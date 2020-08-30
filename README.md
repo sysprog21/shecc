@@ -145,16 +145,16 @@ int fib(int n)      fib:                        Reserve stack frame for function
        fib(n - 1)       x0 = *x0 (4)            Read value from address into x0, length = 4 (int)
                         x1 := 1                 Set x1 to 1
                         x0 -= x1                Subtract x1 from x0 i.e. (n - 1)
-                        x0 := fib() @ 1631      Call function fib() into x0
-       +                push x0                 Store the result on stack
-       fib(n - 2)       x0 = &n                 Get address of variable n
+       +                x0 := fib() @ 1631      Call function fib() into x0
+                        push x0                 Store the result on stack
+       fib(n - 2);      x0 = &n                 Get address of variable n
                         x0 = *x0 (4)            Read value from address into x0, length = 4 (int)
                         x1 := 2                 Set x1 to 2
                         x0 -= x1                Subtract x1 from x0 i.e. (n - 2)
                         x1 := fib() @ 1631      Call function fib() into x1
                         pop x0                  Retrieve the result off stack into x0
-                        x0 += x1                Add x1 to x0
-       ;                return (from fib)       Jump to function exit
+                        x0 += x1                Add x1 to x0 i.e. the result of fib(n-1) + fib(n-2)
+                        return (from fib)       Jump to function exit
                       }                         Restore the previous stack frame
                       exit fib
 ```
