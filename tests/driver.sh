@@ -14,7 +14,7 @@ function try() {
     echo "$input" > "$tmp_in"
     "$SHECC" -o "$tmp_exe" "$tmp_in"
     chmod +x $tmp_exe
-    "$tmp_exe"
+    $ARM_EXEC "$tmp_exe"
     local actual="$?"
 
     if [ "$actual" = "$expected" ]; then
