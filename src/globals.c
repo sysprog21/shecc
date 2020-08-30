@@ -31,6 +31,9 @@ char *elf_header;
 int elf_header_idx;
 int elf_header_len;
 int elf_code_start;
+char *elf_symtab;
+char *elf_strtab;
+char *elf_section;
 
 /* options */
 
@@ -230,6 +233,9 @@ void global_init()
     elf_code = malloc(MAX_CODE);
     elf_data = malloc(MAX_DATA);
     elf_header = malloc(MAX_HEADER);
+    elf_symtab = malloc(MAX_SYMTAB);
+    elf_strtab = malloc(MAX_STRTAB);
+    elf_section = malloc(MAX_SECTION);
 }
 
 void error(char *msg)

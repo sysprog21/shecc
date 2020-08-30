@@ -2,10 +2,7 @@
 
 int elf_symbol_idx;
 int elf_symtab_idx;
-char elf_symtab[MAX_SYMTAB];
-char elf_strtab[MAX_STRTAB];
 int elf_strtab_idx;
-char elf_section[MAX_SECTION];
 int elf_section_idx;
 
 void elf_write_section_str(char *vals, int len)
