@@ -1,0 +1,6 @@
+out
+a.out
+*.o
+*.elf
+*.log
+*.lst
