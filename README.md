@@ -45,9 +45,13 @@ The steps to validate shecc bootstrap on ARMv7-A:
 Code generator in `shecc` does not rely on external utilities. You only need
 ordinary C compilers such as `gcc` and `clang`. However, `shecc` would bootstrap
 itself, and ARM ISA emulation is required. Install QEMU for ARM user emulation
+on GNU/Linux:
 ```shell
 $ sudo apt-get install qemu-user
 ```
+
+It is still possible to build `shecc` on macOS or Microsoft Windows. However,
+the second stage bootstrapping would fail due to `qemu-arm` absence.
 
 ## Build and Verify
 
