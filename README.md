@@ -1,5 +1,7 @@
 # shecc : self-hosting and educational C compiler
 
+<p align="center"><img src="https://user-images.githubusercontent.com/18013815/91671374-b2f0db00-eb58-11ea-8d55-858e9fb160c0.png" alt="logo image" width=40%></p>
+
 ## Introduction
 
 `shecc` is built from scratch, targeted at 32-bit Arm architecture.
