@@ -47,7 +47,7 @@ $(OUT)/inliner: tools/inliner.c
 
 $(OUT)/$(STAGE0): $(OUT)/libc.inc $(OBJS)
 	$(VECHO) "  LD\t$@\n"
-	$(Q)$(CC) $(CFLAGS) $(OBJS) -o $@
+	$(Q)$(CC) $(OBJS) -o $@
 
 $(OUT)/$(STAGE1): $(OUT)/$(STAGE0)
 	$(VECHO) "  SHECC\t$@\n"
