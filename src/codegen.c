@@ -295,7 +295,7 @@ void code_generate()
 
             emit(__b(__AL, ofs));
             if (dump_ir == 1)
-                printf("    return ; from %s", ii->str_param1);
+                printf("    return (from %s)", ii->str_param1);
         } break;
         case OP_call: {
             /* function call */
