@@ -1,8 +1,8 @@
-# shecc - self-hosting and educational C compiler
+# shecc : self-hosting and educational C compiler
 
 ## Introduction
 
-`shecc` is built from scratch, targeted at 32-bit ARM architecture.
+`shecc` is built from scratch, targeted at 32-bit Arm architecture.
 It is a considerably stripped down version of C and it is meant as
 pedagogical tool for learning about compilers.
 
@@ -16,7 +16,9 @@ example, global variables and, in particular, global arrays are there.
 * Provide a minimal C standard library for basic I/O on GNU/Linux;
 * The cross-compiler is written in ANSI C, bootstrapping on most platforms;
 * Self-contained C language front-end and code generator;
-* Two-pass compilation: source code -> IR -> target machine code
+* Two-pass compilation: on the first pass it checks the syntax of 
+  statements and constructs a table of symbols, while on the second pass
+  it actually translates program statements into Arm machine code.
 
 ## Compatibility
 
@@ -34,17 +36,17 @@ Raspberry Pi 3 with GNU/Linux.
 
 ## Bootstrapping
 
-The steps to validate shecc bootstrap on ARMv7-A:
-1. shecc source code is initially compiled using (host)gcc which generates an x86/x86\_64 binary.
-2. Built binary is invoked with its own source code as input and generates a ARMv7-A binary.
-3. The ARMv7-A binary is invoked (via QEMU or other emulators) with its own source code as input and generates another ARMv7-A binary.
-4. If outputs generated in steps 2. and 3. are identical, the bootstrapping would be successful. That is, the compiler regenerated itself from its own source code in two consecutive generations.
+The steps to validate `shecc` bootstrapping:
+1. `shecc` source code is initially compiled using an ordinary compilerg which generates an x86/x86\_64 binary.
+2. The built binary reads its own source code as input and generates an ARMv7-A binary.
+3. The generated ARMv7-A binary is invoked (via QEMU or running on Arm devices) with its own source code as input and generates another ARMv7-A binary.
+4. If outputs generated in steps 2. and 3. are identical, the bootstrapping would be successful. That is, `shecc` can compile its own source code and produces new versions of that same program.
 
 ## Prerequisites
 
 Code generator in `shecc` does not rely on external utilities. You only need
 ordinary C compilers such as `gcc` and `clang`. However, `shecc` would bootstrap
-itself, and ARM ISA emulation is required. Install QEMU for ARM user emulation
+itself, and Arm ISA emulation is required. Install QEMU for Arm user emulation
 on GNU/Linux:
 ```shell
 $ sudo apt-get install qemu-user
