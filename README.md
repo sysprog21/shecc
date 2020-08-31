@@ -9,15 +9,14 @@ It is a considerably stripped down version of C and it is meant as
 pedagogical tool for learning about compilers.
 
 It is worth mentioning that `shecc` is designed to compile the minimal
-subset of C required to self-host with the above execution modes. For
-example, global variables and, in particular, global arrays are there.
+subset of C required to self-host itself along with C runtime library.
 
 ### Features
 
 * Generate executable Linux ELF binaries for ARMv7-A;
 * Provide a minimal C standard library for basic I/O on GNU/Linux;
 * The cross-compiler is written in ANSI C, bootstrapping on most platforms;
-* Self-contained C language front-end and code generator;
+* Self-contained C language front-end and machine code generator;
 * Two-pass compilation: on the first pass it checks the syntax of 
   statements and constructs a table of symbols, while on the second pass
   it actually translates program statements into Arm machine code.
@@ -33,16 +32,20 @@ syntax:
 * local variable initializations for supported data types
     - e.g. `int i = [expr]`
 
-The architecture support targets armv7hf with Linux ABI, verified on
-Raspberry Pi 3 with GNU/Linux.
+The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3.
 
 ## Bootstrapping
 
 The steps to validate `shecc` bootstrapping:
-1. `shecc` source code is initially compiled using an ordinary compilerg which generates an x86/x86\_64 binary.
-2. The built binary reads its own source code as input and generates an ARMv7-A binary.
-3. The generated ARMv7-A binary is invoked (via QEMU or running on Arm devices) with its own source code as input and generates another ARMv7-A binary.
-4. If outputs generated in steps 2. and 3. are identical, the bootstrapping would be successful. That is, `shecc` can compile its own source code and produces new versions of that same program.
+1. `shecc` source code is initially compiled using an ordinary compilerg which
+   generates an x86/x86\_64 binary.
+2. The built binary reads its own source code as input and generates an ARMv7-A
+   binary.
+3. The generated ARMv7-A binary is invoked (via QEMU or running on Arm devices)
+   with its own source code as input and generates another ARMv7-A binary.
+4. If outputs generated in steps 2. and 3. are identical, the bootstrapping
+   would be successful. That is, `shecc` can compile its own source code and
+   produces new versions of that same program.
 
 ## Prerequisites
 
@@ -121,6 +124,7 @@ Execute the following to generate IR:
 $ out/shecc --dump-ir -o fib tests/fib.c
 ```
 
+Line-by-line explanation between C source and IR:
 ```asm
  C Source            IR                         Explanation
 -------------------+--------------------------+----------------------------------------------------
