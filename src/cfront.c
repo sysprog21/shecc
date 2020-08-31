@@ -39,41 +39,41 @@ typedef enum {
     T_comma,  /* , */
     T_string, /* null-terminated string */
     T_char,
-    T_opening_bracket, /* ( */
-    T_closing_bracket, /* ) */
-    T_opening_curly,   /* { */
-    T_closing_curly,   /* } */
-    T_opening_square,  /* [ */
-    T_closing_square,  /* ] */
-    T_asterisk,        /* '*' */
-    T_bit_or,          /* | */
-    T_log_and,         /* && */
-    T_log_or,          /* || */
-    T_log_not,         /* ! */
-    T_lt,              /* < */
-    T_gt,              /* > */
-    T_le,              /* <= */
-    T_ge,              /* >= */
-    T_lshift,          /* << */
-    T_rshift,          /* >> */
-    T_dot,             /* . */
-    T_arrow,           /* -> */
-    T_plus,            /* + */
-    T_minus,           /* - */
-    T_minuseq,         /* -= */
-    T_pluseq,          /* += */
-    T_oreq,            /* |= */
-    T_andeq,           /* &= */
-    T_eq,              /* == */
-    T_noteq,           /* != */
-    T_assign,          /* = */
-    T_plusplus,        /* ++ */
-    T_minusminus,      /* -- */
-    T_colon,           /* : */
-    T_semicolon,       /* ; */
-    T_eof,
-    T_ampersand, /* & */
-    T_return,    /* return */
+    T_open_bracket,  /* ( */
+    T_close_bracket, /* ) */
+    T_open_curly,    /* { */
+    T_close_curly,   /* } */
+    T_open_square,   /* [ */
+    T_close_square,  /* ] */
+    T_asterisk,      /* '*' */
+    T_bit_or,        /* | */
+    T_log_and,       /* && */
+    T_log_or,        /* || */
+    T_log_not,       /* ! */
+    T_lt,            /* < */
+    T_gt,            /* > */
+    T_le,            /* <= */
+    T_ge,            /* >= */
+    T_lshift,        /* << */
+    T_rshift,        /* >> */
+    T_dot,           /* . */
+    T_arrow,         /* -> */
+    T_plus,          /* + */
+    T_minus,         /* - */
+    T_minuseq,       /* -= */
+    T_pluseq,        /* += */
+    T_oreq,          /* |= */
+    T_andeq,         /* &= */
+    T_eq,            /* == */
+    T_noteq,         /* != */
+    T_assign,        /* = */
+    T_increment,     /* ++ */
+    T_decrement,     /* -- */
+    T_colon,         /* : */
+    T_semicolon,     /* ; */
+    T_eof,           /* end-of-file (EOF) */
+    T_ampersand,     /* & */
+    T_return,
     T_if,
     T_else,
     T_while,
@@ -198,27 +198,27 @@ token_t get_next_token()
     }
     if (next_char == '(') {
         read_char(1);
-        return T_opening_bracket;
+        return T_open_bracket;
     }
     if (next_char == ')') {
         read_char(1);
-        return T_closing_bracket;
+        return T_close_bracket;
     }
     if (next_char == '{') {
         read_char(1);
-        return T_opening_curly;
+        return T_open_curly;
     }
     if (next_char == '}') {
         read_char(1);
-        return T_closing_curly;
+        return T_close_curly;
     }
     if (next_char == '[') {
         read_char(1);
-        return T_opening_square;
+        return T_open_square;
     }
     if (next_char == ']') {
         read_char(1);
-        return T_closing_square;
+        return T_close_square;
     }
     if (next_char == ',') {
         read_char(1);
@@ -369,7 +369,7 @@ token_t get_next_token()
         }
         if (next_char == '-') {
             read_char(1);
-            return T_minusminus;
+            return T_decrement;
         }
         if (next_char == '=') {
             read_char(1);
@@ -382,7 +382,7 @@ token_t get_next_token()
         read_char(0);
         if (next_char == '+') {
             read_char(1);
-            return T_plusplus;
+            return T_increment;
         }
         if (next_char == '=') {
             read_char(1);
@@ -547,7 +547,7 @@ void read_inner_var_decl(var_t *vd)
     else
         vd->is_ptr = 0;
     lex_indent(T_identifier, vd->var_name);
-    if (lex_accept(T_opening_square)) {
+    if (lex_accept(T_open_square)) {
         char buffer[10];
         /* array with size */
         if (lex_peek(T_numeric, buffer)) {
@@ -559,7 +559,7 @@ void read_inner_var_decl(var_t *vd)
              */
             vd->is_ptr++;
         }
-        lex_expect(T_closing_square);
+        lex_expect(T_close_square);
     } else {
         vd->array_size = 0;
     }
@@ -583,7 +583,7 @@ void read_partial_var_decl(var_t *vd, var_t *template)
 int read_parameter_list_decl(var_t vds[])
 {
     int vn = 0;
-    lex_expect(T_opening_bracket);
+    lex_expect(T_open_bracket);
     while (lex_peek(T_identifier, NULL) == 1) {
         read_full_var_decl(&vds[vn++]);
         lex_accept(T_comma);
@@ -598,7 +598,7 @@ int read_parameter_list_decl(var_t vds[])
             vds[vn].is_ptr = 1;
         }
     }
-    lex_expect(T_closing_bracket);
+    lex_expect(T_close_bracket);
     return vn;
 }
 
@@ -674,8 +674,8 @@ void read_char_param(int param_no)
 void read_func_parameters(block_t *parent)
 {
     int param_num = 0;
-    lex_expect(T_opening_bracket);
-    while (!lex_accept(T_closing_bracket)) {
+    lex_expect(T_open_bracket);
+    while (!lex_accept(T_close_bracket)) {
         read_expr(param_num++, parent);
         lex_accept(T_comma);
     }
@@ -710,7 +710,7 @@ void read_expr_operand(int param_no, block_t *parent)
         isneg = 1;
         if (lex_peek(T_numeric, NULL) == 0 &&
             lex_peek(T_identifier, NULL) == 0 &&
-            lex_peek(T_opening_bracket, NULL) == 0) {
+            lex_peek(T_open_bracket, NULL) == 0) {
             error("Unexpected token after unary minus");
         }
     }
@@ -741,18 +741,18 @@ void read_expr_operand(int param_no, block_t *parent)
         lvalue_t lvalue;
         ir_instr_t *ii;
 
-        lex_accept(T_opening_bracket);
+        lex_accept(T_open_bracket);
         lex_peek(T_identifier, token);
         var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, param_no, 1, OP_generic);
-        lex_accept(T_closing_bracket);
+        lex_accept(T_close_bracket);
         ii = add_instr(OP_read);
         ii->param_no = param_no;
         ii->int_param1 = param_no;
         ii->int_param2 = lvalue.size;
-    } else if (lex_accept(T_opening_bracket)) {
+    } else if (lex_accept(T_open_bracket)) {
         read_expr(param_no, parent);
-        lex_expect(T_closing_bracket);
+        lex_expect(T_close_bracket);
 
         if (isneg) {
             ir_instr_t *ii = add_instr(OP_negate);
@@ -763,7 +763,7 @@ void read_expr_operand(int param_no, block_t *parent)
         type_t *type;
         ir_instr_t *ii = add_instr(OP_load_constant);
 
-        lex_expect(T_opening_bracket);
+        lex_expect(T_open_bracket);
         lex_indent(T_identifier, token);
         type = find_type(token);
         if (type == NULL)
@@ -771,7 +771,7 @@ void read_expr_operand(int param_no, block_t *parent)
 
         ii->param_no = param_no;
         ii->int_param1 = type->size;
-        lex_expect(T_closing_bracket);
+        lex_expect(T_close_bracket);
     } else {
         /* function call, constant or variable - read token and determine */
         opcode_t prefix_op = OP_generic;
@@ -780,9 +780,9 @@ void read_expr_operand(int param_no, block_t *parent)
         var_t *var;
         constant_t *con;
 
-        if (lex_accept(T_plusplus))
+        if (lex_accept(T_increment))
             prefix_op = OP_add;
-        else if (lex_accept(T_minusminus))
+        else if (lex_accept(T_decrement))
             prefix_op = OP_sub;
 
         lex_peek(T_identifier, token);
@@ -1028,9 +1028,9 @@ void read_lvalue(lvalue_t *lvalue,
     if (var->array_size > 0)
         is_reference = 0;
 
-    while (lex_peek(T_opening_square, NULL) || lex_peek(T_arrow, NULL) ||
+    while (lex_peek(T_open_square, NULL) || lex_peek(T_arrow, NULL) ||
            lex_peek(T_dot, NULL)) {
-        if (lex_accept(T_opening_square)) {
+        if (lex_accept(T_open_square)) {
             is_reference = 1;
             if (var->is_ptr <= 1) /* if nested pointer, still pointer */
                 lvalue->size = lvalue->type->size;
@@ -1068,7 +1068,7 @@ void read_lvalue(lvalue_t *lvalue,
             ii->param_no = param_no;
             ii->int_param1 = param_no + 1;
 
-            lex_expect(T_closing_square);
+            lex_expect(T_close_square);
         } else {
             char token[MAX_ID_LEN];
 
@@ -1170,7 +1170,7 @@ void read_lvalue(lvalue_t *lvalue,
                 ii->int_param1 = param_no;
                 ii->int_param2 = lvalue->size;
             }
-            if (lex_peek(T_plusplus, NULL) || lex_peek(T_minusminus, NULL)) {
+            if (lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) {
                 /* load value into param_no + 1 */
                 ii = add_instr(OP_read);
                 ii->param_no = param_no + 1;
@@ -1187,7 +1187,7 @@ void read_lvalue(lvalue_t *lvalue,
                 ii->int_param1 = 1;
 
                 /* add 1 */
-                if (lex_accept(T_plusplus))
+                if (lex_accept(T_increment))
                     ii = add_instr(OP_add);
                 else
                     ii = add_instr(OP_sub);
@@ -1229,10 +1229,10 @@ int read_body_assignment(char *token, block_t *parent)
         read_lvalue(&lvalue, var, parent, 0, 0, OP_generic);
         size = lvalue.size;
 
-        if (lex_accept(T_plusplus)) {
+        if (lex_accept(T_increment)) {
             op = OP_add;
             one = 1;
-        } else if (lex_accept(T_minusminus)) {
+        } else if (lex_accept(T_decrement)) {
             op = OP_sub;
             one = 1;
         } else if (lex_accept(T_pluseq)) {
@@ -1316,7 +1316,7 @@ void read_body_statement(block_t *parent)
      *   keyword, block
      */
 
-    if (lex_peek(T_opening_curly, NULL)) {
+    if (lex_peek(T_open_curly, NULL)) {
         read_code_block(parent->func, parent);
         return;
     }
@@ -1336,9 +1336,9 @@ void read_body_statement(block_t *parent)
     if (lex_accept(T_if)) {
         ir_instr_t *false_jump;
 
-        lex_expect(T_opening_bracket);
+        lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
-        lex_expect(T_closing_bracket);
+        lex_expect(T_close_bracket);
 
         false_jump = add_instr(OP_jz);
         false_jump->param_no = 0;
@@ -1372,9 +1372,9 @@ void read_body_statement(block_t *parent)
         ir_instr_t *false_jump;
         ir_instr_t *start = add_instr(OP_label); /* start to return to */
 
-        lex_expect(T_opening_bracket);
+        lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
-        lex_expect(T_closing_bracket);
+        lex_expect(T_close_bracket);
 
         false_jump = add_instr(OP_jz);
         false_jump->param_no = 0;
@@ -1400,9 +1400,9 @@ void read_body_statement(block_t *parent)
         ir_instr_t *jump_to_check;
         ir_instr_t *switch_exit;
 
-        lex_expect(T_opening_bracket);
+        lex_expect(T_open_bracket);
         read_expr(1, parent);
-        lex_expect(T_closing_bracket);
+        lex_expect(T_close_bracket);
 
         jump_to_check = add_instr(OP_jump);
 
@@ -1410,7 +1410,7 @@ void read_body_statement(block_t *parent)
         switch_exit = add_instr(OP_jump);
         break_exit_ir_idx[break_level++] = switch_exit->ir_index;
 
-        lex_expect(T_opening_curly);
+        lex_expect(T_open_curly);
         while (lex_peek(T_default, NULL) || lex_peek(T_case, NULL)) {
             if (lex_accept(T_default)) {
                 ii = add_instr(OP_label);
@@ -1434,14 +1434,13 @@ void read_body_statement(block_t *parent)
             lex_expect(T_colon);
 
             /* body is optional, can be another case */
-            while (!lex_peek(T_case, NULL) &&
-                   !lex_peek(T_closing_curly, NULL) &&
+            while (!lex_peek(T_case, NULL) && !lex_peek(T_close_curly, NULL) &&
                    !lex_peek(T_default, NULL)) {
                 read_body_statement(parent);
                 /* should end with a break which will generate jump out */
             }
         }
-        lex_expect(T_closing_curly);
+        lex_expect(T_close_curly);
 
         ii = add_instr(OP_label);
         jump_to_check->int_param1 = ii->ir_index;
@@ -1487,7 +1486,7 @@ void read_body_statement(block_t *parent)
         ir_instr_t *body_jump;
         ir_instr_t *end;
 
-        lex_expect(T_opening_bracket);
+        lex_expect(T_open_bracket);
 
         /* setup - execute once */
         if (!lex_accept(T_semicolon)) {
@@ -1515,10 +1514,10 @@ void read_body_statement(block_t *parent)
 
         /* increment after each loop */
         increment = add_instr(OP_label);
-        if (!lex_accept(T_closing_bracket)) {
+        if (!lex_accept(T_close_bracket)) {
             lex_peek(T_identifier, token);
             read_body_assignment(token, parent);
-            lex_expect(T_closing_bracket);
+            lex_expect(T_close_bracket);
         }
 
         /* jump back to condition */
@@ -1545,9 +1544,9 @@ void read_body_statement(block_t *parent)
 
         read_body_statement(parent);
         lex_expect(T_while);
-        lex_expect(T_opening_bracket);
+        lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
-        lex_expect(T_closing_bracket);
+        lex_expect(T_close_bracket);
 
         false_jump = add_instr(OP_jnz);
         false_jump->param_no = 0;
@@ -1632,9 +1631,9 @@ void read_code_block(func_t *func, block_t *parent)
     block_t *bd = add_block(parent, func);
     ir_instr_t *ii = add_instr(OP_block_start);
     ii->int_param1 = bd->index;
-    lex_expect(T_opening_curly);
+    lex_expect(T_open_curly);
 
-    while (!lex_accept(T_closing_curly))
+    while (!lex_accept(T_close_curly))
         read_body_statement(bd);
 
     ii = add_instr(OP_block_end);
@@ -1663,7 +1662,7 @@ void read_global_decl(block_t *block)
     /* new function, or variables under parent */
     read_full_var_decl(&_temp_var);
 
-    if (lex_peek(T_opening_bracket, NULL)) {
+    if (lex_peek(T_open_bracket, NULL)) {
         ir_instr_t *ii;
 
         /* function */
@@ -1672,7 +1671,7 @@ void read_global_decl(block_t *block)
 
         fd->num_params = read_parameter_list_decl(fd->param_defs);
 
-        if (lex_peek(T_opening_curly, NULL)) {
+        if (lex_peek(T_open_curly, NULL)) {
             ii = add_instr(OP_func_extry);
             ii->str_param1 = fd->return_def.var_name;
             fd->entry_point = ii->ir_index;
@@ -1725,7 +1724,7 @@ void read_global_statement()
 
             type->base_type = TYPE_int;
             type->size = 4;
-            lex_expect(T_opening_curly);
+            lex_expect(T_open_curly);
             do {
                 lex_indent(T_identifier, token);
                 if (lex_accept(T_assign)) {
@@ -1735,7 +1734,7 @@ void read_global_statement()
                 }
                 add_constant(token, val++);
             } while (lex_accept(T_comma));
-            lex_expect(T_closing_curly);
+            lex_expect(T_close_curly);
             lex_indent(T_identifier, token);
             strcpy(type->type_name, token);
             lex_expect(T_semicolon);
@@ -1745,14 +1744,14 @@ void read_global_statement()
 
             if (lex_peek(T_identifier, token)) /* recursive declaration */
                 lex_accept(T_identifier);
-            lex_expect(T_opening_curly);
+            lex_expect(T_open_curly);
             do {
                 var_t *v = &type->fields[i++];
                 read_full_var_decl(v);
                 v->offset = size;
                 size += size_var(v);
                 lex_expect(T_semicolon);
-            } while (!lex_accept(T_closing_curly));
+            } while (!lex_accept(T_close_curly));
 
             lex_indent(T_identifier, token); /* type name */
             strcpy(type->type_name, token);
