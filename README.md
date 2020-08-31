@@ -4,12 +4,8 @@
 
 ## Introduction
 
-`shecc` is built from scratch, targeted at 32-bit Arm architecture.
-It is a considerably stripped down version of C and it is meant as
-pedagogical tool for learning about compilers.
-
-It is worth mentioning that `shecc` is designed to compile the minimal
-subset of C required to self-host itself along with C runtime library.
+`shecc` is built from scratch, targeted at 32-bit Arm architecture, as
+a self-compiling compiler for a subset of the C language.
 
 ### Features
 
