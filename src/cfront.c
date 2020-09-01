@@ -529,7 +529,7 @@ int read_numeric_constant(char buffer[])
                 value = value << 4;
                 if (is_digit(c))
                     value += c - '0';
-                c &= 32; /* convert to lower case */
+                c |= 32; /* convert to lower case */
                 if (c >= 'a' && c <= 'f')
                     value += (c - 'a') + 10;
             }
@@ -630,18 +630,19 @@ void read_numeric_param(int param_no, int isneg)
         isneg = 1 - isneg;
         i++;
     }
-    if ((token[0] == '0') && (token[1] == 'x')) {
+    if ((token[0] == '0') && (token[1] == 'x')) { /* hexadecimal */
         i = 2;
         do {
             c = token[i++];
             if (is_digit(c))
                 c -= '0';
-            else if (c >= 'a' && c <= 'f')
-                c = (c - 'a') + 10;
-            else if (c >= 'A' && c <= 'F')
-                c = (c - 'A') + 10;
-            else
-                error("Invalid numeric constant");
+            else {
+                c |= 32; /* convert to lower case */
+                if (c >= 'a' && c <= 'f')
+                    c = (c - 'a') + 10;
+                else
+                    error("Invalid numeric constant");
+            }
 
             value = (value * 16) + c;
         } while (is_hex(token[i]));
