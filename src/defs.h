@@ -9,7 +9,7 @@
 #define MAX_PARAMS 8
 #define MAX_LOCALS 64
 #define MAX_FIELDS 32
-#define MAX_FUNCTIONS 1024
+#define MAX_FUNCS 1024
 #define MAX_BLOCKS 1048576
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 262144
