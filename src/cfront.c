@@ -606,14 +606,14 @@ void read_literal_param(int param_no)
 {
     char literal[MAX_TOKEN_LEN];
     ir_instr_t *ii;
-    int didx;
+    int index;
 
     lex_indent(T_string, literal);
 
-    didx = write_symbol(literal, strlen(literal) + 1);
+    index = write_symbol(literal, strlen(literal) + 1);
     ii = add_instr(OP_load_data_address);
     ii->param_no = param_no;
-    ii->int_param1 = didx;
+    ii->int_param1 = index;
 }
 
 void read_numeric_param(int param_no, int isneg)
@@ -890,7 +890,7 @@ opcode_t get_operator()
 void read_expr(int param_no, block_t *parent)
 {
     opcode_t op_stack[10];
-    int op_stack_idx = 0;
+    int op_stack_index = 0;
     opcode_t op, next_op;
     ir_instr_t *il;
 
@@ -919,16 +919,16 @@ void read_expr(int param_no, block_t *parent)
     il = add_instr(OP_push);
     il->param_no = param_no + 1;
     op_stack[0] = op;
-    op_stack_idx++;
+    op_stack_index++;
     op = next_op;
 
     while (op != OP_generic) {
         /* if we have operand on stack, compare priorities */
-        if (op_stack_idx > 0) {
+        if (op_stack_index > 0) {
             /* we have a continuation, use stack */
             int same_op = 0;
             do {
-                opcode_t stack_op = op_stack[op_stack_idx - 1];
+                opcode_t stack_op = op_stack[op_stack_index - 1];
                 if (get_operator_prio(stack_op) >= get_operator_prio(op)) {
                     /* stack has higher priority operator i.e. 5 * 6 + _
                      * pop stack and apply operators.
@@ -949,17 +949,17 @@ void read_expr(int param_no, block_t *parent)
                     il->param_no = param_no;
 
                     /* pop op stack */
-                    op_stack_idx--;
+                    op_stack_index--;
                 } else {
                     same_op = 1;
                 }
                 /* continue util next operation is higher prio, i.e. 5 + 6 * _
                  */
-            } while (op_stack_idx > 0 && same_op == 0);
+            } while (op_stack_index > 0 && same_op == 0);
         }
 
         /* push operator on stack */
-        op_stack[op_stack_idx++] = op;
+        op_stack[op_stack_index++] = op;
 
         /* push value on stack */
         read_expr_operand(param_no, parent);
@@ -970,8 +970,8 @@ void read_expr(int param_no, block_t *parent)
     }
 
     /* unwind stack and apply operations */
-    while (op_stack_idx > 0) {
-        opcode_t stack_op = op_stack[op_stack_idx - 1];
+    while (op_stack_index > 0) {
+        opcode_t stack_op = op_stack[op_stack_index - 1];
 
         /* pop stack and apply operators */
         il = add_instr(OP_pop);
@@ -985,7 +985,7 @@ void read_expr(int param_no, block_t *parent)
         il->param_no = param_no;
         il->int_param1 = param_no + 1;
 
-        if (op_stack_idx == 1) /* done */
+        if (op_stack_index == 1) /* done */
             return;
 
         /* push value back on stack */
@@ -993,7 +993,7 @@ void read_expr(int param_no, block_t *parent)
         il->param_no = param_no;
 
         /* pop op stack */
-        op_stack_idx--;
+        op_stack_index--;
     }
 
     error("Unexpected end of expression");
@@ -1299,7 +1299,7 @@ int read_body_assignment(char *token, block_t *parent)
     return 0;
 }
 
-int break_exit_ir_idx[MAX_NESTING];
+int break_exit_ir_index[MAX_NESTING];
 
 void read_code_block(func_t *func, block_t *parent);
 
@@ -1393,9 +1393,9 @@ void read_body_statement(block_t *parent)
 
     if (lex_accept(T_switch)) {
         int case_values[MAX_CASES];
-        int case_ir_idxs[MAX_CASES];
-        int case_idx = 0;
-        int default_ir_idx = 0;
+        int case_ir_index[MAX_CASES];
+        int case_index = 0;
+        int default_ir_index = 0;
         int i;
         ir_instr_t *jump_to_check;
         ir_instr_t *switch_exit;
@@ -1408,13 +1408,13 @@ void read_body_statement(block_t *parent)
 
         /* create exit jump for breaks */
         switch_exit = add_instr(OP_jump);
-        break_exit_ir_idx[break_level++] = switch_exit->ir_index;
+        break_exit_ir_index[break_level++] = switch_exit->ir_index;
 
         lex_expect(T_open_curly);
         while (lex_peek(T_default, NULL) || lex_peek(T_case, NULL)) {
             if (lex_accept(T_default)) {
                 ii = add_instr(OP_label);
-                default_ir_idx = ii->ir_index;
+                default_ir_index = ii->ir_index;
             } else {
                 int case_val;
 
@@ -1428,8 +1428,8 @@ void read_body_statement(block_t *parent)
                     lex_expect(T_identifier); /* already read it */
                 }
                 ii = add_instr(OP_label);
-                case_values[case_idx] = case_val;
-                case_ir_idxs[case_idx++] = ii->ir_index;
+                case_values[case_index] = case_val;
+                case_ir_index[case_index++] = ii->ir_index;
             }
             lex_expect(T_colon);
 
@@ -1446,7 +1446,7 @@ void read_body_statement(block_t *parent)
         jump_to_check->int_param1 = ii->ir_index;
 
         /* perform checks against ?1 */
-        for (i = 0; i < case_idx; i++) {
+        for (i = 0; i < case_index; i++) {
             ii = add_instr(OP_load_constant);
             ii->param_no = 0;
             ii->int_param1 = case_values[i];
@@ -1455,12 +1455,12 @@ void read_body_statement(block_t *parent)
             ii->int_param1 = 1;
             ii = add_instr(OP_jnz);
             ii->param_no = 0;
-            ii->int_param1 = case_ir_idxs[i];
+            ii->int_param1 = case_ir_index[i];
         }
         /* jump to default */
-        if (default_ir_idx) {
+        if (default_ir_index) {
             ii = add_instr(OP_jump);
-            ii->int_param1 = default_ir_idx;
+            ii->int_param1 = default_ir_index;
         }
 
         break_level--;
@@ -1473,7 +1473,7 @@ void read_body_statement(block_t *parent)
 
     if (lex_accept(T_break)) {
         ii = add_instr(OP_jump);
-        ii->int_param1 = break_exit_ir_idx[break_level - 1];
+        ii->int_param1 = break_exit_ir_index[break_level - 1];
     }
 
     if (lex_accept(T_for)) {
