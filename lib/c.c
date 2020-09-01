@@ -372,8 +372,8 @@ int fputc(int c, FILE *stream)
  */
 void *malloc(int size)
 {
-    int brk = __syscall(__syscall_brk, 0); /* read current break */
-    void *request = __syscall(__syscall_brk, brk + size);
+    char *brk = __syscall(__syscall_brk, 0); /* read current break */
+    char *request = __syscall(__syscall_brk, brk + size);
     if (request == -1)
         return NULL;
     /* return previous location, now extended by size */
