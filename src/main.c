@@ -22,38 +22,6 @@
 /* inlined libc */
 #include "../out/libc.inc"
 
-void load_source_file(char *file)
-{
-    char buffer[MAX_LINE_LEN];
-
-    FILE *f = fopen(file, "rb");
-    for (;;) {
-        if (fgets(buffer, MAX_LINE_LEN, f) == NULL) {
-            fclose(f);
-            return;
-        }
-        if ((strncmp(buffer, "#include ", 9) == 0) && (buffer[9] == '"')) {
-            char path[MAX_LINE_LEN];
-            int c = strlen(file) - 1;
-            while (c > 0 && file[c] != '/')
-                c--;
-            if (c) {
-                /* prepend directory name */
-                strncpy(path, file, c + 1);
-                c++;
-            }
-            path[c] = 0;
-            buffer[strlen(buffer) - 2] = 0;
-            strcpy(path + c, buffer + 10);
-            load_source_file(path);
-        } else {
-            strcpy(SOURCE + source_idx, buffer);
-            source_idx += strlen(buffer);
-        }
-    }
-    fclose(f);
-}
-
 int main(int argc, char *argv[])
 {
     int libc = 1;
@@ -90,11 +58,8 @@ int main(int argc, char *argv[])
     if (libc)
         libc_generate();
 
-    /* load source code */
-    load_source_file(in);
-
-    /* parse source into IR */
-    parse();
+    /* load and parse source code into IR */
+    parse(in);
 
     /* generate code from IR */
     code_generate();

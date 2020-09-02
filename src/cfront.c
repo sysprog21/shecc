@@ -1780,7 +1780,7 @@ void read_global_statement()
         error("Syntax error in global statement");
 }
 
-void parse()
+void parse_internal()
 {
     /* parser initialization */
     ir_instr_t *ii;
@@ -1839,4 +1839,43 @@ void parse()
     do {
         read_global_statement();
     } while (!lex_accept(T_eof));
+}
+
+/* Load specified source file and referred inclusion recursively */
+void load_source_file(char *file)
+{
+    char buffer[MAX_LINE_LEN];
+
+    FILE *f = fopen(file, "rb");
+    for (;;) {
+        if (fgets(buffer, MAX_LINE_LEN, f) == NULL) {
+            fclose(f);
+            return;
+        }
+        if ((strncmp(buffer, "#include ", 9) == 0) && (buffer[9] == '"')) {
+            char path[MAX_LINE_LEN];
+            int c = strlen(file) - 1;
+            while (c > 0 && file[c] != '/')
+                c--;
+            if (c) {
+                /* prepend directory name */
+                strncpy(path, file, c + 1);
+                c++;
+            }
+            path[c] = 0;
+            buffer[strlen(buffer) - 2] = 0;
+            strcpy(path + c, buffer + 10);
+            load_source_file(path);
+        } else {
+            strcpy(SOURCE + source_idx, buffer);
+            source_idx += strlen(buffer);
+        }
+    }
+    fclose(f);
+}
+
+void parse(char *file)
+{
+    load_source_file(file);
+    parse_internal();
 }
