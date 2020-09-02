@@ -7,12 +7,12 @@
 #define MAX_VAR_LEN 64
 #define MAX_TYPE_LEN 64
 #define MAX_PARAMS 8
-#define MAX_LOCALS 64
+#define MAX_LOCALS 48
 #define MAX_FIELDS 32
 #define MAX_FUNCS 1024
-#define MAX_BLOCKS 131072
+#define MAX_BLOCKS 65536
 #define MAX_TYPES 64
-#define MAX_IR_INSTR 262144
+#define MAX_IR_INSTR 65536
 #define MAX_SOURCE 131072
 #define MAX_CODE 131072
 #define MAX_DATA 131072
