@@ -105,7 +105,7 @@ int arm_encode(arm_cond_t cond, int opcode, int rn, int rd, int op2)
     return (cond << 28) + (opcode << 20) + (rn << 16) + (rd << 12) + op2;
 }
 
-int __swi()
+int __svc()
 {
     return arm_encode(__AL, 240, 0, 0, 0);
 }

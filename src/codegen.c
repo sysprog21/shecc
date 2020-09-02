@@ -525,7 +525,7 @@ void code_generate()
             emit(__mov_r(__AL, __r0, __r1));
             emit(__mov_r(__AL, __r1, __r2));
             emit(__mov_r(__AL, __r2, __r3));
-            emit(__swi());
+            emit(__svc());
             if (dump_ir == 1)
                 printf("    syscall");
             break;
@@ -533,7 +533,7 @@ void code_generate()
             /* syscall for 'exit' */
             emit(__mov_i(__AL, __r0, 0));
             emit(__mov_i(__AL, __r7, 1));
-            emit(__swi());
+            emit(__svc());
             if (dump_ir == 1)
                 printf("    exit");
             break;
