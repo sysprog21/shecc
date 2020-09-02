@@ -1,5 +1,24 @@
 /* ARMv7-A instruction encoding */
 
+/* Identifier naming conventions
+ *   - prefix arm_ : Arm instruction encoding.
+ *   - prefix __ : mnemonic symbols for Arm instruction, condition code,
+ *                 registers, etc.
+ *
+ * An example of usage in src/codegen.c: (unconditional jump)
+ *
+ *         +---------------- write specified instruction into ELF
+ *         |
+ *      emit(__b(__AL, ofs));
+ *             |    |   |
+ *             |    |   +--- to PC-relative expression
+ *             |    +------- always
+ *             +------------ branch
+ *
+ * Machine-level "b" instructions have restricted ranges from the address of
+ * the current instruction.
+ */
+
 /* opcode */
 typedef enum {
     arm_and = 0,
