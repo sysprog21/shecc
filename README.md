@@ -131,7 +131,7 @@ int fib(int n)      fib:                        Reserve stack frame for function
                         x0 = *x0 (4)            Read value from address into x0, length = 4 (int)
                         x1 := 0                 Set x1 to zero
                         x0 == x1 ?              Compare x0 with x1
-                        if 0 then goto 1641     If x0 != x1, then jump to label 1641
+                        if false then goto 1641 If x0 != x1, then jump to label 1641
         return 0;       x0 := 0                 Set x0 to zero. x0 is the return value.
                         return (from fib)       Jump to function exit
                     1641:
@@ -139,7 +139,7 @@ int fib(int n)      fib:                        Reserve stack frame for function
                         x0 = *x0 (4)            Read value from address into x0, length = 4 (int)
                         x1 := 1                 Set x1 to 1
                         x0 == x1 ?              Compare x0 with x1
-                        if 0 then goto 1649     If x0 != x1, then jump to label 1649
+                        if true then goto 1649  If x0 != x1, then jump to label 1649
         return 1;       x0 := 1                 Set x0 to 1. x0 is the return value.
                         return (from fib)       Jump to function exit
                     1649:

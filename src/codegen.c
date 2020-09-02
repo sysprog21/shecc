@@ -455,11 +455,11 @@ void code_generate()
             if (op == OP_jz) {
                 emit(__b(__EQ, ofs));
                 if (dump_ir == 1)
-                    printf("    if 0 then goto %d", ii->int_param1);
+                    printf("    if false then goto %d", ii->int_param1);
             } else {
                 emit(__b(__NE, ofs));
                 if (dump_ir == 1)
-                    printf("    if 1 then goto %d", ii->int_param1);
+                    printf("    if true then goto %d", ii->int_param1);
             }
         } break;
         case OP_block_start:
