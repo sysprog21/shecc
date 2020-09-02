@@ -9,9 +9,8 @@ void size_func(func_t *fn)
 
     /* parameters are turned into local variables */
     for (i = 0; i < fn->num_params; i++) {
-        int vs = size_var(&fn->param_defs[i]);
-        fn->param_defs[i].offset = s + vs; /* set stack offset */
-        s += vs;
+        s += size_var(&fn->param_defs[i]);
+        fn->param_defs[i].offset = s; /* stack offset */
     }
 
     /* align to 16 bytes */
@@ -24,24 +23,24 @@ void size_func(func_t *fn)
 }
 
 /* Return stack size required after block local variables */
-int size_block(block_t *bd)
+int size_block(block_t *blk)
 {
     int size = 0, i, offset;
 
     /* our offset starts from parent's offset */
-    if (bd->parent == NULL) {
-        if (bd->func)
-            offset = bd->func->params_size;
+    if (blk->parent == NULL) {
+        if (blk->func)
+            offset = blk->func->params_size;
         else
             offset = 0;
     } else
-        offset = size_block(bd->parent);
+        offset = size_block(blk->parent);
 
     /* declared locals */
-    for (i = 0; i < bd->next_local; i++) {
-        int vs = size_var(&bd->locals[i]);
+    for (i = 0; i < blk->next_local; i++) {
+        int vs = size_var(&blk->locals[i]);
         /* look up value off stack */
-        bd->locals[i].offset = size + offset + vs;
+        blk->locals[i].offset = size + offset + vs;
         size += vs;
     }
 
@@ -52,14 +51,14 @@ int size_block(block_t *bd)
         error("Local stack size exceeded");
 
     /* save in block for stack allocation */
-    bd->locals_size = size;
+    blk->locals_size = size;
     return size + offset;
 }
 
 /* Compute stack necessary sizes for all functions */
 void size_funcs(int data_start)
 {
-    block_t *bd;
+    block_t *blk;
     int i;
 
     /* size functions */
@@ -71,12 +70,12 @@ void size_funcs(int data_start)
         size_block(&BLOCKS[i]);
 
     /* allocate data for globals, in block 0 */
-    bd = &BLOCKS[0];
-    for (i = 0; i < bd->next_local; i++) {
-        bd->locals[i].offset = elf_data_idx; /* set offset in data section */
-        elf_add_symbol(bd->locals[i].var_name, strlen(bd->locals[i].var_name),
+    blk = &BLOCKS[0];
+    for (i = 0; i < blk->next_local; i++) {
+        blk->locals[i].offset = elf_data_idx; /* set offset in data section */
+        elf_add_symbol(blk->locals[i].var_name, strlen(blk->locals[i].var_name),
                        data_start + elf_data_idx);
-        elf_data_idx += size_var(&bd->locals[i]);
+        elf_data_idx += size_var(&blk->locals[i]);
     }
 }
 
@@ -84,13 +83,12 @@ void size_funcs(int data_start)
 int get_code_length(ir_instr_t *ii)
 {
     opcode_t op = ii->op;
-    func_t *fn;
-    block_t *bd;
 
     switch (op) {
-    case OP_func_extry:
-        fn = find_func(ii->str_param1);
+    case OP_func_extry: {
+        func_t *fn = find_func(ii->str_param1);
         return 16 + (fn->num_params << 2);
+    }
     case OP_call:
         if (ii->param_no)
             return 8;
@@ -100,12 +98,12 @@ int get_code_length(ir_instr_t *ii)
             return 4;
         return 8;
     case OP_block_start:
-    case OP_block_end:
-        bd = &BLOCKS[ii->int_param1];
-        if (bd->next_local > 0)
+    case OP_block_end: {
+        block_t *blk = &BLOCKS[ii->int_param1];
+        if (blk->next_local > 0)
             return 4;
-        else
-            return 0;
+        return 0;
+    }
     case OP_eq:
     case OP_neq:
     case OP_lt:
@@ -171,7 +169,7 @@ int total_code_length()
 void code_generate()
 {
     int stack_size = 0, i;
-    block_t *bd = NULL;
+    block_t *blk = NULL;
     int _c_block_level = 0;
 
     int code_start = elf_code_start; /* ELF headers size */
@@ -232,7 +230,7 @@ void code_generate()
             } else {
                 int offset;
                 /* need to find the variable offset on stack, i.e. from r11 */
-                var = find_local_var(ii->str_param1, bd);
+                var = find_local_var(ii->str_param1, blk);
                 if (var == NULL) /* not found? */
                     abort();
 
@@ -318,16 +316,16 @@ void code_generate()
                        fn->entry_point);
         } break;
         case OP_push:
-            emit(__add_i(__AL, __sp, __sp,
-                         -16)); /* 16 aligned although we only need 4 */
+            /* 16 aligned although we only need 4 */
+            emit(__add_i(__AL, __sp, __sp, -16));
             emit(__sw(__AL, dest_reg, __sp, 0));
             if (dump_ir == 1)
                 printf("    push x%d", dest_reg);
             break;
         case OP_pop:
             emit(__lw(__AL, dest_reg, __sp, 0));
-            emit(__add_i(__AL, __sp, __sp,
-                         16)); /* 16 aligned although we only need 4 */
+            /* 16 aligned although we only need 4 */
+            emit(__add_i(__AL, __sp, __sp, 16));
             if (dump_ir == 1)
                 printf("    pop x%d", dest_reg);
             break;
@@ -465,25 +463,25 @@ void code_generate()
             }
         } break;
         case OP_block_start:
-            bd = &BLOCKS[ii->int_param1];
-            if (bd->next_local > 0) {
+            blk = &BLOCKS[ii->int_param1];
+            if (blk->next_local > 0) {
                 /* reserve stack space for locals */
-                emit(__add_i(__AL, __sp, __sp, -bd->locals_size));
-                stack_size += bd->locals_size;
+                emit(__add_i(__AL, __sp, __sp, -blk->locals_size));
+                stack_size += blk->locals_size;
             }
             if (dump_ir == 1)
                 printf("    {");
             _c_block_level++;
             break;
         case OP_block_end:
-            bd = &BLOCKS[ii->int_param1]; /* should not be necessarry */
-            if (bd->next_local > 0) {
+            blk = &BLOCKS[ii->int_param1]; /* should not be necessarry */
+            if (blk->next_local > 0) {
                 /* remove stack space for locals */
-                emit(__add_i(__AL, __sp, __sp, bd->locals_size));
-                stack_size -= bd->locals_size;
+                emit(__add_i(__AL, __sp, __sp, blk->locals_size));
+                stack_size -= blk->locals_size;
             }
-            /* bd is current block */
-            bd = bd->parent;
+            /* blk is current block */
+            blk = blk->parent;
             if (dump_ir == 1)
                 printf("}");
             _c_block_level--;
@@ -518,6 +516,11 @@ void code_generate()
                 printf("    start");
             break;
         case OP_syscall:
+            /* Linux Arm/EABI syscalls are invoked using a software interrupt.
+             * The function arguments go in registers R0-R6, the syscall
+             * number in register R7.
+             * See https://man7.org/linux/man-pages/man2/syscall.2.html
+             */
             emit(__mov_r(__AL, __r7, __r0));
             emit(__mov_r(__AL, __r0, __r1));
             emit(__mov_r(__AL, __r1, __r2));
@@ -527,6 +530,7 @@ void code_generate()
                 printf("    syscall");
             break;
         case OP_exit:
+            /* syscall for 'exit' */
             emit(__mov_i(__AL, __r0, 0));
             emit(__mov_i(__AL, __r7, 1));
             emit(__swi());

@@ -1629,16 +1629,16 @@ void read_body_statement(block_t *parent)
 
 void read_code_block(func_t *func, block_t *parent)
 {
-    block_t *bd = add_block(parent, func);
+    block_t *blk = add_block(parent, func);
     ir_instr_t *ii = add_instr(OP_block_start);
-    ii->int_param1 = bd->index;
+    ii->int_param1 = blk->index;
     lex_expect(T_open_curly);
 
     while (!lex_accept(T_close_curly))
-        read_body_statement(bd);
+        read_body_statement(blk);
 
     ii = add_instr(OP_block_end);
-    ii->int_param1 = bd->index;
+    ii->int_param1 = blk->index;
 }
 
 void read_func_body(func_t *fdef)

@@ -60,12 +60,12 @@ ir_instr_t *add_instr(opcode_t op)
 
 block_t *add_block(block_t *parent, func_t *func)
 {
-    block_t *bd = &BLOCKS[blocks_idx];
-    bd->index = blocks_idx++;
-    bd->parent = parent;
-    bd->func = func;
-    bd->next_local = 0;
-    return bd;
+    block_t *blk = &BLOCKS[blocks_idx];
+    blk->index = blocks_idx++;
+    blk->parent = parent;
+    blk->func = func;
+    blk->next_local = 0;
+    return blk;
 }
 
 void add_alias(char *alias, char *value)
