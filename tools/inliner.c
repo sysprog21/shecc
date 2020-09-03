@@ -1,4 +1,9 @@
-/* inliner - inline libc source into C file */
+/* inliner - inline libc source into C file.
+ *
+ * The inliner is used at build-time, and developers can use the
+ * "inline C" feature to implement target-specific parts such as
+ * C runtime and essential libraries.
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
