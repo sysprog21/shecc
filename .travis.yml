@@ -15,7 +15,6 @@ addons:
       - sourceline: "deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ bionic-updates main universe"
     packages:
       - qemu-user
-      - qemu-user-binfmt
 
 before_install:
   - sudo apt-get install -y build-essential
