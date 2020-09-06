@@ -1,6 +1,6 @@
 /* definitions */
 
-/* Limitations */
+/* limitations */
 #define MAX_TOKEN_LEN 256
 #define MAX_ID_LEN 64
 #define MAX_LINE_LEN 256
