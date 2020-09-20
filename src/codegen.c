@@ -376,7 +376,7 @@ void code_generate()
         case OP_gt:
         case OP_geq:
             /* we want 1/nonzero if equ, 0 otherwise */
-            emit(__cmp_r(__AL, dest_reg, dest_reg, OP_reg));
+            emit(__cmp_r(__AL, dest_reg, OP_reg));
             emit(__zero(dest_reg));
             emit(__mov_i(arm_get_cond(op), dest_reg, 1));
 

@@ -256,9 +256,9 @@ int __rsb_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
     return __mov(cond, 1, arm_rsb, 0, rd, rn, imm);
 }
 
-int __cmp_r(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
+int __cmp_r(arm_cond_t cond, arm_reg r1, arm_reg r2)
 {
-    return __mov(cond, 0, arm_cmp, 1, r1, rd, r2);
+    return __mov(cond, 0, arm_cmp, 1, r1, 0, r2);
 }
 
 int __teq(arm_reg rd)
