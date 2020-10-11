@@ -130,6 +130,7 @@ int get_code_length(ir_instr_t *ii)
     case OP_add:
     case OP_sub:
     case OP_mul:
+    case OP_div:
     case OP_read:
     case OP_write:
     case OP_log_or:
@@ -354,6 +355,11 @@ void code_generate()
             emit(__mul(__AL, dest_reg, dest_reg, OP_reg));
             if (dump_ir == 1)
                 printf("    x%d *= x%d", dest_reg, OP_reg);
+            break;
+        case OP_div:
+            emit(__div(__AL, dest_reg, OP_reg, dest_reg));
+            if (dump_ir == 1)
+                printf("    x%d /= x%d", dest_reg, OP_reg);
             break;
         case OP_negate:
             emit(__rsb_i(__AL, dest_reg, 0, dest_reg));
