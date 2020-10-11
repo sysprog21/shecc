@@ -46,6 +46,7 @@ typedef enum {
     T_open_square,   /* [ */
     T_close_square,  /* ] */
     T_asterisk,      /* '*' */
+    T_divide,        /* / */
     T_bit_or,        /* | */
     T_log_and,       /* && */
     T_log_or,        /* || */
@@ -182,6 +183,11 @@ token_t get_next_token()
                     }
                 }
             } while (next_char);
+        } else {
+            /* single '/', predict divide */
+            if (next_char == ' ')
+                read_char(1);
+            return T_divide;
         }
         /* TODO: check invalid cases */
         error("Unexpected '/'");
@@ -845,7 +851,7 @@ int get_operator_prio(opcode_t op)
         return -1;
 
     /* apply first, high priority */
-    if (op == OP_mul)
+    if ((op == OP_mul) || (op == OP_div))
         return 1;
 
     /* everything else left to right */
@@ -861,6 +867,8 @@ opcode_t get_operator()
         op = OP_sub;
     else if (lex_accept(T_asterisk))
         op = OP_mul;
+    else if (lex_accept(T_divide))
+        op = OP_div;
     else if (lex_accept(T_lshift))
         op = OP_lshift;
     else if (lex_accept(T_rshift))

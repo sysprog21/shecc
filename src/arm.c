@@ -251,6 +251,11 @@ int __mul(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
     return arm_encode(cond, 0, rd, 0, (r1 << 8) + 144 + r2);
 }
 
+int __div(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
+{
+    return arm_encode(cond, 113, rd, 15, (r1 << 8) + 16 + r2);
+}
+
 int __rsb_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
 {
     return __mov(cond, 1, arm_rsb, 0, rd, rn, imm);
