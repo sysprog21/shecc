@@ -165,8 +165,7 @@ int fib(int n)      fib:                        Reserve stack frame for function
 
 1. Any non-zero value is NOT treated as logical truth by all ops.
    That is, the expression `0 == strcmp(ptr, "hello")` is not equivalent to `!strcmp(ptr, "hello")`.
-2. Global variable initialization is not supported. 
-   Therefore, you can not initialize a global such as `int i = [expr]`.
+2. The generated ELF lacks of .bss and .rodata section
 3. Dereference is incomplete. Consider `int x = 5; int *ptr = &x;` and it is forbidden to use `*ptr`.
    However, it is valid to use `ptr[0]`, which behaves the same of `*ptr`.
 4. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.

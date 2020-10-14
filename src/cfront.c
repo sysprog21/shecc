@@ -548,6 +548,7 @@ int read_numeric_constant(char buffer[])
 
 void read_inner_var_decl(var_t *vd)
 {
+    vd->init_val = 0;
     if (lex_accept(T_asterisk))
         vd->is_ptr = 1;
     else
@@ -1308,6 +1309,140 @@ int read_body_assignment(char *token, block_t *parent)
     return 0;
 }
 
+int read_numeric_sconstant()
+{
+    /* return signed constant */
+    int isneg = 0, res;
+    char buffer[10];
+    if (lex_accept(T_minus))
+        isneg = 1;
+    if (lex_peek(T_numeric, buffer))
+        res = read_numeric_constant(buffer);
+    else
+        error("Invalid value after assignment");
+    lex_expect(T_numeric);
+    if (isneg)
+        return (-1) * res;
+    return res;
+}
+
+int eval_expression_imm(opcode_t op, int op1, int op2)
+{
+    /* return immediate result */
+    int res;
+    switch (op) {
+    case OP_add:
+        res = op1 + op2;
+        break;
+    case OP_sub:
+        res = op1 - op2;
+        break;
+    case OP_mul:
+        res = op1 * op2;
+        break;
+    case OP_div:
+        res = op1 / op2;
+        break;
+    case OP_lshift:
+        res = op1 << op2;
+        break;
+    case OP_rshift:
+        res = op1 >> op2;
+        break;
+    default:
+        error("The requested operation is not supported.");
+    }
+    return res;
+}
+
+int read_global_assignment(char *token)
+{
+    /* global initialization must be constant */
+    var_t *var = find_global_var(token);
+    if (var) {
+        opcode_t op_stack[10];
+        opcode_t op, next_op;
+        int val_stack[10];
+        int op_stack_index = 0, val_stack_index = 0;
+        int operand1, operand2;
+        operand1 = read_numeric_sconstant();
+        op = get_operator();
+        /* only one value after assignment */
+        if (op == OP_generic) {
+            var->init_val = operand1;
+            return 1;
+        }
+        operand2 = read_numeric_sconstant();
+        next_op = get_operator();
+        if (next_op == OP_generic) {
+            /* only two operands, apply and return */
+            var->init_val = eval_expression_imm(op, operand1, operand2);
+            return 1;
+        }
+
+        /* using stack if operands more than two */
+        op_stack[op_stack_index++] = op;
+        op = next_op;
+        val_stack[val_stack_index++] = operand1;
+        val_stack[val_stack_index++] = operand2;
+
+        while (op != OP_generic) {
+            if (op_stack_index > 0) {
+                /* we have a continuation, use stack */
+                int same_op = 0;
+                do {
+                    opcode_t stack_op = op_stack[op_stack_index - 1];
+                    if (get_operator_prio(stack_op) >= get_operator_prio(op)) {
+                        operand1 = val_stack[val_stack_index - 2];
+                        operand2 = val_stack[val_stack_index - 1];
+                        val_stack_index -= 2;
+
+                        /* apply stack operator and push result back */
+                        val_stack[val_stack_index++] =
+                            eval_expression_imm(stack_op, operand1, operand2);
+
+                        /* pop op stack */
+                        op_stack_index--;
+                    } else {
+                        same_op = 1;
+                    }
+                    /* continue util next operation is higher prio */
+                } while (op_stack_index > 0 && same_op == 0);
+            }
+            /* push next operand on stack */
+            val_stack[val_stack_index++] = read_numeric_sconstant();
+            /* push operator on stack */
+            op_stack[op_stack_index++] = op;
+            op = get_operator();
+        }
+        /* unwind stack and apply operations */
+        while (op_stack_index > 0) {
+            opcode_t stack_op = op_stack[op_stack_index - 1];
+
+            /* pop stack and apply operators */
+            operand1 = val_stack[val_stack_index - 2];
+            operand2 = val_stack[val_stack_index - 1];
+            val_stack_index -= 2;
+
+            /* apply stack operator and push value back on stack */
+            val_stack[val_stack_index++] =
+                eval_expression_imm(stack_op, operand1, operand2);
+
+            if (op_stack_index == 1) {
+                var->init_val = val_stack[0];
+                return 1;
+            }
+
+            /* pop op stack */
+            op_stack_index--;
+        }
+
+        var->init_val = val_stack[0];
+        return 1;
+    }
+    return 0;
+}
+
 int break_exit_ir_index[MAX_NESTING];
 
 void read_code_block(func_t *func, block_t *parent);
@@ -1696,10 +1831,15 @@ void read_global_decl(block_t *block)
     /* is a variable */
     memcpy(&block->locals[block->next_local++], &_temp_var, sizeof(var_t));
 
-    if (lex_accept(T_assign))
-        /* global variable initialization is not supported at the moment. */
-        error("Global initialization not supported");
-    else if (lex_accept(T_comma))
+    if (lex_accept(T_assign)) {
+        if (_temp_var.is_ptr == 0 && _temp_var.array_size == 0) {
+            read_global_assignment(_temp_var.var_name);
+            lex_expect(T_semicolon);
+            return;
+        }
+        /* TODO: support global initialization for array and pointer */
+        error("Global initialization for array and pointer not supported");
+    } else if (lex_accept(T_comma))
         /* TODO: continuation */
         error("Global continuation not supported");
     else if (lex_accept(T_semicolon))

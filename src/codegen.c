@@ -75,7 +75,12 @@ void size_funcs(int data_start)
         blk->locals[i].offset = elf_data_idx; /* set offset in data section */
         elf_add_symbol(blk->locals[i].var_name, strlen(blk->locals[i].var_name),
                        data_start + elf_data_idx);
-        elf_data_idx += size_var(&blk->locals[i]);
+        /* TODO: add .bss section */
+        if (strcmp(blk->locals[i].type_name, "int") == 0 &&
+            blk->locals[i].init_val != 0)
+            elf_write_data_int(blk->locals[i].init_val);
+        else
+            elf_data_idx += size_var(&blk->locals[i]);
     }
 }
 
