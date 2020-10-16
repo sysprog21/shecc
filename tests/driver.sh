@@ -247,6 +247,16 @@ int main() {
 }
 EOF
 
+# global initialization
+try_ 20 << EOF
+int a = 5 * 2;
+int b = -4 * 3 + 7 + 9 / 3 * 5;
+int main()
+{
+    exit(a + b);
+}
+EOF
+
 # conditional operator
 # expr 10 "1 ? 10 : 5"
 # expr 25 "0 ? 10 : 25"

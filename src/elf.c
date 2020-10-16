@@ -19,6 +19,14 @@ void elf_write_data_str(char *vals, int len)
         elf_data[elf_data_idx++] = vals[i];
 }
 
+void elf_write_data_int(int val)
+{
+    elf_data[elf_data_idx++] = (val & 0x000000FF);
+    elf_data[elf_data_idx++] = (val & 0x0000FF00) >> 8;
+    elf_data[elf_data_idx++] = (val & 0x00FF0000) >> 16;
+    elf_data[elf_data_idx++] = (val & 0xFF000000) >> 24;
+}
+
 void elf_write_header_byte(int val)
 {
     elf_header[elf_header_idx++] = val;

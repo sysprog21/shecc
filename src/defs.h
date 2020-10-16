@@ -106,7 +106,8 @@ typedef struct {
     char var_name[MAX_VAR_LEN];
     int is_ptr;
     int array_size;
-    int offset; /* offset from stack or frame */
+    int offset;   /* offset from stack or frame */
+    int init_val; /* for global initialization */
 } var_t;
 
 /* function definition */
