@@ -1329,7 +1329,7 @@ int read_numeric_sconstant()
 int eval_expression_imm(opcode_t op, int op1, int op2)
 {
     /* return immediate result */
-    int res;
+    int res = 0;
     switch (op) {
     case OP_add:
         res = op1 + op2;
