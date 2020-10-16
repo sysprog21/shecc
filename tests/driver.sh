@@ -274,4 +274,10 @@ expr 1 "sizeof(char)";
 items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } exit(a);"
 items 10 "int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } exit(a);"
 
+# enum
+try_ 6 << EOF
+typedef enum { enum1 = 5, enum2 } enum_t;
+int main() { enum_t v = enum2; exit(v); }
+EOF
+
 echo OK
