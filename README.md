@@ -25,7 +25,7 @@ syntax:
 * condition statements: if, while, for, switch, case, break, return, and
                         general expressions
 * compound assignments: `+=`, `-=`, `*=`
-* local variable initializations for supported data types
+* global/local variable initializations for supported data types
     - e.g. `int i = [expr]`
 
 The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3.
