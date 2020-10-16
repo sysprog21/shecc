@@ -1,35 +1,35 @@
 /* Global objects */
 
 block_t *BLOCKS;
-int blocks_idx;
+int blocks_idx = 0;
 
 func_t *FUNCS;
-int funcs_idx;
+int funcs_idx = 0;
 
 type_t *TYPES;
-int types_idx;
+int types_idx = 0;
 
 ir_instr_t *IR;
-int ir_idx;
+int ir_idx = 0;
 
 alias_t *ALIASES;
-int aliases_idx;
+int aliases_idx = 0;
 
 constant_t *CONSTANTS;
-int constants_idx;
+int constants_idx = 0;
 
 char *SOURCE;
-int source_idx;
+int source_idx = 0;
 
 /* ELF sections */
 
 char *elf_code;
-int elf_code_idx;
+int elf_code_idx = 0;
 char *elf_data;
-int elf_data_idx;
+int elf_data_idx = 0;
 char *elf_header;
-int elf_header_idx;
-int elf_header_len;
+int elf_header_idx = 0;
+int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
 int elf_code_start;
 char *elf_symtab;
 char *elf_strtab;
@@ -207,19 +207,6 @@ int size_var(var_t *var)
  */
 void global_init()
 {
-    elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
-
-    elf_header_idx = 0;
-    elf_code_idx = 0;
-    elf_data_idx = 0;
-    ir_idx = 0;
-    source_idx = 0;
-    aliases_idx = 0;
-    constants_idx = 0;
-    blocks_idx = 0;
-    types_idx = 0;
-    funcs_idx = 0;
-
     elf_code_start = ELF_START + elf_header_len;
 
     BLOCKS = malloc(MAX_BLOCKS * sizeof(block_t));
