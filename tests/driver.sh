@@ -280,4 +280,20 @@ typedef enum { enum1 = 5, enum2 } enum_t;
 int main() { enum_t v = enum2; exit(v); }
 EOF
 
+# malloc and free
+try_ 1 << EOF
+int main()
+{
+    /* change test bench if different scheme apply */
+    int *a = malloc(sizeof(int) * 5);
+    free(a);
+    if (a == NULL)
+        abort();
+    int *b = malloc(sizeof(int) * 3);
+
+    /* "malloc" will reuse memory free'd by "free(a)" */
+    exit(a == b);
+}
+EOF
+
 echo OK
