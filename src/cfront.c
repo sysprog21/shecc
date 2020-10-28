@@ -1514,8 +1514,11 @@ void read_body_statement(block_t *parent)
 
     if (lex_accept(T_while)) {
         ir_instr_t *false_jump;
-        ir_instr_t *start = add_instr(OP_label); /* start to return to */
-
+        ir_instr_t *start_jump =
+            add_instr(OP_jump); /* jump to while condition */
+        ir_instr_t *exit_label = add_instr(OP_label);
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label); /* start to return to */
         lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
         lex_expect(T_close_bracket);
@@ -1523,15 +1526,23 @@ void read_body_statement(block_t *parent)
         false_jump = add_instr(OP_jz);
         false_jump->param_no = 0;
 
+        start_jump->int_param1 = start_label->ir_index;
+
+        /* create exit jump for breaks */
+        break_exit_ir_index[break_level++] = exit_label->ir_index;
+
         read_body_statement(parent);
+
+        break_level--;
 
         /* unconditional jump back to expression */
         ii = add_instr(OP_jump);
-        ii->int_param1 = start->ir_index;
+        ii->int_param1 = start_label->ir_index;
 
         /* exit label */
         ii = add_instr(OP_label);
         false_jump->int_param1 = ii->ir_index;
+        exit_jump->int_param1 = ii->ir_index;
         return;
     }
 
@@ -1621,6 +1632,10 @@ void read_body_statement(block_t *parent)
     }
 
     if (lex_accept(T_for)) {
+        ir_instr_t *start_jump = add_instr(OP_jump);
+        ir_instr_t *exit_label = add_instr(OP_label);
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label);
         ir_instr_t *condition_start;
         ir_instr_t *condition_jump_out;
         ir_instr_t *condition_jump_in;
@@ -1630,6 +1645,7 @@ void read_body_statement(block_t *parent)
         ir_instr_t *body_jump;
         ir_instr_t *end;
 
+        start_jump->int_param1 = start_label->ir_index;
         lex_expect(T_open_bracket);
 
         /* setup - execute once */
@@ -1671,7 +1687,9 @@ void read_body_statement(block_t *parent)
         /* loop body */
         body_start = add_instr(OP_label);
         condition_jump_in->int_param1 = body_start->ir_index;
+        break_exit_ir_index[break_level++] = exit_label->ir_index;
         read_body_statement(parent);
+        break_level--;
 
         /* jump to increment */
         body_jump = add_instr(OP_jump);
@@ -1679,14 +1697,22 @@ void read_body_statement(block_t *parent)
 
         end = add_instr(OP_label);
         condition_jump_out->int_param1 = end->ir_index;
+        exit_jump->int_param1 = end->ir_index;
         return;
     }
 
     if (lex_accept(T_do)) {
         ir_instr_t *false_jump;
-        ir_instr_t *start = add_instr(OP_label); /* start to return to */
+        ir_instr_t *start_jump = add_instr(OP_jump);
+        ir_instr_t *exit_label;
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label); /* start to return to */
+        start_jump->int_param1 = start_label->ir_index;
 
+        break_exit_ir_index[break_level++] = exit_jump->ir_index;
         read_body_statement(parent);
+        break_level--;
+
         lex_expect(T_while);
         lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
@@ -1694,7 +1720,9 @@ void read_body_statement(block_t *parent)
 
         false_jump = add_instr(OP_jnz);
         false_jump->param_no = 0;
-        false_jump->int_param1 = start->ir_index;
+        false_jump->int_param1 = start_label->ir_index;
+        exit_label = add_instr(OP_label);
+        exit_jump->int_param1 = exit_label->ir_index;
 
         lex_expect(T_semicolon);
         return;
