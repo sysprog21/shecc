@@ -170,8 +170,6 @@ int fib(int n)      fib:                        Reserve stack frame for function
    However, it is valid to use `ptr[0]`, which behaves the same of `*ptr`.
 4. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.
    Alternatively, check the implementation `printf` in source `lib/c.c` for `var_arg`.
-5. The memory region allocated by `malloc` can not be released. In fact, there is no `free` function.
-   Memory allocator should be introduced in embedded libc implementation.
 6. If you attempt to return values in `main` function, the value will not be reserved after the
    program exited. You have to modify the `return` statement to `exit` call. Check the test items in
    file `tests/driver.sh` for details.
