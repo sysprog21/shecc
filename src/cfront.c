@@ -1227,7 +1227,7 @@ void read_lvalue(lvalue_t *lvalue,
     }
 }
 
-int read_body_assignment(char *token, block_t *parent)
+int read_body_assignment(char *token, block_t *parent, opcode_t prefix_op)
 {
     var_t *var = find_local_var(token, parent);
     if (var == NULL)
@@ -1257,8 +1257,11 @@ int read_body_assignment(char *token, block_t *parent)
             op = OP_bit_or;
         } else if (lex_accept(T_andeq)) {
             op = OP_bit_and;
-        } else {
+        } else if (prefix_op == OP_generic) {
             lex_expect(T_assign);
+        } else {
+            op = prefix_op;
+            one = 1;
         }
 
         if (op != OP_generic) {
@@ -1459,6 +1462,7 @@ void read_body_statement(block_t *parent)
     type_t *type;
     var_t *var;
     ir_instr_t *ii;
+    opcode_t prefix_op = OP_generic;
 
     /* statement can be:
      *   function call, variable declaration, assignment operation,
@@ -1661,7 +1665,7 @@ void read_body_statement(block_t *parent)
         /* setup - execute once */
         if (!lex_accept(T_semicolon)) {
             lex_peek(T_identifier, token);
-            read_body_assignment(token, parent);
+            read_body_assignment(token, parent, OP_generic);
             lex_expect(T_semicolon);
         }
 
@@ -1685,8 +1689,12 @@ void read_body_statement(block_t *parent)
         /* increment after each loop */
         increment = add_instr(OP_label);
         if (!lex_accept(T_close_bracket)) {
+            if (lex_accept(T_increment))
+                prefix_op = OP_add;
+            else if (lex_accept(T_decrement))
+                prefix_op = OP_sub;
             lex_peek(T_identifier, token);
-            read_body_assignment(token, parent);
+            read_body_assignment(token, parent, prefix_op);
             lex_expect(T_close_bracket);
         }
 
@@ -1751,6 +1759,11 @@ void read_body_statement(block_t *parent)
     if (lex_accept(T_semicolon))
         return;
 
+    /* statement with prefix */
+    if (lex_accept(T_increment))
+        prefix_op = OP_add;
+    else if (lex_accept(T_decrement))
+        prefix_op = OP_sub;
     /* must be an identifier */
     if (!lex_peek(T_identifier, token))
         error("Unexpected token");
@@ -1809,7 +1822,7 @@ void read_body_statement(block_t *parent)
     }
 
     /* is an assignment? */
-    if (read_body_assignment(token, parent)) {
+    if (read_body_assignment(token, parent, prefix_op)) {
         lex_expect(T_semicolon);
         return;
     }
