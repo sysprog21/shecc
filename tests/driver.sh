@@ -119,8 +119,8 @@ items 30 "int a; a = 10; if (a) { if (a - 10) { a = a + 1; } else { a = a + 20; 
 # loop
 items 55 "int acc; int p; acc = 0; p = 10; while (p) { acc = acc + p; p = p - 1; } exit(acc);"
 items 60 "int acc; acc = 15; do { acc = acc * -2; } while (acc < 0); exit(acc);"
-# items 45 "int i; int acc; acc = 0; for (i = 0; i < 10; ++i) { acc = acc + i; } exit(acc);"
-# items 45 "int i; int j; i=0; j=0; while (i<10) { j=j+i; i=i+1; } exit(j);"
+items 45 "int i; int acc; acc = 0; for (i = 0; i < 10; ++i) { acc = acc + i; } exit(acc);"
+items 45 "int i; int j; i=0; j=0; while (i<10) { j=j+i; i=i+1; } exit(j);"
 items 1 "int x; x=0; do {x = x + 1; break;} while (1); exit(x);"
 items 2 "int x; x=0; do {x++; continue; abort();} while (x < 2); exit(x);"
 items 2 "int x; x=0; while(x < 2){x++; continue; abort();} exit(x);"
