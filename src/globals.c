@@ -37,7 +37,7 @@ char *elf_section;
 
 /* options */
 
-int dump_ir;
+int dump_ir = 0;
 
 type_t *find_type(char *type_name)
 {

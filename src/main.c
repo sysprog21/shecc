@@ -27,7 +27,6 @@ int main(int argc, char *argv[])
     int libc = 1;
     char *out = NULL, *in = NULL;
     int i;
-    dump_ir = 0;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dump-ir") == 0)
