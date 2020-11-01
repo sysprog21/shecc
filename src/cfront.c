@@ -48,6 +48,7 @@ typedef enum {
     T_asterisk,      /* '*' */
     T_divide,        /* / */
     T_bit_or,        /* | */
+    T_bit_xor,       /* ^ */
     T_log_and,       /* && */
     T_log_or,        /* || */
     T_log_not,       /* ! */
@@ -230,6 +231,10 @@ token_t get_next_token()
     if (next_char == ',') {
         read_char(1);
         return T_comma;
+    }
+    if (next_char == '^') {
+        read_char(1);
+        return T_bit_xor;
     }
     if (next_char == '"') {
         int i = 0;
@@ -846,21 +851,35 @@ void read_expr_operand(int param_no, block_t *parent)
 
 int get_operator_prio(opcode_t op)
 {
-    /* apply last, lowest priority */
-    if (op == OP_log_and || op == OP_log_or)
-        return -2;
-
-    /* apply second last, low priority */
-    if ((op == OP_eq) || (op == OP_neq) || (op == OP_lt) || (op == OP_leq) ||
-        (op == OP_gt) || (op == OP_geq))
-        return -1;
-
-    /* apply first, high priority */
-    if ((op == OP_mul) || (op == OP_div))
-        return 1;
-
-    /* everything else left to right */
-    return 0;
+    /* https://www.cs.uic.edu/~i109/Notes/COperatorPrecedenceTable.pdf */
+    switch (op) {
+    case OP_log_or:
+        return 4;
+    case OP_log_and:
+        return 5;
+    case OP_bit_or:
+        return 6;
+    case OP_bit_xor:
+        return 7;
+    case OP_bit_and:
+        return 8;
+    case OP_eq:
+    case OP_neq:
+        return 9;
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+        return 10;
+    case OP_add:
+    case OP_sub:
+        return 12;
+    case OP_mul:
+    case OP_div:
+        return 13;
+    default:
+        return 0;
+    }
 }
 
 opcode_t get_operator()
@@ -898,6 +917,8 @@ opcode_t get_operator()
         op = OP_bit_and;
     else if (lex_accept(T_bit_or))
         op = OP_bit_or;
+    else if (lex_accept(T_bit_xor))
+        op = OP_bit_xor;
     return op;
 }
 

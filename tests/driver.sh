@@ -92,7 +92,7 @@ expr 1 "1 && 1"
 expr 16 "2 << 3"
 expr 32 "256 >> 3"
 expr 239 "237 | 106"
-# expr 135 "237 ^ 106"
+expr 135 "237 ^ 106"
 expr 104 "237 & 106"
 
 # return statements

@@ -81,6 +81,7 @@ typedef enum {
     OP_geq, /* greater than or equal */
     OP_bit_or,
     OP_bit_and,
+    OP_bit_xor,
     OP_negate,
 
     /* platform-specific */
