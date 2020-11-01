@@ -1879,20 +1879,19 @@ void read_func_body(func_t *fdef)
     fdef->exit_point = ii->ir_index;
 }
 
-var_t _temp_var;
-
 /* if first token is type */
 void read_global_decl(block_t *block)
 {
+    var_t tmp;
     /* new function, or variables under parent */
-    read_full_var_decl(&_temp_var);
+    read_full_var_decl(&tmp);
 
     if (lex_peek(T_open_bracket, NULL)) {
         ir_instr_t *ii;
 
         /* function */
-        func_t *fd = add_func(_temp_var.var_name);
-        memcpy(&fd->return_def, &_temp_var, sizeof(var_t));
+        func_t *fd = add_func(tmp.var_name);
+        memcpy(&fd->return_def, &tmp, sizeof(var_t));
 
         fd->num_params = read_parameter_list_decl(fd->param_defs);
 
@@ -1910,11 +1909,11 @@ void read_global_decl(block_t *block)
     }
 
     /* is a variable */
-    memcpy(&block->locals[block->next_local++], &_temp_var, sizeof(var_t));
+    memcpy(&block->locals[block->next_local++], &tmp, sizeof(var_t));
 
     if (lex_accept(T_assign)) {
-        if (_temp_var.is_ptr == 0 && _temp_var.array_size == 0) {
-            read_global_assignment(_temp_var.var_name);
+        if (tmp.is_ptr == 0 && tmp.array_size == 0) {
+            read_global_assignment(tmp.var_name);
             lex_expect(T_semicolon);
             return;
         }
