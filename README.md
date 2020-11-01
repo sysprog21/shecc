@@ -33,14 +33,14 @@ The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3.
 ## Bootstrapping
 
 The steps to validate `shecc` bootstrapping:
-1. `stage1`: `shecc` source code is initially compiled using an ordinary compiler
+1. `stage0`: `shecc` source code is initially compiled using an ordinary compiler
    which generates a native executable. The generated compiler can be used as a
    cross-compiler.
-2. `stage2`: The built binary reads its own source code as input and generates an
+2. `stage1`: The built binary reads its own source code as input and generates an
    ARMv7-A  binary.
-3. `stage3`: The generated ARMv7-A binary is invoked (via QEMU or running on Arm
+3. `stage2`: The generated ARMv7-A binary is invoked (via QEMU or running on Arm
    devices) with its own source code as input and generates another ARMv7-A binary.
-4. `bootstrap`: Build the `stage2` and `stage3` compilers, and verify that they are
+4. `bootstrap`: Build the `stage1` and `stage2` compilers, and verify that they are
    byte-wise identical. If so, `shecc` can compile its own source code and produce
    new versions of that same program.
 
