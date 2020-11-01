@@ -11,7 +11,7 @@ a self-compiling compiler for a subset of the C language.
 
 * Generate executable Linux ELF binaries for ARMv7-A;
 * Provide a minimal C standard library for basic I/O on GNU/Linux;
-* The cross-compiler is written in ANSI C, bootstrapping on most platforms;
+* The cross-compiler is written in ANSI C, arguably running on most platforms;
 * Self-contained C language front-end and machine code generator;
 * Two-pass compilation: on the first pass it checks the syntax of 
   statements and constructs a table of symbols, while on the second pass
@@ -34,7 +34,8 @@ The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3.
 
 The steps to validate `shecc` bootstrapping:
 1. `stage1`: `shecc` source code is initially compiled using an ordinary compiler
-   which generates an x86/x86\_64 binary.
+   which generates a native executable. The generated compiler can be used as a
+   cross-compiler.
 2. `stage2`: The built binary reads its own source code as input and generates an
    ARMv7-A  binary.
 3. `stage3`: The generated ARMv7-A binary is invoked (via QEMU or running on Arm
