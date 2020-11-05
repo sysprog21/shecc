@@ -47,6 +47,7 @@ typedef enum {
     T_close_square,  /* ] */
     T_asterisk,      /* '*' */
     T_divide,        /* / */
+    T_mod,           /* % */
     T_bit_or,        /* | */
     T_bit_xor,       /* ^ */
     T_log_and,       /* && */
@@ -337,6 +338,10 @@ token_t get_next_token()
         };
         skip_whitespace();
         return T_lt;
+    }
+    if (next_char == '%') {
+        read_char(1);
+        return T_mod;
     }
     if (next_char == '>') {
         read_char(0);
@@ -876,6 +881,7 @@ int get_operator_prio(opcode_t op)
         return 12;
     case OP_mul:
     case OP_div:
+    case OP_mod:
         return 13;
     default:
         return 0;
@@ -893,6 +899,8 @@ opcode_t get_operator()
         op = OP_mul;
     else if (lex_accept(T_divide))
         op = OP_div;
+    else if (lex_accept(T_mod))
+        op = OP_mod;
     else if (lex_accept(T_lshift))
         op = OP_lshift;
     else if (lex_accept(T_rshift))
@@ -1357,6 +1365,7 @@ int read_numeric_sconstant()
 int eval_expression_imm(opcode_t op, int op1, int op2)
 {
     /* return immediate result */
+    int tmp = op2;
     int res = 0;
     switch (op) {
     case OP_add:
@@ -1370,6 +1379,16 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
         break;
     case OP_div:
         res = op1 / op2;
+        break;
+    case OP_mod:
+        /* TODO: provide arithmetic & operation instead of '&=' */
+        /* TODO: do optimization for local expression */
+        tmp &= (tmp - 1);
+        if ((op2 != 0) && (tmp == 0)) {
+            res = op1;
+            res &= (op2 - 1);
+        } else
+            res = op1 % op2;
         break;
     case OP_lshift:
         res = op1 << op2;

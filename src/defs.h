@@ -68,6 +68,7 @@ typedef enum {
     OP_sub,
     OP_mul,
     OP_div, /* signed division */
+    OP_mod, /* modulo */
     OP_lshift,
     OP_rshift,
     OP_log_and,
