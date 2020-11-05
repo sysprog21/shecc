@@ -121,6 +121,7 @@ int get_code_length(ir_instr_t *ii)
     case OP_func_exit:
         return 16;
     case OP_exit:
+    case OP_mod:
         return 12;
     case OP_load_data_address:
     case OP_jz:
@@ -366,6 +367,14 @@ void code_generate()
             emit(__div(__AL, dest_reg, OP_reg, dest_reg));
             if (dump_ir == 1)
                 printf("    x%d /= x%d", dest_reg, OP_reg);
+            break;
+        case OP_mod:
+            emit(__div(__AL, OP_reg + 1, OP_reg, dest_reg));
+            emit(__mul(__AL, OP_reg, OP_reg, OP_reg + 1));
+            emit(__sub_r(__AL, dest_reg, dest_reg, OP_reg));
+            /* TODO: support percent-sign character (%) in format string */
+            if (dump_ir == 1)
+                printf("    x%d = x%d mod x%d", dest_reg, dest_reg, OP_reg);
             break;
         case OP_negate:
             emit(__rsb_i(__AL, dest_reg, 0, dest_reg));
