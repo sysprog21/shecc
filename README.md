@@ -169,7 +169,7 @@ int fib(int n)      fib:                        Reserve stack frame for function
    if the operand is not a "truthiness-generating" expression.
    That is, the expression `0 == strcmp(ptr, "hello")` is not equivalent to `!strcmp(ptr, "hello")`.
 2. The generated ELF lacks of .bss and .rodata section
-3. The `*` operator is not supported, which makes it necessary to use `[0]` syntax.
+3. The unary `*` operator is not supported, which makes it necessary to use `[0]` syntax.
    Consider `int x = 5; int *ptr = &x;` and it is forbidden to use `*ptr`. However, it is valid to
    use `ptr[0]`, which behaves the same of `*ptr`.
 4. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.
