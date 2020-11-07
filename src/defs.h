@@ -83,6 +83,7 @@ typedef enum {
     OP_bit_or,
     OP_bit_and,
     OP_bit_xor,
+    OP_bit_not,
     OP_negate,
 
     /* platform-specific */

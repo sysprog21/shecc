@@ -29,7 +29,8 @@ typedef enum {
     arm_teq = 9,
     arm_cmp = 10,
     arm_orr = 12,
-    arm_mov = 13
+    arm_mov = 13,
+    arm_mvn = 15
 } arm_op_t;
 
 /* Condition code
@@ -142,6 +143,11 @@ int __or_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
 int __eor_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
 {
     return __mov(cond, 0, arm_eor, 0, rs, rd, rm);
+}
+
+int __mvn_r(arm_cond_t cond, arm_reg rd, arm_reg rm)
+{
+    return __mov(cond, 0, arm_mvn, 0, 0, rd, rm);
 }
 
 int __movw(arm_cond_t cond, arm_reg rd, int imm)
