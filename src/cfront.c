@@ -50,6 +50,7 @@ typedef enum {
     T_mod,           /* % */
     T_bit_or,        /* | */
     T_bit_xor,       /* ^ */
+    T_bit_not,       /* ~ */
     T_log_and,       /* && */
     T_log_or,        /* || */
     T_log_not,       /* ! */
@@ -236,6 +237,10 @@ token_t get_next_token()
     if (next_char == '^') {
         read_char(1);
         return T_bit_xor;
+    }
+    if (next_char == '~') {
+        read_char(1);
+        return T_bit_not;
     }
     if (next_char == '"') {
         int i = 0;
@@ -747,6 +752,11 @@ void read_expr_operand(int param_no, block_t *parent)
         ir_instr_t *ii;
         read_expr_operand(param_no, parent);
         ii = add_instr(OP_not);
+        ii->param_no = param_no;
+    } else if (lex_accept(T_bit_not)) {
+        ir_instr_t *ii;
+        read_expr_operand(param_no, parent);
+        ii = add_instr(OP_bit_not);
         ii->param_no = param_no;
     } else if (lex_accept(T_ampersand)) {
         char token[MAX_VAR_LEN];

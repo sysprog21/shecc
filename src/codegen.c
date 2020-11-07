@@ -145,6 +145,7 @@ int get_code_length(ir_instr_t *ii)
     case OP_bit_or:
     case OP_bit_and:
     case OP_bit_xor:
+    case OP_bit_not:
     case OP_negate:
     case OP_lshift:
     case OP_rshift:
@@ -451,6 +452,11 @@ void code_generate()
             emit(__eor_r(__AL, dest_reg, dest_reg, OP_reg));
             if (dump_ir == 1)
                 printf("    x%d ^= x%d", dest_reg, OP_reg);
+            break;
+        case OP_bit_not:
+            emit(__mvn_r(__AL, dest_reg, dest_reg));
+            if (dump_ir == 1)
+                printf("    x%d ~= x%d", dest_reg, dest_reg);
             break;
         case OP_lshift:
             emit(__sll(__AL, dest_reg, dest_reg, OP_reg));
