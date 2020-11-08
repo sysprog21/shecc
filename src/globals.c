@@ -43,7 +43,7 @@ type_t *find_type(char *type_name)
 {
     int i;
     for (i = 0; i < types_idx; i++)
-        if (strcmp(TYPES[i].type_name, type_name) == 0)
+        if (!strcmp(TYPES[i].type_name, type_name))
             return &TYPES[i];
     return NULL;
 }
@@ -79,7 +79,7 @@ char *find_alias(char alias[])
 {
     int i;
     for (i = 0; i < aliases_idx; i++)
-        if (strcmp(alias, ALIASES[i].alias) == 0)
+        if (!strcmp(alias, ALIASES[i].alias))
             return ALIASES[i].value;
     return NULL;
 }
@@ -91,7 +91,7 @@ func_t *add_func(char *name)
 
     /* return existing if found */
     for (i = 0; i < funcs_idx; i++)
-        if (strcmp(FUNCS[i].return_def.var_name, name) == 0)
+        if (!strcmp(FUNCS[i].return_def.var_name, name))
             return &FUNCS[i];
 
     fn = &FUNCS[funcs_idx++];
@@ -122,7 +122,7 @@ constant_t *find_constant(char alias[])
 {
     int i;
     for (i = 0; i < constants_idx; i++)
-        if (strcmp(CONSTANTS[i].alias, alias) == 0)
+        if (!strcmp(CONSTANTS[i].alias, alias))
             return &CONSTANTS[i];
     return NULL;
 }
@@ -131,7 +131,7 @@ func_t *find_func(char func_name[])
 {
     int i;
     for (i = 0; i < funcs_idx; i++)
-        if (strcmp(FUNCS[i].return_def.var_name, func_name) == 0)
+        if (!strcmp(FUNCS[i].return_def.var_name, func_name))
             return &FUNCS[i];
     return NULL;
 }
@@ -140,7 +140,7 @@ var_t *find_member(char token[], type_t *type)
 {
     int i;
     for (i = 0; i < type->num_fields; i++)
-        if (strcmp(type->fields[i].var_name, token) == 0)
+        if (!strcmp(type->fields[i].var_name, token))
             return &type->fields[i];
     return NULL;
 }
@@ -152,13 +152,13 @@ var_t *find_local_var(char *token, block_t *block)
 
     for (; block; block = block->parent) {
         for (i = 0; i < block->next_local; i++)
-            if (strcmp(block->locals[i].var_name, token) == 0)
+            if (!strcmp(block->locals[i].var_name, token))
                 return &block->locals[i];
     }
 
     if (fn) {
         for (i = 0; i < fn->num_params; i++)
-            if (strcmp(fn->param_defs[i].var_name, token) == 0)
+            if (!strcmp(fn->param_defs[i].var_name, token))
                 return &fn->param_defs[i];
     }
     return NULL;
@@ -170,7 +170,7 @@ var_t *find_global_var(char *token)
     block_t *block = &BLOCKS[0];
 
     for (i = 0; i < block->next_local; i++)
-        if (strcmp(block->locals[i].var_name, token) == 0)
+        if (!strcmp(block->locals[i].var_name, token))
             return &block->locals[i];
     return NULL;
 }
@@ -178,7 +178,7 @@ var_t *find_global_var(char *token)
 var_t *find_var(char *token, block_t *parent)
 {
     var_t *var = find_local_var(token, parent);
-    if (var == NULL)
+    if (!var)
         var = find_global_var(token);
     return var;
 }

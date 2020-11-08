@@ -50,7 +50,7 @@ void load_from(char *file)
     char buffer[MAX_LINE_LEN];
     FILE *f = fopen(file, "rb");
     for (;;) {
-        if (fgets(buffer, MAX_LINE_LEN, f) == NULL) {
+        if (!fgets(buffer, MAX_LINE_LEN, f)) {
             fclose(f);
             return;
         }

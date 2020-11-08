@@ -128,19 +128,18 @@ token_t get_next_token()
         token_str[i] = 0;
         skip_whitespace();
 
-        if (strcmp(token_str, "#include") == 0) {
-            i = 0;
+        if (!strcmp(token_str, "#include")) {
             do {
                 token_str[i++] = next_char;
             } while (read_char(0) != '\n');
             skip_whitespace();
             return T_include;
         }
-        if (strcmp(token_str, "#define") == 0) {
+        if (!strcmp(token_str, "#define")) {
             skip_whitespace();
             return T_define;
         }
-        if (strcmp(token_str, "#ifdef") == 0) {
+        if (!strcmp(token_str, "#ifdef")) {
             i = 0;
             do {
                 token_str[i++] = next_char;
@@ -148,7 +147,7 @@ token_t get_next_token()
             token_str[i] = 0;
             /* check if we have this alias/define */
             for (i = 0; i < aliases_idx; i++) {
-                if (strcmp(token_str, ALIASES[i].alias) == 0) {
+                if (!strcmp(token_str, ALIASES[i].alias)) {
                     skip_whitespace();
                     return get_next_token();
                 }
@@ -165,7 +164,7 @@ token_t get_next_token()
             skip_whitespace();
             return get_next_token();
         }
-        if (strcmp(token_str, "#endif") == 0) {
+        if (!strcmp(token_str, "#endif")) {
             skip_whitespace();
             return get_next_token();
         }
@@ -444,35 +443,35 @@ token_t get_next_token()
         token_str[i] = 0;
         skip_whitespace();
 
-        if (strcmp(token_str, "if") == 0)
+        if (!strcmp(token_str, "if"))
             return T_if;
-        if (strcmp(token_str, "while") == 0)
+        if (!strcmp(token_str, "while"))
             return T_while;
-        if (strcmp(token_str, "for") == 0)
+        if (!strcmp(token_str, "for"))
             return T_for;
-        if (strcmp(token_str, "do") == 0)
+        if (!strcmp(token_str, "do"))
             return T_do;
-        if (strcmp(token_str, "else") == 0)
+        if (!strcmp(token_str, "else"))
             return T_else;
-        if (strcmp(token_str, "return") == 0)
+        if (!strcmp(token_str, "return"))
             return T_return;
-        if (strcmp(token_str, "typedef") == 0)
+        if (!strcmp(token_str, "typedef"))
             return T_typedef;
-        if (strcmp(token_str, "enum") == 0)
+        if (!strcmp(token_str, "enum"))
             return T_enum;
-        if (strcmp(token_str, "struct") == 0)
+        if (!strcmp(token_str, "struct"))
             return T_struct;
-        if (strcmp(token_str, "sizeof") == 0)
+        if (!strcmp(token_str, "sizeof"))
             return T_sizeof;
-        if (strcmp(token_str, "switch") == 0)
+        if (!strcmp(token_str, "switch"))
             return T_switch;
-        if (strcmp(token_str, "case") == 0)
+        if (!strcmp(token_str, "case"))
             return T_case;
-        if (strcmp(token_str, "break") == 0)
+        if (!strcmp(token_str, "break"))
             return T_break;
-        if (strcmp(token_str, "default") == 0)
+        if (!strcmp(token_str, "default"))
             return T_default;
-        if (strcmp(token_str, "continue") == 0)
+        if (!strcmp(token_str, "continue"))
             return T_continue;
 
         alias = find_alias(token_str);
@@ -499,7 +498,7 @@ int lex_accept(token_t token)
 int lex_peek(token_t token, char *value)
 {
     if (next_token == token) {
-        if (value == NULL)
+        if (!value)
             return 1;
         strcpy(value, token_str);
         return 1;
@@ -798,7 +797,7 @@ void read_expr_operand(int param_no, block_t *parent)
         lex_expect(T_open_bracket);
         lex_indent(T_identifier, token);
         type = find_type(token);
-        if (type == NULL)
+        if (!type)
             error("Unable to find type");
 
         ii->param_no = param_no;
@@ -1269,7 +1268,7 @@ void read_lvalue(lvalue_t *lvalue,
 int read_body_assignment(char *token, block_t *parent, opcode_t prefix_op)
 {
     var_t *var = find_local_var(token, parent);
-    if (var == NULL)
+    if (!var)
         var = find_global_var(token);
     if (var) {
         ir_instr_t *ii;
@@ -1962,7 +1961,7 @@ void read_global_statement()
     block_t *block = &BLOCKS[0]; /* global block */
 
     if (lex_peek(T_include, token)) {
-        if (strcmp(token_str, "<stdio.h>") == 0) {
+        if (!strcmp(token_str, "<stdio.h>")) {
             /* ignore, we inclue libc by default */
         }
         lex_expect(T_include);
@@ -2023,7 +2022,7 @@ void read_global_statement()
             type_t *type = add_type();
             lex_indent(T_identifier, base_type);
             base = find_type(base_type);
-            if (base == NULL)
+            if (!base)
                 error("Unable to find base type");
             type->base_type = base->base_type;
             type->size = base->size;
@@ -2106,11 +2105,11 @@ void load_source_file(char *file)
 
     FILE *f = fopen(file, "rb");
     for (;;) {
-        if (fgets(buffer, MAX_LINE_LEN, f) == NULL) {
+        if (!fgets(buffer, MAX_LINE_LEN, f)) {
             fclose(f);
             return;
         }
-        if ((strncmp(buffer, "#include ", 9) == 0) && (buffer[9] == '"')) {
+        if (!strncmp(buffer, "#include ", 9) && (buffer[9] == '"')) {
             char path[MAX_LINE_LEN];
             int c = strlen(file) - 1;
             while (c > 0 && file[c] != '/')

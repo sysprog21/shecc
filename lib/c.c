@@ -315,9 +315,9 @@ void abort()
 
 FILE *fopen(char *filename, char *mode)
 {
-    if (strcmp(mode, "wb") == 0)
+    if (!strcmp(mode, "wb"))
         return __syscall(__syscall_open, filename, 65, 0x1fd);
-    if (strcmp(mode, "rb") == 0)
+    if (!strcmp(mode, "rb"))
         return __syscall(__syscall_open, filename, 0, 0);
     abort();
 }
@@ -392,7 +392,7 @@ block_meta_t *__malloc_request_space(int size)
     if (request == -1)
         return NULL;
 
-    if (__malloc_global_last != NULL)
+    if (__malloc_global_last)
         __malloc_global_last->next = block;
 
     block->size = size;
@@ -406,15 +406,15 @@ void *malloc(int size)
     block_meta_t *block;
     if (size == 0)
         return NULL;
-    if (__malloc_global_base == NULL) {
+    if (!__malloc_global_base) {
         block = __malloc_request_space(size);
-        if (block == NULL)
+        if (!block)
             return NULL;
         __malloc_global_base = block;
     } else {
         block_meta_t *current = __malloc_global_base;
         __malloc_global_last = __malloc_global_base;
-        while (current != NULL) {
+        while (current) {
             /* TODO: support break in while loop */
             if (current->free == 1 && current->size >= size)
                 return current + 1;
@@ -422,9 +422,9 @@ void *malloc(int size)
             current = current->next;
         }
         block = current;
-        if (block == NULL) {
+        if (!block) {
             block = __malloc_request_space(size);
-            if (block == NULL)
+            if (!block)
                 return NULL;
         } else {
             /* TODO: use the size requested instead of whole blocks */
@@ -439,7 +439,7 @@ void *malloc(int size)
  */
 void free(void *ptr)
 {
-    if (ptr == NULL)
+    if (!ptr)
         return;
 
     /* TODO: merge several free memory blocks */

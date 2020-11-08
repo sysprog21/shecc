@@ -29,11 +29,11 @@ int main(int argc, char *argv[])
     int i;
 
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--dump-ir") == 0)
+        if (!strcmp(argv[i], "--dump-ir"))
             dump_ir = 1;
-        else if (strcmp(argv[i], "--no-libc") == 0)
+        else if (!strcmp(argv[i], "--no-libc"))
             libc = 0;
-        else if (strcmp(argv[i], "-o") == 0) {
+        else if (!strcmp(argv[i], "-o")) {
             if (i < argc + 1) {
                 out = argv[i + 1];
                 i++;
@@ -44,7 +44,7 @@ int main(int argc, char *argv[])
             in = argv[i];
     }
 
-    if (in == NULL) {
+    if (!in) {
         printf("Missing source file!\n");
         printf("Usage: shecc [-o output] [--dump-ir] [--no-libc] <input.c>\n");
         return -1;
