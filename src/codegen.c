@@ -28,7 +28,7 @@ int size_block(block_t *blk)
     int size = 0, i, offset;
 
     /* our offset starts from parent's offset */
-    if (blk->parent == NULL) {
+    if (!blk->parent) {
         if (blk->func)
             offset = blk->func->params_size;
         else
@@ -76,7 +76,7 @@ void size_funcs(int data_start)
         elf_add_symbol(blk->locals[i].var_name, strlen(blk->locals[i].var_name),
                        data_start + elf_data_idx);
         /* TODO: add .bss section */
-        if (strcmp(blk->locals[i].type_name, "int") == 0 &&
+        if (!strcmp(blk->locals[i].type_name, "int") &&
             blk->locals[i].init_val != 0)
             elf_write_data_int(blk->locals[i].init_val);
         else
@@ -240,7 +240,7 @@ void code_generate()
                 int offset;
                 /* need to find the variable offset on stack, i.e. from r11 */
                 var = find_local_var(ii->str_param1, blk);
-                if (var == NULL) /* not found? */
+                if (!var) /* not found? */
                     abort();
 
                 offset = -var->offset;

@@ -262,7 +262,7 @@ void elf_generate(char *outfile)
     elf_generate_header();
     elf_generate_sections();
 
-    if (outfile == NULL)
+    if (!outfile)
         outfile = "a.out";
 
     fp = fopen(outfile, "wb");
