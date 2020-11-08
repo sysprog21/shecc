@@ -122,6 +122,7 @@ int get_code_length(ir_instr_t *ii)
         return 16;
     case OP_exit:
     case OP_mod:
+    case OP_log_not:
         return 12;
     case OP_load_data_address:
     case OP_jz:
@@ -141,7 +142,6 @@ int get_code_length(ir_instr_t *ii)
     case OP_write:
     case OP_log_or:
     case OP_log_and:
-    case OP_not:
     case OP_bit_or:
     case OP_bit_and:
     case OP_bit_xor:
@@ -468,10 +468,11 @@ void code_generate()
             if (dump_ir == 1)
                 printf("    x%d >>= x%d", dest_reg, OP_reg);
             break;
-        case OP_not:
+        case OP_log_not:
             /* 1 if zero, 0 if nonzero */
-            /* only works for 1/0 */
-            emit(__rsb_i(__AL, dest_reg, 1, dest_reg));
+            emit(__teq(dest_reg));
+            emit(__mov_i(__NE, dest_reg, 0));
+            emit(__mov_i(__EQ, dest_reg, 1));
             if (dump_ir == 1)
                 printf("    !x%d", dest_reg);
             break;

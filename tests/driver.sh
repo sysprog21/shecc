@@ -79,7 +79,7 @@ expr 0 "5 >= 10"
 expr 1 "5 >= 5"
 expr 1 "30 != 20"
 
-# expr 0 "!237"
+expr 0 "!237"
 expr 18 "~237"
 
 expr 0 "0 || 0"
@@ -294,6 +294,14 @@ int main()
 
     /* "malloc" will reuse memory free'd by "free(a)" */
     exit(a == b);
+}
+EOF
+
+try_ 1 << EOF
+int main()
+{
+    char *ptr = "hello";
+    exit((0 == strcmp(ptr, "hello")) == (!strcmp(ptr, "hello")));
 }
 EOF
 

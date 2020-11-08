@@ -164,10 +164,6 @@ int fib(int n)      fib:                        Reserve stack frame for function
 
 ## Known Issues
 
-1. The compiler uses different logic to evaluate the operand of `if` or `!` than a general integer
-   expression. Therefore, explicit failback to "evaluate value and compare against zero" is required
-   if the operand is not a "truthiness-generating" expression.
-   That is, the expression `0 == strcmp(ptr, "hello")` is not equivalent to `!strcmp(ptr, "hello")`.
 2. The generated ELF lacks of .bss and .rodata section
 3. The unary `*` operator is not supported, which makes it necessary to use `[0]` syntax.
    Consider `int x = 5; int *ptr = &x;` and it is forbidden to use `*ptr`. However, it is valid to

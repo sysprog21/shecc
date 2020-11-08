@@ -751,7 +751,7 @@ void read_expr_operand(int param_no, block_t *parent)
     else if (lex_accept(T_log_not)) {
         ir_instr_t *ii;
         read_expr_operand(param_no, parent);
-        ii = add_instr(OP_not);
+        ii = add_instr(OP_log_not);
         ii->param_no = param_no;
     } else if (lex_accept(T_bit_not)) {
         ir_instr_t *ii;
