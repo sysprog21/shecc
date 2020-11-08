@@ -73,7 +73,7 @@ typedef enum {
     OP_rshift,
     OP_log_and,
     OP_log_or,
-    OP_not,
+    OP_log_not,
     OP_eq,  /* equal */
     OP_neq, /* not equal */
     OP_lt,  /* less than */
