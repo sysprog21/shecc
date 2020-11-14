@@ -96,41 +96,41 @@ expr 135 "237 ^ 106"
 expr 104 "237 & 106"
 
 # return statements
-# items 1 "return 1;";
-# items 42 "return 2*21;";
+items 1 "return 1;";
+items 42 "return 2*21;";
 
 # variables
-items 10 "int var; var = 10; exit(var);"
-items 42 "int va; int vb; va = 11; vb = 31; int vc; vc = va + vb; exit(vc);"
-items 50 "int v; v = 30; v = 50; exit(v);"
+items 10 "int var; var = 10; return var;"
+items 42 "int va; int vb; va = 11; vb = 31; int vc; vc = va + vb; return vc;"
+items 50 "int v; v = 30; v = 50; return v;"
 
 # if
-items 5 "if (1) exit(5); else exit(20);"
-items 10 "if (0) exit(5); else if (0) exit(20); else exit(10);"
-items 10 "int a; a = 0; int b; b = 0; if (a) b = 10; else if (0) exit(a); else if (a) exit(b); else exit(10);"
-items 27 "int a; a = 15; int b; b = 2; if(a - 15) b = 10; else if (b) exit(a + b + 10); else if (a) exit(b); else exit(10);"
+items 5 "if (1) return 5; else return 20;"
+items 10 "if (0) return 5; else if (0) return 20; else return 10;"
+items 10 "int a; a = 0; int b; b = 0; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
+items 27 "int a; a = 15; int b; b = 2; if(a - 15) b = 10; else if (b) return a + b + 10; else if (a) return b; else return 10;"
 
 # compound
-items 5 "{ exit(5); }"
-items 10 "{ int a; a = 5; { a = 5 + a; } exit(a); }"
-items 20 "int a; a = 10; if (1) { a = 20; } else { a = 10; } exit(a);"
-items 30 "int a; a = 10; if (a) { if (a - 10) { a = a + 1; } else { a = a + 20; } a = a - 10; } else { a = a + 5; } exit(a + 10);"
+items 5 "{ return 5; }"
+items 10 "{ int a; a = 5; { a = 5 + a; } return a; }"
+items 20 "int a; a = 10; if (1) { a = 20; } else { a = 10; } return a;"
+items 30 "int a; a = 10; if (a) { if (a - 10) { a = a + 1; } else { a = a + 20; } a = a - 10; } else { a = a + 5; } return a + 10;"
 
 # loop
-items 55 "int acc; int p; acc = 0; p = 10; while (p) { acc = acc + p; p = p - 1; } exit(acc);"
-items 60 "int acc; acc = 15; do { acc = acc * -2; } while (acc < 0); exit(acc);"
-items 45 "int i; int acc; acc = 0; for (i = 0; i < 10; ++i) { acc = acc + i; } exit(acc);"
-items 45 "int i; int j; i=0; j=0; while (i<10) { j=j+i; i=i+1; } exit(j);"
-items 1 "int x; x=0; do {x = x + 1; break;} while (1); exit(x);"
-items 2 "int x; x=0; do {x++; continue; abort();} while (x < 2); exit(x);"
-items 2 "int x; x=0; while(x < 2){x++; continue; abort();} exit(x);"
-items 7 "int i; i=0; int j; for (j = 0; j < 10; j++) { if (j < 3) continue; i = i + 1; } exit(i);"
-items 10 "while(0); exit(10);"
-items 10 "while(1) break; exit(10);"
-items 10 "for(;;) break; exit(10);"
-items 0 "int x; for(x = 10; x > 0; x--); exit(x);"
-items 30 "int i; int acc; i = 0; acc = 0; do { i = i + 1; if (i - 1 < 5) continue; acc = acc + i; if (i == 9) break; } while (i < 10); exit(acc);"
-items 26 "int acc; acc = 0; int i; for (i = 0; i < 100; i++) { if (i < 5) continue; if (i == 9) break; acc = acc + i; } exit(acc);"
+items 55 "int acc; int p; acc = 0; p = 10; while (p) { acc = acc + p; p = p - 1; } return acc;"
+items 60 "int acc; acc = 15; do { acc = acc * -2; } while (acc < 0); return acc;"
+items 45 "int i; int acc; acc = 0; for (i = 0; i < 10; ++i) { acc = acc + i; } return acc;"
+items 45 "int i; int j; i=0; j=0; while (i<10) { j=j+i; i=i+1; } return j;"
+items 1 "int x; x=0; do {x = x + 1; break;} while (1); return x;"
+items 2 "int x; x=0; do {x++; continue; abort();} while (x < 2); return x;"
+items 2 "int x; x=0; while(x < 2){x++; continue; abort();} return x;"
+items 7 "int i; i=0; int j; for (j = 0; j < 10; j++) { if (j < 3) continue; i = i + 1; } return i;"
+items 10 "while(0); return 10;"
+items 10 "while(1) break; return 10;"
+items 10 "for(;;) break; return 10;"
+items 0 "int x; for(x = 10; x > 0; x--); return x;"
+items 30 "int i; int acc; i = 0; acc = 0; do { i = i + 1; if (i - 1 < 5) continue; acc = acc + i; if (i == 9) break; } while (i < 10); return acc;"
+items 26 "int acc; acc = 0; int i; for (i = 0; i < 100; i++) { if (i < 5) continue; if (i == 9) break; acc = acc + i; } return acc;"
 
 # functions
 try_ 55 << EOF
@@ -140,7 +140,7 @@ int sum(int m, int n) {
     int i;
     for (i = m; i <= n; i = i + 1)
         acc = acc + i;
-    exit(acc);
+    return acc;
 }
 
 int main() {
@@ -158,7 +158,7 @@ int fact(int x) {
 }
 
 int main() {
-    exit(fact(5));
+    return fact(5);
 }
 EOF
 
@@ -182,7 +182,7 @@ int is_odd(int x) {
 }
 
 int main() {
-    exit(is_even(20));
+    return is_even(20);
 }
 EOF
 
@@ -198,13 +198,13 @@ int ack(int m, int n) {
 }
 
 int main() {
-    exit(ack(3, 5));
+    return ack(3, 5);
 }
 EOF
 
 # pointers
-items 3 "int x; int *y; x = 3; y = &x; exit(y[0]);"
-items 5 "int b; int *a; b = 10; a = &b; a[0] = 5; exit(b);"
+items 3 "int x; int *y; x = 3; y = &x; return y[0];"
+items 5 "int b; int *a; b = 10; a = &b; a[0] = 5; return b;"
 try_ 10 << EOF
 int change_it(int *p) {
     if (p[0] == 0) {
@@ -220,7 +220,7 @@ int main() {
   change_it(&v);
   change_it(&v);
   change_it(&v);
-  exit(v);
+  return v;
 }
 EOF
 
@@ -244,7 +244,7 @@ int main() {
     v0 = nth_of(ary, 0);
     v1 = nth_of(ary, 2);
     v2 = nth_of(ary, 4);
-    exit(v0 + v1 + v2);
+    return v0 + v1 + v2;
 }
 EOF
 
@@ -254,7 +254,7 @@ int a = 5 * 2;
 int b = -4 * 3 + 7 + 9 / 3 * 5;
 int main()
 {
-    exit(a + b);
+    return a + b;
 }
 EOF
 
@@ -263,22 +263,22 @@ EOF
 # expr 25 "0 ? 10 : 25"
 
 # compound assignemnt
-items 5 "int a; a = 2; a += 3; exit(a);"
-items 5 "int a; a = 10; a -= 5; exit(a);"
-items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; exit(p[0]);"
+items 5 "int a; a = 2; a += 3; return a;"
+items 5 "int a; a = 10; a -= 5; return a;"
+items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; return p[0];"
 
 # sizeof
 expr 4 "sizeof(int)";
 expr 1 "sizeof(char)";
 
 # switch-case
-items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } exit(a);"
-items 10 "int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } exit(a);"
+items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } return a;"
+items 10 "int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } return a;"
 
 # enum
 try_ 6 << EOF
 typedef enum { enum1 = 5, enum2 } enum_t;
-int main() { enum_t v = enum2; exit(v); }
+int main() { enum_t v = enum2; return v; }
 EOF
 
 # malloc and free
@@ -293,7 +293,7 @@ int main()
     int *b = malloc(sizeof(int) * 3);
 
     /* "malloc" will reuse memory free'd by "free(a)" */
-    exit(a == b);
+    return a == b;
 }
 EOF
 
@@ -301,7 +301,7 @@ try_ 1 << EOF
 int main()
 {
     char *ptr = "hello";
-    exit((0 == strcmp(ptr, "hello")) == (!strcmp(ptr, "hello")));
+    return (0 == strcmp(ptr, "hello")) == (!strcmp(ptr, "hello"));
 }
 EOF
 

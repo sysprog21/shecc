@@ -564,7 +564,7 @@ void code_generate()
             break;
         case OP_exit:
             /* syscall for 'exit' */
-            emit(__mov_i(__AL, __r0, 0));
+            emit(__mov_r(__AL, __r0, OP_reg));
             emit(__mov_i(__AL, __r7, 1));
             emit(__svc());
             if (dump_ir == 1)
