@@ -707,6 +707,8 @@ void read_func_parameters(block_t *parent)
     }
 }
 
+ir_instr_t *exit_ii; /* exit for program */
+
 void read_func_call(func_t *fn, int param_no, block_t *parent)
 {
     ir_instr_t *ii;
@@ -717,6 +719,8 @@ void read_func_call(func_t *fn, int param_no, block_t *parent)
     ii = add_instr(OP_call);
     ii->str_param1 = fn->return_def.var_name;
     ii->param_no = param_no; /* return value here */
+    if (!strcmp(ii->str_param1, "main"))
+        exit_ii->int_param1 = ii->param_no;
 }
 
 void read_lvalue(lvalue_t *lvalue,
@@ -2070,7 +2074,7 @@ void parse_internal()
     ii->str_param1 = "main";
     ii = add_instr(OP_label);
     ii->str_param1 = "__exit";
-    add_instr(OP_exit);
+    exit_ii = add_instr(OP_exit);
 
     /* Linux syscall */
     fn = add_func("__syscall");

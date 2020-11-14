@@ -170,9 +170,6 @@ int fib(int n)      fib:                        Reserve stack frame for function
    use `ptr[0]`, which behaves the same of `*ptr`.
 4. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.
    Alternatively, check the implementation `printf` in source `lib/c.c` for `var_arg`.
-6. If you attempt to return values in `main` function, the value will not be reserved after the
-   program exited. You have to modify the `return` statement to `exit` call. Check the test items in
-   file `tests/driver.sh` for details.
 7. The C front-end is a bit dirty because there is no effective AST.
 8. No function pointer is supported.
 
