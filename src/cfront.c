@@ -73,6 +73,7 @@ typedef enum {
     T_assign,        /* = */
     T_increment,     /* ++ */
     T_decrement,     /* -- */
+    T_question,      /* ? */
     T_colon,         /* : */
     T_semicolon,     /* ; */
     T_eof,           /* end-of-file (EOF) */
@@ -416,6 +417,10 @@ token_t get_next_token()
         read_char(1);
         return T_semicolon;
     }
+    if (next_char == '?') {
+        read_char(1);
+        return T_question;
+    }
     if (next_char == ':') {
         read_char(1);
         return T_colon;
@@ -697,12 +702,14 @@ void read_char_param(int param_no)
     ii->int_param1 = token[0];
 }
 
+void read_ternary_operation(int dest, block_t *parent);
 void read_func_parameters(block_t *parent)
 {
     int param_num = 0;
     lex_expect(T_open_bracket);
     while (!lex_accept(T_close_bracket)) {
         read_expr(param_num++, parent);
+        read_ternary_operation(param_num - 1, parent);
         lex_accept(T_comma);
     }
 }
@@ -871,6 +878,8 @@ int get_operator_prio(opcode_t op)
 {
     /* https://www.cs.uic.edu/~i109/Notes/COperatorPrecedenceTable.pdf */
     switch (op) {
+    case OP_ternary:
+        return 3;
     case OP_log_or:
         return 4;
     case OP_log_and:
@@ -940,6 +949,8 @@ opcode_t get_operator()
         op = OP_bit_or;
     else if (lex_accept(T_bit_xor))
         op = OP_bit_xor;
+    else if (lex_peek(T_question, NULL))
+        op = OP_ternary;
     return op;
 }
 
@@ -955,13 +966,13 @@ void read_expr(int param_no, block_t *parent)
 
     /* check for any operator following */
     op = get_operator();
-    if (op == OP_generic) /* no continuation */
+    if (op == OP_generic || op == OP_ternary) /* no continuation */
         return;
 
     read_expr_operand(param_no + 1, parent);
     next_op = get_operator();
 
-    if (next_op == OP_generic) {
+    if (next_op == OP_generic || op == OP_ternary) {
         /* only two operands, apply and return */
         il = add_instr(op);
         il->param_no = param_no;
@@ -978,7 +989,7 @@ void read_expr(int param_no, block_t *parent)
     op_stack_index++;
     op = next_op;
 
-    while (op != OP_generic) {
+    while (op != OP_generic && op != OP_ternary) {
         /* if we have operand on stack, compare priorities */
         if (op_stack_index > 0) {
             /* we have a continuation, use stack */
@@ -1269,6 +1280,34 @@ void read_lvalue(lvalue_t *lvalue,
     }
 }
 
+void read_ternary_operation(int dest, block_t *parent)
+{
+    ir_instr_t *false_jump, *true_jump, *ii;
+
+    if (!lex_accept(T_question))
+        return;
+    /* ternary-operator */
+    false_jump = add_instr(OP_jz);
+    false_jump->param_no = dest;
+
+    /* true branch */
+    read_expr(dest, parent);
+    if (!lex_accept(T_colon))
+        return;
+
+    /* jump true branch to end of expression */
+    true_jump = add_instr(OP_jump);
+    ii = add_instr(OP_label);
+    false_jump->int_param1 = ii->ir_index;
+
+    /* false branch */
+    read_expr(dest, parent);
+
+    /* this is finish, link true jump */
+    ii = add_instr(OP_label);
+    true_jump->int_param1 = ii->ir_index;
+}
+
 int read_body_assignment(char *token, block_t *parent, opcode_t prefix_op)
 {
     var_t *var = find_local_var(token, parent);
@@ -1347,6 +1386,8 @@ int read_body_assignment(char *token, block_t *parent, opcode_t prefix_op)
             read_expr(1, parent); /* get expression value into ?1 */
         }
 
+        read_ternary_operation(1, parent);
+
         /* store value at specific address, but need to know the type/size */
         ii = add_instr(OP_write);
         ii->param_no = 1;
@@ -1409,10 +1450,40 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
     case OP_rshift:
         res = op1 >> op2;
         break;
+    case OP_lt:
+        res = op1 < op2 ? 1 : 0;
+        break;
+    case OP_gt:
+        res = op1 > op2 ? 1 : 0;
+        break;
+    case OP_leq:
+        res = op1 <= op2 ? 1 : 0;
+        break;
+    case OP_geq:
+        res = op1 >= op2 ? 1 : 0;
+        break;
     default:
         error("The requested operation is not supported.");
     }
     return res;
+}
+
+int read_global_assignment(char *token);
+void eval_ternary_imm(int cond, char *token)
+{
+    if (cond == 0) {
+        while (next_token != T_colon) {
+            next_token = get_next_token();
+        };
+        lex_accept(T_colon);
+        read_global_assignment(token);
+    } else {
+        read_global_assignment(token);
+        lex_expect(T_colon);
+        while (!lex_peek(T_semicolon, NULL)) {
+            next_token = get_next_token();
+        }
+    }
 }
 
 int read_global_assignment(char *token)
@@ -1431,6 +1502,10 @@ int read_global_assignment(char *token)
         if (op == OP_generic) {
             var->init_val = operand1;
             return 1;
+        } else if (op == OP_ternary) {
+            lex_expect(T_question);
+            eval_ternary_imm(operand1, token);
+            return 1;
         }
         operand2 = read_numeric_sconstant();
         next_op = get_operator();
@@ -1438,7 +1513,14 @@ int read_global_assignment(char *token)
             /* only two operands, apply and return */
             var->init_val = eval_expression_imm(op, operand1, operand2);
             return 1;
+        } else if (op == OP_ternary) {
+            int cond;
+            lex_expect(T_question);
+            cond = eval_expression_imm(op, operand1, operand2);
+            eval_ternary_imm(cond, token);
+            return 1;
         }
+
 
         /* using stack if operands more than two */
         op_stack[op_stack_index++] = op;
@@ -1446,7 +1528,7 @@ int read_global_assignment(char *token)
         val_stack[val_stack_index++] = operand1;
         val_stack[val_stack_index++] = operand2;
 
-        while (op != OP_generic) {
+        while (op != OP_generic && op != OP_ternary) {
             if (op_stack_index > 0) {
                 /* we have a continuation, use stack */
                 int same_op = 0;
@@ -1489,15 +1571,24 @@ int read_global_assignment(char *token)
                 eval_expression_imm(stack_op, operand1, operand2);
 
             if (op_stack_index == 1) {
-                var->init_val = val_stack[0];
+                if (op == OP_ternary) {
+                    lex_expect(T_question);
+                    eval_ternary_imm(val_stack[0], token);
+                } else {
+                    var->init_val = val_stack[0];
+                }
                 return 1;
             }
 
             /* pop op stack */
             op_stack_index--;
         }
-
-        var->init_val = val_stack[0];
+        if (op == OP_ternary) {
+            lex_expect(T_question);
+            eval_ternary_imm(val_stack[0], token);
+        } else {
+            var->init_val = val_stack[0];
+        }
         return 1;
     }
     return 0;
@@ -1531,6 +1622,7 @@ void read_body_statement(block_t *parent)
         if (!lex_accept(T_semicolon)) { /* can be "void" */
             /* get expression value into return value */
             read_expr(0, parent);
+            read_ternary_operation(0, parent);
             lex_expect(T_semicolon);
         }
         fn = parent->func;
@@ -1828,6 +1920,7 @@ void read_body_statement(block_t *parent)
         read_full_var_decl(var);
         if (lex_accept(T_assign)) {
             read_expr(1, parent); /* get expression value into ?1 */
+            read_ternary_operation(1, parent);
             /* assign to our new variable */
 
             /* load variable location */
