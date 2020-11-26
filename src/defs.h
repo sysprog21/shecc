@@ -10,12 +10,12 @@
 #define MAX_LOCALS 48
 #define MAX_FIELDS 32
 #define MAX_FUNCS 1024
-#define MAX_BLOCKS 65536
+#define MAX_BLOCKS 262144
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 65536
-#define MAX_SOURCE 131072
-#define MAX_CODE 131072
-#define MAX_DATA 131072
+#define MAX_SOURCE 262144
+#define MAX_CODE 262144
+#define MAX_DATA 262144
 #define MAX_SYMTAB 65536
 #define MAX_STRTAB 65536
 #define MAX_HEADER 1024
@@ -67,8 +67,9 @@ typedef enum {
     OP_add,
     OP_sub,
     OP_mul,
-    OP_div, /* signed division */
-    OP_mod, /* modulo */
+    OP_div,     /* signed division */
+    OP_mod,     /* modulo */
+    OP_ternary, /* ? : */
     OP_lshift,
     OP_rshift,
     OP_log_and,

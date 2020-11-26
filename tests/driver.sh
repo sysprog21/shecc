@@ -259,8 +259,8 @@ int main()
 EOF
 
 # conditional operator
-# expr 10 "1 ? 10 : 5"
-# expr 25 "0 ? 10 : 25"
+expr 10 "1 ? 10 : 5"
+expr 25 "0 ? 10 : 25"
 
 # compound assignemnt
 items 5 "int a; a = 2; a += 3; return a;"
