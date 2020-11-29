@@ -2,33 +2,25 @@
 
 int is_whitespace(char c)
 {
-    if (c == ' ' || c == '\r' || c == '\n' || c == '\t')
-        return 1;
-    return 0;
+    return (c == ' ' || c == '\r' || c == '\n' || c == '\t');
 }
 
 /* is it alphabet, number or '_'? */
 int is_alnum(char c)
 {
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') || (c == '_'))
-        return 1;
-    return 0;
+    return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || (c == '_'));
 }
 
 int is_digit(char c)
 {
-    if (c >= '0' && c <= '9')
-        return 1;
-    return 0;
+    return (c >= '0' && c <= '9') ? 1 : 0;
 }
 
 int is_hex(char c)
 {
-    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == 'x' ||
-        (c >= 'A' && c <= 'F'))
-        return 1;
-    return 0;
+    return ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == 'x' ||
+            (c >= 'A' && c <= 'F'));
 }
 
 /* lexer tokens */
@@ -1254,10 +1246,7 @@ void read_lvalue(lvalue_t *lvalue,
                 ii->int_param1 = 1;
 
                 /* add 1 */
-                if (lex_accept(T_increment))
-                    ii = add_instr(OP_add);
-                else
-                    ii = add_instr(OP_sub);
+                ii = add_instr(lex_accept(T_increment) ? OP_add : OP_sub);
                 ii->param_no = param_no + 1;
                 ii->int_param1 = param_no + 2;
 
