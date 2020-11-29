@@ -28,12 +28,9 @@ int size_block(block_t *blk)
     int size = 0, i, offset;
 
     /* our offset starts from parent's offset */
-    if (!blk->parent) {
-        if (blk->func)
-            offset = blk->func->params_size;
-        else
-            offset = 0;
-    } else
+    if (!blk->parent)
+        offset = blk->func ? blk->func->params_size : 0;
+    else
         offset = size_block(blk->parent);
 
     /* declared locals */
@@ -95,19 +92,13 @@ int get_code_length(ir_instr_t *ii)
         return 16 + (fn->num_params << 2);
     }
     case OP_call:
-        if (ii->param_no)
-            return 8;
-        return 4;
+        return ii->param_no ? 8 : 4;
     case OP_load_constant:
-        if (ii->int_param1 >= 0 && ii->int_param1 < 256)
-            return 4;
-        return 8;
+        return (ii->int_param1 >= 0 && ii->int_param1 < 256) ? 4 : 8;
     case OP_block_start:
     case OP_block_end: {
         block_t *blk = &BLOCKS[ii->int_param1];
-        if (blk->next_local > 0)
-            return 4;
-        return 0;
+        return (blk->next_local > 0) ? 4 : 0;
     }
     case OP_eq:
     case OP_neq:
