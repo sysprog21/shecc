@@ -1854,7 +1854,7 @@ void read_global_statement()
 
     if (lex_peek(T_include, token)) {
         if (strcmp(token_str, "<stdio.h>") == 0) {
-            /* ignore, we inclue libc by default */
+            /* ignore, we include libc by default */
         }
         lex_expect(T_include);
     } else if (lex_accept(T_define)) {
