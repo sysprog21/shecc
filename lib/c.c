@@ -315,9 +315,9 @@ void abort()
 
 FILE *fopen(char *filename, char *mode)
 {
-    if (strcmp(mode, "wb") == 0)
+    if (!strcmp(mode, "wb"))
         return __syscall(__syscall_open, filename, 65, 0x1fd);
-    if (strcmp(mode, "rb") == 0)
+    if (!strcmp(mode, "rb"))
         return __syscall(__syscall_open, filename, 0, 0);
     abort();
 }
@@ -370,12 +370,81 @@ int fputc(int c, FILE *stream)
  * FIXME: adopt lite_malloc from musl-libc
  *   https://git.musl-libc.org/cgit/musl/tree/src/malloc/lite_malloc.c
  */
-void *malloc(int size)
+
+typedef struct block_meta {
+    int size;
+    struct block_meta *next;
+    int free;
+} block_meta_t;
+
+block_meta_t *__malloc_global_base;
+block_meta_t *__malloc_global_last;
+
+block_meta_t *__malloc_request_space(int size)
 {
-    char *brk = __syscall(__syscall_brk, 0); /* read current break */
-    char *request = __syscall(__syscall_brk, brk + size);
+    char *brk;
+    block_meta_t *block;
+    brk = __syscall(__syscall_brk, 0);
+    block = brk;
+
+    char *request =
+        __syscall(__syscall_brk, block + size + sizeof(block_meta_t));
     if (request == -1)
         return NULL;
-    /* return previous location, now extended by size */
-    return brk;
+
+    if (__malloc_global_last)
+        __malloc_global_last->next = block;
+
+    block->size = size;
+    block->next = NULL;
+    block->free = 0;
+    return block;
+}
+
+void *malloc(int size)
+{
+    block_meta_t *block;
+    if (size == 0)
+        return NULL;
+    if (!__malloc_global_base) {
+        block = __malloc_request_space(size);
+        if (!block)
+            return NULL;
+        __malloc_global_base = block;
+    } else {
+        block_meta_t *current = __malloc_global_base;
+        __malloc_global_last = __malloc_global_base;
+        while (current) {
+            /* TODO: support break in while loop */
+            if (current->free == 1 && current->size >= size)
+                return current + 1;
+            __malloc_global_last = current;
+            current = current->next;
+        }
+        block = current;
+        if (!block) {
+            block = __malloc_request_space(size);
+            if (!block)
+                return NULL;
+        } else {
+            /* TODO: use the size requested instead of whole blocks */
+            block->free = 0;
+        }
+    }
+    return block + 1;
+}
+
+/* Quoting the C standard, 7.20.3.2/2 from ISO-IEC 9899:
+ * "If ptr is a null pointer, no action occurs."
+ */
+void free(void *ptr)
+{
+    if (!ptr)
+        return;
+
+    /* TODO: merge several free memory blocks */
+    block_meta_t *block_ptr = ptr - sizeof(block_meta_t);
+    if (block_ptr->free == 1)
+        abort();
+    block_ptr->free = 1;
 }

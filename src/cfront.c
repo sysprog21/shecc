@@ -2,33 +2,25 @@
 
 int is_whitespace(char c)
 {
-    if (c == ' ' || c == '\r' || c == '\n' || c == '\t')
-        return 1;
-    return 0;
+    return (c == ' ' || c == '\r' || c == '\n' || c == '\t');
 }
 
 /* is it alphabet, number or '_'? */
 int is_alnum(char c)
 {
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') || (c == '_'))
-        return 1;
-    return 0;
+    return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || (c == '_'));
 }
 
 int is_digit(char c)
 {
-    if (c >= '0' && c <= '9')
-        return 1;
-    return 0;
+    return (c >= '0' && c <= '9') ? 1 : 0;
 }
 
 int is_hex(char c)
 {
-    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == 'x' ||
-        (c >= 'A' && c <= 'F'))
-        return 1;
-    return 0;
+    return ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == 'x' ||
+            (c >= 'A' && c <= 'F'));
 }
 
 /* lexer tokens */
@@ -47,7 +39,10 @@ typedef enum {
     T_close_square,  /* ] */
     T_asterisk,      /* '*' */
     T_divide,        /* / */
+    T_mod,           /* % */
     T_bit_or,        /* | */
+    T_bit_xor,       /* ^ */
+    T_bit_not,       /* ~ */
     T_log_and,       /* && */
     T_log_or,        /* || */
     T_log_not,       /* ! */
@@ -70,6 +65,7 @@ typedef enum {
     T_assign,        /* = */
     T_increment,     /* ++ */
     T_decrement,     /* -- */
+    T_question,      /* ? */
     T_colon,         /* : */
     T_semicolon,     /* ; */
     T_eof,           /* end-of-file (EOF) */
@@ -90,7 +86,8 @@ typedef enum {
     T_switch,
     T_case,
     T_break,
-    T_default
+    T_default,
+    T_continue
 } token_t;
 
 char token_str[MAX_TOKEN_LEN];
@@ -124,19 +121,18 @@ token_t get_next_token()
         token_str[i] = 0;
         skip_whitespace();
 
-        if (strcmp(token_str, "#include") == 0) {
-            i = 0;
+        if (!strcmp(token_str, "#include")) {
             do {
                 token_str[i++] = next_char;
             } while (read_char(0) != '\n');
             skip_whitespace();
             return T_include;
         }
-        if (strcmp(token_str, "#define") == 0) {
+        if (!strcmp(token_str, "#define")) {
             skip_whitespace();
             return T_define;
         }
-        if (strcmp(token_str, "#ifdef") == 0) {
+        if (!strcmp(token_str, "#ifdef")) {
             i = 0;
             do {
                 token_str[i++] = next_char;
@@ -144,7 +140,7 @@ token_t get_next_token()
             token_str[i] = 0;
             /* check if we have this alias/define */
             for (i = 0; i < aliases_idx; i++) {
-                if (strcmp(token_str, ALIASES[i].alias) == 0) {
+                if (!strcmp(token_str, ALIASES[i].alias)) {
                     skip_whitespace();
                     return get_next_token();
                 }
@@ -161,7 +157,7 @@ token_t get_next_token()
             skip_whitespace();
             return get_next_token();
         }
-        if (strcmp(token_str, "#endif") == 0) {
+        if (!strcmp(token_str, "#endif")) {
             skip_whitespace();
             return get_next_token();
         }
@@ -229,6 +225,14 @@ token_t get_next_token()
     if (next_char == ',') {
         read_char(1);
         return T_comma;
+    }
+    if (next_char == '^') {
+        read_char(1);
+        return T_bit_xor;
+    }
+    if (next_char == '~') {
+        read_char(1);
+        return T_bit_not;
     }
     if (next_char == '"') {
         int i = 0;
@@ -332,6 +336,10 @@ token_t get_next_token()
         skip_whitespace();
         return T_lt;
     }
+    if (next_char == '%') {
+        read_char(1);
+        return T_mod;
+    }
     if (next_char == '>') {
         read_char(0);
         if (next_char == '=') {
@@ -401,6 +409,10 @@ token_t get_next_token()
         read_char(1);
         return T_semicolon;
     }
+    if (next_char == '?') {
+        read_char(1);
+        return T_question;
+    }
     if (next_char == ':') {
         read_char(1);
         return T_colon;
@@ -428,34 +440,36 @@ token_t get_next_token()
         token_str[i] = 0;
         skip_whitespace();
 
-        if (strcmp(token_str, "if") == 0)
+        if (!strcmp(token_str, "if"))
             return T_if;
-        if (strcmp(token_str, "while") == 0)
+        if (!strcmp(token_str, "while"))
             return T_while;
-        if (strcmp(token_str, "for") == 0)
+        if (!strcmp(token_str, "for"))
             return T_for;
-        if (strcmp(token_str, "do") == 0)
+        if (!strcmp(token_str, "do"))
             return T_do;
-        if (strcmp(token_str, "else") == 0)
+        if (!strcmp(token_str, "else"))
             return T_else;
-        if (strcmp(token_str, "return") == 0)
+        if (!strcmp(token_str, "return"))
             return T_return;
-        if (strcmp(token_str, "typedef") == 0)
+        if (!strcmp(token_str, "typedef"))
             return T_typedef;
-        if (strcmp(token_str, "enum") == 0)
+        if (!strcmp(token_str, "enum"))
             return T_enum;
-        if (strcmp(token_str, "struct") == 0)
+        if (!strcmp(token_str, "struct"))
             return T_struct;
-        if (strcmp(token_str, "sizeof") == 0)
+        if (!strcmp(token_str, "sizeof"))
             return T_sizeof;
-        if (strcmp(token_str, "switch") == 0)
+        if (!strcmp(token_str, "switch"))
             return T_switch;
-        if (strcmp(token_str, "case") == 0)
+        if (!strcmp(token_str, "case"))
             return T_case;
-        if (strcmp(token_str, "break") == 0)
+        if (!strcmp(token_str, "break"))
             return T_break;
-        if (strcmp(token_str, "default") == 0)
+        if (!strcmp(token_str, "default"))
             return T_default;
+        if (!strcmp(token_str, "continue"))
+            return T_continue;
 
         alias = find_alias(token_str);
         if (alias) {
@@ -481,7 +495,7 @@ int lex_accept(token_t token)
 int lex_peek(token_t token, char *value)
 {
     if (next_token == token) {
-        if (value == NULL)
+        if (!value)
             return 1;
         strcpy(value, token_str);
         return 1;
@@ -521,6 +535,7 @@ int get_size(var_t *var, type_t *type)
 }
 
 int break_level;
+int continue_level;
 
 int read_numeric_constant(char buffer[])
 {
@@ -679,15 +694,19 @@ void read_char_param(int param_no)
     ii->int_param1 = token[0];
 }
 
+void read_ternary_operation(int dest, block_t *parent);
 void read_func_parameters(block_t *parent)
 {
     int param_num = 0;
     lex_expect(T_open_bracket);
     while (!lex_accept(T_close_bracket)) {
         read_expr(param_num++, parent);
+        read_ternary_operation(param_num - 1, parent);
         lex_accept(T_comma);
     }
 }
+
+ir_instr_t *exit_ii; /* exit for program */
 
 void read_func_call(func_t *fn, int param_no, block_t *parent)
 {
@@ -699,6 +718,8 @@ void read_func_call(func_t *fn, int param_no, block_t *parent)
     ii = add_instr(OP_call);
     ii->str_param1 = fn->return_def.var_name;
     ii->param_no = param_no; /* return value here */
+    if (!strcmp(ii->str_param1, "main"))
+        exit_ii->int_param1 = ii->param_no;
 }
 
 void read_lvalue(lvalue_t *lvalue,
@@ -732,7 +753,12 @@ void read_expr_operand(int param_no, block_t *parent)
     else if (lex_accept(T_log_not)) {
         ir_instr_t *ii;
         read_expr_operand(param_no, parent);
-        ii = add_instr(OP_not);
+        ii = add_instr(OP_log_not);
+        ii->param_no = param_no;
+    } else if (lex_accept(T_bit_not)) {
+        ir_instr_t *ii;
+        read_expr_operand(param_no, parent);
+        ii = add_instr(OP_bit_not);
         ii->param_no = param_no;
     } else if (lex_accept(T_ampersand)) {
         char token[MAX_VAR_LEN];
@@ -774,7 +800,7 @@ void read_expr_operand(int param_no, block_t *parent)
         lex_expect(T_open_bracket);
         lex_indent(T_identifier, token);
         type = find_type(token);
-        if (type == NULL)
+        if (!type)
             error("Unable to find type");
 
         ii->param_no = param_no;
@@ -842,21 +868,38 @@ void read_expr_operand(int param_no, block_t *parent)
 
 int get_operator_prio(opcode_t op)
 {
-    /* apply last, lowest priority */
-    if (op == OP_log_and || op == OP_log_or)
-        return -2;
-
-    /* apply second last, low priority */
-    if ((op == OP_eq) || (op == OP_neq) || (op == OP_lt) || (op == OP_leq) ||
-        (op == OP_gt) || (op == OP_geq))
-        return -1;
-
-    /* apply first, high priority */
-    if ((op == OP_mul) || (op == OP_div))
-        return 1;
-
-    /* everything else left to right */
-    return 0;
+    /* https://www.cs.uic.edu/~i109/Notes/COperatorPrecedenceTable.pdf */
+    switch (op) {
+    case OP_ternary:
+        return 3;
+    case OP_log_or:
+        return 4;
+    case OP_log_and:
+        return 5;
+    case OP_bit_or:
+        return 6;
+    case OP_bit_xor:
+        return 7;
+    case OP_bit_and:
+        return 8;
+    case OP_eq:
+    case OP_neq:
+        return 9;
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+        return 10;
+    case OP_add:
+    case OP_sub:
+        return 12;
+    case OP_mul:
+    case OP_div:
+    case OP_mod:
+        return 13;
+    default:
+        return 0;
+    }
 }
 
 opcode_t get_operator()
@@ -870,6 +913,8 @@ opcode_t get_operator()
         op = OP_mul;
     else if (lex_accept(T_divide))
         op = OP_div;
+    else if (lex_accept(T_mod))
+        op = OP_mod;
     else if (lex_accept(T_lshift))
         op = OP_lshift;
     else if (lex_accept(T_rshift))
@@ -894,6 +939,10 @@ opcode_t get_operator()
         op = OP_bit_and;
     else if (lex_accept(T_bit_or))
         op = OP_bit_or;
+    else if (lex_accept(T_bit_xor))
+        op = OP_bit_xor;
+    else if (lex_peek(T_question, NULL))
+        op = OP_ternary;
     return op;
 }
 
@@ -909,13 +958,13 @@ void read_expr(int param_no, block_t *parent)
 
     /* check for any operator following */
     op = get_operator();
-    if (op == OP_generic) /* no continuation */
+    if (op == OP_generic || op == OP_ternary) /* no continuation */
         return;
 
     read_expr_operand(param_no + 1, parent);
     next_op = get_operator();
 
-    if (next_op == OP_generic) {
+    if (next_op == OP_generic || op == OP_ternary) {
         /* only two operands, apply and return */
         il = add_instr(op);
         il->param_no = param_no;
@@ -932,7 +981,7 @@ void read_expr(int param_no, block_t *parent)
     op_stack_index++;
     op = next_op;
 
-    while (op != OP_generic) {
+    while (op != OP_generic && op != OP_ternary) {
         /* if we have operand on stack, compare priorities */
         if (op_stack_index > 0) {
             /* we have a continuation, use stack */
@@ -1197,10 +1246,7 @@ void read_lvalue(lvalue_t *lvalue,
                 ii->int_param1 = 1;
 
                 /* add 1 */
-                if (lex_accept(T_increment))
-                    ii = add_instr(OP_add);
-                else
-                    ii = add_instr(OP_sub);
+                ii = add_instr(lex_accept(T_increment) ? OP_add : OP_sub);
                 ii->param_no = param_no + 1;
                 ii->int_param1 = param_no + 2;
 
@@ -1223,10 +1269,38 @@ void read_lvalue(lvalue_t *lvalue,
     }
 }
 
-int read_body_assignment(char *token, block_t *parent)
+void read_ternary_operation(int dest, block_t *parent)
+{
+    ir_instr_t *false_jump, *true_jump, *ii;
+
+    if (!lex_accept(T_question))
+        return;
+    /* ternary-operator */
+    false_jump = add_instr(OP_jz);
+    false_jump->param_no = dest;
+
+    /* true branch */
+    read_expr(dest, parent);
+    if (!lex_accept(T_colon))
+        return;
+
+    /* jump true branch to end of expression */
+    true_jump = add_instr(OP_jump);
+    ii = add_instr(OP_label);
+    false_jump->int_param1 = ii->ir_index;
+
+    /* false branch */
+    read_expr(dest, parent);
+
+    /* this is finish, link true jump */
+    ii = add_instr(OP_label);
+    true_jump->int_param1 = ii->ir_index;
+}
+
+int read_body_assignment(char *token, block_t *parent, opcode_t prefix_op)
 {
     var_t *var = find_local_var(token, parent);
-    if (var == NULL)
+    if (!var)
         var = find_global_var(token);
     if (var) {
         ir_instr_t *ii;
@@ -1253,8 +1327,11 @@ int read_body_assignment(char *token, block_t *parent)
             op = OP_bit_or;
         } else if (lex_accept(T_andeq)) {
             op = OP_bit_and;
-        } else {
+        } else if (prefix_op == OP_generic) {
             lex_expect(T_assign);
+        } else {
+            op = prefix_op;
+            one = 1;
         }
 
         if (op != OP_generic) {
@@ -1298,6 +1375,8 @@ int read_body_assignment(char *token, block_t *parent)
             read_expr(1, parent); /* get expression value into ?1 */
         }
 
+        read_ternary_operation(1, parent);
+
         /* store value at specific address, but need to know the type/size */
         ii = add_instr(OP_write);
         ii->param_no = 1;
@@ -1329,6 +1408,7 @@ int read_numeric_sconstant()
 int eval_expression_imm(opcode_t op, int op1, int op2)
 {
     /* return immediate result */
+    int tmp = op2;
     int res = 0;
     switch (op) {
     case OP_add:
@@ -1343,16 +1423,56 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
     case OP_div:
         res = op1 / op2;
         break;
+    case OP_mod:
+        /* TODO: provide arithmetic & operation instead of '&=' */
+        /* TODO: do optimization for local expression */
+        tmp &= (tmp - 1);
+        if ((op2 != 0) && (tmp == 0)) {
+            res = op1;
+            res &= (op2 - 1);
+        } else
+            res = op1 % op2;
+        break;
     case OP_lshift:
         res = op1 << op2;
         break;
     case OP_rshift:
         res = op1 >> op2;
         break;
+    case OP_lt:
+        res = op1 < op2 ? 1 : 0;
+        break;
+    case OP_gt:
+        res = op1 > op2 ? 1 : 0;
+        break;
+    case OP_leq:
+        res = op1 <= op2 ? 1 : 0;
+        break;
+    case OP_geq:
+        res = op1 >= op2 ? 1 : 0;
+        break;
     default:
         error("The requested operation is not supported.");
     }
     return res;
+}
+
+int read_global_assignment(char *token);
+void eval_ternary_imm(int cond, char *token)
+{
+    if (cond == 0) {
+        while (next_token != T_colon) {
+            next_token = get_next_token();
+        };
+        lex_accept(T_colon);
+        read_global_assignment(token);
+    } else {
+        read_global_assignment(token);
+        lex_expect(T_colon);
+        while (!lex_peek(T_semicolon, NULL)) {
+            next_token = get_next_token();
+        }
+    }
 }
 
 int read_global_assignment(char *token)
@@ -1371,6 +1491,10 @@ int read_global_assignment(char *token)
         if (op == OP_generic) {
             var->init_val = operand1;
             return 1;
+        } else if (op == OP_ternary) {
+            lex_expect(T_question);
+            eval_ternary_imm(operand1, token);
+            return 1;
         }
         operand2 = read_numeric_sconstant();
         next_op = get_operator();
@@ -1378,7 +1502,14 @@ int read_global_assignment(char *token)
             /* only two operands, apply and return */
             var->init_val = eval_expression_imm(op, operand1, operand2);
             return 1;
+        } else if (op == OP_ternary) {
+            int cond;
+            lex_expect(T_question);
+            cond = eval_expression_imm(op, operand1, operand2);
+            eval_ternary_imm(cond, token);
+            return 1;
         }
+
 
         /* using stack if operands more than two */
         op_stack[op_stack_index++] = op;
@@ -1386,7 +1517,7 @@ int read_global_assignment(char *token)
         val_stack[val_stack_index++] = operand1;
         val_stack[val_stack_index++] = operand2;
 
-        while (op != OP_generic) {
+        while (op != OP_generic && op != OP_ternary) {
             if (op_stack_index > 0) {
                 /* we have a continuation, use stack */
                 int same_op = 0;
@@ -1429,21 +1560,31 @@ int read_global_assignment(char *token)
                 eval_expression_imm(stack_op, operand1, operand2);
 
             if (op_stack_index == 1) {
-                var->init_val = val_stack[0];
+                if (op == OP_ternary) {
+                    lex_expect(T_question);
+                    eval_ternary_imm(val_stack[0], token);
+                } else {
+                    var->init_val = val_stack[0];
+                }
                 return 1;
             }
 
             /* pop op stack */
             op_stack_index--;
         }
-
-        var->init_val = val_stack[0];
+        if (op == OP_ternary) {
+            lex_expect(T_question);
+            eval_ternary_imm(val_stack[0], token);
+        } else {
+            var->init_val = val_stack[0];
+        }
         return 1;
     }
     return 0;
 }
 
 int break_exit_ir_index[MAX_NESTING];
+int conti_jump_ir_index[MAX_NESTING];
 
 void read_code_block(func_t *func, block_t *parent);
 
@@ -1454,6 +1595,7 @@ void read_body_statement(block_t *parent)
     type_t *type;
     var_t *var;
     ir_instr_t *ii;
+    opcode_t prefix_op = OP_generic;
 
     /* statement can be:
      *   function call, variable declaration, assignment operation,
@@ -1469,6 +1611,7 @@ void read_body_statement(block_t *parent)
         if (!lex_accept(T_semicolon)) { /* can be "void" */
             /* get expression value into return value */
             read_expr(0, parent);
+            read_ternary_operation(0, parent);
             lex_expect(T_semicolon);
         }
         fn = parent->func;
@@ -1514,8 +1657,11 @@ void read_body_statement(block_t *parent)
 
     if (lex_accept(T_while)) {
         ir_instr_t *false_jump;
-        ir_instr_t *start = add_instr(OP_label); /* start to return to */
-
+        ir_instr_t *start_jump =
+            add_instr(OP_jump); /* jump to while condition */
+        ir_instr_t *exit_label = add_instr(OP_label);
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label); /* start to return to */
         lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
         lex_expect(T_close_bracket);
@@ -1523,15 +1669,23 @@ void read_body_statement(block_t *parent)
         false_jump = add_instr(OP_jz);
         false_jump->param_no = 0;
 
+        start_jump->int_param1 = start_label->ir_index;
+
+        /* create exit jump for breaks */
+        break_exit_ir_index[break_level++] = exit_label->ir_index;
+        conti_jump_ir_index[continue_level++] = start_label->ir_index;
         read_body_statement(parent);
+        break_level--;
+        continue_level--;
 
         /* unconditional jump back to expression */
         ii = add_instr(OP_jump);
-        ii->int_param1 = start->ir_index;
+        ii->int_param1 = start_label->ir_index;
 
         /* exit label */
         ii = add_instr(OP_label);
         false_jump->int_param1 = ii->ir_index;
+        exit_jump->int_param1 = ii->ir_index;
         return;
     }
 
@@ -1620,7 +1774,16 @@ void read_body_statement(block_t *parent)
         ii->int_param1 = break_exit_ir_index[break_level - 1];
     }
 
+    if (lex_accept(T_continue)) {
+        ii = add_instr(OP_jump);
+        ii->int_param1 = conti_jump_ir_index[continue_level - 1];
+    }
+
     if (lex_accept(T_for)) {
+        ir_instr_t *start_jump = add_instr(OP_jump);
+        ir_instr_t *exit_label = add_instr(OP_label);
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label);
         ir_instr_t *condition_start;
         ir_instr_t *condition_jump_out;
         ir_instr_t *condition_jump_in;
@@ -1630,12 +1793,13 @@ void read_body_statement(block_t *parent)
         ir_instr_t *body_jump;
         ir_instr_t *end;
 
+        start_jump->int_param1 = start_label->ir_index;
         lex_expect(T_open_bracket);
 
         /* setup - execute once */
         if (!lex_accept(T_semicolon)) {
             lex_peek(T_identifier, token);
-            read_body_assignment(token, parent);
+            read_body_assignment(token, parent, OP_generic);
             lex_expect(T_semicolon);
         }
 
@@ -1659,8 +1823,12 @@ void read_body_statement(block_t *parent)
         /* increment after each loop */
         increment = add_instr(OP_label);
         if (!lex_accept(T_close_bracket)) {
+            if (lex_accept(T_increment))
+                prefix_op = OP_add;
+            else if (lex_accept(T_decrement))
+                prefix_op = OP_sub;
             lex_peek(T_identifier, token);
-            read_body_assignment(token, parent);
+            read_body_assignment(token, parent, prefix_op);
             lex_expect(T_close_bracket);
         }
 
@@ -1671,7 +1839,11 @@ void read_body_statement(block_t *parent)
         /* loop body */
         body_start = add_instr(OP_label);
         condition_jump_in->int_param1 = body_start->ir_index;
+        break_exit_ir_index[break_level++] = exit_label->ir_index;
+        conti_jump_ir_index[continue_level++] = increment->ir_index;
         read_body_statement(parent);
+        break_level--;
+        continue_level--;
 
         /* jump to increment */
         body_jump = add_instr(OP_jump);
@@ -1679,14 +1851,29 @@ void read_body_statement(block_t *parent)
 
         end = add_instr(OP_label);
         condition_jump_out->int_param1 = end->ir_index;
+        exit_jump->int_param1 = end->ir_index;
         return;
     }
 
     if (lex_accept(T_do)) {
         ir_instr_t *false_jump;
-        ir_instr_t *start = add_instr(OP_label); /* start to return to */
+        ir_instr_t *start_jump = add_instr(OP_jump);
+        ir_instr_t *cond_label;
+        ir_instr_t *cond_jump = add_instr(OP_jump);
+        ir_instr_t *exit_label;
+        ir_instr_t *exit_jump = add_instr(OP_jump);
+        ir_instr_t *start_label = add_instr(OP_label); /* start to return to */
 
+        start_jump->int_param1 = start_label->ir_index;
+
+        break_exit_ir_index[break_level++] = exit_jump->ir_index;
+        conti_jump_ir_index[continue_level++] = cond_jump->ir_index;
         read_body_statement(parent);
+        break_level--;
+        continue_level--;
+
+        cond_label = add_instr(OP_label);
+        cond_jump->int_param1 = cond_label->ir_index;
         lex_expect(T_while);
         lex_expect(T_open_bracket);
         read_expr(0, parent); /* get expression value into return value */
@@ -1694,7 +1881,9 @@ void read_body_statement(block_t *parent)
 
         false_jump = add_instr(OP_jnz);
         false_jump->param_no = 0;
-        false_jump->int_param1 = start->ir_index;
+        false_jump->int_param1 = start_label->ir_index;
+        exit_label = add_instr(OP_label);
+        exit_jump->int_param1 = exit_label->ir_index;
 
         lex_expect(T_semicolon);
         return;
@@ -1704,6 +1893,11 @@ void read_body_statement(block_t *parent)
     if (lex_accept(T_semicolon))
         return;
 
+    /* statement with prefix */
+    if (lex_accept(T_increment))
+        prefix_op = OP_add;
+    else if (lex_accept(T_decrement))
+        prefix_op = OP_sub;
     /* must be an identifier */
     if (!lex_peek(T_identifier, token))
         error("Unexpected token");
@@ -1715,6 +1909,7 @@ void read_body_statement(block_t *parent)
         read_full_var_decl(var);
         if (lex_accept(T_assign)) {
             read_expr(1, parent); /* get expression value into ?1 */
+            read_ternary_operation(1, parent);
             /* assign to our new variable */
 
             /* load variable location */
@@ -1762,7 +1957,7 @@ void read_body_statement(block_t *parent)
     }
 
     /* is an assignment? */
-    if (read_body_assignment(token, parent)) {
+    if (read_body_assignment(token, parent, prefix_op)) {
         lex_expect(T_semicolon);
         return;
     }
@@ -1798,20 +1993,19 @@ void read_func_body(func_t *fdef)
     fdef->exit_point = ii->ir_index;
 }
 
-var_t _temp_var;
-
 /* if first token is type */
 void read_global_decl(block_t *block)
 {
+    var_t tmp;
     /* new function, or variables under parent */
-    read_full_var_decl(&_temp_var);
+    read_full_var_decl(&tmp);
 
     if (lex_peek(T_open_bracket, NULL)) {
         ir_instr_t *ii;
 
         /* function */
-        func_t *fd = add_func(_temp_var.var_name);
-        memcpy(&fd->return_def, &_temp_var, sizeof(var_t));
+        func_t *fd = add_func(tmp.var_name);
+        memcpy(&fd->return_def, &tmp, sizeof(var_t));
 
         fd->num_params = read_parameter_list_decl(fd->param_defs);
 
@@ -1829,11 +2023,11 @@ void read_global_decl(block_t *block)
     }
 
     /* is a variable */
-    memcpy(&block->locals[block->next_local++], &_temp_var, sizeof(var_t));
+    memcpy(&block->locals[block->next_local++], &tmp, sizeof(var_t));
 
     if (lex_accept(T_assign)) {
-        if (_temp_var.is_ptr == 0 && _temp_var.array_size == 0) {
-            read_global_assignment(_temp_var.var_name);
+        if (tmp.is_ptr == 0 && tmp.array_size == 0) {
+            read_global_assignment(tmp.var_name);
             lex_expect(T_semicolon);
             return;
         }
@@ -1853,7 +2047,7 @@ void read_global_statement()
     block_t *block = &BLOCKS[0]; /* global block */
 
     if (lex_peek(T_include, token)) {
-        if (strcmp(token_str, "<stdio.h>") == 0) {
+        if (!strcmp(token_str, "<stdio.h>")) {
             /* ignore, we include libc by default */
         }
         lex_expect(T_include);
@@ -1914,7 +2108,7 @@ void read_global_statement()
             type_t *type = add_type();
             lex_indent(T_identifier, base_type);
             base = find_type(base_type);
-            if (base == NULL)
+            if (!base)
                 error("Unable to find base type");
             type->base_type = base->base_type;
             type->size = base->size;
@@ -1962,7 +2156,7 @@ void parse_internal()
     ii->str_param1 = "main";
     ii = add_instr(OP_label);
     ii->str_param1 = "__exit";
-    add_instr(OP_exit);
+    exit_ii = add_instr(OP_exit);
 
     /* Linux syscall */
     fn = add_func("__syscall");
@@ -1978,6 +2172,7 @@ void parse_internal()
 
     /* internal */
     break_level = 0;
+    continue_level = 0;
 
     /* lexer initialization */
     source_idx = 0;
@@ -1996,11 +2191,11 @@ void load_source_file(char *file)
 
     FILE *f = fopen(file, "rb");
     for (;;) {
-        if (fgets(buffer, MAX_LINE_LEN, f) == NULL) {
+        if (!fgets(buffer, MAX_LINE_LEN, f)) {
             fclose(f);
             return;
         }
-        if ((strncmp(buffer, "#include ", 9) == 0) && (buffer[9] == '"')) {
+        if (!strncmp(buffer, "#include ", 9) && (buffer[9] == '"')) {
             char path[MAX_LINE_LEN];
             int c = strlen(file) - 1;
             while (c > 0 && file[c] != '/')

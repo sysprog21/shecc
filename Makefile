@@ -27,7 +27,6 @@ $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
 	$(Q)$(OUT)/$(STAGE0) --dump-ir -o $@ $< > $(basename $@).log ; \
 	chmod +x $@ ; $(PRINTF) "Running $@ ...\n"
 	$(Q)$(ARM_EXEC) $@ && $(call pass)
-	# $(CROSS_COMPILE)objdump -d $@ > $(basename $@).lst
 
 check: $(TESTBINS) tests/driver.sh
 	tests/driver.sh

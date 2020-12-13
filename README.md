@@ -11,7 +11,7 @@ a self-compiling compiler for a subset of the C language.
 
 * Generate executable Linux ELF binaries for ARMv7-A;
 * Provide a minimal C standard library for basic I/O on GNU/Linux;
-* The cross-compiler is written in ANSI C, bootstrapping on most platforms;
+* The cross-compiler is written in ANSI C, arguably running on most platforms;
 * Self-contained C language front-end and machine code generator;
 * Two-pass compilation: on the first pass it checks the syntax of 
   statements and constructs a table of symbols, while on the second pass
@@ -33,15 +33,16 @@ The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3.
 ## Bootstrapping
 
 The steps to validate `shecc` bootstrapping:
-1. `shecc` source code is initially compiled using an ordinary compiler which
-   generates an x86/x86\_64 binary.
-2. The built binary reads its own source code as input and generates an ARMv7-A
-   binary.
-3. The generated ARMv7-A binary is invoked (via QEMU or running on Arm devices)
-   with its own source code as input and generates another ARMv7-A binary.
-4. If outputs generated in steps 2. and 3. are identical, the bootstrapping
-   would be successful. That is, `shecc` can compile its own source code and
-   produces new versions of that same program.
+1. `stage0`: `shecc` source code is initially compiled using an ordinary compiler
+   which generates a native executable. The generated compiler can be used as a
+   cross-compiler.
+2. `stage1`: The built binary reads its own source code as input and generates an
+   ARMv7-A  binary.
+3. `stage2`: The generated ARMv7-A binary is invoked (via QEMU or running on Arm
+   devices) with its own source code as input and generates another ARMv7-A binary.
+4. `bootstrap`: Build the `stage1` and `stage2` compilers, and verify that they are
+   byte-wise identical. If so, `shecc` can compile its own source code and produce
+   new versions of that same program.
 
 ## Prerequisites
 
@@ -163,18 +164,12 @@ int fib(int n)      fib:                        Reserve stack frame for function
 
 ## Known Issues
 
-1. Any non-zero value is NOT treated as logical truth by all ops.
-   That is, the expression `0 == strcmp(ptr, "hello")` is not equivalent to `!strcmp(ptr, "hello")`.
 2. The generated ELF lacks of .bss and .rodata section
-3. Dereference is incomplete. Consider `int x = 5; int *ptr = &x;` and it is forbidden to use `*ptr`.
-   However, it is valid to use `ptr[0]`, which behaves the same of `*ptr`.
+3. The unary `*` operator is not supported, which makes it necessary to use `[0]` syntax.
+   Consider `int x = 5; int *ptr = &x;` and it is forbidden to use `*ptr`. However, it is valid to
+   use `ptr[0]`, which behaves the same of `*ptr`.
 4. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.
    Alternatively, check the implementation `printf` in source `lib/c.c` for `var_arg`.
-5. The memory region allocated by `malloc` can not be released. In fact, there is no `free` function.
-   Memory allocator should be introduced in embedded libc implementation.
-6. If you attempt to return values in `main` function, the value will not be reserved after the
-   program exited. You have to modify the `return` statement to `exit` call. Check the test items in
-   file `tests/driver.sh` for details.
 7. The C front-end is a bit dirty because there is no effective AST.
 8. No function pointer is supported.
 

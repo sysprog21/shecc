@@ -28,12 +28,9 @@ int size_block(block_t *blk)
     int size = 0, i, offset;
 
     /* our offset starts from parent's offset */
-    if (blk->parent == NULL) {
-        if (blk->func)
-            offset = blk->func->params_size;
-        else
-            offset = 0;
-    } else
+    if (!blk->parent)
+        offset = blk->func ? blk->func->params_size : 0;
+    else
         offset = size_block(blk->parent);
 
     /* declared locals */
@@ -76,7 +73,7 @@ void size_funcs(int data_start)
         elf_add_symbol(blk->locals[i].var_name, strlen(blk->locals[i].var_name),
                        data_start + elf_data_idx);
         /* TODO: add .bss section */
-        if (strcmp(blk->locals[i].type_name, "int") == 0 &&
+        if (!strcmp(blk->locals[i].type_name, "int") &&
             blk->locals[i].init_val != 0)
             elf_write_data_int(blk->locals[i].init_val);
         else
@@ -95,19 +92,13 @@ int get_code_length(ir_instr_t *ii)
         return 16 + (fn->num_params << 2);
     }
     case OP_call:
-        if (ii->param_no)
-            return 8;
-        return 4;
+        return ii->param_no ? 8 : 4;
     case OP_load_constant:
-        if (ii->int_param1 >= 0 && ii->int_param1 < 256)
-            return 4;
-        return 8;
+        return (ii->int_param1 >= 0 && ii->int_param1 < 256) ? 4 : 8;
     case OP_block_start:
     case OP_block_end: {
         block_t *blk = &BLOCKS[ii->int_param1];
-        if (blk->next_local > 0)
-            return 4;
-        return 0;
+        return (blk->next_local > 0) ? 4 : 0;
     }
     case OP_eq:
     case OP_neq:
@@ -121,6 +112,8 @@ int get_code_length(ir_instr_t *ii)
     case OP_func_exit:
         return 16;
     case OP_exit:
+    case OP_mod:
+    case OP_log_not:
         return 12;
     case OP_load_data_address:
     case OP_jz:
@@ -140,9 +133,10 @@ int get_code_length(ir_instr_t *ii)
     case OP_write:
     case OP_log_or:
     case OP_log_and:
-    case OP_not:
     case OP_bit_or:
     case OP_bit_and:
+    case OP_bit_xor:
+    case OP_bit_not:
     case OP_negate:
     case OP_lshift:
     case OP_rshift:
@@ -237,7 +231,7 @@ void code_generate()
                 int offset;
                 /* need to find the variable offset on stack, i.e. from r11 */
                 var = find_local_var(ii->str_param1, blk);
-                if (var == NULL) /* not found? */
+                if (!var) /* not found? */
                     abort();
 
                 offset = -var->offset;
@@ -366,6 +360,14 @@ void code_generate()
             if (dump_ir == 1)
                 printf("    x%d /= x%d", dest_reg, OP_reg);
             break;
+        case OP_mod:
+            emit(__div(__AL, OP_reg + 1, OP_reg, dest_reg));
+            emit(__mul(__AL, OP_reg, OP_reg, OP_reg + 1));
+            emit(__sub_r(__AL, dest_reg, dest_reg, OP_reg));
+            /* TODO: support percent-sign character (%) in format string */
+            if (dump_ir == 1)
+                printf("    x%d = x%d mod x%d", dest_reg, dest_reg, OP_reg);
+            break;
         case OP_negate:
             emit(__rsb_i(__AL, dest_reg, 0, dest_reg));
             if (dump_ir == 1)
@@ -437,6 +439,16 @@ void code_generate()
             if (dump_ir == 1)
                 printf("    x%d |= x%d", dest_reg, OP_reg);
             break;
+        case OP_bit_xor:
+            emit(__eor_r(__AL, dest_reg, dest_reg, OP_reg));
+            if (dump_ir == 1)
+                printf("    x%d ^= x%d", dest_reg, OP_reg);
+            break;
+        case OP_bit_not:
+            emit(__mvn_r(__AL, dest_reg, dest_reg));
+            if (dump_ir == 1)
+                printf("    x%d ~= x%d", dest_reg, dest_reg);
+            break;
         case OP_lshift:
             emit(__sll(__AL, dest_reg, dest_reg, OP_reg));
             if (dump_ir == 1)
@@ -447,10 +459,11 @@ void code_generate()
             if (dump_ir == 1)
                 printf("    x%d >>= x%d", dest_reg, OP_reg);
             break;
-        case OP_not:
+        case OP_log_not:
             /* 1 if zero, 0 if nonzero */
-            /* only works for 1/0 */
-            emit(__rsb_i(__AL, dest_reg, 1, dest_reg));
+            emit(__teq(dest_reg));
+            emit(__mov_i(__NE, dest_reg, 0));
+            emit(__mov_i(__EQ, dest_reg, 1));
             if (dump_ir == 1)
                 printf("    !x%d", dest_reg);
             break;
@@ -542,7 +555,7 @@ void code_generate()
             break;
         case OP_exit:
             /* syscall for 'exit' */
-            emit(__mov_i(__AL, __r0, 0));
+            emit(__mov_r(__AL, __r0, OP_reg));
             emit(__mov_i(__AL, __r7, 1));
             emit(__svc());
             if (dump_ir == 1)

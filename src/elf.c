@@ -237,10 +237,7 @@ void elf_add_symbol(char *symbol, int len, int pc)
     elf_write_symbol_int(elf_strtab_index);
     elf_write_symbol_int(pc);
     elf_write_symbol_int(0);
-    if (pc == 0)
-        elf_write_symbol_int(0);
-    else
-        elf_write_symbol_int(1 << 16);
+    elf_write_symbol_int(pc == 0 ? 0 : 1 << 16);
 
     strncpy(elf_strtab + elf_strtab_index, symbol, len);
     elf_strtab_index += len;
@@ -262,7 +259,7 @@ void elf_generate(char *outfile)
     elf_generate_header();
     elf_generate_sections();
 
-    if (outfile == NULL)
+    if (!outfile)
         outfile = "a.out";
 
     fp = fopen(outfile, "wb");
