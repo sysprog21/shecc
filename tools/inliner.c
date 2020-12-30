@@ -28,17 +28,27 @@ void write_str(char *str)
 
 void write_line(char *src)
 {
-    int i;
-
+    int i,j;
     write_str("  __c(\"");
+
     for (i = 0; src[i]; i++) {
         if (src[i] == '\"') {
             write_char('\\');
             write_char('\"');
         } else if (src[i] != '\n') {
             write_char(src[i]);
+        } else if (src[i] == '\n') {
+            write_char('\\');
+            write_char('\n');
         }
     }
+
+    for (j = 0; SOURCE[j]; j++) {
+        if (SOURCE[j] == '\r') {
+            SOURCE[j] = ' ';
+        }
+    }
+    /* remove \r character */
 
     write_char('\\');
     write_char('n');
