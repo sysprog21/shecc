@@ -24,4 +24,8 @@ script:
   - make config ARCH=arm
   - make VERBOSE=1      
   - make check
+  - make clean
+  - make config ARCH=riscv
+  - make VERBOSE=1
+  - make check
   - sh .ci/check-format.sh

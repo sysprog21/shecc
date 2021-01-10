@@ -26,12 +26,15 @@ all: bootstrap
 
 config:
 ifeq (riscv,$(ARCH))
-	@echo $(RISCV_EXEC) > $(OUT)/target
+	@$(VECHO) "$(RISCV_EXEC)" > $(OUT)/target
+	@$(VECHO) "#define TARGET_RISCV 1" > $@
+	@ln -s $(PWD)/$(SRCDIR)/riscv-codegen.c $(SRCDIR)/codegen.c
 else
-	@echo $(ARM_EXEC) > $(OUT)/target
+	@$(VECHO) "$(ARM_EXEC)" > $(OUT)/target
+	@$(VECHO) "#define TARGET_ARM 1" > $@
+	@ln -s $(PWD)/$(SRCDIR)/arm-codegen.c $(SRCDIR)/codegen.c
 endif
-	@echo -n Target machine code switch to
-	@echo `cat $(OUT)/target` | sed 's/.*qemu-\([^ ]*\).*/ \1/'
+	@$(VECHO) "Target machine code switch to %s\n" "$$(cat out/target | sed 's/.*qemu-\([^ ]*\).*/\1/')"
 
 $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
 	$(VECHO) "  SHECC\t$@\n"
@@ -80,6 +83,6 @@ clean:
 	-$(RM) $(OBJS) $(deps)
 	-$(RM) $(TESTBINS) $(OUT)/tests/*.log $(OUT)/tests/*.lst
 	-$(RM) $(OUT)/shecc*.log
-	-$(RM) $(OUT)/inliner $(OUT)/libc.inc $(OUT)/target
+	-$(RM) $(OUT)/inliner $(OUT)/libc.inc $(OUT)/target config $(SRCDIR)/codegen.c
 
 -include $(deps)

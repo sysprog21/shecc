@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Define target machine */
+#include "../config"
+
 /* The inclusion must follow the fixed order, otherwise it fails to build. */
 #include "defs.h"
 
@@ -17,7 +20,7 @@
 #include "cfront.c"
 
 /* Machine code generation. support ARMv7-A and RISC-V32I */
-#include "arm-codegen.c"
+#include "codegen.c"
 
 /* inlined libc */
 #include "../out/libc.inc"

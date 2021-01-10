@@ -82,7 +82,13 @@ void elf_generate_header()
     elf_write_header_int(0);          /* EI_PAD: unused */
     elf_write_header_byte(2);         /* ET_EXEC */
     elf_write_header_byte(0);
+/* FIXME: use #ifdef ... #else ... #endif */
+#ifdef TARGET_ARM
     elf_write_header_byte(0x28); /* ARM (up to ARMv7/Aarch32) */
+#endif
+#ifdef TARGET_RISCV
+    elf_write_header_byte(0xf3); /* RISC-V */
+#endif
     elf_write_header_byte(0);
     elf_write_header_int(1);                          /* ELF version */
     elf_write_header_int(ELF_START + elf_header_len); /* entry point */
@@ -90,9 +96,15 @@ void elf_generate_header()
     elf_write_header_int(elf_header_len + elf_code_idx + elf_data_idx + 39 +
                          elf_symtab_index +
                          elf_strtab_index); /* section header offset */
-    /* flags */
+/* flags */
+/* FIXME: use #ifdef ... #else ... #endif */
+#ifdef TARGET_ARM
     elf_write_header_int(0x5000200); /* ARM */
-    elf_write_header_byte(0x34);     /* header size */
+#endif
+#ifdef TARGET_RISCV
+    elf_write_header_int(0);
+#endif
+    elf_write_header_byte(0x34); /* header size */
     elf_write_header_byte(0);
     elf_write_header_byte(0x20); /* program header size */
     elf_write_header_byte(0);
