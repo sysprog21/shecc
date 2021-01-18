@@ -5,6 +5,7 @@ CFLAGS := -O -g \
 
 include mk/common.mk
 include mk/arm.mk
+include mk/riscv.mk
 
 STAGE0 := shecc
 STAGE1 := shecc-stage1.elf
@@ -19,14 +20,24 @@ OBJS := $(SRCS:%.c=$(OUT)/%.o)
 deps := $(OBJS:%.o=%.o.d)
 TESTS := $(wildcard tests/*.c)
 TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
+TARGET_EXEC := `cat $(OUT)/target`
 
 all: bootstrap
+
+config:
+ifeq (riscv,$(ARCH))
+	@echo $(RISCV_EXEC) > $(OUT)/target
+else
+	@echo $(ARM_EXEC) > $(OUT)/target
+endif
+	@echo -n Target machine code switch to
+	@echo `cat $(OUT)/target` | sed 's/.*qemu-\([^ ]*\).*/ \1/'
 
 $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
 	$(VECHO) "  SHECC\t$@\n"
 	$(Q)$(OUT)/$(STAGE0) --dump-ir -o $@ $< > $(basename $@).log ; \
 	chmod +x $@ ; $(PRINTF) "Running $@ ...\n"
-	$(Q)$(ARM_EXEC) $@ && $(call pass)
+	$(Q)$(TARGET_EXEC) $@ && $(call pass)
 
 check: $(TESTBINS) tests/driver.sh
 	tests/driver.sh
@@ -55,9 +66,10 @@ $(OUT)/$(STAGE1): $(OUT)/$(STAGE0)
 
 $(OUT)/$(STAGE2): $(OUT)/$(STAGE1)
 	$(VECHO) "  SHECC\t$@\n"
-	$(Q)$(ARM_EXEC) $(OUT)/$(STAGE1) -o $@ $(SRCDIR)/main.c
+	$(Q)$(TARGET_EXEC) $(OUT)/$(STAGE1) -o $@ $(SRCDIR)/main.c
 
 bootstrap: $(OUT)/$(STAGE2)
+	$(Q)chmod 775 $(OUT)/$(STAGE2)
 	$(Q)if ! diff -q $(OUT)/$(STAGE1) $(OUT)/$(STAGE2); then \
 	echo "Unable to bootstrap. Aborting"; false; \
 	fi
@@ -68,6 +80,6 @@ clean:
 	-$(RM) $(OBJS) $(deps)
 	-$(RM) $(TESTBINS) $(OUT)/tests/*.log $(OUT)/tests/*.lst
 	-$(RM) $(OUT)/shecc*.log
-	-$(RM) $(OUT)/inliner $(OUT)/libc.inc
+	-$(RM) $(OUT)/inliner $(OUT)/libc.inc $(OUT)/target
 
 -include $(deps)

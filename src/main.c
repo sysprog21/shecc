@@ -16,8 +16,8 @@
 /* C language front-end */
 #include "cfront.c"
 
-/* Machine code generation. ARMv7-A is the only target */
-#include "codegen.c"
+/* Machine code generation. support ARMv7-A and RISC-V32I */
+#include "arm-codegen.c"
 
 /* inlined libc */
 #include "../out/libc.inc"

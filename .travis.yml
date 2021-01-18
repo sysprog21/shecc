@@ -21,6 +21,7 @@ before_install:
   - sudo apt-get install -y clang-format-6.0
 
 script:
+  - make config ARCH=arm
   - make VERBOSE=1      
   - make check
   - sh .ci/check-format.sh

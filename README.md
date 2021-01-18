@@ -59,6 +59,15 @@ the second stage bootstrapping would fail due to `qemu-arm` absence.
 
 ## Build and Verify
 
+Configure which backend you want, `shecc` supports `ARMv7-A` and `RISC-V32I` backend:
+```
+$ make config ARCH=arm
+# Target machine code switch to Arm
+
+$ make config ARCH=riscv
+# Target machine code switch to riscv
+```
+
 Run `make` and you should see this:
 ```
   CC+LD	out/inliner
