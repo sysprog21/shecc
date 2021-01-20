@@ -22,7 +22,7 @@ TESTS := $(wildcard tests/*.c)
 TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
 TARGET_EXEC := `cat $(OUT)/target`
 
-all: bootstrap
+all: config bootstrap
 
 config:
 ifeq (riscv,$(ARCH))
