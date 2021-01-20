@@ -4,3 +4,5 @@ a.out
 *.elf
 *.log
 *.lst
+config
+src/codegen.c
