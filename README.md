@@ -4,18 +4,18 @@
 
 ## Introduction
 
-`shecc` is built from scratch, targeted at 32-bit Arm architecture, as
+`shecc` is built from scratch, targeted at 32-bit Arm and RISC-V architecture, as
 a self-compiling compiler for a subset of the C language.
 
 ### Features
 
-* Generate executable Linux ELF binaries for ARMv7-A;
+* Generate executable Linux ELF binaries for ARMv7-A and RV32IM;
 * Provide a minimal C standard library for basic I/O on GNU/Linux;
 * The cross-compiler is written in ANSI C, arguably running on most platforms;
 * Self-contained C language front-end and machine code generator;
 * Two-pass compilation: on the first pass it checks the syntax of 
   statements and constructs a table of symbols, while on the second pass
-  it actually translates program statements into Arm machine code.
+  it actually translates program statements into Arm/RISC-V machine code.
 
 ## Compatibility
 
@@ -37,9 +37,10 @@ The steps to validate `shecc` bootstrapping:
    which generates a native executable. The generated compiler can be used as a
    cross-compiler.
 2. `stage1`: The built binary reads its own source code as input and generates an
-   ARMv7-A  binary.
-3. `stage2`: The generated ARMv7-A binary is invoked (via QEMU or running on Arm
-   devices) with its own source code as input and generates another ARMv7-A binary.
+   ARMv7-A/RV32IM  binary.
+3. `stage2`: The generated ARMv7-A/RV32IM binary is invoked (via QEMU or running on
+   Arm and RISC-V devices) with its own source code as input and generates another
+   ARMv7-A/RV32IM binary.
 4. `bootstrap`: Build the `stage1` and `stage2` compilers, and verify that they are
    byte-wise identical. If so, `shecc` can compile its own source code and produce
    new versions of that same program.
@@ -48,8 +49,8 @@ The steps to validate `shecc` bootstrapping:
 
 Code generator in `shecc` does not rely on external utilities. You only need
 ordinary C compilers such as `gcc` and `clang`. However, `shecc` would bootstrap
-itself, and Arm ISA emulation is required. Install QEMU for Arm user emulation
-on GNU/Linux:
+itself, and Arm/RISC-V ISA emulation is required. Install QEMU for Arm/RISC-V user
+emulation on GNU/Linux:
 ```shell
 $ sudo apt-get install qemu-user
 ```
@@ -59,13 +60,13 @@ the second stage bootstrapping would fail due to `qemu-arm` absence.
 
 ## Build and Verify
 
-Configure which backend you want, `shecc` supports `ARMv7-A` and `RISC-V32I` backend:
+Configure which backend you want, `shecc` supports ARMv7-A and RV32IM backend:
 ```
 $ make config ARCH=arm
 # Target machine code switch to Arm
 
 $ make config ARCH=riscv
-# Target machine code switch to riscv
+# Target machine code switch to RISC-V
 ```
 
 Run `make` and you should see this:
