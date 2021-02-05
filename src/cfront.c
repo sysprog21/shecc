@@ -503,7 +503,7 @@ int lex_peek(token_t token, char *value)
     return 0;
 }
 
-void lex_indent(token_t token, char *value)
+void lex_ident(token_t token, char *value)
 {
     if (next_token != token)
         error("Unexpected token");
@@ -568,7 +568,7 @@ void read_inner_var_decl(var_t *vd)
         vd->is_ptr = 1;
     else
         vd->is_ptr = 0;
-    lex_indent(T_identifier, vd->var_name);
+    lex_ident(T_identifier, vd->var_name);
     if (lex_accept(T_open_square)) {
         char buffer[10];
         /* array with size */
@@ -591,7 +591,7 @@ void read_inner_var_decl(var_t *vd)
 void read_full_var_decl(var_t *vd)
 {
     lex_accept(T_struct); /* ignore struct definition */
-    lex_indent(T_identifier, vd->type_name);
+    lex_ident(T_identifier, vd->type_name);
     read_inner_var_decl(vd);
 }
 
@@ -630,7 +630,7 @@ void read_literal_param(int param_no)
     ir_instr_t *ii;
     int index;
 
-    lex_indent(T_string, literal);
+    lex_ident(T_string, literal);
 
     index = write_symbol(literal, strlen(literal) + 1);
     ii = add_instr(OP_load_data_address);
@@ -646,7 +646,7 @@ void read_numeric_param(int param_no, int isneg)
     ir_instr_t *ii;
     char c;
 
-    lex_indent(T_numeric, token);
+    lex_ident(T_numeric, token);
 
     if (token[0] == '-') {
         isneg = 1 - isneg;
@@ -687,7 +687,7 @@ void read_char_param(int param_no)
     ir_instr_t *ii;
     char token[5];
 
-    lex_indent(T_char, token);
+    lex_ident(T_char, token);
 
     ii = add_instr(OP_load_constant);
     ii->param_no = param_no;
@@ -798,7 +798,7 @@ void read_expr_operand(int param_no, block_t *parent)
         ir_instr_t *ii = add_instr(OP_load_constant);
 
         lex_expect(T_open_bracket);
-        lex_indent(T_identifier, token);
+        lex_ident(T_identifier, token);
         type = find_type(token);
         if (!type)
             error("Unable to find type");
@@ -1140,7 +1140,7 @@ void read_lvalue(lvalue_t *lvalue,
             } else
                 lex_expect(T_dot);
 
-            lex_indent(T_identifier, token);
+            lex_ident(T_identifier, token);
 
             /* change type currently pointed to */
             var = find_member(token, lvalue->type);
@@ -2069,16 +2069,16 @@ void read_global_statement()
             type->size = 4;
             lex_expect(T_open_curly);
             do {
-                lex_indent(T_identifier, token);
+                lex_ident(T_identifier, token);
                 if (lex_accept(T_assign)) {
                     char value[MAX_ID_LEN];
-                    lex_indent(T_numeric, value);
+                    lex_ident(T_numeric, value);
                     val = read_numeric_constant(value);
                 }
                 add_constant(token, val++);
             } while (lex_accept(T_comma));
             lex_expect(T_close_curly);
-            lex_indent(T_identifier, token);
+            lex_ident(T_identifier, token);
             strcpy(type->type_name, token);
             lex_expect(T_semicolon);
         } else if (lex_accept(T_struct)) {
@@ -2096,7 +2096,7 @@ void read_global_statement()
                 lex_expect(T_semicolon);
             } while (!lex_accept(T_close_curly));
 
-            lex_indent(T_identifier, token); /* type name */
+            lex_ident(T_identifier, token); /* type name */
             strcpy(type->type_name, token);
             type->size = size;
             type->num_fields = i;
@@ -2106,14 +2106,14 @@ void read_global_statement()
             char base_type[MAX_TYPE_LEN];
             type_t *base;
             type_t *type = add_type();
-            lex_indent(T_identifier, base_type);
+            lex_ident(T_identifier, base_type);
             base = find_type(base_type);
             if (!base)
                 error("Unable to find base type");
             type->base_type = base->base_type;
             type->size = base->size;
             type->num_fields = 0;
-            lex_indent(T_identifier, type->type_name);
+            lex_ident(T_identifier, type->type_name);
             lex_expect(T_semicolon);
         }
     } else if (lex_peek(T_identifier, NULL)) {
