@@ -23,6 +23,21 @@ int is_hex(char c)
             (c >= 'A' && c <= 'F'));
 }
 
+int is_numeric(char buffer[])
+{
+    int i = 0;
+    while (buffer[i]) {
+        if (i == 1 && (buffer[i] == 'x')) {
+            if (buffer[0] != '0')
+                return 0;
+        } else if (is_digit(buffer[i]) == 0) {
+            return 0;
+        }
+        i++;
+    }
+    return 1;
+}
+
 /* lexer tokens */
 typedef enum {
     T_start, /* FIXME: it was intended to start the state machine. */
@@ -473,8 +488,9 @@ token_t get_next_token()
 
         alias = find_alias(token_str);
         if (alias) {
+            token_t t = is_numeric(alias) ? T_numeric : T_string;
             strcpy(token_str, alias);
-            return T_numeric;
+            return t;
         }
 
         return T_identifier;
@@ -2057,9 +2073,13 @@ void read_global_statement()
 
         lex_peek(T_identifier, alias);
         lex_expect(T_identifier);
-        lex_peek(T_numeric, value);
-        lex_expect(T_numeric);
-        add_alias(alias, value);
+        if (lex_peek(T_numeric, value)) {
+            lex_expect(T_numeric);
+            add_alias(alias, value);
+        } else if (lex_peek(T_string, value)) {
+            lex_expect(T_string);
+            add_alias(alias, value);
+        }
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {
             int val = 0;
