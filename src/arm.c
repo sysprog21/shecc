@@ -258,6 +258,11 @@ int __bl(arm_cond_t cond, int ofs)
     return arm_encode(cond, 176, 0, 0, 0) + (o & 16777215);
 }
 
+int __blx(arm_cond_t cond, arm_reg rd)
+{
+    return arm_encode(cond, 18, 15, 15, rd + 3888);
+}
+
 int __mul(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
 {
     return arm_encode(cond, 0, rd, 0, (r1 << 8) + 144 + r2);
