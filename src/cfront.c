@@ -25,15 +25,18 @@ int is_hex(char c)
 
 int is_numeric(char buffer[])
 {
-    int i = 0;
-    while (buffer[i]) {
-        if (i == 1 && (buffer[i] == 'x')) {
-            if (buffer[0] != '0')
-                return 0;
-        } else if (is_digit(buffer[i]) == 0) {
+    int i, hex, size = strlen(buffer);
+
+    if (size > 2)
+        hex = (buffer[0] == '0' && buffer[1] == 'x') ? 1 : 0;
+    else
+        hex = 0;
+
+    for (i = 0; i < size; i++) {
+        if (hex && (is_hex(buffer[i]) == 0))
             return 0;
-        }
-        i++;
+        if (!hex && (is_digit(buffer[i]) == 0))
+            return 0;
     }
     return 1;
 }
