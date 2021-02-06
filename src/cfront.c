@@ -2168,15 +2168,8 @@ void parse_internal()
     add_block(NULL, NULL);    /* global block */
     elf_add_symbol("", 0, 0); /* undef symbol */
 
-/* architecture defines */
-/* FIXME: use #ifdef ... #else ... #endif */
-#ifdef TARGET_ARM
-    add_alias("__arm__", "1"); /* defined by GNU C and RealView */
-#endif
-#ifdef TARGET_RISCV
-    /* Older versions of the GCC toolchain defined __riscv__ */
-    add_alias("__riscv", "1");
-#endif
+    /* architecture defines */
+    add_alias(ARCH_PREDEFINED, "1");
 
     /* binary entry point: read params, call main, exit */
     ii = add_instr(OP_label);

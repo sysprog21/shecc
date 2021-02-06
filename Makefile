@@ -20,21 +20,25 @@ OBJS := $(SRCS:%.c=$(OUT)/%.o)
 deps := $(OBJS:%.o=%.o.d)
 TESTS := $(wildcard tests/*.c)
 TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
-TARGET_EXEC := `cat $(OUT)/target`
 
 all: config bootstrap
 
-config:
-ifeq (riscv,$(ARCH))
-	@$(VECHO) "$(RISCV_EXEC)" > $(OUT)/target
-	@$(VECHO) "#define TARGET_RISCV 1" > $@
-	@ln -s $(PWD)/$(SRCDIR)/riscv-codegen.c $(SRCDIR)/codegen.c
+# set ARM by default
+ifeq ($(strip $(ARCH)),riscv)
+ARCH = riscv
 else
-	@$(VECHO) "$(ARM_EXEC)" > $(OUT)/target
-	@$(VECHO) "#define TARGET_ARM 1" > $@
-	@ln -s $(PWD)/$(SRCDIR)/arm-codegen.c $(SRCDIR)/codegen.c
+ARCH = arm
 endif
-	@$(VECHO) "Target machine code switch to %s\n" "$$(cat out/target | sed 's/.*qemu-\([^ ]*\).*/\1/')"
+
+ifneq ("$(wildcard $(PWD)/config)","")
+TARGET_EXEC := $($(shell head -1 config | sed 's/.*: \([^ ]*\).*/\1/')_EXEC)
+endif
+export TARGET_EXEC
+
+config:
+	$(Q)ln -s $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
+	$(call $(ARCH)-specific-defs) > $@
+	$(VECHO) "Target machine code switch to %s\n" $(ARCH)
 
 $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
 	$(VECHO) "  SHECC\t$@\n"
