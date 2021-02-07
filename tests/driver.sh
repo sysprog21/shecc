@@ -10,11 +10,10 @@ function try() {
 
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
-    local target_exec=$(<"$PWD/out/target")
     echo "$input" > "$tmp_in"
     "$SHECC" -o "$tmp_exe" "$tmp_in"
     chmod +x $tmp_exe
-    $target_exec "$tmp_exe"
+    $TARGET_EXEC "$tmp_exe"
     local actual="$?"
 
     if [ "$actual" = "$expected" ]; then
