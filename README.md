@@ -181,7 +181,6 @@ int fib(int n)      fib:                        Reserve stack frame for function
 4. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.
    Alternatively, check the implementation `printf` in source `lib/c.c` for `var_arg`.
 7. The C front-end is a bit dirty because there is no effective AST.
-8. No function pointer is supported.
 
 ## License
 

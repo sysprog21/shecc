@@ -40,6 +40,7 @@ typedef enum {
     OP_func_extry, /* function entry point */
     OP_exit,       /* program exit routine */
     OP_call,       /* function call */
+    OP_indirect,   /* indirect call with function pointer */
     OP_func_exit,  /* function exit code */
     OP_return,     /* jump to function exit */
 
@@ -109,6 +110,7 @@ typedef struct {
     char type_name[MAX_TYPE_LEN];
     char var_name[MAX_VAR_LEN];
     int is_ptr;
+    int is_func;
     int array_size;
     int offset;   /* offset from stack or frame */
     int init_val; /* for global initialization */

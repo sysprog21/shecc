@@ -548,7 +548,7 @@ int write_symbol(char *data, int len)
 
 int get_size(var_t *var, type_t *type)
 {
-    if (var->is_ptr)
+    if (var->is_ptr || var->is_func)
         return PTR_SIZE;
     return type->size;
 }
@@ -580,53 +580,69 @@ int read_numeric_constant(char buffer[])
     return value;
 }
 
-void read_inner_var_decl(var_t *vd)
+int read_parameter_list_decl(var_t vds[], int anon);
+
+void read_inner_var_decl(var_t *vd, int anon)
 {
     vd->init_val = 0;
     if (lex_accept(T_asterisk))
         vd->is_ptr = 1;
     else
         vd->is_ptr = 0;
-    lex_ident(T_identifier, vd->var_name);
-    if (lex_accept(T_open_square)) {
-        char buffer[10];
-        /* array with size */
-        if (lex_peek(T_numeric, buffer)) {
-            vd->array_size = read_numeric_constant(buffer);
-            lex_expect(T_numeric);
-        } else {
-            /* array without size:
-             * regarded as a pointer although could be nested
-             */
-            vd->is_ptr++;
-        }
-        lex_expect(T_close_square);
+
+    /* is it function pointer declaration? */
+    if (lex_accept(T_open_bracket)) {
+        var_t funargs[MAX_PARAMS];
+        lex_expect(T_asterisk);
+        lex_ident(T_identifier, vd->var_name);
+        lex_expect(T_close_bracket);
+        read_parameter_list_decl(funargs, 1);
+        vd->is_func = 1;
     } else {
-        vd->array_size = 0;
+        if (anon == 0)
+            lex_ident(T_identifier, vd->var_name);
+        if (lex_accept(T_open_square)) {
+            char buffer[10];
+
+            /* array with size */
+            if (lex_peek(T_numeric, buffer)) {
+                vd->array_size = read_numeric_constant(buffer);
+                lex_expect(T_numeric);
+            } else {
+                /* array without size:
+                 * regarded as a pointer although could be nested
+                 */
+                vd->is_ptr++;
+            }
+            lex_expect(T_close_square);
+        } else {
+            vd->array_size = 0;
+        }
+        vd->is_func = 0;
     }
 }
 
 /* starting next_token, need to check the type */
-void read_full_var_decl(var_t *vd)
+void read_full_var_decl(var_t *vd, int anon)
 {
     lex_accept(T_struct); /* ignore struct definition */
     lex_ident(T_identifier, vd->type_name);
-    read_inner_var_decl(vd);
+    read_inner_var_decl(vd, anon);
 }
 
 /* starting next_token, need to check the type */
 void read_partial_var_decl(var_t *vd, var_t *template)
 {
     strcpy(vd->type_name, template->type_name);
-    read_inner_var_decl(vd);
+    read_inner_var_decl(vd, 0);
 }
 
-int read_parameter_list_decl(var_t vds[])
+int read_parameter_list_decl(var_t vds[], int anon)
 {
     int vn = 0;
     lex_expect(T_open_bracket);
     while (lex_peek(T_identifier, NULL) == 1) {
-        read_full_var_decl(&vds[vn++]);
+        read_full_var_decl(&vds[vn++], anon);
         lex_accept(T_comma);
     }
     if (lex_accept(T_elipsis)) {
@@ -733,12 +749,52 @@ void read_func_call(func_t *fn, int param_no, block_t *parent)
 
     /* already have function name in fn */
     lex_expect(T_identifier);
+    if (lex_peek(T_open_bracket, NULL)) {
+        /* direct function call */
+        read_func_parameters(parent);
+        ii = add_instr(OP_call);
+        ii->str_param1 = fn->return_def.var_name;
+        ii->param_no = param_no; /* return value here */
+        if (!strcmp(ii->str_param1, "main"))
+            exit_ii->int_param1 = ii->param_no;
+    } else {
+        /* indirect call with function pointer */
+        ii = add_instr(OP_address_of);
+        ii->str_param1 = fn->return_def.var_name;
+        ii->param_no = param_no; /* return value here */
+    }
+}
+
+void read_indirect_call(int param_no, block_t *parent)
+{
+    ir_instr_t *ii;
+
+    /* preserve existing paremeters */
+    int pn;
+    for (pn = 0; pn < param_no; pn++) {
+        ii = add_instr(OP_push);
+        ii->param_no = pn;
+    }
+
+    /* remember address on stack */
+    ii = add_instr(OP_push);
+    ii->param_no = param_no;
+
     read_func_parameters(parent);
-    ii = add_instr(OP_call);
-    ii->str_param1 = fn->return_def.var_name;
-    ii->param_no = param_no; /* return value here */
-    if (!strcmp(ii->str_param1, "main"))
-        exit_ii->int_param1 = ii->param_no;
+
+    /* retrieve address from stack into last parameter */
+    ii = add_instr(OP_pop);
+    ii->param_no = MAX_PARAMS - 1;
+
+    ii = add_instr(OP_indirect);
+    ii->int_param1 = MAX_PARAMS - 1; /* register with address */
+    ii->param_no = param_no;         /* return value here */
+
+    /* restore existing parameters */
+    for (pn = param_no - 1; pn >= 0; pn--) {
+        ii = add_instr(OP_pop);
+        ii->param_no = pn;
+    }
 }
 
 void read_lvalue(lvalue_t *lvalue,
@@ -855,6 +911,9 @@ void read_expr_operand(int param_no, block_t *parent)
             /* evalue lvalue expression */
             lvalue_t lvalue;
             read_lvalue(&lvalue, var, parent, param_no, 1, prefix_op);
+            /* is it an indirect call with function pointer? */
+            if (lex_peek(T_open_bracket, NULL))
+                read_indirect_call(param_no, parent);
         } else if (fn) {
             ir_instr_t *ii;
             int pn;
@@ -1346,6 +1405,14 @@ int read_body_assignment(char *token, block_t *parent, opcode_t prefix_op)
             op = OP_bit_or;
         } else if (lex_accept(T_andeq)) {
             op = OP_bit_and;
+        } else if (lex_peek(T_open_bracket, NULL)) {
+            /* dereference lvalue into function address */
+            ii = add_instr(OP_read);
+            ii->param_no = 0;
+            ii->int_param1 = 0;
+            ii->int_param2 = lvalue.size;
+            read_indirect_call(0, parent);
+            return 1;
         } else if (prefix_op == OP_generic) {
             lex_expect(T_assign);
         } else {
@@ -1925,7 +1992,7 @@ void read_body_statement(block_t *parent)
     type = find_type(token);
     if (type) {
         var = &parent->locals[parent->next_local++];
-        read_full_var_decl(var);
+        read_full_var_decl(var, 0);
         if (lex_accept(T_assign)) {
             read_expr(1, parent); /* get expression value into ?1 */
             read_ternary_operation(1, parent);
@@ -2017,7 +2084,7 @@ void read_global_decl(block_t *block)
 {
     var_t tmp;
     /* new function, or variables under parent */
-    read_full_var_decl(&tmp);
+    read_full_var_decl(&tmp, 0);
 
     if (lex_peek(T_open_bracket, NULL)) {
         ir_instr_t *ii;
@@ -2026,7 +2093,7 @@ void read_global_decl(block_t *block)
         func_t *fd = add_func(tmp.var_name);
         memcpy(&fd->return_def, &tmp, sizeof(var_t));
 
-        fd->num_params = read_parameter_list_decl(fd->param_defs);
+        fd->num_params = read_parameter_list_decl(fd->param_defs, 0);
 
         if (lex_peek(T_open_curly, NULL)) {
             ii = add_instr(OP_func_extry);
@@ -2113,7 +2180,7 @@ void read_global_statement()
             lex_expect(T_open_curly);
             do {
                 var_t *v = &type->fields[i++];
-                read_full_var_decl(v);
+                read_full_var_decl(v, 0);
                 v->offset = size;
                 size += size_var(v);
                 lex_expect(T_semicolon);

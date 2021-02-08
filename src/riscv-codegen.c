@@ -92,6 +92,7 @@ int get_code_length(ir_instr_t *ii)
         return 16 + (fn->num_params << 2);
     }
     case OP_call:
+    case OP_indirect:
         return ii->param_no ? 8 : 4;
     case OP_load_constant:
         return (ii->int_param1 > -2048 && ii->int_param1 < 2047) ? 4 : 8;
@@ -219,23 +220,32 @@ void code_generate()
             /* lookup address of a variable */
             var = find_global_var(ii->str_param1);
             if (var) {
-                int ofs = data_start + var->offset, offset;
+                int ofs = data_start + var->offset;
                 /* need to find the variable offset in data section, from PC */
                 ofs -= pc;
 
                 emit(__auipc(dest_reg, rv_hi(ofs)));
-                offset = rv_lo(ofs);
-                emit(__addi(dest_reg, dest_reg, offset));
+                emit(__addi(dest_reg, dest_reg, rv_lo(ofs)));
             } else {
-                int offset;
                 /* need to find the variable offset on stack, i.e. from s0 */
                 var = find_local_var(ii->str_param1, blk);
-                if (!var)
-                    abort(); /* not found? */
-
-                offset = -var->offset;
-                emit(__addi(dest_reg, __s0, 0));
-                emit(__addi(dest_reg, dest_reg, offset));
+                if (var) {
+                    int offset = -var->offset;
+                    emit(__addi(dest_reg, __s0, 0));
+                    emit(__addi(dest_reg, dest_reg, offset));
+                } else {
+                    /* is it function address? */
+                    fn = find_func(ii->str_param1);
+                    if (fn) {
+                        int jump_instr_index = fn->entry_point;
+                        ir_instr_t *jump_instr = &IR[jump_instr_index];
+                        /* load code offset into variable */
+                        ofs = code_start + jump_instr->code_offset;
+                        emit(__lui(dest_reg, rv_hi(ofs)));
+                        emit(__addi(dest_reg, dest_reg, rv_lo(ofs)));
+                    } else
+                        error("Undefined identifier");
+                }
             }
             if (dump_ir == 1)
                 printf("    x%d = &%s", dest_reg, ii->str_param1);
@@ -313,6 +323,16 @@ void code_generate()
                 printf("    x%d := %s() @ %d", dest_reg, ii->str_param1,
                        fn->entry_point);
         } break;
+        case OP_indirect:
+            /* indirect call with function pointer.
+             * address in OP_reg, result in dest_reg
+             */
+            emit(__jalr(__ra, OP_reg, 0));
+            if (dest_reg != __a0)
+                emit(__addi(dest_reg, __a0, 0));
+            if (dump_ir == 1)
+                printf("    x%d := x%d()", dest_reg, OP_reg);
+            break;
         case OP_push:
             /* 16 aligned although we only need 4 */
             emit(__addi(__sp, __sp, -16));

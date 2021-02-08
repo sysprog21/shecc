@@ -223,6 +223,23 @@ int main() {
 }
 EOF
 
+# function pointers
+try_ 18 << EOF
+typedef struct {
+    int (*ta)();
+    int (*tb)(int);
+} fptrs;
+int t1() { return 7; }
+int t2(int x) { return x + 1; }
+int main() {
+    fptrs fb;
+    fptrs *fs = &fb;
+    fs->ta = t1;
+    fs->tb = t2;
+    return fs->ta() + fs->tb(10);
+}
+EOF
+
 # arrays
 try_ 12 << EOF
 int nth_of(int *a, int i) {

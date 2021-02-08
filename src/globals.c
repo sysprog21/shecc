@@ -187,7 +187,7 @@ int size_var(var_t *var)
 {
     int s = 0;
 
-    if (var->is_ptr > 0) {
+    if (var->is_ptr > 0 || var->is_func > 0) {
         s += 4;
     } else {
         type_t *td = find_type(var->type_name);

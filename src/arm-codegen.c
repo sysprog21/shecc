@@ -92,6 +92,7 @@ int get_code_length(ir_instr_t *ii)
         return 16 + (fn->num_params << 2);
     }
     case OP_call:
+    case OP_indirect:
         return ii->param_no ? 8 : 4;
     case OP_load_constant:
         return (ii->int_param1 >= 0 && ii->int_param1 < 256) ? 4 : 8;
@@ -228,16 +229,26 @@ void code_generate()
                 emit(__movw(__AL, dest_reg, ofs));
                 emit(__movt(__AL, dest_reg, ofs));
             } else {
-                int offset;
                 /* need to find the variable offset on stack, i.e. from r11 */
                 var = find_local_var(ii->str_param1, blk);
-                if (!var) /* not found? */
-                    abort();
-
-                offset = -var->offset;
-                emit(__add_i(__AL, dest_reg, __r11, offset & 255));
-                emit(
-                    __add_i(__AL, dest_reg, dest_reg, offset - (offset & 255)));
+                if (var) {
+                    int offset = -var->offset;
+                    emit(__add_i(__AL, dest_reg, __r11, offset & 255));
+                    emit(__add_i(__AL, dest_reg, dest_reg,
+                                 offset - (offset & 255)));
+                } else {
+                    /* is it function address? */
+                    fn = find_func(ii->str_param1);
+                    if (fn) {
+                        int jump_instr_index = fn->entry_point;
+                        ir_instr_t *jump_instr = &IR[jump_instr_index];
+                        /* load code offset into variable */
+                        ofs = code_start + jump_instr->code_offset;
+                        emit(__movw(__AL, dest_reg, ofs));
+                        emit(__movt(__AL, dest_reg, ofs));
+                    } else
+                        error("Undefined identifier");
+                }
             }
             if (dump_ir == 1)
                 printf("    x%d = &%s", dest_reg, ii->str_param1);
@@ -315,6 +326,16 @@ void code_generate()
                 printf("    x%d := %s() @ %d", dest_reg, ii->str_param1,
                        fn->entry_point);
         } break;
+        case OP_indirect:
+            /* indirect call with function pointer.
+             * address in OP_reg, result in dest_reg
+             */
+            emit(__blx(__AL, OP_reg));
+            if (dest_reg != __r0)
+                emit(__mov_r(__AL, dest_reg, __r0));
+            if (dump_ir == 1)
+                printf("    x%d := x%d()", dest_reg, OP_reg);
+            break;
         case OP_push:
             /* 16 aligned although we only need 4 */
             emit(__add_i(__AL, __sp, __sp, -16));
