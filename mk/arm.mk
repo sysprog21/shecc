@@ -1,4 +1,4 @@
-ARM_EXEC = qemu-arm                                                                                                                                           
+ARM_EXEC = qemu-arm
 ARM_EXEC := $(shell which $(ARM_EXEC))
 ifndef ARM_EXEC
 $(warning "no qemu-arm found. Please check package installation")
