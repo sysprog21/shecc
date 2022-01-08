@@ -368,17 +368,26 @@ void code_generate()
                 printf("    x%d -= x%d", dest_reg, OP_reg);
             break;
         case OP_mul:
-            emit(__mul(dest_reg, dest_reg, OP_reg));
+            if (riscv_m_extension == 1)
+                emit(__mul(dest_reg, dest_reg, OP_reg));
+            else
+                emit(__addi(__zero, __zero, 0));
             if (dump_ir == 1)
                 printf("    x%d *= x%d", dest_reg, OP_reg);
             break;
         case OP_div:
-            emit(__div(dest_reg, dest_reg, OP_reg));
+            if (riscv_m_externsion == 1)
+                emit(__div(dest_reg, dest_reg, OP_reg));
+            else
+                emit(__addi(__zero, __zero, 0));
             if (dump_ir == 1)
                 printf("    x%d /= x%d", dest_reg, OP_reg);
             break;
         case OP_mod:
-            emit(__mod(dest_reg, dest_reg, OP_reg));
+            if (riscv_m_extension == 1)
+                emit(__mod(dest_reg, dest_reg, OP_reg));
+            else
+                emit(__addi(__zero, __zero, 0));
             if (dump_ir == 1)
                 printf("    x%d = x%d mod x%d", dest_reg, dest_reg, OP_reg);
             break;

@@ -38,6 +38,7 @@ char *elf_section;
 /* options */
 
 int dump_ir = 0;
+int riscv_m_extension = 1;
 
 type_t *find_type(char *type_name)
 {

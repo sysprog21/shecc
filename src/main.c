@@ -36,6 +36,10 @@ int main(int argc, char *argv[])
             dump_ir = 1;
         else if (!strcmp(argv[i], "--no-libc"))
             libc = 0;
+        else if (!strcmp(argv[i], "+m"))
+            riscv_m_extension = 1;
+        else if (!strcmp(argv[i], "-m"))
+            riscv_m_extension = 0;
         else if (!strcmp(argv[i], "-o")) {
             if (i < argc + 1) {
                 out = argv[i + 1];
