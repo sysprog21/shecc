@@ -575,7 +575,8 @@ int read_numeric_constant(char buffer[])
             }
             return value;
         }
-        value = value * 10 + buffer[i++] - '0';
+        /* value = value * 10 + buffer[i++] - '0'; */
+        value = (value << 3) + (value << 1) + buffer[i++] - '0';
     }
     return value;
 }
@@ -701,12 +702,14 @@ void read_numeric_param(int param_no, int isneg)
                     error("Invalid numeric constant");
             }
 
-            value = (value * 16) + c;
+            /* value = (value * 16) + c; */
+            value = (value << 4) + c;
         } while (is_hex(token[i]));
     } else {
         do {
             c = token[i++] - '0';
-            value = (value * 10) + c;
+            /* value = (value * 10) + c; */
+            value = (value << 3) + (value << 1) + c;
         } while (is_digit(token[i]));
     }
 

@@ -368,15 +368,30 @@ void code_generate()
                 printf("    x%d -= x%d", dest_reg, OP_reg);
             break;
         case OP_mul:
-            if (riscv_m_extension == 1)
+            if (use_m_ext == 1)
                 emit(__mul(dest_reg, dest_reg, OP_reg));
-            else
+            else {
                 emit(__addi(__zero, __zero, 0));
+                /* implement multiplication with shift */
+                /* emit(__addi(__t1, __zero, 1));
+                emit(__addi(__t3, __zero, 0));
+                emit(__addi(__t4, __zero, 32));
+                emit(__addi(__t5, __zero, 0));
+                emit(__andi(__t6, OP_reg, 1));
+                emit(__beq(__t6, __zero, 12));
+                emit(__sll(__t6, dest_reg, __t5));
+                emit(__add(__t3, __t3, __t6));
+                emit(__srl(OP_reg, OP_reg, __t1));
+                emit(__addi(__t5, __t5, 1));
+                emit(__addi(__t4, __t4, -1));
+                emit(__bne(__t4, __zero, -28));
+                emit(__add(dest_reg, __zero, __t3)); */
+            }
             if (dump_ir == 1)
                 printf("    x%d *= x%d", dest_reg, OP_reg);
             break;
         case OP_div:
-            if (riscv_m_externsion == 1)
+            if (use_m_ext == 1)
                 emit(__div(dest_reg, dest_reg, OP_reg));
             else
                 emit(__addi(__zero, __zero, 0));
@@ -384,7 +399,7 @@ void code_generate()
                 printf("    x%d /= x%d", dest_reg, OP_reg);
             break;
         case OP_mod:
-            if (riscv_m_extension == 1)
+            if (use_m_ext == 1)
                 emit(__mod(dest_reg, dest_reg, OP_reg));
             else
                 emit(__addi(__zero, __zero, 0));

@@ -321,4 +321,27 @@ int main()
 }
 EOF
 
+# test m extension
+items 0 "return 0 * 0;"
+items 0 "return 0 * 1;"
+items 0 "return 1 * 0;"
+items 1 "return 1 * 1;"
+items 10 "return 1 * 10;"
+items 10 "return 10 * 1;"
+items 168 "return 2 * 2 * 2 * 3 * 7;"
+
+# test using shift to implement multiplication
+try_ 12 << EOF
+int main() {
+    int a = 3, b = 4, c = 0;
+    int i = 0;
+    for (i = 0; i < 32; i++){
+        if (b & 1)
+            c += a << i;
+        b = b >> 1;
+    }
+    return c;
+}
+EOF
+
 echo OK
