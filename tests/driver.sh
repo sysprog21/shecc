@@ -204,6 +204,8 @@ EOF
 # pointers
 items 3 "int x; int *y; x = 3; y = &x; return y[0];"
 items 5 "int b; int *a; b = 10; a = &b; a[0] = 5; return b;"
+items 2 "int x[2]; int y; x[1] = 2; y = *(x + 1); return y;"
+items 2 "int x; int y; int *z; z = 2; y = &z; x = *y; return x;"
 try_ 10 << EOF
 int change_it(int *p) {
     if (p[0] == 0) {
