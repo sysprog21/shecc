@@ -843,7 +843,7 @@ void read_expr_operand(int param_no, block_t *parent)
         lex_peek(T_identifier, token);
         var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, param_no, 0, OP_generic);
-    } else if (lex_peek(T_asterisk, NULL)) {
+    } else if (lex_accept(T_asterisk)) {
         /* dereference */
         char token[MAX_VAR_LEN];
         var_t *var;
