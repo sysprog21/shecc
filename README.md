@@ -174,13 +174,10 @@ int fib(int n)      fib:                        Reserve stack frame for function
 
 ## Known Issues
 
-2. The generated ELF lacks of .bss and .rodata section
-3. The unary `*` operator is not supported, which makes it necessary to use `[0]` syntax.
-   Consider `int x = 5; int *ptr = &x;` and it is forbidden to use `*ptr`. However, it is valid to
-   use `ptr[0]`, which behaves the same of `*ptr`.
-4. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.
+1. The generated ELF lacks of .bss and .rodata section
+2. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.
    Alternatively, check the implementation `printf` in source `lib/c.c` for `var_arg`.
-7. The C front-end is a bit dirty because there is no effective AST.
+3. The C front-end is a bit dirty because there is no effective AST.
 
 ## License
 
