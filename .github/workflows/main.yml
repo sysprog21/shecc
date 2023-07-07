@@ -1,0 +1,26 @@
+name: Github Actions
+  
+on: [push, pull_request]
+
+jobs:
+  host-x86:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        compiler: [gcc-12]
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v3
+      - name: build artifact
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y qemu-user
+          sudo apt-get install -y build-essential
+          sudo apt-get install -y clang-format
+          sh .ci/check-format.sh
+          make clean config ARCH=arm
+          make check || exit 1
+          make clean config ARCH=riscv
+          make check || exit 1
