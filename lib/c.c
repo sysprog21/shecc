@@ -443,15 +443,9 @@ void *malloc(int size)
             __malloc_global_last = current;
             current = current->next;
         }
-        block = current;
-        if (!block) {
-            block = __malloc_request_space(size);
-            if (!block)
-                return NULL;
-        } else {
-            /* TODO: use the size requested instead of whole blocks */
-            block->free = 0;
-        }
+        block = __malloc_request_space(size);
+        if (!block)
+            return NULL;
     }
     return block + 1;
 }
