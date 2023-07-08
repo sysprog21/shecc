@@ -18,9 +18,17 @@ jobs:
           sudo apt-get update -q -y
           sudo apt-get install -q -y qemu-user
           sudo apt-get install -q -y build-essential
-          sudo apt-get install -q -y clang-format
-          sh .ci/check-format.sh
           make clean config ARCH=arm
           make check || exit 1
           make clean config ARCH=riscv
           make check || exit 1
+
+  coding_style:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v3
+    - name: coding convention
+      run: |
+            sudo apt-get install -q -y clang-format-12
+            sh .ci/check-format.sh
+      shell: bash
