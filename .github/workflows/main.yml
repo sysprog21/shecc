@@ -1,5 +1,5 @@
 name: Github Actions
-  
+
 on: [push, pull_request]
 
 jobs:
@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        compiler: [gcc-12]
+        compiler: [gcc-12, clang]
     steps:
       - name: checkout code
         uses: actions/checkout@v3
@@ -17,8 +17,8 @@ jobs:
         run: |
           sudo apt-get update -q -y
           sudo apt-get install -q -y qemu-user
-          sudo apt-get install -y build-essential
-          sudo apt-get install -y clang-format
+          sudo apt-get install -q -y build-essential
+          sudo apt-get install -q -y clang-format
           sh .ci/check-format.sh
           make clean config ARCH=arm
           make check || exit 1
