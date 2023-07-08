@@ -446,6 +446,13 @@ token_t get_next_token()
     }
 
     /* end of file */
+    /* "FIXME: The signedness of 'char' in the C programming language is indeed
+     * implementation-specific. For example, gcc for Arm treats 'char' as
+     * unsigned, while gcc for x86(-64) treats 'char' as signed. The warning
+     * below is raised in gcc for Arm:
+     *   warning: comparison is always false due to limited range of data type
+     *   [-Wtype-limits]
+     */
     if ((next_char == 0) || (next_char == -1))
         return T_eof;
 
