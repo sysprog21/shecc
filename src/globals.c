@@ -6,6 +6,16 @@ int blocks_idx = 0;
 func_t *FUNCS;
 int funcs_idx = 0;
 
+/*
+ * FUNC_TRIES is used to improve the performance of the find_func function.
+ * Instead of searching through all functions and comparing their names, we can
+ * utilize the trie data structure to search for existing functions efficiently.
+ * The index starts from 1 because the first trie node represents an empty input
+ * string, and it is not possible to record a function with an empty name.
+ */
+trie_t *FUNC_TRIES;
+int func_tries_idx = 1;
+
 type_t *TYPES;
 int types_idx = 0;
 
@@ -34,6 +44,63 @@ int elf_code_start;
 char *elf_symtab;
 char *elf_strtab;
 char *elf_section;
+
+/**
+ * insert_trie() - Inserts a new element into the trie structure.
+ * @trie: A pointer to the trie where the name will be inserted.
+ * @name: The name to be inserted into the trie.
+ * @funcs_index: The index of the pointer to the func_t. The index is
+ *               recorded in a 1-indexed format, so it may need to be shifted if
+ *               necessary.
+ * Return: The index of the pointer to the func_t.
+ *
+ * If the function has been inserted, the return value is the index of the
+ * function in FUNCS. Otherwise, the return value is the value of the parameter
+ * @funcs_index.
+ */
+int insert_trie(trie_t *trie, char *name, int funcs_index)
+{
+    char first_char = *name;
+    int i;
+    if (!first_char) {
+        if (!trie->index)
+            trie->index = funcs_index;
+        return trie->index;
+    }
+    if (!trie->next[first_char]) {
+        /* FIXME: The func_tries_idx variable may exceed the maximum number,
+         * which can lead to a segmentation fault. This issue is affected by the
+         * number of functions and the length of their names. The proper way to
+         * handle this is to dynamically allocate a new element.
+         */
+        trie->next[first_char] = func_tries_idx++;
+        for (i = 0; i < 128; i++)
+            FUNC_TRIES[trie->next[first_char]].next[i] = 0;
+        FUNC_TRIES[trie->next[first_char]].index = 0;
+    }
+    return insert_trie(&FUNC_TRIES[trie->next[first_char]], name + 1,
+                       funcs_index);
+}
+
+/**
+ * find_trie() - search the index of the function name in the trie
+ * @trie: A pointer to the trie where the name will be searched.
+ * @name: The name to be searched.
+ *
+ * Return: The index of the pointer to the func_t.
+ *
+ * 0 - the name not found.
+ * otherwise - the index of the founded index in the trie array.
+ */
+int find_trie(trie_t *trie, char *name)
+{
+    char first_char = *name;
+    if (!first_char)
+        return trie->index;
+    else if (!trie->next[first_char])
+        return 0;
+    return find_trie(&FUNC_TRIES[trie->next[first_char]], name + 1);
+}
 
 /* options */
 
@@ -87,15 +154,14 @@ char *find_alias(char alias[])
 func_t *add_func(char *name)
 {
     func_t *fn;
-    int i;
-
-    /* return existing if found */
-    for (i = 0; i < funcs_idx; i++)
-        if (!strcmp(FUNCS[i].return_def.var_name, name))
-            return &FUNCS[i];
-
-    fn = &FUNCS[funcs_idx++];
-    strcpy(fn->return_def.var_name, name);
+    int index = insert_trie(
+        FUNC_TRIES, name,
+        funcs_idx + 1); /* The record index in the trie must be a 1-index */
+    if (index == funcs_idx + 1) {
+        fn = &FUNCS[funcs_idx++];
+        strcpy(fn->return_def.var_name, name);
+    }
+    fn = &FUNCS[index - 1];
     return fn;
 }
 
@@ -129,10 +195,10 @@ constant_t *find_constant(char alias[])
 
 func_t *find_func(char func_name[])
 {
-    int i;
-    for (i = 0; i < funcs_idx; i++)
-        if (!strcmp(FUNCS[i].return_def.var_name, func_name))
-            return &FUNCS[i];
+    int index = find_trie(FUNC_TRIES, func_name);
+    if (index)
+        return &FUNCS[index - 1]; /* As the recorded index is a positive
+                                     integer, shift it to a 0-index. */
     return NULL;
 }
 
@@ -211,6 +277,7 @@ void global_init()
 
     BLOCKS = malloc(MAX_BLOCKS * sizeof(block_t));
     FUNCS = malloc(MAX_FUNCS * sizeof(func_t));
+    FUNC_TRIES = malloc(MAX_FUNCS * sizeof(trie_t));
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
     IR = malloc(MAX_IR_INSTR * sizeof(ir_instr_t));
     SOURCE = malloc(MAX_SOURCE);

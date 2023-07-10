@@ -163,3 +163,8 @@ typedef struct {
     char alias[MAX_VAR_LEN];
     int value;
 } constant_t;
+
+typedef struct {
+    int index;
+    int next[128];
+} trie_t;
