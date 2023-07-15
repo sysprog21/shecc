@@ -87,6 +87,9 @@ clean:
 	-$(RM) $(OBJS) $(deps)
 	-$(RM) $(TESTBINS) $(OUT)/tests/*.log $(OUT)/tests/*.lst
 	-$(RM) $(OUT)/shecc*.log
-	-$(RM) $(OUT)/inliner $(OUT)/libc.inc $(OUT)/target config $(SRCDIR)/codegen.c
+	-$(RM) $(OUT)/libc.inc
+
+distclean: clean
+	-$(RM) $(OUT)/inliner $(OUT)/target $(SRCDIR)/codegen.c config
 
 -include $(deps)

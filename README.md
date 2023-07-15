@@ -110,6 +110,9 @@ int main(int argc, int argv) { int a; a = 0; switch (3) { case 0: return 2; defa
 OK
 ```
 
+To clean up the generated compiler files, execute the command `make clean`.
+For resett`ing architecture configurations, use the command `make distclean`.
+
 ## Intermediate Representation
 
 Once the option `--dump-ir` is passed to `shecc`, the intermediate representation (IR)
