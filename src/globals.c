@@ -61,25 +61,25 @@ char *elf_section;
 int insert_trie(trie_t *trie, char *name, int funcs_index)
 {
     char first_char = *name;
+    int fc = first_char;
     int i;
-    if (!first_char) {
+    if (!fc) {
         if (!trie->index)
             trie->index = funcs_index;
         return trie->index;
     }
-    if (!trie->next[first_char]) {
+    if (!trie->next[fc]) {
         /* FIXME: The func_tries_idx variable may exceed the maximum number,
          * which can lead to a segmentation fault. This issue is affected by the
          * number of functions and the length of their names. The proper way to
          * handle this is to dynamically allocate a new element.
          */
-        trie->next[first_char] = func_tries_idx++;
+        trie->next[fc] = func_tries_idx++;
         for (i = 0; i < 128; i++)
-            FUNC_TRIES[trie->next[first_char]].next[i] = 0;
-        FUNC_TRIES[trie->next[first_char]].index = 0;
+            FUNC_TRIES[trie->next[fc]].next[i] = 0;
+        FUNC_TRIES[trie->next[fc]].index = 0;
     }
-    return insert_trie(&FUNC_TRIES[trie->next[first_char]], name + 1,
-                       funcs_index);
+    return insert_trie(&FUNC_TRIES[trie->next[fc]], name + 1, funcs_index);
 }
 
 /**
@@ -95,11 +95,12 @@ int insert_trie(trie_t *trie, char *name, int funcs_index)
 int find_trie(trie_t *trie, char *name)
 {
     char first_char = *name;
-    if (!first_char)
+    int fc = first_char;
+    if (!fc)
         return trie->index;
-    else if (!trie->next[first_char])
+    else if (!trie->next[fc])
         return 0;
-    return find_trie(&FUNC_TRIES[trie->next[first_char]], name + 1);
+    return find_trie(&FUNC_TRIES[trie->next[fc]], name + 1);
 }
 
 /* options */
