@@ -81,7 +81,7 @@ Run `make` and you should see this:
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```
-shecc [-o output] [-no-libc] [--dump-ir] <infile.c>
+shecc [-o output] [--no-libc] [--dump-ir] <infile.c>
 ```
 
 Compiler options:
