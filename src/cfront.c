@@ -151,19 +151,34 @@ token_t get_next_token()
             return T_define;
         }
         if (!strcmp(token_str, "#ifdef")) {
+            char *alias = NULL;
             i = 0;
             do {
                 token_str[i++] = next_char;
             } while (read_char(0) != '\n');
             token_str[i] = 0;
             /* check if we have this alias/define */
-            for (i = 0; i < aliases_idx; i++) {
-                if (!strcmp(token_str, ALIASES[i].alias)) {
-                    skip_whitespace();
-                    return get_next_token();
-                }
+            alias = find_alias(token_str);
+            if (alias) {
+                /* ignore #else directive */
+                skip_whitespace();
+                return get_next_token();
             }
-            /* skip lines until #endif */
+            /* skip lines until #else or #endif */
+            do {
+                skip_whitespace();
+                i = 0;
+                do {
+                    token_str[i++] = next_char;
+                } while (read_char(0) != '\n');
+                token_str[i] = 0;
+            } while (strcmp(token_str, "#else") && strcmp(token_str, "#endif"));
+            skip_whitespace();
+            return get_next_token();
+        }
+        if (!strcmp(token_str, "#else")) {
+            /* reach here means previous alias is defined so skip lines until
+             * #endif */
             do {
                 skip_whitespace();
                 i = 0;
