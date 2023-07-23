@@ -323,4 +323,20 @@ int main()
 }
 EOF
 
+# #ifdef...#else...#endif
+try_ 0 << EOF
+#define A 0
+#define B 200
+int main()
+{
+    int x;
+#ifdef A
+    x = A;
+#else
+    x = B;
+#endif
+    return x;
+}
+EOF
+
 echo OK
