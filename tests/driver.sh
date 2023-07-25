@@ -339,4 +339,22 @@ int main()
 }
 EOF
 
+# #if defined(...) ... #elif defined(...) ... #else ... #endif
+try_ 0 << EOF
+#define A 0
+#define B 0xDEAD
+int main()
+{
+    int x;
+#if defined(A)
+    x = A;
+#elif defined(B)
+    x = B;
+#else
+    x = 0xCAFE
+#endif
+    return x;
+}
+EOF
+
 echo OK
