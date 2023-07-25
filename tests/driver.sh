@@ -351,7 +351,7 @@ int main()
 #elif defined(B)
     x = B;
 #else
-    x = 0xCAFE
+    x = 0xCAFE;
 #endif
     return x;
 }
