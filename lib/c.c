@@ -2,16 +2,15 @@
 
 #define NULL 0
 
-#ifdef __arm__
+#if defined(__arm__)
 #define __syscall_exit 1
 #define __syscall_read 3
 #define __syscall_write 4
 #define __syscall_close 6
 #define __syscall_open 5
 #define __syscall_brk 45
-#endif
 
-#ifdef __riscv
+#elif defined(__riscv)
 #define __syscall_exit 93
 #define __syscall_read 63
 #define __syscall_write 64
@@ -19,6 +18,7 @@
 #define __syscall_open 1024
 #define __syscall_openat 56
 #define __syscall_brk 214
+
 #endif
 
 typedef int FILE;
@@ -326,19 +326,17 @@ void abort()
 FILE *fopen(char *filename, char *mode)
 {
     if (!strcmp(mode, "wb"))
-#ifdef __arm__
+#if defined(__arm__)
         return __syscall(__syscall_open, filename, 65, 0x1fd);
-#endif
-/* FIXME: mode not work currently in RISC-V */
-#ifdef __riscv
-    return __syscall(__syscall_openat, -100, filename, 65, 0x1fd);
+#elif defined(__riscv)
+        /* FIXME: mode not work currently in RISC-V */
+        return __syscall(__syscall_openat, -100, filename, 65, 0x1fd);
 #endif
     if (!strcmp(mode, "rb"))
-#ifdef __arm__
+#if defined(__arm__)
         return __syscall(__syscall_open, filename, 0, 0);
-#endif
-#ifdef __riscv
-    return __syscall(__syscall_openat, -100, filename, 0, 0);
+#elif defined(__riscv)
+        return __syscall(__syscall_openat, -100, filename, 0, 0);
 #endif
 
     abort();

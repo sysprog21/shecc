@@ -112,6 +112,8 @@ char token_str[MAX_TOKEN_LEN];
 token_t next_token;
 char next_char;
 
+int preproc_match;
+
 void skip_whitespace()
 {
     while (is_whitespace(next_char))
@@ -126,6 +128,79 @@ char read_char(int is_skip_space)
     return next_char;
 }
 
+/*
+ * get alias name from defined() directive
+ * i.e., get __arm__ from defined(__arm__)
+ */
+void read_alias_name_from_defined(char *alias_name, char *src)
+{
+    int i;
+
+    src = src + 8; /* skip defined( */
+    i = 0;
+    while (src[i] != ')') {
+        alias_name[i] = src[i];
+        i++;
+    }
+    alias_name[i] = 0;
+}
+
+char peek_char(int offset)
+{
+    return SOURCE[source_idx + offset];
+}
+
+void if_elif_skip_lines()
+{
+    char peek_c;
+    int i;
+
+    do {
+        skip_whitespace();
+        i = 0;
+        do {
+            token_str[i++] = next_char;
+        } while (read_char(0) != '\n');
+        token_str[i] = 0;
+        read_char(1);
+        peek_c = peek_char(1);
+    } while (next_char != '#' || (next_char == '#' && peek_c == 'd'));
+    skip_whitespace();
+}
+
+void ifdef_else_skip_lines()
+{
+    int i;
+
+    do {
+        skip_whitespace();
+        i = 0;
+        do {
+            token_str[i++] = next_char;
+        } while (read_char(0) != '\n');
+        token_str[i] = 0;
+    } while (strcmp(token_str, "#else") && strcmp(token_str, "#endif"));
+    skip_whitespace();
+}
+
+/*
+ * check alias defined or not
+ */
+void chk_def(int defined)
+{
+    char *alias = NULL;
+    char alias_name[MAX_TOKEN_LEN];
+
+    if (defined) {
+        read_alias_name_from_defined(alias_name, token_str);
+        alias = find_alias(alias_name);
+    } else
+        alias = find_alias(token_str);
+
+    if (alias)
+        preproc_match = 1;
+}
+
 token_t get_next_token()
 {
     token_str[0] = 0;
@@ -133,6 +208,7 @@ token_t get_next_token()
     /* partial preprocessor */
     if (next_char == '#') {
         int i = 0;
+
         do {
             token_str[i++] = next_char;
         } while (is_alnum(read_char(0)));
@@ -150,47 +226,90 @@ token_t get_next_token()
             skip_whitespace();
             return T_define;
         }
-        if (!strcmp(token_str, "#ifdef")) {
-            char *alias = NULL;
+        if (!strcmp(token_str, "#if")) {
+            preproc_match = 0;
             i = 0;
             do {
                 token_str[i++] = next_char;
             } while (read_char(0) != '\n');
             token_str[i] = 0;
-            /* check if we have this alias/define */
-            alias = find_alias(token_str);
-            if (alias) {
-                /* ignore #else directive */
+
+            if (!strncmp(token_str, "defined", 7)) {
+                chk_def(1);
+                if (preproc_match) {
+                    skip_whitespace();
+                    return get_next_token();
+                }
+
+                /* skip lines until #elif or #else or #endif */
+                if_elif_skip_lines();
+                return get_next_token();
+            }
+        }
+        if (!strcmp(token_str, "#elif")) {
+            if (preproc_match) {
+                do {
+                    skip_whitespace();
+                    i = 0;
+                    do {
+                        token_str[i++] = next_char;
+                    } while (read_char(0) != '\n');
+                    token_str[i] = 0;
+                } while (strcmp(token_str, "#endif"));
+                skip_whitespace();
+                return get_next_token();
+            }
+
+            i = 0;
+            do {
+                token_str[i++] = next_char;
+            } while (read_char(0) != '\n');
+            token_str[i] = 0;
+
+            if (!strncmp(token_str, "defined", 7)) {
+                chk_def(1);
+                if (preproc_match) {
+                    skip_whitespace();
+                    return get_next_token();
+                }
+                /* skip lines until #elif or #else or #endif */
+                if_elif_skip_lines();
+                return get_next_token();
+            }
+        }
+        if (!strcmp(token_str, "#ifdef")) {
+            preproc_match = 0;
+            i = 0;
+            do {
+                token_str[i++] = next_char;
+            } while (read_char(0) != '\n');
+            token_str[i] = 0;
+            chk_def(0);
+            if (preproc_match) {
                 skip_whitespace();
                 return get_next_token();
             }
             /* skip lines until #else or #endif */
-            do {
-                skip_whitespace();
-                i = 0;
-                do {
-                    token_str[i++] = next_char;
-                } while (read_char(0) != '\n');
-                token_str[i] = 0;
-            } while (strcmp(token_str, "#else") && strcmp(token_str, "#endif"));
-            skip_whitespace();
+            ifdef_else_skip_lines();
             return get_next_token();
         }
         if (!strcmp(token_str, "#else")) {
-            /* reach here means previous alias is defined so skip lines until
-             * #endif */
-            do {
+            /*
+             * reach here has 2 possible cases:
+             * 1. reach #ifdef preprocessor directive
+             * 2. conditional expression in #elif is false
+             */
+
+            if (!preproc_match) {
                 skip_whitespace();
-                i = 0;
-                do {
-                    token_str[i++] = next_char;
-                } while (read_char(0) != '\n');
-                token_str[i] = 0;
-            } while (strcmp(token_str, "#endif"));
-            skip_whitespace();
+                return get_next_token();
+            }
+            /* skip lines until #else or #endif */
+            ifdef_else_skip_lines();
             return get_next_token();
         }
         if (!strcmp(token_str, "#endif")) {
+            preproc_match = 0;
             skip_whitespace();
             return get_next_token();
         }
