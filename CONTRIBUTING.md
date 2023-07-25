@@ -160,32 +160,6 @@ typedef struct {
 } route_info_t;
 ```
 
-### Initialization
-
-Embrace C99 structure initialization where reasonable, e.g.,
-```c
-static const crypto_ops_t openssl_ops = {
-    .create = openssl_crypto_create,
-    .destroy = openssl_crypto_destroy,
-    .encrypt = openssl_crypto_encrypt,
-    .decrypt = openssl_crypto_decrypt,
-    .hmac = openssl_crypto_hmac,
-};
-```
-
-Embrace C99 array initialization, especially for the state machines, e.g.,
-```c
-static const uint8_t tcp_fsm[TCP_NSTATES][2][TCPFC_COUNT] = {
-    [TCPS_CLOSED] = {
-        [FLOW_FORW] = {
-            /* Handshake (1): initial SYN. */
-            [TCPFC_SYN]	= TCPS_SYN_SENT,
-        },
-    },
-    ...
-}
-```
-
 ### Control structures
 
 Try to make the control flow easy to follow.  Avoid long convoluted logic
