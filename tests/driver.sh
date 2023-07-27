@@ -32,6 +32,28 @@ function try_() {
     try "$expected" "$input"
 }
 
+function try_output() {
+    local expected="$1"
+    local expected_output="$2"
+    local input="$(cat)"
+    
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    echo "$input" > "$tmp_in"
+    "$SHECC" -o "$tmp_exe" "$tmp_in"
+    chmod +x $tmp_exe
+    output=$($TARGET_EXEC "$tmp_exe")
+    
+    if [ "$output" = "$expected_output" ]; then
+        echo "$input => $output"
+    else
+        echo "$input => $expected_output expected, but got $output"
+        echo "input: $tmp_in"
+        echo "executable: $tmp_exe"
+        exit 1
+    fi
+}
+
 function items() {
     local expected="$1"
     local input="$2"
@@ -354,6 +376,56 @@ int main()
     x = 0xCAFE;
 #endif
     return x;
+}
+EOF
+
+# format
+try_output 0 "2147483647" << EOF
+int main() {
+    printf("%d", 2147483647);
+    return 0;
+}
+EOF
+
+try_output 0 "2147483647" << EOF
+int main() {
+    printf("%d", 2147483647);
+    return 0;
+}
+EOF
+
+try_output 0 "-2147483648" << EOF
+int main() {
+    printf("%d", -2147483648);
+    return 0;
+}
+EOF
+
+try_output 0 "-2147483647" << EOF
+int main() {
+    printf("%d", -2147483647);
+    return 0;
+}
+EOF
+
+try_output 0 "-214748364" << EOF
+int main() {
+    printf("%d", -214748364);
+    return 0;
+}
+EOF
+
+try_output 0 " -214748364" << EOF
+int main() {
+    printf("%11d", -214748364);
+    return 0;
+}
+EOF
+
+try_output 0 "      -214748364" << EOF
+int main() {
+    printf("%16d", -214748364);
+    return 0;
 }
 EOF
 
