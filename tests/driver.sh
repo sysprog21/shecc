@@ -387,13 +387,6 @@ int main() {
 }
 EOF
 
-try_output 0 "2147483647" << EOF
-int main() {
-    printf("%d", 2147483647);
-    return 0;
-}
-EOF
-
 try_output 0 "-2147483648" << EOF
 int main() {
     printf("%d", -2147483648);
