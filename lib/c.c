@@ -308,7 +308,7 @@ void printf(char *str, ...)
         }
     }
     buffer[bi] = 0;
-    __syscall(__syscall_write, 0, buffer, bi);
+    __syscall(__syscall_write, 1, buffer, bi);
 }
 
 char *memcpy(char *dest, char *src, int count)
