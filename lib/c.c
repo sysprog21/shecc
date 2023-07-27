@@ -284,6 +284,10 @@ void printf(char *str, ...)
                 int l = strlen(var_args[pi]);
                 strcpy(buffer + bi, var_args[pi]);
                 bi += l;
+            } else if (str[si] == 'c') {
+                /* append param pi as char */
+                buffer[bi] = var_args[pi];
+                bi += 1;
             } else if (str[si] == 'd') {
                 /* append param as decimal */
                 int v = var_args[pi];
