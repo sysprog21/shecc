@@ -6,58 +6,47 @@ readonly SHECC="$PWD/out/shecc"
 
 function try() {
     local expected="$1"
-    local input="$2"
+    local expected_output="$2"
+    local input="$3"
 
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
     "$SHECC" -o "$tmp_exe" "$tmp_in"
     chmod +x $tmp_exe
-    $TARGET_EXEC "$tmp_exe"
+
+    local output=''
+    output=$($TARGET_EXEC "$tmp_exe")
     local actual="$?"
 
-    if [ "$actual" = "$expected" ]; then
-        echo "$input => $actual"
-    else
+    if [ "$actual" != "$expected" ]; then
         echo "$input => $expected expected, but got $actual"
         echo "input: $tmp_in"
         echo "executable: $tmp_exe"
         exit 1
+    elif [ "$output" != "$expected_output" ]; then
+        echo "$input => $expected_output expected, but got $output"
+        echo "input: $tmp_in"
+        echo "executable: $tmp_exe"
+        exit 2
+    else
+        echo "$input"
+        echo "exit code => $actual"
+        echo "output => $output"
     fi
 }
 
 function try_() {
     local expected="$1"
-    local input="$(cat)"
-    try "$expected" "$input"
-}
-
-function try_output() {
-    local expected="$1"
     local expected_output="$2"
     local input="$(cat)"
-    
-    local tmp_in="$(mktemp --suffix .c)"
-    local tmp_exe="$(mktemp)"
-    echo "$input" > "$tmp_in"
-    "$SHECC" -o "$tmp_exe" "$tmp_in"
-    chmod +x $tmp_exe
-    output=$($TARGET_EXEC "$tmp_exe")
-    
-    if [ "$output" = "$expected_output" ]; then
-        echo "$input => $output"
-    else
-        echo "$input => $expected_output expected, but got $output"
-        echo "input: $tmp_in"
-        echo "executable: $tmp_exe"
-        exit 1
-    fi
+    try "$expected" "$expected_output" "$input"
 }
 
 function items() {
     local expected="$1"
     local input="$2"
-    try "$expected" "int main(int argc, int argv) { $input }"
+    try "$expected" "" "int main(int argc, int argv) { $input }"
 }
 
 function expr() {
@@ -154,7 +143,7 @@ items 30 "int i; int acc; i = 0; acc = 0; do { i = i + 1; if (i - 1 < 5) continu
 items 26 "int acc; acc = 0; int i; for (i = 0; i < 100; i++) { if (i < 5) continue; if (i == 9) break; acc = acc + i; } return acc;"
 
 # functions
-try_ 55 << EOF
+try_ 55 "" << EOF
 int sum(int m, int n) {
     int acc;
     acc = 0;
@@ -169,7 +158,7 @@ int main() {
 }
 EOF
 
-try_ 120 << EOF
+try_ 120 "" << EOF
 int fact(int x) {
     if (x == 0) {
         return 1;
@@ -183,7 +172,7 @@ int main() {
 }
 EOF
 
-try_ 1 << EOF
+try_ 1 "" << EOF
 int is_odd(int x);
 
 int is_even(int x) {
@@ -207,7 +196,7 @@ int main() {
 }
 EOF
 
-try_ 253 << EOF
+try_ 253 "" << EOF
 int ack(int m, int n) {
     if (m == 0) {
         return n + 1;
@@ -228,7 +217,7 @@ items 3 "int x; int *y; x = 3; y = &x; return y[0];"
 items 5 "int b; int *a; b = 10; a = &b; a[0] = 5; return b;"
 items 2 "int x[2]; int y; x[1] = 2; y = *(x + 1); return y;"
 items 2 "int x; int *y; int z; z = 2; y = &z; x = *y; return x;"
-try_ 10 << EOF
+try_ 10 "" << EOF
 int change_it(int *p) {
     if (p[0] == 0) {
         p[0] = 10;
@@ -248,7 +237,7 @@ int main() {
 EOF
 
 # function pointers
-try_ 18 << EOF
+try_ 18 "" << EOF
 typedef struct {
     int (*ta)();
     int (*tb)(int);
@@ -265,7 +254,7 @@ int main() {
 EOF
 
 # arrays
-try_ 12 << EOF
+try_ 12 "" << EOF
 int nth_of(int *a, int i) {
     return a[i];
 }
@@ -289,7 +278,7 @@ int main() {
 EOF
 
 # global initialization
-try_ 20 << EOF
+try_ 20 "" << EOF
 int a = 5 * 2;
 int b = -4 * 3 + 7 + 9 / 3 * 5;
 int main()
@@ -316,13 +305,13 @@ items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; ca
 items 10 "int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } return a;"
 
 # enum
-try_ 6 << EOF
+try_ 6 "" << EOF
 typedef enum { enum1 = 5, enum2 } enum_t;
 int main() { enum_t v = enum2; return v; }
 EOF
 
 # malloc and free
-try_ 1 << EOF
+try_ 1 "" << EOF
 int main()
 {
     /* change test bench if different scheme apply */
@@ -337,7 +326,7 @@ int main()
 }
 EOF
 
-try_ 1 << EOF
+try_ 1 "" << EOF
 int main()
 {
     char *ptr = "hello";
@@ -346,7 +335,7 @@ int main()
 EOF
 
 # #ifdef...#else...#endif
-try_ 0 << EOF
+try_ 0 "" << EOF
 #define A 0
 #define B 200
 int main()
@@ -362,7 +351,7 @@ int main()
 EOF
 
 # #if defined(...) ... #elif defined(...) ... #else ... #endif
-try_ 0 << EOF
+try_ 0 "" << EOF
 #define A 0
 #define B 0xDEAD
 int main()
@@ -380,42 +369,42 @@ int main()
 EOF
 
 # format
-try_output 0 "2147483647" << EOF
+try_ 0 "2147483647" << EOF
 int main() {
     printf("%d", 2147483647);
     return 0;
 }
 EOF
 
-try_output 0 "-2147483648" << EOF
+try_ 0 "-2147483648" << EOF
 int main() {
     printf("%d", -2147483648);
     return 0;
 }
 EOF
 
-try_output 0 "-2147483647" << EOF
+try_ 0 "-2147483647" << EOF
 int main() {
     printf("%d", -2147483647);
     return 0;
 }
 EOF
 
-try_output 0 "-214748364" << EOF
+try_ 0 "-214748364" << EOF
 int main() {
     printf("%d", -214748364);
     return 0;
 }
 EOF
 
-try_output 0 " -214748364" << EOF
+try_ 0 " -214748364" << EOF
 int main() {
     printf("%11d", -214748364);
     return 0;
 }
 EOF
 
-try_output 0 "      -214748364" << EOF
+try_ 0 "      -214748364" << EOF
 int main() {
     printf("%16d", -214748364);
     return 0;
