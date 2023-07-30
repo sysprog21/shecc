@@ -4,10 +4,23 @@ set -u
 
 readonly SHECC="$PWD/out/shecc"
 
+# try - test shecc with given code
+# Usage:
+# - try exit_code input_code
+# compile "input_code" with shecc and expect the compile program exit with
+# code "exit_code".
+#
+# - try exit_code expected_output input_code
+# compile "input_code" with shecc and expect the compile program output
+# "expected_output" and exit with code "exit_code".
 function try() {
     local expected="$1"
-    local expected_output="$2"
-    local input="$3"
+    if [ $# -eq 2 ]; then
+        local input="$2"
+    elif [ $# -eq 3 ]; then
+        local expected_output="$2"
+        local input="$3"
+    fi
 
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
@@ -24,7 +37,7 @@ function try() {
         echo "input: $tmp_in"
         echo "executable: $tmp_exe"
         exit 1
-    elif [ "$output" != "$expected_output" ]; then
+    elif [ "${expected_output+x}" != "" ] && [ "$output" != "$expected_output" ]; then
         echo "$input => $expected_output expected, but got $output"
         echo "input: $tmp_in"
         echo "executable: $tmp_exe"
@@ -46,7 +59,7 @@ function try_() {
 function items() {
     local expected="$1"
     local input="$2"
-    try "$expected" "" "int main(int argc, int argv) { $input }"
+    try "$expected" "int main(int argc, int argv) { $input }"
 }
 
 function expr() {
