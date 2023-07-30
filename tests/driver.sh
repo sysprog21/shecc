@@ -4,25 +4,48 @@ set -u
 
 readonly SHECC="$PWD/out/shecc"
 
+# try - test shecc with given code
+# Usage:
+# - try exit_code input_code
+# compile "input_code" with shecc and expect the compile program exit with
+# code "exit_code".
+#
+# - try exit_code expected_output input_code
+# compile "input_code" with shecc and expect the compile program output
+# "expected_output" and exit with code "exit_code".
 function try() {
     local expected="$1"
-    local input="$2"
+    if [ $# -eq 2 ]; then
+        local input="$2"
+    elif [ $# -eq 3 ]; then
+        local expected_output="$2"
+        local input="$3"
+    fi
 
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
     "$SHECC" -o "$tmp_exe" "$tmp_in"
     chmod +x $tmp_exe
-    $TARGET_EXEC "$tmp_exe"
+
+    local output=''
+    output=$($TARGET_EXEC "$tmp_exe")
     local actual="$?"
 
-    if [ "$actual" = "$expected" ]; then
-        echo "$input => $actual"
-    else
+    if [ "$actual" != "$expected" ]; then
         echo "$input => $expected expected, but got $actual"
         echo "input: $tmp_in"
         echo "executable: $tmp_exe"
         exit 1
+    elif [ "${expected_output+x}" != "" ] && [ "$output" != "$expected_output" ]; then
+        echo "$input => $expected_output expected, but got $output"
+        echo "input: $tmp_in"
+        echo "executable: $tmp_exe"
+        exit 2
+    else
+        echo "$input"
+        echo "exit code => $actual"
+        echo "output => $output"
     fi
 }
 
@@ -30,6 +53,13 @@ function try_() {
     local expected="$1"
     local input="$(cat)"
     try "$expected" "$input"
+}
+
+function try_output() {
+    local expected="$1"
+    local expected_output="$2"
+    local input="$(cat)"
+    try "$expected" "$expected_output" "$input"
 }
 
 function items() {
@@ -354,6 +384,49 @@ int main()
     x = 0xCAFE;
 #endif
     return x;
+}
+EOF
+
+# format
+try_output 0 "2147483647" << EOF
+int main() {
+    printf("%d", 2147483647);
+    return 0;
+}
+EOF
+
+try_output 0 "-2147483648" << EOF
+int main() {
+    printf("%d", -2147483648);
+    return 0;
+}
+EOF
+
+try_output 0 "-2147483647" << EOF
+int main() {
+    printf("%d", -2147483647);
+    return 0;
+}
+EOF
+
+try_output 0 "-214748364" << EOF
+int main() {
+    printf("%d", -214748364);
+    return 0;
+}
+EOF
+
+try_output 0 " -214748364" << EOF
+int main() {
+    printf("%11d", -214748364);
+    return 0;
+}
+EOF
+
+try_output 0 "      -214748364" << EOF
+int main() {
+    printf("%16d", -214748364);
+    return 0;
 }
 EOF
 

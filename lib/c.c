@@ -21,6 +21,8 @@
 
 #endif
 
+#define INT_BUF_LEN 11
+
 typedef int FILE;
 
 void abort();
@@ -92,6 +94,10 @@ void __str_base10(char *pb, int val)
 {
     int neg = 0;
 
+    if (val == -2147483648) {
+        strncpy(pb, "-2147483648", 11);
+        return;
+    }
     if (val < 0) {
         neg = 1;
         val = -val;
@@ -99,43 +105,43 @@ void __str_base10(char *pb, int val)
 
     while (val >= 1000000000) {
         val -= 1000000000;
-        pb[0]++;
+        pb[1]++;
     }
     while (val >= 100000000) {
         val -= 100000000;
-        pb[1]++;
+        pb[2]++;
     }
     while (val >= 10000000) {
         val -= 10000000;
-        pb[2]++;
+        pb[3]++;
     }
     while (val >= 1000000) {
         val -= 1000000;
-        pb[3]++;
+        pb[4]++;
     }
     while (val >= 100000) {
         val -= 100000;
-        pb[4]++;
+        pb[5]++;
     }
     while (val >= 10000) {
         val -= 10000;
-        pb[5]++;
+        pb[6]++;
     }
     while (val >= 1000) {
         val -= 1000;
-        pb[6]++;
+        pb[7]++;
     }
     while (val >= 100) {
         val -= 100;
-        pb[7]++;
+        pb[8]++;
     }
     while (val >= 10) {
         val -= 10;
-        pb[8]++;
+        pb[9]++;
     }
     while (val >= 1) {
         val -= 1;
-        pb[9]++;
+        pb[10]++;
     }
 
     if (neg == 1) {
@@ -171,7 +177,7 @@ int __format(char *buffer,
              int hexprefix)
 {
     int bi = 0;
-    char pb[10];
+    char pb[INT_BUF_LEN];
     int pbi = 0;
 
     if (hexprefix == 1) {
@@ -185,7 +191,7 @@ int __format(char *buffer,
     }
 
     /* set to zeroes */
-    while (pbi < 10) {
+    while (pbi < INT_BUF_LEN) {
         pb[pbi] = '0';
         pbi++;
     }
@@ -213,7 +219,7 @@ int __format(char *buffer,
         int started = 0;
 
         /* output from first digit */
-        while (c < 10) {
+        while (c < INT_BUF_LEN) {
             if (pb[c] != '0')
                 started = 1;
             if (started) {
@@ -229,9 +235,9 @@ int __format(char *buffer,
         }
     } else {
         /* padding */
-        int c = 10 - width;
+        int c = INT_BUF_LEN - width;
         int started = 0;
-        while (c < 10) {
+        while (c < INT_BUF_LEN) {
             if (pb[c] != '0')
                 started = 1;
             if (started)
@@ -302,7 +308,7 @@ void printf(char *str, ...)
         }
     }
     buffer[bi] = 0;
-    __syscall(__syscall_write, 0, buffer, bi);
+    __syscall(__syscall_write, 1, buffer, bi);
 }
 
 char *memcpy(char *dest, char *src, int count)
