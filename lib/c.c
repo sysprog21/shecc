@@ -279,7 +279,7 @@ void printf(char *str, ...)
             if (str[si] >= '1' && str[si] <= '9') {
                 w = str[si] - '0';
                 si++;
-                if (str[si] >= '0' && str[si] <= '9') {
+                while (str[si] >= '0' && str[si] <= '9') {
                     w = w * 10;
                     w += str[si] - '0';
                     si++;
@@ -302,6 +302,11 @@ void printf(char *str, ...)
                 /* append param as hex */
                 int v = var_args[pi];
                 bi += __format(buffer + bi, v, w, zp, 16, pp);
+            } else if (str[si] == '%') {
+                /* append literal '%' character */
+                buffer[bi] = '%';
+                bi++;
+                pi++;
             }
             pi--;
             si++;

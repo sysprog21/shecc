@@ -430,4 +430,18 @@ int main() {
 }
 EOF
 
+try_output 0 "$(printf '%97s123')" << EOF
+int main() {
+    printf("%100d", 123);
+    return 0;
+}
+EOF
+
+try_output 0 "%1" << EOF
+int main() {
+    printf("%%%d", 1);
+    return 0;
+}
+EOF
+
 echo OK
