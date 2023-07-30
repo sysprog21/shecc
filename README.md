@@ -111,7 +111,7 @@ OK
 ```
 
 To clean up the generated compiler files, execute the command `make clean`.
-For resett`ing architecture configurations, use the command `make distclean`.
+For resetting architecture configurations, use the command `make distclean`.
 
 ## Intermediate Representation
 
