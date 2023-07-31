@@ -153,7 +153,6 @@ void __str_base10(char *pb, int val)
     }
 }
 
-
 void __str_base8(char *pb, int val)
 {
     int c = INT_BUF_LEN - 1;
@@ -193,17 +192,24 @@ int __format(char *buffer,
     int pbi = 0;
 
     if (alternate_form == 1) {
-        if (base == 8) {
+        switch (base) {
+        case 8:
             /* octal */
             buffer[0] = '0';
             bi = 1;
             width -= 1;
-        } else if (base == 16) {
+            break;
+        case 16:
             /* hex */
             buffer[0] = '0';
             buffer[1] = 'x';
             bi = 2;
             width -= 2;
+            break;
+        default:
+            /* decimal */
+            /* do nothing */
+            break;
         }
         if (width < 0)
             width = 0;
@@ -215,14 +221,19 @@ int __format(char *buffer,
         pbi++;
     }
 
-    if (base == 10)
-        __str_base10(pb, val);
-    else if (base == 8)
+    switch (base) {
+    case 8:
         __str_base8(pb, val);
-    else if (base == 16)
+        break;
+    case 10:
+        __str_base10(pb, val);
+        break;
+    case 16:
         __str_base16(pb, val);
-    else
+        break;
+    default:
         abort();
+    }
 
     while (width > INT_BUF_LEN) {
         /* need to add extra padding */
