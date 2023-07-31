@@ -21,7 +21,7 @@
 
 #endif
 
-#define INT_BUF_LEN 11
+#define INT_BUF_LEN 16
 
 typedef int FILE;
 
@@ -95,7 +95,7 @@ void __str_base10(char *pb, int val)
     int neg = 0;
 
     if (val == -2147483648) {
-        strncpy(pb, "-2147483648", 11);
+        strncpy(pb + INT_BUF_LEN - 11, "-2147483648", 11);
         return;
     }
     if (val < 0) {
@@ -105,43 +105,43 @@ void __str_base10(char *pb, int val)
 
     while (val >= 1000000000) {
         val -= 1000000000;
-        pb[1]++;
+        pb[INT_BUF_LEN - 10]++;
     }
     while (val >= 100000000) {
         val -= 100000000;
-        pb[2]++;
+        pb[INT_BUF_LEN - 9]++;
     }
     while (val >= 10000000) {
         val -= 10000000;
-        pb[3]++;
+        pb[INT_BUF_LEN - 8]++;
     }
     while (val >= 1000000) {
         val -= 1000000;
-        pb[4]++;
+        pb[INT_BUF_LEN - 7]++;
     }
     while (val >= 100000) {
         val -= 100000;
-        pb[5]++;
+        pb[INT_BUF_LEN - 6]++;
     }
     while (val >= 10000) {
         val -= 10000;
-        pb[6]++;
+        pb[INT_BUF_LEN - 5]++;
     }
     while (val >= 1000) {
         val -= 1000;
-        pb[7]++;
+        pb[INT_BUF_LEN - 4]++;
     }
     while (val >= 100) {
         val -= 100;
-        pb[8]++;
+        pb[INT_BUF_LEN - 3]++;
     }
     while (val >= 10) {
         val -= 10;
-        pb[9]++;
+        pb[INT_BUF_LEN - 2]++;
     }
     while (val >= 1) {
         val -= 1;
-        pb[10]++;
+        pb[INT_BUF_LEN - 1]++;
     }
 
     if (neg == 1) {
@@ -153,9 +153,21 @@ void __str_base10(char *pb, int val)
     }
 }
 
+
+void __str_base8(char *pb, int val)
+{
+    int c = INT_BUF_LEN - 1;
+    while (c > 0) {
+        int v = val & 0x7;
+        pb[c] = '0' + v;
+        val = val >> 3;
+        c--;
+    }
+}
+
 void __str_base16(char *pb, int val)
 {
-    int c = 9;
+    int c = INT_BUF_LEN - 1;
     while (c > 0) {
         int v = val & 0xf;
         if (v < 10)
@@ -174,19 +186,26 @@ int __format(char *buffer,
              int width,
              int zeropad,
              int base,
-             int hexprefix)
+             int alternate_form)
 {
     int bi = 0;
     char pb[INT_BUF_LEN];
     int pbi = 0;
 
-    if (hexprefix == 1) {
-        buffer[0] = '0';
-        buffer[1] = 'x';
-        bi = 2;
-        if (width > 2)
+    if (alternate_form == 1) {
+        if (base == 8) {
+            /* octal */
+            buffer[0] = '0';
+            bi = 1;
+            width -= 1;
+        } else if (base == 16) {
+            /* hex */
+            buffer[0] = '0';
+            buffer[1] = 'x';
+            bi = 2;
             width -= 2;
-        else
+        }
+        if (width < 0)
             width = 0;
     }
 
@@ -198,12 +217,14 @@ int __format(char *buffer,
 
     if (base == 10)
         __str_base10(pb, val);
+    else if (base == 8)
+        __str_base8(pb, val);
     else if (base == 16)
         __str_base16(pb, val);
     else
         abort();
 
-    while (width > 10) {
+    while (width > INT_BUF_LEN) {
         /* need to add extra padding */
         if (zeropad == 1)
             buffer[bi] = '0';
@@ -294,6 +315,10 @@ void printf(char *str, ...)
                 /* append param pi as char */
                 buffer[bi] = var_args[pi];
                 bi += 1;
+            } else if (str[si] == 'o') {
+                /* append param as octal */
+                int v = var_args[pi];
+                bi += __format(buffer + bi, v, w, zp, 8, pp);
             } else if (str[si] == 'd') {
                 /* append param as decimal */
                 int v = var_args[pi];

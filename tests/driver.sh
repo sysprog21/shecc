@@ -444,4 +444,32 @@ int main() {
 }
 EOF
 
+try_output 0 "144" << EOF
+int main() {
+    printf("%o", 100);
+    return 0;
+}
+EOF
+
+try_output 0 "0144" << EOF
+int main() {
+    printf("%#o", 100);
+    return 0;
+}
+EOF
+
+try_output 0 "7f" << EOF
+int main() {
+    printf("%x", 127);
+    return 0;
+}
+EOF
+
+try_output 0 "0x7f" << EOF
+int main() {
+    printf("%#x", 127);
+    return 0;
+}
+EOF
+
 echo OK
