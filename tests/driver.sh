@@ -472,4 +472,49 @@ int main() {
 }
 EOF
 
+# function-like macro
+try_ 1 << EOF
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+int main()
+{
+    int x = 0, y = 1;
+    return MAX(x, y);
+}
+EOF
+
+try_ 7 << EOF
+#define M(a, b) a + b
+int main()
+{
+    return M(1, 2) * 3;
+}
+EOF
+
+# function-like variadic macro
+try_ 2 << EOF
+#define M(m, n, ...)     \
+    do {                 \
+        x = __VA_ARGS__; \
+    } while (0)
+int main()
+{
+    int x = 0;
+    M(0, 1, 2);
+    return x;
+}
+EOF
+
+try_output 0 "Wrapper: Hello World!" << EOF
+#define WRAPPER(...)         \
+    do {                     \
+        printf("Wrapper: "); \
+        printf(__VA_ARGS__); \
+    } while (0)
+int main()
+{
+    WRAPPER("%s", "Hello World!");
+    return 0;
+}
+EOF
+
 echo OK

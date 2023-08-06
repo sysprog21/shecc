@@ -9,7 +9,7 @@
 #define MAX_PARAMS 8
 #define MAX_LOCALS 48
 #define MAX_FIELDS 32
-#define MAX_FUNCS 1024
+#define MAX_FUNCS 2048
 #define MAX_BLOCKS 262144
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 65536
@@ -115,6 +115,17 @@ typedef struct {
     int offset;   /* offset from stack or frame */
     int init_val; /* for global initialization */
 } var_t;
+
+typedef struct {
+    char name[MAX_VAR_LEN];
+    int is_variadic;
+    int start_source_idx;
+    int prev_return_idx; /* the return index of the previous macro */
+    var_t param_defs[MAX_PARAMS];
+    int num_param_defs;
+    int params[MAX_PARAMS];
+    int num_params;
+} macro_t;
 
 /* function definition */
 typedef struct {
