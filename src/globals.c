@@ -302,7 +302,7 @@ void global_init()
     BLOCKS = malloc(MAX_BLOCKS * sizeof(block_t));
     MACROS = malloc(MAX_ALIASES * sizeof(macro_t));
     FUNCS = malloc(MAX_FUNCS * sizeof(func_t));
-    FUNC_TRIES = malloc(MAX_FUNCS * sizeof(trie_t));
+    FUNC_TRIES = malloc(MAX_FUNC_TRIES * sizeof(trie_t));
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
     IR = malloc(MAX_IR_INSTR * sizeof(ir_instr_t));
     SOURCE = malloc(MAX_SOURCE);
