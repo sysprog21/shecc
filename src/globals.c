@@ -129,13 +129,12 @@ ir_instr_t *add_instr(opcode_t op)
     return ii;
 }
 
-block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
+block_t *add_block(block_t *parent, func_t *func)
 {
     block_t *blk = &BLOCKS[blocks_idx];
     blk->index = blocks_idx++;
     blk->parent = parent;
     blk->func = func;
-    blk->macro = macro;
     blk->next_local = 0;
     return blk;
 }
@@ -165,17 +164,11 @@ macro_t *find_macro(char *name)
     return NULL;
 }
 
-void error(char *msg);
-int find_macro_param_src_idx(char *name, block_t *parent)
+int find_macro_param_src_idx(char *name, macro_t *macro)
 {
     int i;
-    macro_t *macro = parent->macro;
-
-    if (!parent)
-        error("The macro expansion is not supported in the global scope");
-    if (!parent->macro)
+    if (!macro)
         return 0;
-
     for (i = 0; i < macro->num_param_defs; i++)
         if (!strcmp(macro->param_defs[i].var_name, name))
             return macro->params[i];

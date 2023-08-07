@@ -144,7 +144,6 @@ typedef struct block_t {
     int next_local;
     struct block_t *parent;
     func_t *func;
-    macro_t *macro;
     int locals_size;
     int index;
 } block_t;
