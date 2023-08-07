@@ -3,10 +3,12 @@
 char peek_char(int offset);
 int is_whitespace(char c)
 {
-    if (c == '\\' && peek_char(1) == '\n')
-        return 2;
-
     return (c == ' ' || c == '\t');
+}
+
+int is_line_continuation(char c)
+{
+    return c == '\\' && peek_char(1) == '\n';
 }
 
 int is_newline(char c)
@@ -128,7 +130,7 @@ int macro_return_idx;
 void skip_whitespace()
 {
     while (1) {
-        if (is_whitespace(next_char) == 2) {
+        if (is_line_continuation(next_char)) {
             source_idx += 2;
             next_char = SOURCE[source_idx];
             continue;
@@ -722,7 +724,7 @@ void lex_expect(token_t token)
     next_token = get_next_token();
 }
 
-void read_expr(int param_no, block_t *parent, macro_t *macro);
+void read_expr(int param_no, block_t *parent);
 
 int write_symbol(char *data, int len)
 {
@@ -914,21 +916,21 @@ void read_char_param(int param_no)
     ii->int_param1 = token[0];
 }
 
-void read_ternary_operation(int dest, block_t *parent, macro_t *macro);
-void read_func_parameters(block_t *parent, macro_t *macro)
+void read_ternary_operation(int dest, block_t *parent);
+void read_func_parameters(block_t *parent)
 {
     int param_num = 0;
     lex_expect(T_open_bracket);
     while (!lex_accept(T_close_bracket)) {
-        read_expr(param_num++, parent, macro);
-        read_ternary_operation(param_num - 1, parent, macro);
+        read_expr(param_num++, parent);
+        read_ternary_operation(param_num - 1, parent);
         lex_accept(T_comma);
     }
 }
 
 ir_instr_t *exit_ii; /* exit for program */
 
-void read_func_call(func_t *fn, int param_no, block_t *parent, macro_t *macro)
+void read_func_call(func_t *fn, int param_no, block_t *parent)
 {
     ir_instr_t *ii;
 
@@ -936,7 +938,7 @@ void read_func_call(func_t *fn, int param_no, block_t *parent, macro_t *macro)
     lex_expect(T_identifier);
     if (lex_peek(T_open_bracket, NULL)) {
         /* direct function call */
-        read_func_parameters(parent, macro);
+        read_func_parameters(parent);
         ii = add_instr(OP_call);
         ii->str_param1 = fn->return_def.var_name;
         ii->param_no = param_no; /* return value here */
@@ -950,7 +952,7 @@ void read_func_call(func_t *fn, int param_no, block_t *parent, macro_t *macro)
     }
 }
 
-void read_indirect_call(int param_no, block_t *parent, macro_t *macro)
+void read_indirect_call(int param_no, block_t *parent)
 {
     ir_instr_t *ii;
 
@@ -965,7 +967,7 @@ void read_indirect_call(int param_no, block_t *parent, macro_t *macro)
     ii = add_instr(OP_push);
     ii->param_no = param_no;
 
-    read_func_parameters(parent, macro);
+    read_func_parameters(parent);
 
     /* retrieve address from stack into last parameter */
     ii = add_instr(OP_pop);
@@ -985,7 +987,6 @@ void read_indirect_call(int param_no, block_t *parent, macro_t *macro)
 void read_lvalue(lvalue_t *lvalue,
                  var_t *var,
                  block_t *parent,
-                 macro_t *macro,
                  int param_no,
                  int eval,
                  opcode_t op);
@@ -993,7 +994,7 @@ void read_lvalue(lvalue_t *lvalue,
 /* Maintain a stack of expression values and operators, depending on next
  * operators' priority. Either apply it or operator on stack first.
  */
-void read_expr_operand(int param_no, block_t *parent, macro_t *macro)
+void read_expr_operand(int param_no, block_t *parent)
 {
     int isneg = 0;
     if (lex_accept(T_minus)) {
@@ -1013,12 +1014,12 @@ void read_expr_operand(int param_no, block_t *parent, macro_t *macro)
         read_numeric_param(param_no, isneg);
     else if (lex_accept(T_log_not)) {
         ir_instr_t *ii;
-        read_expr_operand(param_no, parent, macro);
+        read_expr_operand(param_no, parent);
         ii = add_instr(OP_log_not);
         ii->param_no = param_no;
     } else if (lex_accept(T_bit_not)) {
         ir_instr_t *ii;
-        read_expr_operand(param_no, parent, macro);
+        read_expr_operand(param_no, parent);
         ii = add_instr(OP_bit_not);
         ii->param_no = param_no;
     } else if (lex_accept(T_ampersand)) {
@@ -1028,7 +1029,7 @@ void read_expr_operand(int param_no, block_t *parent, macro_t *macro)
 
         lex_peek(T_identifier, token);
         var = find_var(token, parent);
-        read_lvalue(&lvalue, var, parent, macro, param_no, 0, OP_generic);
+        read_lvalue(&lvalue, var, parent, param_no, 0, OP_generic);
     } else if (lex_accept(T_asterisk)) {
         /* dereference */
         char token[MAX_VAR_LEN];
@@ -1039,15 +1040,15 @@ void read_expr_operand(int param_no, block_t *parent, macro_t *macro)
         lex_accept(T_open_bracket);
         lex_peek(T_identifier, token);
         var = find_var(token, parent);
-        read_lvalue(&lvalue, var, parent, macro, param_no, 1, OP_generic);
+        read_lvalue(&lvalue, var, parent, param_no, 1, OP_generic);
         lex_accept(T_close_bracket);
         ii = add_instr(OP_read);
         ii->param_no = param_no;
         ii->int_param1 = param_no;
         ii->int_param2 = lvalue.size;
     } else if (lex_accept(T_open_bracket)) {
-        read_expr(param_no, parent, macro);
-        read_ternary_operation(param_no, parent, macro);
+        read_expr(param_no, parent);
+        read_ternary_operation(param_no, parent);
         lex_expect(T_close_bracket);
 
         if (isneg) {
@@ -1089,28 +1090,33 @@ void read_expr_operand(int param_no, block_t *parent, macro_t *macro)
         con = find_constant(token);
         var = find_var(token, parent);
         fn = find_func(token);
-        macro_param_idx = find_macro_param_src_idx(token, macro);
+        macro_param_idx = find_macro_param_src_idx(token, parent);
         mac = find_macro(token);
 
         if (!strcmp(token, "__VA_ARGS__")) {
-            int t = source_idx;
-            int i, remainder = macro->num_params - macro->num_param_defs;
+            int i, remainder, t = source_idx;
+            macro_t *macro = parent->macro;
 
+            if (!macro)
+                error("The '__VA_ARGS__' identifier can only use in macro");
             if (!macro->is_variadic)
                 error("Unexpected identifier '__VA_ARGS__'");
+
+            remainder = macro->num_params - macro->num_param_defs;
             for (i = 0; i < remainder; i++) {
                 source_idx = macro->params[macro->num_params - remainder + i];
                 next_char = SOURCE[source_idx];
                 next_token = get_next_token();
-                read_expr(param_no + i, parent, macro);
+                read_expr(param_no + i, parent);
             }
             source_idx = t;
             next_char = SOURCE[source_idx];
             next_token = get_next_token();
         } else if (mac) {
-            if (macro)
+            if (parent->macro)
                 error("Nested macro is not yet supported");
 
+            parent->macro = mac;
             lex_expect(T_identifier);
             if (lex_peek(T_open_bracket, NULL)) {
                 mac->num_params = 0;
@@ -1128,16 +1134,18 @@ void read_expr_operand(int param_no, block_t *parent, macro_t *macro)
                 lex_expect(T_close_bracket);
             }
             skip_newline = 0;
-            read_expr(param_no, parent, mac);
+            read_expr(param_no, parent);
             macro_return_idx = mac->prev_return_idx;
-            if (!macro_return_idx)
+            if (!macro_return_idx) {
                 skip_newline = 1;
+                parent->macro = NULL;
+            }
         } else if (macro_param_idx) {
             int t = source_idx;
             source_idx = macro_param_idx;
             next_char = SOURCE[source_idx];
             next_token = get_next_token();
-            read_expr(param_no, parent, macro);
+            read_expr(param_no, parent);
             source_idx = t;
             next_char = SOURCE[source_idx];
             next_token = get_next_token();
@@ -1150,10 +1158,10 @@ void read_expr_operand(int param_no, block_t *parent, macro_t *macro)
         } else if (var) {
             /* evalue lvalue expression */
             lvalue_t lvalue;
-            read_lvalue(&lvalue, var, parent, macro, param_no, 1, prefix_op);
+            read_lvalue(&lvalue, var, parent, param_no, 1, prefix_op);
             /* is it an indirect call with function pointer? */
             if (lex_peek(T_open_bracket, NULL))
-                read_indirect_call(param_no, parent, macro);
+                read_indirect_call(param_no, parent);
         } else if (fn) {
             ir_instr_t *ii;
             int pn;
@@ -1165,7 +1173,7 @@ void read_expr_operand(int param_no, block_t *parent, macro_t *macro)
             /* we should push existing parameters onto the stack since
              * function calls use the same.
              */
-            read_func_call(fn, param_no, parent, macro);
+            read_func_call(fn, param_no, parent);
 
             for (pn = param_no - 1; pn >= 0; pn--) {
                 ii = add_instr(OP_pop);
@@ -1264,7 +1272,7 @@ opcode_t get_operator()
     return op;
 }
 
-void read_expr(int param_no, block_t *parent, macro_t *macro)
+void read_expr(int param_no, block_t *parent)
 {
     opcode_t op_stack[10];
     int op_stack_index = 0;
@@ -1272,14 +1280,14 @@ void read_expr(int param_no, block_t *parent, macro_t *macro)
     ir_instr_t *il;
 
     /* read value into param_no */
-    read_expr_operand(param_no, parent, macro);
+    read_expr_operand(param_no, parent);
 
     /* check for any operator following */
     op = get_operator();
     if (op == OP_generic || op == OP_ternary) /* no continuation */
         return;
 
-    read_expr_operand(param_no + 1, parent, macro);
+    read_expr_operand(param_no + 1, parent);
     next_op = get_operator();
 
     if (next_op == OP_generic || op == OP_ternary) {
@@ -1339,7 +1347,7 @@ void read_expr(int param_no, block_t *parent, macro_t *macro)
         op_stack[op_stack_index++] = op;
 
         /* push value on stack */
-        read_expr_operand(param_no, parent, macro);
+        read_expr_operand(param_no, parent);
         il = add_instr(OP_push);
         il->param_no = param_no;
 
@@ -1385,7 +1393,6 @@ void read_expr(int param_no, block_t *parent, macro_t *macro)
 void read_lvalue(lvalue_t *lvalue,
                  var_t *var,
                  block_t *parent,
-                 macro_t *macro,
                  int param_no,
                  int eval,
                  opcode_t prefix_op)
@@ -1429,7 +1436,7 @@ void read_lvalue(lvalue_t *lvalue,
             }
 
             /* param+1 has the offset in array terms */
-            read_expr(param_no + 1, parent, macro);
+            read_expr(param_no + 1, parent);
 
             /* multiply by element size */
             if (lvalue->size != 1) {
@@ -1501,7 +1508,7 @@ void read_lvalue(lvalue_t *lvalue,
         }
 
         /* param+1 has the offset in array terms */
-        read_expr_operand(param_no + 1, parent, macro);
+        read_expr_operand(param_no + 1, parent);
 
         /* shift by offset in type sizes */
         lvalue->size = lvalue->type->size;
@@ -1588,7 +1595,7 @@ void read_lvalue(lvalue_t *lvalue,
     }
 }
 
-void read_ternary_operation(int dest, block_t *parent, macro_t *macro)
+void read_ternary_operation(int dest, block_t *parent)
 {
     ir_instr_t *false_jump, *true_jump, *ii;
 
@@ -1599,7 +1606,7 @@ void read_ternary_operation(int dest, block_t *parent, macro_t *macro)
     false_jump->param_no = dest;
 
     /* true branch */
-    read_expr(dest, parent, macro);
+    read_expr(dest, parent);
     if (!lex_accept(T_colon))
         return;
 
@@ -1609,17 +1616,14 @@ void read_ternary_operation(int dest, block_t *parent, macro_t *macro)
     false_jump->int_param1 = ii->ir_index;
 
     /* false branch */
-    read_expr(dest, parent, macro);
+    read_expr(dest, parent);
 
     /* this is finish, link true jump */
     ii = add_instr(OP_label);
     true_jump->int_param1 = ii->ir_index;
 }
 
-int read_body_assignment(char *token,
-                         block_t *parent,
-                         macro_t *macro,
-                         opcode_t prefix_op)
+int read_body_assignment(char *token, block_t *parent, opcode_t prefix_op)
 {
     var_t *var = find_local_var(token, parent);
     if (!var)
@@ -1632,7 +1636,7 @@ int read_body_assignment(char *token,
         int size = 0;
 
         /* has memory address that we want to set */
-        read_lvalue(&lvalue, var, parent, macro, 0, 0, OP_generic);
+        read_lvalue(&lvalue, var, parent, 0, 0, OP_generic);
         size = lvalue.size;
 
         if (lex_accept(T_increment)) {
@@ -1655,7 +1659,7 @@ int read_body_assignment(char *token,
             ii->param_no = 0;
             ii->int_param1 = 0;
             ii->int_param2 = lvalue.size;
-            read_indirect_call(0, parent, macro);
+            read_indirect_call(0, parent);
             return 1;
         } else if (prefix_op == OP_generic) {
             lex_expect(T_assign);
@@ -1683,7 +1687,7 @@ int read_body_assignment(char *token,
                 ii->param_no = 2;
                 ii->int_param1 = increment_size;
             } else {
-                read_expr(2, parent, macro);
+                read_expr(2, parent);
 
                 /* multiply by element size if necessary */
                 if (increment_size != 1) {
@@ -1702,10 +1706,10 @@ int read_body_assignment(char *token,
             ii->param_no = 1;
             ii->int_param1 = 2;
         } else {
-            read_expr(1, parent, macro); /* get expression value into ?1 */
+            read_expr(1, parent); /* get expression value into ?1 */
         }
 
-        read_ternary_operation(1, parent, macro);
+        read_ternary_operation(1, parent);
 
         /* store value at specific address, but need to know the type/size */
         ii = add_instr(OP_write);
@@ -1916,9 +1920,9 @@ int read_global_assignment(char *token)
 int break_exit_ir_index[MAX_NESTING];
 int conti_jump_ir_index[MAX_NESTING];
 
-void read_code_block(func_t *func, block_t *parent, macro_t *macro);
+void read_code_block(func_t *func, macro_t *macro, block_t *parent);
 
-void read_body_statement(block_t *parent, macro_t *macro)
+void read_body_statement(block_t *parent)
 {
     char token[MAX_ID_LEN];
     macro_t *mac;
@@ -1934,15 +1938,15 @@ void read_body_statement(block_t *parent, macro_t *macro)
      */
 
     if (lex_peek(T_open_curly, NULL)) {
-        read_code_block(parent->func, parent, macro);
+        read_code_block(parent->func, parent->macro, parent);
         return;
     }
 
     if (lex_accept(T_return)) {
         if (!lex_accept(T_semicolon)) { /* can be "void" */
             /* get expression value into return value */
-            read_expr(0, parent, macro);
-            read_ternary_operation(0, parent, macro);
+            read_expr(0, parent);
+            read_ternary_operation(0, parent);
             lex_expect(T_semicolon);
         }
         fn = parent->func;
@@ -1955,14 +1959,13 @@ void read_body_statement(block_t *parent, macro_t *macro)
         ir_instr_t *false_jump;
 
         lex_expect(T_open_bracket);
-        read_expr(0, parent,
-                  macro); /* get expression value into return value */
+        read_expr(0, parent); /* get expression value into return value */
         lex_expect(T_close_bracket);
 
         false_jump = add_instr(OP_jz);
         false_jump->param_no = 0;
 
-        read_body_statement(parent, macro);
+        read_body_statement(parent);
 
         /* if we have an "else" block, jump to finish */
         if (lex_accept(T_else)) {
@@ -1974,7 +1977,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
             false_jump->int_param1 = ii->ir_index;
 
             /* false branch */
-            read_body_statement(parent, macro);
+            read_body_statement(parent);
 
             /* this is finish, link true jump */
             ii = add_instr(OP_label);
@@ -1995,8 +1998,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
         ir_instr_t *exit_jump = add_instr(OP_jump);
         ir_instr_t *start_label = add_instr(OP_label); /* start to return to */
         lex_expect(T_open_bracket);
-        read_expr(0, parent,
-                  macro); /* get expression value into return value */
+        read_expr(0, parent); /* get expression value into return value */
         lex_expect(T_close_bracket);
 
         false_jump = add_instr(OP_jz);
@@ -2007,7 +2009,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
         /* create exit jump for breaks */
         break_exit_ir_index[break_level++] = exit_label->ir_index;
         conti_jump_ir_index[continue_level++] = start_label->ir_index;
-        read_body_statement(parent, macro);
+        read_body_statement(parent);
         break_level--;
         continue_level--;
 
@@ -2032,7 +2034,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
         ir_instr_t *switch_exit;
 
         lex_expect(T_open_bracket);
-        read_expr(1, parent, macro);
+        read_expr(1, parent);
         lex_expect(T_close_bracket);
 
         jump_to_check = add_instr(OP_jump);
@@ -2067,7 +2069,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
             /* body is optional, can be another case */
             while (!lex_peek(T_case, NULL) && !lex_peek(T_close_curly, NULL) &&
                    !lex_peek(T_default, NULL)) {
-                read_body_statement(parent, macro);
+                read_body_statement(parent);
                 /* should end with a break which will generate jump out */
             }
         }
@@ -2132,14 +2134,14 @@ void read_body_statement(block_t *parent, macro_t *macro)
         /* setup - execute once */
         if (!lex_accept(T_semicolon)) {
             lex_peek(T_identifier, token);
-            read_body_assignment(token, parent, macro, OP_generic);
+            read_body_assignment(token, parent, OP_generic);
             lex_expect(T_semicolon);
         }
 
         /* condition - check before the loop */
         condition_start = add_instr(OP_label);
         if (!lex_accept(T_semicolon)) {
-            read_expr(0, parent, macro);
+            read_expr(0, parent);
             lex_expect(T_semicolon);
         } else {
             /* always true */
@@ -2161,7 +2163,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
             else if (lex_accept(T_decrement))
                 prefix_op = OP_sub;
             lex_peek(T_identifier, token);
-            read_body_assignment(token, parent, macro, prefix_op);
+            read_body_assignment(token, parent, prefix_op);
             lex_expect(T_close_bracket);
         }
 
@@ -2174,7 +2176,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
         condition_jump_in->int_param1 = body_start->ir_index;
         break_exit_ir_index[break_level++] = exit_label->ir_index;
         conti_jump_ir_index[continue_level++] = increment->ir_index;
-        read_body_statement(parent, macro);
+        read_body_statement(parent);
         break_level--;
         continue_level--;
 
@@ -2201,7 +2203,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
 
         break_exit_ir_index[break_level++] = exit_jump->ir_index;
         conti_jump_ir_index[continue_level++] = cond_jump->ir_index;
-        read_body_statement(parent, macro);
+        read_body_statement(parent);
         break_level--;
         continue_level--;
 
@@ -2209,8 +2211,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
         cond_jump->int_param1 = cond_label->ir_index;
         lex_expect(T_while);
         lex_expect(T_open_bracket);
-        read_expr(0, parent,
-                  macro); /* get expression value into return value */
+        read_expr(0, parent); /* get expression value into return value */
         lex_expect(T_close_bracket);
 
         false_jump = add_instr(OP_jnz);
@@ -2242,8 +2243,8 @@ void read_body_statement(block_t *parent, macro_t *macro)
         var = &parent->locals[parent->next_local++];
         read_full_var_decl(var, 0);
         if (lex_accept(T_assign)) {
-            read_expr(1, parent, macro); /* get expression value into ?1 */
-            read_ternary_operation(1, parent, macro);
+            read_expr(1, parent); /* get expression value into ?1 */
+            read_ternary_operation(1, parent);
             /* assign to our new variable */
 
             /* load variable location */
@@ -2262,7 +2263,7 @@ void read_body_statement(block_t *parent, macro_t *macro)
             var_t *nv = &parent->locals[parent->next_local++];
             read_partial_var_decl(nv, var); /* partial */
             if (lex_accept(T_assign)) {
-                read_expr(1, parent, macro); /* get expression value into ?1 */
+                read_expr(1, parent); /* get expression value into ?1 */
                 /* assign to our new variable */
 
                 /* load variable location */
@@ -2284,9 +2285,10 @@ void read_body_statement(block_t *parent, macro_t *macro)
 
     mac = find_macro(token);
     if (mac) {
-        if (macro)
+        if (parent->macro)
             error("Nested macro is not yet supported");
 
+        parent->macro = mac;
         lex_expect(T_identifier);
         if (lex_peek(T_open_bracket, NULL)) {
             mac->num_params = 0;
@@ -2304,23 +2306,25 @@ void read_body_statement(block_t *parent, macro_t *macro)
             lex_expect(T_close_bracket);
         }
         skip_newline = 0;
-        read_body_statement(parent, mac);
+        read_body_statement(parent);
         macro_return_idx = mac->prev_return_idx;
-        if (!macro_return_idx)
+        if (!macro_return_idx) {
             skip_newline = 1;
+            parent->macro = NULL;
+        }
         return;
     }
 
     /* is a function call? */
     fn = find_func(token);
     if (fn) {
-        read_func_call(fn, 0, parent, macro);
+        read_func_call(fn, 0, parent);
         lex_expect(T_semicolon);
         return;
     }
 
     /* is an assignment? */
-    if (read_body_assignment(token, parent, macro, prefix_op)) {
+    if (read_body_assignment(token, parent, prefix_op)) {
         lex_expect(T_semicolon);
         return;
     }
@@ -2328,15 +2332,15 @@ void read_body_statement(block_t *parent, macro_t *macro)
     error("Unrecognized statement token");
 }
 
-void read_code_block(func_t *func, block_t *parent, macro_t *macro)
+void read_code_block(func_t *func, macro_t *macro, block_t *parent)
 {
-    block_t *blk = add_block(parent, func);
+    block_t *blk = add_block(parent, func, macro);
     ir_instr_t *ii = add_instr(OP_block_start);
     ii->int_param1 = blk->index;
     lex_expect(T_open_curly);
 
     while (!lex_accept(T_close_curly))
-        read_body_statement(blk, macro);
+        read_body_statement(blk);
 
     ii = add_instr(OP_block_end);
     ii->int_param1 = blk->index;
@@ -2525,8 +2529,8 @@ void parse_internal()
     type->base_type = TYPE_int;
     type->size = 4;
 
-    add_block(NULL, NULL);    /* global block */
-    elf_add_symbol("", 0, 0); /* undef symbol */
+    add_block(NULL, NULL, NULL); /* global block */
+    elf_add_symbol("", 0, 0);    /* undef symbol */
 
     /* architecture defines */
     add_alias(ARCH_PREDEFINED, "1");
