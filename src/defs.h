@@ -121,7 +121,6 @@ typedef struct {
     char name[MAX_VAR_LEN];
     int is_variadic;
     int start_source_idx;
-    int prev_return_idx; /* the return index of the previous macro */
     var_t param_defs[MAX_PARAMS];
     int num_param_defs;
     int params[MAX_PARAMS];
@@ -144,6 +143,7 @@ typedef struct block_t {
     int next_local;
     struct block_t *parent;
     func_t *func;
+    macro_t *macro;
     int locals_size;
     int index;
 } block_t;
