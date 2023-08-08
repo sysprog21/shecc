@@ -2,7 +2,7 @@
 
 :+1::tada: First off, thanks for taking the time to contribute! :tada::+1:
 
-The following is a set of guidelines for contributing to [shecc](https://github.com/jserv/shecc)
+The following is a set of guidelines for contributing to [shecc](https://github.com/sysprog21/shecc)
 hosted on GitHub. These are mostly guidelines, not rules. Use your best
 judgment, and feel free to propose changes to this document in a pull request.
 
@@ -10,7 +10,7 @@ judgment, and feel free to propose changes to this document in a pull request.
 
 This project uses GitHub Issues to track ongoing development, discuss project plans, and keep track of bugs. Be sure to search for existing issues before you create another one.
 
-Visit our [Issues page on GitHub](https://github.com/jserv/shecc/issues) to search and submit.
+Visit our [Issues page on GitHub](https://github.com/sysprog21/shecc/issues) to search and submit.
 
 ## Coding Convention
 
