@@ -188,14 +188,6 @@ void code_generate()
         int dest_reg = ii->param_no;
         int OP_reg = ii->int_param1;
 
-        if (dump_ir == 1) {
-            int j;
-            printf("%#010x     ", code_start + pc);
-            /* Use 4 space indentation */
-            for (j = 0; j < _c_block_level; j++)
-                printf("    ");
-        }
-
         switch (op) {
         case OP_load_data_address:
             /* lookup address of a constant in data section */
@@ -203,8 +195,7 @@ void code_generate()
             ofs += code_start;
             emit(__movw(__AL, dest_reg, ofs));
             emit(__movt(__AL, dest_reg, ofs));
-            if (dump_ir == 1)
-                printf("    x%d := &data[%d]", dest_reg, ii->int_param1);
+            DUMP_IR("    x%d := &data[%d]", dest_reg, ii->int_param1);
             break;
         case OP_load_constant:
             /* load numeric constant */
@@ -215,8 +206,7 @@ void code_generate()
                 emit(__movw(__AL, dest_reg, val));
                 emit(__movt(__AL, dest_reg, val));
             }
-            if (dump_ir == 1)
-                printf("    x%d := %d", dest_reg, ii->int_param1);
+            DUMP_IR("    x%d := %d", dest_reg, ii->int_param1);
             break;
         case OP_address_of:
             /* lookup address of a variable */
@@ -250,8 +240,7 @@ void code_generate()
                         error("Undefined identifier");
                 }
             }
-            if (dump_ir == 1)
-                printf("    x%d = &%s", dest_reg, ii->str_param1);
+            DUMP_IR("    x%d = &%s", dest_reg, ii->str_param1);
             break;
         case OP_read:
             /* read (dereference) memory address */
@@ -265,8 +254,7 @@ void code_generate()
             default:
                 error("Unsupported word size");
             }
-            if (dump_ir == 1)
-                printf("    x%d = *x%d (%d)", dest_reg, OP_reg, ii->int_param2);
+            DUMP_IR("    x%d = *x%d (%d)", dest_reg, OP_reg, ii->int_param2);
             break;
         case OP_write:
             /* write at memory address */
@@ -280,8 +268,7 @@ void code_generate()
             default:
                 error("Unsupported word size");
             }
-            if (dump_ir == 1)
-                printf("    *x%d = x%d (%d)", OP_reg, dest_reg, ii->int_param2);
+            DUMP_IR("    *x%d = x%d (%d)", OP_reg, dest_reg, ii->int_param2);
             break;
         case OP_jump: {
             /* unconditional jump to an IR-index */
@@ -291,8 +278,7 @@ void code_generate()
             ofs = jump_location - pc;
 
             emit(__b(__AL, ofs));
-            if (dump_ir == 1)
-                printf("    goto %d", ii->int_param1);
+            DUMP_IR("    goto %d", ii->int_param1);
         } break;
         case OP_return: {
             /* jump to function exit */
@@ -303,8 +289,7 @@ void code_generate()
             ofs = jump_location - pc;
 
             emit(__b(__AL, ofs));
-            if (dump_ir == 1)
-                printf("    return (from %s)", ii->str_param1);
+            DUMP_IR("    return (from %s)", ii->str_param1);
         } break;
         case OP_call: {
             /* function call */
@@ -322,9 +307,8 @@ void code_generate()
             emit(__bl(__AL, ofs));
             if (dest_reg != __r0)
                 emit(__mov_r(__AL, dest_reg, __r0));
-            if (dump_ir == 1)
-                printf("    x%d := %s() @ %d", dest_reg, ii->str_param1,
-                       fn->entry_point);
+            DUMP_IR("    x%d := %s() @ %d", dest_reg, ii->str_param1,
+                    fn->entry_point);
         } break;
         case OP_indirect:
             /* indirect call with function pointer.
@@ -333,22 +317,19 @@ void code_generate()
             emit(__blx(__AL, OP_reg));
             if (dest_reg != __r0)
                 emit(__mov_r(__AL, dest_reg, __r0));
-            if (dump_ir == 1)
-                printf("    x%d := x%d()", dest_reg, OP_reg);
+            DUMP_IR("    x%d := x%d()", dest_reg, OP_reg);
             break;
         case OP_push:
             /* 16 aligned although we only need 4 */
             emit(__add_i(__AL, __sp, __sp, -16));
             emit(__sw(__AL, dest_reg, __sp, 0));
-            if (dump_ir == 1)
-                printf("    push x%d", dest_reg);
+            DUMP_IR("    push x%d", dest_reg);
             break;
         case OP_pop:
             emit(__lw(__AL, dest_reg, __sp, 0));
             /* 16 aligned although we only need 4 */
             emit(__add_i(__AL, __sp, __sp, 16));
-            if (dump_ir == 1)
-                printf("    pop x%d", dest_reg);
+            DUMP_IR("    pop x%d", dest_reg);
             break;
         case OP_func_exit:
             /* restore previous frame */
@@ -357,42 +338,35 @@ void code_generate()
             emit(__lw(__AL, __r11, __sp, -4));
             emit(__mov_r(__AL, __pc, __lr));
             fn = NULL;
-            if (dump_ir == 1)
-                printf("    exit %s", ii->str_param1);
+            DUMP_IR("    exit %s", ii->str_param1);
             break;
         case OP_add:
             emit(__add_r(__AL, dest_reg, dest_reg, OP_reg));
 
-            if (dump_ir == 1)
-                printf("    x%d += x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d += x%d", dest_reg, OP_reg);
             break;
         case OP_sub:
             emit(__sub_r(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d -= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d -= x%d", dest_reg, OP_reg);
             break;
         case OP_mul:
             emit(__mul(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d *= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d *= x%d", dest_reg, OP_reg);
             break;
         case OP_div:
             emit(__div(__AL, dest_reg, OP_reg, dest_reg));
-            if (dump_ir == 1)
-                printf("    x%d /= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d /= x%d", dest_reg, OP_reg);
             break;
         case OP_mod:
             emit(__div(__AL, OP_reg + 1, OP_reg, dest_reg));
             emit(__mul(__AL, OP_reg, OP_reg, OP_reg + 1));
             emit(__sub_r(__AL, dest_reg, dest_reg, OP_reg));
             /* TODO: support percent-sign character (%) in format string */
-            if (dump_ir == 1)
-                printf("    x%d = x%d mod x%d", dest_reg, dest_reg, OP_reg);
+            DUMP_IR("    x%d = x%d mod x%d", dest_reg, dest_reg, OP_reg);
             break;
         case OP_negate:
             emit(__rsb_i(__AL, dest_reg, 0, dest_reg));
-            if (dump_ir == 1)
-                printf("    -x%d", dest_reg);
+            DUMP_IR("    -x%d", dest_reg);
             break;
         case OP_label:
             if (ii->str_param1)
@@ -400,8 +374,7 @@ void code_generate()
                 if (strlen(ii->str_param1) > 0)
                     elf_add_symbol(ii->str_param1, strlen(ii->str_param1),
                                    code_start + pc);
-            if (dump_ir == 1)
-                printf("%4d:", i);
+            DUMP_IR("%4d:", i);
             break;
         case OP_eq:
         case OP_neq:
@@ -414,79 +387,54 @@ void code_generate()
             emit(__zero(dest_reg));
             emit(__mov_i(arm_get_cond(op), dest_reg, 1));
 
-            if (dump_ir == 1) {
-                switch (op) {
-                case OP_eq:
-                    printf("    x%d == x%d ?", dest_reg, OP_reg);
-                    break;
-                case OP_neq:
-                    printf("    x%d != x%d ?", dest_reg, OP_reg);
-                    break;
-                case OP_lt:
-                    printf("    x%d < x%d ?", dest_reg, OP_reg);
-                    break;
-                case OP_geq:
-                    printf("    x%d >= x%d ?", dest_reg, OP_reg);
-                    break;
-                case OP_gt:
-                    printf("    x%d > x%d ?", dest_reg, OP_reg);
-                    break;
-                case OP_leq:
-                    printf("    x%d <= x%d ?", dest_reg, OP_reg);
-                    break;
-                default:
-                    break;
-                }
-            }
+            DUMP_IR(op == OP_eq    ? "    x%d == x%d ?"
+                    : op == OP_neq ? "    x%d != x%d ?"
+                    : op == OP_lt  ? "    x%d < x%d ?"
+                    : op == OP_geq ? "    x%d >= x%d ?"
+                    : op == OP_gt  ? "    x%d > x%d ?"
+                    : op == OP_leq ? "    x%d <= x%d ?"
+                                   : "    x%d ?? x%d ?",
+                    dest_reg, OP_reg);
             break;
         case OP_log_and:
             /* we assume both have to be 1, they can not be just nonzero */
             emit(__and_r(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d &&= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d &&= x%d", dest_reg, OP_reg);
             break;
         case OP_log_or:
             emit(__or_r(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d ||= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d ||= x%d", dest_reg, OP_reg);
             break;
         case OP_bit_and:
             emit(__and_r(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d &= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d &= x%d", dest_reg, OP_reg);
             break;
         case OP_bit_or:
             emit(__or_r(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d |= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d |= x%d", dest_reg, OP_reg);
             break;
         case OP_bit_xor:
             emit(__eor_r(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d ^= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d ^= x%d", dest_reg, OP_reg);
             break;
         case OP_bit_not:
             emit(__mvn_r(__AL, dest_reg, dest_reg));
-            if (dump_ir == 1)
-                printf("    x%d ~= x%d", dest_reg, dest_reg);
+            DUMP_IR("    x%d ~= x%d", dest_reg, dest_reg);
             break;
         case OP_lshift:
             emit(__sll(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d <<= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d <<= x%d", dest_reg, OP_reg);
             break;
         case OP_rshift:
             emit(__srl(__AL, dest_reg, dest_reg, OP_reg));
-            if (dump_ir == 1)
-                printf("    x%d >>= x%d", dest_reg, OP_reg);
+            DUMP_IR("    x%d >>= x%d", dest_reg, OP_reg);
             break;
         case OP_log_not:
             /* 1 if zero, 0 if nonzero */
             emit(__teq(dest_reg));
             emit(__mov_i(__NE, dest_reg, 0));
             emit(__mov_i(__EQ, dest_reg, 1));
-            if (dump_ir == 1)
-                printf("    !x%d", dest_reg);
+            DUMP_IR("    !x%d", dest_reg);
             break;
         case OP_jz:
         case OP_jnz: {
@@ -499,12 +447,10 @@ void code_generate()
             emit(__teq(dest_reg));
             if (op == OP_jz) {
                 emit(__b(__EQ, ofs));
-                if (dump_ir == 1)
-                    printf("    if false then goto %d", ii->int_param1);
+                DUMP_IR("    if false then goto %d", ii->int_param1);
             } else {
                 emit(__b(__NE, ofs));
-                if (dump_ir == 1)
-                    printf("    if true then goto %d", ii->int_param1);
+                DUMP_IR("    if true then goto %d", ii->int_param1);
             }
         } break;
         case OP_block_start:
@@ -514,8 +460,7 @@ void code_generate()
                 emit(__add_i(__AL, __sp, __sp, -blk->locals_size));
                 stack_size += blk->locals_size;
             }
-            if (dump_ir == 1)
-                printf("    {");
+            DUMP_IR("    {");
             _c_block_level++;
             break;
         case OP_block_end:
@@ -527,8 +472,7 @@ void code_generate()
             }
             /* blk is current block */
             blk = blk->parent;
-            if (dump_ir == 1)
-                printf("}");
+            DUMP_IR("}");
             _c_block_level--;
             break;
         case OP_func_extry: {
@@ -551,14 +495,12 @@ void code_generate()
             for (pn = 0; pn < fn->num_params; pn++) {
                 emit(__sw(__AL, __r0 + pn, __r11, -fn->param_defs[pn].offset));
             }
-            if (dump_ir == 1)
-                printf("%s:", ii->str_param1);
+            DUMP_IR("%s:", ii->str_param1);
         } break;
         case OP_start:
             emit(__lw(__AL, __r0, __sp, 0));    /* argc */
             emit(__add_i(__AL, __r1, __sp, 4)); /* argv */
-            if (dump_ir == 1)
-                printf("    start");
+            DUMP_IR("    start");
             break;
         case OP_syscall:
             /* Linux Arm/EABI syscalls are invoked using a software interrupt.
@@ -571,21 +513,18 @@ void code_generate()
             emit(__mov_r(__AL, __r1, __r2));
             emit(__mov_r(__AL, __r2, __r3));
             emit(__svc());
-            if (dump_ir == 1)
-                printf("    syscall");
+            DUMP_IR("    syscall");
             break;
         case OP_exit:
             /* syscall for 'exit' */
             emit(__mov_r(__AL, __r0, OP_reg));
             emit(__mov_i(__AL, __r7, 1));
             emit(__svc());
-            if (dump_ir == 1)
-                printf("    exit");
+            DUMP_IR("    exit");
             break;
         default:
             error("Unsupported IR opcode");
         }
-        if (dump_ir == 1)
-            printf("\n");
+        DUMP_IR("\n");
     }
 }

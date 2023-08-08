@@ -22,23 +22,25 @@ deps := $(OBJS:%.o=%.o.d)
 TESTS := $(wildcard tests/*.c)
 TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
 
+ARCH := arm
+DEBUG :=
+
 all: config bootstrap
 
-# set ARM by default
-ifeq ($(strip $(ARCH)),riscv)
-ARCH = riscv
-else
-ARCH = arm
+ifeq (,$(filter $(ARCH),arm riscv))
+    $(error Support ARM and RISC-V only. Select the target with "ARCH=arm" or "ARCH=riscv")
 endif
 
 ifneq ("$(wildcard $(PWD)/config)","")
-TARGET_EXEC := $($(shell head -1 config | sed 's/.*: \([^ ]*\).*/\1/')_EXEC)
+    TARGET_EXEC := $($(shell head -1 config | sed 's/.*: \([^ ]*\).*/\1/')_EXEC)
 endif
+
 export TARGET_EXEC
 
 config:
 	$(Q)ln -s $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
 	$(call $(ARCH)-specific-defs) > $@
+	$(if $(DEBUG),@echo "$(DEBUG_DEF)" >> $@)
 	$(VECHO) "Target machine code switch to %s\n" $(ARCH)
 
 $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
