@@ -3,6 +3,9 @@
 block_t *BLOCKS;
 int blocks_idx = 0;
 
+macro_t *MACROS;
+int macros_idx = 0;
+
 func_t *FUNCS;
 int funcs_idx = 0;
 
@@ -126,12 +129,13 @@ ir_instr_t *add_instr(opcode_t op)
     return ii;
 }
 
-block_t *add_block(block_t *parent, func_t *func)
+block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
 {
     block_t *blk = &BLOCKS[blocks_idx];
     blk->index = blocks_idx++;
     blk->parent = parent;
     blk->func = func;
+    blk->macro = macro;
     blk->next_local = 0;
     return blk;
 }
@@ -150,6 +154,32 @@ char *find_alias(char alias[])
         if (!strcmp(alias, ALIASES[i].alias))
             return ALIASES[i].value;
     return NULL;
+}
+
+macro_t *find_macro(char *name)
+{
+    int i;
+    for (i = 0; i < macros_idx; i++)
+        if (!strcmp(name, MACROS[i].name))
+            return &MACROS[i];
+    return NULL;
+}
+
+void error(char *msg);
+int find_macro_param_src_idx(char *name, block_t *parent)
+{
+    int i;
+    macro_t *macro = parent->macro;
+
+    if (!parent)
+        error("The macro expansion is not supported in the global scope");
+    if (!parent->macro)
+        return 0;
+
+    for (i = 0; i < macro->num_param_defs; i++)
+        if (!strcmp(macro->param_defs[i].var_name, name))
+            return macro->params[i];
+    return 0;
 }
 
 func_t *add_func(char *name)
@@ -277,8 +307,9 @@ void global_init()
     elf_code_start = ELF_START + elf_header_len;
 
     BLOCKS = malloc(MAX_BLOCKS * sizeof(block_t));
+    MACROS = malloc(MAX_ALIASES * sizeof(macro_t));
     FUNCS = malloc(MAX_FUNCS * sizeof(func_t));
-    FUNC_TRIES = malloc(MAX_FUNCS * sizeof(trie_t));
+    FUNC_TRIES = malloc(MAX_FUNC_TRIES * sizeof(trie_t));
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
     IR = malloc(MAX_IR_INSTR * sizeof(ir_instr_t));
     SOURCE = malloc(MAX_SOURCE);

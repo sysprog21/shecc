@@ -2,7 +2,20 @@
 
 int is_whitespace(char c)
 {
-    return (c == ' ' || c == '\r' || c == '\n' || c == '\t');
+    return (c == ' ' || c == '\t');
+}
+
+char peek_char(int offset);
+
+/* is it backslash-newline? */
+int is_linebreak(char c)
+{
+    return c == '\\' && peek_char(1) == '\n';
+}
+
+int is_newline(char c)
+{
+    return (c == '\r' || c == '\n');
 }
 
 /* is it alphabet, number or '_'? */
@@ -111,13 +124,30 @@ typedef enum {
 char token_str[MAX_TOKEN_LEN];
 token_t next_token;
 char next_char;
+int skip_newline = 1;
 
 int preproc_match;
+/*
+ * Point to the first character after where the macro has been called. It is
+ * needed when returning from the macro body.
+ */
+int macro_return_idx;
 
 void skip_whitespace()
 {
-    while (is_whitespace(next_char))
-        next_char = SOURCE[++source_idx];
+    while (1) {
+        if (is_linebreak(next_char)) {
+            source_idx += 2;
+            next_char = SOURCE[source_idx];
+            continue;
+        }
+        if (is_whitespace(next_char) ||
+            (skip_newline && is_newline(next_char))) {
+            next_char = SOURCE[++source_idx];
+            continue;
+        }
+        break;
+    }
 }
 
 char read_char(int is_skip_space)
@@ -639,8 +669,34 @@ token_t get_next_token()
 
         return T_identifier;
     }
+
+    /*
+     * This only happens when parsing a macro. Move to the token after the
+     * macro definition or return to where the macro has been called.
+     */
+    if (next_char == '\n') {
+        if (macro_return_idx) {
+            source_idx = macro_return_idx;
+            next_char = SOURCE[source_idx];
+        } else
+            next_char = read_char(1);
+        return get_next_token();
+    }
+
     error("Unrecognized input");
     return T_eof;
+}
+
+/* Skip the content. We only need the index where the macro body begins. */
+void skip_macro_body()
+{
+    skip_newline = 0;
+
+    while (!is_newline(next_char))
+        next_token = get_next_token();
+
+    skip_newline = 1;
+    next_token = get_next_token();
 }
 
 int lex_accept(token_t token)
@@ -1002,6 +1058,7 @@ void read_expr_operand(int param_no, block_t *parent)
         ii->int_param2 = lvalue.size;
     } else if (lex_accept(T_open_bracket)) {
         read_expr(param_no, parent);
+        read_ternary_operation(param_no, parent);
         lex_expect(T_close_bracket);
 
         if (isneg) {
@@ -1029,6 +1086,8 @@ void read_expr_operand(int param_no, block_t *parent)
         func_t *fn;
         var_t *var;
         constant_t *con;
+        int macro_param_idx;
+        macro_t *mac;
 
         if (lex_accept(T_increment))
             prefix_op = OP_add;
@@ -1041,8 +1100,69 @@ void read_expr_operand(int param_no, block_t *parent)
         con = find_constant(token);
         var = find_var(token, parent);
         fn = find_func(token);
+        macro_param_idx = find_macro_param_src_idx(token, parent);
+        mac = find_macro(token);
 
-        if (con) {
+        if (!strcmp(token, "__VA_ARGS__")) {
+            /* `source_idx` has pointed at the character after __VA_ARGS__ */
+            int i, remainder, t = source_idx;
+            macro_t *macro = parent->macro;
+
+            if (!macro)
+                error("The '__VA_ARGS__' identifier can only be used in macro");
+            if (!macro->is_variadic)
+                error("Unexpected identifier '__VA_ARGS__'");
+
+            remainder = macro->num_params - macro->num_param_defs;
+            for (i = 0; i < remainder; i++) {
+                source_idx = macro->params[macro->num_params - remainder + i];
+                next_char = SOURCE[source_idx];
+                next_token = get_next_token();
+                read_expr(param_no + i, parent);
+            }
+            source_idx = t;
+            next_char = SOURCE[source_idx];
+            next_token = get_next_token();
+        } else if (mac) {
+            if (parent->macro)
+                error("Nested macro is not yet supported");
+
+            parent->macro = mac;
+            mac->num_params = 0;
+            lex_expect(T_identifier);
+
+            /* `source_idx` has pointed at the first parameter */
+            while (!lex_peek(T_close_bracket, NULL)) {
+                mac->params[mac->num_params++] = source_idx;
+                do {
+                    next_token = get_next_token();
+                } while (next_token != T_comma &&
+                         next_token != T_close_bracket);
+            }
+            /* move `source_idx` to the macro body */
+            macro_return_idx = source_idx;
+            source_idx = mac->start_source_idx;
+            next_char = SOURCE[source_idx];
+            lex_expect(T_close_bracket);
+
+            skip_newline = 0;
+            read_expr(param_no, parent);
+
+            /* cleanup */
+            skip_newline = 1;
+            parent->macro = NULL;
+            macro_return_idx = 0;
+        } else if (macro_param_idx) {
+            /* "expand" the argument from where it comes from */
+            int t = source_idx;
+            source_idx = macro_param_idx;
+            next_char = SOURCE[source_idx];
+            next_token = get_next_token();
+            read_expr(param_no, parent);
+            source_idx = t;
+            next_char = SOURCE[source_idx];
+            next_token = get_next_token();
+        } else if (con) {
             int value = con->value;
             ir_instr_t *ii = add_instr(OP_load_constant);
             ii->param_no = param_no;
@@ -1813,11 +1933,12 @@ int read_global_assignment(char *token)
 int break_exit_ir_index[MAX_NESTING];
 int conti_jump_ir_index[MAX_NESTING];
 
-void read_code_block(func_t *func, block_t *parent);
+void read_code_block(func_t *func, macro_t *macro, block_t *parent);
 
 void read_body_statement(block_t *parent)
 {
     char token[MAX_ID_LEN];
+    macro_t *mac;
     func_t *fn;
     type_t *type;
     var_t *var;
@@ -1830,7 +1951,7 @@ void read_body_statement(block_t *parent)
      */
 
     if (lex_peek(T_open_curly, NULL)) {
-        read_code_block(parent->func, parent);
+        read_code_block(parent->func, parent->macro, parent);
         return;
     }
 
@@ -2175,6 +2296,38 @@ void read_body_statement(block_t *parent)
         return;
     }
 
+    mac = find_macro(token);
+    if (mac) {
+        if (parent->macro)
+            error("Nested macro is not yet supported");
+
+        parent->macro = mac;
+        mac->num_params = 0;
+        lex_expect(T_identifier);
+
+        /* `source_idx` has pointed at the first parameter */
+        while (!lex_peek(T_close_bracket, NULL)) {
+            mac->params[mac->num_params++] = source_idx;
+            do {
+                next_token = get_next_token();
+            } while (next_token != T_comma && next_token != T_close_bracket);
+        }
+        /* move `source_idx` to the macro body */
+        macro_return_idx = source_idx;
+        source_idx = mac->start_source_idx;
+        next_char = SOURCE[source_idx];
+        lex_expect(T_close_bracket);
+
+        skip_newline = 0;
+        read_body_statement(parent);
+
+        /* cleanup */
+        skip_newline = 1;
+        parent->macro = NULL;
+        macro_return_idx = 0;
+        return;
+    }
+
     /* is a function call? */
     fn = find_func(token);
     if (fn) {
@@ -2192,9 +2345,9 @@ void read_body_statement(block_t *parent)
     error("Unrecognized statement token");
 }
 
-void read_code_block(func_t *func, block_t *parent)
+void read_code_block(func_t *func, macro_t *macro, block_t *parent)
 {
-    block_t *blk = add_block(parent, func);
+    block_t *blk = add_block(parent, func, macro);
     ir_instr_t *ii = add_instr(OP_block_start);
     ii->int_param1 = blk->index;
     lex_expect(T_open_curly);
@@ -2210,7 +2363,7 @@ void read_func_body(func_t *fdef)
 {
     ir_instr_t *ii;
 
-    read_code_block(fdef, NULL);
+    read_code_block(fdef, NULL, NULL);
 
     /* only add return when we have no return type, as otherwise there should
      * have been a return statement.
@@ -2290,6 +2443,22 @@ void read_global_statement()
         } else if (lex_peek(T_string, value)) {
             lex_expect(T_string);
             add_alias(alias, value);
+        } else if (lex_accept(T_open_bracket)) { /* function-like macro */
+            macro_t *macro = &MACROS[macros_idx++];
+            strcpy(macro->name, alias);
+
+            while (lex_peek(T_identifier, alias)) {
+                lex_expect(T_identifier);
+                strcpy(macro->param_defs[macro->num_param_defs++].var_name,
+                       alias);
+                lex_accept(T_comma);
+            }
+            if (lex_accept(T_elipsis))
+                macro->is_variadic = 1;
+
+            macro->start_source_idx = source_idx;
+            lex_expect(T_close_bracket);
+            skip_macro_body();
         }
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {
@@ -2373,8 +2542,8 @@ void parse_internal()
     type->base_type = TYPE_int;
     type->size = 4;
 
-    add_block(NULL, NULL);    /* global block */
-    elf_add_symbol("", 0, 0); /* undef symbol */
+    add_block(NULL, NULL, NULL); /* global block */
+    elf_add_symbol("", 0, 0);    /* undef symbol */
 
     /* architecture defines */
     add_alias(ARCH_PREDEFINED, "1");

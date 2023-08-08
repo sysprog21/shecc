@@ -1,7 +1,8 @@
 CC ?= gcc
 CFLAGS := -O -g \
 	-ansi -pedantic \
-	-Wall -Wextra
+	-Wall -Wextra \
+	-Wno-variadic-macros
 
 include mk/common.mk
 include mk/arm.mk
