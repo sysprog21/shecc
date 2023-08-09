@@ -102,7 +102,7 @@ int get_code_length(ir_instr_t *ii)
         return (blk->next_local > 0) ? 4 : 0;
     }
     case OP_syscall:
-        return 20;
+        return 32;
     case OP_eq:
     case OP_neq:
     case OP_lt:
@@ -536,6 +536,9 @@ void code_generate()
             emit(__addi(__a0, __a1, 0));
             emit(__addi(__a1, __a2, 0));
             emit(__addi(__a2, __a3, 0));
+            emit(__addi(__a3, __a4, 0));
+            emit(__addi(__a4, __a5, 0));
+            emit(__addi(__a5, __a6, 0));
             emit(__ecall());
             DUMP_IR("    syscall");
             break;

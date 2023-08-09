@@ -109,7 +109,7 @@ int get_code_length(ir_instr_t *ii)
     case OP_geq:
         return 12;
     case OP_syscall:
-        return 20;
+        return 32;
     case OP_func_exit:
         return 16;
     case OP_exit:
@@ -512,6 +512,9 @@ void code_generate()
             emit(__mov_r(__AL, __r0, __r1));
             emit(__mov_r(__AL, __r1, __r2));
             emit(__mov_r(__AL, __r2, __r3));
+            emit(__mov_r(__AL, __r3, __r4));
+            emit(__mov_r(__AL, __r4, __r5));
+            emit(__mov_r(__AL, __r5, __r6));
             emit(__svc());
             DUMP_IR("    syscall");
             break;
