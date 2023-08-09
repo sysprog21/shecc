@@ -49,11 +49,7 @@ int main(int argc, char *argv[])
 
     if (!in) {
         printf("Missing source file!\n");
-#if defined(DEBUG)
         printf("Usage: shecc [-o output] [--dump-ir] [--no-libc] <input.c>\n");
-#else
-        printf("Usage: shecc [-o output] [--no-libc] <input.c>\n");
-#endif
         return -1;
     }
 

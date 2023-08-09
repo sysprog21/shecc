@@ -63,11 +63,11 @@ the second stage bootstrapping would fail due to `qemu-arm` absence.
 
 Configure which backend you want, `shecc` supports ARMv7-A and RV32IM backend:
 ```
-$ make config [options]
+$ make config ARCH=arm
+# Target machine code switch to Arm
 
-# Options:
-    ARCH=arm,riscv          Choose the supported backend. arm is used by default.
-    DEBUG=0,1               Enable the debug build according to your needs. Disabled by default.
+$ make config ARCH=riscv
+# Target machine code switch to RISC-V
 ```
 
 Run `make` and you should see this:
@@ -89,7 +89,6 @@ Compiler options:
 - `-o` : output file name (default: out.elf)
 - `--no-libc` : Exclude embedded C library (default: embedded)
 - `--dump-ir` : Dump intermediate representation (IR)
-    * Only effecting in the debug mode.
 
 Example:
 ```shell
@@ -120,8 +119,6 @@ For resetting architecture configurations, use the command `make distclean`.
 Once the option `--dump-ir` is passed to `shecc`, the intermediate representation (IR)
 will be generated. Take the file `tests/fib.c` for example. It consists of a recursive
 Fibonacci sequence function.
-
-Make sure that you are in the debug mode, or you will not see these.
 ```c
 int fib(int n)
 {

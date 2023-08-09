@@ -107,6 +107,7 @@ int find_trie(trie_t *trie, char *name)
 }
 
 /* options */
+
 int dump_ir = 0;
 
 type_t *find_type(char *type_name)

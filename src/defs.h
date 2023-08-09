@@ -29,7 +29,6 @@
 #define ELF_START 0x10000
 #define PTR_SIZE 4
 
-#if defined(DEBUG)
 #define DUMP_IR(...)                            \
     do {                                        \
         int i;                                  \
@@ -42,9 +41,6 @@
                                                 \
         printf(__VA_ARGS__);                    \
     } while (0)
-#else
-#define DUMP_IR(...)
-#endif
 
 /* builtin types */
 typedef enum { TYPE_void = 0, TYPE_int, TYPE_char, TYPE_struct } base_type_t;

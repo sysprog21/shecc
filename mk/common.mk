@@ -16,8 +16,6 @@ else
     REDIR = >/dev/null
 endif
 
-DEBUG_DEF = \#define DEBUG
-
 # Test suite
 PASS_COLOR = \e[32;01m
 NO_COLOR = \e[0m
