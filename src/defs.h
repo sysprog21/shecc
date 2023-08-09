@@ -29,6 +29,19 @@
 #define ELF_START 0x10000
 #define PTR_SIZE 4
 
+#define DUMP_IR(...)                            \
+    do {                                        \
+        int i;                                  \
+        if (!dump_ir)                           \
+            break;                              \
+                                                \
+        printf("%#010x     ", code_start + pc); \
+        for (i = 0; i < _c_block_level; i++)    \
+            printf("    ");                     \
+                                                \
+        printf(__VA_ARGS__);                    \
+    } while (0)
+
 /* builtin types */
 typedef enum { TYPE_void = 0, TYPE_int, TYPE_char, TYPE_struct } base_type_t;
 

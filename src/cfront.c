@@ -690,8 +690,6 @@ token_t get_next_token()
 /* Skip the content. We only need the index where the macro body begins. */
 void skip_macro_body()
 {
-    skip_newline = 0;
-
     while (!is_newline(next_char))
         next_token = get_next_token();
 
@@ -2447,6 +2445,7 @@ void read_global_statement()
             macro_t *macro = &MACROS[macros_idx++];
             strcpy(macro->name, alias);
 
+            skip_newline = 0;
             while (lex_peek(T_identifier, alias)) {
                 lex_expect(T_identifier);
                 strcpy(macro->param_defs[macro->num_param_defs++].var_name,
@@ -2457,7 +2456,6 @@ void read_global_statement()
                 macro->is_variadic = 1;
 
             macro->start_source_idx = source_idx;
-            lex_expect(T_close_bracket);
             skip_macro_body();
         }
     } else if (lex_accept(T_typedef)) {
