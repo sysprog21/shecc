@@ -548,6 +548,5 @@ void code_generate()
         default:
             error("Unsupported IR op");
         }
-        DUMP_IR("\n");
     }
 }

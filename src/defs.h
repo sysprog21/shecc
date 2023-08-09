@@ -29,17 +29,18 @@
 #define ELF_START 0x10000
 #define PTR_SIZE 4
 
-#define DUMP_IR(...)                            \
-    do {                                        \
-        int i;                                  \
-        if (!dump_ir)                           \
-            break;                              \
-                                                \
-        printf("%#010x     ", code_start + pc); \
-        for (i = 0; i < _c_block_level; i++)    \
-            printf("    ");                     \
-                                                \
-        printf(__VA_ARGS__);                    \
+#define DUMP_IR(...)                                                 \
+    do {                                                             \
+        int dump_ir_i;                                               \
+        if (!dump_ir)                                                \
+            break;                                                   \
+                                                                     \
+        printf("%#010x     ", code_start + pc);                      \
+        for (dump_ir_i = 0; dump_ir_i < _c_block_level; dump_ir_i++) \
+            printf("    ");                                          \
+                                                                     \
+        printf(__VA_ARGS__);                                         \
+        printf("\n");                                                \
     } while (0)
 
 /* builtin types */
