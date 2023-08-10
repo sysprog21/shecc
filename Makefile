@@ -13,6 +13,7 @@ STAGE1 := shecc-stage1.elf
 STAGE2 := shecc-stage2.elf
 
 OUT ?= out
+ARCH ?= arm
 SRCDIR := $(shell find src -type d)
 LIBDIR := $(shell find lib -type d)
 
@@ -24,11 +25,8 @@ TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
 
 all: config bootstrap
 
-# set ARM by default
-ifeq ($(strip $(ARCH)),riscv)
-ARCH = riscv
-else
-ARCH = arm
+ifeq (,$(filter $(ARCH),arm riscv))
+$(error Support ARM and RISC-V only. Select the target with "ARCH=arm" or "ARCH=riscv")
 endif
 
 ifneq ("$(wildcard $(PWD)/config)","")
