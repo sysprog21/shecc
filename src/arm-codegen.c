@@ -528,6 +528,5 @@ void code_generate()
         default:
             error("Unsupported IR opcode");
         }
-        DUMP_IR("\n");
     }
 }
