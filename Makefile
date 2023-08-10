@@ -13,7 +13,7 @@ STAGE1 := shecc-stage1.elf
 STAGE2 := shecc-stage2.elf
 
 OUT ?= out
-ARCH := arm
+ARCH ?= arm
 SRCDIR := $(shell find src -type d)
 LIBDIR := $(shell find lib -type d)
 
