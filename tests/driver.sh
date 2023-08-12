@@ -387,6 +387,22 @@ int main()
 }
 EOF
 
+# #define ... #undef
+try_output 0 "1" << EOF
+#define A 1
+void log()
+{
+    printf("%d", A);
+}
+#undef A
+#define A 0
+int main()
+{
+    log();
+    return A;
+}
+EOF
+
 # format
 try_output 0 "2147483647" << EOF
 int main() {
