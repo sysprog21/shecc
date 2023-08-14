@@ -108,6 +108,7 @@ typedef enum {
     T_for,
     T_do,
     T_define,
+    T_undef,
     T_include,
     T_typedef,
     T_enum,
@@ -127,6 +128,11 @@ char next_char;
 int skip_newline = 1;
 
 int preproc_match;
+/*
+ * Allows replacing identifiers with alias value if alias exists. This is
+ * disabled in certain cases, e.g. #undef.
+ */
+int preproc_aliasing = 1;
 /*
  * Point to the first character after where the macro has been called. It is
  * needed when returning from the macro body.
@@ -255,6 +261,10 @@ token_t get_next_token()
         if (!strcmp(token_str, "#define")) {
             skip_whitespace();
             return T_define;
+        }
+        if (!strcmp(token_str, "#undef")) {
+            skip_whitespace();
+            return T_undef;
         }
         if (!strcmp(token_str, "#if")) {
             preproc_match = 0;
@@ -660,11 +670,13 @@ token_t get_next_token()
         if (!strcmp(token_str, "continue"))
             return T_continue;
 
-        alias = find_alias(token_str);
-        if (alias) {
-            token_t t = is_numeric(alias) ? T_numeric : T_string;
-            strcpy(token_str, alias);
-            return t;
+        if (preproc_aliasing) {
+            alias = find_alias(token_str);
+            if (alias) {
+                token_t t = is_numeric(alias) ? T_numeric : T_string;
+                strcpy(token_str, alias);
+                return t;
+            }
         }
 
         return T_identifier;
@@ -2442,8 +2454,7 @@ void read_global_statement()
             lex_expect(T_string);
             add_alias(alias, value);
         } else if (lex_accept(T_open_bracket)) { /* function-like macro */
-            macro_t *macro = &MACROS[macros_idx++];
-            strcpy(macro->name, alias);
+            macro_t *macro = add_macro(alias);
 
             skip_newline = 0;
             while (lex_peek(T_identifier, alias)) {
@@ -2458,6 +2469,17 @@ void read_global_statement()
             macro->start_source_idx = source_idx;
             skip_macro_body();
         }
+    } else if (lex_peek(T_undef, token)) {
+        char alias[MAX_VAR_LEN];
+
+        preproc_aliasing = 0;
+        lex_expect(T_undef);
+        lex_peek(T_identifier, alias);
+        preproc_aliasing = 1;
+        lex_expect(T_identifier);
+
+        remove_alias(alias);
+        remove_macro(alias);
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {
             int val = 0;

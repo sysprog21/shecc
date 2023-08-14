@@ -140,6 +140,7 @@ typedef struct {
     int num_param_defs;
     int params[MAX_PARAMS];
     int num_params;
+    int disabled;
 } macro_t;
 
 /* function definition */
@@ -183,6 +184,7 @@ typedef struct {
 typedef struct {
     char alias[MAX_VAR_LEN];
     char value[MAX_VAR_LEN];
+    int disabled;
 } alias_t;
 
 /* constants for enums */

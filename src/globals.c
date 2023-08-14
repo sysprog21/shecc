@@ -145,24 +145,57 @@ void add_alias(char *alias, char *value)
     alias_t *al = &ALIASES[aliases_idx++];
     strcpy(al->alias, alias);
     strcpy(al->value, value);
+    al->disabled = 0;
 }
 
 char *find_alias(char alias[])
 {
     int i;
     for (i = 0; i < aliases_idx; i++)
-        if (!strcmp(alias, ALIASES[i].alias))
+        if (!ALIASES[i].disabled && !strcmp(alias, ALIASES[i].alias))
             return ALIASES[i].value;
     return NULL;
+}
+
+int remove_alias(char *alias)
+{
+    int i;
+    for (i = 0; i < aliases_idx; i++) {
+        if (!ALIASES[i].disabled && !strcmp(alias, ALIASES[i].alias)) {
+            ALIASES[i].disabled = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+macro_t *add_macro(char *name)
+{
+    macro_t *ma = &MACROS[macros_idx++];
+    strcpy(ma->name, name);
+    ma->disabled = 0;
+    return ma;
 }
 
 macro_t *find_macro(char *name)
 {
     int i;
     for (i = 0; i < macros_idx; i++)
-        if (!strcmp(name, MACROS[i].name))
+        if (!MACROS[i].disabled && !strcmp(name, MACROS[i].name))
             return &MACROS[i];
     return NULL;
+}
+
+int remove_macro(char *name)
+{
+    int i;
+    for (i = 0; i < macros_idx; i++) {
+        if (!MACROS[i].disabled && !strcmp(name, MACROS[i].name)) {
+            MACROS[i].disabled = 1;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 void error(char *msg);
