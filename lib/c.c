@@ -9,6 +9,8 @@
 #define __syscall_close 6
 #define __syscall_open 5
 #define __syscall_brk 45
+#define __syscall_mmap2 192
+#define __syscall_munmap 91
 
 #elif defined(__riscv)
 #define __syscall_exit 93
@@ -18,6 +20,8 @@
 #define __syscall_open 1024
 #define __syscall_openat 56
 #define __syscall_brk 214
+#define __syscall_mmap2 222
+#define __syscall_munmap 215
 
 #endif
 
@@ -436,80 +440,84 @@ int fputc(int c, FILE *stream)
     return 0;
 }
 
-/* Reference:
- *   https://danluu.com/malloc-tutorial/
- * FIXME: adopt lite_malloc from musl-libc
- *   https://git.musl-libc.org/cgit/musl/tree/src/malloc/lite_malloc.c
- */
+#define PAGESIZE 4096
 
-typedef struct block_meta {
+typedef struct chunk {
+    struct _chunk *next;
+    struct _chunk *prev;
     int size;
-    struct block_meta *next;
-    int free;
-} block_meta_t;
+    void *ptr;
+} chunk_t;
 
-block_meta_t *__malloc_global_base;
-block_meta_t *__malloc_global_last;
+chunk_t *head;
 
-block_meta_t *__malloc_request_space(int size)
+int align_up(int size)
 {
-    char *brk;
-    block_meta_t *block;
-    brk = __syscall(__syscall_brk, 0);
-    block = brk;
+    int mask = PAGESIZE - 1;
 
-    char *request =
-        __syscall(__syscall_brk, block + size + sizeof(block_meta_t));
-    if (request == -1)
-        return NULL;
-
-    if (__malloc_global_last)
-        __malloc_global_last->next = block;
-
-    block->size = size;
-    block->next = NULL;
-    block->free = 0;
-    return block;
+    return ((size - 1) | mask) + 1;
 }
 
 void *malloc(int size)
 {
-    block_meta_t *block;
-    if (size == 0)
+    if (size <= 0)
         return NULL;
-    if (!__malloc_global_base) {
-        block = __malloc_request_space(size);
-        if (!block)
-            return NULL;
-        __malloc_global_base = block;
-    } else {
-        block_meta_t *current = __malloc_global_base;
-        __malloc_global_last = __malloc_global_base;
-        while (current) {
-            /* TODO: support break in while loop */
-            if (current->free == 1 && current->size >= size)
-                return current + 1;
-            __malloc_global_last = current;
-            current = current->next;
-        }
-        block = __malloc_request_space(size);
-        if (!block)
-            return NULL;
+
+    int flags = 34; /* MAP_PRIVATE (0x02) | MAP_ANONYMOUS (0x20) */
+    int prot = 3;   /* PROT_READ (0x01) | PROT_WRITE (0x02) */
+
+    if (head == NULL) {
+        char *tmp = __syscall(__syscall_mmap2, 0, align_up(sizeof(chunk_t)),
+                              prot, flags, -1, 0);
+        head = tmp;
+        head->next = NULL;
+        head->prev = NULL;
+        head->ptr = NULL;
+        head->size = 0;
     }
-    return block + 1;
+
+    chunk_t *cur = head;
+
+    while (cur->next != NULL)
+        cur = cur->next;
+
+    chunk_t *new =
+        __syscall(__syscall_mmap2, NULL, align_up(sizeof(chunk_t) + size), prot,
+                  flags, -1, 0);
+    cur->next = new;
+    new->prev = cur;
+
+    cur = new;
+    cur->next = NULL;
+    cur->size = size;
+    cur->ptr = new + sizeof(chunk_t) - 4;
+    return cur->ptr;
 }
 
-/* Quoting the C standard, 7.20.3.2/2 from ISO-IEC 9899:
- * "If ptr is a null pointer, no action occurs."
- */
 void free(void *ptr)
 {
-    if (!ptr)
+    if (ptr == NULL)
         return;
 
-    /* TODO: merge several free memory blocks */
-    block_meta_t *block_ptr = ptr - sizeof(block_meta_t);
-    if (block_ptr->free == 1)
-        abort();
-    block_ptr->free = 1;
+    chunk_t *cur = head;
+
+    while (cur->ptr != ptr)
+        cur = cur->next;
+
+    chunk_t *prev;
+    if (cur->prev != NULL) {
+        prev = cur->prev;
+        prev->next = cur->next;
+    } else
+        head = cur->next;
+
+    chunk_t *next;
+    if (cur->next != NULL) {
+        next = cur->next;
+        next->prev = cur->prev;
+    } else
+        prev->next = NULL;
+
+    __syscall(__syscall_munmap, cur->ptr, cur->size);
+    __syscall(__syscall_munmap, cur, sizeof(chunk_t) - 4);
 }
