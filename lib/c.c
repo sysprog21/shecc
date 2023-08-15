@@ -8,7 +8,6 @@
 #define __syscall_write 4
 #define __syscall_close 6
 #define __syscall_open 5
-#define __syscall_brk 45
 #define __syscall_mmap2 192
 #define __syscall_munmap 91
 
@@ -19,7 +18,6 @@
 #define __syscall_close 57
 #define __syscall_open 1024
 #define __syscall_openat 56
-#define __syscall_brk 214
 #define __syscall_mmap2 222
 #define __syscall_munmap 215
 
@@ -440,23 +438,23 @@ int fputc(int c, FILE *stream)
     return 0;
 }
 
+/* Non-portable: Assume page size is 4KiB */
 #define PAGESIZE 4096
 
 typedef struct chunk {
-    struct _chunk *next;
-    struct _chunk *prev;
+    struct chunk *next;
+    struct chunk *prev;
     int size;
     void *ptr;
 } chunk_t;
 
-chunk_t *head;
-
 int align_up(int size)
 {
     int mask = PAGESIZE - 1;
-
     return ((size - 1) | mask) + 1;
 }
+
+chunk_t *head;
 
 void *malloc(int size)
 {
