@@ -109,6 +109,7 @@ typedef enum {
     T_do,
     T_define,
     T_undef,
+    T_error,
     T_include,
     T_typedef,
     T_enum,
@@ -265,6 +266,10 @@ token_t get_next_token()
         if (!strcmp(token_str, "#undef")) {
             skip_whitespace();
             return T_undef;
+        }
+        if (!strcmp(token_str, "#error")) {
+            skip_whitespace();
+            return T_error;
         }
         if (!strcmp(token_str, "#if")) {
             preproc_match = 0;
@@ -2480,6 +2485,16 @@ void read_global_statement()
 
         remove_alias(alias);
         remove_macro(alias);
+    } else if (lex_peek(T_error, NULL)) {
+        int i = 0;
+        char error_diagnostic[MAX_LINE_LEN];
+
+        do {
+            error_diagnostic[i++] = next_char;
+        } while (read_char(0) != '\n');
+        error_diagnostic[i] = 0;
+
+        error(error_diagnostic);
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {
             int val = 0;
