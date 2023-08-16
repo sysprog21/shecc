@@ -2485,7 +2485,7 @@ void read_global_statement()
 
         remove_alias(alias);
         remove_macro(alias);
-    } else if (lex_peek(T_error, token)) {
+    } else if (lex_peek(T_error, NULL)) {
         int i = 0;
         char error_diagnostic[MAX_LINE_LEN];
 
