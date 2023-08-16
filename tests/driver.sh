@@ -403,6 +403,15 @@ int main()
 }
 EOF
 
+# #error ...
+try_output 1 "" << EOF
+#error This is an error directive
+int main()
+{
+    return 0;
+}
+EOF
+
 # format
 try_output 0 "2147483647" << EOF
 int main() {
