@@ -357,6 +357,26 @@ void global_init()
     elf_section = malloc(MAX_SECTION);
 }
 
+void global_release()
+{
+    free(BLOCKS);
+    free(MACROS);
+    free(FUNCS);
+    free(FUNC_TRIES);
+    free(TYPES);
+    free(IR);
+    free(SOURCE);
+    free(ALIASES);
+    free(CONSTANTS);
+
+    free(elf_code);
+    free(elf_data);
+    free(elf_header);
+    free(elf_symtab);
+    free(elf_strtab);
+    free(elf_section);
+}
+
 void error(char *msg)
 {
     /* TODO: figure out the corresponding C source and report line number */

@@ -365,8 +365,11 @@ char *memcpy(char *dest, char *src, int count)
     return dest;
 }
 
+int free_all();
+
 void exit(int exit_code)
 {
+    free_all();
     __syscall(__syscall_exit, exit_code);
 }
 
@@ -455,6 +458,7 @@ int align_up(int size)
 }
 
 chunk_t *head;
+chunk_t *freelist_head;
 
 void *malloc(int size)
 {
@@ -464,9 +468,9 @@ void *malloc(int size)
     int flags = 34; /* MAP_PRIVATE (0x02) | MAP_ANONYMOUS (0x20) */
     int prot = 3;   /* PROT_READ (0x01) | PROT_WRITE (0x02) */
 
-    if (head == NULL) {
-        char *tmp = __syscall(__syscall_mmap2, 0, align_up(sizeof(chunk_t)),
-                              prot, flags, -1, 0);
+    if (!head) {
+        chunk_t *tmp = __syscall(__syscall_mmap2, NULL,
+                                 align_up(sizeof(chunk_t)), prot, flags, -1, 0);
         head = tmp;
         head->next = NULL;
         head->prev = NULL;
@@ -474,27 +478,125 @@ void *malloc(int size)
         head->size = 0;
     }
 
+    if (!freelist_head) {
+        chunk_t *tmp = __syscall(__syscall_mmap2, NULL,
+                                 align_up(sizeof(chunk_t)), prot, flags, -1, 0);
+        freelist_head = tmp;
+        freelist_head->next = NULL;
+        freelist_head->prev = NULL;
+        freelist_head->ptr = NULL;
+        freelist_head->size = -1;
+    }
+
     chunk_t *cur = head;
 
-    while (cur->next != NULL)
+    while (cur->next)
         cur = cur->next;
 
-    chunk_t *new =
-        __syscall(__syscall_mmap2, NULL, align_up(sizeof(chunk_t) + size), prot,
-                  flags, -1, 0);
-    cur->next = new;
-    new->prev = cur;
+    /* to search the best chunk */
+    chunk_t *best_fit_chunk = NULL;
+    chunk_t *allocated;
 
-    cur = new;
+    if (!freelist_head->next) {
+        /* If no more chunks in the free chunk list,
+           allocate best_fit_chunk as NULL. */
+        allocated = best_fit_chunk;
+    } else {
+        chunk_t *fh = freelist_head;
+        /* record the size of the chunk */
+        int bsize = 0;
+
+        while (fh->next) {
+            if (fh->size >= size && !best_fit_chunk) {
+                /* first time setting fh as best_fit_chunk */
+                best_fit_chunk = fh;
+                bsize = fh->size;
+            } else if (fh->size >= size && best_fit_chunk &&
+                       (fh->size < bsize)) {
+                /* If there is a smaller chunk available,
+                   replace it with this. */
+                best_fit_chunk = fh;
+                bsize = fh->size;
+            }
+            fh = fh->next;
+        }
+
+        /* a suitable chunk has been found */
+        if (best_fit_chunk) {
+            /* remove the chunk from the freelist */
+            if (best_fit_chunk->prev) {
+                chunk_t *tmp = best_fit_chunk->prev;
+                tmp->next = best_fit_chunk->next;
+            } else
+                freelist_head = best_fit_chunk->next;
+
+            if (best_fit_chunk->next) {
+                chunk_t *tmp = best_fit_chunk->next;
+                tmp->prev = best_fit_chunk->prev;
+            }
+        }
+        allocated = best_fit_chunk;
+    }
+
+    if (!allocated) {
+        allocated =
+            __syscall(__syscall_mmap2, NULL, align_up(sizeof(chunk_t) + size),
+                      prot, flags, -1, 0);
+        allocated->size = align_up(sizeof(chunk_t) + size);
+    }
+
+    cur->next = allocated;
+    allocated->prev = cur;
+
+    cur = allocated;
     cur->next = NULL;
-    cur->size = size;
-    cur->ptr = new + sizeof(chunk_t) - 4;
+    cur->size = allocated->size;
+    int offset = sizeof(chunk_t) - 4;
+    cur->ptr = cur + offset;
     return cur->ptr;
+}
+
+void rfree(void *ptr, int size)
+{
+    if (!ptr)
+        return;
+    __syscall(__syscall_munmap, ptr, size);
+}
+
+int free_all()
+{
+    if (!freelist_head && !head)
+        return 0;
+
+    chunk_t *cur = freelist_head;
+    chunk_t *rel;
+
+    /* release freelist */
+    while (cur->next) {
+        rel = cur;
+        cur = cur->next;
+        rel->next = NULL;
+        rel->prev = NULL;
+        rfree(rel, rel->size);
+    }
+
+    if (head->next) {
+        cur = head->next;
+        /* release chunks which not be free */
+        while (cur) {
+            rel = cur;
+            cur = cur->next;
+            rel->next = NULL;
+            rel->prev = NULL;
+            rfree(rel, rel->size);
+        }
+    }
+    return 0;
 }
 
 void free(void *ptr)
 {
-    if (ptr == NULL)
+    if (!ptr)
         return;
 
     chunk_t *cur = head;
@@ -503,19 +605,22 @@ void free(void *ptr)
         cur = cur->next;
 
     chunk_t *prev;
-    if (cur->prev != NULL) {
+    if (cur->prev) {
         prev = cur->prev;
         prev->next = cur->next;
     } else
         head = cur->next;
 
     chunk_t *next;
-    if (cur->next != NULL) {
+    if (cur->next) {
         next = cur->next;
         next->prev = cur->prev;
     } else
         prev->next = NULL;
 
-    __syscall(__syscall_munmap, cur->ptr, cur->size);
-    __syscall(__syscall_munmap, cur, sizeof(chunk_t) - 4);
+    /* Insert Head in freelist_head */
+    cur->next = freelist_head;
+    cur->prev = NULL;
+    freelist_head->prev = cur;
+    freelist_head = cur;
 }
