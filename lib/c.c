@@ -21,6 +21,8 @@
 #define __syscall_mmap2 222
 #define __syscall_munmap 215
 
+#else /* Only Arm32 and RV32 are supported */
+#error "Unsupported architecture"
 #endif
 
 #define INT_BUF_LEN 16
