@@ -69,5 +69,8 @@ int main(int argc, char *argv[])
     /* output code in ELF */
     elf_generate(out);
 
-    return 0;
+    /* release allocated objects */
+    global_release();
+
+    exit(0);
 }
