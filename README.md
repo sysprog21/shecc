@@ -29,7 +29,8 @@ syntax:
     - e.g. `int i = [expr]`
 * non-nested variadic macros with `__VA_ARGS__` identifier
 
-The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3.
+The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3,
+and also supports RISC-V 32-bit architecture, verified with QEMU.
 
 ## Bootstrapping
 
