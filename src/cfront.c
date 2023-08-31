@@ -981,7 +981,7 @@ void read_indirect_call(int param_no, block_t *parent)
 {
     ir_instr_t *ii;
 
-    /* preserve existing paremeters */
+    /* preserve existing parameters */
     int pn;
     for (pn = 0; pn < param_no; pn++) {
         ii = add_instr(OP_push);
@@ -2280,7 +2280,7 @@ void read_body_statement(block_t *parent)
             ii->param_no = 0;
             ii->str_param1 = var->var_name;
 
-            /* store value at specifc address, but need to know the type/size */
+            /* store value at specific address, but need to know the type/size */
             ii = add_instr(OP_write);
             ii->param_no = 1;
             ii->int_param1 = 0;
