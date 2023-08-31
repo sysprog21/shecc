@@ -493,7 +493,7 @@ void code_generate()
             _c_block_level++;
             break;
         case OP_block_end:
-            blk = &BLOCKS[ii->int_param1]; /* should not be necessarry */
+            blk = &BLOCKS[ii->int_param1]; /* should not be necessary */
             if (blk->next_local > 0) {
                 /* remove stack space for locals */
                 emit(__addi(__sp, __sp, blk->locals_size));
