@@ -2280,7 +2280,8 @@ void read_body_statement(block_t *parent)
             ii->param_no = 0;
             ii->str_param1 = var->var_name;
 
-            /* store value at specific address, but need to know the type/size */
+            /* store value at specific address, but need to know the type/size
+             */
             ii = add_instr(OP_write);
             ii->param_no = 1;
             ii->int_param1 = 0;
