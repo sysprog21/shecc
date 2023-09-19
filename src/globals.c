@@ -6,8 +6,9 @@ int blocks_idx = 0;
 macro_t *MACROS;
 int macros_idx = 0;
 
+/* the first element is reserved for global scope */
 func_t *FUNCS;
-int funcs_idx = 0;
+int funcs_idx = 1;
 
 /*
  * FUNC_TRIES is used to improve the performance of the find_func function.
@@ -22,8 +23,19 @@ int func_tries_idx = 1;
 type_t *TYPES;
 int types_idx = 0;
 
-ir_instr_t *IR;
-int ir_idx = 0;
+ph1_ir_t *GLOBAL_IR;
+int global_ir_idx = 0;
+
+ph1_ir_t *PH1_IR;
+int ph1_ir_idx = 0;
+
+ph2_ir_t *PH2_IR;
+int ph2_ir_idx = 0;
+
+label_lut_t *LABEL_LUT;
+int label_lut_idx = 0;
+
+regfile_t REG[REG_CNT];
 
 alias_t *ALIASES;
 int aliases_idx = 0;
@@ -53,8 +65,8 @@ char *elf_section;
  * @trie: A pointer to the trie where the name will be inserted.
  * @name: The name to be inserted into the trie.
  * @funcs_index: The index of the pointer to the func_t. The index is
- *               recorded in a 1-indexed format, so it may need to be shifted if
- *               necessary.
+ *               recorded in a 1-indexed format. Because the first element of
+ *               `FUNCS` has been reserved, there's no need to shift it.
  * Return: The index of the pointer to the func_t.
  *
  * If the function has been inserted, the return value is the index of the
@@ -119,14 +131,48 @@ type_t *find_type(char *type_name)
     return NULL;
 }
 
-ir_instr_t *add_instr(opcode_t op)
+ph1_ir_t *add_global_ir(opcode_t op)
 {
-    ir_instr_t *ii = &IR[ir_idx];
-    ii->op = op;
-    ii->op_len = 0;
-    ii->str_param1 = 0;
-    ii->ir_index = ir_idx++;
-    return ii;
+    ph1_ir_t *ir = &GLOBAL_IR[global_ir_idx++];
+    ir->op = op;
+    return ir;
+}
+
+ph1_ir_t *add_ph1_ir(opcode_t op)
+{
+    ph1_ir_t *ph1_ir = &PH1_IR[ph1_ir_idx++];
+    ph1_ir->op = op;
+    return ph1_ir;
+}
+
+ph2_ir_t *add_ph2_ir(opcode_t op)
+{
+    ph2_ir_t *ph2_ir = &PH2_IR[ph2_ir_idx++];
+    ph2_ir->op = op;
+    return ph2_ir;
+}
+
+void set_var_liveout(var_t *var, int end)
+{
+    if (var->liveness >= end)
+        return;
+    var->liveness = end;
+}
+
+void add_label(char *name, int offset)
+{
+    label_lut_t *lut = &LABEL_LUT[label_lut_idx++];
+    strcpy(lut->name, name);
+    lut->offset = offset;
+}
+
+int find_label_offset(char name[])
+{
+    int i;
+    for (i = 0; i < label_lut_idx; i++)
+        if (!strcmp(LABEL_LUT[i].name, name))
+            return LABEL_LUT[i].offset;
+    return -1;
 }
 
 block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
@@ -218,14 +264,13 @@ int find_macro_param_src_idx(char *name, block_t *parent)
 func_t *add_func(char *name)
 {
     func_t *fn;
-    int index = insert_trie(
-        FUNC_TRIES, name,
-        funcs_idx + 1); /* The record index in the trie must be a 1-index */
-    if (index == funcs_idx + 1) {
+    int index = insert_trie(FUNC_TRIES, name, funcs_idx);
+    if (index == funcs_idx) {
         fn = &FUNCS[funcs_idx++];
         strcpy(fn->return_def.var_name, name);
     }
-    fn = &FUNCS[index - 1];
+    fn = &FUNCS[index];
+    fn->stack_size = 4; /*starting point of stack */
     return fn;
 }
 
@@ -261,8 +306,7 @@ func_t *find_func(char func_name[])
 {
     int index = find_trie(FUNC_TRIES, func_name);
     if (index)
-        return &FUNCS[index - 1]; /* As the recorded index is a positive
-                                     integer, shift it to a 0-index. */
+        return &FUNCS[index];
     return NULL;
 }
 
@@ -344,7 +388,10 @@ void global_init()
     FUNCS = malloc(MAX_FUNCS * sizeof(func_t));
     FUNC_TRIES = malloc(MAX_FUNC_TRIES * sizeof(trie_t));
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
-    IR = malloc(MAX_IR_INSTR * sizeof(ir_instr_t));
+    GLOBAL_IR = malloc(MAX_GLOBAL_IR * sizeof(ph1_ir_t));
+    PH1_IR = malloc(MAX_IR_INSTR * sizeof(ph1_ir_t));
+    PH2_IR = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t));
+    LABEL_LUT = malloc(MAX_LABEL * sizeof(label_lut_t));
     SOURCE = malloc(MAX_SOURCE);
     ALIASES = malloc(MAX_ALIASES * sizeof(alias_t));
     CONSTANTS = malloc(MAX_CONSTANTS * sizeof(constant_t));
@@ -355,6 +402,9 @@ void global_init()
     elf_symtab = malloc(MAX_SYMTAB);
     elf_strtab = malloc(MAX_STRTAB);
     elf_section = malloc(MAX_SECTION);
+
+    /* set starting point of global stack manually */
+    FUNCS[0].stack_size = 4;
 }
 
 void global_release()
@@ -364,7 +414,10 @@ void global_release()
     free(FUNCS);
     free(FUNC_TRIES);
     free(TYPES);
-    free(IR);
+    free(GLOBAL_IR);
+    free(PH1_IR);
+    free(PH2_IR);
+    free(LABEL_LUT);
     free(SOURCE);
     free(ALIASES);
     free(CONSTANTS);
@@ -380,7 +433,226 @@ void global_release()
 void error(char *msg)
 {
     /* TODO: figure out the corresponding C source and report line number */
-    printf("Error %s at source location %d, IR index %d\n", msg, source_idx,
-           ir_idx);
+    printf("Error %s at source location %d\n", msg, source_idx);
     abort();
+}
+
+void print_indent(int indent)
+{
+    int i;
+    for (i = 0; i < indent; i++)
+        printf("\t");
+}
+
+void dump_ph1_ir()
+{
+    int indent = 0;
+    ph1_ir_t *ph1_ir;
+    func_t *fn;
+    int i, j, k;
+    char rd[MAX_VAR_LEN], op1[MAX_VAR_LEN], op2[MAX_VAR_LEN];
+
+    for (i = 0; i < ph1_ir_idx; i++) {
+        ph1_ir = &PH1_IR[i];
+
+        if (ph1_ir->dest)
+            strcpy(rd, ph1_ir->dest->var_name);
+        if (ph1_ir->src0)
+            strcpy(op1, ph1_ir->src0->var_name);
+        if (ph1_ir->src1)
+            strcpy(op2, ph1_ir->src1->var_name);
+
+        switch (ph1_ir->op) {
+        case OP_define:
+            fn = find_func(ph1_ir->func_name);
+            printf("def %s", fn->return_def.type_name);
+
+            for (j = 0; j < fn->return_def.is_ptr; j++)
+                printf("*");
+            printf(" @%s(", ph1_ir->func_name);
+
+            for (j = 0; j < fn->num_params; j++) {
+                if (j != 0)
+                    printf(", ");
+                printf("%s", fn->param_defs[j].type_name);
+
+                for (k = 0; k < fn->param_defs[j].is_ptr; k++)
+                    printf("*");
+                printf(" %%%s", fn->param_defs[j].var_name);
+            }
+            printf(")");
+            break;
+        case OP_block_start:
+            print_indent(indent);
+            printf("{");
+            indent++;
+            break;
+        case OP_block_end:
+            indent--;
+            print_indent(indent);
+            printf("}");
+            break;
+        case OP_allocat:
+            print_indent(indent);
+            printf("allocat %s", ph1_ir->src0->type_name);
+            for (j = 0; j < ph1_ir->src0->is_ptr; j++)
+                printf("*");
+            printf(" %%%s", op1);
+
+            if (ph1_ir->src0->array_size > 0)
+                printf("[%d]", ph1_ir->src0->array_size);
+            break;
+        case OP_load_constant:
+            print_indent(indent);
+            printf("const %%%s, $%d", rd, ph1_ir->dest->init_val);
+            break;
+        case OP_load_data_address:
+            print_indent(indent);
+            /* offset from .data section */
+            printf("%%%s = .data (%d)", rd, ph1_ir->dest->init_val);
+            break;
+        case OP_address_of:
+            print_indent(indent);
+            printf("%%%s = &(%%%s)", rd, op1);
+            break;
+        case OP_assign:
+            print_indent(indent);
+            printf("%%%s = %%%s", rd, op1);
+            break;
+        case OP_label:
+            print_indent(0);
+            printf("%s", op1);
+            break;
+        case OP_branch:
+            print_indent(indent);
+            printf("br %%%s, %s, %s", rd, op1, op2);
+            break;
+        case OP_jump:
+            print_indent(indent);
+            printf("j %s", rd);
+            break;
+        case OP_push:
+            print_indent(indent);
+            printf("push %%%s", op1);
+            break;
+        case OP_call:
+            print_indent(indent);
+            printf("call @%s, %d", ph1_ir->func_name, ph1_ir->param_num);
+            break;
+        case OP_func_ret:
+            print_indent(indent);
+            printf("retval %%%s", rd);
+            break;
+        case OP_return:
+            print_indent(indent);
+            if (ph1_ir->src0)
+                printf("ret %%%s", op1);
+            else
+                printf("ret");
+            break;
+        case OP_read:
+            print_indent(indent);
+            printf("%%%s = (%%%s), %d", rd, op1, ph1_ir->size);
+            break;
+        case OP_write:
+            print_indent(indent);
+            if (ph1_ir->src0->is_func)
+                printf("(%%%s) = @%s", rd, op1);
+            else
+                printf("(%%%s) = %%%s, %d", rd, op1, ph1_ir->size);
+            break;
+        case OP_indirect:
+            print_indent(indent);
+            printf("indirect call @(%%%s)", op1);
+            break;
+        case OP_negate:
+            print_indent(indent);
+            printf("neg %%%s, %%%s", rd, op1);
+            break;
+        case OP_add:
+            print_indent(indent);
+            printf("%%%s = add %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_sub:
+            print_indent(indent);
+            printf("%%%s = sub %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_mul:
+            print_indent(indent);
+            printf("%%%s = mul %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_div:
+            print_indent(indent);
+            printf("%%%s = div %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_mod:
+            print_indent(indent);
+            printf("%%%s = mod %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_eq:
+            print_indent(indent);
+            printf("%%%s = eq %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_neq:
+            print_indent(indent);
+            printf("%%%s = neq %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_gt:
+            print_indent(indent);
+            printf("%%%s = gt %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_lt:
+            print_indent(indent);
+            printf("%%%s = lt %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_geq:
+            print_indent(indent);
+            printf("%%%s = geq %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_leq:
+            print_indent(indent);
+            printf("%%%s = leq %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_bit_and:
+            print_indent(indent);
+            printf("%%%s = and %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_bit_or:
+            print_indent(indent);
+            printf("%%%s = or %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_bit_not:
+            print_indent(indent);
+            printf("%%%s = not %%%s", rd, op1);
+            break;
+        case OP_bit_xor:
+            print_indent(indent);
+            printf("%%%s = xor %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_log_and:
+            print_indent(indent);
+            printf("%%%s = and %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_log_or:
+            print_indent(indent);
+            printf("%%%s = or %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_log_not:
+            print_indent(indent);
+            printf("%%%s = not %%%s", rd, op1);
+            break;
+        case OP_rshift:
+            print_indent(indent);
+            printf("%%%s = rshift %%%s, %%%s", rd, op1, op2);
+            break;
+        case OP_lshift:
+            print_indent(indent);
+            printf("%%%s = lshift %%%s, %%%s", rd, op1, op2);
+            break;
+        default:
+            break;
+        }
+        printf("\n");
+    }
+    printf("===\n");
 }
