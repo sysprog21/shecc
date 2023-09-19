@@ -275,7 +275,7 @@ int __div(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
 
 int __rsb_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
 {
-    return __mov(cond, 1, arm_rsb, 0, rd, rn, imm);
+    return __mov(cond, 1, arm_rsb, 0, rn, rd, imm);
 }
 
 int __cmp_r(arm_cond_t cond, arm_reg r1, arm_reg r2)
