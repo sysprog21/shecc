@@ -2,554 +2,425 @@
 
 #include "riscv.c"
 
-/* Compute stack space needed for function's parameters */
-void size_func(func_t *fn)
-{
-    int s = 0, i;
-
-    /* parameters are turned into local variables */
-    for (i = 0; i < fn->num_params; i++) {
-        s += size_var(&fn->param_defs[i]);
-        fn->param_defs[i].offset = s; /* stack offset */
-    }
-
-    /* align to 16 bytes */
-    if ((s & 15) > 0)
-        s = (s - (s & 15)) + 16;
-    if (s > 2047)
-        error("Local stack size exceeded");
-
-    fn->params_size = s;
-}
-
-/* Return stack size required after block local variables */
-int size_block(block_t *blk)
-{
-    int size = 0, i, offset;
-
-    /* our offset starts from parent's offset */
-    if (!blk->parent)
-        offset = blk->func ? blk->func->params_size : 0;
-    else
-        offset = size_block(blk->parent);
-
-    /* declared locals */
-    for (i = 0; i < blk->next_local; i++) {
-        int vs = size_var(&blk->locals[i]);
-        /* look up value off stack */
-        blk->locals[i].offset = size + offset + vs;
-        size += vs;
-    }
-
-    /* align to 16 bytes */
-    if ((size & 15) > 0)
-        size = (size - (size & 15)) + 16;
-    if (size > 2047)
-        error("Local stack size exceeded");
-
-    /* save in block for stack allocation */
-    blk->locals_size = size;
-    return size + offset;
-}
-
-/* Compute stack necessary sizes for all functions */
-void size_funcs(int data_start)
-{
-    block_t *blk;
-    int i;
-
-    /* size functions */
-    for (i = 0; i < funcs_idx; i++)
-        size_func(&FUNCS[i]);
-
-    /* size blocks excl. global block */
-    for (i = 1; i < blocks_idx; i++)
-        size_block(&BLOCKS[i]);
-
-    /* allocate data for globals, in block 0 */
-    blk = &BLOCKS[0];
-    for (i = 0; i < blk->next_local; i++) {
-        blk->locals[i].offset = elf_data_idx; /* set offset in data section */
-        elf_add_symbol(blk->locals[i].var_name, strlen(blk->locals[i].var_name),
-                       data_start + elf_data_idx);
-        /* TODO: add .bss section */
-        if (!strcmp(blk->locals[i].type_name, "int") &&
-            blk->locals[i].init_val != 0)
-            elf_write_data_int(blk->locals[i].init_val);
-        else
-            elf_data_idx += size_var(&blk->locals[i]);
-    }
-}
-
-/* Return expected binary length of an IR instruction in bytes */
-int get_code_length(ir_instr_t *ii)
-{
-    opcode_t op = ii->op;
-
-    switch (op) {
-    case OP_func_extry: {
-        func_t *fn = find_func(ii->str_param1);
-        return 16 + (fn->num_params << 2);
-    }
-    case OP_call:
-    case OP_indirect:
-        return ii->param_no ? 8 : 4;
-    case OP_load_constant:
-        return (ii->int_param1 > -2048 && ii->int_param1 < 2047) ? 4 : 8;
-    case OP_block_start:
-    case OP_block_end: {
-        block_t *blk = &BLOCKS[ii->int_param1];
-        return (blk->next_local > 0) ? 4 : 0;
-    }
-    case OP_syscall:
-        return 32;
-    case OP_eq:
-    case OP_neq:
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-    case OP_func_exit:
-        return 16;
-    case OP_exit:
-        return 12;
-    case OP_load_data_address:
-    case OP_jz:
-    case OP_jnz:
-    case OP_push:
-    case OP_pop:
-    case OP_address_of:
-    case OP_start:
-        return 8;
-    case OP_jump:
-    case OP_return:
-    case OP_add:
-    case OP_sub:
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-    case OP_read:
-    case OP_write:
-    case OP_log_or:
-    case OP_log_and:
-    case OP_log_not:
-    case OP_bit_or:
-    case OP_bit_and:
-    case OP_bit_xor:
-    case OP_bit_not:
-    case OP_negate:
-    case OP_lshift:
-    case OP_rshift:
-        return 4;
-    case OP_label:
-        return 0;
-    default:
-        error("Unsupported IR opcode");
-    }
-    return 0;
-}
-
 void emit(int code)
 {
     elf_write_code_int(code);
 }
 
-/* Compute total binary code length based on IR opcode */
-int total_code_length()
-{
-    int code_len = 0, i;
-    for (i = 0; i < ir_idx; i++) {
-        IR[i].code_offset = code_len;
-        IR[i].op_len = get_code_length(&IR[i]);
-        code_len += IR[i].op_len;
-    }
-    return code_len;
-}
-
 void code_generate()
 {
-    int stack_size = 0, i;
-    block_t *blk = NULL;
-    int _c_block_level = 0;
+    ph2_ir_t *ph2_ir;
+    func_t *fn;
+    int i, ofs, global_stack_size, elf_data_start;
+    int rd, rs1, rs2;
+    int block_lv = 0;
 
-    int code_start = elf_code_start; /* ELF headers size */
-    int data_start = total_code_length();
-    size_funcs(code_start + data_start);
-    for (i = 0; i < ir_idx; i++) {
-        var_t *var;
-        func_t *fn;
+    add_label("__syscall", 44);
 
-        ir_instr_t *ii = &IR[i];
-        opcode_t op = ii->op;
-        int pc = elf_code_idx;
-        int ofs, val;
-        int dest_reg = ii->param_no + 10; /* RISC-V specific */
-        int OP_reg = ii->int_param1 + 10; /* RISC-V specific */
+    /* calculate offset of labels */
+    elf_code_idx = 96;
 
-        switch (op) {
-        case OP_load_data_address:
-            /* lookup address of a constant in data section */
-            ofs = data_start + ii->int_param1;
-            ofs -= pc;
-            emit(__auipc(dest_reg, rv_hi(ofs)));
-            emit(__addi(dest_reg, dest_reg, rv_lo(ofs)));
-            DUMP_IR("    x%d := &data[%d]", dest_reg, ii->int_param1);
-            break;
-        case OP_load_constant:
-            /* load numeric constant */
-            val = ii->int_param1;
-            if (val > -2048 && val < 2047) {
-                emit(__addi(dest_reg, __zero, rv_lo(val)));
-            } else {
-                emit(__lui(dest_reg, rv_hi(val)));
-                emit(__addi(dest_reg, dest_reg, rv_lo(val)));
-            }
-            DUMP_IR("    x%d := %d", dest_reg, ii->int_param1);
-            break;
-        case OP_address_of:
-            /* lookup address of a variable */
-            var = find_global_var(ii->str_param1);
-            if (var) {
-                int ofs = data_start + var->offset;
-                /* need to find the variable offset in data section, from PC */
-                ofs -= pc;
+    for (i = 0; i < ph2_ir_idx; i++) {
+        ph2_ir = &PH2_IR[i];
 
-                emit(__auipc(dest_reg, rv_hi(ofs)));
-                emit(__addi(dest_reg, dest_reg, rv_lo(ofs)));
-            } else {
-                /* need to find the variable offset on stack, i.e. from s0 */
-                var = find_local_var(ii->str_param1, blk);
-                if (var) {
-                    int offset = -var->offset;
-                    emit(__addi(dest_reg, __s0, 0));
-                    emit(__addi(dest_reg, dest_reg, offset));
-                } else {
-                    /* is it function address? */
-                    fn = find_func(ii->str_param1);
-                    if (fn) {
-                        int jump_instr_index = fn->entry_point;
-                        ir_instr_t *jump_instr = &IR[jump_instr_index];
-                        /* load code offset into variable */
-                        ofs = code_start + jump_instr->code_offset;
-                        emit(__lui(dest_reg, rv_hi(ofs)));
-                        emit(__addi(dest_reg, dest_reg, rv_lo(ofs)));
-                    } else
-                        error("Undefined identifier");
-                }
-            }
-            DUMP_IR("    x%d = &%s", dest_reg, ii->str_param1);
+        switch (ph2_ir->op) {
+        case OP_define:
+            fn = find_func(ph2_ir->func_name);
+            add_label(ph2_ir->func_name, elf_code_idx);
+            elf_code_idx += 16;
             break;
-        case OP_read:
-            /* read (dereference) memory address */
-            switch (ii->int_param2) {
-            case 4:
-                emit(__lw(dest_reg, OP_reg, 0));
-                break;
-            case 1:
-                emit(__lb(dest_reg, OP_reg, 0));
-                break;
-            default:
-                error("Unsupported word size");
-            }
-            DUMP_IR("    x%d = *x%d (%d)", dest_reg, OP_reg, ii->int_param2);
-            break;
-        case OP_write:
-            /* write at memory address */
-            switch (ii->int_param2) {
-            case 4:
-                emit(__sw(dest_reg, OP_reg, 0));
-                break;
-            case 1:
-                emit(__sb(dest_reg, OP_reg, 0));
-                break;
-            default:
-                error("Unsupported word size");
-            }
-            DUMP_IR("    *x%d = x%d (%d)", OP_reg, dest_reg, ii->int_param2);
-            break;
-        case OP_jump: {
-            /* unconditional jump to an IL-index */
-            int jump_instr_index = ii->int_param1;
-            ir_instr_t *jump_instr = &IR[jump_instr_index];
-            int jump_location = jump_instr->code_offset;
-            ofs = jump_location - pc;
-
-            emit(__jal(__zero, ofs));
-            DUMP_IR("    goto %d", ii->int_param1);
-        } break;
-        case OP_return: {
-            /* jump to function exit */
-            func_t *fd = find_func(ii->str_param1);
-            int jump_instr_index = fd->exit_point;
-            ir_instr_t *jump_instr = &IR[jump_instr_index];
-            int jump_location = jump_instr->code_offset;
-            ofs = jump_location - pc;
-
-            emit(__jal(__zero, ofs));
-            DUMP_IR("    return (from %s)", ii->str_param1);
-        } break;
-        case OP_call: {
-            /* function call */
-            int jump_instr_index;
-            ir_instr_t *jump_instr;
-            int jump_location;
-
-            /* need to find offset */
-            fn = find_func(ii->str_param1);
-            jump_instr_index = fn->entry_point;
-            jump_instr = &IR[jump_instr_index];
-            jump_location = jump_instr->code_offset;
-            ofs = jump_location - pc;
-
-            emit(__jal(__ra, ofs));
-            if (dest_reg != __a0)
-                emit(__add(dest_reg, __zero, OP_reg));
-            DUMP_IR("    x%d := %s() @ %d", dest_reg, ii->str_param1,
-                    fn->entry_point);
-        } break;
-        case OP_indirect:
-            /* indirect call with function pointer.
-             * address in OP_reg, result in dest_reg
-             */
-            emit(__jalr(__ra, OP_reg, 0));
-            if (dest_reg != __a0)
-                emit(__addi(dest_reg, __a0, 0));
-            DUMP_IR("    x%d := x%d()", dest_reg, OP_reg);
-            break;
-        case OP_push:
-            /* 16 aligned although we only need 4 */
-            emit(__addi(__sp, __sp, -16));
-            emit(__sw(dest_reg, __sp, 0));
-            DUMP_IR("    push x%d", dest_reg);
-            break;
-        case OP_pop:
-            emit(__lw(dest_reg, __sp, 0));
-            /* 16 aligned although we only need 4 */
-            emit(__addi(__sp, __sp, 16));
-            DUMP_IR("    pop x%d", dest_reg);
-            break;
-        case OP_func_exit:
-            /* restore previous frame */
-            emit(__addi(__sp, __s0, 16));
-            emit(__lw(__ra, __sp, -8));
-            emit(__lw(__s0, __sp, -4));
-            emit(__jalr(__zero, __ra, 0));
-            fn = NULL;
-            DUMP_IR("    exit %s", ii->str_param1);
-            break;
-        case OP_add:
-            emit(__add(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d += x%d", dest_reg, OP_reg);
-            break;
-        case OP_sub:
-            emit(__sub(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d -= x%d", dest_reg, OP_reg);
-            break;
-        case OP_mul:
-            emit(__mul(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d *= x%d", dest_reg, OP_reg);
-            break;
-        case OP_div:
-            emit(__div(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d /= x%d", dest_reg, OP_reg);
-            break;
-        case OP_mod:
-            emit(__mod(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d = x%d mod x%d", dest_reg, dest_reg, OP_reg);
-            break;
-        case OP_negate:
-            emit(__sub(dest_reg, __zero, dest_reg));
-            DUMP_IR("    -x%d", dest_reg);
-            break;
-        case OP_label:
-            if (ii->str_param1)
-                /* TODO: lazy eval */
-                if (strlen(ii->str_param1) > 0)
-                    elf_add_symbol(ii->str_param1, strlen(ii->str_param1),
-                                   code_start + pc);
-            DUMP_IR("%4d:", i);
-            break;
-        case OP_eq:
-        case OP_neq:
-        case OP_lt:
-        case OP_leq:
-        case OP_gt:
-        case OP_geq:
-            /* we want 1/nonzero if equ, 0 otherwise */
-            switch (op) {
-            case OP_eq:
-                emit(__beq(dest_reg, OP_reg, 12));
-                break;
-            case OP_neq:
-                emit(__bne(dest_reg, OP_reg, 12));
-                break;
-            case OP_lt:
-                emit(__blt(dest_reg, OP_reg, 12));
-                break;
-            case OP_geq:
-                emit(__bge(dest_reg, OP_reg, 12));
-                break;
-            case OP_gt:
-                emit(__blt(OP_reg, dest_reg, 12));
-                break;
-            case OP_leq:
-                emit(__bge(OP_reg, dest_reg, 12));
-                break;
-            default:
-                error("Unsupported conditional IR op");
-                break;
-            }
-            emit(__addi(dest_reg, __zero, 0));
-            emit(__jal(__zero, 8));
-            emit(__addi(dest_reg, __zero, 1));
-
-            DUMP_IR(op == OP_eq    ? "    x%d == x%d ?"
-                    : op == OP_neq ? "    x%d != x%d ?"
-                    : op == OP_lt  ? "    x%d < x%d ?"
-                    : op == OP_geq ? "    x%d >= x%d ?"
-                    : op == OP_gt  ? "    x%d > x%d ?"
-                    : op == OP_leq ? "    x%d <= x%d ?"
-                                   : "    x%d ?? x%d ?",
-                    dest_reg, OP_reg);
-            break;
-        case OP_log_and:
-            /* we assume both have to be 1, they can not be just nonzero */
-            emit(__and(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d &&= x%d", dest_reg, OP_reg);
-            break;
-        case OP_log_or:
-            emit(__or(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d ||= x%d", dest_reg, OP_reg);
-            break;
-        case OP_bit_and:
-            emit(__and(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d &= x%d", dest_reg, OP_reg);
-            break;
-        case OP_bit_or:
-            emit(__or(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d |= x%d", dest_reg, OP_reg);
-            break;
-        case OP_bit_xor:
-            emit(__xor(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d ^= x%d", dest_reg, OP_reg);
-            break;
-        case OP_bit_not:
-            emit(__xori(dest_reg, dest_reg, -1));
-            DUMP_IR("    x%d ~= x%d", dest_reg, OP_reg);
-            break;
-        case OP_lshift:
-            emit(__sll(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d <<= x%d", dest_reg, OP_reg);
-            break;
-        case OP_rshift:
-            emit(__srl(dest_reg, dest_reg, OP_reg));
-            DUMP_IR("    x%d >>= x%d", dest_reg, OP_reg);
-            break;
-        case OP_log_not:
-            /* 1 if zero, 0 if nonzero */
-            /* only works for small range integers */
-            emit(__sltiu(dest_reg, dest_reg, 1));
-            DUMP_IR("    !x%d", dest_reg);
-            break;
-        case OP_jz:
-        case OP_jnz: {
-            /* conditional jumps to IR-index */
-            int jump_instr_index = ii->int_param1;
-            ir_instr_t *jump_instr = &IR[jump_instr_index];
-            int jump_location = jump_instr->code_offset;
-            int ofs = jump_location - pc - 4;
-
-            if (ofs >= -4096 && ofs <= 4095) {
-                if (op == OP_jz) { /* near jump (branch) */
-                    emit(__nop());
-                    emit(__beq(dest_reg, __zero, ofs));
-                    DUMP_IR("    if false then goto %d", ii->int_param1);
-                } else if (op == OP_jnz) {
-                    emit(__nop());
-                    emit(__bne(dest_reg, __zero, ofs));
-                    DUMP_IR("    if true then goto %d", ii->int_param1);
-                }
-            } else { /* far jump */
-                if (op == OP_jz) {
-                    /* skip next instruction */
-                    emit(__bne(dest_reg, __zero, 8));
-                    emit(__jal(__zero, ofs));
-                    DUMP_IR("    if false then goto %d", ii->int_param1);
-                } else if (op == OP_jnz) {
-                    emit(__beq(dest_reg, __zero, 8));
-                    emit(__jal(__zero, ofs));
-                    DUMP_IR("    if true then goto %d", ii->int_param1);
-                }
-            }
-        } break;
         case OP_block_start:
-            blk = &BLOCKS[ii->int_param1];
-            if (blk->next_local > 0) {
-                /* reserve stack space for locals */
-                emit(__addi(__sp, __sp, -blk->locals_size));
-                stack_size += blk->locals_size;
-            }
-            DUMP_IR("    {");
-            _c_block_level++;
+            block_lv++;
             break;
         case OP_block_end:
-            blk = &BLOCKS[ii->int_param1]; /* should not be necessary */
-            if (blk->next_local > 0) {
-                /* remove stack space for locals */
-                emit(__addi(__sp, __sp, blk->locals_size));
-                stack_size -= blk->locals_size;
-            }
-            /* blk is current block */
-            blk = blk->parent;
-            DUMP_IR("}");
-            _c_block_level--;
+            /* handle function with implicit return */
+            --block_lv;
+            if (block_lv != 0)
+                break;
+            if (!strcmp(fn->return_def.type_name, "void"))
+                elf_code_idx += 20;
             break;
-        case OP_func_extry: {
-            int pn, ps;
-            fn = find_func(ii->str_param1);
-            ps = fn->params_size;
-
-            /* add to symbol table */
-            elf_add_symbol(ii->str_param1, strlen(ii->str_param1),
-                           code_start + pc);
-
-            /* create stack space for params and parent frame */
-            emit(__addi(__sp, __sp, -16 - ps));
-            emit(__sw(__s0, __sp, 12 + ps));
-            emit(__sw(__ra, __sp, 8 + ps));
-            emit(__addi(__s0, __sp, ps));
-            stack_size = ps;
-
-            /* push parameters on stack */
-            for (pn = 0; pn < fn->num_params; pn++) {
-                emit(__sw(__a0 + pn, __s0, -fn->param_defs[pn].offset));
-            }
-            DUMP_IR("%s:", ii->str_param1);
-        } break;
-        case OP_start:
-            emit(__lw(__a0, __sp, 0));   /* argc */
-            emit(__addi(__a1, __sp, 4)); /* argv */
-            DUMP_IR("    start");
+        case OP_load:
+        case OP_load_func:
+        case OP_global_load:
+        case OP_global_load_func:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
+                elf_code_idx += 16;
+            else
+                elf_code_idx += 4;
             break;
-        case OP_syscall:
-            emit(__addi(__a7, __a0, 0));
-            emit(__addi(__a0, __a1, 0));
-            emit(__addi(__a1, __a2, 0));
-            emit(__addi(__a2, __a3, 0));
-            emit(__addi(__a3, __a4, 0));
-            emit(__addi(__a4, __a5, 0));
-            emit(__addi(__a5, __a6, 0));
-            emit(__ecall());
-            DUMP_IR("    syscall");
+        case OP_store:
+        case OP_global_store:
+            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047)
+                elf_code_idx += 16;
+            else
+                elf_code_idx += 4;
             break;
-        case OP_exit:
-            emit(__add(__a0, __zero, OP_reg));
-            emit(__addi(__a7, __zero, 93));
-            emit(__ecall());
-            DUMP_IR("    exit");
+        case OP_address_of:
+        case OP_global_address_of:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
+                elf_code_idx += 12;
+            else
+                elf_code_idx += 4;
+            break;
+        case OP_label:
+            add_label(ph2_ir->func_name, elf_code_idx);
+            break;
+        case OP_jump:
+            if (!strcmp(ph2_ir->func_name, "main"))
+                elf_code_idx += 24;
+            else
+                elf_code_idx += 4;
+            break;
+        case OP_load_constant:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
+                elf_code_idx += 8;
+            else
+                elf_code_idx += 4;
+            break;
+        case OP_assign:
+            if (ph2_ir->dest != ph2_ir->src0)
+                elf_code_idx += 4;
+            break;
+        case OP_call:
+        case OP_read:
+        case OP_write:
+        case OP_negate:
+        case OP_add:
+        case OP_sub:
+        case OP_mul:
+        case OP_div:
+        case OP_mod:
+        case OP_gt:
+        case OP_lt:
+        case OP_bit_and:
+        case OP_bit_or:
+        case OP_bit_xor:
+        case OP_bit_not:
+        case OP_rshift:
+        case OP_lshift:
+        case OP_indirect:
+            elf_code_idx += 4;
+            break;
+        case OP_load_data_address:
+        case OP_neq:
+        case OP_geq:
+        case OP_leq:
+        case OP_log_or:
+        case OP_log_not:
+            elf_code_idx += 8;
+            break;
+        case OP_eq:
+        case OP_address_of_func:
+            elf_code_idx += 12;
+            break;
+        case OP_log_and:
+            elf_code_idx += 16;
+            break;
+        case OP_branch:
+            elf_code_idx += 20;
+            break;
+        case OP_return:
+            elf_code_idx += 24;
             break;
         default:
-            error("Unsupported IR op");
+            break;
+        }
+    }
+
+    elf_data_start = elf_code_start + elf_code_idx;
+    global_stack_size = FUNCS[0].stack_size;
+    block_lv = 0;
+    elf_code_idx = 0;
+
+    /* insert entry, exit point and syscall manually */
+    elf_add_symbol("__start", strlen("__start"), elf_code_idx);
+    emit(__lui(__t0, rv_hi(global_stack_size)));
+    emit(__addi(__t0, __t0, rv_lo(global_stack_size)));
+    emit(__sub(__sp, __sp, __t0));
+    emit(__addi(__gp, __sp, 0));
+    emit(__jal(__ra, 96 - elf_code_idx));
+
+    elf_add_symbol("__exit", strlen("__exit"), elf_code_idx);
+    emit(__lui(__t0, rv_hi(global_stack_size)));
+    emit(__addi(__t0, __t0, rv_lo(global_stack_size)));
+    emit(__add(__sp, __sp, __t0));
+    emit(__addi(__a0, __a0, 0));
+    emit(__addi(__a7, __zero, 93));
+    emit(__ecall());
+
+    elf_add_symbol("__syscall", strlen("__syscall"), elf_code_idx);
+    emit(__addi(__sp, __sp, -4));
+    emit(__sw(__ra, __sp, 0));
+    emit(__addi(__a7, __a0, 0));
+    emit(__addi(__a0, __a1, 0));
+    emit(__addi(__a1, __a2, 0));
+    emit(__addi(__a2, __a3, 0));
+    emit(__addi(__a3, __a4, 0));
+    emit(__addi(__a4, __a5, 0));
+    emit(__addi(__a5, __a6, 0));
+    emit(__ecall());
+    emit(__lw(__ra, __sp, 0));
+    emit(__addi(__sp, __sp, 4));
+    emit(__jalr(__zero, __ra, 0));
+
+    for (i = 0; i < ph2_ir_idx; i++) {
+        ph2_ir = &PH2_IR[i];
+
+        rd = ph2_ir->dest + 10;
+        rs1 = ph2_ir->src0 + 10;
+        rs2 = ph2_ir->src1 + 10;
+
+        switch (ph2_ir->op) {
+        case OP_define:
+            fn = find_func(ph2_ir->func_name);
+            emit(__sw(__ra, __sp, -4));
+            emit(__lui(__t0, rv_hi(fn->stack_size + 4)));
+            emit(__addi(__t0, __t0, rv_lo(fn->stack_size + 4)));
+            emit(__sub(__sp, __sp, __t0));
+            break;
+        case OP_block_start:
+            block_lv++;
+            break;
+        case OP_block_end:
+            --block_lv;
+            if (block_lv != 0)
+                break;
+            if (!strcmp(fn->return_def.type_name, "void")) {
+                emit(__lui(__t0, rv_hi(fn->stack_size + 4)));
+                emit(__addi(__t0, __t0, rv_lo(fn->stack_size + 4)));
+                emit(__add(__sp, __sp, __t0));
+                emit(__lw(__ra, __sp, -4));
+                emit(__jalr(__zero, __ra, 0));
+            }
+            break;
+        case OP_load_constant:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+                emit(__lui(rd, rv_hi(ph2_ir->src0)));
+                emit(__addi(rd, rd, rv_lo(ph2_ir->src0)));
+            } else
+                emit(__addi(rd, __zero, ph2_ir->src0));
+            break;
+        case OP_load_data_address:
+            emit(__lui(rd, rv_hi(ph2_ir->src0 + elf_data_start)));
+            emit(__addi(rd, rd, rv_lo(ph2_ir->src0 + elf_data_start)));
+            break;
+        case OP_address_of:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+                emit(__add(rd, __sp, __t0));
+            } else
+                emit(__addi(rd, __sp, ph2_ir->src0));
+            break;
+        case OP_global_address_of:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+                emit(__add(rd, __gp, __t0));
+            } else
+                emit(__addi(rd, __gp, ph2_ir->src0));
+            break;
+        case OP_assign:
+            if (ph2_ir->dest != ph2_ir->src0)
+                emit(__addi(rd, rs1, 0));
+            break;
+        case OP_label:
+            break;
+        case OP_branch:
+            /* calculate the absolute address for jumping */
+            ofs = find_label_offset(ph2_ir->false_label);
+            emit(__lui(__t0, rv_hi(ofs + elf_code_start)));
+            emit(__addi(__t0, __t0, rv_lo(ofs + elf_code_start)));
+            emit(__bne(rs1, __zero, 8));
+            emit(__jalr(__zero, __t0, 0));
+
+            ofs = find_label_offset(ph2_ir->true_label);
+            emit(__jal(__zero, ofs - elf_code_idx));
+            break;
+        case OP_jump:
+            if (!strcmp(ph2_ir->func_name, "main")) {
+                emit(__lui(__t0, rv_hi(global_stack_size)));
+                emit(__addi(__t0, __t0, rv_lo(global_stack_size)));
+                emit(__add(__t0, __sp, __t0));
+                emit(__lw(__a0, __t0, 0));
+                emit(__addi(__a1, __t0, 4));
+            }
+
+            ofs = find_label_offset(ph2_ir->func_name);
+            emit(__jal(__zero, ofs - elf_code_idx));
+            break;
+        case OP_call:
+            ofs = find_label_offset(ph2_ir->func_name);
+            emit(__jal(__ra, ofs - elf_code_idx));
+            break;
+        case OP_return:
+            if (ph2_ir->src0 == -1)
+                emit(__addi(__zero, __zero, 0));
+            else
+                emit(__addi(__a0, rs1, 0));
+            emit(__lui(__t0, rv_hi(fn->stack_size + 4)));
+            emit(__addi(__t0, __t0, rv_lo(fn->stack_size + 4)));
+            emit(__add(__sp, __sp, __t0));
+            emit(__lw(__ra, __sp, -4));
+            emit(__jalr(__zero, __ra, 0));
+            break;
+        case OP_load:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+                emit(__add(__t0, __sp, __t0));
+                emit(__lw(rd, __t0, 0));
+            } else
+                emit(__lw(rd, __sp, ph2_ir->src0));
+            break;
+        case OP_store:
+            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src1)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
+                emit(__add(__t0, __sp, __t0));
+                emit(__sw(rs1, __t0, 0));
+            } else
+                emit(__sw(rs1, __sp, ph2_ir->src1));
+            break;
+        case OP_load_func:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+                emit(__add(__t0, __sp, __t0));
+                emit(__lw(__t0, __t0, 0));
+            } else
+                emit(__lw(__t0, __sp, ph2_ir->src0));
+            break;
+        case OP_global_load:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+                emit(__add(__t0, __gp, __t0));
+                emit(__lw(rd, __t0, 0));
+            } else
+                emit(__lw(rd, __gp, ph2_ir->src0));
+            break;
+        case OP_global_store:
+            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src1)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
+                emit(__add(__t0, __gp, __t0));
+                emit(__sw(rs1, __t0, 0));
+            } else
+                emit(__sw(rs1, __gp, ph2_ir->src1));
+            break;
+        case OP_global_load_func:
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+                emit(__add(__t0, __gp, __t0));
+                emit(__lw(__t0, __t0, 0));
+            } else
+                emit(__lw(__t0, __gp, ph2_ir->src0));
+            break;
+        case OP_read:
+            if (ph2_ir->src1 == 1)
+                emit(__lb(rd, rs1, 0));
+            else if (ph2_ir->src1 == 4)
+                emit(__lw(rd, rs1, 0));
+            else
+                abort();
+            break;
+        case OP_write:
+            if (ph2_ir->dest == 1)
+                emit(__sb(rs1, rs2, 0));
+            else if (ph2_ir->dest == 4)
+                emit(__sw(rs1, rs2, 0));
+            else
+                abort();
+            break;
+        case OP_address_of_func:
+            /* calculate the absolute address for jumping */
+            ofs = find_label_offset(ph2_ir->func_name);
+            emit(__lui(__t0, rv_hi(ofs + elf_code_start)));
+            emit(__addi(__t0, __t0, rv_lo(ofs + elf_code_start)));
+            emit(__sw(__t0, rs1, 0));
+            break;
+        case OP_indirect:
+            emit(__jalr(__ra, __t0, 0));
+            break;
+        case OP_negate:
+            emit(__sub(rd, __zero, rs1));
+            break;
+        case OP_add:
+            emit(__add(rd, rs1, rs2));
+            break;
+        case OP_sub:
+            emit(__sub(rd, rs1, rs2));
+            break;
+        case OP_mul:
+            emit(__mul(rd, rs1, rs2));
+            break;
+        case OP_div:
+            emit(__div(rd, rs1, rs2));
+            break;
+        case OP_mod:
+            emit(__mod(rd, rs1, rs2));
+            break;
+        case OP_eq:
+            emit(__sub(rd, rs1, rs2));
+            emit(__sltu(rd, __zero, rd));
+            emit(__xori(rd, rd, 1));
+            break;
+        case OP_neq:
+            emit(__sub(rd, rs1, rs2));
+            emit(__sltu(rd, __zero, rd));
+            break;
+        case OP_gt:
+            emit(__slt(rd, rs2, rs1));
+            break;
+        case OP_lt:
+            emit(__slt(rd, rs1, rs2));
+            break;
+        case OP_geq:
+            emit(__slt(rd, rs1, rs2));
+            emit(__xori(rd, rd, 1));
+            break;
+        case OP_leq:
+            emit(__slt(rd, rs2, rs1));
+            emit(__xori(rd, rd, 1));
+            break;
+        case OP_bit_and:
+            emit(__and(rd, rs1, rs2));
+            break;
+        case OP_bit_or:
+            emit(__or(rd, rs1, rs2));
+            break;
+        case OP_bit_xor:
+            emit(__xor(rd, rs1, rs2));
+            break;
+        case OP_bit_not:
+            emit(__xori(rd, rs1, -1));
+            break;
+        case OP_log_and:
+            emit(__sltu(__t0, __zero, rs1));
+            emit(__sub(__t0, __zero, __t0));
+            emit(__and(__t0, __t0, rs2));
+            emit(__sltu(rd, __zero, __t0));
+            break;
+        case OP_log_or:
+            emit(__or(rd, rs1, rs2));
+            emit(__sltu(rd, __zero, rd));
+            break;
+        case OP_log_not:
+            emit(__sltu(rd, __zero, rs1));
+            emit(__xori(rd, rd, 1));
+            break;
+        case OP_rshift:
+            emit(__sra(rd, rs1, rs2));
+            break;
+        case OP_lshift:
+            emit(__sll(rd, rs1, rs2));
+            break;
+        default:
+            abort();
+            break;
         }
     }
 }

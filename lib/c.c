@@ -291,7 +291,7 @@ int __format(char *buffer,
 
 void printf(char *str, ...)
 {
-    int *var_args = &str - 4;
+    int *var_args = &str + 4;
     char buffer[200];
     int si = 0, bi = 0, pi = 0;
 
@@ -346,9 +346,10 @@ void printf(char *str, ...)
                 /* append literal '%' character */
                 buffer[bi] = '%';
                 bi++;
-                pi++;
+                si++;
+                continue;
             }
-            pi--;
+            pi++;
             si++;
         }
     }
@@ -356,13 +357,74 @@ void printf(char *str, ...)
     __syscall(__syscall_write, 1, buffer, bi);
 }
 
+void sprintf(char *buffer, char *str, ...)
+{
+    int *var_args = &str + 4;
+    int si = 0, bi = 0, pi = 0;
+
+    while (str[si]) {
+        if (str[si] != '%') {
+            buffer[bi] = str[si];
+            bi++;
+            si++;
+        } else {
+            int w = 0, zp = 0, pp = 0;
+
+            si++;
+            if (str[si] == '#') {
+                pp = 1;
+                si++;
+            }
+            if (str[si] == '0') {
+                zp = 1;
+                si++;
+            }
+            if (str[si] >= '1' && str[si] <= '9') {
+                w = str[si] - '0';
+                si++;
+                if (str[si] >= '0' && str[si] <= '9') {
+                    w = w * 10;
+                    w += str[si] - '0';
+                    si++;
+                }
+            }
+            switch (str[si]) {
+            case 37: /* % */
+                buffer[bi++] = '%';
+                si++;
+                continue;
+            case 99: /* c */
+                buffer[bi++] = var_args[pi];
+                break;
+            case 115: /* s */
+                strcpy(buffer + bi, var_args[bi]);
+                bi += strlen(var_args[pi]);
+                break;
+            case 111: /* o */
+                bi += __format(buffer + bi, var_args[pi], w, zp, 8, pp);
+                break;
+            case 100: /* d */
+                bi += __format(buffer + bi, var_args[pi], w, zp, 10, 0);
+                break;
+            case 120: /* x */
+                bi += __format(buffer + bi, var_args[pi], w, zp, 16, pp);
+                break;
+            default:
+                abort();
+                break;
+            }
+            pi++;
+            si++;
+        }
+    }
+    buffer[bi] = 0;
+}
+
 char *memcpy(char *dest, char *src, int count)
 {
-    if (count > 0) {
-        do {
-            count--;
-            dest[count] = src[count];
-        } while (count > 0);
+    while (count > 0) {
+        count--;
+        dest[count] = src[count];
     }
     return dest;
 }
@@ -396,8 +458,7 @@ FILE *fopen(char *filename, char *mode)
 #elif defined(__riscv)
         return __syscall(__syscall_openat, -100, filename, 0, 0);
 #endif
-
-    abort();
+    return NULL;
 }
 
 int fclose(FILE *stream)
@@ -439,7 +500,7 @@ int fputc(int c, FILE *stream)
 {
     char buf[1];
     buf[0] = c;
-    __syscall(__syscall_write, stream, &buf, 1);
+    __syscall(__syscall_write, stream, buf, 1);
     return 0;
 }
 

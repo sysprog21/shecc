@@ -19,6 +19,9 @@
 /* C language front-end */
 #include "cfront.c"
 
+/* Register allocator */
+#include "reg-alloc.c"
+
 /* Machine code generation. support ARMv7-A and RISC-V32I */
 #include "codegen.c"
 
@@ -62,6 +65,17 @@ int main(int argc, char *argv[])
 
     /* load and parse source code into IR */
     parse(in);
+
+    /* dump first phase IR */
+    if (dump_ir)
+        dump_ph1_ir();
+
+    /* allocate register from IR */
+    reg_alloc();
+
+    /* dump second phase IR */
+    if (dump_ir)
+        dump_ph2_ir();
 
     /* generate code from IR */
     code_generate();
