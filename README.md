@@ -9,15 +9,14 @@ a self-compiling compiler for a subset of the C language.
 
 ### Features
 
-* Generate executable Linux ELF binaries for ARMv7-A and RV32IM;
-* Provide a minimal C standard library for basic I/O on GNU/Linux;
-* The cross-compiler is written in ANSI C, arguably running on most platforms;
-* Self-contained C language front-end and machine code generator;
-* Two-pass compilation: on the first pass, it checks the syntax and destructs
-complex statements to basic operations, while on the second pass, it actually
-translates the basic operations into Arm/RISC-V machine code.
-* Register allocation: compatible with different architecture that the number of 
-available registers could be different (needs at least 7 available registers for now)
+* Generate executable Linux ELF binaries for ARMv7-A and RV32IM.
+* Provide a minimal C standard library for basic I/O on GNU/Linux.
+* The cross-compiler is written in ANSI C, making it compatible with most platforms.
+* Offer a self-contained C language front-end and machine code generator.
+* Utilize a two-pass compilation process: the first pass checks syntax and breaks down complex statements into basic operations,
+  while the second pass translates these operations into Arm/RISC-V machine code.
+* Implement register allocation compatible with various architectures,
+  although the number of available registers may differ (currently requires at least 7 available registers).
 
 ## Compatibility
 
@@ -29,6 +28,7 @@ syntax:
 * compound assignments: `+=`, `-=`, `*=`
 * global/local variable initializations for supported data types
     - e.g. `int i = [expr]`
+* limited support for preprocessor directives: `#define`, `#ifdef`, `#elif`, `#endif`, `#undef`, and `#error`
 * non-nested variadic macros with `__VA_ARGS__` identifier
 
 The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3,
@@ -139,42 +139,43 @@ $ out/shecc --dump-ir -o fib tests/fib.c
 ```
 
 Line-by-line explanation between C source and IR:
-```asm
+```c
  C Source                IR                                         Explanation
------------------------+-------------------------------------------+-------------------------------------------------------------------------------------------------
+------------------+---------------------------------------+----------------------------------------------------------------------------------
 
-int fib(int n)          def int @fib(int %n)                        Indicate a function definition
-{                       {
-    if (n == 0)             const %.t1001, $0                       Load constant 0 into a temporary variable ".t1001"
-                            %.t1002 = eq %n, %.t1001                Test "n" equals ".t1001" or not, and write the result in temporary variable ".t1002"
-                            br %.t1002, .label.1177, .label.1178    If ".t1002" equals zero, goto false label ".label.1178", otherwise, goto true label ".label.1177"
-                        .label.1177
-        return 0;           const %.t1003, $0                       Load constant 0 into a temporary variable ".t1003"
-                            ret %.t1003                             Return ".t1003"
-                            j .label.1179                           Jump to endif label ".label.1179"
-                        .label.1178
-    else if (n == 1)        const %.t1004, $1                       Load constant 1 into a temporary variable ".t1004"
-                            %.t1005 = eq %n, %.t1004                Test "n" equals ".t1004" or not, and write the result in temporary variable ".t1005"
-                            br %.t1005, .label.1183, .label.1184    If ".t1005" equals zero, goto false label ".label.1184". Otherwise, goto true label ".label.1183"
-                        .label.1183
-        return 1;           const %.t1006, $1                       Load constant 1 into a temporary variable ".t1006"
-                            ret %.t1006                             Return ".t1006"
-                        .label.1184
-                        .label.1179
-    return          
-        fib(n - 1)          const %.t1007, $1                       Load constant 1 into a temporary variable ".t1007"
-                            %.t1008 = sub %n, %.t1007               Subtract ".t1007" from "n", and store the result in temporary variable ".t1008"
-                            push %.t1008                            Prepare parameter for function call
-                            call @fib, 1                            Call function "fib" with one parameter
-        +                   retval %.t1009                          Store return value in temporary variable ".t1009"
-        fib(n - 2);         const %.t1010, $2                       Load constant 2 into a temporary variable ".t1010"
-                            %.t1011 = sub %n, %.t1010               Subtract ".t1010" from "n", and store the result in temporary variable ".t1011"
-                            push %.t1011                            Prepare parameter for function call
-                            call @fib, 1                            Call function "fib" with one parameter
-                            retval %.t1012                          Store return value in temporary variable ".t1012"
-                            %.t1013 = add %.t1009, %.t1012          Add ".t1009" and ".t1012", and store the result in temporary variable ".t1013"
-                            ret %.t1013                             Return ".t1013"
-}                       }
+int fib(int n)      def int @fib(int %n)                    Indicate a function definition
+{                   {
+  if (n == 0)         const %.t1001, $0                     Load constant 0 into a temporary variable ".t1001"
+                      %.t1002 = eq %n, %.t1001              Test "n" equals ".t1001" or not, and write the result in temporary variable ".t1002"
+                      br %.t1002, .label.1177, .label.1178  If ".t1002" equals zero, goto false label ".label.1178", otherwise,
+                                                            goto true label ".label.1177"
+                    .label.1177
+    return 0;         const %.t1003, $0                     Load constant 0 into a temporary variable ".t1003"
+                      ret %.t1003                           Return ".t1003"
+                      j .label.1184                         Jump to endif label ".label.1184"
+                    .label.1178
+  else if (n == 1)    const %.t1004, $1                     Load constant 1 into a temporary variable ".t1004"
+                      %.t1005 = eq %n, %.t1004              Test "n" equals ".t1004" or not, and write the result in temporary variable ".t1005"
+                      br %.t1005, .label.1183, .label.1184  If ".t1005" equals zero, goto false label ".label.1184". Otherwise,
+                                                            goto true label ".label.1183"
+                    .label.1183
+    return 1;         const %.t1006, $1                     Load constant 1 into a temporary variable ".t1006"
+                      ret %.t1006                           Return ".t1006"
+                    .label.1184
+  return
+    fib(n - 1)        const %.t1007, $1                     Load constant 1 into a temporary variable ".t1007"
+                      %.t1008 = sub %n, %.t1007             Subtract ".t1007" from "n", and store the result in temporary variable ".t1008"
+                      push %.t1008                          Prepare parameter for function call
+                      call @fib, 1                          Call function "fib" with one parameter
+    +                 retval %.t1009                        Store return value in temporary variable ".t1009"
+    fib(n - 2);       const %.t1010, $2                     Load constant 2 into a temporary variable ".t1010"
+                      %.t1011 = sub %n, %.t1010             Subtract ".t1010" from "n", and store the result in temporary variable ".t1011"
+                      push %.t1011                          Prepare parameter for function call
+                      call @fib, 1                          Call function "fib" with one parameter
+                      retval %.t1012                        Store return value in temporary variable ".t1012"
+                      %.t1013 = add %.t1009, %.t1012        Add ".t1009" and ".t1012", and store the result in temporary variable ".t1013"
+                      ret %.t1013                           Return ".t1013"
+}                   }
 ```
 
 ## Known Issues
