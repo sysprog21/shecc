@@ -521,6 +521,7 @@ int align_up(int size)
 }
 
 chunk_t *head;
+chunk_t *tail;
 chunk_t *freelist_head;
 
 void *malloc(int size)
@@ -535,6 +536,7 @@ void *malloc(int size)
         chunk_t *tmp = __syscall(__syscall_mmap2, NULL,
                                  align_up(sizeof(chunk_t)), prot, flags, -1, 0);
         head = tmp;
+        tail = tmp;
         head->next = NULL;
         head->prev = NULL;
         head->ptr = NULL;
@@ -550,11 +552,6 @@ void *malloc(int size)
         freelist_head->ptr = NULL;
         freelist_head->size = -1;
     }
-
-    chunk_t *cur = head;
-
-    while (cur->next)
-        cur = cur->next;
 
     /* to search the best chunk */
     chunk_t *best_fit_chunk = NULL;
@@ -608,15 +605,15 @@ void *malloc(int size)
         allocated->size = align_up(sizeof(chunk_t) + size);
     }
 
-    cur->next = allocated;
-    allocated->prev = cur;
+    tail->next = allocated;
+    allocated->prev = tail;
 
-    cur = allocated;
-    cur->next = NULL;
-    cur->size = allocated->size;
+    tail = allocated;
+    tail->next = NULL;
+    tail->size = allocated->size;
     int offset = sizeof(chunk_t) - 4;
-    cur->ptr = cur + offset;
-    return cur->ptr;
+    tail->ptr = tail + offset;
+    return tail->ptr;
 }
 
 void rfree(void *ptr, int size)
