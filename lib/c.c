@@ -397,7 +397,7 @@ void sprintf(char *buffer, char *str, ...)
                 buffer[bi++] = var_args[pi];
                 break;
             case 115: /* s */
-                strcpy(buffer + bi, var_args[bi]);
+                strcpy(buffer + bi, var_args[pi]);
                 bi += strlen(var_args[pi]);
                 break;
             case 111: /* o */
