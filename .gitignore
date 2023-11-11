@@ -4,5 +4,6 @@ a.out
 *.elf
 *.log
 *.lst
+*.dot
 config
 src/codegen.c

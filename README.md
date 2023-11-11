@@ -62,6 +62,11 @@ $ sudo apt-get install qemu-user
 It is still possible to build `shecc` on macOS or Microsoft Windows. However,
 the second stage bootstrapping would fail due to `qemu-arm` absence.
 
+To execute the snapshot test, install the packages below:
+```shell
+$ sudo apt-get install graphviz jq
+```
+
 ## Build and Verify
 
 Configure which backend you want, `shecc` supports ARMv7-A and RV32IM backend:
@@ -100,9 +105,14 @@ $ chmod +x fib
 $ qemu-arm fib
 ```
 
-`shecc` comes with unit tests. To run the tests, give "check" as an argument:
+`shecc` comes with unit tests. To run the tests, give `check` as an argument:
 ```shell
 $ make check
+```
+
+Also, verify that the emitted IRs are identical to the snapshots by specifying `check-snapshots` target when invoking `make`:
+```shell
+$ make check-snapshots
 ```
 
 Reference output:
