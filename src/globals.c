@@ -35,6 +35,9 @@ int ph2_ir_idx = 0;
 label_lut_t *LABEL_LUT;
 int label_lut_idx = 0;
 
+func_list_t FUNC_LIST;
+func_t GLOBAL_FUNC;
+
 regfile_t REG[REG_CNT];
 
 alias_t *ALIASES;
@@ -374,6 +377,154 @@ int size_var(var_t *var)
             s += bs;
     }
     return s;
+}
+
+/* TODO: Integrate with `func_t` */
+fn_t *add_fn()
+{
+    fn_t *n = calloc(1, sizeof(fn_t));
+
+    if (!FUNC_LIST.head) {
+        FUNC_LIST.head = n;
+        FUNC_LIST.tail = n;
+        return n;
+    }
+    FUNC_LIST.tail->next = n;
+    FUNC_LIST.tail = n;
+    return n;
+}
+
+/* Create a basic block and set the scope of variables to `parent` block */
+basic_block_t *bb_create(block_t *parent)
+{
+    basic_block_t *bb = calloc(1, sizeof(basic_block_t));
+
+    int i;
+    for (i = 0; i < MAX_BB_PRED; i++) {
+        bb->prev[i].bb = NULL;
+        bb->prev[i].type = NEXT;
+    }
+    bb->scope = parent;
+    bb->belong_to = parent->func->fn;
+    return bb;
+}
+
+/* The pred-succ pair must have only one connection */
+void bb_connect(basic_block_t *pred,
+                basic_block_t *succ,
+                bb_connection_type_t type)
+{
+    if (!pred)
+        abort();
+    if (!succ)
+        abort();
+
+    int i = 0;
+    while (succ->prev[i].bb)
+        i++;
+
+    if (i > MAX_BB_PRED - 1) {
+        printf("Error: too many predecessors\n");
+        abort();
+    }
+
+    succ->prev[i].bb = pred;
+    succ->prev[i].type = type;
+
+    switch (type) {
+    case NEXT:
+        pred->next = succ;
+        break;
+    case THEN:
+        pred->then_ = succ;
+        break;
+    case ELSE:
+        pred->else_ = succ;
+        break;
+    default:
+        abort();
+    }
+}
+
+/* The pred-succ pair must have only one connection */
+void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
+{
+    int i;
+    for (i = 0; i < MAX_BB_PRED; i++) {
+        if (succ->prev[i].bb == pred) {
+            switch (succ->prev[i].type) {
+            case NEXT:
+                pred->next = NULL;
+                break;
+            case THEN:
+                pred->then_ = NULL;
+                break;
+            case ELSE:
+                pred->else_ = NULL;
+                break;
+            default:
+                abort();
+            }
+
+            succ->prev[i].bb = NULL;
+            break;
+        }
+    }
+}
+
+/* The symbol is an argument of function or the variable in declaration */
+void add_symbol(basic_block_t *bb, var_t *var)
+{
+    symbol_t *sym;
+    for (sym = bb->symbol_list.head; sym; sym = sym->next)
+        if (sym->var == var)
+            return;
+
+    sym = calloc(1, sizeof(symbol_t));
+    sym->var = var;
+
+    if (!bb->symbol_list.head) {
+        sym->index = 0;
+        bb->symbol_list.head = sym;
+        bb->symbol_list.tail = sym;
+    } else {
+        sym->index = bb->symbol_list.tail->index + 1;
+        bb->symbol_list.tail->next = sym;
+        bb->symbol_list.tail = sym;
+    }
+}
+
+void add_inst(block_t *block,
+              basic_block_t *bb,
+              opcode_t op,
+              var_t *rd,
+              var_t *rs1,
+              var_t *rs2,
+              int sz,
+              char *str)
+{
+    if (!bb)
+        return;
+
+    bb->scope = block;
+
+    Inst_t *n = calloc(1, sizeof(Inst_t));
+    n->opcode = op;
+    n->rd = rd;
+    n->rs1 = rs1;
+    n->rs2 = rs2;
+    n->sz = sz;
+
+    if (str)
+        strcpy(n->str, str);
+
+    if (!bb->inst_list.head) {
+        bb->inst_list.head = n;
+        bb->inst_list.tail = n;
+    } else {
+        bb->inst_list.tail->next = n;
+        bb->inst_list.tail = n;
+    }
 }
 
 /* This routine is required because the global variable initializations are
