@@ -205,7 +205,7 @@ typedef struct {
 typedef struct basic_block basic_block_t;
 
 /* phase-2 IR definition */
-typedef struct {
+struct ph2_ir {
     opcode_t op;
     int src0;
     int src1;
@@ -213,7 +213,13 @@ typedef struct {
     char func_name[MAX_VAR_LEN];
     char true_label[MAX_VAR_LEN];
     char false_label[MAX_VAR_LEN];
-} ph2_ir_t;
+    basic_block_t *next_bb;
+    basic_block_t *then_bb;
+    basic_block_t *else_bb;
+    struct ph2_ir *next;
+};
+
+typedef struct ph2_ir ph2_ir_t;
 
 /* type definition */
 typedef struct {
@@ -331,6 +337,7 @@ struct basic_block {
     fn_t *belong_to;
     block_t *scope;
     symbol_list_t symbol_list; /* variable declaration */
+    int elf_offset;
 };
 
 struct ref_block {

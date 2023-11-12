@@ -75,8 +75,14 @@ int main(int argc, char *argv[])
 
     ssa_build(dump_ir);
 
+    /* SSA-based liveness analyses */
+    liveness_analysis();
+
     /* allocate register from IR */
     reg_alloc();
+
+    /* flatten CFG to linear instruction */
+    cfg_flatten();
 
     /* dump second phase IR */
     if (dump_ir)

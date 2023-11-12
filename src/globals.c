@@ -37,8 +37,10 @@ int label_lut_idx = 0;
 
 func_list_t FUNC_LIST;
 func_t GLOBAL_FUNC;
+basic_block_t *MAIN_BB;
+int elf_offset = 0;
 
-regfile_t REG[REG_CNT];
+regfile_t REGS[REG_CNT];
 
 alias_t *ALIASES;
 int aliases_idx = 0;

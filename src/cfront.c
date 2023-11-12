@@ -906,10 +906,8 @@ void read_parameter_list_decl(func_t *fd, int anon)
     fd->num_params = vn;
 
     /* Up to `MAX_PARAMS` parameters are accepted for the variadic function. */
-    if (lex_accept(T_elipsis)) {
+    if (lex_accept(T_elipsis))
         fd->va_args = 1;
-        fd->num_params = MAX_PARAMS;
-    }
 
     lex_expect(T_close_bracket);
 }
