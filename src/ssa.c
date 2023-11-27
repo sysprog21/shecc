@@ -106,6 +106,7 @@ void build_rpo()
         args->postorder_cb = &bb_build_rpo;
         bb_forward_traversal(args);
     }
+    free(args);
 }
 
 basic_block_t *intersect(basic_block_t *i, basic_block_t *j)
@@ -218,6 +219,7 @@ void build_dom()
         args->preorder_cb = &bb_build_dom;
         bb_forward_traversal(args);
     }
+    free(args);
 }
 
 void bb_build_df(fn_t *fn, basic_block_t *bb)
@@ -248,6 +250,7 @@ void build_df()
         args->postorder_cb = &bb_build_df;
         bb_forward_traversal(args);
     }
+    free(args);
 }
 
 int var_check_killed(var_t *var, basic_block_t *bb)
@@ -352,6 +355,7 @@ void solve_globals()
         args->postorder_cb = &bb_solve_globals;
         bb_forward_traversal(args);
     }
+    free(args);
 }
 
 int var_check_in_scope(var_t *var, block_t *block)
@@ -647,6 +651,7 @@ void unwind_phi()
         args->preorder_cb = &bb_unwind_phi;
         bb_forward_traversal(args);
     }
+    free(args);
 }
 
 void bb_dump_connection(FILE *fd,
@@ -1039,6 +1044,7 @@ void build_reversed_rpo()
         args->postorder_cb = &bb_build_reversed_rpo;
         bb_backward_traversal(args);
     }
+    free(args);
 }
 
 void bb_reset_live_kill_idx(fn_t *fn, basic_block_t *bb)
@@ -1188,6 +1194,7 @@ void liveness_analysis()
         args->preorder_cb = bb_solve_locals;
         bb_forward_traversal(args);
     }
+    free(args);
 
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
         basic_block_t *bb = fn->exit;
@@ -1246,4 +1253,5 @@ void ssa_release()
         args->postorder_cb = &bb_release;
         bb_forward_traversal(args);
     }
+    free(args);
 }
