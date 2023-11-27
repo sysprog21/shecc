@@ -3024,7 +3024,7 @@ basic_block_t *read_code_block(func_t *func,
     return bb;
 }
 
-void add_killed_block(basic_block_t *bb, var_t *var);
+void var_add_killed_bb(var_t *var, basic_block_t *bb);
 
 void read_func_body(func_t *fdef, fn_t *fn)
 {
@@ -3037,7 +3037,7 @@ void read_func_body(func_t *fdef, fn_t *fn)
         /* arguments */
         add_symbol(fn->bbs, &fdef->param_defs[i]);
         fdef->param_defs[i].base = &fdef->param_defs[i];
-        add_killed_block(fn->bbs, &fdef->param_defs[i]);
+        var_add_killed_bb(&fdef->param_defs[i], fn->bbs);
     }
     basic_block_t *body = read_code_block(fdef, NULL, NULL, fn->bbs);
     if (body)

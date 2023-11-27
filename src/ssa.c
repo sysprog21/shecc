@@ -220,7 +220,7 @@ void build_df()
     }
 }
 
-int check_killed(basic_block_t *bb, var_t *var)
+int var_check_killed(var_t *var, basic_block_t *bb)
 {
     int i;
     for (i = 0; i < bb->live_kill_idx; i++)
@@ -229,7 +229,7 @@ int check_killed(basic_block_t *bb, var_t *var)
     return 0;
 }
 
-void add_killed_var(basic_block_t *bb, var_t *var)
+void bb_add_killed_var(basic_block_t *bb, var_t *var)
 {
     int i, found = 0;
     for (i = 0; i < bb->live_kill_idx; i++)
@@ -244,7 +244,7 @@ void add_killed_var(basic_block_t *bb, var_t *var)
     bb->live_kill[bb->live_kill_idx++] = var;
 }
 
-void add_killed_block(basic_block_t *bb, var_t *var)
+void var_add_killed_bb(var_t *var, basic_block_t *bb)
 {
     int found = 0;
     ref_block_t *ref;
@@ -267,7 +267,7 @@ void add_killed_block(basic_block_t *bb, var_t *var)
     var->ref_block_list.tail = ref;
 }
 
-void add_global(fn_t *fn, var_t *var)
+void fn_add_global(fn_t *fn, var_t *var)
 {
     int found = 0;
     symbol_t *sym;
@@ -298,14 +298,14 @@ void bb_solve_globals(fn_t *fn, basic_block_t *bb)
     Inst_t *inst;
     for (inst = bb->inst_list.head; inst; inst = inst->next) {
         if (inst->rs1)
-            if (!check_killed(bb, inst->rs1))
-                add_global(bb->belong_to, inst->rs1);
+            if (!var_check_killed(inst->rs1, bb))
+                fn_add_global(bb->belong_to, inst->rs1);
         if (inst->rs2)
-            if (!check_killed(bb, inst->rs2))
-                add_global(bb->belong_to, inst->rs2);
+            if (!var_check_killed(inst->rs2, bb))
+                fn_add_global(bb->belong_to, inst->rs2);
         if (inst->rd) {
-            add_killed_var(bb, inst->rd);
-            add_killed_block(bb, inst->rd);
+            bb_add_killed_var(bb, inst->rd);
+            var_add_killed_bb(inst->rd, bb);
         }
     }
 }
@@ -320,7 +320,7 @@ void solve_globals()
     }
 }
 
-int check_in_scope(block_t *block, var_t *var)
+int var_check_in_scope(var_t *var, block_t *block)
 {
     func_t *fn = block->func;
 
@@ -390,7 +390,7 @@ void solve_phi_insertion()
                 int j;
                 for (j = 0; j < bb->df_idx; j++) {
                     basic_block_t *df = bb->DF[j];
-                    if (!check_in_scope(df->scope, var))
+                    if (!var_check_in_scope(var, df->scope))
                         continue;
 
                     int is_decl = 0;
@@ -474,7 +474,7 @@ void pop_name(var_t *var)
     var->base->rename.stack_idx--;
 }
 
-void append_phi_operand(basic_block_t *bb_from, Inst_t *inst, var_t *var)
+void append_phi_operand(Inst_t *inst, var_t *var, basic_block_t *bb_from)
 {
     phi_operand_t *op = calloc(1, sizeof(phi_operand_t));
     op->from = bb_from;
@@ -508,17 +508,17 @@ void bb_solve_phi_params(basic_block_t *bb)
     if (bb->next)
         for (inst = bb->next->inst_list.head; inst; inst = inst->next)
             if (inst->opcode == OP_phi)
-                append_phi_operand(bb, inst, inst->rd);
+                append_phi_operand(inst, inst->rd, bb);
 
     if (bb->then_)
         for (inst = bb->then_->inst_list.head; inst; inst = inst->next)
             if (inst->opcode == OP_phi)
-                append_phi_operand(bb, inst, inst->rd);
+                append_phi_operand(inst, inst->rd, bb);
 
     if (bb->else_)
         for (inst = bb->else_->inst_list.head; inst; inst = inst->next)
             if (inst->opcode == OP_phi)
-                append_phi_operand(bb, inst, inst->rd);
+                append_phi_operand(inst, inst->rd, bb);
 
     int i;
     for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
@@ -1024,18 +1024,18 @@ void bb_solve_locals(fn_t *fn, basic_block_t *bb)
         inst->idx = i++;
 
         if (inst->rs1) {
-            if (!check_killed(bb, inst->rs1))
+            if (!var_check_killed(inst->rs1, bb))
                 add_live_gen(bb, inst->rs1);
             update_consumed(inst, inst->rs1);
         }
         if (inst->rs2) {
-            if (!check_killed(bb, inst->rs2))
+            if (!var_check_killed(inst->rs2, bb))
                 add_live_gen(bb, inst->rs2);
             update_consumed(inst, inst->rs2);
         }
         if (inst->rd)
             if (inst->opcode != OP_unwound_phi)
-                add_killed_var(bb, inst->rd);
+                bb_add_killed_var(bb, inst->rd);
     }
 }
 
@@ -1054,7 +1054,7 @@ void compute_live_in(basic_block_t *bb)
 
     int i;
     for (i = 0; i < bb->live_out_idx; i++) {
-        if (check_killed(bb, bb->live_out[i]))
+        if (var_check_killed(bb->live_out[i], bb))
             continue;
         add_live_in(bb, bb->live_out[i]);
     }

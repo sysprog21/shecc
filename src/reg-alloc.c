@@ -193,7 +193,7 @@ void spill_live_out(basic_block_t *bb)
             REGS[i].polluted = 0;
             continue;
         }
-        if (!check_killed(bb, REGS[i].var)) {
+        if (!var_check_killed(REGS[i].var, bb)) {
             REGS[i].var = NULL;
             REGS[i].polluted = 0;
             continue;
