@@ -99,6 +99,17 @@ basic_block_t *intersect(basic_block_t *i, basic_block_t *j)
     return i;
 }
 
+/**
+ * Find the immediate dominator of each basic block to build the dominator tree.
+ *
+ * Once the dominator tree is built, we can perform the more advanced
+ * optimiaztion according to the liveness analysis and the reachability
+ * analysis, e.g. common subexpression elimination, loop optimiaztion or dead
+ * code elimination .
+ *
+ * Reference: Cooper, Keith D.; Harvey, Timothy J.; Kennedy, Ken (2001). "A
+ *            Simple, Fast Dominance Algorithm"
+ */
 void build_idom()
 {
     fn_t *fn;
@@ -248,13 +259,12 @@ void add_killed_block(basic_block_t *bb, var_t *var)
 
     ref = calloc(1, sizeof(ref_block_t));
     ref->bb = bb;
-    if (!var->ref_block_list.head) {
+    if (!var->ref_block_list.head)
         var->ref_block_list.head = ref;
-        var->ref_block_list.tail = ref;
-    } else {
+    else
         var->ref_block_list.tail->next = ref;
-        var->ref_block_list.tail = ref;
-    }
+
+    var->ref_block_list.tail = ref;
 }
 
 void add_global(fn_t *fn, var_t *var)
@@ -644,6 +654,52 @@ void bb_dump_connection(FILE *fd,
     fprintf(fd, str, pred, pred_id, succ, succ_id);
 }
 
+/* escape character for the tag in dot file */
+char *get_inst_op(Inst_t *inst)
+{
+    switch (inst->opcode) {
+    case OP_add:
+        return "+";
+    case OP_sub:
+        return "-";
+    case OP_mul:
+        return "*";
+    case OP_div:
+        return "/";
+    case OP_mod:
+        return "%%";
+    case OP_lshift:
+        return "&lt;&lt;";
+    case OP_rshift:
+        return "&gt;&gt;";
+    case OP_eq:
+        return "==";
+    case OP_neq:
+        return "!=";
+    case OP_gt:
+        return "&gt;";
+    case OP_lt:
+        return "&lt;";
+    case OP_geq:
+        return "&gt;=";
+    case OP_leq:
+        return "&lt;=";
+    case OP_bit_and:
+        return "&amp;";
+    case OP_bit_or:
+        return "|";
+    case OP_bit_xor:
+        return "^";
+    case OP_log_and:
+        return "&amp;&amp;";
+    case OP_log_or:
+        return "||";
+    default:
+        printf("Unknown opcode");
+        abort();
+    }
+}
+
 void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
 {
     bb->visited++;
@@ -775,26 +831,8 @@ void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
                     "<%s<SUB>%d</SUB> := %s<SUB>%d</SUB> %s %s<SUB>%d</SUB>>",
                     inst->rd->var_name, inst->rd->subscript,
                     inst->rs1->var_name, inst->rs1->subscript,
-                    inst->opcode == OP_add       ? "+"
-                    : inst->opcode == OP_sub     ? "-"
-                    : inst->opcode == OP_mul     ? "*"
-                    : inst->opcode == OP_div     ? "/"
-                    : inst->opcode == OP_mod     ? "%%"
-                    : inst->opcode == OP_lshift  ? "&lt;&lt;"
-                    : inst->opcode == OP_rshift  ? "&gt;&gt;"
-                    : inst->opcode == OP_eq      ? "=="
-                    : inst->opcode == OP_neq     ? "!="
-                    : inst->opcode == OP_gt      ? "&gt;"
-                    : inst->opcode == OP_lt      ? "&lt;"
-                    : inst->opcode == OP_geq     ? "&gt;="
-                    : inst->opcode == OP_leq     ? "&lt;="
-                    : inst->opcode == OP_bit_and ? "&amp;"
-                    : inst->opcode == OP_bit_or  ? "|"
-                    : inst->opcode == OP_bit_xor ? "^"
-                    : inst->opcode == OP_log_and ? "&amp;&amp;"
-                    : inst->opcode == OP_log_or  ? "||"
-                                                 : "UNKNOWN",
-                    inst->rs2->var_name, inst->rs2->subscript);
+                    get_inst_op(inst), inst->rs2->var_name,
+                    inst->rs2->subscript);
                 break;
             case OP_negate:
                 sprintf(str, "<%s<SUB>%d</SUB> := -%s<SUB>%d</SUB>>",

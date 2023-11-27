@@ -345,7 +345,7 @@ struct ref_block {
     struct ref_block *next;
 };
 
-
+/* TODO: integrate func_t into fn_t */
 struct fn {
     basic_block_t *bbs;
     basic_block_t *exit;

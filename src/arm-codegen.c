@@ -26,7 +26,7 @@ void cfg_flatten()
             elf_offset += 4;
             break;
         default:
-            printf("Unknown OP\n");
+            printf("Unknown opcode\n");
             abort();
         }
     }
@@ -177,7 +177,7 @@ void cfg_flatten()
                     elf_offset += 24;
                     break;
                 default:
-                    printf("Unknown OP\n");
+                    printf("Unknown opcode\n");
                     abort();
                 }
             }
@@ -236,7 +236,7 @@ void code_generate()
             emit(__sw(__AL, rn, __r12, ph2_ir->src1));
             break;
         default:
-            printf("Unknown OP\n");
+            printf("Unknown opcode\n");
             abort();
         }
     }
@@ -441,7 +441,7 @@ void code_generate()
             emit(__mov_i(__NE, rd, 1));
             break;
         default:
-            printf("Unknown OP\n");
+            printf("Unknown opcode\n");
             abort();
         }
     }

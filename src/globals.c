@@ -520,13 +520,12 @@ void add_inst(block_t *block,
     if (str)
         strcpy(n->str, str);
 
-    if (!bb->inst_list.head) {
+    if (!bb->inst_list.head)
         bb->inst_list.head = n;
-        bb->inst_list.tail = n;
-    } else {
+    else
         bb->inst_list.tail->next = n;
-        bb->inst_list.tail = n;
-    }
+
+    bb->inst_list.tail = n;
 }
 
 /* This routine is required because the global variable initializations are

@@ -35,13 +35,12 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     ph2_ir_t *n = calloc(1, sizeof(ph2_ir_t));
     n->op = op;
 
-    if (!bb->ph2_ir_list.head) {
+    if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;
-        bb->ph2_ir_list.tail = n;
-    } else {
+    else
         bb->ph2_ir_list.tail->next = n;
-        bb->ph2_ir_list.tail = n;
-    }
+
+    bb->ph2_ir_list.tail = n;
     return n;
 }
 
@@ -519,7 +518,7 @@ void reg_alloc()
                     ir->dest = dest;
                     break;
                 default:
-                    printf("Unknown OP\n");
+                    printf("Unknown opcode\n");
                     abort();
                 }
             }
