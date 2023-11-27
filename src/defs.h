@@ -265,8 +265,8 @@ struct phi_operand {
 
 typedef struct phi_operand phi_operand_t;
 
-struct Inst {
-    struct Inst *next;
+struct insn {
+    struct insn *next;
     int idx;
     opcode_t opcode;
     var_t *rd;
@@ -277,12 +277,12 @@ struct Inst {
     char str[64];
 };
 
-typedef struct Inst Inst_t;
+typedef struct insn insn_t;
 
 typedef struct {
-    Inst_t *head;
-    Inst_t *tail;
-} inst_list_t;
+    insn_t *head;
+    insn_t *tail;
+} insn_list_t;
 
 typedef struct {
     ph2_ir_t *head;
@@ -310,7 +310,7 @@ typedef struct {
 } symbol_list_t;
 
 struct basic_block {
-    inst_list_t inst_list;
+    insn_list_t insn_list;
     ph2_ir_list_t ph2_ir_list;
     bb_connection_t prev[MAX_BB_PRED];
     struct basic_block *next;  /* normal BB */

@@ -49,12 +49,12 @@ void cfg_flatten()
                 /* save ra, sp */
                 elf_offset += 8;
 
-            ph2_ir_t *inst;
-            for (inst = bb->ph2_ir_list.head; inst; inst = inst->next) {
-                switch (inst->op) {
+            ph2_ir_t *insn;
+            for (insn = bb->ph2_ir_list.head; insn; insn = insn->next) {
+                switch (insn->op) {
                 case OP_load_constant:
                     flatten_ir = add_ph2_ir(OP_load_constant);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
                     /* RISC-V uses 12 bits to encode immediate value */
                     if (flatten_ir->src0 < 2048 && flatten_ir->src0 > -2047)
@@ -64,9 +64,9 @@ void cfg_flatten()
 
                     break;
                 case OP_assign:
-                    if (inst->dest != inst->src0) {
+                    if (insn->dest != insn->src0) {
                         flatten_ir = add_ph2_ir(OP_assign);
-                        memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                        memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                         elf_offset += 4;
                     }
                     break;
@@ -99,8 +99,8 @@ void cfg_flatten()
                 case OP_bit_not:
                     /* TODO: if the offset of store/load is more than 12 bits,
                      * use compounded instructions */
-                    flatten_ir = add_ph2_ir(inst->op);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    flatten_ir = add_ph2_ir(insn->op);
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     elf_offset += 4;
                     break;
                 case OP_load_data_address:
@@ -110,19 +110,19 @@ void cfg_flatten()
                 case OP_leq:
                 case OP_log_not:
                 case OP_log_or:
-                    flatten_ir = add_ph2_ir(inst->op);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    flatten_ir = add_ph2_ir(insn->op);
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     elf_offset += 8;
                     break;
                 case OP_address_of_func:
                 case OP_eq:
                     flatten_ir = add_ph2_ir(OP_eq);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     elf_offset += 12;
                     break;
                 case OP_return:
                     flatten_ir = add_ph2_ir(OP_return);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     /* restore sp */
                     flatten_ir->src1 = bb->belong_to->func->stack_size;
                     elf_offset += 16;

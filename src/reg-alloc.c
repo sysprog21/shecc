@@ -15,7 +15,7 @@ int check_live_out(basic_block_t *bb, var_t *var)
     return 0;
 }
 
-void refresh(basic_block_t *bb, Inst_t *inst)
+void refresh(basic_block_t *bb, insn_t *insn)
 {
     int i;
     for (i = 0; i < REG_CNT; i++) {
@@ -23,7 +23,7 @@ void refresh(basic_block_t *bb, Inst_t *inst)
             continue;
         if (check_live_out(bb, REGS[i].var))
             continue;
-        if (REGS[i].var->consumed < inst->idx) {
+        if (REGS[i].var->consumed < insn->idx) {
             REGS[i].var = NULL;
             REGS[i].polluted = 0;
         }
@@ -165,7 +165,7 @@ int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
     return spilled;
 }
 
-void spill_alive(basic_block_t *bb, Inst_t *inst)
+void spill_alive(basic_block_t *bb, insn_t *insn)
 {
     int i;
     for (i = 0; i < REG_CNT; i++) {
@@ -175,7 +175,7 @@ void spill_alive(basic_block_t *bb, Inst_t *inst)
             spill_var(bb, REGS[i].var, i);
             continue;
         }
-        if (REGS[i].var->consumed > inst->idx) {
+        if (REGS[i].var->consumed > insn->idx) {
             spill_var(bb, REGS[i].var, i);
             continue;
         }
@@ -205,57 +205,57 @@ void spill_live_out(basic_block_t *bb)
 /**
  * The operand of `OP_push` should not been killed until function called.
  */
-void extend_liveness(basic_block_t *bb, Inst_t *inst, var_t *var, int offset)
+void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
 {
     if (check_live_out(bb, var))
         return;
-    if (inst->idx + offset > var->consumed)
-        var->consumed = inst->idx + offset;
+    if (insn->idx + offset > var->consumed)
+        var->consumed = insn->idx + offset;
 }
 
 void reg_alloc()
 {
     /* TODO: .bss and .data section */
-    Inst_t *global_inst;
-    for (global_inst = GLOBAL_FUNC.fn->bbs->inst_list.head; global_inst;
-         global_inst = global_inst->next) {
+    insn_t *global_insn;
+    for (global_insn = GLOBAL_FUNC.fn->bbs->insn_list.head; global_insn;
+         global_insn = global_insn->next) {
         ph2_ir_t *ir;
         int dest, src0;
         int sz;
 
-        switch (global_inst->opcode) {
+        switch (global_insn->opcode) {
         case OP_allocat:
-            sz = global_inst->rd->is_ptr
+            sz = global_insn->rd->is_ptr
                      ? PTR_SIZE
-                     : find_type(global_inst->rd->type_name)->size;
-            if (global_inst->rd->array_size) {
-                GLOBAL_FUNC.stack_size += (global_inst->rd->array_size * sz);
-                global_inst->rd->offset = GLOBAL_FUNC.stack_size;
+                     : find_type(global_insn->rd->type_name)->size;
+            if (global_insn->rd->array_size) {
+                GLOBAL_FUNC.stack_size += (global_insn->rd->array_size * sz);
+                global_insn->rd->offset = GLOBAL_FUNC.stack_size;
                 GLOBAL_FUNC.stack_size += PTR_SIZE;
                 dest =
-                    prepare_dest(GLOBAL_FUNC.fn->bbs, global_inst->rd, -1, -1);
+                    prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, -1, -1);
                 ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_global_address_of);
-                ir->src0 = global_inst->rd->offset;
+                ir->src0 = global_insn->rd->offset;
                 ir->dest = dest;
-                spill_var(GLOBAL_FUNC.fn->bbs, global_inst->rd, dest);
+                spill_var(GLOBAL_FUNC.fn->bbs, global_insn->rd, dest);
             } else {
-                global_inst->rd->offset = GLOBAL_FUNC.stack_size;
+                global_insn->rd->offset = GLOBAL_FUNC.stack_size;
                 GLOBAL_FUNC.stack_size += sz;
             }
             break;
         case OP_load_constant:
-            dest = prepare_dest(GLOBAL_FUNC.fn->bbs, global_inst->rd, -1, -1);
+            dest = prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, -1, -1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_load_constant);
-            ir->src0 = global_inst->rd->init_val;
+            ir->src0 = global_insn->rd->init_val;
             ir->dest = dest;
             break;
         case OP_assign:
-            src0 = prepare_operand(GLOBAL_FUNC.fn->bbs, global_inst->rs1, -1);
-            dest = prepare_dest(GLOBAL_FUNC.fn->bbs, global_inst->rd, src0, -1);
+            src0 = prepare_operand(GLOBAL_FUNC.fn->bbs, global_insn->rs1, -1);
+            dest = prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, src0, -1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_assign);
             ir->src0 = src0;
             ir->dest = dest;
-            spill_var(GLOBAL_FUNC.fn->bbs, global_inst->rd, dest);
+            spill_var(GLOBAL_FUNC.fn->bbs, global_insn->rd, dest);
             break;
         default:
             printf("Unsupported global operation\n");
@@ -297,124 +297,124 @@ void reg_alloc()
         for (bb = fn->bbs; bb; bb = bb->rpo_next) {
             int is_pushing_args = 0, args = 0;
 
-            Inst_t *inst;
-            for (inst = bb->inst_list.head; inst; inst = inst->next) {
+            insn_t *insn;
+            for (insn = bb->insn_list.head; insn; insn = insn->next) {
                 ph2_ir_t *ir;
                 int dest, src0, src1;
                 int i, sz;
 
-                refresh(bb, inst);
+                refresh(bb, insn);
 
-                switch (inst->opcode) {
+                switch (insn->opcode) {
                 case OP_unwound_phi:
-                    src0 = prepare_operand(bb, inst->rs1, -1);
+                    src0 = prepare_operand(bb, insn->rs1, -1);
 
-                    if (!inst->rd->offset) {
-                        inst->rd->offset = bb->belong_to->func->stack_size;
+                    if (!insn->rd->offset) {
+                        insn->rd->offset = bb->belong_to->func->stack_size;
                         bb->belong_to->func->stack_size += 4;
                     }
 
                     ir = bb_add_ph2_ir(bb, OP_store);
                     ir->src0 = src0;
-                    ir->src1 = inst->rd->offset;
+                    ir->src1 = insn->rd->offset;
                     break;
                 case OP_allocat:
-                    if ((!strcmp(inst->rd->type_name, "void") ||
-                         !strcmp(inst->rd->type_name, "int") ||
-                         !strcmp(inst->rd->type_name, "char")) &&
-                        inst->rd->array_size == 0)
+                    if ((!strcmp(insn->rd->type_name, "void") ||
+                         !strcmp(insn->rd->type_name, "int") ||
+                         !strcmp(insn->rd->type_name, "char")) &&
+                        insn->rd->array_size == 0)
                         break;
 
                     src0 = fn->func->stack_size;
 
-                    if (inst->rd->is_ptr)
+                    if (insn->rd->is_ptr)
                         sz = PTR_SIZE;
                     else
-                        sz = find_type(inst->rd->type_name)->size;
+                        sz = find_type(insn->rd->type_name)->size;
 
-                    if (inst->rd->array_size)
-                        fn->func->stack_size += (inst->rd->array_size * sz);
+                    if (insn->rd->array_size)
+                        fn->func->stack_size += (insn->rd->array_size * sz);
                     else
                         fn->func->stack_size += sz;
 
-                    inst->rd->offset = fn->func->stack_size;
+                    insn->rd->offset = fn->func->stack_size;
                     fn->func->stack_size += PTR_SIZE;
 
-                    dest = prepare_dest(bb, inst->rd, -1, -1);
+                    dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_address_of);
                     ir->src0 = src0;
                     ir->dest = dest;
                     break;
                 case OP_load_constant:
                 case OP_load_data_address:
-                    dest = prepare_dest(bb, inst->rd, -1, -1);
-                    ir = bb_add_ph2_ir(bb, inst->opcode);
-                    ir->src0 = inst->rd->init_val;
+                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
+                    ir->src0 = insn->rd->init_val;
                     ir->dest = dest;
                     break;
                 case OP_address_of:
                     /* make sure variable is on stack */
-                    if (!inst->rs1->offset) {
-                        inst->rs1->offset = bb->belong_to->func->stack_size;
+                    if (!insn->rs1->offset) {
+                        insn->rs1->offset = bb->belong_to->func->stack_size;
                         bb->belong_to->func->stack_size += 4;
 
                         int i;
                         for (i = 0; i < REG_CNT; i++)
-                            if (REGS[i].var == inst->rs1) {
+                            if (REGS[i].var == insn->rs1) {
                                 ir = bb_add_ph2_ir(bb, OP_store);
                                 ir->src0 = i;
-                                ir->src1 = inst->rs1->offset;
+                                ir->src1 = insn->rs1->offset;
                             }
                     }
 
-                    dest = prepare_dest(bb, inst->rd, -1, -1);
+                    dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_address_of);
-                    ir->src0 = inst->rs1->offset;
+                    ir->src0 = insn->rs1->offset;
                     ir->dest = dest;
                     break;
                 case OP_assign:
-                    src0 = prepare_operand(bb, inst->rs1, -1);
-                    dest = prepare_dest(bb, inst->rd, ir->src0, -1);
-                    ir = bb_add_ph2_ir(bb, inst->opcode);
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    dest = prepare_dest(bb, insn->rd, ir->src0, -1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = src0;
                     ir->dest = dest;
 
                     /* store global variable immediately after assignment */
-                    if (inst->rd->is_global) {
+                    if (insn->rd->is_global) {
                         ir = bb_add_ph2_ir(bb, OP_global_store);
                         ir->src0 = dest;
-                        ir->src1 = inst->rd->offset;
+                        ir->src1 = insn->rd->offset;
                         REGS[dest].polluted = 0;
                     }
                     break;
                 case OP_read:
-                    src0 = prepare_operand(bb, inst->rs1, -1);
-                    dest = prepare_dest(bb, inst->rd, src0, -1);
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    dest = prepare_dest(bb, insn->rd, src0, -1);
                     ir = bb_add_ph2_ir(bb, OP_read);
                     ir->src0 = src0;
-                    ir->src1 = inst->sz;
+                    ir->src1 = insn->sz;
                     ir->dest = dest;
                     break;
                 case OP_write:
-                    if (inst->rs2->is_func) {
-                        src0 = prepare_operand(bb, inst->rs1, -1);
+                    if (insn->rs2->is_func) {
+                        src0 = prepare_operand(bb, insn->rs1, -1);
                         ir = bb_add_ph2_ir(bb, OP_address_of_func);
                         ir->src0 = src0;
-                        strcpy(ir->func_name, inst->rs2->var_name);
+                        strcpy(ir->func_name, insn->rs2->var_name);
                     } else {
                         /* FIXME: Avoid outdated content in register after
                          * storing, but causing some redundant spilling. */
-                        spill_alive(bb, inst);
-                        src0 = prepare_operand(bb, inst->rs1, -1);
-                        src1 = prepare_operand(bb, inst->rs2, src0);
+                        spill_alive(bb, insn);
+                        src0 = prepare_operand(bb, insn->rs1, -1);
+                        src1 = prepare_operand(bb, insn->rs2, src0);
                         ir = bb_add_ph2_ir(bb, OP_write);
                         ir->src0 = src0;
                         ir->src1 = src1;
-                        ir->dest = inst->sz;
+                        ir->dest = insn->sz;
                     }
                     break;
                 case OP_branch:
-                    src0 = prepare_operand(bb, inst->rs1, -1);
+                    src0 = prepare_operand(bb, insn->rs1, -1);
 
                     /**
                      * REGS[src0].var had been set to NULL, but the actual
@@ -428,24 +428,24 @@ void reg_alloc()
                     ir->else_bb = bb->else_;
                     break;
                 case OP_push:
-                    extend_liveness(bb, inst, inst->rs1, inst->sz);
+                    extend_liveness(bb, insn, insn->rs1, insn->sz);
 
                     if (!is_pushing_args) {
-                        spill_alive(bb, inst);
+                        spill_alive(bb, insn);
                         is_pushing_args = 1;
                     }
 
-                    src0 = prepare_operand(bb, inst->rs1, -1);
+                    src0 = prepare_operand(bb, insn->rs1, -1);
                     ir = bb_add_ph2_ir(bb, OP_assign);
                     ir->src0 = src0;
                     ir->dest = args++;
                     break;
                 case OP_call:
-                    if (!find_func(inst->str)->num_params)
-                        spill_alive(bb, inst);
+                    if (!find_func(insn->str)->num_params)
+                        spill_alive(bb, insn);
 
                     ir = bb_add_ph2_ir(bb, OP_call);
-                    strcpy(ir->func_name, inst->str);
+                    strcpy(ir->func_name, insn->str);
 
                     is_pushing_args = 0;
                     args = 0;
@@ -456,9 +456,9 @@ void reg_alloc()
                     break;
                 case OP_indirect:
                     if (!args)
-                        spill_alive(bb, inst);
+                        spill_alive(bb, insn);
 
-                    src0 = prepare_operand(bb, inst->rs1, -1);
+                    src0 = prepare_operand(bb, insn->rs1, -1);
                     ir = bb_add_ph2_ir(bb, OP_load_func);
                     ir->src0 = src0;
 
@@ -468,14 +468,14 @@ void reg_alloc()
                     args = 0;
                     break;
                 case OP_func_ret:
-                    dest = prepare_dest(bb, inst->rd, -1, -1);
+                    dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_assign);
                     ir->src0 = 0;
                     ir->dest = dest;
                     break;
                 case OP_return:
-                    if (inst->rs1)
-                        src0 = prepare_operand(bb, inst->rs1, -1);
+                    if (insn->rs1)
+                        src0 = prepare_operand(bb, insn->rs1, -1);
                     else
                         src0 = -1;
 
@@ -500,10 +500,10 @@ void reg_alloc()
                 case OP_bit_xor:
                 case OP_log_and:
                 case OP_log_or:
-                    src0 = prepare_operand(bb, inst->rs1, -1);
-                    src1 = prepare_operand(bb, inst->rs2, ir->src0);
-                    dest = prepare_dest(bb, inst->rd, ir->src0, ir->src1);
-                    ir = bb_add_ph2_ir(bb, inst->opcode);
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    src1 = prepare_operand(bb, insn->rs2, ir->src0);
+                    dest = prepare_dest(bb, insn->rd, ir->src0, ir->src1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = src0;
                     ir->src1 = src1;
                     ir->dest = dest;
@@ -511,9 +511,9 @@ void reg_alloc()
                 case OP_negate:
                 case OP_bit_not:
                 case OP_log_not:
-                    src0 = prepare_operand(bb, inst->rs1, -1);
-                    dest = prepare_dest(bb, inst->rd, ir->src0, -1);
-                    ir = bb_add_ph2_ir(bb, inst->opcode);
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    dest = prepare_dest(bb, insn->rd, ir->src0, -1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = src0;
                     ir->dest = dest;
                     break;
@@ -554,7 +554,7 @@ void reg_alloc()
             if (strcmp(fn->func->return_def.type_name, "void"))
                 continue;
 
-            if (bb->inst_list.tail && bb->inst_list.tail->opcode == OP_return)
+            if (bb->insn_list.tail && bb->insn_list.tail->opcode == OP_return)
                 continue;
 
             ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_return);

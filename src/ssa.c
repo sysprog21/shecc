@@ -325,17 +325,17 @@ void fn_add_global(fn_t *fn, var_t *var)
 
 void bb_solve_globals(fn_t *fn, basic_block_t *bb)
 {
-    Inst_t *inst;
-    for (inst = bb->inst_list.head; inst; inst = inst->next) {
-        if (inst->rs1)
-            if (!var_check_killed(inst->rs1, bb))
-                fn_add_global(bb->belong_to, inst->rs1);
-        if (inst->rs2)
-            if (!var_check_killed(inst->rs2, bb))
-                fn_add_global(bb->belong_to, inst->rs2);
-        if (inst->rd) {
-            bb_add_killed_var(bb, inst->rd);
-            var_add_killed_bb(inst->rd, bb);
+    insn_t *insn;
+    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+        if (insn->rs1)
+            if (!var_check_killed(insn->rs1, bb))
+                fn_add_global(bb->belong_to, insn->rs1);
+        if (insn->rs2)
+            if (!var_check_killed(insn->rs2, bb))
+                fn_add_global(bb->belong_to, insn->rs2);
+        if (insn->rd) {
+            bb_add_killed_var(bb, insn->rd);
+            var_add_killed_bb(insn->rd, bb);
         }
     }
 }
@@ -374,31 +374,31 @@ int var_check_in_scope(var_t *var, block_t *block)
     return 0;
 }
 
-int insert_phi_inst(basic_block_t *bb, var_t *var)
+int insert_phi_insn(basic_block_t *bb, var_t *var)
 {
-    Inst_t *inst;
+    insn_t *insn;
     int found = 0;
-    for (inst = bb->inst_list.head; inst; inst = inst->next)
-        if (inst->opcode == OP_phi)
-            if (inst->rd == var) {
+    for (insn = bb->insn_list.head; insn; insn = insn->next)
+        if (insn->opcode == OP_phi)
+            if (insn->rd == var) {
                 found = 1;
                 break;
             }
     if (found)
         return 0;
 
-    Inst_t *head = bb->inst_list.head;
-    Inst_t *n = calloc(1, sizeof(Inst_t));
+    insn_t *head = bb->insn_list.head;
+    insn_t *n = calloc(1, sizeof(insn_t));
     n->opcode = OP_phi;
     n->rd = var;
     n->rs1 = var;
     n->rs2 = var;
     if (!head) {
-        bb->inst_list.head = n;
-        bb->inst_list.tail = n;
+        bb->insn_list.head = n;
+        bb->insn_list.tail = n;
     } else {
         n->next = head;
-        bb->inst_list.head = n;
+        bb->insn_list.head = n;
     }
     return 1;
 }
@@ -444,7 +444,7 @@ void solve_phi_insertion()
                     if (var->is_global)
                         continue;
 
-                    if (insert_phi_inst(df, var)) {
+                    if (insert_phi_insn(df, var)) {
                         int l, found = 0;
                         for (l = 0; l < work_list_idx; l++)
                             if (work_list[l] == df) {
@@ -508,51 +508,51 @@ void pop_name(var_t *var)
     var->base->rename.stack_idx--;
 }
 
-void append_phi_operand(Inst_t *inst, var_t *var, basic_block_t *bb_from)
+void append_phi_operand(insn_t *insn, var_t *var, basic_block_t *bb_from)
 {
     phi_operand_t *op = calloc(1, sizeof(phi_operand_t));
     op->from = bb_from;
     op->var = get_stack_top_subscript_var(var);
 
-    phi_operand_t *tail = inst->phi_ops;
+    phi_operand_t *tail = insn->phi_ops;
     if (tail) {
         while (tail->next)
             tail = tail->next;
         tail->next = op;
     } else
-        inst->phi_ops = op;
+        insn->phi_ops = op;
 }
 
 void bb_solve_phi_params(basic_block_t *bb)
 {
-    Inst_t *inst;
-    for (inst = bb->inst_list.head; inst; inst = inst->next)
-        if (inst->opcode == OP_phi)
-            new_name(bb->scope, &inst->rd);
+    insn_t *insn;
+    for (insn = bb->insn_list.head; insn; insn = insn->next)
+        if (insn->opcode == OP_phi)
+            new_name(bb->scope, &insn->rd);
         else {
-            if (inst->rs1)
-                rename_var(bb->scope, &inst->rs1);
-            if (inst->rs2)
-                if (!inst->rs2->is_func)
-                    rename_var(bb->scope, &inst->rs2);
-            if (inst->rd)
-                new_name(bb->scope, &inst->rd);
+            if (insn->rs1)
+                rename_var(bb->scope, &insn->rs1);
+            if (insn->rs2)
+                if (!insn->rs2->is_func)
+                    rename_var(bb->scope, &insn->rs2);
+            if (insn->rd)
+                new_name(bb->scope, &insn->rd);
         }
 
     if (bb->next)
-        for (inst = bb->next->inst_list.head; inst; inst = inst->next)
-            if (inst->opcode == OP_phi)
-                append_phi_operand(inst, inst->rd, bb);
+        for (insn = bb->next->insn_list.head; insn; insn = insn->next)
+            if (insn->opcode == OP_phi)
+                append_phi_operand(insn, insn->rd, bb);
 
     if (bb->then_)
-        for (inst = bb->then_->inst_list.head; inst; inst = inst->next)
-            if (inst->opcode == OP_phi)
-                append_phi_operand(inst, inst->rd, bb);
+        for (insn = bb->then_->insn_list.head; insn; insn = insn->next)
+            if (insn->opcode == OP_phi)
+                append_phi_operand(insn, insn->rd, bb);
 
     if (bb->else_)
-        for (inst = bb->else_->inst_list.head; inst; inst = inst->next)
-            if (inst->opcode == OP_phi)
-                append_phi_operand(inst, inst->rd, bb);
+        for (insn = bb->else_->insn_list.head; insn; insn = insn->next)
+            if (insn->opcode == OP_phi)
+                append_phi_operand(insn, insn->rd, bb);
 
     int i;
     for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
@@ -561,11 +561,11 @@ void bb_solve_phi_params(basic_block_t *bb)
         bb_solve_phi_params(bb->dom_next[i]);
     }
 
-    for (inst = bb->inst_list.head; inst; inst = inst->next)
-        if (inst->opcode == OP_phi)
-            pop_name(inst->rd);
-        else if (inst->rd)
-            pop_name(inst->rd);
+    for (insn = bb->insn_list.head; insn; insn = insn->next)
+        if (insn->opcode == OP_phi)
+            pop_name(insn->rd);
+        else if (insn->rd)
+            pop_name(insn->rd);
 }
 
 void solve_phi_params()
@@ -590,49 +590,49 @@ void solve_phi_params()
     }
 }
 
-void append_unwound_phi_inst(basic_block_t *bb, var_t *dest, var_t *rs)
+void append_unwound_phi_insn(basic_block_t *bb, var_t *dest, var_t *rs)
 {
-    Inst_t *n = calloc(1, sizeof(Inst_t));
+    insn_t *n = calloc(1, sizeof(insn_t));
     n->opcode = OP_unwound_phi;
     n->rd = dest;
     n->rs1 = rs;
 
-    Inst_t *tail = bb->inst_list.tail;
+    insn_t *tail = bb->insn_list.tail;
     if (!tail) {
-        bb->inst_list.head = n;
-        bb->inst_list.tail = n;
+        bb->insn_list.head = n;
+        bb->insn_list.tail = n;
     } else {
         /* insert it before branch instruction */
         if (tail->opcode == OP_branch) {
-            Inst_t *prev = bb->inst_list.head;
+            insn_t *prev = bb->insn_list.head;
             while (prev->next != tail)
                 prev = prev->next;
             prev->next = n;
             n->next = tail;
         } else {
-            bb->inst_list.tail->next = n;
-            bb->inst_list.tail = n;
+            bb->insn_list.tail->next = n;
+            bb->insn_list.tail = n;
         }
     }
 }
 
 void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
 {
-    Inst_t *inst;
-    for (inst = bb->inst_list.head; inst; inst = inst->next) {
-        if (inst->opcode != OP_phi)
+    insn_t *insn;
+    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+        if (insn->opcode != OP_phi)
             break;
 
         phi_operand_t *operand;
-        for (operand = inst->phi_ops; operand; operand = operand->next) {
-            append_unwound_phi_inst(operand->from, inst->rd, operand->var);
+        for (operand = insn->phi_ops; operand; operand = operand->next) {
+            append_unwound_phi_insn(operand->from, insn->rd, operand->var);
         }
         /* TODO: Release dangling phi instruction */
     }
 
-    bb->inst_list.head = inst;
-    if (!inst)
-        bb->inst_list.tail = NULL;
+    bb->insn_list.head = insn;
+    if (!insn)
+        bb->insn_list.tail = NULL;
 }
 
 void unwind_phi()
@@ -672,9 +672,9 @@ void bb_dump_connection(FILE *fd,
 
     char *pred;
     void *pred_id;
-    if (curr->inst_list.tail) {
-        pred = &"inst"[0];
-        pred_id = curr->inst_list.tail;
+    if (curr->insn_list.tail) {
+        pred = &"insn"[0];
+        pred_id = curr->insn_list.tail;
     } else {
         pred = &"pseudo"[0];
         pred_id = curr;
@@ -682,9 +682,9 @@ void bb_dump_connection(FILE *fd,
 
     char *succ;
     void *succ_id;
-    if (next->inst_list.tail) {
-        succ = &"inst"[0];
-        succ_id = next->inst_list.head;
+    if (next->insn_list.tail) {
+        succ = &"insn"[0];
+        succ_id = next->insn_list.head;
     } else {
         succ = &"pseudo"[0];
         succ_id = next;
@@ -694,9 +694,9 @@ void bb_dump_connection(FILE *fd,
 }
 
 /* escape character for the tag in dot file */
-char *get_inst_op(Inst_t *inst)
+char *get_insn_op(insn_t *insn)
 {
-    switch (inst->opcode) {
+    switch (insn->opcode) {
     case OP_add:
         return "+";
     case OP_sub:
@@ -760,92 +760,92 @@ void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
     fprintf(fd, "subgraph cluster_%p {\n", bb);
     fprintf(fd, "label=\"BasicBlock %p\"\n", bb);
 
-    Inst_t *inst = bb->inst_list.head;
-    if (!inst)
+    insn_t *insn = bb->insn_list.head;
+    if (!insn)
         fprintf(fd, "pseudo_%p [label=\"pseudo\"]\n", bb);
-    if (!inst && (then_ || else_))
+    if (!insn && (then_ || else_))
         printf("Warning: pseudo node should only have NEXT\n");
 
-    for (; inst; inst = inst->next) {
-        if (inst->opcode == OP_phi) {
-            fprintf(fd, "inst_%p [label=", inst);
+    for (; insn; insn = insn->next) {
+        if (insn->opcode == OP_phi) {
+            fprintf(fd, "insn_%p [label=", insn);
             fprintf(fd, "<%s<SUB>%d</SUB> := PHI(%s<SUB>%d</SUB>",
-                    inst->rd->var_name, inst->rd->subscript,
-                    inst->phi_ops->var->var_name,
-                    inst->phi_ops->var->subscript);
+                    insn->rd->var_name, insn->rd->subscript,
+                    insn->phi_ops->var->var_name,
+                    insn->phi_ops->var->subscript);
 
             phi_operand_t *op;
-            for (op = inst->phi_ops->next; op; op = op->next) {
+            for (op = insn->phi_ops->next; op; op = op->next) {
                 fprintf(fd, ", %s<SUB>%d</SUB>", op->var->var_name,
                         op->var->subscript);
             }
             fprintf(fd, ")>]\n");
         } else {
             char str[256];
-            switch (inst->opcode) {
+            switch (insn->opcode) {
             case OP_allocat:
-                sprintf(str, "<%s<SUB>%d</SUB> := ALLOC>", inst->rd->var_name,
-                        inst->rd->subscript);
+                sprintf(str, "<%s<SUB>%d</SUB> := ALLOC>", insn->rd->var_name,
+                        insn->rd->subscript);
                 break;
             case OP_load_constant:
                 sprintf(str, "<%s<SUB>%d</SUB> := CONST %d>",
-                        inst->rd->var_name, inst->rd->subscript,
-                        inst->rd->init_val);
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rd->init_val);
                 break;
             case OP_load_data_address:
                 sprintf(str, "<%s<SUB>%d</SUB> := [.data] + %d>",
-                        inst->rd->var_name, inst->rd->subscript,
-                        inst->rd->init_val);
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rd->init_val);
                 break;
             case OP_address_of:
                 sprintf(str, "<%s<SUB>%d</SUB> := &amp;%s<SUB>%d</SUB>>",
-                        inst->rd->var_name, inst->rd->subscript,
-                        inst->rs1->var_name, inst->rs1->subscript);
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript);
                 break;
             case OP_assign:
                 sprintf(str, "<%s<SUB>%d</SUB> := %s<SUB>%d</SUB>>",
-                        inst->rd->var_name, inst->rd->subscript,
-                        inst->rs1->var_name, inst->rs1->subscript);
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript);
                 break;
             case OP_read:
                 sprintf(str, "<%s<SUB>%d</SUB> := (%s<SUB>%d</SUB>)>",
-                        inst->rd->var_name, inst->rd->subscript,
-                        inst->rs1->var_name, inst->rs1->subscript);
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript);
                 break;
             case OP_write:
-                if (inst->rs2->is_func)
+                if (insn->rs2->is_func)
                     sprintf(str, "<(%s<SUB>%d</SUB>) := %s>",
-                            inst->rs1->var_name, inst->rs1->subscript,
-                            inst->rs2->var_name);
+                            insn->rs1->var_name, insn->rs1->subscript,
+                            insn->rs2->var_name);
                 else
                     sprintf(str, "<(%s<SUB>%d</SUB>) := %s<SUB>%d</SUB>>",
-                            inst->rs1->var_name, inst->rs1->subscript,
-                            inst->rs2->var_name, inst->rs2->subscript);
+                            insn->rs1->var_name, insn->rs1->subscript,
+                            insn->rs2->var_name, insn->rs2->subscript);
                 break;
             case OP_branch:
-                sprintf(str, "<BRANCH %s<SUB>%d</SUB>>", inst->rs1->var_name,
-                        inst->rs1->subscript);
+                sprintf(str, "<BRANCH %s<SUB>%d</SUB>>", insn->rs1->var_name,
+                        insn->rs1->subscript);
                 break;
             case OP_push:
-                sprintf(str, "<PUSH %s<SUB>%d</SUB>>", inst->rs1->var_name,
-                        inst->rs1->subscript);
+                sprintf(str, "<PUSH %s<SUB>%d</SUB>>", insn->rs1->var_name,
+                        insn->rs1->subscript);
                 break;
             case OP_call:
-                sprintf(str, "<CALL @%s>", inst->str);
+                sprintf(str, "<CALL @%s>", insn->str);
                 break;
             case OP_indirect:
                 sprintf(str, "<INDIRECT CALL>");
                 break;
             case OP_return:
-                if (inst->rs1)
+                if (insn->rs1)
                     sprintf(str, "<RETURN %s<SUB>%d</SUB>>",
-                            inst->rs1->var_name, inst->rs1->subscript);
+                            insn->rs1->var_name, insn->rs1->subscript);
                 else
                     sprintf(str, "<RETURN>");
                 break;
             case OP_func_ret:
                 sprintf(str, "<%s<SUB>%d</SUB> := RETURN VALUE>",
-                        inst->rd->var_name, inst->rd->subscript);
+                        insn->rd->var_name, insn->rd->subscript);
                 break;
             case OP_add:
             case OP_sub:
@@ -868,35 +868,35 @@ void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
                 sprintf(
                     str,
                     "<%s<SUB>%d</SUB> := %s<SUB>%d</SUB> %s %s<SUB>%d</SUB>>",
-                    inst->rd->var_name, inst->rd->subscript,
-                    inst->rs1->var_name, inst->rs1->subscript,
-                    get_inst_op(inst), inst->rs2->var_name,
-                    inst->rs2->subscript);
+                    insn->rd->var_name, insn->rd->subscript,
+                    insn->rs1->var_name, insn->rs1->subscript,
+                    get_insn_op(insn), insn->rs2->var_name,
+                    insn->rs2->subscript);
                 break;
             case OP_negate:
                 sprintf(str, "<%s<SUB>%d</SUB> := -%s<SUB>%d</SUB>>",
-                        inst->rd->var_name, inst->rd->subscript,
-                        inst->rs1->var_name, inst->rs1->subscript);
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript);
                 break;
             case OP_bit_not:
                 sprintf(str, "<%s<SUB>%d</SUB> := ~%s<SUB>%d</SUB>>",
-                        inst->rd->var_name, inst->rd->subscript,
-                        inst->rs1->var_name, inst->rs1->subscript);
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript);
                 break;
             case OP_log_not:
                 sprintf(str, "<%s<SUB>%d</SUB> := !%s<SUB>%d</SUB>>",
-                        inst->rd->var_name, inst->rd->subscript,
-                        inst->rs1->var_name, inst->rs1->subscript);
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript);
                 break;
             default:
                 printf("Unknown opcode\n");
                 abort();
             }
-            fprintf(fd, "inst_%p [label=%s]\n", inst, str);
+            fprintf(fd, "insn_%p [label=%s]\n", insn, str);
         }
 
-        if (inst->next)
-            fprintf(fd, "inst_%p->inst_%p [weight=100]\n", inst, inst->next);
+        if (insn->next)
+            fprintf(fd, "insn_%p->insn_%p [weight=100]\n", insn, insn->next);
     }
     fprintf(fd, "}\n");
 
@@ -1058,32 +1058,32 @@ void add_live_gen(basic_block_t *bb, var_t *var)
     bb->live_gen[bb->live_gen_idx++] = var;
 }
 
-void update_consumed(Inst_t *inst, var_t *var)
+void update_consumed(insn_t *insn, var_t *var)
 {
-    if (inst->idx > var->consumed)
-        var->consumed = inst->idx;
+    if (insn->idx > var->consumed)
+        var->consumed = insn->idx;
 }
 
 void bb_solve_locals(fn_t *fn, basic_block_t *bb)
 {
     int i = 0;
-    Inst_t *inst;
-    for (inst = bb->inst_list.head; inst; inst = inst->next) {
-        inst->idx = i++;
+    insn_t *insn;
+    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+        insn->idx = i++;
 
-        if (inst->rs1) {
-            if (!var_check_killed(inst->rs1, bb))
-                add_live_gen(bb, inst->rs1);
-            update_consumed(inst, inst->rs1);
+        if (insn->rs1) {
+            if (!var_check_killed(insn->rs1, bb))
+                add_live_gen(bb, insn->rs1);
+            update_consumed(insn, insn->rs1);
         }
-        if (inst->rs2) {
-            if (!var_check_killed(inst->rs2, bb))
-                add_live_gen(bb, inst->rs2);
-            update_consumed(inst, inst->rs2);
+        if (insn->rs2) {
+            if (!var_check_killed(insn->rs2, bb))
+                add_live_gen(bb, insn->rs2);
+            update_consumed(insn, insn->rs2);
         }
-        if (inst->rd)
-            if (inst->opcode != OP_unwound_phi)
-                bb_add_killed_var(bb, inst->rd);
+        if (insn->rd)
+            if (insn->opcode != OP_unwound_phi)
+                bb_add_killed_var(bb, insn->rd);
     }
 }
 
@@ -1202,12 +1202,12 @@ void liveness_analysis()
 
 void bb_release(fn_t *fn, basic_block_t *bb)
 {
-    Inst_t *inst = bb->inst_list.head;
-    Inst_t *next_inst;
-    while (inst) {
-        next_inst = inst->next;
-        free(inst);
-        inst = next_inst;
+    insn_t *insn = bb->insn_list.head;
+    insn_t *next_insn;
+    while (insn) {
+        next_insn = insn->next;
+        free(insn);
+        insn = next_insn;
     }
 
     /* disconnect all predecessors */

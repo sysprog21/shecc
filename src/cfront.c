@@ -928,7 +928,7 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     vd->init_val = index;
     ph1_ir->dest = vd;
     opstack_push(vd);
-    add_inst(parent, bb, OP_load_data_address, ph1_ir->dest, NULL, NULL, 0,
+    add_insn(parent, bb, OP_load_data_address, ph1_ir->dest, NULL, NULL, 0,
              NULL);
 }
 
@@ -979,7 +979,7 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
     strcpy(vd->var_name, gen_name());
     ph1_ir->dest = vd;
     opstack_push(vd);
-    add_inst(parent, bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0, NULL);
+    add_insn(parent, bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0, NULL);
 }
 
 void read_char_param(block_t *parent, basic_block_t *bb)
@@ -996,7 +996,7 @@ void read_char_param(block_t *parent, basic_block_t *bb)
     strcpy(vd->var_name, gen_name());
     ph1_ir->dest = vd;
     opstack_push(vd);
-    add_inst(parent, bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0, NULL);
+    add_insn(parent, bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0, NULL);
 }
 
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
@@ -1020,7 +1020,7 @@ void read_func_parameters(block_t *parent, basic_block_t **bb)
          * The operand should keep alive before calling function. Pass the
          * number of remained parameters to allocator to extend their liveness.
          */
-        add_inst(parent, *bb, OP_push, NULL, ph1_ir->src0, NULL, param_num - i,
+        add_insn(parent, *bb, OP_push, NULL, ph1_ir->src0, NULL, param_num - i,
                  NULL);
     }
 }
@@ -1035,7 +1035,7 @@ void read_func_call(func_t *fn, block_t *parent, basic_block_t **bb)
     ph1_ir = add_ph1_ir(OP_call);
     ph1_ir->param_num = fn->num_params;
     strcpy(ph1_ir->func_name, fn->return_def.var_name);
-    add_inst(parent, *bb, OP_call, NULL, NULL, NULL, 0,
+    add_insn(parent, *bb, OP_call, NULL, NULL, NULL, 0,
              fn->return_def.var_name);
 }
 
@@ -1047,7 +1047,7 @@ void read_indirect_call(block_t *parent, basic_block_t **bb)
 
     ph1_ir = add_ph1_ir(OP_indirect);
     ph1_ir->src0 = opstack_pop();
-    add_inst(parent, *bb, OP_indirect, NULL, ph1_ir->src0, NULL, 0, NULL);
+    add_insn(parent, *bb, OP_indirect, NULL, ph1_ir->src0, NULL, 0, NULL);
 }
 
 ph1_ir_t side_effect[10];
@@ -1093,7 +1093,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         strcpy(vd->var_name, gen_name());
         ph1_ir->dest = vd;
         opstack_push(vd);
-        add_inst(parent, *bb, OP_log_not, ph1_ir->dest, ph1_ir->src0, NULL, 0,
+        add_insn(parent, *bb, OP_log_not, ph1_ir->dest, ph1_ir->src0, NULL, 0,
                  NULL);
     } else if (lex_accept(T_bit_not)) {
         read_expr_operand(parent, bb);
@@ -1104,7 +1104,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         strcpy(vd->var_name, gen_name());
         ph1_ir->dest = vd;
         opstack_push(vd);
-        add_inst(parent, *bb, OP_bit_not, ph1_ir->dest, ph1_ir->src0, NULL, 0,
+        add_insn(parent, *bb, OP_bit_not, ph1_ir->dest, ph1_ir->src0, NULL, 0,
                  NULL);
     } else if (lex_accept(T_ampersand)) {
         char token[MAX_VAR_LEN];
@@ -1122,7 +1122,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = vd;
             opstack_push(vd);
-            add_inst(parent, *bb, OP_address_of, ph1_ir->dest, ph1_ir->src0,
+            add_insn(parent, *bb, OP_address_of, ph1_ir->dest, ph1_ir->src0,
                      NULL, 0, NULL);
         }
     } else if (lex_accept(T_asterisk)) {
@@ -1147,7 +1147,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         strcpy(vd->var_name, gen_name());
         ph1_ir->dest = vd;
         opstack_push(vd);
-        add_inst(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0, ph1_ir->src1,
+        add_insn(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0, ph1_ir->src1,
                  ph1_ir->size, NULL);
     } else if (lex_accept(T_open_bracket)) {
         read_expr(parent, bb);
@@ -1170,7 +1170,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         ph1_ir->dest = vd;
         opstack_push(vd);
         lex_expect(T_close_bracket);
-        add_inst(parent, *bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
+        add_insn(parent, *bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
                  NULL);
     } else {
         /* function call, constant or variable - read token and determine */
@@ -1263,7 +1263,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             ph1_ir->dest = vd;
             opstack_push(vd);
             lex_expect(T_identifier);
-            add_inst(parent, *bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
+            add_insn(parent, *bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
                      NULL);
         } else if (var) {
             /* evalue lvalue expression */
@@ -1279,7 +1279,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_func_ret, ph1_ir->dest, NULL, NULL, 0,
+                add_insn(parent, *bb, OP_func_ret, ph1_ir->dest, NULL, NULL, 0,
                          NULL);
             }
         } else if (fn) {
@@ -1293,7 +1293,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_func_ret, ph1_ir->dest, NULL, NULL, 0,
+                add_insn(parent, *bb, OP_func_ret, ph1_ir->dest, NULL, NULL, 0,
                          NULL);
             } else {
                 /* indirective function pointer assignment */
@@ -1315,7 +1315,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = vd;
             opstack_push(vd);
-            add_inst(parent, *bb, OP_negate, ph1_ir->dest, ph1_ir->src0, NULL,
+            add_insn(parent, *bb, OP_negate, ph1_ir->dest, ph1_ir->src0, NULL,
                      0, NULL);
         }
     }
@@ -1432,7 +1432,7 @@ void read_expr(block_t *parent, basic_block_t **bb)
                     strcpy(vd->var_name, gen_name());
                     ph1_ir->dest = vd;
                     opstack_push(vd);
-                    add_inst(parent, *bb, ph1_ir->op, ph1_ir->dest,
+                    add_insn(parent, *bb, ph1_ir->op, ph1_ir->dest,
                              ph1_ir->src0, ph1_ir->src1, 0, NULL);
 
                     oper_stack_idx--;
@@ -1453,7 +1453,7 @@ void read_expr(block_t *parent, basic_block_t **bb)
         strcpy(vd->var_name, gen_name());
         ph1_ir->dest = vd;
         opstack_push(vd);
-        add_inst(parent, *bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
+        add_insn(parent, *bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
                  ph1_ir->src1, 0, NULL);
     }
 }
@@ -1512,7 +1512,7 @@ void read_lvalue(lvalue_t *lvalue,
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_load_constant, ph1_ir->dest, NULL,
+                add_insn(parent, *bb, OP_load_constant, ph1_ir->dest, NULL,
                          NULL, 0, NULL);
 
                 ph1_ir = add_ph1_ir(OP_mul);
@@ -1522,7 +1522,7 @@ void read_lvalue(lvalue_t *lvalue,
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_mul, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, *bb, OP_mul, ph1_ir->dest, ph1_ir->src0,
                          ph1_ir->src1, 0, NULL);
             }
 
@@ -1533,7 +1533,7 @@ void read_lvalue(lvalue_t *lvalue,
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = vd;
             opstack_push(vd);
-            add_inst(parent, *bb, OP_add, ph1_ir->dest, ph1_ir->src0,
+            add_insn(parent, *bb, OP_add, ph1_ir->dest, ph1_ir->src0,
                      ph1_ir->src1, 0, NULL);
 
             lex_expect(T_close_square);
@@ -1554,7 +1554,7 @@ void read_lvalue(lvalue_t *lvalue,
                     ph1_ir->dest = vd;
                     opstack_push(vd);
                     ph1_ir->size = 4;
-                    add_inst(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0,
+                    add_insn(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0,
                              NULL, ph1_ir->size, NULL);
                 }
             } else {
@@ -1567,7 +1567,7 @@ void read_lvalue(lvalue_t *lvalue,
                     strcpy(vd->var_name, gen_name());
                     ph1_ir->dest = vd;
                     opstack_push(vd);
-                    add_inst(parent, *bb, OP_address_of, ph1_ir->dest,
+                    add_insn(parent, *bb, OP_address_of, ph1_ir->dest,
                              ph1_ir->src0, NULL, 0, NULL);
 
                     is_address_got = 1;
@@ -1595,7 +1595,7 @@ void read_lvalue(lvalue_t *lvalue,
             vd->init_val = var->offset;
             ph1_ir->dest = vd;
             opstack_push(vd);
-            add_inst(parent, *bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
+            add_insn(parent, *bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
                      NULL);
 
             ph1_ir = add_ph1_ir(OP_add);
@@ -1605,7 +1605,7 @@ void read_lvalue(lvalue_t *lvalue,
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = vd;
             opstack_push(vd);
-            add_inst(parent, *bb, OP_add, ph1_ir->dest, ph1_ir->src0,
+            add_insn(parent, *bb, OP_add, ph1_ir->dest, ph1_ir->src0,
                      ph1_ir->src1, 0, NULL);
 
             is_address_got = 1;
@@ -1627,7 +1627,7 @@ void read_lvalue(lvalue_t *lvalue,
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0, NULL,
+                add_insn(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0, NULL,
                          ph1_ir->size, NULL);
             }
 
@@ -1642,7 +1642,7 @@ void read_lvalue(lvalue_t *lvalue,
                 vd->init_val = lvalue->size;
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_load_constant, ph1_ir->dest, NULL,
+                add_insn(parent, *bb, OP_load_constant, ph1_ir->dest, NULL,
                          NULL, 0, NULL);
 
                 ph1_ir = add_ph1_ir(OP_mul);
@@ -1652,7 +1652,7 @@ void read_lvalue(lvalue_t *lvalue,
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_mul, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, *bb, OP_mul, ph1_ir->dest, ph1_ir->src0,
                          ph1_ir->src1, 0, NULL);
             }
 
@@ -1663,7 +1663,7 @@ void read_lvalue(lvalue_t *lvalue,
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = vd;
             opstack_push(vd);
-            add_inst(parent, *bb, OP_add, ph1_ir->dest, ph1_ir->src0,
+            add_insn(parent, *bb, OP_add, ph1_ir->dest, ph1_ir->src0,
                      ph1_ir->src1, 0, NULL);
         }
     } else {
@@ -1682,7 +1682,7 @@ void read_lvalue(lvalue_t *lvalue,
             strcpy(t->var_name, gen_name());
             ph1_ir->dest = t;
             opstack_push(t);
-            add_inst(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0, NULL,
+            add_insn(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0, NULL,
                      ph1_ir->size, NULL);
         }
         if (prefix_op != OP_generic) {
@@ -1692,7 +1692,7 @@ void read_lvalue(lvalue_t *lvalue,
             vd->init_val = 1;
             ph1_ir->dest = vd;
             opstack_push(vd);
-            add_inst(parent, *bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
+            add_insn(parent, *bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
                      NULL);
 
             ph1_ir = add_ph1_ir(prefix_op);
@@ -1704,7 +1704,7 @@ void read_lvalue(lvalue_t *lvalue,
             vd = require_var(parent);
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = vd;
-            add_inst(parent, *bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
+            add_insn(parent, *bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
                      ph1_ir->src1, 0, NULL);
 
             if (lvalue->is_reference) {
@@ -1712,15 +1712,15 @@ void read_lvalue(lvalue_t *lvalue,
                 ph1_ir->src0 = vd;
                 ph1_ir->dest = opstack_pop();
                 ph1_ir->size = lvalue->size;
-                /* The column of arguments of the new inst of `OP_write` is
+                /* The column of arguments of the new insn of `OP_write` is
                  * different from `ph1_ir` */
-                add_inst(parent, *bb, OP_write, NULL, ph1_ir->dest,
+                add_insn(parent, *bb, OP_write, NULL, ph1_ir->dest,
                          ph1_ir->src0, ph1_ir->size, NULL);
             } else {
                 ph1_ir = add_ph1_ir(OP_assign);
                 ph1_ir->src0 = vd;
                 ph1_ir->dest = operand_stack[operand_stack_idx - 1];
-                add_inst(parent, *bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, *bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
                          NULL, 0, NULL);
             }
         } else if (lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) {
@@ -1793,7 +1793,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     vd = require_var(parent);
     strcpy(vd->var_name, false_label);
     ph1_ir->src1 = vd;
-    add_inst(parent, *bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
+    add_insn(parent, *bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
 
     basic_block_t *then_ = bb_create(parent);
     basic_block_t *else_ = bb_create(parent);
@@ -1820,7 +1820,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     var = require_var(parent);
     strcpy(var->var_name, gen_name());
     ph1_ir->dest = var;
-    add_inst(parent, then_, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
+    add_insn(parent, then_, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
              NULL);
 
     /* jump true branch to end of expression */
@@ -1841,7 +1841,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     ph1_ir = add_ph1_ir(OP_assign);
     ph1_ir->src0 = opstack_pop();
     ph1_ir->dest = var;
-    add_inst(parent, else_, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
+    add_insn(parent, else_, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
              NULL);
 
     ph1_ir = add_ph1_ir(OP_label);
@@ -1929,7 +1929,7 @@ int read_body_assignment(char *token,
                     strcpy(vd->var_name, gen_name());
                     ph1_ir->dest = vd;
                     opstack_push(vd);
-                    add_inst(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0,
+                    add_insn(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0,
                              NULL, lvalue.size, NULL);
                 } else
                     t = operand_stack[operand_stack_idx - 1];
@@ -1939,7 +1939,7 @@ int read_body_assignment(char *token,
                 strcpy(vd->var_name, gen_name());
                 vd->init_val = increment_size;
                 ph1_ir->dest = vd;
-                add_inst(parent, *bb, OP_load_constant, ph1_ir->dest, NULL,
+                add_insn(parent, *bb, OP_load_constant, ph1_ir->dest, NULL,
                          NULL, 0, NULL);
 
                 ph1_ir = add_ph1_ir(op);
@@ -1948,7 +1948,7 @@ int read_body_assignment(char *token,
                 vd = require_var(parent);
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
-                add_inst(parent, *bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, *bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
                          ph1_ir->src1, 0, NULL);
 
                 if (lvalue.is_reference) {
@@ -1956,13 +1956,13 @@ int read_body_assignment(char *token,
                     ph1_ir->src0 = vd;
                     ph1_ir->dest = t;
                     ph1_ir->size = size;
-                    add_inst(parent, *bb, OP_write, NULL, ph1_ir->dest,
+                    add_insn(parent, *bb, OP_write, NULL, ph1_ir->dest,
                              ph1_ir->src0, size, NULL);
                 } else {
                     ph1_ir = add_ph1_ir(OP_assign);
                     ph1_ir->src0 = vd;
                     ph1_ir->dest = t;
-                    add_inst(parent, *bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
+                    add_insn(parent, *bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
                              NULL, 0, NULL);
                 }
             } else {
@@ -1975,7 +1975,7 @@ int read_body_assignment(char *token,
                     strcpy(vd->var_name, gen_name());
                     ph1_ir->dest = vd;
                     opstack_push(vd);
-                    add_inst(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0,
+                    add_insn(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0,
                              NULL, ph1_ir->size, NULL);
                 } else
                     t = operand_stack[operand_stack_idx - 1];
@@ -1988,7 +1988,7 @@ int read_body_assignment(char *token,
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_load_constant, ph1_ir->dest, NULL,
+                add_insn(parent, *bb, OP_load_constant, ph1_ir->dest, NULL,
                          NULL, 0, NULL);
 
                 ph1_ir = add_ph1_ir(OP_mul);
@@ -1998,7 +1998,7 @@ int read_body_assignment(char *token,
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, *bb, OP_mul, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, *bb, OP_mul, ph1_ir->dest, ph1_ir->src0,
                          ph1_ir->src1, 0, NULL);
 
                 ph1_ir = add_ph1_ir(op);
@@ -2007,7 +2007,7 @@ int read_body_assignment(char *token,
                 vd = require_var(parent);
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
-                add_inst(parent, *bb, op, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, *bb, op, ph1_ir->dest, ph1_ir->src0,
                          ph1_ir->src1, 0, NULL);
 
                 if (lvalue.is_reference) {
@@ -2015,13 +2015,13 @@ int read_body_assignment(char *token,
                     ph1_ir->src0 = vd;
                     ph1_ir->dest = t;
                     ph1_ir->size = lvalue.size;
-                    add_inst(parent, *bb, OP_write, NULL, ph1_ir->dest,
+                    add_insn(parent, *bb, OP_write, NULL, ph1_ir->dest,
                              ph1_ir->src0, lvalue.size, NULL);
                 } else {
                     ph1_ir = add_ph1_ir(OP_assign);
                     ph1_ir->src0 = vd;
                     ph1_ir->dest = t;
-                    add_inst(parent, *bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
+                    add_insn(parent, *bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
                              NULL, 0, NULL);
                 }
             }
@@ -2033,20 +2033,20 @@ int read_body_assignment(char *token,
                 ph1_ir = add_ph1_ir(OP_write);
                 ph1_ir->src0 = opstack_pop();
                 ph1_ir->dest = opstack_pop();
-                add_inst(parent, *bb, OP_write, NULL, ph1_ir->dest,
+                add_insn(parent, *bb, OP_write, NULL, ph1_ir->dest,
                          ph1_ir->src0, PTR_SIZE, NULL);
             } else if (lvalue.is_reference) {
                 ph1_ir = add_ph1_ir(OP_write);
                 ph1_ir->src0 = opstack_pop();
                 ph1_ir->dest = opstack_pop();
                 ph1_ir->size = size;
-                add_inst(parent, *bb, OP_write, NULL, ph1_ir->dest,
+                add_insn(parent, *bb, OP_write, NULL, ph1_ir->dest,
                          ph1_ir->src0, size, NULL);
             } else {
                 ph1_ir = add_ph1_ir(OP_assign);
                 ph1_ir->src0 = opstack_pop();
                 ph1_ir->dest = opstack_pop();
-                add_inst(parent, *bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, *bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
                          NULL, 0, NULL);
             }
         }
@@ -2165,7 +2165,7 @@ int read_global_assignment(char *token)
             strcpy(vd->var_name, gen_name());
             vd->init_val = operand1;
             ph1_ir->dest = vd;
-            add_inst(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
+            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
                      ph1_ir->dest, NULL, NULL, 0, NULL);
 
             ph1_ir = add_global_ir(OP_assign);
@@ -2173,7 +2173,7 @@ int read_global_assignment(char *token)
             vd = require_var(parent);
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = opstack_pop();
-            add_inst(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
+            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
                      ph1_ir->src0, NULL, 0, NULL);
             return 1;
         } else if (op == OP_ternary) {
@@ -2190,7 +2190,7 @@ int read_global_assignment(char *token)
             strcpy(vd->var_name, gen_name());
             vd->init_val = eval_expression_imm(op, operand1, operand2);
             ph1_ir->dest = vd;
-            add_inst(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
+            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
                      ph1_ir->dest, NULL, NULL, 0, NULL);
 
             ph1_ir = add_global_ir(OP_assign);
@@ -2198,7 +2198,7 @@ int read_global_assignment(char *token)
             vd = require_var(parent);
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = opstack_pop();
-            add_inst(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
+            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
                      ph1_ir->src0, NULL, 0, NULL);
             return 1;
         } else if (op == OP_ternary) {
@@ -2268,7 +2268,7 @@ int read_global_assignment(char *token)
                     strcpy(vd->var_name, gen_name());
                     vd->init_val = val_stack[0];
                     ph1_ir->dest = vd;
-                    add_inst(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
+                    add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
                              ph1_ir->dest, NULL, NULL, 0, NULL);
 
                     ph1_ir = add_global_ir(OP_assign);
@@ -2276,7 +2276,7 @@ int read_global_assignment(char *token)
                     vd = require_var(parent);
                     strcpy(vd->var_name, gen_name());
                     ph1_ir->dest = opstack_pop();
-                    add_inst(parent, GLOBAL_FUNC.fn->bbs, OP_assign,
+                    add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign,
                              ph1_ir->dest, ph1_ir->src0, NULL, 0, NULL);
                 }
                 return 1;
@@ -2294,7 +2294,7 @@ int read_global_assignment(char *token)
             strcpy(vd->var_name, gen_name());
             vd->init_val = val_stack[0];
             ph1_ir->dest = vd;
-            add_inst(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
+            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
                      ph1_ir->dest, NULL, NULL, 0, NULL);
 
             ph1_ir = add_global_ir(OP_assign);
@@ -2302,7 +2302,7 @@ int read_global_assignment(char *token)
             vd = require_var(parent);
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = opstack_pop();
-            add_inst(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
+            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
                      ph1_ir->src0, NULL, 0, NULL);
         }
         return 1;
@@ -2323,7 +2323,7 @@ void perform_side_effect(block_t *parent, basic_block_t *bb)
     for (i = 0; i < se_idx; i++) {
         ph1_ir_t *ph1_ir = add_ph1_ir(side_effect[i].op);
         memcpy(ph1_ir, &side_effect[i], sizeof(ph1_ir_t));
-        add_inst(parent, bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
+        add_insn(parent, bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
                  ph1_ir->src1, ph1_ir->size, ph1_ir->func_name);
     }
     se_idx = 0;
@@ -2359,7 +2359,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         /* return void */
         if (lex_accept(T_semicolon)) {
             add_ph1_ir(OP_return);
-            add_inst(parent, bb, OP_return, NULL, NULL, NULL, 0, NULL);
+            add_insn(parent, bb, OP_return, NULL, NULL, NULL, 0, NULL);
             bb_connect(bb, parent->func->fn->exit, NEXT);
             return NULL;
         }
@@ -2375,7 +2375,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         ph1_ir = add_ph1_ir(OP_return);
         ph1_ir->src0 = opstack_pop();
 
-        add_inst(parent, bb, OP_return, NULL, ph1_ir->src0, NULL, 0, NULL);
+        add_insn(parent, bb, OP_return, NULL, ph1_ir->src0, NULL, 0, NULL);
         bb_connect(bb, parent->func->fn->exit, NEXT);
         return NULL;
     }
@@ -2404,7 +2404,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         strcpy(vd->var_name, label_false);
         ph1_ir->src1 = vd;
         /* argument column is different with ph1_ir */
-        add_inst(parent, bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
+        add_insn(parent, bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
 
         ph1_ir = add_ph1_ir(OP_label);
         vd = require_var(parent);
@@ -2512,7 +2512,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         vd = require_var(parent);
         strcpy(vd->var_name, label_end);
         ph1_ir->src1 = vd;
-        add_inst(parent, bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
+        add_insn(parent, bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
 
         ph1_ir = add_ph1_ir(OP_label);
         vd = require_var(parent);
@@ -2594,7 +2594,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 vd->init_val = case_val;
                 ph1_ir->dest = vd;
                 opstack_push(vd);
-                add_inst(parent, bb, OP_load_constant, ph1_ir->dest, NULL, NULL,
+                add_insn(parent, bb, OP_load_constant, ph1_ir->dest, NULL, NULL,
                          0, NULL);
 
                 ph1_ir = add_ph1_ir(OP_eq);
@@ -2605,7 +2605,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 vd = require_var(parent);
                 strcpy(vd->var_name, gen_name());
                 ph1_ir->dest = vd;
-                add_inst(parent, bb, OP_eq, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, bb, OP_eq, ph1_ir->dest, ph1_ir->src0,
                          ph1_ir->src1, 0, NULL);
 
                 ph1_ir = add_ph1_ir(OP_branch);
@@ -2616,7 +2616,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 vd = require_var(parent);
                 strcpy(vd->var_name, false_label);
                 ph1_ir->src1 = vd;
-                add_inst(parent, bb, OP_branch, NULL, ph1_ir->dest, NULL, 0,
+                add_insn(parent, bb, OP_branch, NULL, ph1_ir->dest, NULL, 0,
                          NULL);
             }
             lex_expect(T_colon);
@@ -2753,7 +2753,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = vd;
             opstack_push(vd);
-            add_inst(parent, cond_, OP_load_constant, ph1_ir->dest, NULL, NULL,
+            add_insn(parent, cond_, OP_load_constant, ph1_ir->dest, NULL, NULL,
                      0, NULL);
         }
 
@@ -2765,7 +2765,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         vd = require_var(parent);
         strcpy(vd->var_name, end);
         ph1_ir->src1 = vd;
-        add_inst(parent, cond_, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
+        add_insn(parent, cond_, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
 
         var_break = require_var(parent);
         strcpy(var_break->var_name, end);
@@ -2882,7 +2882,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         vd = require_var(parent);
         strcpy(vd->var_name, var_break->var_name);
         ph1_ir->src1 = vd;
-        add_inst(parent, cond_, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
+        add_insn(parent, cond_, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
 
         ph1_ir = add_ph1_ir(OP_label);
         ph1_ir->src0 = var_break;
@@ -2916,7 +2916,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (type) {
         var = require_var(parent);
         read_full_var_decl(var, 0, 0);
-        add_inst(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
+        add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
         add_symbol(bb, var);
         if (lex_accept(T_assign)) {
             read_expr(parent, &bb);
@@ -2925,7 +2925,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             ph1_ir = add_ph1_ir(OP_assign);
             ph1_ir->src0 = opstack_pop();
             ph1_ir->dest = var;
-            add_inst(parent, bb, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
+            add_insn(parent, bb, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
                      NULL);
         }
         while (lex_accept(T_comma)) {
@@ -2944,7 +2944,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 ph1_ir = add_ph1_ir(OP_assign);
                 ph1_ir->src0 = opstack_pop();
                 ph1_ir->dest = nv;
-                add_inst(parent, bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
+                add_insn(parent, bb, OP_assign, ph1_ir->dest, ph1_ir->src0,
                          NULL, 0, NULL);
             }
         }
@@ -3075,7 +3075,7 @@ void read_global_decl(block_t *block)
             return;
         error("Syntax error in global declaration");
     } else
-        add_inst(block, GLOBAL_FUNC.fn->bbs, OP_allocat, var, NULL, NULL, 0,
+        add_insn(block, GLOBAL_FUNC.fn->bbs, OP_allocat, var, NULL, NULL, 0,
                  NULL);
 
     /* is a variable */

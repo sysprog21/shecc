@@ -49,12 +49,12 @@ void cfg_flatten()
                 /* save ra, sp */
                 elf_offset += 16;
 
-            ph2_ir_t *inst;
-            for (inst = bb->ph2_ir_list.head; inst; inst = inst->next) {
-                switch (inst->op) {
+            ph2_ir_t *insn;
+            for (insn = bb->ph2_ir_list.head; insn; insn = insn->next) {
+                switch (insn->op) {
                 case OP_load_constant:
                     flatten_ir = add_ph2_ir(OP_load_constant);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
                     /**
                      * ARMv7 uses 12 bits to encode immediate value, but the
@@ -71,15 +71,15 @@ void cfg_flatten()
 
                     break;
                 case OP_assign:
-                    if (inst->dest != inst->src0) {
+                    if (insn->dest != insn->src0) {
                         flatten_ir = add_ph2_ir(OP_assign);
-                        memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                        memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                         elf_offset += 4;
                     }
                     break;
                 case OP_address_of:
                     flatten_ir = add_ph2_ir(OP_address_of);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
                     /**
                      * ARMv7 uses 12 bits to encode immediate value, but the
@@ -96,7 +96,7 @@ void cfg_flatten()
                 case OP_load:
                 case OP_global_load:
                     flatten_ir = add_ph2_ir(OP_address_of);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
                     /**
                      * ARMv7 straight uses 12 bits to encode the offset of
@@ -111,7 +111,7 @@ void cfg_flatten()
                 case OP_store:
                 case OP_global_store:
                     flatten_ir = add_ph2_ir(OP_address_of);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
                     /**
                      * ARMv7 straight uses 12 bits to encode the offset of
@@ -142,13 +142,13 @@ void cfg_flatten()
                 case OP_negate:
                 case OP_log_and:
                 case OP_bit_not:
-                    flatten_ir = add_ph2_ir(inst->op);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    flatten_ir = add_ph2_ir(insn->op);
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     elf_offset += 4;
                     break;
                 case OP_load_data_address:
                     flatten_ir = add_ph2_ir(OP_load_data_address);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     elf_offset += 8;
                     break;
                 case OP_address_of_func:
@@ -161,18 +161,18 @@ void cfg_flatten()
                 case OP_leq:
                 case OP_log_not:
                 case OP_log_or:
-                    flatten_ir = add_ph2_ir(inst->op);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    flatten_ir = add_ph2_ir(insn->op);
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     elf_offset += 12;
                     break;
                 case OP_branch:
                     flatten_ir = add_ph2_ir(OP_branch);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     elf_offset += 24;
                     break;
                 case OP_return:
                     flatten_ir = add_ph2_ir(OP_return);
-                    memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
+                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
                     flatten_ir->src1 = bb->belong_to->func->stack_size;
                     elf_offset += 24;
                     break;

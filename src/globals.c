@@ -496,7 +496,7 @@ void add_symbol(basic_block_t *bb, var_t *var)
     }
 }
 
-void add_inst(block_t *block,
+void add_insn(block_t *block,
               basic_block_t *bb,
               opcode_t op,
               var_t *rd,
@@ -510,7 +510,7 @@ void add_inst(block_t *block,
 
     bb->scope = block;
 
-    Inst_t *n = calloc(1, sizeof(Inst_t));
+    insn_t *n = calloc(1, sizeof(insn_t));
     n->opcode = op;
     n->rd = rd;
     n->rs1 = rs1;
@@ -520,12 +520,12 @@ void add_inst(block_t *block,
     if (str)
         strcpy(n->str, str);
 
-    if (!bb->inst_list.head)
-        bb->inst_list.head = n;
+    if (!bb->insn_list.head)
+        bb->insn_list.head = n;
     else
-        bb->inst_list.tail->next = n;
+        bb->insn_list.tail->next = n;
 
-    bb->inst_list.tail = n;
+    bb->insn_list.tail = n;
 }
 
 /* This routine is required because the global variable initializations are
