@@ -56,6 +56,7 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_load_constant);
                     memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
 
+                    /* RISC-V uses 12 bits to encode immediate value */
                     if (flatten_ir->src0 < 2048 && flatten_ir->src0 > -2047)
                         elf_offset += 4;
                     else
@@ -96,6 +97,8 @@ void cfg_flatten()
                 case OP_negate:
                 case OP_log_and:
                 case OP_bit_not:
+                    /* TODO: if the offset of store/load is more than 12 bits,
+                     * use compounded instructions */
                     flatten_ir = add_ph2_ir(inst->op);
                     memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
                     elf_offset += 4;

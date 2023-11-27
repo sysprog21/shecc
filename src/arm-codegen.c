@@ -56,6 +56,12 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_load_constant);
                     memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
 
+                    /**
+                     * ARMv7 uses 12 bits to encode immediate value, but the
+                     * higher 4 bits are for rotation. See A5.2.4 "Modified
+                     * immediate constants in ARM instructions" in ARMv7-A
+                     * manual.
+                     */
                     if (flatten_ir->src0 < 0)
                         elf_offset += 12;
                     else if (flatten_ir->src0 > 255)
@@ -75,6 +81,12 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_address_of);
                     memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
 
+                    /**
+                     * ARMv7 uses 12 bits to encode immediate value, but the
+                     * higher 4 bits are for rotation. See A5.2.4 "Modified
+                     * immediate constants in ARM instructions" in ARMv7-A
+                     * manual.
+                     */
                     if (flatten_ir->src0 > 255)
                         elf_offset += 12;
                     else
@@ -86,7 +98,11 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_address_of);
                     memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
 
-                    if (flatten_ir->src0 > 255)
+                    /**
+                     * ARMv7 straight uses 12 bits to encode the offset of
+                     * load instruction (no rotation).
+                     */
+                    if (flatten_ir->src0 > 4095)
                         elf_offset += 16;
                     else
                         elf_offset += 4;
@@ -97,7 +113,11 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_address_of);
                     memcpy(flatten_ir, inst, sizeof(ph2_ir_t));
 
-                    if (flatten_ir->src1 > 255)
+                    /**
+                     * ARMv7 straight uses 12 bits to encode the offset of
+                     * store instruction (no rotation).
+                     */
+                    if (flatten_ir->src1 > 4095)
                         elf_offset += 16;
                     else
                         elf_offset += 4;
@@ -265,7 +285,7 @@ void code_generate()
             emit(__mov_r(__AL, rd, rn));
             break;
         case OP_load:
-            if (ph2_ir->src0 > 255) {
+            if (ph2_ir->src0 > 4095) {
                 emit(__movw(__AL, __r8, ph2_ir->src0));
                 emit(__movt(__AL, __r8, ph2_ir->src0));
                 emit(__add_r(__AL, __r8, __sp, __r8));
@@ -274,7 +294,7 @@ void code_generate()
                 emit(__lw(__AL, rd, __sp, ph2_ir->src0));
             break;
         case OP_store:
-            if (ph2_ir->src1 > 255) {
+            if (ph2_ir->src1 > 4095) {
                 emit(__movw(__AL, __r8, ph2_ir->src1));
                 emit(__movt(__AL, __r8, ph2_ir->src1));
                 emit(__add_r(__AL, __r8, __sp, __r8));
@@ -283,7 +303,7 @@ void code_generate()
                 emit(__sw(__AL, rn, __sp, ph2_ir->src1));
             break;
         case OP_global_load:
-            if (ph2_ir->src0 > 255) {
+            if (ph2_ir->src0 > 4095) {
                 emit(__movw(__AL, __r8, ph2_ir->src0));
                 emit(__movt(__AL, __r8, ph2_ir->src0));
                 emit(__add_r(__AL, __r8, __r12, __r8));
@@ -292,7 +312,7 @@ void code_generate()
                 emit(__lw(__AL, rd, __r12, ph2_ir->src0));
             break;
         case OP_global_store:
-            if (ph2_ir->src1 > 255) {
+            if (ph2_ir->src1 > 4095) {
                 emit(__movw(__AL, __r8, ph2_ir->src1));
                 emit(__movt(__AL, __r8, ph2_ir->src1));
                 emit(__add_r(__AL, __r8, __r12, __r8));
