@@ -6,689 +6,563 @@
  * dead variable and does NOT wrtie it back to the stack.
  */
 
-void expire_regs(int i)
+int check_live_out(basic_block_t *bb, var_t *var)
 {
-    int t;
-    for (t = 0; t < REG_CNT; t++) {
-        if (REG[t].var == NULL)
+    int i;
+    for (i = 0; i < bb->live_out_idx; i++)
+        if (bb->live_out[i] == var)
+            return 1;
+    return 0;
+}
+
+void refresh(basic_block_t *bb, insn_t *insn)
+{
+    int i;
+    for (i = 0; i < REG_CNT; i++) {
+        if (!REGS[i].var)
             continue;
-        if (REG[t].var->liveness < i) {
-            REG[t].var = NULL;
-            REG[t].polluted = 0;
+        if (check_live_out(bb, REGS[i].var))
+            continue;
+        if (REGS[i].var->consumed < insn->idx) {
+            REGS[i].var = NULL;
+            REGS[i].polluted = 0;
         }
     }
 }
 
-int find_in_regs(var_t *var)
+ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
+{
+    ph2_ir_t *n = calloc(1, sizeof(ph2_ir_t));
+    n->op = op;
+
+    if (!bb->ph2_ir_list.head)
+        bb->ph2_ir_list.head = n;
+    else
+        bb->ph2_ir_list.tail->next = n;
+
+    bb->ph2_ir_list.tail = n;
+    return n;
+}
+
+/**
+ * Priority of spilling:
+ * - live_out variable
+ * - farthest local variable
+ */
+void spill_var(basic_block_t *bb, var_t *var, int idx)
+{
+    if (!REGS[idx].polluted) {
+        REGS[idx].var = NULL;
+        return;
+    }
+
+    if (!var->offset) {
+        var->offset = bb->belong_to->func->stack_size;
+        bb->belong_to->func->stack_size += 4;
+    }
+    ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_store)
+                                  : bb_add_ph2_ir(bb, OP_store);
+    ir->src0 = idx;
+    ir->src1 = var->offset;
+    REGS[idx].var = NULL;
+    REGS[idx].polluted = 0;
+}
+
+void load_var(basic_block_t *bb, var_t *var, int idx)
+{
+    ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_load)
+                                  : bb_add_ph2_ir(bb, OP_load);
+    ir->src0 = var->offset;
+    ir->dest = idx;
+    REGS[idx].var = var;
+    REGS[idx].polluted = 0;
+}
+
+int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 {
     int i;
     for (i = 0; i < REG_CNT; i++)
-        if (REG[i].var == var)
+        if (REGS[i].var == var)
             return i;
-    return -1;
+
+    for (i = 0; i < REG_CNT; i++)
+        if (!REGS[i].var) {
+            load_var(bb, var, i);
+            return i;
+        }
+
+    for (i = 0; i < REG_CNT; i++) {
+        if (i == operand_0)
+            continue;
+        if (check_live_out(bb, REGS[i].var)) {
+            spill_var(bb, REGS[i].var, i);
+            load_var(bb, var, i);
+            return i;
+        }
+    }
+
+    /* spill farthest local */
+    int spilled = 0;
+    for (i = 0; i < REG_CNT; i++) {
+        if (!REGS[i].var)
+            continue;
+        if (REGS[i].var->consumed > REGS[spilled].var->consumed)
+            spilled = i;
+    }
+
+    spill_var(bb, REGS[spilled].var, spilled);
+    load_var(bb, var, spilled);
+
+    return spilled;
 }
 
-int try_avl_reg()
+int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
 {
     int i;
     for (i = 0; i < REG_CNT; i++)
-        if (REG[i].var == NULL)
+        if (REGS[i].var == var) {
+            REGS[i].polluted = 1;
             return i;
-    return -1;
-}
+        }
 
-/* Return the available register. Spill the content if needed */
-int get_src_reg(func_t *fn, var_t *var, int reserved)
-{
-    ph2_ir_t *ph2_ir;
-    int reg_idx, i, ofs, t = 0;
-
-    reg_idx = find_in_regs(var);
-    if (reg_idx > -1)
-        return reg_idx;
-
-    reg_idx = try_avl_reg();
-    if (reg_idx > -1) {
-        REG[reg_idx].var = var;
-        REG[reg_idx].polluted = 0;
-
-        if (var->is_global == 1)
-            ph2_ir = add_ph2_ir(OP_global_load);
-        else
-            ph2_ir = add_ph2_ir(OP_load);
-        ph2_ir->dest = reg_idx;
-        ph2_ir->src0 = var->offset;
-        return reg_idx;
-    }
+    for (i = 0; i < REG_CNT; i++)
+        if (!REGS[i].var) {
+            REGS[i].var = var;
+            REGS[i].polluted = 1;
+            return i;
+        }
 
     for (i = 0; i < REG_CNT; i++) {
-        if (reserved == i)
+        if (i == operand_0)
             continue;
-        if (REG[i].var->liveness > t) {
-            t = REG[i].var->liveness;
-            reg_idx = i;
+        if (i == operand_1)
+            continue;
+        if (check_live_out(bb, REGS[i].var)) {
+            spill_var(bb, REGS[i].var, i);
+            REGS[i].var = var;
+            REGS[i].polluted = 1;
+            return i;
         }
     }
 
-    /**
-     * TODO: Estimate the cost of global spilling. It should spill itself if
-     * it has the longest lifetime.
-     */
-    if (0 && var->liveness > REG[reg_idx].var->liveness) {
-        ;
-    } else {
-        ofs = REG[reg_idx].var->offset;
+    /* spill farthest local */
+    int spilled = 0;
+    for (i = 0; i < REG_CNT; i++) {
+        if (i == operand_0)
+            continue;
+        if (i == operand_1)
+            continue;
+        if (!REGS[i].var)
+            continue;
+        if (REGS[i].var->consumed > REGS[spilled].var->consumed)
+            spilled = i;
+    }
 
-        /* allocate space if the temporary var is going to be spilled */
-        if (ofs == 0) {
-            if (REG[reg_idx].var->is_global == 1) {
-                ofs = FUNCS[0].stack_size;
-                FUNCS[0].stack_size += 4;
-            } else {
-                ofs = fn->stack_size;
-                fn->stack_size += 4;
-            }
-            REG[reg_idx].var->offset = ofs;
+    spill_var(bb, REGS[spilled].var, spilled);
+    REGS[spilled].var = var;
+    REGS[spilled].polluted = 1;
+
+    return spilled;
+}
+
+void spill_alive(basic_block_t *bb, insn_t *insn)
+{
+    int i;
+    for (i = 0; i < REG_CNT; i++) {
+        if (!REGS[i].var)
+            continue;
+        if (check_live_out(bb, REGS[i].var)) {
+            spill_var(bb, REGS[i].var, i);
+            continue;
         }
-
-        if (REG[reg_idx].polluted) {
-            if (REG[reg_idx].var->is_global == 1)
-                ph2_ir = add_ph2_ir(OP_global_store);
-            else
-                ph2_ir = add_ph2_ir(OP_store);
-            ph2_ir->src0 = reg_idx;
-            ph2_ir->src1 = ofs;
+        if (REGS[i].var->consumed > insn->idx) {
+            spill_var(bb, REGS[i].var, i);
+            continue;
         }
-
-        if (var->is_global == 1)
-            ph2_ir = add_ph2_ir(OP_global_load);
-        else
-            ph2_ir = add_ph2_ir(OP_load);
-        ph2_ir->dest = reg_idx;
-        ph2_ir->src0 = var->offset;
-
-        REG[reg_idx].var = var;
-        REG[reg_idx].polluted = 0;
-
-        return reg_idx;
     }
 }
 
-/* use the source register if it is going to be expired */
-int get_dest_reg(func_t *fn, var_t *var, int pc, int src0, int src1)
+void spill_live_out(basic_block_t *bb)
 {
-    ph2_ir_t *ph2_ir;
-    int i, ofs, reg_idx;
-    int t = 0;
-
-    reg_idx = find_in_regs(var);
-    if (reg_idx > -1) {
-        REG[reg_idx].polluted = 1;
-        return reg_idx;
-    }
-
-    reg_idx = try_avl_reg();
-    if (reg_idx > -1) {
-        REG[reg_idx].var = var;
-        REG[reg_idx].polluted = 1;
-        return reg_idx;
-    }
-
-    if (src0 > -1)
-        if (REG[src0].var->liveness == pc) {
-            REG[src0].var = var;
-            REG[src0].polluted = 1;
-            return src0;
-        }
-
-    if (src1 > -1)
-        if (REG[src1].var->liveness == pc) {
-            REG[src1].var = var;
-            REG[src1].polluted = 1;
-            return src1;
-        }
-
+    int i;
     for (i = 0; i < REG_CNT; i++) {
-        if (REG[i].var->liveness > t) {
-            t = REG[i].var->liveness;
-            reg_idx = i;
+        if (!REGS[i].var)
+            continue;
+        if (!check_live_out(bb, REGS[i].var)) {
+            REGS[i].var = NULL;
+            REGS[i].polluted = 0;
+            continue;
         }
-    }
-
-    /**
-     * TODO: Estimate the cost of global spilling. It should spill itself if
-     * it has the longest lifetime.
-     */
-    if (0 && var->liveness > REG[reg_idx].var->liveness) {
-        ;
-    } else {
-        ofs = REG[reg_idx].var->offset;
-
-        /* allocate space if the temporary var is going to be spilled */
-        if (ofs == 0) {
-            if (REG[reg_idx].var->is_global == 1) {
-                ofs = FUNCS[0].stack_size;
-                FUNCS[0].stack_size += 4;
-            } else {
-                ofs = fn->stack_size;
-                fn->stack_size += 4;
-            }
-            REG[reg_idx].var->offset = ofs;
+        if (!var_check_killed(REGS[i].var, bb)) {
+            REGS[i].var = NULL;
+            REGS[i].polluted = 0;
+            continue;
         }
-
-        if (REG[reg_idx].polluted) {
-            if (REG[reg_idx].var->is_global == 1)
-                ph2_ir = add_ph2_ir(OP_global_store);
-            else
-                ph2_ir = add_ph2_ir(OP_store);
-            ph2_ir->src0 = reg_idx;
-            ph2_ir->src1 = ofs;
-        }
-
-        REG[reg_idx].var = var;
-        REG[reg_idx].polluted = 1;
-
-        return reg_idx;
+        spill_var(bb, REGS[i].var, i);
     }
 }
 
 /**
- * Do not store if the var is going to to be expired after current iteration.
- * Used in `OP_branch`.
+ * The operand of `OP_push` should not been killed until function called.
  */
-void spill_all_regs(func_t *fn, int pc)
+void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
 {
-    ph2_ir_t *ph2_ir;
-    int i, ofs;
-
-    for (i = 0; i < REG_CNT; i++) {
-        if (REG[i].var == NULL)
-            continue;
-
-        if (REG[i].var->liveness == pc)
-            continue;
-
-        if (REG[i].polluted == 0) {
-            REG[i].var = NULL;
-            continue;
-        }
-
-        if (REG[i].var->is_global == 1)
-            ph2_ir = add_ph2_ir(OP_global_store);
-        else
-            ph2_ir = add_ph2_ir(OP_store);
-
-        ph2_ir->src0 = i;
-        ofs = REG[i].var->offset;
-
-        /* allocate space if the temporary var is going to be spilled */
-        if (ofs == 0) {
-            if (REG[i].var->is_global == 1) {
-                ofs = FUNCS[0].stack_size;
-                FUNCS[0].stack_size += 4;
-            } else {
-                ofs = fn->stack_size;
-                fn->stack_size += 4;
-            }
-            REG[i].var->offset = ofs;
-        }
-        ph2_ir->src1 = ofs;
-
-        REG[i].var = NULL;
-        REG[i].polluted = 0;
-    }
+    if (check_live_out(bb, var))
+        return;
+    if (insn->idx + offset > var->consumed)
+        var->consumed = insn->idx + offset;
 }
 
 void reg_alloc()
 {
-    ph1_ir_t *ph1_ir;
-    ph2_ir_t *ph2_ir;
-    func_t *fn;
-    int i, j, ofs;
-    int reg_idx, reg_idx_src0, reg_idx_src1;
+    /* TODO: .bss and .data section */
+    insn_t *global_insn;
+    for (global_insn = GLOBAL_FUNC.fn->bbs->insn_list.head; global_insn;
+         global_insn = global_insn->next) {
+        ph2_ir_t *ir;
+        int dest, src0;
+        int sz;
 
-    int argument_idx = 0;
-    int loop_end_idx = 0;
-
-    /**
-     * Make sure the var which is "write-after-read" to be written back to the
-     * stack before next iteration starting.
-     */
-    int loop_lv[MAX_NESTING];
-    int loop_lv_idx = 0;
-
-    for (i = 0; i < global_ir_idx; i++) {
-        ph1_ir = &GLOBAL_IR[i];
-
-        /* TODO: Estimate the cost of global spilling. */
-        if (ph1_ir->op == OP_allocat)
-            set_var_liveout(ph1_ir->src0, 1 << 28);
-        else if (ph1_ir->op == OP_assign)
-            set_var_liveout(ph1_ir->src0, i);
-        else if (ph1_ir->op != OP_load_constant)
-            error("Unsupported operation in global scope");
-    }
-
-    for (i = 0; i < ph1_ir_idx; i++) {
-        ph1_ir = &PH1_IR[i];
-
-        switch (ph1_ir->op) {
+        switch (global_insn->opcode) {
         case OP_allocat:
-            if (ph1_ir->src0->is_global == 1)
-                error("Unknown global allocation in body statement");
-            break;
-        case OP_label:
-            if (loop_end_idx == i) {
-                loop_end_idx = loop_lv[--loop_lv_idx];
-                break;
-            }
-            if (ph1_ir->src0->init_val != 0) {
-                loop_lv[loop_lv_idx++] = loop_end_idx;
-                loop_end_idx = ph1_ir->src0->init_val;
-            }
-            break;
-        case OP_write:
-            set_var_liveout(ph1_ir->dest, i);
-            if (ph1_ir->src0->is_func == 0)
-                set_var_liveout(ph1_ir->src0, i);
-            break;
-        case OP_branch:
-            set_var_liveout(ph1_ir->dest, i);
-            break;
-        case OP_push:
-        case OP_indirect:
-            set_var_liveout(ph1_ir->src0, i);
-            break;
-        case OP_return:
-            if (ph1_ir->src0)
-                set_var_liveout(ph1_ir->src0, i);
-            break;
-        case OP_add:
-        case OP_sub:
-        case OP_mul:
-        case OP_div:
-        case OP_mod:
-        case OP_eq:
-        case OP_neq:
-        case OP_gt:
-        case OP_lt:
-        case OP_geq:
-        case OP_leq:
-        case OP_bit_and:
-        case OP_bit_or:
-        case OP_bit_xor:
-        case OP_log_and:
-        case OP_log_or:
-        case OP_rshift:
-        case OP_lshift:
-            set_var_liveout(ph1_ir->src0, i);
-            set_var_liveout(ph1_ir->src1, i);
-            if (loop_end_idx != 0) {
-                ph1_ir->src0->in_loop = 1;
-                ph1_ir->src1->in_loop = 1;
-            }
-            if (ph1_ir->dest->in_loop != 0)
-                set_var_liveout(ph1_ir->dest, loop_end_idx);
-            break;
-        case OP_assign:
-        case OP_read:
-        case OP_address_of:
-        case OP_bit_not:
-        case OP_log_not:
-        case OP_negate:
-            set_var_liveout(ph1_ir->src0, i);
-            if (loop_end_idx != 0)
-                ph1_ir->src0->in_loop = 1;
-            if (ph1_ir->dest->in_loop != 0)
-                set_var_liveout(ph1_ir->dest, loop_end_idx);
-            break;
-        default:
-            break;
-        }
-    }
-
-    /* initiate register file */
-    for (i = 0; i < REG_CNT; i++) {
-        REG[i].var = NULL;
-        REG[i].polluted = 0;
-    }
-
-    for (i = 0; i < global_ir_idx; i++) {
-        ph1_ir = &GLOBAL_IR[i];
-        fn = &FUNCS[0];
-
-        if (ph1_ir->op == OP_allocat) {
-            ph1_ir->src0->offset = fn->stack_size;
-
-            if (ph1_ir->src0->array_size == 0) {
-                if (ph1_ir->src0->is_ptr)
-                    fn->stack_size += 4;
-                else if (strcmp(ph1_ir->src0->type_name, "int") &&
-                         strcmp(ph1_ir->src0->type_name, "char")) {
-                    type_t *type = find_type(ph1_ir->src0->type_name);
-                    fn->stack_size += type->size;
-                } else
-                    fn->stack_size += 4;
+            sz = global_insn->rd->is_ptr
+                     ? PTR_SIZE
+                     : find_type(global_insn->rd->type_name)->size;
+            if (global_insn->rd->array_size) {
+                GLOBAL_FUNC.stack_size += (global_insn->rd->array_size * sz);
+                global_insn->rd->offset = GLOBAL_FUNC.stack_size;
+                GLOBAL_FUNC.stack_size += PTR_SIZE;
+                dest =
+                    prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, -1, -1);
+                ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_global_address_of);
+                ir->src0 = global_insn->rd->offset;
+                ir->dest = dest;
+                spill_var(GLOBAL_FUNC.fn->bbs, global_insn->rd, dest);
             } else {
-                /* allocate a pointer that pointing to the first element */
-                int sz = fn->stack_size;
-                fn->stack_size += PTR_SIZE;
-
-                reg_idx = get_dest_reg(fn, ph1_ir->src0, i, -1, -1);
-
-                ph2_ir = add_ph2_ir(OP_global_address_of);
-                ph2_ir->src0 = fn->stack_size;
-                ph2_ir->dest = reg_idx;
-
-                if (ph1_ir->src0->is_ptr)
-                    fn->stack_size += PTR_SIZE * ph1_ir->src0->array_size;
-                else {
-                    type_t *type = find_type(ph1_ir->src0->type_name);
-                    fn->stack_size += type->size * ph1_ir->src0->array_size;
-                }
-
-                ph2_ir = add_ph2_ir(OP_global_store);
-                ph2_ir->src0 = reg_idx;
-                ph2_ir->src1 = sz;
-            }
-        } else if (ph1_ir->op == OP_load_constant) {
-            reg_idx = get_dest_reg(fn, ph1_ir->dest, i, -1, -1);
-            ph2_ir = add_ph2_ir(OP_load_constant);
-            ph2_ir->src0 = ph1_ir->dest->init_val;
-            ph2_ir->dest = reg_idx;
-        } else if (ph1_ir->op == OP_assign) {
-            reg_idx_src0 = get_src_reg(fn, ph1_ir->src0, -1);
-            reg_idx = get_dest_reg(fn, ph1_ir->dest, i, reg_idx_src0, -1);
-            ph2_ir = add_ph2_ir(OP_assign);
-            ph2_ir->src0 = reg_idx_src0;
-            ph2_ir->dest = reg_idx;
-
-            ph2_ir = add_ph2_ir(OP_global_store);
-            ofs = ph1_ir->dest->offset;
-            ph2_ir->src0 = reg_idx;
-            ph2_ir->src1 = ofs;
-        } else
-            error("Unsupported operation in global scope ");
-    }
-
-    /* jump to entry point after global statements */
-    ph2_ir = add_ph2_ir(OP_jump);
-    strcpy(ph2_ir->func_name, "main");
-
-    for (i = 0; i < ph1_ir_idx; i++) {
-        ph1_ir = &PH1_IR[i];
-
-        expire_regs(i);
-
-        switch (ph1_ir->op) {
-        case OP_define:
-            fn = find_func(ph1_ir->func_name);
-
-            ph2_ir = add_ph2_ir(OP_define);
-            strcpy(ph2_ir->func_name, ph1_ir->func_name);
-
-            /* set arguments valid */
-            for (j = 0; j < fn->num_params; j++) {
-                REG[j].var = &fn->param_defs[j];
-                REG[j].polluted = 1;
-            }
-            for (; j < REG_CNT; j++) {
-                REG[j].var = NULL;
-                REG[j].polluted = 0;
-            }
-
-            /* make sure all arguments are in stack */
-            spill_all_regs(fn, -1);
-
-            break;
-        case OP_block_start:
-        case OP_block_end:
-            spill_all_regs(fn, -1);
-            add_ph2_ir(ph1_ir->op);
-            break;
-        case OP_allocat:
-            ph1_ir->src0->offset = fn->stack_size;
-
-            if (ph1_ir->src0->is_global == 1)
-                error("Invalid allocation in body statement");
-
-            if (ph1_ir->src0->array_size == 0) {
-                if (ph1_ir->src0->is_ptr) {
-                    fn->stack_size += 4;
-                } else if (strcmp(ph1_ir->src0->type_name, "int") &&
-                           strcmp(ph1_ir->src0->type_name, "char")) {
-                    type_t *type = find_type(ph1_ir->src0->type_name);
-                    fn->stack_size += type->size;
-                } else
-                    fn->stack_size += 4;
-            } else {
-                int sz = fn->stack_size;
-                fn->stack_size += PTR_SIZE;
-
-                reg_idx = get_dest_reg(fn, ph1_ir->src0, i, -1, -1);
-
-                ph2_ir = add_ph2_ir(OP_address_of);
-                ph2_ir->src0 = fn->stack_size;
-                ph2_ir->dest = reg_idx;
-
-                if (ph1_ir->src0->is_ptr)
-                    fn->stack_size += PTR_SIZE * ph1_ir->src0->array_size;
-                else {
-                    type_t *type = find_type(ph1_ir->src0->type_name);
-                    fn->stack_size += type->size * ph1_ir->src0->array_size;
-                }
-                ph2_ir = add_ph2_ir(OP_store);
-                ph2_ir->src0 = reg_idx;
-                ph2_ir->src1 = sz;
+                global_insn->rd->offset = GLOBAL_FUNC.stack_size;
+                GLOBAL_FUNC.stack_size += sz;
             }
             break;
         case OP_load_constant:
-        case OP_load_data_address:
-            reg_idx = get_dest_reg(fn, ph1_ir->dest, i, -1, -1);
-            ph2_ir = add_ph2_ir(ph1_ir->op);
-            ph2_ir->src0 = ph1_ir->dest->init_val;
-            ph2_ir->dest = reg_idx;
-            break;
-        case OP_address_of:
-            ofs = ph1_ir->src0->offset;
-            if (ofs == 0) {
-                reg_idx = find_in_regs(ph1_ir->src0);
-                if (reg_idx == -1)
-                    error("Unexpected error");
-
-                ph2_ir = add_ph2_ir(OP_store);
-                if (ph1_ir->src0->is_global) {
-                    ofs = FUNCS[0].stack_size;
-                    FUNCS[0].stack_size += 4;
-                } else {
-                    ofs = fn->stack_size;
-                    fn->stack_size += 4;
-                }
-                ph1_ir->src0->offset = ofs;
-                ph2_ir->src0 = reg_idx;
-                ph2_ir->src1 = ofs;
-
-                REG[reg_idx].polluted = 0;
-            }
-
-            /**
-             * Write the content back to the stack to prevent getting the
-             * obsolete content when dereferencing.
-             */
-            reg_idx = find_in_regs(ph1_ir->src0);
-            if (reg_idx > -1)
-                if (REG[reg_idx].polluted) {
-                    if (REG[reg_idx].var->is_global)
-                        ph2_ir = add_ph2_ir(OP_global_store);
-                    else
-                        ph2_ir = add_ph2_ir(OP_store);
-                    ph2_ir->src0 = reg_idx;
-                    ph2_ir->src1 = ofs;
-                }
-
-            reg_idx = get_dest_reg(fn, ph1_ir->dest, i, -1, -1);
-
-            if (ph1_ir->src0->is_global)
-                ph2_ir = add_ph2_ir(OP_global_address_of);
-            else
-                ph2_ir = add_ph2_ir(OP_address_of);
-            ph2_ir->src0 = ofs;
-            ph2_ir->dest = reg_idx;
-            break;
-        case OP_label:
-            spill_all_regs(fn, -1);
-            ph2_ir = add_ph2_ir(OP_label);
-            strcpy(ph2_ir->func_name, ph1_ir->src0->var_name);
-            break;
-        case OP_branch:
-            spill_all_regs(fn, i);
-
-            reg_idx_src0 = get_src_reg(fn, ph1_ir->dest, -1);
-            ph2_ir = add_ph2_ir(OP_branch);
-            ph2_ir->src0 = reg_idx_src0;
-            strcpy(ph2_ir->true_label, ph1_ir->src0->var_name);
-            strcpy(ph2_ir->false_label, ph1_ir->src1->var_name);
-            break;
-        case OP_jump:
-            spill_all_regs(fn, -1);
-
-            ph2_ir = add_ph2_ir(OP_jump);
-            strcpy(ph2_ir->func_name, ph1_ir->dest->var_name);
-            break;
-        case OP_push:
-            if (argument_idx == 0)
-                spill_all_regs(fn, -1);
-
-            ofs = ph1_ir->src0->offset;
-            if (ph1_ir->src0->is_global)
-                ph2_ir = add_ph2_ir(OP_global_load);
-            else
-                ph2_ir = add_ph2_ir(OP_load);
-            ph2_ir->src0 = ofs;
-            ph2_ir->dest = argument_idx;
-
-            argument_idx++;
-            break;
-        case OP_call:
-            if (argument_idx == 0)
-                spill_all_regs(fn, -1);
-
-            ph2_ir = add_ph2_ir(OP_call);
-            strcpy(ph2_ir->func_name, ph1_ir->func_name);
-
-            argument_idx = 0;
-            break;
-        case OP_indirect:
-            if (argument_idx == 0)
-                spill_all_regs(fn, -1);
-
-            ofs = ph1_ir->src0->offset;
-            if (ph1_ir->src0->is_global)
-                ph2_ir = add_ph2_ir(OP_global_load_func);
-            else
-                ph2_ir = add_ph2_ir(OP_load_func);
-            ph2_ir->src0 = ofs;
-
-            ph2_ir = add_ph2_ir(OP_indirect);
-
-            argument_idx = 0;
-            break;
-        case OP_func_ret:
-            /* pseudo instruction: r0 := r0 */
-            reg_idx = get_dest_reg(fn, ph1_ir->dest, i, -1, -1);
-            ph2_ir = add_ph2_ir(OP_assign);
-            ph2_ir->src0 = 0;
-            ph2_ir->dest = reg_idx;
-            break;
-        case OP_return:
-            spill_all_regs(fn, -1);
-
-            if (ph1_ir->src0)
-                reg_idx_src0 = get_src_reg(fn, ph1_ir->src0, -1);
-            else
-                reg_idx_src0 = -1;
-
-            ph2_ir = add_ph2_ir(OP_return);
-            ph2_ir->src0 = reg_idx_src0;
-            break;
-        case OP_read:
-            reg_idx_src0 = get_src_reg(fn, ph1_ir->src0, -1);
-            reg_idx = get_dest_reg(fn, ph1_ir->dest, i, reg_idx_src0, -1);
-            ph2_ir = add_ph2_ir(OP_read);
-            ph2_ir->src0 = reg_idx_src0;
-            ph2_ir->src1 = ph1_ir->size;
-            ph2_ir->dest = reg_idx;
-            break;
-        case OP_write:
-            if (ph1_ir->src0->is_func) {
-                reg_idx_src0 = get_src_reg(fn, ph1_ir->dest, -1);
-                ph2_ir = add_ph2_ir(OP_address_of_func);
-                ph2_ir->src0 = reg_idx_src0;
-                strcpy(ph2_ir->func_name, ph1_ir->src0->var_name);
-            } else {
-                /* make sure there is no obsolete content after storing */
-                spill_all_regs(fn, -1);
-
-                reg_idx_src0 = get_src_reg(fn, ph1_ir->src0, -1);
-                reg_idx_src1 = get_src_reg(fn, ph1_ir->dest, reg_idx_src0);
-                ph2_ir = add_ph2_ir(OP_write);
-                ph2_ir->src0 = reg_idx_src0;
-                ph2_ir->src1 = reg_idx_src1;
-                ph2_ir->dest = ph1_ir->size;
-            }
+            dest = prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, -1, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_load_constant);
+            ir->src0 = global_insn->rd->init_val;
+            ir->dest = dest;
             break;
         case OP_assign:
-        case OP_negate:
-        case OP_bit_not:
-        case OP_log_not:
-            reg_idx_src0 = get_src_reg(fn, ph1_ir->src0, -1);
-            reg_idx = get_dest_reg(fn, ph1_ir->dest, i, reg_idx_src0, -1);
-            ph2_ir = add_ph2_ir(ph1_ir->op);
-            ph2_ir->src0 = reg_idx_src0;
-            ph2_ir->dest = reg_idx;
-            break;
-        case OP_add:
-        case OP_sub:
-        case OP_mul:
-        case OP_div:
-        case OP_mod:
-        case OP_eq:
-        case OP_neq:
-        case OP_gt:
-        case OP_lt:
-        case OP_geq:
-        case OP_leq:
-        case OP_bit_and:
-        case OP_bit_or:
-        case OP_bit_xor:
-        case OP_log_and:
-        case OP_log_or:
-        case OP_rshift:
-        case OP_lshift:
-            reg_idx_src0 = get_src_reg(fn, ph1_ir->src0, -1);
-            reg_idx_src1 = get_src_reg(fn, ph1_ir->src1, reg_idx_src0);
-            reg_idx =
-                get_dest_reg(fn, ph1_ir->dest, i, reg_idx_src0, reg_idx_src1);
-            ph2_ir = add_ph2_ir(ph1_ir->op);
-            ph2_ir->src0 = reg_idx_src0;
-            ph2_ir->src1 = reg_idx_src1;
-            ph2_ir->dest = reg_idx;
+            src0 = prepare_operand(GLOBAL_FUNC.fn->bbs, global_insn->rs1, -1);
+            dest = prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, src0, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_assign);
+            ir->src0 = src0;
+            ir->dest = dest;
+            spill_var(GLOBAL_FUNC.fn->bbs, global_insn->rd, dest);
             break;
         default:
-            add_ph2_ir(ph1_ir->op);
-            break;
+            printf("Unsupported global operation\n");
+            abort();
+        }
+    }
+
+    fn_t *fn;
+    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        if (!strcmp(fn->func->return_def.var_name, "main"))
+            MAIN_BB = fn->bbs;
+
+        int i;
+        for (i = 0; i < REG_CNT; i++)
+            REGS[i].var = NULL;
+
+        /* set arguments available */
+        for (i = 0; i < fn->func->num_params; i++) {
+            REGS[i].var = fn->func->param_defs[i].subscripts[0];
+            REGS[i].polluted = 1;
         }
 
-        if (ph1_ir->op == OP_jump || ph1_ir->op == OP_call ||
-            ph1_ir->op == OP_indirect)
-            for (j = 0; j < REG_CNT; j++) {
-                REG[j].var = NULL;
-                REG[j].polluted = 0;
+        /* variadic function implementation */
+        if (fn->func->va_args) {
+            for (i = 0; i < MAX_PARAMS; i++) {
+                ph2_ir_t *ir = bb_add_ph2_ir(fn->bbs, OP_store);
+
+                if (i < fn->func->num_params)
+                    fn->func->param_defs[i].subscripts[0]->offset =
+                        fn->func->stack_size;
+
+                ir->src0 = i;
+                ir->src1 = fn->func->stack_size;
+                fn->func->stack_size += 4;
             }
+        }
+
+        basic_block_t *bb;
+        for (bb = fn->bbs; bb; bb = bb->rpo_next) {
+            int is_pushing_args = 0, args = 0;
+
+            insn_t *insn;
+            for (insn = bb->insn_list.head; insn; insn = insn->next) {
+                ph2_ir_t *ir;
+                int dest, src0, src1;
+                int i, sz;
+
+                refresh(bb, insn);
+
+                switch (insn->opcode) {
+                case OP_unwound_phi:
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+
+                    if (!insn->rd->offset) {
+                        insn->rd->offset = bb->belong_to->func->stack_size;
+                        bb->belong_to->func->stack_size += 4;
+                    }
+
+                    ir = bb_add_ph2_ir(bb, OP_store);
+                    ir->src0 = src0;
+                    ir->src1 = insn->rd->offset;
+                    break;
+                case OP_allocat:
+                    if ((!strcmp(insn->rd->type_name, "void") ||
+                         !strcmp(insn->rd->type_name, "int") ||
+                         !strcmp(insn->rd->type_name, "char")) &&
+                        insn->rd->array_size == 0)
+                        break;
+
+                    src0 = fn->func->stack_size;
+
+                    if (insn->rd->is_ptr)
+                        sz = PTR_SIZE;
+                    else
+                        sz = find_type(insn->rd->type_name)->size;
+
+                    if (insn->rd->array_size)
+                        fn->func->stack_size += (insn->rd->array_size * sz);
+                    else
+                        fn->func->stack_size += sz;
+
+                    insn->rd->offset = fn->func->stack_size;
+                    fn->func->stack_size += PTR_SIZE;
+
+                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    ir = bb_add_ph2_ir(bb, OP_address_of);
+                    ir->src0 = src0;
+                    ir->dest = dest;
+                    break;
+                case OP_load_constant:
+                case OP_load_data_address:
+                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
+                    ir->src0 = insn->rd->init_val;
+                    ir->dest = dest;
+                    break;
+                case OP_address_of:
+                    /* make sure variable is on stack */
+                    if (!insn->rs1->offset) {
+                        insn->rs1->offset = bb->belong_to->func->stack_size;
+                        bb->belong_to->func->stack_size += 4;
+
+                        int i;
+                        for (i = 0; i < REG_CNT; i++)
+                            if (REGS[i].var == insn->rs1) {
+                                ir = bb_add_ph2_ir(bb, OP_store);
+                                ir->src0 = i;
+                                ir->src1 = insn->rs1->offset;
+                            }
+                    }
+
+                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    ir = bb_add_ph2_ir(bb, OP_address_of);
+                    ir->src0 = insn->rs1->offset;
+                    ir->dest = dest;
+                    break;
+                case OP_assign:
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    dest = prepare_dest(bb, insn->rd, ir->src0, -1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
+                    ir->src0 = src0;
+                    ir->dest = dest;
+
+                    /* store global variable immediately after assignment */
+                    if (insn->rd->is_global) {
+                        ir = bb_add_ph2_ir(bb, OP_global_store);
+                        ir->src0 = dest;
+                        ir->src1 = insn->rd->offset;
+                        REGS[dest].polluted = 0;
+                    }
+                    break;
+                case OP_read:
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    dest = prepare_dest(bb, insn->rd, src0, -1);
+                    ir = bb_add_ph2_ir(bb, OP_read);
+                    ir->src0 = src0;
+                    ir->src1 = insn->sz;
+                    ir->dest = dest;
+                    break;
+                case OP_write:
+                    if (insn->rs2->is_func) {
+                        src0 = prepare_operand(bb, insn->rs1, -1);
+                        ir = bb_add_ph2_ir(bb, OP_address_of_func);
+                        ir->src0 = src0;
+                        strcpy(ir->func_name, insn->rs2->var_name);
+                    } else {
+                        /* FIXME: Avoid outdated content in register after
+                         * storing, but causing some redundant spilling. */
+                        spill_alive(bb, insn);
+                        src0 = prepare_operand(bb, insn->rs1, -1);
+                        src1 = prepare_operand(bb, insn->rs2, src0);
+                        ir = bb_add_ph2_ir(bb, OP_write);
+                        ir->src0 = src0;
+                        ir->src1 = src1;
+                        ir->dest = insn->sz;
+                    }
+                    break;
+                case OP_branch:
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+
+                    /**
+                     * REGS[src0].var had been set to NULL, but the actual
+                     * content is still holded in the register.
+                     */
+                    spill_live_out(bb);
+
+                    ir = bb_add_ph2_ir(bb, OP_branch);
+                    ir->src0 = src0;
+                    ir->then_bb = bb->then_;
+                    ir->else_bb = bb->else_;
+                    break;
+                case OP_push:
+                    extend_liveness(bb, insn, insn->rs1, insn->sz);
+
+                    if (!is_pushing_args) {
+                        spill_alive(bb, insn);
+                        is_pushing_args = 1;
+                    }
+
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    ir = bb_add_ph2_ir(bb, OP_assign);
+                    ir->src0 = src0;
+                    ir->dest = args++;
+                    break;
+                case OP_call:
+                    if (!find_func(insn->str)->num_params)
+                        spill_alive(bb, insn);
+
+                    ir = bb_add_ph2_ir(bb, OP_call);
+                    strcpy(ir->func_name, insn->str);
+
+                    is_pushing_args = 0;
+                    args = 0;
+
+                    for (i = 0; i < REG_CNT; i++)
+                        REGS[i].var = NULL;
+
+                    break;
+                case OP_indirect:
+                    if (!args)
+                        spill_alive(bb, insn);
+
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    ir = bb_add_ph2_ir(bb, OP_load_func);
+                    ir->src0 = src0;
+
+                    bb_add_ph2_ir(bb, OP_indirect);
+
+                    is_pushing_args = 0;
+                    args = 0;
+                    break;
+                case OP_func_ret:
+                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    ir = bb_add_ph2_ir(bb, OP_assign);
+                    ir->src0 = 0;
+                    ir->dest = dest;
+                    break;
+                case OP_return:
+                    if (insn->rs1)
+                        src0 = prepare_operand(bb, insn->rs1, -1);
+                    else
+                        src0 = -1;
+
+                    ir = bb_add_ph2_ir(bb, OP_return);
+                    ir->src0 = src0;
+                    break;
+                case OP_add:
+                case OP_sub:
+                case OP_mul:
+                case OP_div:
+                case OP_mod:
+                case OP_lshift:
+                case OP_rshift:
+                case OP_eq:
+                case OP_neq:
+                case OP_gt:
+                case OP_geq:
+                case OP_lt:
+                case OP_leq:
+                case OP_bit_and:
+                case OP_bit_or:
+                case OP_bit_xor:
+                case OP_log_and:
+                case OP_log_or:
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    src1 = prepare_operand(bb, insn->rs2, ir->src0);
+                    dest = prepare_dest(bb, insn->rd, ir->src0, ir->src1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
+                    ir->src0 = src0;
+                    ir->src1 = src1;
+                    ir->dest = dest;
+                    break;
+                case OP_negate:
+                case OP_bit_not:
+                case OP_log_not:
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    dest = prepare_dest(bb, insn->rd, ir->src0, -1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
+                    ir->src0 = src0;
+                    ir->dest = dest;
+                    break;
+                default:
+                    printf("Unknown opcode\n");
+                    abort();
+                }
+            }
+
+            if (bb->next)
+                spill_live_out(bb);
+
+            if (bb == fn->exit)
+                continue;
+
+            /* append jump instruction for the normal block only */
+            if (!bb->next)
+                continue;
+
+            if (bb->next == fn->exit)
+                continue;
+
+            /* jump to the beginning of loop or over the else block */
+            if (bb->next->visited == fn->visited ||
+                bb->next->visited != bb->rpo + 1) {
+                ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_jump);
+                ir->next_bb = bb->next;
+            }
+        }
+
+        /* handle implicit return */
+        for (i = 0; i < MAX_BB_PRED; i++) {
+            basic_block_t *bb = fn->exit->prev[i].bb;
+
+            if (!bb)
+                continue;
+
+            if (strcmp(fn->func->return_def.type_name, "void"))
+                continue;
+
+            if (bb->insn_list.tail && bb->insn_list.tail->opcode == OP_return)
+                continue;
+
+            ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_return);
+            ir->src0 = -1;
+        }
     }
 }
 
-/* not support "%c" in printf() yet */
 void dump_ph2_ir()
 {
     ph2_ir_t *ph2_ir;

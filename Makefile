@@ -23,6 +23,7 @@ OBJS := $(SRCS:%.c=$(OUT)/%.o)
 deps := $(OBJS:%.o=%.o.d)
 TESTS := $(wildcard tests/*.c)
 TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
+SNAPSHOTS := $(patsubst tests/%.c, tests/snapshots/%.json, $(TESTS))
 
 all: config bootstrap
 
@@ -48,6 +49,9 @@ $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
 
 check: $(TESTBINS) tests/driver.sh
 	tests/driver.sh
+
+check-snapshots: $(OUT)/$(STAGE0) $(SNAPSHOTS) tests/check-snapshots.sh
+	tests/check-snapshots.sh
 
 $(OUT)/%.o: %.c
 	$(VECHO) "  CC\t$@\n"

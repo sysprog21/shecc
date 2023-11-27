@@ -14,6 +14,8 @@
 #define MAX_BLOCKS 750
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 32768
+#define MAX_BB_PRED 16
+#define MAX_BB_DOM_SUCC 64
 #define MAX_GLOBAL_IR 256
 #define MAX_LABEL 4096
 #define MAX_SOURCE 262144
@@ -42,6 +44,9 @@ typedef enum { TYPE_void = 0, TYPE_int, TYPE_char, TYPE_struct } base_type_t;
 typedef enum {
     /* intermediate use in front-end. No code generation */
     OP_generic,
+
+    OP_phi,
+    OP_unwound_phi, /* work like address_of + store */
 
     /* calling convention */
     OP_define,   /* function entry point */
@@ -108,6 +113,21 @@ typedef enum {
 
 /* variable definition */
 typedef struct {
+    int counter;
+    int stack[64];
+    int stack_idx;
+} rename_t;
+
+typedef struct ref_block ref_block_t;
+
+struct ref_block_list {
+    ref_block_t *head;
+    ref_block_t *tail;
+};
+
+typedef struct ref_block_list ref_block_list_t;
+
+struct var {
     char type_name[MAX_TYPE_LEN];
     char var_name[MAX_VAR_LEN];
     int is_ptr;
@@ -118,7 +138,16 @@ typedef struct {
     int init_val; /* for global initialization */
     int liveness; /* live range */
     int in_loop;
-} var_t;
+    struct var *base;
+    int subscript;
+    struct var *subscripts[64];
+    int subscripts_idx;
+    rename_t rename;
+    ref_block_list_t ref_block_list; /* blocks which kill variable */
+    int consumed;
+};
+
+typedef struct var var_t;
 
 typedef struct {
     char name[MAX_VAR_LEN];
@@ -131,6 +160,8 @@ typedef struct {
     int disabled;
 } macro_t;
 
+typedef struct fn fn_t;
+
 /* function definition */
 typedef struct {
     var_t return_def;
@@ -138,18 +169,21 @@ typedef struct {
     int num_params;
     int va_args;
     int stack_size; /* stack always starts at offset 4 for convenience */
+    fn_t *fn;
 } func_t;
 
 /* block definition */
-typedef struct block_t {
+struct block {
     var_t locals[MAX_LOCALS];
     int next_local;
-    struct block_t *parent;
+    struct block *parent;
     func_t *func;
     macro_t *macro;
     int locals_size;
     int index;
-} block_t;
+};
+
+typedef struct block block_t;
 
 /* phase-1 IR definition */
 typedef struct {
@@ -168,13 +202,10 @@ typedef struct {
     int offset;
 } label_lut_t;
 
-typedef struct {
-    var_t *var;
-    int polluted;
-} regfile_t;
+typedef struct basic_block basic_block_t;
 
 /* phase-2 IR definition */
-typedef struct {
+struct ph2_ir {
     opcode_t op;
     int src0;
     int src1;
@@ -182,7 +213,13 @@ typedef struct {
     char func_name[MAX_VAR_LEN];
     char true_label[MAX_VAR_LEN];
     char false_label[MAX_VAR_LEN];
-} ph2_ir_t;
+    basic_block_t *next_bb;
+    basic_block_t *then_bb;
+    basic_block_t *else_bb;
+    struct ph2_ir *next;
+};
+
+typedef struct ph2_ir ph2_ir_t;
 
 /* type definition */
 typedef struct {
@@ -219,3 +256,119 @@ typedef struct {
     int index;
     int next[128];
 } trie_t;
+
+struct phi_operand {
+    var_t *var;
+    basic_block_t *from;
+    struct phi_operand *next;
+};
+
+typedef struct phi_operand phi_operand_t;
+
+struct insn {
+    struct insn *next;
+    int idx;
+    opcode_t opcode;
+    var_t *rd;
+    var_t *rs1;
+    var_t *rs2;
+    int sz;
+    phi_operand_t *phi_ops;
+    char str[64];
+};
+
+typedef struct insn insn_t;
+
+typedef struct {
+    insn_t *head;
+    insn_t *tail;
+} insn_list_t;
+
+typedef struct {
+    ph2_ir_t *head;
+    ph2_ir_t *tail;
+} ph2_ir_list_t;
+
+typedef enum { NEXT, ELSE, THEN } bb_connection_type_t;
+
+typedef struct {
+    basic_block_t *bb;
+    bb_connection_type_t type;
+} bb_connection_t;
+
+struct symbol {
+    var_t *var;
+    int index;
+    struct symbol *next;
+};
+
+typedef struct symbol symbol_t;
+
+typedef struct {
+    symbol_t *head;
+    symbol_t *tail;
+} symbol_list_t;
+
+struct basic_block {
+    insn_list_t insn_list;
+    ph2_ir_list_t ph2_ir_list;
+    bb_connection_t prev[MAX_BB_PRED];
+    struct basic_block *next;  /* normal BB */
+    struct basic_block *then_; /* conditional BB */
+    struct basic_block *else_;
+    struct basic_block *idom;
+    struct basic_block *rpo_next;
+    struct basic_block *rpo_r_next;
+    var_t *live_gen[64];
+    int live_gen_idx;
+    var_t *live_kill[64];
+    int live_kill_idx;
+    var_t *live_in[64];
+    int live_in_idx;
+    var_t *live_out[64];
+    int live_out_idx;
+    int rpo;
+    int rpo_r;
+    struct basic_block *DF[64];
+    int df_idx;
+    int visited;
+    struct basic_block *dom_next[64];
+    struct basic_block *dom_prev;
+    fn_t *belong_to;
+    block_t *scope;
+    symbol_list_t symbol_list; /* variable declaration */
+    int elf_offset;
+};
+
+struct ref_block {
+    basic_block_t *bb;
+    struct ref_block *next;
+};
+
+/* TODO: integrate func_t into fn_t */
+struct fn {
+    basic_block_t *bbs;
+    basic_block_t *exit;
+    symbol_list_t global_sym_list;
+    int bb_cnt;
+    int visited;
+    func_t *func;
+    struct fn *next;
+};
+
+typedef struct {
+    fn_t *head;
+    fn_t *tail;
+} func_list_t;
+
+typedef struct {
+    fn_t *fn;
+    basic_block_t *bb;
+    void (*preorder_cb)(fn_t *, basic_block_t *);
+    void (*postorder_cb)(fn_t *, basic_block_t *);
+} bb_traversal_args_t;
+
+typedef struct {
+    var_t *var;
+    int polluted;
+} regfile_t;

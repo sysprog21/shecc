@@ -19,6 +19,9 @@
 /* C language front-end */
 #include "cfront.c"
 
+/* architecture-independent middle-end */
+#include "ssa.c"
+
 /* Register allocator */
 #include "reg-alloc.c"
 
@@ -70,8 +73,16 @@ int main(int argc, char *argv[])
     if (dump_ir)
         dump_ph1_ir();
 
+    ssa_build(dump_ir);
+
+    /* SSA-based liveness analyses */
+    liveness_analysis();
+
     /* allocate register from IR */
     reg_alloc();
+
+    /* flatten CFG to linear instruction */
+    cfg_flatten();
 
     /* dump second phase IR */
     if (dump_ir)
@@ -84,6 +95,7 @@ int main(int argc, char *argv[])
     elf_generate(out);
 
     /* release allocated objects */
+    ssa_release();
     global_release();
 
     exit(0);

@@ -16,8 +16,11 @@ jobs:
           CC: ${{ matrix.compiler }}
         run: |
           sudo apt-get update -q -y
+          sudo apt-get install -q -y graphviz jq
           sudo apt-get install -q -y qemu-user
           sudo apt-get install -q -y build-essential
+          make clean config
+          make check-snapshots || exit 1
           make clean config ARCH=arm
           make check || exit 1
           make clean config ARCH=riscv
