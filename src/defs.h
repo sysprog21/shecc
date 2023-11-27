@@ -362,6 +362,13 @@ typedef struct {
 } func_list_t;
 
 typedef struct {
+    fn_t *fn;
+    basic_block_t *bb;
+    void (*preorder_cb)(fn_t *, basic_block_t *);
+    void (*postorder_cb)(fn_t *, basic_block_t *);
+} bb_traversal_args_t;
+
+typedef struct {
     var_t *var;
     int polluted;
 } regfile_t;

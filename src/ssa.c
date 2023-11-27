@@ -1,45 +1,56 @@
-void bb_forward_traversal(fn_t *fn,
-                          basic_block_t *bb,
-                          void (*preorder_cb)(fn_t *, basic_block_t *),
-                          void (*postorder_cb)(fn_t *, basic_block_t *))
+/* cfront does not accept structure as an argument, pass pointer */
+void bb_forward_traversal(bb_traversal_args_t *args)
 {
-    bb->visited++;
+    args->bb->visited++;
 
-    if (preorder_cb)
-        preorder_cb(fn, bb);
+    if (args->preorder_cb)
+        args->preorder_cb(args->fn, args->bb);
 
-    if (bb->next && bb->next->visited < fn->visited)
-        bb_forward_traversal(fn, bb->next, preorder_cb, postorder_cb);
-    if (bb->then_ && bb->then_->visited < fn->visited)
-        bb_forward_traversal(fn, bb->then_, preorder_cb, postorder_cb);
-    if (bb->else_ && bb->else_->visited < fn->visited)
-        bb_forward_traversal(fn, bb->else_, preorder_cb, postorder_cb);
+    /* `args` is a reference, do not modify it */
+    bb_traversal_args_t next_args;
+    memcpy(&next_args, args, sizeof(bb_traversal_args_t));
 
-    if (postorder_cb)
-        postorder_cb(fn, bb);
+    if (args->bb->next && args->bb->next->visited < args->fn->visited) {
+        next_args.bb = args->bb->next;
+        bb_forward_traversal(&next_args);
+    }
+    if (args->bb->then_ && args->bb->then_->visited < args->fn->visited) {
+        next_args.bb = args->bb->then_;
+        bb_forward_traversal(&next_args);
+    }
+    if (args->bb->else_ && args->bb->else_->visited < args->fn->visited) {
+        next_args.bb = args->bb->else_;
+        bb_forward_traversal(&next_args);
+    }
+
+    if (args->postorder_cb)
+        args->postorder_cb(args->fn, args->bb);
 }
 
-void bb_backward_traversal(fn_t *fn,
-                           basic_block_t *bb,
-                           void (*preorder_cb)(fn_t *, basic_block_t *),
-                           void (*postorder_cb)(fn_t *, basic_block_t *))
+/* cfront does not accept structure as an argument, pass pointer */
+void bb_backward_traversal(bb_traversal_args_t *args)
 {
-    bb->visited++;
+    args->bb->visited++;
 
-    if (preorder_cb)
-        preorder_cb(fn, bb);
+    if (args->preorder_cb)
+        args->preorder_cb(args->fn, args->bb);
 
     int i;
     for (i = 0; i < MAX_BB_PRED; i++) {
-        if (!bb->prev[i].bb)
+        if (!args->bb->prev[i].bb)
             continue;
-        if (bb->prev[i].bb->visited < fn->visited)
-            bb_backward_traversal(fn, bb->prev[i].bb, preorder_cb,
-                                  postorder_cb);
+        if (args->bb->prev[i].bb->visited < args->fn->visited) {
+            /* `args` is a reference, do not modify it */
+            bb_traversal_args_t next_args;
+            memcpy(&next_args, args, sizeof(bb_traversal_args_t));
+
+            next_args.bb = args->bb->prev[i].bb;
+            bb_backward_traversal(&next_args);
+        }
     }
 
-    if (postorder_cb)
-        postorder_cb(fn, bb);
+    if (args->postorder_cb)
+        args->postorder_cb(args->fn, args->bb);
 }
 
 void bb_index_rpo(fn_t *fn, basic_block_t *bb)
@@ -78,13 +89,22 @@ void bb_build_rpo(fn_t *fn, basic_block_t *bb)
 void build_rpo()
 {
     fn_t *fn;
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->bbs;
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, NULL, &bb_index_rpo);
+        args->postorder_cb = &bb_index_rpo;
+        bb_forward_traversal(args);
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, NULL, &bb_reverse_index);
+        args->postorder_cb = &bb_reverse_index;
+        bb_forward_traversal(args);
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, NULL, &bb_build_rpo);
+        args->postorder_cb = &bb_build_rpo;
+        bb_forward_traversal(args);
     }
 }
 
@@ -189,9 +209,14 @@ void bb_build_dom(fn_t *fn, basic_block_t *bb)
 void build_dom()
 {
     fn_t *fn;
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->bbs;
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, &bb_build_dom, NULL);
+        args->preorder_cb = &bb_build_dom;
+        bb_forward_traversal(args);
     }
 }
 
@@ -214,9 +239,14 @@ void bb_build_df(fn_t *fn, basic_block_t *bb)
 void build_df()
 {
     fn_t *fn;
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->bbs;
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, NULL, &bb_build_df);
+        args->postorder_cb = &bb_build_df;
+        bb_forward_traversal(args);
     }
 }
 
@@ -313,10 +343,14 @@ void bb_solve_globals(fn_t *fn, basic_block_t *bb)
 void solve_globals()
 {
     fn_t *fn;
-
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->bbs;
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, NULL, &bb_solve_globals);
+        args->postorder_cb = &bb_solve_globals;
+        bb_forward_traversal(args);
     }
 }
 
@@ -604,9 +638,14 @@ void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
 void unwind_phi()
 {
     fn_t *fn;
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->bbs;
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, &bb_unwind_phi, NULL);
+        args->preorder_cb = &bb_unwind_phi;
+        bb_forward_traversal(args);
     }
 }
 
@@ -982,14 +1021,23 @@ void bb_build_reversed_rpo(fn_t *fn, basic_block_t *bb)
 void build_reversed_rpo()
 {
     fn_t *fn;
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
         fn->bb_cnt = 0;
+        args->fn = fn;
+        args->bb = fn->exit;
+
         fn->visited++;
-        bb_backward_traversal(fn, fn->exit, NULL, &bb_index_reversed_rpo);
+        args->postorder_cb = &bb_index_reversed_rpo;
+        bb_backward_traversal(args);
+
         fn->visited++;
-        bb_backward_traversal(fn, fn->exit, NULL, &bb_reverse_reversed_index);
+        args->postorder_cb = &bb_reverse_reversed_index;
+        bb_backward_traversal(args);
+
         fn->visited++;
-        bb_backward_traversal(fn, fn->exit, NULL, &bb_build_reversed_rpo);
+        args->postorder_cb = &bb_build_reversed_rpo;
+        bb_backward_traversal(args);
     }
 }
 
@@ -1123,16 +1171,22 @@ void liveness_analysis()
     build_reversed_rpo();
 
     fn_t *fn;
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->bbs;
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, &bb_reset_live_kill_idx, NULL);
+        args->preorder_cb = &bb_reset_live_kill_idx;
+        bb_forward_traversal(args);
 
         int i;
         for (i = 0; i < fn->func->num_params; i++)
-            add_killed_var(fn->bbs, fn->func->param_defs[i].subscripts[0]);
+            bb_add_killed_var(fn->bbs, fn->func->param_defs[i].subscripts[0]);
 
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, &bb_solve_locals, NULL);
+        args->preorder_cb = bb_solve_locals;
+        bb_forward_traversal(args);
     }
 
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
@@ -1183,8 +1237,13 @@ void bb_release(fn_t *fn, basic_block_t *bb)
 void ssa_release()
 {
     fn_t *fn;
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->bbs;
+
         fn->visited++;
-        bb_forward_traversal(fn, fn->bbs, NULL, &bb_release);
+        args->postorder_cb = &bb_release;
+        bb_forward_traversal(args);
     }
 }
