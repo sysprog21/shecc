@@ -10,7 +10,7 @@ jobs:
         compiler: [gcc-12, clang]
     steps:
       - name: checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: build artifact
         env:
           CC: ${{ matrix.compiler }}
@@ -29,7 +29,7 @@ jobs:
   coding_style:
     runs-on: ubuntu-22.04
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: coding convention
       run: |
             sudo apt-get install -q -y clang-format-12
