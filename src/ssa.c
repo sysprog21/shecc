@@ -1,3 +1,10 @@
+/*
+ * shecc - Self-Hosting and Educational C Compiler.
+ *
+ * shecc is freely redistributable under the BSD 2 clause license. See the
+ * file "LICENSE" for information on usage and redistribution of this file.
+ */
+
 /* cfront does not accept structure as an argument, pass pointer */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
