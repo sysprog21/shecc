@@ -12,11 +12,11 @@ a self-compiling compiler for a subset of the C language.
 * Generate executable Linux ELF binaries for ARMv7-A and RV32IM.
 * Provide a minimal C standard library for basic I/O on GNU/Linux.
 * The cross-compiler is written in ANSI C, making it compatible with most platforms.
-* Offer a self-contained C language front-end and machine code generator.
+* Include a self-contained C front-end with an integrated machine code generator; no external assembler or linker needed.
 * Utilize a two-pass compilation process: the first pass checks syntax and breaks down complex statements into basic operations,
   while the second pass translates these operations into Arm/RISC-V machine code.
-* Implement register allocation compatible with various architectures,
-  although the number of available registers may differ (currently requires at least 7 available registers).
+* Develop a register allocation system that is compatible with RISC-style architectures.
+* Implement an architecture-independent, single static assignment (SSA)-based middle-end for enhanced optimizations.
 
 ## Compatibility
 
