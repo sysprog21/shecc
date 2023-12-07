@@ -185,12 +185,11 @@ int dom_connect(basic_block_t *pred, basic_block_t *succ)
     if (succ->dom_prev)
         return 0;
 
-    int i, found = 0;
+    int i;
     for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
-        if (pred->dom_next[i] == succ) {
-            found = 1;
+        if (pred->dom_next[i] == succ)
             return 0;
-        } else if (!pred->dom_next[i])
+        if (!pred->dom_next[i])
             break;
     }
 

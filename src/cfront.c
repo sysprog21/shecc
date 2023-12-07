@@ -3009,6 +3009,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     }
 
     error("Unrecognized statement token");
+    return NULL;
 }
 
 basic_block_t *read_code_block(func_t *func,

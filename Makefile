@@ -3,7 +3,8 @@ CFLAGS := -O -g \
 	-ansi -pedantic \
 	-Wall -Wextra \
 	-Wno-variadic-macros \
-	-Wno-maybe-uninitialized
+	-Wno-maybe-uninitialized \
+	-Wno-declaration-after-statement
 
 include mk/common.mk
 include mk/arm.mk
