@@ -52,7 +52,7 @@ int strcmp(char *s1, char *s2)
     while (s1[i] && s2[i]) {
         if (s1[i] < s2[i])
             return -1;
-        else if (s1[i] > s2[i])
+        if (s1[i] > s2[i])
             return 1;
         i++;
     }
@@ -65,7 +65,7 @@ int strncmp(char *s1, char *s2, int len)
     while (i < len) {
         if (s1[i] < s2[i])
             return -1;
-        else if (s1[i] > s2[i])
+        if (s1[i] > s2[i])
             return 1;
         i++;
     }
@@ -96,6 +96,15 @@ char *strncpy(char *dest, char *src, int len)
             dest[i] = 0;
         }
         i++;
+    }
+    return dest;
+}
+
+char *memcpy(char *dest, char *src, int count)
+{
+    while (count > 0) {
+        count--;
+        dest[count] = src[count];
     }
     return dest;
 }
@@ -184,8 +193,10 @@ void __str_base16(char *pb, int val)
             pb[c] = '0' + v;
         else if (v < 16)
             pb[c] = 'a' + v - 10;
-        else
+        else {
             abort();
+            break;
+        }
         val = val >> 4;
         c--;
     }
@@ -244,6 +255,7 @@ int __format(char *buffer,
         break;
     default:
         abort();
+        break;
     }
 
     while (width > INT_BUF_LEN) {
@@ -427,15 +439,6 @@ void sprintf(char *buffer, char *str, ...)
     buffer[bi] = 0;
 }
 
-char *memcpy(char *dest, char *src, int count)
-{
-    while (count > 0) {
-        count--;
-        dest[count] = src[count];
-    }
-    return dest;
-}
-
 int free_all();
 
 void exit(int exit_code)
@@ -452,19 +455,21 @@ void abort()
 
 FILE *fopen(char *filename, char *mode)
 {
-    if (!strcmp(mode, "wb"))
+    if (!strcmp(mode, "wb")) {
 #if defined(__arm__)
         return __syscall(__syscall_open, filename, 65, 0x1fd);
 #elif defined(__riscv)
         /* FIXME: mode not work currently in RISC-V */
         return __syscall(__syscall_openat, -100, filename, 65, 0x1fd);
 #endif
-    if (!strcmp(mode, "rb"))
+    }
+    if (!strcmp(mode, "rb")) {
 #if defined(__arm__)
         return __syscall(__syscall_open, filename, 0, 0);
 #elif defined(__riscv)
         return __syscall(__syscall_openat, -100, filename, 0, 0);
 #endif
+    }
     return NULL;
 }
 
@@ -565,8 +570,9 @@ void *malloc(int size)
     chunk_t *allocated;
 
     if (!freelist_head->next) {
-        /* If no more chunks in the free chunk list,
-           allocate best_fit_chunk as NULL. */
+        /* If no more chunks in the free chunk list, allocate best_fit_chunk
+         * as NULL.
+         */
         allocated = best_fit_chunk;
     } else {
         chunk_t *fh = freelist_head;
@@ -578,7 +584,7 @@ void *malloc(int size)
                 /* first time setting fh as best_fit_chunk */
                 best_fit_chunk = fh;
                 bsize = fh->size;
-            } else if (fh->size >= size && best_fit_chunk &&
+            } else if ((fh->size >= size) && best_fit_chunk &&
                        (fh->size < bsize)) {
                 /* If there is a smaller chunk available, replace it. */
                 best_fit_chunk = fh;
@@ -666,7 +672,6 @@ void free(void *ptr)
         return;
 
     chunk_t *cur = head;
-
     while (cur->ptr != ptr)
         cur = cur->next;
 
