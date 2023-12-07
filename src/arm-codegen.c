@@ -63,8 +63,7 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_load_constant);
                     memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
-                    /**
-                     * ARMv7 uses 12 bits to encode immediate value, but the
+                    /* ARMv7 uses 12 bits to encode immediate value, but the
                      * higher 4 bits are for rotation. See A5.2.4 "Modified
                      * immediate constants in ARM instructions" in ARMv7-A
                      * manual.
@@ -88,8 +87,7 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_address_of);
                     memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
-                    /**
-                     * ARMv7 uses 12 bits to encode immediate value, but the
+                    /* ARMv7 uses 12 bits to encode immediate value, but the
                      * higher 4 bits are for rotation. See A5.2.4 "Modified
                      * immediate constants in ARM instructions" in ARMv7-A
                      * manual.
@@ -105,8 +103,7 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_address_of);
                     memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
-                    /**
-                     * ARMv7 straight uses 12 bits to encode the offset of
+                    /* ARMv7 straight uses 12 bits to encode the offset of
                      * load instruction (no rotation).
                      */
                     if (flatten_ir->src0 > 4095)
@@ -120,8 +117,7 @@ void cfg_flatten()
                     flatten_ir = add_ph2_ir(OP_address_of);
                     memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
-                    /**
-                     * ARMv7 straight uses 12 bits to encode the offset of
+                    /* ARMv7 straight uses 12 bits to encode the offset of
                      * store instruction (no rotation).
                      */
                     if (flatten_ir->src1 > 4095)

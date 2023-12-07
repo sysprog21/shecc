@@ -136,13 +136,13 @@ char next_char;
 int skip_newline = 1;
 
 int preproc_match;
-/*
- * Allows replacing identifiers with alias value if alias exists. This is
+
+/* Allow replacing identifiers with alias value if alias exists. This is
  * disabled in certain cases, e.g. #undef.
  */
 int preproc_aliasing = 1;
-/*
- * Point to the first character after where the macro has been called. It is
+
+/* Point to the first character after where the macro has been called. It is
  * needed when returning from the macro body.
  */
 int macro_return_idx;
@@ -209,8 +209,7 @@ char read_char(int is_skip_space)
     return next_char;
 }
 
-/*
- * get alias name from defined() directive
+/* get alias name from defined() directive
  * i.e., get __arm__ from defined(__arm__)
  */
 void read_alias_name_from_defined(char *alias_name, char *src)
@@ -264,9 +263,7 @@ void ifdef_else_skip_lines()
     skip_whitespace();
 }
 
-/*
- * check alias defined or not
- */
+/* check alias defined or not */
 void chk_def(int defined)
 {
     char *alias = NULL;
@@ -383,12 +380,10 @@ token_t get_next_token()
             return get_next_token();
         }
         if (!strcmp(token_str, "#else")) {
-            /*
-             * reach here has 2 possible cases:
+            /* reach here has 2 possible cases:
              * 1. reach #ifdef preprocessor directive
              * 2. conditional expression in #elif is false
              */
-
             if (!preproc_match) {
                 skip_whitespace();
                 return get_next_token();
@@ -1023,8 +1018,7 @@ void read_func_parameters(block_t *parent, basic_block_t **bb)
     for (i = 0; i < param_num; i++) {
         ph1_ir_t *ph1_ir = add_ph1_ir(OP_push);
         ph1_ir->src0 = params[i];
-        /**
-         * The operand should keep alive before calling function. Pass the
+        /* The operand should keep alive before calling function. Pass the
          * number of remained parameters to allocator to extend their liveness.
          */
         add_insn(parent, *bb, OP_push, NULL, ph1_ir->src0, NULL, param_num - i,
@@ -1676,8 +1670,7 @@ void read_lvalue(lvalue_t *lvalue,
     } else {
         var_t *t;
 
-        /**
-         * If operand is a reference, read the value and push to stack
+        /* If operand is a reference, read the value and push to stack
          * for the incoming addition/subtraction. Otherwise, use the
          * top element of stack as the one of operands and the destination.
          */
@@ -1921,8 +1914,7 @@ int read_body_assignment(char *token,
             if (lvalue.is_ptr)
                 increment_size = lvalue.type->size;
 
-            /**
-             * If operand is a reference, read the value and push to stack
+            /* If operand is a reference, read the value and push to stack
              * for the incoming addition/subtraction. Otherwise, use the
              * top element of stack as the one of operands and the destination.
              */
@@ -2137,7 +2129,7 @@ void eval_ternary_imm(int cond, char *token)
     if (cond == 0) {
         while (next_token != T_colon) {
             next_token = get_next_token();
-        };
+        }
         lex_accept(T_colon);
         read_global_assignment(token);
     } else {
@@ -2183,7 +2175,8 @@ int read_global_assignment(char *token)
             add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
                      ph1_ir->src0, NULL, 0, NULL);
             return 1;
-        } else if (op == OP_ternary) {
+        }
+        if (op == OP_ternary) {
             lex_expect(T_question);
             eval_ternary_imm(operand1, token);
             return 1;
@@ -2208,14 +2201,14 @@ int read_global_assignment(char *token)
             add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
                      ph1_ir->src0, NULL, 0, NULL);
             return 1;
-        } else if (op == OP_ternary) {
+        }
+        if (op == OP_ternary) {
             int cond;
             lex_expect(T_question);
             cond = eval_expression_imm(op, operand1, operand2);
             eval_ternary_imm(cond, token);
             return 1;
         }
-
 
         /* using stack if operands more than two */
         op_stack[op_stack_index++] = op;
@@ -2654,8 +2647,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             }
 
             if (control && true_body_) {
-                /**
-                 * Create a new body block for next case, and connect the last
+                /* Create a new body block for next case, and connect the last
                  * body block which lacks `break` to it to make that one ignore
                  * the upcoming cases.
                  */

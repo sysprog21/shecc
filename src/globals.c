@@ -17,8 +17,7 @@ int macros_idx = 0;
 func_t *FUNCS;
 int funcs_idx = 1;
 
-/*
- * FUNC_TRIES is used to improve the performance of the find_func function.
+/* FUNC_TRIES is used to improve the performance of the find_func function.
  * Instead of searching through all functions and comparing their names, we can
  * utilize the trie data structure to search for existing functions efficiently.
  * The index starts from 1 because the first trie node represents an empty input
@@ -125,7 +124,7 @@ int find_trie(trie_t *trie, char *name)
     int fc = first_char;
     if (!fc)
         return trie->index;
-    else if (!trie->next[fc])
+    if (!trie->next[fc])
         return 0;
     return find_trie(&FUNC_TRIES[trie->next[fc]], name + 1);
 }
@@ -137,9 +136,10 @@ int dump_ir = 0;
 type_t *find_type(char *type_name)
 {
     int i;
-    for (i = 0; i < types_idx; i++)
+    for (i = 0; i < types_idx; i++) {
         if (!strcmp(TYPES[i].type_name, type_name))
             return &TYPES[i];
+    }
     return NULL;
 }
 
@@ -181,9 +181,10 @@ void add_label(char *name, int offset)
 int find_label_offset(char name[])
 {
     int i;
-    for (i = 0; i < label_lut_idx; i++)
+    for (i = 0; i < label_lut_idx; i++) {
         if (!strcmp(LABEL_LUT[i].name, name))
             return LABEL_LUT[i].offset;
+    }
     return -1;
 }
 
@@ -209,9 +210,10 @@ void add_alias(char *alias, char *value)
 char *find_alias(char alias[])
 {
     int i;
-    for (i = 0; i < aliases_idx; i++)
+    for (i = 0; i < aliases_idx; i++) {
         if (!ALIASES[i].disabled && !strcmp(alias, ALIASES[i].alias))
             return ALIASES[i].value;
+    }
     return NULL;
 }
 
@@ -238,9 +240,10 @@ macro_t *add_macro(char *name)
 macro_t *find_macro(char *name)
 {
     int i;
-    for (i = 0; i < macros_idx; i++)
+    for (i = 0; i < macros_idx; i++) {
         if (!MACROS[i].disabled && !strcmp(name, MACROS[i].name))
             return &MACROS[i];
+    }
     return NULL;
 }
 
@@ -267,9 +270,10 @@ int find_macro_param_src_idx(char *name, block_t *parent)
     if (!parent->macro)
         return 0;
 
-    for (i = 0; i < macro->num_param_defs; i++)
+    for (i = 0; i < macro->num_param_defs; i++) {
         if (!strcmp(macro->param_defs[i].var_name, name))
             return macro->params[i];
+    }
     return 0;
 }
 
@@ -308,9 +312,10 @@ void add_constant(char alias[], int value)
 constant_t *find_constant(char alias[])
 {
     int i;
-    for (i = 0; i < constants_idx; i++)
+    for (i = 0; i < constants_idx; i++) {
         if (!strcmp(CONSTANTS[i].alias, alias))
             return &CONSTANTS[i];
+    }
     return NULL;
 }
 
@@ -325,9 +330,10 @@ func_t *find_func(char func_name[])
 var_t *find_member(char token[], type_t *type)
 {
     int i;
-    for (i = 0; i < type->num_fields; i++)
+    for (i = 0; i < type->num_fields; i++) {
         if (!strcmp(type->fields[i].var_name, token))
             return &type->fields[i];
+    }
     return NULL;
 }
 
@@ -337,15 +343,17 @@ var_t *find_local_var(char *token, block_t *block)
     func_t *fn = block->func;
 
     for (; block; block = block->parent) {
-        for (i = 0; i < block->next_local; i++)
+        for (i = 0; i < block->next_local; i++) {
             if (!strcmp(block->locals[i].var_name, token))
                 return &block->locals[i];
+        }
     }
 
     if (fn) {
-        for (i = 0; i < fn->num_params; i++)
+        for (i = 0; i < fn->num_params; i++) {
             if (!strcmp(fn->param_defs[i].var_name, token))
                 return &fn->param_defs[i];
+        }
     }
     return NULL;
 }
@@ -355,9 +363,10 @@ var_t *find_global_var(char *token)
     int i;
     block_t *block = &BLOCKS[0];
 
-    for (i = 0; i < block->next_local; i++)
+    for (i = 0; i < block->next_local; i++) {
         if (!strcmp(block->locals[i].var_name, token))
             return &block->locals[i];
+    }
     return NULL;
 }
 
@@ -485,9 +494,10 @@ void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
 void add_symbol(basic_block_t *bb, var_t *var)
 {
     symbol_t *sym;
-    for (sym = bb->symbol_list.head; sym; sym = sym->next)
+    for (sym = bb->symbol_list.head; sym; sym = sym->next) {
         if (sym->var == var)
             return;
+    }
 
     sym = calloc(1, sizeof(symbol_t));
     sym->var = var;

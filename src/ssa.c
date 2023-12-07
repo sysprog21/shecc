@@ -13,7 +13,7 @@ void bb_forward_traversal(bb_traversal_args_t *args)
     if (args->preorder_cb)
         args->preorder_cb(args->fn, args->bb);
 
-    /* `args` is a reference, do not modify it */
+    /* 'args' is a reference, do not modify it */
     bb_traversal_args_t next_args;
     memcpy(&next_args, args, sizeof(bb_traversal_args_t));
 
@@ -47,7 +47,7 @@ void bb_backward_traversal(bb_traversal_args_t *args)
         if (!args->bb->prev[i].bb)
             continue;
         if (args->bb->prev[i].bb->visited < args->fn->visited) {
-            /* `args` is a reference, do not modify it */
+            /* 'args' is a reference, do not modify it */
             bb_traversal_args_t next_args;
             memcpy(&next_args, args, sizeof(bb_traversal_args_t));
 
@@ -127,16 +127,16 @@ basic_block_t *intersect(basic_block_t *i, basic_block_t *j)
     return i;
 }
 
-/**
- * Find the immediate dominator of each basic block to build the dominator tree.
+/* Find the immediate dominator of each basic block to build the dominator tree.
  *
  * Once the dominator tree is built, we can perform the more advanced
  * optimiaztion according to the liveness analysis and the reachability
  * analysis, e.g. common subexpression elimination, loop optimiaztion or dead
  * code elimination .
  *
- * Reference: Cooper, Keith D.; Harvey, Timothy J.; Kennedy, Ken (2001). "A
- *            Simple, Fast Dominance Algorithm"
+ * Reference:
+ *   Cooper, Keith D.; Harvey, Timothy J.; Kennedy, Ken (2001).
+ *   "A Simple, Fast Dominance Algorithm"
  */
 void build_idom()
 {
@@ -262,20 +262,22 @@ void build_df()
 int var_check_killed(var_t *var, basic_block_t *bb)
 {
     int i;
-    for (i = 0; i < bb->live_kill_idx; i++)
+    for (i = 0; i < bb->live_kill_idx; i++) {
         if (bb->live_kill[i] == var)
             return 1;
+    }
     return 0;
 }
 
 void bb_add_killed_var(basic_block_t *bb, var_t *var)
 {
     int i, found = 0;
-    for (i = 0; i < bb->live_kill_idx; i++)
+    for (i = 0; i < bb->live_kill_idx; i++) {
         if (bb->live_kill[i] == var) {
             found = 1;
             break;
         }
+    }
 
     if (found)
         return;
@@ -287,11 +289,12 @@ void var_add_killed_bb(var_t *var, basic_block_t *bb)
 {
     int found = 0;
     ref_block_t *ref;
-    for (ref = var->ref_block_list.head; ref; ref = ref->next)
+    for (ref = var->ref_block_list.head; ref; ref = ref->next) {
         if (ref->bb == bb) {
             found = 1;
             break;
         }
+    }
 
     if (found)
         return;
@@ -310,11 +313,12 @@ void fn_add_global(fn_t *fn, var_t *var)
 {
     int found = 0;
     symbol_t *sym;
-    for (sym = fn->global_sym_list.head; sym; sym = sym->next)
+    for (sym = fn->global_sym_list.head; sym; sym = sym->next) {
         if (sym->var == var) {
             found = 1;
             break;
         }
+    }
 
     if (found)
         return;
@@ -370,16 +374,18 @@ int var_check_in_scope(var_t *var, block_t *block)
 
     while (block) {
         int i;
-        for (i = 0; i < block->next_local; i++)
+        for (i = 0; i < block->next_local; i++) {
             if (&(block->locals[i]) == var)
                 return 1;
+        }
         block = block->parent;
     }
 
     int i;
-    for (i = 0; i < fn->num_params; i++)
+    for (i = 0; i < fn->num_params; i++) {
         if (&fn->param_defs[i] == var)
             return 1;
+    }
 
     return 0;
 }
@@ -388,12 +394,12 @@ int insert_phi_insn(basic_block_t *bb, var_t *var)
 {
     insn_t *insn;
     int found = 0;
-    for (insn = bb->insn_list.head; insn; insn = insn->next)
-        if (insn->opcode == OP_phi)
-            if (insn->rd == var) {
-                found = 1;
-                break;
-            }
+    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+        if ((insn->opcode == OP_phi) && (insn->rd == var)) {
+            found = 1;
+            break;
+        }
+    }
     if (found)
         return 0;
 
@@ -494,9 +500,10 @@ var_t *get_stack_top_subscript_var(var_t *var)
 {
     int sub = var->base->rename.stack[var->base->rename.stack_idx - 1];
     int i;
-    for (i = 0; i < var->base->subscripts_idx; i++)
+    for (i = 0; i < var->base->subscripts_idx; i++) {
         if (var->base->subscripts[i]->subscript == sub)
             return var->base->subscripts[i];
+    }
 
     abort();
 }
@@ -549,20 +556,23 @@ void bb_solve_phi_params(basic_block_t *bb)
                 new_name(bb->scope, &insn->rd);
         }
 
-    if (bb->next)
+    if (bb->next) {
         for (insn = bb->next->insn_list.head; insn; insn = insn->next)
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
+    }
 
-    if (bb->then_)
+    if (bb->then_) {
         for (insn = bb->then_->insn_list.head; insn; insn = insn->next)
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
+    }
 
-    if (bb->else_)
+    if (bb->else_) {
         for (insn = bb->else_->insn_list.head; insn; insn = insn->next)
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
+    }
 
     int i;
     for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
@@ -571,11 +581,12 @@ void bb_solve_phi_params(basic_block_t *bb)
         bb_solve_phi_params(bb->dom_next[i]);
     }
 
-    for (insn = bb->insn_list.head; insn; insn = insn->next)
+    for (insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->opcode == OP_phi)
             pop_name(insn->rd);
         else if (insn->rd)
             pop_name(insn->rd);
+    }
 }
 
 void solve_phi_params()
@@ -634,9 +645,8 @@ void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
             break;
 
         phi_operand_t *operand;
-        for (operand = insn->phi_ops; operand; operand = operand->next) {
+        for (operand = insn->phi_ops; operand; operand = operand->next)
             append_unwound_phi_insn(operand->from, insn->rd, operand->var);
-        }
         /* TODO: Release dangling phi instruction */
     }
 

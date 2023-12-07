@@ -5,8 +5,7 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
-/*
- * Allocate registers from IR. The linear-scan algorithm now expects a minimum
+/* Allocate registers from IR. The linear-scan algorithm now expects a minimum
  * of 7 available registers (typical for RISC-style architectures).
  *
  * TODO: Implement the "-O level" option. This allocator now always drops the
@@ -51,8 +50,7 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     return n;
 }
 
-/**
- * Priority of spilling:
+/* Priority of spilling:
  * - live_out variable
  * - farthest local variable
  */
@@ -88,15 +86,17 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
 int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 {
     int i;
-    for (i = 0; i < REG_CNT; i++)
+    for (i = 0; i < REG_CNT; i++) {
         if (REGS[i].var == var)
             return i;
+    }
 
-    for (i = 0; i < REG_CNT; i++)
+    for (i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var) {
             load_var(bb, var, i);
             return i;
         }
+    }
 
     for (i = 0; i < REG_CNT; i++) {
         if (i == operand_0)
@@ -132,12 +132,13 @@ int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
             return i;
         }
 
-    for (i = 0; i < REG_CNT; i++)
+    for (i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var) {
             REGS[i].var = var;
             REGS[i].polluted = 1;
             return i;
         }
+    }
 
     for (i = 0; i < REG_CNT; i++) {
         if (i == operand_0)
@@ -209,9 +210,7 @@ void spill_live_out(basic_block_t *bb)
     }
 }
 
-/**
- * The operand of `OP_push` should not been killed until function called.
- */
+/* The operand of `OP_push` should not been killed until function called. */
 void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
 {
     if (check_live_out(bb, var))
@@ -423,8 +422,7 @@ void reg_alloc()
                 case OP_branch:
                     src0 = prepare_operand(bb, insn->rs1, -1);
 
-                    /**
-                     * REGS[src0].var had been set to NULL, but the actual
+                    /* REGS[src0].var had been set to NULL, but the actual
                      * content is still holded in the register.
                      */
                     spill_live_out(bb);
@@ -554,7 +552,6 @@ void reg_alloc()
         /* handle implicit return */
         for (i = 0; i < MAX_BB_PRED; i++) {
             basic_block_t *bb = fn->exit->prev[i].bb;
-
             if (!bb)
                 continue;
 
