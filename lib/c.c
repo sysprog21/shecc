@@ -1,4 +1,11 @@
-/* minimal libc implementation for shecc */
+/*
+ * shecc - Self-Hosting and Educational C Compiler.
+ *
+ * shecc is freely redistributable under the BSD 2 clause license. See the
+ * file "LICENSE" for information on usage and redistribution of this file.
+ */
+
+/* minimal libc implementation */
 
 #define NULL 0
 
@@ -573,8 +580,7 @@ void *malloc(int size)
                 bsize = fh->size;
             } else if (fh->size >= size && best_fit_chunk &&
                        (fh->size < bsize)) {
-                /* If there is a smaller chunk available,
-                   replace it with this. */
+                /* If there is a smaller chunk available, replace it. */
                 best_fit_chunk = fh;
                 bsize = fh->size;
             }
@@ -678,7 +684,7 @@ void free(void *ptr)
     } else
         prev->next = NULL;
 
-    /* Insert Head in freelist_head */
+    /* Insert head in freelist_head */
     cur->next = freelist_head;
     cur->prev = NULL;
     freelist_head->prev = cur;
