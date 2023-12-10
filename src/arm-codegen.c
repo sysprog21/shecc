@@ -27,18 +27,39 @@ void cfg_flatten()
          ph2_ir = ph2_ir->next) {
         switch (ph2_ir->op) {
         case OP_load_constant:
+            if (ph2_ir->src0 < 0)
+                elf_offset += 12;
+            else if (ph2_ir->src0 > 255)
+                elf_offset += 8;
+            else
+                elf_offset += 4;
+            break;
         case OP_global_address_of:
+            if (ph2_ir->src0 < 0)
+                abort();
+            else if (ph2_ir->src0 > 255)
+                elf_offset += 12;
+            else
+                elf_offset += 4;
+            break;
         case OP_assign:
-        case OP_global_store:
             elf_offset += 4;
+            break;
+        case OP_global_store:
+            if (ph2_ir->src1 < 0)
+                abort();
+            else if (ph2_ir->src1 > 4095)
+                elf_offset += 16;
+            else
+                elf_offset += 4;
             break;
         default:
             printf("Unknown opcode\n");
             abort();
         }
     }
-    /* jump to main */
-    elf_offset += 4;
+    /* prepare `argc` and `argv`, then proceed to `main` function */
+    elf_offset += 24;
 
     fn_t *fn;
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
@@ -84,6 +105,7 @@ void cfg_flatten()
                     }
                     break;
                 case OP_address_of:
+                case OP_global_address_of:
                     flatten_ir = add_ph2_ir(OP_address_of);
                     memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
@@ -126,7 +148,6 @@ void cfg_flatten()
                         elf_offset += 4;
 
                     break;
-                case OP_global_address_of:
                 case OP_read:
                 case OP_write:
                 case OP_jump:
@@ -226,23 +247,51 @@ void code_generate()
 
         switch (ph2_ir->op) {
         case OP_load_constant:
-            emit(__mov_i(__AL, rd, ph2_ir->src0));
+            if (ph2_ir->src0 < 0) {
+                emit(__movw(__AL, __r8, -ph2_ir->src0));
+                emit(__movt(__AL, __r8, -ph2_ir->src0));
+                emit(__rsb_i(__AL, rd, 0, __r8));
+            } else if (ph2_ir->src0 > 255) {
+                emit(__movw(__AL, rd, ph2_ir->src0));
+                emit(__movt(__AL, rd, ph2_ir->src0));
+            } else
+                emit(__mov_i(__AL, rd, ph2_ir->src0));
             break;
         case OP_global_address_of:
-            emit(__add_i(__AL, rd, __r12, ph2_ir->src0));
+            if (ph2_ir->src0 < 0)
+                abort();
+            else if (ph2_ir->src0 > 255) {
+                emit(__movw(__AL, __r8, ph2_ir->src0));
+                emit(__movt(__AL, __r8, ph2_ir->src0));
+                emit(__add_r(__AL, rd, __r12, __r8));
+            } else
+                emit(__add_i(__AL, rd, __r12, ph2_ir->src0));
             break;
         case OP_assign:
             emit(__mov_r(__AL, rd, rn));
             break;
         case OP_global_store:
-            emit(__sw(__AL, rn, __r12, ph2_ir->src1));
+            if (ph2_ir->src1 < 0)
+                abort();
+            else if (ph2_ir->src1 > 4095) {
+                emit(__movw(__AL, __r8, ph2_ir->src1));
+                emit(__movt(__AL, __r8, ph2_ir->src1));
+                emit(__add_r(__AL, __r8, __r12, __r8));
+                emit(__sw(__AL, rn, __r8, 0));
+            } else
+                emit(__sw(__AL, rn, __r12, ph2_ir->src1));
             break;
         default:
             printf("Unknown opcode\n");
             abort();
         }
     }
-    /* jump to main */
+    /* prepare `argc` and `argv`, then proceed to `main` function */
+    emit(__movw(__AL, __r8, GLOBAL_FUNC.stack_size));
+    emit(__movt(__AL, __r8, GLOBAL_FUNC.stack_size));
+    emit(__add_r(__AL, __r8, __r12, __r8));
+    emit(__lw(__AL, __r0, __r8, 0));
+    emit(__add_i(__AL, __r1, __r8, 4));
     emit(__b(__AL, MAIN_BB->elf_offset - elf_code_idx));
 
     int i;

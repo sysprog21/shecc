@@ -462,6 +462,16 @@ void solve_phi_insertion()
 
                     if (insert_phi_insn(df, var)) {
                         int l, found = 0;
+
+                        /* Restrict phi insertion of ternary operation.
+                         *
+                         * The ternary operation doesn't create new scope, so
+                         * prevent temporary variable from propagating through
+                         * the dominance tree.
+                         */
+                        if (var->is_ternary_ret)
+                            continue;
+
                         for (l = 0; l < work_list_idx; l++)
                             if (work_list[l] == df) {
                                 found = 1;
@@ -1149,7 +1159,7 @@ void merge_live_in(var_t *live_out[], int *live_out_idx, basic_block_t *bb)
 
 int recompute_live_out(fn_t *fn, basic_block_t *bb)
 {
-    var_t *live_out[64];
+    var_t *live_out[MAX_ANALYSIS_STACK_SIZE];
     int live_out_idx = 0;
 
     if (bb->next) {
