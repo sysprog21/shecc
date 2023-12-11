@@ -9,9 +9,84 @@
 
 #include "riscv.c"
 
-void emit(int code)
+void update_elf_offset(ph2_ir_t *ph2_ir)
 {
-    elf_write_code_int(code);
+    switch (ph2_ir->op) {
+    case OP_load_constant:
+        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
+            elf_offset += 8;
+        else
+            elf_offset += 4;
+        return;
+    case OP_address_of:
+    case OP_global_address_of:
+        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
+            elf_offset += 12;
+        else
+            elf_offset += 4;
+        return;
+    case OP_assign:
+        elf_offset += 4;
+        return;
+    case OP_load:
+    case OP_global_load:
+        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
+            elf_offset += 16;
+        else
+            elf_offset += 4;
+        return;
+    case OP_store:
+    case OP_global_store:
+        if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047)
+            elf_offset += 16;
+        else
+            elf_offset += 4;
+        return;
+    case OP_read:
+    case OP_write:
+    case OP_jump:
+    case OP_call:
+    case OP_load_func:
+    case OP_indirect:
+    case OP_add:
+    case OP_sub:
+    case OP_mul:
+    case OP_div:
+    case OP_mod:
+    case OP_lshift:
+    case OP_rshift:
+    case OP_gt:
+    case OP_lt:
+    case OP_bit_and:
+    case OP_bit_or:
+    case OP_bit_xor:
+    case OP_negate:
+    case OP_log_and:
+    case OP_bit_not:
+        elf_offset += 4;
+        return;
+    case OP_load_data_address:
+    case OP_neq:
+    case OP_geq:
+    case OP_leq:
+    case OP_log_not:
+    case OP_log_or:
+        elf_offset += 8;
+        return;
+    case OP_address_of_func:
+    case OP_eq:
+        elf_offset += 12;
+        return;
+    case OP_branch:
+        elf_offset += 20;
+        return;
+    case OP_return:
+        elf_offset += 24;
+        return;
+    default:
+        printf("Unknown opcode\n");
+        abort();
+    }
 }
 
 void cfg_flatten()
@@ -24,34 +99,9 @@ void cfg_flatten()
 
     ph2_ir_t *ph2_ir;
     for (ph2_ir = GLOBAL_FUNC.fn->bbs->ph2_ir_list.head; ph2_ir;
-         ph2_ir = ph2_ir->next) {
-        switch (ph2_ir->op) {
-        case OP_load_constant:
-            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
-                elf_offset += 8;
-            else
-                elf_offset += 4;
-            break;
-        case OP_global_address_of:
-            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
-                elf_offset += 12;
-            else
-                elf_offset += 4;
-            break;
-        case OP_assign:
-            elf_offset += 4;
-            break;
-        case OP_global_store:
-            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047)
-                elf_offset += 16;
-            else
-                elf_offset += 4;
-            break;
-        default:
-            printf("Unknown opcode\n");
-            abort();
-        }
-    }
+         ph2_ir = ph2_ir->next)
+        update_elf_offset(ph2_ir);
+
     /* prepare `argc` and `argv`, then proceed to `main` function */
     elf_offset += 24;
 
@@ -73,120 +123,243 @@ void cfg_flatten()
 
             ph2_ir_t *insn;
             for (insn = bb->ph2_ir_list.head; insn; insn = insn->next) {
-                switch (insn->op) {
-                case OP_load_constant:
-                    flatten_ir = add_ph2_ir(OP_load_constant);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
+                if (insn->op == OP_assign && insn->dest == insn->src0)
+                    continue;
 
-                    /* RISC-V uses 12 bits to encode immediate value */
-                    if (flatten_ir->src0 < 2048 && flatten_ir->src0 > -2047)
-                        elf_offset += 4;
-                    else
-                        elf_offset += 8;
+                flatten_ir = add_ph2_ir(OP_generic);
+                memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
-                    break;
-                case OP_assign:
-                    if (insn->dest != insn->src0) {
-                        flatten_ir = add_ph2_ir(OP_assign);
-                        memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
-                        elf_offset += 4;
-                    }
-                    break;
-                case OP_address_of:
-                case OP_global_address_of:
-                    flatten_ir = add_ph2_ir(insn->op);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
-                    if (flatten_ir->src0 < -2048 || flatten_ir->src0 > 2047)
-                        elf_offset += 12;
-                    else
-                        elf_offset += 4;
-                    break;
-                case OP_load:
-                case OP_global_load:
-                    flatten_ir = add_ph2_ir(insn->op);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
-                    if (flatten_ir->src0 < -2048 || flatten_ir->src0 > 2047)
-                        elf_offset += 16;
-                    else
-                        elf_offset += 4;
-                    break;
-                case OP_store:
-                case OP_global_store:
-                    flatten_ir = add_ph2_ir(insn->op);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
-                    if (flatten_ir->src1 < -2048 || flatten_ir->src1 > 2047)
-                        elf_offset += 16;
-                    else
-                        elf_offset += 4;
-                    break;
-                case OP_read:
-                case OP_write:
-                case OP_jump:
-                case OP_call:
-                case OP_load_func:
-                case OP_indirect:
-                case OP_add:
-                case OP_sub:
-                case OP_mul:
-                case OP_div:
-                case OP_mod:
-                case OP_lshift:
-                case OP_rshift:
-                case OP_gt:
-                case OP_lt:
-                case OP_bit_and:
-                case OP_bit_or:
-                case OP_bit_xor:
-                case OP_negate:
-                case OP_log_and:
-                case OP_bit_not:
-                    /* TODO: if the offset of store/load is more than 12 bits,
-                     * use compounded instructions.
-                     */
-                    flatten_ir = add_ph2_ir(insn->op);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
-                    elf_offset += 4;
-                    break;
-                case OP_branch:
-                    flatten_ir = add_ph2_ir(insn->op);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
-                    elf_offset += 20;
-                    break;
-                case OP_load_data_address:
-                case OP_neq:
-                case OP_geq:
-                case OP_leq:
-                case OP_log_not:
-                case OP_log_or:
-                    flatten_ir = add_ph2_ir(insn->op);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
-                    elf_offset += 8;
-                    break;
-                case OP_address_of_func:
-                case OP_eq:
-                    flatten_ir = add_ph2_ir(OP_eq);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
-                    elf_offset += 12;
-                    break;
-                case OP_return:
-                    flatten_ir = add_ph2_ir(OP_return);
-                    memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
+                if (insn->op == OP_return)
                     /* restore sp */
                     flatten_ir->src1 = bb->belong_to->func->stack_size;
-                    elf_offset += 24;
-                    break;
-                default:
-                    printf("Unknown opcode\n");
-                    abort();
-                }
+
+                update_elf_offset(flatten_ir);
             }
         }
     }
 }
 
+void emit(int code)
+{
+    elf_write_code_int(code);
+}
+
+void emit_ph2_ir(ph2_ir_t *ph2_ir)
+{
+    int rd = ph2_ir->dest + 10;
+    int rs1 = ph2_ir->src0 + 10;
+    int rs2 = ph2_ir->src1 + 10;
+    int ofs;
+
+    switch (ph2_ir->op) {
+    case OP_define:
+        emit(__lui(__t0, rv_hi(ph2_ir->src0 + 4)));
+        emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0 + 4)));
+        emit(__sub(__sp, __sp, __t0));
+        emit(__sw(__ra, __sp, 0));
+        return;
+    case OP_load_constant:
+        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+            emit(__lui(rd, rv_hi(ph2_ir->src0)));
+            emit(__addi(rd, rd, rv_lo(ph2_ir->src0)));
+
+        } else
+            emit(__addi(rd, __zero, ph2_ir->src0));
+        return;
+    case OP_global_address_of:
+        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+            emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+            emit(__add(rd, __gp, __t0));
+        } else
+            emit(__addi(rd, __gp, ph2_ir->src0));
+        return;
+    case OP_address_of:
+        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+            emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+            emit(__add(rd, __sp, __t0));
+        } else
+            emit(__addi(rd, __sp, ph2_ir->src0));
+        return;
+    case OP_assign:
+        emit(__addi(rd, rs1, 0));
+        return;
+    case OP_load:
+        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+            emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+            emit(__add(__t0, __sp, __t0));
+            emit(__lw(rd, __t0, 0));
+        } else
+            emit(__lw(rd, __sp, ph2_ir->src0));
+        return;
+    case OP_store:
+        if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
+            emit(__lui(__t0, rv_hi(ph2_ir->src1)));
+            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
+            emit(__add(__t0, __sp, __t0));
+            emit(__sw(rs1, __t0, 0));
+        } else
+            emit(__sw(rs1, __sp, ph2_ir->src1));
+        return;
+    case OP_global_load:
+        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+            emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+            emit(__add(__t0, __gp, __t0));
+            emit(__lw(rd, __t0, 0));
+        } else
+            emit(__lw(rd, __gp, ph2_ir->src0));
+        return;
+    case OP_global_store:
+        if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
+            emit(__lui(__t0, rv_hi(ph2_ir->src1)));
+            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
+            emit(__add(__t0, __gp, __t0));
+            emit(__sw(rs1, __t0, 0));
+        } else
+            emit(__sw(rs1, __gp, ph2_ir->src1));
+        return;
+    case OP_read:
+        if (ph2_ir->src1 == 1)
+            emit(__lb(rd, rs1, 0));
+        else if (ph2_ir->src1 == 4)
+            emit(__lw(rd, rs1, 0));
+        else
+            abort();
+        return;
+    case OP_write:
+        if (ph2_ir->dest == 1)
+            emit(__sb(rs2, rs1, 0));
+        else if (ph2_ir->dest == 4)
+            emit(__sw(rs2, rs1, 0));
+        else
+            abort();
+        return;
+    case OP_branch:
+        ofs = elf_code_start + ph2_ir->then_bb->elf_offset;
+        emit(__lui(__t0, rv_hi(ofs)));
+        emit(__addi(__t0, __t0, rv_lo(ofs)));
+        emit(__beq(rs1, __zero, 8));
+        emit(__jalr(__zero, __t0, 0));
+        emit(__jal(__zero, ph2_ir->else_bb->elf_offset - elf_code_idx));
+        return;
+    case OP_jump:
+        emit(__jal(__zero, ph2_ir->next_bb->elf_offset - elf_code_idx));
+        return;
+    case OP_call:
+        emit(__jal(__ra, find_func(ph2_ir->func_name)->fn->bbs->elf_offset -
+                             elf_code_idx));
+        return;
+    case OP_load_data_address:
+        emit(__lui(rd, rv_hi(elf_data_start + ph2_ir->src0)));
+        emit(__addi(rd, rd, rv_lo(elf_data_start + ph2_ir->src0)));
+        return;
+    case OP_address_of_func:
+        ofs =
+            elf_code_start + find_func(ph2_ir->func_name)->fn->bbs->elf_offset;
+        emit(__lui(__t0, rv_hi(ofs)));
+        emit(__addi(__t0, __t0, rv_lo(ofs)));
+        emit(__sw(__t0, rs1, 0));
+        return;
+    case OP_load_func:
+        emit(__addi(__t0, rs1, 0));
+        return;
+    case OP_indirect:
+        emit(__jalr(__ra, __t0, 0));
+        return;
+    case OP_return:
+        if (ph2_ir->src0 == -1)
+            emit(__addi(__zero, __zero, 0));
+        else
+            emit(__addi(__a0, rs1, 0));
+        emit(__lw(__ra, __sp, 0));
+        emit(__lui(__t0, rv_hi(ph2_ir->src1 + 4)));
+        emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1 + 4)));
+        emit(__add(__sp, __sp, __t0));
+        emit(__jalr(__zero, __ra, 0));
+        return;
+    case OP_add:
+        emit(__add(rd, rs1, rs2));
+        return;
+    case OP_sub:
+        emit(__sub(rd, rs1, rs2));
+        return;
+    case OP_mul:
+        emit(__mul(rd, rs1, rs2));
+        return;
+    case OP_div:
+        emit(__div(rd, rs1, rs2));
+        return;
+    case OP_mod:
+        emit(__mod(rd, rs1, rs2));
+        return;
+    case OP_lshift:
+        emit(__sll(rd, rs1, rs2));
+        return;
+    case OP_rshift:
+        emit(__sra(rd, rs1, rs2));
+        return;
+    case OP_eq:
+        emit(__sub(rd, rs1, rs2));
+        emit(__sltu(rd, __zero, rd));
+        emit(__xori(rd, rd, 1));
+        return;
+    case OP_neq:
+        emit(__sub(rd, rs1, rs2));
+        emit(__sltu(rd, __zero, rd));
+        return;
+    case OP_gt:
+        emit(__slt(rd, rs2, rs1));
+        return;
+    case OP_geq:
+        emit(__slt(rd, rs1, rs2));
+        emit(__xori(rd, rd, 1));
+        return;
+    case OP_lt:
+        emit(__slt(rd, rs1, rs2));
+        return;
+    case OP_leq:
+        emit(__slt(rd, rs2, rs1));
+        emit(__xori(rd, rd, 1));
+        return;
+    case OP_negate:
+        emit(__sub(rd, __zero, rs1));
+        return;
+    case OP_bit_not:
+        emit(__xori(rd, rs1, -1));
+        return;
+    case OP_bit_and:
+        emit(__and(rd, rs1, rs2));
+        return;
+    case OP_bit_or:
+        emit(__or(rd, rs1, rs2));
+        return;
+    case OP_bit_xor:
+        emit(__xor(rd, rs1, rs2));
+        return;
+    case OP_log_not:
+        emit(__sltu(rd, __zero, rs1));
+        emit(__xori(rd, rd, 1));
+        return;
+    case OP_log_and:
+        /* FIXME: bad logical-and instruction */
+        emit(__and(rd, rs1, rs2));
+        return;
+    case OP_log_or:
+        emit(__or(rd, rs1, rs2));
+        emit(__sltu(rd, __zero, rd));
+        return;
+    default:
+        printf("Unknown opcode\n");
+        abort();
+    }
+}
+
 void code_generate()
 {
-    int elf_data_start = elf_code_start + elf_offset;
+    elf_data_start = elf_code_start + elf_offset;
 
     /* start */
     emit(__lui(__t0, rv_hi(GLOBAL_FUNC.stack_size)));
@@ -217,44 +390,9 @@ void code_generate()
 
     ph2_ir_t *ph2_ir;
     for (ph2_ir = GLOBAL_FUNC.fn->bbs->ph2_ir_list.head; ph2_ir;
-         ph2_ir = ph2_ir->next) {
-        int rd = ph2_ir->dest + 10;
-        int rs1 = ph2_ir->src0 + 10;
-        int rs2 = ph2_ir->src1 + 10;
+         ph2_ir = ph2_ir->next)
+        emit_ph2_ir(ph2_ir);
 
-        switch (ph2_ir->op) {
-        case OP_load_constant:
-            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-                emit(__lui(rd, rv_hi(ph2_ir->src0)));
-                emit(__addi(rd, rd, rv_lo(ph2_ir->src0)));
-            } else
-                emit(__addi(rd, __zero, ph2_ir->src0));
-            break;
-        case OP_global_address_of:
-            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-                emit(__add(rd, __gp, __t0));
-            } else
-                emit(__addi(rd, __gp, ph2_ir->src0));
-            break;
-        case OP_assign:
-            emit(__addi(rd, rs1, 0));
-            break;
-        case OP_global_store:
-            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src1)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
-                emit(__add(__t0, __gp, __t0));
-                emit(__sw(rs1, __t0, 0));
-            } else
-                emit(__sw(rs1, __gp, ph2_ir->src1));
-            break;
-        default:
-            printf("Unknown opcode\n");
-            abort();
-        }
-    }
     /* prepare `argc` and `argv`, then proceed to `main` function */
     emit(__lui(__t0, rv_hi(GLOBAL_FUNC.stack_size)));
     emit(__addi(__t0, __t0, rv_lo(GLOBAL_FUNC.stack_size)));
@@ -265,207 +403,7 @@ void code_generate()
 
     int i;
     for (i = 0; i < ph2_ir_idx; i++) {
-        ph2_ir_t *ph2_ir = &PH2_IR[i];
-        int rd = ph2_ir->dest + 10;
-        int rs1 = ph2_ir->src0 + 10;
-        int rs2 = ph2_ir->src1 + 10;
-        int ofs;
-
-        switch (ph2_ir->op) {
-        case OP_define:
-            emit(__lui(__t0, rv_hi(ph2_ir->src0 + 4)));
-            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0 + 4)));
-            emit(__sub(__sp, __sp, __t0));
-            emit(__sw(__ra, __sp, 0));
-            break;
-        case OP_load_constant:
-            if (ph2_ir->src0 < 2048 && ph2_ir->src0 > -2047)
-                emit(__addi(rd, __zero, ph2_ir->src0));
-            else {
-                emit(__lui(rd, rv_hi(ph2_ir->src0)));
-                emit(__addi(rd, rd, rv_lo(ph2_ir->src0)));
-            }
-            break;
-        case OP_load_data_address:
-            emit(__lui(rd, rv_hi(elf_data_start + ph2_ir->src0)));
-            emit(__addi(rd, rd, rv_lo(elf_data_start + ph2_ir->src0)));
-            break;
-        case OP_address_of:
-            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-                emit(__add(rd, __sp, __t0));
-            } else
-                emit(__addi(rd, __sp, ph2_ir->src0));
-            break;
-        case OP_assign:
-            emit(__addi(rd, rs1, 0));
-            break;
-        case OP_load:
-            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-                emit(__add(__t0, __sp, __t0));
-                emit(__lw(rd, __t0, 0));
-            } else
-                emit(__lw(rd, __sp, ph2_ir->src0));
-            break;
-        case OP_store:
-            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src1)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
-                emit(__add(__t0, __sp, __t0));
-                emit(__sw(rs1, __t0, 0));
-            } else
-                emit(__sw(rs1, __sp, ph2_ir->src1));
-            break;
-        case OP_global_load:
-            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-                emit(__add(__t0, __gp, __t0));
-                emit(__lw(rd, __t0, 0));
-            } else
-                emit(__lw(rd, __gp, ph2_ir->src0));
-            break;
-        case OP_global_store:
-            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src1)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
-                emit(__add(__t0, __gp, __t0));
-                emit(__sw(rs1, __t0, 0));
-            } else
-                emit(__sw(rs1, __gp, ph2_ir->src1));
-            break;
-        case OP_read:
-            if (ph2_ir->src1 == 1)
-                emit(__lb(rd, rs1, 0));
-            else if (ph2_ir->src1 == 4)
-                emit(__lw(rd, rs1, 0));
-            else
-                abort();
-            break;
-        case OP_write:
-            if (ph2_ir->dest == 1)
-                emit(__sb(rs2, rs1, 0));
-            else if (ph2_ir->dest == 4)
-                emit(__sw(rs2, rs1, 0));
-            else
-                abort();
-            break;
-        case OP_branch:
-            ofs = elf_code_start + ph2_ir->then_bb->elf_offset;
-            emit(__lui(__t0, rv_hi(ofs)));
-            emit(__addi(__t0, __t0, rv_lo(ofs)));
-            emit(__beq(rs1, __zero, 8));
-            emit(__jalr(__zero, __t0, 0));
-            emit(__jal(__zero, ph2_ir->else_bb->elf_offset - elf_code_idx));
-            break;
-        case OP_jump:
-            emit(__jal(__zero, ph2_ir->next_bb->elf_offset - elf_code_idx));
-            break;
-        case OP_call:
-            emit(__jal(__ra, find_func(ph2_ir->func_name)->fn->bbs->elf_offset -
-                                 elf_code_idx));
-            break;
-        case OP_address_of_func:
-            ofs = elf_code_start +
-                  find_func(ph2_ir->func_name)->fn->bbs->elf_offset;
-            emit(__lui(__t0, rv_hi(ofs)));
-            emit(__addi(__t0, __t0, rv_lo(ofs)));
-            emit(__sw(__t0, rs1, 0));
-            break;
-        case OP_load_func:
-            emit(__addi(__t0, rs1, 0));
-            break;
-        case OP_indirect:
-            emit(__jalr(__ra, __t0, 0));
-            break;
-        case OP_return:
-            if (ph2_ir->src0 == -1)
-                emit(__addi(__zero, __zero, 0));
-            else
-                emit(__addi(__a0, rs1, 0));
-            emit(__lw(__ra, __sp, 0));
-            emit(__lui(__t0, rv_hi(ph2_ir->src1 + 4)));
-            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1 + 4)));
-            emit(__add(__sp, __sp, __t0));
-            emit(__jalr(__zero, __ra, 0));
-            break;
-        case OP_add:
-            emit(__add(rd, rs1, rs2));
-            break;
-        case OP_sub:
-            emit(__sub(rd, rs1, rs2));
-            break;
-        case OP_mul:
-            emit(__mul(rd, rs1, rs2));
-            break;
-        case OP_div:
-            emit(__div(rd, rs1, rs2));
-            break;
-        case OP_mod:
-            emit(__mod(rd, rs1, rs2));
-            break;
-        case OP_lshift:
-            emit(__sll(rd, rs1, rs2));
-            break;
-        case OP_rshift:
-            emit(__sra(rd, rs1, rs2));
-            break;
-        case OP_eq:
-            emit(__sub(rd, rs1, rs2));
-            emit(__sltu(rd, __zero, rd));
-            emit(__xori(rd, rd, 1));
-            break;
-        case OP_neq:
-            emit(__sub(rd, rs1, rs2));
-            emit(__sltu(rd, __zero, rd));
-            break;
-        case OP_gt:
-            emit(__slt(rd, rs2, rs1));
-            break;
-        case OP_geq:
-            emit(__slt(rd, rs1, rs2));
-            emit(__xori(rd, rd, 1));
-            break;
-        case OP_lt:
-            emit(__slt(rd, rs1, rs2));
-            break;
-        case OP_leq:
-            emit(__slt(rd, rs2, rs1));
-            emit(__xori(rd, rd, 1));
-            break;
-        case OP_negate:
-            emit(__sub(rd, __zero, rs1));
-            break;
-        case OP_bit_not:
-            emit(__xori(rd, rs1, -1));
-            break;
-        case OP_bit_and:
-            emit(__and(rd, rs1, rs2));
-            break;
-        case OP_bit_or:
-            emit(__or(rd, rs1, rs2));
-            break;
-        case OP_bit_xor:
-            emit(__xor(rd, rs1, rs2));
-            break;
-        case OP_log_not:
-            emit(__sltu(rd, __zero, rs1));
-            emit(__xori(rd, rd, 1));
-            break;
-        case OP_log_and:
-            /* FIXME: bad logical-and instruction */
-            emit(__and(rd, rs1, rs2));
-            break;
-        case OP_log_or:
-            emit(__or(rd, rs1, rs2));
-            emit(__sltu(rd, __zero, rd));
-            break;
-        default:
-            printf("Unknown opcode\n");
-            abort();
-        }
+        ph2_ir = &PH2_IR[i];
+        emit_ph2_ir(ph2_ir);
     }
 }
