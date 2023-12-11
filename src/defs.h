@@ -14,14 +14,14 @@
 #define MAX_VAR_LEN 32
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
-#define MAX_LOCALS 900
+#define MAX_LOCALS 1450
 #define MAX_FIELDS 32
 #define MAX_FUNCS 256
 #define MAX_FUNC_TRIES 1536
-#define MAX_BLOCKS 750
+#define MAX_BLOCKS 900
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 32768
-#define MAX_BB_PRED 16
+#define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_GLOBAL_IR 256
 #define MAX_LABEL 4096
@@ -37,6 +37,7 @@
 #define MAX_CASES 128
 #define MAX_NESTING 128
 #define MAX_OPERAND_STACK_SIZE 32
+#define MAX_ANALYSIS_STACK_SIZE 700
 
 #define ELF_START 0x10000
 #define PTR_SIZE 4
@@ -152,6 +153,7 @@ struct var {
     rename_t rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
     int consumed;
+    int is_ternary_ret;
 };
 
 typedef struct var var_t;
@@ -326,13 +328,13 @@ struct basic_block {
     struct basic_block *idom;
     struct basic_block *rpo_next;
     struct basic_block *rpo_r_next;
-    var_t *live_gen[64];
+    var_t *live_gen[MAX_ANALYSIS_STACK_SIZE];
     int live_gen_idx;
-    var_t *live_kill[64];
+    var_t *live_kill[MAX_ANALYSIS_STACK_SIZE];
     int live_kill_idx;
-    var_t *live_in[64];
+    var_t *live_in[MAX_ANALYSIS_STACK_SIZE];
     int live_in_idx;
-    var_t *live_out[64];
+    var_t *live_out[MAX_ANALYSIS_STACK_SIZE];
     int live_out_idx;
     int rpo;
     int rpo_r;

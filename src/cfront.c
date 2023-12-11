@@ -1729,6 +1729,8 @@ void read_lvalue(lvalue_t *lvalue,
             strcpy(vd->var_name, gen_name());
             vd->init_val = 1;
             side_effect[se_idx].dest = vd;
+            side_effect[se_idx].src0 = NULL;
+            side_effect[se_idx].src1 = NULL;
             se_idx++;
 
             side_effect[se_idx].op = lex_accept(T_increment) ? OP_add : OP_sub;
@@ -1744,15 +1746,17 @@ void read_lvalue(lvalue_t *lvalue,
 
             if (lvalue->is_reference) {
                 side_effect[se_idx].op = OP_write;
-                side_effect[se_idx].src0 = vd;
-                side_effect[se_idx].dest = opstack_pop();
+                side_effect[se_idx].src1 = vd;
+                side_effect[se_idx].src0 = opstack_pop();
                 side_effect[se_idx].size = lvalue->size;
+                side_effect[se_idx].dest = NULL;
                 opstack_push(t);
                 se_idx++;
             } else {
                 side_effect[se_idx].op = OP_assign;
                 side_effect[se_idx].src0 = vd;
                 side_effect[se_idx].dest = operand_stack[operand_stack_idx - 1];
+                side_effect[se_idx].src1 = NULL;
                 se_idx++;
             }
         } else {
@@ -1779,10 +1783,6 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
 
     if (!lex_accept(T_question))
         return;
-
-    basic_block_t *n = bb_create(parent);
-    bb_connect(*bb, n, NEXT);
-    *bb = n;
 
     /* ternary-operator */
     ph1_ir = add_ph1_ir(OP_branch);
@@ -1849,6 +1849,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     strcpy(vd->var_name, end_label);
     ph1_ir->src0 = vd;
 
+    var->is_ternary_ret = 1;
     opstack_push(var);
     *bb = end_ternary;
 }
@@ -2693,6 +2694,15 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
         strcpy(var_break->var_name, vd->var_name);
         break_exit_idx--;
+
+        int i, dangling = 1;
+        for (i = 0; i < MAX_BB_PRED; i++)
+            if (switch_end->prev[i].bb)
+                dangling = 0;
+
+        if (dangling)
+            return NULL;
+
         return switch_end;
     }
 
@@ -2936,6 +2946,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             /* multiple (partial) declarations */
             nv = require_var(parent);
             read_partial_var_decl(nv, var); /* partial */
+            add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
             add_symbol(bb, nv);
             if (lex_accept(T_assign)) {
                 read_expr(parent, &bb);

@@ -67,6 +67,7 @@ char *elf_header;
 int elf_header_idx = 0;
 int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
 int elf_code_start;
+int elf_data_start;
 char *elf_symtab;
 char *elf_strtab;
 char *elf_section;

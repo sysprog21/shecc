@@ -227,26 +227,39 @@ void reg_alloc()
          global_insn = global_insn->next) {
         ph2_ir_t *ir;
         int dest, src0;
-        int sz;
 
         switch (global_insn->opcode) {
         case OP_allocat:
-            sz = global_insn->rd->is_ptr
-                     ? PTR_SIZE
-                     : find_type(global_insn->rd->type_name)->size;
             if (global_insn->rd->array_size) {
-                GLOBAL_FUNC.stack_size += (global_insn->rd->array_size * sz);
                 global_insn->rd->offset = GLOBAL_FUNC.stack_size;
                 GLOBAL_FUNC.stack_size += PTR_SIZE;
+                src0 = GLOBAL_FUNC.stack_size;
+                if (global_insn->rd->is_ptr)
+                    GLOBAL_FUNC.stack_size +=
+                        (PTR_SIZE * global_insn->rd->array_size);
+                else {
+                    type_t *type = find_type(global_insn->rd->type_name);
+                    GLOBAL_FUNC.stack_size +=
+                        (global_insn->rd->array_size * type->size);
+                }
+
                 dest =
                     prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, -1, -1);
                 ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_global_address_of);
-                ir->src0 = global_insn->rd->offset;
+                ir->src0 = src0;
                 ir->dest = dest;
                 spill_var(GLOBAL_FUNC.fn->bbs, global_insn->rd, dest);
             } else {
                 global_insn->rd->offset = GLOBAL_FUNC.stack_size;
-                GLOBAL_FUNC.stack_size += sz;
+                if (global_insn->rd->is_ptr)
+                    GLOBAL_FUNC.stack_size += PTR_SIZE;
+                else if (strcmp(global_insn->rd->type_name, "int") &&
+                         strcmp(global_insn->rd->type_name, "char"))
+                    GLOBAL_FUNC.stack_size +=
+                        find_type(global_insn->rd->type_name)->size;
+                else
+                    /* `char` is aligned to one byte for the convenience */
+                    GLOBAL_FUNC.stack_size += 4;
             }
             break;
         case OP_load_constant:
@@ -262,6 +275,9 @@ void reg_alloc()
             ir->src0 = src0;
             ir->dest = dest;
             spill_var(GLOBAL_FUNC.fn->bbs, global_insn->rd, dest);
+            /* release the unused constant number in register manually */
+            REGS[src0].polluted = 0;
+            REGS[src0].var = NULL;
             break;
         default:
             printf("Unsupported global operation\n");
@@ -331,6 +347,8 @@ void reg_alloc()
                         insn->rd->array_size == 0)
                         break;
 
+                    insn->rd->offset = fn->func->stack_size;
+                    fn->func->stack_size += PTR_SIZE;
                     src0 = fn->func->stack_size;
 
                     if (insn->rd->is_ptr)
@@ -342,9 +360,6 @@ void reg_alloc()
                         fn->func->stack_size += (insn->rd->array_size * sz);
                     else
                         fn->func->stack_size += sz;
-
-                    insn->rd->offset = fn->func->stack_size;
-                    fn->func->stack_size += PTR_SIZE;
 
                     dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_address_of);
@@ -444,6 +459,8 @@ void reg_alloc()
                     ir = bb_add_ph2_ir(bb, OP_assign);
                     ir->src0 = src0;
                     ir->dest = args++;
+                    REGS[ir->dest].var = insn->rs1;
+                    REGS[ir->dest].polluted = 0;
                     break;
                 case OP_call:
                     if (!find_func(insn->str)->num_params)
