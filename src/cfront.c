@@ -2899,8 +2899,15 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         var_start->init_val = ph1_ir_idx - 1;
         lex_expect(T_semicolon);
 
-        bb_connect(cond_, bb, THEN);
-        bb_connect(cond_, do_while_end, ELSE);
+        int i;
+        for (i = 0; i < MAX_BB_PRED; i++) {
+            if (cond_->prev[i].bb) {
+                bb_connect(cond_, bb, THEN);
+                bb_connect(cond_, do_while_end, ELSE);
+                break;
+            }
+            /* if breaking out of loop, skip condition block */
+        }
 
         continue_pos_idx--;
         break_exit_idx--;
