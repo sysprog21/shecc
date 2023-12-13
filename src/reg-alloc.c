@@ -73,6 +73,17 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
     REGS[idx].polluted = 0;
 }
 
+/* Return the index of register for given variable. Otherwise, return -1. */
+int find_in_regs(var_t *var)
+{
+    int i;
+    for (i = 0; i < REG_CNT; i++) {
+        if (REGS[i].var == var)
+            return i;
+    }
+    return -1;
+}
+
 void load_var(basic_block_t *bb, var_t *var, int idx)
 {
     ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_load)
@@ -85,11 +96,9 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
 
 int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 {
-    int i;
-    for (i = 0; i < REG_CNT; i++) {
-        if (REGS[i].var == var)
-            return i;
-    }
+    int i = find_in_regs(var);
+    if (i > -1)
+        return i;
 
     for (i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var) {
@@ -125,12 +134,11 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 
 int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
 {
-    int i;
-    for (i = 0; i < REG_CNT; i++)
-        if (REGS[i].var == var) {
-            REGS[i].polluted = 1;
-            return i;
-        }
+    int i = find_in_regs(var);
+    if (i > -1) {
+        REGS[i].polluted = 1;
+        return i;
+    }
 
     for (i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var) {
@@ -328,7 +336,7 @@ void reg_alloc()
                 func_t *func;
                 ph2_ir_t *ir;
                 int dest, src0, src1;
-                int i, sz;
+                int i, sz, clear_reg;
 
                 refresh(bb, insn);
 
@@ -404,9 +412,19 @@ void reg_alloc()
                     ir->dest = dest;
                     break;
                 case OP_assign:
-                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    src0 = find_in_regs(insn->rs1);
+
+                    /* If operand is loaded from stack, clear the original slot
+                     * after moving.
+                     */
+                    if (src0 > -1)
+                        clear_reg = 0;
+                    else {
+                        clear_reg = 1;
+                        src0 = prepare_operand(bb, insn->rs1, -1);
+                    }
                     dest = prepare_dest(bb, insn->rd, src0, -1);
-                    ir = bb_add_ph2_ir(bb, insn->opcode);
+                    ir = bb_add_ph2_ir(bb, OP_assign);
                     ir->src0 = src0;
                     ir->dest = dest;
 
@@ -417,6 +435,10 @@ void reg_alloc()
                         ir->src1 = insn->rd->offset;
                         REGS[dest].polluted = 0;
                     }
+
+                    if (clear_reg)
+                        REGS[src0].var = NULL;
+
                     break;
                 case OP_read:
                     src0 = prepare_operand(bb, insn->rs1, -1);

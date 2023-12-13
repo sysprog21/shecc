@@ -123,9 +123,6 @@ void cfg_flatten()
 
             ph2_ir_t *insn;
             for (insn = bb->ph2_ir_list.head; insn; insn = insn->next) {
-                if (insn->op == OP_assign && insn->dest == insn->src0)
-                    continue;
-
                 flatten_ir = add_ph2_ir(OP_generic);
                 memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
@@ -146,6 +143,7 @@ void emit(int code)
 
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
 {
+    func_t *func;
     int rd = ph2_ir->dest + 10;
     int rs1 = ph2_ir->src0 + 10;
     int rs2 = ph2_ir->src1 + 10;
@@ -249,16 +247,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__jal(__zero, ph2_ir->next_bb->elf_offset - elf_code_idx));
         return;
     case OP_call:
-        emit(__jal(__ra, find_func(ph2_ir->func_name)->fn->bbs->elf_offset -
-                             elf_code_idx));
+        func = find_func(ph2_ir->func_name);
+        emit(__jal(__ra, func->fn->bbs->elf_offset - elf_code_idx));
         return;
     case OP_load_data_address:
         emit(__lui(rd, rv_hi(elf_data_start + ph2_ir->src0)));
         emit(__addi(rd, rd, rv_lo(elf_data_start + ph2_ir->src0)));
         return;
     case OP_address_of_func:
-        ofs =
-            elf_code_start + find_func(ph2_ir->func_name)->fn->bbs->elf_offset;
+        func = find_func(ph2_ir->func_name);
+        ofs = elf_code_start + func->fn->bbs->elf_offset;
         emit(__lui(__t0, rv_hi(ofs)));
         emit(__addi(__t0, __t0, rv_lo(ofs)));
         emit(__sw(__t0, rs1, 0));

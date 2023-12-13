@@ -33,6 +33,9 @@
 /* Register allocator */
 #include "reg-alloc.c"
 
+/* Peephole optimization */
+#include "peephole.c"
+
 /* Machine code generation. support ARMv7-A and RISC-V32I */
 #include "codegen.c"
 
@@ -88,6 +91,8 @@ int main(int argc, char *argv[])
 
     /* allocate register from IR */
     reg_alloc();
+
+    peephole();
 
     /* flatten CFG to linear instruction */
     cfg_flatten();
