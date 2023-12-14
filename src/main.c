@@ -21,8 +21,11 @@
 /* ELF manipulation */
 #include "elf.c"
 
-/* C language front-end */
-#include "cfront.c"
+/* C language lexical analyzer */
+#include "lexer.c"
+
+/* C language syntactic analyzer */
+#include "parser.c"
 
 /* architecture-independent middle-end */
 #include "ssa.c"
