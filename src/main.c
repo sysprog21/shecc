@@ -86,6 +86,9 @@ int main(int argc, char *argv[])
 
     ssa_build(dump_ir);
 
+    /* SSA-based optimization */
+    optimize();
+
     /* SSA-based liveness analyses */
     liveness_analysis();
 

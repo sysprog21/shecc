@@ -1051,6 +1051,84 @@ void ssa_build(int dump_ir)
     unwind_phi();
 }
 
+/* Common Subexpression Elimination (CSE) */
+/* TODO: simplify with def-use chain */
+/* TODO: release detached insns node */
+int cse(insn_t *insn, basic_block_t *bb)
+{
+    if (insn->opcode != OP_read)
+        return 0;
+
+    insn_t *prev = insn->prev;
+
+    if (!prev)
+        return 0;
+    if (prev->opcode != OP_add)
+        return 0;
+    if (prev->rd != insn->rs1)
+        return 0;
+
+    var_t *def = NULL, *base = prev->rs1, *idx = prev->rs2;
+    basic_block_t *b;
+    insn_t *i = prev;
+    for (b = bb;; b = b->idom) {
+        if (!i)
+            i = b->insn_list.tail;
+
+        for (; i; i = i->prev) {
+            if (i == prev)
+                continue;
+            if (i->opcode != OP_add)
+                continue;
+            if (!i->next)
+                continue;
+            if (i->next->opcode != OP_read)
+                continue;
+            if (i->rs1 != base || i->rs2 != idx)
+                continue;
+            def = i->next->rd;
+        }
+        if (def)
+            break;
+        if (b->idom == b)
+            break;
+    }
+
+    if (!def)
+        return 0;
+
+    if (prev->prev) {
+        insn->prev = prev->prev;
+        prev->next = insn;
+    } else {
+        bb->insn_list.head = insn;
+        insn->prev = NULL;
+    }
+
+    insn->opcode = OP_assign;
+    insn->rs1 = def;
+    return 1;
+}
+
+void optimize()
+{
+    int changed = 0;
+    fn_t *fn;
+    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        /* basic block level (control flow) optimizations */
+
+        basic_block_t *bb;
+        for (bb = fn->bbs; bb; bb = bb->rpo_next) {
+            /* instruction level optimizations */
+            insn_t *insn;
+            for (insn = bb->insn_list.head; insn; insn = insn->next) {
+                changed |= cse(insn, bb);
+                /* more optimizations */
+            }
+        }
+    }
+}
+
 void bb_index_reversed_rpo(fn_t *fn, basic_block_t *bb)
 {
     bb->rpo_r = fn->bb_cnt++;

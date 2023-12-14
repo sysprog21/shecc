@@ -576,6 +576,7 @@ void add_insn(block_t *block,
     else
         bb->insn_list.tail->next = n;
 
+    n->prev = bb->insn_list.tail;
     bb->insn_list.tail = n;
 }
 

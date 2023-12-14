@@ -299,6 +299,7 @@ typedef struct phi_operand phi_operand_t;
 
 struct insn {
     struct insn *next;
+    struct insn *prev;
     int idx;
     opcode_t opcode;
     var_t *rd;
