@@ -122,12 +122,10 @@ int is_hex(char c)
 
 int is_numeric(char buffer[])
 {
-    int i, hex, size = strlen(buffer);
+    int i, hex = 0, size = strlen(buffer);
 
     if (size > 2)
         hex = (buffer[0] == '0' && buffer[1] == 'x') ? 1 : 0;
-    else
-        hex = 0;
 
     for (i = 0; i < size; i++) {
         if (hex && (is_hex(buffer[i]) == 0))
