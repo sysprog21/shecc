@@ -651,18 +651,16 @@ void append_unwound_phi_insn(basic_block_t *bb, var_t *dest, var_t *rs)
     } else {
         /* insert it before branch instruction */
         if (tail->opcode == OP_branch) {
-            insn_t *prev = bb->insn_list.head;
-            if (!prev->next) {
+            if (tail->prev) {
+                tail->prev->next = n;
+                n->prev = tail->prev;
+            } else
                 bb->insn_list.head = n;
-                n->next = prev;
-            } else {
-                while (prev->next != tail)
-                    prev = prev->next;
-                prev->next = n;
-                n->next = tail;
-            }
+
+            n->next = tail;
+            tail->prev = n;
         } else {
-            bb->insn_list.tail->next = n;
+            tail->next = n;
             bb->insn_list.tail = n;
         }
     }
