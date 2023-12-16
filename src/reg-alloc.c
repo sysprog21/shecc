@@ -287,6 +287,8 @@ void reg_alloc()
 
     fn_t *fn;
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+        fn->visited++;
+
         if (!strcmp(fn->func->return_def.var_name, "main"))
             MAIN_BB = fn->bbs;
 
@@ -318,6 +320,8 @@ void reg_alloc()
         basic_block_t *bb;
         for (bb = fn->bbs; bb; bb = bb->rpo_next) {
             int is_pushing_args = 0, args = 0;
+
+            bb->visited++;
 
             insn_t *insn;
             for (insn = bb->insn_list.head; insn; insn = insn->next) {
@@ -560,7 +564,7 @@ void reg_alloc()
 
             /* jump to the beginning of loop or over the else block */
             if (bb->next->visited == fn->visited ||
-                bb->next->visited != bb->rpo + 1) {
+                bb->next->rpo != bb->rpo + 1) {
                 ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_jump);
                 ir->next_bb = bb->next;
             }
