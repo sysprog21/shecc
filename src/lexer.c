@@ -1,3 +1,10 @@
+/*
+ * shecc - Self-Hosting and Educational C Compiler.
+ *
+ * shecc is freely redistributable under the BSD 2 clause license. See the
+ * file "LICENSE" for information on usage and redistribution of this file.
+ */
+
 /* lexer tokens */
 typedef enum {
     T_start, /* FIXME: it was intended to start the state machine. */
