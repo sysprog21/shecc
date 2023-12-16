@@ -315,7 +315,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__movt(__AL, __r8, ph2_ir->src1 + 4));
         emit(__add_r(__AL, __sp, __sp, __r8));
         emit(__lw(__AL, __lr, __sp, -4));
-        emit(__mov_r(__AL, __pc, __lr));
+        emit(__blx(__AL, __lr));
         return;
     case OP_add:
         emit(__add_r(__AL, rd, rn, rm));
