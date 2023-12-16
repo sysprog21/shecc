@@ -226,6 +226,7 @@ struct ph2_ir {
     basic_block_t *then_bb;
     basic_block_t *else_bb;
     struct ph2_ir *next;
+    int is_branch_detached;
 };
 
 typedef struct ph2_ir ph2_ir_t;

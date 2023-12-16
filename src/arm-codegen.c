@@ -103,6 +103,11 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 12;
         return;
     case OP_branch:
+        if (ph2_ir->is_branch_detached)
+            elf_offset += 12;
+        else
+            elf_offset += 8;
+        return;
     case OP_return:
         elf_offset += 24;
         return;
@@ -155,6 +160,12 @@ void cfg_flatten()
                 if (insn->op == OP_return)
                     /* restore sp */
                     flatten_ir->src1 = bb->belong_to->func->stack_size;
+
+                if (insn->op == OP_branch) {
+                    /* In SSA, we index `else_bb` first, and then `then_bb` */
+                    if (insn->else_bb != bb->rpo_next)
+                        flatten_ir->is_branch_detached = 1;
+                }
 
                 update_elf_offset(flatten_ir);
             }
@@ -264,13 +275,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             abort();
         return;
     case OP_branch:
-        ofs = ph2_ir->else_bb->elf_offset;
-        emit(__movw(__AL, __r8, ofs + elf_code_start));
-        emit(__movt(__AL, __r8, ofs + elf_code_start));
         emit(__teq(rn));
-        emit(__b(__NE, 8));
-        emit(__blx(__AL, __r8));
-        emit(__b(__AL, ph2_ir->then_bb->elf_offset - elf_code_idx));
+        if (ph2_ir->is_branch_detached) {
+            emit(__b(__NE, 8));
+            emit(__b(__AL, ph2_ir->else_bb->elf_offset - elf_code_idx));
+        } else
+            emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code_idx));
         return;
     case OP_jump:
         emit(__b(__AL, ph2_ir->next_bb->elf_offset - elf_code_idx));
