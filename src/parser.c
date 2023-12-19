@@ -2516,6 +2516,9 @@ void parse_internal()
     /* architecture defines */
     add_alias(ARCH_PREDEFINED, "1");
 
+    /* shecc run-time defines */
+    add_alias("__SHECC__", "1");
+
     /* Linux syscall */
     func = add_func("__syscall");
     func->num_params = 0;

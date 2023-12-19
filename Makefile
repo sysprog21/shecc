@@ -4,7 +4,8 @@ CFLAGS := -O -g \
 	-Wall -Wextra \
 	-Wno-variadic-macros \
 	-Wno-maybe-uninitialized \
-	-Wno-declaration-after-statement
+	-Wno-declaration-after-statement \
+	-Wno-format
 
 include mk/common.mk
 include mk/arm.mk

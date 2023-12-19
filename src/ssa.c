@@ -230,6 +230,8 @@ void build_dom()
 
 void bb_build_df(fn_t *fn, basic_block_t *bb)
 {
+    UNUSED(fn);
+
     int i, cnt = 0;
     for (i = 0; i < MAX_BB_PRED; i++)
         if (bb->prev[i].bb)
@@ -338,6 +340,8 @@ void fn_add_global(fn_t *fn, var_t *var)
 
 void bb_solve_globals(fn_t *fn, basic_block_t *bb)
 {
+    UNUSED(fn);
+
     insn_t *insn;
     for (insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->rs1)
@@ -518,7 +522,7 @@ var_t *get_stack_top_subscript_var(var_t *var)
     abort();
 }
 
-void rename_var(block_t *block, var_t **var)
+void rename_var(var_t **var)
 {
     if (!(*var)->base)
         (*var)->base = *var;
@@ -558,10 +562,10 @@ void bb_solve_phi_params(basic_block_t *bb)
             new_name(bb->scope, &insn->rd);
         else {
             if (insn->rs1)
-                rename_var(bb->scope, &insn->rs1);
+                rename_var(&insn->rs1);
             if (insn->rs2)
                 if (!insn->rs2->is_func)
-                    rename_var(bb->scope, &insn->rs2);
+                    rename_var(&insn->rs2);
             if (insn->rd)
                 new_name(bb->scope, &insn->rd);
         }
@@ -649,6 +653,8 @@ void append_unwound_phi_insn(basic_block_t *bb, var_t *dest, var_t *rs)
 
 void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
 {
+    UNUSED(fn);
+
     insn_t *insn;
     for (insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->opcode != OP_phi)
@@ -1075,6 +1081,7 @@ void build_reversed_rpo()
 
 void bb_reset_live_kill_idx(fn_t *fn, basic_block_t *bb)
 {
+    UNUSED(fn);
     bb->live_kill_idx = 0;
 }
 
@@ -1098,6 +1105,8 @@ void update_consumed(insn_t *insn, var_t *var)
 
 void bb_solve_locals(fn_t *fn, basic_block_t *bb)
 {
+    UNUSED(fn);
+
     int i = 0;
     insn_t *insn;
     for (insn = bb->insn_list.head; insn; insn = insn->next) {
@@ -1157,7 +1166,7 @@ void merge_live_in(var_t *live_out[], int *live_out_idx, basic_block_t *bb)
     }
 }
 
-int recompute_live_out(fn_t *fn, basic_block_t *bb)
+int recompute_live_out(basic_block_t *bb)
 {
     var_t *live_out[MAX_ANALYSIS_STACK_SIZE];
     int live_out_idx = 0;
@@ -1217,7 +1226,7 @@ void liveness_analysis()
             bb_add_killed_var(fn->bbs, fn->func->param_defs[i].subscripts[0]);
 
         fn->visited++;
-        args->preorder_cb = bb_solve_locals;
+        args->preorder_cb = &bb_solve_locals;
         bb_forward_traversal(args);
     }
     free(args);
@@ -1228,13 +1237,15 @@ void liveness_analysis()
         do {
             changed = 0;
             for (bb = fn->exit; bb; bb = bb->rpo_r_next)
-                changed |= recompute_live_out(fn, bb);
+                changed |= recompute_live_out(bb);
         } while (changed);
     }
 }
 
 void bb_release(fn_t *fn, basic_block_t *bb)
 {
+    UNUSED(fn);
+
     insn_t *insn = bb->insn_list.head;
     insn_t *next_insn;
     while (insn) {
