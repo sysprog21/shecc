@@ -479,21 +479,22 @@ int fclose(FILE *stream)
     return 0;
 }
 
+/* Read a byte from file descriptor. So the return value is either in the range
+ * of 0 to 127 for the character, or -1 on the end of file. */
 int fgetc(FILE *stream)
 {
-    char buf;
-    int r = __syscall(__syscall_read, stream, &buf, 1);
-    if (r <= 0)
+    int buf = 0, r = __syscall(__syscall_read, stream, &buf, 1);
+    if (r < 1)
         return -1;
     return buf;
 }
 
 char *fgets(char *str, int n, FILE *stream)
 {
-    int i = 0;
-    do {
-        char c = fgetc(stream);
-        if (c == -1 || c == 255) {
+    int i;
+    for (i = 0; i < n - 1; i++) {
+        int c = fgetc(stream);
+        if (c == -1) {
             if (i == 0)
                 /* EOF on first char */
                 return NULL;
@@ -501,9 +502,14 @@ char *fgets(char *str, int n, FILE *stream)
             str[i] = 0;
             return str;
         }
+        /* Not support casting yet. Simply assign it. */
         str[i] = c;
-        i++;
-    } while (str[i - 1] != '\n');
+
+        if (c == '\n') {
+            str[i + 1] = 0;
+            return str;
+        }
+    }
     str[i] = 0;
     return str;
 }
