@@ -45,6 +45,14 @@
 /* Number of the available registers. Either 7 or 8 is accepted now. */
 #define REG_CNT 8
 
+/* This macro will be automatically defined at shecc run-time. */
+#ifdef __SHECC__
+#define UNUSED(x) (x)
+#else
+/* suppress GCC/Clang warnings */
+#define UNUSED(x) (void) (x)
+#endif
+
 /* builtin types */
 typedef enum { TYPE_void = 0, TYPE_int, TYPE_char, TYPE_struct } base_type_t;
 
