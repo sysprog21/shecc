@@ -238,7 +238,7 @@ void reg_alloc()
                     GLOBAL_FUNC.stack_size +=
                         (PTR_SIZE * global_insn->rd->array_size);
                 else {
-                    type_t *type = find_type(global_insn->rd->type_name);
+                    type_t *type = find_type(global_insn->rd->type_name, 0);
                     GLOBAL_FUNC.stack_size +=
                         (global_insn->rd->array_size * type->size);
                 }
@@ -254,10 +254,10 @@ void reg_alloc()
                 if (global_insn->rd->is_ptr)
                     GLOBAL_FUNC.stack_size += PTR_SIZE;
                 else if (strcmp(global_insn->rd->type_name, "int") &&
-                         strcmp(global_insn->rd->type_name, "char"))
-                    GLOBAL_FUNC.stack_size +=
-                        find_type(global_insn->rd->type_name)->size;
-                else
+                         strcmp(global_insn->rd->type_name, "char")) {
+                    type_t *type = find_type(global_insn->rd->type_name, 0);
+                    GLOBAL_FUNC.stack_size += type->size;
+                } else
                     /* `char` is aligned to one byte for the convenience */
                     GLOBAL_FUNC.stack_size += 4;
             }
@@ -325,6 +325,7 @@ void reg_alloc()
 
             insn_t *insn;
             for (insn = bb->insn_list.head; insn; insn = insn->next) {
+                func_t *func;
                 ph2_ir_t *ir;
                 int dest, src0, src1;
                 int i, sz;
@@ -357,8 +358,10 @@ void reg_alloc()
 
                     if (insn->rd->is_ptr)
                         sz = PTR_SIZE;
-                    else
-                        sz = find_type(insn->rd->type_name)->size;
+                    else {
+                        type_t *type = find_type(insn->rd->type_name, 0);
+                        sz = type->size;
+                    }
 
                     if (insn->rd->array_size)
                         fn->func->stack_size += (insn->rd->array_size * sz);
@@ -393,7 +396,10 @@ void reg_alloc()
                     }
 
                     dest = prepare_dest(bb, insn->rd, -1, -1);
-                    ir = bb_add_ph2_ir(bb, OP_address_of);
+                    if (insn->rs1->is_global)
+                        ir = bb_add_ph2_ir(bb, OP_global_address_of);
+                    else
+                        ir = bb_add_ph2_ir(bb, OP_address_of);
                     ir->src0 = insn->rs1->offset;
                     ir->dest = dest;
                     break;
@@ -467,7 +473,8 @@ void reg_alloc()
                     REGS[ir->dest].polluted = 0;
                     break;
                 case OP_call:
-                    if (!find_func(insn->str)->num_params)
+                    func = find_func(insn->str);
+                    if (!func->num_params)
                         spill_alive(bb, insn);
 
                     ir = bb_add_ph2_ir(bb, OP_call);
@@ -579,8 +586,9 @@ void reg_alloc()
             if (strcmp(fn->func->return_def.type_name, "void"))
                 continue;
 
-            if (bb->insn_list.tail && bb->insn_list.tail->opcode == OP_return)
-                continue;
+            if (bb->insn_list.tail)
+                if (bb->insn_list.tail->opcode == OP_return)
+                    continue;
 
             ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_return);
             ir->src0 = -1;
@@ -627,8 +635,7 @@ void dump_ph2_ir()
             printf("%s:", ph2_ir->func_name);
             break;
         case OP_branch:
-            printf("\tbr %%x%c, %s, %s", rs1, ph2_ir->true_label,
-                   ph2_ir->false_label);
+            printf("\tbr %%x%c", rs1);
             break;
         case OP_jump:
             printf("\tj %s", ph2_ir->func_name);

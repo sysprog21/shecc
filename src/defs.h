@@ -17,15 +17,15 @@
 #define MAX_LOCALS 1450
 #define MAX_FIELDS 32
 #define MAX_FUNCS 256
-#define MAX_FUNC_TRIES 1536
-#define MAX_BLOCKS 900
+#define MAX_FUNC_TRIES 1950
+#define MAX_BLOCKS 1050
 #define MAX_TYPES 64
-#define MAX_IR_INSTR 32768
+#define MAX_IR_INSTR 36864
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_GLOBAL_IR 256
 #define MAX_LABEL 4096
-#define MAX_SOURCE 262144
+#define MAX_SOURCE 278528
 #define MAX_CODE 262144
 #define MAX_DATA 262144
 #define MAX_SYMTAB 65536
@@ -37,7 +37,7 @@
 #define MAX_CASES 128
 #define MAX_NESTING 128
 #define MAX_OPERAND_STACK_SIZE 32
-#define MAX_ANALYSIS_STACK_SIZE 700
+#define MAX_ANALYSIS_STACK_SIZE 750
 
 #define ELF_START 0x10000
 #define PTR_SIZE 4
@@ -47,14 +47,27 @@
 
 /* This macro will be automatically defined at shecc run-time. */
 #ifdef __SHECC__
-#define UNUSED(x) (x)
+/* use do-while as a substitution for nop */
+#define UNUSED(x) \
+    do {          \
+        ;         \
+    } while (0)
+#define HOST_PTR_SIZE 4
 #else
 /* suppress GCC/Clang warnings */
 #define UNUSED(x) (void) (x)
+/* configure host data model when using `memcpy()` */
+#define HOST_PTR_SIZE __SIZEOF_POINTER__
 #endif
 
 /* builtin types */
-typedef enum { TYPE_void = 0, TYPE_int, TYPE_char, TYPE_struct } base_type_t;
+typedef enum {
+    TYPE_void = 0,
+    TYPE_int,
+    TYPE_char,
+    TYPE_struct,
+    TYPE_typedef
+} base_type_t;
 
 /* IR opcode */
 typedef enum {
@@ -228,8 +241,6 @@ struct ph2_ir {
     int src1;
     int dest;
     char func_name[MAX_VAR_LEN];
-    char true_label[MAX_VAR_LEN];
-    char false_label[MAX_VAR_LEN];
     basic_block_t *next_bb;
     basic_block_t *then_bb;
     basic_block_t *else_bb;
@@ -240,13 +251,16 @@ struct ph2_ir {
 typedef struct ph2_ir ph2_ir_t;
 
 /* type definition */
-typedef struct {
+struct type {
     char type_name[MAX_TYPE_LEN];
     base_type_t base_type;
+    struct type *base_struct;
     int size;
     var_t fields[MAX_FIELDS];
     int num_fields;
-} type_t;
+};
+
+typedef struct type type_t;
 
 /* lvalue details */
 typedef struct {
