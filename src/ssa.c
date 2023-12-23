@@ -17,17 +17,23 @@ void bb_forward_traversal(bb_traversal_args_t *args)
     bb_traversal_args_t next_args;
     memcpy(&next_args, args, sizeof(bb_traversal_args_t));
 
-    if (args->bb->next && args->bb->next->visited < args->fn->visited) {
-        next_args.bb = args->bb->next;
-        bb_forward_traversal(&next_args);
+    if (args->bb->next) {
+        if (args->bb->next->visited < args->fn->visited) {
+            next_args.bb = args->bb->next;
+            bb_forward_traversal(&next_args);
+        }
     }
-    if (args->bb->then_ && args->bb->then_->visited < args->fn->visited) {
-        next_args.bb = args->bb->then_;
-        bb_forward_traversal(&next_args);
+    if (args->bb->then_) {
+        if (args->bb->then_->visited < args->fn->visited) {
+            next_args.bb = args->bb->then_;
+            bb_forward_traversal(&next_args);
+        }
     }
-    if (args->bb->else_ && args->bb->else_->visited < args->fn->visited) {
-        next_args.bb = args->bb->else_;
-        bb_forward_traversal(&next_args);
+    if (args->bb->else_) {
+        if (args->bb->else_->visited < args->fn->visited) {
+            next_args.bb = args->bb->else_;
+            bb_forward_traversal(&next_args);
+        }
     }
 
     if (args->postorder_cb)
@@ -102,15 +108,15 @@ void build_rpo()
         args->bb = fn->bbs;
 
         fn->visited++;
-        args->postorder_cb = &bb_index_rpo;
+        args->postorder_cb = bb_index_rpo;
         bb_forward_traversal(args);
 
         fn->visited++;
-        args->postorder_cb = &bb_reverse_index;
+        args->postorder_cb = bb_reverse_index;
         bb_forward_traversal(args);
 
         fn->visited++;
-        args->postorder_cb = &bb_build_rpo;
+        args->postorder_cb = bb_build_rpo;
         bb_forward_traversal(args);
     }
     free(args);
@@ -222,7 +228,7 @@ void build_dom()
         args->bb = fn->bbs;
 
         fn->visited++;
-        args->preorder_cb = &bb_build_dom;
+        args->preorder_cb = bb_build_dom;
         bb_forward_traversal(args);
     }
     free(args);
@@ -255,7 +261,7 @@ void build_df()
         args->bb = fn->bbs;
 
         fn->visited++;
-        args->postorder_cb = &bb_build_df;
+        args->postorder_cb = bb_build_df;
         bb_forward_traversal(args);
     }
     free(args);
@@ -366,7 +372,7 @@ void solve_globals()
         args->bb = fn->bbs;
 
         fn->visited++;
-        args->postorder_cb = &bb_solve_globals;
+        args->postorder_cb = bb_solve_globals;
         bb_forward_traversal(args);
     }
     free(args);
@@ -379,7 +385,8 @@ int var_check_in_scope(var_t *var, block_t *block)
     while (block) {
         int i;
         for (i = 0; i < block->next_local; i++) {
-            if (&(block->locals[i]) == var)
+            var_t *locals = block->locals;
+            if (var == &locals[i])
                 return 1;
         }
         block = block->parent;
@@ -494,24 +501,27 @@ var_t *require_var(block_t *blk);
 
 void new_name(block_t *block, var_t **var)
 {
-    if (!(*var)->base)
-        (*var)->base = *var;
-    if ((*var)->is_global)
+    var_t *v = *var;
+    if (!v->base)
+        v->base = v;
+    if (v->is_global)
         return;
 
-    int i = (*var)->base->rename.counter++;
-    (*var)->base->rename.stack[(*var)->base->rename.stack_idx++] = i;
-
+    int i = v->base->rename.counter++;
+    v->base->rename.stack[v->base->rename.stack_idx++] = i;
     var_t *vd = require_var(block);
     memcpy(vd, *var, sizeof(var_t));
     vd->base = *var;
     vd->subscript = i;
-    (*var)->subscripts[(*var)->subscripts_idx++] = vd;
-    *var = vd;
+    v->subscripts[v->subscripts_idx++] = vd;
+    var[0] = vd;
 }
 
 var_t *get_stack_top_subscript_var(var_t *var)
 {
+    if (var->base->rename.stack_idx < 1)
+        error("Index is less than 1");
+
     int sub = var->base->rename.stack[var->base->rename.stack_idx - 1];
     int i;
     for (i = 0; i < var->base->subscripts_idx; i++) {
@@ -524,17 +534,18 @@ var_t *get_stack_top_subscript_var(var_t *var)
 
 void rename_var(var_t **var)
 {
-    if (!(*var)->base)
-        (*var)->base = *var;
-    if ((*var)->is_global)
+    var_t *v = *var;
+    if (!v->base)
+        v->base = v;
+    if (v->is_global)
         return;
 
-    *var = get_stack_top_subscript_var(*var);
+    var[0] = get_stack_top_subscript_var(*var);
 }
 
 void pop_name(var_t *var)
 {
-    if ((*var).is_global)
+    if (var->is_global)
         return;
     var->base->rename.stack_idx--;
 }
@@ -557,7 +568,7 @@ void append_phi_operand(insn_t *insn, var_t *var, basic_block_t *bb_from)
 void bb_solve_phi_params(basic_block_t *bb)
 {
     insn_t *insn;
-    for (insn = bb->insn_list.head; insn; insn = insn->next)
+    for (insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->opcode == OP_phi)
             new_name(bb->scope, &insn->rd);
         else {
@@ -569,6 +580,7 @@ void bb_solve_phi_params(basic_block_t *bb)
             if (insn->rd)
                 new_name(bb->scope, &insn->rd);
         }
+    }
 
     if (bb->next) {
         for (insn = bb->next->insn_list.head; insn; insn = insn->next)
@@ -640,10 +652,15 @@ void append_unwound_phi_insn(basic_block_t *bb, var_t *dest, var_t *rs)
         /* insert it before branch instruction */
         if (tail->opcode == OP_branch) {
             insn_t *prev = bb->insn_list.head;
-            while (prev->next != tail)
-                prev = prev->next;
-            prev->next = n;
-            n->next = tail;
+            if (!prev->next) {
+                bb->insn_list.head = n;
+                n->next = prev;
+            } else {
+                while (prev->next != tail)
+                    prev = prev->next;
+                prev->next = n;
+                n->next = tail;
+            }
         } else {
             bb->insn_list.tail->next = n;
             bb->insn_list.tail = n;
@@ -680,12 +697,19 @@ void unwind_phi()
         args->bb = fn->bbs;
 
         fn->visited++;
-        args->preorder_cb = &bb_unwind_phi;
+        args->preorder_cb = bb_unwind_phi;
         bb_forward_traversal(args);
     }
     free(args);
 }
 
+/*
+ * The current cfonrt does not yet support string literal addressing, which
+ * results in the omission of basic block visualization during the stage-1 and
+ * stage-2 bootstrapping phases.
+ */
+#ifdef __SHECC__
+#else
 void bb_dump_connection(FILE *fd,
                         basic_block_t *curr,
                         basic_block_t *next,
@@ -1003,6 +1027,7 @@ void dump_dom(char name[])
     fprintf(fd, "}\n");
     fclose(fd);
 }
+#endif
 
 void ssa_build(int dump_ir)
 {
@@ -1015,10 +1040,13 @@ void ssa_build(int dump_ir)
     solve_phi_insertion();
     solve_phi_params();
 
+#ifdef __SHECC__
+#else
     if (dump_ir) {
         dump_cfg("CFG.dot");
         dump_dom("DOM.dot");
     }
+#endif
 
     unwind_phi();
 }
@@ -1065,15 +1093,15 @@ void build_reversed_rpo()
         args->bb = fn->exit;
 
         fn->visited++;
-        args->postorder_cb = &bb_index_reversed_rpo;
+        args->postorder_cb = bb_index_reversed_rpo;
         bb_backward_traversal(args);
 
         fn->visited++;
-        args->postorder_cb = &bb_reverse_reversed_index;
+        args->postorder_cb = bb_reverse_reversed_index;
         bb_backward_traversal(args);
 
         fn->visited++;
-        args->postorder_cb = &bb_build_reversed_rpo;
+        args->postorder_cb = bb_build_reversed_rpo;
         bb_backward_traversal(args);
     }
     free(args);
@@ -1151,19 +1179,20 @@ void compute_live_in(basic_block_t *bb)
         add_live_in(bb, bb->live_gen[i]);
 }
 
-void merge_live_in(var_t *live_out[], int *live_out_idx, basic_block_t *bb)
+int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
 {
     int i;
     for (i = 0; i < bb->live_in_idx; i++) {
         int j, found = 0;
-        for (j = 0; j < *live_out_idx; j++)
+        for (j = 0; j < live_out_idx; j++)
             if (live_out[j] == bb->live_in[i]) {
                 found = 1;
                 break;
             }
         if (!found)
-            live_out[(*live_out_idx)++] = bb->live_in[i];
+            live_out[live_out_idx++] = bb->live_in[i];
     }
+    return live_out_idx;
 }
 
 int recompute_live_out(basic_block_t *bb)
@@ -1173,19 +1202,19 @@ int recompute_live_out(basic_block_t *bb)
 
     if (bb->next) {
         compute_live_in(bb->next);
-        merge_live_in(live_out, &live_out_idx, bb->next);
+        live_out_idx = merge_live_in(live_out, live_out_idx, bb->next);
     }
     if (bb->then_) {
         compute_live_in(bb->then_);
-        merge_live_in(live_out, &live_out_idx, bb->then_);
+        live_out_idx = merge_live_in(live_out, live_out_idx, bb->then_);
     }
     if (bb->else_) {
         compute_live_in(bb->else_);
-        merge_live_in(live_out, &live_out_idx, bb->else_);
+        live_out_idx = merge_live_in(live_out, live_out_idx, bb->else_);
     }
 
     if (bb->live_out_idx != live_out_idx) {
-        memcpy(bb->live_out, live_out, sizeof(var_t *) * live_out_idx);
+        memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
         bb->live_out_idx = live_out_idx;
         return 1;
     }
@@ -1199,7 +1228,7 @@ int recompute_live_out(basic_block_t *bb)
                 break;
             }
         if (!same) {
-            memcpy(bb->live_out, live_out, sizeof(var_t *) * live_out_idx);
+            memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
             bb->live_out_idx = live_out_idx;
             return 1;
         }
@@ -1218,7 +1247,7 @@ void liveness_analysis()
         args->bb = fn->bbs;
 
         fn->visited++;
-        args->preorder_cb = &bb_reset_live_kill_idx;
+        args->preorder_cb = bb_reset_live_kill_idx;
         bb_forward_traversal(args);
 
         int i;
@@ -1226,7 +1255,7 @@ void liveness_analysis()
             bb_add_killed_var(fn->bbs, fn->func->param_defs[i].subscripts[0]);
 
         fn->visited++;
-        args->preorder_cb = &bb_solve_locals;
+        args->preorder_cb = bb_solve_locals;
         bb_forward_traversal(args);
     }
     free(args);
@@ -1287,7 +1316,7 @@ void ssa_release()
         args->bb = fn->bbs;
 
         fn->visited++;
-        args->postorder_cb = &bb_release;
+        args->postorder_cb = bb_release;
         bb_forward_traversal(args);
     }
     free(args);

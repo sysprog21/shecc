@@ -180,6 +180,7 @@ void emit(int code)
 
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
 {
+    func_t *func;
     int rd = ph2_ir->dest;
     int rn = ph2_ir->src0;
     int rm = ph2_ir->src1;
@@ -286,16 +287,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__b(__AL, ph2_ir->next_bb->elf_offset - elf_code_idx));
         return;
     case OP_call:
-        emit(__bl(__AL, find_func(ph2_ir->func_name)->fn->bbs->elf_offset -
-                            elf_code_idx));
+        func = find_func(ph2_ir->func_name);
+        emit(__bl(__AL, func->fn->bbs->elf_offset - elf_code_idx));
         return;
     case OP_load_data_address:
         emit(__movw(__AL, rd, ph2_ir->src0 + elf_data_start));
         emit(__movt(__AL, rd, ph2_ir->src0 + elf_data_start));
         return;
     case OP_address_of_func:
-        ofs =
-            elf_code_start + find_func(ph2_ir->func_name)->fn->bbs->elf_offset;
+        func = find_func(ph2_ir->func_name);
+        ofs = elf_code_start + func->fn->bbs->elf_offset;
         emit(__movw(__AL, __r8, ofs));
         emit(__movt(__AL, __r8, ofs));
         emit(__sw(__AL, __r8, rn, 0));

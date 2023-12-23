@@ -134,12 +134,38 @@ int find_trie(trie_t *trie, char *name)
 
 int dump_ir = 0;
 
-type_t *find_type(char *type_name)
+/**
+ * find_type() - Find the type by the given name.
+ * @type_name: The name to be searched.
+ * @flag:
+ *      0 - Search in all type names.
+ *      1 - Search in all names, excluding the tags of structure.
+ *      2 - Only search in tags.
+ *
+ * Return: The pointer to the type, or NULL if not found.
+ */
+type_t *find_type(char *type_name, int flag)
 {
     int i;
     for (i = 0; i < types_idx; i++) {
-        if (!strcmp(TYPES[i].type_name, type_name))
-            return &TYPES[i];
+        if (TYPES[i].base_type == TYPE_struct) {
+            if (flag == 1)
+                continue;
+            if (!strcmp(TYPES[i].type_name, type_name))
+                return &TYPES[i];
+        } else {
+            if (flag == 2)
+                continue;
+            if (!strcmp(TYPES[i].type_name, type_name)) {
+                /*
+                 * If it is a forwardly declared alias of a structure, return
+                 * the base structure type.
+                 */
+                if (TYPES[i].base_type == TYPE_typedef && TYPES[i].size == 0)
+                    return TYPES[i].base_struct;
+                return &TYPES[i];
+            }
+        }
     }
     return NULL;
 }
@@ -330,6 +356,13 @@ func_t *find_func(char func_name[])
 
 var_t *find_member(char token[], type_t *type)
 {
+    /*
+     * If it is a forwardly declared alias of a structure, switch to the base
+     * structure type.
+     */
+    if (type->size == 0)
+        type = type->base_struct;
+
     int i;
     for (i = 0; i < type->num_fields; i++) {
         if (!strcmp(type->fields[i].var_name, token))
@@ -381,21 +414,21 @@ var_t *find_var(char *token, block_t *parent)
 
 int size_var(var_t *var)
 {
-    int s = 0;
-
+    int size;
     if (var->is_ptr > 0 || var->is_func > 0) {
-        s += 4;
+        size = 4;
     } else {
-        type_t *td = find_type(var->type_name);
-        int bs = td->size;
-        if (var->array_size > 0) {
-            int j = 0;
-            for (; j < var->array_size; j++)
-                s += bs;
-        } else
-            s += bs;
+        type_t *type = find_type(var->type_name, 0);
+        if (!type)
+            error("Incomplete type");
+        if (type->size == 0)
+            size = type->base_struct->size;
+        else
+            size = type->size;
     }
-    return s;
+    if (var->array_size > 0)
+        size = size * var->array_size;
+    return size;
 }
 
 /* TODO: Integrate with `func_t` */

@@ -634,6 +634,15 @@ void *malloc(int size)
     return tail->ptr;
 }
 
+void *calloc(int n, int size)
+{
+    char *p = malloc(n * size);
+    int i;
+    for (i = 0; i < n * size; i++)
+        p[i] = 0;
+    return p;
+}
+
 void rfree(void *ptr, int size)
 {
     if (!ptr)
@@ -677,9 +686,15 @@ void free(void *ptr)
     if (!ptr)
         return;
 
+    /* FIXME: it takes long time to search in chuncks */
     chunk_t *cur = head;
-    while (cur->ptr != ptr)
+    while (cur->ptr != ptr) {
         cur = cur->next;
+        if (!cur) {
+            printf("free(): double free detected\n");
+            abort();
+        }
+    }
 
     chunk_t *prev;
     if (cur->prev) {
@@ -692,8 +707,10 @@ void free(void *ptr)
     if (cur->next) {
         next = cur->next;
         next->prev = cur->prev;
-    } else
+    } else {
         prev->next = NULL;
+        tail = prev;
+    }
 
     /* Insert head in freelist_head */
     cur->next = freelist_head;

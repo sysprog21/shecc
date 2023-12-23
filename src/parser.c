@@ -24,6 +24,9 @@ char *gen_label()
 
 var_t *require_var(block_t *blk)
 {
+    if (blk->next_local >= MAX_LOCALS)
+        error("Too many locals");
+
     var_t *var = &blk->locals[blk->next_local++];
     var->base = var;
     return var;
@@ -88,10 +91,10 @@ void read_parameter_list_decl(func_t *fd, int anon);
 void read_inner_var_decl(var_t *vd, int anon, int is_param)
 {
     vd->init_val = 0;
-    if (lex_accept(T_asterisk))
-        vd->is_ptr = 1;
-    else
-        vd->is_ptr = 0;
+    vd->is_ptr = 0;
+
+    while (lex_accept(T_asterisk))
+        vd->is_ptr++;
 
     /* is it function pointer declaration? */
     if (lex_accept(T_open_bracket)) {
@@ -387,11 +390,12 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         var_t *var;
         lvalue_t lvalue;
 
-        lex_accept(T_open_bracket);
+        int open_bracket = lex_accept(T_open_bracket);
         lex_peek(T_identifier, token);
         var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, 1, OP_generic);
-        lex_accept(T_close_bracket);
+        if (open_bracket)
+            lex_expect(T_close_bracket);
 
         ph1_ir = add_ph1_ir(OP_read);
         ph1_ir->src0 = opstack_pop();
@@ -412,10 +416,12 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
     } else if (lex_accept(T_sizeof)) {
         char token[MAX_TYPE_LEN];
         type_t *type;
+        int find_type_flag;
 
         lex_expect(T_open_bracket);
+        find_type_flag = lex_accept(T_struct) ? 2 : 1;
         lex_ident(T_identifier, token);
-        type = find_type(token);
+        type = find_type(token, find_type_flag);
         if (!type)
             error("Unable to find type");
 
@@ -735,7 +741,7 @@ void read_lvalue(lvalue_t *lvalue,
     /* already peeked and have the variable */
     lex_expect(T_identifier);
 
-    lvalue->type = find_type(var->type_name);
+    lvalue->type = find_type(var->type_name, 0);
     lvalue->size = get_size(var, lvalue->type);
     lvalue->is_ptr = var->is_ptr;
     lvalue->is_func = var->is_func;
@@ -834,7 +840,7 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* change type currently pointed to */
             var = find_member(token, lvalue->type);
-            lvalue->type = find_type(var->type_name);
+            lvalue->type = find_type(var->type_name, 0);
             lvalue->is_ptr = var->is_ptr;
             lvalue->is_func = var->is_func;
             lvalue->size = get_size(var, lvalue->type);
@@ -1106,7 +1112,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
 
     var->is_ternary_ret = 1;
     opstack_push(var);
-    *bb = end_ternary;
+    bb[0] = end_ternary;
 }
 
 int read_body_assignment(char *token,
@@ -1152,6 +1158,8 @@ int read_body_assignment(char *token,
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = vd;
             opstack_push(vd);
+            add_insn(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0, NULL,
+                     PTR_SIZE, NULL);
 
             read_indirect_call(parent, bb);
             return 1;
@@ -2183,7 +2191,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         error("Unexpected token");
 
     /* is it a variable declaration? */
-    type = find_type(token);
+    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+    type = find_type(token, find_type_flag);
     if (type) {
         var = require_var(parent);
         read_full_var_decl(var, 0, 0);
@@ -2330,6 +2339,7 @@ void read_global_decl(block_t *block)
         /* function */
         func_t *fd = add_func(var->var_name);
         memcpy(&fd->return_def, var, sizeof(var_t));
+        var->is_global = 0;
         block->next_local--;
 
         read_parameter_list_decl(fd, 0);
@@ -2429,6 +2439,30 @@ void read_global_statement()
         error_diagnostic[i] = 0;
 
         error(error_diagnostic);
+    } else if (lex_accept(T_struct)) {
+        int i = 0, size = 0;
+
+        lex_ident(T_identifier, token);
+
+        /* has forward declaration? */
+        type_t *type = find_type(token, 2);
+        if (!type)
+            type = add_type();
+
+        strcpy(type->type_name, token);
+        lex_expect(T_open_curly);
+        do {
+            var_t *v = &type->fields[i++];
+            read_full_var_decl(v, 0, 1);
+            v->offset = size;
+            size += size_var(v);
+            lex_expect(T_semicolon);
+        } while (!lex_accept(T_close_curly));
+
+        type->size = size;
+        type->num_fields = i;
+        type->base_type = TYPE_struct;
+        lex_expect(T_semicolon);
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {
             int val = 0;
@@ -2451,32 +2485,60 @@ void read_global_statement()
             strcpy(type->type_name, token);
             lex_expect(T_semicolon);
         } else if (lex_accept(T_struct)) {
-            int i = 0, size = 0;
-            type_t *type = add_type();
+            int i = 0, size = 0, has_struct_def = 0;
+            type_t *tag = NULL, *type = add_type();
 
-            if (lex_peek(T_identifier, token)) /* recursive declaration */
-                lex_accept(T_identifier);
-            lex_expect(T_open_curly);
-            do {
-                var_t *v = &type->fields[i++];
-                read_full_var_decl(v, 0, 1);
-                v->offset = size;
-                size += size_var(v);
-                lex_expect(T_semicolon);
-            } while (!lex_accept(T_close_curly));
+            /* is struct definition? */
+            if (lex_peek(T_identifier, token)) {
+                lex_expect(T_identifier);
 
-            lex_ident(T_identifier, token); /* type name */
-            strcpy(type->type_name, token);
+                /* is existent? */
+                tag = find_type(token, 2);
+                if (!tag) {
+                    tag = add_type();
+                    tag->base_type = TYPE_struct;
+                    strcpy(tag->type_name, token);
+                }
+            }
+
+            /* typedef with struct definition */
+            if (lex_accept(T_open_curly)) {
+                has_struct_def = 1;
+                do {
+                    var_t *v = &type->fields[i++];
+                    read_full_var_decl(v, 0, 1);
+                    v->offset = size;
+                    size += size_var(v);
+                    lex_expect(T_semicolon);
+                } while (!lex_accept(T_close_curly));
+            }
+
+            lex_ident(T_identifier, type->type_name);
             type->size = size;
             type->num_fields = i;
-            type->base_type = TYPE_struct; /* is used? */
+            type->base_type = TYPE_typedef;
+
+            if (tag && has_struct_def == 1) {
+                strcpy(token, tag->type_name);
+                memcpy(tag, type, sizeof(type_t));
+                tag->base_type = TYPE_struct;
+                strcpy(tag->type_name, token);
+            } else {
+                /*
+                 * If it is a forward declaration, build a connection between
+                 * structure tag and alias. In `find_type()`, it will retrieve
+                 * infomation from base structure for alias.
+                 */
+                type->base_struct = tag;
+            }
+
             lex_expect(T_semicolon);
         } else {
             char base_type[MAX_TYPE_LEN];
             type_t *base;
             type_t *type = add_type();
             lex_ident(T_identifier, base_type);
-            base = find_type(base_type);
+            base = find_type(base_type, 1);
             if (!base)
                 error("Unable to find base type");
             type->base_type = base->base_type;
