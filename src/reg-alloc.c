@@ -405,7 +405,7 @@ void reg_alloc()
                     break;
                 case OP_assign:
                     src0 = prepare_operand(bb, insn->rs1, -1);
-                    dest = prepare_dest(bb, insn->rd, ir->src0, -1);
+                    dest = prepare_dest(bb, insn->rd, src0, -1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = src0;
                     ir->dest = dest;
@@ -534,8 +534,8 @@ void reg_alloc()
                 case OP_log_and:
                 case OP_log_or:
                     src0 = prepare_operand(bb, insn->rs1, -1);
-                    src1 = prepare_operand(bb, insn->rs2, ir->src0);
-                    dest = prepare_dest(bb, insn->rd, ir->src0, ir->src1);
+                    src1 = prepare_operand(bb, insn->rs2, src0);
+                    dest = prepare_dest(bb, insn->rd, src0, src1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = src0;
                     ir->src1 = src1;
@@ -545,7 +545,7 @@ void reg_alloc()
                 case OP_bit_not:
                 case OP_log_not:
                     src0 = prepare_operand(bb, insn->rs1, -1);
-                    dest = prepare_dest(bb, insn->rd, ir->src0, -1);
+                    dest = prepare_dest(bb, insn->rd, src0, -1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = src0;
                     ir->dest = dest;
