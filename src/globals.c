@@ -637,7 +637,7 @@ void error(char *msg)
 {
     char src[100];
     strncpy(src, SOURCE+source_idx, 99);
-    src[99] = '\0';
+    src[99] = 0;
 
     /* TODO: figure out the corresponding C source and report line number */
     printf("Error %s at source location %d (%s)\n", msg, source_idx, src);
