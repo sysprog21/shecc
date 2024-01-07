@@ -18,7 +18,7 @@
 #define MAX_FIELDS 32
 #define MAX_FUNCS 256
 #define MAX_FUNC_TRIES 1950
-#define MAX_BLOCKS 1050
+#define MAX_BLOCKS 1150
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 36864
 #define MAX_BB_PRED 128
@@ -299,6 +299,7 @@ typedef struct phi_operand phi_operand_t;
 
 struct insn {
     struct insn *next;
+    struct insn *prev;
     int idx;
     opcode_t opcode;
     var_t *rd;

@@ -151,9 +151,6 @@ void cfg_flatten()
 
             ph2_ir_t *insn;
             for (insn = bb->ph2_ir_list.head; insn; insn = insn->next) {
-                if (insn->op == OP_assign && insn->dest == insn->src0)
-                    continue;
-
                 flatten_ir = add_ph2_ir(OP_generic);
                 memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
