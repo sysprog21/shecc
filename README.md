@@ -1,11 +1,12 @@
-# shecc : self-hosting and educational C compiler
+# shecc : self-hosting and educational C optimizing compiler
 
 <p align="center"><img src="https://user-images.githubusercontent.com/18013815/91671374-b2f0db00-eb58-11ea-8d55-858e9fb160c0.png" alt="logo image" width=40%></p>
 
 ## Introduction
 
-`shecc` is built from scratch, targeted at 32-bit Arm and RISC-V architecture, as
-a self-compiling compiler for a subset of the C language.
+`shecc` is built from scratch, targeting both 32-bit Arm and RISC-V architectures,
+as a self-compiling compiler for a subset of the C language.
+Despite its simplistic nature, it is capable of performing basic optimization strategies as a standalone optimizing compiler.
 
 ### Features
 
