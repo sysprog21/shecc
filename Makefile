@@ -2,10 +2,13 @@ CC ?= gcc
 CFLAGS := -O -g \
 	-ansi -pedantic \
 	-Wall -Wextra \
+	-Wno-unused-but-set-variable \
 	-Wno-variadic-macros \
-	-Wno-maybe-uninitialized \
+	-Wno-uninitialized \
+	-Wno-strict-prototypes \
 	-Wno-declaration-after-statement \
-	-Wno-format
+	-Wno-format \
+	-Wno-format-pedantic
 
 include mk/common.mk
 include mk/arm.mk
