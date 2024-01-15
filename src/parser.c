@@ -2386,9 +2386,6 @@ void read_global_statement()
     block_t *block = &BLOCKS[0]; /* global block */
 
     if (lex_peek(T_include, token)) {
-        if (!strcmp(token_str, "<stdio.h>")) {
-            /* ignore, we include libc by default */
-        }
         lex_expect(T_include);
     } else if (lex_accept(T_define)) {
         char alias[MAX_VAR_LEN];
