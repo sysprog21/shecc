@@ -2593,9 +2593,6 @@ void read_global_statement()
     char token[MAX_ID_LEN];
     block_t *block = &BLOCKS[0]; /* global block */
 
-    if (read_preproc_directive())
-        return;
-
     if (lex_accept(T_struct)) {
         int i = 0, size = 0;
 
@@ -2756,6 +2753,8 @@ void parse_internal()
     lex_expect(T_start);
 
     do {
+        if (read_preproc_directive())
+            continue;
         read_global_statement();
     } while (!lex_accept(T_eof));
 }
