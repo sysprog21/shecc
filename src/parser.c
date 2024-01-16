@@ -66,6 +66,9 @@ int get_size(var_t *var, type_t *type)
  * whitespace */
 void skip_line(int invalidate)
 {
+    /* FIXME: this invalidation is too aggressive, comment should not be
+     * invalidate by this.
+     */
     skip_whitespace();
     do {
         if (invalidate && !is_whitespace(peek_char(0)) &&
@@ -75,28 +78,14 @@ void skip_line(int invalidate)
     } while (read_char(0) != '\n');
 }
 
-void if_elif_skip_lines()
+/* Skips lines where preprocessor match is false, this will stop once next
+ * token is either `T_cppd_elif`, `T_cppd_else` or `cppd_endif`.
+ */
+void cppd_control_flow_skip_lines()
 {
-    char peek_c;
-    int i;
-
-    do {
-        skip_whitespace();
-        i = 0;
-        do {
-            token_str[i++] = next_char;
-        } while (read_char(0) != '\n');
-        token_str[i] = 0;
-        read_char(1);
-        peek_c = peek_char(1);
-    } while (next_char != '#' || (next_char == '#' && peek_c == 'd'));
-    skip_whitespace();
-}
-
-void ifdef_else_skip_lines()
-{
-    while (!lex_peek(T_cppd_else, NULL) && !lex_peek(T_cppd_endif, NULL)) {
-        next_token = get_next_token();
+    while (!lex_peek(T_cppd_elif, NULL) && !lex_peek(T_cppd_else, NULL) &&
+           !lex_peek(T_cppd_endif, NULL)) {
+        next_token = lex_token();
     }
     skip_whitespace();
 }
@@ -111,12 +100,10 @@ void read_defined_macro()
 {
     char lookup_alias[MAX_TOKEN_LEN];
 
-    preproc_aliasing = 0;     /* to prevent aggressive aliasing */
     lex_expect(T_identifier); /* defined */
-    lex_expect(T_open_bracket);
+    lex_expect_internal(T_open_bracket, 0);
     lex_ident(T_identifier, lookup_alias);
     lex_expect(T_close_bracket);
-    preproc_aliasing = 1;
 
     check_def(lookup_alias);
 }
@@ -169,10 +156,8 @@ int read_preproc_directive()
     if (lex_peek(T_cppd_undef, token)) {
         char alias[MAX_VAR_LEN];
 
-        preproc_aliasing = 0;
-        lex_expect(T_cppd_undef);
+        lex_expect_internal(T_cppd_undef, 0);
         lex_peek(T_identifier, alias);
-        preproc_aliasing = 1;
         lex_expect(T_identifier);
 
         remove_alias(alias);
@@ -201,7 +186,7 @@ int read_preproc_directive()
                 return 1;
             }
 
-            if_elif_skip_lines();
+            cppd_control_flow_skip_lines();
         } else {
             /* TODO: parse and evaluate constant expression here */
         }
@@ -210,7 +195,7 @@ int read_preproc_directive()
     if (lex_accept(T_cppd_elif)) {
         if (preproc_match) {
             while (!lex_peek(T_cppd_endif, NULL)) {
-                next_token = get_next_token();
+                next_token = lex_token();
             }
             return 1;
         }
@@ -223,7 +208,7 @@ int read_preproc_directive()
                 return 1;
             }
 
-            if_elif_skip_lines();
+            cppd_control_flow_skip_lines();
         } else {
             /* TODO: parse and evaluate constant expression here */
         }
@@ -240,8 +225,7 @@ int read_preproc_directive()
             return 1;
         }
 
-        /* skip lines until #else or #endif */
-        ifdef_else_skip_lines();
+        cppd_control_flow_skip_lines();
         return 1;
     }
     if (lex_accept(T_cppd_endif)) {
@@ -249,7 +233,7 @@ int read_preproc_directive()
         skip_whitespace();
         return 1;
     }
-    if (lex_accept(T_cppd_ifdef)) {
+    if (lex_accept_internal(T_cppd_ifdef, 0)) {
         preproc_match = 0;
         lex_ident(T_identifier, token);
         check_def(token);
@@ -259,8 +243,7 @@ int read_preproc_directive()
             return 1;
         }
 
-        /* skip lines until #else or #endif */
-        ifdef_else_skip_lines();
+        cppd_control_flow_skip_lines();
         return 1;
     }
 
@@ -677,12 +660,12 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             for (i = 0; i < remainder; i++) {
                 source_idx = macro->params[macro->num_params - remainder + i];
                 next_char = SOURCE[source_idx];
-                next_token = get_next_token();
+                next_token = lex_token();
                 read_expr(parent, bb);
             }
             source_idx = t;
             next_char = SOURCE[source_idx];
-            next_token = get_next_token();
+            next_token = lex_token();
         } else if (mac) {
             if (parent->macro)
                 error("Nested macro is not yet supported");
@@ -695,7 +678,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             while (!lex_peek(T_close_bracket, NULL)) {
                 mac->params[mac->num_params++] = source_idx;
                 do {
-                    next_token = get_next_token();
+                    next_token = lex_token();
                 } while (next_token != T_comma &&
                          next_token != T_close_bracket);
             }
@@ -717,11 +700,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             int t = source_idx;
             source_idx = macro_param_idx;
             next_char = SOURCE[source_idx];
-            next_token = get_next_token();
+            next_token = lex_token();
             read_expr(parent, bb);
             source_idx = t;
             next_char = SOURCE[source_idx];
-            next_token = get_next_token();
+            next_token = lex_token();
         } else if (con) {
             ph1_ir = add_ph1_ir(OP_load_constant);
             vd = require_var(parent);
@@ -1599,7 +1582,7 @@ void eval_ternary_imm(int cond, char *token)
 {
     if (cond == 0) {
         while (next_token != T_colon) {
-            next_token = get_next_token();
+            next_token = lex_token();
         }
         lex_accept(T_colon);
         read_global_assignment(token);
@@ -1607,7 +1590,7 @@ void eval_ternary_imm(int cond, char *token)
         read_global_assignment(token);
         lex_expect(T_colon);
         while (!lex_peek(T_semicolon, NULL)) {
-            next_token = get_next_token();
+            next_token = lex_token();
         }
     }
 }
@@ -2453,7 +2436,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         while (!lex_peek(T_close_bracket, NULL)) {
             mac->params[mac->num_params++] = source_idx;
             do {
-                next_token = get_next_token();
+                next_token = lex_token();
             } while (next_token != T_comma && next_token != T_close_bracket);
         }
         /* move `source_idx` to the macro body */
