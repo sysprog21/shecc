@@ -95,8 +95,7 @@ void if_elif_skip_lines()
 
 void ifdef_else_skip_lines()
 {
-    while (!lex_peek(T_cppd_else, NULL) &&
-           !lex_peek(T_cppd_endif, NULL)) {
+    while (!lex_peek(T_cppd_else, NULL) && !lex_peek(T_cppd_endif, NULL)) {
         next_token = get_next_token();
     }
     skip_whitespace();
