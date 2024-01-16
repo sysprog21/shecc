@@ -95,8 +95,8 @@ void if_elif_skip_lines()
 
 void ifdef_else_skip_lines()
 {
-    while (!lex_peek(T_preproc_else, NULL) &&
-           !lex_peek(T_preproc_endif, NULL)) {
+    while (!lex_peek(T_cppd_else, NULL) &&
+           !lex_peek(T_cppd_endif, NULL)) {
         next_token = get_next_token();
     }
     skip_whitespace();
@@ -129,14 +129,14 @@ int read_preproc_directive()
 {
     char token[MAX_ID_LEN];
 
-    if (lex_peek(T_preproc_include, token)) {
+    if (lex_peek(T_cppd_include, token)) {
         skip_line(0); /* FIXME: remove this line after syntax parsing is
                          implemented */
-        lex_expect(T_preproc_include);
+        lex_expect(T_cppd_include);
         /* TODO: parse include syntax here */
         return 1;
     }
-    if (lex_accept(T_preproc_define)) {
+    if (lex_accept(T_cppd_define)) {
         char alias[MAX_VAR_LEN];
         char value[MAX_VAR_LEN];
 
@@ -167,11 +167,11 @@ int read_preproc_directive()
 
         return 1;
     }
-    if (lex_peek(T_preproc_undef, token)) {
+    if (lex_peek(T_cppd_undef, token)) {
         char alias[MAX_VAR_LEN];
 
         preproc_aliasing = 0;
-        lex_expect(T_preproc_undef);
+        lex_expect(T_cppd_undef);
         lex_peek(T_identifier, alias);
         preproc_aliasing = 1;
         lex_expect(T_identifier);
@@ -180,7 +180,7 @@ int read_preproc_directive()
         remove_macro(alias);
         return 1;
     }
-    if (lex_peek(T_preproc_error, NULL)) {
+    if (lex_peek(T_cppd_error, NULL)) {
         int i = 0;
         char error_diagnostic[MAX_LINE_LEN];
 
@@ -191,7 +191,7 @@ int read_preproc_directive()
 
         error(error_diagnostic);
     }
-    if (lex_accept(T_preproc_if)) {
+    if (lex_accept(T_cppd_if)) {
         preproc_match = 0;
 
         if (lex_peek(T_identifier, token) && !strcmp(token, "defined")) {
@@ -208,9 +208,9 @@ int read_preproc_directive()
         }
         return 1;
     }
-    if (lex_accept(T_preproc_elif)) {
+    if (lex_accept(T_cppd_elif)) {
         if (preproc_match) {
-            while (!lex_peek(T_preproc_endif, NULL)) {
+            while (!lex_peek(T_cppd_endif, NULL)) {
                 next_token = get_next_token();
             }
             return 1;
@@ -231,7 +231,7 @@ int read_preproc_directive()
 
         return 1;
     }
-    if (lex_accept(T_preproc_else)) {
+    if (lex_accept(T_cppd_else)) {
         /* reach here has 2 possible cases:
          * 1. reach #ifdef preprocessor directive
          * 2. conditional expression in #elif is false
@@ -245,12 +245,12 @@ int read_preproc_directive()
         ifdef_else_skip_lines();
         return 1;
     }
-    if (lex_accept(T_preproc_endif)) {
+    if (lex_accept(T_cppd_endif)) {
         preproc_match = 0;
         skip_whitespace();
         return 1;
     }
-    if (lex_accept(T_preproc_ifdef)) {
+    if (lex_accept(T_cppd_ifdef)) {
         preproc_match = 0;
         lex_ident(T_identifier, token);
         check_def(token);

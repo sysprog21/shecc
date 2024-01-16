@@ -68,15 +68,15 @@ typedef enum {
     T_break,
     T_default,
     T_continue,
-    T_preproc_include,
-    T_preproc_define,
-    T_preproc_undef,
-    T_preproc_error,
-    T_preproc_if,
-    T_preproc_elif,
-    T_preproc_else,
-    T_preproc_endif,
-    T_preproc_ifdef
+    T_cppd_include,
+    T_cppd_define,
+    T_cppd_undef,
+    T_cppd_error,
+    T_cppd_if,
+    T_cppd_elif,
+    T_cppd_else,
+    T_cppd_endif,
+    T_cppd_ifdef
 } token_t;
 
 char token_str[MAX_TOKEN_LEN];
@@ -225,31 +225,31 @@ token_t get_next_token()
         skip_whitespace();
 
         if (!strcmp(token_str, "#include")) {
-            return T_preproc_include;
+            return T_cppd_include;
         }
         if (!strcmp(token_str, "#define")) {
-            return T_preproc_define;
+            return T_cppd_define;
         }
         if (!strcmp(token_str, "#undef")) {
-            return T_preproc_undef;
+            return T_cppd_undef;
         }
         if (!strcmp(token_str, "#error")) {
-            return T_preproc_error;
+            return T_cppd_error;
         }
         if (!strcmp(token_str, "#if")) {
-            return T_preproc_if;
+            return T_cppd_if;
         }
         if (!strcmp(token_str, "#elif")) {
-            return T_preproc_elif;
+            return T_cppd_elif;
         }
         if (!strcmp(token_str, "#ifdef")) {
-            return T_preproc_ifdef;
+            return T_cppd_ifdef;
         }
         if (!strcmp(token_str, "#else")) {
-            return T_preproc_else;
+            return T_cppd_else;
         }
         if (!strcmp(token_str, "#endif")) {
-            return T_preproc_endif;
+            return T_cppd_endif;
         }
         error("Unknown directive");
     }
@@ -605,10 +605,10 @@ int lex_accept(token_t token)
 {
     if (next_token == token) {
         /* FIXME: this is a hack, fix aggressive aliasing first */
-        if (token == T_preproc_ifdef)
+        if (token == T_cppd_ifdef)
             preproc_aliasing = 0;
         next_token = get_next_token();
-        if (token == T_preproc_ifdef)
+        if (token == T_cppd_ifdef)
             preproc_aliasing = 1;
         return 1;
     }
