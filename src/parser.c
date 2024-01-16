@@ -1012,7 +1012,8 @@ void read_lvalue(lvalue_t *lvalue,
 
             if (lex_accept(T_arrow)) {
                 /* resolve where the pointer points at from the calculated
-                 * address in a structure */
+                 * address in a structure.
+                 */
                 if (is_member == 1) {
                     ph1_ir = add_ph1_ir(OP_read);
                     ph1_ir->src0 = opstack_pop();
@@ -1051,7 +1052,8 @@ void read_lvalue(lvalue_t *lvalue,
             lvalue->size = get_size(var, lvalue->type);
 
             /* if it is an array, get the address of first element instead of
-             * its value */
+             * its value.
+             */
             if (var->array_size > 0)
                 lvalue->is_reference = 0;
 

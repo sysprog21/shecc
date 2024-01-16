@@ -68,6 +68,7 @@ typedef enum {
     T_break,
     T_default,
     T_continue,
+    /* C pre-processor directives */
     T_cppd_include,
     T_cppd_define,
     T_cppd_undef,
@@ -224,33 +225,24 @@ token_t get_next_token()
         token_str[i] = 0;
         skip_whitespace();
 
-        if (!strcmp(token_str, "#include")) {
+        if (!strcmp(token_str, "#include"))
             return T_cppd_include;
-        }
-        if (!strcmp(token_str, "#define")) {
+        if (!strcmp(token_str, "#define"))
             return T_cppd_define;
-        }
-        if (!strcmp(token_str, "#undef")) {
+        if (!strcmp(token_str, "#undef"))
             return T_cppd_undef;
-        }
-        if (!strcmp(token_str, "#error")) {
+        if (!strcmp(token_str, "#error"))
             return T_cppd_error;
-        }
-        if (!strcmp(token_str, "#if")) {
+        if (!strcmp(token_str, "#if"))
             return T_cppd_if;
-        }
-        if (!strcmp(token_str, "#elif")) {
+        if (!strcmp(token_str, "#elif"))
             return T_cppd_elif;
-        }
-        if (!strcmp(token_str, "#ifdef")) {
+        if (!strcmp(token_str, "#ifdef"))
             return T_cppd_ifdef;
-        }
-        if (!strcmp(token_str, "#else")) {
+        if (!strcmp(token_str, "#else"))
             return T_cppd_else;
-        }
-        if (!strcmp(token_str, "#endif")) {
+        if (!strcmp(token_str, "#endif"))
             return T_cppd_endif;
-        }
         error("Unknown directive");
     }
 
@@ -569,8 +561,7 @@ token_t get_next_token()
         return T_identifier;
     }
 
-    /*
-     * This only happens when parsing a macro. Move to the token after the
+    /* This only happens when parsing a macro. Move to the token after the
      * macro definition or return to where the macro has been called.
      */
     if (next_char == '\n') {
