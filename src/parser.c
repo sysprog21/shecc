@@ -62,12 +62,14 @@ int get_size(var_t *var, type_t *type)
     return type->size;
 }
 
-/* abort when invalidate is true and the line contains  character other than whitespace */
+/* abort when invalidate is true and the line contains  character other than
+ * whitespace */
 void skip_line(int invalidate)
 {
     skip_whitespace();
     do {
-        if (invalidate && !is_whitespace(peek_char(0)) && !is_newline(peek_char(0))) {
+        if (invalidate && !is_whitespace(peek_char(0)) &&
+            !is_newline(peek_char(0))) {
             error("Expects whitespace after preprocessor directive");
         }
     } while (read_char(0) != '\n');
@@ -93,7 +95,8 @@ void if_elif_skip_lines()
 
 void ifdef_else_skip_lines()
 {
-    while (!lex_peek(T_preproc_else, NULL) && !lex_peek(T_preproc_endif, NULL)) {
+    while (!lex_peek(T_preproc_else, NULL) &&
+           !lex_peek(T_preproc_endif, NULL)) {
         next_token = get_next_token();
     }
     skip_whitespace();
@@ -109,7 +112,7 @@ void read_defined_macro()
 {
     char lookup_alias[MAX_TOKEN_LEN];
 
-    preproc_aliasing = 0; /* to prevent aggressive aliasing */
+    preproc_aliasing = 0;     /* to prevent aggressive aliasing */
     lex_expect(T_identifier); /* defined */
     lex_expect(T_open_bracket);
     lex_ident(T_identifier, lookup_alias);
@@ -127,7 +130,8 @@ int read_preproc_directive()
     char token[MAX_ID_LEN];
 
     if (lex_peek(T_preproc_include, token)) {
-        skip_line(0); /* FIXME: remove this line after syntax parsing is implemented */
+        skip_line(0); /* FIXME: remove this line after syntax parsing is
+                         implemented */
         lex_expect(T_preproc_include);
         /* TODO: parse include syntax here */
         return 1;
