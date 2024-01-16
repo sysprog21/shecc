@@ -62,6 +62,208 @@ int get_size(var_t *var, type_t *type)
     return type->size;
 }
 
+/* abort when invalidate is true and the line contains  character other than whitespace */
+void skip_line(int invalidate)
+{
+    skip_whitespace();
+    do {
+        if (invalidate && !is_whitespace(peek_char(0)) && !is_newline(peek_char(0))) {
+            error("Expects whitespace after preprocessor directive");
+        }
+    } while (read_char(0) != '\n');
+}
+
+void if_elif_skip_lines()
+{
+    char peek_c;
+    int i;
+
+    do {
+        skip_whitespace();
+        i = 0;
+        do {
+            token_str[i++] = next_char;
+        } while (read_char(0) != '\n');
+        token_str[i] = 0;
+        read_char(1);
+        peek_c = peek_char(1);
+    } while (next_char != '#' || (next_char == '#' && peek_c == 'd'));
+    skip_whitespace();
+}
+
+void ifdef_else_skip_lines()
+{
+    while (!lex_peek(T_preproc_else, NULL) && !lex_peek(T_preproc_endif, NULL)) {
+        next_token = get_next_token();
+    }
+    skip_whitespace();
+}
+
+void check_def(char *alias)
+{
+    if (find_alias(alias))
+        preproc_match = 1;
+}
+
+void read_defined_macro()
+{
+    char lookup_alias[MAX_TOKEN_LEN];
+
+    preproc_aliasing = 0; /* to prevent aggressive aliasing */
+    lex_expect(T_identifier); /* defined */
+    lex_expect(T_open_bracket);
+    lex_ident(T_identifier, lookup_alias);
+    lex_expect(T_close_bracket);
+    preproc_aliasing = 1;
+
+    check_def(lookup_alias);
+}
+
+/* read preprocessor directive at each potential positions:
+ * e.g. global statement / body statement
+ */
+int read_preproc_directive()
+{
+    char token[MAX_ID_LEN];
+
+    if (lex_peek(T_preproc_include, token)) {
+        skip_line(0); /* FIXME: remove this line after syntax parsing is implemented */
+        lex_expect(T_preproc_include);
+        /* TODO: parse include syntax here */
+        return 1;
+    }
+    if (lex_accept(T_preproc_define)) {
+        char alias[MAX_VAR_LEN];
+        char value[MAX_VAR_LEN];
+
+        lex_ident(T_identifier, alias);
+
+        if (lex_peek(T_numeric, value)) {
+            lex_expect(T_numeric);
+            add_alias(alias, value);
+        } else if (lex_peek(T_string, value)) {
+            lex_expect(T_string);
+            add_alias(alias, value);
+        } else if (lex_accept(T_open_bracket)) { /* function-like macro */
+            macro_t *macro = add_macro(alias);
+
+            skip_newline = 0;
+            while (lex_peek(T_identifier, alias)) {
+                lex_expect(T_identifier);
+                strcpy(macro->param_defs[macro->num_param_defs++].var_name,
+                       alias);
+                lex_accept(T_comma);
+            }
+            if (lex_accept(T_elipsis))
+                macro->is_variadic = 1;
+
+            macro->start_source_idx = source_idx;
+            skip_macro_body();
+        }
+
+        return 1;
+    }
+    if (lex_peek(T_preproc_undef, token)) {
+        char alias[MAX_VAR_LEN];
+
+        preproc_aliasing = 0;
+        lex_expect(T_preproc_undef);
+        lex_peek(T_identifier, alias);
+        preproc_aliasing = 1;
+        lex_expect(T_identifier);
+
+        remove_alias(alias);
+        remove_macro(alias);
+        return 1;
+    }
+    if (lex_peek(T_preproc_error, NULL)) {
+        int i = 0;
+        char error_diagnostic[MAX_LINE_LEN];
+
+        do {
+            error_diagnostic[i++] = next_char;
+        } while (read_char(0) != '\n');
+        error_diagnostic[i] = 0;
+
+        error(error_diagnostic);
+    }
+    if (lex_accept(T_preproc_if)) {
+        preproc_match = 0;
+
+        if (lex_peek(T_identifier, token) && !strcmp(token, "defined")) {
+            read_defined_macro();
+
+            if (preproc_match) {
+                skip_whitespace();
+                return 1;
+            }
+
+            if_elif_skip_lines();
+        } else {
+            /* TODO: parse and evaluate constant expression here */
+        }
+        return 1;
+    }
+    if (lex_accept(T_preproc_elif)) {
+        if (preproc_match) {
+            while (!lex_peek(T_preproc_endif, NULL)) {
+                next_token = get_next_token();
+            }
+            return 1;
+        }
+
+        if (lex_peek(T_identifier, token) && !strcmp(token, "defined")) {
+            read_defined_macro();
+
+            if (preproc_match) {
+                skip_whitespace();
+                return 1;
+            }
+
+            if_elif_skip_lines();
+        } else {
+            /* TODO: parse and evaluate constant expression here */
+        }
+
+        return 1;
+    }
+    if (lex_accept(T_preproc_else)) {
+        /* reach here has 2 possible cases:
+         * 1. reach #ifdef preprocessor directive
+         * 2. conditional expression in #elif is false
+         */
+        if (!preproc_match) {
+            skip_whitespace();
+            return 1;
+        }
+
+        /* skip lines until #else or #endif */
+        ifdef_else_skip_lines();
+        return 1;
+    }
+    if (lex_accept(T_preproc_endif)) {
+        preproc_match = 0;
+        skip_whitespace();
+        return 1;
+    }
+    if (lex_accept(T_preproc_ifdef)) {
+        preproc_match = 0;
+        lex_ident(T_identifier, token);
+        check_def(token);
+
+        if (preproc_match) {
+            skip_whitespace();
+            return 1;
+        }
+
+        /* skip lines until #else or #endif */
+        ifdef_else_skip_lines();
+        return 1;
+    }
+
+    return 0;
+}
+
 int read_numeric_constant(char buffer[])
 {
     int i = 0;
@@ -2298,6 +2500,8 @@ basic_block_t *read_code_block(func_t *func,
     lex_expect(T_open_curly);
 
     while (!lex_accept(T_close_curly)) {
+        if (read_preproc_directive())
+            continue;
         bb = read_body_statement(blk, bb);
         perform_side_effect(blk, bb);
     }
@@ -2385,58 +2589,10 @@ void read_global_statement()
     char token[MAX_ID_LEN];
     block_t *block = &BLOCKS[0]; /* global block */
 
-    if (lex_peek(T_include, token)) {
-        lex_expect(T_include);
-    } else if (lex_accept(T_define)) {
-        char alias[MAX_VAR_LEN];
-        char value[MAX_VAR_LEN];
+    if (read_preproc_directive())
+        return;
 
-        lex_peek(T_identifier, alias);
-        lex_expect(T_identifier);
-        if (lex_peek(T_numeric, value)) {
-            lex_expect(T_numeric);
-            add_alias(alias, value);
-        } else if (lex_peek(T_string, value)) {
-            lex_expect(T_string);
-            add_alias(alias, value);
-        } else if (lex_accept(T_open_bracket)) { /* function-like macro */
-            macro_t *macro = add_macro(alias);
-
-            skip_newline = 0;
-            while (lex_peek(T_identifier, alias)) {
-                lex_expect(T_identifier);
-                strcpy(macro->param_defs[macro->num_param_defs++].var_name,
-                       alias);
-                lex_accept(T_comma);
-            }
-            if (lex_accept(T_elipsis))
-                macro->is_variadic = 1;
-
-            macro->start_source_idx = source_idx;
-            skip_macro_body();
-        }
-    } else if (lex_peek(T_undef, token)) {
-        char alias[MAX_VAR_LEN];
-
-        preproc_aliasing = 0;
-        lex_expect(T_undef);
-        lex_peek(T_identifier, alias);
-        preproc_aliasing = 1;
-        lex_expect(T_identifier);
-
-        remove_alias(alias);
-        remove_macro(alias);
-    } else if (lex_peek(T_error, NULL)) {
-        int i = 0;
-        char error_diagnostic[MAX_LINE_LEN];
-
-        do {
-            error_diagnostic[i++] = next_char;
-        } while (read_char(0) != '\n');
-        error_diagnostic[i] = 0;
-
-        error(error_diagnostic);
-    } else if (lex_accept(T_struct)) {
+    if (lex_accept(T_struct)) {
         int i = 0, size = 0;
 
         lex_ident(T_identifier, token);
