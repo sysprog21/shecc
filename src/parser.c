@@ -66,9 +66,7 @@ int get_size(var_t *var, type_t *type)
  * whitespace */
 void skip_line(int invalidate)
 {
-    /* FIXME: this invalidation is too aggressive, comment should not be
-     * invalidate by this.
-     */
+    /* FIXME: Comments will causes current validation failed. */
     skip_whitespace();
     do {
         if (invalidate && !is_whitespace(peek_char(0)) &&

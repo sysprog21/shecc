@@ -174,7 +174,9 @@ char peek_char(int offset)
     return SOURCE[source_idx + offset];
 }
 
-/* Lex next token and returns its token type. */
+/* Lex next token and returns its token type. Parameter `aliasing` is used for
+ * disable preprocessor aliasing on identifier tokens.
+ */
 token_t lex_token_internal(int aliasing)
 {
     token_str[0] = 0;
