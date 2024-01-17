@@ -87,11 +87,6 @@ int skip_newline = 1;
 
 int preproc_match;
 
-/* Allow replacing identifiers with alias value if alias exists. This is
- * disabled in certain cases, e.g. #undef.
- */
-int preproc_aliasing = 1;
-
 /* Point to the first character after where the macro has been called. It is
  * needed when returning from the macro body.
  */
@@ -174,44 +169,15 @@ char read_char(int is_skip_space)
     return next_char;
 }
 
-/* get alias name from defined() directive
- * i.e., get __arm__ from defined(__arm__)
- */
-void read_alias_name_from_defined(char *alias_name, char *src)
-{
-    int i;
-
-    src = src + 8; /* skip defined( */
-    i = 0;
-    while (src[i] != ')') {
-        alias_name[i] = src[i];
-        i++;
-    }
-    alias_name[i] = 0;
-}
-
 char peek_char(int offset)
 {
     return SOURCE[source_idx + offset];
 }
 
-/* check alias defined or not */
-void chk_def(int defined)
-{
-    char *alias = NULL;
-    char alias_name[MAX_TOKEN_LEN];
-
-    if (defined) {
-        read_alias_name_from_defined(alias_name, token_str);
-        alias = find_alias(alias_name);
-    } else
-        alias = find_alias(token_str);
-
-    if (alias)
-        preproc_match = 1;
-}
-
-token_t get_next_token()
+/* Lex next token and returns its token type. Parameter `aliasing` is used for
+ * disable preprocessor aliasing on identifier tokens.
+ */
+token_t lex_token_internal(int aliasing)
 {
     token_str[0] = 0;
 
@@ -257,7 +223,7 @@ token_t get_next_token()
                     read_char(0);
                     if (next_char == '/') {
                         read_char(1);
-                        return get_next_token();
+                        return lex_token_internal(aliasing);
                     }
                 }
             } while (next_char);
@@ -549,7 +515,7 @@ token_t get_next_token()
         if (!strcmp(token_str, "continue"))
             return T_continue;
 
-        if (preproc_aliasing) {
+        if (aliasing) {
             alias = find_alias(token_str);
             if (alias) {
                 token_t t = is_numeric(alias) ? T_numeric : T_string;
@@ -570,7 +536,7 @@ token_t get_next_token()
             next_char = SOURCE[source_idx];
         } else
             next_char = read_char(1);
-        return get_next_token();
+        return lex_token_internal(aliasing);
     }
 
     if (next_char == 0)
@@ -582,30 +548,45 @@ token_t get_next_token()
     return T_eof;
 }
 
+/* Lex next token and returns its token type. To disable aliasing on next
+ * token, use `lex_token_internal`. */
+token_t lex_token()
+{
+    return lex_token_internal(1);
+}
+
 /* Skip the content. We only need the index where the macro body begins. */
 void skip_macro_body()
 {
     while (!is_newline(next_char))
-        next_token = get_next_token();
+        next_token = lex_token();
 
     skip_newline = 1;
-    next_token = get_next_token();
+    next_token = lex_token();
 }
 
-int lex_accept(token_t token)
+/* Accepts next token if token types are matched. */
+int lex_accept_internal(token_t token, int aliasing)
 {
     if (next_token == token) {
-        /* FIXME: this is a hack, fix aggressive aliasing first */
-        if (token == T_cppd_ifdef)
-            preproc_aliasing = 0;
-        next_token = get_next_token();
-        if (token == T_cppd_ifdef)
-            preproc_aliasing = 1;
+        next_token = lex_token_internal(aliasing);
         return 1;
     }
+
     return 0;
 }
 
+/* Accepts next token if token types are matched. To disable aliasing
+ * on next token, use `lex_accept_internal`.
+ */
+int lex_accept(token_t token)
+{
+    return lex_accept_internal(token, 1);
+}
+
+/* Peeks next token and copy token's literal to value if token types
+ * are matched.
+ */
 int lex_peek(token_t token, char *value)
 {
     if (next_token == token) {
@@ -617,17 +598,38 @@ int lex_peek(token_t token, char *value)
     return 0;
 }
 
-void lex_ident(token_t token, char *value)
+/* Strictly match next token with given token type and copy token's
+ * literal to value.
+ */
+void lex_ident_internal(token_t token, char *value, int aliasing)
 {
     if (next_token != token)
         error("Unexpected token");
     strcpy(value, token_str);
-    next_token = get_next_token();
+    next_token = lex_token_internal(aliasing);
 }
 
-void lex_expect(token_t token)
+/* Strictly match next token with given token type and copy token's
+ * literal to value. To disable aliasing on next token, use
+ * `lex_ident_internal`.
+ */
+void lex_ident(token_t token, char *value)
+{
+    lex_ident_internal(token, value, 1);
+}
+
+/* Strictly match next token with given token type. */
+void lex_expect_internal(token_t token, int aliasing)
 {
     if (next_token != token)
         error("Unexpected token");
-    next_token = get_next_token();
+    next_token = lex_token_internal(aliasing);
+}
+
+/* Strictly match next token with given token type. To disable aliasing
+ * on next token, use `lex_expect_internal`.
+ */
+void lex_expect(token_t token)
+{
+    lex_expect_internal(token, 1);
 }
