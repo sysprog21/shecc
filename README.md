@@ -17,7 +17,7 @@ Despite its simplistic nature, it is capable of performing basic optimization st
 * Utilize a two-pass compilation process: the first pass checks syntax and breaks down complex statements into basic operations,
   while the second pass translates these operations into Arm/RISC-V machine code.
 * Develop a register allocation system that is compatible with RISC-style architectures.
-* Implement an architecture-independent, single static assignment (SSA)-based middle-end for enhanced optimizations.
+* Implement an architecture-independent, [static single assignment](https://en.wikipedia.org/wiki/Static_single-assignment_form) (SSA)-based middle-end for enhanced optimizations.
 
 ## Compatibility
 
