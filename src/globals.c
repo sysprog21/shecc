@@ -640,11 +640,13 @@ void error(char *msg)
     int offset, start_idx, i = 0;
     char diagnostic[512 /* MAX_LINE_LEN * 2 */];
 
-    for (offset = source_idx; offset >= 0 && SOURCE[offset] != '\n'; offset--);
+    for (offset = source_idx; offset >= 0 && SOURCE[offset] != '\n'; offset--)
+        ;
 
     start_idx = offset + 1;
-    
-    for (offset = 0; offset < MAX_SOURCE && SOURCE[start_idx + offset] != '\n'; offset++) {
+
+    for (offset = 0; offset < MAX_SOURCE && SOURCE[start_idx + offset] != '\n';
+         offset++) {
         diagnostic[i++] = SOURCE[start_idx + offset];
     }
     diagnostic[i++] = '\n';
@@ -655,7 +657,8 @@ void error(char *msg)
 
     strcpy(diagnostic + i, "^ Error occurs here");
 
-    /* TODO: figure out the corresponding C source file path and report line number */
+    /* TODO: figure out the corresponding C source file path and report line
+     * number */
     printf("Error %s at source location %d\n%s\n", msg, source_idx, diagnostic);
     abort();
 }
