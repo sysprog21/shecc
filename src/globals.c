@@ -636,7 +636,8 @@ void global_release()
 
 void error(char *msg)
 {
-    /* Construct error source diagnostic */
+    /* Construct error source diagnostics, enabling precise identification of
+     * syntax and logic issues within the code. */
     int offset, start_idx, i = 0;
     char diagnostic[512 /* MAX_LINE_LEN * 2 */];
 
