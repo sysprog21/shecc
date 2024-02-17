@@ -636,8 +636,31 @@ void global_release()
 
 void error(char *msg)
 {
-    /* TODO: figure out the corresponding C source and report line number */
-    printf("Error %s at source location %d\n", msg, source_idx);
+    /* Construct error source diagnostics, enabling precise identification of
+     * syntax and logic issues within the code. */
+    int offset, start_idx, i = 0;
+    char diagnostic[512 /* MAX_LINE_LEN * 2 */];
+
+    for (offset = source_idx; offset >= 0 && SOURCE[offset] != '\n'; offset--)
+        ;
+
+    start_idx = offset + 1;
+
+    for (offset = 0; offset < MAX_SOURCE && SOURCE[start_idx + offset] != '\n';
+         offset++) {
+        diagnostic[i++] = SOURCE[start_idx + offset];
+    }
+    diagnostic[i++] = '\n';
+
+    for (offset = start_idx; offset < source_idx; offset++) {
+        diagnostic[i++] = ' ';
+    }
+
+    strcpy(diagnostic + i, "^ Error occurs here");
+
+    /* TODO: figure out the corresponding C source file path and report line
+     * number */
+    printf("Error %s at source location %d\n%s\n", msg, source_idx, diagnostic);
     abort();
 }
 
