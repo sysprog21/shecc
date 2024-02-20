@@ -62,20 +62,6 @@ int get_size(var_t *var, type_t *type)
     return type->size;
 }
 
-/* abort when invalidate is true and the line contains  character other than
- * whitespace */
-void skip_line(int invalidate)
-{
-    /* FIXME: Comments will causes current validation failed. */
-    skip_whitespace();
-    do {
-        if (invalidate && !is_whitespace(peek_char(0)) &&
-            !is_newline(peek_char(0))) {
-            error("Expects whitespace after preprocessor directive");
-        }
-    } while (read_char(0) != '\n');
-}
-
 /* Skips lines where preprocessor match is false, this will stop once next
  * token is either `T_cppd_elif`, `T_cppd_else` or `cppd_endif`.
  */
@@ -114,10 +100,23 @@ int read_preproc_directive()
     char token[MAX_ID_LEN];
 
     if (lex_peek(T_cppd_include, token)) {
-        skip_line(0); /* FIXME: remove this line after syntax parsing is
-                         implemented */
         lex_expect(T_cppd_include);
-        /* TODO: parse include syntax here */
+
+        /* Basic #define syntax validation */
+        if (lex_peek(T_string, NULL)) {
+            /* #define "header.h" */
+            lex_expect(T_string);
+        } else {
+            /* #define <stdlib.h> */
+            lex_expect(T_lt);
+
+            while (!lex_peek(T_gt, NULL)) {
+                next_token = lex_token();
+            }
+
+            lex_expect(T_gt);
+        }
+
         return 1;
     }
     if (lex_accept(T_cppd_define)) {
