@@ -533,10 +533,10 @@ int main()
 }
 EOF
 
-try_ 1 << EOF
-#if -1
-#define A 1
-#elif 1 || 0
+try_ 0 << EOF
+#if 1 || 0
+#define A 0
+#elif 1 && 0
 #define A 1
 #else
 #define A 2

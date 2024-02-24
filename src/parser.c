@@ -224,21 +224,17 @@ int read_constant_infix_expr(int precedence)
         switch (op) {
         case OP_add:
             break;
-        case OP_sub: {
+        case OP_sub:
             lhs = lhs * -1;
             break;
-        }
-        case OP_bit_not: {
+        case OP_bit_not:
             lhs = ~lhs;
             break;
-        }
-        case OP_log_not: {
+        case OP_log_not:
             lhs = !lhs;
             break;
-        }
-        default: {
+        default:
             error("Unexpected unary token while evaluating constant");
-        }
         }
     } else {
         lhs = read_constant_expr_operand();
@@ -255,80 +251,61 @@ int read_constant_infix_expr(int precedence)
         rhs = read_constant_infix_expr(current_precedence);
 
         switch (op) {
-        case OP_add: {
+        case OP_add:
             lhs = lhs + rhs;
             break;
-        }
-        case OP_sub: {
+        case OP_sub:
             lhs = lhs - rhs;
             break;
-        }
-        case OP_mul: {
+        case OP_mul:
             lhs = lhs * rhs;
             break;
-        }
-        case OP_div: {
+        case OP_div:
             lhs = lhs / rhs;
             break;
-        }
-        case OP_bit_and: {
+        case OP_bit_and:
             lhs = lhs & rhs;
             break;
-        }
-        case OP_bit_or: {
+        case OP_bit_or:
             lhs = lhs | rhs;
             break;
-        }
-        case OP_bit_xor: {
+        case OP_bit_xor:
             lhs = lhs ^ rhs;
             break;
-        }
-        case OP_lshift: {
+        case OP_lshift:
             lhs = lhs << rhs;
             break;
-        }
-        case OP_rshift: {
+        case OP_rshift:
             lhs = lhs >> rhs;
             break;
-        }
-        case OP_gt: {
+        case OP_gt:
             lhs = lhs > rhs;
             break;
-        }
-        case OP_geq: {
+        case OP_geq:
             lhs = lhs >= rhs;
             break;
-        }
-        case OP_lt: {
+        case OP_lt:
             lhs = lhs < rhs;
             break;
-        }
-        case OP_leq: {
+        case OP_leq:
             lhs = lhs <= rhs;
             break;
-        }
-        case OP_eq: {
+        case OP_eq:
             lhs = lhs == rhs;
             break;
-        }
-        case OP_neq: {
+        case OP_neq:
             lhs = lhs != rhs;
             break;
-        }
-        case OP_log_and: {
+        case OP_log_and:
             /* TODO: Short-circuit evaluation */
             lhs = lhs && rhs;
             break;
-        }
-        case OP_log_or: {
+        case OP_log_or:
             /* TODO: Short-circuit evaluation */
             lhs = lhs || rhs;
             break;
-        }
-        default: {
+        default:
             error("Unexpected infix token while evaluating constant");
-            break;
-        }
         }
 
         op = get_operator();
