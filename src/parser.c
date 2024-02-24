@@ -62,6 +62,263 @@ int get_size(var_t *var, type_t *type)
     return type->size;
 }
 
+int get_operator_prio(opcode_t op)
+{
+    /* https://www.cs.uic.edu/~i109/Notes/COperatorPrecedenceTable.pdf */
+    switch (op) {
+    case OP_ternary:
+        return 3;
+    case OP_log_or:
+        return 4;
+    case OP_log_and:
+        return 5;
+    case OP_bit_or:
+        return 6;
+    case OP_bit_xor:
+        return 7;
+    case OP_bit_and:
+        return 8;
+    case OP_eq:
+    case OP_neq:
+        return 9;
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+        return 10;
+    case OP_add:
+    case OP_sub:
+        return 12;
+    case OP_mul:
+    case OP_div:
+    case OP_mod:
+        return 13;
+    default:
+        return 0;
+    }
+}
+
+int get_unary_operator_prio(opcode_t op)
+{
+    switch (op) {
+    case OP_add:
+    case OP_sub:
+    case OP_bit_not:
+    case OP_log_not:
+        return 14;
+    default:
+        return 0;
+    }
+}
+
+opcode_t get_operator()
+{
+    opcode_t op = OP_generic;
+    if (lex_accept(T_plus))
+        op = OP_add;
+    else if (lex_accept(T_minus))
+        op = OP_sub;
+    else if (lex_accept(T_asterisk))
+        op = OP_mul;
+    else if (lex_accept(T_divide))
+        op = OP_div;
+    else if (lex_accept(T_mod))
+        op = OP_mod;
+    else if (lex_accept(T_lshift))
+        op = OP_lshift;
+    else if (lex_accept(T_rshift))
+        op = OP_rshift;
+    else if (lex_accept(T_log_and))
+        op = OP_log_and;
+    else if (lex_accept(T_log_or))
+        op = OP_log_or;
+    else if (lex_accept(T_eq))
+        op = OP_eq;
+    else if (lex_accept(T_noteq))
+        op = OP_neq;
+    else if (lex_accept(T_lt))
+        op = OP_lt;
+    else if (lex_accept(T_le))
+        op = OP_leq;
+    else if (lex_accept(T_gt))
+        op = OP_gt;
+    else if (lex_accept(T_ge))
+        op = OP_geq;
+    else if (lex_accept(T_ampersand))
+        op = OP_bit_and;
+    else if (lex_accept(T_bit_or))
+        op = OP_bit_or;
+    else if (lex_accept(T_bit_xor))
+        op = OP_bit_xor;
+    else if (lex_peek(T_question, NULL))
+        op = OP_ternary;
+    return op;
+}
+
+int read_numeric_constant(char buffer[])
+{
+    int i = 0;
+    int value = 0;
+    while (buffer[i]) {
+        if (i == 1 && (buffer[i] == 'x')) { /* hexadecimal */
+            value = 0;
+            i = 2;
+            while (buffer[i]) {
+                char c = buffer[i++];
+                value = value << 4;
+                if (is_digit(c))
+                    value += c - '0';
+                c |= 32; /* convert to lower case */
+                if (c >= 'a' && c <= 'f')
+                    value += (c - 'a') + 10;
+            }
+            return value;
+        }
+        value = value * 10 + buffer[i++] - '0';
+    }
+    return value;
+}
+
+int read_constant_expr_operand()
+{
+    char buffer[MAX_ID_LEN];
+    int value;
+
+    if (lex_peek(T_numeric, buffer)) {
+        lex_expect(T_numeric);
+        return read_numeric_constant(buffer);
+    }
+
+    if (lex_accept(T_open_bracket)) {
+        value = read_constant_expr_operand();
+        lex_expect(T_close_bracket);
+        return value;
+    }
+
+    if (lex_peek(T_identifier, buffer) && !strcmp(buffer, "defined")) {
+        char lookup_alias[MAX_TOKEN_LEN];
+
+        lex_expect(T_identifier); /* defined */
+        lex_expect_internal(T_open_bracket, 0);
+        lex_ident(T_identifier, lookup_alias);
+        lex_expect(T_close_bracket);
+
+        return find_alias(lookup_alias) ? 1 : 0;
+    }
+
+    error("Unexpected token while evaluating constant");
+    return -1;
+}
+
+int read_constant_infix_expr(int precedence)
+{
+    int lhs, rhs, current_precedence;
+    opcode_t op;
+
+    /* Evaluate unary expression first */
+    op = get_operator();
+    current_precedence = get_unary_operator_prio(op);
+    if (current_precedence != 0 && current_precedence >= precedence) {
+        lhs = read_constant_infix_expr(current_precedence);
+
+        switch (op) {
+        case OP_add:
+            break;
+        case OP_sub:
+            lhs = lhs * -1;
+            break;
+        case OP_bit_not:
+            lhs = ~lhs;
+            break;
+        case OP_log_not:
+            lhs = !lhs;
+            break;
+        default:
+            error("Unexpected unary token while evaluating constant");
+        }
+    } else {
+        lhs = read_constant_expr_operand();
+    }
+
+    while (1) {
+        op = get_operator();
+        current_precedence = get_operator_prio(op);
+
+        if (current_precedence == 0 || current_precedence <= precedence) {
+            break;
+        }
+
+        rhs = read_constant_infix_expr(current_precedence);
+
+        switch (op) {
+        case OP_add:
+            lhs = lhs + rhs;
+            break;
+        case OP_sub:
+            lhs = lhs - rhs;
+            break;
+        case OP_mul:
+            lhs = lhs * rhs;
+            break;
+        case OP_div:
+            lhs = lhs / rhs;
+            break;
+        case OP_bit_and:
+            lhs = lhs & rhs;
+            break;
+        case OP_bit_or:
+            lhs = lhs | rhs;
+            break;
+        case OP_bit_xor:
+            lhs = lhs ^ rhs;
+            break;
+        case OP_lshift:
+            lhs = lhs << rhs;
+            break;
+        case OP_rshift:
+            lhs = lhs >> rhs;
+            break;
+        case OP_gt:
+            lhs = lhs > rhs;
+            break;
+        case OP_geq:
+            lhs = lhs >= rhs;
+            break;
+        case OP_lt:
+            lhs = lhs < rhs;
+            break;
+        case OP_leq:
+            lhs = lhs <= rhs;
+            break;
+        case OP_eq:
+            lhs = lhs == rhs;
+            break;
+        case OP_neq:
+            lhs = lhs != rhs;
+            break;
+        case OP_log_and:
+            /* TODO: Short-circuit evaluation */
+            lhs = lhs && rhs;
+            break;
+        case OP_log_or:
+            /* TODO: Short-circuit evaluation */
+            lhs = lhs || rhs;
+            break;
+        default:
+            error("Unexpected infix token while evaluating constant");
+        }
+
+        op = get_operator();
+    }
+
+    return lhs;
+}
+
+int read_constant_expr()
+{
+    return read_constant_infix_expr(0);
+}
+
 /* Skips lines where preprocessor match is false, this will stop once next
  * token is either `T_cppd_elif`, `T_cppd_else` or `cppd_endif`.
  */
@@ -173,20 +430,14 @@ int read_preproc_directive()
         error(error_diagnostic);
     }
     if (lex_accept(T_cppd_if)) {
-        preproc_match = 0;
+        preproc_match = read_constant_expr() != 0;
 
-        if (lex_peek(T_identifier, token) && !strcmp(token, "defined")) {
-            read_defined_macro();
-
-            if (preproc_match) {
-                skip_whitespace();
-                return 1;
-            }
-
-            cppd_control_flow_skip_lines();
+        if (preproc_match) {
+            skip_whitespace();
         } else {
-            /* TODO: parse and evaluate constant expression here */
+            cppd_control_flow_skip_lines();
         }
+
         return 1;
     }
     if (lex_accept(T_cppd_elif)) {
@@ -197,17 +448,12 @@ int read_preproc_directive()
             return 1;
         }
 
-        if (lex_peek(T_identifier, token) && !strcmp(token, "defined")) {
-            read_defined_macro();
+        preproc_match = read_constant_expr() != 0;
 
-            if (preproc_match) {
-                skip_whitespace();
-                return 1;
-            }
-
-            cppd_control_flow_skip_lines();
+        if (preproc_match) {
+            skip_whitespace();
         } else {
-            /* TODO: parse and evaluate constant expression here */
+            cppd_control_flow_skip_lines();
         }
 
         return 1;
@@ -245,30 +491,6 @@ int read_preproc_directive()
     }
 
     return 0;
-}
-
-int read_numeric_constant(char buffer[])
-{
-    int i = 0;
-    int value = 0;
-    while (buffer[i]) {
-        if (i == 1 && (buffer[i] == 'x')) { /* hexadecimal */
-            value = 0;
-            i = 2;
-            while (buffer[i]) {
-                char c = buffer[i++];
-                value = value << 4;
-                if (is_digit(c))
-                    value += c - '0';
-                c |= 32; /* convert to lower case */
-                if (c >= 'a' && c <= 'f')
-                    value += (c - 'a') + 10;
-            }
-            return value;
-        }
-        value = value * 10 + buffer[i++] - '0';
-    }
-    return value;
 }
 
 void read_parameter_list_decl(func_t *fd, int anon);
@@ -766,86 +988,6 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                      0, NULL);
         }
     }
-}
-
-int get_operator_prio(opcode_t op)
-{
-    /* https://www.cs.uic.edu/~i109/Notes/COperatorPrecedenceTable.pdf */
-    switch (op) {
-    case OP_ternary:
-        return 3;
-    case OP_log_or:
-        return 4;
-    case OP_log_and:
-        return 5;
-    case OP_bit_or:
-        return 6;
-    case OP_bit_xor:
-        return 7;
-    case OP_bit_and:
-        return 8;
-    case OP_eq:
-    case OP_neq:
-        return 9;
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-        return 10;
-    case OP_add:
-    case OP_sub:
-        return 12;
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-        return 13;
-    default:
-        return 0;
-    }
-}
-
-opcode_t get_operator()
-{
-    opcode_t op = OP_generic;
-    if (lex_accept(T_plus))
-        op = OP_add;
-    else if (lex_accept(T_minus))
-        op = OP_sub;
-    else if (lex_accept(T_asterisk))
-        op = OP_mul;
-    else if (lex_accept(T_divide))
-        op = OP_div;
-    else if (lex_accept(T_mod))
-        op = OP_mod;
-    else if (lex_accept(T_lshift))
-        op = OP_lshift;
-    else if (lex_accept(T_rshift))
-        op = OP_rshift;
-    else if (lex_accept(T_log_and))
-        op = OP_log_and;
-    else if (lex_accept(T_log_or))
-        op = OP_log_or;
-    else if (lex_accept(T_eq))
-        op = OP_eq;
-    else if (lex_accept(T_noteq))
-        op = OP_neq;
-    else if (lex_accept(T_lt))
-        op = OP_lt;
-    else if (lex_accept(T_le))
-        op = OP_leq;
-    else if (lex_accept(T_gt))
-        op = OP_gt;
-    else if (lex_accept(T_ge))
-        op = OP_geq;
-    else if (lex_accept(T_ampersand))
-        op = OP_bit_and;
-    else if (lex_accept(T_bit_or))
-        op = OP_bit_or;
-    else if (lex_accept(T_bit_xor))
-        op = OP_bit_xor;
-    else if (lex_peek(T_question, NULL))
-        op = OP_ternary;
-    return op;
 }
 
 void read_expr(block_t *parent, basic_block_t **bb)
