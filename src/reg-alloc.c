@@ -383,10 +383,22 @@ void reg_alloc()
                     break;
                 case OP_load_constant:
                 case OP_load_data_address:
+                    if (insn->rd->consumed == -1)
+                        break;
+
                     dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = insn->rd->init_val;
                     ir->dest = dest;
+
+                    /* store global variable immediately after assignment */
+                    if (insn->rd->is_global) {
+                        ir = bb_add_ph2_ir(bb, OP_global_store);
+                        ir->src0 = dest;
+                        ir->src1 = insn->rd->offset;
+                        REGS[dest].polluted = 0;
+                    }
+
                     break;
                 case OP_address_of:
                     /* make sure variable is on stack */
@@ -412,6 +424,9 @@ void reg_alloc()
                     ir->dest = dest;
                     break;
                 case OP_assign:
+                    if (insn->rd->consumed == -1)
+                        break;
+
                     src0 = find_in_regs(insn->rs1);
 
                     /* If operand is loaded from stack, clear the original slot

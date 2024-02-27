@@ -28,6 +28,7 @@ var_t *require_var(block_t *blk)
         error("Too many locals");
 
     var_t *var = &blk->locals[blk->next_local++];
+    var->consumed = -1;
     var->base = var;
     return var;
 }
