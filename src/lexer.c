@@ -119,7 +119,7 @@ int is_alnum(char c)
 
 int is_digit(char c)
 {
-    return (c >= '0' && c <= '9') ? 1 : 0;
+    return (c >= '0' && c <= '9');
 }
 
 int is_hex(char c)
