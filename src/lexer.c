@@ -94,7 +94,7 @@ int macro_return_idx;
 
 int is_whitespace(char c)
 {
-    return (c == ' ' || c == '\t');
+    return c == ' ' || c == '\t';
 }
 
 char peek_char(int offset);
@@ -107,7 +107,7 @@ int is_linebreak(char c)
 
 int is_newline(char c)
 {
-    return (c == '\r' || c == '\n');
+    return c == '\r' || c == '\n';
 }
 
 /* is it alphabet, number or '_'? */
@@ -119,7 +119,7 @@ int is_alnum(char c)
 
 int is_digit(char c)
 {
-    return (c >= '0' && c <= '9') ? 1 : 0;
+    return c >= '0' && c <= '9';
 }
 
 int is_hex(char c)
