@@ -547,4 +547,23 @@ int main()
 }
 EOF
 
+# optimizer
+try_ 1 << EOF
+int i = 0;
+void func()
+{
+    i = 1;
+}
+int main()
+{
+    char arr[2], t;
+    arr[0] = 0;
+    arr[1] = 1;
+    t = arr[i];
+    func();
+    t = arr[i];
+    return t;
+}
+EOF
+
 echo OK
