@@ -1067,6 +1067,9 @@ int cse(insn_t *insn, basic_block_t *bb)
         return 0;
 
     var_t *def = NULL, *base = prev->rs1, *idx = prev->rs2;
+    if (base->is_global || idx->is_global)
+        return 0;
+
     basic_block_t *b;
     insn_t *i = prev;
     for (b = bb;; b = b->idom) {
@@ -1097,7 +1100,7 @@ int cse(insn_t *insn, basic_block_t *bb)
 
     if (prev->prev) {
         insn->prev = prev->prev;
-        prev->next = insn;
+        prev->prev->next = insn;
     } else {
         bb->insn_list.head = insn;
         insn->prev = NULL;
@@ -1110,7 +1113,6 @@ int cse(insn_t *insn, basic_block_t *bb)
 
 void optimize()
 {
-    int changed = 0;
     fn_t *fn;
     for (fn = FUNC_LIST.head; fn; fn = fn->next) {
         /* basic block level (control flow) optimizations */
@@ -1120,7 +1122,9 @@ void optimize()
             /* instruction level optimizations */
             insn_t *insn;
             for (insn = bb->insn_list.head; insn; insn = insn->next) {
-                changed |= cse(insn, bb);
+                if (cse(insn, bb))
+                    continue;
+
                 /* more optimizations */
             }
         }
