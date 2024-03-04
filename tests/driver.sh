@@ -578,5 +578,6 @@ int main()
     int d = c + 8;        /* mixed assigment */
     return a + b + c + d; /* chained assignment */
 }
+EOF
 
 echo OK
