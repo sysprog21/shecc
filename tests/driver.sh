@@ -547,7 +547,9 @@ int main()
 }
 EOF
 
-# optimizer
+# optimizers
+
+# common subexpression elimination (CSE)
 try_ 1 << EOF
 int i = 0;
 void func()
@@ -563,6 +565,18 @@ int main()
     func();
     t = arr[i];
     return t;
+}
+EOF
+
+# constant folding
+try_ 20 << EOF
+int main()
+{
+    int a = 2;            /* constant assingment */
+    int b = a;            /* assignment via constant representation */
+    int c = a + b;
+    int d = c + 8;        /* mixed assigment */
+    return a + b + c + d; /* chained assignment */
 }
 EOF
 

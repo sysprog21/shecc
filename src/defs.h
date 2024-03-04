@@ -16,8 +16,8 @@
 #define MAX_PARAMS 8
 #define MAX_LOCALS 1450
 #define MAX_FIELDS 32
-#define MAX_FUNCS 256
-#define MAX_FUNC_TRIES 1950
+#define MAX_FUNCS 512
+#define MAX_FUNC_TRIES 2160
 #define MAX_BLOCKS 1150
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 36864
@@ -175,6 +175,7 @@ struct var {
     ref_block_list_t ref_block_list; /* blocks which kill variable */
     int consumed;
     int is_ternary_ret;
+    int is_const; /* whether a constant representaion or not */
 };
 
 typedef struct var var_t;
