@@ -580,4 +580,16 @@ int main()
 }
 EOF
 
+# Variables can be declared within a for-loop iteration
+try_ 120 << EOF
+int main()
+{
+    int fac = 1;
+    for (int i = 1; i <= 5; i++) {
+        fac = fac * i;
+    }
+    return fac;
+}
+EOF
+
 echo OK

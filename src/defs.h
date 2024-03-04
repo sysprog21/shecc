@@ -18,7 +18,7 @@
 #define MAX_FIELDS 32
 #define MAX_FUNCS 512
 #define MAX_FUNC_TRIES 2160
-#define MAX_BLOCKS 1150
+#define MAX_BLOCKS 2048
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 36864
 #define MAX_BB_PRED 128
