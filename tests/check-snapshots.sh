@@ -12,7 +12,7 @@ function check_snapshot() {
 
     $SHECC --dump-ir -o $temp_exe $source &>/dev/null
     dot -Tdot_json -o $temp_json CFG.dot
-    diff -q <(cat $ref) <(sed -E "/0x[0-9a-f]+/d" $temp_json | jq -c .)
+    diff -q <(cat $ref) <(sed -E "/0x[0-9a-f]+/d" $temp_json | jq -S -c .)
 }
 
 for file in tests/*.c; do
