@@ -12,7 +12,12 @@ function check_snapshot() {
 
     $SHECC --dump-ir -o $temp_exe $source &>/dev/null
     dot -Tdot_json -o $temp_json CFG.dot
-    diff -q <(cat $ref) <(sed -E "/0x[0-9a-f]+/d" $temp_json | jq -S -c .)
+    diff -q <(cat $ref) \
+            <(sed -E "/0x[0-9a-f]+/d" $temp_json | \
+                jq -S -c '.edges |= sort_by(._gvid) | .objects |= sort_by(._gvid) |
+                            .objects |= map_values(.edges |= (. // [] | sort)) |
+                            .objects |= map_values(.nodes |= (. // [] | sort)) |
+                            .objects |= map_values(.subgraphs |= (. // [] | sort))')
 }
 
 for file in tests/*.c; do
