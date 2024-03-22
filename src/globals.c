@@ -89,7 +89,6 @@ int insert_trie(trie_t *trie, char *name, int funcs_index)
 {
     char first_char = *name;
     int fc = first_char;
-    int i;
     if (!fc) {
         if (!trie->index)
             trie->index = funcs_index;
@@ -102,7 +101,7 @@ int insert_trie(trie_t *trie, char *name, int funcs_index)
          * handle this is to dynamically allocate a new element.
          */
         trie->next[fc] = func_tries_idx++;
-        for (i = 0; i < 128; i++)
+        for (int i = 0; i < 128; i++)
             FUNC_TRIES[trie->next[fc]].next[i] = 0;
         FUNC_TRIES[trie->next[fc]].index = 0;
     }
@@ -146,8 +145,7 @@ int dump_ir = 0;
  */
 type_t *find_type(char *type_name, int flag)
 {
-    int i;
-    for (i = 0; i < types_idx; i++) {
+    for (int i = 0; i < types_idx; i++) {
         if (TYPES[i].base_type == TYPE_struct) {
             if (flag == 1)
                 continue;
@@ -207,8 +205,7 @@ void add_label(char *name, int offset)
 
 int find_label_offset(char name[])
 {
-    int i;
-    for (i = 0; i < label_lut_idx; i++) {
+    for (int i = 0; i < label_lut_idx; i++) {
         if (!strcmp(LABEL_LUT[i].name, name))
             return LABEL_LUT[i].offset;
     }
@@ -236,8 +233,7 @@ void add_alias(char *alias, char *value)
 
 char *find_alias(char alias[])
 {
-    int i;
-    for (i = 0; i < aliases_idx; i++) {
+    for (int i = 0; i < aliases_idx; i++) {
         if (!ALIASES[i].disabled && !strcmp(alias, ALIASES[i].alias))
             return ALIASES[i].value;
     }
@@ -246,8 +242,7 @@ char *find_alias(char alias[])
 
 int remove_alias(char *alias)
 {
-    int i;
-    for (i = 0; i < aliases_idx; i++) {
+    for (int i = 0; i < aliases_idx; i++) {
         if (!ALIASES[i].disabled && !strcmp(alias, ALIASES[i].alias)) {
             ALIASES[i].disabled = 1;
             return 1;
@@ -266,8 +261,7 @@ macro_t *add_macro(char *name)
 
 macro_t *find_macro(char *name)
 {
-    int i;
-    for (i = 0; i < macros_idx; i++) {
+    for (int i = 0; i < macros_idx; i++) {
         if (!MACROS[i].disabled && !strcmp(name, MACROS[i].name))
             return &MACROS[i];
     }
@@ -276,8 +270,7 @@ macro_t *find_macro(char *name)
 
 int remove_macro(char *name)
 {
-    int i;
-    for (i = 0; i < macros_idx; i++) {
+    for (int i = 0; i < macros_idx; i++) {
         if (!MACROS[i].disabled && !strcmp(name, MACROS[i].name)) {
             MACROS[i].disabled = 1;
             return 1;
@@ -289,7 +282,6 @@ int remove_macro(char *name)
 void error(char *msg);
 int find_macro_param_src_idx(char *name, block_t *parent)
 {
-    int i;
     macro_t *macro = parent->macro;
 
     if (!parent)
@@ -297,7 +289,7 @@ int find_macro_param_src_idx(char *name, block_t *parent)
     if (!parent->macro)
         return 0;
 
-    for (i = 0; i < macro->num_param_defs; i++) {
+    for (int i = 0; i < macro->num_param_defs; i++) {
         if (!strcmp(macro->param_defs[i].var_name, name))
             return macro->params[i];
     }
@@ -338,8 +330,7 @@ void add_constant(char alias[], int value)
 
 constant_t *find_constant(char alias[])
 {
-    int i;
-    for (i = 0; i < constants_idx; i++) {
+    for (int i = 0; i < constants_idx; i++) {
         if (!strcmp(CONSTANTS[i].alias, alias))
             return &CONSTANTS[i];
     }
@@ -363,8 +354,7 @@ var_t *find_member(char token[], type_t *type)
     if (type->size == 0)
         type = type->base_struct;
 
-    int i;
-    for (i = 0; i < type->num_fields; i++) {
+    for (int i = 0; i < type->num_fields; i++) {
         if (!strcmp(type->fields[i].var_name, token))
             return &type->fields[i];
     }
@@ -373,18 +363,17 @@ var_t *find_member(char token[], type_t *type)
 
 var_t *find_local_var(char *token, block_t *block)
 {
-    int i;
     func_t *fn = block->func;
 
     for (; block; block = block->parent) {
-        for (i = 0; i < block->next_local; i++) {
+        for (int i = 0; i < block->next_local; i++) {
             if (!strcmp(block->locals[i].var_name, token))
                 return &block->locals[i];
         }
     }
 
     if (fn) {
-        for (i = 0; i < fn->num_params; i++) {
+        for (int i = 0; i < fn->num_params; i++) {
             if (!strcmp(fn->param_defs[i].var_name, token))
                 return &fn->param_defs[i];
         }
@@ -394,10 +383,9 @@ var_t *find_local_var(char *token, block_t *block)
 
 var_t *find_global_var(char *token)
 {
-    int i;
     block_t *block = &BLOCKS[0];
 
-    for (i = 0; i < block->next_local; i++) {
+    for (int i = 0; i < block->next_local; i++) {
         if (!strcmp(block->locals[i].var_name, token))
             return &block->locals[i];
     }
@@ -451,8 +439,7 @@ basic_block_t *bb_create(block_t *parent)
 {
     basic_block_t *bb = calloc(1, sizeof(basic_block_t));
 
-    int i;
-    for (i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < MAX_BB_PRED; i++) {
         bb->prev[i].bb = NULL;
         bb->prev[i].type = NEXT;
     }
@@ -501,8 +488,7 @@ void bb_connect(basic_block_t *pred,
 /* The pred-succ pair must have only one connection */
 void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
 {
-    int i;
-    for (i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < MAX_BB_PRED; i++) {
         if (succ->prev[i].bb == pred) {
             switch (succ->prev[i].type) {
             case NEXT:
@@ -666,8 +652,7 @@ void error(char *msg)
 
 void print_indent(int indent)
 {
-    int i;
-    for (i = 0; i < indent; i++)
+    for (int i = 0; i < indent; i++)
         printf("\t");
 }
 
@@ -676,10 +661,9 @@ void dump_ph1_ir()
     int indent = 0;
     ph1_ir_t *ph1_ir;
     func_t *fn;
-    int i, j, k;
     char rd[MAX_VAR_LEN], op1[MAX_VAR_LEN], op2[MAX_VAR_LEN];
 
-    for (i = 0; i < ph1_ir_idx; i++) {
+    for (int i = 0; i < ph1_ir_idx; i++) {
         ph1_ir = &PH1_IR[i];
 
         if (ph1_ir->dest)
@@ -694,16 +678,16 @@ void dump_ph1_ir()
             fn = find_func(ph1_ir->func_name);
             printf("def %s", fn->return_def.type_name);
 
-            for (j = 0; j < fn->return_def.is_ptr; j++)
+            for (int j = 0; j < fn->return_def.is_ptr; j++)
                 printf("*");
             printf(" @%s(", ph1_ir->func_name);
 
-            for (j = 0; j < fn->num_params; j++) {
+            for (int j = 0; j < fn->num_params; j++) {
                 if (j != 0)
                     printf(", ");
                 printf("%s", fn->param_defs[j].type_name);
 
-                for (k = 0; k < fn->param_defs[j].is_ptr; k++)
+                for (int k = 0; k < fn->param_defs[j].is_ptr; k++)
                     printf("*");
                 printf(" %%%s", fn->param_defs[j].var_name);
             }
@@ -722,7 +706,7 @@ void dump_ph1_ir()
         case OP_allocat:
             print_indent(indent);
             printf("allocat %s", ph1_ir->src0->type_name);
-            for (j = 0; j < ph1_ir->src0->is_ptr; j++)
+            for (int j = 0; j < ph1_ir->src0->is_ptr; j++)
                 printf("*");
             printf(" %%%s", op1);
 

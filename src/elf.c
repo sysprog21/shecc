@@ -14,15 +14,13 @@ int elf_section_index;
 
 void elf_write_section_str(char *vals, int len)
 {
-    int i;
-    for (i = 0; i < len; i++)
+    for (int i = 0; i < len; i++)
         elf_section[elf_section_index++] = vals[i];
 }
 
 void elf_write_data_str(char *vals, int len)
 {
-    int i;
-    for (i = 0; i < len; i++)
+    for (int i = 0; i < len; i++)
         elf_data[elf_data_idx++] = vals[i];
 }
 
@@ -43,8 +41,7 @@ char e_extract_byte(int v, int b)
 
 int elf_write_int(char *buf, int index, int val)
 {
-    int i = 0;
-    for (i = 0; i < 4; i++)
+    for (int i = 0; i < 4; i++)
         buf[index++] = e_extract_byte(val, i);
     return index;
 }
@@ -118,12 +115,11 @@ void elf_generate_header()
 void elf_generate_sections()
 {
     /* symtab section */
-    int b;
-    for (b = 0; b < elf_symtab_index; b++)
+    for (int b = 0; b < elf_symtab_index; b++)
         elf_write_section_byte(elf_symtab[b]);
 
     /* strtab section */
-    for (b = 0; b < elf_strtab_index; b++)
+    for (int b = 0; b < elf_strtab_index; b++)
         elf_write_section_byte(elf_strtab[b]);
 
     /* shstr section; len = 39 */
@@ -246,9 +242,6 @@ void elf_add_symbol(char *symbol, int len, int pc)
 
 void elf_generate(char *outfile)
 {
-    FILE *fp;
-    int i;
-
     elf_symbol_index = 0;
     elf_symtab_index = 0;
     elf_strtab_index = 0;
@@ -261,14 +254,14 @@ void elf_generate(char *outfile)
     if (!outfile)
         outfile = "a.out";
 
-    fp = fopen(outfile, "wb");
-    for (i = 0; i < elf_header_idx; i++)
+    FILE *fp = fopen(outfile, "wb");
+    for (int i = 0; i < elf_header_idx; i++)
         fputc(elf_header[i], fp);
-    for (i = 0; i < elf_code_idx; i++)
+    for (int i = 0; i < elf_code_idx; i++)
         fputc(elf_code[i], fp);
-    for (i = 0; i < elf_data_idx; i++)
+    for (int i = 0; i < elf_data_idx; i++)
         fputc(elf_data[i], fp);
-    for (i = 0; i < elf_section_index; i++)
+    for (int i = 0; i < elf_section_index; i++)
         fputc(elf_section[i], fp);
     fclose(fp);
 }

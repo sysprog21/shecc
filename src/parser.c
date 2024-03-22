@@ -670,7 +670,7 @@ void read_char_param(block_t *parent, basic_block_t *bb)
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
 void read_func_parameters(block_t *parent, basic_block_t **bb)
 {
-    int i, param_num = 0;
+    int param_num = 0;
     var_t *params[MAX_PARAMS];
 
     lex_expect(T_open_bracket);
@@ -681,7 +681,7 @@ void read_func_parameters(block_t *parent, basic_block_t **bb)
         params[param_num++] = opstack_pop();
         lex_accept(T_comma);
     }
-    for (i = 0; i < param_num; i++) {
+    for (int i = 0; i < param_num; i++) {
         ph1_ir_t *ph1_ir = add_ph1_ir(OP_push);
         ph1_ir->src0 = params[i];
         /* The operand should keep alive before calling function. Pass the
@@ -868,7 +868,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
         if (!strcmp(token, "__VA_ARGS__")) {
             /* `source_idx` has pointed at the character after __VA_ARGS__ */
-            int i, remainder, t = source_idx;
+            int remainder, t = source_idx;
             macro_t *macro = parent->macro;
 
             if (!macro)
@@ -877,7 +877,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 error("Unexpected identifier '__VA_ARGS__'");
 
             remainder = macro->num_params - macro->num_param_defs;
-            for (i = 0; i < remainder; i++) {
+            for (int i = 0; i < remainder; i++) {
                 source_idx = macro->params[macro->num_params - remainder + i];
                 next_char = SOURCE[source_idx];
                 next_token = lex_token();
@@ -1913,8 +1913,7 @@ basic_block_t *continue_bb[MAX_NESTING];
 
 void perform_side_effect(block_t *parent, basic_block_t *bb)
 {
-    int i;
-    for (i = 0; i < se_idx; i++) {
+    for (int i = 0; i < se_idx; i++) {
         ph1_ir_t *ph1_ir = add_ph1_ir(side_effect[i].op);
         memcpy(ph1_ir, &side_effect[i], sizeof(ph1_ir_t));
         add_insn(parent, bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
@@ -2288,8 +2287,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         strcpy(var_break->var_name, vd->var_name);
         break_exit_idx--;
 
-        int i, dangling = 1;
-        for (i = 0; i < MAX_BB_PRED; i++)
+        int dangling = 1;
+        for (int i = 0; i < MAX_BB_PRED; i++)
             if (switch_end->prev[i].bb)
                 dangling = 0;
 
@@ -2543,8 +2542,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         var_start->init_val = ph1_ir_idx - 1;
         lex_expect(T_semicolon);
 
-        int i;
-        for (i = 0; i < MAX_BB_PRED; i++) {
+        for (int i = 0; i < MAX_BB_PRED; i++) {
             if (cond_->prev[i].bb) {
                 bb_connect(cond_, bb, THEN);
                 bb_connect(cond_, do_while_end, ELSE);
@@ -2698,8 +2696,7 @@ void read_func_body(func_t *fdef, fn_t *fn)
     fn->bbs = bb_create(blk);
     fn->exit = bb_create(blk);
 
-    int i;
-    for (i = 0; i < fdef->num_params; i++) {
+    for (int i = 0; i < fdef->num_params; i++) {
         /* arguments */
         add_symbol(fn->bbs, &fdef->param_defs[i]);
         fdef->param_defs[i].base = &fdef->param_defs[i];
