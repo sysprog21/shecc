@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS := -O -g \
-	-ansi -pedantic \
+	-std=c99 -pedantic \
 	-Wall -Wextra \
 	-Wno-unused-but-set-variable \
 	-Wno-variadic-macros \

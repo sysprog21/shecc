@@ -97,13 +97,11 @@ arm_cond_t arm_get_cond(opcode_t op)
 
 int arm_extract_bits(int imm, int i_start, int i_end, int d_start, int d_end)
 {
-    int v;
-
     if (((d_end - d_start) != (i_end - i_start)) || (i_start > i_end) ||
         (d_start > d_end))
         error("Invalid bit copy");
 
-    v = imm >> i_start;
+    int v = imm >> i_start;
     v = v & ((2 << (i_end - i_start)) - 1);
     v = v << d_start;
     return v;

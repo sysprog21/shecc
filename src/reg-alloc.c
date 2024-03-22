@@ -14,8 +14,7 @@
 
 int check_live_out(basic_block_t *bb, var_t *var)
 {
-    int i;
-    for (i = 0; i < bb->live_out_idx; i++)
+    for (int i = 0; i < bb->live_out_idx; i++)
         if (bb->live_out[i] == var)
             return 1;
     return 0;
@@ -23,8 +22,7 @@ int check_live_out(basic_block_t *bb, var_t *var)
 
 void refresh(basic_block_t *bb, insn_t *insn)
 {
-    int i;
-    for (i = 0; i < REG_CNT; i++) {
+    for (int i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var)
             continue;
         if (check_live_out(bb, REGS[i].var))
@@ -76,8 +74,7 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
 /* Return the index of register for given variable. Otherwise, return -1. */
 int find_in_regs(var_t *var)
 {
-    int i;
-    for (i = 0; i < REG_CNT; i++) {
+    for (int i = 0; i < REG_CNT; i++) {
         if (REGS[i].var == var)
             return i;
     }
@@ -183,8 +180,7 @@ int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
 
 void spill_alive(basic_block_t *bb, insn_t *insn)
 {
-    int i;
-    for (i = 0; i < REG_CNT; i++) {
+    for (int i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var)
             continue;
         if (check_live_out(bb, REGS[i].var)) {
@@ -200,8 +196,7 @@ void spill_alive(basic_block_t *bb, insn_t *insn)
 
 void spill_live_out(basic_block_t *bb)
 {
-    int i;
-    for (i = 0; i < REG_CNT; i++) {
+    for (int i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var)
             continue;
         if (!check_live_out(bb, REGS[i].var)) {
@@ -230,8 +225,7 @@ void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
 void reg_alloc()
 {
     /* TODO: .bss and .data section */
-    insn_t *global_insn;
-    for (global_insn = GLOBAL_FUNC.fn->bbs->insn_list.head; global_insn;
+    for (insn_t *global_insn = GLOBAL_FUNC.fn->bbs->insn_list.head; global_insn;
          global_insn = global_insn->next) {
         ph2_ir_t *ir;
         int dest, src0;
@@ -293,26 +287,24 @@ void reg_alloc()
         }
     }
 
-    fn_t *fn;
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         fn->visited++;
 
         if (!strcmp(fn->func->return_def.var_name, "main"))
             MAIN_BB = fn->bbs;
 
-        int i;
-        for (i = 0; i < REG_CNT; i++)
+        for (int i = 0; i < REG_CNT; i++)
             REGS[i].var = NULL;
 
         /* set arguments available */
-        for (i = 0; i < fn->func->num_params; i++) {
+        for (int i = 0; i < fn->func->num_params; i++) {
             REGS[i].var = fn->func->param_defs[i].subscripts[0];
             REGS[i].polluted = 1;
         }
 
         /* variadic function implementation */
         if (fn->func->va_args) {
-            for (i = 0; i < MAX_PARAMS; i++) {
+            for (int i = 0; i < MAX_PARAMS; i++) {
                 ph2_ir_t *ir = bb_add_ph2_ir(fn->bbs, OP_store);
 
                 if (i < fn->func->num_params)
@@ -325,14 +317,12 @@ void reg_alloc()
             }
         }
 
-        basic_block_t *bb;
-        for (bb = fn->bbs; bb; bb = bb->rpo_next) {
+        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
             int is_pushing_args = 0, args = 0;
 
             bb->visited++;
 
-            insn_t *insn;
-            for (insn = bb->insn_list.head; insn; insn = insn->next) {
+            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
                 func_t *func;
                 ph2_ir_t *ir;
                 int dest, src0, src1;
@@ -406,8 +396,7 @@ void reg_alloc()
                         insn->rs1->offset = bb->belong_to->func->stack_size;
                         bb->belong_to->func->stack_size += 4;
 
-                        int i;
-                        for (i = 0; i < REG_CNT; i++)
+                        for (int i = 0; i < REG_CNT; i++)
                             if (REGS[i].var == insn->rs1) {
                                 ir = bb_add_ph2_ir(bb, OP_store);
                                 ir->src0 = i;
@@ -615,7 +604,7 @@ void reg_alloc()
         }
 
         /* handle implicit return */
-        for (i = 0; i < MAX_BB_PRED; i++) {
+        for (int i = 0; i < MAX_BB_PRED; i++) {
             basic_block_t *bb = fn->exit->prev[i].bb;
             if (!bb)
                 continue;
@@ -635,15 +624,12 @@ void reg_alloc()
 
 void dump_ph2_ir()
 {
-    ph2_ir_t *ph2_ir;
-    int i, rd, rs1, rs2;
+    for (int i = 0; i < ph2_ir_idx; i++) {
+        ph2_ir_t *ph2_ir = &PH2_IR[i];
 
-    for (i = 0; i < ph2_ir_idx; i++) {
-        ph2_ir = &PH2_IR[i];
-
-        rd = ph2_ir->dest + 48;
-        rs1 = ph2_ir->src0 + 48;
-        rs2 = ph2_ir->src1 + 48;
+        int rd = ph2_ir->dest + 48;
+        int rs1 = ph2_ir->src0 + 48;
+        int rs2 = ph2_ir->src1 + 48;
 
         switch (ph2_ir->op) {
         case OP_define:

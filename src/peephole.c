@@ -53,12 +53,10 @@ void insn_fusion(ph2_ir_t *ph2_ir)
 /* FIXME: release detached basic blocks */
 void peephole()
 {
-    fn_t *fn;
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
-        basic_block_t *bb;
-        for (bb = fn->bbs; bb; bb = bb->rpo_next) {
-            ph2_ir_t *ph2_ir;
-            for (ph2_ir = bb->ph2_ir_list.head; ph2_ir; ph2_ir = ph2_ir->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+            for (ph2_ir_t *ph2_ir = bb->ph2_ir_list.head; ph2_ir;
+                 ph2_ir = ph2_ir->next) {
                 ph2_ir_t *next = ph2_ir->next;
                 if (!next)
                     continue;

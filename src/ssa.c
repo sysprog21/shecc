@@ -48,8 +48,7 @@ void bb_backward_traversal(bb_traversal_args_t *args)
     if (args->preorder_cb)
         args->preorder_cb(args->fn, args->bb);
 
-    int i;
-    for (i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < MAX_BB_PRED; i++) {
         if (!args->bb->prev[i].bb)
             continue;
         if (args->bb->prev[i].bb->visited < args->fn->visited) {
@@ -101,9 +100,8 @@ void bb_build_rpo(fn_t *fn, basic_block_t *bb)
 
 void build_rpo()
 {
-    fn_t *fn;
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         args->fn = fn;
         args->bb = fn->bbs;
 
@@ -146,8 +144,7 @@ basic_block_t *intersect(basic_block_t *i, basic_block_t *j)
  */
 void build_idom()
 {
-    fn_t *fn;
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         int changed;
 
         fn->bbs->idom = fn->bbs;
@@ -155,12 +152,10 @@ void build_idom()
         do {
             changed = 0;
 
-            basic_block_t *bb;
-            for (bb = fn->bbs->rpo_next; bb; bb = bb->rpo_next) {
+            for (basic_block_t *bb = fn->bbs->rpo_next; bb; bb = bb->rpo_next) {
                 /* pick one predecessor */
                 basic_block_t *pred;
-                int i;
-                for (i = 0; i < MAX_BB_PRED; i++) {
+                for (int i = 0; i < MAX_BB_PRED; i++) {
                     if (!bb->prev[i].bb)
                         continue;
                     if (!bb->prev[i].bb->idom)
@@ -169,7 +164,7 @@ void build_idom()
                     break;
                 }
 
-                for (i = 0; i < MAX_BB_PRED; i++) {
+                for (int i = 0; i < MAX_BB_PRED; i++) {
                     if (!bb->prev[i].bb)
                         continue;
                     if (bb->prev[i].bb == pred)
@@ -221,9 +216,8 @@ void bb_build_dom(fn_t *fn, basic_block_t *bb)
 
 void build_dom()
 {
-    fn_t *fn;
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         args->fn = fn;
         args->bb = fn->bbs;
 
@@ -238,25 +232,24 @@ void bb_build_df(fn_t *fn, basic_block_t *bb)
 {
     UNUSED(fn);
 
-    int i, cnt = 0;
-    for (i = 0; i < MAX_BB_PRED; i++)
+    int cnt = 0;
+    for (int i = 0; i < MAX_BB_PRED; i++)
         if (bb->prev[i].bb)
             cnt++;
 
     if (cnt > 1)
-        for (i = 0; i < MAX_BB_PRED; i++)
+        for (int i = 0; i < MAX_BB_PRED; i++)
             if (bb->prev[i].bb) {
-                basic_block_t *curr;
-                for (curr = bb->prev[i].bb; curr != bb->idom; curr = curr->idom)
+                for (basic_block_t *curr = bb->prev[i].bb; curr != bb->idom;
+                     curr = curr->idom)
                     curr->DF[curr->df_idx++] = bb;
             }
 }
 
 void build_df()
 {
-    fn_t *fn;
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         args->fn = fn;
         args->bb = fn->bbs;
 
@@ -269,8 +262,7 @@ void build_df()
 
 int var_check_killed(var_t *var, basic_block_t *bb)
 {
-    int i;
-    for (i = 0; i < bb->live_kill_idx; i++) {
+    for (int i = 0; i < bb->live_kill_idx; i++) {
         if (bb->live_kill[i] == var)
             return 1;
     }
@@ -279,8 +271,8 @@ int var_check_killed(var_t *var, basic_block_t *bb)
 
 void bb_add_killed_var(basic_block_t *bb, var_t *var)
 {
-    int i, found = 0;
-    for (i = 0; i < bb->live_kill_idx; i++) {
+    int found = 0;
+    for (int i = 0; i < bb->live_kill_idx; i++) {
         if (bb->live_kill[i] == var) {
             found = 1;
             break;
@@ -348,8 +340,7 @@ void bb_solve_globals(fn_t *fn, basic_block_t *bb)
 {
     UNUSED(fn);
 
-    insn_t *insn;
-    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->rs1)
             if (!var_check_killed(insn->rs1, bb))
                 fn_add_global(bb->belong_to, insn->rs1);
@@ -365,9 +356,8 @@ void bb_solve_globals(fn_t *fn, basic_block_t *bb)
 
 void solve_globals()
 {
-    fn_t *fn;
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         args->fn = fn;
         args->bb = fn->bbs;
 
@@ -383,8 +373,7 @@ int var_check_in_scope(var_t *var, block_t *block)
     func_t *fn = block->func;
 
     while (block) {
-        int i;
-        for (i = 0; i < block->next_local; i++) {
+        for (int i = 0; i < block->next_local; i++) {
             var_t *locals = block->locals;
             if (var == &locals[i])
                 return 1;
@@ -392,8 +381,7 @@ int var_check_in_scope(var_t *var, block_t *block)
         block = block->parent;
     }
 
-    int i;
-    for (i = 0; i < fn->num_params; i++) {
+    for (int i = 0; i < fn->num_params; i++) {
         if (&fn->param_defs[i] == var)
             return 1;
     }
@@ -403,9 +391,8 @@ int var_check_in_scope(var_t *var, block_t *block)
 
 int insert_phi_insn(basic_block_t *bb, var_t *var)
 {
-    insn_t *insn;
     int found = 0;
-    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         if ((insn->opcode == OP_phi) && (insn->rd == var)) {
             found = 1;
             break;
@@ -432,31 +419,26 @@ int insert_phi_insn(basic_block_t *bb, var_t *var)
 
 void solve_phi_insertion()
 {
-    fn_t *fn;
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
-        symbol_t *sym;
-        for (sym = fn->global_sym_list.head; sym; sym = sym->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        for (symbol_t *sym = fn->global_sym_list.head; sym; sym = sym->next) {
             var_t *var = sym->var;
 
             basic_block_t *work_list[64];
             int work_list_idx = 0;
 
-            ref_block_t *ref;
-            for (ref = var->ref_block_list.head; ref; ref = ref->next)
+            for (ref_block_t *ref = var->ref_block_list.head; ref;
+                 ref = ref->next)
                 work_list[work_list_idx++] = ref->bb;
 
-            int i;
-            for (i = 0; i < work_list_idx; i++) {
+            for (int i = 0; i < work_list_idx; i++) {
                 basic_block_t *bb = work_list[i];
-                int j;
-                for (j = 0; j < bb->df_idx; j++) {
+                for (int j = 0; j < bb->df_idx; j++) {
                     basic_block_t *df = bb->DF[j];
                     if (!var_check_in_scope(var, df->scope))
                         continue;
 
                     int is_decl = 0;
-                    symbol_t *s;
-                    for (s = df->symbol_list.head; s; s = s->next)
+                    for (symbol_t *s = df->symbol_list.head; s; s = s->next)
                         if (s->var == var) {
                             is_decl = 1;
                             break;
@@ -472,7 +454,7 @@ void solve_phi_insertion()
                         continue;
 
                     if (insert_phi_insn(df, var)) {
-                        int l, found = 0;
+                        int found = 0;
 
                         /* Restrict phi insertion of ternary operation.
                          *
@@ -483,7 +465,7 @@ void solve_phi_insertion()
                         if (var->is_ternary_ret)
                             continue;
 
-                        for (l = 0; l < work_list_idx; l++)
+                        for (int l = 0; l < work_list_idx; l++)
                             if (work_list[l] == df) {
                                 found = 1;
                                 break;
@@ -523,8 +505,7 @@ var_t *get_stack_top_subscript_var(var_t *var)
         error("Index is less than 1");
 
     int sub = var->base->rename.stack[var->base->rename.stack_idx - 1];
-    int i;
-    for (i = 0; i < var->base->subscripts_idx; i++) {
+    for (int i = 0; i < var->base->subscripts_idx; i++) {
         if (var->base->subscripts[i]->subscript == sub)
             return var->base->subscripts[i];
     }
@@ -567,8 +548,7 @@ void append_phi_operand(insn_t *insn, var_t *var, basic_block_t *bb_from)
 
 void bb_solve_phi_params(basic_block_t *bb)
 {
-    insn_t *insn;
-    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->opcode == OP_phi)
             new_name(bb->scope, &insn->rd);
         else {
@@ -583,31 +563,30 @@ void bb_solve_phi_params(basic_block_t *bb)
     }
 
     if (bb->next) {
-        for (insn = bb->next->insn_list.head; insn; insn = insn->next)
+        for (insn_t *insn = bb->next->insn_list.head; insn; insn = insn->next)
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
     }
 
     if (bb->then_) {
-        for (insn = bb->then_->insn_list.head; insn; insn = insn->next)
+        for (insn_t *insn = bb->then_->insn_list.head; insn; insn = insn->next)
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
     }
 
     if (bb->else_) {
-        for (insn = bb->else_->insn_list.head; insn; insn = insn->next)
+        for (insn_t *insn = bb->else_->insn_list.head; insn; insn = insn->next)
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
     }
 
-    int i;
-    for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
+    for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
         if (!bb->dom_next[i])
             break;
         bb_solve_phi_params(bb->dom_next[i]);
     }
 
-    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->opcode == OP_phi)
             pop_name(insn->rd);
         else if (insn->rd)
@@ -617,10 +596,8 @@ void bb_solve_phi_params(basic_block_t *bb)
 
 void solve_phi_params()
 {
-    fn_t *fn;
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
-        int i;
-        for (i = 0; i < fn->func->num_params; i++) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        for (int i = 0; i < fn->func->num_params; i++) {
             /* FIXME: Rename arguments directly, might be not good here. */
             var_t *var = require_var(fn->bbs->scope);
             var_t *base = &fn->func->param_defs[i];
@@ -675,8 +652,8 @@ void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
         if (insn->opcode != OP_phi)
             break;
 
-        phi_operand_t *operand;
-        for (operand = insn->phi_ops; operand; operand = operand->next)
+        for (phi_operand_t *operand = insn->phi_ops; operand;
+             operand = operand->next)
             append_unwound_phi_insn(operand->from, insn->rd, operand->var);
         /* TODO: Release dangling phi instruction */
     }
@@ -688,9 +665,8 @@ void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
 
 void unwind_phi()
 {
-    fn_t *fn;
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         args->fn = fn;
         args->bb = fn->bbs;
 
@@ -833,8 +809,7 @@ void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
                     insn->phi_ops->var->var_name,
                     insn->phi_ops->var->subscript);
 
-            phi_operand_t *op;
-            for (op = insn->phi_ops->next; op; op = op->next) {
+            for (phi_operand_t *op = insn->phi_ops->next; op; op = op->next) {
                 fprintf(fd, ", %s<SUB>%d</SUB>", op->var->var_name,
                         op->var->subscript);
             }
@@ -972,8 +947,7 @@ void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
         bb_dump_connection(fd, bb, bb->else_, ELSE);
     }
 
-    int i;
-    for (i = 0; i < MAX_BB_PRED; i++)
+    for (int i = 0; i < MAX_BB_PRED; i++)
         if (bb->prev[i].bb)
             bb_dump_connection(fd, bb->prev[i].bb, bb, bb->prev[i].type);
 }
@@ -981,11 +955,10 @@ void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
 void dump_cfg(char name[])
 {
     FILE *fd = fopen(name, "w");
-    fn_t *fn;
 
     fprintf(fd, "strict digraph CFG {\n");
     fprintf(fd, "node [shape=box]\n");
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         fn->visited++;
         fprintf(fd, "subgraph cluster_%p {\n", fn);
         fprintf(fd, "label=\"%p\"\n", fn);
@@ -999,8 +972,7 @@ void dump_cfg(char name[])
 void dom_dump(FILE *fd, basic_block_t *bb)
 {
     fprintf(fd, "\"%p\"\n", bb);
-    int i;
-    for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
+    for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
         if (!bb->dom_next[i])
             break;
         dom_dump(fd, bb->dom_next[i]);
@@ -1011,12 +983,11 @@ void dom_dump(FILE *fd, basic_block_t *bb)
 void dump_dom(char name[])
 {
     FILE *fd = fopen(name, "w");
-    fn_t *fn;
 
     fprintf(fd, "strict digraph DOM {\n");
     fprintf(fd, "node [shape=box]\n");
     fprintf(fd, "splines=polyline\n");
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         fprintf(fd, "subgraph cluster_%p {\n", fn);
         fprintf(fd, "label=\"%p\"\n", fn);
         dom_dump(fd, fn->bbs);
@@ -1070,9 +1041,8 @@ int cse(insn_t *insn, basic_block_t *bb)
     if (base->is_global || idx->is_global)
         return 0;
 
-    basic_block_t *b;
     insn_t *i = prev;
-    for (b = bb;; b = b->idom) {
+    for (basic_block_t *b = bb;; b = b->idom) {
         if (!i)
             i = b->insn_list.tail;
 
@@ -1194,15 +1164,12 @@ int const_folding(insn_t *insn)
 
 void optimize()
 {
-    fn_t *fn;
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         /* basic block level (control flow) optimizations */
 
-        basic_block_t *bb;
-        for (bb = fn->bbs; bb; bb = bb->rpo_next) {
+        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
             /* instruction level optimizations */
-            insn_t *insn;
-            for (insn = bb->insn_list.head; insn; insn = insn->next) {
+            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
                 if (cse(insn, bb))
                     continue;
                 if (const_folding(insn))
@@ -1247,9 +1214,8 @@ void bb_build_reversed_rpo(fn_t *fn, basic_block_t *bb)
 
 void build_reversed_rpo()
 {
-    fn_t *fn;
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         fn->bb_cnt = 0;
         args->fn = fn;
         args->bb = fn->exit;
@@ -1280,8 +1246,7 @@ void add_live_gen(basic_block_t *bb, var_t *var)
     if (var->is_global)
         return;
 
-    int i;
-    for (i = 0; i < bb->live_gen_idx; i++)
+    for (int i = 0; i < bb->live_gen_idx; i++)
         if (bb->live_gen[i] == var)
             return;
     bb->live_gen[bb->live_gen_idx++] = var;
@@ -1298,8 +1263,7 @@ void bb_solve_locals(fn_t *fn, basic_block_t *bb)
     UNUSED(fn);
 
     int i = 0;
-    insn_t *insn;
-    for (insn = bb->insn_list.head; insn; insn = insn->next) {
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         insn->idx = i++;
 
         if (insn->rs1) {
@@ -1320,8 +1284,7 @@ void bb_solve_locals(fn_t *fn, basic_block_t *bb)
 
 void add_live_in(basic_block_t *bb, var_t *var)
 {
-    int i;
-    for (i = 0; i < bb->live_in_idx; i++)
+    for (int i = 0; i < bb->live_in_idx; i++)
         if (bb->live_in[i] == var)
             return;
     bb->live_in[bb->live_in_idx++] = var;
@@ -1331,22 +1294,20 @@ void compute_live_in(basic_block_t *bb)
 {
     bb->live_in_idx = 0;
 
-    int i;
-    for (i = 0; i < bb->live_out_idx; i++) {
+    for (int i = 0; i < bb->live_out_idx; i++) {
         if (var_check_killed(bb->live_out[i], bb))
             continue;
         add_live_in(bb, bb->live_out[i]);
     }
-    for (i = 0; i < bb->live_gen_idx; i++)
+    for (int i = 0; i < bb->live_gen_idx; i++)
         add_live_in(bb, bb->live_gen[i]);
 }
 
 int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
 {
-    int i;
-    for (i = 0; i < bb->live_in_idx; i++) {
-        int j, found = 0;
-        for (j = 0; j < live_out_idx; j++)
+    for (int i = 0; i < bb->live_in_idx; i++) {
+        int found = 0;
+        for (int j = 0; j < live_out_idx; j++)
             if (live_out[j] == bb->live_in[i]) {
                 found = 1;
                 break;
@@ -1381,10 +1342,9 @@ int recompute_live_out(basic_block_t *bb)
         return 1;
     }
 
-    int i;
-    for (i = 0; i < live_out_idx; i++) {
-        int j, same = 0;
-        for (j = 0; j < bb->live_out_idx; j++)
+    for (int i = 0; i < live_out_idx; i++) {
+        int same = 0;
+        for (int j = 0; j < bb->live_out_idx; j++)
             if (live_out[i] == bb->live_out[j]) {
                 same = 1;
                 break;
@@ -1402,9 +1362,8 @@ void liveness_analysis()
 {
     build_reversed_rpo();
 
-    fn_t *fn;
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         args->fn = fn;
         args->bb = fn->bbs;
 
@@ -1412,8 +1371,7 @@ void liveness_analysis()
         args->preorder_cb = bb_reset_live_kill_idx;
         bb_forward_traversal(args);
 
-        int i;
-        for (i = 0; i < fn->func->num_params; i++)
+        for (int i = 0; i < fn->func->num_params; i++)
             bb_add_killed_var(fn->bbs, fn->func->param_defs[i].subscripts[0]);
 
         fn->visited++;
@@ -1422,7 +1380,7 @@ void liveness_analysis()
     }
     free(args);
 
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         basic_block_t *bb = fn->exit;
         int changed;
         do {
@@ -1446,8 +1404,7 @@ void bb_release(fn_t *fn, basic_block_t *bb)
     }
 
     /* disconnect all predecessors */
-    int i;
-    for (i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < MAX_BB_PRED; i++) {
         if (!bb->prev[i].bb)
             continue;
         switch (bb->prev[i].type) {
@@ -1471,9 +1428,8 @@ void bb_release(fn_t *fn, basic_block_t *bb)
 
 void ssa_release()
 {
-    fn_t *fn;
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         args->fn = fn;
         args->bb = fn->bbs;
 

@@ -46,9 +46,8 @@ int main(int argc, char *argv[])
 {
     int libc = 1;
     char *out = NULL, *in = NULL;
-    int i;
 
-    for (i = 1; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
             dump_ir = 1;
         else if (!strcmp(argv[i], "--no-libc"))
