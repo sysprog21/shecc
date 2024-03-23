@@ -28,17 +28,14 @@ void write_char(char c)
 
 void write_str(char *str)
 {
-    int i = 0;
-    while (str[i])
-        write_char(str[i++]);
+    for (int i = 0; str[i]; i++)
+        write_char(str[i]);
 }
 
 void write_line(char *src)
 {
-    int i;
-
     write_str("  __c(\"");
-    for (i = 0; src[i]; i++) {
+    for (int i = 0; src[i]; i++) {
         if (src[i] == '\"') {
             write_char('\\');
             write_char('\"');
@@ -68,9 +65,8 @@ void load_from(char *file)
 
 void save_to(char *file)
 {
-    int i;
     FILE *f = fopen(file, "wb");
-    for (i = 0; i < source_idx; i++)
+    for (int i = 0; i < source_idx; i++)
         fputc(SOURCE[i], f);
     fclose(f);
 }
@@ -87,8 +83,9 @@ int main(int argc, char *argv[])
 
     write_str("/* Created by tools/inliner - DO NOT EDIT. */\n");
 
-    /* __c is inspired by __asm keyword, which invokes the inline assembler.
-     * Here, it is meant to "inline C code." Example:
+    /* The __c construct is inspired by the __asm keyword, which is used to
+     * invoke the inline assembler. In a similar vein, __c aims to "inline C
+     * code," allowing for the emission of specified C code as needed. e.g.,
      *   __c("int strlen(char *str) {\n");
      *   __c("    int i = 0;\n");
      *   __c("    while (str[i])\n");
@@ -97,8 +94,7 @@ int main(int argc, char *argv[])
      *   __c("}\n");
      */
     write_str("void __c(char *src) {\n");
-    write_str("    int i;\n");
-    write_str("    for (i = 0; src[i]; i++)\n");
+    write_str("    for (int i = 0; src[i]; i++)\n");
     write_str("        SOURCE[source_idx++] = src[i];\n");
     write_str("}\n");
 
