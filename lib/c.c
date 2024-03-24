@@ -439,11 +439,11 @@ void sprintf(char *buffer, char *str, ...)
     buffer[bi] = 0;
 }
 
-int free_all();
+int __free_all();
 
 void exit(int exit_code)
 {
-    free_all();
+    __free_all();
     __syscall(__syscall_exit, exit_code);
 }
 
@@ -532,15 +532,15 @@ typedef struct chunk {
     void *ptr;
 } chunk_t;
 
-int align_up(int size)
+int __align_up(int size)
 {
     int mask = PAGESIZE - 1;
     return ((size - 1) | mask) + 1;
 }
 
-chunk_t *head;
-chunk_t *tail;
-chunk_t *freelist_head;
+chunk_t *__alloc_head;
+chunk_t *__alloc_tail;
+chunk_t *__freelist_head;
 
 void *malloc(int size)
 {
@@ -550,42 +550,43 @@ void *malloc(int size)
     int flags = 34; /* MAP_PRIVATE (0x02) | MAP_ANONYMOUS (0x20) */
     int prot = 3;   /* PROT_READ (0x01) | PROT_WRITE (0x02) */
 
-    if (!head) {
-        chunk_t *tmp = __syscall(__syscall_mmap2, NULL,
-                                 align_up(sizeof(chunk_t)), prot, flags, -1, 0);
-        head = tmp;
-        tail = tmp;
-        head->next = NULL;
-        head->prev = NULL;
-        head->ptr = NULL;
-        head->size = 0;
+    if (!__alloc_head) {
+        chunk_t *tmp =
+            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t)), prot,
+                      flags, -1, 0);
+        __alloc_head = tmp;
+        __alloc_tail = tmp;
+        __alloc_head->next = NULL;
+        __alloc_head->prev = NULL;
+        __alloc_head->ptr = NULL;
+        __alloc_head->size = 0;
     }
 
-    if (!freelist_head) {
-        chunk_t *tmp = __syscall(__syscall_mmap2, NULL,
-                                 align_up(sizeof(chunk_t)), prot, flags, -1, 0);
-        freelist_head = tmp;
-        freelist_head->next = NULL;
-        freelist_head->prev = NULL;
-        freelist_head->ptr = NULL;
-        freelist_head->size = -1;
+    if (!__freelist_head) {
+        chunk_t *tmp =
+            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t)), prot,
+                      flags, -1, 0);
+        __freelist_head = tmp;
+        __freelist_head->next = NULL;
+        __freelist_head->prev = NULL;
+        __freelist_head->ptr = NULL;
+        __freelist_head->size = -1;
     }
 
     /* to search the best chunk */
     chunk_t *best_fit_chunk = NULL;
     chunk_t *allocated;
 
-    if (!freelist_head->next) {
+    if (!__freelist_head->next) {
         /* If no more chunks in the free chunk list, allocate best_fit_chunk
          * as NULL.
          */
         allocated = best_fit_chunk;
     } else {
-        chunk_t *fh = freelist_head;
         /* record the size of the chunk */
         int bsize = 0;
 
-        while (fh->next) {
+        for (chunk_t *fh = __freelist_head; fh->next; fh = fh->next) {
             if (fh->size >= size && !best_fit_chunk) {
                 /* first time setting fh as best_fit_chunk */
                 best_fit_chunk = fh;
@@ -596,7 +597,6 @@ void *malloc(int size)
                 best_fit_chunk = fh;
                 bsize = fh->size;
             }
-            fh = fh->next;
         }
 
         /* a suitable chunk has been found */
@@ -606,7 +606,7 @@ void *malloc(int size)
                 chunk_t *tmp = best_fit_chunk->prev;
                 tmp->next = best_fit_chunk->next;
             } else
-                freelist_head = best_fit_chunk->next;
+                __freelist_head = best_fit_chunk->next;
 
             if (best_fit_chunk->next) {
                 chunk_t *tmp = best_fit_chunk->next;
@@ -618,44 +618,43 @@ void *malloc(int size)
 
     if (!allocated) {
         allocated =
-            __syscall(__syscall_mmap2, NULL, align_up(sizeof(chunk_t) + size),
+            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t) + size),
                       prot, flags, -1, 0);
-        allocated->size = align_up(sizeof(chunk_t) + size);
+        allocated->size = __align_up(sizeof(chunk_t) + size);
     }
 
-    tail->next = allocated;
-    allocated->prev = tail;
+    __alloc_tail->next = allocated;
+    allocated->prev = __alloc_tail;
 
-    tail = allocated;
-    tail->next = NULL;
-    tail->size = allocated->size;
+    __alloc_tail = allocated;
+    __alloc_tail->next = NULL;
+    __alloc_tail->size = allocated->size;
     int offset = sizeof(chunk_t) - 4;
-    tail->ptr = tail + offset;
-    return tail->ptr;
+    __alloc_tail->ptr = __alloc_tail + offset;
+    return __alloc_tail->ptr;
 }
 
 void *calloc(int n, int size)
 {
     char *p = malloc(n * size);
-    int i;
-    for (i = 0; i < n * size; i++)
+    for (int i = 0; i < n * size; i++)
         p[i] = 0;
     return p;
 }
 
-void rfree(void *ptr, int size)
+void __rfree(void *ptr, int size)
 {
     if (!ptr)
         return;
     __syscall(__syscall_munmap, ptr, size);
 }
 
-int free_all()
+int __free_all()
 {
-    if (!freelist_head && !head)
+    if (!__freelist_head && !__alloc_head)
         return 0;
 
-    chunk_t *cur = freelist_head;
+    chunk_t *cur = __freelist_head;
     chunk_t *rel;
 
     /* release freelist */
@@ -664,18 +663,18 @@ int free_all()
         cur = cur->next;
         rel->next = NULL;
         rel->prev = NULL;
-        rfree(rel, rel->size);
+        __rfree(rel, rel->size);
     }
 
-    if (head->next) {
-        cur = head->next;
+    if (__alloc_head->next) {
+        cur = __alloc_head->next;
         /* release chunks which not be free */
         while (cur) {
             rel = cur;
             cur = cur->next;
             rel->next = NULL;
             rel->prev = NULL;
-            rfree(rel, rel->size);
+            __rfree(rel, rel->size);
         }
     }
     return 0;
@@ -687,7 +686,7 @@ void free(void *ptr)
         return;
 
     /* FIXME: it takes long time to search in chuncks */
-    chunk_t *cur = head;
+    chunk_t *cur = __alloc_head;
     while (cur->ptr != ptr) {
         cur = cur->next;
         if (!cur) {
@@ -701,20 +700,19 @@ void free(void *ptr)
         prev = cur->prev;
         prev->next = cur->next;
     } else
-        head = cur->next;
+        __alloc_head = cur->next;
 
-    chunk_t *next;
     if (cur->next) {
-        next = cur->next;
+        chunk_t *next = cur->next;
         next->prev = cur->prev;
     } else {
         prev->next = NULL;
-        tail = prev;
+        __alloc_tail = prev;
     }
 
-    /* Insert head in freelist_head */
-    cur->next = freelist_head;
+    /* Insert head in __freelist_head */
+    cur->next = __freelist_head;
     cur->prev = NULL;
-    freelist_head->prev = cur;
-    freelist_head = cur;
+    __freelist_head->prev = cur;
+    __freelist_head = cur;
 }
