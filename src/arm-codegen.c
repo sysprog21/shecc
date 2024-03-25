@@ -13,10 +13,9 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
 {
     switch (ph2_ir->op) {
     case OP_load_constant:
-        /* ARMv7 uses 12 bits to encode immediate value, but the
-         * higher 4 bits are for rotation. See A5.2.4 "Modified
-         * immediate constants in ARM instructions" in ARMv7-A
-         * manual.
+        /* ARMv7 uses 12 bits to encode immediate value, but the higher 4 bits
+         * are for rotation. See A5.2.4 "Modified immediate constants in ARM
+         * instructions" in ARMv7-A manual.
          */
         if (ph2_ir->src0 < 0)
             elf_offset += 12;
@@ -27,10 +26,9 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_address_of:
     case OP_global_address_of:
-        /* ARMv7 uses 12 bits to encode immediate value, but the
-         * higher 4 bits are for rotation. See A5.2.4 "Modified
-         * immediate constants in ARM instructions" in ARMv7-A
-         * manual.
+        /* ARMv7 uses 12 bits to encode immediate value, but the higher 4 bits
+         * are for rotation. See A5.2.4 "Modified immediate constants in ARM
+         * instructions" in ARMv7-A manual.
          */
         if (ph2_ir->src0 > 255)
             elf_offset += 12;
@@ -45,8 +43,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_load:
     case OP_global_load:
-        /* ARMv7 straight uses 12 bits to encode the offset of
-         * load instruction (no rotation).
+        /* ARMv7 straight uses 12 bits to encode the offset of load instruction
+         * (no rotation).
          */
         if (ph2_ir->src0 > 4095)
             elf_offset += 16;
@@ -57,8 +55,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_store:
     case OP_global_store:
-        /* ARMv7 straight uses 12 bits to encode the offset of
-         * store instruction (no rotation).
+        /* ARMv7 straight uses 12 bits to encode the offset of store instruction
+         * (no rotation).
          */
         if (ph2_ir->src1 > 4095)
             elf_offset += 16;
@@ -126,10 +124,11 @@ void cfg_flatten()
     GLOBAL_FUNC.fn->bbs->elf_offset = elf_offset;
 
     for (ph2_ir_t *ph2_ir = GLOBAL_FUNC.fn->bbs->ph2_ir_list.head; ph2_ir;
-         ph2_ir = ph2_ir->next)
+         ph2_ir = ph2_ir->next) {
         update_elf_offset(ph2_ir);
+    }
 
-    /* prepare `argc` and `argv`, then proceed to `main` function */
+    /* prepare 'argc' and 'argv', then proceed to 'main' function */
     elf_offset += 24;
 
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
@@ -142,21 +141,23 @@ void cfg_flatten()
         for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
             bb->elf_offset = elf_offset;
 
-            if (bb == fn->bbs)
+            if (bb == fn->bbs) {
                 /* save ra, sp */
                 elf_offset += 16;
+            }
 
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {
                 flatten_ir = add_ph2_ir(OP_generic);
                 memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
-                if (insn->op == OP_return)
+                if (insn->op == OP_return) {
                     /* restore sp */
                     flatten_ir->src1 = bb->belong_to->func->stack_size;
+                }
 
                 if (insn->op == OP_branch) {
-                    /* In SSA, we index `else_bb` first, and then `then_bb` */
+                    /* In SSA, we index 'else_bb' first, and then 'then_bb' */
                     if (insn->else_bb != bb->rpo_next)
                         flatten_ir->is_branch_detached = 1;
                 }
@@ -415,7 +416,7 @@ void code_generate()
          ph2_ir = ph2_ir->next)
         emit_ph2_ir(ph2_ir);
 
-    /* prepare `argc` and `argv`, then proceed to `main` function */
+    /* prepare 'argc' and 'argv', then proceed to 'main' function */
     emit(__movw(__AL, __r8, GLOBAL_FUNC.stack_size));
     emit(__movt(__AL, __r8, GLOBAL_FUNC.stack_size));
     emit(__add_r(__AL, __r8, __r12, __r8));

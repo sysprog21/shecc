@@ -76,9 +76,9 @@ char *elf_section;
  * insert_trie() - Inserts a new element into the trie structure.
  * @trie: A pointer to the trie where the name will be inserted.
  * @name: The name to be inserted into the trie.
- * @funcs_index: The index of the pointer to the func_t. The index is
- *               recorded in a 1-indexed format. Because the first element of
- *               `FUNCS` has been reserved, there's no need to shift it.
+ * @funcs_index: The index of the pointer to the func_t. The index is recorded
+ *     in a 1-indexed format. Because the first element of 'FUNCS' has been
+ *     reserved, there is no need to shift it.
  * Return: The index of the pointer to the func_t.
  *
  * If the function has been inserted, the return value is the index of the
@@ -155,8 +155,7 @@ type_t *find_type(char *type_name, int flag)
             if (flag == 2)
                 continue;
             if (!strcmp(TYPES[i].type_name, type_name)) {
-                /*
-                 * If it is a forwardly declared alias of a structure, return
+                /* If it is a forwardly declared alias of a structure, return
                  * the base structure type.
                  */
                 if (TYPES[i].base_type == TYPE_typedef && TYPES[i].size == 0)
@@ -305,7 +304,7 @@ func_t *add_func(char *name)
         strcpy(fn->return_def.var_name, name);
     }
     fn = &FUNCS[index];
-    fn->stack_size = 4; /*starting point of stack */
+    fn->stack_size = 4; /* starting point of stack */
     return fn;
 }
 
@@ -347,8 +346,7 @@ func_t *find_func(char func_name[])
 
 var_t *find_member(char token[], type_t *type)
 {
-    /*
-     * If it is a forwardly declared alias of a structure, switch to the base
+    /* If it is a forwardly declared alias of a structure, switch to the base
      * structure type.
      */
     if (type->size == 0)
@@ -419,7 +417,7 @@ int size_var(var_t *var)
     return size;
 }
 
-/* TODO: Integrate with `func_t` */
+/* TODO: Integrate with 'func_t' */
 fn_t *add_fn()
 {
     fn_t *n = calloc(1, sizeof(fn_t));
@@ -434,7 +432,7 @@ fn_t *add_fn()
     return n;
 }
 
-/* Create a basic block and set the scope of variables to `parent` block */
+/* Create a basic block and set the scope of variables to 'parent' block */
 basic_block_t *bb_create(block_t *parent)
 {
     basic_block_t *bb = calloc(1, sizeof(basic_block_t));
@@ -623,7 +621,8 @@ void global_release()
 void error(char *msg)
 {
     /* Construct error source diagnostics, enabling precise identification of
-     * syntax and logic issues within the code. */
+     * syntax and logic issues within the code.
+     */
     int offset, start_idx, i = 0;
     char diagnostic[512 /* MAX_LINE_LEN * 2 */];
 
@@ -645,7 +644,8 @@ void error(char *msg)
     strcpy(diagnostic + i, "^ Error occurs here");
 
     /* TODO: figure out the corresponding C source file path and report line
-     * number */
+     * number.
+     */
     printf("Error %s at source location %d\n%s\n", msg, source_idx, diagnostic);
     abort();
 }

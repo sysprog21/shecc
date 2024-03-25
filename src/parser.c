@@ -213,12 +213,11 @@ int read_constant_expr_operand()
 
 int read_constant_infix_expr(int precedence)
 {
-    int lhs, rhs, current_precedence;
-    opcode_t op;
+    int lhs, rhs;
 
     /* Evaluate unary expression first */
-    op = get_operator();
-    current_precedence = get_unary_operator_prio(op);
+    opcode_t op = get_operator();
+    int current_precedence = get_unary_operator_prio(op);
     if (current_precedence != 0 && current_precedence >= precedence) {
         lhs = read_constant_infix_expr(current_precedence);
 
@@ -321,7 +320,7 @@ int read_constant_expr()
 }
 
 /* Skips lines where preprocessor match is false, this will stop once next
- * token is either `T_cppd_elif`, `T_cppd_else` or `cppd_endif`.
+ * token is either 'T_cppd_elif', 'T_cppd_else' or 'cppd_endif'.
  */
 void cppd_control_flow_skip_lines()
 {
@@ -350,8 +349,8 @@ void read_defined_macro()
     check_def(lookup_alias);
 }
 
-/* read preprocessor directive at each potential positions:
- * e.g. global statement / body statement
+/* read preprocessor directive at each potential positions: e.g.,
+ * global statement / body statement
  */
 int read_preproc_directive()
 {
@@ -573,7 +572,7 @@ void read_parameter_list_decl(func_t *fd, int anon)
     }
     fd->num_params = vn;
 
-    /* Up to `MAX_PARAMS` parameters are accepted for the variadic function. */
+    /* Up to 'MAX_PARAMS' parameters are accepted for the variadic function. */
     if (lex_accept(T_elipsis))
         fd->va_args = 1;
 
@@ -582,16 +581,13 @@ void read_parameter_list_decl(func_t *fd, int anon)
 
 void read_literal_param(block_t *parent, basic_block_t *bb)
 {
-    ph1_ir_t *ph1_ir;
-    var_t *vd;
-    int index;
     char literal[MAX_TOKEN_LEN];
 
     lex_ident(T_string, literal);
-    index = write_symbol(literal, strlen(literal) + 1);
+    int index = write_symbol(literal, strlen(literal) + 1);
 
-    ph1_ir = add_ph1_ir(OP_load_data_address);
-    vd = require_var(parent);
+    ph1_ir_t *ph1_ir = add_ph1_ir(OP_load_data_address);
+    var_t *vd = require_var(parent);
     strcpy(vd->var_name, gen_name());
     vd->init_val = index;
     ph1_ir->dest = vd;
@@ -602,8 +598,6 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
 
 void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
 {
-    ph1_ir_t *ph1_ir;
-    var_t *vd;
     char token[MAX_ID_LEN];
     int value = 0;
     int i = 0;
@@ -641,8 +635,8 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
     if (is_neg)
         value = -value;
 
-    ph1_ir = add_ph1_ir(OP_load_constant);
-    vd = require_var(parent);
+    ph1_ir_t *ph1_ir = add_ph1_ir(OP_load_constant);
+    var_t *vd = require_var(parent);
     vd->init_val = value;
     strcpy(vd->var_name, gen_name());
     ph1_ir->dest = vd;
@@ -653,13 +647,11 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
 void read_char_param(block_t *parent, basic_block_t *bb)
 {
     char token[5];
-    ph1_ir_t *ph1_ir;
-    var_t *vd;
 
     lex_ident(T_char, token);
 
-    ph1_ir = add_ph1_ir(OP_load_constant);
-    vd = require_var(parent);
+    ph1_ir_t *ph1_ir = add_ph1_ir(OP_load_constant);
+    var_t *vd = require_var(parent);
     vd->init_val = token[0];
     strcpy(vd->var_name, gen_name());
     ph1_ir->dest = vd;
@@ -694,12 +686,10 @@ void read_func_parameters(block_t *parent, basic_block_t **bb)
 
 void read_func_call(func_t *fn, block_t *parent, basic_block_t **bb)
 {
-    ph1_ir_t *ph1_ir;
-
     /* direct function call */
     read_func_parameters(parent, bb);
 
-    ph1_ir = add_ph1_ir(OP_call);
+    ph1_ir_t *ph1_ir = add_ph1_ir(OP_call);
     ph1_ir->param_num = fn->num_params;
     strcpy(ph1_ir->func_name, fn->return_def.var_name);
     add_insn(parent, *bb, OP_call, NULL, NULL, NULL, 0,
@@ -708,11 +698,9 @@ void read_func_call(func_t *fn, block_t *parent, basic_block_t **bb)
 
 void read_indirect_call(block_t *parent, basic_block_t **bb)
 {
-    ph1_ir_t *ph1_ir;
-
     read_func_parameters(parent, bb);
 
-    ph1_ir = add_ph1_ir(OP_indirect);
+    ph1_ir_t *ph1_ir = add_ph1_ir(OP_indirect);
     ph1_ir->src0 = opstack_pop();
     add_insn(parent, *bb, OP_indirect, NULL, ph1_ir->src0, NULL, 0, NULL);
 }
@@ -775,11 +763,10 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                  NULL);
     } else if (lex_accept(T_ampersand)) {
         char token[MAX_VAR_LEN];
-        var_t *var;
         lvalue_t lvalue;
 
         lex_peek(T_identifier, token);
-        var = find_var(token, parent);
+        var_t *var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, 0, OP_generic);
 
         if (lvalue.is_reference == 0) {
@@ -795,12 +782,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
     } else if (lex_accept(T_asterisk)) {
         /* dereference */
         char token[MAX_VAR_LEN];
-        var_t *var;
         lvalue_t lvalue;
 
         int open_bracket = lex_accept(T_open_bracket);
         lex_peek(T_identifier, token);
-        var = find_var(token, parent);
+        var_t *var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, 1, OP_generic);
         if (open_bracket)
             lex_expect(T_close_bracket);
@@ -823,13 +809,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         lex_expect(T_close_bracket);
     } else if (lex_accept(T_sizeof)) {
         char token[MAX_TYPE_LEN];
-        type_t *type;
-        int find_type_flag;
 
         lex_expect(T_open_bracket);
-        find_type_flag = lex_accept(T_struct) ? 2 : 1;
+        int find_type_flag = lex_accept(T_struct) ? 2 : 1;
         lex_ident(T_identifier, token);
-        type = find_type(token, find_type_flag);
+        type_t *type = find_type(token, find_type_flag);
         if (!type)
             error("Unable to find type");
 
@@ -846,11 +830,6 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         /* function call, constant or variable - read token and determine */
         opcode_t prefix_op = OP_generic;
         char token[MAX_ID_LEN];
-        func_t *fn;
-        var_t *var;
-        constant_t *con;
-        int macro_param_idx;
-        macro_t *mac;
 
         if (lex_accept(T_increment))
             prefix_op = OP_add;
@@ -860,14 +839,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         lex_peek(T_identifier, token);
 
         /* is a constant or variable? */
-        con = find_constant(token);
-        var = find_var(token, parent);
-        fn = find_func(token);
-        macro_param_idx = find_macro_param_src_idx(token, parent);
-        mac = find_macro(token);
+        constant_t *con = find_constant(token);
+        var_t *var = find_var(token, parent);
+        func_t *fn = find_func(token);
+        int macro_param_idx = find_macro_param_src_idx(token, parent);
+        macro_t *mac = find_macro(token);
 
         if (!strcmp(token, "__VA_ARGS__")) {
-            /* `source_idx` has pointed at the character after __VA_ARGS__ */
+            /* 'source_idx' has pointed at the character after __VA_ARGS__ */
             int remainder, t = source_idx;
             macro_t *macro = parent->macro;
 
@@ -894,7 +873,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             mac->num_params = 0;
             lex_expect(T_identifier);
 
-            /* `source_idx` has pointed at the first parameter */
+            /* 'source_idx' has pointed at the first parameter */
             while (!lex_peek(T_close_bracket, NULL)) {
                 mac->params[mac->num_params++] = source_idx;
                 do {
@@ -902,7 +881,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 } while (next_token != T_comma &&
                          next_token != T_close_bracket);
             }
-            /* move `source_idx` to the macro body */
+            /* move 'source_idx' to the macro body */
             macro_return_idx = source_idx;
             source_idx = mac->start_source_idx;
             next_char = SOURCE[source_idx];
@@ -995,13 +974,12 @@ void read_expr(block_t *parent, basic_block_t **bb)
 {
     ph1_ir_t *ph1_ir;
     var_t *vd;
-    opcode_t op;
     opcode_t oper_stack[10];
     int oper_stack_idx = 0;
 
     read_expr_operand(parent, bb);
 
-    op = get_operator();
+    opcode_t op = get_operator();
     if (op == OP_generic || op == OP_ternary)
         return;
 
@@ -1303,8 +1281,9 @@ void read_lvalue(lvalue_t *lvalue,
                 ph1_ir->src0 = vd;
                 ph1_ir->dest = opstack_pop();
                 ph1_ir->size = lvalue->size;
-                /* The column of arguments of the new insn of `OP_write` is
-                 * different from `ph1_ir` */
+                /* The column of arguments of the new insn of 'OP_write' is
+                 * different from 'ph1_ir'
+                 */
                 add_insn(parent, *bb, OP_write, NULL, ph1_ir->dest,
                          ph1_ir->src0, ph1_ir->size, NULL);
             } else {
@@ -1363,10 +1342,8 @@ void read_lvalue(lvalue_t *lvalue,
 
 void read_ternary_operation(block_t *parent, basic_block_t **bb)
 {
-    ph1_ir_t *ph1_ir;
-    var_t *vd, *var;
-    char true_label[MAX_VAR_LEN], false_label[MAX_VAR_LEN],
-        end_label[MAX_VAR_LEN];
+    char true_label[MAX_VAR_LEN], false_label[MAX_VAR_LEN];
+    char end_label[MAX_VAR_LEN];
 
     strcpy(true_label, gen_label());
     strcpy(false_label, gen_label());
@@ -1376,9 +1353,9 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
         return;
 
     /* ternary-operator */
-    ph1_ir = add_ph1_ir(OP_branch);
+    ph1_ir_t *ph1_ir = add_ph1_ir(OP_branch);
     ph1_ir->dest = opstack_pop();
-    vd = require_var(parent);
+    var_t *vd = require_var(parent);
     strcpy(vd->var_name, true_label);
     ph1_ir->src0 = vd;
     vd = require_var(parent);
@@ -1401,14 +1378,15 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     read_expr(parent, &then_);
     bb_connect(*bb, then_, THEN);
 
-    if (!lex_accept(T_colon))
+    if (!lex_accept(T_colon)) {
         /* ternary operator in standard C needs three operands */
-        /* TODO: Release dangling basicblock */
+        /* TODO: Release dangling basic block */
         abort();
+    }
 
     ph1_ir = add_ph1_ir(OP_assign);
     ph1_ir->src0 = opstack_pop();
-    var = require_var(parent);
+    var_t *var = require_var(parent);
     strcpy(var->var_name, gen_name());
     ph1_ir->dest = var;
     add_insn(parent, then_, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
@@ -1453,6 +1431,7 @@ int read_body_assignment(char *token,
     var_t *var = find_local_var(token, parent);
     if (!var)
         var = find_global_var(token);
+
     if (var) {
         ph1_ir_t *ph1_ir;
         int one = 0;
@@ -1508,9 +1487,9 @@ int read_body_assignment(char *token,
             if (lvalue.is_ptr)
                 increment_size = lvalue.type->size;
 
-            /* If operand is a reference, read the value and push to stack
-             * for the incoming addition/subtraction. Otherwise, use the
-             * top element of stack as the one of operands and the destination.
+            /* If operand is a reference, read the value and push to stack for
+             * the incoming addition/subtraction. Otherwise, use the top element
+             * of stack as the one of operands and the destination.
              */
             if (one == 1) {
                 if (lvalue.is_reference) {
@@ -1797,9 +1776,8 @@ int read_global_assignment(char *token)
             return 1;
         }
         if (op == OP_ternary) {
-            int cond;
             lex_expect(T_question);
-            cond = eval_expression_imm(op, operand1, operand2);
+            int cond = eval_expression_imm(op, operand1, operand2);
             eval_ternary_imm(cond, token);
             return 1;
         }
@@ -1974,8 +1952,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     }
 
     if (lex_accept(T_if)) {
-        char label_true[MAX_VAR_LEN], label_false[MAX_VAR_LEN],
-            label_endif[MAX_VAR_LEN];
+        char label_true[MAX_VAR_LEN], label_false[MAX_VAR_LEN];
+        char label_endif[MAX_VAR_LEN];
         strcpy(label_true, gen_label());
         strcpy(label_false, gen_label());
         strcpy(label_endif, gen_label());
@@ -2071,8 +2049,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
     if (lex_accept(T_while)) {
         var_t *var_continue, *var_break;
-        char label_start[MAX_VAR_LEN], label_body[MAX_VAR_LEN],
-            label_end[MAX_VAR_LEN];
+        char label_start[MAX_VAR_LEN], label_end[MAX_VAR_LEN];
+        char label_body[MAX_VAR_LEN];
         strcpy(label_start, gen_label());
         strcpy(label_body, gen_label());
         strcpy(label_end, gen_label());
@@ -2143,7 +2121,6 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     }
 
     if (lex_accept(T_switch)) {
-        var_t *var_break;
         int is_default = 0;
         char true_label[MAX_VAR_LEN], false_label[MAX_VAR_LEN];
         strcpy(true_label, gen_label());
@@ -2158,7 +2135,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         lex_expect(T_close_bracket);
 
         /* create exit jump for breaks */
-        var_break = require_var(parent);
+        var_t *var_break = require_var(parent);
         break_exit[break_exit_idx++] = var_break;
         basic_block_t *switch_end = bb_create(parent);
         break_bb[break_exit_idx - 1] = switch_end;
@@ -2241,7 +2218,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
             if (control && true_body_) {
                 /* Create a new body block for next case, and connect the last
-                 * body block which lacks `break` to it to make that one ignore
+                 * body block which lacks 'break' to it to make that one ignore
                  * the upcoming cases.
                  */
                 basic_block_t *n = bb_create(parent);
@@ -2264,7 +2241,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 bb = n;
 
                 /* create a new body block for next case if the last body block
-                 * exits `switch` */
+                 * exits 'switch'.
+                 */
                 if (!true_body_)
                     true_body_ = bb_create(parent);
             } else if (!is_default) {
@@ -2464,7 +2442,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             bb_connect(body_, inc_, NEXT);
             bb_connect(inc_, cond_, NEXT);
         } else {
-            /* TODO: Release dangling inc basicblock */;
+            /* TODO: Release dangling inc basic block */
         }
 
         /* jump to increment */
@@ -2622,14 +2600,14 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         mac->num_params = 0;
         lex_expect(T_identifier);
 
-        /* `source_idx` has pointed at the first parameter */
+        /* 'source_idx' has pointed at the first parameter */
         while (!lex_peek(T_close_bracket, NULL)) {
             mac->params[mac->num_params++] = source_idx;
             do {
                 next_token = lex_token();
             } while (next_token != T_comma && next_token != T_close_bracket);
         }
-        /* move `source_idx` to the macro body */
+        /* move 'source_idx' to the macro body */
         macro_return_idx = source_idx;
         source_idx = mac->start_source_idx;
         next_char = SOURCE[source_idx];
@@ -2851,9 +2829,8 @@ void read_global_statement()
                 tag->base_type = TYPE_struct;
                 strcpy(tag->type_name, token);
             } else {
-                /*
-                 * If it is a forward declaration, build a connection between
-                 * structure tag and alias. In `find_type()`, it will retrieve
+                /* If it is a forward declaration, build a connection between
+                 * structure tag and alias. In 'find_type', it will retrieve
                  * infomation from base structure for alias.
                  */
                 type->base_struct = tag;
@@ -2882,12 +2859,8 @@ void read_global_statement()
 
 void parse_internal()
 {
-    /* parser initialization */
-    type_t *type;
-    func_t *func;
-
     /* built-in types */
-    type = add_named_type("void");
+    type_t *type = add_named_type("void");
     type->base_type = TYPE_void;
     type->size = 0;
 
@@ -2909,13 +2882,13 @@ void parse_internal()
     add_alias("__SHECC__", "1");
 
     /* Linux syscall */
-    func = add_func("__syscall");
+    func_t *func = add_func("__syscall");
     func->num_params = 0;
     func->va_args = 1;
     func->fn = calloc(1, sizeof(fn_t));
     func->fn->bbs = calloc(1, sizeof(basic_block_t));
 
-    /* TODO: This hack should be removed after merging `func_t` and `fn_t` */
+    /* TODO: This hack should be removed after merging 'func_t' and 'fn_t' */
     GLOBAL_FUNC.stack_size = 4;
     GLOBAL_FUNC.fn = calloc(1, sizeof(fn_t));
     GLOBAL_FUNC.fn->bbs = calloc(1, sizeof(basic_block_t));

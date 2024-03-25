@@ -174,7 +174,7 @@ char peek_char(int offset)
     return SOURCE[source_idx + offset];
 }
 
-/* Lex next token and returns its token type. Parameter `aliasing` is used for
+/* Lex next token and returns its token type. Parameter 'aliasing' is used for
  * disable preprocessor aliasing on identifier tokens.
  */
 token_t lex_token_internal(int aliasing)
@@ -549,7 +549,8 @@ token_t lex_token_internal(int aliasing)
 }
 
 /* Lex next token and returns its token type. To disable aliasing on next
- * token, use `lex_token_internal`. */
+ * token, use 'lex_token_internal'.
+ */
 token_t lex_token()
 {
     return lex_token_internal(1);
@@ -576,16 +577,16 @@ int lex_accept_internal(token_t token, int aliasing)
     return 0;
 }
 
-/* Accepts next token if token types are matched. To disable aliasing
- * on next token, use `lex_accept_internal`.
+/* Accepts next token if token types are matched. To disable aliasing on next
+ * token, use 'lex_accept_internal'.
  */
 int lex_accept(token_t token)
 {
     return lex_accept_internal(token, 1);
 }
 
-/* Peeks next token and copy token's literal to value if token types
- * are matched.
+/* Peeks next token and copy token's literal to value if token types are
+ * matched.
  */
 int lex_peek(token_t token, char *value)
 {
@@ -598,8 +599,8 @@ int lex_peek(token_t token, char *value)
     return 0;
 }
 
-/* Strictly match next token with given token type and copy token's
- * literal to value.
+/* Strictly match next token with given token type and copy token's literal to
+ * value.
  */
 void lex_ident_internal(token_t token, char *value, int aliasing)
 {
@@ -609,9 +610,8 @@ void lex_ident_internal(token_t token, char *value, int aliasing)
     next_token = lex_token_internal(aliasing);
 }
 
-/* Strictly match next token with given token type and copy token's
- * literal to value. To disable aliasing on next token, use
- * `lex_ident_internal`.
+/* Strictly match next token with given token type and copy token's literal to
+ * value. To disable aliasing on next token, use 'lex_ident_internal'.
  */
 void lex_ident(token_t token, char *value)
 {
@@ -626,8 +626,8 @@ void lex_expect_internal(token_t token, int aliasing)
     next_token = lex_token_internal(aliasing);
 }
 
-/* Strictly match next token with given token type. To disable aliasing
- * on next token, use `lex_expect_internal`.
+/* Strictly match next token with given token type. To disable aliasing on next
+ * token, use 'lex_expect_internal'.
  */
 void lex_expect(token_t token)
 {

@@ -98,34 +98,35 @@ void cfg_flatten()
     GLOBAL_FUNC.fn->bbs->elf_offset = elf_offset;
 
     for (ph2_ir_t *ph2_ir = GLOBAL_FUNC.fn->bbs->ph2_ir_list.head; ph2_ir;
-         ph2_ir = ph2_ir->next)
+         ph2_ir = ph2_ir->next) {
         update_elf_offset(ph2_ir);
+    }
 
-    /* prepare `argc` and `argv`, then proceed to `main` function */
+    /* prepare 'argc' and 'argv', then proceed to 'main' function */
     elf_offset += 24;
 
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        ph2_ir_t *flatten_ir;
-
         /* reserve stack */
-        flatten_ir = add_ph2_ir(OP_define);
+        ph2_ir_t *fflatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = fn->func->stack_size;
 
         for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
             bb->elf_offset = elf_offset;
 
-            if (bb == fn->bbs)
+            if (bb == fn->bbs) {
                 /* save ra, sp */
                 elf_offset += 16;
+            }
 
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {
                 flatten_ir = add_ph2_ir(OP_generic);
                 memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
 
-                if (insn->op == OP_return)
+                if (insn->op == OP_return) {
                     /* restore sp */
                     flatten_ir->src1 = bb->belong_to->func->stack_size;
+                }
 
                 update_elf_offset(flatten_ir);
             }
@@ -388,7 +389,7 @@ void code_generate()
          ph2_ir = ph2_ir->next)
         emit_ph2_ir(ph2_ir);
 
-    /* prepare `argc` and `argv`, then proceed to `main` function */
+    /* prepare 'argc' and 'argv', then proceed to 'main' function */
     emit(__lui(__t0, rv_hi(GLOBAL_FUNC.stack_size)));
     emit(__addi(__t0, __t0, rv_lo(GLOBAL_FUNC.stack_size)));
     emit(__add(__t0, __gp, __t0));

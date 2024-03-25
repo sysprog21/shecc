@@ -77,13 +77,11 @@ void bb_reverse_index(fn_t *fn, basic_block_t *bb)
 
 void bb_build_rpo(fn_t *fn, basic_block_t *bb)
 {
-    basic_block_t *prev, *curr;
-
     if (fn->bbs == bb)
         return;
 
-    prev = fn->bbs;
-    curr = prev->rpo_next;
+    basic_block_t *prev = fn->bbs;
+    basic_block_t *curr = prev->rpo_next;
     for (; curr; curr = curr->rpo_next) {
         if (curr->rpo < bb->rpo) {
             prev = curr;
@@ -233,17 +231,20 @@ void bb_build_df(fn_t *fn, basic_block_t *bb)
     UNUSED(fn);
 
     int cnt = 0;
-    for (int i = 0; i < MAX_BB_PRED; i++)
+    for (int i = 0; i < MAX_BB_PRED; i++) {
         if (bb->prev[i].bb)
             cnt++;
+    }
+    if (cnt <= 0)
+        return;
 
-    if (cnt > 1)
-        for (int i = 0; i < MAX_BB_PRED; i++)
-            if (bb->prev[i].bb) {
-                for (basic_block_t *curr = bb->prev[i].bb; curr != bb->idom;
-                     curr = curr->idom)
-                    curr->DF[curr->df_idx++] = bb;
-            }
+    for (int i = 0; i < MAX_BB_PRED; i++) {
+        if (bb->prev[i].bb) {
+            for (basic_block_t *curr = bb->prev[i].bb; curr != bb->idom;
+                 curr = curr->idom)
+                curr->DF[curr->df_idx++] = bb;
+        }
+    }
 }
 
 void build_df()
@@ -278,7 +279,6 @@ void bb_add_killed_var(basic_block_t *bb, var_t *var)
             break;
         }
     }
-
     if (found)
         return;
 
@@ -295,7 +295,6 @@ void var_add_killed_bb(var_t *var, basic_block_t *bb)
             break;
         }
     }
-
     if (found)
         return;
 
@@ -319,7 +318,6 @@ void fn_add_global(fn_t *fn, var_t *var)
             break;
         }
     }
-
     if (found)
         return;
 
@@ -438,11 +436,12 @@ void solve_phi_insertion()
                         continue;
 
                     int is_decl = 0;
-                    for (symbol_t *s = df->symbol_list.head; s; s = s->next)
+                    for (symbol_t *s = df->symbol_list.head; s; s = s->next) {
                         if (s->var == var) {
                             is_decl = 1;
                             break;
                         }
+                    }
 
                     if (is_decl)
                         continue;
@@ -563,21 +562,26 @@ void bb_solve_phi_params(basic_block_t *bb)
     }
 
     if (bb->next) {
-        for (insn_t *insn = bb->next->insn_list.head; insn; insn = insn->next)
+        for (insn_t *insn = bb->next->insn_list.head; insn; insn = insn->next) {
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
+        }
     }
 
     if (bb->then_) {
-        for (insn_t *insn = bb->then_->insn_list.head; insn; insn = insn->next)
+        for (insn_t *insn = bb->then_->insn_list.head; insn;
+             insn = insn->next) {
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
+        }
     }
 
     if (bb->else_) {
-        for (insn_t *insn = bb->else_->insn_list.head; insn; insn = insn->next)
+        for (insn_t *insn = bb->else_->insn_list.head; insn;
+             insn = insn->next) {
             if (insn->opcode == OP_phi)
                 append_phi_operand(insn, insn->rd, bb);
+        }
     }
 
     for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
@@ -1089,6 +1093,7 @@ int mark_const(insn_t *insn)
     }
     if (insn->opcode != OP_assign)
         return 0;
+
     /* The global variable is unique and has no subscripts in our SSA. Do NOT
      * evaluate its value.
      */
@@ -1122,8 +1127,7 @@ int eval_const_arithmetic(insn_t *insn)
         return 0;
 
     int res;
-    int l = insn->rs1->init_val;
-    int r = insn->rs2->init_val;
+    int l = insn->rs1->init_val, r = insn->rs2->init_val;
 
     switch (insn->opcode) {
     case OP_add:
@@ -1192,12 +1196,11 @@ void bb_reverse_reversed_index(fn_t *fn, basic_block_t *bb)
 
 void bb_build_reversed_rpo(fn_t *fn, basic_block_t *bb)
 {
-    basic_block_t *prev, *curr;
     if (fn->exit == bb)
         return;
 
-    prev = fn->exit;
-    curr = fn->exit->rpo_r_next;
+    basic_block_t *prev = fn->exit;
+    basic_block_t *curr = fn->exit->rpo_r_next;
     for (; curr; curr = curr->rpo_r_next) {
         if (curr->rpo_r < bb->rpo_r) {
             prev = curr;
@@ -1246,9 +1249,10 @@ void add_live_gen(basic_block_t *bb, var_t *var)
     if (var->is_global)
         return;
 
-    for (int i = 0; i < bb->live_gen_idx; i++)
+    for (int i = 0; i < bb->live_gen_idx; i++) {
         if (bb->live_gen[i] == var)
             return;
+    }
     bb->live_gen[bb->live_gen_idx++] = var;
 }
 
@@ -1284,9 +1288,10 @@ void bb_solve_locals(fn_t *fn, basic_block_t *bb)
 
 void add_live_in(basic_block_t *bb, var_t *var)
 {
-    for (int i = 0; i < bb->live_in_idx; i++)
+    for (int i = 0; i < bb->live_in_idx; i++) {
         if (bb->live_in[i] == var)
             return;
+    }
     bb->live_in[bb->live_in_idx++] = var;
 }
 
@@ -1307,11 +1312,12 @@ int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
 {
     for (int i = 0; i < bb->live_in_idx; i++) {
         int found = 0;
-        for (int j = 0; j < live_out_idx; j++)
+        for (int j = 0; j < live_out_idx; j++) {
             if (live_out[j] == bb->live_in[i]) {
                 found = 1;
                 break;
             }
+        }
         if (!found)
             live_out[live_out_idx++] = bb->live_in[i];
     }
@@ -1344,11 +1350,12 @@ int recompute_live_out(basic_block_t *bb)
 
     for (int i = 0; i < live_out_idx; i++) {
         int same = 0;
-        for (int j = 0; j < bb->live_out_idx; j++)
+        for (int j = 0; j < bb->live_out_idx; j++) {
             if (live_out[i] == bb->live_out[j]) {
                 same = 1;
                 break;
             }
+        }
         if (!same) {
             memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
             bb->live_out_idx = live_out_idx;

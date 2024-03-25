@@ -56,7 +56,7 @@
 #else
 /* suppress GCC/Clang warnings */
 #define UNUSED(x) (void) (x)
-/* configure host data model when using `memcpy()` */
+/* configure host data model when using 'memcpy'. */
 #define HOST_PTR_SIZE __SIZEOF_POINTER__
 #endif
 

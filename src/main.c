@@ -36,7 +36,7 @@
 /* Peephole optimization */
 #include "peephole.c"
 
-/* Machine code generation. support ARMv7-A and RISC-V32I */
+/* Machine code generation. support ARMv7-A and RV32I */
 #include "codegen.c"
 
 /* inlined libc */

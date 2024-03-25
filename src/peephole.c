@@ -55,16 +55,15 @@ void peephole()
 {
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
-            for (ph2_ir_t *ph2_ir = bb->ph2_ir_list.head; ph2_ir;
-                 ph2_ir = ph2_ir->next) {
-                ph2_ir_t *next = ph2_ir->next;
+            for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+                ph2_ir_t *next = ir->next;
                 if (!next)
                     continue;
                 if (next->op == OP_assign && next->dest == next->src0) {
-                    ph2_ir->next = next->next;
+                    ir->next = next->next;
                     continue;
                 }
-                insn_fusion(ph2_ir);
+                insn_fusion(ir);
             }
         }
     }
