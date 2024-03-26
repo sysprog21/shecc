@@ -130,7 +130,8 @@ bool is_hex(char c)
 
 bool is_numeric(char buffer[])
 {
-    int hex = 0, size = strlen(buffer);
+    bool hex = false;
+    int size = strlen(buffer);
 
     if (size > 2)
         hex = buffer[0] == '0' && buffer[1] == 'x';
@@ -518,7 +519,8 @@ token_t lex_token_internal(bool aliasing)
         if (aliasing) {
             alias = find_alias(token_str);
             if (alias) {
-                token_t t = is_numeric(alias) ? T_numeric : T_string;
+                /* TODO: Need more reliable way to identify the token's type */
+                token_t t = is_numeric(alias) ? T_numeric : T_identifier;
                 strcpy(token_str, alias);
                 return t;
             }

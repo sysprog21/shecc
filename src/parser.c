@@ -2875,6 +2875,14 @@ void parse_internal()
     type->base_type = TYPE_int;
     type->size = 4;
 
+    /* builtin type _Bool was introduced in C99 specification, it is more
+     * well-known as macro type bool, which is defined in <std_bool.h> (in
+     * shecc, it is defined in 'lib/c.c').
+     */
+    type = add_named_type("_Bool");
+    type->base_type = TYPE_char;
+    type->size = 1;
+
     add_block(NULL, NULL, NULL); /* global block */
     elf_add_symbol("", 0, 0);    /* undef symbol */
 
