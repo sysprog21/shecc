@@ -9,6 +9,10 @@
 
 #define NULL 0
 
+#define bool _Bool
+#define true 1
+#define false 0
+
 #if defined(__arm__)
 #define __syscall_exit 1
 #define __syscall_read 3

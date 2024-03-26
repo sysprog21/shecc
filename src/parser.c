@@ -380,13 +380,16 @@ int read_preproc_directive()
         char alias[MAX_VAR_LEN];
         char value[MAX_VAR_LEN];
 
-        lex_ident(T_identifier, alias);
+        lex_ident_internal(T_identifier, alias, 0);
 
         if (lex_peek(T_numeric, value)) {
             lex_expect(T_numeric);
             add_alias(alias, value);
         } else if (lex_peek(T_string, value)) {
             lex_expect(T_string);
+            add_alias(alias, value);
+        } else if (lex_peek(T_identifier, value)) {
+            lex_expect(T_identifier);
             add_alias(alias, value);
         } else if (lex_accept(T_open_bracket)) { /* function-like macro */
             macro_t *macro = add_macro(alias);
