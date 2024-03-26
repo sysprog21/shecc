@@ -5,10 +5,10 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 
 /* Define target machine */
 #include "../config"
