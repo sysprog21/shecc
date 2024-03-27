@@ -592,4 +592,13 @@ int main()
 }
 EOF
 
+# _Bool size should be equivalent to char, which is 1 byte
+try_output 0 "1" << EOF
+int main()
+{
+    printf("%d", sizeof(bool));
+    return 0;
+}
+EOF
+
 echo OK

@@ -240,7 +240,7 @@ int read_constant_infix_expr(int precedence)
         lhs = read_constant_expr_operand();
     }
 
-    while (1) {
+    while (true) {
         op = get_operator();
         current_precedence = get_operator_prio(op);
 
@@ -334,7 +334,7 @@ void cppd_control_flow_skip_lines()
 void check_def(char *alias)
 {
     if (find_alias(alias))
-        preproc_match = 1;
+        preproc_match = true;
 }
 
 void read_defined_macro()
@@ -352,7 +352,7 @@ void read_defined_macro()
 /* read preprocessor directive at each potential positions: e.g.,
  * global statement / body statement
  */
-int read_preproc_directive()
+bool read_preproc_directive()
 {
     char token[MAX_ID_LEN];
 
@@ -374,13 +374,13 @@ int read_preproc_directive()
             lex_expect(T_gt);
         }
 
-        return 1;
+        return true;
     }
     if (lex_accept(T_cppd_define)) {
         char alias[MAX_VAR_LEN];
         char value[MAX_VAR_LEN];
 
-        lex_ident(T_identifier, alias);
+        lex_ident_internal(T_identifier, alias, false);
 
         if (lex_peek(T_numeric, value)) {
             lex_expect(T_numeric);
@@ -388,10 +388,13 @@ int read_preproc_directive()
         } else if (lex_peek(T_string, value)) {
             lex_expect(T_string);
             add_alias(alias, value);
+        } else if (lex_peek(T_identifier, value)) {
+            lex_expect(T_identifier);
+            add_alias(alias, value);
         } else if (lex_accept(T_open_bracket)) { /* function-like macro */
             macro_t *macro = add_macro(alias);
 
-            skip_newline = 0;
+            skip_newline = false;
             while (lex_peek(T_identifier, alias)) {
                 lex_expect(T_identifier);
                 strcpy(macro->param_defs[macro->num_param_defs++].var_name,
@@ -405,18 +408,18 @@ int read_preproc_directive()
             skip_macro_body();
         }
 
-        return 1;
+        return true;
     }
     if (lex_peek(T_cppd_undef, token)) {
         char alias[MAX_VAR_LEN];
 
-        lex_expect_internal(T_cppd_undef, 0);
+        lex_expect_internal(T_cppd_undef, false);
         lex_peek(T_identifier, alias);
         lex_expect(T_identifier);
 
         remove_alias(alias);
         remove_macro(alias);
-        return 1;
+        return true;
     }
     if (lex_peek(T_cppd_error, NULL)) {
         int i = 0;
@@ -424,7 +427,7 @@ int read_preproc_directive()
 
         do {
             error_diagnostic[i++] = next_char;
-        } while (read_char(0) != '\n');
+        } while (read_char(false) != '\n');
         error_diagnostic[i] = 0;
 
         error(error_diagnostic);
@@ -438,14 +441,14 @@ int read_preproc_directive()
             cppd_control_flow_skip_lines();
         }
 
-        return 1;
+        return true;
     }
     if (lex_accept(T_cppd_elif)) {
         if (preproc_match) {
             while (!lex_peek(T_cppd_endif, NULL)) {
                 next_token = lex_token();
             }
-            return 1;
+            return true;
         }
 
         preproc_match = read_constant_expr() != 0;
@@ -456,7 +459,7 @@ int read_preproc_directive()
             cppd_control_flow_skip_lines();
         }
 
-        return 1;
+        return true;
     }
     if (lex_accept(T_cppd_else)) {
         /* reach here has 2 possible cases:
@@ -465,32 +468,32 @@ int read_preproc_directive()
          */
         if (!preproc_match) {
             skip_whitespace();
-            return 1;
+            return true;
         }
 
         cppd_control_flow_skip_lines();
-        return 1;
+        return true;
     }
     if (lex_accept(T_cppd_endif)) {
-        preproc_match = 0;
+        preproc_match = false;
         skip_whitespace();
-        return 1;
+        return true;
     }
-    if (lex_accept_internal(T_cppd_ifdef, 0)) {
-        preproc_match = 0;
+    if (lex_accept_internal(T_cppd_ifdef, false)) {
+        preproc_match = false;
         lex_ident(T_identifier, token);
         check_def(token);
 
         if (preproc_match) {
             skip_whitespace();
-            return 1;
+            return true;
         }
 
         cppd_control_flow_skip_lines();
-        return 1;
+        return true;
     }
 
-    return 0;
+    return false;
 }
 
 void read_parameter_list_decl(func_t *fd, int anon);
@@ -2871,6 +2874,14 @@ void parse_internal()
     type = add_named_type("int");
     type->base_type = TYPE_int;
     type->size = 4;
+
+    /* builtin type _Bool was introduced in C99 specification, it is more
+     * well-known as macro type bool, which is defined in <std_bool.h> (in
+     * shecc, it is defined in 'lib/c.c').
+     */
+    type = add_named_type("_Bool");
+    type->base_type = TYPE_char;
+    type->size = 1;
 
     add_block(NULL, NULL, NULL); /* global block */
     elf_add_symbol("", 0, 0);    /* undef symbol */
