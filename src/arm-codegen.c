@@ -74,7 +74,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_add:
     case OP_sub:
     case OP_mul:
-    case OP_div:
     case OP_lshift:
     case OP_rshift:
     case OP_bit_and:
@@ -85,11 +84,14 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_bit_not:
         elf_offset += 4;
         return;
+    case OP_div:
+    case OP_mod:
+        elf_offset += 60;
+        return;
     case OP_load_data_address:
         elf_offset += 8;
         return;
     case OP_address_of_func:
-    case OP_mod:
     case OP_eq:
     case OP_neq:
     case OP_gt:
@@ -323,12 +325,38 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mul(__AL, rd, rn, rm));
         return;
     case OP_div:
-        emit(__div(__AL, rd, rm, rn));
+        emit(__cmp_i(__AL, rn, 0));
+        emit(__b(__EQ, 52));
+        emit(__zero(__r9));
+        emit(__mov_i(__AL, __r8, 1));
+        emit(__cmp_r(__AL, rm, rn));
+        emit(__sll_amt(__LS, 0, rm, rm, 1));
+        emit(__sll_amt(__LS, 0, __r8, __r8, 1));
+        emit(__b(__LS, -12));
+        emit(__cmp_r(__AL, rn, rm));
+        emit(__sub_r(__CS, rn, rn, rm));
+        emit(__add_r(__CS, __r9, __r9, __r8));
+        emit(__srl_amt(__AL, 1, __r8, __r8, 1));
+        emit(__srl_amt(__CC, 0, rm, rm, 1));
+        emit(__b(__CC, -20));
+        emit(__add_i(__AL, rd, __r9, 0));
         return;
     case OP_mod:
-        emit(__div(__AL, __r8, rm, rn));
-        emit(__mul(__AL, __r8, rm, __r8));
-        emit(__sub_r(__AL, rd, rn, __r8));
+        emit(__cmp_i(__AL, rn, 0));
+        emit(__b(__EQ, 52));
+        emit(__zero(__r9));
+        emit(__mov_i(__AL, __r8, 1));
+        emit(__cmp_r(__AL, rm, rn));
+        emit(__sll_amt(__LS, 0, rm, rm, 1));
+        emit(__sll_amt(__LS, 0, __r8, __r8, 1));
+        emit(__b(__LS, -12));
+        emit(__cmp_r(__AL, rn, rm));
+        emit(__sub_r(__CS, rn, rn, rm));
+        emit(__add_r(__CS, __r9, __r9, __r8));
+        emit(__srl_amt(__AL, 1, __r8, __r8, 1));
+        emit(__srl_amt(__CC, 0, rm, rm, 1));
+        emit(__b(__CC, -20));
+        emit(__add_i(__AL, rd, rn, 0));
         return;
     case OP_lshift:
         emit(__sll(__AL, rd, rn, rm));

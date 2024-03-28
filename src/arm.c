@@ -47,6 +47,9 @@ typedef enum {
 typedef enum {
     __EQ = 0,  /* Equal */
     __NE = 1,  /* Not equal */
+    __CS = 2,  /* Unsigned higher or same */
+    __CC = 3,  /* Unsigned Lower */
+    __LS = 9,  /* unsigned lower or same */
     __GE = 10, /* Signed greater than or equal */
     __LT = 11, /* Signed less than */
     __GT = 12, /* Signed greater than */
@@ -186,10 +189,22 @@ int __srl(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
                       rm + (1 << 4) + (1 << 5) + (rs << 8));
 }
 
+int __srl_amt(arm_cond_t cond, int s, arm_reg rd, arm_reg rm, int amt)
+{
+    return arm_encode(cond, s + (arm_mov << 1) + (0 << 5), 0, rd,
+                      rm + (0 << 4) + (1 << 5) + (amt << 7));
+}
+
 int __sll(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
 {
     return arm_encode(cond, 0 + (arm_mov << 1) + (0 << 5), 0, rd,
                       rm + (1 << 4) + (0 << 5) + (rs << 8));
+}
+
+int __sll_amt(arm_cond_t cond, int s, arm_reg rd, arm_reg rm, int amt)
+{
+    return arm_encode(cond, s + (arm_mov << 1) + (0 << 5), 0, rd,
+                      rm + (0 << 4) + (0 << 5) + (amt << 7));
 }
 
 int __add_i(arm_cond_t cond, arm_reg rd, arm_reg rs, int imm)
@@ -286,6 +301,11 @@ int __rsb_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
 int __cmp_r(arm_cond_t cond, arm_reg r1, arm_reg r2)
 {
     return __mov(cond, 0, arm_cmp, 1, r1, 0, r2);
+}
+
+int __cmp_i(arm_cond_t cond, arm_reg rn, int imm)
+{
+    return __mov(cond, 1, arm_cmp, 1, rn, 0, imm);
 }
 
 int __teq(arm_reg rd)
