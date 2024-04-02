@@ -240,7 +240,7 @@ int read_constant_infix_expr(int precedence)
         lhs = read_constant_expr_operand();
     }
 
-    while (true) {
+    while (1) {
         op = get_operator();
         current_precedence = get_operator_prio(op);
 
@@ -334,7 +334,7 @@ void cppd_control_flow_skip_lines()
 void check_def(char *alias)
 {
     if (find_alias(alias))
-        preproc_match = true;
+        preproc_match = 1;
 }
 
 void read_defined_macro()
@@ -352,7 +352,7 @@ void read_defined_macro()
 /* read preprocessor directive at each potential positions: e.g.,
  * global statement / body statement
  */
-bool read_preproc_directive()
+int read_preproc_directive()
 {
     char token[MAX_ID_LEN];
 
@@ -374,13 +374,13 @@ bool read_preproc_directive()
             lex_expect(T_gt);
         }
 
-        return true;
+        return 1;
     }
     if (lex_accept(T_cppd_define)) {
         char alias[MAX_VAR_LEN];
         char value[MAX_VAR_LEN];
 
-        lex_ident_internal(T_identifier, alias, false);
+        lex_ident(T_identifier, alias);
 
         if (lex_peek(T_numeric, value)) {
             lex_expect(T_numeric);
@@ -394,7 +394,7 @@ bool read_preproc_directive()
         } else if (lex_accept(T_open_bracket)) { /* function-like macro */
             macro_t *macro = add_macro(alias);
 
-            skip_newline = false;
+            skip_newline = 0;
             while (lex_peek(T_identifier, alias)) {
                 lex_expect(T_identifier);
                 strcpy(macro->param_defs[macro->num_param_defs++].var_name,
@@ -408,18 +408,18 @@ bool read_preproc_directive()
             skip_macro_body();
         }
 
-        return true;
+        return 1;
     }
     if (lex_peek(T_cppd_undef, token)) {
         char alias[MAX_VAR_LEN];
 
-        lex_expect_internal(T_cppd_undef, false);
+        lex_expect_internal(T_cppd_undef, 0);
         lex_peek(T_identifier, alias);
         lex_expect(T_identifier);
 
         remove_alias(alias);
         remove_macro(alias);
-        return true;
+        return 1;
     }
     if (lex_peek(T_cppd_error, NULL)) {
         int i = 0;
@@ -427,7 +427,7 @@ bool read_preproc_directive()
 
         do {
             error_diagnostic[i++] = next_char;
-        } while (read_char(false) != '\n');
+        } while (read_char(0) != '\n');
         error_diagnostic[i] = 0;
 
         error(error_diagnostic);
@@ -441,14 +441,14 @@ bool read_preproc_directive()
             cppd_control_flow_skip_lines();
         }
 
-        return true;
+        return 1;
     }
     if (lex_accept(T_cppd_elif)) {
         if (preproc_match) {
             while (!lex_peek(T_cppd_endif, NULL)) {
                 next_token = lex_token();
             }
-            return true;
+            return 1;
         }
 
         preproc_match = read_constant_expr() != 0;
@@ -459,7 +459,7 @@ bool read_preproc_directive()
             cppd_control_flow_skip_lines();
         }
 
-        return true;
+        return 1;
     }
     if (lex_accept(T_cppd_else)) {
         /* reach here has 2 possible cases:
@@ -468,32 +468,32 @@ bool read_preproc_directive()
          */
         if (!preproc_match) {
             skip_whitespace();
-            return true;
+            return 1;
         }
 
         cppd_control_flow_skip_lines();
-        return true;
+        return 1;
     }
     if (lex_accept(T_cppd_endif)) {
-        preproc_match = false;
+        preproc_match = 0;
         skip_whitespace();
-        return true;
+        return 1;
     }
-    if (lex_accept_internal(T_cppd_ifdef, false)) {
-        preproc_match = false;
+    if (lex_accept_internal(T_cppd_ifdef, 0)) {
+        preproc_match = 0;
         lex_ident(T_identifier, token);
         check_def(token);
 
         if (preproc_match) {
             skip_whitespace();
-            return true;
+            return 1;
         }
 
         cppd_control_flow_skip_lines();
-        return true;
+        return 1;
     }
 
-    return false;
+    return 0;
 }
 
 void read_parameter_list_decl(func_t *fd, int anon);
