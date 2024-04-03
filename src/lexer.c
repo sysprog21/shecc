@@ -83,16 +83,16 @@ typedef enum {
 char token_str[MAX_TOKEN_LEN];
 token_t next_token;
 char next_char;
-int skip_newline = 1;
+bool skip_newline = true;
 
-int preproc_match;
+bool preproc_match;
 
 /* Point to the first character after where the macro has been called. It is
  * needed when returning from the macro body.
  */
 int macro_return_idx;
 
-int is_whitespace(char c)
+bool is_whitespace(char c)
 {
     return c == ' ' || c == '\t';
 }
@@ -100,53 +100,54 @@ int is_whitespace(char c)
 char peek_char(int offset);
 
 /* is it backslash-newline? */
-int is_linebreak(char c)
+bool is_linebreak(char c)
 {
     return c == '\\' && peek_char(1) == '\n';
 }
 
-int is_newline(char c)
+bool is_newline(char c)
 {
     return c == '\r' || c == '\n';
 }
 
 /* is it alphabet, number or '_'? */
-int is_alnum(char c)
+bool is_alnum(char c)
 {
     return ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
             (c >= '0' && c <= '9') || (c == '_'));
 }
 
-int is_digit(char c)
+bool is_digit(char c)
 {
     return c >= '0' && c <= '9';
 }
 
-int is_hex(char c)
+bool is_hex(char c)
 {
     return ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == 'x' ||
             (c >= 'A' && c <= 'F'));
 }
 
-int is_numeric(char buffer[])
+bool is_numeric(char buffer[])
 {
-    int hex = 0, size = strlen(buffer);
+    bool hex = false;
+    int size = strlen(buffer);
 
     if (size > 2)
-        hex = (buffer[0] == '0' && buffer[1] == 'x') ? 1 : 0;
+        hex = !strncmp(buffer, "0x", 2);
 
     for (int i = 0; i < size; i++) {
-        if (hex && (is_hex(buffer[i]) == 0))
-            return 0;
-        if (!hex && (is_digit(buffer[i]) == 0))
-            return 0;
+        if (hex && !is_hex(buffer[i]))
+            return false;
+        if (!hex && !is_digit(buffer[i]))
+            return false;
     }
-    return 1;
+    return true;
 }
 
 void skip_whitespace()
 {
-    while (1) {
+    while (true) {
         if (is_linebreak(next_char)) {
             source_idx += 2;
             next_char = SOURCE[source_idx];
@@ -161,10 +162,10 @@ void skip_whitespace()
     }
 }
 
-char read_char(int is_skip_space)
+char read_char(bool is_skip_space)
 {
     next_char = SOURCE[++source_idx];
-    if (is_skip_space == 1)
+    if (is_skip_space)
         skip_whitespace();
     return next_char;
 }
@@ -177,7 +178,7 @@ char peek_char(int offset)
 /* Lex next token and returns its token type. Parameter 'aliasing' is used for
  * disable preprocessor aliasing on identifier tokens.
  */
-token_t lex_token_internal(int aliasing)
+token_t lex_token_internal(bool aliasing)
 {
     token_str[0] = 0;
 
@@ -187,7 +188,7 @@ token_t lex_token_internal(int aliasing)
 
         do {
             token_str[i++] = next_char;
-        } while (is_alnum(read_char(0)));
+        } while (is_alnum(read_char(false)));
         token_str[i] = 0;
         skip_whitespace();
 
@@ -214,15 +215,15 @@ token_t lex_token_internal(int aliasing)
 
     /* C-style comments */
     if (next_char == '/') {
-        read_char(0);
+        read_char(false);
         if (next_char == '*') {
             /* in a comment, skip until end */
             do {
-                read_char(0);
+                read_char(false);
                 if (next_char == '*') {
-                    read_char(0);
+                    read_char(false);
                     if (next_char == '/') {
-                        read_char(1);
+                        read_char(true);
                         return lex_token_internal(aliasing);
                     }
                 }
@@ -230,7 +231,7 @@ token_t lex_token_internal(int aliasing)
         } else {
             /* single '/', predict divide */
             if (next_char == ' ')
-                read_char(1);
+                read_char(true);
             return T_divide;
         }
         /* TODO: check invalid cases */
@@ -241,52 +242,52 @@ token_t lex_token_internal(int aliasing)
         int i = 0;
         do {
             token_str[i++] = next_char;
-        } while (is_hex(read_char(0)));
+        } while (is_hex(read_char(false)));
         token_str[i] = 0;
         skip_whitespace();
         return T_numeric;
     }
     if (next_char == '(') {
-        read_char(1);
+        read_char(true);
         return T_open_bracket;
     }
     if (next_char == ')') {
-        read_char(1);
+        read_char(true);
         return T_close_bracket;
     }
     if (next_char == '{') {
-        read_char(1);
+        read_char(true);
         return T_open_curly;
     }
     if (next_char == '}') {
-        read_char(1);
+        read_char(true);
         return T_close_curly;
     }
     if (next_char == '[') {
-        read_char(1);
+        read_char(true);
         return T_open_square;
     }
     if (next_char == ']') {
-        read_char(1);
+        read_char(true);
         return T_close_square;
     }
     if (next_char == ',') {
-        read_char(1);
+        read_char(true);
         return T_comma;
     }
     if (next_char == '^') {
-        read_char(1);
+        read_char(true);
         return T_bit_xor;
     }
     if (next_char == '~') {
-        read_char(1);
+        read_char(true);
         return T_bit_not;
     }
     if (next_char == '"') {
         int i = 0;
         int special = 0;
 
-        while ((read_char(0) != '"') || special) {
+        while ((read_char(false) != '"') || special) {
             if ((i > 0) && (token_str[i - 1] == '\\')) {
                 if (next_char == 'n')
                     token_str[i - 1] = '\n';
@@ -311,13 +312,13 @@ token_t lex_token_internal(int aliasing)
                 special = 0;
         }
         token_str[i] = 0;
-        read_char(1);
+        read_char(true);
         return T_string;
     }
     if (next_char == '\'') {
-        read_char(0);
+        read_char(false);
         if (next_char == '\\') {
-            read_char(0);
+            read_char(false);
             if (next_char == 'n')
                 token_str[0] = '\n';
             else if (next_char == 'r')
@@ -336,86 +337,86 @@ token_t lex_token_internal(int aliasing)
             token_str[0] = next_char;
         }
         token_str[1] = 0;
-        if (read_char(0) != '\'')
+        if (read_char(true) != '\'')
             abort();
-        read_char(1);
+        read_char(true);
         return T_char;
     }
     if (next_char == '*') {
-        read_char(1);
+        read_char(true);
         return T_asterisk;
     }
     if (next_char == '&') {
-        read_char(0);
+        read_char(false);
         if (next_char == '&') {
-            read_char(1);
+            read_char(true);
             return T_log_and;
         };
         if (next_char == '=') {
-            read_char(1);
+            read_char(true);
             return T_andeq;
         }
         skip_whitespace();
         return T_ampersand;
     }
     if (next_char == '|') {
-        read_char(0);
+        read_char(false);
         if (next_char == '|') {
-            read_char(1);
+            read_char(true);
             return T_log_or;
         };
         if (next_char == '=') {
-            read_char(1);
+            read_char(true);
             return T_oreq;
         }
         skip_whitespace();
         return T_bit_or;
     }
     if (next_char == '<') {
-        read_char(0);
+        read_char(false);
         if (next_char == '=') {
-            read_char(1);
+            read_char(true);
             return T_le;
         };
         if (next_char == '<') {
-            read_char(1);
+            read_char(true);
             return T_lshift;
         };
         skip_whitespace();
         return T_lt;
     }
     if (next_char == '%') {
-        read_char(1);
+        read_char(true);
         return T_mod;
     }
     if (next_char == '>') {
-        read_char(0);
+        read_char(false);
         if (next_char == '=') {
-            read_char(1);
+            read_char(true);
             return T_ge;
         };
         if (next_char == '>') {
-            read_char(1);
+            read_char(true);
             return T_rshift;
         };
         skip_whitespace();
         return T_gt;
     }
     if (next_char == '!') {
-        read_char(0);
+        read_char(false);
         if (next_char == '=') {
-            read_char(1);
+            read_char(true);
             return T_noteq;
         }
         skip_whitespace();
         return T_log_not;
     }
     if (next_char == '.') {
-        read_char(0);
+        read_char(false);
         if (next_char == '.') {
-            read_char(0);
+            read_char(false);
             if (next_char == '.') {
-                read_char(1);
+                read_char(true);
                 return T_elipsis;
             }
             abort();
@@ -424,51 +425,51 @@ token_t lex_token_internal(int aliasing)
         return T_dot;
     }
     if (next_char == '-') {
-        read_char(0);
+        read_char(true);
         if (next_char == '>') {
-            read_char(1);
+            read_char(true);
             return T_arrow;
         }
         if (next_char == '-') {
-            read_char(1);
+            read_char(true);
             return T_decrement;
         }
         if (next_char == '=') {
-            read_char(1);
+            read_char(true);
             return T_minuseq;
         }
         skip_whitespace();
         return T_minus;
     }
     if (next_char == '+') {
-        read_char(0);
+        read_char(false);
         if (next_char == '+') {
-            read_char(1);
+            read_char(true);
             return T_increment;
         }
         if (next_char == '=') {
-            read_char(1);
+            read_char(true);
             return T_pluseq;
         }
         skip_whitespace();
         return T_plus;
     }
     if (next_char == ';') {
-        read_char(1);
+        read_char(true);
         return T_semicolon;
     }
     if (next_char == '?') {
-        read_char(1);
+        read_char(true);
         return T_question;
     }
     if (next_char == ':') {
-        read_char(1);
+        read_char(true);
         return T_colon;
     }
     if (next_char == '=') {
-        read_char(0);
+        read_char(false);
         if (next_char == '=') {
-            read_char(1);
+            read_char(true);
             return T_eq;
         }
         skip_whitespace();
@@ -480,7 +481,7 @@ token_t lex_token_internal(int aliasing)
         int i = 0;
         do {
             token_str[i++] = next_char;
-        } while (is_alnum(read_char(0)));
+        } while (is_alnum(read_char(false)));
         token_str[i] = 0;
         skip_whitespace();
 
@@ -545,7 +546,7 @@ token_t lex_token_internal(int aliasing)
             source_idx = macro_return_idx;
             next_char = SOURCE[source_idx];
         } else
-            next_char = read_char(1);
+            next_char = read_char(true);
         return lex_token_internal(aliasing);
     }
 
@@ -563,7 +564,7 @@ token_t lex_token_internal(int aliasing)
  */
 token_t lex_token()
 {
-    return lex_token_internal(1);
+    return lex_token_internal(true);
 }
 
 /* Skip the content. We only need the index where the macro body begins. */
@@ -572,25 +573,25 @@ void skip_macro_body()
     while (!is_newline(next_char))
         next_token = lex_token();
 
-    skip_newline = 1;
+    skip_newline = true;
     next_token = lex_token();
 }
 
 /* Accepts next token if token types are matched. */
-int lex_accept_internal(token_t token, int aliasing)
+bool lex_accept_internal(token_t token, bool aliasing)
 {
     if (next_token == token) {
         next_token = lex_token_internal(aliasing);
-        return 1;
+        return true;
     }
 
-    return 0;
+    return false;
 }
 
 /* Accepts next token if token types are matched. To disable aliasing on next
  * token, use 'lex_accept_internal'.
  */
-int lex_accept(token_t token)
+bool lex_accept(token_t token)
 {
     return lex_accept_internal(token, 1);
 }
@@ -598,21 +599,21 @@ int lex_accept(token_t token)
 /* Peeks next token and copy token's literal to value if token types are
  * matched.
  */
-int lex_peek(token_t token, char *value)
+bool lex_peek(token_t token, char *value)
 {
     if (next_token == token) {
         if (!value)
-            return 1;
+            return true;
         strcpy(value, token_str);
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 
 /* Strictly match next token with given token type and copy token's literal to
  * value.
  */
-void lex_ident_internal(token_t token, char *value, int aliasing)
+void lex_ident_internal(token_t token, char *value, bool aliasing)
 {
     if (next_token != token)
         error("Unexpected token");
@@ -625,11 +626,11 @@ void lex_ident_internal(token_t token, char *value, int aliasing)
  */
 void lex_ident(token_t token, char *value)
 {
-    lex_ident_internal(token, value, 1);
+    lex_ident_internal(token, value, true);
 }
 
 /* Strictly match next token with given token type. */
-void lex_expect_internal(token_t token, int aliasing)
+void lex_expect_internal(token_t token, bool aliasing)
 {
     if (next_token != token)
         error("Unexpected token");
@@ -641,5 +642,5 @@ void lex_expect_internal(token_t token, int aliasing)
  */
 void lex_expect(token_t token)
 {
-    lex_expect_internal(token, 1);
+    lex_expect_internal(token, true);
 }

@@ -257,7 +257,8 @@ void reg_alloc()
                 if (global_insn->rd->is_ptr)
                     GLOBAL_FUNC.stack_size += PTR_SIZE;
                 else if (strcmp(global_insn->rd->type_name, "int") &&
-                         strcmp(global_insn->rd->type_name, "char")) {
+                         strcmp(global_insn->rd->type_name, "char") &&
+                         strcmp(global_insn->rd->type_name, "_Bool")) {
                     type_t *type = find_type(global_insn->rd->type_name, 0);
                     GLOBAL_FUNC.stack_size += type->size;
                 } else
@@ -347,7 +348,8 @@ void reg_alloc()
                 case OP_allocat:
                     if ((!strcmp(insn->rd->type_name, "void") ||
                          !strcmp(insn->rd->type_name, "int") ||
-                         !strcmp(insn->rd->type_name, "char")) &&
+                         !strcmp(insn->rd->type_name, "char") ||
+                         !strcmp(insn->rd->type_name, "_Bool")) &&
                         insn->rd->array_size == 0)
                         break;
 
