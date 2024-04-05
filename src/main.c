@@ -51,6 +51,8 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
             dump_ir = 1;
+        else if (!strcmp(argv[i], "+m"))
+            hard_mul_div = 1;
         else if (!strcmp(argv[i], "--no-libc"))
             libc = 0;
         else if (!strcmp(argv[i], "-o")) {
@@ -66,7 +68,9 @@ int main(int argc, char *argv[])
 
     if (!in) {
         printf("Missing source file!\n");
-        printf("Usage: shecc [-o output] [--dump-ir] [--no-libc] <input.c>\n");
+        printf(
+            "Usage: shecc [-o output] [+m] [--dump-ir] [--no-libc] "
+            "<input.c>\n");
         return -1;
     }
 

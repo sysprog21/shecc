@@ -132,6 +132,7 @@ int find_trie(trie_t *trie, char *name)
 /* options */
 
 int dump_ir = 0;
+int hard_mul_div = 0;
 
 /**
  * find_type() - Find the type by the given name.

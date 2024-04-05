@@ -592,6 +592,207 @@ int main()
 }
 EOF
 
+# Division and modulo for signed integers
+try_output 0 "-1 -2" << EOF
+int main()
+{
+    printf("%d %d", -6 / 4, -6 % 4);
+    return 0;
+}
+EOF
+
+try_output 0 "-3 1" << EOF
+int main()
+{
+    printf("%d %d", 7 / -2, 7 % -2);
+    return 0;
+}
+EOF
+
+try_output 0 "12 -1" << EOF
+int main()
+{
+    printf("%d %d", -109 / -9, -109 % -9);
+    return 0;
+}
+EOF
+
+try_output 0 "1365 0" << EOF
+int main()
+{
+    printf("%d %d", 1365 / 1, 1365 % 1);
+    return 0;
+}
+EOF
+
+try_output 0 "-126322567 -8" << EOF
+int main()
+{
+    printf("%d %d", -2147483647 / 17, -2147483647 % 17);
+    return 0;
+}
+EOF
+
+try_output 0 "-1 -1" << EOF
+int main()
+{
+    printf("%d %d", -2147483648 / 2147483647, -2147483648 % 2147483647);
+    return 0;
+}
+EOF
+
+try_output 0 "-2147483648 0" << EOF
+int main()
+{
+    printf("%d %d", -2147483648 / 1, -2147483648 % 1);
+    return 0;
+}
+EOF
+
+try_output 0 "-134217728 0" << EOF
+int main()
+{
+    printf("%d %d", -2147483648 / 16, -2147483648 % 16);
+    return 0;
+}
+EOF
+
+try_output 0 "134217728 0" << EOF
+int main()
+{
+    printf("%d %d", -2147483648 / -16, -2147483648 % -16);
+    return 0;
+}
+EOF
+
+try_output 0 "1 0" << EOF
+int main()
+{
+    printf("%d %d", -2147483648 / -2147483648, -2147483648 % -2147483648);
+    return 0;
+}
+EOF
+
+try_output 0 "-8910720 -128" << EOF
+int main()
+{
+    printf("%d %d", -2147483648 / 241, -2147483648 % 241);
+    return 0;
+}
+EOF
+
+try_output 0 "1" << EOF
+int main()
+{
+    printf("%d", 6 / -2 / -3);
+    return 0;
+}
+EOF
+
+try_output 0 "0" << EOF
+int main()
+{
+    printf("%d", 477 / 37 % -3);
+    return 0;
+}
+EOF
+
+try_output 0 "12" << EOF
+int main()
+{
+    printf("%d", 477 / (37 + 1 / -3));
+    return 0;
+}
+EOF
+
+try_output 0 "-39" << EOF
+int main()
+{
+    printf("%d", 477 / (37 / -3));
+    return 0;
+}
+EOF
+
+try_output 0 "2 3" << EOF
+int div(int a, int b)
+{
+    return a / b;
+}
+
+int mod(int a, int b)
+{
+    return a % b;
+}
+
+int main()
+{
+    int a = div(4 + 5 + 6, 1 + 2 + 3);
+    int b = mod(4 + 5 + 6, 1 + 2 + 3);
+    printf("%d %d", a, b);
+    return 0;
+}
+EOF
+
+try_output 0 "-1422 -3094" << EOF
+int div(int a, int b)
+{
+    return a / b;
+}
+
+int mod(int a, int b)
+{
+    return a % b;
+}
+
+int main()
+{
+    int a = div(-4449688, 3127);
+    int b = mod(-4449688, 3127);
+    printf("%d %d", a, b);
+    return 0;
+}
+EOF
+
+try_output 0 "-2267573 102" << EOF
+int div(int a, int b)
+{
+    return a / b;
+}
+
+int mod(int a, int b)
+{
+    return a % b;
+}
+
+int main()
+{
+    int a = div(333333333, -147);
+    int b = mod(333333333, -147);
+    printf("%d %d", a, b);
+    return 0;
+}
+EOF
+
+try_output 0 "104643 -134" << EOF
+int div(int a, int b)
+{
+    return a / b;
+}
+
+int mod(int a, int b)
+{
+    return a % b;
+}
+
+int main()
+{
+    int a = div(-104747777, -1001);
+    int b = mod(-104747777, -1001);
+    printf("%d %d", a, b);
+    return 0;
+}
+EOF
+
 # _Bool size should be equivalent to char, which is 1 byte
 try_output 0 "1" << EOF
 int main()
