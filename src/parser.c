@@ -402,7 +402,7 @@ bool read_preproc_directive()
                 lex_accept(T_comma);
             }
             if (lex_accept(T_elipsis))
-                macro->is_variadic = 1;
+                macro->is_variadic = true;
 
             macro->start_source_idx = source_idx;
             skip_macro_body();
@@ -513,7 +513,7 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
         lex_ident(T_identifier, vd->var_name);
         lex_expect(T_close_bracket);
         read_parameter_list_decl(&func, 1);
-        vd->is_func = 1;
+        vd->is_func = true;
     } else {
         if (anon == 0) {
             lex_ident(T_identifier, vd->var_name);
@@ -546,7 +546,7 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
         } else {
             vd->array_size = 0;
         }
-        vd->is_func = 0;
+        vd->is_func = false;
     }
 }
 
@@ -772,7 +772,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         var_t *var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, 0, OP_generic);
 
-        if (lvalue.is_reference == 0) {
+        if (!lvalue.is_reference) {
             ph1_ir = add_ph1_ir(OP_address_of);
             ph1_ir->src0 = opstack_pop();
             vd = require_var(parent);
@@ -950,7 +950,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             } else {
                 /* indirective function pointer assignment */
                 vd = require_var(parent);
-                vd->is_func = 1;
+                vd->is_func = true;
                 strcpy(vd->var_name, token);
                 opstack_push(vd);
             }
@@ -1054,13 +1054,13 @@ void read_lvalue(lvalue_t *lvalue,
     lvalue->size = get_size(var, lvalue->type);
     lvalue->is_ptr = var->is_ptr;
     lvalue->is_func = var->is_func;
-    lvalue->is_reference = 0;
+    lvalue->is_reference = false;
 
     opstack_push(var);
 
     if (lex_peek(T_open_square, NULL) || lex_peek(T_arrow, NULL) ||
         lex_peek(T_dot, NULL))
-        lvalue->is_reference = 1;
+        lvalue->is_reference = true;
 
     while (lex_peek(T_open_square, NULL) || lex_peek(T_arrow, NULL) ||
            lex_peek(T_dot, NULL)) {
@@ -1110,7 +1110,7 @@ void read_lvalue(lvalue_t *lvalue,
             lex_expect(T_close_square);
             is_address_got = 1;
             is_member = 1;
-            lvalue->is_reference = 1;
+            lvalue->is_reference = true;
         } else {
             char token[MAX_ID_LEN];
 
@@ -1159,7 +1159,7 @@ void read_lvalue(lvalue_t *lvalue,
              * its value.
              */
             if (var->array_size > 0)
-                lvalue->is_reference = 0;
+                lvalue->is_reference = false;
 
             /* move pointer to offset of structure */
             ph1_ir = add_ph1_ir(OP_load_constant);
@@ -1421,7 +1421,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     strcpy(vd->var_name, end_label);
     ph1_ir->src0 = vd;
 
-    var->is_ternary_ret = 1;
+    var->is_ternary_ret = true;
     opstack_push(var);
     bb[0] = end_ternary;
 }
@@ -2692,7 +2692,7 @@ void read_func_body(func_t *fdef, fn_t *fn)
 void read_global_decl(block_t *block)
 {
     var_t *var = require_var(block);
-    var->is_global = 1;
+    var->is_global = true;
 
     /* new function, or variables under parent */
     read_full_var_decl(var, 0, 0);
@@ -2701,7 +2701,7 @@ void read_global_decl(block_t *block)
         /* function */
         func_t *fd = add_func(var->var_name);
         memcpy(&fd->return_def, var, sizeof(var_t));
-        var->is_global = 0;
+        var->is_global = false;
         block->next_local--;
 
         read_parameter_list_decl(fd, 0);

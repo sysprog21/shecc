@@ -143,12 +143,12 @@ basic_block_t *intersect(basic_block_t *i, basic_block_t *j)
 void build_idom()
 {
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        int changed;
+        bool changed;
 
         fn->bbs->idom = fn->bbs;
 
         do {
-            changed = 0;
+            changed = false;
 
             for (basic_block_t *bb = fn->bbs->rpo_next; bb; bb = bb->rpo_next) {
                 /* pick one predecessor */
@@ -172,22 +172,22 @@ void build_idom()
                 }
                 if (bb->idom != pred) {
                     bb->idom = pred;
-                    changed = 1;
+                    changed = true;
                 }
             }
         } while (changed);
     }
 }
 
-int dom_connect(basic_block_t *pred, basic_block_t *succ)
+bool dom_connect(basic_block_t *pred, basic_block_t *succ)
 {
     if (succ->dom_prev)
-        return 0;
+        return false;
 
     int i;
     for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
         if (pred->dom_next[i] == succ)
-            return 0;
+            return false;
         if (!pred->dom_next[i])
             break;
     }
@@ -199,7 +199,7 @@ int dom_connect(basic_block_t *pred, basic_block_t *succ)
 
     pred->dom_next[i++] = succ;
     succ->dom_prev = pred;
-    return 1;
+    return true;
 }
 
 void bb_build_dom(fn_t *fn, basic_block_t *bb)
@@ -261,21 +261,21 @@ void build_df()
     free(args);
 }
 
-int var_check_killed(var_t *var, basic_block_t *bb)
+bool var_check_killed(var_t *var, basic_block_t *bb)
 {
     for (int i = 0; i < bb->live_kill_idx; i++) {
         if (bb->live_kill[i] == var)
-            return 1;
+            return true;
     }
-    return 0;
+    return false;
 }
 
 void bb_add_killed_var(basic_block_t *bb, var_t *var)
 {
-    int found = 0;
+    bool found = false;
     for (int i = 0; i < bb->live_kill_idx; i++) {
         if (bb->live_kill[i] == var) {
-            found = 1;
+            found = true;
             break;
         }
     }
@@ -287,11 +287,11 @@ void bb_add_killed_var(basic_block_t *bb, var_t *var)
 
 void var_add_killed_bb(var_t *var, basic_block_t *bb)
 {
-    int found = 0;
+    bool found = false;
     ref_block_t *ref;
     for (ref = var->ref_block_list.head; ref; ref = ref->next) {
         if (ref->bb == bb) {
-            found = 1;
+            found = true;
             break;
         }
     }
@@ -310,11 +310,11 @@ void var_add_killed_bb(var_t *var, basic_block_t *bb)
 
 void fn_add_global(fn_t *fn, var_t *var)
 {
-    int found = 0;
+    bool found = false;
     symbol_t *sym;
     for (sym = fn->global_sym_list.head; sym; sym = sym->next) {
         if (sym->var == var) {
-            found = 1;
+            found = true;
             break;
         }
     }
@@ -366,7 +366,7 @@ void solve_globals()
     free(args);
 }
 
-int var_check_in_scope(var_t *var, block_t *block)
+bool var_check_in_scope(var_t *var, block_t *block)
 {
     func_t *fn = block->func;
 
@@ -374,30 +374,30 @@ int var_check_in_scope(var_t *var, block_t *block)
         for (int i = 0; i < block->next_local; i++) {
             var_t *locals = block->locals;
             if (var == &locals[i])
-                return 1;
+                return true;
         }
         block = block->parent;
     }
 
     for (int i = 0; i < fn->num_params; i++) {
         if (&fn->param_defs[i] == var)
-            return 1;
+            return true;
     }
 
-    return 0;
+    return false;
 }
 
-int insert_phi_insn(basic_block_t *bb, var_t *var)
+bool insert_phi_insn(basic_block_t *bb, var_t *var)
 {
-    int found = 0;
+    bool found = false;
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         if ((insn->opcode == OP_phi) && (insn->rd == var)) {
-            found = 1;
+            found = true;
             break;
         }
     }
     if (found)
-        return 0;
+        return false;
 
     insn_t *head = bb->insn_list.head;
     insn_t *n = calloc(1, sizeof(insn_t));
@@ -412,7 +412,7 @@ int insert_phi_insn(basic_block_t *bb, var_t *var)
         n->next = head;
         bb->insn_list.head = n;
     }
-    return 1;
+    return true;
 }
 
 void solve_phi_insertion()
@@ -435,10 +435,10 @@ void solve_phi_insertion()
                     if (!var_check_in_scope(var, df->scope))
                         continue;
 
-                    int is_decl = 0;
+                    bool is_decl = false;
                     for (symbol_t *s = df->symbol_list.head; s; s = s->next) {
                         if (s->var == var) {
-                            is_decl = 1;
+                            is_decl = true;
                             break;
                         }
                     }
@@ -453,7 +453,7 @@ void solve_phi_insertion()
                         continue;
 
                     if (insert_phi_insn(df, var)) {
-                        int found = 0;
+                        bool found = false;
 
                         /* Restrict phi insertion of ternary operation.
                          *
@@ -466,7 +466,7 @@ void solve_phi_insertion()
 
                         for (int l = 0; l < work_list_idx; l++)
                             if (work_list[l] == df) {
-                                found = 1;
+                                found = true;
                                 break;
                             }
                         if (!found)
@@ -782,13 +782,13 @@ void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
 {
     bb->visited++;
 
-    int next_ = 0, then_ = 0, else_ = 0;
+    bool next_ = false, then_ = false, else_ = false;
     if (bb->next)
-        next_ = 1;
+        next_ = true;
     if (bb->then_)
-        then_ = 1;
+        then_ = true;
     if (bb->else_)
-        else_ = 1;
+        else_ = true;
     if (then_ && !else_)
         printf("Warning: missing false branch\n");
     if (!then_ && else_)
@@ -1027,23 +1027,23 @@ void ssa_build(int dump_ir)
 /* Common Subexpression Elimination (CSE) */
 /* TODO: simplify with def-use chain */
 /* TODO: release detached insns node */
-int cse(insn_t *insn, basic_block_t *bb)
+bool cse(insn_t *insn, basic_block_t *bb)
 {
     if (insn->opcode != OP_read)
-        return 0;
+        return false;
 
     insn_t *prev = insn->prev;
 
     if (!prev)
-        return 0;
+        return false;
     if (prev->opcode != OP_add)
-        return 0;
+        return false;
     if (prev->rd != insn->rs1)
-        return 0;
+        return false;
 
     var_t *def = NULL, *base = prev->rs1, *idx = prev->rs2;
     if (base->is_global || idx->is_global)
-        return 0;
+        return false;
 
     insn_t *i = prev;
     for (basic_block_t *b = bb;; b = b->idom) {
@@ -1070,7 +1070,7 @@ int cse(insn_t *insn, basic_block_t *bb)
     }
 
     if (!def)
-        return 0;
+        return false;
 
     if (prev->prev) {
         insn->prev = prev->prev;
@@ -1082,49 +1082,49 @@ int cse(insn_t *insn, basic_block_t *bb)
 
     insn->opcode = OP_assign;
     insn->rs1 = def;
-    return 1;
+    return true;
 }
 
-int mark_const(insn_t *insn)
+bool mark_const(insn_t *insn)
 {
     if (insn->opcode == OP_load_constant) {
-        insn->rd->is_const = 1;
-        return 0;
+        insn->rd->is_const = true;
+        return false;
     }
     if (insn->opcode != OP_assign)
-        return 0;
+        return false;
 
     /* The global variable is unique and has no subscripts in our SSA. Do NOT
      * evaluate its value.
      */
     if (insn->rd->is_global)
-        return 0;
+        return false;
     if (!insn->rs1->is_const) {
         if (!insn->prev)
-            return 0;
+            return false;
         if (insn->prev->opcode != OP_load_constant)
-            return 0;
+            return false;
         if (insn->rs1 != insn->prev->rd)
-            return 0;
+            return false;
     }
 
     insn->opcode = OP_load_constant;
-    insn->rd->is_const = 1;
+    insn->rd->is_const = true;
     insn->rd->init_val = insn->rs1->init_val;
     insn->rs1 = NULL;
-    return 1;
+    return true;
 }
 
-int eval_const_arithmetic(insn_t *insn)
+bool eval_const_arithmetic(insn_t *insn)
 {
     if (!insn->rs1)
-        return 0;
+        return false;
     if (!insn->rs1->is_const)
-        return 0;
+        return false;
     if (!insn->rs2)
-        return 0;
+        return false;
     if (!insn->rs2->is_const)
-        return 0;
+        return false;
 
     int res;
     int l = insn->rs1->init_val, r = insn->rs2->init_val;
@@ -1146,7 +1146,7 @@ int eval_const_arithmetic(insn_t *insn)
         res = l % r;
         break;
     default:
-        return 0;
+        return false;
     }
 
     insn->rs1 = NULL;
@@ -1154,16 +1154,16 @@ int eval_const_arithmetic(insn_t *insn)
     insn->rd->is_const = 1;
     insn->rd->init_val = res;
     insn->opcode = OP_load_constant;
-    return 1;
+    return true;
 }
 
-int const_folding(insn_t *insn)
+bool const_folding(insn_t *insn)
 {
     if (mark_const(insn))
-        return 1;
+        return true;
     if (eval_const_arithmetic(insn))
-        return 1;
-    return 0;
+        return true;
+    return false;
 }
 
 void optimize()
@@ -1324,7 +1324,7 @@ int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
     return live_out_idx;
 }
 
-int recompute_live_out(basic_block_t *bb)
+bool recompute_live_out(basic_block_t *bb)
 {
     var_t *live_out[MAX_ANALYSIS_STACK_SIZE];
     int live_out_idx = 0;
@@ -1345,7 +1345,7 @@ int recompute_live_out(basic_block_t *bb)
     if (bb->live_out_idx != live_out_idx) {
         memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
         bb->live_out_idx = live_out_idx;
-        return 1;
+        return true;
     }
 
     for (int i = 0; i < live_out_idx; i++) {
@@ -1359,10 +1359,10 @@ int recompute_live_out(basic_block_t *bb)
         if (!same) {
             memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
             bb->live_out_idx = live_out_idx;
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
 void liveness_analysis()
@@ -1389,9 +1389,9 @@ void liveness_analysis()
 
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         basic_block_t *bb = fn->exit;
-        int changed;
+        bool changed;
         do {
-            changed = 0;
+            changed = false;
             for (bb = fn->exit; bb; bb = bb->rpo_r_next)
                 changed |= recompute_live_out(bb);
         } while (changed);

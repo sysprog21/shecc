@@ -5,7 +5,7 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
-int is_fusible_insn(ph2_ir_t *ph2_ir)
+bool is_fusible_insn(ph2_ir_t *ph2_ir)
 {
     switch (ph2_ir->op) {
     case OP_add:
@@ -25,9 +25,9 @@ int is_fusible_insn(ph2_ir_t *ph2_ir)
     case OP_load:
     case OP_global_load:
     case OP_load_data_address:
-        return 1;
+        return true;
     default:
-        return 0;
+        return false;
     }
 }
 

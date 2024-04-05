@@ -227,7 +227,7 @@ void add_alias(char *alias, char *value)
     alias_t *al = &ALIASES[aliases_idx++];
     strcpy(al->alias, alias);
     strcpy(al->value, value);
-    al->disabled = 0;
+    al->disabled = false;
 }
 
 char *find_alias(char alias[])
@@ -239,22 +239,22 @@ char *find_alias(char alias[])
     return NULL;
 }
 
-int remove_alias(char *alias)
+bool remove_alias(char *alias)
 {
     for (int i = 0; i < aliases_idx; i++) {
         if (!ALIASES[i].disabled && !strcmp(alias, ALIASES[i].alias)) {
-            ALIASES[i].disabled = 1;
-            return 1;
+            ALIASES[i].disabled = true;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
 macro_t *add_macro(char *name)
 {
     macro_t *ma = &MACROS[macros_idx++];
     strcpy(ma->name, name);
-    ma->disabled = 0;
+    ma->disabled = false;
     return ma;
 }
 
@@ -267,15 +267,15 @@ macro_t *find_macro(char *name)
     return NULL;
 }
 
-int remove_macro(char *name)
+bool remove_macro(char *name)
 {
     for (int i = 0; i < macros_idx; i++) {
         if (!MACROS[i].disabled && !strcmp(name, MACROS[i].name)) {
-            MACROS[i].disabled = 1;
-            return 1;
+            MACROS[i].disabled = true;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
 void error(char *msg);
@@ -401,7 +401,7 @@ var_t *find_var(char *token, block_t *parent)
 int size_var(var_t *var)
 {
     int size;
-    if (var->is_ptr > 0 || var->is_func > 0) {
+    if (var->is_ptr > 0 || var->is_func) {
         size = 4;
     } else {
         type_t *type = find_type(var->type_name, 0);

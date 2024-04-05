@@ -159,7 +159,7 @@ void cfg_flatten()
                 if (insn->op == OP_branch) {
                     /* In SSA, we index 'else_bb' first, and then 'then_bb' */
                     if (insn->else_bb != bb->rpo_next)
-                        flatten_ir->is_branch_detached = 1;
+                        flatten_ir->is_branch_detached = true;
                 }
 
                 update_elf_offset(flatten_ir);

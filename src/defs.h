@@ -160,8 +160,8 @@ struct var {
     char type_name[MAX_TYPE_LEN];
     char var_name[MAX_VAR_LEN];
     int is_ptr;
-    int is_func;
-    int is_global;
+    bool is_func;
+    bool is_global;
     int array_size;
     int offset;   /* offset from stack or frame, index 0 is reserved */
     int init_val; /* for global initialization */
@@ -174,21 +174,21 @@ struct var {
     rename_t rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
     int consumed;
-    int is_ternary_ret;
-    int is_const; /* whether a constant representaion or not */
+    bool is_ternary_ret;
+    bool is_const; /* whether a constant representaion or not */
 };
 
 typedef struct var var_t;
 
 typedef struct {
     char name[MAX_VAR_LEN];
-    int is_variadic;
+    bool is_variadic;
     int start_source_idx;
     var_t param_defs[MAX_PARAMS];
     int num_param_defs;
     int params[MAX_PARAMS];
     int num_params;
-    int disabled;
+    bool disabled;
 } macro_t;
 
 typedef struct fn fn_t;
@@ -246,7 +246,7 @@ struct ph2_ir {
     basic_block_t *then_bb;
     basic_block_t *else_bb;
     struct ph2_ir *next;
-    int is_branch_detached;
+    bool is_branch_detached;
 };
 
 typedef struct ph2_ir ph2_ir_t;
@@ -267,8 +267,8 @@ typedef struct type type_t;
 typedef struct {
     int size;
     int is_ptr;
-    int is_func;
-    int is_reference;
+    bool is_func;
+    bool is_reference;
     type_t *type;
 } lvalue_t;
 
@@ -276,7 +276,7 @@ typedef struct {
 typedef struct {
     char alias[MAX_VAR_LEN];
     char value[MAX_VAR_LEN];
-    int disabled;
+    bool disabled;
 } alias_t;
 
 /* constants for enums */

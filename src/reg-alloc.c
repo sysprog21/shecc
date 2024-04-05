@@ -12,13 +12,13 @@
  * dead variable and does NOT wrtie it back to the stack.
  */
 
-int check_live_out(basic_block_t *bb, var_t *var)
+bool check_live_out(basic_block_t *bb, var_t *var)
 {
     for (int i = 0; i < bb->live_out_idx; i++) {
         if (bb->live_out[i] == var)
-            return 1;
+            return true;
     }
-    return 0;
+    return false;
 }
 
 void refresh(basic_block_t *bb, insn_t *insn)
