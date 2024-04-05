@@ -91,11 +91,12 @@ Run `make` and you should see this:
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```
-shecc [-o output] [--no-libc] [--dump-ir] <infile.c>
+shecc [-o output] [+m] [--no-libc] [--dump-ir] <infile.c>
 ```
 
 Compiler options:
 - `-o` : output file name (default: out.elf)
+- `+m` : Enable hardware multiplication and division instructions (default: disabled)
 - `--no-libc` : Exclude embedded C library (default: embedded)
 - `--dump-ir` : Dump intermediate representation (IR)
 

@@ -74,7 +74,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_add:
     case OP_sub:
     case OP_mul:
-    case OP_div:
     case OP_lshift:
     case OP_rshift:
     case OP_bit_and:
@@ -85,11 +84,24 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_bit_not:
         elf_offset += 4;
         return;
+    case OP_div:
+        if (hard_mul_div) {
+            elf_offset += 4;
+        } else {
+            elf_offset += 104;
+        }
+        return;
+    case OP_mod:
+        if (hard_mul_div) {
+            elf_offset += 12;
+        } else {
+            elf_offset += 104;
+        }
+        return;
     case OP_load_data_address:
         elf_offset += 8;
         return;
     case OP_address_of_func:
-    case OP_mod:
     case OP_eq:
     case OP_neq:
     case OP_gt:
@@ -323,12 +335,76 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mul(__AL, rd, rn, rm));
         return;
     case OP_div:
-        emit(__div(__AL, rd, rm, rn));
+        if (hard_mul_div) {
+            emit(__div(__AL, rd, rm, rn));
+        } else {
+            /* Obtain absoulte values of dividend and divisor */
+            emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
+            emit(__add_r(__AL, rn, rn, __r8));
+            emit(__eor_r(__AL, rn, rn, __r8));
+            emit(__srl_amt(__AL, 0, arith_rs, __r9, rm, 31));
+            emit(__add_r(__AL, rm, rm, __r9));
+            emit(__eor_r(__AL, rm, rm, __r9));
+            emit(__eor_r(__AL, __r10, __r8, __r9));
+            /* Unsigned integer division */
+            emit(__zero(__r9));
+            emit(__mov_i(__AL, __r8, 1));
+            emit(__cmp_i(__AL, rm, 0));
+            emit(__b(__EQ, 52));
+            emit(__cmp_i(__AL, rn, 0));
+            emit(__b(__EQ, 44));
+            emit(__cmp_r(__AL, rm, rn));
+            emit(__sll_amt(__CC, 0, logic_ls, rm, rm, 1));
+            emit(__sll_amt(__CC, 0, logic_ls, __r8, __r8, 1));
+            emit(__b(__CC, -12));
+            emit(__cmp_r(__AL, rn, rm));
+            emit(__sub_r(__CS, rn, rn, rm));
+            emit(__add_r(__CS, __r9, __r9, __r8));
+            emit(__srl_amt(__AL, 1, logic_rs, __r8, __r8, 1));
+            emit(__srl_amt(__CC, 0, logic_rs, rm, rm, 1));
+            emit(__b(__CC, -20));
+            emit(__mov_r(__AL, rd, __r9));
+            /* Handle the correct sign for quotient */
+            emit(__cmp_i(__AL, __r10, 0));
+            emit(__rsb_i(__NE, rd, 0, rd));
+        }
         return;
     case OP_mod:
-        emit(__div(__AL, __r8, rm, rn));
-        emit(__mul(__AL, __r8, rm, __r8));
-        emit(__sub_r(__AL, rd, rn, __r8));
+        if (hard_mul_div) {
+            emit(__div(__AL, __r8, rm, rn));
+            emit(__mul(__AL, __r8, rm, __r8));
+            emit(__sub_r(__AL, rd, rn, __r8));
+        } else {
+            /* Obtain absoulte values of dividend and divisor */
+            emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
+            emit(__add_r(__AL, rn, rn, __r8));
+            emit(__eor_r(__AL, rn, rn, __r8));
+            emit(__srl_amt(__AL, 0, arith_rs, __r9, rm, 31));
+            emit(__add_r(__AL, rm, rm, __r9));
+            emit(__eor_r(__AL, rm, rm, __r9));
+            emit(__mov_r(__AL, __r10, __r8));
+            /* Unsigned integer division */
+            emit(__zero(__r9));
+            emit(__mov_i(__AL, __r8, 1));
+            emit(__cmp_i(__AL, rm, 0));
+            emit(__b(__EQ, 52));
+            emit(__cmp_i(__AL, rn, 0));
+            emit(__b(__EQ, 44));
+            emit(__cmp_r(__AL, rm, rn));
+            emit(__sll_amt(__CC, 0, logic_ls, rm, rm, 1));
+            emit(__sll_amt(__CC, 0, logic_ls, __r8, __r8, 1));
+            emit(__b(__CC, -12));
+            emit(__cmp_r(__AL, rn, rm));
+            emit(__sub_r(__CS, rn, rn, rm));
+            emit(__add_r(__CS, __r9, __r9, __r8));
+            emit(__srl_amt(__AL, 1, logic_rs, __r8, __r8, 1));
+            emit(__srl_amt(__CC, 0, logic_rs, rm, rm, 1));
+            emit(__b(__CC, -20));
+            emit(__mov_r(__AL, rd, rn));
+            /* Handle the correct sign for remainder */
+            emit(__cmp_i(__AL, __r10, 0));
+            emit(__rsb_i(__NE, rd, 0, rd));
+        }
         return;
     case OP_lshift:
         emit(__sll(__AL, rd, rn, rm));
