@@ -21,9 +21,9 @@ jobs:
           sudo apt-get install -q -y build-essential
           make clean config
           make check-snapshots || exit 1
-          make clean config ARCH=arm
+          make distclean config ARCH=arm
           make check || exit 1
-          make clean config ARCH=riscv
+          make distclean config ARCH=riscv
           make check || exit 1
 
   host-arm:

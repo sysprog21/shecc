@@ -107,7 +107,7 @@ void cfg_flatten()
 
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         /* reserve stack */
-        ph2_ir_t *fflatten_ir = add_ph2_ir(OP_define);
+        ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = fn->func->stack_size;
 
         for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
