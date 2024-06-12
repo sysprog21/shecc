@@ -455,13 +455,14 @@ void solve_phi_insertion()
                     if (insert_phi_insn(df, var)) {
                         bool found = false;
 
-                        /* Restrict phi insertion of ternary operation.
+                        /* Restrict phi insertion of ternary operation and
+                         * logical-and operation.
                          *
-                         * The ternary operation doesn't create new scope, so
-                         * prevent temporary variable from propagating through
-                         * the dominance tree.
+                         * The ternary and logical-and operation doesn't create
+                         * new scope, so prevent temporary variable from
+                         * propagating through the dominance tree.
                          */
-                        if (var->is_ternary_ret)
+                        if (var->is_ternary_ret || var->is_log_and_ret)
                             continue;
 
                         for (int l = 0; l < work_list_idx; l++)

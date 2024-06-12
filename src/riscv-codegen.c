@@ -412,15 +412,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sltu(rd, __zero, rs1));
         emit(__xori(rd, rd, 1));
         return;
-    case OP_log_and:
-        /* TODO: short-circuit evaluation */
-        emit(__xor(__t0, rs1, rs2));
-        emit(__sub(rd, __t0, rs1));
-        emit(__sub(__t0, __t0, rs2));
-        emit(__sltu(rd, __zero, rd));
-        emit(__sltu(__t0, __zero, __t0));
-        emit(__and(rd, rd, __t0));
-        return;
     case OP_log_or:
         emit(__or(rd, rs1, rs2));
         emit(__sltu(rd, __zero, rd));

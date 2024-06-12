@@ -662,6 +662,9 @@ void read_char_param(block_t *parent, basic_block_t *bb)
     add_insn(parent, bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0, NULL);
 }
 
+void read_log_and_operation(block_t *parent,
+                            basic_block_t **bb,
+                            char *label_else);
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
 void read_func_parameters(block_t *parent, basic_block_t **bb)
 {
@@ -973,6 +976,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
     }
 }
 
+void finalize_log_and(block_t *parent,
+                      basic_block_t **bb,
+                      char *label_else,
+                      basic_block_t *else_bb);
+
 void read_expr(block_t *parent, basic_block_t **bb)
 {
     ph1_ir_t *ph1_ir;
@@ -980,13 +988,25 @@ void read_expr(block_t *parent, basic_block_t **bb)
     opcode_t oper_stack[10];
     int oper_stack_idx = 0;
 
+    /* These variables used for parsing logical-and operation. False branch of
+     * each logical-and operand points to the same basic block.
+     */
+    bool has_log_and = false;
+    basic_block_t *else_bb = bb_create(parent);
+    char land_else_label[MAX_VAR_LEN];
+    strcpy(land_else_label, gen_label());
+
     read_expr_operand(parent, bb);
 
     opcode_t op = get_operator();
     if (op == OP_generic || op == OP_ternary)
         return;
-
-    oper_stack[oper_stack_idx++] = op;
+    if (op == OP_log_and) {
+        bb_connect(*bb, else_bb, ELSE);
+        read_log_and_operation(parent, bb, land_else_label);
+        has_log_and = true;
+    } else
+        oper_stack[oper_stack_idx++] = op;
     read_expr_operand(parent, bb);
     op = get_operator();
 
@@ -1011,8 +1031,25 @@ void read_expr(block_t *parent, basic_block_t **bb)
                     same = 1;
             } while (oper_stack_idx > 0 && same == 0);
         }
+        if (op == OP_log_and) {
+            bb_connect(*bb, else_bb, ELSE);
+            read_log_and_operation(parent, bb, land_else_label);
+            has_log_and = true;
+        }
+        /* When encountering an operator with lower priority, conclude the
+         * current logical-and and create a new "else" basic block for next
+         * logical-and operator.
+         */
+        if (has_log_and &&
+            get_operator_prio(op) < get_operator_prio(OP_log_and)) {
+            finalize_log_and(parent, bb, land_else_label, else_bb);
+            else_bb = bb_create(parent);
+            strcpy(land_else_label, gen_label());
+            has_log_and = false;
+        }
         read_expr_operand(parent, bb);
-        oper_stack[oper_stack_idx++] = op;
+        if (op != OP_log_and)
+            oper_stack[oper_stack_idx++] = op;
         op = get_operator();
     }
 
@@ -1026,6 +1063,9 @@ void read_expr(block_t *parent, basic_block_t **bb)
         opstack_push(vd);
         add_insn(parent, *bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
                  ph1_ir->src1, 0, NULL);
+    }
+    if (has_log_and) {
+        finalize_log_and(parent, bb, land_else_label, else_bb);
     }
 }
 
@@ -1341,6 +1381,127 @@ void read_lvalue(lvalue_t *lvalue,
             }
         }
     }
+}
+
+void read_log_and_operation(block_t *parent,
+                            basic_block_t **bb,
+                            char *label_else)
+{
+    char label_true[MAX_VAR_LEN];
+    var_t *vd;
+    ph1_ir_t *ph1_ir;
+    strcpy(label_true, gen_label());
+
+    /* test the operand before the logical-and operator */
+    ph1_ir = add_ph1_ir(OP_branch);
+    ph1_ir->dest = opstack_pop();
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_true);
+    ph1_ir->src0 = vd;
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_else);
+    ph1_ir->src1 = vd;
+    add_insn(parent, *bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
+
+    /* true branch label */
+    ph1_ir = add_ph1_ir(OP_label);
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_true);
+    ph1_ir->src0 = vd;
+
+    basic_block_t *then_ = bb_create(parent);
+    bb_connect(*bb, then_, THEN);
+
+    bb[0] = then_;
+}
+
+void finalize_log_and(block_t *parent,
+                      basic_block_t **bb,
+                      char *label_else,
+                      basic_block_t *else_bb)
+{
+    basic_block_t *then_next_ = bb_create(parent);
+    basic_block_t *end_ = bb_create(parent);
+    bb_connect(*bb, then_next_, THEN);
+    bb_connect(*bb, else_bb, ELSE);
+    bb_connect(then_next_, end_, NEXT);
+    bb_connect(else_bb, end_, NEXT);
+    char label_and_true[MAX_VAR_LEN], label_end[MAX_VAR_LEN];
+    strcpy(label_and_true, gen_label());
+    strcpy(label_end, gen_label());
+    var_t *and_res;
+
+    /* create branch instruction for final logical-and operand */
+    ph1_ir_t *ph1_ir = add_ph1_ir(OP_branch);
+    var_t *vd = opstack_pop();
+    ph1_ir->dest = vd;
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_and_true);
+    ph1_ir->src0 = vd;
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_else);
+    ph1_ir->src1 = vd;
+    add_insn(parent, *bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
+
+    /* true branch of the logical-and operation */
+    ph1_ir = add_ph1_ir(OP_label);
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_and_true);
+    ph1_ir->dest = vd;
+
+    ph1_ir = add_ph1_ir(OP_load_constant);
+    vd = require_var(parent);
+    strcpy(vd->var_name, gen_name());
+    vd->init_val = 1;
+    ph1_ir->dest = vd;
+    add_insn(parent, then_next_, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
+             NULL);
+
+    ph1_ir = add_ph1_ir(OP_assign);
+    and_res = require_var(parent);
+    strcpy(and_res->var_name, gen_name());
+    ph1_ir->dest = and_res;
+    ph1_ir->src0 = vd;
+    add_insn(parent, then_next_, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
+             NULL);
+
+    /* end of true branch, jump over the false branch */
+    ph1_ir = add_ph1_ir(OP_jump);
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_end);
+    ph1_ir->dest = vd;
+
+    /* false branch of logical-and operation */
+    ph1_ir = add_ph1_ir(OP_label);
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_else);
+    ph1_ir->src0 = vd;
+
+    ph1_ir = add_ph1_ir(OP_load_constant);
+    vd = require_var(parent);
+    strcpy(vd->var_name, gen_name());
+    vd->init_val = 0;
+    ph1_ir->dest = vd;
+    add_insn(parent, else_bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
+             NULL);
+
+    /* final basic block to retrieve the value from one of previous basic block
+     */
+    ph1_ir = add_ph1_ir(OP_assign);
+    ph1_ir->dest = and_res;
+    ph1_ir->src0 = vd;
+    add_insn(parent, else_bb, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
+             NULL);
+
+    ph1_ir = add_ph1_ir(OP_label);
+    vd = require_var(parent);
+    strcpy(vd->var_name, label_end);
+    ph1_ir->src0 = vd;
+
+    and_res->is_log_and_ret = true;
+    opstack_push(and_res);
+
+    bb[0] = end_;
 }
 
 void read_ternary_operation(block_t *parent, basic_block_t **bb)
@@ -2074,6 +2235,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         strcpy(var_break->var_name, label_end);
         break_exit[break_exit_idx++] = var_break;
 
+        basic_block_t *cond = bb_create(parent);
+        cond = bb;
         lex_expect(T_open_bracket);
         read_expr(parent, &bb);
         lex_expect(T_close_bracket);
@@ -2118,7 +2281,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
         /* return, break, continue */
         if (body_)
-            bb_connect(body_, bb, NEXT);
+            bb_connect(body_, cond, NEXT);
 
         return else_;
     }
@@ -2365,9 +2528,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
         basic_block_t *cond_ = bb_create(blk);
         basic_block_t *for_end = bb_create(parent);
+        basic_block_t *cond_start = cond_;
         break_bb[break_exit_idx] = for_end;
         bb_connect(setup, cond_, NEXT);
-        bb_connect(cond_, for_end, ELSE);
 
         /* condition - check before the loop */
         ph1_ir = add_ph1_ir(OP_label);
@@ -2388,6 +2551,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             add_insn(blk, cond_, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
                      NULL);
         }
+        bb_connect(cond_, for_end, ELSE);
 
         ph1_ir = add_ph1_ir(OP_branch);
         ph1_ir->dest = opstack_pop();
@@ -2443,7 +2607,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
         if (body_) {
             bb_connect(body_, inc_, NEXT);
-            bb_connect(inc_, cond_, NEXT);
+            bb_connect(inc_, cond_start, NEXT);
         } else {
             /* TODO: Release dangling inc basic block */
         }

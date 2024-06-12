@@ -440,16 +440,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mov_i(__NE, rd, 0));
         emit(__mov_i(__EQ, rd, 1));
         return;
-    case OP_log_and:
-        /* TODO: short-circuit evaluation */
-        emit(__teq(rn));
-        emit(__mov_i(__NE, __r8, 1));
-        emit(__mov_i(__EQ, __r8, 0));
-        emit(__teq(rm));
-        emit(__mov_i(__NE, rd, 1));
-        emit(__mov_i(__EQ, rd, 0));
-        emit(__and_r(__AL, rd, rd, __r8));
-        return;
     case OP_log_or:
         emit(__or_r(__AL, rd, rn, rm));
         emit(__teq(rd));
