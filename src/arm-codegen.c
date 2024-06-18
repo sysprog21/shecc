@@ -338,7 +338,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         if (hard_mul_div) {
             emit(__div(__AL, rd, rm, rn));
         } else {
-            /* Obtain absoulte values of dividend and divisor */
+            /* Obtain absolute values of dividend and divisor */
             emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
             emit(__add_r(__AL, rn, rn, __r8));
             emit(__eor_r(__AL, rn, rn, __r8));
@@ -375,7 +375,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__mul(__AL, __r8, rm, __r8));
             emit(__sub_r(__AL, rd, rn, __r8));
         } else {
-            /* Obtain absoulte values of dividend and divisor */
+            /* Obtain absolute values of dividend and divisor */
             emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
             emit(__add_r(__AL, rn, rn, __r8));
             emit(__eor_r(__AL, rn, rn, __r8));
