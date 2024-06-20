@@ -50,7 +50,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_indirect:
     case OP_add:
     case OP_sub:
-    case OP_mul:
     case OP_div:
     case OP_mod:
     case OP_lshift:
@@ -64,6 +63,12 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_log_and:
     case OP_bit_not:
         elf_offset += 4;
+        return;
+    case OP_mul:
+        if (hard_mul_div)
+            elf_offset += 4;
+        else
+            elf_offset += 52;
         return;
     case OP_load_data_address:
     case OP_neq:
@@ -283,7 +288,23 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sub(rd, rs1, rs2));
         return;
     case OP_mul:
-        emit(__mul(rd, rs1, rs2));
+        if (hard_mul_div)
+            emit(__mul(rd, rs1, rs2));
+        else {
+            emit(__addi(__t0, __zero, 0));
+            emit(__addi(__t1, __zero, 0));
+            emit(__addi(__t3, rs1, 0));
+            emit(__addi(__t4, rs2, 0));
+            emit(__beq(__t3, __zero, 32));
+            emit(__beq(__t4, __zero, 28));
+            emit(__andi(__t1, __t4, 1));
+            emit(__beq(__t1, __zero, 8));
+            emit(__add(__t0, __t0, __t3));
+            emit(__slli(__t3, __t3, 1));
+            emit(__srli(__t4, __t4, 1));
+            emit(__jal(__zero, -28));
+            emit(__addi(rd, __t0, 0));
+        }
         return;
     case OP_div:
         emit(__div(rd, rs1, rs2));
