@@ -50,8 +50,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_indirect:
     case OP_add:
     case OP_sub:
-    case OP_div:
-    case OP_mod:
     case OP_lshift:
     case OP_rshift:
     case OP_gt:
@@ -69,6 +67,13 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             elf_offset += 4;
         else
             elf_offset += 52;
+        return;
+    case OP_div:
+    case OP_mod:
+        if (hard_mul_div)
+            elf_offset += 4;
+        else
+            elf_offset += 104;
         return;
     case OP_load_data_address:
     case OP_neq:
@@ -151,6 +156,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     int rs1 = ph2_ir->src0 + 10;
     int rs2 = ph2_ir->src1 + 10;
     int ofs;
+
+    /* Prepare the variables to reuse the same code for
+     * the instruction sequence of division and modulo.
+     */
+    rv_reg soft_div_rd = __t0, divisor_mask = __t1;
 
     switch (ph2_ir->op) {
     case OP_define:
@@ -307,10 +317,52 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
         return;
     case OP_div:
-        emit(__div(rd, rs1, rs2));
-        return;
     case OP_mod:
-        emit(__mod(rd, rs1, rs2));
+        if (hard_mul_div) {
+            if (ph2_ir->op == OP_div)
+                emit(__div(rd, rs1, rs2));
+            else
+                emit(__mod(rd, rs1, rs2));
+            return;
+        }
+        /* div/mod emulation */
+        if (ph2_ir->op == OP_mod) {
+            /* If the requested operation is modulo, the result will be stored
+             * in __t2. The sign of the divisor is irrelevant for determining
+             * the result's sign.
+             */
+            soft_div_rd = __t2;
+            divisor_mask = __zero;
+        }
+        /* Obtain absolute values of the dividend and divisor */
+        emit(__addi(__t2, rs1, 0));
+        emit(__addi(__t3, rs2, 0));
+        emit(__srai(__t0, __t2, 31));
+        emit(__add(__t2, __t2, __t0));
+        emit(__xor(__t2, __t2, __t0));
+        emit(__srai(__t1, __t3, 31));
+        emit(__add(__t3, __t3, __t1));
+        emit(__xor(__t3, __t3, __t1));
+        emit(__xor(__t5, __t0, divisor_mask));
+        /* Unsigned integer division */
+        emit(__addi(__t0, __zero, 0));
+        emit(__addi(__t1, __zero, 1));
+        emit(__beq(__t3, __zero, 48));
+        emit(__beq(__t2, __zero, 44));
+        emit(__bltu(__t2, __t3, 16));
+        emit(__slli(__t3, __t3, 1));
+        emit(__slli(__t1, __t1, 1));
+        emit(__jal(__zero, -12));
+        emit(__bltu(__t2, __t3, 12));
+        emit(__sub(__t2, __t2, __t3));
+        emit(__add(__t0, __t0, __t1));
+        emit(__srli(__t1, __t1, 1));
+        emit(__srli(__t3, __t3, 1));
+        emit(__bne(__t1, __zero, -20));
+        emit(__addi(rd, soft_div_rd, 0));
+        /* Handle the correct sign for the quotient or remainder */
+        emit(__beq(__t5, __zero, 8));
+        emit(__sub(rd, __zero, rd));
         return;
     case OP_lshift:
         emit(__sll(rd, rs1, rs2));
