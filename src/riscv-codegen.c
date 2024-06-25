@@ -58,7 +58,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_bit_or:
     case OP_bit_xor:
     case OP_negate:
-    case OP_log_and:
     case OP_bit_not:
         elf_offset += 4;
         return;
@@ -87,6 +86,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_eq:
         elf_offset += 12;
         return;
+    case OP_log_and:
     case OP_branch:
         elf_offset += 20;
         return;
@@ -413,8 +413,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__xori(rd, rd, 1));
         return;
     case OP_log_and:
-        /* FIXME: bad logical-and instruction */
-        emit(__and(rd, rs1, rs2));
+        /* TODO: Short-circuit evaluation */
+        emit(__beq(rs1, __zero, 16));
+        emit(__beq(rs2, __zero, 12));
+        emit(__addi(rd, __zero, 1));
+        emit(__jal(__zero, 8));
+        emit(__addi(rd, __zero, 0));
         return;
     case OP_log_or:
         emit(__or(rd, rs1, rs2));

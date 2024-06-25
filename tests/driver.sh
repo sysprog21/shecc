@@ -835,4 +835,26 @@ int main()
 }
 EOF
 
+# Logical-and
+try_output 0 "1 0 0 0" << EOF
+int main()
+{
+    int a = 7, b = -15;
+    int res = a && b;
+    printf("%d ", res);
+    a = 0;
+    res = a && b;
+    printf("%d ", res);
+    a = -79;
+    b = 0;
+    res = a && b;
+    printf("%d ", res);
+    a = 0;
+    b = 0;
+    res = a && b;
+    printf("%d", res);
+    return 0;
+}
+EOF
+
 echo OK
