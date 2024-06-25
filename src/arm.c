@@ -49,7 +49,7 @@ typedef enum {
     __NE = 1,  /* Not equal */
     __CS = 2,  /* Unsigned higher or same */
     __CC = 3,  /* Unsigned lower */
-    __LS = 9,  /* unsigned lower or same */
+    __LS = 9,  /* Unsigned lower or same */
     __GE = 10, /* Signed greater than or equal */
     __LT = 11, /* Signed less than */
     __GT = 12, /* Signed greater than */
@@ -82,7 +82,7 @@ typedef enum {
     logic_rs = 1, /* Logical right shift */
     arith_rs = 2, /* Arithmetic right shift */
     rotat_rs = 3  /* Rotate right shift */
-} shfit_type;
+} shift_type;
 
 arm_cond_t arm_get_cond(opcode_t op)
 {
@@ -198,7 +198,7 @@ int __srl(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
 
 int __srl_amt(arm_cond_t cond,
               int s,
-              shfit_type shift,
+              shift_type shift,
               arm_reg rd,
               arm_reg rm,
               int amt)
@@ -215,7 +215,7 @@ int __sll(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
 
 int __sll_amt(arm_cond_t cond,
               int s,
-              shfit_type shift,
+              shift_type shift,
               arm_reg rd,
               arm_reg rm,
               int amt)

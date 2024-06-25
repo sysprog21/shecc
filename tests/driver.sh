@@ -592,6 +592,39 @@ int main()
 }
 EOF
 
+# Multiplication for signed integers
+try_output 0 "35 -35 -35 35" << EOF
+int main()
+{
+    printf("%d %d %d %d\n", 5 * 7, 5 * (-7), (-5) * 7, (-5) * (-7));
+    return 0;
+}
+EOF
+
+try_output 0 "-212121 -535050 336105 666666666" << EOF
+int main()
+{
+    printf("%d %d %d %d\n", (-333) * 637, 1450 * (-369), 37345 * 9, (-111111111) * (-6));
+    return 0;
+}
+EOF
+
+try_output 0 "1073676289 -131071 30" << EOF
+int main()
+{
+    printf("%d %d %d\n", 32767 * 32767, 65535 * 65535, 54 * 5 * 954437177);
+    return 0;
+}
+EOF
+
+try_output 0 "-2 6 24" << EOF
+int main()
+{
+    printf("%d %d %d\n", (-1) * 2, (-1) * 2 * (-3), (-1) * 2 * (-3) * 4);
+    return 0;
+}
+EOF
+
 # Division and modulo for signed integers
 try_output 0 "-1 -2" << EOF
 int main()
