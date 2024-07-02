@@ -33,11 +33,13 @@ typedef enum {
     arm_sub = 2,
     arm_rsb = 3,
     arm_add = 4,
+    arm_ldm = 9,
     arm_teq = 9,
     arm_cmp = 10,
     arm_orr = 12,
     arm_mov = 13,
-    arm_mvn = 15
+    arm_mvn = 15,
+    arm_stmdb = 16
 } arm_op_t;
 
 /* Condition code
@@ -281,6 +283,16 @@ int __sw(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 int __sb(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 {
     return arm_transfer(cond, 0, 1, rn, rd, ofs);
+}
+
+int __stmdb(arm_cond_t cond, int w, arm_reg rn, int reg_list)
+{
+    return arm_encode(cond, arm_stmdb + (0x2 << 6) + (w << 1), rn, 0, reg_list);
+}
+
+int __ldm(arm_cond_t cond, int w, arm_reg rn, int reg_list)
+{
+    return arm_encode(cond, arm_ldm + (0x2 << 6) + (w << 1), rn, 0, reg_list);
 }
 
 int __b(arm_cond_t cond, int ofs)

@@ -85,18 +85,16 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 4;
         return;
     case OP_div:
-        if (hard_mul_div) {
-            elf_offset += 4;
-        } else {
-            elf_offset += 104;
-        }
-        return;
     case OP_mod:
         if (hard_mul_div) {
-            elf_offset += 12;
-        } else {
-            elf_offset += 104;
+            if (ph2_ir->op == OP_div)
+                elf_offset += 4;
+            else
+                elf_offset += 12;
+            return;
         }
+        /* div/mod emulation's offset */
+        elf_offset += 116;
         return;
     case OP_load_data_address:
         elf_offset += 8;
@@ -192,6 +190,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     int rn = ph2_ir->src0;
     int rm = ph2_ir->src1;
     int ofs;
+
+    /* Prepare this variable to reuse the same code for
+     * the instruction sequence of division and modulo.
+     */
+    arm_reg soft_div_rd = __r8;
 
     switch (ph2_ir->op) {
     case OP_define:
@@ -335,76 +338,69 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mul(__AL, rd, rn, rm));
         return;
     case OP_div:
-        if (hard_mul_div) {
-            emit(__div(__AL, rd, rm, rn));
-        } else {
-            /* Obtain absolute values of dividend and divisor */
-            emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
-            emit(__add_r(__AL, rn, rn, __r8));
-            emit(__eor_r(__AL, rn, rn, __r8));
-            emit(__srl_amt(__AL, 0, arith_rs, __r9, rm, 31));
-            emit(__add_r(__AL, rm, rm, __r9));
-            emit(__eor_r(__AL, rm, rm, __r9));
-            emit(__eor_r(__AL, __r10, __r8, __r9));
-            /* Unsigned integer division */
-            emit(__zero(__r9));
-            emit(__mov_i(__AL, __r8, 1));
-            emit(__cmp_i(__AL, rm, 0));
-            emit(__b(__EQ, 52));
-            emit(__cmp_i(__AL, rn, 0));
-            emit(__b(__EQ, 44));
-            emit(__cmp_r(__AL, rm, rn));
-            emit(__sll_amt(__CC, 0, logic_ls, rm, rm, 1));
-            emit(__sll_amt(__CC, 0, logic_ls, __r8, __r8, 1));
-            emit(__b(__CC, -12));
-            emit(__cmp_r(__AL, rn, rm));
-            emit(__sub_r(__CS, rn, rn, rm));
-            emit(__add_r(__CS, __r9, __r9, __r8));
-            emit(__srl_amt(__AL, 1, logic_rs, __r8, __r8, 1));
-            emit(__srl_amt(__CC, 0, logic_rs, rm, rm, 1));
-            emit(__b(__CC, -20));
-            emit(__mov_r(__AL, rd, __r9));
-            /* Handle the correct sign for quotient */
-            emit(__cmp_i(__AL, __r10, 0));
-            emit(__rsb_i(__NE, rd, 0, rd));
-        }
-        return;
     case OP_mod:
         if (hard_mul_div) {
-            emit(__div(__AL, __r8, rm, rn));
-            emit(__mul(__AL, __r8, rm, __r8));
-            emit(__sub_r(__AL, rd, rn, __r8));
-        } else {
-            /* Obtain absolute values of dividend and divisor */
-            emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
-            emit(__add_r(__AL, rn, rn, __r8));
-            emit(__eor_r(__AL, rn, rn, __r8));
-            emit(__srl_amt(__AL, 0, arith_rs, __r9, rm, 31));
-            emit(__add_r(__AL, rm, rm, __r9));
-            emit(__eor_r(__AL, rm, rm, __r9));
-            emit(__mov_r(__AL, __r10, __r8));
-            /* Unsigned integer division */
-            emit(__zero(__r9));
-            emit(__mov_i(__AL, __r8, 1));
-            emit(__cmp_i(__AL, rm, 0));
-            emit(__b(__EQ, 52));
-            emit(__cmp_i(__AL, rn, 0));
-            emit(__b(__EQ, 44));
-            emit(__cmp_r(__AL, rm, rn));
-            emit(__sll_amt(__CC, 0, logic_ls, rm, rm, 1));
-            emit(__sll_amt(__CC, 0, logic_ls, __r8, __r8, 1));
-            emit(__b(__CC, -12));
-            emit(__cmp_r(__AL, rn, rm));
-            emit(__sub_r(__CS, rn, rn, rm));
-            emit(__add_r(__CS, __r9, __r9, __r8));
-            emit(__srl_amt(__AL, 1, logic_rs, __r8, __r8, 1));
-            emit(__srl_amt(__CC, 0, logic_rs, rm, rm, 1));
-            emit(__b(__CC, -20));
-            emit(__mov_r(__AL, rd, rn));
-            /* Handle the correct sign for remainder */
-            emit(__cmp_i(__AL, __r10, 0));
-            emit(__rsb_i(__NE, rd, 0, rd));
+            if (ph2_ir->op == OP_div)
+                emit(__div(__AL, rd, rm, rn));
+            else {
+                emit(__div(__AL, __r8, rm, rn));
+                emit(__mul(__AL, __r8, rm, __r8));
+                emit(__sub_r(__AL, rd, rn, __r8));
+            }
+            return;
         }
+        /* div/mod emulation */
+        /* Preserve the values of the dividend and divisor */
+        emit(__stmdb(__AL, 1, __sp, (1 << rn) | (1 << rm)));
+        /* Obtain absolute values of the dividend and divisor */
+        emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
+        emit(__add_r(__AL, rn, rn, __r8));
+        emit(__eor_r(__AL, rn, rn, __r8));
+        emit(__srl_amt(__AL, 0, arith_rs, __r9, rm, 31));
+        emit(__add_r(__AL, rm, rm, __r9));
+        emit(__eor_r(__AL, rm, rm, __r9));
+        if (ph2_ir->op == OP_div)
+            emit(__eor_r(__AL, __r10, __r8, __r9));
+        else {
+            /* If the requested operation is modulo, the result will be stored
+             * in __r9. The sign of the divisor is irrelevant for determining
+             * the result's sign.
+             */
+            soft_div_rd = __r9;
+            emit(__mov_r(__AL, __r10, __r8));
+        }
+        /* Unsigned integer division */
+        emit(__zero(__r8));
+        emit(__mov_i(__AL, __r9, 1));
+        emit(__cmp_i(__AL, rm, 0));
+        emit(__b(__EQ, 52));
+        emit(__cmp_i(__AL, rn, 0));
+        emit(__b(__EQ, 44));
+        emit(__cmp_r(__AL, rm, rn));
+        emit(__sll_amt(__CC, 0, logic_ls, rm, rm, 1));
+        emit(__sll_amt(__CC, 0, logic_ls, __r9, __r9, 1));
+        emit(__b(__CC, -12));
+        emit(__cmp_r(__AL, rn, rm));
+        emit(__sub_r(__CS, rn, rn, rm));
+        emit(__add_r(__CS, __r8, __r8, __r9));
+        emit(__srl_amt(__AL, 1, logic_rs, __r9, __r9, 1));
+        emit(__srl_amt(__CC, 0, logic_rs, rm, rm, 1));
+        emit(__b(__CC, -20));
+        /* After completing the emulation, the quotient and remainder
+         * will be stored in __r8 and __r9, respectively.
+         *
+         * The original values of the dividend and divisor will be
+         * restored in rn and rm.
+         *
+         * Finally, the result (quotient or remainder) will be stored
+         * in rd.
+         */
+        emit(__mov_r(__AL, __r9, rn));
+        emit(__ldm(__AL, 1, __sp, (1 << rn) | (1 << rm)));
+        emit(__mov_r(__AL, rd, soft_div_rd));
+        /* Handle the correct sign for the quotient or remainder */
+        emit(__cmp_i(__AL, __r10, 0));
+        emit(__rsb_i(__NE, rd, 0, rd));
         return;
     case OP_lshift:
         emit(__sll(__AL, rd, rn, rm));
