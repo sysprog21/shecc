@@ -409,6 +409,7 @@ bool insert_phi_insn(basic_block_t *bb, var_t *var)
         bb->insn_list.head = n;
         bb->insn_list.tail = n;
     } else {
+        head->prev = n;
         n->next = head;
         bb->insn_list.head = n;
     }
@@ -666,6 +667,8 @@ void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
     bb->insn_list.head = insn;
     if (!insn)
         bb->insn_list.tail = NULL;
+    else
+        insn->prev = NULL;
 }
 
 void unwind_phi()
