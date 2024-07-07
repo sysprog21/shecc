@@ -409,6 +409,7 @@ bool insert_phi_insn(basic_block_t *bb, var_t *var)
         bb->insn_list.head = n;
         bb->insn_list.tail = n;
     } else {
+        head->prev = n;
         n->next = head;
         bb->insn_list.head = n;
     }
@@ -455,13 +456,14 @@ void solve_phi_insertion()
                     if (insert_phi_insn(df, var)) {
                         bool found = false;
 
-                        /* Restrict phi insertion of ternary operation.
+                        /* Restrict phi insertion of ternary operation and
+                         * logical-and operation.
                          *
-                         * The ternary operation doesn't create new scope, so
-                         * prevent temporary variable from propagating through
-                         * the dominance tree.
+                         * The ternary and logical-and operation doesn't create
+                         * new scope, so prevent temporary variable from
+                         * propagating through the dominance tree.
                          */
-                        if (var->is_ternary_ret)
+                        if (var->is_ternary_ret || var->is_log_and_ret)
                             continue;
 
                         for (int l = 0; l < work_list_idx; l++)
@@ -665,6 +667,8 @@ void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
     bb->insn_list.head = insn;
     if (!insn)
         bb->insn_list.tail = NULL;
+    else
+        insn->prev = NULL;
 }
 
 void unwind_phi()

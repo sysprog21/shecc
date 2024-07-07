@@ -835,4 +835,97 @@ int main()
 }
 EOF
 
+# Logical-and
+try_output 0 "1 0 0 0" << EOF
+int main()
+{
+    int a = 7, b = -15;
+    int res = a && b;
+    printf("%d ", res);
+    a = 0;
+    res = a && b;
+    printf("%d ", res);
+    a = -79;
+    b = 0;
+    res = a && b;
+    printf("%d ", res);
+    a = 0;
+    b = 0;
+    res = a && b;
+    printf("%d", res);
+    return 0;
+}
+EOF
+
+# Logical-and, if statement
+try_output 0 "6" << EOF
+int main()
+{
+    int a = 4, b = 10;
+    if (a && b)
+        printf("%d", b - a);
+    return 0;
+}
+EOF
+
+# Logical-and, for loop condition 
+try_output 0 "10" << EOF
+int main()
+{
+    int a = 0;
+    for (int i = 0; i < 10 && a < 10; i++) {
+        a += 2;
+    }
+    printf("%d", a);
+    return 0;
+}
+EOF
+
+# Logical-and, while loop condition expression
+try_output 0 "5" << EOF
+int main()
+{
+    int a = 10, b = 1;
+    while (a > 5 && b){
+        a--;
+    }
+    printf("%d", a);
+    return 0;
+}
+EOF
+
+# Logical-and, do-while loop condition expression
+try_output 0 "10" << EOF
+int main()
+{
+    int a = 1, b = 5;
+    do {
+        a++;
+    } while(a < 10 && b == 5);
+    printf("%d", a);
+    return 0;
+}
+EOF
+
+# Logical-and, Left-to-right evaluation
+try_output 0 "x > 0, 1" << EOF
+int func(int x)
+{
+    if (x > 0) {
+        printf("x > 0, ");
+    }
+    return x;
+}
+int main()
+{
+    int ret = 0;
+    ret = 1 && func(5);
+    if (ret)
+        printf("%d", ret);
+    ret = 0 && func(5);
+    if (ret)
+        printf("%d", ret);
+    return 0;
+}
+EOF
 echo OK
