@@ -14,7 +14,7 @@
 #define MAX_VAR_LEN 32
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
-#define MAX_LOCALS 1450
+#define MAX_LOCALS 1500
 #define MAX_FIELDS 32
 #define MAX_FUNCS 512
 #define MAX_FUNC_TRIES 2160
