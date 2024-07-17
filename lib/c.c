@@ -529,12 +529,26 @@ int fputc(int c, FILE *stream)
 /* Non-portable: Assume page size is 4KiB */
 #define PAGESIZE 4096
 
+#define CHUNK_SIZE_FREED_MASK 1
+#define CHUNK_SIZE_SZ_MASK 0xFFFFFFFE
+#define CHUNK_GET_SIZE(size) (size & CHUNK_SIZE_SZ_MASK)
+#define IS_CHUNK_GET_FREED(size) (size & CHUNK_SIZE_FREED_MASK)
+
 typedef struct chunk {
     struct chunk *next;
     struct chunk *prev;
     int size;
-    void *ptr;
 } chunk_t;
+
+void chunk_set_freed(chunk_t *chunk)
+{
+    chunk->size |= CHUNK_SIZE_FREED_MASK;
+}
+
+void chunk_clear_freed(chunk_t *chunk)
+{
+    chunk->size &= CHUNK_SIZE_SZ_MASK;
+}
 
 int __align_up(int size)
 {
@@ -562,7 +576,6 @@ void *malloc(int size)
         __alloc_tail = tmp;
         __alloc_head->next = NULL;
         __alloc_head->prev = NULL;
-        __alloc_head->ptr = NULL;
         __alloc_head->size = 0;
     }
 
@@ -573,7 +586,6 @@ void *malloc(int size)
         __freelist_head = tmp;
         __freelist_head->next = NULL;
         __freelist_head->prev = NULL;
-        __freelist_head->ptr = NULL;
         __freelist_head->size = -1;
     }
 
@@ -591,15 +603,16 @@ void *malloc(int size)
         int bsize = 0;
 
         for (chunk_t *fh = __freelist_head; fh->next; fh = fh->next) {
-            if (fh->size >= size && !best_fit_chunk) {
+            int fh_size = CHUNK_GET_SIZE(fh->size);
+            if (fh_size >= size && !best_fit_chunk) {
                 /* first time setting fh as best_fit_chunk */
                 best_fit_chunk = fh;
-                bsize = fh->size;
-            } else if ((fh->size >= size) && best_fit_chunk &&
-                       (fh->size < bsize)) {
+                bsize = fh_size;
+            } else if ((fh_size >= size) && best_fit_chunk &&
+                       (fh_size < bsize)) {
                 /* If there is a smaller chunk available, replace it. */
                 best_fit_chunk = fh;
-                bsize = fh->size;
+                bsize = fh_size;
             }
         }
 
@@ -633,9 +646,9 @@ void *malloc(int size)
     __alloc_tail = allocated;
     __alloc_tail->next = NULL;
     __alloc_tail->size = allocated->size;
-    int offset = sizeof(chunk_t) - 4;
-    __alloc_tail->ptr = __alloc_tail + offset;
-    return __alloc_tail->ptr;
+    chunk_clear_freed(__alloc_tail);
+    void *ptr = __alloc_tail + 1;
+    return ptr;
 }
 
 void *calloc(int n, int size)
@@ -660,6 +673,7 @@ int __free_all()
 
     chunk_t *cur = __freelist_head;
     chunk_t *rel;
+    int size;
 
     /* release freelist */
     while (cur->next) {
@@ -667,7 +681,8 @@ int __free_all()
         cur = cur->next;
         rel->next = NULL;
         rel->prev = NULL;
-        __rfree(rel, rel->size);
+        size = CHUNK_GET_SIZE(rel->size);
+        __rfree(rel, size);
     }
 
     if (__alloc_head->next) {
@@ -678,7 +693,8 @@ int __free_all()
             cur = cur->next;
             rel->next = NULL;
             rel->prev = NULL;
-            __rfree(rel, rel->size);
+            size = CHUNK_GET_SIZE(rel->size);
+            __rfree(rel, size);
         }
     }
     return 0;
@@ -689,14 +705,11 @@ void free(void *ptr)
     if (!ptr)
         return;
 
-    /* FIXME: it takes long time to search in chuncks */
-    chunk_t *cur = __alloc_head;
-    while (cur->ptr != ptr) {
-        cur = cur->next;
-        if (!cur) {
-            printf("free(): double free detected\n");
-            abort();
-        }
+    char *__ptr = ptr;
+    chunk_t *cur = __ptr - sizeof(chunk_t);
+    if (IS_CHUNK_GET_FREED(cur->size)) {
+        printf("free(): double free detected\n");
+        abort();
     }
 
     chunk_t *prev;
@@ -717,6 +730,7 @@ void free(void *ptr)
     /* Insert head in __freelist_head */
     cur->next = __freelist_head;
     cur->prev = NULL;
+    chunk_set_freed(cur);
     __freelist_head->prev = cur;
     __freelist_head = cur;
 }
