@@ -654,6 +654,9 @@ void *malloc(int size)
 void *calloc(int n, int size)
 {
     char *p = malloc(n * size);
+
+    if (!p)
+        return NULL;
     for (int i = 0; i < n * size; i++)
         p[i] = 0;
     return p;
