@@ -408,7 +408,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sll(__AL, rd, rn, rm));
         return;
     case OP_rshift:
-        emit(__srl(__AL, rd, rn, rm));
+        emit(__sra(__AL, rd, rn, rm));
         return;
     case OP_eq:
     case OP_neq:

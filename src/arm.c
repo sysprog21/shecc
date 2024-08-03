@@ -226,6 +226,12 @@ int __sll_amt(arm_cond_t cond,
                       rm + (0 << 4) + (shift << 5) + (amt << 7));
 }
 
+int __sra(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
+{
+    return arm_encode(cond, 0 + (arm_mov << 1) + (0 << 5), 0, rd,
+                      rm + (5 << 4) + (rs << 8));
+}
+
 int __add_i(arm_cond_t cond, arm_reg rd, arm_reg rs, int imm)
 {
     if (imm >= 0)
