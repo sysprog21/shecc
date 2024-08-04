@@ -552,6 +552,7 @@ void add_insn(block_t *block,
     n->rs1 = rs1;
     n->rs2 = rs2;
     n->sz = sz;
+    n->belong_to = bb;
 
     if (str)
         strcpy(n->str, str);
