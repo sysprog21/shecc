@@ -15,7 +15,7 @@
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
 #define MAX_LOCALS 1500
-#define MAX_FIELDS 32
+#define MAX_FIELDS 64
 #define MAX_FUNCS 512
 #define MAX_FUNC_TRIES 2160
 #define MAX_BLOCKS 2048
@@ -23,6 +23,7 @@
 #define MAX_IR_INSTR 40000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
+#define MAX_BB_RDOM_SUCC 256
 #define MAX_GLOBAL_IR 256
 #define MAX_LABEL 4096
 #define MAX_SOURCE 327680
@@ -173,6 +174,7 @@ struct var {
     int subscripts_idx;
     rename_t rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
+    struct insn *last_assign;
     int consumed;
     bool is_ternary_ret;
     bool is_log_and_ret;
@@ -308,6 +310,8 @@ struct insn {
     var_t *rs1;
     var_t *rs2;
     int sz;
+    bool useful; /* Used in DCE process. Set true if instruction is useful. */
+    basic_block_t *belong_to;
     phi_operand_t *phi_ops;
     char str[64];
 };
@@ -352,6 +356,7 @@ struct basic_block {
     struct basic_block *then_; /* conditional BB */
     struct basic_block *else_;
     struct basic_block *idom;
+    struct basic_block *r_idom;
     struct basic_block *rpo_next;
     struct basic_block *rpo_r_next;
     var_t *live_gen[MAX_ANALYSIS_STACK_SIZE];
@@ -365,10 +370,15 @@ struct basic_block {
     int rpo;
     int rpo_r;
     struct basic_block *DF[64];
+    struct basic_block *RDF[64];
     int df_idx;
+    int rdf_idx;
     int visited;
+    bool useful; /* indicate whether this BB contains useful instructions */
     struct basic_block *dom_next[64];
     struct basic_block *dom_prev;
+    struct basic_block *rdom_next[256];
+    struct basic_block *rdom_prev;
     fn_t *belong_to;
     block_t *scope;
     symbol_list_t symbol_list; /* variable declaration */

@@ -261,6 +261,146 @@ void build_df()
     free(args);
 }
 
+basic_block_t *reverse_intersect(basic_block_t *i, basic_block_t *j)
+{
+    while (i != j) {
+        while (i->rpo_r > j->rpo_r)
+            i = i->r_idom;
+        while (j->rpo_r > i->rpo_r)
+            j = j->r_idom;
+    }
+    return i;
+}
+
+void build_r_idom()
+{
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        bool changed;
+
+        fn->exit->r_idom = fn->exit;
+
+        do {
+            changed = false;
+
+            for (basic_block_t *bb = fn->exit->rpo_r_next; bb;
+                 bb = bb->rpo_r_next) {
+                /* pick one predecessor */
+                basic_block_t *pred;
+                if (bb->next && bb->next->r_idom) {
+                    pred = bb->next;
+                } else if (bb->else_ && bb->else_->r_idom) {
+                    pred = bb->else_;
+                } else if (bb->then_ && bb->then_->r_idom) {
+                    pred = bb->then_;
+                }
+
+                if (bb->next && bb->next != pred && bb->next->r_idom) {
+                    pred = reverse_intersect(bb->next, pred);
+                }
+                if (bb->else_ && bb->else_ != pred && bb->else_->r_idom) {
+                    pred = reverse_intersect(bb->else_, pred);
+                }
+                if (bb->then_ && bb->then_ != pred && bb->then_->r_idom) {
+                    pred = reverse_intersect(bb->then_, pred);
+                }
+                if (bb->r_idom != pred) {
+                    bb->r_idom = pred;
+                    changed = true;
+                }
+            }
+        } while (changed);
+    }
+}
+
+bool rdom_connect(basic_block_t *pred, basic_block_t *succ)
+{
+    if (succ->rdom_prev)
+        return false;
+    int i;
+    for (i = 0; i < MAX_BB_RDOM_SUCC; i++) {
+        if (pred->rdom_next[i] == succ)
+            return false;
+        if (!pred->rdom_next[i])
+            break;
+    }
+
+    if (i > MAX_BB_RDOM_SUCC - 1) {
+        printf("Error: too many predecessors\n");
+        abort();
+    }
+
+    pred->rdom_next[i++] = succ;
+    succ->rdom_prev = pred;
+    return true;
+}
+
+void bb_build_rdom(fn_t *fn, basic_block_t *bb)
+{
+    for (basic_block_t *curr = bb; curr != fn->exit; curr = curr->r_idom) {
+        if (!rdom_connect(curr->r_idom, curr))
+            break;
+    }
+}
+
+void build_rdom()
+{
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->exit;
+
+        fn->visited++;
+        args->preorder_cb = bb_build_rdom;
+        bb_backward_traversal(args);
+    }
+    free(args);
+}
+
+void bb_build_rdf(fn_t *fn, basic_block_t *bb)
+{
+    UNUSED(fn);
+
+    int cnt = 0;
+    if (bb->next)
+        cnt++;
+    if (bb->then_)
+        cnt++;
+    if (bb->else_)
+        cnt++;
+    if (cnt <= 0)
+        return;
+
+    if (bb->next) {
+        for (basic_block_t *curr = bb->next; curr != bb->r_idom;
+             curr = curr->r_idom)
+            curr->RDF[curr->rdf_idx++] = bb;
+    }
+    if (bb->else_) {
+        for (basic_block_t *curr = bb->else_; curr != bb->r_idom;
+             curr = curr->r_idom)
+            curr->RDF[curr->rdf_idx++] = bb;
+    }
+    if (bb->then_) {
+        for (basic_block_t *curr = bb->then_; curr != bb->r_idom;
+             curr = curr->r_idom)
+            curr->RDF[curr->rdf_idx++] = bb;
+    }
+}
+
+void build_rdf()
+{
+    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        args->fn = fn;
+        args->bb = fn->exit;
+
+        fn->visited++;
+        args->postorder_cb = bb_build_rdf;
+        bb_backward_traversal(args);
+    }
+    free(args);
+}
+
 bool var_check_killed(var_t *var, basic_block_t *bb)
 {
     for (int i = 0; i < bb->live_kill_idx; i++) {
@@ -626,6 +766,7 @@ void append_unwound_phi_insn(basic_block_t *bb, var_t *dest, var_t *rs)
     n->opcode = OP_unwound_phi;
     n->rd = dest;
     n->rs1 = rs;
+    n->belong_to = bb;
 
     insn_t *tail = bb->insn_list.tail;
     if (!tail) {
@@ -1170,14 +1311,170 @@ bool const_folding(insn_t *insn)
     return false;
 }
 
+/* initial mark useful instruction */
+int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
+{
+    int mark_num = 0;
+    /*
+     * mark instruction "useful" if it sets a return value, affects the value in
+     * a storage location, or it is a function call.
+     */
+    switch (insn->opcode) {
+    case OP_return:
+    case OP_write:
+    case OP_address_of:
+    case OP_unwound_phi:
+    case OP_allocat:
+        insn->useful = true;
+        insn->belong_to->useful = true;
+        work_list[work_list_idx + mark_num] = insn;
+        mark_num++;
+        break;
+    case OP_indirect:
+    case OP_call:
+        insn->useful = true;
+        insn->belong_to->useful = true;
+        work_list[work_list_idx + mark_num] = insn;
+        mark_num++;
+        /* mark precall and postreturn sequences at calls */
+        if (insn->next && insn->next->opcode == OP_func_ret) {
+            insn->next->useful = true;
+            work_list[work_list_idx + mark_num] = insn;
+            mark_num++;
+        }
+        while (insn->prev && insn->prev->opcode == OP_push) {
+            insn = insn->prev;
+            insn->useful = true;
+            work_list[work_list_idx + mark_num] = insn;
+            mark_num++;
+        }
+        break;
+    default:
+        if (!insn->rd)
+            break;
+        /* if the instruction affects a global value, set "useful" */
+        if (insn->rd->is_global && !insn->useful) {
+            insn->useful = true;
+            insn->belong_to->useful = true;
+            work_list[work_list_idx + mark_num] = insn;
+            mark_num++;
+        }
+        break;
+    }
+    return mark_num;
+}
+
+/* Dead Code Elimination (DCE) */
+void dce_insn(basic_block_t *bb)
+{
+    insn_t *work_list[2048];
+    int work_list_idx = 0;
+
+    /* initially analyze current bb*/
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+        int mark_num = dce_init_mark(insn, work_list, work_list_idx);
+        work_list_idx += mark_num;
+        if (work_list_idx > 2048 - 1) {
+            printf("size of work_list in DCE is not enough\n");
+            abort();
+        }
+    }
+
+    while (work_list_idx != 0) {
+        insn_t *curr = work_list[--work_list_idx];
+        insn_t *rs1_insn, *rs2_insn;
+
+        /* trace back where rs1 and rs2 are assigned values */
+        if (curr->rs1 && curr->rs1->last_assign) {
+            rs1_insn = curr->rs1->last_assign;
+            if (!rs1_insn->useful) {
+                rs1_insn->useful = true;
+                rs1_insn->belong_to->useful = true;
+                work_list[work_list_idx++] = rs1_insn;
+            }
+        }
+        if (curr->rs2 && curr->rs2->last_assign) {
+            rs2_insn = curr->rs2->last_assign;
+            if (!rs2_insn->useful) {
+                rs2_insn->useful = true;
+                rs2_insn->belong_to->useful = true;
+                work_list[work_list_idx++] = rs2_insn;
+            }
+        }
+
+        basic_block_t *rdf;
+        for (int i = 0; i < curr->belong_to->rdf_idx; i++) {
+            rdf = curr->belong_to->RDF[i];
+            if (!rdf)
+                break;
+            insn_t *tail = rdf->insn_list.tail;
+            if (tail->opcode == OP_branch && !tail->useful) {
+                tail->useful = true;
+                rdf->useful = true;
+                work_list[work_list_idx++] = tail;
+            }
+        }
+    }
+}
+
+void dce_sweep()
+{
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+                if (insn->useful)
+                    continue;
+                /*
+                 * If a branch instruction is useless, redirect to the
+                 * reverse immediate dominator of this basic block and
+                 * remove the branch instruction. Later, register allocation
+                 * will insert a jump instruction.
+                 */
+                if (insn->opcode == OP_branch) {
+                    basic_block_t *jump_bb = bb->r_idom;
+                    bb_disconnect(bb, bb->then_);
+                    bb_disconnect(bb, bb->else_);
+                    while (jump_bb != bb->belong_to->exit) {
+                        if (jump_bb->useful) {
+                            bb_connect(bb, jump_bb, NEXT);
+                            break;
+                        }
+                        jump_bb = jump_bb->r_idom;
+                    }
+                }
+                /* remove useless instructions */
+                if (insn->next)
+                    insn->next->prev = insn->prev;
+                else
+                    bb->insn_list.tail = insn->prev;
+                if (insn->prev)
+                    insn->prev->next = insn->next;
+                else
+                    bb->insn_list.head = insn->next;
+            }
+        }
+    }
+}
+
+void build_reversed_rpo();
+
 void optimize()
 {
+    /* build rdf information for DCE */
+    build_reversed_rpo();
+    build_r_idom();
+    build_rdom();
+    build_rdf();
+
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         /* basic block level (control flow) optimizations */
 
         for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
             /* instruction level optimizations */
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+                /* record the instruction assigned value to rd */
+                if (insn->rd)
+                    insn->rd->last_assign = insn;
                 if (cse(insn, bb))
                     continue;
                 if (const_folding(insn))
@@ -1186,6 +1483,13 @@ void optimize()
             }
         }
     }
+
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+            dce_insn(bb);
+        }
+    }
+    dce_sweep();
 }
 
 void bb_index_reversed_rpo(fn_t *fn, basic_block_t *bb)
@@ -1371,8 +1675,6 @@ bool recompute_live_out(basic_block_t *bb)
 
 void liveness_analysis()
 {
-    build_reversed_rpo();
-
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         args->fn = fn;
