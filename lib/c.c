@@ -158,13 +158,8 @@ void __str_base10(char *pb, int val)
         i--;
     }
 
-    if (neg == 1) {
-        int c = 0;
-        while (pb[c] == '0')
-            c++;
-        if (c > 0)
-            pb[c - 1] = '-';
-    }
+    if (neg == 1)
+        pb[i] = '-';
 }
 
 void __str_base8(char *pb, int val)
