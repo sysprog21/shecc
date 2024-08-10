@@ -113,10 +113,25 @@ char *memcpy(char *dest, char *src, int count)
     return dest;
 }
 
-/* set 10 digits (32bit) without div */
+/*
+ * set 10 digits (32bit) without div
+ *
+ * This function converts a given integer value to its string representation
+ * in base-10 without using division operations. The method involves calculating
+ * the approximate quotient and remainder using bitwise operations, which are
+ * then used to derive each digit of the result.
+ *
+ * The logic is based on an efficient method of dividing by constants, as
+ * detailed in the reference link:
+ * http://web.archive.org/web/20180517023231/http://www.hackersdelight.org/divcMore.pdf.
+ * This approach avoids expensive division instructions by using a series of
+ * bitwise shifts and additions to calculate the quotient and remainder.
+ */
 void __str_base10(char *pb, int val)
 {
     int neg = 0;
+    int q, r, t;
+    int i = INT_BUF_LEN - 1;
 
     if (val == -2147483648) {
         strncpy(pb + INT_BUF_LEN - 11, "-2147483648", 11);
@@ -127,54 +142,24 @@ void __str_base10(char *pb, int val)
         val = -val;
     }
 
-    while (val >= 1000000000) {
-        val -= 1000000000;
-        pb[INT_BUF_LEN - 10]++;
-    }
-    while (val >= 100000000) {
-        val -= 100000000;
-        pb[INT_BUF_LEN - 9]++;
-    }
-    while (val >= 10000000) {
-        val -= 10000000;
-        pb[INT_BUF_LEN - 8]++;
-    }
-    while (val >= 1000000) {
-        val -= 1000000;
-        pb[INT_BUF_LEN - 7]++;
-    }
-    while (val >= 100000) {
-        val -= 100000;
-        pb[INT_BUF_LEN - 6]++;
-    }
-    while (val >= 10000) {
-        val -= 10000;
-        pb[INT_BUF_LEN - 5]++;
-    }
-    while (val >= 1000) {
-        val -= 1000;
-        pb[INT_BUF_LEN - 4]++;
-    }
-    while (val >= 100) {
-        val -= 100;
-        pb[INT_BUF_LEN - 3]++;
-    }
-    while (val >= 10) {
-        val -= 10;
-        pb[INT_BUF_LEN - 2]++;
-    }
-    while (val >= 1) {
-        val -= 1;
-        pb[INT_BUF_LEN - 1]++;
+    while (val) {
+        q = (val >> 1) + (val >> 2);
+        q += (q >> 4);
+        q += (q >> 8);
+        q += (q >> 16);
+        q = q >> 3;
+        r = val - (((q << 2) + q) << 1);
+        t = ((r + 6) >> 4);
+        q += t;
+        r = r - (((t << 2) + t) << 1);
+
+        pb[i] += r;
+        val = q;
+        i--;
     }
 
-    if (neg == 1) {
-        int c = 0;
-        while (pb[c] == '0')
-            c++;
-        if (c > 0)
-            pb[c - 1] = '-';
-    }
+    if (neg == 1)
+        pb[i] = '-';
 }
 
 void __str_base8(char *pb, int val)
