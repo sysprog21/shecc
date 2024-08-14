@@ -2608,6 +2608,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         if (body_) {
             bb_connect(body_, inc_, NEXT);
             bb_connect(inc_, cond_start, NEXT);
+        } else if (inc_->insn_list.head) {
+            bb_connect(inc_, cond_start, NEXT);
         } else {
             /* TODO: Release dangling inc basic block */
         }
