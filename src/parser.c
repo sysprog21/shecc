@@ -175,7 +175,10 @@ int read_numeric_constant(char buffer[])
             }
             return value;
         }
-        value = value * 10 + buffer[i++] - '0';
+        if (buffer[0] == '0') /* octal */
+            value = value * 8 + buffer[i++] - '0';
+        else
+            value = value * 10 + buffer[i++] - '0';
     }
     return value;
 }
