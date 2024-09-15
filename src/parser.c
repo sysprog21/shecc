@@ -634,7 +634,10 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
             } while (is_hex(token[i]));
         } else { /* octal */
             do {
-                c = token[i++] - '0';
+                c = token[i++];
+                if (c > '7')
+                    error("Invalid numeric constant");
+                c -= '0';
                 value = (value * 8) + c;
             } while (is_digit(token[i]));
         }
