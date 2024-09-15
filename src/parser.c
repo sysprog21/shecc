@@ -175,7 +175,10 @@ int read_numeric_constant(char buffer[])
             }
             return value;
         }
-        value = value * 10 + buffer[i++] - '0';
+        if (buffer[0] == '0') /* octal */
+            value = value * 8 + buffer[i++] - '0';
+        else
+            value = value * 10 + buffer[i++] - '0';
     }
     return value;
 }
@@ -612,22 +615,29 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
         is_neg = 1 - is_neg;
         i++;
     }
-    if ((token[0] == '0') && (token[1] == 'x')) { /* hexadecimal */
-        i = 2;
-        do {
-            c = token[i++];
-            if (is_digit(c))
-                c -= '0';
-            else {
-                c |= 32; /* convert to lower case */
-                if (c >= 'a' && c <= 'f')
-                    c = (c - 'a') + 10;
-                else
-                    error("Invalid numeric constant");
-            }
+    if (token[0] == '0') {
+        if (token[1] == 'x') { /* hexdecimal */
+            i = 2;
+            do {
+                c = token[i++];
+                if (is_digit(c))
+                    c -= '0';
+                else {
+                    c |= 32; /* convert to lower case */
+                    if (c >= 'a' && c <= 'f')
+                        c = (c - 'a') + 10;
+                    else
+                        error("Invalid numeric constant");
+                }
 
-            value = (value * 16) + c;
-        } while (is_hex(token[i]));
+                value = (value * 16) + c;
+            } while (is_hex(token[i]));
+        } else { /* octal */
+            do {
+                c = token[i++] - '0';
+                value = (value * 8) + c;
+            } while (is_digit(token[i]));
+        }
     } else {
         do {
             c = token[i++] - '0';

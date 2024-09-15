@@ -78,6 +78,10 @@ function expr() {
 expr 0 0
 expr 42 42
 
+# octal constant (satisfying re(0[0-7]+))
+expr 10 012
+expr 65 0101
+
 # arithmetic
 expr 42 "24 + 18"
 expr 30 "58 - 28"
@@ -95,6 +99,9 @@ expr 55 "((((((((1 + 2) + 3) + 4) + 5) + 6) + 7) + 8) + 9) + 10"
 expr 55 "1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + 10))))))))"
 expr 210 "1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + (10 + (11 + (12 + (13 + (14 + (15 + (16 + (17 + (18 + (19 + 20))))))))))))))))))"
 
+expr 11 "1 + 012"   # oct(012) = dec(10)
+expr 25 "017 + 012" # oct(017) = dec(15), oct(012) = dec(10)
+
 # expr 21 "+1+20"
 # expr 10 "-15+(+35-10)"
 
@@ -107,6 +114,16 @@ expr 0 "30 == 20"
 expr 0 "5 >= 10"
 expr 1 "5 >= 5"
 expr 1 "30 != 20"
+
+# value satisfying re(0[0-7]+) should be parsed as octal
+expr 1 "010 == 8"
+expr 1 "011 < 11"
+expr 0 "021 >= 21"
+expr 1 "(012 - 5) == 5"
+expr 16 "0100 >> 2"
+
+# oct(355) = bin(1110_1101), oct(~355) = bin(0001_0010) = dec(18)
+expr 18 "~0355"
 
 expr 0 "!237"
 expr 18 "~237"
@@ -139,11 +156,20 @@ items 10 "int var; var = 10; return var;"
 items 42 "int va; int vb; va = 11; vb = 31; int vc; vc = va + vb; return vc;"
 items 50 "int v; v = 30; v = 50; return v;"
 
+# variable with octal literals
+items 10 "int var; var = 012; return var;"
+items 100 "int var; var = 10 * 012; return var;"
+items 32 "int var; var = 0100 / 2; return var;"
+items 65 "int var; var = 010 << 3; var += 1; return var;"
+
 # if
 items 5 "if (1) return 5; else return 20;"
 items 10 "if (0) return 5; else if (0) return 20; else return 10;"
 items 10 "int a; a = 0; int b; b = 0; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
 items 27 "int a; a = 15; int b; b = 2; if(a - 15) b = 10; else if (b) return a + b + 10; else if (a) return b; else return 10;"
+
+items 8 "if (1) return 010; else return 11;"
+items 10 "int a; a = 012 - 10; int b; b = 0100 - 64; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
 
 # compound
 items 5 "{ return 5; }"
@@ -194,6 +220,21 @@ int fact(int x) {
 
 int main() {
     return fact(5);
+}
+EOF
+
+try_ 55 << EOF
+int fib(int n, int a, int b)
+{
+    if (n == 0)
+        return a;
+    else if (n == 1)
+        return b;
+    return fib(n - 1, b, a + b);
+}
+
+int main() {
+    return fib(012, 0, 1); /* octal(12) = dec(10) */
 }
 EOF
 
@@ -652,6 +693,15 @@ try_output 0 "12 -1" << EOF
 int main()
 {
     printf("%d %d", -109 / -9, -109 % -9);
+    return 0;
+}
+EOF
+
+# octal(155) = dec(109), expect same output with above test suite
+try_output 0 "12 -1" << EOF
+int main()
+{
+    printf("%d %d", -0155 / -9, -0155 % -9);
     return 0;
 }
 EOF
