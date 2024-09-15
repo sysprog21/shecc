@@ -62,6 +62,31 @@ function try_output() {
     try "$expected" "$expected_output" "$input"
 }
 
+# try_compile_error - test shecc with invalid C program
+# Usage:
+# - try_compile_error invalid_input_code
+# compile "invalid_input_code" with shecc so that shecc generates a
+# compilation error message.
+#
+# This function uses shecc to compile invalid code and obtains the exit
+# code returned by shecc. The exit code must be a non-zero value to
+# indicate that shecc has the ability to parse the invalid code and
+# output an error message.
+function try_compile_error() {
+    local input=$(cat)
+
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    echo "$input" > "$tmp_in"
+    "$SHECC" -o "$tmp_exe" "$tmp_in"
+    local exit_code=$?
+
+    if [ 0 == $exit_code ]; then
+        echo "Error: compilation is passed."
+        exit 1
+    fi
+}
+
 function items() {
     local expected="$1"
     local input="$2"
@@ -235,6 +260,14 @@ int fib(int n, int a, int b)
 
 int main() {
     return fib(012, 0, 1); /* octal(12) = dec(10) */
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    int a = 03, b = 01118, c = 091;
+    printf("%d %d %d\n", a, b, c);
+    return 0;
 }
 EOF
 
