@@ -271,6 +271,15 @@ int main() {
 }
 EOF
 
+# Unreachable declaration should not cause prog seg-falut (prog should leave normally with exit code 0)
+try_ 0 << EOF
+int main()
+{
+    return 0;
+    int a = 5;
+}
+EOF
+
 try_ 1 << EOF
 int is_odd(int x);
 
