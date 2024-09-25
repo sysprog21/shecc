@@ -524,6 +524,8 @@ void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
 /* The symbol is an argument of function or the variable in declaration */
 void add_symbol(basic_block_t *bb, var_t *var)
 {
+    if (!bb)
+        return;
     symbol_t *sym;
     for (sym = bb->symbol_list.head; sym; sym = sym->next) {
         if (sym->var == var)
