@@ -34,10 +34,11 @@ jobs:
     - name: build artifact
       # The GitHub Action for non-x86 CPU
       # https://github.com/uraimo/run-on-arch-action
-      uses: uraimo/run-on-arch-action@v2.7.1
+      uses: uraimo/run-on-arch-action@v2
       with:
-        arch: armv7
-        distro: ubuntu22.04
+        arch: none
+        distro: none
+        base_image: "--platform=linux/arm/v7 arm32v7/ubuntu:22.04"
         install: |
           apt-get update -q -y
           apt-get install -q -y build-essential
