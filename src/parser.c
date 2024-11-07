@@ -334,9 +334,9 @@ void cppd_control_flow_skip_lines()
     skip_whitespace();
 }
 
-void check_def(char *alias)
+void check_def(char *alias, bool expected)
 {
-    if (find_alias(alias))
+    if ((find_alias(alias) != NULL) == expected)
         preproc_match = true;
 }
 
@@ -349,7 +349,7 @@ void read_defined_macro()
     lex_ident(T_identifier, lookup_alias);
     lex_expect(T_close_bracket);
 
-    check_def(lookup_alias);
+    check_def(lookup_alias, true);
 }
 
 /* read preprocessor directive at each potential positions: e.g.,
@@ -485,7 +485,20 @@ bool read_preproc_directive()
     if (lex_accept_internal(T_cppd_ifdef, false)) {
         preproc_match = false;
         lex_ident(T_identifier, token);
-        check_def(token);
+        check_def(token, true);
+
+        if (preproc_match) {
+            skip_whitespace();
+            return true;
+        }
+
+        cppd_control_flow_skip_lines();
+        return true;
+    }
+    if (lex_accept_internal(T_cppd_ifndef, false)) {
+        preproc_match = false;
+        lex_ident(T_identifier, token);
+        check_def(token, false);
 
         if (preproc_match) {
             skip_whitespace();

@@ -77,7 +77,8 @@ typedef enum {
     T_cppd_elif,
     T_cppd_else,
     T_cppd_endif,
-    T_cppd_ifdef
+    T_cppd_ifdef,
+    T_cppd_ifndef
 } token_t;
 
 char token_str[MAX_TOKEN_LEN];
@@ -206,6 +207,8 @@ token_t lex_token_internal(bool aliasing)
             return T_cppd_elif;
         if (!strcmp(token_str, "#ifdef"))
             return T_cppd_ifdef;
+        if (!strcmp(token_str, "#ifndef"))
+            return T_cppd_ifndef;
         if (!strcmp(token_str, "#else"))
             return T_cppd_else;
         if (!strcmp(token_str, "#endif"))

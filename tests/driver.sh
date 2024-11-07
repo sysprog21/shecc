@@ -458,6 +458,19 @@ int main()
 }
 EOF
 
+# #ifndef...#else...#endif
+try_ 0 << EOF
+#ifndef A
+#define A 0
+#else
+#define A 1
+#endif
+int main()
+{
+    return A;
+}
+EOF
+
 # #if defined(...) ... #elif defined(...) ... #else ... #endif
 try_ 0 << EOF
 #define A 0
