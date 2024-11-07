@@ -157,6 +157,14 @@ struct ref_block_list {
 
 typedef struct ref_block_list ref_block_list_t;
 
+typedef struct insn insn_t;
+
+typedef struct use_chain_node {
+    insn_t *insn;
+    struct use_chain_node *next;
+    struct use_chain_node *prev;
+} use_chain_t;
+
 struct var {
     char type_name[MAX_TYPE_LEN];
     char var_name[MAX_VAR_LEN];
@@ -174,6 +182,8 @@ struct var {
     int subscripts_idx;
     rename_t rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
+    use_chain_t *users_head;
+    use_chain_t *users_tail;
     struct insn *last_assign;
     int consumed;
     bool is_ternary_ret;
@@ -315,8 +325,6 @@ struct insn {
     phi_operand_t *phi_ops;
     char str[64];
 };
-
-typedef struct insn insn_t;
 
 typedef struct {
     insn_t *head;

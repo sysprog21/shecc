@@ -401,6 +401,54 @@ void build_rdf()
     free(args);
 }
 
+void use_chain_add_tail(insn_t *i, var_t *var)
+{
+    use_chain_t *u = calloc(1, sizeof(use_chain_t));
+    if (!u) {
+        printf("calloc failed\n");
+        abort();
+    }
+
+    u->insn = i;
+    if (!var->users_head)
+        var->users_head = u;
+    else
+        var->users_tail->next = u;
+    u->prev = var->users_tail;
+    var->users_tail = u;
+}
+
+void use_chain_delete(use_chain_t *u, var_t *var)
+{
+    if (u->prev)
+        u->prev->next = u->next;
+    else {
+        var->users_head = u->next;
+        u->next->prev = NULL;
+    }
+    if (u->next)
+        u->next->prev = u->prev;
+    else {
+        var->users_tail = u->prev;
+        u->prev->next = NULL;
+    }
+    free(u);
+}
+
+void use_chain_build()
+{
+    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+            for (insn_t *i = bb->insn_list.head; i; i = i->next) {
+                if (i->rs1)
+                    use_chain_add_tail(i, i->rs1);
+                if (i->rs2)
+                    use_chain_add_tail(i, i->rs2);
+            }
+        }
+    }
+}
+
 bool var_check_killed(var_t *var, basic_block_t *bb)
 {
     for (int i = 0; i < bb->live_kill_idx; i++) {
@@ -1170,7 +1218,6 @@ void ssa_build(int dump_ir)
 }
 
 /* Common Subexpression Elimination (CSE) */
-/* TODO: simplify with def-use chain */
 /* TODO: release detached insns node */
 bool cse(insn_t *insn, basic_block_t *bb)
 {
@@ -1178,7 +1225,6 @@ bool cse(insn_t *insn, basic_block_t *bb)
         return false;
 
     insn_t *prev = insn->prev;
-
     if (!prev)
         return false;
     if (prev->opcode != OP_add)
@@ -1186,47 +1232,66 @@ bool cse(insn_t *insn, basic_block_t *bb)
     if (prev->rd != insn->rs1)
         return false;
 
-    var_t *def = NULL, *base = prev->rs1, *idx = prev->rs2;
+    var_t *def = insn->rd, *base = prev->rs1, *idx = prev->rs2;
     if (base->is_global || idx->is_global)
         return false;
 
-    insn_t *i = prev;
-    for (basic_block_t *b = bb;; b = b->idom) {
-        if (!i)
-            i = b->insn_list.tail;
+    use_chain_t *rs1_delete_user = NULL;
+    use_chain_t *rs2_delete_user = NULL;
+    for (use_chain_t *user = base->users_head; user; user = user->next) {
+        insn_t *i = user->insn;
 
-        for (; i; i = i->prev) {
-            if (i == prev)
-                continue;
-            if (i->opcode != OP_add)
-                continue;
-            if (!i->next)
-                continue;
-            if (i->next->opcode != OP_read)
-                continue;
-            if (i->rs1 != base || i->rs2 != idx)
-                continue;
-            def = i->next->rd;
+        /* Delete the use chain nodes found in the last loop */
+        if (rs1_delete_user) {
+            use_chain_delete(rs1_delete_user, rs1_delete_user->insn->rs1);
+            rs1_delete_user = NULL;
         }
-        if (def)
-            break;
-        if (b->idom == b)
-            break;
+        if (rs2_delete_user) {
+            use_chain_delete(rs2_delete_user, rs2_delete_user->insn->rs2);
+            rs2_delete_user = NULL;
+        }
+        if (i == prev)
+            continue;
+        if (i->opcode != OP_add)
+            continue;
+        if (!i->next)
+            continue;
+        if (i->next->opcode != OP_read)
+            continue;
+        if (i->rs1 != base || i->rs2 != idx)
+            continue;
+        basic_block_t *i_bb = i->belong_to;
+        bool check_dom = 0;
+        /* Check if the instructions are under the same dominate tree */
+        for (;; i_bb = i_bb->idom) {
+            if (i_bb == bb) {
+                check_dom = true;
+                break;
+            }
+            if (i_bb == i_bb->idom)
+                break;
+        }
+        if (!check_dom)
+            continue;
+
+        i->next->opcode = OP_assign;
+        i->next->rs1 = def;
+        if (i->prev) {
+            i->prev->next = i->next;
+            i->next->prev = i->prev;
+        } else {
+            i->belong_to->insn_list.head = i->next;
+            i->next->prev = NULL;
+        }
+        i->next->opcode = OP_assign;
+        i->next->rs1 = def;
+        /* Prepare information for deleting use chain nodes */
+        rs1_delete_user = user;
+        for (rs2_delete_user = i->rs2->users_head;
+             rs2_delete_user->insn != rs1_delete_user->insn;
+             rs2_delete_user = rs2_delete_user->next)
+            ;
     }
-
-    if (!def)
-        return false;
-
-    if (prev->prev) {
-        insn->prev = prev->prev;
-        prev->prev->next = insn;
-    } else {
-        bb->insn_list.head = insn;
-        insn->prev = NULL;
-    }
-
-    insn->opcode = OP_assign;
-    insn->rs1 = def;
     return true;
 }
 
@@ -1465,6 +1530,8 @@ void optimize()
     build_r_idom();
     build_rdom();
     build_rdf();
+
+    use_chain_build();
 
     for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
         /* basic block level (control flow) optimizations */
