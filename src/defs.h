@@ -5,6 +5,9 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
+#ifndef SHECC_DEFS_H
+#define SHECC_DEFS_H
+
 /* definitions */
 
 /* Limitations */
@@ -425,3 +428,5 @@ typedef struct {
     var_t *var;
     int polluted;
 } regfile_t;
+
+#endif

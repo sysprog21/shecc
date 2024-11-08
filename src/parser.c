@@ -409,6 +409,10 @@ bool read_preproc_directive()
 
             macro->start_source_idx = source_idx;
             skip_macro_body();
+        } else {
+            /* Empty alias, may be dummy alias serves as include guard */
+            value[0] = 0;
+            add_alias(alias, value);
         }
 
         return true;

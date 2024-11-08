@@ -465,9 +465,49 @@ try_ 0 << EOF
 #else
 #define A 1
 #endif
+
+#ifndef A
+#define B 1
+#else
+#define B 0
+#endif
 int main()
 {
-    return A;
+    return A + B;
+}
+EOF
+
+# include guard test, simulates inclusion of a file named defs.h and global.c
+try_ 0 << EOF
+/* #include "defs.h" */
+#ifndef DEFS_H
+#define DEFS_H
+
+#define A 1
+
+#endif
+/* end if "defs.h" inclusion */
+
+/* #include "global.c" */
+#ifndef GLOBAL_C
+#define GLOBAL_C
+
+#define B 1
+
+/* [global.c] #include "defs.h" */
+#ifndef DEFS_H
+#define DEFS_H
+
+#define A 2
+
+#endif
+/* end if "defs.h" inclusion */
+#endif
+/* end if "global.c" inclusion */
+
+int main()
+{
+    return A - B;
 }
 EOF
 
