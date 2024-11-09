@@ -630,6 +630,12 @@ int main() {
 }
 EOF
 
+try_ 0 << EOF
+int main() {
+    return '\0';
+}
+EOF
+
 # function-like macro
 try_ 1 << EOF
 #define MAX(a, b) ((a) > (b) ? (a) : (b))

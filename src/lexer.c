@@ -304,6 +304,8 @@ token_t lex_token_internal(bool aliasing)
                     token_str[i - 1] = '\t';
                 else if (next_char == '\\')
                     token_str[i - 1] = '\\';
+                else if (next_char == '0')
+                    token_str[i - 1] = '\0';
                 else
                     abort();
             } else {
@@ -334,6 +336,8 @@ token_t lex_token_internal(bool aliasing)
                 token_str[0] = '\t';
             else if (next_char == '\\')
                 token_str[0] = '\\';
+            else if (next_char == '0')
+                token_str[0] = '\0';
             else
                 abort();
         } else {
