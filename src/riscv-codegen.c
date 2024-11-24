@@ -161,6 +161,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
      * the instruction sequence of
      * 1. division and modulo.
      * 2. load and store operations.
+     * 3. address-of operations.
      */
     rv_reg interm, divisor_mask = __t1;
 
@@ -179,21 +180,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         } else
             emit(__addi(rd, __zero, ph2_ir->src0));
         return;
-    case OP_global_address_of:
-        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-            emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-            emit(__add(rd, __gp, __t0));
-        } else
-            emit(__addi(rd, __gp, ph2_ir->src0));
-        return;
     case OP_address_of:
+    case OP_global_address_of:
+        interm = ph2_ir->op == OP_address_of ? __sp : __gp;
         if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
             emit(__lui(__t0, rv_hi(ph2_ir->src0)));
             emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-            emit(__add(rd, __sp, __t0));
+            emit(__add(rd, interm, __t0));
         } else
-            emit(__addi(rd, __sp, ph2_ir->src0));
+            emit(__addi(rd, interm, ph2_ir->src0));
         return;
     case OP_assign:
         emit(__addi(rd, rs1, 0));
