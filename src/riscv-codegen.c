@@ -158,9 +158,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     int ofs;
 
     /* Prepare the variables to reuse the same code for
-     * the instruction sequence of division and modulo.
+     * the instruction sequence of
+     * 1. division and modulo.
+     * 2. load and store operations.
      */
-    rv_reg soft_div_rd = __t0, divisor_mask = __t1;
+    rv_reg interm, divisor_mask = __t1;
 
     switch (ph2_ir->op) {
     case OP_define:
@@ -197,40 +199,26 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__addi(rd, rs1, 0));
         return;
     case OP_load:
+    case OP_global_load:
+        interm = ph2_ir->op == OP_load ? __sp : __gp;
         if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
             emit(__lui(__t0, rv_hi(ph2_ir->src0)));
             emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-            emit(__add(__t0, __sp, __t0));
+            emit(__add(__t0, interm, __t0));
             emit(__lw(rd, __t0, 0));
         } else
-            emit(__lw(rd, __sp, ph2_ir->src0));
+            emit(__lw(rd, interm, ph2_ir->src0));
         return;
     case OP_store:
-        if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
-            emit(__lui(__t0, rv_hi(ph2_ir->src1)));
-            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
-            emit(__add(__t0, __sp, __t0));
-            emit(__sw(rs1, __t0, 0));
-        } else
-            emit(__sw(rs1, __sp, ph2_ir->src1));
-        return;
-    case OP_global_load:
-        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-            emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-            emit(__add(__t0, __gp, __t0));
-            emit(__lw(rd, __t0, 0));
-        } else
-            emit(__lw(rd, __gp, ph2_ir->src0));
-        return;
     case OP_global_store:
+        interm = ph2_ir->op == OP_store ? __sp : __gp;
         if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
             emit(__lui(__t0, rv_hi(ph2_ir->src1)));
             emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
-            emit(__add(__t0, __gp, __t0));
+            emit(__add(__t0, interm, __t0));
             emit(__sw(rs1, __t0, 0));
         } else
-            emit(__sw(rs1, __gp, ph2_ir->src1));
+            emit(__sw(rs1, interm, ph2_ir->src1));
         return;
     case OP_read:
         if (ph2_ir->src1 == 1)
@@ -325,13 +313,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                 emit(__mod(rd, rs1, rs2));
             return;
         }
+        interm = __t0;
         /* div/mod emulation */
         if (ph2_ir->op == OP_mod) {
             /* If the requested operation is modulo, the result will be stored
              * in __t2. The sign of the divisor is irrelevant for determining
              * the result's sign.
              */
-            soft_div_rd = __t2;
+            interm = __t2;
             divisor_mask = __zero;
         }
         /* Obtain absolute values of the dividend and divisor */
@@ -359,7 +348,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__srli(__t1, __t1, 1));
         emit(__srli(__t3, __t3, 1));
         emit(__bne(__t1, __zero, -20));
-        emit(__addi(rd, soft_div_rd, 0));
+        emit(__addi(rd, interm, 0));
         /* Handle the correct sign for the quotient or remainder */
         emit(__beq(__t5, __zero, 8));
         emit(__sub(rd, __zero, rd));
