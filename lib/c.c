@@ -178,7 +178,8 @@ void __str_base8(char *pb, int val)
 void __str_base16(char *pb, int val)
 {
     int c = INT_BUF_LEN - 1;
-    while (c > 0) {
+    int times = sizeof(int) << 1;
+    for (int i = 0; i < times; i++) {
         int v = val & 0xf;
         if (v < 10)
             pb[c] = '0' + v;
