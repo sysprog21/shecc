@@ -1611,4 +1611,32 @@ int main()
 }
 EOF
 
+# snprintf, including truncation and zero size input
+try_output 0 "Hello World 1123" << EOF
+int main() {
+    char buffer[50];
+    snprintf(buffer, 50, "Hello %s %d", "World", 1123);
+    printf("%s", buffer);
+    return 0;
+}
+EOF
+
+try_output 0 "" << EOF
+int main() {
+    char buffer[20];
+    snprintf(buffer, 0, "Number: %d", -37);
+    printf("%s", buffer);
+    return 0;
+}
+EOF
+
+try_output 0 "Number: -" << EOF
+int main() {
+    char buffer[10];
+    snprintf(buffer, 10, "Number: %d", -37);
+    printf("%s", buffer);
+    return 0;
+}
+EOF
+
 echo OK
