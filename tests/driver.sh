@@ -1085,4 +1085,23 @@ int main()
     return 0;
 }
 EOF
+
+try_output "Hello World 1123" << EOF
+int main() {
+    char buffer[50];
+    snprintf(buffer, sizeof(buffer), "Hello %s %d", "World", 1123);
+    printf("%s", buffer);
+    return 0;
+}
+EOF
+
+try_output "Number: -37" << EOF
+int main() {
+    char buffer[20];
+    snprintf(buffer, sizeof(buffer), "Number: %d", -37);
+    printf("%s", buffer);
+    return 0;
+}
+EOF
+
 echo OK
