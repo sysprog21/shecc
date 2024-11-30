@@ -166,13 +166,24 @@ void __str_base10(char *pb, int val)
 
 void __str_base8(char *pb, int val)
 {
-    int c = INT_BUF_LEN - 1;
-    while (c > 0) {
-        int v = val & 0x7;
+    int c = INT_BUF_LEN - 1, v;
+    /*
+     * Because every 3 binary digits can be converted
+     * to 1 octal digit, here performs the conversion
+     * 10 times, derived from 32 divided by 3.
+     *
+     * Finally, the remaining 2 bits are processed after
+     * the loop.
+     * */
+    int times = (sizeof(int) << 3) / 3;
+    for (int i = 0; i < times; i++) {
+        v = val & 0x7;
         pb[c] = '0' + v;
         val = val >> 3;
         c--;
     }
+    v = val & 0x3;
+    pb[c] = '0' + v;
 }
 
 void __str_base16(char *pb, int val)
