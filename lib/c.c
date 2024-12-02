@@ -166,19 +166,31 @@ void __str_base10(char *pb, int val)
 
 void __str_base8(char *pb, int val)
 {
-    int c = INT_BUF_LEN - 1;
-    while (c > 0) {
-        int v = val & 0x7;
+    int c = INT_BUF_LEN - 1, v;
+    /*
+     * Because every 3 binary digits can be converted
+     * to 1 octal digit, here performs the conversion
+     * 10 times, derived from 32 divided by 3.
+     *
+     * Finally, the remaining 2 bits are processed after
+     * the loop.
+     * */
+    int times = (sizeof(int) << 3) / 3;
+    for (int i = 0; i < times; i++) {
+        v = val & 0x7;
         pb[c] = '0' + v;
         val = val >> 3;
         c--;
     }
+    v = val & 0x3;
+    pb[c] = '0' + v;
 }
 
 void __str_base16(char *pb, int val)
 {
     int c = INT_BUF_LEN - 1;
-    while (c > 0) {
+    int times = sizeof(int) << 1;
+    for (int i = 0; i < times; i++) {
         int v = val & 0xf;
         if (v < 10)
             pb[c] = '0' + v;
@@ -202,37 +214,13 @@ int __format(char *buffer,
 {
     int bi = 0;
     char pb[INT_BUF_LEN];
-    int pbi = 0;
-
-    if (alternate_form == 1) {
-        switch (base) {
-        case 8:
-            /* octal */
-            buffer[0] = '0';
-            bi = 1;
-            width -= 1;
-            break;
-        case 16:
-            /* hex */
-            buffer[0] = '0';
-            buffer[1] = 'x';
-            bi = 2;
-            width -= 2;
-            break;
-        default:
-            /* decimal */
-            /* do nothing */
-            break;
-        }
-        if (width < 0)
-            width = 0;
-    }
+    int pbi;
 
     /* set to zeroes */
-    while (pbi < INT_BUF_LEN) {
+    for (pbi = 0; pbi < INT_BUF_LEN; pbi++)
         pb[pbi] = '0';
-        pbi++;
-    }
+
+    pbi = 0;
 
     switch (base) {
     case 8:
@@ -249,53 +237,52 @@ int __format(char *buffer,
         break;
     }
 
-    while (width > INT_BUF_LEN) {
-        /* need to add extra padding */
-        if (zeropad == 1)
-            buffer[bi] = '0';
-        else
-            buffer[bi] = ' ';
-        bi++;
+    while (pb[pbi] == '0' && pbi < INT_BUF_LEN - 1)
+        pbi++;
+
+    switch (base) {
+    case 8:
+        if (alternate_form) {
+            if (width && zeropad && pb[pbi] != '0') {
+                buffer[bi++] = '0';
+                width -= 1;
+            } else if (pb[pbi] != '0')
+                pb[--pbi] = '0';
+        }
+        break;
+    case 10:
+        if (width && zeropad && pb[pbi] == '-') {
+            buffer[bi++] = '-';
+            pbi++;
+            width--;
+        }
+        break;
+    case 16:
+        if (alternate_form) {
+            if (width && zeropad && pb[pbi] != '0') {
+                buffer[bi++] = '0';
+                buffer[bi++] = 'x';
+                width -= 2;
+            } else if (pb[pbi] != '0') {
+                pb[--pbi] = 'x';
+                pb[--pbi] = '0';
+            }
+        }
+        break;
+    }
+
+    width -= (INT_BUF_LEN - pbi);
+    if (width < 0)
+        width = 0;
+
+    while (width) {
+        buffer[bi++] = zeropad ? '0' : ' ';
         width--;
     }
 
-    /* no padding */
-    if (width == 0) {
-        int c = 0;
-        int started = 0;
+    for (; pbi < INT_BUF_LEN; pbi++)
+        buffer[bi++] = pb[pbi];
 
-        /* output from first digit */
-        while (c < INT_BUF_LEN) {
-            if (pb[c] != '0')
-                started = 1;
-            if (started) {
-                buffer[bi] = pb[c];
-                bi++;
-            }
-            c++;
-        }
-        /* special case - zero */
-        if (started == 0) {
-            buffer[bi] = '0';
-            bi++;
-        }
-    } else {
-        /* padding */
-        int c = INT_BUF_LEN - width;
-        int started = 0;
-        while (c < INT_BUF_LEN) {
-            if (pb[c] != '0')
-                started = 1;
-            if (started)
-                buffer[bi] = pb[c];
-            else if (zeropad == 1)
-                buffer[bi] = '0';
-            else
-                buffer[bi] = ' ';
-            bi++;
-            c++;
-        }
-    }
     return bi;
 }
 
