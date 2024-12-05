@@ -725,13 +725,13 @@ void free(void *ptr)
     __freelist_head = cur;
 }
 
-void snprintf(char *buffer, size_t n, char *str, ...)
+void snprintf(char *buffer, int n, char *str, ...)
 {
     int *var_args = &str + 4;
     int si = 0, bi = 0, pi = 0;
 
     while (str[si]) {
-        if (bi >= n-1) {
+        if (bi >= n - 1) {
             break;
         } else if (str[si] != '%') {
             buffer[bi] = str[si];
@@ -787,5 +787,6 @@ void snprintf(char *buffer, size_t n, char *str, ...)
             si++;
         }
     }
-    if (bi < n) buffer[bi] = '\0';
+    if (bi < n)
+        buffer[bi] = '\0';
 }
