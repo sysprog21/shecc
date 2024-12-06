@@ -52,10 +52,18 @@ $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
 	chmod +x $@ ; $(PRINTF) "Running $@ ...\n"
 	$(Q)$(TARGET_EXEC) $@ && $(call pass)
 
-check: $(TESTBINS) tests/driver.sh
+check: check-stage0 check-stage2
+
+check-stage0: $(OUT)/$(STAGE0) $(TESTBINS) tests/driver.sh
+	$(VECHO) "  TEST STAGE 0\n"
 	tests/driver.sh
 
+check-stage2: $(OUT)/$(STAGE2) $(TESTBINS) tests/driver-stage2.sh
+	$(VECHO) "  TEST STAGE 2\n"
+	tests/driver-stage2.sh
+
 check-snapshots: $(OUT)/$(STAGE0) $(SNAPSHOTS) tests/check-snapshots.sh
+	$(VECHO) "  TEST SNAPSHOTS\n"
 	tests/check-snapshots.sh
 
 $(OUT)/%.o: %.c
