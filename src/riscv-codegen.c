@@ -72,7 +72,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         if (hard_mul_div)
             elf_offset += 4;
         else
-            elf_offset += 104;
+            elf_offset += 108;
         return;
     case OP_load_data_address:
     case OP_neq:
@@ -331,12 +331,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* Unsigned integer division */
         emit(__addi(__t0, __zero, 0));
         emit(__addi(__t1, __zero, 1));
-        emit(__beq(__t3, __zero, 48));
-        emit(__beq(__t2, __zero, 44));
+        emit(__beq(__t3, __zero, 52));
+        emit(__beq(__t2, __zero, 48));
+        emit(__beq(__t2, __t3, 20));
         emit(__bltu(__t2, __t3, 16));
         emit(__slli(__t3, __t3, 1));
         emit(__slli(__t1, __t1, 1));
-        emit(__jal(__zero, -12));
+        emit(__jal(__zero, -16));
         emit(__bltu(__t2, __t3, 12));
         emit(__sub(__t2, __t2, __t3));
         emit(__add(__t0, __t0, __t1));

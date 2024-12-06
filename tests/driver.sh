@@ -2,7 +2,22 @@
 
 set -u
 
-readonly SHECC="$PWD/out/shecc"
+if [ "$#" != 1 ]; then
+    echo "Usage: $0 <stage>"
+    exit 1
+fi
+
+case "$1" in
+    "0")
+        readonly SHECC="$PWD/out/shecc" ;;
+    "1")
+        readonly SHECC="$PWD/out/shecc-stage1.elf" ;;
+    "2")
+        readonly SHECC="$PWD/out/shecc-stage2.elf" ;;
+    *)
+        echo "$1 is not a valid stage"
+        exit 1 ;;
+esac
 
 # try - test shecc with given code
 # Usage:
@@ -405,8 +420,36 @@ items 5 "int a; a = 10; a -= 5; return a;"
 items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; return p[0];"
 
 # sizeof
-expr 4 "sizeof(int)";
+expr 0 "sizeof(void)";
+expr 1 "sizeof(_Bool)";
 expr 1 "sizeof(char)";
+expr 4 "sizeof(int)";
+# sizeof pointers
+expr 4 "sizeof(void*)";
+expr 4 "sizeof(_Bool*)";
+expr 4 "sizeof(char*)";
+expr 4 "sizeof(int*)";
+# sizeof multi-level pointer
+expr 4 "sizeof(void**)";
+expr 4 "sizeof(_Bool**)";
+expr 4 "sizeof(char**)";
+expr 4 "sizeof(int**)";
+# sizeof struct
+try_ 4 << EOF
+typedef struct {
+    int a;
+    int b;
+} struct_t;
+int main() { return sizeof(struct_t*); }
+EOF
+# sizeof enum
+try_ 4 << EOF
+typedef enum {
+    A,
+    B
+} enum_t;
+int main() { return sizeof(enum_t*); }
+EOF
 
 # switch-case
 items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } return a;"
