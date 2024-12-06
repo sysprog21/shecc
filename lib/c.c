@@ -14,6 +14,7 @@
 #define false 0
 
 #if defined(__arm__)
+#define __SIZEOF_POINTER__ 4
 #define __syscall_exit 1
 #define __syscall_read 3
 #define __syscall_write 4
@@ -23,6 +24,7 @@
 #define __syscall_munmap 91
 
 #elif defined(__riscv)
+#define __SIZEOF_POINTER__ 4
 #define __syscall_exit 93
 #define __syscall_read 63
 #define __syscall_write 64

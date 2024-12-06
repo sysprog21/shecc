@@ -336,7 +336,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
         interm = __r8;
         /* div/mod emulation */
-        /* Preserve the values of the dividend and divisor */
+        /* Preserve the values of the dividend and divisor. This also keeps
+         * stack pointer to be aligned.
+         */
         emit(__stmdb(__AL, 1, __sp, (1 << rn) | (1 << rm)));
         /* Obtain absolute values of the dividend and divisor */
         emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
