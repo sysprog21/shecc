@@ -4,9 +4,16 @@ set -u
 
 readonly SHECC="$PWD/out/shecc"
 
+if [ "$#" != 1 ]; then
+    echo "Usage: $0 <architecture>"
+    exit 1
+fi
+
+readonly ARCH="$1"
+
 function update_snapshot() {
     local source="$1"
-    local dest="tests/snapshots/$(basename $source .c).json"
+    local dest="tests/snapshots/$(basename $source .c)-$ARCH.json"
     local temp_exe=$(mktemp)
     local temp_json=$(mktemp --suffix .json)
 

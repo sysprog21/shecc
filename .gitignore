@@ -7,3 +7,4 @@ a.out
 *.dot
 config
 src/codegen.c
+.session.mk

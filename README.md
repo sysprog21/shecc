@@ -107,12 +107,28 @@ $ chmod +x fib
 $ qemu-arm fib
 ```
 
-Verify that the emitted IRs are identical to the snapshots by specifying `check-snapshots` target when invoking `make`:
+### IR Regression Tests
+
+To ensure the consistency of frontend (lexer, parser) behavior when working on it, the snapshot test is introduced.
+The snapshot test dumps IRs from the executable and compares the structural identity with the provided snapshots.
+
+Verify the emitted IRs by specifying `check-snapshots` target when invoking `make`:
 ```shell
 $ make check-snapshots
 ```
 
-`shecc` comes with unit tests consist of stage 0, stage 2. To run these tests, give `check` as an argument:
+If the compiler frontend is updated, the emitted IRs might be changed.
+Thus, you can update snapshots by specifying `update-snapshots` target when invoking `make`:
+```shell
+$ make update-snapshots
+```
+
+Notice that the above 2 targets will update all backend snapshots at once, to update/check current backend's snapshot, 
+use `update-snapshot` / `check-snapshot` instead.
+
+### Unit Tests
+
+`shecc` comes with unit tests. To run the tests, give `check` as an argument:
 ```shell
 $ make check
 ```
