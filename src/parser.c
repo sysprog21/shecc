@@ -844,7 +844,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         read_ternary_operation(parent, bb);
         lex_expect(T_close_bracket);
     } else if (lex_accept(T_sizeof)) {
+        /* TODO: Use more generalized type grammar parsing function to handle
+         * type reading
+         */
         char token[MAX_TYPE_LEN];
+        int ptr_cnt = 0;
 
         lex_expect(T_open_bracket);
         int find_type_flag = lex_accept(T_struct) ? 2 : 1;
@@ -853,9 +857,12 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         if (!type)
             error("Unable to find type");
 
+        while (lex_accept(T_asterisk))
+            ptr_cnt++;
+
         ph1_ir = add_ph1_ir(OP_load_constant);
         vd = require_var(parent);
-        vd->init_val = type->size;
+        vd->init_val = ptr_cnt ? PTR_SIZE : type->size;
         strcpy(vd->var_name, gen_name());
         ph1_ir->dest = vd;
         opstack_push(vd);
