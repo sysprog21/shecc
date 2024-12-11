@@ -12,6 +12,18 @@
  * dead variable and does NOT wrtie it back to the stack.
  */
 
+/* Aligns size to nearest multiple of 4, this meets
+ * ARMv7's alignment requirement.
+ *
+ * This function should
+ * be called whenever handling with user-defined type's
+ * size.
+ */
+int align_size(int i)
+{
+    return i <= 4 ? 4 : (i + 3) & ~3;
+}
+
 bool check_live_out(basic_block_t *bb, var_t *var)
 {
     for (int i = 0; i < bb->live_out_idx; i++) {
@@ -239,11 +251,11 @@ void reg_alloc()
                 src0 = GLOBAL_FUNC.stack_size;
                 if (global_insn->rd->is_ptr)
                     GLOBAL_FUNC.stack_size +=
-                        (PTR_SIZE * global_insn->rd->array_size);
+                        align_size(PTR_SIZE * global_insn->rd->array_size);
                 else {
                     type_t *type = find_type(global_insn->rd->type_name, 0);
                     GLOBAL_FUNC.stack_size +=
-                        (global_insn->rd->array_size * type->size);
+                        align_size(global_insn->rd->array_size * type->size);
                 }
 
                 dest =
@@ -260,7 +272,7 @@ void reg_alloc()
                          strcmp(global_insn->rd->type_name, "char") &&
                          strcmp(global_insn->rd->type_name, "_Bool")) {
                     type_t *type = find_type(global_insn->rd->type_name, 0);
-                    GLOBAL_FUNC.stack_size += type->size;
+                    GLOBAL_FUNC.stack_size += align_size(type->size);
                 } else
                     /* 'char' is aligned to one byte for the convenience */
                     GLOBAL_FUNC.stack_size += 4;
@@ -365,9 +377,10 @@ void reg_alloc()
                     }
 
                     if (insn->rd->array_size)
-                        fn->func->stack_size += (insn->rd->array_size * sz);
+                        fn->func->stack_size +=
+                            align_size(insn->rd->array_size * sz);
                     else
-                        fn->func->stack_size += sz;
+                        fn->func->stack_size += align_size(sz);
 
                     dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_address_of);

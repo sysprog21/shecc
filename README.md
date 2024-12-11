@@ -112,17 +112,27 @@ Verify that the emitted IRs are identical to the snapshots by specifying `check-
 $ make check-snapshots
 ```
 
-`shecc` comes with unit tests. To run the tests, give `check` as an argument:
+`shecc` comes with unit tests consist of stage 0, stage 2. To run these tests, give `check` as an argument:
 ```shell
 $ make check
 ```
 
 Reference output:
 ```
+  TEST STAGE 0
 ...
 int main(int argc, int argv) { exit(sizeof(char)); } => 1
 int main(int argc, int argv) { int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } exit(a); } => 10
 int main(int argc, int argv) { int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } exit(a); } => 10
+OK
+  TEST STAGE 2
+...
+int main(int argc, int argv) { exit(sizeof(char*)); }
+exit code => 4
+output => 
+int main(int argc, int argv) { exit(sizeof(int*)); }
+exit code => 4
+output => 
 OK
 ```
 
