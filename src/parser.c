@@ -1828,18 +1828,24 @@ bool read_body_assignment(char *token,
     return false;
 }
 
-int read_numeric_sconstant()
+int read_primary_constant()
 {
     /* return signed constant */
     int isneg = 0, res;
     char buffer[10];
     if (lex_accept(T_minus))
         isneg = 1;
-    if (lex_peek(T_numeric, buffer))
+    if (lex_accept(T_open_bracket)) {
+        res = read_primary_constant();
+        lex_expect(T_close_bracket);
+    } else if (lex_peek(T_numeric, buffer)) {
         res = read_numeric_constant(buffer);
-    else
+        lex_expect(T_numeric);
+    } else if (lex_peek(T_char, buffer)) {
+        res = buffer[0];
+        lex_expect(T_char);
+    } else
         error("Invalid value after assignment");
-    lex_expect(T_numeric);
     if (isneg)
         return (-1) * res;
     return res;
@@ -1878,6 +1884,18 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
         break;
     case OP_rshift:
         res = op1 >> op2;
+        break;
+    case OP_log_and:
+        res = op1 && op2;
+        break;
+    case OP_log_or:
+        res = op1 || op2;
+        break;
+    case OP_eq:
+        res = op1 == op2;
+        break;
+    case OP_neq:
+        res = op1 != op2;
         break;
     case OP_lt:
         res = op1 < op2 ? 1 : 0;
@@ -1929,7 +1947,7 @@ bool read_global_assignment(char *token)
         int val_stack[10];
         int op_stack_index = 0, val_stack_index = 0;
         int operand1, operand2;
-        operand1 = read_numeric_sconstant();
+        operand1 = read_primary_constant();
         op = get_operator();
         /* only one value after assignment */
         if (op == OP_generic) {
@@ -1955,7 +1973,7 @@ bool read_global_assignment(char *token)
             eval_ternary_imm(operand1, token);
             return true;
         }
-        operand2 = read_numeric_sconstant();
+        operand2 = read_primary_constant();
         next_op = get_operator();
         if (next_op == OP_generic) {
             /* only two operands, apply and return */
@@ -2013,7 +2031,7 @@ bool read_global_assignment(char *token)
                 } while (op_stack_index > 0 && same_op == 0);
             }
             /* push next operand on stack */
-            val_stack[val_stack_index++] = read_numeric_sconstant();
+            val_stack[val_stack_index++] = read_primary_constant();
             /* push operator on stack */
             op_stack[op_stack_index++] = op;
             op = get_operator();
