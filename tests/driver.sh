@@ -1249,4 +1249,27 @@ int main()
     return 0;
 }
 EOF
+
+# global character initialization
+try_ 198 << EOF
+char ch1 = 'A';
+char ch2 = ('B');
+char ch3 = (('C'));
+int main()
+{
+    return ch1 + ch2 + ch3;
+}
+EOF
+
+# global initialization with logical and equality operation
+try_ 4 << EOF
+int b1 = 1 && 1;
+int b2 = 1 || 0;
+int b3 = 1 == 1;
+int b4 = 1 != 2;
+int main()
+{
+    return b1 + b2 + b3 + b4;
+}
+EOF
 echo OK
