@@ -106,7 +106,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_geq:
     case OP_leq:
     case OP_log_not:
-    case OP_log_or:
         elf_offset += 12;
         return;
     case OP_branch:
@@ -117,9 +116,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_return:
         elf_offset += 24;
-        return;
-    case OP_log_and:
-        elf_offset += 28;
         return;
     default:
         printf("Unknown opcode\n");
@@ -423,11 +419,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__teq(rn));
         emit(__mov_i(__NE, rd, 0));
         emit(__mov_i(__EQ, rd, 1));
-        return;
-    case OP_log_or:
-        emit(__or_r(__AL, rd, rn, rm));
-        emit(__teq(rd));
-        emit(__mov_i(__NE, rd, 1));
         return;
     default:
         printf("Unknown opcode\n");
