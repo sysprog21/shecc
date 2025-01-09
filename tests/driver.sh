@@ -1272,4 +1272,261 @@ int main()
     return b1 + b2 + b3 + b4;
 }
 EOF
+
+# Logical-or: simplest case
+expr 1 "41 || 20"
+
+# Logical-or: control flow
+
+ans="0 20
+0"
+
+try_output 0 "$ans" << EOF
+int main()
+{
+    int a = 0;
+    int b = 20;
+
+    if (a || b)
+        printf("%d %d\n", a, b);
+
+    b = 0;
+
+    if (a || b)
+        printf("%d %d\n", a, b);
+    else
+        printf("0\n");
+
+    return 0;
+}
+EOF
+
+# Logical-or: for loop
+ans="a--
+a--
+b--
+b--
+b--
+b--
+b--
+b--
+b--
+b--
+0 0 45"
+
+try_output 0 "$ans" << EOF
+int main()
+{
+    int a = 2, b = 8, c = 0;
+    for (int i = 0; a || b; i++) {
+        if (a) {
+            c += i;
+            a--;
+            printf("a--\n");
+            continue;
+        }
+        if (b) {
+            c += i;
+            b--;
+            printf("b--\n");
+            continue;
+        }
+    }
+    printf("%d %d %d\n", a, b, c);
+
+    return 0;
+}
+EOF
+
+# Logical-or: while loop
+ans="a -= 2
+a -= 2
+b -= 3
+b -= 3
+b -= 3
+-1 0 13"
+
+try_output 0 "$ans" << EOF
+int main()
+{
+    int a = 3, b = 9, c = 0;
+    while (a > 0 || b > 0) {
+        if (a > 0) {
+            c += 2;
+            a -= 2;
+            printf("a -= 2\n");
+            continue;
+        }
+        if (b > 0) {
+            c += 3;
+            b -= 3;
+            printf("b -= 3\n");
+            continue;
+        }
+    }
+    printf("%d %d %d\n", a, b, c);
+
+    return 0;
+}
+EOF
+
+# Logical-or: do-while loop
+ans="do: a -= 2
+do: a -= 2
+do: a -= 2
+do: b -= 5
+do: b -= 5
+do: b -= 5
+do: b -= 5
+-1 -4 -26"
+
+try_output 0 "$ans" << EOF
+int main()
+{
+    int a = 5, b = 16, c = 0;
+    do {
+        printf("do: ");
+        if (a > 0) {
+            c -= 2;
+            a -= 2;
+            printf("a -= 2\n");
+        } else if (b > 0) {
+            c -= 5;
+            b -= 5;
+            printf("b -= 5\n");
+        }
+    } while (a > 0 || b > 0);
+    printf("%d %d %d\n", a, b, c);
+
+    return 0;
+}
+EOF
+
+# Logical-or: test the short-circuit principle
+ans="10 > 0
+10 0
+20 > 0
+0 20
+get 0"
+
+try_output 0 "$ans" << EOF
+int func(int x)
+{
+    if (x > 0)
+        printf("%d > 0\n", x);
+    return x;
+}
+
+int main()
+{
+    int a = 10, b = 0, c = 20, d = -100;
+    if (func(a) || func(b))
+        printf("%d %d\n", a, b);
+
+    if (func(b) || func(c))
+        printf("%d %d\n", b, c);
+
+    if (func(d + 100) || func(b))
+        printf("%d %d\n", b, c);
+    else
+        printf("get 0\n");
+
+
+    return 0;
+}
+EOF
+
+# Logical-or and logical-and: More complex use cases
+ans="0
+1
+1
+1
+1
+1
+1
+1
+0
+1
+1
+1
+1
+1
+0
+1
+0
+func(10): 10 > 0
+func(20): 20 > 0
+func(0): 0 <= 0
+0
+func(10): 10 > 0
+0
+func(10): 10 > 0
+0
+func(0): 0 <= 0
+func(10): 10 > 0
+func(-100): -100 <= 0
+1
+func(0): 0 <= 0
+func(0): 0 <= 0
+0
+func(0): 0 <= 0
+func(0): 0 <= 0
+0
+func(0): 0 <= 0
+func(10): 10 > 0
+func(-100): -100 <= 0
+1
+func(10): 10 > 0
+func(-100): -100 <= 0
+1
+func(10): 10 > 0
+func(-100): -100 <= 0
+1"
+
+try_output 0 "$ans" << EOF
+int func(int x)
+{
+    if (x > 0)
+        printf("func(%d): %d > 0\n", x, x);
+    else
+	printf("func(%d): %d <= 0\n", x, x);
+    return x;
+}
+
+int main()
+{
+    int a = 10, b = 20, c = 0, d = -100;
+    printf("%d\n", a && b && c && d);
+    printf("%d\n", a || b && c && d);
+    printf("%d\n", a && b || c && d);
+    printf("%d\n", a && b && c || d);
+    printf("%d\n", a || b || c && d);
+    printf("%d\n", a || b && c || d);
+    printf("%d\n", a && b || c || d);
+    printf("%d\n", a || b || c || d);
+
+    printf("%d\n", (a || b) && c && d);
+    printf("%d\n", a && (b || c) && d);
+    printf("%d\n", a && b && (c || d));
+    printf("%d\n", (a || b || c) && d);
+    printf("%d\n", (a || b) && (c || d));
+    printf("%d\n", a && (b || c || d));
+    printf("%d\n", a * 0 && (b || c || d));
+    printf("%d\n", a * 2 && (b || c || d));
+    printf("%d\n", a && (b * 0 || c || d * 0));
+
+    printf("%d\n", func(a) && func(b) && func(c));
+    printf("%d\n", func(a) - a && func(b) && func(c));
+    printf("%d\n", func(a) - a && func(b) && func(c) + 1);
+    printf("%d\n", func(c) || func(a) && func(d));
+    printf("%d\n", func(c) || func(c) && func(d));
+    printf("%d\n", (func(c) || func(c)) && func(d + 100));
+    printf("%d\n", func(c) || func(a) && func(d));
+    printf("%d\n", func(a) && (func(d) || func(c)));
+    printf("%d\n", func(a) * 2 && (func(d) || func(c)));
+
+    return 0;
+}
+EOF
+
 echo OK
