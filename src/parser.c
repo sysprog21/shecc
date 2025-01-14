@@ -300,11 +300,9 @@ int read_constant_infix_expr(int precedence)
             lhs = lhs != rhs;
             break;
         case OP_log_and:
-            /* TODO: Short-circuit evaluation */
             lhs = lhs && rhs;
             break;
         case OP_log_or:
-            /* TODO: Short-circuit evaluation */
             lhs = lhs || rhs;
             break;
         default:
@@ -692,9 +690,10 @@ void read_char_param(block_t *parent, basic_block_t *bb)
     add_insn(parent, bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0, NULL);
 }
 
-void read_log_and_operation(block_t *parent,
-                            basic_block_t **bb,
-                            char *label_else);
+void read_logical(opcode_t op,
+                  block_t *parent,
+                  basic_block_t **bb,
+                  char *label_shared);
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
 void read_func_parameters(block_t *parent, basic_block_t **bb)
 {
@@ -1013,10 +1012,16 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
     }
 }
 
-void finalize_log_and(block_t *parent,
+void finalize_logical(opcode_t op,
+                      block_t *parent,
                       basic_block_t **bb,
-                      char *label_else,
-                      basic_block_t *else_bb);
+                      char *label_shared,
+                      basic_block_t *shared_bb);
+
+bool is_logical(opcode_t op)
+{
+    return op == OP_log_and || op == OP_log_or;
+}
 
 void read_expr(block_t *parent, basic_block_t **bb)
 {
@@ -1025,23 +1030,36 @@ void read_expr(block_t *parent, basic_block_t **bb)
     opcode_t oper_stack[10];
     int oper_stack_idx = 0;
 
-    /* These variables used for parsing logical-and operation. False branch of
-     * each logical-and operand points to the same basic block.
+    /* These variables used for parsing logical-and/or operation.
+     *
+     * For the logical-and operation, the false condition code path for
+     * testing each operand uses the same code snippet (basic block).
+     *
+     * Likewise, when testing each operand for the logical-or operation,
+     * all of them share a unified code path for the true condition.
      */
-    bool has_log_and = false;
-    basic_block_t *else_bb = bb_create(parent);
-    char land_else_label[MAX_VAR_LEN];
-    strcpy(land_else_label, gen_label());
+    bool has_prev_log_op = false;
+    opcode_t prev_log_op = 0, pprev_log_op = 0;
+    basic_block_t *log_and_shared_bb = bb_create(parent),
+                  *log_or_shared_bb = bb_create(parent);
+    char log_and_shared_label[MAX_VAR_LEN];
+    char log_or_shared_label[MAX_VAR_LEN];
+    strcpy(log_and_shared_label, gen_label());
+    strcpy(log_or_shared_label, gen_label());
 
     read_expr_operand(parent, bb);
 
     opcode_t op = get_operator();
     if (op == OP_generic || op == OP_ternary)
         return;
-    if (op == OP_log_and) {
-        bb_connect(*bb, else_bb, ELSE);
-        read_log_and_operation(parent, bb, land_else_label);
-        has_log_and = true;
+    if (is_logical(op)) {
+        bb_connect(*bb, op == OP_log_and ? log_and_shared_bb : log_or_shared_bb,
+                   op == OP_log_and ? ELSE : THEN);
+        read_logical(
+            op, parent, bb,
+            op == OP_log_and ? log_and_shared_label : log_or_shared_label);
+        has_prev_log_op = true;
+        prev_log_op = op;
     } else
         oper_stack[oper_stack_idx++] = op;
     read_expr_operand(parent, bb);
@@ -1068,24 +1086,113 @@ void read_expr(block_t *parent, basic_block_t **bb)
                     same = 1;
             } while (oper_stack_idx > 0 && same == 0);
         }
-        if (op == OP_log_and) {
-            bb_connect(*bb, else_bb, ELSE);
-            read_log_and_operation(parent, bb, land_else_label);
-            has_log_and = true;
-        }
-        /* When encountering an operator with lower priority, conclude the
-         * current logical-and and create a new "else" basic block for next
-         * logical-and operator.
-         */
-        if (has_log_and &&
-            get_operator_prio(op) < get_operator_prio(OP_log_and)) {
-            finalize_log_and(parent, bb, land_else_label, else_bb);
-            else_bb = bb_create(parent);
-            strcpy(land_else_label, gen_label());
-            has_log_and = false;
+        if (is_logical(op)) {
+            if (prev_log_op == 0 || prev_log_op == op) {
+                bb_connect(
+                    *bb,
+                    op == OP_log_and ? log_and_shared_bb : log_or_shared_bb,
+                    op == OP_log_and ? ELSE : THEN);
+                read_logical(op, parent, bb,
+                             op == OP_log_and ? log_and_shared_label
+                                              : log_or_shared_label);
+                prev_log_op = op;
+                has_prev_log_op = true;
+            } else if (prev_log_op == OP_log_and) {
+                /* For example: a && b || c
+                 * previous opcode: prev_log_op == OP_log_and
+                 * current opcode:  op == OP_log_or
+                 * current operand: b
+                 *
+                 * Finalize the logical-and operation and test the operand
+                 * for the following logical-or operation.
+                 * */
+                finalize_logical(prev_log_op, parent, bb, log_and_shared_label,
+                                 log_and_shared_bb);
+                log_and_shared_bb = bb_create(parent);
+                strcpy(log_and_shared_label, gen_label());
+
+                bb_connect(*bb, log_or_shared_bb, THEN);
+                read_logical(op, parent, bb, log_or_shared_label);
+
+                /* Here are two cases to illustrate the following assignments
+                 * after finalizing the logical-and operation and testing the
+                 * operand for the following logical-or operation.
+                 *
+                 * 1. a && b || c
+                 *    pprev opcode:    pprev_log_op == 0 (no opcode)
+                 *    previous opcode: prev_log_op == OP_log_and
+                 *    current opcode:  op == OP_log_or
+                 *    current operand: b
+                 *
+                 *    The current opcode should become the previous opcode,
+                 * and the pprev opcode remains 0.
+                 *
+                 * 2. a || b && c || d
+                 *    pprev opcode:    pprev_log_op == OP_log_or
+                 *    previous opcode: prev_log_op == OP_log_and
+                 *    current opcode:  op == OP_log_or
+                 *    current operand: b
+                 *
+                 *    The previous opcode should inherit the pprev opcode, which
+                 * is equivalent to inheriting the current opcode because both
+                 * of pprev opcode and current opcode are logical-or operator.
+                 *
+                 *    Thus, pprev opcode is considered used and is cleared to 0.
+                 *
+                 * Eventually, the current opcode becomes the previous opcode
+                 * and pprev opcode is set to 0.
+                 * */
+                prev_log_op = op;
+                pprev_log_op = 0;
+            } else {
+                /* For example: a || b && c
+                 * previous opcode: prev_log_op == OP_log_or
+                 * current opcode:  op == OP_log_and
+                 * current operand: b
+                 *
+                 * Using the logical-and operation to test the current
+                 * operand instead of using the logical-or operation.
+                 *
+                 * Then, the previous opcode becomes pprev opcode and
+                 * the current opcode becomes the previous opcode.
+                 * */
+                bb_connect(*bb, log_and_shared_bb, ELSE);
+                read_logical(op, parent, bb, log_and_shared_label);
+                pprev_log_op = prev_log_op;
+                prev_log_op = op;
+            }
+        } else {
+            while (has_prev_log_op &&
+                   (get_operator_prio(op) < get_operator_prio(prev_log_op))) {
+                /* When encountering an operator with lower priority, conclude
+                 * the current logical-and/or and create a new basic block for
+                 * next logical-and/or operator.
+                 */
+                finalize_logical(prev_log_op, parent, bb,
+                                 prev_log_op == OP_log_and
+                                     ? log_and_shared_label
+                                     : log_or_shared_label,
+                                 prev_log_op == OP_log_and ? log_and_shared_bb
+                                                           : log_or_shared_bb);
+                if (prev_log_op == OP_log_and)
+                    log_and_shared_bb = bb_create(parent);
+                else
+                    log_or_shared_bb = bb_create(parent);
+                strcpy(prev_log_op == OP_log_and ? log_and_shared_label
+                                                 : log_or_shared_label,
+                       gen_label());
+
+                /* After finalizing the previous logical-and/or operation,
+                 * the prev_log_op should inherit pprev_log_op and continue
+                 * to check whether to finalize a logical-and/or operation.
+                 * */
+                prev_log_op = pprev_log_op;
+                has_prev_log_op = prev_log_op != 0;
+                pprev_log_op = 0;
+            }
         }
         read_expr_operand(parent, bb);
-        if (op != OP_log_and)
+        if (!is_logical(op))
             oper_stack[oper_stack_idx++] = op;
         op = get_operator();
     }
@@ -1101,8 +1208,16 @@ void read_expr(block_t *parent, basic_block_t **bb)
         add_insn(parent, *bb, ph1_ir->op, ph1_ir->dest, ph1_ir->src0,
                  ph1_ir->src1, 0, NULL);
     }
-    if (has_log_and) {
-        finalize_log_and(parent, bb, land_else_label, else_bb);
+    while (has_prev_log_op) {
+        finalize_logical(
+            prev_log_op, parent, bb,
+            prev_log_op == OP_log_and ? log_and_shared_label
+                                      : log_or_shared_label,
+            prev_log_op == OP_log_and ? log_and_shared_bb : log_or_shared_bb);
+
+        prev_log_op = pprev_log_op;
+        has_prev_log_op = prev_log_op != 0;
+        pprev_log_op = 0;
     }
 }
 
@@ -1420,16 +1535,25 @@ void read_lvalue(lvalue_t *lvalue,
     }
 }
 
-void read_log_and_operation(block_t *parent,
-                            basic_block_t **bb,
-                            char *label_else)
+void read_logical(opcode_t op,
+                  block_t *parent,
+                  basic_block_t **bb,
+                  char *label_shared)
 {
-    char label_true[MAX_VAR_LEN];
+    char __label[MAX_VAR_LEN], *label_true, *label_else;
     var_t *vd;
     ph1_ir_t *ph1_ir;
-    strcpy(label_true, gen_label());
+    strcpy(__label, gen_label());
+    if (op == OP_log_and) {
+        label_true = __label;
+        label_else = label_shared;
+    } else if (op == OP_log_or) {
+        label_true = label_shared;
+        label_else = __label;
+    } else
+        error("encounter an invalid logical opcode in read_logical()");
 
-    /* test the operand before the logical-and operator */
+    /* Test the operand before the logical-and/or operator */
     ph1_ir = add_ph1_ir(OP_branch);
     ph1_ir->dest = opstack_pop();
     vd = require_var(parent);
@@ -1440,105 +1564,197 @@ void read_log_and_operation(block_t *parent,
     ph1_ir->src1 = vd;
     add_insn(parent, *bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
 
-    /* true branch label */
+    /* Create a proper branch label for the operand of the logical-and/or
+     * operation.
+     * */
     ph1_ir = add_ph1_ir(OP_label);
     vd = require_var(parent);
-    strcpy(vd->var_name, label_true);
+    strcpy(vd->var_name, op == OP_log_and ? label_true : label_else);
     ph1_ir->src0 = vd;
 
-    basic_block_t *then_ = bb_create(parent);
-    bb_connect(*bb, then_, THEN);
+    basic_block_t *new_bb = bb_create(parent);
+    bb_connect(*bb, new_bb, op == OP_log_and ? THEN : ELSE);
 
-    bb[0] = then_;
+    bb[0] = new_bb;
 }
 
-void finalize_log_and(block_t *parent,
+void finalize_logical(opcode_t op,
+                      block_t *parent,
                       basic_block_t **bb,
-                      char *label_else,
-                      basic_block_t *else_bb)
+                      char *label_shared,
+                      basic_block_t *shared_bb)
 {
-    basic_block_t *then_next_ = bb_create(parent);
-    basic_block_t *end_ = bb_create(parent);
-    bb_connect(*bb, then_next_, THEN);
-    bb_connect(*bb, else_bb, ELSE);
-    bb_connect(then_next_, end_, NEXT);
-    bb_connect(else_bb, end_, NEXT);
-    char label_and_true[MAX_VAR_LEN], label_end[MAX_VAR_LEN];
-    strcpy(label_and_true, gen_label());
+    char __label[MAX_VAR_LEN], label_end[MAX_VAR_LEN], *label_true, *label_else;
+    strcpy(__label, gen_label());
     strcpy(label_end, gen_label());
-    var_t *and_res;
 
-    /* create branch instruction for final logical-and operand */
+    basic_block_t *then, *then_next, *else_if, *else_bb;
+    basic_block_t *end = bb_create(parent);
+    if (op == OP_log_and) {
+        /* For example: a && b
+         *
+         * If handling the expression, the basic blocks will
+         * connect to each other as the following illustration:
+         *
+         *  bb1                 bb2                bb3
+         * +-----------+       +-----------+       +---------+
+         * | teq a, #0 | True  | teq b, #0 | True  | ldr 1   |
+         * | bne bb2   | ----> | bne bb3   | ----> | b   bb5 |
+         * | b   bb4   |       | b   bb4   |       +---------+
+         * +-----------+       +-----------+           |
+         *      |                   |                  |
+         *      | False             | False            |
+         *      |                   |                  |
+         *      |              +---------+         +--------+
+         *      -------------> | ldr 0   | ------> |        |
+         *                     | b   bb5 |         |        |
+         *                     +---------+         +--------+
+         *                      bb4                 bb5
+         *
+         * In this case, finalize_logical() should add some
+         * instructions to bb2 ~ bb5 and properly connect them
+         * to each other.
+         *
+         * Notice that
+         * - bb1 has been handled by read_logical().
+         * - bb2 is equivalent to '*bb'.
+         * - bb3 needs to be created.
+         * - bb4 is 'shared_bb'.
+         * - bb5 needs to be created.
+         *
+         * Thus, here uses 'then', 'then_next', 'else_bb' and
+         * 'end' to respectively point to bb2 ~ bb5. Subsequently,
+         * perform the mentioned operations for finalizing.
+         * */
+        then = *bb;
+        then_next = bb_create(parent);
+        else_bb = shared_bb;
+        bb_connect(then, then_next, THEN);
+        bb_connect(then, else_bb, ELSE);
+        bb_connect(then_next, end, NEXT);
+        label_true = __label;
+        label_else = label_shared;
+    } else if (op == OP_log_or) {
+        /* For example: a || b
+         *
+         * Similar to handling logical-and operations, it should
+         * add some instructions to the basic blocks and connect
+         * them to each other for logical-or operations as in
+         * the figure:
+         *
+         *  bb1                 bb2                bb3
+         * +-----------+       +-----------+       +---------+
+         * | teq a, #0 | False | teq b, #0 | False | ldr 0   |
+         * | bne bb4   | ----> | bne bb4   | ----> | b   bb5 |
+         * | b   bb2   |       | b   bb3   |       +---------+
+         * +-----------+       +-----------+           |
+         *      |                   |                  |
+         *      | True              | True             |
+         *      |                   |                  |
+         *      |              +---------+         +--------+
+         *      -------------> | ldr 1   | ------> |        |
+         *                     | b   bb5 |         |        |
+         *                     +---------+         +--------+
+         *                      bb4                 bb5
+         *
+         * Similarly, here uses 'else_if', 'else_bb', 'then' and
+         * 'end' to respectively point to bb2 ~ bb5, and then
+         * finishes the finalization.
+         * */
+        then = shared_bb;
+        else_if = *bb;
+        else_bb = bb_create(parent);
+        bb_connect(else_if, then, THEN);
+        bb_connect(else_if, else_bb, ELSE);
+        bb_connect(then, end, NEXT);
+        label_true = label_shared;
+        label_else = __label;
+    } else
+        error("encounter an invalid logical opcode in finalize_logical()");
+    bb_connect(else_bb, end, NEXT);
+    var_t *log_op_res;
+
+    /* Create the branch instruction for final logical-and/or operand */
     ph1_ir_t *ph1_ir = add_ph1_ir(OP_branch);
     var_t *vd = opstack_pop();
     ph1_ir->dest = vd;
     vd = require_var(parent);
-    strcpy(vd->var_name, label_and_true);
+    strcpy(vd->var_name, label_true);
     ph1_ir->src0 = vd;
     vd = require_var(parent);
     strcpy(vd->var_name, label_else);
     ph1_ir->src1 = vd;
-    add_insn(parent, *bb, OP_branch, NULL, ph1_ir->dest, NULL, 0, NULL);
+    add_insn(parent, op == OP_log_and ? then : else_if, OP_branch, NULL,
+             ph1_ir->dest, NULL, 0, NULL);
 
-    /* true branch of the logical-and operation */
+    /*
+     * If handling logical-and operation, here creates a true branch for the
+     * logical-and operation and assigns a true value.
+     *
+     * Otherwise, create a false branch and assign a false value for logical-or
+     * operation.
+     * */
     ph1_ir = add_ph1_ir(OP_label);
     vd = require_var(parent);
-    strcpy(vd->var_name, label_and_true);
+    strcpy(vd->var_name, op == OP_log_and ? label_true : label_else);
     ph1_ir->dest = vd;
 
     ph1_ir = add_ph1_ir(OP_load_constant);
     vd = require_var(parent);
     strcpy(vd->var_name, gen_name());
-    vd->init_val = 1;
+    vd->init_val = op == OP_log_and;
     ph1_ir->dest = vd;
-    add_insn(parent, then_next_, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
-             NULL);
+    add_insn(parent, op == OP_log_and ? then_next : else_bb, OP_load_constant,
+             ph1_ir->dest, NULL, NULL, 0, NULL);
 
     ph1_ir = add_ph1_ir(OP_assign);
-    and_res = require_var(parent);
-    strcpy(and_res->var_name, gen_name());
-    ph1_ir->dest = and_res;
+    log_op_res = require_var(parent);
+    strcpy(log_op_res->var_name, gen_name());
+    ph1_ir->dest = log_op_res;
     ph1_ir->src0 = vd;
-    add_insn(parent, then_next_, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
-             NULL);
+    add_insn(parent, op == OP_log_and ? then_next : else_bb, OP_assign,
+             ph1_ir->dest, ph1_ir->src0, NULL, 0, NULL);
 
-    /* end of true branch, jump over the false branch */
+    /* After assigning a value, go to the final basic block. */
     ph1_ir = add_ph1_ir(OP_jump);
     vd = require_var(parent);
     strcpy(vd->var_name, label_end);
     ph1_ir->dest = vd;
 
-    /* false branch of logical-and operation */
+    /* Create the shared branch and assign the other value
+     * for the other condition of a logical-and/or operation.
+     *
+     * If handing a logical-and operation, assign a false value.
+     * else, assign a true value for a logical-or operation.
+     * */
     ph1_ir = add_ph1_ir(OP_label);
     vd = require_var(parent);
-    strcpy(vd->var_name, label_else);
+    strcpy(vd->var_name, op == OP_log_and ? label_else : label_true);
     ph1_ir->src0 = vd;
 
     ph1_ir = add_ph1_ir(OP_load_constant);
     vd = require_var(parent);
     strcpy(vd->var_name, gen_name());
-    vd->init_val = 0;
+    vd->init_val = op != OP_log_and;
     ph1_ir->dest = vd;
-    add_insn(parent, else_bb, OP_load_constant, ph1_ir->dest, NULL, NULL, 0,
-             NULL);
+    add_insn(parent, op == OP_log_and ? else_bb : then, OP_load_constant,
+             ph1_ir->dest, NULL, NULL, 0, NULL);
 
-    /* final basic block to retrieve the value from one of previous basic block
-     */
     ph1_ir = add_ph1_ir(OP_assign);
-    ph1_ir->dest = and_res;
+    ph1_ir->dest = log_op_res;
     ph1_ir->src0 = vd;
-    add_insn(parent, else_bb, OP_assign, ph1_ir->dest, ph1_ir->src0, NULL, 0,
-             NULL);
+    add_insn(parent, op == OP_log_and ? else_bb : then, OP_assign, ph1_ir->dest,
+             ph1_ir->src0, NULL, 0, NULL);
 
     ph1_ir = add_ph1_ir(OP_label);
     vd = require_var(parent);
     strcpy(vd->var_name, label_end);
     ph1_ir->src0 = vd;
 
-    and_res->is_log_and_ret = true;
-    opstack_push(and_res);
+    log_op_res->is_logical_ret = true;
+    opstack_push(log_op_res);
 
-    bb[0] = end_;
+    bb[0] = end;
 }
 
 void read_ternary_operation(block_t *parent, basic_block_t **bb)

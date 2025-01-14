@@ -574,8 +574,6 @@ void reg_alloc()
                 case OP_bit_and:
                 case OP_bit_or:
                 case OP_bit_xor:
-                case OP_log_and:
-                case OP_log_or:
                     src0 = prepare_operand(bb, insn->rs1, -1);
                     src1 = prepare_operand(bb, insn->rs2, src0);
                     dest = prepare_dest(bb, insn->rd, src0, src1);
@@ -766,12 +764,6 @@ void dump_ph2_ir()
             break;
         case OP_bit_xor:
             printf("\t%%x%c = xor %%x%c, %%x%c", rd, rs1, rs2);
-            break;
-        case OP_log_and:
-            printf("\t%%x%c = and %%x%c, %%x%c", rd, rs1, rs2);
-            break;
-        case OP_log_or:
-            printf("\t%%x%c = or %%x%c, %%x%c", rd, rs1, rs2);
             break;
         case OP_log_not:
             printf("\t%%x%c = not %%x%c", rd, rs1);

@@ -23,7 +23,7 @@
 #define MAX_FUNC_TRIES 2160
 #define MAX_BLOCKS 2048
 #define MAX_TYPES 64
-#define MAX_IR_INSTR 40000
+#define MAX_IR_INSTR 50000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_BB_RDOM_SUCC 256
@@ -190,7 +190,7 @@ struct var {
     struct insn *last_assign;
     int consumed;
     bool is_ternary_ret;
-    bool is_log_and_ret;
+    bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
 };
 
