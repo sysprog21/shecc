@@ -2153,7 +2153,7 @@ bool read_global_assignment(char *token)
 {
     ph1_ir_t *ph1_ir;
     var_t *vd;
-    block_t *parent = &BLOCKS[0];
+    block_t *parent = BLOCKS.head;
 
     /* global initialization must be constant */
     var_t *var = find_global_var(token);
@@ -3182,7 +3182,7 @@ void read_global_decl(block_t *block)
 void read_global_statement()
 {
     char token[MAX_ID_LEN];
-    block_t *block = &BLOCKS[0]; /* global block */
+    block_t *block = BLOCKS.head; /* global block */
 
     if (lex_accept(T_struct)) {
         int i = 0, size = 0;
