@@ -21,7 +21,6 @@
 #define MAX_FIELDS 64
 #define MAX_FUNCS 512
 #define MAX_FUNC_TRIES 2160
-#define MAX_BLOCKS 2048
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 50000
 #define MAX_BB_PRED 128
@@ -227,10 +226,15 @@ struct block {
     func_t *func;
     macro_t *macro;
     int locals_size;
-    int index;
+    struct block *next;
 };
 
 typedef struct block block_t;
+
+typedef struct {
+    block_t *head;
+    block_t *tail;
+} block_list_t;
 
 /* phase-1 IR definition */
 typedef struct {

@@ -7,8 +7,7 @@
 
 /* Global objects */
 
-block_t *BLOCKS;
-int blocks_idx = 0;
+block_list_t BLOCKS;
 
 macro_t *MACROS;
 int macros_idx = 0;
@@ -226,8 +225,16 @@ int find_label_offset(char name[])
 
 block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
 {
-    block_t *blk = &BLOCKS[blocks_idx];
-    blk->index = blocks_idx++;
+    block_t *blk = malloc(sizeof(block_t));
+
+    if (!BLOCKS.head) {
+        BLOCKS.head = blk;
+        BLOCKS.tail = BLOCKS.head;
+    } else {
+        BLOCKS.tail->next = blk;
+        BLOCKS.tail = blk;
+    }
+
     blk->parent = parent;
     blk->func = func;
     blk->macro = macro;
@@ -394,7 +401,7 @@ var_t *find_local_var(char *token, block_t *block)
 
 var_t *find_global_var(char *token)
 {
-    block_t *block = &BLOCKS[0];
+    block_t *block = BLOCKS.head;
 
     for (int i = 0; i < block->next_local; i++) {
         if (!strcmp(block->locals[i].var_name, token))
@@ -587,7 +594,8 @@ void global_init()
 {
     elf_code_start = ELF_START + elf_header_len;
 
-    BLOCKS = malloc(MAX_BLOCKS * sizeof(block_t));
+    BLOCKS.head = NULL;
+    BLOCKS.tail = NULL;
     MACROS = malloc(MAX_ALIASES * sizeof(macro_t));
     FUNCS = malloc(MAX_FUNCS * sizeof(func_t));
     FUNC_TRIES = malloc(MAX_FUNC_TRIES * sizeof(trie_t));
@@ -613,7 +621,11 @@ void global_init()
 
 void global_release()
 {
-    free(BLOCKS);
+    while (BLOCKS.head) {
+        block_t *next = BLOCKS.head->next;
+        free(BLOCKS.head);
+        BLOCKS.head = next;
+    }
     free(MACROS);
     free(FUNCS);
     free(FUNC_TRIES);
