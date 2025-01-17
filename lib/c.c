@@ -151,11 +151,11 @@ void __str_base10(char *pb, int val)
         q += (q >> 4);
         q += (q >> 8);
         q += (q >> 16);
-        q = q >> 3;
+        q >>= 3;
         r = val - (((q << 2) + q) << 1);
         t = ((r + 6) >> 4);
         q += t;
-        r = r - (((t << 2) + t) << 1);
+        r -= (((t << 2) + t) << 1);
 
         pb[i] += r;
         val = q;
@@ -181,7 +181,7 @@ void __str_base8(char *pb, int val)
     for (int i = 0; i < times; i++) {
         v = val & 0x7;
         pb[c] = '0' + v;
-        val = val >> 3;
+        val >>= 3;
         c--;
     }
     v = val & 0x3;
@@ -202,7 +202,7 @@ void __str_base16(char *pb, int val)
             abort();
             break;
         }
-        val = val >> 4;
+        val >>= 4;
         c--;
     }
 }
@@ -315,7 +315,7 @@ void printf(char *str, ...)
                 w = str[si] - '0';
                 si++;
                 while (str[si] >= '0' && str[si] <= '9') {
-                    w = w * 10;
+                    w *= 10;
                     w += str[si] - '0';
                     si++;
                 }
@@ -382,7 +382,7 @@ void sprintf(char *buffer, char *str, ...)
                 w = str[si] - '0';
                 si++;
                 if (str[si] >= '0' && str[si] <= '9') {
-                    w = w * 10;
+                    w *= 10;
                     w += str[si] - '0';
                     si++;
                 }

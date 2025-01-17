@@ -166,7 +166,7 @@ int read_numeric_constant(char buffer[])
             i = 2;
             while (buffer[i]) {
                 char c = buffer[i++];
-                value = value << 4;
+                value <<= 4;
                 if (is_digit(c))
                     value += c - '0';
                 c |= 32; /* convert to lower case */
@@ -228,7 +228,7 @@ int read_constant_infix_expr(int precedence)
         case OP_add:
             break;
         case OP_sub:
-            lhs = lhs * -1;
+            lhs = -lhs;
             break;
         case OP_bit_not:
             lhs = ~lhs;
@@ -255,31 +255,31 @@ int read_constant_infix_expr(int precedence)
 
         switch (op) {
         case OP_add:
-            lhs = lhs + rhs;
+            lhs += rhs;
             break;
         case OP_sub:
-            lhs = lhs - rhs;
+            lhs -= rhs;
             break;
         case OP_mul:
-            lhs = lhs * rhs;
+            lhs *= rhs;
             break;
         case OP_div:
-            lhs = lhs / rhs;
+            lhs /= rhs;
             break;
         case OP_bit_and:
-            lhs = lhs & rhs;
+            lhs &= rhs;
             break;
         case OP_bit_or:
-            lhs = lhs | rhs;
+            lhs |= rhs;
             break;
         case OP_bit_xor:
-            lhs = lhs ^ rhs;
+            lhs ^= rhs;
             break;
         case OP_lshift:
-            lhs = lhs << rhs;
+            lhs <<= rhs;
             break;
         case OP_rshift:
-            lhs = lhs >> rhs;
+            lhs >>= rhs;
             break;
         case OP_gt:
             lhs = lhs > rhs;
@@ -1870,6 +1870,18 @@ bool read_body_assignment(char *token,
             op = OP_add;
         } else if (lex_accept(T_minuseq)) {
             op = OP_sub;
+        } else if (lex_accept(T_asteriskeq)) {
+            op = OP_mul;
+        } else if (lex_accept(T_divideeq)) {
+            op = OP_div;
+        } else if (lex_accept(T_modeq)) {
+            op = OP_mod;
+        } else if (lex_accept(T_lshifteq)) {
+            op = OP_lshift;
+        } else if (lex_accept(T_rshifteq)) {
+            op = OP_rshift;
+        } else if (lex_accept(T_xoreq)) {
+            op = OP_bit_xor;
         } else if (lex_accept(T_oreq)) {
             op = OP_bit_or;
         } else if (lex_accept(T_andeq)) {

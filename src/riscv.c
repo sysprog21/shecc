@@ -105,8 +105,8 @@ int rv_extract_bits(int imm, int i_start, int i_end, int d_start, int d_end)
         error("Invalid bit copy");
 
     v = imm >> i_start;
-    v = v & ((2 << (i_end - i_start)) - 1);
-    v = v << d_start;
+    v &= ((2 << (i_end - i_start)) - 1);
+    v <<= d_start;
     return v;
 }
 

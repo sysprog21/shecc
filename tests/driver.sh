@@ -450,6 +450,12 @@ expr 25 "0 ? 10 : 25"
 # compound assignemnt
 items 5 "int a; a = 2; a += 3; return a;"
 items 5 "int a; a = 10; a -= 5; return a;"
+items 4 "int a; a = 2; a *= 2; return a;"
+items 33 "int a; a = 100; a /= 3; return a;"
+items 1 "int a; a = 100; a %= 3; return a;"
+items 4 "int a; a = 2; a <<= 1; return a;"
+items 2 "int a; a = 4; a >>= 1; return a;"
+items 1 "int a; a = 1; a ^= 0; return a;"
 items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; return p[0];"
 
 # sizeof
