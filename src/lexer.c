@@ -40,6 +40,12 @@ typedef enum {
     T_minus,         /* - */
     T_minuseq,       /* -= */
     T_pluseq,        /* += */
+    T_asteriskeq,    /* *= */
+    T_divideeq,      /* /= */
+    T_modeq,         /* %= */
+    T_lshifteq,      /* <<= */
+    T_rshifteq,      /* >>= */
+    T_xoreq,         /* ^= */
     T_oreq,          /* |= */
     T_andeq,         /* &= */
     T_eq,            /* == */
@@ -246,6 +252,11 @@ token_t lex_token_internal(bool aliasing)
             return lex_token_internal(aliasing);
         }
 
+        if (next_char == '=') {
+            read_char(true);
+            return T_divideeq;
+        }
+
         return T_divide;
     }
 
@@ -288,6 +299,12 @@ token_t lex_token_internal(bool aliasing)
     }
     if (next_char == '^') {
         read_char(true);
+
+        if (next_char == '=') {
+            read_char(true);
+            return T_xoreq;
+        }
+
         return T_bit_xor;
     }
     if (next_char == '~') {
@@ -359,6 +376,12 @@ token_t lex_token_internal(bool aliasing)
     }
     if (next_char == '*') {
         read_char(true);
+
+        if (next_char == '=') {
+            read_char(true);
+            return T_asteriskeq;
+        }
+
         return T_asterisk;
     }
     if (next_char == '&') {
@@ -366,7 +389,7 @@ token_t lex_token_internal(bool aliasing)
         if (next_char == '&') {
             read_char(true);
             return T_log_and;
-        };
+        }
         if (next_char == '=') {
             read_char(true);
             return T_andeq;
@@ -379,7 +402,7 @@ token_t lex_token_internal(bool aliasing)
         if (next_char == '|') {
             read_char(true);
             return T_log_or;
-        };
+        }
         if (next_char == '=') {
             read_char(true);
             return T_oreq;
@@ -392,16 +415,28 @@ token_t lex_token_internal(bool aliasing)
         if (next_char == '=') {
             read_char(true);
             return T_le;
-        };
+        }
         if (next_char == '<') {
             read_char(true);
+
+            if (next_char == '=') {
+                read_char(true);
+                return T_lshifteq;
+            }
+
             return T_lshift;
-        };
+        }
         skip_whitespace();
         return T_lt;
     }
     if (next_char == '%') {
         read_char(true);
+
+        if (next_char == '=') {
+            read_char(true);
+            return T_modeq;
+        }
+
         return T_mod;
     }
     if (next_char == '>') {
@@ -409,11 +444,17 @@ token_t lex_token_internal(bool aliasing)
         if (next_char == '=') {
             read_char(true);
             return T_ge;
-        };
+        }
         if (next_char == '>') {
             read_char(true);
+
+            if (next_char == '=') {
+                read_char(true);
+                return T_rshifteq;
+            }
+
             return T_rshift;
-        };
+        }
         skip_whitespace();
         return T_gt;
     }

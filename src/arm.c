@@ -114,8 +114,8 @@ int arm_extract_bits(int imm, int i_start, int i_end, int d_start, int d_end)
         error("Invalid bit copy");
 
     int v = imm >> i_start;
-    v = v & ((2 << (i_end - i_start)) - 1);
-    v = v << d_start;
+    v &= ((2 << (i_end - i_start)) - 1);
+    v <<= d_start;
     return v;
 }
 
@@ -136,7 +136,7 @@ int __mov(arm_cond_t cond, int io, int opcode, int s, int rn, int rd, int op2)
         shift = 16; /* full rotation */
         while ((op2 & 3) == 0) {
             /* we can shift by two bits */
-            op2 = op2 >> 2;
+            op2 >>= 2;
             shift -= 1;
         }
         if (op2 > 255)
@@ -176,7 +176,7 @@ int __movw(arm_cond_t cond, arm_reg rd, int imm)
 
 int __movt(arm_cond_t cond, arm_reg rd, int imm)
 {
-    imm = imm >> 16;
+    imm >>= 16;
     return arm_encode(cond, 52, 0, rd, 0) +
            arm_extract_bits(imm, 0, 11, 0, 11) +
            arm_extract_bits(imm, 12, 15, 16, 19);

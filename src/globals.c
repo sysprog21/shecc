@@ -109,7 +109,7 @@ int insert_trie(trie_t *trie, char *name, int funcs_index)
             FUNC_TRIES[trie->next[fc]].index = 0;
         }
         trie = &FUNC_TRIES[trie->next[fc]];
-        name = name + 1;
+        name++;
     }
 }
 
@@ -136,7 +136,7 @@ int find_trie(trie_t *trie, char *name)
         if (!trie->next[fc])
             return 0;
         trie = &FUNC_TRIES[trie->next[fc]];
-        name = name + 1;
+        name++;
     }
 }
 
