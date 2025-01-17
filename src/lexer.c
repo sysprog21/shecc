@@ -216,9 +216,10 @@ token_t lex_token_internal(bool aliasing)
         error("Unknown directive");
     }
 
-    /* C-style comments */
     if (next_char == '/') {
-        read_char(false);
+        read_char(true);
+
+        /* C-style comments */
         if (next_char == '*') {
             /* in a comment, skip until end */
             do {
@@ -231,14 +232,21 @@ token_t lex_token_internal(bool aliasing)
                     }
                 }
             } while (next_char);
-        } else {
-            /* single '/', predict divide */
-            if (next_char == ' ')
-                read_char(true);
-            return T_divide;
+
+            if (!next_char)
+                error("Unenclosed C-style comment");
+            return lex_token_internal(aliasing);
         }
-        /* TODO: check invalid cases */
-        error("Unexpected '/'");
+
+        /* C++-style comments */
+        if (next_char == '/') {
+            do {
+                read_char(false);
+            } while (next_char && !is_newline(next_char));
+            return lex_token_internal(aliasing);
+        }
+
+        return T_divide;
     }
 
     if (is_digit(next_char)) {

@@ -233,6 +233,39 @@ items 0 "int x; for(x = 10; x > 0; x--); return x;"
 items 30 "int i; int acc; i = 0; acc = 0; do { i = i + 1; if (i - 1 < 5) continue; acc = acc + i; if (i == 9) break; } while (i < 10); return acc;"
 items 26 "int acc; acc = 0; int i; for (i = 0; i < 100; i++) { if (i < 5) continue; if (i == 9) break; acc = acc + i; } return acc;"
 
+# C-style comments / C++-style comments
+# Start
+try_ 0 << EOF
+/* This is a test C-style comments */
+int main() { return 0; }
+EOF
+try_ 0 << EOF
+// This is a test C++-style comments
+int main() { return 0; }
+EOF
+# Middle
+try_ 0 << EOF
+int main() {
+    /* This is a test C-style comments */
+    return 0;
+}
+EOF
+try_ 0 << EOF
+int main() {
+    // This is a test C++-style comments
+    return 0;
+}
+EOF
+# End
+try_ 0 << EOF
+int main() { return 0; }
+/* This is a test C-style comments */
+EOF
+try_ 0 << EOF
+int main() { return 0; }
+// This is a test C++-style comments
+EOF
+
 # functions
 try_ 55 << EOF
 int sum(int m, int n) {
