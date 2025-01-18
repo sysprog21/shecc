@@ -5,6 +5,9 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
+#include <stdbool.h>
+#include <stdlib.h>
+
 /* C language syntactic analyzer */
 int global_var_idx = 0;
 int global_label_idx = 0;

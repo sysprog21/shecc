@@ -5,6 +5,9 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
+#include <stdbool.h>
+#include <stdlib.h>
+
 /* Global objects */
 
 block_list_t BLOCKS;
