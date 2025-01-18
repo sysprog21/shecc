@@ -20,7 +20,6 @@
 #define MAX_LOCALS 1500
 #define MAX_FIELDS 64
 #define MAX_FUNCS 512
-#define MAX_FUNC_TRIES 2160
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 50000
 #define MAX_BB_PRED 128
@@ -305,10 +304,18 @@ typedef struct {
     int value;
 } constant_t;
 
+/* string-based hash map definitions */
+
+typedef struct hashmap_node {
+    char *key;
+    void *val;
+    struct hashmap_node *next;
+} hashmap_node_t;
+
 typedef struct {
-    int index;
-    int next[128];
-} trie_t;
+    int size;
+    hashmap_node_t **buckets;
+} hashmap_t;
 
 struct phi_operand {
     var_t *var;

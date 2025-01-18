@@ -15,18 +15,13 @@ block_list_t BLOCKS;
 macro_t *MACROS;
 int macros_idx = 0;
 
-/* the first element is reserved for global scope */
-func_t *FUNCS;
-int funcs_idx = 1;
-
-/* FUNC_TRIES is used to improve the performance of the find_func function.
- * Instead of searching through all functions and comparing their names, we can
- * utilize the trie data structure to search for existing functions efficiently.
- * The index starts from 1 because the first trie node represents an empty input
- * string, and it is not possible to record a function with an empty name.
+/* FUNCS_MAP is used to integrate function storing and boost lookup
+ * performance, currently it uses FNV-1a hash function to hash function
+ * name. The bucket size defaults to MAX_FUNCS. Ideally, it should be a small
+ * number, but due to lack of rehashing implementation, to prevent collision,
+ * we have to initially create large amount of buckets.
  */
-trie_t *FUNC_TRIES;
-int func_tries_idx = 1;
+hashmap_t *FUNCS_MAP;
 
 type_t *TYPES;
 int types_idx = 0;
@@ -75,72 +70,195 @@ char *elf_strtab;
 char *elf_section;
 
 /**
- * insert_trie() - Inserts a new element into the trie structure.
- * @trie: A pointer to the trie where the name will be inserted.
- * @name: The name to be inserted into the trie.
- * @funcs_index: The index of the pointer to the func_t. The index is recorded
- *     in a 1-indexed format. Because the first element of 'FUNCS' has been
- *     reserved, there is no need to shift it.
- * Return: The index of the pointer to the func_t.
+ * hashmap_hash_index() - hashses a string with FNV-1a hash function
+ * and converts into usable hashmap index. The range of returned
+ * hashmap index is ranged from "(0 ~ 2,147,483,647) mod size" due to
+ * lack of unsigned integer implementation.
+ * @size: The size of map. Must not be negative or 0.
+ * @key: The key string. May be NULL.
  *
- * If the function has been inserted, the return value is the index of the
- * function in FUNCS. Otherwise, the return value is the value of the parameter
- * @funcs_index.
+ * Return: The usable hashmap index.
  */
-int insert_trie(trie_t *trie, char *name, int funcs_index)
+int hashmap_hash_index(int size, char *key)
 {
-    char first_char;
-    int fc;
+    int hash = 0x811c9dc5, mask;
 
-    while (1) {
-        first_char = *name;
-        fc = first_char;
-        if (!fc) {
-            if (!trie->index)
-                trie->index = funcs_index;
-            return trie->index;
-        }
-        if (!trie->next[fc]) {
-            /* FIXME: The func_tries_idx variable may exceed the maximum number,
-             * which can lead to a segmentation fault. This issue is affected by
-             * the number of functions and the length of their names. The proper
-             * way to handle this is to dynamically allocate a new element.
-             */
-            trie->next[fc] = func_tries_idx++;
-            for (int i = 0; i < 128; i++)
-                FUNC_TRIES[trie->next[fc]].next[i] = 0;
-            FUNC_TRIES[trie->next[fc]].index = 0;
-        }
-        trie = &FUNC_TRIES[trie->next[fc]];
-        name++;
+    for (; *key; key++) {
+        hash ^= *key;
+        hash *= 0x01000193;
     }
+
+    mask = hash >> 31;
+    return ((hash ^ mask) - mask) & (size - 1);
+}
+
+int round_up_pow2(int v)
+{
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v++;
+    return v;
 }
 
 /**
- * find_trie() - search the index of the function name in the trie
- * @trie: A pointer to the trie where the name will be searched.
- * @name: The name to be searched.
+ * hashmap_create() - creates a hashmap on heap. Notice that
+ * provided size will always be rounded up to nearest power of 2.
+ * @size: The initial bucket size of hashmap. Must not be 0 or
+ * negative.
  *
- * Return: The index of the pointer to the func_t.
- *
- * 0 - the name not found.
- * otherwise - the index of the founded index in the trie array.
+ * Return: The pointer of created hashmap.
  */
-int find_trie(trie_t *trie, char *name)
+hashmap_t *hashmap_create(int size)
 {
-    char first_char;
-    int fc;
+    hashmap_t *map = malloc(sizeof(hashmap_t));
 
-    while (1) {
-        first_char = *name;
-        fc = first_char;
-        if (!fc)
-            return trie->index;
-        if (!trie->next[fc])
-            return 0;
-        trie = &FUNC_TRIES[trie->next[fc]];
-        name++;
+    if (!map) {
+        printf("Failed to allocate hashmap_t with size %d\n", size);
+        return NULL;
     }
+
+    map->size = round_up_pow2(size);
+    map->buckets = malloc(map->size * sizeof(hashmap_node_t *));
+
+    if (!map->buckets) {
+        printf("Failed to allocate buckets in hashmap_t\n");
+        free(map);
+        return NULL;
+    }
+
+    for (int i = 0; i < map->size; i++)
+        map->buckets[i] = 0;
+
+    return map;
+}
+
+/**
+ * hashmap_node_new() - creates a hashmap node on heap.
+ * @key: The key of node. Must not be NULL.
+ * @val: The value of node. Could be NULL.
+ *
+ * Return: The pointer of created node.
+ */
+hashmap_node_t *hashmap_node_new(char *key, void *val)
+{
+    if (!key)
+        return NULL;
+
+    int len = strlen(key);
+    hashmap_node_t *node = malloc(sizeof(hashmap_node_t));
+
+
+    if (!node) {
+        printf("Failed to allocate hashmap_node_t\n");
+        return NULL;
+    }
+
+    node->key = calloc(len + 1, sizeof(char));
+
+    if (!node->key) {
+        printf("Failed to allocate hashmap_node_t key with size %d\n");
+        free(node);
+        return NULL;
+    }
+
+    strcpy(node->key, key);
+    node->val = val;
+    node->next = NULL;
+    return node;
+}
+
+/**
+ * hashmap_put() - puts a key-value pair into given hashmap.
+ * If key already contains a value, then replace it with new
+ * value, the old value will be freed.
+ * @map: The hashmap to be put into. Must not be NULL.
+ * @key: The key string. May be NULL.
+ * @val: The value pointer. May be NULL. This value's lifetime
+ * is held by hashmap.
+ */
+void hashmap_put(hashmap_t *map, char *key, void *val)
+{
+    if (!map)
+        return;
+
+    int index = hashmap_hash_index(map->size, key);
+    hashmap_node_t *cur = map->buckets[index];
+
+    if (!cur) {
+        map->buckets[index] = hashmap_node_new(key, val);
+    } else {
+        while (cur->next)
+            cur = cur->next;
+        cur->next = hashmap_node_new(key, val);
+    }
+
+    /* TODO: Rehash if size exceeds size * load factor */
+}
+
+/**
+ * hashmap_get() - gets value from hashmap from given key.
+ * @map: The hashmap to be looked up. Must no be NULL.
+ * @key: The key string. May be NULL.
+ *
+ * Return: The look up result, if the key-value pair entry
+ * exists, then returns its value's address, NULL otherwise.
+ */
+void *hashmap_get(hashmap_t *map, char *key)
+{
+    if (!map)
+        return NULL;
+
+    int index = hashmap_hash_index(map->size, key);
+
+    for (hashmap_node_t *cur = map->buckets[index]; cur; cur = cur->next)
+        if (!strcmp(cur->key, key))
+            return cur->val;
+
+    return NULL;
+}
+
+/**
+ * hashmap_contains() - checks if the key-value pair entry exists
+ * from given key.
+ * @map: The hashmap to be looked up. Must no be NULL.
+ * @key: The key string. May be NULL.
+ *
+ * Return: The look up result, if the key-value pair entry
+ * exists, then returns true, false otherwise.
+ */
+bool hashmap_contains(hashmap_t *map, char *key)
+{
+    return hashmap_get(map, key);
+}
+
+/**
+ * hashmap_free() - frees the hashmap, this also frees key-value pair
+ * entry's value.
+ * @map: The hashmap to be looked up. Must no be NULL.
+ */
+void hashmap_free(hashmap_t *map)
+{
+    if (!map)
+        return;
+
+    for (int i = 0; i < map->size; i++) {
+        for (hashmap_node_t *cur = map->buckets[i], *next; cur; cur = next) {
+            next = cur->next;
+            free(cur->key);
+            free(cur->val);
+            /* FIXME: Remove this if-clause will cause double free error */
+            if (cur != map->buckets[0])
+                free(cur);
+            cur = next;
+        }
+    }
+
+    free(map->buckets);
+    free(map);
 }
 
 /* options */
@@ -321,12 +439,20 @@ int find_macro_param_src_idx(char *name, block_t *parent)
 func_t *add_func(char *name)
 {
     func_t *fn;
-    int index = insert_trie(FUNC_TRIES, name, funcs_idx);
-    if (index == funcs_idx) {
-        fn = &FUNCS[funcs_idx++];
+    if (hashmap_contains(FUNCS_MAP, name)) {
+        fn = hashmap_get(FUNCS_MAP, name);
+    } else {
+        fn = malloc(sizeof(func_t));
+
+        if (!fn) {
+            printf("Failed to allocate func_t\n");
+            return NULL;
+        }
+
+        hashmap_put(FUNCS_MAP, name, fn);
         strcpy(fn->return_def.var_name, name);
     }
-    fn = &FUNCS[index];
+
     fn->stack_size = 4; /* starting point of stack */
     return fn;
 }
@@ -361,10 +487,7 @@ constant_t *find_constant(char alias[])
 
 func_t *find_func(char func_name[])
 {
-    int index = find_trie(FUNC_TRIES, func_name);
-    if (index)
-        return &FUNCS[index];
-    return NULL;
+    return hashmap_get(FUNCS_MAP, func_name);
 }
 
 var_t *find_member(char token[], type_t *type)
@@ -600,8 +723,7 @@ void global_init()
     BLOCKS.head = NULL;
     BLOCKS.tail = NULL;
     MACROS = malloc(MAX_ALIASES * sizeof(macro_t));
-    FUNCS = malloc(MAX_FUNCS * sizeof(func_t));
-    FUNC_TRIES = malloc(MAX_FUNC_TRIES * sizeof(trie_t));
+    FUNCS_MAP = hashmap_create(MAX_FUNCS);
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
     GLOBAL_IR = malloc(MAX_GLOBAL_IR * sizeof(ph1_ir_t));
     PH1_IR = malloc(MAX_IR_INSTR * sizeof(ph1_ir_t));
@@ -619,7 +741,8 @@ void global_init()
     elf_section = malloc(MAX_SECTION);
 
     /* set starting point of global stack manually */
-    FUNCS[0].stack_size = 4;
+    func_t *global_func = add_func("");
+    global_func->stack_size = 4;
 }
 
 void global_release()
@@ -630,8 +753,7 @@ void global_release()
         BLOCKS.head = next;
     }
     free(MACROS);
-    free(FUNCS);
-    free(FUNC_TRIES);
+    hashmap_free(FUNCS_MAP);
     free(TYPES);
     free(GLOBAL_IR);
     free(PH1_IR);
