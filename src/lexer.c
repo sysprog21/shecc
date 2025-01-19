@@ -5,6 +5,8 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
+#include <stdbool.h>
+
 /* lexer tokens */
 typedef enum {
     T_start, /* FIXME: it was intended to start the state machine. */
