@@ -750,7 +750,7 @@ void read_lvalue(lvalue_t *lvalue,
                  var_t *var,
                  block_t *parent,
                  basic_block_t **bb,
-                 int eval,
+                 bool eval,
                  opcode_t op);
 
 /* Maintain a stack of expression values and operators, depending on next
@@ -805,7 +805,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
         lex_peek(T_identifier, token);
         var_t *var = find_var(token, parent);
-        read_lvalue(&lvalue, var, parent, bb, 0, OP_generic);
+        read_lvalue(&lvalue, var, parent, bb, false, OP_generic);
 
         if (!lvalue.is_reference) {
             ph1_ir = add_ph1_ir(OP_address_of);
@@ -825,7 +825,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         int open_bracket = lex_accept(T_open_bracket);
         lex_peek(T_identifier, token);
         var_t *var = find_var(token, parent);
-        read_lvalue(&lvalue, var, parent, bb, 1, OP_generic);
+        read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
         if (open_bracket)
             lex_expect(T_close_bracket);
 
@@ -962,7 +962,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         } else if (var) {
             /* evalue lvalue expression */
             lvalue_t lvalue;
-            read_lvalue(&lvalue, var, parent, bb, 1, prefix_op);
+            read_lvalue(&lvalue, var, parent, bb, true, prefix_op);
 
             /* is it an indirect call with function pointer? */
             if (lex_peek(T_open_bracket, NULL)) {
@@ -1234,13 +1234,13 @@ void read_lvalue(lvalue_t *lvalue,
                  var_t *var,
                  block_t *parent,
                  basic_block_t **bb,
-                 int eval,
+                 bool eval,
                  opcode_t prefix_op)
 {
     ph1_ir_t *ph1_ir;
     var_t *vd;
-    int is_address_got = 0;
-    int is_member = 0;
+    bool is_address_got = false;
+    bool is_member = false;
 
     /* already peeked and have the variable */
     lex_expect(T_identifier);
@@ -1260,6 +1260,23 @@ void read_lvalue(lvalue_t *lvalue,
     while (lex_peek(T_open_square, NULL) || lex_peek(T_arrow, NULL) ||
            lex_peek(T_dot, NULL)) {
         if (lex_accept(T_open_square)) {
+            /* if subscripted member's is not yet resolved, dereference to
+             * resolve base address.
+             * e.g., dereference of "->" in "data->raw[0]" would be performed
+             * here.
+             */
+            if (lvalue->is_reference && lvalue->is_ptr && is_member) {
+                ph1_ir = add_ph1_ir(OP_read);
+                ph1_ir->src0 = opstack_pop();
+                vd = require_var(parent);
+                strcpy(vd->var_name, gen_name());
+                ph1_ir->dest = vd;
+                opstack_push(vd);
+                ph1_ir->size = 4;
+                add_insn(parent, *bb, OP_read, ph1_ir->dest, ph1_ir->src0, NULL,
+                         ph1_ir->size, NULL);
+            }
+
             /* var must be either a pointer or an array of some type */
             if (var->is_ptr == 0 && var->array_size == 0)
                 error("Cannot apply square operator to non-pointer");
@@ -1303,8 +1320,8 @@ void read_lvalue(lvalue_t *lvalue,
                      ph1_ir->src1, 0, NULL);
 
             lex_expect(T_close_square);
-            is_address_got = 1;
-            is_member = 1;
+            is_address_got = true;
+            is_member = true;
             lvalue->is_reference = true;
         } else {
             char token[MAX_ID_LEN];
@@ -1313,7 +1330,7 @@ void read_lvalue(lvalue_t *lvalue,
                 /* resolve where the pointer points at from the calculated
                  * address in a structure.
                  */
-                if (is_member == 1) {
+                if (is_member) {
                     ph1_ir = add_ph1_ir(OP_read);
                     ph1_ir->src0 = opstack_pop();
                     vd = require_var(parent);
@@ -1327,7 +1344,7 @@ void read_lvalue(lvalue_t *lvalue,
             } else {
                 lex_expect(T_dot);
 
-                if (is_address_got == 0) {
+                if (!is_address_got) {
                     ph1_ir = add_ph1_ir(OP_address_of);
                     ph1_ir->src0 = opstack_pop();
                     vd = require_var(parent);
@@ -1337,7 +1354,7 @@ void read_lvalue(lvalue_t *lvalue,
                     add_insn(parent, *bb, OP_address_of, ph1_ir->dest,
                              ph1_ir->src0, NULL, 0, NULL);
 
-                    is_address_got = 1;
+                    is_address_got = true;
                 }
             }
 
@@ -1376,8 +1393,8 @@ void read_lvalue(lvalue_t *lvalue,
             add_insn(parent, *bb, OP_add, ph1_ir->dest, ph1_ir->src0,
                      ph1_ir->src1, 0, NULL);
 
-            is_address_got = 1;
-            is_member = 1;
+            is_address_got = true;
+            is_member = true;
         }
     }
 
@@ -1860,7 +1877,7 @@ bool read_body_assignment(char *token,
         int size = 0;
 
         /* has memory address that we want to set */
-        read_lvalue(&lvalue, var, parent, bb, 0, OP_generic);
+        read_lvalue(&lvalue, var, parent, bb, false, OP_generic);
         size = lvalue.size;
 
         if (lex_accept(T_increment)) {

@@ -433,6 +433,49 @@ int main() {
 }
 EOF
 
+# Mixed subscript and arrow / dot operators,
+# excerpted and modified from issue #165
+try_output 0 "DDDDDDMMMEEE1" << EOF
+#include <stdlib.h>
+#include <string.h>
+
+char a[100];
+
+typedef struct {
+    char *raw;
+} data_t;
+
+int main() {
+    strcpy(a, "DATA");
+    data_t *data = malloc(sizeof(data_t));
+    data->raw = a;
+    data_t data2;
+    data2.raw = a;
+    char *raw = data->raw;
+    char *raw2 = data2.raw;
+    /* mixed arrow / dot with subscript operators dereference */
+    printf("%c", a[0]);
+    printf("%c", raw[0]);
+    printf("%c", data->raw[0]);
+    printf("%c", a[0]);
+    printf("%c", raw2[0]);
+    printf("%c", data2.raw[0]);
+    /* mixed arrow / dot with subscript operators assignment */
+    data2.raw[0] = 'M';
+    data->raw[1] = 'E';
+    printf("%c", a[0]);
+    printf("%c", raw[0]);
+    printf("%c", data->raw[0]);
+    printf("%c", a[1]);
+    printf("%c", raw2[1]);
+    printf("%c", data2.raw[1]);
+    /* their addresses should be same */
+    printf("%d", &data2.raw[0] == &data->raw[0]);
+    free(data);
+    return 0;
+}
+EOF
+
 # global initialization
 try_ 20 << EOF
 int a = 5 * 2;
