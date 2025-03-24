@@ -250,9 +250,7 @@ void hashmap_free(hashmap_t *map)
             next = cur->next;
             free(cur->key);
             free(cur->val);
-            /* FIXME: Remove this if-clause will cause double free error */
-            if (cur != map->buckets[0])
-                free(cur);
+            free(cur);
             cur = next;
         }
     }
