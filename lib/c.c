@@ -629,12 +629,30 @@ void *malloc(int size)
 
 void *calloc(int n, int size)
 {
-    char *p = malloc(n * size);
+    int total = n * size, offset = 0;
+    char *p = malloc(total);
 
     if (!p)
         return NULL;
-    for (int i = 0; i < n * size; i++)
-        p[i] = 0;
+
+    /* TODO: Replace the byte buffer clearing algorithm with memset once
+     * implemented
+     */
+    while ((p + offset) & 3 && offset < total) {
+        p[offset++] = 0;
+    }
+
+    int *pi = p + offset;
+    int num_words = (total - offset) >> 2;
+
+    for (int i = 0; i < num_words; i++)
+        pi[i] = 0;
+
+    offset += num_words;
+
+    while (offset < total)
+        p[offset++] = 0;
+
     return p;
 }
 

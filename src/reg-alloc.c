@@ -49,7 +49,7 @@ void refresh(basic_block_t *bb, insn_t *insn)
 
 ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
 {
-    ph2_ir_t *n = calloc(1, sizeof(ph2_ir_t));
+    ph2_ir_t *n = arena_alloc(BB_ARENA, sizeof(ph2_ir_t));
     n->op = op;
 
     if (!bb->ph2_ir_list.head)
@@ -640,7 +640,7 @@ void reg_alloc()
 void dump_ph2_ir()
 {
     for (int i = 0; i < ph2_ir_idx; i++) {
-        ph2_ir_t *ph2_ir = &PH2_IR[i];
+        ph2_ir_t *ph2_ir = PH2_IR_FLATTEN[i];
 
         int rd = ph2_ir->dest + 48;
         int rs1 = ph2_ir->src0 + 48;
