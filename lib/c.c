@@ -629,12 +629,27 @@ void *malloc(int size)
 
 void *calloc(int n, int size)
 {
-    char *p = malloc(n * size);
+    int total = n * size;
+    char *p = malloc(total);
 
     if (!p)
         return NULL;
-    for (int i = 0; i < n * size; i++)
-        p[i] = 0;
+
+    /* TODO: Replace the byte buffer clearing algorithm with memset once
+     * implemented.
+     */
+
+    /* Currently malloc uses mmap(2) to request allocation, which guarantees
+     * memory to be page-aligned
+     */
+    int *pi = p, num_words = total >> 2, offset = num_words << 2;
+
+    for (int i = 0; i < num_words; i++)
+        pi[i] = 0;
+
+    while (offset < total)
+        p[offset++] = 0;
+
     return p;
 }
 

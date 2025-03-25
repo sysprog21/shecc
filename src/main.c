@@ -115,7 +115,6 @@ int main(int argc, char *argv[])
     elf_generate(out);
 
     /* release allocated objects */
-    ssa_release();
     global_release();
 
     exit(0);

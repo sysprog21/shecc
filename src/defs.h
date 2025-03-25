@@ -41,6 +41,10 @@
 #define MAX_OPERAND_STACK_SIZE 32
 #define MAX_ANALYSIS_STACK_SIZE 750
 
+/* Default capacities for common data structures */
+/* Default arena size is initialized with 256 KiB */
+#define DEFAULT_ARENA_SIZE 262144
+
 #define ELF_START 0x10000
 #define PTR_SIZE 4
 
@@ -61,6 +65,18 @@
 /* configure host data model when using 'memcpy'. */
 #define HOST_PTR_SIZE __SIZEOF_POINTER__
 #endif
+
+/* Common data structures */
+typedef struct arena_block {
+    char *memory;
+    int capacity;
+    int offset;
+    struct arena_block *next;
+} arena_block_t;
+
+typedef struct {
+    arena_block_t *head;
+} arena_t;
 
 /* builtin types */
 typedef enum {
