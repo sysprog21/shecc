@@ -31,23 +31,114 @@ bool is_fusible_insn(ph2_ir_t *ph2_ir)
     }
 }
 
-void insn_fusion(ph2_ir_t *ph2_ir)
+bool insn_fusion(ph2_ir_t *ph2_ir)
 {
     ph2_ir_t *next = ph2_ir->next;
     if (!next)
-        return;
+        return false;
 
     if (next->op == OP_assign) {
-        /* eliminate {ALU rn, rs1, rs2; mv rd, rn;} */
-        if (!is_fusible_insn(ph2_ir))
-            return;
-        if (ph2_ir->dest == next->src0) {
+        if (is_fusible_insn(ph2_ir) && ph2_ir->dest == next->src0) {
+            /* eliminates:
+             * {ALU rn, rs1, rs2; mv rd, rn;}
+             * reduces to:
+             * {ALU rd, rs1, rs2;}
+             */
             ph2_ir->dest = next->dest;
             ph2_ir->next = next->next;
-            return;
+            return true;
         }
     }
-    /* other insn fusions */
+
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0) {
+        if (next->op == OP_add &&
+            (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
+            /* eliminates:
+             * {li rn, 0; add rd, rs1, rn;} or
+             * {li rn, 0; add rd, rn, rs1;}
+             * reduces to:
+             * {mv rd, rs1;}, based on identity property of addition
+             */
+            /* Determine the non-zero source operand */
+            int non_zero_src =
+                (ph2_ir->dest == next->src0) ? next->src1 : next->src0;
+
+            /* Transform instruction sequence from addition with zero to move */
+            ph2_ir->op = OP_assign;
+            ph2_ir->src0 = non_zero_src;
+            ph2_ir->dest = next->dest;
+            ph2_ir->next = next->next;
+            return true;
+        }
+
+        if (next->op == OP_sub) {
+            if (ph2_ir->dest == next->src1) {
+                /* eliminates:
+                 * {li rn, 0; sub rd, rs1, rn;}
+                 * reduces to:
+                 * {mv rd, rs1;}
+                 */
+                ph2_ir->op = OP_assign;
+                ph2_ir->src0 = next->src0;
+                ph2_ir->dest = next->dest;
+                ph2_ir->next = next->next;
+                return true;
+            }
+
+            if (ph2_ir->dest == next->src0) {
+                /* eliminates:
+                 * {li rn, 0; sub rd, rn, rs1;}
+                 * reduces to:
+                 * {negate rd, rs1;}
+                 */
+                ph2_ir->op = OP_negate;
+                ph2_ir->src0 = next->src1;
+                ph2_ir->dest = next->dest;
+                ph2_ir->next = next->next;
+                return true;
+            }
+        }
+
+        if (next->op == OP_mul &&
+            (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
+            /* eliminates:
+             * {li rn, 0; mul rd, rs1, rn;} or
+             * {li rn, 0; mul rd, rn, rs1;}
+             * reduces to:
+             * {li rd, 0}, based on zero property of multiplication
+             */
+            ph2_ir->op = OP_load_constant;
+            ph2_ir->src0 = 0;
+            ph2_ir->dest = next->dest;
+            ph2_ir->next = next->next;
+            return true;
+        }
+    }
+
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1) {
+        if (next->op == OP_mul &&
+            (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
+            /* eliminates:
+             * {li rn, 1; mul rd, rs1, rn;} or
+             * {li rn, 1; mul rd, rn, rs1;}
+             * reduces to:
+             * {li rd, rs1}, based on identity property of multiplication
+             */
+            ph2_ir->op = OP_assign;
+            ph2_ir->src0 = ph2_ir->dest == next->src0 ? next->src1 : next->src0;
+            ph2_ir->dest = next->dest;
+            ph2_ir->next = next->next;
+            return true;
+        }
+    }
+
+    /* Other instruction fusion should be done here, and for any success fusion,
+     * it should return true. This meant to allow peephole optimization to do
+     * multiple passes over the IR list to maximize optimization as much as
+     * possbile.
+     */
+
+    return false;
 }
 
 /* FIXME: release detached basic blocks */
