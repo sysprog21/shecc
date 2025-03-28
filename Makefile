@@ -121,7 +121,7 @@ bootstrap: $(OUT)/$(STAGE2)
 	fi
 
 $(BUILD_SESSION):
-	$(PRINTF) "ARCH=$(ARCH)" > $@
+	$(VECHO) "ARCH=$(ARCH)" > $@
 
 .PHONY: clean
 clean:

@@ -3401,17 +3401,15 @@ void load_source_file(char *file)
         }
         if (!strncmp(buffer, "#include ", 9) && (buffer[9] == '"')) {
             char path[MAX_LINE_LEN];
-            int c = strlen(file) - 1;
+            int c = strlen(file) - 1, inclusion_path_len = strlen(buffer) - 11;
             while (c > 0 && file[c] != '/')
                 c--;
             if (c) {
                 /* prepend directory name */
-                strncpy(path, file, c + 1);
-                c++;
+                snprintf(path, c + 2, "%s", file);
             }
-            path[c] = 0;
-            buffer[strlen(buffer) - 2] = 0;
-            strcpy(path + c, buffer + 10);
+
+            snprintf(path + c + 1, inclusion_path_len, "%s", buffer + 10);
             load_source_file(path);
         } else {
             strcpy(SOURCE + source_idx, buffer);

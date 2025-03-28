@@ -713,3 +713,72 @@ void free(void *ptr)
     __freelist_head->prev = cur;
     __freelist_head = cur;
 }
+
+void snprintf(char *buffer, int n, char *str, ...)
+{
+    int *var_args = &str + 4;
+    int si = 0, bi = 0, pi = 0;
+
+    if (n == 0)
+        return;
+
+    while (str[si]) {
+        if (bi >= n - 1) {
+            break;
+        } else if (str[si] != '%') {
+            buffer[bi] = str[si];
+            bi++;
+            si++;
+        } else {
+            int w = 0, zp = 0, pp = 0;
+
+            si++;
+            if (str[si] == '#') {
+                pp = 1;
+                si++;
+            }
+            if (str[si] == '0') {
+                zp = 1;
+                si++;
+            }
+            if (str[si] >= '1' && str[si] <= '9') {
+                w = str[si] - '0';
+                si++;
+                if (str[si] >= '0' && str[si] <= '9') {
+                    w = w * 10;
+                    w += str[si] - '0';
+                    si++;
+                }
+            }
+            switch (str[si]) {
+            case 37: /* % */
+                buffer[bi++] = '%';
+                si++;
+                continue;
+            case 99: /* c */
+                buffer[bi++] = var_args[pi];
+                break;
+            case 115: /* s */
+                strcpy(buffer + bi, var_args[pi]);
+                bi += strlen(var_args[pi]);
+                break;
+            case 111: /* o */
+                bi += __format(buffer + bi, var_args[pi], w, zp, 8, pp);
+                break;
+            case 100: /* d */
+                bi += __format(buffer + bi, var_args[pi], w, zp, 10, 0);
+                break;
+            case 120: /* x */
+                bi += __format(buffer + bi, var_args[pi], w, zp, 16, pp);
+                break;
+            default:
+                abort();
+                break;
+            }
+            pi++;
+            si++;
+        }
+    }
+
+    buffer[n - 1] = 0;
+}
