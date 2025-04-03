@@ -408,7 +408,7 @@ bool read_preproc_directive()
             if (lex_accept(T_elipsis))
                 macro->is_variadic = true;
 
-            macro->start_source_idx = source_idx;
+            macro->start_source_idx = SOURCE->size;
             skip_macro_body();
         } else {
             /* Empty alias, may be dummy alias serves as include guard */
@@ -891,8 +891,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         macro_t *mac = find_macro(token);
 
         if (!strcmp(token, "__VA_ARGS__")) {
-            /* 'source_idx' has pointed at the character after __VA_ARGS__ */
-            int remainder, t = source_idx;
+            /* 'size' has pointed at the character after __VA_ARGS__ */
+            int remainder, t = SOURCE->size;
             macro_t *macro = parent->macro;
 
             if (!macro)
@@ -902,13 +902,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
             remainder = macro->num_params - macro->num_param_defs;
             for (int i = 0; i < remainder; i++) {
-                source_idx = macro->params[macro->num_params - remainder + i];
-                next_char = SOURCE[source_idx];
+                SOURCE->size = macro->params[macro->num_params - remainder + i];
+                next_char = SOURCE->elements[SOURCE->size];
                 next_token = lex_token();
                 read_expr(parent, bb);
             }
-            source_idx = t;
-            next_char = SOURCE[source_idx];
+            SOURCE->size = t;
+            next_char = SOURCE->elements[SOURCE->size];
             next_token = lex_token();
         } else if (mac) {
             if (parent->macro)
@@ -918,18 +918,18 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             mac->num_params = 0;
             lex_expect(T_identifier);
 
-            /* 'source_idx' has pointed at the first parameter */
+            /* 'size' has pointed at the first parameter */
             while (!lex_peek(T_close_bracket, NULL)) {
-                mac->params[mac->num_params++] = source_idx;
+                mac->params[mac->num_params++] = SOURCE->size;
                 do {
                     next_token = lex_token();
                 } while (next_token != T_comma &&
                          next_token != T_close_bracket);
             }
-            /* move 'source_idx' to the macro body */
-            macro_return_idx = source_idx;
-            source_idx = mac->start_source_idx;
-            next_char = SOURCE[source_idx];
+            /* move 'size' to the macro body */
+            macro_return_idx = SOURCE->size;
+            SOURCE->size = mac->start_source_idx;
+            next_char = SOURCE->elements[SOURCE->size];
             lex_expect(T_close_bracket);
 
             skip_newline = 0;
@@ -941,13 +941,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             macro_return_idx = 0;
         } else if (macro_param_idx) {
             /* "expand" the argument from where it comes from */
-            int t = source_idx;
-            source_idx = macro_param_idx;
-            next_char = SOURCE[source_idx];
+            int t = SOURCE->size;
+            SOURCE->size = macro_param_idx;
+            next_char = SOURCE->elements[SOURCE->size];
             next_token = lex_token();
             read_expr(parent, bb);
-            source_idx = t;
-            next_char = SOURCE[source_idx];
+            SOURCE->size = t;
+            next_char = SOURCE->elements[SOURCE->size];
             next_token = lex_token();
         } else if (con) {
             ph1_ir = add_ph1_ir(OP_load_constant);
@@ -3075,17 +3075,17 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         mac->num_params = 0;
         lex_expect(T_identifier);
 
-        /* 'source_idx' has pointed at the first parameter */
+        /* 'size' has pointed at the first parameter */
         while (!lex_peek(T_close_bracket, NULL)) {
-            mac->params[mac->num_params++] = source_idx;
+            mac->params[mac->num_params++] = SOURCE->size;
             do {
                 next_token = lex_token();
             } while (next_token != T_comma && next_token != T_close_bracket);
         }
-        /* move 'source_idx' to the macro body */
-        macro_return_idx = source_idx;
-        source_idx = mac->start_source_idx;
-        next_char = SOURCE[source_idx];
+        /* move 'size' to the macro body */
+        macro_return_idx = SOURCE->size;
+        SOURCE->size = mac->start_source_idx;
+        next_char = SOURCE->elements[SOURCE->size];
         lex_expect(T_close_bracket);
 
         skip_newline = 0;
@@ -3377,8 +3377,8 @@ void parse_internal()
     GLOBAL_FUNC.fn->bbs = calloc(1, sizeof(basic_block_t));
 
     /* lexer initialization */
-    source_idx = 0;
-    next_char = SOURCE[0];
+    SOURCE->size = 0;
+    next_char = SOURCE->elements[0];
     lex_expect(T_start);
 
     do {
@@ -3415,8 +3415,8 @@ void load_source_file(char *file)
             snprintf(path + c + 1, inclusion_path_len, "%s", buffer + 10);
             load_source_file(path);
         } else {
-            strcpy(SOURCE + source_idx, buffer);
-            source_idx += strlen(buffer);
+            strcpy(SOURCE->elements + SOURCE->size, buffer);
+            SOURCE->size += strlen(buffer);
         }
     }
     fclose(f);

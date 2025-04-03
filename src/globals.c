@@ -56,8 +56,7 @@ int aliases_idx = 0;
 constant_t *CONSTANTS;
 int constants_idx = 0;
 
-char *SOURCE;
-int source_idx = 0;
+source_t *SOURCE;
 
 /* ELF sections */
 
@@ -837,6 +836,62 @@ void add_insn(block_t *block,
     bb->insn_list.tail = n;
 }
 
+source_t *create_source(int init_capacity)
+{
+    source_t *array = malloc(sizeof(source_t));
+    if (!array)
+        return NULL;
+
+    array->size = 0;
+    array->capacity = init_capacity;
+    array->elements = malloc(array->capacity * sizeof(char));
+    if (!array->elements) {
+        free(array);
+        return NULL;
+    }
+
+    return array;
+}
+
+bool source_expand(source_t *src)
+{
+    if (src->size < src->capacity)
+        return true;
+
+    src->capacity <<= 1;
+    char *new_arr = malloc(src->capacity * sizeof(char));
+
+    if (!new_arr)
+        return false;
+
+    memcpy(new_arr, src->elements, src->size * sizeof(char));
+
+    free(src->elements);
+    src->elements = new_arr;
+
+    return true;
+}
+
+bool source_push(source_t *src, char value)
+{
+    if (!source_expand(src))
+        return false;
+
+    src->elements[src->size] = value;
+    src->size++;
+
+    return true;
+}
+
+void source_release(source_t *src)
+{
+    if (!src)
+        return;
+
+    free(src->elements);
+    free(src);
+}
+
 /* This routine is required because the global variable initializations are
  * not supported now.
  */
@@ -855,7 +910,7 @@ void global_init()
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     LABEL_LUT = malloc(MAX_LABEL * sizeof(label_lut_t));
-    SOURCE = malloc(MAX_SOURCE);
+    SOURCE = create_source(MAX_SOURCE);
     ALIASES = malloc(MAX_ALIASES * sizeof(alias_t));
     CONSTANTS = malloc(MAX_CONSTANTS * sizeof(constant_t));
 
@@ -887,7 +942,7 @@ void global_release()
     arena_free(BB_ARENA);
     free(PH2_IR_FLATTEN);
     free(LABEL_LUT);
-    free(SOURCE);
+    source_release(SOURCE);
     free(ALIASES);
     free(CONSTANTS);
 
@@ -907,18 +962,20 @@ void error(char *msg)
     int offset, start_idx, i = 0;
     char diagnostic[512 /* MAX_LINE_LEN * 2 */];
 
-    for (offset = source_idx; offset >= 0 && SOURCE[offset] != '\n'; offset--)
+    for (offset = SOURCE->size; offset >= 0 && SOURCE->elements[offset] != '\n';
+         offset--)
         ;
 
     start_idx = offset + 1;
 
-    for (offset = 0; offset < MAX_SOURCE && SOURCE[start_idx + offset] != '\n';
+    for (offset = 0;
+         offset < MAX_SOURCE && SOURCE->elements[start_idx + offset] != '\n';
          offset++) {
-        diagnostic[i++] = SOURCE[start_idx + offset];
+        diagnostic[i++] = SOURCE->elements[start_idx + offset];
     }
     diagnostic[i++] = '\n';
 
-    for (offset = start_idx; offset < source_idx; offset++) {
+    for (offset = start_idx; offset < SOURCE->size; offset++) {
         diagnostic[i++] = ' ';
     }
 
@@ -927,7 +984,8 @@ void error(char *msg)
     /* TODO: figure out the corresponding C source file path and report line
      * number.
      */
-    printf("Error %s at source location %d\n%s\n", msg, source_idx, diagnostic);
+    printf("Error %s at source location %d\n%s\n", msg, SOURCE->size,
+           diagnostic);
     abort();
 }
 

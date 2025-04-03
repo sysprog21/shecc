@@ -95,7 +95,7 @@ int main(int argc, char *argv[])
      */
     write_str("void __c(char *src) {\n");
     write_str("    for (int i = 0; src[i]; i++)\n");
-    write_str("        SOURCE[source_idx++] = src[i];\n");
+    write_str("        source_push(SOURCE, src[i]);\n");
     write_str("}\n");
 
     write_str("void libc_generate() {\n");
