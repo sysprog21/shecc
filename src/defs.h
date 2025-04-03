@@ -270,6 +270,14 @@ typedef struct {
 
 typedef struct basic_block basic_block_t;
 
+/* source dynamic array definition*/
+
+typedef struct {
+    int size;
+    int capacity;
+    char *elements;
+} source_t;
+
 /* phase-2 IR definition */
 struct ph2_ir {
     opcode_t op;
