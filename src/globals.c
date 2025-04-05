@@ -32,7 +32,12 @@ int global_ir_idx = 0;
 ph1_ir_t *PH1_IR;
 int ph1_ir_idx = 0;
 
-ph2_ir_t *PH2_IR;
+arena_t *INSN_ARENA;
+
+/* BB_ARENA is responsible for basic_block_t / ph2_ir_t allocation */
+arena_t *BB_ARENA;
+
+ph2_ir_t **PH2_IR_FLATTEN;
 int ph2_ir_idx = 0;
 
 label_lut_t *LABEL_LUT;
@@ -68,6 +73,121 @@ int elf_data_start;
 char *elf_symtab;
 char *elf_strtab;
 char *elf_section;
+
+/**
+ * arena_block_create() - creates a new arena block with given capacity.
+ * The created arena block is guaranteed to be zero-initialized.
+ * @capacity: The capacity of the arena block. Must be positive.
+ *
+ * Return: The pointer of created arena block. NULL if failed to allocate.
+ */
+arena_block_t *arena_block_create(int capacity)
+{
+    arena_block_t *block = malloc(sizeof(arena_block_t));
+
+    if (!block) {
+        printf("Failed to allocate memory for arena block\n");
+        exit(1);
+    }
+
+    block->memory = calloc(capacity, sizeof(char));
+
+    if (!block->memory) {
+        printf("Failed to allocate memory for arena block\n");
+        free(block);
+        exit(1);
+    }
+
+    block->capacity = capacity;
+    block->offset = 0;
+    block->next = NULL;
+    return block;
+}
+
+/**
+ * arena_init() - initializes the given arena with initial capacity.
+ * @initial_capacity: The initial capacity of the arena. Must be positive.
+ *
+ * Return: The pointer of initialized arena.
+ */
+arena_t *arena_init(int initial_capacity)
+{
+    arena_t *arena = malloc(sizeof(arena_t));
+    arena->head = arena_block_create(initial_capacity);
+    return arena;
+}
+
+/**
+ * arena_alloc() - allocates memory from the given arena with given size.
+ * The arena may create a new arena block if no space is available.
+ * @arena: The arena to allocate memory from. Must not be NULL.
+ * @size: The size of memory to allocate. Must be positive.
+ *
+ * Return: The pointer of allocated memory. NULL if new arena block is failed to
+ * allocate.
+ */
+void *arena_alloc(arena_t *arena, int size)
+{
+    char *ptr;
+    arena_block_t *block = arena->head;
+
+    while (block) {
+        if (block->offset + size <= block->capacity) {
+            ptr = block->memory + block->offset;
+            block->offset += size;
+            return ptr;
+        }
+        if (!block->next)
+            break;
+        block = block->next;
+    }
+
+    /* If no space is available, create a new block
+     * Allocate at least 256 KiB or the requested size
+     */
+    int new_capacity = size > DEFAULT_ARENA_SIZE ? size : DEFAULT_ARENA_SIZE;
+    arena_block_t *new_block = arena_block_create(new_capacity);
+
+    if (!new_block)
+        return NULL;
+
+    block->next = new_block;
+    ptr = new_block->memory + new_block->offset;
+    new_block->offset += size;
+    return ptr;
+}
+
+/**
+ * arena_reset() - resets the given arena by resetting all blocks' offset to 0.
+ * @arena: The arena to reset. Must not be NULL.
+ */
+void arena_reset(arena_t *arena)
+{
+    arena_block_t *block = arena->head;
+
+    while (block) {
+        block->offset = 0;
+        block = block->next;
+    }
+}
+
+/**
+ * arena_free() - frees the given arena and all its blocks.
+ * @arena: The arena to free. Must not be NULL.
+ */
+void arena_free(arena_t *arena)
+{
+    arena_block_t *block = arena->head, *next;
+
+    while (block) {
+        next = block->next;
+        free(block->memory);
+        free(block);
+        block = next;
+    }
+
+    free(arena);
+}
 
 /**
  * hashmap_hash_index() - hashses a string with FNV-1a hash function
@@ -312,11 +432,17 @@ ph1_ir_t *add_ph1_ir(opcode_t op)
     return ph1_ir;
 }
 
+ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
+{
+    PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
+    return ph2_ir;
+}
+
 ph2_ir_t *add_ph2_ir(opcode_t op)
 {
-    ph2_ir_t *ph2_ir = &PH2_IR[ph2_ir_idx++];
+    ph2_ir_t *ph2_ir = arena_alloc(BB_ARENA, sizeof(ph2_ir_t));
     ph2_ir->op = op;
-    return ph2_ir;
+    return add_existed_ph2_ir(ph2_ir);
 }
 
 void set_var_liveout(var_t *var, int end)
@@ -579,7 +705,7 @@ fn_t *add_fn()
 /* Create a basic block and set the scope of variables to 'parent' block */
 basic_block_t *bb_create(block_t *parent)
 {
-    basic_block_t *bb = calloc(1, sizeof(basic_block_t));
+    basic_block_t *bb = arena_alloc(BB_ARENA, sizeof(basic_block_t));
 
     for (int i = 0; i < MAX_BB_PRED; i++) {
         bb->prev[i].bb = NULL;
@@ -691,7 +817,7 @@ void add_insn(block_t *block,
 
     bb->scope = block;
 
-    insn_t *n = calloc(1, sizeof(insn_t));
+    insn_t *n = arena_alloc(INSN_ARENA, sizeof(insn_t));
     n->opcode = op;
     n->rd = rd;
     n->rs1 = rs1;
@@ -725,7 +851,9 @@ void global_init()
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
     GLOBAL_IR = malloc(MAX_GLOBAL_IR * sizeof(ph1_ir_t));
     PH1_IR = malloc(MAX_IR_INSTR * sizeof(ph1_ir_t));
-    PH2_IR = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t));
+    INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
+    BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
+    PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     LABEL_LUT = malloc(MAX_LABEL * sizeof(label_lut_t));
     SOURCE = malloc(MAX_SOURCE);
     ALIASES = malloc(MAX_ALIASES * sizeof(alias_t));
@@ -755,7 +883,9 @@ void global_release()
     free(TYPES);
     free(GLOBAL_IR);
     free(PH1_IR);
-    free(PH2_IR);
+    arena_free(INSN_ARENA);
+    arena_free(BB_ARENA);
+    free(PH2_IR_FLATTEN);
     free(LABEL_LUT);
     free(SOURCE);
     free(ALIASES);

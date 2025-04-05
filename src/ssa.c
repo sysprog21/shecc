@@ -588,7 +588,7 @@ bool insert_phi_insn(basic_block_t *bb, var_t *var)
         return false;
 
     insn_t *head = bb->insn_list.head;
-    insn_t *n = calloc(1, sizeof(insn_t));
+    insn_t *n = arena_alloc(INSN_ARENA, sizeof(insn_t));
     n->opcode = OP_phi;
     n->rd = var;
     n->rs1 = var;
@@ -810,7 +810,7 @@ void solve_phi_params()
 
 void append_unwound_phi_insn(basic_block_t *bb, var_t *dest, var_t *rs)
 {
-    insn_t *n = calloc(1, sizeof(insn_t));
+    insn_t *n = arena_alloc(INSN_ARENA, sizeof(insn_t));
     n->opcode = OP_unwound_phi;
     n->rd = dest;
     n->rs1 = rs;
@@ -1769,53 +1769,4 @@ void liveness_analysis()
                 changed |= recompute_live_out(bb);
         } while (changed);
     }
-}
-
-void bb_release(fn_t *fn, basic_block_t *bb)
-{
-    UNUSED(fn);
-
-    insn_t *insn = bb->insn_list.head;
-    insn_t *next_insn;
-    while (insn) {
-        next_insn = insn->next;
-        free(insn);
-        insn = next_insn;
-    }
-
-    /* disconnect all predecessors */
-    for (int i = 0; i < MAX_BB_PRED; i++) {
-        if (!bb->prev[i].bb)
-            continue;
-        switch (bb->prev[i].type) {
-        case NEXT:
-            bb->prev[i].bb->next = NULL;
-            break;
-        case THEN:
-            bb->prev[i].bb->then_ = NULL;
-            break;
-        case ELSE:
-            bb->prev[i].bb->else_ = NULL;
-            break;
-        default:
-            abort();
-        }
-
-        bb->prev[i].bb = NULL;
-    }
-    free(bb);
-}
-
-void ssa_release()
-{
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->bbs;
-
-        fn->visited++;
-        args->postorder_cb = bb_release;
-        bb_forward_traversal(args);
-    }
-    free(args);
 }

@@ -128,8 +128,7 @@ void cfg_flatten()
 
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {
-                flatten_ir = add_ph2_ir(OP_generic);
-                memcpy(flatten_ir, insn, sizeof(ph2_ir_t));
+                flatten_ir = add_existed_ph2_ir(insn);
 
                 if (insn->op == OP_return) {
                     /* restore sp */
@@ -446,7 +445,7 @@ void code_generate()
     emit(__jal(__zero, MAIN_BB->elf_offset - elf_code_idx));
 
     for (int i = 0; i < ph2_ir_idx; i++) {
-        ph2_ir = &PH2_IR[i];
+        ph2_ir = PH2_IR_FLATTEN[i];
         emit_ph2_ir(ph2_ir);
     }
 }
