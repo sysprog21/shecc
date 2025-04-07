@@ -1674,4 +1674,33 @@ int main() {
 }
 EOF
 
+# test the return value when calling fputc().
+#
+# Since the FILE data type is defined as an int in
+# the built-in C library, and most of the functions
+# such as fputc(), fgetc(), fclose() and fgets() directly
+# treat the "stream" parameter (of type FILE *) as a file
+# descriptor for performing input/output operations, the
+# following test cases define "stdout" as 1, which is the
+# file descriptor for the standard output.
+try_output 0 "awritten = a" << EOF
+#define stdout 1
+int main()
+{
+	int c = fputc('a', stdout);
+	printf("written = %c", c);
+	return 0;
+}
+EOF
+
+try_output 1 "" << EOF
+#define stdout 1
+int main()
+{
+	__syscall(__syscall_close, 1);
+	int c = fputc('a', stdout);
+	return c == -1;
+}
+EOF
+
 echo OK
