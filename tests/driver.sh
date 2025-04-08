@@ -1611,4 +1611,67 @@ int main()
 }
 EOF
 
+# printf family, including truncation and zero size input
+try_output 11 "Hello World" << EOF
+int main() {
+    int written = printf("Hello World");
+    return written;
+}
+EOF
+
+# tests printf returns EBADF (errno 9) when stdout is closed
+try_output 1 "" << EOF
+int main()
+{
+    __syscall(__syscall_close, 1);
+    int written = printf("Hello\n");
+    return written == -9;
+}
+EOF
+
+try_output 11 "Hello World" << EOF
+int main() {
+    char buffer[50];
+    int written = sprintf(buffer, "Hello World");
+    printf("%s", buffer);
+    return written;
+}
+EOF
+
+try_output 16 "Hello World 1123" << EOF
+int main() {
+    char buffer[50];
+    int written = sprintf(buffer, "Hello %s %d", "World", 1123);
+    printf("%s", buffer);
+    return written;
+}
+EOF
+
+try_output 16 "Hello World 1123" << EOF
+int main() {
+    char buffer[50];
+    int written = snprintf(buffer, 50, "Hello %s %d", "World", 1123);
+    printf("%s", buffer);
+    return written;
+}
+EOF
+
+try_output 0 "" << EOF
+int main() {
+    char buffer[20];
+    int written = snprintf(buffer, 0, "Number: %d", -37);
+    printf("%s", buffer);
+    return written;
+}
+EOF
+
+try_output 9 "Number: -" << EOF
+int main() {
+    char buffer[10];
+    int written = snprintf(buffer, 10, "Number: %d", -37);
+    printf("%s", buffer);
+    return written;
+}
+EOF
+
 echo OK

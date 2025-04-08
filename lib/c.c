@@ -13,6 +13,9 @@
 #define true 1
 #define false 0
 
+#define INT_MAX 0x7fffffff
+#define INT_MIN 0x80000000
+
 #if defined(__arm__)
 #define __SIZEOF_POINTER__ 4
 #define __syscall_exit 1
@@ -288,60 +291,65 @@ int __format(char *buffer,
     return bi;
 }
 
-void printf(char *str, ...)
+int __format_to_buf(char *buffer, char *format, int *var_args, int size)
 {
-    int *var_args = &str + 4;
-    char buffer[200];
     int si = 0, bi = 0, pi = 0;
 
-    while (str[si]) {
-        if (str[si] != '%') {
-            buffer[bi] = str[si];
+    if (size == 0)
+        return 0;
+
+    while (format[si] && bi < size - 1) {
+        if (format[si] != '%') {
+            buffer[bi] = format[si];
             bi++;
             si++;
         } else {
-            int w = 0, zp = 0, pp = 0;
+            int w = 0, zp = 0, pp = 0, v = var_args[pi], l;
 
             si++;
-            if (str[si] == '#') {
+            if (format[si] == '#') {
                 pp = 1;
                 si++;
             }
-            if (str[si] == '0') {
+            if (format[si] == '0') {
                 zp = 1;
                 si++;
             }
-            if (str[si] >= '1' && str[si] <= '9') {
-                w = str[si] - '0';
+            if (format[si] >= '1' && format[si] <= '9') {
+                w = format[si] - '0';
                 si++;
-                while (str[si] >= '0' && str[si] <= '9') {
+                while (format[si] >= '0' && format[si] <= '9') {
                     w *= 10;
-                    w += str[si] - '0';
+                    w += format[si] - '0';
                     si++;
                 }
             }
-            if (str[si] == 's') {
+            switch (format[si]) {
+            case 's':
                 /* append param pi as string */
-                int l = strlen(var_args[pi]);
-                strcpy(buffer + bi, var_args[pi]);
+                l = strlen(v);
+                l = l < size - bi ? l : size - bi;
+                strncpy(buffer + bi, v, l);
                 bi += l;
-            } else if (str[si] == 'c') {
+                break;
+            case 'c':
                 /* append param pi as char */
-                buffer[bi] = var_args[pi];
+                buffer[bi] = v;
                 bi += 1;
-            } else if (str[si] == 'o') {
+                break;
+            case 'o':
                 /* append param as octal */
-                int v = var_args[pi];
                 bi += __format(buffer + bi, v, w, zp, 8, pp);
-            } else if (str[si] == 'd') {
+                break;
+            case 'd':
                 /* append param as decimal */
-                int v = var_args[pi];
                 bi += __format(buffer + bi, v, w, zp, 10, 0);
-            } else if (str[si] == 'x') {
+                break;
+            case 'x':
                 /* append param as hex */
-                int v = var_args[pi];
                 bi += __format(buffer + bi, v, w, zp, 16, pp);
-            } else if (str[si] == '%') {
+                break;
+            case '%':
                 /* append literal '%' character */
                 buffer[bi] = '%';
                 bi++;
@@ -352,71 +360,27 @@ void printf(char *str, ...)
             si++;
         }
     }
-    buffer[bi] = 0;
-    __syscall(__syscall_write, 1, buffer, bi);
+
+    int len = size - 1 > bi ? bi : size - 1;
+    buffer[len] = 0;
+    return len;
 }
 
-void sprintf(char *buffer, char *str, ...)
+int printf(char *str, ...)
 {
-    int *var_args = &str + 4;
-    int si = 0, bi = 0, pi = 0;
+    char buffer[200];
+    int len = __format_to_buf(buffer, str, &str + 4, INT_MAX);
+    return __syscall(__syscall_write, 1, buffer, len);
+}
 
-    while (str[si]) {
-        if (str[si] != '%') {
-            buffer[bi] = str[si];
-            bi++;
-            si++;
-        } else {
-            int w = 0, zp = 0, pp = 0;
+int sprintf(char *buffer, char *str, ...)
+{
+    return __format_to_buf(buffer, str, &str + 4, INT_MAX);
+}
 
-            si++;
-            if (str[si] == '#') {
-                pp = 1;
-                si++;
-            }
-            if (str[si] == '0') {
-                zp = 1;
-                si++;
-            }
-            if (str[si] >= '1' && str[si] <= '9') {
-                w = str[si] - '0';
-                si++;
-                if (str[si] >= '0' && str[si] <= '9') {
-                    w *= 10;
-                    w += str[si] - '0';
-                    si++;
-                }
-            }
-            switch (str[si]) {
-            case 37: /* % */
-                buffer[bi++] = '%';
-                si++;
-                continue;
-            case 99: /* c */
-                buffer[bi++] = var_args[pi];
-                break;
-            case 115: /* s */
-                strcpy(buffer + bi, var_args[pi]);
-                bi += strlen(var_args[pi]);
-                break;
-            case 111: /* o */
-                bi += __format(buffer + bi, var_args[pi], w, zp, 8, pp);
-                break;
-            case 100: /* d */
-                bi += __format(buffer + bi, var_args[pi], w, zp, 10, 0);
-                break;
-            case 120: /* x */
-                bi += __format(buffer + bi, var_args[pi], w, zp, 16, pp);
-                break;
-            default:
-                abort();
-                break;
-            }
-            pi++;
-            si++;
-        }
-    }
-    buffer[bi] = 0;
+int snprintf(char *buffer, int n, char *str, ...)
+{
+    return __format_to_buf(buffer, str, &str + 4, n);
 }
 
 int __free_all();

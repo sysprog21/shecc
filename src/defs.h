@@ -17,17 +17,17 @@
 #define MAX_VAR_LEN 32
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
-#define MAX_LOCALS 1500
+#define MAX_LOCALS 1600
 #define MAX_FIELDS 64
 #define MAX_FUNCS 512
 #define MAX_TYPES 64
-#define MAX_IR_INSTR 50000
+#define MAX_IR_INSTR 60000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_BB_RDOM_SUCC 256
 #define MAX_GLOBAL_IR 256
 #define MAX_LABEL 4096
-#define MAX_SOURCE 327680
+#define MAX_SOURCE 524288
 #define MAX_CODE 262144
 #define MAX_DATA 262144
 #define MAX_SYMTAB 65536
@@ -39,7 +39,7 @@
 #define MAX_CASES 128
 #define MAX_NESTING 128
 #define MAX_OPERAND_STACK_SIZE 32
-#define MAX_ANALYSIS_STACK_SIZE 750
+#define MAX_ANALYSIS_STACK_SIZE 800
 
 /* Default capacities for common data structures */
 /* Default arena size is initialized with 256 KiB */
