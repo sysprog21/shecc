@@ -4,10 +4,10 @@ on: [push, pull_request]
 
 jobs:
   host-x86:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        compiler: [gcc-12, clang]
+        compiler: [gcc, clang]
         architecture: [arm, riscv]
     steps:
       - name: checkout code
@@ -25,7 +25,7 @@ jobs:
           make check || exit 1
 
   host-arm:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - name: checkout code
       uses: actions/checkout@v4
@@ -37,6 +37,7 @@ jobs:
         arch: none
         distro: none
         base_image: "--platform=linux/arm/v7 arm32v7/ubuntu:22.04"
+        githubToken: ${{ github.token }}
         install: |
           apt-get update -q -y
           apt-get install -q -y build-essential
@@ -45,12 +46,12 @@ jobs:
           make check || exit 1
 
   coding-style:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: coding convention
       run: |
-            sudo apt-get install -q -y clang-format-12
+            sudo apt-get install -q -y clang-format-18
             .ci/check-newline.sh
             .ci/check-format.sh
       shell: bash
