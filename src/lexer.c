@@ -158,13 +158,14 @@ void skip_whitespace()
 {
     while (true) {
         if (is_linebreak(next_char)) {
-            source_idx += 2;
-            next_char = SOURCE[source_idx];
+            SOURCE->size += 2;
+            next_char = SOURCE->elements[SOURCE->size];
             continue;
         }
         if (is_whitespace(next_char) ||
             (skip_newline && is_newline(next_char))) {
-            next_char = SOURCE[++source_idx];
+            SOURCE->size++;
+            next_char = SOURCE->elements[SOURCE->size];
             continue;
         }
         break;
@@ -173,7 +174,8 @@ void skip_whitespace()
 
 char read_char(bool is_skip_space)
 {
-    next_char = SOURCE[++source_idx];
+    SOURCE->size++;
+    next_char = SOURCE->elements[SOURCE->size];
     if (is_skip_space)
         skip_whitespace();
     return next_char;
@@ -181,7 +183,7 @@ char read_char(bool is_skip_space)
 
 char peek_char(int offset)
 {
-    return SOURCE[source_idx + offset];
+    return SOURCE->elements[SOURCE->size + offset];
 }
 
 /* Lex next token and returns its token type. Parameter 'aliasing' is used for
@@ -601,8 +603,8 @@ token_t lex_token_internal(bool aliasing)
      */
     if (next_char == '\n') {
         if (macro_return_idx) {
-            source_idx = macro_return_idx;
-            next_char = SOURCE[source_idx];
+            SOURCE->size = macro_return_idx;
+            next_char = SOURCE->elements[SOURCE->size];
         } else
             next_char = read_char(true);
         return lex_token_internal(aliasing);
