@@ -460,10 +460,9 @@ char *fgets(char *str, int n, FILE *stream)
 
 int fputc(int c, FILE *stream)
 {
-    char buf[1];
-    buf[0] = c;
-    __syscall(__syscall_write, stream, buf, 1);
-    return 0;
+    if (__syscall(__syscall_write, stream, &c, 1) < 0)
+        return -1;
+    return c;
 }
 
 /* Non-portable: Assume page size is 4KiB */
