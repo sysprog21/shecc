@@ -270,6 +270,17 @@ typedef struct {
 
 typedef struct basic_block basic_block_t;
 
+/* Definition of a dynamic array structure for sources in src/globals.c
+ * size:     Current number of elements in the array
+ * capacity: Number of elements that can be stored without resizing
+ * elements: Pointer to the array of characters
+ */
+typedef struct {
+    int size;
+    int capacity;
+    char *elements;
+} source_t;
+
 /* phase-2 IR definition */
 struct ph2_ir {
     opcode_t op;
