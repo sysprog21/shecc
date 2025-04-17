@@ -5,6 +5,11 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
+#include <stdbool.h>
+
+#include "defs.h"
+#include "globals.c"
+
 bool is_fusible_insn(ph2_ir_t *ph2_ir)
 {
     switch (ph2_ir->op) {
