@@ -5,6 +5,12 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
+#include <stdio.h>
+#include <string.h>
+
+#include "defs.h"
+#include "globals.c"
+
 /* cfront does not accept structure as an argument, pass pointer */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
