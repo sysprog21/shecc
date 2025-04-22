@@ -231,26 +231,24 @@ int round_up_pow2(int v)
  *
  * Return: The pointer of created hashmap.
  */
-hashmap_t *hashmap_create(int size)
+hashmap_t *hashmap_create(int cap)
 {
     hashmap_t *map = malloc(sizeof(hashmap_t));
 
     if (!map) {
-        printf("Failed to allocate hashmap_t with size %d\n", size);
+        printf("Failed to allocate hashmap_t with capacity %d\n", cap);
         return NULL;
     }
 
-    map->size = round_up_pow2(size);
-    map->buckets = malloc(map->size * sizeof(hashmap_node_t *));
+    map->size = 0;
+    map->cap = round_up_pow2(cap);
+    map->buckets = calloc(map->cap, sizeof(hashmap_node_t *));
 
     if (!map->buckets) {
         printf("Failed to allocate buckets in hashmap_t\n");
         free(map);
         return NULL;
     }
-
-    for (int i = 0; i < map->size; i++)
-        map->buckets[i] = 0;
 
     return map;
 }
@@ -290,6 +288,47 @@ hashmap_node_t *hashmap_node_new(char *key, void *val)
     return node;
 }
 
+void hashmap_rehash(hashmap_t *map)
+{
+    if (!map)
+        return;
+
+    int old_cap = map->cap;
+    hashmap_node_t **old_buckets = map->buckets;
+
+    map->cap <<= 1;
+    map->buckets = calloc(map->cap, sizeof(hashmap_node_t *));
+
+    if (!map->buckets) {
+        printf("Failed to allocate new buckets in hashmap_t\n");
+        map->buckets = old_buckets;
+        map->cap = old_cap;
+        return;
+    }
+
+    for (int i = 0; i < old_cap; i++) {
+        hashmap_node_t *cur = old_buckets[i], *next, *target_cur;
+
+        while (cur) {
+            next = cur->next;
+            cur->next = NULL;
+            int index = hashmap_hash_index(map->cap, cur->key);
+            target_cur = map->buckets[index];
+
+            if (!target_cur) {
+                map->buckets[index] = cur;
+            } else {
+                cur->next = target_cur;
+                map->buckets[index] = cur;
+            }
+
+            cur = next;
+        }
+    }
+
+    free(old_buckets);
+}
+
 /**
  * hashmap_put() - puts a key-value pair into given hashmap.
  * If key already contains a value, then replace it with new
@@ -304,18 +343,44 @@ void hashmap_put(hashmap_t *map, char *key, void *val)
     if (!map)
         return;
 
-    int index = hashmap_hash_index(map->size, key);
-    hashmap_node_t *cur = map->buckets[index];
+    int index = hashmap_hash_index(map->cap, key);
+    hashmap_node_t *cur = map->buckets[index],
+                   *new_node = hashmap_node_new(key, val);
 
     if (!cur) {
-        map->buckets[index] = hashmap_node_new(key, val);
+        map->buckets[index] = new_node;
     } else {
         while (cur->next)
             cur = cur->next;
-        cur->next = hashmap_node_new(key, val);
+        cur->next = new_node;
     }
 
-    /* TODO: Rehash if size exceeds size * load factor */
+    map->size++;
+    /* Check if size of map exceeds load factor 75% (or 3/4 of capacity) */
+    if ((map->cap >> 2) + (map->cap >> 1) <= map->size)
+        hashmap_rehash(map);
+}
+
+/**
+ * hashmap_get_node() - gets key-value pair node from hashmap from given key.
+ * @map: The hashmap to be looked up. Must no be NULL.
+ * @key: The key string. May be NULL.
+ *
+ * Return: The look up result, if the key-value pair entry
+ * exists, then returns address of itself, NULL otherwise.
+ */
+hashmap_node_t *hashmap_get_node(hashmap_t *map, char *key)
+{
+    if (!map)
+        return NULL;
+
+    int index = hashmap_hash_index(map->cap, key);
+
+    for (hashmap_node_t *cur = map->buckets[index]; cur; cur = cur->next)
+        if (!strcmp(cur->key, key))
+            return cur;
+
+    return NULL;
 }
 
 /**
@@ -328,16 +393,8 @@ void hashmap_put(hashmap_t *map, char *key, void *val)
  */
 void *hashmap_get(hashmap_t *map, char *key)
 {
-    if (!map)
-        return NULL;
-
-    int index = hashmap_hash_index(map->size, key);
-
-    for (hashmap_node_t *cur = map->buckets[index]; cur; cur = cur->next)
-        if (!strcmp(cur->key, key))
-            return cur->val;
-
-    return NULL;
+    hashmap_node_t *node = hashmap_get_node(map, key);
+    return node ? node->val : NULL;
 }
 
 /**
@@ -351,7 +408,7 @@ void *hashmap_get(hashmap_t *map, char *key)
  */
 bool hashmap_contains(hashmap_t *map, char *key)
 {
-    return hashmap_get(map, key);
+    return hashmap_get_node(map, key);
 }
 
 /**

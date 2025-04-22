@@ -78,6 +78,20 @@ typedef struct {
     arena_block_t *head;
 } arena_t;
 
+/* string-based hash map definitions */
+
+typedef struct hashmap_node {
+    char *key;
+    void *val;
+    struct hashmap_node *next;
+} hashmap_node_t;
+
+typedef struct {
+    int size;
+    int cap;
+    hashmap_node_t **buckets;
+} hashmap_t;
+
 /* builtin types */
 typedef enum {
     TYPE_void = 0,
@@ -330,19 +344,6 @@ typedef struct {
     char alias[MAX_VAR_LEN];
     int value;
 } constant_t;
-
-/* string-based hash map definitions */
-
-typedef struct hashmap_node {
-    char *key;
-    void *val;
-    struct hashmap_node *next;
-} hashmap_node_t;
-
-typedef struct {
-    int size;
-    hashmap_node_t **buckets;
-} hashmap_t;
 
 struct phi_operand {
     var_t *var;
