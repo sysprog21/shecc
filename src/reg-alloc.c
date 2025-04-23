@@ -12,6 +12,11 @@
  * dead variable and does NOT wrtie it back to the stack.
  */
 
+#include <stdbool.h>
+
+#include "defs.h"
+#include "globals.c"
+
 /* Aligns size to nearest multiple of 4, this meets
  * ARMv7's alignment requirement.
  *

@@ -6,7 +6,12 @@
  */
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
+
+#include "../config"
+#include "defs.h"
+#include "globals.c"
 
 /* C language syntactic analyzer */
 int global_var_idx = 0;
@@ -511,6 +516,10 @@ bool read_preproc_directive()
         }
 
         cppd_control_flow_skip_lines();
+        return true;
+    }
+    if (lex_accept_internal(T_cppd_pragma, false)) {
+        lex_expect(T_identifier);
         return true;
     }
 
@@ -3399,6 +3408,10 @@ void load_source_file(char *file)
 
     for (;;) {
         if (!fgets(buffer, MAX_LINE_LEN, f)) {
+            break;
+        }
+        if (!strncmp(buffer, "#pragma once", 12) &&
+            hashmap_contains(INCLUSION_MAP, file)) {
             fclose(f);
             return;
         }
@@ -3419,6 +3432,8 @@ void load_source_file(char *file)
             SOURCE->size += strlen(buffer);
         }
     }
+
+    hashmap_put(INCLUSION_MAP, file, NULL);
     fclose(f);
 }
 

@@ -5,8 +5,24 @@
  * file "LICENSE" for information on usage and redistribution of this file.
  */
 
+#pragma once
 #include <stdbool.h>
 #include <stdlib.h>
+
+#include "defs.h"
+
+/* Lexer */
+char token_str[MAX_TOKEN_LEN];
+token_t next_token;
+char next_char;
+bool skip_newline = true;
+
+bool preproc_match;
+
+/* Point to the first character after where the macro has been called. It is
+ * needed when returning from the macro body.
+ */
+int macro_return_idx;
 
 /* Global objects */
 
@@ -57,6 +73,8 @@ constant_t *CONSTANTS;
 int constants_idx = 0;
 
 source_t *SOURCE;
+
+hashmap_t *INCLUSION_MAP;
 
 /* ELF sections */
 
@@ -968,6 +986,7 @@ void global_init()
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     LABEL_LUT = malloc(MAX_LABEL * sizeof(label_lut_t));
     SOURCE = create_source(MAX_SOURCE);
+    INCLUSION_MAP = hashmap_create(MAX_INCLUSIONS);
     ALIASES = malloc(MAX_ALIASES * sizeof(alias_t));
     CONSTANTS = malloc(MAX_CONSTANTS * sizeof(constant_t));
 
@@ -1000,6 +1019,7 @@ void global_release()
     free(PH2_IR_FLATTEN);
     free(LABEL_LUT);
     source_release(SOURCE);
+    hashmap_free(INCLUSION_MAP);
     free(ALIASES);
     free(CONSTANTS);
 

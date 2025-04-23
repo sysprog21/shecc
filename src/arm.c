@@ -26,6 +26,8 @@
  * the current instruction.
  */
 
+#include "defs.h"
+
 /* opcode */
 typedef enum {
     arm_and = 0,

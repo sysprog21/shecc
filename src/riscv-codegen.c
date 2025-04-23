@@ -7,6 +7,8 @@
 
 /* Translate IR to target machine code */
 
+#include "defs.h"
+#include "globals.c"
 #include "riscv.c"
 
 void update_elf_offset(ph2_ir_t *ph2_ir)
