@@ -7,6 +7,10 @@
 
 /* ELF file manipulation */
 
+#include "../config"
+#include "defs.h"
+#include "globals.c"
+
 int elf_symbol_index;
 
 void elf_write_str(strbuf_t *elf_array, char *vals)

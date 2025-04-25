@@ -28,8 +28,6 @@ int macro_return_idx;
 
 /* Global objects */
 
-block_list_t BLOCKS;
-
 macro_t *MACROS;
 int macros_idx = 0;
 
@@ -41,10 +39,22 @@ hashmap_t *FUNC_MAP;
 hashmap_t *ALIASES_MAP;
 hashmap_t *CONSTANTS_MAP;
 
+/* Types */
+
 type_t *TYPES;
 int types_idx = 0;
 
+type_t *TY_void;
+type_t *TY_char;
+type_t *TY_bool;
+type_t *TY_int;
+
+/* Arenas */
+
 arena_t *INSN_ARENA;
+
+/* BLOCK_ARENA is responsible for block_t / var_t allocation */
+arena_t *BLOCK_ARENA;
 
 /* BB_ARENA is responsible for basic_block_t / ph2_ir_t allocation */
 arena_t *BB_ARENA;
@@ -56,6 +66,7 @@ int ph2_ir_idx = 0;
 
 func_list_t FUNC_LIST;
 func_t *GLOBAL_FUNC;
+block_t *GLOBAL_BLOCK;
 basic_block_t *MAIN_BB;
 int elf_offset = 0;
 
@@ -499,20 +510,14 @@ void set_var_liveout(var_t *var, int end)
 
 block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
 {
-    block_t *blk = malloc(sizeof(block_t));
-
-    if (!BLOCKS.head) {
-        BLOCKS.head = blk;
-        BLOCKS.tail = BLOCKS.head;
-    } else {
-        BLOCKS.tail->next = blk;
-        BLOCKS.tail = blk;
-    }
+    block_t *blk = arena_alloc(BLOCK_ARENA, sizeof(block_t));
 
     blk->parent = parent;
     blk->func = func;
     blk->macro = macro;
-    blk->next_local = 0;
+    blk->locals.capacity = 16;
+    blk->locals.elements =
+        arena_alloc(BLOCK_ARENA, blk->locals.capacity * sizeof(var_t *));
     return blk;
 }
 
@@ -645,9 +650,10 @@ var_t *find_local_var(char *token, block_t *block)
     func_t *func = block->func;
 
     for (; block; block = block->parent) {
-        for (int i = 0; i < block->next_local; i++) {
-            if (!strcmp(block->locals[i].var_name, token))
-                return &block->locals[i];
+        var_list_t *var_list = &block->locals;
+        for (int i = 0; i < var_list->size; i++) {
+            if (!strcmp(var_list->elements[i]->var_name, token))
+                return var_list->elements[i];
         }
     }
 
@@ -662,11 +668,11 @@ var_t *find_local_var(char *token, block_t *block)
 
 var_t *find_global_var(char *token)
 {
-    block_t *block = BLOCKS.head;
+    var_list_t *var_list = &GLOBAL_BLOCK->locals;
 
-    for (int i = 0; i < block->next_local; i++) {
-        if (!strcmp(block->locals[i].var_name, token))
-            return &block->locals[i];
+    for (int i = 0; i < var_list->size; i++) {
+        if (!strcmp(var_list->elements[i]->var_name, token))
+            return var_list->elements[i];
     }
     return NULL;
 }
@@ -685,9 +691,7 @@ int size_var(var_t *var)
     if (var->is_ptr > 0 || var->is_func) {
         size = 4;
     } else {
-        type_t *type = find_type(var->type_name, 0);
-        if (!type)
-            error("Incomplete type");
+        type_t *type = var->type;
         if (type->size == 0)
             size = type->base_struct->size;
         else
@@ -970,16 +974,14 @@ void global_init()
 {
     elf_code_start = ELF_START + elf_header_len;
 
-    BLOCKS.head = NULL;
-    BLOCKS.tail = NULL;
-
     MACROS = malloc(MAX_ALIASES * sizeof(macro_t));
-    FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
+    BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     SOURCE = strbuf_create(MAX_SOURCE);
+    FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
     ALIASES_MAP = hashmap_create(MAX_ALIASES);
     CONSTANTS_MAP = hashmap_create(MAX_CONSTANTS);
@@ -994,18 +996,14 @@ void global_init()
 
 void global_release()
 {
-    while (BLOCKS.head) {
-        block_t *next = BLOCKS.head->next;
-        free(BLOCKS.head);
-        BLOCKS.head = next;
-    }
     free(MACROS);
-    hashmap_free(FUNC_MAP);
     free(TYPES);
+    arena_free(BLOCK_ARENA);
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     free(PH2_IR_FLATTEN);
     strbuf_free(SOURCE);
+    hashmap_free(FUNC_MAP);
     hashmap_free(INCLUSION_MAP);
     hashmap_free(ALIASES_MAP);
     hashmap_free(CONSTANTS_MAP);
@@ -1018,6 +1016,14 @@ void global_release()
     strbuf_free(elf_section);
 }
 
+/* Reports an error without specifying a position */
+void fatal(char *msg)
+{
+    printf("[Error]: %s\n", msg);
+    abort();
+}
+
+/* Reports an error and specifying a position */
 void error(char *msg)
 {
     /* Construct error source diagnostics, enabling precise identification of
@@ -1048,8 +1054,8 @@ void error(char *msg)
     /* TODO: figure out the corresponding C source file path and report line
      * number.
      */
-    printf("Error %s at source location %d\n%s\n", msg, SOURCE->size,
-           diagnostic);
+    printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg,
+           SOURCE->size, diagnostic);
     abort();
 }
 
@@ -1081,7 +1087,7 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             continue;
         case OP_allocat:
             print_indent(1);
-            printf("allocat %s", rd->type_name);
+            printf("allocat %s", rd->type->type_name);
 
             for (int i = 0; i < rd->is_ptr; i++)
                 printf("*");
@@ -1251,6 +1257,16 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             printf("%%%s = lshift %%%s, %%%s", rd->var_name, rs1->var_name,
                    rs2->var_name);
             break;
+        case OP_trunc:
+            print_indent(1);
+            printf("%%%s = trunc %%%s, %d", rd->var_name, rs1->var_name,
+                   insn->sz);
+            break;
+        case OP_sign_ext:
+            print_indent(1);
+            printf("%%%s = sign_ext %%%s, %d", rd->var_name, rs1->var_name,
+                   insn->sz);
+            break;
         default:
             printf("<Unsupported opcode: %d>", insn->opcode);
             break;
@@ -1277,7 +1293,7 @@ void dump_insn()
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         bool at_func_start = true;
 
-        printf("def %s", func->return_def.type_name);
+        printf("def %s", func->return_def.type->type_name);
 
         for (int i = 0; i < func->return_def.is_ptr; i++)
             printf("*");
@@ -1286,7 +1302,7 @@ void dump_insn()
         for (int i = 0; i < func->num_params; i++) {
             if (i != 0)
                 printf(", ");
-            printf("%s", func->param_defs[i].type_name);
+            printf("%s", func->param_defs[i].type->type_name);
 
             for (int k = 0; k < func->param_defs[i].is_ptr; k++)
                 printf("*");
@@ -1302,7 +1318,7 @@ void dump_insn()
             if (!bb)
                 continue;
 
-            if (strcmp(func->return_def.type_name, "void"))
+            if (func->return_def.type != TY_void)
                 continue;
 
             if (bb->insn_list.tail)
