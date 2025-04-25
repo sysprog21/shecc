@@ -996,6 +996,7 @@ void global_release()
 {
     while (BLOCKS.head) {
         block_t *next = BLOCKS.head->next;
+        printf("%d\n", BLOCKS.head->next_local);
         free(BLOCKS.head);
         BLOCKS.head = next;
     }

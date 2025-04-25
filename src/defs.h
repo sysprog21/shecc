@@ -276,8 +276,12 @@ typedef struct use_chain_node {
     struct use_chain_node *prev;
 } use_chain_t;
 
+typedef struct var var_t;
+typedef struct type type_t;
+
 struct var {
     char type_name[MAX_TYPE_LEN];
+    type_t *type;
     char var_name[MAX_VAR_LEN];
     int is_ptr;
     bool is_func;
@@ -302,8 +306,6 @@ struct var {
     bool is_const; /* whether a constant representaion or not */
 };
 
-typedef struct var var_t;
-
 typedef struct {
     char name[MAX_VAR_LEN];
     bool is_variadic;
@@ -324,7 +326,6 @@ struct block {
     struct block *parent;
     func_t *func;
     macro_t *macro;
-    int locals_size;
     struct block *next;
 };
 
@@ -373,8 +374,6 @@ struct type {
     var_t fields[MAX_FIELDS];
     int num_fields;
 };
-
-typedef struct type type_t;
 
 /* lvalue details */
 typedef struct {

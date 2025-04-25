@@ -47,6 +47,21 @@ var_t *require_var(block_t *blk)
     return var;
 }
 
+var_t *require_var_t(block_t *blk, type_t *type)
+{
+    if (blk->next_local >= MAX_LOCALS)
+        error("Too many locals");
+
+    if (!type)
+        error("Type must not be NULL");
+    
+    var_t *var = &blk->locals[blk->next_local++];
+    var->consumed = -1;
+    var->base = var;
+    var->type = type;
+    return var;
+}
+
 void opstack_push(var_t *var)
 {
     operand_stack[operand_stack_idx++] = var;
