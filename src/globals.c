@@ -911,7 +911,7 @@ void add_insn(block_t *block,
     bb->insn_list.tail = n;
 }
 
-source_t *create_source(int init_capacity)
+source_t *source_create(int init_capacity)
 {
     source_t *array = malloc(sizeof(source_t));
     if (!array)
@@ -928,12 +928,18 @@ source_t *create_source(int init_capacity)
     return array;
 }
 
-bool source_expand(source_t *src)
+bool source_extend(source_t *src, int len)
 {
-    if (src->size < src->capacity)
+    int new_size = src->size + len;
+
+    if (new_size < src->capacity)
         return true;
 
-    src->capacity <<= 1;
+    if (new_size > src->capacity << 1)
+        src->capacity = new_size;
+    else
+        src->capacity <<= 1;
+
     char *new_arr = malloc(src->capacity * sizeof(char));
 
     if (!new_arr)
@@ -949,7 +955,7 @@ bool source_expand(source_t *src)
 
 bool source_push(source_t *src, char value)
 {
-    if (!source_expand(src))
+    if (!source_extend(src, 1))
         return false;
 
     src->elements[src->size] = value;
@@ -958,7 +964,20 @@ bool source_push(source_t *src, char value)
     return true;
 }
 
-void source_release(source_t *src)
+bool source_push_str(source_t *src, char *value)
+{
+    int len = strlen(value);
+
+    if (!source_extend(src, len))
+        return false;
+
+    strncpy(src->elements + src->size, value, len);
+    src->size += len;
+
+    return true;
+}
+
+void source_free(source_t *src)
 {
     if (!src)
         return;
@@ -985,7 +1004,7 @@ void global_init()
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     LABEL_LUT = malloc(MAX_LABEL * sizeof(label_lut_t));
-    SOURCE = create_source(MAX_SOURCE);
+    SOURCE = source_create(MAX_SOURCE);
     INCLUSION_MAP = hashmap_create(MAX_INCLUSIONS);
     ALIASES = malloc(MAX_ALIASES * sizeof(alias_t));
     CONSTANTS = malloc(MAX_CONSTANTS * sizeof(constant_t));
@@ -1018,7 +1037,7 @@ void global_release()
     arena_free(BB_ARENA);
     free(PH2_IR_FLATTEN);
     free(LABEL_LUT);
-    source_release(SOURCE);
+    source_free(SOURCE);
     hashmap_free(INCLUSION_MAP);
     free(ALIASES);
     free(CONSTANTS);

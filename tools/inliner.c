@@ -12,24 +12,98 @@
  * C runtime and essential libraries.
  */
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define MAX_LINE_LEN 200
-#define MAX_SIZE 65536
+#define DEFAULT_SOURCE_SIZE 65536
 
-char *SOURCE;
-int source_idx;
+#define write_char(c) source_push(SOURCE, c)
+#define write_str(s) source_push_str(SOURCE, s)
 
-void write_char(char c)
+typedef struct {
+    int size;
+    int capacity;
+    char *elements;
+} source_t;
+
+source_t *SOURCE;
+
+source_t *source_create(int init_capacity)
 {
-    SOURCE[source_idx++] = c;
+    source_t *array = malloc(sizeof(source_t));
+    if (!array)
+        return NULL;
+
+    array->size = 0;
+    array->capacity = init_capacity;
+    array->elements = malloc(array->capacity * sizeof(char));
+    if (!array->elements) {
+        free(array);
+        return NULL;
+    }
+
+    return array;
 }
 
-void write_str(char *str)
+bool source_extend(source_t *src, int len)
 {
-    for (int i = 0; str[i]; i++)
-        write_char(str[i]);
+    int new_size = src->size + len;
+
+    if (new_size < src->capacity)
+        return true;
+
+    if (new_size > src->capacity << 1)
+        src->capacity = new_size;
+    else
+        src->capacity <<= 1;
+
+    char *new_arr = malloc(src->capacity * sizeof(char));
+
+    if (!new_arr)
+        return false;
+
+    memcpy(new_arr, src->elements, src->size * sizeof(char));
+
+    free(src->elements);
+    src->elements = new_arr;
+
+    return true;
+}
+
+bool source_push(source_t *src, char value)
+{
+    if (!source_extend(src, 1))
+        return false;
+
+    src->elements[src->size] = value;
+    src->size++;
+
+    return true;
+}
+
+bool source_push_str(source_t *src, char *value)
+{
+    int len = strlen(value);
+
+    if (!source_extend(src, len))
+        return false;
+
+    strncpy(src->elements + src->size, value, len);
+    src->size += len;
+
+    return true;
+}
+
+void source_free(source_t *src)
+{
+    if (!src)
+        return;
+
+    free(src->elements);
+    free(src);
 }
 
 void write_line(char *src)
@@ -66,8 +140,8 @@ void load_from(char *file)
 void save_to(char *file)
 {
     FILE *f = fopen(file, "wb");
-    for (int i = 0; i < source_idx; i++)
-        fputc(SOURCE[i], f);
+    for (int i = 0; i < SOURCE->size; i++)
+        fputc(SOURCE->elements[i], f);
     fclose(f);
 }
 
@@ -78,8 +152,7 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    source_idx = 0;
-    SOURCE = malloc(MAX_SIZE);
+    SOURCE = source_create(DEFAULT_SOURCE_SIZE);
 
     write_str("/* Created by tools/inliner - DO NOT EDIT. */\n");
 
@@ -94,14 +167,14 @@ int main(int argc, char *argv[])
      *   __c("}\n");
      */
     write_str("void __c(char *src) {\n");
-    write_str("    for (int i = 0; src[i]; i++)\n");
-    write_str("        source_push(SOURCE, src[i]);\n");
+    write_str("    source_push_str(SOURCE, src);\n");
     write_str("}\n");
 
     write_str("void libc_generate() {\n");
     load_from(argv[1]);
     write_str("}\n");
     save_to(argv[2]);
+    source_free(SOURCE);
 
     return 0;
 }
