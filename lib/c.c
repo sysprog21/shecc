@@ -210,15 +210,83 @@ void __str_base16(char *pb, int val)
     }
 }
 
-int __format(char *buffer,
-             int val,
-             int width,
-             int zeropad,
-             int base,
-             int alternate_form)
+/*
+ * The specification of snprintf() is defined in C99 7.19.6.5,
+ * and its behavior and return value should comply with the
+ * following description:
+ *
+ * - If n is zero, nothing is written.
+ * - Writes at most n bytes, including the null character.
+ * - On success, the return value should be the length of the
+ *   entire converted string even if n is insufficient to store it.
+ *
+ * Therefore, the following code defines a structure called fmtbuf_t
+ * to implement formatted output conversion for the functions in the
+ * printf() family.
+ *
+ * @buf: the current position of the buffer.
+ * @n  : the remaining space of the buffer.
+ * @len: the number of characters that would have been written
+ *       had n been sufficiently large.
+ *
+ * Once a write operation is performed, buf and n will be
+ * respectively incremented and decremented by the actual written
+ * size if n is sufficient, and len must be incremented to store
+ * the length of the entire converted string.
+ */
+typedef struct {
+    char *buf;
+    int n;
+    int len;
+} fmtbuf_t;
+
+void __fmtbuf_write_char(fmtbuf_t *fmtbuf, int val)
 {
-    int bi = 0;
-    char pb[INT_BUF_LEN];
+    fmtbuf->len += 1;
+
+    /*
+     * Write the given character when n is greater than 1.
+     * This means preserving one position for the null character.
+     */
+    if (fmtbuf->n <= 1)
+        return;
+
+    char ch = val & 0xFF;
+    fmtbuf->buf[0] = ch;
+    fmtbuf->buf += 1;
+    fmtbuf->n -= 1;
+}
+
+void __fmtbuf_write_str(fmtbuf_t *fmtbuf, char *str, int l)
+{
+    fmtbuf->len += l;
+
+    /*
+     * Write the given string when n is greater than 1.
+     * This means preserving one position for the null character.
+     */
+    if (fmtbuf->n <= 1)
+        return;
+
+    /*
+     * If the remaining space is less than the length of the string,
+     * write only n - 1 bytes.
+     */
+    int sz = fmtbuf->n - 1;
+    l = l <= sz ? l : sz;
+    strncpy(fmtbuf->buf, str, l);
+    fmtbuf->buf += l;
+    fmtbuf->n -= l;
+}
+
+void __format(fmtbuf_t *fmtbuf,
+              int val,
+              int width,
+              int zeropad,
+              int base,
+              int alternate_form)
+{
+    char pb[INT_BUF_LEN], ch;
     int pbi;
 
     /* set to zeroes */
@@ -249,7 +317,7 @@ int __format(char *buffer,
     case 8:
         if (alternate_form) {
             if (width && zeropad && pb[pbi] != '0') {
-                buffer[bi++] = '0';
+                __fmtbuf_write_char(fmtbuf, '0');
                 width -= 1;
             } else if (pb[pbi] != '0')
                 pb[--pbi] = '0';
@@ -257,7 +325,7 @@ int __format(char *buffer,
         break;
     case 10:
         if (width && zeropad && pb[pbi] == '-') {
-            buffer[bi++] = '-';
+            __fmtbuf_write_char(fmtbuf, '-');
             pbi++;
             width--;
         }
@@ -265,8 +333,8 @@ int __format(char *buffer,
     case 16:
         if (alternate_form) {
             if (width && zeropad && pb[pbi] != '0') {
-                buffer[bi++] = '0';
-                buffer[bi++] = 'x';
+                __fmtbuf_write_char(fmtbuf, '0');
+                __fmtbuf_write_char(fmtbuf, 'x');
                 width -= 2;
             } else if (pb[pbi] != '0') {
                 pb[--pbi] = 'x';
@@ -280,28 +348,22 @@ int __format(char *buffer,
     if (width < 0)
         width = 0;
 
+    ch = zeropad ? '0' : ' ';
     while (width) {
-        buffer[bi++] = zeropad ? '0' : ' ';
+        __fmtbuf_write_char(fmtbuf, ch);
         width--;
     }
 
-    for (; pbi < INT_BUF_LEN; pbi++)
-        buffer[bi++] = pb[pbi];
-
-    return bi;
+    __fmtbuf_write_str(fmtbuf, pb + pbi, INT_BUF_LEN - pbi);
 }
 
-int __format_to_buf(char *buffer, char *format, int *var_args, int size)
+void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
 {
-    int si = 0, bi = 0, pi = 0;
+    int si = 0, pi = 0;
 
-    if (size == 0)
-        return 0;
-
-    while (format[si] && bi < size - 1) {
+    while (format[si]) {
         if (format[si] != '%') {
-            buffer[bi] = format[si];
-            bi++;
+            __fmtbuf_write_char(fmtbuf, format[si]);
             si++;
         } else {
             int w = 0, zp = 0, pp = 0, v = var_args[pi], l;
@@ -328,31 +390,27 @@ int __format_to_buf(char *buffer, char *format, int *var_args, int size)
             case 's':
                 /* append param pi as string */
                 l = strlen(v);
-                l = l < size - bi ? l : size - bi;
-                strncpy(buffer + bi, v, l);
-                bi += l;
+                __fmtbuf_write_str(fmtbuf, v, l);
                 break;
             case 'c':
                 /* append param pi as char */
-                buffer[bi] = v;
-                bi += 1;
+                __fmtbuf_write_char(fmtbuf, v);
                 break;
             case 'o':
                 /* append param as octal */
-                bi += __format(buffer + bi, v, w, zp, 8, pp);
+                __format(fmtbuf, v, w, zp, 8, pp);
                 break;
             case 'd':
                 /* append param as decimal */
-                bi += __format(buffer + bi, v, w, zp, 10, 0);
+                __format(fmtbuf, v, w, zp, 10, 0);
                 break;
             case 'x':
                 /* append param as hex */
-                bi += __format(buffer + bi, v, w, zp, 16, pp);
+                __format(fmtbuf, v, w, zp, 16, pp);
                 break;
             case '%':
                 /* append literal '%' character */
-                buffer[bi] = '%';
-                bi++;
+                __fmtbuf_write_char(fmtbuf, '%');
                 si++;
                 continue;
             }
@@ -361,26 +419,43 @@ int __format_to_buf(char *buffer, char *format, int *var_args, int size)
         }
     }
 
-    int len = size - 1 > bi ? bi : size - 1;
-    buffer[len] = 0;
-    return len;
+    /* If n is still greater than 0, set the null character. */
+    if (fmtbuf->n)
+        fmtbuf->buf[0] = 0;
 }
 
 int printf(char *str, ...)
 {
     char buffer[200];
-    int len = __format_to_buf(buffer, str, &str + 4, INT_MAX);
-    return __syscall(__syscall_write, 1, buffer, len);
+    fmtbuf_t fmtbuf;
+
+    fmtbuf.buf = buffer;
+    fmtbuf.n = INT_MAX;
+    fmtbuf.len = 0;
+    __format_to_buf(&fmtbuf, str, &str + 4);
+    return __syscall(__syscall_write, 1, buffer, fmtbuf.len);
 }
 
 int sprintf(char *buffer, char *str, ...)
 {
-    return __format_to_buf(buffer, str, &str + 4, INT_MAX);
+    fmtbuf_t fmtbuf;
+
+    fmtbuf.buf = buffer;
+    fmtbuf.n = INT_MAX;
+    fmtbuf.len = 0;
+    __format_to_buf(&fmtbuf, str, &str + 4);
+    return fmtbuf.len;
 }
 
 int snprintf(char *buffer, int n, char *str, ...)
 {
-    return __format_to_buf(buffer, str, &str + 4, n);
+    fmtbuf_t fmtbuf;
+
+    fmtbuf.buf = buffer;
+    fmtbuf.n = n;
+    fmtbuf.len = 0;
+    __format_to_buf(&fmtbuf, str, &str + 4);
+    return fmtbuf.len;
 }
 
 int __free_all();

@@ -1647,6 +1647,11 @@ int main() {
 }
 EOF
 
+# The following cases validate the behavior and return value of
+# snprintf().
+#
+# This case is a normal case and outputs the complete string
+# because the given buffer size is large enough.
 try_output 16 "Hello World 1123" << EOF
 int main() {
     char buffer[50];
@@ -1656,21 +1661,84 @@ int main() {
 }
 EOF
 
-try_output 0 "" << EOF
+# If n is zero, nothing is written.
+#
+# Thus, the output should be the string containing 19 characters
+# for this test case.
+try_output 11 "0000000000000000000" << EOF
 int main() {
     char buffer[20];
+    for (int i = 0; i < 19; i++)
+        buffer[i] = '0';
+    buffer[19] = 0;
     int written = snprintf(buffer, 0, "Number: %d", -37);
     printf("%s", buffer);
     return written;
 }
 EOF
 
-try_output 9 "Number: -" << EOF
+# In this case, snprintf() only writes at most 10 bytes (including '\0'),
+# but the return value is 11, which corresponds to the length of
+# "Number: -37".
+try_output 11 "Number: -" << EOF
 int main() {
     char buffer[10];
+    for (int i = 0; i < 9; i++)
+        buffer[i] = '0';
+    buffer[9] = 0;
     int written = snprintf(buffer, 10, "Number: %d", -37);
     printf("%s", buffer);
     return written;
+}
+EOF
+
+try_output 14 " 4e 75 6d 62 65 72 3a 20 2d 0 30 30 30 30 30 30 30 30 30 0" << EOF
+int main()
+{
+    char buffer[20];
+    for (int i = 0; i < 19; i++)
+        buffer[i] = '0';
+    buffer[19] = 0;
+
+    int written = snprintf(buffer, 10, "Number: %06d", -35337);
+
+    for (int i = 0; i < 20; i++)
+        printf(" %x", buffer[i]);
+    return written;
+}
+EOF
+
+# A complex test case for snprintf().
+ans="written = 24
+buffer  = buf - 00000
+written = 13
+buffer  = aaaa - 0
+written = 19
+buffer  = aaaa - 000000777777
+written = 14
+buffer  = aaaa - 000000777777
+ 61 61 61 61 20 2d 20 30 30 30 30 30 30 37 37 37 37 37 37 0 30 30 30 30 30 30 30 30 30 0"
+try_output 0 "$ans" << EOF
+int main()
+{
+    char buffer[30];
+    for (int i = 0; i < 29; i++)
+        buffer[i] = '0';
+    buffer[29] = 0;
+
+    int written = snprintf(buffer, 12, "%s - %018d", "buf", 35133127);
+    printf("written = %d\nbuffer  = %s\n", written, buffer);
+    written = snprintf(buffer, 9, "%s - %#06x", "aaaa", 0xFF);
+    printf("written = %d\nbuffer  = %s\n", written, buffer);
+    written = snprintf(buffer, 30, "%s - %#012o", "aaaa", 0777777);
+    printf("written = %d\nbuffer  = %s\n", written, buffer);
+    written = snprintf(buffer, 0, "%s - %#05x", "bbbbb", 0xAAFF);
+    printf("written = %d\nbuffer  = %s\n", written, buffer);
+
+    for (int i = 0; i < 30; i++)
+        printf(" %x", buffer[i]);
+    printf("\n");
+    return 0;
 }
 EOF
 
