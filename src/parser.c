@@ -3428,8 +3428,7 @@ void load_source_file(char *file)
             snprintf(path + c + 1, inclusion_path_len, "%s", buffer + 10);
             load_source_file(path);
         } else {
-            strcpy(SOURCE->elements + SOURCE->size, buffer);
-            SOURCE->size += strlen(buffer);
+            source_push_str(SOURCE, buffer);
         }
     }
 
