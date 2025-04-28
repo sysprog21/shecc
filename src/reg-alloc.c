@@ -78,8 +78,8 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
     }
 
     if (!var->offset) {
-        var->offset = bb->belong_to->func->stack_size;
-        bb->belong_to->func->stack_size += 4;
+        var->offset = bb->belong_to->stack_size;
+        bb->belong_to->stack_size += 4;
     }
     ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_store)
                                   : bb_add_ph2_ir(bb, OP_store);
@@ -243,7 +243,7 @@ void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
 void reg_alloc()
 {
     /* TODO: .bss and .data section */
-    for (insn_t *global_insn = GLOBAL_FUNC.fn->bbs->insn_list.head; global_insn;
+    for (insn_t *global_insn = GLOBAL_FUNC->bbs->insn_list.head; global_insn;
          global_insn = global_insn->next) {
         ph2_ir_t *ir;
         int dest, src0;
@@ -251,51 +251,50 @@ void reg_alloc()
         switch (global_insn->opcode) {
         case OP_allocat:
             if (global_insn->rd->array_size) {
-                global_insn->rd->offset = GLOBAL_FUNC.stack_size;
-                GLOBAL_FUNC.stack_size += PTR_SIZE;
-                src0 = GLOBAL_FUNC.stack_size;
+                global_insn->rd->offset = GLOBAL_FUNC->stack_size;
+                GLOBAL_FUNC->stack_size += PTR_SIZE;
+                src0 = GLOBAL_FUNC->stack_size;
                 if (global_insn->rd->is_ptr)
-                    GLOBAL_FUNC.stack_size +=
+                    GLOBAL_FUNC->stack_size +=
                         align_size(PTR_SIZE * global_insn->rd->array_size);
                 else {
                     type_t *type = find_type(global_insn->rd->type_name, 0);
-                    GLOBAL_FUNC.stack_size +=
+                    GLOBAL_FUNC->stack_size +=
                         align_size(global_insn->rd->array_size * type->size);
                 }
 
-                dest =
-                    prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, -1, -1);
-                ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_global_address_of);
+                dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, -1, -1);
+                ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
                 ir->src0 = src0;
                 ir->dest = dest;
-                spill_var(GLOBAL_FUNC.fn->bbs, global_insn->rd, dest);
+                spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
             } else {
-                global_insn->rd->offset = GLOBAL_FUNC.stack_size;
+                global_insn->rd->offset = GLOBAL_FUNC->stack_size;
                 if (global_insn->rd->is_ptr)
-                    GLOBAL_FUNC.stack_size += PTR_SIZE;
+                    GLOBAL_FUNC->stack_size += PTR_SIZE;
                 else if (strcmp(global_insn->rd->type_name, "int") &&
                          strcmp(global_insn->rd->type_name, "char") &&
                          strcmp(global_insn->rd->type_name, "_Bool")) {
                     type_t *type = find_type(global_insn->rd->type_name, 0);
-                    GLOBAL_FUNC.stack_size += align_size(type->size);
+                    GLOBAL_FUNC->stack_size += align_size(type->size);
                 } else
                     /* 'char' is aligned to one byte for the convenience */
-                    GLOBAL_FUNC.stack_size += 4;
+                    GLOBAL_FUNC->stack_size += 4;
             }
             break;
         case OP_load_constant:
-            dest = prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, -1, -1);
-            ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_load_constant);
+            dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, -1, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_load_constant);
             ir->src0 = global_insn->rd->init_val;
             ir->dest = dest;
             break;
         case OP_assign:
-            src0 = prepare_operand(GLOBAL_FUNC.fn->bbs, global_insn->rs1, -1);
-            dest = prepare_dest(GLOBAL_FUNC.fn->bbs, global_insn->rd, src0, -1);
-            ir = bb_add_ph2_ir(GLOBAL_FUNC.fn->bbs, OP_assign);
+            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, src0, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_assign);
             ir->src0 = src0;
             ir->dest = dest;
-            spill_var(GLOBAL_FUNC.fn->bbs, global_insn->rd, dest);
+            spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
             /* release the unused constant number in register manually */
             REGS[src0].polluted = 0;
             REGS[src0].var = NULL;
@@ -306,43 +305,43 @@ void reg_alloc()
         }
     }
 
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        fn->visited++;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        func->visited++;
 
-        if (!strcmp(fn->func->return_def.var_name, "main"))
-            MAIN_BB = fn->bbs;
+        if (!strcmp(func->return_def.var_name, "main"))
+            MAIN_BB = func->bbs;
 
         for (int i = 0; i < REG_CNT; i++)
             REGS[i].var = NULL;
 
         /* set arguments available */
-        for (int i = 0; i < fn->func->num_params; i++) {
-            REGS[i].var = fn->func->param_defs[i].subscripts[0];
+        for (int i = 0; i < func->num_params; i++) {
+            REGS[i].var = func->param_defs[i].subscripts[0];
             REGS[i].polluted = 1;
         }
 
         /* variadic function implementation */
-        if (fn->func->va_args) {
+        if (func->va_args) {
             for (int i = 0; i < MAX_PARAMS; i++) {
-                ph2_ir_t *ir = bb_add_ph2_ir(fn->bbs, OP_store);
+                ph2_ir_t *ir = bb_add_ph2_ir(func->bbs, OP_store);
 
-                if (i < fn->func->num_params)
-                    fn->func->param_defs[i].subscripts[0]->offset =
-                        fn->func->stack_size;
+                if (i < func->num_params)
+                    func->param_defs[i].subscripts[0]->offset =
+                        func->stack_size;
 
                 ir->src0 = i;
-                ir->src1 = fn->func->stack_size;
-                fn->func->stack_size += 4;
+                ir->src1 = func->stack_size;
+                func->stack_size += 4;
             }
         }
 
-        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             int is_pushing_args = 0, args = 0;
 
             bb->visited++;
 
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-                func_t *func;
+                func_t *callee_func;
                 ph2_ir_t *ir;
                 int dest, src0, src1;
                 int sz, clear_reg;
@@ -354,8 +353,8 @@ void reg_alloc()
                     src0 = prepare_operand(bb, insn->rs1, -1);
 
                     if (!insn->rd->offset) {
-                        insn->rd->offset = bb->belong_to->func->stack_size;
-                        bb->belong_to->func->stack_size += 4;
+                        insn->rd->offset = bb->belong_to->stack_size;
+                        bb->belong_to->stack_size += 4;
                     }
 
                     ir = bb_add_ph2_ir(bb, OP_store);
@@ -370,9 +369,9 @@ void reg_alloc()
                         insn->rd->array_size == 0)
                         break;
 
-                    insn->rd->offset = fn->func->stack_size;
-                    fn->func->stack_size += PTR_SIZE;
-                    src0 = fn->func->stack_size;
+                    insn->rd->offset = func->stack_size;
+                    func->stack_size += PTR_SIZE;
+                    src0 = func->stack_size;
 
                     if (insn->rd->is_ptr)
                         sz = PTR_SIZE;
@@ -382,10 +381,10 @@ void reg_alloc()
                     }
 
                     if (insn->rd->array_size)
-                        fn->func->stack_size +=
+                        func->stack_size +=
                             align_size(insn->rd->array_size * sz);
                     else
-                        fn->func->stack_size += align_size(sz);
+                        func->stack_size += align_size(sz);
 
                     dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_address_of);
@@ -414,8 +413,8 @@ void reg_alloc()
                 case OP_address_of:
                     /* make sure variable is on stack */
                     if (!insn->rs1->offset) {
-                        insn->rs1->offset = bb->belong_to->func->stack_size;
-                        bb->belong_to->func->stack_size += 4;
+                        insn->rs1->offset = bb->belong_to->stack_size;
+                        bb->belong_to->stack_size += 4;
 
                         for (int i = 0; i < REG_CNT; i++)
                             if (REGS[i].var == insn->rs1) {
@@ -521,8 +520,8 @@ void reg_alloc()
                     REGS[ir->dest].polluted = 0;
                     break;
                 case OP_call:
-                    func = find_func(insn->str);
-                    if (!func->num_params)
+                    callee_func = find_func(insn->str);
+                    if (!callee_func->num_params)
                         spill_alive(bb, insn);
 
                     ir = bb_add_ph2_ir(bb, OP_call);
@@ -605,18 +604,18 @@ void reg_alloc()
             if (bb->next)
                 spill_live_out(bb);
 
-            if (bb == fn->exit)
+            if (bb == func->exit)
                 continue;
 
             /* append jump instruction for the normal block only */
             if (!bb->next)
                 continue;
 
-            if (bb->next == fn->exit)
+            if (bb->next == func->exit)
                 continue;
 
             /* jump to the beginning of loop or over the else block */
-            if (bb->next->visited == fn->visited ||
+            if (bb->next->visited == func->visited ||
                 bb->next->rpo != bb->rpo + 1) {
                 ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_jump);
                 ir->next_bb = bb->next;
@@ -625,11 +624,11 @@ void reg_alloc()
 
         /* handle implicit return */
         for (int i = 0; i < MAX_BB_PRED; i++) {
-            basic_block_t *bb = fn->exit->prev[i].bb;
+            basic_block_t *bb = func->exit->prev[i].bb;
             if (!bb)
                 continue;
 
-            if (strcmp(fn->func->return_def.type_name, "void"))
+            if (strcmp(func->return_def.type_name, "void"))
                 continue;
 
             if (bb->insn_list.tail)

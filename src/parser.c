@@ -526,7 +526,7 @@ bool read_preproc_directive()
     return false;
 }
 
-void read_parameter_list_decl(func_t *fd, int anon);
+void read_parameter_list_decl(func_t *func, int anon);
 
 void read_inner_var_decl(var_t *vd, int anon, int is_param)
 {
@@ -595,19 +595,19 @@ void read_partial_var_decl(var_t *vd, var_t *template)
     read_inner_var_decl(vd, 0, 0);
 }
 
-void read_parameter_list_decl(func_t *fd, int anon)
+void read_parameter_list_decl(func_t *func, int anon)
 {
     int vn = 0;
     lex_expect(T_open_bracket);
     while (lex_peek(T_identifier, NULL) == 1) {
-        read_full_var_decl(&fd->param_defs[vn++], anon, 1);
+        read_full_var_decl(&func->param_defs[vn++], anon, 1);
         lex_accept(T_comma);
     }
-    fd->num_params = vn;
+    func->num_params = vn;
 
     /* Up to 'MAX_PARAMS' parameters are accepted for the variadic function. */
     if (lex_accept(T_elipsis))
-        fd->va_args = 1;
+        func->va_args = 1;
 
     lex_expect(T_close_bracket);
 }
@@ -731,16 +731,16 @@ void read_func_parameters(block_t *parent, basic_block_t **bb)
     }
 }
 
-void read_func_call(func_t *fn, block_t *parent, basic_block_t **bb)
+void read_func_call(func_t *func, block_t *parent, basic_block_t **bb)
 {
     /* direct function call */
     read_func_parameters(parent, bb);
 
     ph1_ir_t *ph1_ir = add_ph1_ir(OP_call);
-    ph1_ir->param_num = fn->num_params;
-    strcpy(ph1_ir->func_name, fn->return_def.var_name);
+    ph1_ir->param_num = func->num_params;
+    strcpy(ph1_ir->func_name, func->return_def.var_name);
     add_insn(parent, *bb, OP_call, NULL, NULL, NULL, 0,
-             fn->return_def.var_name);
+             func->return_def.var_name);
 }
 
 void read_indirect_call(block_t *parent, basic_block_t **bb)
@@ -895,7 +895,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         /* is a constant or variable? */
         constant_t *con = find_constant(token);
         var_t *var = find_var(token, parent);
-        func_t *fn = find_func(token);
+        func_t *func = find_func(token);
         int macro_param_idx = find_macro_param_src_idx(token, parent);
         macro_t *mac = find_macro(token);
 
@@ -985,11 +985,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 add_insn(parent, *bb, OP_func_ret, ph1_ir->dest, NULL, NULL, 0,
                          NULL);
             }
-        } else if (fn) {
+        } else if (func) {
             lex_expect(T_identifier);
 
             if (lex_peek(T_open_bracket, NULL)) {
-                read_func_call(fn, parent, bb);
+                read_func_call(func, parent, bb);
 
                 ph1_ir = add_ph1_ir(OP_func_ret);
                 vd = require_var(parent);
@@ -2213,15 +2213,15 @@ bool read_global_assignment(char *token)
             strcpy(vd->var_name, gen_name());
             vd->init_val = operand1;
             ph1_ir->dest = vd;
-            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
-                     ph1_ir->dest, NULL, NULL, 0, NULL);
+            add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant, ph1_ir->dest,
+                     NULL, NULL, 0, NULL);
 
             ph1_ir = add_global_ir(OP_assign);
             ph1_ir->src0 = vd;
             vd = require_var(parent);
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = opstack_pop();
-            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
+            add_insn(parent, GLOBAL_FUNC->bbs, OP_assign, ph1_ir->dest,
                      ph1_ir->src0, NULL, 0, NULL);
             return true;
         }
@@ -2239,15 +2239,15 @@ bool read_global_assignment(char *token)
             strcpy(vd->var_name, gen_name());
             vd->init_val = eval_expression_imm(op, operand1, operand2);
             ph1_ir->dest = vd;
-            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
-                     ph1_ir->dest, NULL, NULL, 0, NULL);
+            add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant, ph1_ir->dest,
+                     NULL, NULL, 0, NULL);
 
             ph1_ir = add_global_ir(OP_assign);
             ph1_ir->src0 = vd;
             vd = require_var(parent);
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = opstack_pop();
-            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
+            add_insn(parent, GLOBAL_FUNC->bbs, OP_assign, ph1_ir->dest,
                      ph1_ir->src0, NULL, 0, NULL);
             return true;
         }
@@ -2316,7 +2316,7 @@ bool read_global_assignment(char *token)
                     strcpy(vd->var_name, gen_name());
                     vd->init_val = val_stack[0];
                     ph1_ir->dest = vd;
-                    add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
+                    add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant,
                              ph1_ir->dest, NULL, NULL, 0, NULL);
 
                     ph1_ir = add_global_ir(OP_assign);
@@ -2324,8 +2324,8 @@ bool read_global_assignment(char *token)
                     vd = require_var(parent);
                     strcpy(vd->var_name, gen_name());
                     ph1_ir->dest = opstack_pop();
-                    add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign,
-                             ph1_ir->dest, ph1_ir->src0, NULL, 0, NULL);
+                    add_insn(parent, GLOBAL_FUNC->bbs, OP_assign, ph1_ir->dest,
+                             ph1_ir->src0, NULL, 0, NULL);
                 }
                 return true;
             }
@@ -2342,15 +2342,15 @@ bool read_global_assignment(char *token)
             strcpy(vd->var_name, gen_name());
             vd->init_val = val_stack[0];
             ph1_ir->dest = vd;
-            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_load_constant,
-                     ph1_ir->dest, NULL, NULL, 0, NULL);
+            add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant, ph1_ir->dest,
+                     NULL, NULL, 0, NULL);
 
             ph1_ir = add_global_ir(OP_assign);
             ph1_ir->src0 = vd;
             vd = require_var(parent);
             strcpy(vd->var_name, gen_name());
             ph1_ir->dest = opstack_pop();
-            add_insn(parent, GLOBAL_FUNC.fn->bbs, OP_assign, ph1_ir->dest,
+            add_insn(parent, GLOBAL_FUNC->bbs, OP_assign, ph1_ir->dest,
                      ph1_ir->src0, NULL, 0, NULL);
         }
         return true;
@@ -2386,7 +2386,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     char token[MAX_ID_LEN];
     ph1_ir_t *ph1_ir;
     macro_t *mac;
-    func_t *fn;
+    func_t *func;
     type_t *type;
     var_t *vd, *var;
     opcode_t prefix_op = OP_generic;
@@ -2407,7 +2407,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         if (lex_accept(T_semicolon)) {
             add_ph1_ir(OP_return);
             add_insn(parent, bb, OP_return, NULL, NULL, NULL, 0, NULL);
-            bb_connect(bb, parent->func->fn->exit, NEXT);
+            bb_connect(bb, parent->func->exit, NEXT);
             return NULL;
         }
 
@@ -2423,7 +2423,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         ph1_ir->src0 = opstack_pop();
 
         add_insn(parent, bb, OP_return, NULL, ph1_ir->src0, NULL, 0, NULL);
-        bb_connect(bb, parent->func->fn->exit, NEXT);
+        bb_connect(bb, parent->func->exit, NEXT);
         return NULL;
     }
 
@@ -3108,10 +3108,10 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     }
 
     /* is a function call? */
-    fn = find_func(token);
-    if (fn) {
+    func = find_func(token);
+    if (func) {
         lex_expect(T_identifier);
-        read_func_call(fn, parent, &bb);
+        read_func_call(func, parent, &bb);
         perform_side_effect(parent, bb);
         lex_expect(T_semicolon);
         return bb;
@@ -3152,21 +3152,21 @@ basic_block_t *read_code_block(func_t *func,
 
 void var_add_killed_bb(var_t *var, basic_block_t *bb);
 
-void read_func_body(func_t *fdef, fn_t *fn)
+void read_func_body(func_t *func)
 {
-    block_t *blk = add_block(NULL, fdef, NULL);
-    fn->bbs = bb_create(blk);
-    fn->exit = bb_create(blk);
+    block_t *blk = add_block(NULL, func, NULL);
+    func->bbs = bb_create(blk);
+    func->exit = bb_create(blk);
 
-    for (int i = 0; i < fdef->num_params; i++) {
+    for (int i = 0; i < func->num_params; i++) {
         /* arguments */
-        add_symbol(fn->bbs, &fdef->param_defs[i]);
-        fdef->param_defs[i].base = &fdef->param_defs[i];
-        var_add_killed_bb(&fdef->param_defs[i], fn->bbs);
+        add_symbol(func->bbs, &func->param_defs[i]);
+        func->param_defs[i].base = &func->param_defs[i];
+        var_add_killed_bb(&func->param_defs[i], func->bbs);
     }
-    basic_block_t *body = read_code_block(fdef, NULL, NULL, fn->bbs);
+    basic_block_t *body = read_code_block(func, NULL, NULL, func->bbs);
     if (body)
-        bb_connect(body, fn->exit, NEXT);
+        bb_connect(body, func->exit, NEXT);
 }
 
 /* if first token is type */
@@ -3180,29 +3180,24 @@ void read_global_decl(block_t *block)
 
     if (lex_peek(T_open_bracket, NULL)) {
         /* function */
-        func_t *fd = add_func(var->var_name);
-        memcpy(&fd->return_def, var, sizeof(var_t));
-        var->is_global = false;
+        func_t *func = add_func(var->var_name, false);
+        memcpy(&func->return_def, var, sizeof(var_t));
         block->next_local--;
 
-        read_parameter_list_decl(fd, 0);
+        read_parameter_list_decl(func, 0);
 
         if (lex_peek(T_open_curly, NULL)) {
             ph1_ir_t *ph1_ir = add_ph1_ir(OP_define);
             strcpy(ph1_ir->func_name, var->var_name);
 
-            fn_t *fn = add_fn();
-            fn->func = fd;
-            fd->fn = fn;
-            read_func_body(fd, fn);
+            read_func_body(func);
             return;
         }
         if (lex_accept(T_semicolon)) /* forward definition */
             return;
         error("Syntax error in global declaration");
     } else
-        add_insn(block, GLOBAL_FUNC.fn->bbs, OP_allocat, var, NULL, NULL, 0,
-                 NULL);
+        add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
 
     /* is a variable */
     if (lex_accept(T_assign)) {
@@ -3343,6 +3338,11 @@ void read_global_statement()
 
 void parse_internal()
 {
+    /* set starting point of global stack manually */
+    GLOBAL_FUNC = add_func("", true);
+    GLOBAL_FUNC->stack_size = 4;
+    GLOBAL_FUNC->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
+
     /* built-in types */
     type_t *type = add_named_type("void");
     type->base_type = TYPE_void;
@@ -3374,16 +3374,10 @@ void parse_internal()
     add_alias("__SHECC__", "1");
 
     /* Linux syscall */
-    func_t *func = add_func("__syscall");
+    func_t *func = add_func("__syscall", true);
     func->num_params = 0;
     func->va_args = 1;
-    func->fn = calloc(1, sizeof(fn_t));
-    func->fn->bbs = calloc(1, sizeof(basic_block_t));
-
-    /* TODO: This hack should be removed after merging 'func_t' and 'fn_t' */
-    GLOBAL_FUNC.stack_size = 4;
-    GLOBAL_FUNC.fn = calloc(1, sizeof(fn_t));
-    GLOBAL_FUNC.fn->bbs = calloc(1, sizeof(basic_block_t));
+    func->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
 
     /* lexer initialization */
     SOURCE->size = 0;
