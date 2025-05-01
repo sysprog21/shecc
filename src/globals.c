@@ -38,6 +38,8 @@ int macros_idx = 0;
  * we have to initially create large amount of buckets.
  */
 hashmap_t *FUNCS_MAP;
+hashmap_t *ALIASES_MAP;
+hashmap_t *CONSTANTS_MAP;
 
 type_t *TYPES;
 int types_idx = 0;
@@ -65,12 +67,6 @@ basic_block_t *MAIN_BB;
 int elf_offset = 0;
 
 regfile_t REGS[REG_CNT];
-
-alias_t *ALIASES;
-int aliases_idx = 0;
-
-constant_t *CONSTANTS;
-int constants_idx = 0;
 
 source_t *SOURCE;
 
@@ -563,28 +559,34 @@ block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
 
 void add_alias(char *alias, char *value)
 {
-    alias_t *al = &ALIASES[aliases_idx++];
-    strcpy(al->alias, alias);
+    alias_t *al = hashmap_get(ALIASES_MAP, alias);
+    if (!al) {
+        al = malloc(sizeof(alias_t));
+        if (!al) {
+            printf("Failed to allocate alias_t\n");
+            return;
+        }
+        strcpy(al->alias, alias);
+        hashmap_put(ALIASES_MAP, alias, al);
+    }
     strcpy(al->value, value);
     al->disabled = false;
 }
 
 char *find_alias(char alias[])
 {
-    for (int i = 0; i < aliases_idx; i++) {
-        if (!ALIASES[i].disabled && !strcmp(alias, ALIASES[i].alias))
-            return ALIASES[i].value;
-    }
+    alias_t *al = hashmap_get(ALIASES_MAP, alias);
+    if (al && !al->disabled)
+        return al->value;
     return NULL;
 }
 
 bool remove_alias(char *alias)
 {
-    for (int i = 0; i < aliases_idx; i++) {
-        if (!ALIASES[i].disabled && !strcmp(alias, ALIASES[i].alias)) {
-            ALIASES[i].disabled = true;
-            return true;
-        }
+    alias_t *al = hashmap_get(ALIASES_MAP, alias);
+    if (al && !al->disabled) {
+        al->disabled = true;
+        return true;
     }
     return false;
 }
@@ -669,18 +671,20 @@ type_t *add_named_type(char *name)
 
 void add_constant(char alias[], int value)
 {
-    constant_t *constant = &CONSTANTS[constants_idx++];
+    constant_t *constant = malloc(sizeof(constant_t));
+    if (!constant) {
+        printf("Failed to allocate constant_t\n");
+        return;
+    }
+
     strcpy(constant->alias, alias);
     constant->value = value;
+    hashmap_put(CONSTANTS_MAP, alias, constant);
 }
 
 constant_t *find_constant(char alias[])
 {
-    for (int i = 0; i < constants_idx; i++) {
-        if (!strcmp(CONSTANTS[i].alias, alias))
-            return &CONSTANTS[i];
-    }
-    return NULL;
+    return hashmap_get(CONSTANTS_MAP, alias);
 }
 
 func_t *find_func(char func_name[])
@@ -1006,8 +1010,8 @@ void global_init()
     LABEL_LUT = malloc(MAX_LABEL * sizeof(label_lut_t));
     SOURCE = source_create(MAX_SOURCE);
     INCLUSION_MAP = hashmap_create(MAX_INCLUSIONS);
-    ALIASES = malloc(MAX_ALIASES * sizeof(alias_t));
-    CONSTANTS = malloc(MAX_CONSTANTS * sizeof(constant_t));
+    ALIASES_MAP = hashmap_create(MAX_ALIASES);
+    CONSTANTS_MAP = hashmap_create(MAX_CONSTANTS);
 
     elf_code = malloc(MAX_CODE);
     elf_data = malloc(MAX_DATA);
@@ -1039,8 +1043,8 @@ void global_release()
     free(LABEL_LUT);
     source_free(SOURCE);
     hashmap_free(INCLUSION_MAP);
-    free(ALIASES);
-    free(CONSTANTS);
+    hashmap_free(ALIASES_MAP);
+    hashmap_free(CONSTANTS_MAP);
 
     free(elf_code);
     free(elf_data);
