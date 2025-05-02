@@ -128,12 +128,12 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
 void cfg_flatten()
 {
     func_t *func = find_func("__syscall");
-    func->fn->bbs->elf_offset = 44; /* offset of start + exit in codegen */
+    func->bbs->elf_offset = 44; /* offset of start + exit in codegen */
 
     elf_offset = 80; /* offset of start + exit + syscall in codegen */
-    GLOBAL_FUNC.fn->bbs->elf_offset = elf_offset;
+    GLOBAL_FUNC->bbs->elf_offset = elf_offset;
 
-    for (ph2_ir_t *ph2_ir = GLOBAL_FUNC.fn->bbs->ph2_ir_list.head; ph2_ir;
+    for (ph2_ir_t *ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
          ph2_ir = ph2_ir->next) {
         update_elf_offset(ph2_ir);
     }
@@ -141,17 +141,17 @@ void cfg_flatten()
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
     elf_offset += 24;
 
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (func = FUNC_LIST.head; func; func = func->next) {
         ph2_ir_t *flatten_ir;
 
         /* reserve stack */
         flatten_ir = add_ph2_ir(OP_define);
-        flatten_ir->src0 = fn->func->stack_size;
+        flatten_ir->src0 = func->stack_size;
 
-        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             bb->elf_offset = elf_offset;
 
-            if (bb == fn->bbs) {
+            if (bb == func->bbs) {
                 /* save ra, sp */
                 elf_offset += 16;
             }
@@ -162,7 +162,7 @@ void cfg_flatten()
 
                 if (insn->op == OP_return) {
                     /* restore sp */
-                    flatten_ir->src1 = bb->belong_to->func->stack_size;
+                    flatten_ir->src1 = bb->belong_to->stack_size;
                 }
 
                 if (insn->op == OP_branch) {
@@ -280,7 +280,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_call:
         func = find_func(ph2_ir->func_name);
-        emit(__bl(__AL, func->fn->bbs->elf_offset - elf_code_idx));
+        emit(__bl(__AL, func->bbs->elf_offset - elf_code_idx));
         return;
     case OP_load_data_address:
         emit(__movw(__AL, rd, ph2_ir->src0 + elf_data_start));
@@ -288,7 +288,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_address_of_func:
         func = find_func(ph2_ir->func_name);
-        ofs = elf_code_start + func->fn->bbs->elf_offset;
+        ofs = elf_code_start + func->bbs->elf_offset;
         emit(__movw(__AL, __r8, ofs));
         emit(__movt(__AL, __r8, ofs));
         emit(__sw(__AL, __r8, rn, 0));
@@ -432,15 +432,15 @@ void code_generate()
     elf_data_start = elf_code_start + elf_offset;
 
     /* start */
-    emit(__movw(__AL, __r8, GLOBAL_FUNC.stack_size));
-    emit(__movt(__AL, __r8, GLOBAL_FUNC.stack_size));
+    emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
+    emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
     emit(__sub_r(__AL, __sp, __sp, __r8));
     emit(__mov_r(__AL, __r12, __sp));
-    emit(__bl(__AL, GLOBAL_FUNC.fn->bbs->elf_offset - elf_code_idx));
+    emit(__bl(__AL, GLOBAL_FUNC->bbs->elf_offset - elf_code_idx));
 
     /* exit */
-    emit(__movw(__AL, __r8, GLOBAL_FUNC.stack_size));
-    emit(__movt(__AL, __r8, GLOBAL_FUNC.stack_size));
+    emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
+    emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
     emit(__add_r(__AL, __sp, __sp, __r8));
     emit(__mov_r(__AL, __r0, __r0));
     emit(__mov_i(__AL, __r7, 1));
@@ -458,13 +458,13 @@ void code_generate()
     emit(__mov_r(__AL, __pc, __lr));
 
     ph2_ir_t *ph2_ir;
-    for (ph2_ir = GLOBAL_FUNC.fn->bbs->ph2_ir_list.head; ph2_ir;
+    for (ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
          ph2_ir = ph2_ir->next)
         emit_ph2_ir(ph2_ir);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
-    emit(__movw(__AL, __r8, GLOBAL_FUNC.stack_size));
-    emit(__movt(__AL, __r8, GLOBAL_FUNC.stack_size));
+    emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
+    emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
     emit(__add_r(__AL, __r8, __r12, __r8));
     emit(__lw(__AL, __r0, __r8, 0));
     emit(__add_i(__AL, __r1, __r8, 4));

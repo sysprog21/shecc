@@ -19,14 +19,12 @@
 #define MAX_PARAMS 8
 #define MAX_LOCALS 1600
 #define MAX_FIELDS 64
-#define MAX_FUNCS 512
 #define MAX_TYPES 64
 #define MAX_IR_INSTR 60000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_BB_RDOM_SUCC 256
 #define MAX_GLOBAL_IR 256
-#define MAX_LABEL 4096
 #define MAX_SOURCE 524288
 #define MAX_CODE 262144
 #define MAX_DATA 262144
@@ -40,11 +38,12 @@
 #define MAX_NESTING 128
 #define MAX_OPERAND_STACK_SIZE 32
 #define MAX_ANALYSIS_STACK_SIZE 800
-#define MAX_INCLUSIONS 16
 
 /* Default capacities for common data structures */
 /* Default arena size is initialized with 256 KiB */
 #define DEFAULT_ARENA_SIZE 262144
+#define DEFAULT_FUNCS_SIZE 64
+#define DEFAULT_INCLUSIONS_SIZE 16
 
 #define ELF_START 0x10000
 #define PTR_SIZE 4
@@ -319,17 +318,7 @@ typedef struct {
     bool disabled;
 } macro_t;
 
-typedef struct fn fn_t;
-
-/* function definition */
-typedef struct {
-    var_t return_def;
-    var_t param_defs[MAX_PARAMS];
-    int num_params;
-    int va_args;
-    int stack_size; /* stack always starts at offset 4 for convenience */
-    fn_t *fn;
-} func_t;
+typedef struct func func_t;
 
 /* block definition */
 struct block {
@@ -359,12 +348,6 @@ typedef struct {
     var_t *src0;
     var_t *src1;
 } ph1_ir_t;
-
-/* label lookup table*/
-typedef struct {
-    char name[MAX_VAR_LEN];
-    int offset;
-} label_lut_t;
 
 typedef struct basic_block basic_block_t;
 
@@ -513,7 +496,7 @@ struct basic_block {
     struct basic_block *dom_prev;
     struct basic_block *rdom_next[256];
     struct basic_block *rdom_prev;
-    fn_t *belong_to;
+    func_t *belong_to;
     block_t *scope;
     symbol_list_t symbol_list; /* variable declaration */
     int elf_offset;
@@ -524,27 +507,40 @@ struct ref_block {
     struct ref_block *next;
 };
 
-/* TODO: integrate func_t into fn_t */
-struct fn {
+/**
+ * Syntatic representation of func, combines syntactic details
+ * (e.g., return type, parameters) with SSA-related information
+ * (e.g., basic blocks, control flow) to support parsing,
+ * analysis, optimization, and code generation.
+ */
+struct func {
+    /* Syntatic info */
+    var_t return_def;
+    var_t param_defs[MAX_PARAMS];
+    int num_params;
+    int va_args;
+    int stack_size; /* stack always starts at offset 4 for convenience */
+
+    /* SSA info */
     basic_block_t *bbs;
     basic_block_t *exit;
     symbol_list_t global_sym_list;
     int bb_cnt;
     int visited;
-    func_t *func;
-    struct fn *next;
+
+    struct func *next;
 };
 
 typedef struct {
-    fn_t *head;
-    fn_t *tail;
+    func_t *head;
+    func_t *tail;
 } func_list_t;
 
 typedef struct {
-    fn_t *fn;
+    func_t *func;
     basic_block_t *bb;
-    void (*preorder_cb)(fn_t *, basic_block_t *);
-    void (*postorder_cb)(fn_t *, basic_block_t *);
+    void (*preorder_cb)(func_t *, basic_block_t *);
+    void (*postorder_cb)(func_t *, basic_block_t *);
 } bb_traversal_args_t;
 
 typedef struct {

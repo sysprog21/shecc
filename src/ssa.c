@@ -17,33 +17,33 @@ void bb_forward_traversal(bb_traversal_args_t *args)
     args->bb->visited++;
 
     if (args->preorder_cb)
-        args->preorder_cb(args->fn, args->bb);
+        args->preorder_cb(args->func, args->bb);
 
     /* 'args' is a reference, do not modify it */
     bb_traversal_args_t next_args;
     memcpy(&next_args, args, sizeof(bb_traversal_args_t));
 
     if (args->bb->next) {
-        if (args->bb->next->visited < args->fn->visited) {
+        if (args->bb->next->visited < args->func->visited) {
             next_args.bb = args->bb->next;
             bb_forward_traversal(&next_args);
         }
     }
     if (args->bb->then_) {
-        if (args->bb->then_->visited < args->fn->visited) {
+        if (args->bb->then_->visited < args->func->visited) {
             next_args.bb = args->bb->then_;
             bb_forward_traversal(&next_args);
         }
     }
     if (args->bb->else_) {
-        if (args->bb->else_->visited < args->fn->visited) {
+        if (args->bb->else_->visited < args->func->visited) {
             next_args.bb = args->bb->else_;
             bb_forward_traversal(&next_args);
         }
     }
 
     if (args->postorder_cb)
-        args->postorder_cb(args->fn, args->bb);
+        args->postorder_cb(args->func, args->bb);
 }
 
 /* cfront does not accept structure as an argument, pass pointer */
@@ -52,12 +52,12 @@ void bb_backward_traversal(bb_traversal_args_t *args)
     args->bb->visited++;
 
     if (args->preorder_cb)
-        args->preorder_cb(args->fn, args->bb);
+        args->preorder_cb(args->func, args->bb);
 
     for (int i = 0; i < MAX_BB_PRED; i++) {
         if (!args->bb->prev[i].bb)
             continue;
-        if (args->bb->prev[i].bb->visited < args->fn->visited) {
+        if (args->bb->prev[i].bb->visited < args->func->visited) {
             /* 'args' is a reference, do not modify it */
             bb_traversal_args_t next_args;
             memcpy(&next_args, args, sizeof(bb_traversal_args_t));
@@ -68,25 +68,25 @@ void bb_backward_traversal(bb_traversal_args_t *args)
     }
 
     if (args->postorder_cb)
-        args->postorder_cb(args->fn, args->bb);
+        args->postorder_cb(args->func, args->bb);
 }
 
-void bb_index_rpo(fn_t *fn, basic_block_t *bb)
+void bb_index_rpo(func_t *func, basic_block_t *bb)
 {
-    bb->rpo = fn->bb_cnt++;
+    bb->rpo = func->bb_cnt++;
 }
 
-void bb_reverse_index(fn_t *fn, basic_block_t *bb)
+void bb_reverse_index(func_t *func, basic_block_t *bb)
 {
-    bb->rpo = fn->bb_cnt - bb->rpo;
+    bb->rpo = func->bb_cnt - bb->rpo;
 }
 
-void bb_build_rpo(fn_t *fn, basic_block_t *bb)
+void bb_build_rpo(func_t *func, basic_block_t *bb)
 {
-    if (fn->bbs == bb)
+    if (func->bbs == bb)
         return;
 
-    basic_block_t *prev = fn->bbs;
+    basic_block_t *prev = func->bbs;
     basic_block_t *curr = prev->rpo_next;
     for (; curr; curr = curr->rpo_next) {
         if (curr->rpo < bb->rpo) {
@@ -105,19 +105,19 @@ void bb_build_rpo(fn_t *fn, basic_block_t *bb)
 void build_rpo()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->bbs;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        args->func = func;
+        args->bb = func->bbs;
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_index_rpo;
         bb_forward_traversal(args);
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_reverse_index;
         bb_forward_traversal(args);
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_build_rpo;
         bb_forward_traversal(args);
     }
@@ -148,15 +148,16 @@ basic_block_t *intersect(basic_block_t *i, basic_block_t *j)
  */
 void build_idom()
 {
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         bool changed;
 
-        fn->bbs->idom = fn->bbs;
+        func->bbs->idom = func->bbs;
 
         do {
             changed = false;
 
-            for (basic_block_t *bb = fn->bbs->rpo_next; bb; bb = bb->rpo_next) {
+            for (basic_block_t *bb = func->bbs->rpo_next; bb;
+                 bb = bb->rpo_next) {
                 /* pick one predecessor */
                 basic_block_t *pred;
                 for (int i = 0; i < MAX_BB_PRED; i++) {
@@ -208,10 +209,10 @@ bool dom_connect(basic_block_t *pred, basic_block_t *succ)
     return true;
 }
 
-void bb_build_dom(fn_t *fn, basic_block_t *bb)
+void bb_build_dom(func_t *func, basic_block_t *bb)
 {
     basic_block_t *curr = bb;
-    while (curr != fn->bbs) {
+    while (curr != func->bbs) {
         if (!dom_connect(curr->idom, curr))
             break;
         curr = curr->idom;
@@ -221,20 +222,20 @@ void bb_build_dom(fn_t *fn, basic_block_t *bb)
 void build_dom()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->bbs;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        args->func = func;
+        args->bb = func->bbs;
 
-        fn->visited++;
+        func->visited++;
         args->preorder_cb = bb_build_dom;
         bb_forward_traversal(args);
     }
     free(args);
 }
 
-void bb_build_df(fn_t *fn, basic_block_t *bb)
+void bb_build_df(func_t *func, basic_block_t *bb)
 {
-    UNUSED(fn);
+    UNUSED(func);
 
     int cnt = 0;
     for (int i = 0; i < MAX_BB_PRED; i++) {
@@ -256,11 +257,11 @@ void bb_build_df(fn_t *fn, basic_block_t *bb)
 void build_df()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->bbs;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        args->func = func;
+        args->bb = func->bbs;
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_build_df;
         bb_forward_traversal(args);
     }
@@ -280,15 +281,15 @@ basic_block_t *reverse_intersect(basic_block_t *i, basic_block_t *j)
 
 void build_r_idom()
 {
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         bool changed;
 
-        fn->exit->r_idom = fn->exit;
+        func->exit->r_idom = func->exit;
 
         do {
             changed = false;
 
-            for (basic_block_t *bb = fn->exit->rpo_r_next; bb;
+            for (basic_block_t *bb = func->exit->rpo_r_next; bb;
                  bb = bb->rpo_r_next) {
                 /* pick one predecessor */
                 basic_block_t *pred;
@@ -340,9 +341,9 @@ bool rdom_connect(basic_block_t *pred, basic_block_t *succ)
     return true;
 }
 
-void bb_build_rdom(fn_t *fn, basic_block_t *bb)
+void bb_build_rdom(func_t *func, basic_block_t *bb)
 {
-    for (basic_block_t *curr = bb; curr != fn->exit; curr = curr->r_idom) {
+    for (basic_block_t *curr = bb; curr != func->exit; curr = curr->r_idom) {
         if (!rdom_connect(curr->r_idom, curr))
             break;
     }
@@ -351,20 +352,20 @@ void bb_build_rdom(fn_t *fn, basic_block_t *bb)
 void build_rdom()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->exit;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        args->func = func;
+        args->bb = func->exit;
 
-        fn->visited++;
+        func->visited++;
         args->preorder_cb = bb_build_rdom;
         bb_backward_traversal(args);
     }
     free(args);
 }
 
-void bb_build_rdf(fn_t *fn, basic_block_t *bb)
+void bb_build_rdf(func_t *func, basic_block_t *bb)
 {
-    UNUSED(fn);
+    UNUSED(func);
 
     int cnt = 0;
     if (bb->next)
@@ -396,11 +397,11 @@ void bb_build_rdf(fn_t *fn, basic_block_t *bb)
 void build_rdf()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->exit;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        args->func = func;
+        args->bb = func->exit;
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_build_rdf;
         bb_backward_traversal(args);
     }
@@ -443,8 +444,8 @@ void use_chain_delete(use_chain_t *u, var_t *var)
 
 void use_chain_build()
 {
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (insn_t *i = bb->insn_list.head; i; i = i->next) {
                 if (i->rs1)
                     use_chain_add_tail(i, i->rs1);
@@ -502,11 +503,11 @@ void var_add_killed_bb(var_t *var, basic_block_t *bb)
     var->ref_block_list.tail = ref;
 }
 
-void fn_add_global(fn_t *fn, var_t *var)
+void fn_add_global(func_t *func, var_t *var)
 {
     bool found = false;
     symbol_t *sym;
-    for (sym = fn->global_sym_list.head; sym; sym = sym->next) {
+    for (sym = func->global_sym_list.head; sym; sym = sym->next) {
         if (sym->var == var) {
             found = true;
             break;
@@ -517,20 +518,20 @@ void fn_add_global(fn_t *fn, var_t *var)
 
     sym = calloc(1, sizeof(symbol_t));
     sym->var = var;
-    if (!fn->global_sym_list.head) {
+    if (!func->global_sym_list.head) {
         sym->index = 0;
-        fn->global_sym_list.head = sym;
-        fn->global_sym_list.tail = sym;
+        func->global_sym_list.head = sym;
+        func->global_sym_list.tail = sym;
     } else {
-        sym->index = fn->global_sym_list.tail->index + 1;
-        fn->global_sym_list.tail->next = sym;
-        fn->global_sym_list.tail = sym;
+        sym->index = func->global_sym_list.tail->index + 1;
+        func->global_sym_list.tail->next = sym;
+        func->global_sym_list.tail = sym;
     }
 }
 
-void bb_solve_globals(fn_t *fn, basic_block_t *bb)
+void bb_solve_globals(func_t *func, basic_block_t *bb)
 {
-    UNUSED(fn);
+    UNUSED(func);
 
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->rs1)
@@ -549,11 +550,11 @@ void bb_solve_globals(fn_t *fn, basic_block_t *bb)
 void solve_globals()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->bbs;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        args->func = func;
+        args->bb = func->bbs;
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_solve_globals;
         bb_forward_traversal(args);
     }
@@ -562,7 +563,7 @@ void solve_globals()
 
 bool var_check_in_scope(var_t *var, block_t *block)
 {
-    func_t *fn = block->func;
+    func_t *func = block->func;
 
     while (block) {
         for (int i = 0; i < block->next_local; i++) {
@@ -573,8 +574,8 @@ bool var_check_in_scope(var_t *var, block_t *block)
         block = block->parent;
     }
 
-    for (int i = 0; i < fn->num_params; i++) {
-        if (&fn->param_defs[i] == var)
+    for (int i = 0; i < func->num_params; i++) {
+        if (&func->param_defs[i] == var)
             return true;
     }
 
@@ -612,8 +613,8 @@ bool insert_phi_insn(basic_block_t *bb, var_t *var)
 
 void solve_phi_insertion()
 {
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        for (symbol_t *sym = fn->global_sym_list.head; sym; sym = sym->next) {
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        for (symbol_t *sym = func->global_sym_list.head; sym; sym = sym->next) {
             var_t *var = sym->var;
 
             basic_block_t *work_list[64];
@@ -641,7 +642,7 @@ void solve_phi_insertion()
                     if (is_decl)
                         continue;
 
-                    if (df == fn->exit)
+                    if (df == func->exit)
                         continue;
 
                     if (var->is_global)
@@ -796,11 +797,11 @@ void bb_solve_phi_params(basic_block_t *bb)
 
 void solve_phi_params()
 {
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        for (int i = 0; i < fn->func->num_params; i++) {
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        for (int i = 0; i < func->num_params; i++) {
             /* FIXME: Rename arguments directly, might be not good here. */
-            var_t *var = require_var(fn->bbs->scope);
-            var_t *base = &fn->func->param_defs[i];
+            var_t *var = require_var(func->bbs->scope);
+            var_t *base = &func->param_defs[i];
             memcpy(var, base, sizeof(var_t));
             var->base = base;
             var->subscript = 0;
@@ -810,7 +811,7 @@ void solve_phi_params()
             base->subscripts[base->subscripts_idx++] = var;
         }
 
-        bb_solve_phi_params(fn->bbs);
+        bb_solve_phi_params(func->bbs);
     }
 }
 
@@ -844,9 +845,9 @@ void append_unwound_phi_insn(basic_block_t *bb, var_t *dest, var_t *rs)
     }
 }
 
-void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
+void bb_unwind_phi(func_t *func, basic_block_t *bb)
 {
-    UNUSED(fn);
+    UNUSED(func);
 
     insn_t *insn;
     for (insn = bb->insn_list.head; insn; insn = insn->next) {
@@ -869,11 +870,11 @@ void bb_unwind_phi(fn_t *fn, basic_block_t *bb)
 void unwind_phi()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->bbs;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        args->func = func;
+        args->bb = func->bbs;
 
-        fn->visited++;
+        func->visited++;
         args->preorder_cb = bb_unwind_phi;
         bb_forward_traversal(args);
     }
@@ -977,7 +978,7 @@ char *get_insn_op(insn_t *insn)
     }
 }
 
-void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
+void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
 {
     bb->visited++;
 
@@ -1137,16 +1138,16 @@ void bb_dump(FILE *fd, fn_t *fn, basic_block_t *bb)
     }
     fprintf(fd, "}\n");
 
-    if (bb->next && bb->next->visited < fn->visited) {
-        bb_dump(fd, fn, bb->next);
+    if (bb->next && bb->next->visited < func->visited) {
+        bb_dump(fd, func, bb->next);
         bb_dump_connection(fd, bb, bb->next, NEXT);
     }
-    if (bb->then_ && bb->then_->visited < fn->visited) {
-        bb_dump(fd, fn, bb->then_);
+    if (bb->then_ && bb->then_->visited < func->visited) {
+        bb_dump(fd, func, bb->then_);
         bb_dump_connection(fd, bb, bb->then_, THEN);
     }
-    if (bb->else_ && bb->else_->visited < fn->visited) {
-        bb_dump(fd, fn, bb->else_);
+    if (bb->else_ && bb->else_->visited < func->visited) {
+        bb_dump(fd, func, bb->else_);
         bb_dump_connection(fd, bb, bb->else_, ELSE);
     }
 
@@ -1161,11 +1162,11 @@ void dump_cfg(char name[])
 
     fprintf(fd, "strict digraph CFG {\n");
     fprintf(fd, "node [shape=box]\n");
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        fn->visited++;
-        fprintf(fd, "subgraph cluster_%p {\n", fn);
-        fprintf(fd, "label=\"%p\"\n", fn);
-        bb_dump(fd, fn, fn->bbs);
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        func->visited++;
+        fprintf(fd, "subgraph cluster_%p {\n", func);
+        fprintf(fd, "label=\"%p\"\n", func);
+        bb_dump(fd, func, func->bbs);
         fprintf(fd, "}\n");
     }
     fprintf(fd, "}\n");
@@ -1190,10 +1191,10 @@ void dump_dom(char name[])
     fprintf(fd, "strict digraph DOM {\n");
     fprintf(fd, "node [shape=box]\n");
     fprintf(fd, "splines=polyline\n");
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        fprintf(fd, "subgraph cluster_%p {\n", fn);
-        fprintf(fd, "label=\"%p\"\n", fn);
-        dom_dump(fd, fn->bbs);
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        fprintf(fd, "subgraph cluster_%p {\n", func);
+        fprintf(fd, "label=\"%p\"\n", func);
+        dom_dump(fd, func->bbs);
         fprintf(fd, "}\n");
     }
     fprintf(fd, "}\n");
@@ -1490,8 +1491,8 @@ void dce_insn(basic_block_t *bb)
 
 void dce_sweep()
 {
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
                 if (insn->useful)
                     continue;
@@ -1539,10 +1540,10 @@ void optimize()
 
     use_chain_build();
 
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         /* basic block level (control flow) optimizations */
 
-        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             /* instruction level optimizations */
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
                 /* record the instruction assigned value to rd */
@@ -1557,31 +1558,31 @@ void optimize()
         }
     }
 
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        for (basic_block_t *bb = fn->bbs; bb; bb = bb->rpo_next) {
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             dce_insn(bb);
         }
     }
     dce_sweep();
 }
 
-void bb_index_reversed_rpo(fn_t *fn, basic_block_t *bb)
+void bb_index_reversed_rpo(func_t *func, basic_block_t *bb)
 {
-    bb->rpo_r = fn->bb_cnt++;
+    bb->rpo_r = func->bb_cnt++;
 }
 
-void bb_reverse_reversed_index(fn_t *fn, basic_block_t *bb)
+void bb_reverse_reversed_index(func_t *func, basic_block_t *bb)
 {
-    bb->rpo_r = fn->bb_cnt - bb->rpo_r;
+    bb->rpo_r = func->bb_cnt - bb->rpo_r;
 }
 
-void bb_build_reversed_rpo(fn_t *fn, basic_block_t *bb)
+void bb_build_reversed_rpo(func_t *func, basic_block_t *bb)
 {
-    if (fn->exit == bb)
+    if (func->exit == bb)
         return;
 
-    basic_block_t *prev = fn->exit;
-    basic_block_t *curr = fn->exit->rpo_r_next;
+    basic_block_t *prev = func->exit;
+    basic_block_t *curr = func->exit->rpo_r_next;
     for (; curr; curr = curr->rpo_r_next) {
         if (curr->rpo_r < bb->rpo_r) {
             prev = curr;
@@ -1599,29 +1600,29 @@ void bb_build_reversed_rpo(fn_t *fn, basic_block_t *bb)
 void build_reversed_rpo()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        fn->bb_cnt = 0;
-        args->fn = fn;
-        args->bb = fn->exit;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        func->bb_cnt = 0;
+        args->func = func;
+        args->bb = func->exit;
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_index_reversed_rpo;
         bb_backward_traversal(args);
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_reverse_reversed_index;
         bb_backward_traversal(args);
 
-        fn->visited++;
+        func->visited++;
         args->postorder_cb = bb_build_reversed_rpo;
         bb_backward_traversal(args);
     }
     free(args);
 }
 
-void bb_reset_live_kill_idx(fn_t *fn, basic_block_t *bb)
+void bb_reset_live_kill_idx(func_t *func, basic_block_t *bb)
 {
-    UNUSED(fn);
+    UNUSED(func);
     bb->live_kill_idx = 0;
 }
 
@@ -1643,9 +1644,9 @@ void update_consumed(insn_t *insn, var_t *var)
         var->consumed = insn->idx;
 }
 
-void bb_solve_locals(fn_t *fn, basic_block_t *bb)
+void bb_solve_locals(func_t *func, basic_block_t *bb)
 {
-    UNUSED(fn);
+    UNUSED(func);
 
     int i = 0;
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
@@ -1749,29 +1750,29 @@ bool recompute_live_out(basic_block_t *bb)
 void liveness_analysis()
 {
     bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        args->fn = fn;
-        args->bb = fn->bbs;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        args->func = func;
+        args->bb = func->bbs;
 
-        fn->visited++;
+        func->visited++;
         args->preorder_cb = bb_reset_live_kill_idx;
         bb_forward_traversal(args);
 
-        for (int i = 0; i < fn->func->num_params; i++)
-            bb_add_killed_var(fn->bbs, fn->func->param_defs[i].subscripts[0]);
+        for (int i = 0; i < func->num_params; i++)
+            bb_add_killed_var(func->bbs, func->param_defs[i].subscripts[0]);
 
-        fn->visited++;
+        func->visited++;
         args->preorder_cb = bb_solve_locals;
         bb_forward_traversal(args);
     }
     free(args);
 
-    for (fn_t *fn = FUNC_LIST.head; fn; fn = fn->next) {
-        basic_block_t *bb = fn->exit;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        basic_block_t *bb = func->exit;
         bool changed;
         do {
             changed = false;
-            for (bb = fn->exit; bb; bb = bb->rpo_r_next)
+            for (bb = func->exit; bb; bb = bb->rpo_r_next)
                 changed |= recompute_live_out(bb);
         } while (changed);
     }
