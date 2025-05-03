@@ -64,7 +64,7 @@ int elf_offset = 0;
 
 regfile_t REGS[REG_CNT];
 
-source_t *SOURCE;
+strbuf_t *SOURCE;
 
 hashmap_t *INCLUSION_MAP;
 
@@ -905,9 +905,9 @@ void add_insn(block_t *block,
     bb->insn_list.tail = n;
 }
 
-source_t *source_create(int init_capacity)
+strbuf_t *strbuf_create(int init_capacity)
 {
-    source_t *array = malloc(sizeof(source_t));
+    strbuf_t *array = malloc(sizeof(strbuf_t));
     if (!array)
         return NULL;
 
@@ -922,7 +922,7 @@ source_t *source_create(int init_capacity)
     return array;
 }
 
-bool source_extend(source_t *src, int len)
+bool strbuf_extend(strbuf_t *src, int len)
 {
     int new_size = src->size + len;
 
@@ -947,9 +947,9 @@ bool source_extend(source_t *src, int len)
     return true;
 }
 
-bool source_push(source_t *src, char value)
+bool strbuf_putc(strbuf_t *src, char value)
 {
-    if (!source_extend(src, 1))
+    if (!strbuf_extend(src, 1))
         return false;
 
     src->elements[src->size] = value;
@@ -958,11 +958,11 @@ bool source_push(source_t *src, char value)
     return true;
 }
 
-bool source_push_str(source_t *src, char *value)
+bool strbuf_puts(strbuf_t *src, char *value)
 {
     int len = strlen(value);
 
-    if (!source_extend(src, len))
+    if (!strbuf_extend(src, len))
         return false;
 
     strncpy(src->elements + src->size, value, len);
@@ -971,7 +971,7 @@ bool source_push_str(source_t *src, char *value)
     return true;
 }
 
-void source_free(source_t *src)
+void strbuf_free(strbuf_t *src)
 {
     if (!src)
         return;
@@ -998,7 +998,7 @@ void global_init()
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
-    SOURCE = source_create(MAX_SOURCE);
+    SOURCE = strbuf_create(MAX_SOURCE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
     ALIASES_MAP = hashmap_create(MAX_ALIASES);
     CONSTANTS_MAP = hashmap_create(MAX_CONSTANTS);
@@ -1026,7 +1026,7 @@ void global_release()
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     free(PH2_IR_FLATTEN);
-    source_free(SOURCE);
+    strbuf_free(SOURCE);
     hashmap_free(INCLUSION_MAP);
     hashmap_free(ALIASES_MAP);
     hashmap_free(CONSTANTS_MAP);

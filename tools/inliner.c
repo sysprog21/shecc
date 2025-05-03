@@ -20,20 +20,20 @@
 #define MAX_LINE_LEN 200
 #define DEFAULT_SOURCE_SIZE 65536
 
-#define write_char(c) source_push(SOURCE, c)
-#define write_str(s) source_push_str(SOURCE, s)
+#define write_char(c) strbuf_putc(SOURCE, c)
+#define write_str(s) strbuf_puts(SOURCE, s)
 
 typedef struct {
     int size;
     int capacity;
     char *elements;
-} source_t;
+} strbuf_t;
 
-source_t *SOURCE;
+strbuf_t *SOURCE;
 
-source_t *source_create(int init_capacity)
+strbuf_t *strbuf_create(int init_capacity)
 {
-    source_t *array = malloc(sizeof(source_t));
+    strbuf_t *array = malloc(sizeof(strbuf_t));
     if (!array)
         return NULL;
 
@@ -48,7 +48,7 @@ source_t *source_create(int init_capacity)
     return array;
 }
 
-bool source_extend(source_t *src, int len)
+bool strbuf_extend(strbuf_t *src, int len)
 {
     int new_size = src->size + len;
 
@@ -73,9 +73,9 @@ bool source_extend(source_t *src, int len)
     return true;
 }
 
-bool source_push(source_t *src, char value)
+bool strbuf_putc(strbuf_t *src, char value)
 {
-    if (!source_extend(src, 1))
+    if (!strbuf_extend(src, 1))
         return false;
 
     src->elements[src->size] = value;
@@ -84,11 +84,11 @@ bool source_push(source_t *src, char value)
     return true;
 }
 
-bool source_push_str(source_t *src, char *value)
+bool strbuf_puts(strbuf_t *src, char *value)
 {
     int len = strlen(value);
 
-    if (!source_extend(src, len))
+    if (!strbuf_extend(src, len))
         return false;
 
     strncpy(src->elements + src->size, value, len);
@@ -97,7 +97,7 @@ bool source_push_str(source_t *src, char *value)
     return true;
 }
 
-void source_free(source_t *src)
+void strbuf_free(strbuf_t *src)
 {
     if (!src)
         return;
@@ -152,7 +152,7 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    SOURCE = source_create(DEFAULT_SOURCE_SIZE);
+    SOURCE = strbuf_create(DEFAULT_SOURCE_SIZE);
 
     write_str("/* Created by tools/inliner - DO NOT EDIT. */\n");
 
@@ -167,14 +167,14 @@ int main(int argc, char *argv[])
      *   __c("}\n");
      */
     write_str("void __c(char *src) {\n");
-    write_str("    source_push_str(SOURCE, src);\n");
+    write_str("    strbuf_puts(SOURCE, src);\n");
     write_str("}\n");
 
     write_str("void libc_generate() {\n");
     load_from(argv[1]);
     write_str("}\n");
     save_to(argv[2]);
-    source_free(SOURCE);
+    strbuf_free(SOURCE);
 
     return 0;
 }

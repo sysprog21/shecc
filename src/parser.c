@@ -3422,7 +3422,7 @@ void load_source_file(char *file)
             snprintf(path + c + 1, inclusion_path_len, "%s", buffer + 10);
             load_source_file(path);
         } else {
-            source_push_str(SOURCE, buffer);
+            strbuf_puts(SOURCE, buffer);
         }
     }
 
