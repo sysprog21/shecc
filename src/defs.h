@@ -547,3 +547,48 @@ typedef struct {
     var_t *var;
     int polluted;
 } regfile_t;
+
+/* FIXME: replace char[2] with a short data type in ELF header structures */
+/* ELF header */
+typedef struct {
+    char e_ident[16];
+    char e_type[2];
+    char e_machine[2];
+    int e_version;
+    int e_entry;
+    int e_phoff;
+    int e_shoff;
+    int e_flags;
+    char e_ehsize[2];
+    char e_phentsize[2];
+    char e_phnum[2];
+    char e_shentsize[2];
+    char e_shnum[2];
+    char e_shstrndx[2];
+} elf32_hdr_t;
+
+/* ELF program header */
+typedef struct {
+    int p_type;
+    int p_offset;
+    int p_vaddr;
+    int p_paddr;
+    int p_filesz;
+    int p_memsz;
+    int p_flags;
+    int p_align;
+} elf32_phdr_t;
+
+/* ELF section header */
+typedef struct {
+    int sh_name;
+    int sh_type;
+    int sh_flags;
+    int sh_addr;
+    int sh_offset;
+    int sh_size;
+    int sh_link;
+    int sh_info;
+    int sh_addralign;
+    int sh_entsize;
+} elf32_shdr_t;
