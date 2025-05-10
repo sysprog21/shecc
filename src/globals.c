@@ -64,24 +64,20 @@ int elf_offset = 0;
 
 regfile_t REGS[REG_CNT];
 
-source_t *SOURCE;
+strbuf_t *SOURCE;
 
 hashmap_t *INCLUSION_MAP;
 
 /* ELF sections */
-
-char *elf_code;
-int elf_code_idx = 0;
-char *elf_data;
-int elf_data_idx = 0;
-char *elf_header;
-int elf_header_idx = 0;
+strbuf_t *elf_code;
+strbuf_t *elf_data;
+strbuf_t *elf_header;
+strbuf_t *elf_symtab;
+strbuf_t *elf_strtab;
+strbuf_t *elf_section;
 int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
 int elf_code_start;
 int elf_data_start;
-char *elf_symtab;
-char *elf_strtab;
-char *elf_section;
 
 /**
  * arena_block_create() - Creates a new arena block with given capacity.
@@ -905,9 +901,9 @@ void add_insn(block_t *block,
     bb->insn_list.tail = n;
 }
 
-source_t *source_create(int init_capacity)
+strbuf_t *strbuf_create(int init_capacity)
 {
-    source_t *array = malloc(sizeof(source_t));
+    strbuf_t *array = malloc(sizeof(strbuf_t));
     if (!array)
         return NULL;
 
@@ -922,7 +918,7 @@ source_t *source_create(int init_capacity)
     return array;
 }
 
-bool source_extend(source_t *src, int len)
+bool strbuf_extend(strbuf_t *src, int len)
 {
     int new_size = src->size + len;
 
@@ -947,9 +943,9 @@ bool source_extend(source_t *src, int len)
     return true;
 }
 
-bool source_push(source_t *src, char value)
+bool strbuf_putc(strbuf_t *src, char value)
 {
-    if (!source_extend(src, 1))
+    if (!strbuf_extend(src, 1))
         return false;
 
     src->elements[src->size] = value;
@@ -958,11 +954,11 @@ bool source_push(source_t *src, char value)
     return true;
 }
 
-bool source_push_str(source_t *src, char *value)
+bool strbuf_puts(strbuf_t *src, char *value)
 {
     int len = strlen(value);
 
-    if (!source_extend(src, len))
+    if (!strbuf_extend(src, len))
         return false;
 
     strncpy(src->elements + src->size, value, len);
@@ -971,7 +967,7 @@ bool source_push_str(source_t *src, char *value)
     return true;
 }
 
-void source_free(source_t *src)
+void strbuf_free(strbuf_t *src)
 {
     if (!src)
         return;
@@ -998,17 +994,17 @@ void global_init()
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
-    SOURCE = source_create(MAX_SOURCE);
+    SOURCE = strbuf_create(MAX_SOURCE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
     ALIASES_MAP = hashmap_create(MAX_ALIASES);
     CONSTANTS_MAP = hashmap_create(MAX_CONSTANTS);
 
-    elf_code = malloc(MAX_CODE);
-    elf_data = malloc(MAX_DATA);
-    elf_header = malloc(MAX_HEADER);
-    elf_symtab = malloc(MAX_SYMTAB);
-    elf_strtab = malloc(MAX_STRTAB);
-    elf_section = malloc(MAX_SECTION);
+    elf_code = strbuf_create(MAX_CODE);
+    elf_data = strbuf_create(MAX_DATA);
+    elf_header = strbuf_create(MAX_HEADER);
+    elf_symtab = strbuf_create(MAX_SYMTAB);
+    elf_strtab = strbuf_create(MAX_STRTAB);
+    elf_section = strbuf_create(MAX_SECTION);
 }
 
 void global_release()
@@ -1026,17 +1022,17 @@ void global_release()
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     free(PH2_IR_FLATTEN);
-    source_free(SOURCE);
+    strbuf_free(SOURCE);
     hashmap_free(INCLUSION_MAP);
     hashmap_free(ALIASES_MAP);
     hashmap_free(CONSTANTS_MAP);
 
-    free(elf_code);
-    free(elf_data);
-    free(elf_header);
-    free(elf_symtab);
-    free(elf_strtab);
-    free(elf_section);
+    strbuf_free(elf_code);
+    strbuf_free(elf_data);
+    strbuf_free(elf_header);
+    strbuf_free(elf_symtab);
+    strbuf_free(elf_strtab);
+    strbuf_free(elf_section);
 }
 
 void error(char *msg)

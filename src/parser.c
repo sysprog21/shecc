@@ -57,10 +57,11 @@ var_t *opstack_pop()
 
 void read_expr(block_t *parent, basic_block_t **bb);
 
-int write_symbol(char *data, int len)
+int write_symbol(char *data)
 {
-    int startLen = elf_data_idx;
-    elf_write_data_str(data, len);
+    int startLen = elf_data->size;
+    elf_write_str(elf_data, data);
+    elf_write_byte(elf_data, 0);
     return startLen;
 }
 
@@ -617,7 +618,7 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     char literal[MAX_TOKEN_LEN];
 
     lex_ident(T_string, literal);
-    int index = write_symbol(literal, strlen(literal) + 1);
+    int index = write_symbol(literal);
 
     ph1_ir_t *ph1_ir = add_ph1_ir(OP_load_data_address);
     var_t *vd = require_var(parent);
@@ -3365,7 +3366,7 @@ void parse_internal()
     type->size = 1;
 
     add_block(NULL, NULL, NULL); /* global block */
-    elf_add_symbol("", 0, 0);    /* undef symbol */
+    elf_add_symbol("", 0);       /* undef symbol */
 
     /* architecture defines */
     add_alias(ARCH_PREDEFINED, "1");
@@ -3422,7 +3423,7 @@ void load_source_file(char *file)
             snprintf(path + c + 1, inclusion_path_len, "%s", buffer + 10);
             load_source_file(path);
         } else {
-            source_push_str(SOURCE, buffer);
+            strbuf_puts(SOURCE, buffer);
         }
     }
 

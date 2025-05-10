@@ -179,7 +179,7 @@ void cfg_flatten()
 
 void emit(int code)
 {
-    elf_write_code_int(code);
+    elf_write_int(elf_code, code);
 }
 
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
@@ -271,16 +271,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__teq(rn));
         if (ph2_ir->is_branch_detached) {
             emit(__b(__NE, 8));
-            emit(__b(__AL, ph2_ir->else_bb->elf_offset - elf_code_idx));
+            emit(__b(__AL, ph2_ir->else_bb->elf_offset - elf_code->size));
         } else
-            emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code_idx));
+            emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code->size));
         return;
     case OP_jump:
-        emit(__b(__AL, ph2_ir->next_bb->elf_offset - elf_code_idx));
+        emit(__b(__AL, ph2_ir->next_bb->elf_offset - elf_code->size));
         return;
     case OP_call:
         func = find_func(ph2_ir->func_name);
-        emit(__bl(__AL, func->bbs->elf_offset - elf_code_idx));
+        emit(__bl(__AL, func->bbs->elf_offset - elf_code->size));
         return;
     case OP_load_data_address:
         emit(__movw(__AL, rd, ph2_ir->src0 + elf_data_start));
@@ -436,7 +436,7 @@ void code_generate()
     emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
     emit(__sub_r(__AL, __sp, __sp, __r8));
     emit(__mov_r(__AL, __r12, __sp));
-    emit(__bl(__AL, GLOBAL_FUNC->bbs->elf_offset - elf_code_idx));
+    emit(__bl(__AL, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
 
     /* exit */
     emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
@@ -468,7 +468,7 @@ void code_generate()
     emit(__add_r(__AL, __r8, __r12, __r8));
     emit(__lw(__AL, __r0, __r8, 0));
     emit(__add_i(__AL, __r1, __r8, 4));
-    emit(__b(__AL, MAIN_BB->elf_offset - elf_code_idx));
+    emit(__b(__AL, MAIN_BB->elf_offset - elf_code->size));
 
     for (int i = 0; i < ph2_ir_idx; i++) {
         ph2_ir = PH2_IR_FLATTEN[i];
