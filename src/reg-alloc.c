@@ -654,8 +654,6 @@ void dump_ph2_ir()
         case OP_define:
             printf("%s:", ph2_ir->func_name);
             break;
-        case OP_block_start:
-        case OP_block_end:
         case OP_allocat:
             continue;
         case OP_assign:
@@ -672,9 +670,6 @@ void dump_ph2_ir()
             break;
         case OP_global_address_of:
             printf("\t%%x%c = %%gp + %d", rd, ph2_ir->src0);
-            break;
-        case OP_label:
-            printf("%s:", ph2_ir->func_name);
             break;
         case OP_branch:
             printf("\tbr %%x%c", rs1);

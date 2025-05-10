@@ -84,11 +84,11 @@ int main(int argc, char *argv[])
     /* load and parse source code into IR */
     parse(in);
 
+    ssa_build();
+
     /* dump first phase IR */
     if (dump_ir)
-        dump_ph1_ir();
-
-    ssa_build(dump_ir);
+        dump_insn();
 
     /* SSA-based optimization */
     optimize();

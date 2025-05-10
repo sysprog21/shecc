@@ -4,6 +4,9 @@ CFLAGS := -O -g \
 	-fwrapv \
 	-Wall -Wextra \
 	-Wno-unused-but-set-variable \
+	-Wno-unused-parameter \
+	-Wno-unused-function \
+	-Wshadow \
 	-Wno-variadic-macros \
 	-Wno-uninitialized \
 	-Wno-strict-prototypes \

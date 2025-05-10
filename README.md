@@ -176,44 +176,39 @@ Execute the following to generate IR:
 $ out/shecc --dump-ir -o fib tests/fib.c
 ```
 
-Line-by-line explanation between C source and IR:
+Line-by-line explanation between C source and IR (variable and label numbering may differ):
 ```c
- C Source                IR                                         Explanation
-------------------+---------------------------------------+----------------------------------------------------------------------------------
-
-int fib(int n)      def int @fib(int %n)                    Indicate a function definition
-{                   {
-  if (n == 0)         const %.t1001, $0                     Load constant 0 into a temporary variable ".t1001"
-                      %.t1002 = eq %n, %.t1001              Test "n" equals ".t1001" or not, and write the result in temporary variable ".t1002"
-                      br %.t1002, .label.1177, .label.1178  If ".t1002" equals zero, goto false label ".label.1178", otherwise,
-                                                            goto true label ".label.1177"
-                    .label.1177
-    return 0;         const %.t1003, $0                     Load constant 0 into a temporary variable ".t1003"
-                      ret %.t1003                           Return ".t1003"
-                      j .label.1184                         Jump to endif label ".label.1184"
-                    .label.1178
-  else if (n == 1)    const %.t1004, $1                     Load constant 1 into a temporary variable ".t1004"
-                      %.t1005 = eq %n, %.t1004              Test "n" equals ".t1004" or not, and write the result in temporary variable ".t1005"
-                      br %.t1005, .label.1183, .label.1184  If ".t1005" equals zero, goto false label ".label.1184". Otherwise,
-                                                            goto true label ".label.1183"
-                    .label.1183
-    return 1;         const %.t1006, $1                     Load constant 1 into a temporary variable ".t1006"
-                      ret %.t1006                           Return ".t1006"
-                    .label.1184
-  return
-    fib(n - 1)        const %.t1007, $1                     Load constant 1 into a temporary variable ".t1007"
-                      %.t1008 = sub %n, %.t1007             Subtract ".t1007" from "n", and store the result in temporary variable ".t1008"
-                      push %.t1008                          Prepare parameter for function call
-                      call @fib, 1                          Call function "fib" with one parameter
-    +                 retval %.t1009                        Store return value in temporary variable ".t1009"
-    fib(n - 2);       const %.t1010, $2                     Load constant 2 into a temporary variable ".t1010"
-                      %.t1011 = sub %n, %.t1010             Subtract ".t1010" from "n", and store the result in temporary variable ".t1011"
-                      push %.t1011                          Prepare parameter for function call
-                      call @fib, 1                          Call function "fib" with one parameter
-                      retval %.t1012                        Store return value in temporary variable ".t1012"
-                      %.t1013 = add %.t1009, %.t1012        Add ".t1009" and ".t1012", and store the result in temporary variable ".t1013"
-                      ret %.t1013                           Return ".t1013"
-}                   }
+C Source                  IR                                         Explanation
+-------------------+--------------------------------------+--------------------------------------------------------------------------------------
+int fib(int n)       def int @fib(int %n)
+{                    {
+  if (n == 0)          const %.t871, 0                      Load constant 0 into a temporary variable ".t871"
+                       %.t872 = eq %n, %.t871               Test if "n" is equal to ".t871", store result in ".t872"
+                       br %.t872, .label.1430, .label.1431  If ".t872" is non-zero, branch to label ".label.1430", otherwise to ".label.1431"
+                     .label.1430:
+    return 0;          const %.t873, 0                      Load constant 0 into a temporary variable ".t873"
+                       ret %.t873                           Return ".t873"
+                     .label.1431:
+  else if (n == 1)     const %.t874, 1                      Load constant 1 into a temporary variable ".t874"
+                       %.t875 = eq %n, %.t874               Test if "n" is equal to ".t874", store result in ".t875"
+                       br %.t875, .label.1434, .label.1435  If ".t875" is true, branch to ".label.1434", otherwise to ".label.1435"
+                     .label.1434:
+    return 1;          const %.t876, 1                      Load constant 1 into a temporary variable ".t876"
+                       ret %.t876                           Return ".t876"
+                     .label.1435:
+  return fib(n - 1)    const %.t877, 1                      Load constant 1 into ".t877"
+                       %.t878 = sub %n, %.t877              Subtract ".t877" from "n", store in ".t878"
+                       push %.t878                          Prepare argument ".t878" for function call
+                       call @fib, 1                         Call function "@fib" with 1 argument
+         +             retval %.t879                        Store the return value in ".t879"
+         fib(n - 2);   const %.t880, 2                      Load constant 2 into ".t880"
+                       %.t881 = sub %n, %.t880              Subtract ".t880" from "n", store in ".t881"
+                       push %.t881                          Prepare argument ".t881" for function call
+                       call @fib, 1                         Call function "@fib" with 1 argument
+                       retval %.t882                        Store the return value in ".t882"
+                       %.t883 = add %.t879, %.t882          Add ".t879" and ".t882", store in ".t883"
+                       ret %.t883                           Return ".t883"
+}                    }
 ```
 
 ## Known Issues

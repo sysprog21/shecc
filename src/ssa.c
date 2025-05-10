@@ -1202,7 +1202,7 @@ void dump_dom(char name[])
 }
 #endif
 
-void ssa_build(int dump_ir)
+void ssa_build()
 {
     build_rpo();
     build_idom();

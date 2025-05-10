@@ -205,12 +205,9 @@ typedef enum {
     OP_load_data_address, /* lookup address of a constant in data section */
 
     /* control flow */
-    OP_label,
-    OP_branch,      /* conditional jump */
-    OP_jump,        /* unconditional jump */
-    OP_func_ret,    /* returned value */
-    OP_block_start, /* code block start */
-    OP_block_end,   /* code block end */
+    OP_branch,   /* conditional jump */
+    OP_jump,     /* unconditional jump */
+    OP_func_ret, /* returned value */
 
     /* function pointer */
     OP_address_of_func, /* resolve function entry */
@@ -338,17 +335,6 @@ typedef struct {
     block_t *tail;
 } block_list_t;
 
-/* phase-1 IR definition */
-typedef struct {
-    opcode_t op;
-    char func_name[MAX_VAR_LEN];
-    int param_num;
-    int size;
-    var_t *dest;
-    var_t *src0;
-    var_t *src1;
-} ph1_ir_t;
-
 typedef struct basic_block basic_block_t;
 
 /* Definition of a growable buffer for a mutable null-terminated string
@@ -469,8 +455,10 @@ struct basic_block {
     insn_list_t insn_list;
     ph2_ir_list_t ph2_ir_list;
     bb_connection_t prev[MAX_BB_PRED];
-    struct basic_block *next;  /* normal BB */
-    struct basic_block *then_; /* conditional BB */
+    char bb_label_name[MAX_VAR_LEN]; /* Used in instruction dumping when ir_dump
+                                        is enabled. */
+    struct basic_block *next;        /* normal BB */
+    struct basic_block *then_;       /* conditional BB */
     struct basic_block *else_;
     struct basic_block *idom;
     struct basic_block *r_idom;
