@@ -136,5 +136,6 @@ clean:
 
 distclean: clean
 	-$(RM) $(OUT)/inliner $(OUT)/target $(SRCDIR)/codegen.c config $(BUILD_SESSION)
+	-$(RM) DOM.dot CFG.dot
 
 -include $(deps)
