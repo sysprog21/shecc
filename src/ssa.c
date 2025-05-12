@@ -566,9 +566,8 @@ bool var_check_in_scope(var_t *var, block_t *block)
     func_t *func = block->func;
 
     while (block) {
-        for (int i = 0; i < block->next_local; i++) {
-            var_t *locals = block->locals;
-            if (var == &locals[i])
+        for (int i = 0; i < block->locals.capacity; i++) {
+            if (var == block->locals.elements[i])
                 return true;
         }
         block = block->parent;

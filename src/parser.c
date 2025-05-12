@@ -38,10 +38,19 @@ char *gen_name_to(char *buf)
 
 var_t *require_var(block_t *blk)
 {
-    if (blk->next_local >= MAX_LOCALS)
-        error("Too many locals");
+    var_list_t *var_list = &blk->locals;
 
-    var_t *var = &blk->locals[blk->next_local++];
+    if (var_list->size >= var_list->capacity) {
+        var_list->capacity *= 2;
+
+        var_t **new_locals = calloc(var_list->capacity, sizeof(var_t *));
+        memcpy(new_locals, var_list->elements,
+               var_list->size * sizeof(var_t *));
+        var_list->elements = new_locals;
+    }
+
+    var_t *var = arena_alloc(BLOCK_ARENA, sizeof(var_t));
+    var_list->elements[var_list->size++] = var;
     var->consumed = -1;
     var->base = var;
     return var;
@@ -49,15 +58,10 @@ var_t *require_var(block_t *blk)
 
 var_t *require_var_t(block_t *blk, type_t *type)
 {
-    if (blk->next_local >= MAX_LOCALS)
-        error("Too many locals");
-
     if (!type)
         error("Type must not be NULL");
-    
-    var_t *var = &blk->locals[blk->next_local++];
-    var->consumed = -1;
-    var->base = var;
+
+    var_t *var = require_var(blk);
     var->type = type;
     return var;
 }
@@ -1924,7 +1928,7 @@ void eval_ternary_imm(int cond, char *token)
 bool read_global_assignment(char *token)
 {
     var_t *vd, *rs1, *var;
-    block_t *parent = BLOCKS.head;
+    block_t *parent = GLOBAL_BLOCK;
 
     /* global initialization must be constant */
     var = find_global_var(token);
@@ -2648,7 +2652,7 @@ void read_global_decl(block_t *block)
         /* function */
         func_t *func = add_func(var->var_name, false);
         memcpy(&func->return_def, var, sizeof(var_t));
-        block->next_local--;
+        block->locals.size--;
 
         read_parameter_list_decl(func, 0);
 
@@ -2684,7 +2688,7 @@ void read_global_decl(block_t *block)
 void read_global_statement()
 {
     char token[MAX_ID_LEN];
-    block_t *block = BLOCKS.head; /* global block */
+    block_t *block = GLOBAL_BLOCK; /* global block */
 
     if (lex_accept(T_struct)) {
         int i = 0, size = 0;
@@ -2827,8 +2831,8 @@ void parse_internal()
     type->base_type = TYPE_char;
     type->size = 1;
 
-    add_block(NULL, NULL, NULL); /* global block */
-    elf_add_symbol("", 0);       /* undef symbol */
+    GLOBAL_BLOCK = add_block(NULL, NULL, NULL); /* global block */
+    elf_add_symbol("", 0);                      /* undef symbol */
 
     /* architecture defines */
     add_alias(ARCH_PREDEFINED, "1");

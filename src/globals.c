@@ -28,8 +28,6 @@ int macro_return_idx;
 
 /* Global objects */
 
-block_list_t BLOCKS;
-
 macro_t *MACROS;
 int macros_idx = 0;
 
@@ -46,6 +44,9 @@ int types_idx = 0;
 
 arena_t *INSN_ARENA;
 
+/* BLOCK_ARENA is responsible for block_t / var_t allocation */
+arena_t *BLOCK_ARENA;
+
 /* BB_ARENA is responsible for basic_block_t / ph2_ir_t allocation */
 arena_t *BB_ARENA;
 
@@ -56,6 +57,7 @@ int ph2_ir_idx = 0;
 
 func_list_t FUNC_LIST;
 func_t *GLOBAL_FUNC;
+block_t *GLOBAL_BLOCK;
 basic_block_t *MAIN_BB;
 int elf_offset = 0;
 
@@ -499,20 +501,14 @@ void set_var_liveout(var_t *var, int end)
 
 block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
 {
-    block_t *blk = malloc(sizeof(block_t));
-
-    if (!BLOCKS.head) {
-        BLOCKS.head = blk;
-        BLOCKS.tail = BLOCKS.head;
-    } else {
-        BLOCKS.tail->next = blk;
-        BLOCKS.tail = blk;
-    }
+    block_t *blk = arena_alloc(BLOCK_ARENA, sizeof(block_t));
 
     blk->parent = parent;
     blk->func = func;
     blk->macro = macro;
-    blk->next_local = 0;
+    blk->locals.capacity = 16;
+    blk->locals.elements =
+        arena_alloc(BLOCK_ARENA, blk->locals.capacity * sizeof(var_t *));
     return blk;
 }
 
@@ -645,9 +641,10 @@ var_t *find_local_var(char *token, block_t *block)
     func_t *func = block->func;
 
     for (; block; block = block->parent) {
-        for (int i = 0; i < block->next_local; i++) {
-            if (!strcmp(block->locals[i].var_name, token))
-                return &block->locals[i];
+        var_list_t *var_list = &block->locals;
+        for (int i = 0; i < var_list->size; i++) {
+            if (!strcmp(var_list->elements[i]->var_name, token))
+                return var_list->elements[i];
         }
     }
 
@@ -662,11 +659,11 @@ var_t *find_local_var(char *token, block_t *block)
 
 var_t *find_global_var(char *token)
 {
-    block_t *block = BLOCKS.head;
+    var_list_t *var_list = &GLOBAL_BLOCK->locals;
 
-    for (int i = 0; i < block->next_local; i++) {
-        if (!strcmp(block->locals[i].var_name, token))
-            return &block->locals[i];
+    for (int i = 0; i < var_list->size; i++) {
+        if (!strcmp(var_list->elements[i]->var_name, token))
+            return var_list->elements[i];
     }
     return NULL;
 }
@@ -970,16 +967,14 @@ void global_init()
 {
     elf_code_start = ELF_START + elf_header_len;
 
-    BLOCKS.head = NULL;
-    BLOCKS.tail = NULL;
-
     MACROS = malloc(MAX_ALIASES * sizeof(macro_t));
-    FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
+    BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     SOURCE = strbuf_create(MAX_SOURCE);
+    FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
     ALIASES_MAP = hashmap_create(MAX_ALIASES);
     CONSTANTS_MAP = hashmap_create(MAX_CONSTANTS);
@@ -994,19 +989,14 @@ void global_init()
 
 void global_release()
 {
-    while (BLOCKS.head) {
-        block_t *next = BLOCKS.head->next;
-        printf("%d\n", BLOCKS.head->next_local);
-        free(BLOCKS.head);
-        BLOCKS.head = next;
-    }
     free(MACROS);
-    hashmap_free(FUNC_MAP);
     free(TYPES);
+    arena_free(BLOCK_ARENA);
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     free(PH2_IR_FLATTEN);
     strbuf_free(SOURCE);
+    hashmap_free(FUNC_MAP);
     hashmap_free(INCLUSION_MAP);
     hashmap_free(ALIASES_MAP);
     hashmap_free(CONSTANTS_MAP);

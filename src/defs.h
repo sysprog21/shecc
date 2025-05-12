@@ -279,6 +279,12 @@ typedef struct use_chain_node {
 typedef struct var var_t;
 typedef struct type type_t;
 
+typedef struct var_list {
+    int capacity;
+    int size;
+    var_t **elements;
+} var_list_t;
+
 struct var {
     char type_name[MAX_TYPE_LEN];
     type_t *type;
@@ -321,8 +327,7 @@ typedef struct func func_t;
 
 /* block definition */
 struct block {
-    var_t locals[MAX_LOCALS];
-    int next_local;
+    var_list_t locals;
     struct block *parent;
     func_t *func;
     macro_t *macro;
@@ -330,12 +335,6 @@ struct block {
 };
 
 typedef struct block block_t;
-
-typedef struct {
-    block_t *head;
-    block_t *tail;
-} block_list_t;
-
 typedef struct basic_block basic_block_t;
 
 /* Definition of a growable buffer for a mutable null-terminated string
