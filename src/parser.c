@@ -5496,12 +5496,33 @@ void parse_internal(void)
     /* shecc run-time defines */
     add_alias("__SHECC__", "1");
 
-    /* Linux syscall */
-    func_t *func = add_func("__syscall", true);
-    func->return_def.type = TY_int;
-    func->num_params = 0;
-    func->va_args = 1;
-    func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    if (dynlink) {
+        /* In dynamic mode, __syscall won't be implemented.
+         *
+         * Simply declare a 'syscall' function as follows if the program
+         * needs to use 'syscall':
+         *
+         * int syscall(int number, ...);
+         *
+         * shecc will treat it as an external function, and the compiled
+         * program will eventually use the implementation provided by
+         * the external C library.
+         *
+         * If shecc supports the 'long' data type in the future, it would be
+         * better to declare syscall using its original prototype:
+         *
+         * long syscall(long number, ...);
+         * */
+    } else {
+        /* Linux syscall */
+        func_t *func = add_func("__syscall", true);
+        func->return_def.type = TY_int;
+        func->num_params = 0;
+        func->va_args = 1;
+        func->bbs = NULL;
+        /* Otherwise, allocate a basic block to implement in static mode. */
+        func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    }
 
     /* lexer initialization */
     SOURCE->size = 0;

@@ -32,8 +32,18 @@
 #define MAX_SYMTAB 65536
 #define MAX_STRTAB 65536
 #define MAX_HEADER 1024
+#define MAX_PROGRAM_HEADER 1024
 #define MAX_SECTION 1024
 #define MAX_ALIASES 128
+#define MAX_SECTION_HEADER 1024
+#define MAX_SHSTR 1024
+#define MAX_INTERP 1024
+#define MAX_DYNAMIC 1024
+#define MAX_DYNSYM 1024
+#define MAX_DYNSTR 1024
+#define MAX_RELPLT 1024
+#define MAX_PLT 1024
+#define MAX_GOTPLT 1024
 #define MAX_CONSTANTS 1024
 #define MAX_CASES 128
 #define MAX_NESTING 128
@@ -588,6 +598,10 @@ struct func {
     int bb_cnt;
     int visited;
 
+    /* Information used for dynamic linking */
+    bool is_used;
+    int plt_offset, got_offset;
+
     struct func *next;
 };
 
@@ -650,3 +664,46 @@ typedef struct {
     int sh_addralign;
     int sh_entsize;
 } elf32_shdr_t;
+
+/* Structures for dynamic linked program */
+/* ELF buffers for dynamic sections */
+typedef struct {
+    strbuf_t *elf_interp;
+    strbuf_t *elf_dynamic;
+    strbuf_t *elf_dynsym;
+    strbuf_t *elf_dynstr;
+    strbuf_t *elf_relplt;
+    strbuf_t *elf_plt;
+    strbuf_t *elf_got;
+    int elf_interp_start;
+    int elf_relplt_start;
+    int elf_plt_start;
+    int elf_got_start;
+    int relplt_size;
+    int plt_size;
+    int got_size;
+} dynamic_sections_t;
+
+/* For .dynsym section. */
+typedef struct {
+    int st_name;
+    int st_value;
+    int st_size;
+    char st_info;
+    char st_other;
+    char st_shndx[2];
+} elf32_sym_t;
+
+/* For .rel.plt section */
+typedef struct {
+    int r_offset;
+    int r_info;
+} elf32_rel_t;
+
+/* For .dynamic section */
+typedef struct {
+    int d_tag;
+    int d_un;
+} elf32_dyn_t;
+
+#define ELF32_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))
