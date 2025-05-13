@@ -167,6 +167,8 @@ void build_idom(void)
             continue;
 
         bool changed;
+        if (!func->bbs)
+            continue;
 
         func->bbs->idom = func->bbs;
 
@@ -308,6 +310,8 @@ void build_r_idom(void)
             continue;
 
         bool changed;
+        if (!func->bbs)
+            continue;
 
         func->exit->r_idom = func->exit;
 
@@ -364,6 +368,8 @@ bool rdom_connect(basic_block_t *pred, basic_block_t *succ)
 
 void bb_build_rdom(func_t *func, basic_block_t *bb)
 {
+    if (!func->bbs)
+        return;
     for (basic_block_t *curr = bb; curr != func->exit; curr = curr->r_idom) {
         if (!rdom_connect(curr->r_idom, curr))
             break;
@@ -1897,7 +1903,8 @@ void optimize(void)
             continue;
 
         /* basic block level (control flow) optimizations */
-
+        if (!func->bbs)
+            continue;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             /* instruction level optimizations */
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {

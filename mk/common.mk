@@ -36,6 +36,9 @@ ifneq ($(HOST_ARCH),$(ARCH_NAME))
 
     # Generate the path to the architecture-specific qemu
     TARGET_EXEC = $(shell which $(ARCH_RUNNER))
+    ifeq ($(DYNLINK),1)
+        TARGET_EXEC += $(RUNNER_LD_PREFIX)
+    endif
 endif
 export TARGET_EXEC
 
