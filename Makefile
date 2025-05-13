@@ -36,6 +36,15 @@ STAGE0 := shecc
 STAGE1 := shecc-stage1.elf
 STAGE2 := shecc-stage2.elf
 
+BUILTIN_LIBC ?= c.c
+STAGE0_FLAGS ?= --dump-ir
+STAGE1_FLAGS ?=
+ifeq ($(DYNLINK),1)
+BUILTIN_LIBC := c.h
+STAGE0_FLAGS += --dynlink
+STAGE1_FLAGS += --dynlink
+endif
+
 OUT ?= out
 ARCHS = arm riscv
 ARCH ?= $(firstword $(ARCHS))
@@ -122,9 +131,9 @@ $(OUT)/norm-lf: tools/norm-lf.c
 	$(VECHO) "  CC+LD\t$@\n"
 	$(Q)$(CC) $(CFLAGS) -o $@ $^
 
-$(OUT)/libc.inc: $(OUT)/inliner $(OUT)/norm-lf $(LIBDIR)/c.c
+$(OUT)/libc.inc: $(OUT)/inliner $(OUT)/norm-lf $(LIBDIR)/$(BUILTIN_LIBC)
 	$(VECHO) "  GEN\t$@\n"
-	$(Q)$(OUT)/norm-lf $(LIBDIR)/c.c $(OUT)/c.normalized.c
+	$(Q)$(OUT)/norm-lf $(LIBDIR)/$(BUILTIN_LIBC) $(OUT)/c.normalized.c
 	$(Q)$(OUT)/inliner $(OUT)/c.normalized.c $@
 	$(Q)$(RM) $(OUT)/c.normalized.c
 
@@ -143,12 +152,12 @@ $(OUT)/$(STAGE0)-sanitizer: $(OUT)/libc.inc $(OBJS)
 $(OUT)/$(STAGE1): $(OUT)/$(STAGE0)
 	$(Q)$(STAGE1_CHECK_CMD)
 	$(VECHO) "  SHECC\t$@\n"
-	$(Q)$(OUT)/$(STAGE0) --dump-ir -o $@ $(SRCDIR)/main.c > $(OUT)/shecc-stage1.log
+	$(Q)$(OUT)/$(STAGE0) $(STAGE0_FLAGS) -o $@ $(SRCDIR)/main.c > $(OUT)/shecc-stage1.log
 	$(Q)chmod a+x $@
 
 $(OUT)/$(STAGE2): $(OUT)/$(STAGE1)
 	$(VECHO) "  SHECC\t$@\n"
-	$(Q)$(TARGET_EXEC) $(OUT)/$(STAGE1) -o $@ $(SRCDIR)/main.c
+	$(Q)$(TARGET_EXEC) $(OUT)/$(STAGE1) $(STAGE1_FLAGS) -o $@ $(SRCDIR)/main.c
 
 bootstrap: $(OUT)/$(STAGE2)
 	$(Q)chmod 775 $(OUT)/$(STAGE2)

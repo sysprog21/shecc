@@ -4719,12 +4719,14 @@ void parse_internal(void)
     /* shecc run-time defines */
     add_alias("__SHECC__", "1");
 
-    /* Linux syscall */
-    func_t *func = add_func("__syscall", true);
-    func->return_def.type = TY_int;
-    func->num_params = 0;
-    func->va_args = 1;
-    func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    if (!dynlink) {
+        /* Linux syscall */
+        func_t *func = add_func("__syscall", true);
+        func->return_def.type = TY_int;
+        func->num_params = 0;
+        func->va_args = 1;
+        func->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
+    }
 
     /* lexer initialization */
     SOURCE->size = 0;
