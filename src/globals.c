@@ -86,14 +86,34 @@ hashmap_t *INCLUSION_MAP;
 strbuf_t *elf_code;
 strbuf_t *elf_data;
 strbuf_t *elf_header;
+strbuf_t *elf_program_header;
 strbuf_t *elf_symtab;
 strbuf_t *elf_strtab;
-strbuf_t *elf_section;
-int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
+strbuf_t *elf_section_header;
+strbuf_t *elf_shstr;
+strbuf_t *elf_interp;
+strbuf_t *elf_dynamic;
+strbuf_t *elf_dynsym;
+strbuf_t *elf_dynstr;
+strbuf_t *elf_relplt;
+strbuf_t *elf_plt;
+strbuf_t *elf_got;
+int elf_header_len;
 int elf_code_start;
 int elf_data_start;
+int elf_relplt_start;
+int elf_plt_start;
+int elf_got_start;
+int relplt_sz;
+int plt_sz;
+int got_sz;
+
+/* Dynamic linking flag */
+bool dynlink = false;
 
 /* Create a new arena block with given capacity.
+ * arena_block_create() - Creates a new arena block with given capacity.
+ * The created arena block is guaranteed to be zero-initialized.
  * @capacity: The capacity of the arena block. Must be positive.
  *
  * Return: The pointer of created arena block. NULL if failed to allocate.
@@ -1100,8 +1120,6 @@ void strbuf_free(strbuf_t *src)
  */
 void global_init(void)
 {
-    elf_code_start = ELF_START + elf_header_len;
-
     MACROS_MAP = hashmap_create(MAX_ALIASES);
 
     /* Initialize arenas first so we can use them for allocation */
@@ -1125,9 +1143,18 @@ void global_init(void)
     elf_code = strbuf_create(MAX_CODE);
     elf_data = strbuf_create(MAX_DATA);
     elf_header = strbuf_create(MAX_HEADER);
+    elf_program_header = strbuf_create(MAX_PROGRAM_HEADER);
     elf_symtab = strbuf_create(MAX_SYMTAB);
     elf_strtab = strbuf_create(MAX_STRTAB);
-    elf_section = strbuf_create(MAX_SECTION);
+    elf_shstr = strbuf_create(MAX_SHSTR);
+    elf_section_header = strbuf_create(MAX_SECTION_HEADER);
+    elf_interp = strbuf_create(MAX_INTERP);
+    elf_dynamic = strbuf_create(MAX_DYNAMIC);
+    elf_dynsym = strbuf_create(MAX_DYNSYM);
+    elf_dynstr = strbuf_create(MAX_DYNSTR);
+    elf_relplt = strbuf_create(MAX_RELPLT);
+    elf_plt = strbuf_create(MAX_PLT);
+    elf_got = strbuf_create(MAX_GOTPLT);
 }
 
 /* Forward declaration for lexer cleanup */
@@ -1144,19 +1171,27 @@ void global_release(void)
     arena_free(BB_ARENA);
     arena_free(HASHMAP_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
+    hashmap_free(FUNC_MAP);
+    hashmap_free(INCLUSION_MAP);
+    hashmap_free(ALIASES_MAP);
+    hashmap_free(CONSTANTS_MAP);
 
     strbuf_free(SOURCE);
     strbuf_free(elf_code);
     strbuf_free(elf_data);
     strbuf_free(elf_header);
+    strbuf_free(elf_program_header);
     strbuf_free(elf_symtab);
     strbuf_free(elf_strtab);
-    strbuf_free(elf_section);
-
-    hashmap_free(FUNC_MAP);
-    hashmap_free(INCLUSION_MAP);
-    hashmap_free(ALIASES_MAP);
-    hashmap_free(CONSTANTS_MAP);
+    strbuf_free(elf_shstr);
+    strbuf_free(elf_section_header);
+    strbuf_free(elf_interp);
+    strbuf_free(elf_dynamic);
+    strbuf_free(elf_dynsym);
+    strbuf_free(elf_dynstr);
+    strbuf_free(elf_relplt);
+    strbuf_free(elf_plt);
+    strbuf_free(elf_got);
 }
 
 /* Reports an error without specifying a position */
@@ -1210,6 +1245,8 @@ void print_indent(int indent)
 
 void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
 {
+    if (!bb)
+        return;
     var_t *rd, *rs1, *rs2;
 
     if (bb != func->bbs && bb->insn_list.head) {
@@ -1427,7 +1464,7 @@ void dump_bb_insn_by_dom(func_t *func, basic_block_t *bb, bool *at_func_start)
 {
     dump_bb_insn(func, bb, at_func_start);
     for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
-        if (!bb->dom_next[i])
+        if (!bb || !bb->dom_next[i])
             break;
         dump_bb_insn_by_dom(func, bb->dom_next[i], at_func_start);
     }
@@ -1461,6 +1498,8 @@ void dump_insn(void)
 
         /* Handle implicit return */
         for (int i = 0; i < MAX_BB_PRED; i++) {
+            if (!func->exit)
+                break;
             basic_block_t *bb = func->exit->prev[i].bb;
             if (!bb)
                 continue;
