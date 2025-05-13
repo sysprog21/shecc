@@ -43,6 +43,19 @@ HOST_ARCH = $(shell arch 2>/dev/null)
 SRCDIR := $(shell find src -type d)
 LIBDIR := $(shell find lib -type d)
 
+BUILTIN_LIBC ?= c.c
+STAGE0_FLAGS ?= --dump-ir
+STAGE1_FLAGS ?=
+ifeq ($(DYNLINK),1)
+    ifeq ($(ARCH),riscv)
+        # TODO: implement dynamic linking for RISC-V.
+        $(error "Dynamic linking mode is not implemented for RISC-V")
+    endif
+    BUILTIN_LIBC := c.h
+    STAGE0_FLAGS += --dynlink
+    STAGE1_FLAGS += --dynlink
+endif
+
 SRCS := $(wildcard $(patsubst %,%/main.c, $(SRCDIR)))
 OBJS := $(SRCS:%.c=$(OUT)/%.o)
 deps := $(OBJS:%.o=%.o.d)
@@ -72,7 +85,7 @@ config:
 
 $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
 	$(VECHO) "  SHECC\t$@\n"
-	$(Q)$(OUT)/$(STAGE0) --dump-ir -o $@ $< > $(basename $@).log ; \
+	$(Q)$(OUT)/$(STAGE0) $(STAGE0_FLAGS) -o $@ $< > $(basename $@).log ; \
 	chmod +x $@ ; $(PRINTF) "Running $@ ...\n"
 	$(Q)$(TARGET_EXEC) $@ && $(call pass)
 
@@ -122,9 +135,9 @@ $(OUT)/norm-lf: tools/norm-lf.c
 	$(VECHO) "  CC+LD\t$@\n"
 	$(Q)$(CC) $(CFLAGS) -o $@ $^
 
-$(OUT)/libc.inc: $(OUT)/inliner $(OUT)/norm-lf $(LIBDIR)/c.c
+$(OUT)/libc.inc: $(OUT)/inliner $(OUT)/norm-lf $(LIBDIR)/$(BUILTIN_LIBC)
 	$(VECHO) "  GEN\t$@\n"
-	$(Q)$(OUT)/norm-lf $(LIBDIR)/c.c $(OUT)/c.normalized.c
+	$(Q)$(OUT)/norm-lf $(LIBDIR)/$(BUILTIN_LIBC) $(OUT)/c.normalized.c
 	$(Q)$(OUT)/inliner $(OUT)/c.normalized.c $@
 	$(Q)$(RM) $(OUT)/c.normalized.c
 
@@ -143,12 +156,12 @@ $(OUT)/$(STAGE0)-sanitizer: $(OUT)/libc.inc $(OBJS)
 $(OUT)/$(STAGE1): $(OUT)/$(STAGE0)
 	$(Q)$(STAGE1_CHECK_CMD)
 	$(VECHO) "  SHECC\t$@\n"
-	$(Q)$(OUT)/$(STAGE0) --dump-ir -o $@ $(SRCDIR)/main.c > $(OUT)/shecc-stage1.log
+	$(Q)$(OUT)/$(STAGE0) $(STAGE0_FLAGS) -o $@ $(SRCDIR)/main.c > $(OUT)/shecc-stage1.log
 	$(Q)chmod a+x $@
 
 $(OUT)/$(STAGE2): $(OUT)/$(STAGE1)
 	$(VECHO) "  SHECC\t$@\n"
-	$(Q)$(TARGET_EXEC) $(OUT)/$(STAGE1) -o $@ $(SRCDIR)/main.c
+	$(Q)$(TARGET_EXEC) $(OUT)/$(STAGE1) $(STAGE1_FLAGS) -o $@ $(SRCDIR)/main.c
 
 bootstrap: $(OUT)/$(STAGE2)
 	$(Q)chmod 775 $(OUT)/$(STAGE2)

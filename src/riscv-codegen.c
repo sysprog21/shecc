@@ -480,10 +480,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
 void code_generate(void)
 {
-    elf_data_start = elf_code_start + elf_offset;
-    elf_rodata_start = elf_data_start + elf_data->size;
-    elf_bss_start = elf_rodata_start + elf_rodata->size;
-
     /* start: save original sp in s0; allocate global stack; run init */
     emit(__addi(__s0, __sp, 0));
     emit(__lui(__t0, rv_hi(GLOBAL_FUNC->stack_size)));
