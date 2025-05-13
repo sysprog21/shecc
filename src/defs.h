@@ -248,6 +248,10 @@ typedef enum {
     OP_bit_not,
     OP_negate,
 
+    /* data type conversion */
+    OP_trunc,
+    OP_sign_ext,
+
     /* entry point of the state machine */
     OP_start
 } opcode_t;

@@ -53,16 +53,52 @@ var_t *require_var(block_t *blk)
     var_list->elements[var_list->size++] = var;
     var->consumed = -1;
     var->base = var;
+    var->type = TY_int;
     return var;
 }
 
-var_t *require_var_t(block_t *blk, type_t *type)
+var_t *require_typed_var(block_t *blk, type_t *type)
 {
     if (!type)
         error("Type must not be NULL");
 
     var_t *var = require_var(blk);
     var->type = type;
+    return var;
+}
+
+var_t *require_typed_ptr_var(block_t *blk, type_t *type, int ptr)
+{
+    var_t *var = require_typed_var(blk, type);
+    var->is_ptr = ptr;
+    return var;
+}
+
+var_t *require_ref_var(block_t *blk, type_t *type, int ptr)
+{
+    if (!type)
+        error("Cannot reference variable from NULL type");
+
+    var_t *var = require_typed_var(blk, type);
+    var->is_ptr = ptr + 1;
+    return var;
+}
+
+var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
+{
+    if (!type)
+        error("Cannot dereference variable from NULL type");
+
+    /* Allowing integer dereferencing */
+    if (!ptr &&
+        (type->base_type != TYPE_struct || type->base_type != TYPE_typedef))
+        return require_var(blk);
+
+    if (!ptr)
+        error("Cannot dereference from non-pointer typed variable");
+
+    var_t *var = require_typed_var(blk, type);
+    var->is_ptr = ptr - 1;
     return var;
 }
 
@@ -184,6 +220,24 @@ opcode_t get_operator()
     else if (lex_peek(T_question, NULL))
         op = OP_ternary;
     return op;
+}
+
+var_t *promote(block_t *block, basic_block_t **bb, var_t *var)
+{
+    /* Effectively checking whether var has size of int */
+    if (var->type->size == 4 || var->is_ptr || var->array_size != 0)
+        return var;
+
+    if (var->type->size > 4 && !var->is_ptr) {
+        printf("Warning: Suspicious type promotion %s\n", var->type->type_name);
+        return var;
+    }
+
+    var_t *rd = require_var(block);
+    gen_name_to(rd->var_name);
+    add_insn(block, *bb, OP_sign_ext, rd, var, NULL, 4, NULL);
+
+    return rd;
 }
 
 int read_numeric_constant(char buffer[])
@@ -599,8 +653,19 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
 /* starting next_token, need to check the type */
 void read_full_var_decl(var_t *vd, int anon, int is_param)
 {
-    lex_accept(T_struct); /* ignore struct definition */
+    char type_name[MAX_TYPE_LEN];
+    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     lex_ident(T_identifier, vd->type_name);
+    strcpy(type_name, vd->type_name);
+    type_t *type = find_type(type_name, find_type_flag);
+
+    if (!type) {
+        printf("Could find type %s%s\n", find_type_flag == 2 ? "struct " : "",
+               type_name);
+        abort();
+    }
+
+    vd->type = type;
     read_inner_var_decl(vd, anon, is_param);
 }
 
@@ -635,7 +700,7 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     lex_ident(T_string, literal);
     int index = write_symbol(literal);
 
-    var_t *vd = require_var(parent);
+    var_t *vd = require_typed_ptr_var(parent, TY_char, 1);
     gen_name_to(vd->var_name);
     vd->init_val = index;
     opstack_push(vd);
@@ -704,7 +769,7 @@ void read_char_param(block_t *parent, basic_block_t *bb)
 
     lex_ident(T_char, token);
 
-    var_t *vd = require_var(parent);
+    var_t *vd = require_typed_var(parent, TY_char);
     gen_name_to(vd->var_name);
     vd->init_val = token[0];
     opstack_push(vd);
@@ -713,19 +778,26 @@ void read_char_param(block_t *parent, basic_block_t *bb)
 
 void read_logical(opcode_t op, block_t *parent, basic_block_t **bb);
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
-void read_func_parameters(block_t *parent, basic_block_t **bb)
+void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
 {
     int param_num = 0;
-    var_t *params[MAX_PARAMS];
+    var_t *params[MAX_PARAMS], *param;
 
     lex_expect(T_open_bracket);
     while (!lex_accept(T_close_bracket)) {
         read_expr(parent, bb);
         read_ternary_operation(parent, bb);
 
-        params[param_num++] = opstack_pop();
+        param = opstack_pop();
+
+        if (func && param_num >= func->num_params && func->va_args) {
+            param = promote(parent, bb, param);
+        }
+
+        params[param_num++] = param;
         lex_accept(T_comma);
     }
+
     for (int i = 0; i < param_num; i++) {
         /* The operand should keep alive before calling function. Pass the
          * number of remained parameters to allocator to extend their liveness.
@@ -738,7 +810,7 @@ void read_func_parameters(block_t *parent, basic_block_t **bb)
 void read_func_call(func_t *func, block_t *parent, basic_block_t **bb)
 {
     /* direct function call */
-    read_func_parameters(parent, bb);
+    read_func_parameters(func, parent, bb);
 
     add_insn(parent, *bb, OP_call, NULL, NULL, NULL, 0,
              func->return_def.var_name);
@@ -746,7 +818,8 @@ void read_func_call(func_t *func, block_t *parent, basic_block_t **bb)
 
 void read_indirect_call(block_t *parent, basic_block_t **bb)
 {
-    read_func_parameters(parent, bb);
+    /* TODO: Support function parameter typing */
+    read_func_parameters(NULL, parent, bb);
 
     add_insn(parent, *bb, OP_indirect, NULL, opstack_pop(), NULL, 0, NULL);
 }
@@ -807,7 +880,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
         if (!lvalue.is_reference) {
             rs1 = opstack_pop();
-            vd = require_var(parent);
+            vd = require_ref_var(parent, lvalue.type, lvalue.is_ptr);
             gen_name_to(vd->var_name);
             opstack_push(vd);
             add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
@@ -825,7 +898,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             lex_expect(T_close_bracket);
 
         rs1 = opstack_pop();
-        vd = require_var(parent);
+        vd = require_deref_var(parent, var->type, var->is_ptr);
         if (lvalue.is_ptr > 1)
             sz = PTR_SIZE;
         else
@@ -965,7 +1038,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             if (lex_peek(T_open_bracket, NULL)) {
                 read_func_call(func, parent, bb);
 
-                vd = require_var(parent);
+                vd = require_typed_ptr_var(parent, func->return_def.type,
+                                           func->return_def.is_ptr);
                 gen_name_to(vd->var_name);
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_func_ret, vd, NULL, NULL, 0, NULL);
@@ -1794,6 +1868,14 @@ bool read_body_assignment(char *token,
                     add_insn(parent, *bb, OP_write, NULL, t, vd, lvalue.size,
                              NULL);
                 } else {
+                    if (lvalue.type->size < vd->type->size) {
+                        rs1 = require_typed_var(parent, TY_char);
+                        gen_name_to(rs1->var_name);
+                        add_insn(parent, *bb, OP_trunc, rs1, vd, NULL,
+                                 lvalue.size, NULL);
+                        vd = rs1;
+                    }
+
                     add_insn(parent, *bb, OP_assign, t, vd, NULL, 0, NULL);
                 }
             }
@@ -2514,7 +2596,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     type = find_type(token, find_type_flag);
     if (type) {
-        var = require_var(parent);
+        var = require_typed_var(parent, type);
         read_full_var_decl(var, 0, 0);
         add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
         add_symbol(bb, var);
@@ -2532,7 +2614,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             perform_side_effect(parent, bb);
 
             /* multiple (partial) declarations */
-            nv = require_var(parent);
+            nv = require_typed_var(parent, type);
             read_partial_var_decl(nv, var); /* partial */
             add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
             add_symbol(bb, nv);
@@ -2701,6 +2783,8 @@ void read_global_statement()
             type = add_type();
 
         strcpy(type->type_name, token);
+        type->base_type = TYPE_struct;
+
         lex_expect(T_open_curly);
         do {
             var_t *v = &type->fields[i++];
@@ -2712,7 +2796,6 @@ void read_global_statement()
 
         type->size = size;
         type->num_fields = i;
-        type->base_type = TYPE_struct;
         lex_expect(T_semicolon);
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {
@@ -2811,25 +2894,25 @@ void parse_internal()
     GLOBAL_FUNC->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
 
     /* built-in types */
-    type_t *type = add_named_type("void");
-    type->base_type = TYPE_void;
-    type->size = 0;
+    TY_void = add_named_type("void");
+    TY_void->base_type = TYPE_void;
+    TY_void->size = 0;
 
-    type = add_named_type("char");
-    type->base_type = TYPE_char;
-    type->size = 1;
+    TY_char = add_named_type("char");
+    TY_char->base_type = TYPE_char;
+    TY_char->size = 1;
 
-    type = add_named_type("int");
-    type->base_type = TYPE_int;
-    type->size = 4;
+    TY_int = add_named_type("int");
+    TY_int->base_type = TYPE_int;
+    TY_int->size = 4;
 
     /* builtin type _Bool was introduced in C99 specification, it is more
      * well-known as macro type bool, which is defined in <std_bool.h> (in
      * shecc, it is defined in 'lib/c.c').
      */
-    type = add_named_type("_Bool");
-    type->base_type = TYPE_char;
-    type->size = 1;
+    TY_bool = add_named_type("_Bool");
+    TY_bool->base_type = TYPE_char;
+    TY_bool->size = 1;
 
     GLOBAL_BLOCK = add_block(NULL, NULL, NULL); /* global block */
     elf_add_symbol("", 0);                      /* undef symbol */
@@ -2842,6 +2925,7 @@ void parse_internal()
 
     /* Linux syscall */
     func_t *func = add_func("__syscall", true);
+    func->return_def.type = TY_int;
     func->num_params = 0;
     func->va_args = 1;
     func->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));

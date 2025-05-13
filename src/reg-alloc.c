@@ -595,6 +595,15 @@ void reg_alloc()
                     ir->src0 = src0;
                     ir->dest = dest;
                     break;
+                case OP_trunc:
+                case OP_sign_ext:
+                    src0 = prepare_operand(bb, insn->rs1, -1);
+                    dest = prepare_dest(bb, insn->rd, src0, -1);
+                    ir = bb_add_ph2_ir(bb, insn->opcode);
+                    ir->src1 = insn->sz;
+                    ir->src0 = src0;
+                    ir->dest = dest;
+                    break;
                 default:
                     printf("Unknown opcode\n");
                     abort();
@@ -772,6 +781,12 @@ void dump_ph2_ir()
             break;
         case OP_lshift:
             printf("\t%%x%c = lshift %%x%c, %%x%c", rd, rs1, rs2);
+            break;
+        case OP_trunc:
+            printf("\t%%x%c = trunc %%x%c, %d", rd, rs1, ph2_ir->src1);
+            break;
+        case OP_sign_ext:
+            printf("\t%%x%c = sign_ext %%x%c, %d", rd, rs1, ph2_ir->src1);
             break;
         default:
             break;

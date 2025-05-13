@@ -39,8 +39,17 @@ hashmap_t *FUNC_MAP;
 hashmap_t *ALIASES_MAP;
 hashmap_t *CONSTANTS_MAP;
 
+/* Types */
+
 type_t *TYPES;
 int types_idx = 0;
+
+type_t *TY_void;
+type_t *TY_char;
+type_t *TY_bool;
+type_t *TY_int;
+
+/* Arenas */
 
 arena_t *INSN_ARENA;
 
@@ -1241,6 +1250,16 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             print_indent(1);
             printf("%%%s = lshift %%%s, %%%s", rd->var_name, rs1->var_name,
                    rs2->var_name);
+            break;
+        case OP_trunc:
+            print_indent(1);
+            printf("%%%s = trunc %%%s, %d", rd->var_name, rs1->var_name,
+                   insn->sz);
+            break;
+        case OP_sign_ext:
+            print_indent(1);
+            printf("%%%s = sign_ext %%%s, %d", rd->var_name, rs1->var_name,
+                   insn->sz);
             break;
         default:
             printf("<Unsupported opcode: %d>", insn->opcode);

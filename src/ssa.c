@@ -1125,6 +1125,17 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
                         insn->rd->var_name, insn->rd->subscript,
                         insn->rs1->var_name, insn->rs1->subscript);
                 break;
+            case OP_trunc:
+                sprintf(str, "<%s<SUB>%d</SUB> := trunc %s<SUB>%d</SUB>, %d>",
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript, insn->sz);
+                break;
+            case OP_sign_ext:
+                sprintf(str,
+                        "<%s<SUB>%s</SUB> := sign_ext %s<SUB>%d</SUB>, %d>",
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript, insn->sz);
+                break;
             default:
                 printf("Unknown opcode\n");
                 abort();

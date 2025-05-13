@@ -119,6 +119,12 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_return:
         elf_offset += 24;
         return;
+    case OP_trunc:
+        elf_offset += 4;
+        return;
+    case OP_sign_ext:
+        elf_offset += 4;
+        return;
     default:
         printf("Unknown opcode\n");
         abort();
@@ -420,6 +426,22 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__teq(rn));
         emit(__mov_i(__NE, rd, 0));
         emit(__mov_i(__EQ, rd, 1));
+        return;
+    case OP_trunc:
+        if (rm == 1) {
+            rm = 0xFF;
+        } else if (rm == 4) {
+            rm = 0xFFFFFFFF;
+        } else {
+            printf("Unsupported truncation operation with target size %d\n",
+                   rm);
+            abort();
+        }
+
+        emit(__and_i(__AL, rd, rn, rm));
+        return;
+    case OP_sign_ext:
+        emit(__sxtb(__AL, rd, rn, 0));
         return;
     default:
         printf("Unknown opcode\n");
