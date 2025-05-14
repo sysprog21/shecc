@@ -97,7 +97,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 4;
         return;
     case OP_sign_ext:
-        elf_offset += 4;
+        elf_offset += 12;
         return;
     default:
         error_no_loc("Unknown opcode");

@@ -90,8 +90,8 @@ var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
         error("Cannot dereference variable from NULL type");
 
     /* Allowing integer dereferencing */
-    if (!ptr &&
-        (type->base_type != TYPE_struct || type->base_type != TYPE_typedef))
+    if (!ptr && type->base_type != TYPE_struct &&
+        type->base_type != TYPE_typedef)
         return require_var(blk);
 
     if (!ptr)
