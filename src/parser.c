@@ -222,9 +222,6 @@ opcode_t get_operator()
     return op;
 }
 
-/**
- *
- */
 var_t *promote_unchecked(block_t *block,
                          basic_block_t **bb,
                          var_t *var,
@@ -233,7 +230,8 @@ var_t *promote_unchecked(block_t *block,
 {
     var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
     gen_name_to(rd->var_name);
-    add_insn(block, *bb, OP_sign_ext, rd, var, NULL, target_type->size, NULL);
+    add_insn(block, *bb, OP_sign_ext, rd, var, NULL,
+             target_ptr ? PTR_SIZE : target_type->size, NULL);
     return rd;
 }
 
@@ -263,7 +261,8 @@ var_t *truncate_unchecked(block_t *block,
 {
     var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
     gen_name_to(rd->var_name);
-    add_insn(block, *bb, OP_trunc, rd, var, NULL, target_type->size, NULL);
+    add_insn(block, *bb, OP_trunc, rd, var, NULL,
+             target_ptr ? PTR_SIZE : target_type->size, NULL);
     return rd;
 }
 
