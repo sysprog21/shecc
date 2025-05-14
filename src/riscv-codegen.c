@@ -97,11 +97,10 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 4;
         return;
     case OP_sign_ext:
-        elf_offset += 12;
+        elf_offset += 4;
         return;
     default:
-        printf("Unknown opcode\n");
-        abort();
+        error_no_loc("Unknown opcode");
     }
 }
 
@@ -403,26 +402,28 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__xori(rd, rd, 1));
         return;
     case OP_trunc:
-        if (ph2_ir->src1 == 1) {
+        if (ph2_ir->src1 == 1)
             rs2 = 0xFF;
-        } else if (ph2_ir->src1 == 4) {
+        else if (ph2_ir->src1 == 2)
+            rs2 = 0xFFFF;
+        else if (ph2_ir->src1 == 4)
             rs2 = 0xFFFFFFFF;
-        } else {
-            printf("Unsupported truncation operation with target size %d\n",
-                   ph2_ir->src1);
-            abort();
-        }
+        else
+            error_no_loc(
+                "Unsupported truncation operation with invalid target size");
 
         emit(__andi(rd, rs1, rs2));
         return;
     case OP_sign_ext:
+        /* TODO: Allow to sign extends to other types */
         emit(__andi(rs1, rs1, 0xFF));
         emit(__slli(rs1, rs1, 24));
         emit(__srai(rd, rs1, 24));
+        /* TODO: Allow user to switch to Zbb extension if needed */
+        /* emit(__sext_b(rd, rs1)); */
         return;
     default:
-        printf("Unknown opcode\n");
-        abort();
+        error_no_loc("Unknown opcode");
     }
 }
 

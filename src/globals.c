@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -691,9 +692,7 @@ int size_var(var_t *var)
     if (var->is_ptr > 0 || var->is_func) {
         size = 4;
     } else {
-        type_t *type = find_type(var->type_name, 0);
-        if (!type)
-            error("Incomplete type");
+        type_t *type = var->type;
         if (type->size == 0)
             size = type->base_struct->size;
         else
@@ -1018,6 +1017,14 @@ void global_release()
     strbuf_free(elf_section);
 }
 
+/* Reports an error without specifying a position */
+void error_no_loc(char *msg)
+{
+    printf("[Error]: %s\n", msg);
+    abort();
+}
+
+/* Reports an error and specifying a position */
 void error(char *msg)
 {
     /* Construct error source diagnostics, enabling precise identification of
@@ -1081,7 +1088,7 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             continue;
         case OP_allocat:
             print_indent(1);
-            printf("allocat %s", rd->type_name);
+            printf("allocat %s", rd->type->type_name);
 
             for (int i = 0; i < rd->is_ptr; i++)
                 printf("*");
@@ -1287,7 +1294,7 @@ void dump_insn()
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         bool at_func_start = true;
 
-        printf("def %s", func->return_def.type_name);
+        printf("def %s", func->return_def.type->type_name);
 
         for (int i = 0; i < func->return_def.is_ptr; i++)
             printf("*");
@@ -1296,11 +1303,11 @@ void dump_insn()
         for (int i = 0; i < func->num_params; i++) {
             if (i != 0)
                 printf(", ");
-            printf("%s", func->param_defs[i].type_name);
+            printf("%s", func->param_defs[i].type->type_name);
 
             for (int k = 0; k < func->param_defs[i].is_ptr; k++)
                 printf("*");
-            printf(" %%%s", func->param_defs[i].var_name);
+            printf(" %%%s", func->param_defs[i].type->type_name);
         }
         printf(") {\n");
 
@@ -1312,7 +1319,7 @@ void dump_insn()
             if (!bb)
                 continue;
 
-            if (strcmp(func->return_def.type_name, "void"))
+            if (func->return_def.type != TY_void)
                 continue;
 
             if (bb->insn_list.tail)

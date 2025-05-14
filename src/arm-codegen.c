@@ -126,8 +126,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 4;
         return;
     default:
-        printf("Unknown opcode\n");
-        abort();
+        error_no_loc("Unknown opcode");
     }
 }
 
@@ -428,24 +427,24 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mov_i(__EQ, rd, 1));
         return;
     case OP_trunc:
-        if (rm == 1) {
+        if (rm == 1)
             rm = 0xFF;
-        } else if (rm == 4) {
+        else if (rm == 2)
+            rm = 0xFFFF;
+        else if (rm == 4)
             rm = 0xFFFFFFFF;
-        } else {
-            printf("Unsupported truncation operation with target size %d\n",
-                   rm);
-            abort();
-        }
+        else
+            error_no_loc(
+                "Unsupported truncation operation with invalid target size");
 
         emit(__and_i(__AL, rd, rn, rm));
         return;
     case OP_sign_ext:
+        /* TODO: Allow to sign extends to other types */
         emit(__sxtb(__AL, rd, rn, 0));
         return;
     default:
-        printf("Unknown opcode\n");
-        abort();
+        error_no_loc("Unknown opcode");
     }
 }
 

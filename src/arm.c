@@ -357,10 +357,8 @@ int __teq(arm_reg rd)
 
 int __sxtb(arm_cond_t cond, arm_reg rd, arm_reg rm, int rotation)
 {
-    if (rotation != 0 && rotation != 8 && rotation != 16 && rotation != 24) {
-        printf("SXTB rotation must be 0, 8, 16, or 24\n");
-        abort();
-    }
+    if (rotation != 0 && rotation != 8 && rotation != 16 && rotation != 24)
+        error_no_loc("SXTB rotation must be 0, 8, 16, or 24");
 
     return arm_encode(cond, 106, 0xF, rd,
                       rm | ((rotation >> 3) << 10) | (0x7 << 4));

@@ -290,7 +290,6 @@ typedef struct var_list {
 } var_list_t;
 
 struct var {
-    char type_name[MAX_TYPE_LEN];
     type_t *type;
     char var_name[MAX_VAR_LEN];
     int is_ptr;

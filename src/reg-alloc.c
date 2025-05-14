@@ -258,9 +258,9 @@ void reg_alloc()
                     GLOBAL_FUNC->stack_size +=
                         align_size(PTR_SIZE * global_insn->rd->array_size);
                 else {
-                    type_t *type = find_type(global_insn->rd->type_name, 0);
                     GLOBAL_FUNC->stack_size +=
-                        align_size(global_insn->rd->array_size * type->size);
+                        align_size(global_insn->rd->array_size *
+                                   global_insn->rd->type->size);
                 }
 
                 dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, -1, -1);
@@ -272,11 +272,11 @@ void reg_alloc()
                 global_insn->rd->offset = GLOBAL_FUNC->stack_size;
                 if (global_insn->rd->is_ptr)
                     GLOBAL_FUNC->stack_size += PTR_SIZE;
-                else if (strcmp(global_insn->rd->type_name, "int") &&
-                         strcmp(global_insn->rd->type_name, "char") &&
-                         strcmp(global_insn->rd->type_name, "_Bool")) {
-                    type_t *type = find_type(global_insn->rd->type_name, 0);
-                    GLOBAL_FUNC->stack_size += align_size(type->size);
+                else if (global_insn->rd->type != TY_int &&
+                         global_insn->rd->type != TY_char &&
+                         global_insn->rd->type != TY_bool) {
+                    GLOBAL_FUNC->stack_size +=
+                        align_size(global_insn->rd->type->size);
                 } else
                     /* 'char' is aligned to one byte for the convenience */
                     GLOBAL_FUNC->stack_size += 4;
@@ -362,10 +362,10 @@ void reg_alloc()
                     ir->src1 = insn->rd->offset;
                     break;
                 case OP_allocat:
-                    if ((!strcmp(insn->rd->type_name, "void") ||
-                         !strcmp(insn->rd->type_name, "int") ||
-                         !strcmp(insn->rd->type_name, "char") ||
-                         !strcmp(insn->rd->type_name, "_Bool")) &&
+                    if ((insn->rd->type == TY_void ||
+                         insn->rd->type == TY_int ||
+                         insn->rd->type == TY_char ||
+                         insn->rd->type == TY_bool) &&
                         insn->rd->array_size == 0)
                         break;
 
@@ -376,8 +376,7 @@ void reg_alloc()
                     if (insn->rd->is_ptr)
                         sz = PTR_SIZE;
                     else {
-                        type_t *type = find_type(insn->rd->type_name, 0);
-                        sz = type->size;
+                        sz = insn->rd->type->size;
                     }
 
                     if (insn->rd->array_size)
@@ -637,7 +636,7 @@ void reg_alloc()
             if (!bb)
                 continue;
 
-            if (strcmp(func->return_def.type_name, "void"))
+            if (func->return_def.type != TY_void)
                 continue;
 
             if (bb->insn_list.tail)

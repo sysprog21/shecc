@@ -122,11 +122,11 @@ int write_symbol(char *data)
     return start_len;
 }
 
-int get_size(var_t *var, type_t *type)
+int get_size(var_t *var)
 {
     if (var->is_ptr || var->is_func)
         return PTR_SIZE;
-    return type->size;
+    return var->type->size;
 }
 
 int get_operator_prio(opcode_t op)
@@ -222,22 +222,72 @@ opcode_t get_operator()
     return op;
 }
 
-var_t *promote(block_t *block, basic_block_t **bb, var_t *var)
+/**
+ *
+ */
+var_t *promote_unchecked(block_t *block,
+                         basic_block_t **bb,
+                         var_t *var,
+                         type_t *target_type,
+                         int target_ptr)
+{
+    var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
+    gen_name_to(rd->var_name);
+    add_insn(block, *bb, OP_sign_ext, rd, var, NULL, target_type->size, NULL);
+    return rd;
+}
+
+var_t *promote(block_t *block,
+               basic_block_t **bb,
+               var_t *var,
+               type_t *target_type,
+               int target_ptr)
 {
     /* Effectively checking whether var has size of int */
-    if (var->type->size == 4 || var->is_ptr || var->array_size != 0)
+    if (var->type->size == target_type->size || var->is_ptr || var->array_size)
         return var;
 
-    if (var->type->size > 4 && !var->is_ptr) {
+    if (var->type->size > TY_int->size && !var->is_ptr) {
         printf("Warning: Suspicious type promotion %s\n", var->type->type_name);
         return var;
     }
 
-    var_t *rd = require_var(block);
-    gen_name_to(rd->var_name);
-    add_insn(block, *bb, OP_sign_ext, rd, var, NULL, 4, NULL);
+    return promote_unchecked(block, bb, var, target_type, target_ptr);
+}
 
+var_t *truncate_unchecked(block_t *block,
+                          basic_block_t **bb,
+                          var_t *var,
+                          type_t *target_type,
+                          int target_ptr)
+{
+    var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
+    gen_name_to(rd->var_name);
+    add_insn(block, *bb, OP_trunc, rd, var, NULL, target_type->size, NULL);
     return rd;
+}
+
+var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
+{
+    bool is_from_ptr = from->is_ptr || from->array_size,
+         is_to_ptr = to->is_ptr || to->array_size;
+
+    if (is_from_ptr && is_to_ptr)
+        return from;
+
+    int from_size = get_size(from), to_size = get_size(to);
+
+    if (from_size > to_size) {
+        /* Truncation */
+        return truncate_unchecked(block, bb, from, to->type, to->is_ptr);
+    }
+
+    if (from_size < to_size) {
+        /* Sign extend */
+        return promote_unchecked(block, bb, from, to->type, to->is_ptr);
+    }
+
+    return from;
 }
 
 int read_numeric_constant(char buffer[])
@@ -655,8 +705,7 @@ void read_full_var_decl(var_t *vd, int anon, int is_param)
 {
     char type_name[MAX_TYPE_LEN];
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-    lex_ident(T_identifier, vd->type_name);
-    strcpy(type_name, vd->type_name);
+    lex_ident(T_identifier, type_name);
     type_t *type = find_type(type_name, find_type_flag);
 
     if (!type) {
@@ -672,7 +721,6 @@ void read_full_var_decl(var_t *vd, int anon, int is_param)
 /* starting next_token, need to check the type */
 void read_partial_var_decl(var_t *vd, var_t *template)
 {
-    strcpy(vd->type_name, template->type_name);
     read_inner_var_decl(vd, 0, 0);
 }
 
@@ -790,8 +838,13 @@ void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
 
         param = opstack_pop();
 
-        if (func && param_num >= func->num_params && func->va_args) {
-            param = promote(parent, bb, param);
+        if (func) {
+            if (param_num >= func->num_params && func->va_args) {
+                param = promote(parent, bb, param, TY_int, 0);
+            } else {
+                param =
+                    resize_var(parent, bb, param, &func->param_defs[param_num]);
+            }
         }
 
         params[param_num++] = param;
@@ -1269,8 +1322,8 @@ void read_lvalue(lvalue_t *lvalue,
     /* already peeked and have the variable */
     lex_expect(T_identifier);
 
-    lvalue->type = find_type(var->type_name, 0);
-    lvalue->size = get_size(var, lvalue->type);
+    lvalue->type = var->type;
+    lvalue->size = get_size(var);
     lvalue->is_ptr = var->is_ptr;
     lvalue->is_func = var->is_func;
     lvalue->is_reference = false;
@@ -1368,10 +1421,10 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* change type currently pointed to */
             var = find_member(token, lvalue->type);
-            lvalue->type = find_type(var->type_name, 0);
+            lvalue->type = var->type;
             lvalue->is_ptr = var->is_ptr;
             lvalue->is_func = var->is_func;
-            lvalue->size = get_size(var, lvalue->type);
+            lvalue->size = get_size(var);
 
             /* if it is an array, get the address of first element instead of
              * its value.
@@ -1829,6 +1882,7 @@ bool read_body_assignment(char *token,
                 if (lvalue.is_reference) {
                     add_insn(parent, *bb, OP_write, NULL, t, vd, size, NULL);
                 } else {
+                    vd = resize_var(parent, bb, vd, t);
                     add_insn(parent, *bb, OP_assign, t, vd, NULL, 0, NULL);
                 }
             } else {
@@ -1868,14 +1922,7 @@ bool read_body_assignment(char *token,
                     add_insn(parent, *bb, OP_write, NULL, t, vd, lvalue.size,
                              NULL);
                 } else {
-                    if (lvalue.type->size < vd->type->size) {
-                        rs1 = require_typed_var(parent, TY_char);
-                        gen_name_to(rs1->var_name);
-                        add_insn(parent, *bb, OP_trunc, rs1, vd, NULL,
-                                 lvalue.size, NULL);
-                        vd = rs1;
-                    }
-
+                    vd = resize_var(parent, bb, vd, t);
                     add_insn(parent, *bb, OP_assign, t, vd, NULL, 0, NULL);
                 }
             }
@@ -1894,6 +1941,7 @@ bool read_body_assignment(char *token,
             } else {
                 rs1 = opstack_pop();
                 vd = opstack_pop();
+                rs1 = resize_var(parent, bb, rs1, vd);
                 add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
             }
         }
@@ -2447,7 +2495,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             int find_type_flag = lex_accept(T_struct) ? 2 : 1;
             type = find_type(token, find_type_flag);
             if (type) {
-                var = require_var(blk);
+                var = require_typed_var(blk, type);
                 read_full_var_decl(var, 0, 0);
                 add_insn(blk, setup, OP_allocat, var, NULL, NULL, 0, NULL);
                 add_symbol(setup, var);
@@ -2455,7 +2503,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     read_expr(blk, &setup);
                     read_ternary_operation(blk, &setup);
 
-                    rs1 = opstack_pop();
+                    rs1 = resize_var(parent, &bb, opstack_pop(), var);
                     add_insn(blk, setup, OP_assign, var, rs1, NULL, 0, NULL);
                 }
                 while (lex_accept(T_comma)) {
@@ -2465,14 +2513,14 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     perform_side_effect(blk, setup);
 
                     /* multiple (partial) declarations */
-                    nv = require_var(blk);
+                    nv = require_typed_var(blk, type);
                     read_partial_var_decl(nv, var); /* partial */
                     add_insn(blk, setup, OP_allocat, nv, NULL, NULL, 0, NULL);
                     add_symbol(setup, nv);
                     if (lex_accept(T_assign)) {
                         read_expr(blk, &setup);
 
-                        rs1 = opstack_pop();
+                        rs1 = resize_var(parent, &bb, opstack_pop(), nv);
                         add_insn(blk, setup, OP_assign, nv, rs1, NULL, 0, NULL);
                     }
                 }
@@ -2604,7 +2652,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             read_expr(parent, &bb);
             read_ternary_operation(parent, &bb);
 
-            rs1 = opstack_pop();
+            rs1 = resize_var(parent, &bb, opstack_pop(), var);
             add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
         }
         while (lex_accept(T_comma)) {
@@ -2621,7 +2669,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             if (lex_accept(T_assign)) {
                 read_expr(parent, &bb);
 
-                rs1 = opstack_pop();
+                rs1 = resize_var(parent, &bb, opstack_pop(), nv);
                 add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
             }
         }
