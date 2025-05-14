@@ -1,11 +1,11 @@
-RISCV_EXEC = qemu-riscv32
-RISCV_EXEC := $(shell which $(RISCV_EXEC))
-ifndef RISCV_EXEC
+TARGET_EXEC = qemu-riscv32
+TARGET_EXEC := $(shell which $(TARGET_EXEC))
+ifndef TARGET_EXEC
 $(warning "no qemu-riscv32 found. Please check package installation")
-RISCV_EXEC = echo WARN: unable to run
+TARGET_EXEC = echo WARN: unable to run
 endif
 
-export RISCV_EXEC
+export TARGET_EXEC
 
 riscv-specific-defs = \
     $(Q)$(PRINTF) \

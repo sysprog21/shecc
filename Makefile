@@ -17,8 +17,6 @@ CFLAGS := -O -g \
 BUILD_SESSION := .session.mk
 
 include mk/common.mk
-include mk/arm.mk
-include mk/riscv.mk
 -include $(BUILD_SESSION)
 
 STAGE0 := shecc
@@ -43,11 +41,7 @@ all: config bootstrap
 ifeq (,$(filter $(ARCH),$(ARCHS)))
 $(error Support ARM and RISC-V only. Select the target with "ARCH=arm" or "ARCH=riscv")
 endif
-
-ifneq ("$(wildcard $(PWD)/config)","")
-TARGET_EXEC := $($(shell head -1 config | sed 's/.*: \([^ ]*\).*/\1/')_EXEC)
-endif
-export TARGET_EXEC
+include mk/$(ARCH).mk
 
 config:
 	$(Q)ln -s $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c

@@ -1,15 +1,15 @@
 ifeq ($(HOST_ARCH),armv7l) # detect ARMv7-A only and assume Linux-compatible
-    ARM_EXEC :=
+    TARGET_EXEC :=
 else
-    ARM_EXEC = qemu-arm
-    ARM_EXEC := $(shell which $(ARM_EXEC))
-    ifndef ARM_EXEC
+    TARGET_EXEC = qemu-arm
+    TARGET_EXEC := $(shell which $(TARGET_EXEC))
+    ifndef TARGET_EXEC
     $(warning "no qemu-arm found. Please check package installation")
     ARM_EXEC = echo WARN: unable to run
     endif
 endif
 
-export ARM_EXEC
+export TARGET_EXEC
 
 arm-specific-defs = \
     $(Q)$(PRINTF) \
