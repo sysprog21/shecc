@@ -416,9 +416,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_sign_ext:
         /* TODO: Allow to sign extends to other types */
-        emit(__andi(rs1, rs1, 0xFF));
-        emit(__slli(rs1, rs1, 24));
-        emit(__srai(rd, rs1, 24));
+        emit(__andi(rd, rs1, 0xFF));
+        emit(__slli(rd, rd, 24));
+        emit(__srai(rd, rd, 24));
         /* TODO: Allow user to switch to Zbb extension if needed */
         /* emit(__sext_b(rd, rs1)); */
         return;
