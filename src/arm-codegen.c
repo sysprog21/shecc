@@ -126,7 +126,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 4;
         return;
     default:
-        error_no_loc("Unknown opcode");
+        fatal("Unknown opcode");
     }
 }
 
@@ -434,8 +434,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         else if (rm == 4)
             rm = 0xFFFFFFFF;
         else
-            error_no_loc(
-                "Unsupported truncation operation with invalid target size");
+            fatal("Unsupported truncation operation with invalid target size");
 
         emit(__and_i(__AL, rd, rn, rm));
         return;
@@ -444,7 +443,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sxtb(__AL, rd, rn, 0));
         return;
     default:
-        error_no_loc("Unknown opcode");
+        fatal("Unknown opcode");
     }
 }
 

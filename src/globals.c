@@ -1017,7 +1017,7 @@ void global_release()
 }
 
 /* Reports an error without specifying a position */
-void error_no_loc(char *msg)
+void fatal(char *msg)
 {
     printf("[Error]: %s\n", msg);
     abort();
@@ -1054,8 +1054,8 @@ void error(char *msg)
     /* TODO: figure out the corresponding C source file path and report line
      * number.
      */
-    printf("Error %s at source location %d\n%s\n", msg, SOURCE->size,
-           diagnostic);
+    printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg,
+           SOURCE->size, diagnostic);
     abort();
 }
 
