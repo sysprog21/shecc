@@ -566,9 +566,8 @@ bool var_check_in_scope(var_t *var, block_t *block)
     func_t *func = block->func;
 
     while (block) {
-        for (int i = 0; i < block->next_local; i++) {
-            var_t *locals = block->locals;
-            if (var == &locals[i])
+        for (int i = 0; i < block->locals.capacity; i++) {
+            if (var == block->locals.elements[i])
                 return true;
         }
         block = block->parent;
@@ -1125,6 +1124,17 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
                 sprintf(str, "<%s<SUB>%d</SUB> := !%s<SUB>%d</SUB>>",
                         insn->rd->var_name, insn->rd->subscript,
                         insn->rs1->var_name, insn->rs1->subscript);
+                break;
+            case OP_trunc:
+                sprintf(str, "<%s<SUB>%d</SUB> := trunc %s<SUB>%d</SUB>, %d>",
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript, insn->sz);
+                break;
+            case OP_sign_ext:
+                sprintf(str,
+                        "<%s<SUB>%s</SUB> := sign_ext %s<SUB>%d</SUB>, %d>",
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript, insn->sz);
                 break;
             default:
                 printf("Unknown opcode\n");
