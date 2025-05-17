@@ -1306,7 +1306,7 @@ void dump_insn()
 
             for (int k = 0; k < func->param_defs[i].is_ptr; k++)
                 printf("*");
-            printf(" %%%s", func->param_defs[i].type->type_name);
+            printf(" %%%s", func->param_defs[i].var_name);
         }
         printf(") {\n");
 

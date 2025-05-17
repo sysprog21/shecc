@@ -41,9 +41,10 @@ var_t *require_var(block_t *blk)
     var_list_t *var_list = &blk->locals;
 
     if (var_list->size >= var_list->capacity) {
-        var_list->capacity *= 2;
+        var_list->capacity <<= 1;
 
-        var_t **new_locals = calloc(var_list->capacity, sizeof(var_t *));
+        var_t **new_locals =
+            arena_alloc(BLOCK_ARENA, var_list->capacity * sizeof(var_t *));
         memcpy(new_locals, var_list->elements,
                var_list->size * sizeof(var_t *));
         var_list->elements = new_locals;
