@@ -728,6 +728,17 @@ void read_parameter_list_decl(func_t *func, int anon)
 {
     int vn = 0;
     lex_expect(T_open_bracket);
+
+    char token[MAX_TYPE_LEN];
+    if (lex_peek(T_identifier, token) && !strncmp(token, "void", 4)) {
+        next_token = lex_token();
+        if (lex_accept(T_close_bracket))
+            return;
+        func->param_defs[vn].type = TY_void;
+        read_inner_var_decl(&func->param_defs[vn++], anon, 1);
+        lex_accept(T_comma);
+    }
+
     while (lex_peek(T_identifier, NULL) == 1) {
         read_full_var_decl(&func->param_defs[vn++], anon, 1);
         lex_accept(T_comma);
