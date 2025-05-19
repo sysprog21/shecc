@@ -248,6 +248,10 @@ typedef enum {
     OP_bit_not,
     OP_negate,
 
+    /* data type conversion */
+    OP_trunc,
+    OP_sign_ext,
+
     /* entry point of the state machine */
     OP_start
 } opcode_t;
@@ -276,8 +280,17 @@ typedef struct use_chain_node {
     struct use_chain_node *prev;
 } use_chain_t;
 
+typedef struct var var_t;
+typedef struct type type_t;
+
+typedef struct var_list {
+    int capacity;
+    int size;
+    var_t **elements;
+} var_list_t;
+
 struct var {
-    char type_name[MAX_TYPE_LEN];
+    type_t *type;
     char var_name[MAX_VAR_LEN];
     int is_ptr;
     bool is_func;
@@ -302,8 +315,6 @@ struct var {
     bool is_const; /* whether a constant representaion or not */
 };
 
-typedef struct var var_t;
-
 typedef struct {
     char name[MAX_VAR_LEN];
     bool is_variadic;
@@ -319,22 +330,14 @@ typedef struct func func_t;
 
 /* block definition */
 struct block {
-    var_t locals[MAX_LOCALS];
-    int next_local;
+    var_list_t locals;
     struct block *parent;
     func_t *func;
     macro_t *macro;
-    int locals_size;
     struct block *next;
 };
 
 typedef struct block block_t;
-
-typedef struct {
-    block_t *head;
-    block_t *tail;
-} block_list_t;
-
 typedef struct basic_block basic_block_t;
 
 /* Definition of a growable buffer for a mutable null-terminated string
@@ -373,8 +376,6 @@ struct type {
     var_t fields[MAX_FIELDS];
     int num_fields;
 };
-
-typedef struct type type_t;
 
 /* lvalue details */
 typedef struct {
