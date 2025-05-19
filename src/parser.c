@@ -735,7 +735,11 @@ void read_parameter_list_decl(func_t *func, int anon)
         if (lex_accept(T_close_bracket))
             return;
         func->param_defs[vn].type = TY_void;
-        read_inner_var_decl(&func->param_defs[vn++], anon, 1);
+        read_inner_var_decl(&func->param_defs[vn], anon, 1);
+        if (!func->param_defs[vn].is_ptr && !func->param_defs[vn].is_func &&
+            !func->param_defs[vn].array_size)
+            error("'void' must be the only parameter and unnamed");
+        vn++;
         lex_accept(T_comma);
     }
 
