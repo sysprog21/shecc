@@ -63,7 +63,7 @@ bool is_numeric(char buffer[])
     return true;
 }
 
-void skip_whitespace()
+void skip_whitespace(void)
 {
     while (true) {
         if (is_linebreak(next_char)) {
@@ -533,13 +533,13 @@ token_t lex_token_internal(bool aliasing)
 /* Lex next token and returns its token type. To disable aliasing on next
  * token, use 'lex_token_internal'.
  */
-token_t lex_token()
+token_t lex_token(void)
 {
     return lex_token_internal(true);
 }
 
 /* Skip the content. We only need the index where the macro body begins. */
-void skip_macro_body()
+void skip_macro_body(void)
 {
     while (!is_newline(next_char))
         next_token = lex_token();

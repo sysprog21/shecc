@@ -108,7 +108,7 @@ void opstack_push(var_t *var)
     operand_stack[operand_stack_idx++] = var;
 }
 
-var_t *opstack_pop()
+var_t *opstack_pop(void)
 {
     return operand_stack[--operand_stack_idx];
 }
@@ -179,7 +179,7 @@ int get_unary_operator_prio(opcode_t op)
     }
 }
 
-opcode_t get_operator()
+opcode_t get_operator(void)
 {
     opcode_t op = OP_generic;
     if (lex_accept(T_plus))
@@ -317,7 +317,7 @@ int read_numeric_constant(char buffer[])
     return value;
 }
 
-int read_constant_expr_operand()
+int read_constant_expr_operand(void)
 {
     char buffer[MAX_ID_LEN];
     int value;
@@ -449,7 +449,7 @@ int read_constant_infix_expr(int precedence)
     return lhs;
 }
 
-int read_constant_expr()
+int read_constant_expr(void)
 {
     return read_constant_infix_expr(0);
 }
@@ -457,7 +457,7 @@ int read_constant_expr()
 /* Skips lines where preprocessor match is false, this will stop once next
  * token is either 'T_cppd_elif', 'T_cppd_else' or 'cppd_endif'.
  */
-void cppd_control_flow_skip_lines()
+void cppd_control_flow_skip_lines(void)
 {
     while (!lex_peek(T_cppd_elif, NULL) && !lex_peek(T_cppd_else, NULL) &&
            !lex_peek(T_cppd_endif, NULL)) {
@@ -472,7 +472,7 @@ void check_def(char *alias, bool expected)
         preproc_match = true;
 }
 
-void read_defined_macro()
+void read_defined_macro(void)
 {
     char lookup_alias[MAX_TOKEN_LEN];
 
@@ -487,7 +487,7 @@ void read_defined_macro()
 /* read preprocessor directive at each potential positions: e.g.,
  * global statement / body statement
  */
-bool read_preproc_directive()
+bool read_preproc_directive(void)
 {
     char token[MAX_ID_LEN];
 
@@ -1969,7 +1969,7 @@ bool read_body_assignment(char *token,
     return false;
 }
 
-int read_primary_constant()
+int read_primary_constant(void)
 {
     /* return signed constant */
     int isneg = 0, res;
@@ -2834,7 +2834,7 @@ void read_global_decl(block_t *block)
     error("Syntax error in global declaration");
 }
 
-void read_global_statement()
+void read_global_statement(void)
 {
     char token[MAX_ID_LEN];
     block_t *block = GLOBAL_BLOCK; /* global block */
@@ -2953,7 +2953,7 @@ void read_global_statement()
         error("Syntax error in global statement");
 }
 
-void parse_internal()
+void parse_internal(void)
 {
     /* set starting point of global stack manually */
     GLOBAL_FUNC = add_func("", true);

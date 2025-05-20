@@ -146,7 +146,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
     return false;
 }
 
-void peephole()
+void peephole(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {

@@ -600,7 +600,7 @@ int find_macro_param_src_idx(char *name, block_t *parent)
     return 0;
 }
 
-type_t *add_type()
+type_t *add_type(void)
 {
     return &TYPES[types_idx++];
 }
@@ -970,7 +970,7 @@ void strbuf_free(strbuf_t *src)
 /* This routine is required because the global variable initializations are
  * not supported now.
  */
-void global_init()
+void global_init(void)
 {
     elf_code_start = ELF_START + elf_header_len;
 
@@ -994,7 +994,7 @@ void global_init()
     elf_section = strbuf_create(MAX_SECTION);
 }
 
-void global_release()
+void global_release(void)
 {
     free(MACROS);
     free(TYPES);
@@ -1286,7 +1286,7 @@ void dump_bb_insn_by_dom(func_t *func, basic_block_t *bb, bool *at_func_start)
     }
 }
 
-void dump_insn()
+void dump_insn(void)
 {
     printf("==<START OF INSN DUMP>==\n");
 
