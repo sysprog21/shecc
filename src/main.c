@@ -62,6 +62,8 @@ int main(int argc, char *argv[])
             } else
                 /* unsupported options */
                 abort();
+        } else if (argv[i][0] == '-') {
+            fatal("Unidentified option");
         } else
             in = argv[i];
     }

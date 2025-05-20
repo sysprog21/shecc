@@ -709,8 +709,8 @@ void read_full_var_decl(var_t *vd, int anon, int is_param)
     type_t *type = find_type(type_name, find_type_flag);
 
     if (!type) {
-        printf("Could find type %s%s\n", find_type_flag == 2 ? "struct " : "",
-               type_name);
+        printf("Could not find type %s%s\n",
+               find_type_flag == 2 ? "struct " : "", type_name);
         abort();
     }
 
