@@ -47,7 +47,7 @@ void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
         strbuf_putc(elf_array, ptr[i]);
 }
 
-void elf_generate_header()
+void elf_generate_header(void)
 {
     elf32_hdr_t hdr;
     /*
@@ -173,7 +173,7 @@ void elf_generate_header()
     elf_write_blk(elf_header, &phdr, sizeof(elf32_phdr_t));
 }
 
-void elf_generate_sections()
+void elf_generate_sections(void)
 {
     /* symtab section */
     for (int b = 0; b < elf_symtab->size; b++)
@@ -310,7 +310,7 @@ void elf_generate_sections()
     elf_write_blk(elf_section, &shdr, sizeof(elf32_shdr_t));
 }
 
-void elf_align()
+void elf_align(void)
 {
     while (elf_data->size & 3)
         elf_write_byte(elf_data, 0);

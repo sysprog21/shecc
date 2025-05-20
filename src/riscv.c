@@ -372,17 +372,17 @@ int __auipc(rv_reg rd, int imm)
     return rv_encode_U(rv_auipc, rd, imm);
 }
 
-int __ecall()
+int __ecall(void)
 {
     return rv_encode_I(rv_ecall, __zero, __zero, 0);
 }
 
-int __ebreak()
+int __ebreak(void)
 {
     return rv_encode_I(rv_ebreak, __zero, __zero, 1);
 }
 
-int __nop()
+int __nop(void)
 {
     return __addi(__zero, __zero, 0);
 }

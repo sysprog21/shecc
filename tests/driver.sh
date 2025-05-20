@@ -267,6 +267,12 @@ int main() { return 0; }
 EOF
 
 # functions
+try_ 0 << EOF
+int main(void) {
+    return 0;
+}
+EOF
+
 try_ 55 << EOF
 int sum(int m, int n) {
     int acc;
@@ -317,6 +323,14 @@ int main() {
     printf("%d %d %d\n", a, b, c);
     return 0;
 }
+EOF
+
+try_compile_error << EOF
+int main(void v) {}
+EOF
+
+try_compile_error << EOF
+int main(void, int i) {}
 EOF
 
 # Unreachable declaration should not cause prog seg-falut (prog should leave normally with exit code 0)

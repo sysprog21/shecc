@@ -240,7 +240,7 @@ void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
         var->consumed = insn->idx + offset;
 }
 
-void reg_alloc()
+void reg_alloc(void)
 {
     /* TODO: .bss and .data section */
     for (insn_t *global_insn = GLOBAL_FUNC->bbs->insn_list.head; global_insn;
@@ -649,7 +649,7 @@ void reg_alloc()
     }
 }
 
-void dump_ph2_ir()
+void dump_ph2_ir(void)
 {
     for (int i = 0; i < ph2_ir_idx; i++) {
         ph2_ir_t *ph2_ir = PH2_IR_FLATTEN[i];

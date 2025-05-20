@@ -45,7 +45,7 @@
 
 typedef int FILE;
 
-void abort();
+void abort(void);
 
 int strlen(char *str)
 {
@@ -458,7 +458,7 @@ int snprintf(char *buffer, int n, char *str, ...)
     return fmtbuf.len;
 }
 
-int __free_all();
+int __free_all(void);
 
 void exit(int exit_code)
 {
@@ -466,7 +466,7 @@ void exit(int exit_code)
     __syscall(__syscall_exit, exit_code);
 }
 
-void abort()
+void abort(void)
 {
     printf("Abnormal program termination\n");
     exit(-1);
@@ -698,7 +698,7 @@ void __rfree(void *ptr, int size)
     __syscall(__syscall_munmap, ptr, size);
 }
 
-int __free_all()
+int __free_all(void)
 {
     if (!__freelist_head && !__alloc_head)
         return 0;

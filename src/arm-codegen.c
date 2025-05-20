@@ -130,7 +130,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     }
 }
 
-void cfg_flatten()
+void cfg_flatten(void)
 {
     func_t *func = find_func("__syscall");
     func->bbs->elf_offset = 44; /* offset of start + exit in codegen */
@@ -447,7 +447,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     }
 }
 
-void code_generate()
+void code_generate(void)
 {
     elf_data_start = elf_code_start + elf_offset;
 
