@@ -2078,10 +2078,19 @@ bool read_global_assignment(char *token)
 {
     var_t *vd, *rs1, *var;
     block_t *parent = GLOBAL_BLOCK;
+    basic_block_t *bb = GLOBAL_FUNC->bbs;
 
     /* global initialization must be constant */
     var = find_global_var(token);
     if (var) {
+        if (lex_peek(T_string, NULL)) {
+            read_literal_param(parent, bb);
+            rs1 = opstack_pop();
+            vd = var;
+            add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
+            return true;
+        }
+
         opcode_t op_stack[10];
         opcode_t op, next_op;
         int val_stack[10];
@@ -2094,13 +2103,11 @@ bool read_global_assignment(char *token)
             vd = require_var(parent);
             gen_name_to(vd->var_name);
             vd->init_val = operand1;
-            add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant, vd, NULL, NULL,
-                     0, NULL);
+            add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
             rs1 = vd;
             vd = opstack_pop();
-            add_insn(parent, GLOBAL_FUNC->bbs, OP_assign, vd, rs1, NULL, 0,
-                     NULL);
+            add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
             return true;
         }
         if (op == OP_ternary) {
@@ -2115,13 +2122,11 @@ bool read_global_assignment(char *token)
             vd = require_var(parent);
             gen_name_to(vd->var_name);
             vd->init_val = eval_expression_imm(op, operand1, operand2);
-            add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant, vd, NULL, NULL,
-                     0, NULL);
+            add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
             rs1 = vd;
             vd = opstack_pop();
-            add_insn(parent, GLOBAL_FUNC->bbs, OP_assign, vd, rs1, NULL, 0,
-                     NULL);
+            add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
             return true;
         }
         if (op == OP_ternary) {
@@ -2187,13 +2192,12 @@ bool read_global_assignment(char *token)
                     vd = require_var(parent);
                     gen_name_to(vd->var_name);
                     vd->init_val = val_stack[0];
-                    add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant, vd,
-                             NULL, NULL, 0, NULL);
+                    add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0,
+                             NULL);
 
                     rs1 = vd;
                     vd = opstack_pop();
-                    add_insn(parent, GLOBAL_FUNC->bbs, OP_assign, vd, rs1, NULL,
-                             0, NULL);
+                    add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
                 }
                 return true;
             }
@@ -2817,13 +2821,13 @@ void read_global_decl(block_t *block)
 
     /* is a variable */
     if (lex_accept(T_assign)) {
-        if (var->is_ptr == 0 && var->array_size == 0) {
+        if (var->array_size == 0) {
             read_global_assignment(var->var_name);
             lex_expect(T_semicolon);
             return;
         }
-        /* TODO: support global initialization for array and pointer */
-        error("Global initialization for array and pointer not supported");
+        /* TODO: support global initialization for array */
+        error("Global initialization for array is not supported");
     } else if (lex_accept(T_comma))
         /* TODO: continuation */
         error("Global continuation not supported");
