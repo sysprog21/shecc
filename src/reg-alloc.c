@@ -283,8 +283,9 @@ void reg_alloc(void)
             }
             break;
         case OP_load_constant:
+        case OP_load_data_address:
             dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, -1, -1);
-            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_load_constant);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
             ir->src0 = global_insn->rd->init_val;
             ir->dest = dest;
             break;

@@ -1357,6 +1357,19 @@ int main()
 }
 EOF
 
+# global string initialization and modification
+try_output 0 "Hello World!Hallo World!" << EOF
+char *data = "Hello World!";
+
+int main(void)
+{
+    printf(data);
+    data[1] = 'a';
+    printf(data);
+    return 0;
+}
+EOF
+
 # global initialization with logical and equality operation
 try_ 4 << EOF
 int b1 = 1 && 1;

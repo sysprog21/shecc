@@ -880,11 +880,6 @@ void unwind_phi(void)
     free(args);
 }
 
-/*
- * The current cfonrt does not yet support string literal addressing, which
- * results in the omission of basic block visualization during the stage-1 and
- * stage-2 bootstrapping phases.
- */
 #ifdef __SHECC__
 #else
 void bb_dump_connection(FILE *fd,
@@ -896,13 +891,13 @@ void bb_dump_connection(FILE *fd,
 
     switch (type) {
     case NEXT:
-        str = &"%s_%p:s->%s_%p:n\n"[0];
+        str = "%s_%p:s->%s_%p:n\n";
         break;
     case THEN:
-        str = &"%s_%p:sw->%s_%p:n\n"[0];
+        str = "%s_%p:sw->%s_%p:n\n";
         break;
     case ELSE:
-        str = &"%s_%p:se->%s_%p:n\n"[0];
+        str = "%s_%p:se->%s_%p:n\n";
         break;
     default:
         abort();
@@ -911,20 +906,20 @@ void bb_dump_connection(FILE *fd,
     char *pred;
     void *pred_id;
     if (curr->insn_list.tail) {
-        pred = &"insn"[0];
+        pred = "insn";
         pred_id = curr->insn_list.tail;
     } else {
-        pred = &"pseudo"[0];
+        pred = "pseudo";
         pred_id = curr;
     }
 
     char *succ;
     void *succ_id;
     if (next->insn_list.tail) {
-        succ = &"insn"[0];
+        succ = "insn";
         succ_id = next->insn_list.head;
     } else {
-        succ = &"pseudo"[0];
+        succ = "pseudo";
         succ_id = next;
     }
 
