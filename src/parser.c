@@ -2084,6 +2084,13 @@ bool read_global_assignment(char *token)
     var = find_global_var(token);
     if (var) {
         if (lex_peek(T_string, NULL)) {
+            /* FIXME: Current implementation lacks of considerations:
+             * 1. string literal should be stored in .rodata section of elf
+             * 2. this does not respect the variable type, if var is char *,
+             *    then simply assign the data address of string literal,
+             *    otherwise, if var is char[], then copies the string and
+             *    mutate the size of var here.
+             */
             read_literal_param(parent, bb);
             rs1 = opstack_pop();
             vd = var;
