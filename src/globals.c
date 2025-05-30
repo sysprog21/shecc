@@ -28,13 +28,12 @@ int macro_return_idx;
 
 /* Global objects */
 
-macro_t *MACROS;
-int macros_idx = 0;
-
 /* FUNC_MAP is used to integrate function storing and boost lookup
  * performance, currently it uses FNV-1a hash function to hash function
  * name.
  */
+
+hashmap_t *MACROS_MAP;
 hashmap_t *FUNC_MAP;
 hashmap_t *ALIASES_MAP;
 hashmap_t *CONSTANTS_MAP;
@@ -557,28 +556,34 @@ bool remove_alias(char *alias)
 
 macro_t *add_macro(char *name)
 {
-    macro_t *ma = &MACROS[macros_idx++];
-    strcpy(ma->name, name);
+    macro_t *ma = hashmap_get(MACROS_MAP, name);
+    if (!ma) {
+        ma = malloc(sizeof(macro_t));
+        if (!ma) {
+            printf("Failed to allocate macro_t\n");
+            return NULL;
+        }
+        strcpy(ma->name, name);
+        hashmap_put(MACROS_MAP, name, ma);
+    }
     ma->disabled = false;
     return ma;
 }
 
 macro_t *find_macro(char *name)
 {
-    for (int i = 0; i < macros_idx; i++) {
-        if (!MACROS[i].disabled && !strcmp(name, MACROS[i].name))
-            return &MACROS[i];
-    }
+    macro_t *ma = hashmap_get(MACROS_MAP, name);
+    if (ma && !ma->disabled)
+        return ma;
     return NULL;
 }
 
 bool remove_macro(char *name)
 {
-    for (int i = 0; i < macros_idx; i++) {
-        if (!MACROS[i].disabled && !strcmp(name, MACROS[i].name)) {
-            MACROS[i].disabled = true;
-            return true;
-        }
+    macro_t *ma = hashmap_get(MACROS_MAP, name);
+    if (ma) {
+        ma->disabled = true;
+        return true;
     }
     return false;
 }
@@ -974,7 +979,7 @@ void global_init(void)
 {
     elf_code_start = ELF_START + elf_header_len;
 
-    MACROS = malloc(MAX_ALIASES * sizeof(macro_t));
+    MACROS_MAP = hashmap_create(MAX_ALIASES);
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
     BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
@@ -996,7 +1001,7 @@ void global_init(void)
 
 void global_release(void)
 {
-    free(MACROS);
+    hashmap_free(MACROS_MAP);
     free(TYPES);
     arena_free(BLOCK_ARENA);
     arena_free(INSN_ARENA);
