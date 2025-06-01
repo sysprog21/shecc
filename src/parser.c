@@ -539,7 +539,7 @@ bool read_preproc_directive(void)
             if (lex_accept(T_elipsis))
                 macro->is_variadic = true;
 
-            macro->start_source_idx = SOURCE->size;
+            macro->start_source_idx = source_idx;
             skip_macro_body();
         } else {
             /* Empty alias, may be dummy alias serves as include guard */
@@ -1025,8 +1025,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         macro_t *mac = find_macro(token);
 
         if (!strcmp(token, "__VA_ARGS__")) {
-            /* 'size' has pointed at the character after __VA_ARGS__ */
-            int remainder, t = SOURCE->size;
+            /* 'source_idx' has pointed at the character after __VA_ARGS__ */
+            int remainder, t = source_idx;
             macro_t *macro = parent->macro;
 
             if (!macro)
@@ -1036,13 +1036,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
             remainder = macro->num_params - macro->num_param_defs;
             for (int i = 0; i < remainder; i++) {
-                SOURCE->size = macro->params[macro->num_params - remainder + i];
-                next_char = SOURCE->elements[SOURCE->size];
+                source_idx = macro->params[macro->num_params - remainder + i];
+                next_char = dynarr_get_byte(SOURCE, source_idx);
                 next_token = lex_token();
                 read_expr(parent, bb);
             }
-            SOURCE->size = t;
-            next_char = SOURCE->elements[SOURCE->size];
+            source_idx = t;
+            next_char = dynarr_get_byte(SOURCE, source_idx);
             next_token = lex_token();
         } else if (mac) {
             if (parent->macro)
@@ -1052,18 +1052,18 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             mac->num_params = 0;
             lex_expect(T_identifier);
 
-            /* 'size' has pointed at the first parameter */
+            /* 'source_idx' has pointed at the first parameter */
             while (!lex_peek(T_close_bracket, NULL)) {
-                mac->params[mac->num_params++] = SOURCE->size;
+                mac->params[mac->num_params++] = source_idx;
                 do {
                     next_token = lex_token();
                 } while (next_token != T_comma &&
                          next_token != T_close_bracket);
             }
-            /* move 'size' to the macro body */
-            macro_return_idx = SOURCE->size;
-            SOURCE->size = mac->start_source_idx;
-            next_char = SOURCE->elements[SOURCE->size];
+            /* move 'source_idx' to the macro body */
+            macro_return_idx = source_idx;
+            source_idx = mac->start_source_idx;
+            next_char = dynarr_get_byte(SOURCE, source_idx);
             lex_expect(T_close_bracket);
 
             skip_newline = 0;
@@ -1075,13 +1075,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             macro_return_idx = 0;
         } else if (macro_param_idx) {
             /* "expand" the argument from where it comes from */
-            int t = SOURCE->size;
-            SOURCE->size = macro_param_idx;
-            next_char = SOURCE->elements[SOURCE->size];
+            int t = source_idx;
+            source_idx = macro_param_idx;
+            next_char = dynarr_get_byte(SOURCE, source_idx);
             next_token = lex_token();
             read_expr(parent, bb);
-            SOURCE->size = t;
-            next_char = SOURCE->elements[SOURCE->size];
+            source_idx = t;
+            next_char = dynarr_get_byte(SOURCE, source_idx);
             next_token = lex_token();
         } else if (con) {
             vd = require_var(parent);
@@ -2716,17 +2716,17 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         mac->num_params = 0;
         lex_expect(T_identifier);
 
-        /* 'size' has pointed at the first parameter */
+        /* 'source_idx' has pointed at the first parameter */
         while (!lex_peek(T_close_bracket, NULL)) {
-            mac->params[mac->num_params++] = SOURCE->size;
+            mac->params[mac->num_params++] = source_idx;
             do {
                 next_token = lex_token();
             } while (next_token != T_comma && next_token != T_close_bracket);
         }
-        /* move 'size' to the macro body */
-        macro_return_idx = SOURCE->size;
-        SOURCE->size = mac->start_source_idx;
-        next_char = SOURCE->elements[SOURCE->size];
+        /* move 'source_idx' to the macro body */
+        macro_return_idx = source_idx;
+        source_idx = mac->start_source_idx;
+        next_char = dynarr_get_byte(SOURCE, source_idx);
         lex_expect(T_close_bracket);
 
         skip_newline = 0;
@@ -3009,8 +3009,8 @@ void parse_internal(void)
     func->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
 
     /* lexer initialization */
-    SOURCE->size = 0;
-    next_char = SOURCE->elements[0];
+    source_idx = 0;
+    next_char = dynarr_get_byte(SOURCE, 0);
     lex_expect(T_start);
 
     do {
@@ -3051,7 +3051,7 @@ void load_source_file(char *file)
             snprintf(path + c + 1, inclusion_path_len, "%s", buffer + 10);
             load_source_file(path);
         } else {
-            strbuf_puts(SOURCE, buffer);
+            dynarr_extend(SOURCE, buffer, strlen(buffer));
         }
     }
 

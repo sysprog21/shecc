@@ -58,6 +58,8 @@ arena_t *BLOCK_ARENA;
 /* BB_ARENA is responsible for basic_block_t / ph2_ir_t allocation */
 arena_t *BB_ARENA;
 
+arena_t *SOURCE_ARENA;
+
 int bb_label_idx = 0;
 
 ph2_ir_t **PH2_IR_FLATTEN;
@@ -71,7 +73,8 @@ int elf_offset = 0;
 
 regfile_t REGS[REG_CNT];
 
-strbuf_t *SOURCE;
+dynarr_t *SOURCE;
+int source_idx = 0;
 
 hashmap_t *INCLUSION_MAP;
 
@@ -1177,10 +1180,12 @@ char dynarr_get_byte(dynarr_t *arr, int index)
         printf("dynarr_get_byte: elem_size must be 1\n");
         abort();
     }
+
     if (index < 0 || index >= arr->size) {
         printf("index %d out of bounds (size=%d)\n", index, arr->size);
         return 0;
     }
+
     char *ptr = arr->elements;
     return ptr[index];
 }
@@ -1310,8 +1315,9 @@ void global_init(void)
     BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
+    SOURCE_ARENA = arena_init(MAX_SOURCE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
-    SOURCE = strbuf_create(MAX_SOURCE);
+    SOURCE = dynarr_init(SOURCE_ARENA, MAX_SOURCE, sizeof(char));
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
     ALIASES_MAP = hashmap_create(MAX_ALIASES);
@@ -1332,8 +1338,8 @@ void global_release(void)
     arena_free(BLOCK_ARENA);
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
+    arena_free(SOURCE_ARENA);
     free(PH2_IR_FLATTEN);
-    strbuf_free(SOURCE);
     hashmap_free(FUNC_MAP);
     hashmap_free(INCLUSION_MAP);
     hashmap_free(ALIASES_MAP);
@@ -1363,20 +1369,20 @@ void error(char *msg)
     int offset, start_idx, i = 0;
     char diagnostic[512 /* MAX_LINE_LEN * 2 */];
 
-    for (offset = SOURCE->size; offset >= 0 && SOURCE->elements[offset] != '\n';
-         offset--)
+    for (offset = source_idx;
+         offset >= 0 && dynarr_get_byte(SOURCE, offset) != '\n'; offset--)
         ;
 
     start_idx = offset + 1;
 
-    for (offset = 0;
-         offset < MAX_SOURCE && SOURCE->elements[start_idx + offset] != '\n';
+    for (offset = 0; offset < MAX_SOURCE &&
+                     dynarr_get_byte(SOURCE, start_idx + offset) != '\n';
          offset++) {
-        diagnostic[i++] = SOURCE->elements[start_idx + offset];
+        diagnostic[i++] = dynarr_get_byte(SOURCE, start_idx + offset);
     }
     diagnostic[i++] = '\n';
 
-    for (offset = start_idx; offset < SOURCE->size; offset++) {
+    for (offset = start_idx; offset < source_idx; offset++) {
         diagnostic[i++] = ' ';
     }
 
@@ -1385,8 +1391,8 @@ void error(char *msg)
     /* TODO: figure out the corresponding C source file path and report line
      * number.
      */
-    printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg,
-           SOURCE->size, diagnostic);
+    printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg, source_idx,
+           diagnostic);
     abort();
 }
 
