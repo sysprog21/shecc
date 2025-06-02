@@ -11,9 +11,9 @@ case "$1" in
     "0")
         readonly SHECC="$PWD/out/shecc" ;;
     "1")
-        readonly SHECC="$PWD/out/shecc-stage1.elf" ;;
+        readonly SHECC="$TARGET_EXEC $PWD/out/shecc-stage1.elf" ;;
     "2")
-        readonly SHECC="$PWD/out/shecc-stage2.elf" ;;
+        readonly SHECC="$TARGET_EXEC $PWD/out/shecc-stage2.elf" ;;
     *)
         echo "$1 is not a valid stage"
         exit 1 ;;
@@ -40,7 +40,7 @@ function try() {
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
-    "$SHECC" -o "$tmp_exe" "$tmp_in"
+    $SHECC -o "$tmp_exe" "$tmp_in"
     chmod +x $tmp_exe
 
     local output=''
@@ -93,7 +93,7 @@ function try_compile_error() {
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
-    "$SHECC" -o "$tmp_exe" "$tmp_in"
+    $SHECC -o "$tmp_exe" "$tmp_in"
     local exit_code=$?
 
     if [ 0 == $exit_code ]; then
