@@ -89,7 +89,6 @@ int elf_data_start;
 
 /**
  * arena_block_create() - Creates a new arena block with given capacity.
- * The created arena block is guaranteed to be zero-initialized.
  * @capacity: The capacity of the arena block. Must be positive.
  *
  * Return: The pointer of created arena block. NULL if failed to allocate.
@@ -99,22 +98,32 @@ arena_block_t *arena_block_create(int capacity)
     arena_block_t *block = malloc(sizeof(arena_block_t));
 
     if (!block) {
-        printf("Failed to allocate memory for arena block\n");
-        exit(1);
+        printf("Failed to allocate memory for arena block structure\n");
+        abort();
     }
 
-    block->memory = calloc(capacity, sizeof(char));
+    block->memory = malloc(capacity * sizeof(char));
 
     if (!block->memory) {
-        printf("Failed to allocate memory for arena block\n");
+        printf("Failed to allocate memory for arena block buffer\n");
         free(block);
-        exit(1);
+        abort();
     }
 
     block->capacity = capacity;
     block->offset = 0;
     block->next = NULL;
     return block;
+}
+
+/**
+ * arena_block_free() - Free a single arena block and its memory buffer.
+ * @block: Pointer to the arena_block_t to free. Must not be NULL.
+ */
+void arena_block_free(arena_block_t *block)
+{
+    free(block->memory);
+    free(block);
 }
 
 /**
@@ -126,6 +135,10 @@ arena_block_t *arena_block_create(int capacity)
 arena_t *arena_init(int initial_capacity)
 {
     arena_t *arena = malloc(sizeof(arena_t));
+    if (!arena) {
+        printf("Failed to allocate memory for arena structure\n");
+        abort();
+    }
     arena->head = arena_block_create(initial_capacity);
     return arena;
 }
@@ -141,47 +154,147 @@ arena_t *arena_init(int initial_capacity)
  */
 void *arena_alloc(arena_t *arena, int size)
 {
-    char *ptr;
-    arena_block_t *block = arena->head;
-
-    while (block) {
-        if (block->offset + size <= block->capacity) {
-            ptr = block->memory + block->offset;
-            block->offset += size;
-            return ptr;
-        }
-        if (!block->next)
-            break;
-        block = block->next;
+    if (size <= 0) {
+        printf("arena_alloc: size must be positive\n");
+        abort();
     }
 
-    /* If no space is available, create a new block
-     * Allocate at least 256 KiB or the requested size
-     */
-    int new_capacity = size > DEFAULT_ARENA_SIZE ? size : DEFAULT_ARENA_SIZE;
-    arena_block_t *new_block = arena_block_create(new_capacity);
+    /* Align to PTR_SIZE bytes */
+    size = (size + PTR_SIZE - 1) & ~(PTR_SIZE - 1);
 
-    if (!new_block)
-        return NULL;
+    if (!arena->head || arena->head->offset + size > arena->head->capacity) {
+        /* Need a new block: choose capacity = max(DEFAULT_ARENA_SIZE, size) */
+        int new_capacity =
+            (size > DEFAULT_ARENA_SIZE ? size : DEFAULT_ARENA_SIZE);
+        arena_block_t *new_block = arena_block_create(new_capacity);
+        new_block->next = arena->head;
+        arena->head = new_block;
+    }
 
-    block->next = new_block;
-    ptr = new_block->memory + new_block->offset;
-    new_block->offset += size;
+    void *ptr = arena->head->memory + arena->head->offset;
+    arena->head->offset += size;
     return ptr;
 }
 
 /**
- * arena_reset() - Resets the given arena by resetting all blocks' offset to 0.
- * @arena: The arena to reset. Must not be NULL.
+ * arena_calloc() - arena_alloc() plus explicit zero‑initialization.
+ * @arena: The arena to allocate memory from. Must not be NULL.
+ * @n:     Number of elements.
+ * @size:  Size of each element in bytes.
+ *
+ * Internally calls arena_alloc(n * size) and then fills the entire region
+ * with zero bytes.
+ *
+ * Return: Pointer to zero-initialized memory.
  */
-void arena_reset(arena_t *arena)
+void *arena_calloc(arena_t *arena, int n, int size)
 {
-    arena_block_t *block = arena->head;
-
-    while (block) {
-        block->offset = 0;
-        block = block->next;
+    if (n * size == 0) {
+        printf("arena_calloc: cannot allocate 0 bytes\n");
+        abort();
     }
+
+    int total = n * size;
+    void *ptr = arena_alloc(arena, total);
+
+    int *w_ptr = ptr;
+    int w_count = total >> 2;
+    int b_index = w_count << 2;
+
+    for (int i = 0; i < w_count; ++i)
+        w_ptr[i] = 0;
+
+    char *b_ptr = ptr;
+    while (b_index < total)
+        b_ptr[b_index++] = 0;
+
+    return ptr;
+}
+
+/**
+ * arena_realloc() - Reallocate a previously allocated region within the arena
+ * to a different size.
+ *
+ * Behaviors:
+ * 1. If oldptr == NULL and oldsz == 0, act like malloc.
+ * 2. If newsz <= oldsz, return oldptr immediately.
+ * 3. Grow in place if oldptr is the last allocation in the current block.
+ * 4. Otherwise, allocate a new region and copy old data.
+ *
+ * @arena: Pointer to the arena. Must not be NULL.
+ * @oldptr: Pointer to the previously allocated memory in the arena.
+ * @oldsz: Original size (in bytes) of that allocation.
+ * @newsz: New desired size (in bytes).
+ *
+ * Return: Pointer to the reallocated (resized) memory region.
+ */
+void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
+{
+    /* act like malloc */
+    if (oldptr == NULL) {
+        if (oldsz != 0) {
+            printf("arena_realloc: oldptr == NULL requires oldsz == 0\n");
+            abort();
+        }
+        return arena_alloc(arena, newsz);
+    }
+    if (oldsz == 0) {
+        printf("arena_realloc: oldptr != NULL requires oldsz > 0\n");
+        abort();
+    }
+
+    /* return oldptr immediately */
+    if (newsz <= oldsz) {
+        return oldptr;
+    }
+
+    /* From here on, oldptr != NULL and newsz > oldsz and oldsz != 0 */
+    int delta = newsz - oldsz;
+    arena_block_t *blk = arena->head;
+    char *block_end = blk->memory + blk->offset;
+
+    /* grow in place if oldptr is the last allocation in the current block */
+    if (oldptr + oldsz == block_end && blk->offset + delta <= blk->capacity) {
+        blk->offset += delta;
+        return oldptr;
+    }
+
+    /* allocate a new region and copy old data */
+    void *newptr = arena_alloc(arena, newsz);
+    memcpy(newptr, oldptr, oldsz);
+    return newptr;
+}
+
+/**
+ * arena_strdup() - Duplicate a NULL-terminated string into the arena.
+ *
+ * @arena: a Pointer to the arena. Must not be NULL.
+ * @str: NULL-terminated input string to duplicate. Must not be NULL.
+ *
+ * Return: Pointer to the duplicated string stored in the arena.
+ */
+char *arena_strdup(arena_t *arena, char *str)
+{
+    int n = strlen(str);
+    char *dup = arena_alloc(arena, n + 1);
+    memcpy(dup, str, n);
+    dup[n] = '\0';
+    return dup;
+}
+
+/**
+ * arena_memdup() - Duplicate a block of memory into the arena.
+ * Allocates size bytes within the arena and copies data from the input pointer.
+ *
+ * @arena: a Pointer to the arena. Must not be NULL.
+ * @data: data Pointer to the source memory. Must not be NULL.
+ * @size: size Number of bytes to copy. Must be non-negative.
+ *
+ * Return: The pointer to the duplicated memory stored in the arena.
+ */
+void *arena_memdup(arena_t *arena, void *data, int size)
+{
+    return memcpy(arena_alloc(arena, size), data, size);
 }
 
 /**
@@ -194,8 +307,7 @@ void arena_free(arena_t *arena)
 
     while (block) {
         next = block->next;
-        free(block->memory);
-        free(block);
+        arena_block_free(block);
         block = next;
     }
 
