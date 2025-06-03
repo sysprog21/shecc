@@ -26,8 +26,7 @@ check_flag = $(shell $(CC) $(1) -S -o /dev/null -xc /dev/null 2>/dev/null; \
 
 # Iterate through the list of all potential flags, effectively filtering out all
 # unsupported flags.
-$(foreach flag, $(CFLAGS_TO_CHECK), $(eval SUPPORTED_CFLAGS += $(call check_flag, $(flag))))
-CFLAGS += $(SUPPORTED_CFLAGS)
+$(foreach flag, $(CFLAGS_TO_CHECK), $(eval CFLAGS += $(call check_flag, $(flag))))
 
 BUILD_SESSION := .session.mk
 
