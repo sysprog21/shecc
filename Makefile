@@ -1,6 +1,8 @@
 CC ?= gcc
 CFLAGS := -O -g \
-	-std=c99 -pedantic \
+	-std=c99 -pedantic
+
+CFLAGS_TO_CHECK := \
 	-fwrapv \
 	-Wall -Wextra \
 	-Wno-unused-but-set-variable \
@@ -13,6 +15,19 @@ CFLAGS := -O -g \
 	-Wno-declaration-after-statement \
 	-Wno-format \
 	-Wno-format-pedantic
+
+SUPPORTED_CFLAGS :=
+# Check if a specific compiler flag is supported, attempting a dummy compilation
+# with flags. If successful, it returns the flag string; otherwise, it returns
+# an empty string.
+# Usage: $(call check_flag, -some-flag)
+check_flag = $(shell $(CC) $(1) -S -o /dev/null -xc /dev/null 2>/dev/null; \
+              if test $$? -eq 0; then echo "$(1)"; fi)
+
+# Iterate through the list of all potential flags, effectively filtering out all
+# unsupported flags.
+$(foreach flag, $(CFLAGS_TO_CHECK), $(eval SUPPORTED_CFLAGS += $(call check_flag, $(flag))))
+CFLAGS += $(SUPPORTED_CFLAGS)
 
 BUILD_SESSION := .session.mk
 
