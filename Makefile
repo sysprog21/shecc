@@ -1,4 +1,3 @@
-CC ?= gcc
 CFLAGS := -O -g \
 	-std=c99 -pedantic
 
@@ -14,7 +13,8 @@ CFLAGS_TO_CHECK := \
 	-Wno-strict-prototypes \
 	-Wno-declaration-after-statement \
 	-Wno-format \
-	-Wno-format-pedantic
+	-Wno-format-pedantic \
+	-Wno-overflow
 
 SUPPORTED_CFLAGS :=
 # Check if a specific compiler flag is supported, attempting a dummy compilation
