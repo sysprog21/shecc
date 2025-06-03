@@ -484,8 +484,8 @@ void read_defined_macro(void)
     check_def(lookup_alias, true);
 }
 
-/* read preprocessor directive at each potential positions: e.g.,
- * global statement / body statement
+/* read preprocessor directive at each potential positions: e.g., global
+ * statement / body statement
  */
 bool read_preproc_directive(void)
 {
@@ -1156,11 +1156,11 @@ void read_expr(block_t *parent, basic_block_t **bb)
 
     /* These variables used for parsing logical-and/or operation.
      *
-     * For the logical-and operation, the false condition code path for
-     * testing each operand uses the same code snippet (basic block).
+     * For the logical-and operation, the false condition code path for testing
+     * each operand uses the same code snippet (basic block).
      *
-     * Likewise, when testing each operand for the logical-or operation,
-     * all of them share a unified code path for the true condition.
+     * Likewise, when testing each operand for the logical-or operation, all of
+     * them share a unified code path for the true condition.
      */
     bool has_prev_log_op = false;
     opcode_t prev_log_op = 0, pprev_log_op = 0;
@@ -1216,9 +1216,9 @@ void read_expr(block_t *parent, basic_block_t **bb)
                  * current opcode:  op == OP_log_or
                  * current operand: b
                  *
-                 * Finalize the logical-and operation and test the operand
-                 * for the following logical-or operation.
-                 * */
+                 * Finalize the logical-and operation and test the operand for
+                 * the following logical-or operation.
+                 */
                 finalize_logical(prev_log_op, parent, bb, log_and_shared_bb);
                 log_and_shared_bb = bb_create(parent);
                 bb_connect(*bb, log_or_shared_bb, THEN);
@@ -1260,12 +1260,12 @@ void read_expr(block_t *parent, basic_block_t **bb)
                  * current opcode:  op == OP_log_and
                  * current operand: b
                  *
-                 * Using the logical-and operation to test the current
-                 * operand instead of using the logical-or operation.
+                 * Using the logical-and operation to test the current operand
+                 * instead of using the logical-or operation.
                  *
-                 * Then, the previous opcode becomes pprev opcode and
-                 * the current opcode becomes the previous opcode.
-                 * */
+                 * Then, the previous opcode becomes pprev opcode and the
+                 * current opcode becomes the previous opcode.
+                 */
                 bb_connect(*bb, log_and_shared_bb, ELSE);
                 read_logical(op, parent, bb);
                 pprev_log_op = prev_log_op;
@@ -1286,10 +1286,10 @@ void read_expr(block_t *parent, basic_block_t **bb)
                 else
                     log_or_shared_bb = bb_create(parent);
 
-                /* After finalizing the previous logical-and/or operation,
-                 * the prev_log_op should inherit pprev_log_op and continue
-                 * to check whether to finalize a logical-and/or operation.
-                 * */
+                /* After finalizing the previous logical-and/or operation, the
+                 * prev_log_op should inherit pprev_log_op and continue to check
+                 * whether to finalize a logical-and/or operation.
+                 */
                 prev_log_op = pprev_log_op;
                 has_prev_log_op = prev_log_op != 0;
                 pprev_log_op = 0;
@@ -1515,9 +1515,9 @@ void read_lvalue(lvalue_t *lvalue,
     } else {
         var_t *t;
 
-        /* If operand is a reference, read the value and push to stack
-         * for the incoming addition/subtraction. Otherwise, use the
-         * top element of stack as the one of operands and the destination.
+        /* If operand is a reference, read the value and push to stack for the
+         * incoming addition/subtraction. Otherwise, use the top element of
+         * stack as the one of operands and the destination.
          */
         if (lvalue->is_reference) {
             rs1 = operand_stack[operand_stack_idx - 1];
@@ -1616,7 +1616,7 @@ void read_logical(opcode_t op, block_t *parent, basic_block_t **bb)
 
     /* Create a proper branch label for the operand of the logical-and/or
      * operation.
-     * */
+     */
     basic_block_t *new_bb = bb_create(parent);
     bb_connect(*bb, new_bb, op == OP_log_and ? THEN : ELSE);
 
@@ -1735,14 +1735,15 @@ void finalize_logical(opcode_t op,
              log_op_res, vd, NULL, 0, NULL);
 
     /* After assigning a value, go to the final basic block, this is done by BB
-     * fallthrough. */
+     * fallthrough.
+     */
 
-    /* Create the shared branch and assign the other value
-     * for the other condition of a logical-and/or operation.
+    /* Create the shared branch and assign the other value for the other
+     * condition of a logical-and/or operation.
      *
-     * If handing a logical-and operation, assign a false value.
-     * else, assign a true value for a logical-or operation.
-     * */
+     * If handing a logical-and operation, assign a false value. else, assign
+     * a true value for a logical-or operation.
+     */
     vd = require_var(parent);
     gen_name_to(vd->var_name);
     vd->init_val = op != OP_log_and;
@@ -2085,7 +2086,7 @@ bool read_global_assignment(char *token)
     if (var) {
         if (lex_peek(T_string, NULL)) {
             /* FIXME: Current implementation lacks of considerations:
-             * 1. string literal should be stored in .rodata section of elf
+             * 1. string literal should be stored in .rodata section of ELF
              * 2. this does not respect the variable type, if var is char *,
              *    then simply assign the data address of string literal,
              *    otherwise, if var is char[], then copies the string and

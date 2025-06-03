@@ -140,8 +140,7 @@ char *memcpy(char *dest, char *src, int count)
     return dest;
 }
 
-/*
- * set 10 digits (32bit) without div
+/* set 10 digits (32bit) without div
  *
  * This function converts a given integer value to its string representation
  * in base-10 without using division operations. The method involves calculating
@@ -192,14 +191,12 @@ void __str_base10(char *pb, int val)
 void __str_base8(char *pb, int val)
 {
     int c = INT_BUF_LEN - 1, v;
-    /*
-     * Because every 3 binary digits can be converted
-     * to 1 octal digit, here performs the conversion
-     * 10 times, derived from 32 divided by 3.
+
+    /* Because every 3 binary digits can be converted to 1 octal digit, here
+     * performs the conversion 10 times, derived from 32 divided by 3.
      *
-     * Finally, the remaining 2 bits are processed after
-     * the loop.
-     * */
+     * Finally, the remaining 2 bits are processed after the loop.
+     */
     int times = (sizeof(int) << 3) / 3;
     for (int i = 0; i < times; i++) {
         v = val & 0x7;
@@ -230,29 +227,24 @@ void __str_base16(char *pb, int val)
     }
 }
 
-/*
- * The specification of snprintf() is defined in C99 7.19.6.5,
- * and its behavior and return value should comply with the
- * following description:
- *
+/* The specification of snprintf() is defined in C99 7.19.6.5, and its behavior
+ * and return value should comply with the following description:
  * - If n is zero, nothing is written.
  * - Writes at most n bytes, including the null character.
- * - On success, the return value should be the length of the
- *   entire converted string even if n is insufficient to store it.
+ * - On success, the return value should be the length of the entire converted
+ *   string even if n is insufficient to store it.
  *
- * Therefore, the following code defines a structure called fmtbuf_t
- * to implement formatted output conversion for the functions in the
- * printf() family.
- *
+ * Thus, a structure fmtbuf_t is defined for formatted output conversion for
+ * the functions in the printf() family.
  * @buf: the current position of the buffer.
  * @n  : the remaining space of the buffer.
- * @len: the number of characters that would have been written
- *       had n been sufficiently large.
+ * @len: the number of characters that would have been written (excluding the
+ * null terminator) had n been sufficiently large.
  *
- * Once a write operation is performed, buf and n will be
- * respectively incremented and decremented by the actual written
- * size if n is sufficient, and len must be incremented to store
- * the length of the entire converted string.
+ * Once a write operation is performed, buf and n will be respectively
+ * incremented and decremented by the actual written size if n is sufficient,
+ * and len must be incremented to store the length of the entire converted
+ * string.
  */
 typedef struct {
     char *buf;
@@ -264,8 +256,7 @@ void __fmtbuf_write_char(fmtbuf_t *fmtbuf, int val)
 {
     fmtbuf->len += 1;
 
-    /*
-     * Write the given character when n is greater than 1.
+    /* Write the given character when n is greater than 1.
      * This means preserving one position for the null character.
      */
     if (fmtbuf->n <= 1)
@@ -281,16 +272,14 @@ void __fmtbuf_write_str(fmtbuf_t *fmtbuf, char *str, int l)
 {
     fmtbuf->len += l;
 
-    /*
-     * Write the given string when n is greater than 1.
+    /* Write the given string when n is greater than 1.
      * This means preserving one position for the null character.
      */
     if (fmtbuf->n <= 1)
         return;
 
-    /*
-     * If the remaining space is less than the length of the string,
-     * write only n - 1 bytes.
+    /* If the remaining space is less than the length of the string, write only
+     * n - 1 bytes.
      */
     int sz = fmtbuf->n - 1;
     l = l <= sz ? l : sz;
@@ -519,7 +508,8 @@ int fclose(FILE *stream)
 }
 
 /* Read a byte from file descriptor. So the return value is either in the range
- * of 0 to 127 for the character, or -1 on the end of file. */
+ * of 0 to 127 for the character, or -1 on the end of file.
+ */
 int fgetc(FILE *stream)
 {
     int buf = 0, r = __syscall(__syscall_read, stream, &buf, 1);

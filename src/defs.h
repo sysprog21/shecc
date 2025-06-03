@@ -341,9 +341,9 @@ typedef struct block block_t;
 typedef struct basic_block basic_block_t;
 
 /* Definition of a growable buffer for a mutable null-terminated string
- * size:     Current number of elements in the array
- * capacity: Number of elements that can be stored without resizing
- * elements: Pointer to the array of characters
+ * @size:     Current number of elements in the array
+ * @capacity: Number of elements that can be stored without resizing
+ * @elements: Pointer to the array of characters
  */
 typedef struct {
     int size;
@@ -456,10 +456,10 @@ struct basic_block {
     insn_list_t insn_list;
     ph2_ir_list_t ph2_ir_list;
     bb_connection_t prev[MAX_BB_PRED];
-    char bb_label_name[MAX_VAR_LEN]; /* Used in instruction dumping when ir_dump
-                                        is enabled. */
-    struct basic_block *next;        /* normal BB */
-    struct basic_block *then_;       /* conditional BB */
+    /* Used in instruction dumping when ir_dump is enabled. */
+    char bb_label_name[MAX_VAR_LEN];
+    struct basic_block *next;  /* normal BB */
+    struct basic_block *then_; /* conditional BB */
     struct basic_block *else_;
     struct basic_block *idom;
     struct basic_block *r_idom;
@@ -496,11 +496,9 @@ struct ref_block {
     struct ref_block *next;
 };
 
-/**
- * Syntatic representation of func, combines syntactic details
- * (e.g., return type, parameters) with SSA-related information
- * (e.g., basic blocks, control flow) to support parsing,
- * analysis, optimization, and code generation.
+/* Syntactic representation of func, combines syntactic details (e.g., return
+ * type, parameters) with SSA-related information (e.g., basic blocks, control
+ * flow) to support parsing, analysis, optimization, and code generation.
  */
 struct func {
     /* Syntatic info */

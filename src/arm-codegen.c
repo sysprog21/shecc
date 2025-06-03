@@ -195,11 +195,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     int rm = ph2_ir->src1;
     int ofs;
 
-    /* Prepare this variable to reuse the same code for
-     * the instruction sequence of
-     * 1. division and modulo.
-     * 2. load and store operations.
-     * 3. address-of operations.
+    /* Prepare this variable to reuse code for:
+     * 1. division and modulo operations
+     * 2. load and store operations
+     * 3. address-of operations
      */
     arm_reg interm;
 
@@ -374,14 +373,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__srl_amt(__AL, 1, logic_rs, __r9, __r9, 1));
         emit(__srl_amt(__CC, 0, logic_rs, rm, rm, 1));
         emit(__b(__CC, -20));
-        /* After completing the emulation, the quotient and remainder
-         * will be stored in __r8 and __r9, respectively.
+        /* After completing the emulation, the quotient and remainder will be
+         * stored in __r8 and __r9, respectively.
          *
-         * The original values of the dividend and divisor will be
-         * restored in rn and rm.
+         * The original values of the dividend and divisor will be restored in
+         * rn and rm.
          *
-         * Finally, the result (quotient or remainder) will be stored
-         * in rd.
+         * Finally, the result (quotient or remainder) will be stored in rd.
          */
         emit(__mov_r(__AL, __r9, rn));
         emit(__ldm(__AL, 1, __sp, (1 << rn) | (1 << rm)));

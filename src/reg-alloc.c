@@ -17,11 +17,10 @@
 #include "defs.h"
 #include "globals.c"
 
-/* Aligns size to nearest multiple of 4, this meets
- * ARMv7's alignment requirement.
+/* Aligns size to nearest multiple of 4, this meets ARMv7's alignment
+ * requirement.
  *
- * This function should
- * be called whenever handling with user-defined type's
+ * This function should be called whenever handling with user-defined type's
  * size.
  */
 int align_size(int i)

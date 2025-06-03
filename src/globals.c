@@ -32,7 +32,6 @@ int macro_return_idx;
  * performance, currently it uses FNV-1a hash function to hash function
  * name.
  */
-
 hashmap_t *MACROS_MAP;
 hashmap_t *FUNC_MAP;
 hashmap_t *ALIASES_MAP;
@@ -86,8 +85,7 @@ int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
 int elf_code_start;
 int elf_data_start;
 
-/**
- * arena_block_create() - Creates a new arena block with given capacity.
+/* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
  *
  * Return: The pointer of created arena block. NULL if failed to allocate.
@@ -115,8 +113,7 @@ arena_block_t *arena_block_create(int capacity)
     return block;
 }
 
-/**
- * arena_block_free() - Free a single arena block and its memory buffer.
+/* Free a single arena block and its memory buffer.
  * @block: Pointer to the arena_block_t to free. Must not be NULL.
  */
 void arena_block_free(arena_block_t *block)
@@ -125,8 +122,7 @@ void arena_block_free(arena_block_t *block)
     free(block);
 }
 
-/**
- * arena_init() - Initializes the given arena with initial capacity.
+/* Initialize the given arena with initial capacity.
  * @initial_capacity: The initial capacity of the arena. Must be positive.
  *
  * Return: The pointer of initialized arena.
@@ -142,8 +138,7 @@ arena_t *arena_init(int initial_capacity)
     return arena;
 }
 
-/**
- * arena_alloc() - Allocates memory from the given arena with given size.
+/* Allocate memory from the given arena with given size.
  * The arena may create a new arena block if no space is available.
  * @arena: The arena to allocate memory from. Must not be NULL.
  * @size: The size of memory to allocate. Must be positive.
@@ -175,14 +170,13 @@ void *arena_alloc(arena_t *arena, int size)
     return ptr;
 }
 
-/**
- * arena_calloc() - arena_alloc() plus explicit zero‑initialization.
+/* arena_alloc() plus explicit zero‑initialization.
  * @arena: The arena to allocate memory from. Must not be NULL.
  * @n:     Number of elements.
  * @size:  Size of each element in bytes.
  *
- * Internally calls arena_alloc(n * size) and then fills the entire region
- * with zero bytes.
+ * Internally calls arena_alloc(n * size) and then fills the entire region with
+ * zero bytes.
  *
  * Return: Pointer to zero-initialized memory.
  */
@@ -210,9 +204,8 @@ void *arena_calloc(arena_t *arena, int n, int size)
     return ptr;
 }
 
-/**
- * arena_realloc() - Reallocate a previously allocated region within the arena
- * to a different size.
+/* Reallocate a previously allocated region within the arena to a different
+ * size.
  *
  * Behaviors:
  * 1. If oldptr == NULL and oldsz == 0, act like malloc.
@@ -264,8 +257,7 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
     return newptr;
 }
 
-/**
- * arena_strdup() - Duplicate a NULL-terminated string into the arena.
+/* Duplicate a NULL-terminated string into the arena.
  *
  * @arena: a Pointer to the arena. Must not be NULL.
  * @str: NULL-terminated input string to duplicate. Must not be NULL.
@@ -281,8 +273,7 @@ char *arena_strdup(arena_t *arena, char *str)
     return dup;
 }
 
-/**
- * arena_memdup() - Duplicate a block of memory into the arena.
+/* Duplicate a block of memory into the arena.
  * Allocates size bytes within the arena and copies data from the input pointer.
  *
  * @arena: a Pointer to the arena. Must not be NULL.
@@ -296,8 +287,7 @@ void *arena_memdup(arena_t *arena, void *data, int size)
     return memcpy(arena_alloc(arena, size), data, size);
 }
 
-/**
- * arena_free() - Frees the given arena and all its blocks.
+/* Free the given arena and all its blocks.
  * @arena: The arena to free. Must not be NULL.
  */
 void arena_free(arena_t *arena)
@@ -313,8 +303,7 @@ void arena_free(arena_t *arena)
     free(arena);
 }
 
-/**
- * hashmap_hash_index() - Hashses a string with FNV-1a hash function
+/* Hash a string with FNV-1a hash function
  * and converts into usable hashmap index. The range of returned
  * hashmap index is ranged from "(0 ~ 2,147,483,647) mod size" due to
  * lack of unsigned integer implementation.
@@ -348,9 +337,8 @@ int round_up_pow2(int v)
     return v;
 }
 
-/**
- * hashmap_create() - Creates a hashmap on heap. Notice that
- * provided size will always be rounded up to nearest power of 2.
+/* Create a hashmap on heap. Notice that provided size will always be rounded
+ * up to nearest power of 2.
  * @size: The initial bucket size of hashmap. Must not be 0 or
  * negative.
  *
@@ -378,8 +366,7 @@ hashmap_t *hashmap_create(int cap)
     return map;
 }
 
-/**
- * hashmap_node_new() - Creates a hashmap node on heap.
+/* Create a hashmap node on heap.
  * @key: The key of node. Must not be NULL.
  * @val: The value of node. Could be NULL.
  *
@@ -454,14 +441,13 @@ void hashmap_rehash(hashmap_t *map)
     free(old_buckets);
 }
 
-/**
- * hashmap_put() - Puts a key-value pair into given hashmap.
- * If key already contains a value, then replace it with new
- * value, the old value will be freed.
+/* Put a key-value pair into given hashmap.
+ * If key already contains a value, then replace it with new value, the old
+ * value will be freed.
  * @map: The hashmap to be put into. Must not be NULL.
  * @key: The key string. May be NULL.
- * @val: The value pointer. May be NULL. This value's lifetime
- * is held by hashmap.
+ * @val: The value pointer. May be NULL. This value's lifetime is held by
+ * hashmap.
  */
 void hashmap_put(hashmap_t *map, char *key, void *val)
 {
@@ -486,13 +472,12 @@ void hashmap_put(hashmap_t *map, char *key, void *val)
         hashmap_rehash(map);
 }
 
-/**
- * hashmap_get_node() - Gets key-value pair node from hashmap from given key.
+/* Get key-value pair node from hashmap from given key.
  * @map: The hashmap to be looked up. Must no be NULL.
  * @key: The key string. May be NULL.
  *
- * Return: The look up result, if the key-value pair entry
- * exists, then returns address of itself, NULL otherwise.
+ * Return: The look up result, if the key-value pair entry exists, then returns
+ * address of itself, NULL otherwise.
  */
 hashmap_node_t *hashmap_get_node(hashmap_t *map, char *key)
 {
@@ -508,13 +493,12 @@ hashmap_node_t *hashmap_get_node(hashmap_t *map, char *key)
     return NULL;
 }
 
-/**
- * hashmap_get() - Gets value from hashmap from given key.
+/* Get value from hashmap from given key.
  * @map: The hashmap to be looked up. Must no be NULL.
  * @key: The key string. May be NULL.
  *
- * Return: The look up result, if the key-value pair entry
- * exists, then returns its value's address, NULL otherwise.
+ * Return: The look up result, if the key-value pair entry exists, then returns
+ * its value's address, NULL otherwise.
  */
 void *hashmap_get(hashmap_t *map, char *key)
 {
@@ -522,23 +506,19 @@ void *hashmap_get(hashmap_t *map, char *key)
     return node ? node->val : NULL;
 }
 
-/**
- * hashmap_contains() - Checks if the key-value pair entry exists
- * from given key.
+/* Check if the key-value pair entry exists from given key.
  * @map: The hashmap to be looked up. Must no be NULL.
  * @key: The key string. May be NULL.
  *
- * Return: The look up result, if the key-value pair entry
- * exists, then returns true, false otherwise.
+ * Return: The look up result, if the key-value pair entry exists, then returns
+ * true, false otherwise.
  */
 bool hashmap_contains(hashmap_t *map, char *key)
 {
     return hashmap_get_node(map, key);
 }
 
-/**
- * hashmap_free() - Frees the hashmap, this also frees key-value pair
- * entry's value.
+/* Free the hashmap, this also frees key-value pair entry's value.
  * @map: The hashmap to be looked up. Must no be NULL.
  */
 void hashmap_free(hashmap_t *map)
@@ -565,8 +545,7 @@ void hashmap_free(hashmap_t *map)
 int dump_ir = 0;
 int hard_mul_div = 0;
 
-/**
- * find_type() - Find the type by the given name.
+/* Find the type by the given name.
  * @type_name: The name to be searched.
  * @flag:
  *      0 - Search in all type names.
@@ -819,12 +798,11 @@ int size_var(var_t *var)
     return size;
 }
 
-/**
- * add_func() - Creates a new function and adds it to the
- * function lookup table and function list if it does not already exist,
- * or returns the existing instance if the function already exists.
+/* Create a new function and adds it to the function lookup table and function
+ * list if it does not already exist, or returns the existing instance if the
+ * function already exists.
  *
- * Synthesized functions (e.g., compiler-generated functions like `__syscall`)
+ * Synthesized functions (e.g., compiler-generated functions like '__syscall')
  * are excluded from SSA analysis.
  *
  * @func_name: The name of the function. May be NULL.
@@ -859,8 +837,7 @@ func_t *add_func(char *func_name, bool synthesize)
     return func;
 }
 
-/**
- * find_func() - Finds the function in function map.
+/* Find the function in function map.
  * @func_name: The name of the function. May be NULL.
  *
  * Return: A pointer to the function if exists, NULL otherwise.
