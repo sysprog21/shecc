@@ -121,10 +121,22 @@ char *strncpy(char *dest, char *src, int len)
 
 char *memcpy(char *dest, char *src, int count)
 {
-    while (count > 0) {
-        count--;
-        dest[count] = src[count];
+    int i = 0;
+
+    /* Continues as long as there are at least 4 bytes remaining to copy. */
+    for (; i + 4 <= count; i += 4) {
+        dest[i] = src[i];
+        dest[i + 1] = src[i + 1];
+        dest[i + 2] = src[i + 2];
+        dest[i + 3] = src[i + 3];
     }
+
+    /* Ensure all @count bytes are copied, even if @count is not a multiple of
+     * 4, or if @count was less than 4 initially.
+     */
+    for (; i < count; i++)
+        dest[i] = src[i];
+
     return dest;
 }
 
