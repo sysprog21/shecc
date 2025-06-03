@@ -49,10 +49,18 @@ void abort(void);
 
 int strlen(char *str)
 {
+    /* process the string by checking 4 characters (a 32-bit word) at a time */
     int i = 0;
-    while (str[i])
-        i++;
-    return i;
+    for (;; i += 4) {
+        if (!str[i])
+            return i;
+        if (!str[i + 1])
+            return i + 1;
+        if (!str[i + 2])
+            return i + 2;
+        if (!str[i + 3])
+            return i + 3;
+    }
 }
 
 int strcmp(char *s1, char *s2)
