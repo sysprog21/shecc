@@ -140,6 +140,23 @@ char *memcpy(char *dest, char *src, int count)
     return dest;
 }
 
+void *memset(void *s, int c, int n)
+{
+    int i = 0;
+    char *ptr = s;
+    for (; i + 4 <= n; i += 4) {
+        ptr[i] = c;
+        ptr[i + 1] = c;
+        ptr[i + 2] = c;
+        ptr[i + 3] = c;
+    }
+
+    for (; i < n; i++)
+        ptr[i] = c;
+
+    return s;
+}
+
 /* set 10 digits (32bit) without div
  *
  * This function converts a given integer value to its string representation
@@ -683,22 +700,7 @@ void *calloc(int n, int size)
     if (!p)
         return NULL;
 
-    /* TODO: Replace the byte buffer clearing algorithm with memset once
-     * implemented.
-     */
-
-    /* Currently malloc uses mmap(2) to request allocation, which guarantees
-     * memory to be page-aligned
-     */
-    int *pi = p, num_words = total >> 2, offset = num_words << 2;
-
-    for (int i = 0; i < num_words; i++)
-        pi[i] = 0;
-
-    while (offset < total)
-        p[offset++] = 0;
-
-    return p;
+    return memset(p, 0, total);
 }
 
 void __rfree(void *ptr, int size)

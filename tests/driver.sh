@@ -1823,4 +1823,36 @@ int main()
 }
 EOF
 
+# Test memset()
+ans=" 7d 7d 7d 7d 7d 7d 7d 7d 7d 7d 7d 00 00 00 00 00
+ 00 00 00 00 00 00 7d 7d 7d 7d 7d 00 00 00 00 00
+ 3a 3a 3a 3a 3a 3a 3a 3a 3a 3a 3a 3a 3a 3a 3a 3a"
+try_output 0 "$ans" << EOF
+void print_array(char *ptr, int sz)
+{
+    for (int i = 0; i < sz; i++)
+        printf(" %02x", ptr[i]);
+    printf("\n");
+}
+
+int main(void)
+{
+    int sz = sizeof(char) * 16;
+    char *ptr = malloc(sz);
+
+    if (ptr != memset(ptr, 0x7D, sizeof(char) * 11))
+        exit(1);
+    print_array(ptr, sz);
+    if (ptr != memset(ptr, 0, sizeof(char) * 6))
+        exit(1);
+    print_array(ptr, sz);
+    if (ptr != memset(ptr, 0x3A, sz))
+        exit(1);
+    print_array(ptr, sz);
+
+    free(ptr);
+    return 0;
+}
+EOF
+
 echo OK
