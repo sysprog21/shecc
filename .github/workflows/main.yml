@@ -10,26 +10,32 @@ jobs:
         compiler: [gcc, clang]
         architecture: [arm, riscv]
     steps:
-      - name: checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
-      - name: build artifact
-        env:
-          CC: ${{ matrix.compiler }}
+      - name: Download dependencies
         run: |
           sudo apt-get update -q -y
           sudo apt-get install -q -y graphviz jq
           sudo apt-get install -q -y qemu-user
           sudo apt-get install -q -y build-essential
+      - name: Build artifacts
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
           make distclean config ARCH=${{ matrix.architecture }}
+      - name: IR regression tests
+        run: |
           make check-snapshot || exit 1
+      - name: Unit tests
+        run: |
           make check || exit 1
 
   host-arm:
     runs-on: ubuntu-24.04
     steps:
-    - name: checkout code
+    - name: Checkout code
       uses: actions/checkout@v4
-    - name: build artifact
+    - name: Build artifacts
       # The GitHub Action for non-x86 CPU
       # https://github.com/uraimo/run-on-arch-action
       uses: uraimo/run-on-arch-action@v3
@@ -48,7 +54,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
-    - name: coding convention
+    - name: Coding convention
       run: |
             sudo apt-get install -q -y clang-format-18
             .ci/check-newline.sh
