@@ -389,7 +389,7 @@ hashmap_node_t *hashmap_node_new(char *key, void *val)
     node->key = calloc(len + 1, sizeof(char));
 
     if (!node->key) {
-        printf("Failed to allocate hashmap_node_t key with size %d\n");
+        printf("Failed to allocate hashmap_node_t key with size %d\n", len + 1);
         free(node);
         return NULL;
     }
