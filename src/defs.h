@@ -351,6 +351,23 @@ typedef struct {
     char *elements;
 } strbuf_t;
 
+/* Definition of a generic dynamic array.
+ *
+ * size:      Number of elements currently in use.
+ * capacity:  Number of elements the buffer can hold before reallocation.
+ * elem_size: Size of each element in bytes.
+ * elements:  Pointer to the data buffer.
+ * arena:     Arena allocator used for allocations.
+ */
+typedef struct {
+    int size;
+    int capacity;
+    int elem_size;
+    void *elements;
+
+    arena_t *arena;
+} dynarr_t;
+
 /* phase-2 IR definition */
 struct ph2_ir {
     opcode_t op;

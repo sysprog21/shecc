@@ -67,14 +67,13 @@ void skip_whitespace(void)
 {
     while (true) {
         if (is_linebreak(next_char)) {
-            SOURCE->size += 2;
-            next_char = SOURCE->elements[SOURCE->size];
+            source_idx += 2;
+            next_char = dynarr_get_byte(SOURCE, source_idx);
             continue;
         }
         if (is_whitespace(next_char) ||
             (skip_newline && is_newline(next_char))) {
-            SOURCE->size++;
-            next_char = SOURCE->elements[SOURCE->size];
+            next_char = dynarr_get_byte(SOURCE, ++source_idx);
             continue;
         }
         break;
@@ -83,8 +82,7 @@ void skip_whitespace(void)
 
 char read_char(bool is_skip_space)
 {
-    SOURCE->size++;
-    next_char = SOURCE->elements[SOURCE->size];
+    next_char = dynarr_get_byte(SOURCE, ++source_idx);
     if (is_skip_space)
         skip_whitespace();
     return next_char;
@@ -92,7 +90,7 @@ char read_char(bool is_skip_space)
 
 char peek_char(int offset)
 {
-    return SOURCE->elements[SOURCE->size + offset];
+    return dynarr_get_byte(SOURCE, source_idx + offset);
 }
 
 /* Lex next token and returns its token type. Parameter 'aliasing' is used for
@@ -514,8 +512,8 @@ token_t lex_token_internal(bool aliasing)
      */
     if (next_char == '\n') {
         if (macro_return_idx) {
-            SOURCE->size = macro_return_idx;
-            next_char = SOURCE->elements[SOURCE->size];
+            source_idx = macro_return_idx;
+            next_char = dynarr_get_byte(SOURCE, source_idx);
         } else
             next_char = read_char(true);
         return lex_token_internal(aliasing);
