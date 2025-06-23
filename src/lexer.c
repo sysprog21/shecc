@@ -73,7 +73,10 @@ void skip_whitespace(void)
         }
         if (is_whitespace(next_char) ||
             (skip_newline && is_newline(next_char))) {
-            next_char = dynarr_get_byte(SOURCE, ++source_idx);
+            if (++source_idx >= SOURCE->size) {
+                return;
+            }
+            next_char = dynarr_get_byte(SOURCE, source_idx);
             continue;
         }
         break;
@@ -82,7 +85,9 @@ void skip_whitespace(void)
 
 char read_char(bool is_skip_space)
 {
-    next_char = dynarr_get_byte(SOURCE, ++source_idx);
+    if (++source_idx >= SOURCE->size)
+        return 0;
+    next_char = dynarr_get_byte(SOURCE, source_idx);
     if (is_skip_space)
         skip_whitespace();
     return next_char;
