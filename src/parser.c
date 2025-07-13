@@ -295,7 +295,7 @@ int read_numeric_constant(char buffer[])
     int i = 0;
     int value = 0;
     while (buffer[i]) {
-        if (i == 1 && (buffer[i] == 'x')) { /* hexadecimal */
+        if (i == 1 && (buffer[i] | 32) == 'x') { /* hexadecimal */
             value = 0;
             i = 2;
             while (buffer[i]) {
@@ -784,7 +784,7 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
         i++;
     }
     if (token[0] == '0') {
-        if (token[1] == 'x') { /* hexdecimal */
+        if ((token[1] | 32) == 'x') { /* hexdecimal */
             i = 2;
             do {
                 c = token[i++];
