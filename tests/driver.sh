@@ -1855,4 +1855,32 @@ int main(void)
 }
 EOF
 
+try_output 0 "2748 6719 105884 0" << EOF
+int main()
+{
+    int a = 0XABC;
+    int b = 0X1a3f;
+    int c = 0XDEaD + 0xBeEF;
+    int d = 0X0;
+    printf("%d %d %d %d", a, b, c, d);
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+int main()
+{
+    int x = 0X;
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+int main()
+{
+    int x = 0XGHI;
+    return 0;
+}
+EOF
+
 echo OK
