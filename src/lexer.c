@@ -42,8 +42,8 @@ bool is_digit(char c)
 
 bool is_hex(char c)
 {
-    return ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == 'x' ||
-            (c >= 'A' && c <= 'F'));
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
 }
 
 bool is_numeric(char buffer[])
@@ -51,10 +51,10 @@ bool is_numeric(char buffer[])
     bool hex = false;
     int size = strlen(buffer);
 
-    if (size > 2)
-        hex = !strncmp(buffer, "0x", 2);
+    if (size > 2 && buffer[0] == '0' && (buffer[1] | 32) == 'x')
+        hex = true;
 
-    for (int i = 0; i < size; i++) {
+    for (int i = hex ? 2 : 0; i < size; i++) {
         if (hex && !is_hex(buffer[i]))
             return false;
         if (!hex && !is_digit(buffer[i]))
@@ -177,9 +177,38 @@ token_t lex_token_internal(bool aliasing)
 
     if (is_digit(next_char)) {
         int i = 0;
-        do {
+        token_str[i++] = next_char;
+        read_char(false);
+
+        if (token_str[0] == '0' && ((next_char | 32) == 'x')) {
+            /* Hexadecimal: starts with 0x or 0X */
             token_str[i++] = next_char;
-        } while (is_hex(read_char(false)));
+
+            read_char(false);
+            if (!is_hex(next_char))
+                error("Invalid hex literal: expected hex digit after 0x");
+
+            do {
+                token_str[i++] = next_char;
+            } while (is_hex(read_char(false)));
+
+        } else if (token_str[0] == '0') {
+            /* Octal: starts with 0 but not followed by 'x' */
+            while (is_digit(next_char)) {
+                if (next_char >= '8')
+                    error("Invalid octal digit: must be in range 0-7");
+                token_str[i++] = next_char;
+                read_char(false);
+            }
+
+        } else {
+            /* Decimal */
+            while (is_digit(next_char)) {
+                token_str[i++] = next_char;
+                read_char(false);
+            }
+        }
+
         token_str[i] = 0;
         skip_whitespace();
         return T_numeric;
