@@ -57,6 +57,8 @@ arena_t *BLOCK_ARENA;
 /* BB_ARENA is responsible for basic_block_t / ph2_ir_t allocation */
 arena_t *BB_ARENA;
 
+arena_t *SOURCE_ARENA;
+
 int bb_label_idx = 0;
 
 ph2_ir_t **PH2_IR_FLATTEN;
@@ -70,7 +72,8 @@ int elf_offset = 0;
 
 regfile_t REGS[REG_CNT];
 
-strbuf_t *SOURCE;
+dynarr_t *SOURCE;
+int source_idx = 0;
 
 hashmap_t *INCLUSION_MAP;
 
@@ -986,6 +989,222 @@ void add_insn(block_t *block,
     bb->insn_list.tail = n;
 }
 
+/**
+ * dynarr_reserve() - Ensure the array can hold at least new_cap elements.
+ * @arr:     Dynamic array (must not be NULL).
+ * @new_cap: Desired capacity (in elements).
+ *
+ * If new_cap <= current capacity, do nothing. Otherwise, reallocate
+ * via arena_realloc(), preserving existing elements.
+ */
+void dynarr_reserve(dynarr_t *arr, int new_cap)
+{
+    if (new_cap <= arr->capacity)
+        return;
+    int oldsz = arr->capacity * arr->elem_size;
+    int newsz = new_cap * arr->elem_size;
+    arr->elements = arena_realloc(arr->arena, arr->elements, oldsz, newsz);
+    arr->capacity = new_cap;
+}
+
+/**
+ * dynarr_init() - Initialize a new dynamic array in the given arena.
+ * @arena:     Arena allocator (must not be NULL).
+ * @init_cap:  Initial capacity (0 for none).
+ * @elem_size: Size of each element in bytes (> 0).
+ *
+ * Returns a pointer to the new dynarr_t.
+ */
+dynarr_t *dynarr_init(arena_t *arena, int init_cap, int elem_size)
+{
+    if (elem_size <= 0) {
+        printf("dynarr_init: elem_size must be > 0\n");
+        abort();
+    }
+    dynarr_t *arr = arena_alloc(arena, sizeof(dynarr_t));
+    arr->size = 0;
+    arr->capacity = 0;
+    arr->elem_size = elem_size;
+    arr->elements = NULL;
+    arr->arena = arena;
+    dynarr_reserve(arr, init_cap);
+    return arr;
+}
+
+void _dynarr_grow(dynarr_t *arr, int need)
+{
+    if (need <= arr->capacity)
+        return;
+    int new_cap = arr->capacity ? arr->capacity << 1 : 4;
+    while (need > new_cap)
+        new_cap <<= 1;
+    dynarr_reserve(arr, new_cap);
+}
+
+/**
+ * dynarr_resize() - Set array size, growing capacity if needed.
+ * @arr:      Target array.
+ * @new_size: New size (>= 0).
+ */
+void dynarr_resize(dynarr_t *arr, int new_size)
+{
+    if (new_size < 0) {
+        printf("dynarr_resize: new_size must be >= 0\n");
+        abort();
+    }
+    _dynarr_grow(arr, new_size);
+    arr->size = new_size;
+}
+
+/**
+ * dynarr_push_raw() - Append an element by copying bytes.
+ * @arr:  Target array.
+ * @elem: Pointer to element (elem_size bytes).
+ */
+void dynarr_push_raw(dynarr_t *arr, void *elem)
+{
+    _dynarr_grow(arr, arr->size + 1);
+    char *dst = arr->elements;
+    char *src = elem;
+    dst += arr->size * arr->elem_size;
+    memcpy(dst, src, arr->elem_size);
+    ++arr->size;
+}
+
+/**
+ * dynarr_push_byte() - Append a single byte.
+ * @arr:  Target array (elem_size must be 1).
+ * @elem: Byte value to append.
+ */
+void dynarr_push_byte(dynarr_t *arr, char elem)
+{
+    if (arr->elem_size != sizeof(char)) {
+        printf("dynarr_push_byte: elem_size must be 1\n");
+        abort();
+    }
+    _dynarr_grow(arr, arr->size + 1);
+    char *ptr = arr->elements;
+    ptr[arr->size] = elem;
+    ++arr->size;
+}
+
+/**
+ * dynarr_push_word() - Append an int value.
+ * @arr:  Target array (elem_size must equal sizeof(int)).
+ * @elem: Int value to append.
+ */
+void dynarr_push_word(dynarr_t *arr, int elem)
+{
+    if (arr->elem_size != sizeof(int)) {
+        printf("dynarr_push_word: elem_size must be sizeof(int)\n");
+        abort();
+    }
+    _dynarr_grow(arr, arr->size + 1);
+    int *ptr = arr->elements;
+    ptr[arr->size] = elem;
+    ++arr->size;
+}
+
+/**
+ * dynarr_extend() - Append multiple elements from a buffer.
+ * @arr:   Target array.
+ * @elems: Buffer of elements to copy.
+ * @size:  Size of buffer in bytes (multiple of elem_size).
+ */
+void dynarr_extend(dynarr_t *arr, void *elems, int size)
+{
+    if (size % arr->elem_size != 0) {
+        printf("dynarr_extend: size must be a multiple of elem_size\n");
+        abort();
+    }
+    int added = (size / arr->elem_size);
+    _dynarr_grow(arr, arr->size + added);
+    char *dst = arr->elements;
+    int offset = arr->size * arr->elem_size;
+    char *ptr = elems;
+    memcpy(dst + offset, ptr, size);
+    arr->size += added;
+}
+
+/**
+ * dynarr_get_raw() - Get pointer to element at index.
+ * @arr:   Target array.
+ * @index: Element index (0-based).
+ *
+ * Returns pointer to element in internal buffer.
+ */
+void *dynarr_get_raw(dynarr_t *arr, int index)
+{
+    if (index < 0 || index >= arr->size) {
+        printf("index %d out of bounds (size=%d)\n", index, arr->size);
+        return NULL;
+    }
+    char *ptr = arr->elements;
+    ptr += index * arr->elem_size;
+    return ptr;
+}
+
+/**
+ * dynarr_get_byte() - Fetch byte at index.
+ * @arr:   Target array (elem_size must be 1).
+ * @index: Element index.
+ *
+ * Returns the byte value.
+ */
+char dynarr_get_byte(dynarr_t *arr, int index)
+{
+    if (arr->elem_size != sizeof(char)) {
+        printf("dynarr_get_byte: elem_size must be 1\n");
+        abort();
+    }
+
+    if (index < 0 || index >= arr->size) {
+        printf("index %d out of bounds (size=%d)\n", index, arr->size);
+        return 0;
+    }
+
+    char *ptr = arr->elements;
+    return ptr[index];
+}
+
+/**
+ * dynarr_get_word() - Fetch int at index.
+ * @arr:   Target array (elem_size must be sizeof(int)).
+ * @index: Element index.
+ *
+ * Returns the int value.
+ */
+int dynarr_get_word(dynarr_t *arr, int index)
+{
+    if (arr->elem_size != sizeof(int)) {
+        printf("dynarr_get_word: elem_size must be sizeof(int)\n");
+        abort();
+    }
+    if (index < 0 || index >= arr->size) {
+        printf("index %d out of bounds (size=%d)\n", index, arr->size);
+        return 0;
+    }
+    int *ptr = arr->elements;
+    return ptr[index];
+}
+
+/**
+ * dynarr_set_raw() - Overwrite element at index with given bytes.
+ * @arr:   Target array.
+ * @index: Element index to overwrite.
+ * @elem:  Pointer to source bytes (elem_size bytes).
+ */
+void dynarr_set_raw(dynarr_t *arr, int index, void *elem)
+{
+    if (index < 0 || index >= arr->size) {
+        printf("index %d out of bounds (size=%d)\n", index, arr->size);
+        return;
+    }
+    char *dst = arr->elements;
+    dst += index * arr->elem_size;
+    memcpy(dst, elem, arr->elem_size);
+}
+
 strbuf_t *strbuf_create(int init_capacity)
 {
     strbuf_t *array = malloc(sizeof(strbuf_t));
@@ -1073,8 +1292,9 @@ void global_init(void)
     BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
+    SOURCE_ARENA = arena_init(MAX_SOURCE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
-    SOURCE = strbuf_create(MAX_SOURCE);
+    SOURCE = dynarr_init(SOURCE_ARENA, MAX_SOURCE, sizeof(char));
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
     ALIASES_MAP = hashmap_create(MAX_ALIASES);
@@ -1095,8 +1315,8 @@ void global_release(void)
     arena_free(BLOCK_ARENA);
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
+    arena_free(SOURCE_ARENA);
     free(PH2_IR_FLATTEN);
-    strbuf_free(SOURCE);
     hashmap_free(FUNC_MAP);
     hashmap_free(INCLUSION_MAP);
     hashmap_free(ALIASES_MAP);
@@ -1126,20 +1346,20 @@ void error(char *msg)
     int offset, start_idx, i = 0;
     char diagnostic[512 /* MAX_LINE_LEN * 2 */];
 
-    for (offset = SOURCE->size; offset >= 0 && SOURCE->elements[offset] != '\n';
-         offset--)
+    for (offset = source_idx;
+         offset >= 0 && dynarr_get_byte(SOURCE, offset) != '\n'; offset--)
         ;
 
     start_idx = offset + 1;
 
-    for (offset = 0;
-         offset < MAX_SOURCE && SOURCE->elements[start_idx + offset] != '\n';
+    for (offset = 0; offset < MAX_SOURCE &&
+                     dynarr_get_byte(SOURCE, start_idx + offset) != '\n';
          offset++) {
-        diagnostic[i++] = SOURCE->elements[start_idx + offset];
+        diagnostic[i++] = dynarr_get_byte(SOURCE, start_idx + offset);
     }
     diagnostic[i++] = '\n';
 
-    for (offset = start_idx; offset < SOURCE->size; offset++) {
+    for (offset = start_idx; offset < source_idx; offset++) {
         diagnostic[i++] = ' ';
     }
 
@@ -1148,8 +1368,8 @@ void error(char *msg)
     /* TODO: figure out the corresponding C source file path and report line
      * number.
      */
-    printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg,
-           SOURCE->size, diagnostic);
+    printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg, source_idx,
+           diagnostic);
     abort();
 }
 
