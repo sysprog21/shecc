@@ -697,7 +697,7 @@ void new_name(block_t *block, var_t **var)
 var_t *get_stack_top_subscript_var(var_t *var)
 {
     if (var->base->rename.stack_idx < 1)
-        error("Index is less than 1");
+        fatal("Index is less than 1");
 
     int sub = var->base->rename.stack[var->base->rename.stack_idx - 1];
     for (int i = 0; i < var->base->subscripts_idx; i++) {
