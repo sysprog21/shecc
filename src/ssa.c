@@ -991,7 +991,7 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
         printf("Warning: normal BB with condition\n");
 
     fprintf(fd, "subgraph cluster_%p {\n", bb);
-    fprintf(fd, "label=\"BasicBlock %p\"\n", bb);
+    fprintf(fd, "label=\"BasicBlock %p (%s)\"\n", bb, bb->bb_label_name);
 
     insn_t *insn = bb->insn_list.head;
     if (!insn)
@@ -1170,7 +1170,7 @@ void dump_cfg(char name[])
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         func->visited++;
         fprintf(fd, "subgraph cluster_%p {\n", func);
-        fprintf(fd, "label=\"%p\"\n", func);
+        fprintf(fd, "label=\"%p (%s)\"\n", func, func->return_def.var_name);
         bb_dump(fd, func, func->bbs);
         fprintf(fd, "}\n");
     }
