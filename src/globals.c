@@ -51,6 +51,9 @@ type_t *TY_int;
 
 arena_t *INSN_ARENA;
 
+/* HASHMAP_ARENA is responsible for hashmap_node_t allocation */
+arena_t *HASHMAP_ARENA;
+
 /* BLOCK_ARENA is responsible for block_t / var_t allocation */
 arena_t *BLOCK_ARENA;
 
@@ -378,7 +381,7 @@ hashmap_node_t *hashmap_node_new(char *key, void *val)
         return NULL;
 
     int len = strlen(key);
-    hashmap_node_t *node = malloc(sizeof(hashmap_node_t));
+    hashmap_node_t *node = arena_alloc(HASHMAP_ARENA, sizeof(hashmap_node_t));
 
 
     if (!node) {
@@ -386,7 +389,7 @@ hashmap_node_t *hashmap_node_new(char *key, void *val)
         return NULL;
     }
 
-    node->key = calloc(len + 1, sizeof(char));
+    node->key = arena_alloc(HASHMAP_ARENA, len + 1);
 
     if (!node->key) {
         printf("Failed to allocate hashmap_node_t key with size %d\n", len + 1);
@@ -525,16 +528,6 @@ void hashmap_free(hashmap_t *map)
 {
     if (!map)
         return;
-
-    for (int i = 0; i < map->size; i++) {
-        for (hashmap_node_t *cur = map->buckets[i], *next; cur; cur = next) {
-            next = cur->next;
-            free(cur->key);
-            free(cur->val);
-            free(cur);
-            cur = next;
-        }
-    }
 
     free(map->buckets);
     free(map);
@@ -1073,6 +1066,7 @@ void global_init(void)
     BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
+    HASHMAP_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     SOURCE = strbuf_create(MAX_SOURCE);
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
@@ -1095,6 +1089,7 @@ void global_release(void)
     arena_free(BLOCK_ARENA);
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
+    arena_free(HASHMAP_ARENA);
     free(PH2_IR_FLATTEN);
     strbuf_free(SOURCE);
     hashmap_free(FUNC_MAP);
