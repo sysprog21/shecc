@@ -423,6 +423,20 @@ int main() {
 }
 EOF
 
+# struct with multiple pointer declarations in same line
+try_ 42 << EOF
+typedef struct chunk {
+    struct chunk *next, *prev;
+    int size;
+} chunk_t;
+
+int main() {
+    chunk_t c;
+    c.size = 42;
+    return c.size;
+}
+EOF
+
 # arrays
 try_ 12 << EOF
 int nth_of(int *a, int i) {

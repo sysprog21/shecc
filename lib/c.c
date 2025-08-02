@@ -576,8 +576,7 @@ int fputc(int c, FILE *stream)
 #define IS_CHUNK_GET_FREED(size) (size & CHUNK_SIZE_FREED_MASK)
 
 typedef struct chunk {
-    struct chunk *next;
-    struct chunk *prev;
+    struct chunk *next, *prev;
     int size;
 } chunk_t;
 

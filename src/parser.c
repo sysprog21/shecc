@@ -2870,6 +2870,31 @@ void read_global_statement(void)
             read_full_var_decl(v, 0, 1);
             v->offset = size;
             size += size_var(v);
+
+            /* Handle multiple variable declarations with same base type */
+            while (lex_accept(T_comma)) {
+                if (i >= MAX_FIELDS)
+                    error("Too many struct fields");
+
+                var_t *nv = &type->fields[i++];
+                nv->type = v->type;
+                nv->var_name[0] = '\0';
+                nv->is_ptr = 0;
+                nv->is_func = false;
+                nv->is_global = false;
+                nv->array_size = 0;
+                nv->offset = 0;
+                nv->init_val = 0;
+                nv->liveness = 0;
+                nv->in_loop = 0;
+                nv->base = NULL;
+                nv->subscript = 0;
+                nv->subscripts_idx = 0;
+                read_inner_var_decl(nv, 0, 1);
+                nv->offset = size;
+                size += size_var(nv);
+            }
+
             lex_expect(T_semicolon);
         } while (!lex_accept(T_close_curly));
 
@@ -2922,6 +2947,32 @@ void read_global_statement(void)
                     read_full_var_decl(v, 0, 1);
                     v->offset = size;
                     size += size_var(v);
+
+                    /* Handle multiple variable declarations with same base type
+                     */
+                    while (lex_accept(T_comma)) {
+                        if (i >= MAX_FIELDS)
+                            error("Too many struct fields");
+
+                        var_t *nv = &type->fields[i++];
+                        nv->type = v->type;
+                        nv->var_name[0] = '\0';
+                        nv->is_ptr = 0;
+                        nv->is_func = false;
+                        nv->is_global = false;
+                        nv->array_size = 0;
+                        nv->offset = 0;
+                        nv->init_val = 0;
+                        nv->liveness = 0;
+                        nv->in_loop = 0;
+                        nv->base = NULL;
+                        nv->subscript = 0;
+                        nv->subscripts_idx = 0;
+                        read_inner_var_decl(nv, 0, 1);
+                        nv->offset = size;
+                        size += size_var(nv);
+                    }
+
                     lex_expect(T_semicolon);
                 } while (!lex_accept(T_close_curly));
             }
