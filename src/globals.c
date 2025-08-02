@@ -60,6 +60,11 @@ arena_t *BLOCK_ARENA;
 /* BB_ARENA is responsible for basic_block_t / ph2_ir_t allocation */
 arena_t *BB_ARENA;
 
+/* GENERAL_ARENA is responsible for functions, symbols, constants, aliases,
+ * macros, and traversal args
+ */
+arena_t *GENERAL_ARENA;
+
 int bb_label_idx = 0;
 
 ph2_ir_t **PH2_IR_FLATTEN;
@@ -288,6 +293,37 @@ char *arena_strdup(arena_t *arena, char *str)
 void *arena_memdup(arena_t *arena, void *data, int size)
 {
     return memcpy(arena_alloc(arena, size), data, size);
+}
+
+/* Typed allocators for consistent memory management */
+func_t *arena_alloc_func(void)
+{
+    return arena_calloc(GENERAL_ARENA, 1, sizeof(func_t));
+}
+
+symbol_t *arena_alloc_symbol(void)
+{
+    return arena_calloc(GENERAL_ARENA, 1, sizeof(symbol_t));
+}
+
+constant_t *arena_alloc_constant(void)
+{
+    return arena_alloc(GENERAL_ARENA, sizeof(constant_t));
+}
+
+alias_t *arena_alloc_alias(void)
+{
+    return arena_alloc(GENERAL_ARENA, sizeof(alias_t));
+}
+
+macro_t *arena_alloc_macro(void)
+{
+    return arena_alloc(GENERAL_ARENA, sizeof(macro_t));
+}
+
+bb_traversal_args_t *arena_alloc_traversal_args(void)
+{
+    return arena_calloc(GENERAL_ARENA, 1, sizeof(bb_traversal_args_t));
 }
 
 /* Free the given arena and all its blocks.
@@ -608,7 +644,7 @@ void add_alias(char *alias, char *value)
 {
     alias_t *al = hashmap_get(ALIASES_MAP, alias);
     if (!al) {
-        al = malloc(sizeof(alias_t));
+        al = arena_alloc_alias();
         if (!al) {
             printf("Failed to allocate alias_t\n");
             return;
@@ -642,7 +678,7 @@ macro_t *add_macro(char *name)
 {
     macro_t *ma = hashmap_get(MACROS_MAP, name);
     if (!ma) {
-        ma = malloc(sizeof(macro_t));
+        ma = arena_alloc_macro();
         if (!ma) {
             printf("Failed to allocate macro_t\n");
             return NULL;
@@ -703,7 +739,7 @@ type_t *add_named_type(char *name)
 
 void add_constant(char alias[], int value)
 {
-    constant_t *constant = malloc(sizeof(constant_t));
+    constant_t *constant = arena_alloc_constant();
     if (!constant) {
         printf("Failed to allocate constant_t\n");
         return;
@@ -811,7 +847,7 @@ func_t *add_func(char *func_name, bool synthesize)
     if (func)
         return func;
 
-    func = calloc(1, sizeof(func_t));
+    func = arena_alloc_func();
     hashmap_put(FUNC_MAP, func_name, func);
     strcpy(func->return_def.var_name, func_name);
     func->stack_size = 4;
@@ -931,7 +967,7 @@ void add_symbol(basic_block_t *bb, var_t *var)
             return;
     }
 
-    sym = calloc(1, sizeof(symbol_t));
+    sym = arena_alloc_symbol();
     sym->var = var;
 
     if (!bb->symbol_list.head) {
@@ -1067,6 +1103,7 @@ void global_init(void)
     INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     HASHMAP_ARENA = arena_init(DEFAULT_ARENA_SIZE);
+    GENERAL_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     SOURCE = strbuf_create(MAX_SOURCE);
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
@@ -1090,6 +1127,7 @@ void global_release(void)
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     arena_free(HASHMAP_ARENA);
+    arena_free(GENERAL_ARENA);
     free(PH2_IR_FLATTEN);
     strbuf_free(SOURCE);
     hashmap_free(FUNC_MAP);
