@@ -410,11 +410,7 @@ void build_rdf(void)
 
 void use_chain_add_tail(insn_t *i, var_t *var)
 {
-    use_chain_t *u = calloc(1, sizeof(use_chain_t));
-    if (!u) {
-        printf("calloc failed\n");
-        abort();
-    }
+    use_chain_t *u = arena_calloc(INSN_ARENA, 1, sizeof(use_chain_t));
 
     u->insn = i;
     if (!var->users_head)
@@ -439,7 +435,6 @@ void use_chain_delete(use_chain_t *u, var_t *var)
         var->users_tail = u->prev;
         u->prev->next = NULL;
     }
-    free(u);
 }
 
 void use_chain_build(void)
