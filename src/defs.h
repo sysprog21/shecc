@@ -266,8 +266,7 @@ typedef struct {
 typedef struct ref_block ref_block_t;
 
 struct ref_block_list {
-    ref_block_t *head;
-    ref_block_t *tail;
+    ref_block_t *head, *tail;
 };
 
 typedef struct ref_block_list ref_block_list_t;
@@ -276,8 +275,7 @@ typedef struct insn insn_t;
 
 typedef struct use_chain_node {
     insn_t *insn;
-    struct use_chain_node *next;
-    struct use_chain_node *prev;
+    struct use_chain_node *next, *prev;
 } use_chain_t;
 
 typedef struct var var_t;
@@ -306,8 +304,7 @@ struct var {
     int subscripts_idx;
     rename_t rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
-    use_chain_t *users_head;
-    use_chain_t *users_tail;
+    use_chain_t *users_head, *users_tail;
     struct insn *last_assign;
     int consumed;
     bool is_ternary_ret;
@@ -408,8 +405,7 @@ struct phi_operand {
 typedef struct phi_operand phi_operand_t;
 
 struct insn {
-    struct insn *next;
-    struct insn *prev;
+    struct insn *next, *prev;
     int idx;
     opcode_t opcode;
     var_t *rd;
@@ -423,13 +419,11 @@ struct insn {
 };
 
 typedef struct {
-    insn_t *head;
-    insn_t *tail;
+    insn_t *head, *tail;
 } insn_list_t;
 
 typedef struct {
-    ph2_ir_t *head;
-    ph2_ir_t *tail;
+    ph2_ir_t *head, *tail;
 } ph2_ir_list_t;
 
 typedef enum { NEXT, ELSE, THEN } bb_connection_type_t;
@@ -448,8 +442,7 @@ struct symbol {
 typedef struct symbol symbol_t;
 
 typedef struct {
-    symbol_t *head;
-    symbol_t *tail;
+    symbol_t *head, *tail;
 } symbol_list_t;
 
 struct basic_block {
@@ -519,8 +512,7 @@ struct func {
 };
 
 typedef struct {
-    func_t *head;
-    func_t *tail;
+    func_t *head, *tail;
 } func_list_t;
 
 typedef struct {
