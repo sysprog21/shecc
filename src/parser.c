@@ -2671,6 +2671,36 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (!lex_peek(T_identifier, token))
         error("Unexpected token");
 
+    /* handle macro parameter substitution for statements */
+    int macro_param_idx = find_macro_param_src_idx(token, parent);
+    if (macro_param_idx && parent->macro) {
+        /* save current state */
+        int saved_size = SOURCE->size;
+        char saved_char = next_char;
+        int saved_token = next_token;
+
+        /* jump to parameter value */
+        SOURCE->size = macro_param_idx;
+        next_char = SOURCE->elements[SOURCE->size];
+        next_token = lex_token();
+
+        /* extract the parameter value as identifier token */
+        if (lex_peek(T_identifier, token)) {
+            lex_expect(T_identifier);
+        } else {
+            /* parameter is not a simple identifier, restore state and continue
+             */
+            SOURCE->size = saved_size;
+            next_char = saved_char;
+            next_token = saved_token;
+        }
+
+        /* restore source position */
+        SOURCE->size = saved_size;
+        next_char = saved_char;
+        next_token = saved_token;
+    }
+
     /* is it a variable declaration? */
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     type = find_type(token, find_type_flag);
