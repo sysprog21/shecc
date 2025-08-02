@@ -45,6 +45,9 @@
 
 typedef int FILE;
 
+/* va_list support for variadic functions */
+typedef int *va_list;
+
 void abort(void);
 
 int strlen(char *str)

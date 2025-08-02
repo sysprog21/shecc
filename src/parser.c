@@ -657,7 +657,7 @@ void read_parameter_list_decl(func_t *func, int anon);
 void read_inner_var_decl(var_t *vd, int anon, int is_param)
 {
     vd->init_val = 0;
-    vd->is_ptr = 0;
+    /* Preserve typedef pointer level - don't reset if already inherited */
 
     while (lex_accept(T_asterisk))
         vd->is_ptr++;
@@ -715,6 +715,11 @@ void read_full_var_decl(var_t *vd, int anon, int is_param)
     }
 
     vd->type = type;
+
+    /* Inherit pointer level from typedef */
+    if (type->ptr_level > 0)
+        vd->is_ptr = type->ptr_level;
+
     read_inner_var_decl(vd, anon, is_param);
 }
 
@@ -963,21 +968,33 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         lvalue_t lvalue;
 
         int open_bracket = lex_accept(T_open_bracket);
-        lex_peek(T_identifier, token);
-        var_t *var = find_var(token, parent);
-        read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
-        if (open_bracket)
+        if (open_bracket) {
+            /* Handle expressions like *(++p) */
+            read_expr(parent, bb);
             lex_expect(T_close_bracket);
+            rs1 = opstack_pop();
+            /* Create a temporary variable for the dereferenced result */
+            vd = require_var(parent);
+            vd->type = TY_int; /* Default to int type for now */
+            vd->is_ptr = 0;
+            gen_name_to(vd->var_name);
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_read, vd, rs1, NULL, vd->type->size, NULL);
+        } else {
+            lex_peek(T_identifier, token);
+            var_t *var = find_var(token, parent);
+            read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
 
-        rs1 = opstack_pop();
-        vd = require_deref_var(parent, var->type, var->is_ptr);
-        if (lvalue.is_ptr > 1)
-            sz = PTR_SIZE;
-        else
-            sz = lvalue.type->size;
-        gen_name_to(vd->var_name);
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+            rs1 = opstack_pop();
+            vd = require_deref_var(parent, var->type, var->is_ptr);
+            if (lvalue.is_ptr > 1)
+                sz = PTR_SIZE;
+            else
+                sz = lvalue.type->size;
+            gen_name_to(vd->var_name);
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+        }
     } else if (lex_accept(T_open_bracket)) {
         read_expr(parent, bb);
         read_ternary_operation(parent, bb);
@@ -1374,8 +1391,31 @@ void read_lvalue(lvalue_t *lvalue,
                 error("Cannot apply square operator to non-pointer");
 
             /* if nested pointer, still pointer */
-            if (var->is_ptr <= 1 && var->array_size == 0)
-                lvalue->size = lvalue->type->size;
+            if (var->is_ptr <= 1 && var->array_size == 0) {
+                /* For typedef pointers, get the size of the base type that the
+                 * pointer points to
+                 */
+                if (lvalue->type->ptr_level > 0) {
+                    /* This is a typedef pointer, get base type size */
+                    switch (lvalue->type->base_type) {
+                    case TYPE_char:
+                        lvalue->size = TY_char->size;
+                        break;
+                    case TYPE_int:
+                        lvalue->size = TY_int->size;
+                        break;
+                    case TYPE_void:
+                        /* void pointers treated as byte pointers */
+                        lvalue->size = 1;
+                        break;
+                    default:
+                        lvalue->size = lvalue->type->size;
+                        break;
+                    }
+                } else {
+                    lvalue->size = lvalue->type->size;
+                }
+            }
 
             read_expr(parent, bb);
 
@@ -1529,7 +1569,12 @@ void read_lvalue(lvalue_t *lvalue,
         if (prefix_op != OP_generic) {
             vd = require_var(parent);
             gen_name_to(vd->var_name);
-            vd->init_val = 1;
+            /* For pointer arithmetic, increment by the size of pointed-to type
+             */
+            if (lvalue->is_ptr)
+                vd->init_val = lvalue->type->size;
+            else
+                vd->init_val = 1;
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
@@ -1550,6 +1595,8 @@ void read_lvalue(lvalue_t *lvalue,
                  */
                 add_insn(parent, *bb, OP_write, NULL, vd, rs1, lvalue->size,
                          NULL);
+                /* Push the new value onto the operand stack */
+                opstack_push(rs1);
             } else {
                 rs1 = vd;
                 vd = operand_stack[operand_stack_idx - 1];
@@ -3037,6 +3084,14 @@ void read_global_statement(void)
             type->base_type = base->base_type;
             type->size = base->size;
             type->num_fields = 0;
+            type->ptr_level = 0;
+
+            /* Handle pointer types in typedef: typedef char *string; */
+            while (lex_accept(T_asterisk)) {
+                type->ptr_level++;
+                type->size = PTR_SIZE;
+            }
+
             lex_ident(T_identifier, type->type_name);
             lex_expect(T_semicolon);
         }
