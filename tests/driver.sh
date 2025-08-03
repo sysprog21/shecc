@@ -942,6 +942,49 @@ int main()
 }
 EOF
 
+# macro parameter substitution works in expression contexts
+try_ 15 << EOF
+#define ADD_PARAMS(a, b) ((a) + (b))
+int main()
+{
+    int x = 5, y = 10;
+    return ADD_PARAMS(x, y);
+}
+EOF
+
+# macro with assignment operators
+try_ 18 << EOF
+#define ASSIGN_MACRO(variable, val) \
+    variable = variable + val + 10
+int main()
+{
+    int x = 5;
+    ASSIGN_MACRO(x, 3);
+    return x;
+}
+EOF
+
+try_ 27 << EOF
+#define COMPOUND_ASSIGN(variable, val) \
+    variable += val + 10
+int main()
+{
+    int y = 10;
+    COMPOUND_ASSIGN(y, 7);
+    return y;
+}
+EOF
+
+try_ 42 << EOF
+#define SET_VAR(var, value) var = value
+int main()
+{
+    int z = 0;
+    SET_VAR(z, 42);
+    return z;
+}
+EOF
+
 try_output 0 "Wrapper: Hello World!" << EOF
 #define WRAPPER(...)         \
     do {                     \
