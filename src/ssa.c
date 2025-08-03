@@ -104,7 +104,7 @@ void bb_build_rpo(func_t *func, basic_block_t *bb)
 
 void build_rpo(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         args->func = func;
         args->bb = func->bbs;
@@ -121,7 +121,6 @@ void build_rpo(void)
         args->postorder_cb = bb_build_rpo;
         bb_forward_traversal(args);
     }
-    free(args);
 }
 
 basic_block_t *intersect(basic_block_t *i, basic_block_t *j)
@@ -221,7 +220,7 @@ void bb_build_dom(func_t *func, basic_block_t *bb)
 
 void build_dom(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         args->func = func;
         args->bb = func->bbs;
@@ -230,7 +229,6 @@ void build_dom(void)
         args->preorder_cb = bb_build_dom;
         bb_forward_traversal(args);
     }
-    free(args);
 }
 
 void bb_build_df(func_t *func, basic_block_t *bb)
@@ -256,7 +254,7 @@ void bb_build_df(func_t *func, basic_block_t *bb)
 
 void build_df(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         args->func = func;
         args->bb = func->bbs;
@@ -265,7 +263,6 @@ void build_df(void)
         args->postorder_cb = bb_build_df;
         bb_forward_traversal(args);
     }
-    free(args);
 }
 
 basic_block_t *reverse_intersect(basic_block_t *i, basic_block_t *j)
@@ -351,7 +348,7 @@ void bb_build_rdom(func_t *func, basic_block_t *bb)
 
 void build_rdom(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         args->func = func;
         args->bb = func->exit;
@@ -360,7 +357,6 @@ void build_rdom(void)
         args->preorder_cb = bb_build_rdom;
         bb_backward_traversal(args);
     }
-    free(args);
 }
 
 void bb_build_rdf(func_t *func, basic_block_t *bb)
@@ -396,7 +392,7 @@ void bb_build_rdf(func_t *func, basic_block_t *bb)
 
 void build_rdf(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         args->func = func;
         args->bb = func->exit;
@@ -405,7 +401,6 @@ void build_rdf(void)
         args->postorder_cb = bb_build_rdf;
         bb_backward_traversal(args);
     }
-    free(args);
 }
 
 void use_chain_add_tail(insn_t *i, var_t *var)
@@ -488,7 +483,7 @@ void var_add_killed_bb(var_t *var, basic_block_t *bb)
     if (found)
         return;
 
-    ref = calloc(1, sizeof(ref_block_t));
+    ref = arena_calloc(GENERAL_ARENA, 1, sizeof(ref_block_t));
     ref->bb = bb;
     if (!var->ref_block_list.head)
         var->ref_block_list.head = ref;
@@ -511,7 +506,7 @@ void fn_add_global(func_t *func, var_t *var)
     if (found)
         return;
 
-    sym = calloc(1, sizeof(symbol_t));
+    sym = arena_alloc_symbol();
     sym->var = var;
     if (!func->global_sym_list.head) {
         sym->index = 0;
@@ -544,7 +539,7 @@ void bb_solve_globals(func_t *func, basic_block_t *bb)
 
 void solve_globals(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         args->func = func;
         args->bb = func->bbs;
@@ -553,7 +548,6 @@ void solve_globals(void)
         args->postorder_cb = bb_solve_globals;
         bb_forward_traversal(args);
     }
-    free(args);
 }
 
 bool var_check_in_scope(var_t *var, block_t *block)
@@ -723,7 +717,7 @@ void pop_name(var_t *var)
 
 void append_phi_operand(insn_t *insn, var_t *var, basic_block_t *bb_from)
 {
-    phi_operand_t *op = calloc(1, sizeof(phi_operand_t));
+    phi_operand_t *op = arena_calloc(GENERAL_ARENA, 1, sizeof(phi_operand_t));
     op->from = bb_from;
     op->var = get_stack_top_subscript_var(var);
 
@@ -863,7 +857,7 @@ void bb_unwind_phi(func_t *func, basic_block_t *bb)
 
 void unwind_phi(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         args->func = func;
         args->bb = func->bbs;
@@ -872,7 +866,6 @@ void unwind_phi(void)
         args->preorder_cb = bb_unwind_phi;
         bb_forward_traversal(args);
     }
-    free(args);
 }
 
 #ifdef __SHECC__
@@ -1599,7 +1592,7 @@ void bb_build_reversed_rpo(func_t *func, basic_block_t *bb)
 
 void build_reversed_rpo(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         func->bb_cnt = 0;
         args->func = func;
@@ -1617,7 +1610,6 @@ void build_reversed_rpo(void)
         args->postorder_cb = bb_build_reversed_rpo;
         bb_backward_traversal(args);
     }
-    free(args);
 }
 
 void bb_reset_live_kill_idx(func_t *func, basic_block_t *bb)
@@ -1749,7 +1741,7 @@ bool recompute_live_out(basic_block_t *bb)
 
 void liveness_analysis(void)
 {
-    bb_traversal_args_t *args = calloc(1, sizeof(bb_traversal_args_t));
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         args->func = func;
         args->bb = func->bbs;
@@ -1765,7 +1757,6 @@ void liveness_analysis(void)
         args->preorder_cb = bb_solve_locals;
         bb_forward_traversal(args);
     }
-    free(args);
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         basic_block_t *bb = func->exit;
