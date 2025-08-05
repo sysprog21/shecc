@@ -106,9 +106,16 @@ $(OUT)/%.o: %.c
 	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
 
 SHELL_HACK := $(shell mkdir -p $(OUT) $(OUT)/$(SRCDIR) $(OUT)/tests)
-$(OUT)/libc.inc: $(OUT)/inliner $(LIBDIR)/c.c
+
+$(OUT)/norm-lf: tools/norm-lf.c
+	$(VECHO) "  CC+LD\t$@\n"
+	$(Q)$(CC) $(CFLAGS) -o $@ $^
+
+$(OUT)/libc.inc: $(OUT)/inliner $(OUT)/norm-lf $(LIBDIR)/c.c
 	$(VECHO) "  GEN\t$@\n"
-	$(Q)$(OUT)/inliner $(LIBDIR)/c.c $@
+	$(Q)$(OUT)/norm-lf $(LIBDIR)/c.c $(OUT)/c.normalized.c
+	$(Q)$(OUT)/inliner $(OUT)/c.normalized.c $@
+	$(Q)$(RM) $(OUT)/c.normalized.c
 
 $(OUT)/inliner: tools/inliner.c
 	$(VECHO) "  CC+LD\t$@\n"
@@ -146,7 +153,7 @@ clean:
 	-$(RM) $(OUT)/libc.inc
 
 distclean: clean
-	-$(RM) $(OUT)/inliner $(OUT)/target $(SRCDIR)/codegen.c config $(BUILD_SESSION)
+	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config $(BUILD_SESSION)
 	-$(RM) DOM.dot CFG.dot
 
 -include $(deps)

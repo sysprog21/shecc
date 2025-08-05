@@ -10,6 +10,9 @@
  * The inliner is used at build-time, and developers can use the
  * "inline C" feature to implement target-specific parts such as
  * C runtime and essential libraries.
+ *
+ * Note: Input files are preprocessed by norm-lf tool to ensure
+ * consistent LF (Unix) line endings before processing.
  */
 
 #include <stdbool.h>
@@ -110,7 +113,10 @@ void write_line(char *src)
 {
     write_str("  __c(\"");
     for (int i = 0; src[i]; i++) {
-        if (src[i] == '\"') {
+        if (src[i] == '\\') {
+            write_char('\\');
+            write_char('\\');
+        } else if (src[i] == '\"') {
             write_char('\\');
             write_char('\"');
         } else if (src[i] != '\n') {
