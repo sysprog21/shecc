@@ -372,6 +372,7 @@ struct type {
     int size;
     var_t fields[MAX_FIELDS];
     int num_fields;
+    int ptr_level; /* pointer level for typedef pointer types */
 };
 
 /* lvalue details */

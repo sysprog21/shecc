@@ -1342,7 +1342,7 @@ int main()
 }
 EOF
 
-# Logical-and, for loop condition 
+# Logical-and, for loop condition
 try_output 0 "10" << EOF
 int main()
 {
@@ -1936,6 +1936,315 @@ try_compile_error << EOF
 int main()
 {
     int x = 0XGHI;
+    return 0;
+}
+EOF
+
+# va_list and variadic function tests
+# Note: These tests demonstrate both direct pointer arithmetic and
+# va_list typedef forwarding between functions, now fully supported.
+
+# Test 1: Sum calculation using variadic arguments
+try_output 0 "Sum: 15" << EOF
+int calculate_sum(int count, ...)
+{
+    int sum = 0;
+    int i;
+    int *p;
+
+    p = &count;
+    p++;
+
+    for (i = 0; i < count; i++)
+        sum += p[i];
+
+    return sum;
+}
+
+int main()
+{
+    int result = calculate_sum(5, 1, 2, 3, 4, 5);
+    printf("Sum: %d", result);
+    return 0;
+}
+EOF
+
+# Test 2: Multiple integer arguments
+try_output 0 "Multi: 10 20 255" << EOF
+void multi_arg_test(int first, ...)
+{
+    int *p;
+    int val1, val2;
+
+    /* Point to variadic arguments */
+    p = &first;
+    p++;
+
+    /* Get integer values */
+    val1 = p[0];
+    val2 = p[1];
+
+    printf("Multi: %d %d %d", first, val1, val2);
+}
+
+int main()
+{
+    multi_arg_test(10, 20, 255);
+    return 0;
+}
+EOF
+
+# Test 3: Variable argument count with different values
+try_output 0 "Args: 1=100 2=200 3=300" << EOF
+void print_args(int count, ...)
+{
+    int *p = &count;
+    int i;
+
+    p++;
+    printf("Args:");
+    for (i = 0; i < count; i++)
+        printf(" %d=%d", i + 1, p[i]);
+}
+
+int main()
+{
+    print_args(3, 100, 200, 300);
+    return 0;
+}
+EOF
+
+# Test 4: Mixed argument types (integers with different sizes)
+try_output 0 "Values: 42 -17 0 999" << EOF
+void mixed_args(int first, ...)
+{
+    int *p = &first;
+
+    printf("Values: %d", first);
+    printf(" %d", *(++p));
+    printf(" %d", *(++p));
+    printf(" %d", *(++p));
+}
+
+int main()
+{
+    mixed_args(42, -17, 0, 999);
+    return 0;
+}
+EOF
+
+# Test 5: Minimum and maximum finder
+try_output 0 "Min: 5, Max: 50" << EOF
+void find_min_max(int count, ...)
+{
+    int *p = &count;
+    int i, min, max;
+
+    p++;
+    min = p[0];
+    max = p[0];
+
+    for (i = 1; i < count; i++) {
+        if (p[i] < min) min = p[i];
+        if (p[i] > max) max = p[i];
+    }
+
+    printf("Min: %d, Max: %d", min, max);
+}
+
+int main()
+{
+    find_min_max(4, 10, 50, 5, 25);
+    return 0;
+}
+EOF
+
+# Test 6: Simple printf-like function
+try_output 0 "ERROR: Failed with code 42" << EOF
+void error_log(int code, ...)
+{
+    printf("ERROR: Failed with code %d", code);
+}
+
+int main()
+{
+    error_log(42);
+    return 0;
+}
+EOF
+
+# Test 7: Function with single variadic argument
+try_output 0 "Single extra: 123" << EOF
+void single_extra(int base, ...)
+{
+    int *p = &base;
+    p++;
+    printf("Single extra: %d", *p);
+}
+
+int main()
+{
+    single_extra(0, 123);
+    return 0;
+}
+EOF
+
+# Test 8: Zero additional arguments
+try_output 0 "Only required: 77" << EOF
+void only_required(int value, ...)
+{
+    printf("Only required: %d", value);
+}
+
+int main()
+{
+    only_required(77);
+    return 0;
+}
+EOF
+
+# Test 9: Arithmetic operations on variadic arguments
+try_output 0 "Result: 25" << EOF
+int arithmetic_va(int count, ...)
+{
+    int *p = &count;
+    int result = 0;
+    int i;
+
+    p++;
+    for (i = 0; i < count; i++) {
+        if (i % 2 == 0)
+            result += p[i];
+        else
+            result -= p[i];
+    }
+    return result;
+}
+
+int main()
+{
+    int res = arithmetic_va(4, 20, 5, 15, 5);  /* 20 - 5 + 15 - 5 = 25 */
+    printf("Result: %d", res);
+    return 0;
+}
+EOF
+
+# Test 10: Simple working variadic function test
+try_output 0 "Variadic: 60" << EOF
+int sum_three(int a, ...)
+{
+    int *p = &a;
+    int v1 = p[0];
+    int v2 = p[1];
+    int v3 = p[2];
+    return v1 + v2 + v3;
+}
+
+int main()
+{
+    printf("Variadic: %d", sum_three(10, 20, 30));
+    return 0;
+}
+EOF
+
+# va_list typedef forwarding tests
+# These tests demonstrate va_list typedef forwarding between functions
+
+# Test 11: Basic va_list typedef forwarding
+try_output 0 "Test: 42" << EOF
+typedef int *va_list;
+
+void print_with_va_list(va_list args)
+{
+    printf("Test: %d", args[0]);
+}
+
+int main()
+{
+    int values[3];
+    values[0] = 42;
+    values[1] = 100;
+    values[2] = 200;
+    va_list myargs = values;
+    print_with_va_list(myargs);
+    return 0;
+}
+EOF
+
+# Test 12: va_list array indexing
+try_output 0 "args[0] = 42" << EOF
+typedef int *va_list;
+
+int main()
+{
+    int x = 42;
+    va_list args = &x;
+    printf("args[0] = %d", args[0]);
+    return 0;
+}
+EOF
+
+# Test 13: Built-in va_list usage (from lib/c.c)
+try_output 0 "Built-in: 777" << EOF
+int main()
+{
+    int test_val = 777;
+    va_list args = &test_val;
+    printf("Built-in: %d", args[0]);
+    return 0;
+}
+EOF
+
+# typedef pointer tests
+try_ 42 << EOF
+typedef int *int_ptr;
+
+int main(void)
+{
+    int x = 42;
+    int_ptr p = &x;
+    return *p;
+}
+EOF
+
+try_output 0 "Hello" << EOF
+typedef char *string;
+
+int main(void)
+{
+    char buf[] = "Hello";
+    string str = buf;
+    printf("%s", str);
+    return 0;
+}
+EOF
+
+try_output 0 "Pointer arithmetic: 10 20 30" << EOF
+typedef int *int_ptr;
+
+int main(void)
+{
+    int a = 10, b = 20, c = 30;
+    int_ptr ptr = &a;
+
+    printf("Pointer arithmetic:");
+    printf(" %d", *ptr);
+    ptr = &b;
+    printf(" %d", *ptr);
+    ptr = &c;
+    printf(" %d", *ptr);
+    return 0;
+}
+EOF
+
+try_output 0 "Value: 42" << EOF
+typedef int *int_ptr;
+
+int main(void)
+{
+    int value = 42;
+    int_ptr iptr = &value;
+    printf("Value: %d", *iptr);
     return 0;
 }
 EOF
