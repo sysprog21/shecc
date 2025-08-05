@@ -143,6 +143,7 @@ arena_t *arena_init(int initial_capacity)
         abort();
     }
     arena->head = arena_block_create(initial_capacity);
+    arena->total_bytes = initial_capacity;
     return arena;
 }
 
@@ -171,6 +172,7 @@ void *arena_alloc(arena_t *arena, int size)
         arena_block_t *new_block = arena_block_create(new_capacity);
         new_block->next = arena->head;
         arena->head = new_block;
+        arena->total_bytes += new_capacity;
     }
 
     void *ptr = arena->head->memory + arena->head->offset;
@@ -198,16 +200,8 @@ void *arena_calloc(arena_t *arena, int n, int size)
     int total = n * size;
     void *ptr = arena_alloc(arena, total);
 
-    int *w_ptr = ptr;
-    int w_count = total >> 2;
-    int b_index = w_count << 2;
-
-    for (int i = 0; i < w_count; ++i)
-        w_ptr[i] = 0;
-
-    char *b_ptr = ptr;
-    while (b_index < total)
-        b_ptr[b_index++] = 0;
+    /* Use memset for better performance */
+    memset(ptr, 0, total);
 
     return ptr;
 }
@@ -1099,11 +1093,11 @@ void global_init(void)
 
     MACROS_MAP = hashmap_create(MAX_ALIASES);
     TYPES = malloc(MAX_TYPES * sizeof(type_t));
-    BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE);
-    INSN_ARENA = arena_init(DEFAULT_ARENA_SIZE);
-    BB_ARENA = arena_init(DEFAULT_ARENA_SIZE);
-    HASHMAP_ARENA = arena_init(DEFAULT_ARENA_SIZE);
-    GENERAL_ARENA = arena_init(DEFAULT_ARENA_SIZE);
+    BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Variables/blocks */
+    INSN_ARENA = arena_init(LARGE_ARENA_SIZE); /* Instructions - high usage */
+    BB_ARENA = arena_init(SMALL_ARENA_SIZE);   /* Basic blocks - low usage */
+    HASHMAP_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Hash nodes */
+    GENERAL_ARENA = arena_init(SMALL_ARENA_SIZE);   /* Misc - low usage */
     PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
     SOURCE = strbuf_create(MAX_SOURCE);
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);

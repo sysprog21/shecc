@@ -40,8 +40,10 @@
 #define MAX_ANALYSIS_STACK_SIZE 800
 
 /* Default capacities for common data structures */
-/* Default arena size is initialized with 256 KiB */
-#define DEFAULT_ARENA_SIZE 262144
+/* Arena sizes optimized based on typical usage patterns */
+#define DEFAULT_ARENA_SIZE 262144 /* 256 KiB - standard default */
+#define SMALL_ARENA_SIZE 65536    /* 64 KiB - for small allocations */
+#define LARGE_ARENA_SIZE 524288   /* 512 KiB - for instruction arena */
 #define DEFAULT_FUNCS_SIZE 64
 #define DEFAULT_INCLUSIONS_SIZE 16
 
@@ -76,6 +78,7 @@ typedef struct arena_block {
 
 typedef struct {
     arena_block_t *head;
+    int total_bytes; /* Track total allocation for profiling */
 } arena_t;
 
 /* string-based hash map definitions */
