@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
         else if (!strcmp(argv[i], "--no-libc"))
             libc = 0;
         else if (!strcmp(argv[i], "-o")) {
-            if (i < argc + 1) {
+            if (i + 1 < argc) {
                 out = argv[i + 1];
                 i++;
             } else
