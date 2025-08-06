@@ -1113,8 +1113,14 @@ void global_init(void)
     elf_section = strbuf_create(MAX_SECTION);
 }
 
+/* Forward declaration for lexer cleanup */
+void lexer_cleanup(void);
+
 void global_release(void)
 {
+    /* Cleanup lexer hashmaps */
+    lexer_cleanup();
+
     hashmap_free(MACROS_MAP);
     free(TYPES);
     arena_free(BLOCK_ARENA);

@@ -10,6 +10,163 @@
 #include "defs.h"
 #include "globals.c"
 
+/* Hash table constants */
+#define NUM_DIRECTIVES 11
+#define NUM_KEYWORDS 15
+
+/* Preprocessor directive hash table using existing shecc hashmap */
+hashmap_t *DIRECTIVE_MAP = NULL;
+/* C keywords hash table */
+hashmap_t *KEYWORD_MAP = NULL;
+/* Token arrays for cleanup */
+token_t *directive_tokens_storage = NULL;
+token_t *keyword_tokens_storage = NULL;
+
+void lex_init_directives()
+{
+    if (DIRECTIVE_MAP)
+        return;
+
+    DIRECTIVE_MAP = hashmap_create(16); /* Small capacity for directives */
+
+    /* Initialization using indexed for-loop */
+    directive_tokens_storage =
+        arena_alloc(GENERAL_ARENA, NUM_DIRECTIVES * sizeof(token_t));
+
+    char *names[NUM_DIRECTIVES];
+    token_t token_values[NUM_DIRECTIVES];
+
+    /* Populate arrays using index-based assignments for compatibility */
+    names[0] = "#define";
+    token_values[0] = T_cppd_define;
+    names[1] = "#elif";
+    token_values[1] = T_cppd_elif;
+    names[2] = "#else";
+    token_values[2] = T_cppd_else;
+    names[3] = "#endif";
+    token_values[3] = T_cppd_endif;
+    names[4] = "#error";
+    token_values[4] = T_cppd_error;
+    names[5] = "#if";
+    token_values[5] = T_cppd_if;
+    names[6] = "#ifdef";
+    token_values[6] = T_cppd_ifdef;
+    names[7] = "#ifndef";
+    token_values[7] = T_cppd_ifndef;
+    names[8] = "#include";
+    token_values[8] = T_cppd_include;
+    names[9] = "#pragma";
+    token_values[9] = T_cppd_pragma;
+    names[10] = "#undef";
+    token_values[10] = T_cppd_undef;
+
+    /* hashmap insertion */
+    for (int i = 0; i < NUM_DIRECTIVES; i++) {
+        directive_tokens_storage[i] = token_values[i];
+        hashmap_put(DIRECTIVE_MAP, names[i], &directive_tokens_storage[i]);
+    }
+}
+
+void lex_init_keywords()
+{
+    if (KEYWORD_MAP)
+        return;
+
+    KEYWORD_MAP = hashmap_create(32); /* Capacity for keywords */
+
+    /* Initialization using indexed for-loop */
+    keyword_tokens_storage =
+        arena_alloc(GENERAL_ARENA, NUM_KEYWORDS * sizeof(token_t));
+
+    char *names[NUM_KEYWORDS];
+    token_t token_values[NUM_KEYWORDS];
+
+    /* Populate arrays using index-based assignments for compatibility */
+    names[0] = "if";
+    token_values[0] = T_if;
+    names[1] = "while";
+    token_values[1] = T_while;
+    names[2] = "for";
+    token_values[2] = T_for;
+    names[3] = "do";
+    token_values[3] = T_do;
+    names[4] = "else";
+    token_values[4] = T_else;
+    names[5] = "return";
+    token_values[5] = T_return;
+    names[6] = "typedef";
+    token_values[6] = T_typedef;
+    names[7] = "enum";
+    token_values[7] = T_enum;
+    names[8] = "struct";
+    token_values[8] = T_struct;
+    names[9] = "sizeof";
+    token_values[9] = T_sizeof;
+    names[10] = "switch";
+    token_values[10] = T_switch;
+    names[11] = "case";
+    token_values[11] = T_case;
+    names[12] = "break";
+    token_values[12] = T_break;
+    names[13] = "default";
+    token_values[13] = T_default;
+    names[14] = "continue";
+    token_values[14] = T_continue;
+
+    /* hashmap insertion */
+    for (int i = 0; i < NUM_KEYWORDS; i++) {
+        keyword_tokens_storage[i] = token_values[i];
+        hashmap_put(KEYWORD_MAP, names[i], &keyword_tokens_storage[i]);
+    }
+}
+
+/* Hash table lookup for preprocessor directives */
+token_t lookup_directive(char *token)
+{
+    if (!DIRECTIVE_MAP)
+        lex_init_directives();
+
+    token_t *result = hashmap_get(DIRECTIVE_MAP, token);
+    if (result)
+        return *result;
+
+    return T_identifier;
+}
+
+/* Hash table lookup for C keywords */
+token_t lookup_keyword(char *token)
+{
+    if (!KEYWORD_MAP)
+        lex_init_keywords();
+
+    token_t *result = hashmap_get(KEYWORD_MAP, token);
+    if (result)
+        return *result;
+
+    return T_identifier;
+}
+
+/* Cleanup function for lexer hashmaps */
+void lexer_cleanup()
+{
+    if (DIRECTIVE_MAP) {
+        hashmap_free(DIRECTIVE_MAP);
+        DIRECTIVE_MAP = NULL;
+    }
+
+    if (KEYWORD_MAP) {
+        hashmap_free(KEYWORD_MAP);
+        KEYWORD_MAP = NULL;
+    }
+
+    /* Token storage arrays are allocated from GENERAL_ARENA and will be
+     * automatically freed when the arena is freed in global_release().
+     * No need to explicitly free them here.
+     */
+    directive_tokens_storage = NULL;
+    keyword_tokens_storage = NULL;
+}
+
 bool is_whitespace(char c)
 {
     return c == ' ' || c == '\t';
@@ -112,28 +269,9 @@ token_t lex_token_internal(bool aliasing)
         token_str[i] = 0;
         skip_whitespace();
 
-        if (!strcmp(token_str, "#include"))
-            return T_cppd_include;
-        if (!strcmp(token_str, "#define"))
-            return T_cppd_define;
-        if (!strcmp(token_str, "#undef"))
-            return T_cppd_undef;
-        if (!strcmp(token_str, "#error"))
-            return T_cppd_error;
-        if (!strcmp(token_str, "#if"))
-            return T_cppd_if;
-        if (!strcmp(token_str, "#elif"))
-            return T_cppd_elif;
-        if (!strcmp(token_str, "#ifdef"))
-            return T_cppd_ifdef;
-        if (!strcmp(token_str, "#ifndef"))
-            return T_cppd_ifndef;
-        if (!strcmp(token_str, "#else"))
-            return T_cppd_else;
-        if (!strcmp(token_str, "#endif"))
-            return T_cppd_endif;
-        if (!strcmp(token_str, "#pragma"))
-            return T_cppd_pragma;
+        token_t directive = lookup_directive(token_str);
+        if (directive != T_identifier)
+            return directive;
         error("Unknown directive");
     }
 
@@ -485,36 +623,9 @@ token_t lex_token_internal(bool aliasing)
         token_str[i] = 0;
         skip_whitespace();
 
-        if (!strcmp(token_str, "if"))
-            return T_if;
-        if (!strcmp(token_str, "while"))
-            return T_while;
-        if (!strcmp(token_str, "for"))
-            return T_for;
-        if (!strcmp(token_str, "do"))
-            return T_do;
-        if (!strcmp(token_str, "else"))
-            return T_else;
-        if (!strcmp(token_str, "return"))
-            return T_return;
-        if (!strcmp(token_str, "typedef"))
-            return T_typedef;
-        if (!strcmp(token_str, "enum"))
-            return T_enum;
-        if (!strcmp(token_str, "struct"))
-            return T_struct;
-        if (!strcmp(token_str, "sizeof"))
-            return T_sizeof;
-        if (!strcmp(token_str, "switch"))
-            return T_switch;
-        if (!strcmp(token_str, "case"))
-            return T_case;
-        if (!strcmp(token_str, "break"))
-            return T_break;
-        if (!strcmp(token_str, "default"))
-            return T_default;
-        if (!strcmp(token_str, "continue"))
-            return T_continue;
+        token_t keyword = lookup_keyword(token_str);
+        if (keyword != T_identifier)
+            return keyword;
 
         if (aliasing) {
             alias = find_alias(token_str);
