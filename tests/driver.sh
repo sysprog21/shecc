@@ -114,6 +114,45 @@ function expr() {
     items "$expected" "exit($input);"
 }
 
+# try_large - test shecc with large return values (> 255)
+# Usage:
+# - try_large expected_value input_code
+# compile "input_code" with shecc and verify the return value by printing it
+# instead of using exit code (which is limited to 0-255).
+function try_large() {
+    local expected="$1"
+    local input="$(cat)"
+
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+
+    # Wrap the input to print the return value
+    cat > "$tmp_in" << EOF
+int printf(char *format, ...);
+$input
+int main() {
+    int result = test_function();
+    printf("%d", result);
+    return 0;
+}
+EOF
+
+    $SHECC -o "$tmp_exe" "$tmp_in"
+    chmod +x $tmp_exe
+
+    local output=$($TARGET_EXEC "$tmp_exe")
+
+    if [ "$output" != "$expected" ]; then
+        echo "$input => $expected expected, but got $output"
+        echo "input: $tmp_in"
+        echo "executable: $tmp_exe"
+        exit 1
+    else
+        echo "Large value test: $expected"
+        echo "output => $output"
+    fi
+}
+
 # just a number
 expr 0 0
 expr 42 42
@@ -314,6 +353,41 @@ int fib(int n, int a, int b)
 
 int main() {
     return fib(012, 0, 1); /* octal(12) = dec(10) */
+}
+EOF
+
+# Test large fibonacci values using the new try_large function
+try_large 987 << EOF
+int fib(int n, int a, int b)
+{
+    if (n == 0)
+        return a;
+    if (n == 1)
+        return b;
+    return fib(n - 1, b, a + b);
+}
+
+int test_function() {
+    return fib(16, 0, 1); /* fib(16) = 987 */
+}
+EOF
+
+# Test other large values
+try_large 1000 << EOF
+int test_function() {
+    return 1000;
+}
+EOF
+
+try_large 65536 << EOF
+int test_function() {
+    return 1 << 16; /* 2^16 = 65536 */
+}
+EOF
+
+try_large 999999 << EOF
+int test_function() {
+    return 999999;
 }
 EOF
 
