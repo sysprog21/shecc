@@ -2323,4 +2323,373 @@ int main(void)
 }
 EOF
 
+# Complex pointer arithmetic tests
+# Testing enhanced parser capability to handle expressions like *(ptr + offset)
+
+# Test 1: Basic pointer arithmetic on RHS
+try_output 0 "Values: 10 20 30" << EOF
+int main()
+{
+    int arr[3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    int *ptr = arr;
+    printf("Values: %d %d %d", *(ptr + 0), *(ptr + 1), *(ptr + 2));
+    return 0;
+}
+EOF
+
+# Test 2: Complex pointer arithmetic with variables on RHS
+try_output 0 "Complex: 25 35 45" << EOF
+int main()
+{
+    int data[5];
+    data[0] = 5;
+    data[1] = 15;
+    data[2] = 25;
+    data[3] = 35;
+    data[4] = 45;
+    int *p = data;
+    int offset = 2;
+    printf("Complex: %d %d %d", *(p + offset), *(p + offset + 1), *(p + (offset + 2)));
+    return 0;
+}
+EOF
+
+# Test 3: Pointer arithmetic with negative offsets on RHS
+try_output 0 "Negative: 30 20 10" << EOF
+int main()
+{
+    int values[3];
+    values[0] = 10;
+    values[1] = 20;
+    values[2] = 30;
+    int *ptr = &values[2];  /* Point to last element */
+    printf("Negative: %d %d %d", ptr[0], ptr[-1], ptr[-2]);
+    return 0;
+}
+EOF
+
+# Test 4: Multiple levels of pointer arithmetic on RHS
+try_output 0 "Multi: 100 200 300" << EOF
+int main()
+{
+    int matrix[3];
+    matrix[0] = 100;
+    matrix[1] = 200;
+    matrix[2] = 300;
+    int *base = matrix;
+    int i = 1, j = 2;
+    printf("Multi: %d %d %d", *(base + 0), *(base + i), *(base + j));
+    return 0;
+}
+EOF
+
+# Test 5: Complex expressions in pointer arithmetic on RHS
+try_output 0 "Expr: 42 84 126" << EOF
+int main()
+{
+    int nums[6];
+    nums[0] = 0;
+    nums[1] = 42;
+    nums[2] = 84;
+    nums[3] = 126;
+    nums[4] = 168;
+    nums[5] = 210;
+    int *p = nums;
+    int step = 1;
+    printf("Expr: %d %d %d", *(p + 1), *(p + 2), *(p + 3));
+    return 0;
+}
+EOF
+
+# Test 6: Pointer arithmetic on LHS for assignment
+try_ 42 << EOF
+int main()
+{
+    int arr[3];
+    arr[0] = 0;
+    arr[1] = 0;
+    arr[2] = 0;
+    int *ptr = arr;
+    ptr[0] = 10;
+    ptr[1] = 20;
+    ptr[2] = 12;
+    return ptr[0] + ptr[1] + ptr[2];
+}
+EOF
+
+# Test 7: Complex LHS assignment with variables
+try_output 0 "LHS: 5 15 25" << EOF
+int main()
+{
+    int data[3];
+    data[0] = 0;
+    data[1] = 0;
+    data[2] = 0;
+    int *p = data;
+    int offset = 1;
+    p[0] = 5;
+    p[offset] = 15;
+    p[offset + 1] = 25;
+    printf("LHS: %d %d %d", data[0], data[1], data[2]);
+    return 0;
+}
+EOF
+
+# Test 8: LHS assignment with negative offsets
+try_output 0 "Reverse: 10 20 30" << EOF
+int main()
+{
+    int vals[3];
+    vals[0] = 0;
+    vals[1] = 0;
+    vals[2] = 0;
+    int *ptr = &vals[2];  /* Point to last element */
+    ptr[-2] = 10;
+    ptr[-1] = 20;
+    ptr[0] = 30;
+    printf("Reverse: %d %d %d", vals[0], vals[1], vals[2]);
+    return 0;
+}
+EOF
+
+# Test 9: Multi-level pointer dereference with arithmetic
+try_ 9 << EOF
+int main()
+{
+    int value = 777;
+    int *ptr1 = &value;
+    int **ptr2 = &ptr1;
+    int ***ptr3 = &ptr2;
+    return ***(ptr3 + 0);
+}
+EOF
+
+# Test 10: Complex multi-level pointer arithmetic
+try_output 0 "Complex multi: 100 200" << EOF
+int main()
+{
+    int arr[2];
+    arr[0] = 100;
+    arr[1] = 200;
+    int *ptrs[2];
+    ptrs[0] = &arr[0];
+    ptrs[1] = &arr[1];
+    int **pptr = ptrs;
+    printf("Complex multi: %d %d", **(pptr + 0), **(pptr + 1));
+    return 0;
+}
+EOF
+
+# Test 11: Mixed pointer arithmetic and array indexing
+try_output 0 "Mixed: 11 22 33" << EOF
+int main()
+{
+    int matrix[3];
+    matrix[0] = 11;
+    matrix[1] = 22;
+    matrix[2] = 33;
+    int *p = matrix;
+    printf("Mixed: %d %d %d", p[0], *(p + 1), matrix[2]);
+    return 0;
+}
+EOF
+
+# Test 12: Pointer arithmetic in function calls
+try_output 0 "Function: 45" << EOF
+int get_value(int *ptr, int offset)
+{
+    return *(ptr + offset);
+}
+
+int main()
+{
+    int data[3];
+    data[0] = 15;
+    data[1] = 30;
+    data[2] = 45;
+    printf("Function: %d", get_value(data, 2));
+    return 0;
+}
+EOF
+
+# Test 13: Complex pointer arithmetic with structure members
+try_output 0 "Struct: 10 20" << EOF
+typedef struct {
+    int x;
+    int y;
+} point_t;
+
+int main()
+{
+    point_t points[2];
+    points[0].x = 10;
+    points[0].y = 20;
+    points[1].x = 30;
+    points[1].y = 40;
+    point_t *p = points;
+    printf("Struct: %d %d", p->x, p->y);
+    return 0;
+}
+EOF
+
+# Test 14: Arithmetic with pointer dereferencing in expressions
+try_output 0 "Arithmetic: 35" << EOF
+int main()
+{
+    int nums[3];
+    nums[0] = 10;
+    nums[1] = 15;
+    nums[2] = 20;
+    int *p = nums;
+    int result = *(p + 0) + *(p + 1) + *(p + 2) - 10;
+    printf("Arithmetic: %d", result);
+    return 0;
+}
+EOF
+
+# Test 15: Complex LHS with compound assignment operators
+try_output 0 "Compound: 15 25 35" << EOF
+int main()
+{
+    int arr[3];
+    arr[0] = 10;
+    arr[1] = 20;
+    arr[2] = 30;
+    int *ptr = arr;
+    ptr[0] += 5;
+    ptr[1] += 5;
+    ptr[2] += 5;
+    printf("Compound: %d %d %d", arr[0], arr[1], arr[2]);
+    return 0;
+}
+EOF
+
+# Test 16: Pointer arithmetic with character arrays
+try_output 0 "Chars: ABC" << EOF
+int main()
+{
+    char str[4];
+    str[0] = 'A';
+    str[1] = 'B';
+    str[2] = 'C';
+    str[3] = '\0';
+    char *p = str;
+    printf("Chars: %c%c%c", *(p + 0), *(p + 1), *(p + 2));
+    return 0;
+}
+EOF
+
+# Test 17: Complex nested pointer arithmetic
+try_output 0 "Nested: 42" << EOF
+int main()
+{
+    int data[5];
+    data[0] = 0;
+    data[1] = 10;
+    data[2] = 20;
+    data[3] = 42;
+    data[4] = 50;
+    int *base = data;
+    int offset1 = 2, offset2 = 1;
+    printf("Nested: %d", *(base + offset1 + offset2));
+    return 0;
+}
+EOF
+
+# Test 18: Pointer arithmetic with conditional expressions
+try_output 0 "Conditional: 100" << EOF
+int main()
+{
+    int vals[2];
+    vals[0] = 50;
+    vals[1] = 100;
+    int *p = vals;
+    int flag = 1;
+    printf("Conditional: %d", *(p + (flag ? 1 : 0)));
+    return 0;
+}
+EOF
+
+# Test 19: Complex triple dereference with arithmetic
+try_output 0 "Triple deref: 777" << EOF
+int main()
+{
+    int value = 777;
+    int *ptr1 = &value;
+    int **ptr2 = &ptr1;
+    int ***ptr3 = &ptr2;
+    printf("Triple deref: %d", ***(ptr3 + 0));
+    return 0;
+}
+EOF
+
+# Test 20: Complex double dereference with arithmetic
+try_output 0 "Double deref: 888" << EOF
+int main()
+{
+    int value = 888;
+    int *ptr1 = &value;
+    int **ptr2 = &ptr1;
+    printf("Double deref: %d", **(ptr2 + 0));
+    return 0;
+}
+EOF
+
+# Test 21: Complex nested parentheses with multiple dereference
+try_output 0 "Nested parens: 999" << EOF
+int main()
+{
+    int value = 999;
+    int *ptr1 = &value;
+    int **ptr2 = &ptr1;
+    int ***ptr3 = &ptr2;
+    printf("Nested parens: %d", ***((ptr3 + 0)));
+    return 0;
+}
+EOF
+
+# Test 22: Variable offset in complex dereference
+try_output 0 "Variable offset: 555" << EOF
+int main()
+{
+    int value = 555;
+    int *ptr1 = &value;
+    int **ptr2 = &ptr1;
+    int ***ptr3 = &ptr2;
+    int offset = 0;
+    printf("Variable offset: %d", ***(ptr3 + offset));
+    return 0;
+}
+EOF
+
+# Test 23: Array of pointers with complex dereference
+try_output 0 "Array ptr: 111 222 333" << EOF
+int main()
+{
+    int a = 111, b = 222, c = 333;
+    int *arr[3];
+    arr[0] = &a;
+    arr[1] = &b;
+    arr[2] = &c;
+    int **parr = arr;
+    printf("Array ptr: %d %d %d", **(parr + 0), **(parr + 1), **(parr + 2));
+    return 0;
+}
+EOF
+
+# Test 24: Mixed single and multiple dereference
+try_output 0 "Mixed: 666 666 666" << EOF
+int main()
+{
+    int value = 666;
+    int *ptr1 = &value;
+    int **ptr2 = &ptr1;
+    printf("Mixed: %d %d %d", *ptr1, **ptr2, **(ptr2 + 0));
+    return 0;
+}
+EOF
+
 echo OK

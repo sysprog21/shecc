@@ -964,23 +964,89 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         }
     } else if (lex_accept(T_asterisk)) {
         /* dereference */
-        char token[MAX_VAR_LEN];
-        lvalue_t lvalue;
-
-        int open_bracket = lex_accept(T_open_bracket);
-        if (open_bracket) {
-            /* Handle expressions like *(++p) */
+        if (lex_peek(T_open_bracket, NULL)) {
+            /* Handle general expression dereference: *(expr) */
+            lex_expect(T_open_bracket);
             read_expr(parent, bb);
             lex_expect(T_close_bracket);
+
             rs1 = opstack_pop();
-            /* Create a temporary variable for the dereferenced result */
-            vd = require_var(parent);
-            vd->type = TY_int; /* Default to int type for now */
-            vd->is_ptr = 0;
+            /* For pointer dereference, we need to determine the target type and
+             * size. Since we do not have full type tracking in expressions, use
+             * defaults
+             */
+            type_t *deref_type = rs1->type ? rs1->type : TY_int;
+            int deref_ptr = rs1->is_ptr > 0 ? rs1->is_ptr - 1 : 0;
+
+            vd = require_deref_var(parent, deref_type, deref_ptr);
+            if (deref_ptr > 0)
+                sz = PTR_SIZE;
+            else
+                sz = deref_type->size;
             gen_name_to(vd->var_name);
             opstack_push(vd);
-            add_insn(parent, *bb, OP_read, vd, rs1, NULL, vd->type->size, NULL);
+            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+        } else if (lex_peek(T_asterisk, NULL)) {
+            /* Handle consecutive asterisks for multiple dereference: **pp,
+             * ***ppp, ***(expr)
+             */
+            int deref_count = 1; /* We already consumed one asterisk */
+            while (lex_accept(T_asterisk))
+                deref_count++;
+
+            /* Check if we have a parenthesized expression or simple identifier
+             */
+            if (lex_peek(T_open_bracket, NULL)) {
+                /* Handle ***(expr) case */
+                lex_expect(T_open_bracket);
+                read_expr(parent, bb);
+                lex_expect(T_close_bracket);
+
+                /* Apply dereferences one by one */
+                for (int i = 0; i < deref_count; i++) {
+                    rs1 = opstack_pop();
+                    /* For expression dereference, use default type info */
+                    type_t *deref_type = rs1->type ? rs1->type : TY_int;
+                    int deref_ptr = rs1->is_ptr > 0 ? rs1->is_ptr - 1 : 0;
+
+                    vd = require_deref_var(parent, deref_type, deref_ptr);
+                    if (deref_ptr > 0)
+                        sz = PTR_SIZE;
+                    else
+                        sz = deref_type->size;
+                    gen_name_to(vd->var_name);
+                    opstack_push(vd);
+                    add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+                }
+            } else {
+                /* Handle **pp, ***ppp case with simple identifier */
+                char token[MAX_VAR_LEN];
+                lvalue_t lvalue;
+
+                lex_peek(T_identifier, token);
+                var_t *var = find_var(token, parent);
+                read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
+
+                /* Apply dereferences one by one */
+                for (int i = 0; i < deref_count; i++) {
+                    rs1 = opstack_pop();
+                    vd = require_deref_var(
+                        parent, var->type,
+                        lvalue.is_ptr > i ? lvalue.is_ptr - i - 1 : 0);
+                    if (lvalue.is_ptr > i + 1)
+                        sz = PTR_SIZE;
+                    else
+                        sz = lvalue.type->size;
+                    gen_name_to(vd->var_name);
+                    opstack_push(vd);
+                    add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+                }
+            }
         } else {
+            /* Handle simple identifier dereference: *var */
+            char token[MAX_VAR_LEN];
+            lvalue_t lvalue;
+
             lex_peek(T_identifier, token);
             var_t *var = find_var(token, parent);
             read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
@@ -1513,7 +1579,12 @@ void read_lvalue(lvalue_t *lvalue,
     if (!eval)
         return;
 
-    if (lex_peek(T_plus, NULL) && (var->is_ptr || var->array_size)) {
+    /* Only handle pointer arithmetic if we have a pointer/array that hasn't
+     * been dereferenced. After array indexing like arr[0], we have a value, not
+     * a pointer.
+     */
+    if (lex_peek(T_plus, NULL) && (var->is_ptr || var->array_size) &&
+        !lvalue->is_reference) {
         while (lex_peek(T_plus, NULL) && (var->is_ptr || var->array_size)) {
             lex_expect(T_plus);
             if (lvalue->is_reference) {
@@ -1916,7 +1987,10 @@ bool read_body_assignment(char *token,
             int increment_size = 1;
 
             /* if we have a pointer, shift it by element size */
-            if (lvalue.is_ptr)
+            /* But not if we are operating on a dereferenced value (array
+             * indexing)
+             */
+            if (lvalue.is_ptr && !lvalue.is_reference)
                 increment_size = lvalue.type->size;
 
             /* If operand is a reference, read the value and push to stack for
