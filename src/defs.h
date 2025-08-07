@@ -19,7 +19,7 @@
 #define MAX_PARAMS 8
 #define MAX_LOCALS 1600
 #define MAX_FIELDS 64
-#define MAX_TYPES 64
+#define MAX_TYPES 128
 #define MAX_IR_INSTR 60000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
