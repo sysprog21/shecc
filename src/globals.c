@@ -721,6 +721,10 @@ int find_macro_param_src_idx(char *name, block_t *parent)
 
 type_t *add_type(void)
 {
+    if (types_idx >= MAX_TYPES) {
+        printf("Error: Maximum number of types (%d) exceeded\n", MAX_TYPES);
+        abort();
+    }
     return &TYPES[types_idx++];
 }
 
