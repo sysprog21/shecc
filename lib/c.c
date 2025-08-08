@@ -204,7 +204,7 @@ void __str_base10(char *pb, int val)
         i--;
     }
 
-    if (neg == 1)
+    if (neg)
         pb[i] = '-';
 }
 
@@ -692,7 +692,7 @@ void *calloc(int n, int size)
     /* Check for overflow before multiplication */
     if (!n || !size)
         return NULL;
-    if (size != 0 && n > INT_MAX / size)
+    if (n > INT_MAX / size)
         return NULL; /* Overflow protection */
 
     int total = n * size;
