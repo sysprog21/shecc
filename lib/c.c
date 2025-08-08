@@ -578,6 +578,10 @@ int fputc(int c, FILE *stream)
 #define CHUNK_GET_SIZE(size) (size & CHUNK_SIZE_SZ_MASK)
 #define IS_CHUNK_GET_FREED(size) (size & CHUNK_SIZE_FREED_MASK)
 
+/* Minimum alignment for all memory allocations. */
+#define MIN_ALIGNMENT 8
+#define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
+
 typedef struct chunk {
     struct chunk *next, *prev;
     int size;
@@ -595,8 +599,7 @@ void chunk_clear_freed(chunk_t *chunk)
 
 int __align_up(int size)
 {
-    int mask = PAGESIZE - 1;
-    return ((size - 1) | mask) + 1;
+    return ALIGN_UP(size, PAGESIZE);
 }
 
 chunk_t *__alloc_head;
@@ -610,6 +613,9 @@ void *malloc(int size)
 
     int flags = 34; /* MAP_PRIVATE (0x02) | MAP_ANONYMOUS (0x20) */
     int prot = 3;   /* PROT_READ (0x01) | PROT_WRITE (0x02) */
+
+    /* Align size to MIN_ALIGNMENT */
+    size = ALIGN_UP(size, MIN_ALIGNMENT);
 
     if (!__alloc_head) {
         chunk_t *tmp =
@@ -632,45 +638,31 @@ void *malloc(int size)
         __freelist_head->size = -1;
     }
 
-    /* to search the best chunk */
+    /* Search for the best fit chunk in the free list */
     chunk_t *best_fit_chunk = NULL;
     chunk_t *allocated;
+    int best_size = 0;
 
     if (!__freelist_head->next) {
-        /* If no more chunks in the free chunk list, allocate best_fit_chunk
-         * as NULL.
-         */
-        allocated = best_fit_chunk;
+        allocated = NULL;
     } else {
-        /* record the size of the chunk */
-        int bsize = 0;
-
         for (chunk_t *fh = __freelist_head; fh->next; fh = fh->next) {
             int fh_size = CHUNK_GET_SIZE(fh->size);
-            if (fh_size >= size && !best_fit_chunk) {
-                /* first time setting fh as best_fit_chunk */
+            if (fh_size >= size && (!best_fit_chunk || fh_size < best_size)) {
                 best_fit_chunk = fh;
-                bsize = fh_size;
-            } else if ((fh_size >= size) && best_fit_chunk &&
-                       (fh_size < bsize)) {
-                /* If there is a smaller chunk available, replace it. */
-                best_fit_chunk = fh;
-                bsize = fh_size;
+                best_size = fh_size;
             }
         }
 
-        /* a suitable chunk has been found */
         if (best_fit_chunk) {
-            /* remove the chunk from the freelist */
+            /* Remove from freelist */
             if (best_fit_chunk->prev) {
-                chunk_t *tmp = best_fit_chunk->prev;
-                tmp->next = best_fit_chunk->next;
-            } else
+                best_fit_chunk->prev->next = best_fit_chunk->next;
+            } else {
                 __freelist_head = best_fit_chunk->next;
-
+            }
             if (best_fit_chunk->next) {
-                chunk_t *tmp = best_fit_chunk->next;
-                tmp->prev = best_fit_chunk->prev;
+                best_fit_chunk->next->prev = best_fit_chunk->prev;
             }
         }
         allocated = best_fit_chunk;
@@ -683,19 +675,26 @@ void *malloc(int size)
         allocated->size = __align_up(sizeof(chunk_t) + size);
     }
 
+    /* Add to allocation list */
     __alloc_tail->next = allocated;
     allocated->prev = __alloc_tail;
-
     __alloc_tail = allocated;
     __alloc_tail->next = NULL;
     __alloc_tail->size = allocated->size;
     chunk_clear_freed(__alloc_tail);
+
     void *ptr = __alloc_tail + 1;
     return ptr;
 }
 
 void *calloc(int n, int size)
 {
+    /* Check for overflow before multiplication */
+    if (!n || !size)
+        return NULL;
+    if (size != 0 && n > INT_MAX / size)
+        return NULL; /* Overflow protection */
+
     int total = n * size;
     char *p = malloc(total);
 
@@ -722,7 +721,7 @@ int __free_all(void)
     int size;
 
     /* release freelist */
-    while (cur->next) {
+    while (cur && cur->next) {
         rel = cur;
         cur = cur->next;
         rel->next = NULL;
@@ -731,7 +730,7 @@ int __free_all(void)
         __rfree(rel, size);
     }
 
-    if (__alloc_head->next) {
+    if (__alloc_head && __alloc_head->next) {
         cur = __alloc_head->next;
         /* release chunks which not be free */
         while (cur) {
@@ -758,17 +757,18 @@ void free(void *ptr)
         abort();
     }
 
-    chunk_t *prev;
+    chunk_t *prev = NULL;
     if (cur->prev) {
         prev = cur->prev;
         prev->next = cur->next;
-    } else
+    } else {
         __alloc_head = cur->next;
+    }
 
     if (cur->next) {
         chunk_t *next = cur->next;
         next->prev = cur->prev;
-    } else {
+    } else if (prev) {
         prev->next = NULL;
         __alloc_tail = prev;
     }
@@ -777,6 +777,7 @@ void free(void *ptr)
     cur->next = __freelist_head;
     cur->prev = NULL;
     chunk_set_freed(cur);
-    __freelist_head->prev = cur;
+    if (__freelist_head)
+        __freelist_head->prev = cur;
     __freelist_head = cur;
 }
