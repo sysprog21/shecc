@@ -419,7 +419,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__eor_r(__AL, rd, rn, rm));
         return;
     case OP_log_not:
-        emit(__teq(rn));
+        emit(__cmp_i(__AL, rn, 0));
         emit(__mov_i(__NE, rd, 0));
         emit(__mov_i(__EQ, rd, 1));
         return;
