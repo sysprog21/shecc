@@ -10,24 +10,28 @@
 #include "defs.h"
 #include "globals.c"
 
+/* Determines if an instruction can be fused with a following OP_assign.
+ * Fusible instructions are those whose results can be directly written
+ * to the final destination register, eliminating intermediate moves.
+ */
 bool is_fusible_insn(ph2_ir_t *ph2_ir)
 {
     switch (ph2_ir->op) {
-    case OP_add:
+    case OP_add: /* Arithmetic operations */
     case OP_sub:
     case OP_mul:
     case OP_div:
     case OP_mod:
-    case OP_lshift:
+    case OP_lshift: /* Shift operations */
     case OP_rshift:
-    case OP_bit_and:
+    case OP_bit_and: /* Bitwise operations */
     case OP_bit_or:
     case OP_bit_xor:
-    case OP_log_and:
+    case OP_log_and: /* Logical operations */
     case OP_log_or:
     case OP_log_not:
-    case OP_negate:
-    case OP_load:
+    case OP_negate: /* Unary operations */
+    case OP_load:   /* Memory operations */
     case OP_global_load:
     case OP_load_data_address:
         return true;
@@ -36,18 +40,25 @@ bool is_fusible_insn(ph2_ir_t *ph2_ir)
     }
 }
 
+/* Main peephole optimization function that applies pattern matching
+ * and transformation rules to consecutive IR instructions.
+ * Returns true if any optimization was applied, false otherwise.
+ */
 bool insn_fusion(ph2_ir_t *ph2_ir)
 {
     ph2_ir_t *next = ph2_ir->next;
     if (!next)
         return false;
 
+    /* ALU instruction fusion.
+     * Eliminates redundant move operations following arithmetic/logical
+     * operations. This is the most fundamental optimization that removes
+     * temporary register usage.
+     */
     if (next->op == OP_assign) {
         if (is_fusible_insn(ph2_ir) && ph2_ir->dest == next->src0) {
-            /* eliminates:
-             * {ALU rn, rs1, rs2; mv rd, rn;}
-             * reduces to:
-             * {ALU rd, rs1, rs2;}
+            /* Pattern: {ALU rn, rs1, rs2; mv rd, rn} → {ALU rd, rs1, rs2}
+             * Example: {add t1, a, b; mv result, t1} → {add result, a, b}
              */
             ph2_ir->dest = next->dest;
             ph2_ir->next = next->next;
@@ -55,20 +66,17 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         }
     }
 
+    /* Arithmetic identity with zero constant */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0) {
         if (next->op == OP_add &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
-            /* eliminates:
-             * {li rn, 0; add rd, rs1, rn;} or
-             * {li rn, 0; add rd, rn, rs1;}
-             * reduces to:
-             * {mv rd, rs1;}, based on identity property of addition
+            /* Pattern: {li 0; add x, 0} → {mov x} (additive identity: x+0 = x)
+             * Handles both operand positions due to addition commutativity
+             * Example: {li t1, 0; add result, var, t1} → {mov result, var}
              */
-            /* Determine the non-zero source operand */
             int non_zero_src =
                 (ph2_ir->dest == next->src0) ? next->src1 : next->src0;
 
-            /* Transform instruction sequence from addition with zero to move */
             ph2_ir->op = OP_assign;
             ph2_ir->src0 = non_zero_src;
             ph2_ir->dest = next->dest;
@@ -78,10 +86,8 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
 
         if (next->op == OP_sub) {
             if (ph2_ir->dest == next->src1) {
-                /* eliminates:
-                 * {li rn, 0; sub rd, rs1, rn;}
-                 * reduces to:
-                 * {mv rd, rs1;}
+                /* Pattern: {li 0; sub x, 0} → {mov x} (x - 0 = x)
+                 * Example: {li t1, 0; sub result, var, t1} → {mov result, var}
                  */
                 ph2_ir->op = OP_assign;
                 ph2_ir->src0 = next->src0;
@@ -91,10 +97,8 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
             }
 
             if (ph2_ir->dest == next->src0) {
-                /* eliminates:
-                 * {li rn, 0; sub rd, rn, rs1;}
-                 * reduces to:
-                 * {negate rd, rs1;}
+                /* Pattern: {li 0; sub 0, x} → {neg x} (0 - x = -x)
+                 * Example: {li t1, 0; sub result, t1, var} → {neg result, var}
                  */
                 ph2_ir->op = OP_negate;
                 ph2_ir->src0 = next->src1;
@@ -106,11 +110,9 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
 
         if (next->op == OP_mul &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
-            /* eliminates:
-             * {li rn, 0; mul rd, rs1, rn;} or
-             * {li rn, 0; mul rd, rn, rs1;}
-             * reduces to:
-             * {li rd, 0}, based on zero property of multiplication
+            /* Pattern: {li 0; mul x, 0} → {li 0} (absorbing element: x * 0 = 0)
+             * Example: {li t1, 0; mul result, var, t1} → {li result, 0}
+             * Eliminates multiplication entirely
              */
             ph2_ir->op = OP_load_constant;
             ph2_ir->src0 = 0;
@@ -120,14 +122,15 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         }
     }
 
+    /* Multiplicative identity with one constant */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1) {
         if (next->op == OP_mul &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
-            /* eliminates:
-             * {li rn, 1; mul rd, rs1, rn;} or
-             * {li rn, 1; mul rd, rn, rs1;}
-             * reduces to:
-             * {li rd, rs1}, based on identity property of multiplication
+            /* Pattern: {li 1; mul x, 1} → {mov x} (multiplicative identity:
+             * x * 1 = x)
+             * Example: {li t1, 1; mul result, var, t1} → {mov result, var}
+             * Handles both operand positions due to multiplication
+             * commutativity
              */
             ph2_ir->op = OP_assign;
             ph2_ir->src0 = ph2_ir->dest == next->src0 ? next->src1 : next->src0;
@@ -137,15 +140,112 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         }
     }
 
-    /* Other instruction fusion should be done here, and for any success fusion,
-     * it should return true. This meant to allow peephole optimization to do
-     * multiple passes over the IR list to maximize optimization as much as
-     * possbile.
+    /* Bitwise identity operations */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
+        next->op == OP_bit_and && ph2_ir->dest == next->src1) {
+        /* Pattern: {li -1; and x, -1} → {mov x} (x & 0xFFFFFFFF = x)
+         * Example: {li t1, -1; and result, var, t1} → {mov result, var}
+         * Eliminates bitwise AND with all-ones mask
+         */
+        ph2_ir->op = OP_assign;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->dest = next->dest;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
+        (next->op == OP_lshift || next->op == OP_rshift) &&
+        ph2_ir->dest == next->src1) {
+        /* Pattern: {li 0; shl/shr x, 0} → {mov x} (x << 0 = x >> 0 = x)
+         * Example: {li t1, 0; shl result, var, t1} → {mov result, var}
+         * Eliminates no-op shift operations
+         */
+        ph2_ir->op = OP_assign;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->dest = next->dest;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
+        next->op == OP_bit_or && ph2_ir->dest == next->src1) {
+        /* Pattern: {li 0; or x, 0} → {mov x} (x | 0 = x)
+         * Example: {li t1, 0; or result, var, t1} → {mov result, var}
+         * Eliminates bitwise OR with zero (identity element)
+         */
+        ph2_ir->op = OP_assign;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->dest = next->dest;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Power-of-2 multiplication to shift conversion.
+     * Shift operations are significantly faster than multiplication
      */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 > 0 &&
+        next->op == OP_mul && ph2_ir->dest == next->src1) {
+        int power = ph2_ir->src0;
+        /* Detect power-of-2 using bit manipulation: (n & (n-1)) == 0 for powers
+         * of 2
+         */
+        if (power && (power & (power - 1)) == 0) {
+            /* Calculate log2(power) to determine shift amount */
+            int shift_amount = 0;
+            int tmp = power;
+            while (tmp > 1) {
+                tmp >>= 1;
+                shift_amount++;
+            }
+            /* Pattern: {li 2^n; mul x, 2^n} → {li n; shl x, n}
+             * Example: {li t1, 4; mul result, var, t1} →
+             *          {li t1, 2; shl result, var, t1}
+             */
+            ph2_ir->op = OP_load_constant;
+            ph2_ir->src0 = shift_amount;
+            next->op = OP_lshift;
+            return true;
+        }
+    }
+
+    /* XOR identity operation */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
+        next->op == OP_bit_xor && ph2_ir->dest == next->src1) {
+        /* Pattern: {li 0; xor x, 0} → {mov x} (x ^ 0 = x)
+         * Example: {li t1, 0; xor result, var, t1} → {mov result, var}
+         * Completes bitwise identity optimization coverage
+         */
+        ph2_ir->op = OP_assign;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->dest = next->dest;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Extended multiplicative identity (operand position variant)
+     * Handles the case where constant 1 is in src0 position of multiplication
+     */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1 &&
+        next->op == OP_mul && ph2_ir->dest == next->src0) {
+        /* Pattern: {li 1; mul 1, x} → {mov x} (1 * x = x)
+         * Example: {li t1, 1; mul result, t1, var} → {mov result, var}
+         * Covers multiplication commutativity edge case
+         */
+        ph2_ir->op = OP_assign;
+        ph2_ir->src0 = next->src1;
+        ph2_ir->dest = next->dest;
+        ph2_ir->next = next->next;
+        return true;
+    }
 
     return false;
 }
 
+/* Main peephole optimization driver.
+ * It iterates through all functions, basic blocks, and IR instructions to apply
+ * local optimizations on adjacent instruction pairs.
+ */
 void peephole(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
@@ -154,10 +254,17 @@ void peephole(void)
                 ph2_ir_t *next = ir->next;
                 if (!next)
                     continue;
+
+                /* Self-assignment elimination
+                 * Removes trivial assignments where destination equals source
+                 * Pattern: {mov x, x} → eliminated
+                 * Common in compiler-generated intermediate code
+                 */
                 if (next->op == OP_assign && next->dest == next->src0) {
                     ir->next = next->next;
                     continue;
                 }
+
                 insn_fusion(ir);
             }
         }
