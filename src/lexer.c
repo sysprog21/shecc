@@ -508,6 +508,8 @@ token_t lex_token_internal(bool aliasing)
                     token_str[i - 1] = next_char;
                 }
             } else {
+                if (i >= MAX_TOKEN_LEN - 1)
+                    error("String literal too long");
                 token_str[i++] = next_char;
             }
             if (next_char == '\\')
