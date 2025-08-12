@@ -99,6 +99,9 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_sign_ext:
         elf_offset += 12;
         return;
+    case OP_cast:
+        elf_offset += 4;
+        return;
     default:
         fatal("Unknown opcode");
     }
@@ -421,6 +424,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__srai(rd, rd, 24));
         /* TODO: Allow user to switch to Zbb extension if needed */
         /* emit(__sext_b(rd, rs1)); */
+        return;
+    case OP_cast:
+        /* Generic cast operation - for now, just move the value */
+        emit(__addi(rd, rs1, 0));
         return;
     default:
         fatal("Unknown opcode");

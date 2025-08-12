@@ -580,7 +580,8 @@ int hard_mul_div = 0;
 type_t *find_type(char *type_name, int flag)
 {
     for (int i = 0; i < types_idx; i++) {
-        if (TYPES[i].base_type == TYPE_struct) {
+        if (TYPES[i].base_type == TYPE_struct ||
+            TYPES[i].base_type == TYPE_union) {
             if (flag == 1)
                 continue;
             if (!strcmp(TYPES[i].type_name, type_name))
@@ -1397,6 +1398,10 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             print_indent(1);
             printf("%%%s = sign_ext %%%s, %d", rd->var_name, rs1->var_name,
                    insn->sz);
+            break;
+        case OP_cast:
+            print_indent(1);
+            printf("%%%s = cast %%%s", rd->var_name, rs1->var_name);
             break;
         default:
             printf("<Unsupported opcode: %d>", insn->opcode);

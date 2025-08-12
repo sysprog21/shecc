@@ -146,16 +146,17 @@ char *memcpy(char *dest, char *src, int count)
 void *memset(void *s, int c, int n)
 {
     int i = 0;
-    char *ptr = s;
+    char *ptr = (char *) s;
+    char byte_val = (char) c;
     for (; i + 4 <= n; i += 4) {
-        ptr[i] = c;
-        ptr[i + 1] = c;
-        ptr[i + 2] = c;
-        ptr[i + 3] = c;
+        ptr[i] = byte_val;
+        ptr[i + 1] = byte_val;
+        ptr[i + 2] = byte_val;
+        ptr[i + 3] = byte_val;
     }
 
     for (; i < n; i++)
-        ptr[i] = c;
+        ptr[i] = byte_val;
 
     return s;
 }
@@ -282,7 +283,7 @@ void __fmtbuf_write_char(fmtbuf_t *fmtbuf, int val)
     if (fmtbuf->n <= 1)
         return;
 
-    char ch = val & 0xFF;
+    char ch = (char) (val & 0xFF);
     fmtbuf->buf[0] = ch;
     fmtbuf->buf += 1;
     fmtbuf->n -= 1;
@@ -418,12 +419,12 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
             switch (format[si]) {
             case 's':
                 /* append param pi as string */
-                l = strlen(v);
-                __fmtbuf_write_str(fmtbuf, v, l);
+                l = strlen((char *) v);
+                __fmtbuf_write_str(fmtbuf, (char *) v, l);
                 break;
             case 'c':
                 /* append param pi as char */
-                __fmtbuf_write_char(fmtbuf, v);
+                __fmtbuf_write_char(fmtbuf, (char) v);
                 break;
             case 'o':
                 /* append param as octal */
@@ -551,8 +552,8 @@ char *fgets(char *str, int n, FILE *stream)
             str[i] = 0;
             return str;
         }
-        /* Not support casting yet. Simply assign it. */
-        str[i] = c;
+        /* Use explicit cast for clarity */
+        str[i] = (char) c;
 
         if (c == '\n') {
             str[i + 1] = 0;
@@ -683,7 +684,7 @@ void *malloc(int size)
     __alloc_tail->size = allocated->size;
     chunk_clear_freed(__alloc_tail);
 
-    void *ptr = __alloc_tail + 1;
+    void *ptr = (void *) (__alloc_tail + 1);
     return ptr;
 }
 
@@ -750,8 +751,8 @@ void free(void *ptr)
     if (!ptr)
         return;
 
-    char *__ptr = ptr;
-    chunk_t *cur = __ptr - sizeof(chunk_t);
+    char *__ptr = (char *) ptr;
+    chunk_t *cur = (chunk_t *) (__ptr - sizeof(chunk_t));
     if (IS_CHUNK_GET_FREED(cur->size)) {
         printf("free(): double free detected\n");
         abort();

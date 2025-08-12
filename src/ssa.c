@@ -1119,6 +1119,11 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
                         insn->rd->var_name, insn->rd->subscript,
                         insn->rs1->var_name, insn->rs1->subscript, insn->sz);
                 break;
+            case OP_cast:
+                sprintf(str, "<%s<SUB>%d</SUB> := cast %s<SUB>%d</SUB>>",
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript);
+                break;
             default:
                 printf("Unknown opcode\n");
                 abort();
