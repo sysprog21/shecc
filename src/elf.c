@@ -31,7 +31,7 @@ void elf_write_byte(strbuf_t *elf_array, int val)
 
 char e_extract_byte(int v, int b)
 {
-    return (v >> (b << 3)) & 0xFF;
+    return (char) ((v >> (b << 3)) & 0xFF);
 }
 
 void elf_write_int(strbuf_t *elf_array, int val)
@@ -97,7 +97,7 @@ void elf_generate_header(void)
      * 34 |                |                                                 |
      */
     /* ELF file header */
-    hdr.e_ident[0] = 0x7F; /* ELF magic number */
+    hdr.e_ident[0] = (char) 0x7F; /* ELF magic number */
     hdr.e_ident[1] = 'E';
     hdr.e_ident[2] = 'L';
     hdr.e_ident[3] = 'F';
@@ -124,13 +124,13 @@ void elf_generate_header(void)
                   elf_symtab->size +
                   elf_strtab->size; /* section header offset */
     hdr.e_flags = ELF_FLAGS;        /* flags */
-    hdr.e_ehsize[0] = 0x34;         /* header size */
+    hdr.e_ehsize[0] = (char) 0x34;  /* header size */
     hdr.e_ehsize[1] = 0;
-    hdr.e_phentsize[0] = 0x20; /* program header size */
+    hdr.e_phentsize[0] = (char) 0x20; /* program header size */
     hdr.e_phentsize[1] = 0;
     hdr.e_phnum[0] = 1; /* number of program headers */
     hdr.e_phnum[1] = 0;
-    hdr.e_shentsize[0] = 0x28; /* section header size */
+    hdr.e_shentsize[0] = (char) 0x28; /* section header size */
     hdr.e_shentsize[1] = 0;
     hdr.e_shnum[0] = 6; /* number of section headers */
     hdr.e_shnum[1] = 0;
