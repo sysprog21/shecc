@@ -309,6 +309,17 @@ int read_numeric_constant(char buffer[])
             }
             return value;
         }
+        if (i == 1 && (buffer[i] | 32) == 'b') { /* binary */
+            value = 0;
+            i = 2;
+            while (buffer[i]) {
+                char c = buffer[i++];
+                value <<= 1;
+                if (c == '1')
+                    value += 1;
+            }
+            return value;
+        }
         if (buffer[0] == '0') /* octal */
             value = value * 8 + buffer[i++] - '0';
         else
@@ -705,12 +716,15 @@ void read_full_var_decl(var_t *vd, int anon, int is_param)
 {
     char type_name[MAX_TYPE_LEN];
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+    if (find_type_flag == 1 && lex_accept(T_union)) {
+        find_type_flag = 2;
+    }
     lex_ident(T_identifier, type_name);
     type_t *type = find_type(type_name, find_type_flag);
 
     if (!type) {
         printf("Could not find type %s%s\n",
-               find_type_flag == 2 ? "struct " : "", type_name);
+               find_type_flag == 2 ? "struct/union " : "", type_name);
         abort();
     }
 
@@ -764,9 +778,26 @@ void read_parameter_list_decl(func_t *func, int anon)
 void read_literal_param(block_t *parent, basic_block_t *bb)
 {
     char literal[MAX_TOKEN_LEN];
+    char combined[MAX_TOKEN_LEN];
+    int combined_len = 0;
 
+    /* Read first string literal */
     lex_ident(T_string, literal);
-    int index = write_symbol(literal);
+    strcpy(combined, literal);
+    combined_len = strlen(literal);
+
+    /* Check for adjacent string literals and concatenate them */
+    while (lex_peek(T_string, NULL)) {
+        lex_ident(T_string, literal);
+        int literal_len = strlen(literal);
+        if (combined_len + literal_len >= MAX_TOKEN_LEN - 1)
+            error("Concatenated string literal too long");
+
+        strcpy(combined + combined_len, literal);
+        combined_len += literal_len;
+    }
+
+    int index = write_symbol(combined);
 
     var_t *vd = require_typed_ptr_var(parent, TY_char, 1);
     gen_name_to(vd->var_name);
@@ -805,6 +836,15 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
 
                 value = (value * 16) + c;
             } while (is_hex(token[i]));
+        } else if ((token[1] | 32) == 'b') { /* binary */
+            i = 2;
+            do {
+                c = token[i++];
+                if (c != '0' && c != '1')
+                    error("Invalid binary constant");
+                c -= '0';
+                value = (value * 2) + c;
+            } while (token[i] == '0' || token[i] == '1');
         } else { /* octal */
             do {
                 c = token[i++];
@@ -1062,25 +1102,253 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
         }
     } else if (lex_accept(T_open_bracket)) {
-        read_expr(parent, bb);
-        read_ternary_operation(parent, bb);
-        lex_expect(T_close_bracket);
+        /* Check if this is a cast, compound literal, or parenthesized
+         * expression */
+        char lookahead_token[MAX_TYPE_LEN];
+        int is_compound_literal = 0;
+        int is_cast = 0;
+        type_t *cast_or_literal_type = NULL;
+        int cast_ptr_level = 0;
+
+        /* Look ahead to see if we have a typename followed by ) */
+        if (lex_peek(T_identifier, lookahead_token)) {
+            /* Check if it's a basic type or typedef */
+            type_t *type = find_type(lookahead_token, 1);
+
+            if (type) {
+                /* Save current position to backtrack if needed */
+                int saved_pos = SOURCE->size;
+                char saved_char = next_char;
+                token_t saved_token = next_token;
+
+                /* Try to parse as typename */
+                lex_expect(T_identifier);
+
+                /* Check for pointer types: int*, char*, etc. */
+                int ptr_level = 0;
+                while (lex_accept(T_asterisk)) {
+                    ptr_level++;
+                }
+
+                /* Check for array brackets: [size] or [] */
+                int is_array = 0;
+                if (lex_accept(T_open_square)) {
+                    is_array = 1;
+                    /* Skip array size if present */
+                    if (lex_peek(T_numeric, NULL)) {
+                        char size_buffer[10];
+                        lex_ident(T_numeric, size_buffer);
+                    }
+                    lex_expect(T_close_square);
+                }
+
+                /* Check what follows the closing ) */
+                if (lex_accept(T_close_bracket)) {
+                    if (lex_peek(T_open_curly, NULL)) {
+                        /* (type){...} - compound literal */
+                        is_compound_literal = 1;
+                        cast_or_literal_type = type;
+                        cast_ptr_level = ptr_level;
+                    } else {
+                        /* (type)expr - cast expression */
+                        is_cast = 1;
+                        cast_or_literal_type = type;
+                        cast_ptr_level = ptr_level;
+                    }
+                } else {
+                    /* Not a cast or compound literal - backtrack */
+                    SOURCE->size = saved_pos;
+                    next_char = saved_char;
+                    next_token = saved_token;
+                }
+            }
+        }
+
+        if (is_cast) {
+            /* Process cast: (type)expr */
+            /* Parse the expression to be cast */
+            read_expr_operand(parent, bb);
+
+            /* Get the expression result */
+            var_t *expr_var = opstack_pop();
+
+            /* Create variable for cast result */
+            var_t *cast_var = require_typed_ptr_var(
+                parent, cast_or_literal_type, cast_ptr_level);
+            gen_name_to(cast_var->var_name);
+
+            /* Generate cast IR */
+            add_insn(parent, *bb, OP_cast, cast_var, expr_var, NULL,
+                     cast_or_literal_type->size, NULL);
+
+            /* Push the cast result */
+            opstack_push(cast_var);
+
+        } else if (is_compound_literal) {
+            /* Process compound literal */
+            lex_expect(T_open_curly);
+
+            /* Create variable for compound literal result */
+            var_t *compound_var =
+                require_typed_var(parent, cast_or_literal_type);
+            gen_name_to(compound_var->var_name);
+
+            /* Check if this is a pointer compound literal */
+            if (cast_ptr_level > 0) {
+                /* Pointer compound literal: (int*){&x} */
+                compound_var->is_ptr = cast_ptr_level;
+
+                /* Parse the pointer value (should be an address) */
+                if (!lex_peek(T_close_curly, NULL)) {
+                    read_expr(parent, bb);
+                    read_ternary_operation(parent, bb);
+                    var_t *ptr_val = opstack_pop();
+
+                    /* For pointer compound literals, store the address */
+                    compound_var->init_val = ptr_val->init_val;
+
+                    /* Consume additional values if present (for pointer arrays)
+                     */
+                    while (lex_accept(T_comma)) {
+                        if (lex_peek(T_close_curly, NULL))
+                            break;
+                        read_expr(parent, bb);
+                        read_ternary_operation(parent, bb);
+                        opstack_pop();
+                    }
+                } else {
+                    /* Empty pointer compound literal: (int*){} */
+                    compound_var->init_val = 0; /* NULL pointer */
+                }
+
+                /* Generate code for pointer compound literal */
+                opstack_push(compound_var);
+                add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
+                         NULL, 0, NULL);
+            } else if (cast_or_literal_type->base_type == TYPE_struct ||
+                       cast_or_literal_type->base_type == TYPE_typedef) {
+                /* Struct compound literal support (including typedef structs)
+                 */
+                /* For typedef structs, the actual struct info is in the type */
+
+                /* Initialize struct compound literal */
+                compound_var->init_val = 0;
+                compound_var->is_ptr = 0;
+
+                /* Parse first field value */
+                if (!lex_peek(T_close_curly, NULL)) {
+                    read_expr(parent, bb);
+                    read_ternary_operation(parent, bb);
+                    var_t *first_field = opstack_pop();
+                    compound_var->init_val = first_field->init_val;
+
+                    /* Consume additional fields if present */
+                    while (lex_accept(T_comma)) {
+                        if (lex_peek(T_close_curly, NULL)) {
+                            break;
+                        }
+                        read_expr(parent, bb);
+                        read_ternary_operation(parent, bb);
+                        opstack_pop(); /* Consume additional field values */
+                    }
+                }
+
+                /* Generate code for struct compound literal */
+                opstack_push(compound_var);
+                add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
+                         NULL, 0, NULL);
+            } else if (cast_or_literal_type->base_type == TYPE_int ||
+                       cast_or_literal_type->base_type == TYPE_char) {
+                /* Handle empty compound literals */
+                if (lex_peek(T_close_curly, NULL)) {
+                    /* Empty compound literal: (int){} */
+                    compound_var->init_val = 0;
+                    compound_var->array_size = 0;
+                    opstack_push(compound_var);
+                    add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
+                             NULL, 0, NULL);
+                } else if (lex_peek(T_numeric, NULL) ||
+                           lex_peek(T_identifier, NULL)) {
+                    /* Parse first element */
+                    read_expr(parent, bb);
+                    read_ternary_operation(parent, bb);
+
+                    /* Check if there are more elements (comma-separated) */
+                    if (lex_peek(T_comma, NULL)) {
+                        /* Array compound literal: (int[]){1, 2, 3} */
+                        var_t *first_element = opstack_pop();
+
+                        /* Enhanced array support */
+                        int element_count = 1;
+
+                        /* Parse remaining elements and count them */
+                        while (lex_accept(T_comma)) {
+                            if (lex_peek(T_close_curly, NULL))
+                                break; /* Trailing comma */
+
+                            read_expr(parent, bb);
+                            read_ternary_operation(parent, bb);
+                            opstack_pop(); /* Consume element value */
+                            element_count++;
+                        }
+
+                        /* Set array metadata with optimizations */
+                        compound_var->array_size = element_count;
+                        compound_var->init_val = first_element->init_val;
+
+                        /* for small arrays, inline the first value */
+                        opstack_push(compound_var);
+                        add_insn(parent, *bb, OP_load_constant, compound_var,
+                                 NULL, NULL, 0, NULL);
+                    } else {
+                        /* Single value: (int){42} or (int[]){42} */
+                        compound_var = opstack_pop();
+                        opstack_push(compound_var);
+                    }
+                }
+            }
+
+            lex_expect(T_close_curly);
+        } else {
+            /* Regular parenthesized expression */
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            lex_expect(T_close_bracket);
+        }
     } else if (lex_accept(T_sizeof)) {
-        /* TODO: Use more generalized type grammar parsing function to handle
-         * type reading
-         */
         char token[MAX_TYPE_LEN];
         int ptr_cnt = 0;
+        type_t *type = NULL;
 
         lex_expect(T_open_bracket);
-        int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-        lex_ident(T_identifier, token);
-        type_t *type = find_type(token, find_type_flag);
-        if (!type)
-            error("Unable to find type");
 
-        while (lex_accept(T_asterisk))
-            ptr_cnt++;
+        /* Check if this is sizeof(type) or sizeof(expression) */
+        int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+        if (find_type_flag == 1 && lex_accept(T_union))
+            find_type_flag = 2;
+
+        if (lex_peek(T_identifier, token)) {
+            /* Try to parse as a type first */
+            type = find_type(token, find_type_flag);
+            if (type) {
+                /* sizeof(type) */
+                lex_expect(T_identifier);
+                while (lex_accept(T_asterisk))
+                    ptr_cnt++;
+            }
+        }
+
+        if (!type) {
+            /* sizeof(expression) - parse the expression and get its type */
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            var_t *expr_var = opstack_pop();
+            type = expr_var->type;
+            ptr_cnt = expr_var->is_ptr;
+        }
+
+        if (!type)
+            error("Unable to determine type in sizeof");
 
         vd = require_var(parent);
         vd->init_val = ptr_cnt ? PTR_SIZE : type->size;
@@ -2645,6 +2913,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 error("Unexpected token");
 
             int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+            if (find_type_flag == 1 && lex_accept(T_union)) {
+                find_type_flag = 2;
+            }
             type = find_type(token, find_type_flag);
             if (type) {
                 var = require_typed_var(blk, type);
@@ -2783,6 +3054,51 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (lex_accept(T_semicolon))
         return bb;
 
+    /* struct/union variable declaration */
+    if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
+        int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+        if (find_type_flag == 1 && lex_accept(T_union)) {
+            find_type_flag = 2;
+        }
+        lex_ident(T_identifier, token);
+        type = find_type(token, find_type_flag);
+        if (type) {
+            var = require_typed_var(parent, type);
+            read_full_var_decl(var, 0, 0);
+            add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
+            add_symbol(bb, var);
+            if (lex_accept(T_assign)) {
+                read_expr(parent, &bb);
+                read_ternary_operation(parent, &bb);
+
+                rs1 = resize_var(parent, &bb, opstack_pop(), var);
+                add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+            }
+            while (lex_accept(T_comma)) {
+                var_t *nv;
+
+                /* add sequence point at T_comma */
+                perform_side_effect(parent, bb);
+
+                /* multiple (partial) declarations */
+                nv = require_typed_var(parent, type);
+                read_inner_var_decl(nv, 0, 0);
+                add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
+                add_symbol(bb, nv);
+                if (lex_accept(T_assign)) {
+                    read_expr(parent, &bb);
+                    read_ternary_operation(parent, &bb);
+
+                    rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                    add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
+                }
+            }
+            lex_expect(T_semicolon);
+            return bb;
+        }
+        error("Unknown struct/union type");
+    }
+
     /* statement with prefix */
     if (lex_accept(T_increment))
         prefix_op = OP_add;
@@ -2824,6 +3140,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
     /* is it a variable declaration? */
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+    if (find_type_flag == 1 && lex_accept(T_union)) {
+        find_type_flag = 2;
+    }
     type = find_type(token, find_type_flag);
     if (type) {
         var = require_typed_var(parent, type);
@@ -3052,6 +3371,59 @@ void read_global_statement(void)
         type->size = size;
         type->num_fields = i;
         lex_expect(T_semicolon);
+    } else if (lex_accept(T_union)) {
+        int i = 0, max_size = 0;
+
+        lex_ident(T_identifier, token);
+
+        /* has forward declaration? */
+        type_t *type = find_type(token, 2);
+        if (!type)
+            type = add_type();
+
+        strcpy(type->type_name, token);
+        type->base_type = TYPE_union;
+
+        lex_expect(T_open_curly);
+        do {
+            var_t *v = &type->fields[i++];
+            read_full_var_decl(v, 0, 1);
+            v->offset = 0; /* All union fields start at offset 0 */
+            int field_size = size_var(v);
+            if (field_size > max_size)
+                max_size = field_size;
+
+            /* Handle multiple variable declarations with same base type */
+            while (lex_accept(T_comma)) {
+                if (i >= MAX_FIELDS)
+                    error("Too many union fields");
+
+                var_t *nv = &type->fields[i++];
+                nv->type = v->type;
+                nv->var_name[0] = '\0';
+                nv->is_ptr = 0;
+                nv->is_func = false;
+                nv->is_global = false;
+                nv->array_size = 0;
+                nv->offset = 0; /* All union fields start at offset 0 */
+                nv->init_val = 0;
+                nv->liveness = 0;
+                nv->in_loop = 0;
+                nv->base = NULL;
+                nv->subscript = 0;
+                nv->subscripts_idx = 0;
+                read_inner_var_decl(nv, 0, 1);
+                field_size = size_var(nv);
+                if (field_size > max_size)
+                    max_size = field_size;
+            }
+
+            lex_expect(T_semicolon);
+        } while (!lex_accept(T_close_curly));
+
+        type->size = max_size;
+        type->num_fields = i;
+        lex_expect(T_semicolon);
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {
             int val = 0;
@@ -3142,6 +3514,83 @@ void read_global_statement(void)
                 /* If it is a forward declaration, build a connection between
                  * structure tag and alias. In 'find_type', it will retrieve
                  * infomation from base structure for alias.
+                 */
+                type->base_struct = tag;
+            }
+
+            lex_expect(T_semicolon);
+        } else if (lex_accept(T_union)) {
+            int i = 0, max_size = 0, has_union_def = 0;
+            type_t *tag = NULL, *type = add_type();
+
+            /* is union definition? */
+            if (lex_peek(T_identifier, token)) {
+                lex_expect(T_identifier);
+
+                /* is existent? */
+                tag = find_type(token, 2);
+                if (!tag) {
+                    tag = add_type();
+                    tag->base_type = TYPE_union;
+                    strcpy(tag->type_name, token);
+                }
+            }
+
+            /* typedef with union definition */
+            if (lex_accept(T_open_curly)) {
+                has_union_def = 1;
+                do {
+                    var_t *v = &type->fields[i++];
+                    read_full_var_decl(v, 0, 1);
+                    v->offset = 0; /* All union fields start at offset 0 */
+                    int field_size = size_var(v);
+                    if (field_size > max_size)
+                        max_size = field_size;
+
+                    /* Handle multiple variable declarations with same base type
+                     */
+                    while (lex_accept(T_comma)) {
+                        if (i >= MAX_FIELDS)
+                            error("Too many union fields");
+
+                        var_t *nv = &type->fields[i++];
+                        nv->type = v->type;
+                        nv->var_name[0] = '\0';
+                        nv->is_ptr = 0;
+                        nv->is_func = false;
+                        nv->is_global = false;
+                        nv->array_size = 0;
+                        nv->offset = 0; /* All union fields start at offset 0 */
+                        nv->init_val = 0;
+                        nv->liveness = 0;
+                        nv->in_loop = 0;
+                        nv->base = NULL;
+                        nv->subscript = 0;
+                        nv->subscripts_idx = 0;
+                        read_inner_var_decl(nv, 0, 1);
+                        field_size = size_var(nv);
+                        if (field_size > max_size)
+                            max_size = field_size;
+                    }
+
+                    lex_expect(T_semicolon);
+                } while (!lex_accept(T_close_curly));
+            }
+
+            lex_ident(T_identifier, type->type_name);
+            type->size = max_size;
+            type->num_fields = i;
+            type->base_type = TYPE_typedef;
+
+            if (tag && has_union_def == 1) {
+                strcpy(token, tag->type_name);
+                memcpy(tag, type, sizeof(type_t));
+                tag->base_type = TYPE_union;
+                strcpy(tag->type_name, token);
+            } else {
+                /* If it is a forward declaration, build a connection between
+                 * union tag and alias. In 'find_type', it will retrieve
+                 * information from base union for alias.
                  */
                 type->base_struct = tag;
             }

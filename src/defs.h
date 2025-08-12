@@ -157,6 +157,7 @@ typedef enum {
     T_typedef,
     T_enum,
     T_struct,
+    T_union,
     T_sizeof,
     T_elipsis, /* ... */
     T_switch,
@@ -184,6 +185,7 @@ typedef enum {
     TYPE_int,
     TYPE_char,
     TYPE_struct,
+    TYPE_union,
     TYPE_typedef
 } base_type_t;
 
@@ -254,6 +256,7 @@ typedef enum {
     /* data type conversion */
     OP_trunc,
     OP_sign_ext,
+    OP_cast,
 
     /* entry point of the state machine */
     OP_start
@@ -531,7 +534,6 @@ typedef struct {
     int polluted;
 } regfile_t;
 
-/* FIXME: replace char[2] with a short data type in ELF header structures */
 /* ELF header */
 typedef struct {
     char e_ident[16];
