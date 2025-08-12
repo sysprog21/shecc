@@ -635,6 +635,56 @@ typedef enum {
 int main() { return sizeof(enum_t*); }
 EOF
 
+# sizeof with expressions
+items 4 "int x = 42; return sizeof(x);"
+items 4 "int arr[5]; return sizeof(arr[0]);"
+items 4 "int x = 10; int *ptr = &x; return sizeof(*ptr);"
+items 1 "char c = 'A'; return sizeof(c);"
+items 4 "int a = 1, b = 2; return sizeof(a + b);"
+
+# sizeof with complex expressions
+try_ 4 << EOF
+int main() {
+    int arr[10];
+    int i = 5;
+    return sizeof(arr[i]);
+}
+EOF
+
+try_ 4 << EOF
+int main() {
+    int x = 100;
+    int *p = &x;
+    int **pp = &p;
+    return sizeof(**pp);
+}
+EOF
+
+try_ 4 << EOF
+int main() {
+    int values[3];
+    values[1] = 2;
+    values[2] = 3;
+    return sizeof(values[1] + values[2]);
+}
+EOF
+
+# sizeof with function calls
+try_ 4 << EOF
+int get_value() { return 42; }
+int main() {
+    return sizeof(get_value());
+}
+EOF
+
+# sizeof with ternary expressions
+try_ 4 << EOF
+int main() {
+    int a = 5, b = 10;
+    return sizeof(a > b ? a : b);
+}
+EOF
+
 # switch-case
 items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } return a;"
 items 10 "int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } return a;"
@@ -2014,6 +2064,258 @@ int main()
 }
 EOF
 
+# Binary literal tests (0b/0B prefix)
+# Test basic binary literals
+expr 0 "0b0"
+expr 1 "0b1"
+expr 2 "0b10"
+expr 3 "0b11"
+expr 4 "0b100"
+expr 8 "0b1000"
+expr 15 "0b1111"
+expr 16 "0b10000"
+expr 255 "0b11111111"
+
+# Test uppercase B prefix
+expr 10 "0B1010"
+expr 240 "0B11110000"
+
+# Test binary literals in arithmetic expressions
+expr 15 "0b1100 | 0b0011"
+expr 0 "0b1100 & 0b0011"
+expr 15 "0b1100 ^ 0b0011"
+expr 24 "0b110 << 2"
+expr 3 "0b1100 >> 2"
+
+# Test binary literals in variables
+items 10 "int a = 0b1010; return a;"
+items 255 "int b = 0B11111111; return b;"
+items 45 "int x = 0b101101; return x;"
+
+# Test binary literals in complex expressions
+items 54 "int a = 0b1111; int b = 0b0011; return (a + b) * 3;"
+items 160 "int mask = 0b11110000; int value = 0b10101010; return value & mask;"
+
+# Test combination of different number bases
+expr 45 "0b1111 + 0xF + 017"  # 15 + 15 + 15 = 45
+expr 90 "0b110000 + 0x10 + 032"  # 48 + 16 + 26 = 90
+
+# Test binary literals in comparisons
+expr 1 "0b1010 == 10"
+expr 1 "0b11111111 == 255"
+expr 0 "0b1000 != 8"
+expr 1 "0b10000 > 0xF"
+expr 1 "0B1111 < 020"  # 15 < 16 (octal)
+
+# Test binary literals with large values
+try_large 1023 << EOF
+int test_function() {
+    return 0b1111111111;  /* 10 bits set = 1023 */
+}
+EOF
+
+try_large 65535 << EOF
+int test_function() {
+    return 0b1111111111111111;  /* 16 bits set = 65535 */
+}
+EOF
+
+# Test invalid binary literal errors
+try_compile_error << EOF
+int main()
+{
+    int x = 0b;  /* No binary digits */
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+int main()
+{
+    int x = 0b2;  /* Invalid binary digit */
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+int main()
+{
+    int x = 0B9;  /* Invalid binary digit */
+    return 0;
+}
+EOF
+
+# New escape sequence tests (\a, \b, \v, \f)
+# Test character literals with new escape sequences
+try_ 7 << EOF
+int main() {
+    char bell = '\a';  /* ASCII 7 - bell/alert */
+    return bell;
+}
+EOF
+
+try_ 8 << EOF
+int main() {
+    char backspace = '\b';  /* ASCII 8 - backspace */
+    return backspace;
+}
+EOF
+
+try_ 11 << EOF
+int main() {
+    char vtab = '\v';  /* ASCII 11 - vertical tab */
+    return vtab;
+}
+EOF
+
+try_ 12 << EOF
+int main() {
+    char formfeed = '\f';  /* ASCII 12 - form feed */
+    return formfeed;
+}
+EOF
+
+# Test all escape sequences together
+try_output 0 "7 8 11 12" << EOF
+int main() {
+    printf("%d %d %d %d", '\a', '\b', '\v', '\f');
+    return 0;
+}
+EOF
+
+# Test escape sequences in strings
+try_ 65 << EOF
+int main() {
+    char *str = "A\a\b\v\f";
+    return str[0];  /* Should return 'A' = 65 */
+}
+EOF
+
+try_ 7 << EOF
+int main() {
+    char *str = "A\a\b\v\f";
+    return str[1];  /* Should return '\a' = 7 */
+}
+EOF
+
+try_ 8 << EOF
+int main() {
+    char *str = "A\a\b\v\f";
+    return str[2];  /* Should return '\b' = 8 */
+}
+EOF
+
+# Test that existing escape sequences still work
+try_output 0 "10 9 13 0" << EOF
+int main() {
+    printf("%d %d %d %d", '\n', '\t', '\r', '\0');
+    return 0;
+}
+EOF
+
+# Test additional escape sequences (\?, \e, unknown escapes)
+try_ 63 << EOF
+int main() {
+    return '\?';  /* Should return 63 (ASCII '?') */
+}
+EOF
+
+try_ 27 << EOF
+int main() {
+    return '\e';  /* GNU extension: ESC character (ASCII 27) */
+}
+EOF
+
+try_ 122 << EOF
+int main() {
+    return '\z';  /* Unknown escape should return 'z' (ASCII 122) */
+}
+EOF
+
+# Test hexadecimal escape sequences
+try_ 65 << EOF
+int main() {
+    return '\x41';  /* Should return 65 (ASCII 'A') */
+}
+EOF
+
+try_ 72 << EOF
+int main() {
+    return '\x48';  /* Should return 72 (ASCII 'H') */
+}
+EOF
+
+# Test octal escape sequences
+try_ 65 << EOF
+int main() {
+    return '\101';  /* Should return 65 (octal 101 = ASCII 'A') */
+}
+EOF
+
+try_ 10 << EOF
+int main() {
+    return '\12';   /* Should return 10 (octal 12 = newline) */
+}
+EOF
+
+try_ 8 << EOF
+int main() {
+    return '\10';   /* Should return 8 (octal 10 = backspace) */
+}
+EOF
+
+# Test hex escapes in strings
+try_output 0 "Hello World" << EOF
+int main() {
+    char *s = "\x48\x65\x6C\x6C\x6F \x57\x6F\x72\x6C\x64";
+    printf("%s", s);
+    return 0;
+}
+EOF
+
+# Test octal escapes in strings
+try_output 0 "ABC" << EOF
+int main() {
+    char *s = "\101\102\103";
+    printf("%s", s);
+    return 0;
+}
+EOF
+
+# Test escape sequences in printf
+# Note: The bell character (\a) is non-printable but present in output
+try_output 0 "$(printf 'Bell: \a Tab:\t Newline:\n')" << EOF
+int main() {
+    printf("Bell: %c Tab:%c Newline:%c", '\a', '\t', '\n');
+    return 0;
+}
+EOF
+
+# Test adjacent string literal concatenation
+try_output 0 "Hello World" << EOF
+int main() {
+    char *s = "Hello " "World";
+    printf("%s", s);
+    return 0;
+}
+EOF
+
+try_output 0 "Testing string concatenation" << EOF
+int main() {
+    char *s = "Testing " "string " "concatenation";
+    printf("%s", s);
+    return 0;
+}
+EOF
+
+try_output 0 "Multiple adjacent strings work!" << EOF
+int main() {
+    char *s = "Multiple " "adjacent " "strings " "work!";
+    printf("%s", s);
+    return 0;
+}
+EOF
+
 # va_list and variadic function tests
 # Note: These tests demonstrate both direct pointer arithmetic and
 # va_list typedef forwarding between functions, now fully supported.
@@ -2689,6 +2991,680 @@ int main()
     int **ptr2 = &ptr1;
     printf("Mixed: %d %d %d", *ptr1, **ptr2, **(ptr2 + 0));
     return 0;
+}
+EOF
+
+# Test compound literals: basic int/char and arrays
+try_ 42 << EOF
+int main() {
+    /* Basic int compound literal */
+    return (int){42};
+}
+EOF
+
+try_ 65 << EOF
+int main() {
+    /* Basic char compound literal */
+    return (char){65};
+}
+EOF
+
+try_ 25 << EOF
+int main() {
+    /* Single element array compound literal */
+    return (int[]){25};
+}
+EOF
+
+try_ 10 << EOF
+int main() {
+    /* Multi-element array compound literal - returns first element */
+    return (int[]){10, 20, 30};
+}
+EOF
+
+try_ 100 << EOF
+int main() {
+    /* Array compound literal assignment */
+    int x = (int[]){100, 200, 300};
+    return x;
+}
+EOF
+
+try_ 50 << EOF
+int main() {
+    /* Char array compound literal */
+    return (char[]){50, 60, 70};
+}
+EOF
+
+# Test compound literals: advanced features
+try_ 35 << EOF
+int main() {
+    /* Compound literals in arithmetic expressions */
+    return (int){10} + (int){20} + (int[]){5, 15, 25};
+}
+EOF
+
+try_ 42 << EOF
+int add_values(int a, int b) { return a + b; }
+int main() {
+    /* Compound literals as function arguments */
+    return add_values((int){30}, (int){12});
+}
+EOF
+
+try_ 75 << EOF
+int main() {
+    /* Multiple array compound literals */
+    int a = (int[]){25, 35, 45};
+    int b = (int[]){50, 60, 70};
+    return a + b; /* 25 + 50 = 75 */
+}
+EOF
+
+try_ 120 << EOF
+int main() {
+    /* Complex expression with mixed compound literals */
+    return (int){40} + (char){80} + (int[]){0, 0, 0};  /* 40 + 80 + 0 = 120 */
+}
+EOF
+
+try_ 200 << EOF
+int main() {
+    /* Compound literal with larger numbers */
+    return (int[]){200, 300, 400};
+}
+EOF
+
+# Test compound literals: edge cases
+try_ 0 << EOF
+int main() {
+    /* Empty compound literal */
+    return (int){};
+}
+EOF
+
+try_ 0 << EOF
+int main() {
+    /* Empty array compound literal */
+    return (int[]){};
+}
+EOF
+
+try_ 90 << EOF
+int main() {
+    /* Multiple compound literals in expression */
+    return (int[]){30, 60} + (int[]){60, 30};  /* 30 + 60 = 90 */
+}
+EOF
+
+try_ 255 << EOF
+int main() {
+    /* Large char compound literal */
+    return (char){255};
+}
+EOF
+
+try_ 150 << EOF
+int main() {
+    /* Mixed compound literal expressions */
+    int a = (int){50};
+    int b = (int[]){100, 200, 300};
+    return a + b;  /* 50 + 100 = 150 */
+}
+EOF
+
+# Test pointer compound literals
+try_ 0 << EOF
+int main()
+{
+    /* Test NULL pointer compound literal */
+    int *p = (int*){};
+    return p ? 1 : 0;
+}
+EOF
+
+try_ 0 << EOF
+int main()
+{
+    /* Test pointer compound literal with zero */
+    int *p = (int*){0};
+    return p ? 1 : 0;
+}
+EOF
+
+# Test char pointer compound literals
+try_ 0 << EOF
+int main()
+{
+    char *p = (char*){};
+    return p ? 1 : 0;
+}
+EOF
+
+# Test typedef pointer compound literals
+try_ 0 << EOF
+typedef int* IntPtr;
+
+int main()
+{
+    IntPtr p = (IntPtr){0};
+    return p ? 1 : 0;
+}
+EOF
+
+# Additional struct initialization tests from refine-parser
+# Test: Local struct initialization (working with field-by-field assignment)
+try_ 42 << EOF
+typedef struct {
+    int x;
+    int y;
+} point_t;
+
+int main() {
+    point_t p;
+    p.x = 10;
+    p.y = 32;
+    return p.x + p.y;  /* Returns 42 */
+}
+EOF
+
+# Test: Simple array initialization
+try_ 15 << EOF
+int main() {
+    int nums[3];
+    nums[0] = 1;
+    nums[1] = 5;
+    nums[2] = 9;
+    return nums[0] + nums[1] + nums[2];  /* Returns 15 */
+}
+EOF
+
+# Test: Character array with integer values
+try_ 24 << EOF
+int main() {
+    char arr[3];
+    arr[0] = 5;
+    arr[1] = 9;
+    arr[2] = 10;
+    return arr[0] + arr[1] + arr[2];  /* Returns 24 (5+9+10) */
+}
+EOF
+
+# Test: Simple 3-element array
+try_ 6 << EOF
+int main() {
+    int arr[3];
+    arr[0] = 1;
+    arr[1] = 2;
+    arr[2] = 3;
+    return arr[0] + arr[1] + arr[2];  /* Returns 6 (1+2+3) */
+}
+EOF
+
+# Test: Mixed scalar fields in struct
+try_ 42 << EOF
+typedef struct {
+    int scalar;
+    int x, y;
+} mixed_t;
+
+int main() {
+    mixed_t m;
+    m.scalar = 0;
+    m.x = 10;
+    m.y = 32;
+    return m.x + m.y;  /* Returns 42 */
+}
+EOF
+
+# Union support tests
+# Basic union declaration and field access
+try_ 42 << EOF
+typedef union {
+    int i;
+    char c;
+} basic_union_t;
+
+int main() {
+    basic_union_t u;
+    u.i = 42;
+    return u.i;  /* Returns 42 */
+}
+EOF
+
+# Union field access - different types sharing same memory
+try_ 65 << EOF
+typedef union {
+    int i;
+    char c;
+} char_int_union_t;
+
+int main() {
+    char_int_union_t u;
+    u.c = 65;  /* ASCII 'A' */
+    return u.c;  /* Returns 65 */
+}
+EOF
+
+# Union with multiple integer fields
+try_ 100 << EOF
+typedef union {
+    int value;
+    int number;
+    int data;
+} multi_int_union_t;
+
+int main() {
+    multi_int_union_t u;
+    u.value = 100;
+    return u.number;  /* Returns 100 - same memory location */
+}
+EOF
+
+# Union size calculation - should be size of largest member
+try_ 4 << EOF
+typedef union {
+    int i;      /* 4 bytes */
+    char c;     /* 1 byte */
+} size_union_t;
+
+int main() {
+    return sizeof(size_union_t);  /* Returns 4 (size of int) */
+}
+EOF
+
+# Union with different data types
+try_output 0 "Value as int: 1094795585, as char: 65" << EOF
+typedef union {
+    int i;
+    char c;
+} data_union_t;
+
+int main() {
+    data_union_t u;
+    u.i = 1094795585;  /* 0x41414141 in hex - four 'A' characters */
+    printf("Value as int: %d, as char: %d", u.i, u.c);
+    return 0;
+}
+EOF
+
+# Nested union in struct
+try_ 50 << EOF
+typedef union {
+    int value;
+    char byte;
+} nested_union_t;
+
+typedef struct {
+    int id;
+    nested_union_t data;
+} container_t;
+
+int main() {
+    container_t c;
+    c.id = 10;
+    c.data.value = 40;
+    return c.id + c.data.value;  /* Returns 50 */
+}
+EOF
+
+# Array of unions
+try_ 30 << EOF
+typedef union {
+    int i;
+    char c;
+} array_union_t;
+
+int main() {
+    array_union_t arr[3];
+    arr[0].i = 10;
+    arr[1].i = 20;
+    arr[2].i = 0;  /* Will be overridden */
+    arr[2].c = 0;  /* Sets to 0 */
+    return arr[0].i + arr[1].i + arr[2].i;  /* Returns 30 */
+}
+EOF
+
+# Union with pointer fields
+try_ 42 << EOF
+typedef union {
+    int *int_ptr;
+    char *char_ptr;
+} ptr_union_t;
+
+int main() {
+    int value = 42;
+    ptr_union_t u;
+    u.int_ptr = &value;
+    return *(u.int_ptr);  /* Returns 42 */
+}
+EOF
+
+# Complex union with struct member
+try_ 77 << EOF
+typedef struct {
+    int x;
+    int y;
+} point_t;
+
+typedef union {
+    point_t pt;
+    int values[2];
+} point_union_t;
+
+int main() {
+    point_union_t u;
+    u.pt.x = 30;
+    u.pt.y = 47;
+    return u.values[0] + u.values[1];  /* Returns 77 (30+47) */
+}
+EOF
+
+# Union assignment and memory sharing (endianness-neutral)
+try_output 0 "Union works: 100" << EOF
+typedef union {
+    int i;
+    char bytes[4];
+} byte_union_t;
+
+int main() {
+    byte_union_t u;
+    u.i = 100;
+    printf("Union works: %d", u.i);
+    return 0;
+}
+EOF
+
+# Union with typedef pointer
+try_ 99 << EOF
+typedef int *int_ptr_t;
+
+typedef union {
+    int_ptr_t ptr;
+    int direct;
+} typedef_ptr_union_t;
+
+int main() {
+    int value = 99;
+    typedef_ptr_union_t u;
+    u.ptr = &value;
+    return *(u.ptr);  /* Returns 99 */
+}
+EOF
+
+# Union initialization with different members
+try_ 25 << EOF
+typedef union {
+    int integer;
+    char character;
+} init_union_t;
+
+int main() {
+    init_union_t u1, u2;
+    u1.integer = 25;
+    u2.character = 25;
+    return u1.integer;  /* Returns 25 */
+}
+EOF
+
+# Union with function pointers
+try_ 15 << EOF
+int add_func(int a, int b) { return a + b; }
+int mult_func(int a, int b) { return a * b; }
+
+typedef union {
+    int (*add_ptr)(int, int);
+    int (*mult_ptr)(int, int);
+} func_union_t;
+
+int main() {
+    func_union_t u;
+    u.add_ptr = add_func;
+    return u.add_ptr(7, 8);  /* Returns 15 */
+}
+EOF
+
+# Sizeof union with mixed types
+try_ 4 << EOF
+typedef union {
+    char c;
+    int i;
+    char *p;
+} mixed_union_t;
+
+int main() {
+    return sizeof(mixed_union_t);  /* Returns 4 (size of largest member) */
+}
+EOF
+
+# Union field modification
+try_ 200 << EOF
+typedef union {
+    int total;
+    int sum;
+} modify_union_t;
+
+int main() {
+    modify_union_t u;
+    u.total = 100;
+    u.sum += 100;  /* Modifies same memory location */
+    return u.total;  /* Returns 200 */
+}
+EOF
+
+# Named union inside struct
+try_ 88 << EOF
+typedef union {
+    int value;
+    char byte;
+} inner_union_t;
+
+typedef struct {
+    int id;
+    inner_union_t data;
+} named_union_container_t;
+
+int main() {
+    named_union_container_t c;
+    c.id = 8;
+    c.data.value = 80;
+    return c.id + c.data.value;  /* Returns 88 */
+}
+EOF
+
+# Union with array members
+try_ 15 << EOF
+typedef union {
+    int array[3];
+    char bytes[12];
+} array_union_t;
+
+int main() {
+    array_union_t u;
+    u.array[0] = 5;
+    u.array[1] = 10;
+    u.array[2] = 0;
+    return u.array[0] + u.array[1] + u.array[2];  /* Returns 15 */
+}
+EOF
+
+# Complex union with nested structures
+try_ 33 << EOF
+typedef struct {
+    int a;
+    int b;
+} pair_t;
+
+typedef union {
+    pair_t pair;
+    int values[2];
+    char bytes[8];
+} complex_union_t;
+
+int main() {
+    complex_union_t u;
+    u.pair.a = 11;
+    u.pair.b = 22;
+    return u.values[0] + u.values[1];  /* Returns 33 */
+}
+EOF
+
+# Union as function parameter
+try_ 60 << EOF
+typedef union {
+    int i;
+    char c;
+} param_union_t;
+
+int process_union(param_union_t u) {
+    return u.i;
+}
+
+int main() {
+    param_union_t u;
+    u.i = 60;
+    return process_union(u);  /* Returns 60 */
+}
+EOF
+
+# Union as return type
+try_ 45 << EOF
+typedef union {
+    int value;
+    char byte;
+} return_union_t;
+
+return_union_t create_union(int val) {
+    return_union_t u;
+    u.value = val;
+    return u;
+}
+
+int main() {
+    return_union_t result = create_union(45);
+    return result.value;  /* Returns 45 */
+}
+EOF
+
+# Multiple union declarations
+try_ 120 << EOF
+typedef union {
+    int x;
+    char c;
+} union1_t;
+
+typedef union {
+    int y;
+    char d;
+} union2_t;
+
+int main() {
+    union1_t u1;
+    union2_t u2;
+    u1.x = 50;
+    u2.y = 70;
+    return u1.x + u2.y;  /* Returns 120 */
+}
+EOF
+
+# Type Casting Tests
+echo "Testing type casting functionality..."
+
+# Basic int to char cast
+try_ 65 << EOF
+int main() {
+    int x = 65;
+    char c = (char)x;
+    return c;  /* Returns 65 ('A') */
+}
+EOF
+
+# Char to int cast
+try_ 42 << EOF
+int main() {
+    char c = 42;
+    int x = (int)c;
+    return x;  /* Returns 42 */
+}
+EOF
+
+# Cast in expressions
+try_ 130 << EOF
+int main() {
+    int a = 65;
+    int b = 65;
+    return (char)a + (char)b;  /* Returns 130 */
+}
+EOF
+
+# Cast with arithmetic
+try_ 42 << EOF
+int main() {
+    int x = 50;
+    return (int)((char)(x - 8));  /* Returns 42 */
+}
+EOF
+
+# Multiple casts in sequence
+try_ 100 << EOF
+int main() {
+    int x = 100;
+    char c = (char)x;
+    int y = (int)c;
+    return y;  /* Returns 100 */
+}
+EOF
+
+# Cast with function parameters
+try_ 88 << EOF
+int test_func(char c) {
+    return (int)c;
+}
+
+int main() {
+    int x = 88;
+    return test_func((char)x);  /* Returns 88 */
+}
+EOF
+
+# Cast in return statement
+try_ 123 << EOF
+int get_char() {
+    int x = 123;
+    return (char)x;
+}
+
+int main() {
+    return get_char();  /* Returns 123 */
+}
+EOF
+
+# Nested casts
+try_ 200 << EOF
+int main() {
+    int x = 200;
+    return (int)((char)((int)x));  /* Returns 200 */
+}
+EOF
+
+# Cast with assignment
+try_ 150 << EOF
+int main() {
+    int x = 150;
+    char c;
+    c = (char)x;
+    return (int)c;  /* Returns 150 */
+}
+EOF
+
+# Cast zero value
+try_ 0 << EOF
+int main() {
+    int x = 0;
+    char c = (char)x;
+    return (int)c;  /* Returns 0 */
 }
 EOF
 
