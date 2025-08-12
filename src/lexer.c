@@ -12,7 +12,7 @@
 
 /* Hash table constants */
 #define NUM_DIRECTIVES 11
-#define NUM_KEYWORDS 15
+#define NUM_KEYWORDS 16
 
 /* Preprocessor directive hash table using existing shecc hashmap */
 hashmap_t *DIRECTIVE_MAP = NULL;
@@ -112,6 +112,8 @@ void lex_init_keywords()
     token_values[13] = T_default;
     names[14] = "continue";
     token_values[14] = T_continue;
+    names[15] = "union";
+    token_values[15] = T_union;
 
     /* hashmap insertion */
     for (int i = 0; i < NUM_KEYWORDS; i++) {
@@ -201,6 +203,17 @@ bool is_hex(char c)
 {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
            (c >= 'A' && c <= 'F');
+}
+
+int hex_digit_value(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
 }
 
 bool is_numeric(char buffer[])
@@ -330,8 +343,21 @@ token_t lex_token_internal(bool aliasing)
                 token_str[i++] = next_char;
             } while (is_hex(read_char(false)));
 
+        } else if (token_str[0] == '0' && ((next_char | 32) == 'b')) {
+            /* Binary: starts with 0b or 0B */
+            token_str[i++] = next_char;
+
+            read_char(false);
+            if (next_char != '0' && next_char != '1')
+                error("Invalid binary literal: expected 0 or 1 after 0b");
+
+            do {
+                token_str[i++] = next_char;
+                read_char(false);
+            } while (next_char == '0' || next_char == '1');
+
         } else if (token_str[0] == '0') {
-            /* Octal: starts with 0 but not followed by 'x' */
+            /* Octal: starts with 0 but not followed by 'x' or 'b' */
             while (is_digit(next_char)) {
                 if (next_char >= '8')
                     error("Invalid octal digit: must be in range 0-7");
@@ -413,8 +439,58 @@ token_t lex_token_internal(bool aliasing)
                     token_str[i - 1] = '\\';
                 else if (next_char == '0')
                     token_str[i - 1] = '\0';
-                else
-                    abort();
+                else if (next_char == 'a')
+                    token_str[i - 1] = '\a';
+                else if (next_char == 'b')
+                    token_str[i - 1] = '\b';
+                else if (next_char == 'v')
+                    token_str[i - 1] = '\v';
+                else if (next_char == 'f')
+                    token_str[i - 1] = '\f';
+                else if (next_char == 'e') /* GNU extension: ESC character */
+                    token_str[i - 1] = 27;
+                else if (next_char == '?')
+                    token_str[i - 1] = '?';
+                else if (next_char == 'x') {
+                    /* Hexadecimal escape sequence \xHH */
+                    read_char(false);
+                    if (!is_hex(next_char))
+                        error("Invalid hex escape sequence");
+                    int value = 0;
+                    int count = 0;
+                    while (is_hex(next_char) && count < 2) {
+                        value = (value << 4) + hex_digit_value(next_char);
+                        read_char(false);
+                        count++;
+                    }
+                    token_str[i - 1] = value;
+                    /* Back up one character as we read one too many */
+                    SOURCE->size--;
+                    next_char = SOURCE->elements[SOURCE->size];
+                } else if (next_char >= '0' && next_char <= '7') {
+                    /* Octal escape sequence \nnn */
+                    int value = next_char - '0';
+                    read_char(false);
+                    if (next_char >= '0' && next_char <= '7') {
+                        value = (value << 3) + (next_char - '0');
+                        read_char(false);
+                        if (next_char >= '0' && next_char <= '7') {
+                            value = (value << 3) + (next_char - '0');
+                        } else {
+                            /* Back up one character */
+                            SOURCE->size--;
+                            next_char = SOURCE->elements[SOURCE->size];
+                        }
+                    } else {
+                        /* Back up one character */
+                        SOURCE->size--;
+                        next_char = SOURCE->elements[SOURCE->size];
+                    }
+                    token_str[i - 1] = value;
+                } else {
+                    /* Handle unknown escapes gracefully */
+                    token_str[i - 1] = next_char;
+                }
             } else {
                 token_str[i++] = next_char;
             }
@@ -445,8 +521,58 @@ token_t lex_token_internal(bool aliasing)
                 token_str[0] = '\\';
             else if (next_char == '0')
                 token_str[0] = '\0';
-            else
-                abort();
+            else if (next_char == 'a')
+                token_str[0] = '\a';
+            else if (next_char == 'b')
+                token_str[0] = '\b';
+            else if (next_char == 'v')
+                token_str[0] = '\v';
+            else if (next_char == 'f')
+                token_str[0] = '\f';
+            else if (next_char == 'e') /* GNU extension: ESC character */
+                token_str[0] = 27;
+            else if (next_char == '?')
+                token_str[0] = '?';
+            else if (next_char == 'x') {
+                /* Hexadecimal escape sequence \xHH */
+                read_char(false);
+                if (!is_hex(next_char))
+                    error("Invalid hex escape sequence");
+                int value = 0;
+                int count = 0;
+                while (is_hex(next_char) && count < 2) {
+                    value = (value << 4) + hex_digit_value(next_char);
+                    read_char(false);
+                    count++;
+                }
+                token_str[0] = value;
+                /* Back up one character as we read one too many */
+                SOURCE->size--;
+                next_char = SOURCE->elements[SOURCE->size];
+            } else if (next_char >= '0' && next_char <= '7') {
+                /* Octal escape sequence \nnn */
+                int value = next_char - '0';
+                read_char(false);
+                if (next_char >= '0' && next_char <= '7') {
+                    value = (value << 3) + (next_char - '0');
+                    read_char(false);
+                    if (next_char >= '0' && next_char <= '7') {
+                        value = (value << 3) + (next_char - '0');
+                    } else {
+                        /* Back up one character */
+                        SOURCE->size--;
+                        next_char = SOURCE->elements[SOURCE->size];
+                    }
+                } else {
+                    /* Back up one character */
+                    SOURCE->size--;
+                    next_char = SOURCE->elements[SOURCE->size];
+                }
+                token_str[0] = value;
+            } else {
+                /* Handle unknown escapes gracefully */
+                token_str[0] = next_char;
+            }
         } else {
             token_str[0] = next_char;
         }
