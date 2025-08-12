@@ -420,10 +420,8 @@ hashmap_node_t *hashmap_node_new(char *key, void *val)
     }
 
     node->key = arena_alloc(HASHMAP_ARENA, len + 1);
-
     if (!node->key) {
         printf("Failed to allocate hashmap_node_t key with size %d\n", len + 1);
-        free(node);
         return NULL;
     }
 

@@ -277,6 +277,8 @@ token_t lex_token_internal(bool aliasing)
         int i = 0;
 
         do {
+            if (i >= MAX_TOKEN_LEN - 1)
+                error("Token too long");
             token_str[i++] = next_char;
         } while (is_alnum(read_char(false)));
         token_str[i] = 0;
@@ -328,11 +330,15 @@ token_t lex_token_internal(bool aliasing)
 
     if (is_digit(next_char)) {
         int i = 0;
+        if (i >= MAX_TOKEN_LEN - 1)
+            error("Token too long");
         token_str[i++] = next_char;
         read_char(false);
 
         if (token_str[0] == '0' && ((next_char | 32) == 'x')) {
             /* Hexadecimal: starts with 0x or 0X */
+            if (i >= MAX_TOKEN_LEN - 1)
+                error("Token too long");
             token_str[i++] = next_char;
 
             read_char(false);
@@ -340,11 +346,15 @@ token_t lex_token_internal(bool aliasing)
                 error("Invalid hex literal: expected hex digit after 0x");
 
             do {
+                if (i >= MAX_TOKEN_LEN - 1)
+                    error("Token too long");
                 token_str[i++] = next_char;
             } while (is_hex(read_char(false)));
 
         } else if (token_str[0] == '0' && ((next_char | 32) == 'b')) {
             /* Binary: starts with 0b or 0B */
+            if (i >= MAX_TOKEN_LEN - 1)
+                error("Token too long");
             token_str[i++] = next_char;
 
             read_char(false);
@@ -352,6 +362,8 @@ token_t lex_token_internal(bool aliasing)
                 error("Invalid binary literal: expected 0 or 1 after 0b");
 
             do {
+                if (i >= MAX_TOKEN_LEN - 1)
+                    error("Token too long");
                 token_str[i++] = next_char;
                 read_char(false);
             } while (next_char == '0' || next_char == '1');
@@ -361,6 +373,8 @@ token_t lex_token_internal(bool aliasing)
             while (is_digit(next_char)) {
                 if (next_char >= '8')
                     error("Invalid octal digit: must be in range 0-7");
+                if (i >= MAX_TOKEN_LEN - 1)
+                    error("Token too long");
                 token_str[i++] = next_char;
                 read_char(false);
             }
@@ -368,6 +382,8 @@ token_t lex_token_internal(bool aliasing)
         } else {
             /* Decimal */
             while (is_digit(next_char)) {
+                if (i >= MAX_TOKEN_LEN - 1)
+                    error("Token too long");
                 token_str[i++] = next_char;
                 read_char(false);
             }
@@ -492,6 +508,8 @@ token_t lex_token_internal(bool aliasing)
                     token_str[i - 1] = next_char;
                 }
             } else {
+                if (i >= MAX_TOKEN_LEN - 1)
+                    error("String literal too long");
                 token_str[i++] = next_char;
             }
             if (next_char == '\\')
@@ -744,6 +762,8 @@ token_t lex_token_internal(bool aliasing)
         char *alias;
         int i = 0;
         do {
+            if (i >= MAX_TOKEN_LEN - 1)
+                error("Token too long");
             token_str[i++] = next_char;
         } while (is_alnum(read_char(false)));
         token_str[i] = 0;
