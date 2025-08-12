@@ -125,6 +125,9 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_sign_ext:
         elf_offset += 4;
         return;
+    case OP_cast:
+        elf_offset += 4;
+        return;
     default:
         fatal("Unknown opcode");
     }
@@ -438,6 +441,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_sign_ext:
         /* TODO: Allow to sign extends to other types */
         emit(__sxtb(__AL, rd, rn, 0));
+        return;
+    case OP_cast:
+        /* Generic cast operation - for now, just move the value */
+        emit(__mov_r(__AL, rd, rn));
         return;
     default:
         fatal("Unknown opcode");

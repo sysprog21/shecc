@@ -596,6 +596,7 @@ void reg_alloc(void)
                     break;
                 case OP_trunc:
                 case OP_sign_ext:
+                case OP_cast:
                     src0 = prepare_operand(bb, insn->rs1, -1);
                     dest = prepare_dest(bb, insn->rd, src0, -1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
@@ -786,6 +787,9 @@ void dump_ph2_ir(void)
             break;
         case OP_sign_ext:
             printf("\t%%x%c = sign_ext %%x%c, %d", rd, rs1, ph2_ir->src1);
+            break;
+        case OP_cast:
+            printf("\t%%x%c = cast %%x%c", rd, rs1);
             break;
         default:
             break;
