@@ -1095,13 +1095,19 @@ void global_init(void)
     elf_code_start = ELF_START + elf_header_len;
 
     MACROS_MAP = hashmap_create(MAX_ALIASES);
-    TYPES = malloc(MAX_TYPES * sizeof(type_t));
+
+    /* Initialize arenas first so we can use them for allocation */
     BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Variables/blocks */
     INSN_ARENA = arena_init(LARGE_ARENA_SIZE); /* Instructions - high usage */
     BB_ARENA = arena_init(SMALL_ARENA_SIZE);   /* Basic blocks - low usage */
     HASHMAP_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Hash nodes */
-    GENERAL_ARENA = arena_init(SMALL_ARENA_SIZE);   /* Misc - low usage */
-    PH2_IR_FLATTEN = malloc(MAX_IR_INSTR * sizeof(ph2_ir_t *));
+    GENERAL_ARENA =
+        arena_init(DEFAULT_ARENA_SIZE); /* For TYPES and PH2_IR_FLATTEN */
+
+    /* Use arena allocation for better memory management */
+    TYPES = arena_alloc(GENERAL_ARENA, MAX_TYPES * sizeof(type_t));
+    PH2_IR_FLATTEN =
+        arena_alloc(GENERAL_ARENA, MAX_IR_INSTR * sizeof(ph2_ir_t *));
     SOURCE = strbuf_create(MAX_SOURCE);
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
@@ -1125,25 +1131,24 @@ void global_release(void)
     lexer_cleanup();
 
     hashmap_free(MACROS_MAP);
-    free(TYPES);
     arena_free(BLOCK_ARENA);
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     arena_free(HASHMAP_ARENA);
-    arena_free(GENERAL_ARENA);
-    free(PH2_IR_FLATTEN);
-    strbuf_free(SOURCE);
-    hashmap_free(FUNC_MAP);
-    hashmap_free(INCLUSION_MAP);
-    hashmap_free(ALIASES_MAP);
-    hashmap_free(CONSTANTS_MAP);
+    arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
 
+    strbuf_free(SOURCE);
     strbuf_free(elf_code);
     strbuf_free(elf_data);
     strbuf_free(elf_header);
     strbuf_free(elf_symtab);
     strbuf_free(elf_strtab);
     strbuf_free(elf_section);
+
+    hashmap_free(FUNC_MAP);
+    hashmap_free(INCLUSION_MAP);
+    hashmap_free(ALIASES_MAP);
+    hashmap_free(CONSTANTS_MAP);
 }
 
 /* Reports an error without specifying a position */
