@@ -144,6 +144,8 @@ arena_t *arena_init(int initial_capacity)
     }
     arena->head = arena_block_create(initial_capacity);
     arena->total_bytes = initial_capacity;
+    /* Use the initial capacity as the default block size for future growth. */
+    arena->block_size = initial_capacity;
     return arena;
 }
 
@@ -166,9 +168,12 @@ void *arena_alloc(arena_t *arena, int size)
     size = (size + PTR_SIZE - 1) & ~(PTR_SIZE - 1);
 
     if (!arena->head || arena->head->offset + size > arena->head->capacity) {
-        /* Need a new block: choose capacity = max(DEFAULT_ARENA_SIZE, size) */
-        int new_capacity =
-            (size > DEFAULT_ARENA_SIZE ? size : DEFAULT_ARENA_SIZE);
+        /* Need a new block: choose capacity = max(DEFAULT_ARENA_SIZE,
+         * arena->block_size, size) */
+        int base =
+            (arena->block_size > DEFAULT_ARENA_SIZE ? arena->block_size
+                                                    : DEFAULT_ARENA_SIZE);
+        int new_capacity = (size > base ? size : base);
         arena_block_t *new_block = arena_block_create(new_capacity);
         new_block->next = arena->head;
         arena->head = new_block;
