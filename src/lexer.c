@@ -235,20 +235,23 @@ bool is_numeric(char buffer[])
 
 void skip_whitespace(void)
 {
+    int pos = SOURCE->size;
     while (true) {
-        if (is_linebreak(next_char)) {
-            SOURCE->size += 2;
-            next_char = SOURCE->elements[SOURCE->size];
+        /* Handle backslash-newline (line continuation) using local pos */
+        if (next_char == '\\' && SOURCE->elements[pos + 1] == '\n') {
+            pos += 2;
+            next_char = SOURCE->elements[pos];
             continue;
         }
         if (is_whitespace(next_char) ||
             (skip_newline && is_newline(next_char))) {
-            SOURCE->size++;
-            next_char = SOURCE->elements[SOURCE->size];
+            pos++;
+            next_char = SOURCE->elements[pos];
             continue;
         }
         break;
     }
+    SOURCE->size = pos;
 }
 
 char read_char(bool is_skip_space)
@@ -296,17 +299,29 @@ token_t lex_token_internal(bool aliasing)
         /* C-style comments */
         if (next_char == '*') {
             /* in a comment, skip until end */
+            int pos = SOURCE->size;
             do {
-                read_char(false);
+                /* advance one char */
+                pos++;
+                next_char = SOURCE->elements[pos];
                 if (next_char == '*') {
-                    read_char(false);
+                    /* look ahead */
+                    pos++;
+                    next_char = SOURCE->elements[pos];
                     if (next_char == '/') {
-                        read_char(true);
+                        /* consume closing '/', then commit and skip trailing
+                         * whitespaces
+                         */
+                        pos++;
+                        next_char = SOURCE->elements[pos];
+                        SOURCE->size = pos;
+                        skip_whitespace();
                         return lex_token_internal(aliasing);
                     }
                 }
             } while (next_char);
 
+            SOURCE->size = pos;
             if (!next_char)
                 error("Unenclosed C-style comment");
             return lex_token_internal(aliasing);
@@ -314,9 +329,12 @@ token_t lex_token_internal(bool aliasing)
 
         /* C++-style comments */
         if (next_char == '/') {
+            int pos = SOURCE->size;
             do {
-                read_char(false);
+                pos++;
+                next_char = SOURCE->elements[pos];
             } while (next_char && !is_newline(next_char));
+            SOURCE->size = pos;
             return lex_token_internal(aliasing);
         }
 

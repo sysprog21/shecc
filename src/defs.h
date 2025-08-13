@@ -79,6 +79,7 @@ typedef struct arena_block {
 typedef struct {
     arena_block_t *head;
     int total_bytes; /* Track total allocation for profiling */
+    int block_size;  /* Default block size for new blocks */
 } arena_t;
 
 /* string-based hash map definitions */
