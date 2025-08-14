@@ -11,6 +11,9 @@
 #include "defs.h"
 #include "globals.c"
 
+/* SCCP (Sparse Conditional Constant Propagation) optimization */
+#include "opt-sccp.c"
+
 /* cfront does not accept structure as an argument, pass pointer */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
@@ -1612,6 +1615,10 @@ void optimize(void)
     build_rdf();
 
     use_chain_build();
+
+    /* Run SCCP optimization first */
+    for (func_t *func = FUNC_LIST.head; func; func = func->next)
+        simple_sccp(func);
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         /* basic block level (control flow) optimizations */
