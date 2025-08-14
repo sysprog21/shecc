@@ -298,15 +298,12 @@ void build_r_idom(void)
                     pred = bb->then_;
                 }
 
-                if (bb->next && bb->next != pred && bb->next->r_idom) {
+                if (bb->next && bb->next != pred && bb->next->r_idom)
                     pred = reverse_intersect(bb->next, pred);
-                }
-                if (bb->else_ && bb->else_ != pred && bb->else_->r_idom) {
+                if (bb->else_ && bb->else_ != pred && bb->else_->r_idom)
                     pred = reverse_intersect(bb->else_, pred);
-                }
-                if (bb->then_ && bb->then_ != pred && bb->then_->r_idom) {
+                if (bb->then_ && bb->then_ != pred && bb->then_->r_idom)
                     pred = reverse_intersect(bb->then_, pred);
-                }
                 if (bb->r_idom != pred) {
                     bb->r_idom = pred;
                     changed = true;
@@ -320,6 +317,7 @@ bool rdom_connect(basic_block_t *pred, basic_block_t *succ)
 {
     if (succ->rdom_prev)
         return false;
+
     int i;
     for (i = 0; i < MAX_BB_RDOM_SUCC; i++) {
         if (pred->rdom_next[i] == succ)
@@ -649,11 +647,12 @@ void solve_phi_insertion(void)
                         if (var->is_ternary_ret || var->is_logical_ret)
                             continue;
 
-                        for (int l = 0; l < work_list_idx; l++)
+                        for (int l = 0; l < work_list_idx; l++) {
                             if (work_list[l] == df) {
                                 found = true;
                                 break;
                             }
+                        }
                         if (!found)
                             work_list[work_list_idx++] = df;
                     }
@@ -1494,8 +1493,7 @@ void dce_sweep(void)
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
                 if (insn->useful)
                     continue;
-                /*
-                 * If a branch instruction is useless, redirect to the
+                /* If a branch instruction is useless, redirect to the
                  * reverse immediate dominator of this basic block and
                  * remove the branch instruction. Later, register allocation
                  * will insert a jump instruction.
@@ -1512,6 +1510,7 @@ void dce_sweep(void)
                         jump_bb = jump_bb->r_idom;
                     }
                 }
+
                 /* remove useless instructions */
                 if (insn->next)
                     insn->next->prev = insn->prev;
