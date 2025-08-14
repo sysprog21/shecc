@@ -1354,10 +1354,53 @@ bool eval_const_arithmetic(insn_t *insn)
         res = l * r;
         break;
     case OP_div:
+        if (r == 0)
+            return false; /* avoid division by zero */
         res = l / r;
         break;
     case OP_mod:
+        if (r == 0)
+            return false; /* avoid modulo by zero */
         res = l % r;
+        break;
+    case OP_lshift:
+        res = l << r;
+        break;
+    case OP_rshift:
+        res = l >> r;
+        break;
+    case OP_bit_and:
+        res = l & r;
+        break;
+    case OP_bit_or:
+        res = l | r;
+        break;
+    case OP_bit_xor:
+        res = l ^ r;
+        break;
+    case OP_log_and:
+        res = l && r;
+        break;
+    case OP_log_or:
+        res = l || r;
+        break;
+    case OP_eq:
+        res = l == r;
+        break;
+    case OP_neq:
+        res = l != r;
+        break;
+    case OP_lt:
+        res = l < r;
+        break;
+    case OP_leq:
+        res = l <= r;
+        break;
+    case OP_gt:
+        res = l > r;
+        break;
+    case OP_geq:
+        res = l >= r;
         break;
     default:
         return false;
@@ -1371,11 +1414,44 @@ bool eval_const_arithmetic(insn_t *insn)
     return true;
 }
 
+bool eval_const_unary(insn_t *insn)
+{
+    if (!insn->rs1)
+        return false;
+    if (!insn->rs1->is_const)
+        return false;
+
+    int res;
+    int val = insn->rs1->init_val;
+
+    switch (insn->opcode) {
+    case OP_negate:
+        res = -val;
+        break;
+    case OP_bit_not:
+        res = ~val;
+        break;
+    case OP_log_not:
+        res = !val;
+        break;
+    default:
+        return false;
+    }
+
+    insn->rs1 = NULL;
+    insn->rd->is_const = 1;
+    insn->rd->init_val = res;
+    insn->opcode = OP_load_constant;
+    return true;
+}
+
 bool const_folding(insn_t *insn)
 {
     if (mark_const(insn))
         return true;
     if (eval_const_arithmetic(insn))
+        return true;
+    if (eval_const_unary(insn))
         return true;
     return false;
 }
