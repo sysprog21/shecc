@@ -37,6 +37,9 @@
 /* Peephole optimization */
 #include "peephole.c"
 
+/* Arch-specific IR lowering boundary */
+#include "arch-lower.c"
+
 /* Machine code generation. support ARMv7-A and RV32I */
 #include "codegen.c"
 
@@ -102,6 +105,9 @@ int main(int argc, char *argv[])
     reg_alloc();
 
     peephole();
+
+    /* Apply arch-specific IR tweaks before final codegen */
+    arch_lower();
 
     /* flatten CFG to linear instruction */
     cfg_flatten();

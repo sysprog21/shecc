@@ -172,11 +172,7 @@ void cfg_flatten(void)
                     flatten_ir->src1 = bb->belong_to->stack_size;
                 }
 
-                if (insn->op == OP_branch) {
-                    /* In SSA, we index 'else_bb' first, and then 'then_bb' */
-                    if (insn->else_bb != bb->rpo_next)
-                        flatten_ir->is_branch_detached = true;
-                }
+                /* Branch detachment is determined in the arch-lowering stage */
 
                 update_elf_offset(flatten_ir);
             }
