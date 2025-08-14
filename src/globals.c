@@ -615,6 +615,9 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
 {
     ph2_ir_t *ph2_ir = arena_alloc(BB_ARENA, sizeof(ph2_ir_t));
     ph2_ir->op = op;
+    /* Set safe defaults; arch-lowering may annotate later */
+    ph2_ir->next = NULL;
+    ph2_ir->is_branch_detached = 0;
     return add_existed_ph2_ir(ph2_ir);
 }
 

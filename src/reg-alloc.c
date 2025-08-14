@@ -55,6 +55,9 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
 {
     ph2_ir_t *n = arena_alloc(BB_ARENA, sizeof(ph2_ir_t));
     n->op = op;
+    /* Ensure deterministic defaults for newly created IR nodes */
+    n->next = NULL;            /* well-formed singly linked list */
+    n->is_branch_detached = 0; /* arch-lowering will set for branches */
 
     if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;
