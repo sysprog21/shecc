@@ -205,10 +205,8 @@ bool dom_connect(basic_block_t *pred, basic_block_t *succ)
             break;
     }
 
-    if (i > MAX_BB_DOM_SUCC - 1) {
-        printf("Error: too many predecessors\n");
-        abort();
-    }
+    if (i > MAX_BB_DOM_SUCC - 1)
+        fatal("Too many predecessors in dominator tree");
 
     pred->dom_next[i++] = succ;
     succ->dom_prev = pred;
@@ -333,10 +331,8 @@ bool rdom_connect(basic_block_t *pred, basic_block_t *succ)
             break;
     }
 
-    if (i > MAX_BB_RDOM_SUCC - 1) {
-        printf("Error: too many predecessors\n");
-        abort();
-    }
+    if (i > MAX_BB_RDOM_SUCC - 1)
+        fatal("Too many predecessors in reverse dominator tree");
 
     pred->rdom_next[i++] = succ;
     succ->rdom_prev = pred;
@@ -615,10 +611,8 @@ void solve_phi_insertion(void)
 
             for (ref_block_t *ref = var->ref_block_list.head; ref;
                  ref = ref->next) {
-                if (work_list_idx >= PHI_WORKLIST_SIZE - 1) {
-                    printf("Error: PHI worklist overflow\n");
-                    abort();
-                }
+                if (work_list_idx >= PHI_WORKLIST_SIZE - 1)
+                    fatal("PHI worklist overflow");
                 work_list[work_list_idx++] = ref->bb;
             }
 
@@ -666,10 +660,8 @@ void solve_phi_insertion(void)
                             }
                         }
                         if (!found) {
-                            if (work_list_idx >= PHI_WORKLIST_SIZE - 1) {
-                                printf("Error: PHI worklist overflow\n");
-                                abort();
-                            }
+                            if (work_list_idx >= PHI_WORKLIST_SIZE - 1)
+                                fatal("PHI worklist overflow");
                             work_list[work_list_idx++] = df;
                         }
                     }
@@ -710,7 +702,8 @@ var_t *get_stack_top_subscript_var(var_t *var)
             return var->base->subscripts[i];
     }
 
-    abort();
+    fatal("Failed to find subscript variable on rename stack");
+    return NULL; /* unreachable, but silences compiler warning */
 }
 
 void rename_var(var_t **var)
@@ -904,7 +897,7 @@ void bb_dump_connection(FILE *fd,
         str = "%s_%p:se->%s_%p:n\n";
         break;
     default:
-        abort();
+        fatal("Unknown basic block connection type");
     }
 
     char *pred;
@@ -971,8 +964,8 @@ char *get_insn_op(insn_t *insn)
     case OP_log_or:
         return "||";
     default:
-        printf("Unknown opcode");
-        abort();
+        fatal("Unknown opcode in operator string conversion");
+        return ""; /* unreachable, but silences compiler warning */
     }
 }
 
@@ -1141,8 +1134,7 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
                         insn->rs1->var_name, insn->rs1->subscript);
                 break;
             default:
-                printf("Unknown opcode\n");
-                abort();
+                fatal("Unknown opcode in instruction dump");
             }
             fprintf(fd, "insn_%p [label=%s]\n", insn, str);
         }
@@ -1531,17 +1523,81 @@ bool const_folding(insn_t *insn)
     return false;
 }
 
+/* Check if a basic block is unreachable */
+bool is_block_unreachable(basic_block_t *bb)
+{
+    if (!bb)
+        return true;
+
+    /* Entry block is always reachable */
+    if (!bb->idom && bb->belong_to && bb == bb->belong_to->bbs)
+        return false;
+
+    /* If block has no immediate dominator and it is not the entry block, it is
+     * unreachable
+     */
+    if (!bb->idom)
+        return true;
+
+    /* If block was never visited during dominator tree construction, it is
+     * unreachable
+     */
+    if (!bb->visited)
+        return true;
+
+    return false;
+}
+
+/* Check if a variable escapes (is used outside the function) */
+bool var_escapes(var_t *var)
+{
+    if (!var)
+        return true; /* conservative: assume it escapes */
+
+    /* Global variables always escape */
+    if (var->is_global)
+        return true;
+
+    /* Function definitions escape */
+    if (var->is_func)
+        return true;
+
+    /* Conservative approach - assume all variables escape to avoid issues */
+    /* This ensures we don't eliminate stores that might be needed */
+    return true;
+}
+
 /* initial mark useful instruction */
 int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
 {
     int mark_num = 0;
-    /*
-     * mark instruction "useful" if it sets a return value, affects the value in
+    /* mark instruction "useful" if it sets a return value, affects the value in
      * a storage location, or it is a function call.
      */
     switch (insn->opcode) {
     case OP_return:
+        insn->useful = true;
+        insn->belong_to->useful = true;
+        work_list[work_list_idx + mark_num] = insn;
+        mark_num++;
+        break;
     case OP_write:
+    case OP_store:
+        /* Only mark stores/writes to escaping variables as useful */
+        if (!insn->rd || var_escapes(insn->rd)) {
+            insn->useful = true;
+            insn->belong_to->useful = true;
+            work_list[work_list_idx + mark_num] = insn;
+            mark_num++;
+        }
+        break;
+    case OP_global_store:
+        /* Global stores always escape */
+        insn->useful = true;
+        insn->belong_to->useful = true;
+        work_list[work_list_idx + mark_num] = insn;
+        mark_num++;
+        break;
     case OP_address_of:
     case OP_unwound_phi:
     case OP_allocat:
@@ -1559,7 +1615,7 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
         /* mark precall and postreturn sequences at calls */
         if (insn->next && insn->next->opcode == OP_func_ret) {
             insn->next->useful = true;
-            work_list[work_list_idx + mark_num] = insn;
+            work_list[work_list_idx + mark_num] = insn->next;
             mark_num++;
         }
         while (insn->prev && insn->prev->opcode == OP_push) {
@@ -1590,35 +1646,64 @@ void dce_insn(basic_block_t *bb)
     insn_t *work_list[DCE_WORKLIST_SIZE];
     int work_list_idx = 0;
 
-    /* initially analyze current bb*/
+    /* initially analyze current bb */
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         int mark_num = dce_init_mark(insn, work_list, work_list_idx);
         work_list_idx += mark_num;
-        if (work_list_idx > DCE_WORKLIST_SIZE - 1) {
-            printf("size of work_list in DCE is not enough\n");
-            abort();
-        }
+        if (work_list_idx > DCE_WORKLIST_SIZE - 1)
+            fatal("DCE worklist size exceeded");
     }
 
+    /* Process worklist - marking dependencies as useful */
     while (work_list_idx != 0) {
         insn_t *curr = work_list[--work_list_idx];
-        insn_t *rs1_insn, *rs2_insn;
 
-        /* trace back where rs1 and rs2 are assigned values */
+        /* Skip if already processed to avoid redundant work */
+        if (!curr)
+            continue;
+
+        /* Mark instruction as useful and add to worklist */
+        insn_t *dep_insn = NULL;
+
+        /* trace back where rs1 is assigned */
         if (curr->rs1 && curr->rs1->last_assign) {
-            rs1_insn = curr->rs1->last_assign;
-            if (!rs1_insn->useful) {
-                rs1_insn->useful = true;
-                rs1_insn->belong_to->useful = true;
-                work_list[work_list_idx++] = rs1_insn;
+            dep_insn = curr->rs1->last_assign;
+            if (!dep_insn->useful) {
+                dep_insn->useful = true;
+                dep_insn->belong_to->useful = true;
+                if (work_list_idx < DCE_WORKLIST_SIZE - 1)
+                    work_list[work_list_idx++] = dep_insn;
+                else
+                    fatal("DCE worklist overflow");
             }
         }
+
+        /* trace back where rs2 is assigned */
         if (curr->rs2 && curr->rs2->last_assign) {
-            rs2_insn = curr->rs2->last_assign;
-            if (!rs2_insn->useful) {
-                rs2_insn->useful = true;
-                rs2_insn->belong_to->useful = true;
-                work_list[work_list_idx++] = rs2_insn;
+            dep_insn = curr->rs2->last_assign;
+            if (!dep_insn->useful) {
+                dep_insn->useful = true;
+                dep_insn->belong_to->useful = true;
+                if (work_list_idx < DCE_WORKLIST_SIZE - 1)
+                    work_list[work_list_idx++] = dep_insn;
+                else
+                    fatal("DCE worklist overflow");
+            }
+        }
+
+        /* For phi nodes, mark all operands as useful */
+        if (curr->opcode == OP_phi && curr->useful) {
+            for (phi_operand_t *phi_op = curr->phi_ops; phi_op;
+                 phi_op = phi_op->next) {
+                if (phi_op->var && phi_op->var->last_assign &&
+                    !phi_op->var->last_assign->useful) {
+                    phi_op->var->last_assign->useful = true;
+                    phi_op->var->last_assign->belong_to->useful = true;
+                    if (work_list_idx < DCE_WORKLIST_SIZE - 1)
+                        work_list[work_list_idx++] = phi_op->var->last_assign;
+                    else
+                        fatal("DCE worklist overflow");
+                }
             }
         }
 
@@ -1628,10 +1713,12 @@ void dce_insn(basic_block_t *bb)
             if (!rdf)
                 break;
             insn_t *tail = rdf->insn_list.tail;
-            if (tail->opcode == OP_branch && !tail->useful) {
+            if (tail && tail->opcode == OP_branch && !tail->useful) {
                 tail->useful = true;
                 rdf->useful = true;
                 work_list[work_list_idx++] = tail;
+                if (work_list_idx > DCE_WORKLIST_SIZE - 1)
+                    fatal("DCE worklist overflow");
             }
         }
     }
@@ -1639,38 +1726,58 @@ void dce_insn(basic_block_t *bb)
 
 void dce_sweep(void)
 {
+    int total_eliminated = 0; /* Track effectiveness */
+
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-                if (insn->useful)
-                    continue;
-                /* If a branch instruction is useless, redirect to the
-                 * reverse immediate dominator of this basic block and
-                 * remove the branch instruction. Later, register allocation
-                 * will insert a jump instruction.
-                 */
-                if (insn->opcode == OP_branch) {
-                    basic_block_t *jump_bb = bb->r_idom;
-                    bb_disconnect(bb, bb->then_);
-                    bb_disconnect(bb, bb->else_);
-                    while (jump_bb != bb->belong_to->exit) {
-                        if (jump_bb->useful) {
-                            bb_connect(bb, jump_bb, NEXT);
-                            break;
-                        }
-                        jump_bb = jump_bb->r_idom;
-                    }
+            /* Skip unreachable blocks entirely */
+            if (is_block_unreachable(bb)) {
+                /* Count instructions being eliminated */
+                for (insn_t *insn = bb->insn_list.head; insn;
+                     insn = insn->next) {
+                    if (!insn->useful)
+                        total_eliminated++;
+                    insn->useful = false;
                 }
+                /* Mark entire block as dead */
+                bb->useful = false;
+                continue;
+            }
 
-                /* remove useless instructions */
-                if (insn->next)
-                    insn->next->prev = insn->prev;
-                else
-                    bb->insn_list.tail = insn->prev;
-                if (insn->prev)
-                    insn->prev->next = insn->next;
-                else
-                    bb->insn_list.head = insn->next;
+            insn_t *insn = bb->insn_list.head;
+            while (insn) {
+                insn_t *next = insn->next;
+                if (!insn->useful) {
+                    total_eliminated++;
+                    /* If a branch instruction is useless, redirect to the
+                     * reverse immediate dominator of this basic block and
+                     * remove the branch instruction. Later, register allocation
+                     * will insert a jump instruction.
+                     */
+                    if (insn->opcode == OP_branch) {
+                        basic_block_t *jump_bb = bb->r_idom;
+                        bb_disconnect(bb, bb->then_);
+                        bb_disconnect(bb, bb->else_);
+                        while (jump_bb != bb->belong_to->exit) {
+                            if (jump_bb->useful) {
+                                bb_connect(bb, jump_bb, NEXT);
+                                break;
+                            }
+                            jump_bb = jump_bb->r_idom;
+                        }
+                    }
+
+                    /* remove useless instructions */
+                    if (insn->next)
+                        insn->next->prev = insn->prev;
+                    else
+                        bb->insn_list.tail = insn->prev;
+                    if (insn->prev)
+                        insn->prev->next = insn->next;
+                    else
+                        bb->insn_list.head = insn->next;
+                }
+                insn = next;
             }
         }
     }
@@ -1701,20 +1808,61 @@ void optimize(void)
                 /* record the instruction assigned value to rd */
                 if (insn->rd)
                     insn->rd->last_assign = insn;
-                if (cse(insn, bb))
+
+                /* Apply optimizations in order */
+                if (const_folding(insn)) /* First: fold constants */
                     continue;
-                if (const_folding(insn))
+                if (cse(insn, bb)) /* Then: eliminate common subexpressions */
                     continue;
+
+                /* Eliminate redundant assignments: x = x */
+                if (insn->opcode == OP_assign && insn->rd && insn->rs1 &&
+                    insn->rd == insn->rs1) {
+                    /* Convert to no-op that DCE will remove */
+                    insn->rd = NULL;
+                    insn->rs1 = NULL;
+                    continue;
+                }
+
+                /* Dead store elimination - conservative */
+                if (insn->opcode == OP_store || insn->opcode == OP_write) {
+                    /* Only eliminate if target is local and immediately
+                     * overwritten
+                     */
+                    if (insn->rd && !insn->rd->is_global && insn->next) {
+                        insn_t *next_insn = insn->next;
+
+                        /* Check for immediate overwrite with no intervening
+                         * instructions
+                         */
+                        if ((next_insn->opcode == OP_store ||
+                             next_insn->opcode == OP_write) &&
+                            next_insn->rd == insn->rd) {
+                            /* Eliminate only immediate overwrites */
+                            insn->rd = NULL;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                }
+
+                /* TODO: Dead load elimination */
+
                 /* more optimizations */
             }
         }
     }
 
+    /* TODO: Phi node optimization */
+
+    /* Mark useful instructions */
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             dce_insn(bb);
         }
     }
+
+    /* Eliminate dead instructions */
     dce_sweep();
 }
 
