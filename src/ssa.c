@@ -14,6 +14,10 @@
 /* SCCP (Sparse Conditional Constant Propagation) optimization */
 #include "opt-sccp.c"
 
+/* Configuration constants - replace magic numbers */
+#define PHI_WORKLIST_SIZE 64
+#define DCE_WORKLIST_SIZE 2048
+
 /* cfront does not accept structure as an argument, pass pointer */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
@@ -606,12 +610,17 @@ void solve_phi_insertion(void)
         for (symbol_t *sym = func->global_sym_list.head; sym; sym = sym->next) {
             var_t *var = sym->var;
 
-            basic_block_t *work_list[64];
+            basic_block_t *work_list[PHI_WORKLIST_SIZE];
             int work_list_idx = 0;
 
             for (ref_block_t *ref = var->ref_block_list.head; ref;
-                 ref = ref->next)
+                 ref = ref->next) {
+                if (work_list_idx >= PHI_WORKLIST_SIZE - 1) {
+                    printf("Error: PHI worklist overflow\n");
+                    abort();
+                }
                 work_list[work_list_idx++] = ref->bb;
+            }
 
             for (int i = 0; i < work_list_idx; i++) {
                 basic_block_t *bb = work_list[i];
@@ -656,8 +665,13 @@ void solve_phi_insertion(void)
                                 break;
                             }
                         }
-                        if (!found)
+                        if (!found) {
+                            if (work_list_idx >= PHI_WORKLIST_SIZE - 1) {
+                                printf("Error: PHI worklist overflow\n");
+                                abort();
+                            }
                             work_list[work_list_idx++] = df;
+                        }
                     }
                 }
             }
@@ -1515,14 +1529,14 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
 /* Dead Code Elimination (DCE) */
 void dce_insn(basic_block_t *bb)
 {
-    insn_t *work_list[2048];
+    insn_t *work_list[DCE_WORKLIST_SIZE];
     int work_list_idx = 0;
 
     /* initially analyze current bb*/
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         int mark_num = dce_init_mark(insn, work_list, work_list_idx);
         work_list_idx += mark_num;
-        if (work_list_idx > 2048 - 1) {
+        if (work_list_idx > DCE_WORKLIST_SIZE - 1) {
             printf("size of work_list in DCE is not enough\n");
             abort();
         }
