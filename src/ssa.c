@@ -1238,82 +1238,140 @@ void ssa_build(void)
     unwind_phi();
 }
 
+/* Check if operation can be subject to CSE */
+bool is_cse_candidate(insn_t *insn)
+{
+    switch (insn->opcode) {
+    case OP_add:
+    case OP_sub:
+    case OP_mul:
+    case OP_div:
+    case OP_mod:
+    case OP_lshift:
+    case OP_rshift:
+    case OP_bit_and:
+    case OP_bit_or:
+    case OP_bit_xor:
+    case OP_log_and:
+    case OP_log_or:
+    case OP_eq:
+    case OP_neq:
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /* Common Subexpression Elimination (CSE) */
-/* TODO: release detached insns node */
+/* Enhanced to support general binary operations */
 bool cse(insn_t *insn, basic_block_t *bb)
 {
-    if (insn->opcode != OP_read)
-        return false;
+    /* Handle array access pattern: add + read */
+    if (insn->opcode == OP_read) {
+        insn_t *prev = insn->prev;
+        if (!prev)
+            return false;
+        if (prev->opcode != OP_add)
+            return false;
+        if (prev->rd != insn->rs1)
+            return false;
 
-    insn_t *prev = insn->prev;
-    if (!prev)
-        return false;
-    if (prev->opcode != OP_add)
-        return false;
-    if (prev->rd != insn->rs1)
-        return false;
+        var_t *def = insn->rd, *base = prev->rs1, *idx = prev->rs2;
+        if (base->is_global || idx->is_global)
+            return false;
 
-    var_t *def = insn->rd, *base = prev->rs1, *idx = prev->rs2;
-    if (base->is_global || idx->is_global)
-        return false;
+        /* Look for identical add+read patterns */
+        for (use_chain_t *user = base->users_head; user; user = user->next) {
+            insn_t *i = user->insn;
+            if (i == prev)
+                continue;
+            if (i->opcode != OP_add)
+                continue;
+            if (!i->next)
+                continue;
+            if (i->next->opcode != OP_read)
+                continue;
+            if (i->rs1 != base || i->rs2 != idx)
+                continue;
 
-    use_chain_t *rs1_delete_user = NULL;
-    use_chain_t *rs2_delete_user = NULL;
-    for (use_chain_t *user = base->users_head; user; user = user->next) {
-        insn_t *i = user->insn;
-
-        /* Delete the use chain nodes found in the last loop */
-        if (rs1_delete_user) {
-            use_chain_delete(rs1_delete_user, rs1_delete_user->insn->rs1);
-            rs1_delete_user = NULL;
-        }
-        if (rs2_delete_user) {
-            use_chain_delete(rs2_delete_user, rs2_delete_user->insn->rs2);
-            rs2_delete_user = NULL;
-        }
-        if (i == prev)
-            continue;
-        if (i->opcode != OP_add)
-            continue;
-        if (!i->next)
-            continue;
-        if (i->next->opcode != OP_read)
-            continue;
-        if (i->rs1 != base || i->rs2 != idx)
-            continue;
-        basic_block_t *i_bb = i->belong_to;
-        bool check_dom = 0;
-        /* Check if the instructions are under the same dominate tree */
-        for (;; i_bb = i_bb->idom) {
-            if (i_bb == bb) {
-                check_dom = true;
-                break;
+            /* Check dominance */
+            basic_block_t *i_bb = i->belong_to;
+            bool check_dom = false;
+            for (;; i_bb = i_bb->idom) {
+                if (i_bb == bb) {
+                    check_dom = true;
+                    break;
+                }
+                if (i_bb == i_bb->idom)
+                    break;
             }
-            if (i_bb == i_bb->idom)
-                break;
+            if (!check_dom)
+                continue;
+
+            /* Replace with assignment */
+            i->next->opcode = OP_assign;
+            i->next->rs1 = def;
+            if (i->prev) {
+                i->prev->next = i->next;
+                i->next->prev = i->prev;
+            } else {
+                i->belong_to->insn_list.head = i->next;
+                i->next->prev = NULL;
+            }
         }
-        if (!check_dom)
+        return true;
+    }
+
+    /* Handle general binary operations */
+    if (!is_cse_candidate(insn))
+        return false;
+
+    if (!insn->rs1 || !insn->rs2 || !insn->rd)
+        return false;
+
+    /* Don't CSE operations with global variables */
+    if (insn->rs1->is_global || insn->rs2->is_global)
+        return false;
+
+    /* Look for identical binary operations */
+    for (insn_t *other = bb->insn_list.head; other; other = other->next) {
+        if (other == insn)
+            break; /* Only consider earlier instructions */
+
+        if (other->opcode != insn->opcode)
+            continue;
+        if (!other->rs1 || !other->rs2 || !other->rd)
             continue;
 
-        i->next->opcode = OP_assign;
-        i->next->rs1 = def;
-        if (i->prev) {
-            i->prev->next = i->next;
-            i->next->prev = i->prev;
-        } else {
-            i->belong_to->insn_list.head = i->next;
-            i->next->prev = NULL;
+        /* Check if operands match */
+        bool operands_match = false;
+        if (other->rs1 == insn->rs1 && other->rs2 == insn->rs2) {
+            operands_match = true;
+        } else if (insn->opcode == OP_add || insn->opcode == OP_mul ||
+                   insn->opcode == OP_bit_and || insn->opcode == OP_bit_or ||
+                   insn->opcode == OP_bit_xor || insn->opcode == OP_log_and ||
+                   insn->opcode == OP_log_or || insn->opcode == OP_eq ||
+                   insn->opcode == OP_neq) {
+            /* Commutative operations */
+            if (other->rs1 == insn->rs2 && other->rs2 == insn->rs1) {
+                operands_match = true;
+            }
         }
-        i->next->opcode = OP_assign;
-        i->next->rs1 = def;
-        /* Prepare information for deleting use chain nodes */
-        rs1_delete_user = user;
-        for (rs2_delete_user = i->rs2->users_head;
-             rs2_delete_user->insn != rs1_delete_user->insn;
-             rs2_delete_user = rs2_delete_user->next)
-            ;
+
+        if (operands_match) {
+            /* Replace current instruction with assignment */
+            insn->opcode = OP_assign;
+            insn->rs1 = other->rd;
+            insn->rs2 = NULL;
+            return true;
+        }
     }
-    return true;
+
+    return false;
 }
 
 bool mark_const(insn_t *insn)
