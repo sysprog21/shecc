@@ -3231,8 +3231,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         prefix_op = OP_add;
     else if (lex_accept(T_decrement))
         prefix_op = OP_sub;
-    /* must be an identifier */
-    if (!lex_peek(T_identifier, token))
+    /* must be an identifier or asterisk (for pointer dereference) */
+    if (!lex_peek(T_identifier, token) && !lex_peek(T_asterisk, NULL))
         error("Unexpected token");
 
     /* handle macro parameter substitution for statements */
@@ -3356,6 +3356,29 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         lex_expect(T_identifier);
         read_func_call(func, parent, &bb);
         perform_side_effect(parent, bb);
+        lex_expect(T_semicolon);
+        return bb;
+    }
+
+    /* handle pointer dereference expressions like *ptr = value */
+    if (lex_peek(T_asterisk, NULL)) {
+        read_expr(parent, &bb);
+        read_ternary_operation(parent, &bb);
+
+        /* Check if it's an assignment */
+        if (lex_accept(T_assign)) {
+            var_t *lvalue = opstack_pop();
+            read_expr(parent, &bb);
+            read_ternary_operation(parent, &bb);
+            var_t *rvalue = opstack_pop();
+
+            /* Generate OP_write for pointer dereference assignment */
+            add_insn(parent, bb, OP_write, NULL, lvalue, rvalue,
+                     rvalue->type ? rvalue->type->size : PTR_SIZE, NULL);
+        } else {
+            /* Expression statement without assignment */
+            perform_side_effect(parent, bb);
+        }
         lex_expect(T_semicolon);
         return bb;
     }
