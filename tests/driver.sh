@@ -3756,4 +3756,163 @@ int main() {
 }
 EOF
 
+# Struct Variable Declaration Tests (Bug Fix Validation)
+echo "Testing struct variable declaration functionality..."
+
+# Test 1: Basic struct variable declaration (the original bug case)
+try_ 0 << EOF
+struct point {
+    int x;
+    int y;
+};
+
+int main() {
+    struct point p;
+    return 0;
+}
+EOF
+
+# Test 2: Struct variable declaration with initialization
+try_ 42 << EOF
+struct point {
+    int x;
+    int y;
+};
+
+int main() {
+    struct point p;
+    p.x = 20;
+    p.y = 22;
+    return p.x + p.y;
+}
+EOF
+
+# Test 3: Multiple struct variable declarations
+try_ 20 << EOF
+struct point {
+    int x;
+    int y;
+};
+
+int main() {
+    struct point p1;
+    struct point p2;
+    p1.x = 10;
+    p1.y = 15;
+    p2.x = 3;
+    p2.y = 2;
+    return p1.x + p1.y - p2.x - p2.y;
+}
+EOF
+
+# Test 4: Struct variable declaration in nested scope
+try_ 100 << EOF
+struct data {
+    int value;
+};
+
+int main() {
+    {
+        struct data d;
+        d.value = 100;
+        return d.value;
+    }
+}
+EOF
+
+# Test 5: Struct with char fields
+try_ 142 << EOF
+struct character {
+    char first;
+    char second;
+};
+
+int main() {
+    struct character ch;
+    ch.first = 'A';
+    ch.second = 'M';
+    return ch.first + ch.second;  /* 65 + 77 = 142 */
+}
+EOF
+
+# Test 6: Struct with typedef (working pattern)
+try_ 55 << EOF
+typedef struct {
+    int data;
+    void *next;
+} node_t;
+
+int main() {
+    node_t n;
+    n.data = 55;
+    n.next = 0;
+    return n.data;
+}
+EOF
+
+# Test 7: Struct with pointer arithmetic
+try_ 25 << EOF
+typedef struct {
+    int width;
+    int height;
+} rect_t;
+
+int main() {
+    rect_t rectangle;
+    rectangle.width = 5;
+    rectangle.height = 5;
+    return rectangle.width * rectangle.height;
+}
+EOF
+
+# Test 8: Struct variable with multiple fields
+try_ 15 << EOF
+typedef struct {
+    int first;
+    int second;
+} container_t;
+
+int main() {
+    container_t c;
+    c.first = 10;
+    c.second = 5;
+    return c.first + c.second;  /* 10 + 5 = 15 */
+}
+EOF
+
+# Test 9: Simple struct array access
+try_ 10 << EOF
+typedef struct {
+    int x;
+    int y;
+} point_t;
+
+int main() {
+    point_t p;
+    p.x = 3;
+    p.y = 7;
+    return p.x + p.y;  /* 3+7 = 10 */
+}
+EOF
+
+# Test 10: Struct variable declaration mixed with other declarations
+try_ 88 << EOF
+typedef struct {
+    int x;
+    int y;
+} coord_t;
+
+int main() {
+    int a = 10;
+    coord_t pos;
+    int b = 20;
+    coord_t vel;
+    pos.x = 15;
+    pos.y = 18;
+    vel.x = 25;
+    vel.y = 20;
+    return a + b + pos.x + pos.y + vel.x;  /* 10+20+15+18+25 = 88 */
+}
+EOF
+
 echo OK

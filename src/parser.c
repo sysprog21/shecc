@@ -3180,7 +3180,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         type = find_type(token, find_type_flag);
         if (type) {
             var = require_typed_var(parent, type);
-            read_full_var_decl(var, 0, 0);
+            read_partial_var_decl(var, NULL);
             add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
             add_symbol(bb, var);
             if (lex_accept(T_assign)) {
