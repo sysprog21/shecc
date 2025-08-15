@@ -110,9 +110,11 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
 void cfg_flatten(void)
 {
     func_t *func = find_func("__syscall");
-    func->bbs->elf_offset = 48; /* offset of start + exit in codegen */
+    /* Prologue ~ 6 instructions (24 bytes). Place __syscall right after. */
+    func->bbs->elf_offset = 24;
 
-    elf_offset = 84; /* offset of start + exit + syscall in codegen */
+    /* Reserve space for prologue (24) + syscall trampoline (36) = 60 bytes. */
+    elf_offset = 60;
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
 
     for (ph2_ir_t *ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
@@ -437,24 +439,17 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 void code_generate(void)
 {
     elf_data_start = elf_code_start + elf_offset;
+    func_t *func;
 
-    /* start */
+    /* start: save original sp in s0; allocate global stack; run init */
+    emit(__addi(__s0, __sp, 0));
     emit(__lui(__t0, rv_hi(GLOBAL_FUNC->stack_size)));
     emit(__addi(__t0, __t0, rv_lo(GLOBAL_FUNC->stack_size)));
     emit(__sub(__sp, __sp, __t0));
-    emit(__addi(__gp, __sp, 0));
+    emit(__addi(__gp, __sp, 0)); /* Set up global pointer */
     emit(__jal(__ra, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
 
-    /* exit */
-    emit(__lui(__t0, rv_hi(GLOBAL_FUNC->stack_size)));
-    emit(__addi(__t0, __t0, rv_lo(GLOBAL_FUNC->stack_size)));
-    emit(__add(__gp, __gp, __t0));
-    emit(__addi(__sp, __gp, 0));
-    emit(__addi(__a0, __a0, 0));
-    emit(__addi(__a7, __zero, 93));
-    emit(__ecall());
-
-    /* syscall */
+    /* syscall trampoline for __syscall - must be at offset 24 */
     emit(__addi(__a7, __a0, 0));
     emit(__addi(__a0, __a1, 0));
     emit(__addi(__a1, __a2, 0));
@@ -471,12 +466,15 @@ void code_generate(void)
         emit_ph2_ir(ph2_ir);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
-    emit(__lui(__t0, rv_hi(GLOBAL_FUNC->stack_size)));
-    emit(__addi(__t0, __t0, rv_lo(GLOBAL_FUNC->stack_size)));
-    emit(__add(__t0, __gp, __t0));
+    /* use original sp saved in s0 to get argc/argv */
+    emit(__addi(__t0, __s0, 0));
     emit(__lw(__a0, __t0, 0));
     emit(__addi(__a1, __t0, 4));
-    emit(__jal(__zero, MAIN_BB->elf_offset - elf_code->size));
+    emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
+
+    /* exit with main's return value in a0 */
+    emit(__addi(__a7, __zero, 93));
+    emit(__ecall());
 
     for (int i = 0; i < ph2_ir_idx; i++) {
         ph2_ir = PH2_IR_FLATTEN[i];

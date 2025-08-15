@@ -665,6 +665,122 @@ bool read_preproc_directive(void)
 
 void read_parameter_list_decl(func_t *func, int anon);
 
+/* Forward declaration for ternary handling used by initializers */
+void read_ternary_operation(block_t *parent, basic_block_t **bb);
+
+/* Parse array initializer to determine size for implicit arrays and
+ * optionally emit initialization code.
+ */
+void parse_array_init(var_t *var,
+                      block_t *parent,
+                      basic_block_t **bb,
+                      int emit_code)
+{
+    int elem_size = var->type->size;
+    int count = 0;
+    var_t *base_addr = NULL;
+
+    /* Store values if we need to emit code later for implicit arrays */
+    var_t *stored_vals[256]; /* Max 256 elements for now */
+    int is_implicit = (var->array_size == 0);
+
+    /* If emitting code and size is known, arrays are already addresses */
+    if (emit_code && !is_implicit) {
+        /* Arrays are already addresses, no need for OP_address_of */
+        base_addr = var;
+    }
+
+    lex_expect(T_open_curly);
+    if (!lex_peek(T_close_curly, NULL)) {
+        for (;;) {
+            /* Parse element expression */
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            var_t *val = opstack_pop();
+
+            /* Store value for implicit arrays */
+            if (is_implicit && emit_code && count < 256)
+                stored_vals[count] = val;
+
+            if (emit_code && !is_implicit && count < var->array_size) {
+                /* Emit code for explicit size arrays */
+                var_t target;
+                memset(&target, 0, sizeof(target));
+                target.type = var->type;
+                target.is_ptr = 0;
+                var_t *v = resize_var(parent, bb, val, &target);
+
+                /* Compute element address: base + count*elem_size */
+                var_t *elem_addr = base_addr;
+                if (count > 0) {
+                    var_t *offset = require_var(parent);
+                    gen_name_to(offset->var_name);
+                    offset->init_val = count * elem_size;
+                    add_insn(parent, *bb, OP_load_constant, offset, NULL, NULL,
+                             0, NULL);
+
+                    var_t *addr = require_var(parent);
+                    gen_name_to(addr->var_name);
+                    add_insn(parent, *bb, OP_add, addr, base_addr, offset, 0,
+                             NULL);
+                    elem_addr = addr;
+                }
+
+                /* Write element */
+                add_insn(parent, *bb, OP_write, NULL, elem_addr, v, elem_size,
+                         NULL);
+            }
+
+            count++;
+            if (!lex_accept(T_comma))
+                break;
+            if (lex_peek(T_close_curly, NULL))
+                break;
+        }
+    }
+    lex_expect(T_close_curly);
+
+    /* For implicit size arrays, set the size and emit code */
+    if (is_implicit) {
+        if (var->is_ptr > 0)
+            var->is_ptr = 0;
+        var->array_size = count;
+
+        /* Now emit the code since we know the size */
+        if (emit_code && count > 0) {
+            base_addr = var; /* Arrays are already addresses */
+
+            for (int i = 0; i < count && i < 256; i++) {
+                var_t target;
+                memset(&target, 0, sizeof(target));
+                target.type = var->type;
+                target.is_ptr = 0;
+                var_t *v = resize_var(parent, bb, stored_vals[i], &target);
+
+                /* Compute element address */
+                var_t *elem_addr = base_addr;
+                if (i > 0) {
+                    var_t *offset = require_var(parent);
+                    gen_name_to(offset->var_name);
+                    offset->init_val = i * elem_size;
+                    add_insn(parent, *bb, OP_load_constant, offset, NULL, NULL,
+                             0, NULL);
+
+                    var_t *addr = require_var(parent);
+                    gen_name_to(addr->var_name);
+                    add_insn(parent, *bb, OP_add, addr, base_addr, offset, 0,
+                             NULL);
+                    elem_addr = addr;
+                }
+
+                /* Write element */
+                add_insn(parent, *bb, OP_write, NULL, elem_addr, v, elem_size,
+                         NULL);
+            }
+        }
+    }
+}
+
 void read_inner_var_decl(var_t *vd, int anon, int is_param)
 {
     vd->init_val = 0;
@@ -885,7 +1001,6 @@ void read_char_param(block_t *parent, basic_block_t *bb)
 }
 
 void read_logical(opcode_t op, block_t *parent, basic_block_t **bb);
-void read_ternary_operation(block_t *parent, basic_block_t **bb);
 void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
 {
     int param_num = 0;
@@ -969,6 +1084,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         read_literal_param(parent, *bb);
     else if (lex_peek(T_char, NULL))
         read_char_param(parent, *bb);
+
     else if (lex_peek(T_numeric, NULL))
         read_numeric_param(parent, *bb, is_neg);
     else if (lex_accept(T_log_not)) {
@@ -3068,11 +3184,17 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
             add_symbol(bb, var);
             if (lex_accept(T_assign)) {
-                read_expr(parent, &bb);
-                read_ternary_operation(parent, &bb);
+                if (lex_peek(T_open_curly, NULL) &&
+                    (var->array_size > 0 || var->is_ptr > 0)) {
+                    parse_array_init(var, parent, &bb,
+                                     1); /* Always emit code */
+                } else {
+                    read_expr(parent, &bb);
+                    read_ternary_operation(parent, &bb);
 
-                rs1 = resize_var(parent, &bb, opstack_pop(), var);
-                add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+                    rs1 = resize_var(parent, &bb, opstack_pop(), var);
+                    add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+                }
             }
             while (lex_accept(T_comma)) {
                 var_t *nv;
@@ -3086,11 +3208,16 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
                 add_symbol(bb, nv);
                 if (lex_accept(T_assign)) {
-                    read_expr(parent, &bb);
-                    read_ternary_operation(parent, &bb);
+                    if (lex_peek(T_open_curly, NULL) &&
+                        (nv->array_size > 0 || nv->is_ptr > 0)) {
+                        parse_array_init(nv, parent, &bb, 1);
+                    } else {
+                        read_expr(parent, &bb);
+                        read_ternary_operation(parent, &bb);
 
-                    rs1 = resize_var(parent, &bb, opstack_pop(), nv);
-                    add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
+                        rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                        add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
+                    }
                 }
             }
             lex_expect(T_semicolon);
@@ -3150,11 +3277,18 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
         add_symbol(bb, var);
         if (lex_accept(T_assign)) {
-            read_expr(parent, &bb);
-            read_ternary_operation(parent, &bb);
+            if (lex_peek(T_open_curly, NULL) &&
+                (var->array_size > 0 || var->is_ptr > 0)) {
+                parse_array_init(
+                    var, parent, &bb,
+                    1); /* FIXED: Emit code for locals in functions */
+            } else {
+                read_expr(parent, &bb);
+                read_ternary_operation(parent, &bb);
 
-            rs1 = resize_var(parent, &bb, opstack_pop(), var);
-            add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+                rs1 = resize_var(parent, &bb, opstack_pop(), var);
+                add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+            }
         }
         while (lex_accept(T_comma)) {
             var_t *nv;
@@ -3168,10 +3302,16 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
             add_symbol(bb, nv);
             if (lex_accept(T_assign)) {
-                read_expr(parent, &bb);
+                if (lex_peek(T_open_curly, NULL) &&
+                    (nv->array_size > 0 || nv->is_ptr > 0)) {
+                    parse_array_init(nv, parent, &bb,
+                                     1); /* FIXED: Emit code for locals */
+                } else {
+                    read_expr(parent, &bb);
 
-                rs1 = resize_var(parent, &bb, opstack_pop(), nv);
-                add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
+                    rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                    add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
+                }
             }
         }
         lex_expect(T_semicolon);

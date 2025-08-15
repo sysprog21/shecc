@@ -147,7 +147,7 @@ void cfg_flatten(void)
     }
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
-    elf_offset += 24;
+    elf_offset += 32; /* 6 insns for main call + 2 for exit */
 
     for (func = FUNC_LIST.head; func; func = func->next) {
         /* reserve stack */
@@ -488,7 +488,11 @@ void code_generate(void)
     emit(__add_r(__AL, __r8, __r12, __r8));
     emit(__lw(__AL, __r0, __r8, 0));
     emit(__add_i(__AL, __r1, __r8, 4));
-    emit(__b(__AL, MAIN_BB->elf_offset - elf_code->size));
+    emit(__bl(__AL, MAIN_BB->elf_offset - elf_code->size));
+
+    /* exit with main's return value */
+    emit(__mov_i(__AL, __r7, 1));
+    emit(__svc());
 
     for (int i = 0; i < ph2_ir_idx; i++) {
         ph2_ir = PH2_IR_FLATTEN[i];
