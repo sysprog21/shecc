@@ -3683,4 +3683,77 @@ int main() {
 }
 EOF
 
+# Local array initializers - verify compilation and correct values
+# Test 1: Implicit size array with single element
+try_ 1 << 'EOF'
+int main() {
+    int a[] = {1};
+    return a[0];  /* Should return 1 */
+}
+EOF
+
+# Test 2: Explicit size array with single element
+try_ 42 << 'EOF'
+int main() {
+    int a[1] = {42};
+    return a[0];  /* Should return 42 */
+}
+EOF
+
+# Test 3: Multiple elements - verify all are initialized
+try_ 6 << 'EOF'
+int main() {
+    int a[3] = {1, 2, 3};
+    return a[0] + a[1] + a[2];  /* Should return 1+2+3=6 */
+}
+EOF
+
+# Test 4: Character array initialization
+try_ 97 << 'EOF'
+int main() {
+    char s[] = {'a', 'b', 'c'};
+    return s[0];  /* Should return ASCII value of 'a' = 97 */
+}
+EOF
+
+# Test 5: Empty initializer (all zeros)
+try_ 0 << 'EOF'
+int main() {
+    int a[5] = {};
+    return a[0] + a[1] + a[2] + a[3] + a[4];  /* Should return 0 */
+}
+EOF
+
+# Test 6: Partial initialization (remaining should be zero)
+try_ 15 << 'EOF'
+int main() {
+    int a[5] = {5, 10};
+    return a[0] + a[1] + a[2] + a[3] + a[4];  /* Should return 5+10+0+0+0=15 */
+}
+EOF
+
+# Test 7: Pass initialized array to function
+try_ 30 << 'EOF'
+int sum(int *p, int n) {
+    int total = 0;
+    for (int i = 0; i < n; i++)
+        total += p[i];
+    return total;
+}
+int main() {
+    int a[] = {5, 10, 15};
+    return sum(a, 3);  /* Should return 5+10+15=30 */
+}
+EOF
+
+# Test 8: Nested scope with array initialization
+try_ 100 << 'EOF'
+int main() {
+    {
+        int values[] = {25, 25, 25, 25};
+        return values[0] + values[1] + values[2] + values[3];
+    }
+}
+EOF
+
 echo OK
