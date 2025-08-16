@@ -135,10 +135,16 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
 
 void cfg_flatten(void)
 {
-    func_t *func = find_func("__syscall");
-    func->bbs->elf_offset = 44; /* offset of start + exit in codegen */
+    func_t *func;
 
-    elf_offset = 80; /* offset of start + exit + syscall in codegen */
+    if (dynlink)
+        elf_offset = 108; /* offset of start + exit in codegen */
+    else {
+        func = find_func("__syscall");
+        func->bbs->elf_offset = 44; /* offset of start + exit in codegen */
+        elf_offset = 80; /* offset of start + exit + syscall in codegen */
+    }
+
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
 
     for (ph2_ir_t *ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
@@ -147,9 +153,15 @@ void cfg_flatten(void)
     }
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
-    elf_offset += 32; /* 6 insns for main call + 2 for exit */
+    if (dynlink)
+        elf_offset += 20;
+    else
+        elf_offset += 32; /* 6 insns for main call + 2 for exit */
 
     for (func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
+
         /* reserve stack */
         ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = func->stack_size;
@@ -282,7 +294,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_call:
         func = find_func(ph2_ir->func_name);
-        emit(__bl(__AL, func->bbs->elf_offset - elf_code->size));
+        if (func->bbs)
+            ofs = func->bbs->elf_offset - elf_code->size;
+        else
+            ofs = (elf_plt_start + func->plt_offset) -
+                  (elf_code_start + elf_code->size);
+        emit(__bl(__AL, ofs));
         return;
     case OP_load_data_address:
         emit(__movw(__AL, rd, ph2_ir->src0 + elf_data_start));
@@ -290,7 +307,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_address_of_func:
         func = find_func(ph2_ir->func_name);
-        ofs = elf_code_start + func->bbs->elf_offset;
+        if (func->bbs)
+            ofs = elf_code_start + func->bbs->elf_offset;
+        else
+            ofs = elf_plt_start + func->plt_offset;
         emit(__movw(__AL, __r8, ofs));
         emit(__movt(__AL, __r8, ofs));
         emit(__sw(__AL, __r8, rn, 0));
@@ -447,11 +467,40 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     }
 }
 
+void plt_generate(void);
 void code_generate(void)
 {
-    elf_data_start = elf_code_start + elf_offset;
+    if (dynlink) {
+        plt_generate();
+        /* Call __libc_start_main() */
+        emit(__mov_i(__AL, __r11, 0));
+        emit(__mov_i(__AL, __lr, 0));
+        emit(__pop_word(__AL, __r1));
+        emit(__mov_r(__AL, __r2, __sp));
+        emit(__push_reg(__AL, __r2));
+        emit(__push_reg(__AL, __r0));
+        emit(__mov_i(__AL, __r12, 0));
+        emit(__push_reg(__AL, __r12));
+        emit(__movw(__AL, __r0, elf_code_start + 56));
+        emit(__movt(__AL, __r0, elf_code_start + 56));
+        emit(__mov_i(__AL, __r3, 0));
+        emit(__bl(__AL, (elf_plt_start + PLT_FIXUP_SIZE) -
+                            (elf_code_start + elf_code->size)));
+        /* Goto the 'exit' code snippet if __libc_start_main returns */
+        emit(__mov_i(__AL, __r0, 127));
+        emit(__bl(__AL, 28));
 
-    /* start */
+        /* If the compiled program is dynamic linking, the starting
+         * point of 'start' is located here.
+         *
+         * Preserve the 'argc' and 'argv' for the 'main' function.
+         * */
+        emit(__mov_r(__AL, __r9, __r0));
+        emit(__mov_r(__AL, __r10, __r1));
+    }
+    /* If the compiled program is static linking, the starting point
+     * of 'start' is here.
+     * */
     emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
     emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
     emit(__sub_r(__AL, __sp, __sp, __r8));
@@ -466,16 +515,18 @@ void code_generate(void)
     emit(__mov_i(__AL, __r7, 1));
     emit(__svc());
 
-    /* syscall */
-    emit(__mov_r(__AL, __r7, __r0));
-    emit(__mov_r(__AL, __r0, __r1));
-    emit(__mov_r(__AL, __r1, __r2));
-    emit(__mov_r(__AL, __r2, __r3));
-    emit(__mov_r(__AL, __r3, __r4));
-    emit(__mov_r(__AL, __r4, __r5));
-    emit(__mov_r(__AL, __r5, __r6));
-    emit(__svc());
-    emit(__mov_r(__AL, __pc, __lr));
+    if (!dynlink) {
+        /* syscall */
+        emit(__mov_r(__AL, __r7, __r0));
+        emit(__mov_r(__AL, __r0, __r1));
+        emit(__mov_r(__AL, __r1, __r2));
+        emit(__mov_r(__AL, __r2, __r3));
+        emit(__mov_r(__AL, __r3, __r4));
+        emit(__mov_r(__AL, __r4, __r5));
+        emit(__mov_r(__AL, __r5, __r6));
+        emit(__svc());
+        emit(__mov_r(__AL, __pc, __lr));
+    }
 
     ph2_ir_t *ph2_ir;
     for (ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
@@ -483,11 +534,16 @@ void code_generate(void)
         emit_ph2_ir(ph2_ir);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
-    emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-    emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
-    emit(__add_r(__AL, __r8, __r12, __r8));
-    emit(__lw(__AL, __r0, __r8, 0));
-    emit(__add_i(__AL, __r1, __r8, 4));
+    if (dynlink) {
+        emit(__mov_r(__AL, __r0, __r9));
+        emit(__mov_r(__AL, __r1, __r10));
+    } else {
+        emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
+        emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+        emit(__add_r(__AL, __r8, __r12, __r8));
+        emit(__lw(__AL, __r0, __r8, 0));
+        emit(__add_i(__AL, __r1, __r8, 4));
+    }
     emit(__bl(__AL, MAIN_BB->elf_offset - elf_code->size));
 
     /* exit with main's return value */
@@ -497,5 +553,22 @@ void code_generate(void)
     for (int i = 0; i < ph2_ir_idx; i++) {
         ph2_ir = PH2_IR_FLATTEN[i];
         emit_ph2_ir(ph2_ir);
+    }
+}
+
+void plt_generate(void)
+{
+    int addr_of_got = elf_got_start + PTR_SIZE * 2;
+    int end = plt_sz - PLT_FIXUP_SIZE;
+    elf_write_int(elf_plt, __push_reg(__AL, __lr));
+    elf_write_int(elf_plt, __movw(__AL, __r10, addr_of_got));
+    elf_write_int(elf_plt, __movt(__AL, __r10, addr_of_got));
+    elf_write_int(elf_plt, __mov_r(__AL, __lr, __r10));
+    elf_write_int(elf_plt, __lw(__AL, __pc, __lr, 0));
+    for (int i = 0; i * PLT_ENT_SIZE < end; i++) {
+        addr_of_got = elf_got_start + PTR_SIZE * (i + 3);
+        elf_write_int(elf_plt, __movw(__AL, __r12, addr_of_got));
+        elf_write_int(elf_plt, __movt(__AL, __r12, addr_of_got));
+        elf_write_int(elf_plt, __lw(__AL, __pc, __r12, 0));
     }
 }

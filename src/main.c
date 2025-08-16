@@ -58,6 +58,8 @@ int main(int argc, char *argv[])
             hard_mul_div = 1;
         else if (!strcmp(argv[i], "--no-libc"))
             libc = 0;
+        else if (!strcmp(argv[i], "--dynlink"))
+            dynlink = true;
         else if (!strcmp(argv[i], "-o")) {
             if (i + 1 < argc) {
                 out = argv[i + 1];
@@ -74,7 +76,7 @@ int main(int argc, char *argv[])
     if (!in) {
         printf("Missing source file!\n");
         printf(
-            "Usage: shecc [-o output] [+m] [--dump-ir] [--no-libc] "
+            "Usage: shecc [-o output] [+m] [--dump-ir] [--no-libc] [--dynlink]"
             "<input.c>\n");
         return -1;
     }
@@ -116,8 +118,18 @@ int main(int argc, char *argv[])
     if (dump_ir)
         dump_ph2_ir();
 
+    /*
+     * ELF preprocess:
+     * 1. generate all sections except for .text section.
+     * 2. calculate the starting addresses of certain sections.
+     */
+    elf_preprocess();
+
     /* generate code from IR */
     code_generate();
+
+    /* ELF postprocess: generate all ELF headers */
+    elf_postprocess();
 
     /* output code in ELF */
     elf_generate(out);

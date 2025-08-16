@@ -106,6 +106,8 @@ void build_rpo(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         args->func = func;
         args->bb = func->bbs;
 
@@ -149,6 +151,8 @@ void build_idom(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         bool changed;
+        if (!func->bbs)
+            continue;
 
         func->bbs->idom = func->bbs;
 
@@ -222,6 +226,8 @@ void build_dom(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         args->func = func;
         args->bb = func->bbs;
 
@@ -256,6 +262,8 @@ void build_df(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         args->func = func;
         args->bb = func->bbs;
 
@@ -280,6 +288,8 @@ void build_r_idom(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         bool changed;
+        if (!func->bbs)
+            continue;
 
         func->exit->r_idom = func->exit;
 
@@ -340,6 +350,8 @@ bool rdom_connect(basic_block_t *pred, basic_block_t *succ)
 
 void bb_build_rdom(func_t *func, basic_block_t *bb)
 {
+    if (!func->bbs)
+        return;
     for (basic_block_t *curr = bb; curr != func->exit; curr = curr->r_idom) {
         if (!rdom_connect(curr->r_idom, curr))
             break;
@@ -350,6 +362,8 @@ void build_rdom(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         args->func = func;
         args->bb = func->exit;
 
@@ -394,6 +408,9 @@ void build_rdf(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
+
         args->func = func;
         args->bb = func->exit;
 
@@ -435,6 +452,8 @@ void use_chain_delete(use_chain_t *u, var_t *var)
 void use_chain_build(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (insn_t *i = bb->insn_list.head; i; i = i->next) {
                 if (i->rs1)
@@ -541,6 +560,8 @@ void solve_globals(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         args->func = func;
         args->bb = func->bbs;
 
@@ -602,6 +623,8 @@ bool insert_phi_insn(basic_block_t *bb, var_t *var)
 void solve_phi_insertion(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         for (symbol_t *sym = func->global_sym_list.head; sym; sym = sym->next) {
             var_t *var = sym->var;
 
@@ -786,6 +809,8 @@ void bb_solve_phi_params(basic_block_t *bb)
 void solve_phi_params(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         for (int i = 0; i < func->num_params; i++) {
             /* FIXME: Rename arguments directly, might be not good here. */
             var_t *var = require_var(func->bbs->scope);
@@ -859,6 +884,8 @@ void unwind_phi(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         args->func = func;
         args->bb = func->bbs;
 
@@ -1161,6 +1188,8 @@ void dump_cfg(char name[])
     fprintf(fd, "strict digraph CFG {\n");
     fprintf(fd, "node [shape=box]\n");
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         func->visited++;
         fprintf(fd, "subgraph cluster_%p {\n", func);
         fprintf(fd, "label=\"%p (%s)\"\n", func, func->return_def.var_name);
@@ -1190,6 +1219,8 @@ void dump_dom(char name[])
     fprintf(fd, "node [shape=box]\n");
     fprintf(fd, "splines=polyline\n");
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         fprintf(fd, "subgraph cluster_%p {\n", func);
         fprintf(fd, "label=\"%p\"\n", func);
         dom_dump(fd, func->bbs);
@@ -1540,7 +1571,8 @@ void optimize(void)
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         /* basic block level (control flow) optimizations */
-
+        if (!func->bbs)
+            continue;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             /* instruction level optimizations */
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
@@ -1557,6 +1589,8 @@ void optimize(void)
     }
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             dce_insn(bb);
         }
@@ -1599,6 +1633,8 @@ void build_reversed_rpo(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         func->bb_cnt = 0;
         args->func = func;
         args->bb = func->exit;
@@ -1748,6 +1784,9 @@ void liveness_analysis(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
+
         args->func = func;
         args->bb = func->bbs;
 
@@ -1764,6 +1803,8 @@ void liveness_analysis(void)
     }
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         basic_block_t *bb = func->exit;
         bool changed;
         do {
