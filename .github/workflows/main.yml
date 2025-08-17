@@ -26,6 +26,11 @@ jobs:
       - name: IR regression tests
         run: |
           make check-snapshot || exit 1
+      - name: Sanitizer-enabled stage 0 tests
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          make check-sanitizer || exit 1
       - name: Unit tests
         run: |
           make check || exit 1
@@ -48,6 +53,7 @@ jobs:
           apt-get install -yqq build-essential
         run: |
           make config ARCH=arm
+          make check-sanitizer || exit 1
           make check || exit 1
 
   coding-style:
