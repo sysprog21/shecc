@@ -3232,7 +3232,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     else if (lex_accept(T_decrement))
         prefix_op = OP_sub;
     /* must be an identifier or asterisk (for pointer dereference) */
-    if (!lex_peek(T_identifier, token) && !lex_peek(T_asterisk, NULL))
+    bool has_asterisk = lex_peek(T_asterisk, NULL);
+    if (!lex_peek(T_identifier, token) && !has_asterisk)
         error("Unexpected token");
 
     /* handle macro parameter substitution for statements */
@@ -3350,14 +3351,16 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         return bb;
     }
 
-    /* is a function call? */
-    func = find_func(token);
-    if (func) {
-        lex_expect(T_identifier);
-        read_func_call(func, parent, &bb);
-        perform_side_effect(parent, bb);
-        lex_expect(T_semicolon);
-        return bb;
+    /* is a function call? Skip function call check when has_asterisk is true */
+    if (!has_asterisk) {
+        func = find_func(token);
+        if (func) {
+            lex_expect(T_identifier);
+            read_func_call(func, parent, &bb);
+            perform_side_effect(parent, bb);
+            lex_expect(T_semicolon);
+            return bb;
+        }
     }
 
     /* handle pointer dereference expressions like *ptr = value */
