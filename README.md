@@ -23,14 +23,20 @@ Despite its simplistic nature, it is capable of performing basic optimization st
 
 `shecc` is capable of compiling C source files written in the following
 syntax:
-* data types: char, int, struct, and pointer
-* condition statements: if, while, for, switch, case, break, return, and
+* data types: `char`, `int`, `struct`, `enum`, `typedef`, and pointer types
+* condition statements: `if`, `else`, `while`, `for`, `do-while`, `switch`, `case`, `default`, `break`, `continue`, `return`, and
                         general expressions
-* compound assignments: `+=`, `-=`, `*=`
-* global/local variable initializations for supported data types
-    - e.g. `int i = [expr]`
-* limited support for preprocessor directives: `#define`, `#ifdef`, `#elif`, `#endif`, `#undef`, and `#error`
-* non-nested variadic macros with `__VA_ARGS__` identifier
+* operators: all arithmetic, logical, bitwise, and assignment operators including compound assignments
+  (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
+* arrays: global/local arrays with initializers, multi-dimensional arrays
+* functions: function declarations, definitions, and calls with fixed arguments
+* variadic functions: basic support via direct pointer arithmetic (no `<stdarg.h>`)
+* typedef: type aliasing including typedef pointers (`typedef int *ptr_t;`)
+* pointers: full pointer arithmetic, multi-level pointer dereference (`***ptr`)
+* global/local variable initializations for all supported data types
+    - e.g. `int i = [expr];`, `int arr[] = {1, 2, 3};`
+* preprocessor directives: `#define`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`, `#undef`, `#error`, and `#include`
+* function-like macros with parameters and `__VA_ARGS__` support
 
 The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3,
 and also supports RISC-V 32-bit architecture, verified with QEMU.
@@ -89,6 +95,12 @@ Run `make` and you should see this:
   SHECC	out/shecc-stage2.elf
 ```
 
+For development builds with memory safety checks:
+```shell
+$ make sanitizer
+$ make check-sanitizer
+```
+
 File `out/shecc` is the first stage compiler. Its usage:
 ```shell
 $ shecc [-o output] [+m] [--no-libc] [--dump-ir] <infile.c>
@@ -128,10 +140,22 @@ use `update-snapshot` / `check-snapshot` instead.
 
 ### Unit Tests
 
-`shecc` comes with unit tests. To run the tests, give `check` as an argument:
+`shecc` comes with a comprehensive test suite (200+ test cases). To run the tests:
 ```shell
-$ make check
+$ make check          # Run all tests (stage 0 and stage 2)
+$ make check-stage0   # Test stage 0 compiler only
+$ make check-stage2   # Test stage 2 compiler only
+$ make check-sanitizer # Test with AddressSanitizer and UBSan
 ```
+
+The test suite covers:
+* Basic data types and operators
+* Control flow statements
+* Arrays and pointers (including multi-level dereference)
+* Structs, enums, and typedefs
+* Variadic functions
+* Preprocessor directives and macros
+* Self-hosting validation
 
 Reference output:
 ```
@@ -213,10 +237,11 @@ int fib(int n)       def int @fib(int %n)
 
 ## Known Issues
 
-1. The generated ELF lacks of .bss and .rodata section
-2. The support of varying number of function arguments is incomplete. No `<stdarg.h>` can be used.
-   Alternatively, check the implementation `printf` in source `lib/c.c` for `var_arg`.
-3. The C front-end is a bit dirty because there is no effective AST.
+1. The generated ELF lacks .bss and .rodata sections
+2. Full `<stdarg.h>` support is not available. Variadic functions work via direct pointer arithmetic.
+   See the `printf` implementation in `lib/c.c` for the supported approach.
+3. The C front-end operates directly on token streams without building a full AST.
+4. Complex pointer arithmetic expressions like `*(p + offset)` have limited support.
 
 ## License
 
