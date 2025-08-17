@@ -75,6 +75,40 @@ bool simple_sccp(func_t *func)
                 }
                 break;
 
+            case OP_sign_ext:
+                /* Constant sign extension optimization integrated into SCCP */
+                if (insn->rs1 && insn->rs1->is_const && !insn->rd->is_global &&
+                    insn->sz > 0) {
+                    int value = insn->rs1->init_val;
+                    int result = value;
+
+                    /* Perform sign extension based on source size */
+                    if (insn->sz == 1) {
+                        /* Sign extend from 8 bits */
+                        result = (value & 0x80) ? (value | 0xFFFFFF00)
+                                                : (value & 0xFF);
+                    } else if (insn->sz == 2) {
+                        /* Sign extend from 16 bits */
+                        result = (value & 0x8000) ? (value | 0xFFFF0000)
+                                                  : (value & 0xFFFF);
+                    } else if (insn->sz == 4) {
+                        /* No sign extension needed for 32-bit */
+                        result = value;
+                    } else {
+                        /* Invalid size, skip */
+                        break;
+                    }
+
+                    /* Convert to constant load */
+                    insn->opcode = OP_load_constant;
+                    insn->rd->is_const = true;
+                    insn->rd->init_val = result;
+                    insn->rs1 = NULL;
+                    insn->sz = 0;
+                    changed = true;
+                }
+                break;
+
             case OP_add:
             case OP_sub:
             case OP_mul:
