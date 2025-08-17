@@ -1795,9 +1795,21 @@ void optimize(void)
 
     use_chain_build();
 
-    /* Run SCCP optimization first */
+    /* Run SCCP optimization multiple times for full propagation */
+    bool sccp_changed = true;
+    int sccp_iterations = 0;
+    while (sccp_changed && sccp_iterations < 5) {
+        sccp_changed = false;
+        for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+            if (simple_sccp(func))
+                sccp_changed = true;
+        }
+        sccp_iterations++;
+    }
+
+    /* Run constant cast optimization for truncation */
     for (func_t *func = FUNC_LIST.head; func; func = func->next)
-        simple_sccp(func);
+        optimize_constant_casts(func);
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         /* basic block level (control flow) optimizations */

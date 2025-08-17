@@ -43,6 +43,38 @@ bool simple_sccp(func_t *func)
                 }
                 break;
 
+            case OP_trunc:
+                /* Constant truncation optimization integrated into SCCP */
+                if (insn->rs1 && insn->rs1->is_const && !insn->rd->is_global &&
+                    insn->sz > 0) {
+                    int value = insn->rs1->init_val;
+                    int result = value;
+
+                    /* Perform truncation based on size */
+                    if (insn->sz == 1) {
+                        /* Truncate to 8 bits */
+                        result = value & 0xFF;
+                    } else if (insn->sz == 2) {
+                        /* Truncate to 16 bits */
+                        result = value & 0xFFFF;
+                    } else if (insn->sz == 4) {
+                        /* No truncation needed for 32-bit */
+                        result = value;
+                    } else {
+                        /* Invalid size, skip */
+                        break;
+                    }
+
+                    /* Convert to constant load */
+                    insn->opcode = OP_load_constant;
+                    insn->rd->is_const = true;
+                    insn->rd->init_val = result;
+                    insn->rs1 = NULL;
+                    insn->sz = 0;
+                    changed = true;
+                }
+                break;
+
             case OP_add:
             case OP_sub:
             case OP_mul:
@@ -147,6 +179,70 @@ bool simple_sccp(func_t *func)
                 }
 
                 last->rs1 = NULL;
+                changed = true;
+            }
+        }
+    }
+
+    return changed;
+}
+
+/* Targeted constant truncation peephole optimization */
+bool optimize_constant_casts(func_t *func)
+{
+    if (!func || !func->bbs)
+        return false;
+
+    bool changed = false;
+
+    /* Simple peephole optimization: const + trunc pattern */
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        if (!bb)
+            continue;
+
+        for (insn_t *insn = bb->insn_list.head; insn && insn->next;
+             insn = insn->next) {
+            insn_t *next_insn = insn->next;
+
+            /* Look for pattern: const %.tX, VALUE followed by
+             * %.tY = trunc %.tX, SIZE
+             */
+            if (insn->opcode == OP_load_constant &&
+                next_insn->opcode == OP_trunc && insn->rd && next_insn->rs1 &&
+                insn->rd == next_insn->rs1 && next_insn->sz > 0 &&
+                !next_insn->rd->is_global) {
+                int value = insn->rd->init_val;
+                int result = value;
+
+                /* Perform truncation based on size */
+                if (next_insn->sz == 1) {
+                    /* Truncate to 8 bits */
+                    result = value & 0xFF;
+                } else if (next_insn->sz == 2) {
+                    /* Truncate to 16 bits */
+                    result = value & 0xFFFF;
+                } else if (next_insn->sz == 4) {
+                    /* No truncation needed for 32-bit */
+                    result = value;
+                } else {
+                    /* Invalid size, skip */
+                    continue;
+                }
+
+                /* Optimize: Replace both instructions with single const */
+                insn->rd = next_insn->rd; /* Update dest to final target */
+                insn->rd->is_const = true;
+                insn->rd->init_val = result;
+
+                /* Remove the truncation instruction by converting it to
+                 * NOP-like
+                 */
+                next_insn->opcode = OP_load_constant;
+                next_insn->rd->is_const = true;
+                next_insn->rd->init_val = result;
+                next_insn->rs1 = NULL;
+                next_insn->sz = 0;
+
                 changed = true;
             }
         }
