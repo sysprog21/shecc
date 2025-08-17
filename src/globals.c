@@ -164,8 +164,9 @@ void *arena_alloc(arena_t *arena, int size)
         abort();
     }
 
-    /* Align to PTR_SIZE bytes */
-    size = (size + PTR_SIZE - 1) & ~(PTR_SIZE - 1);
+    /* Align to sizeof(void*) bytes for host compatibility */
+    int alignment = sizeof(void *);
+    size = (size + alignment - 1) & ~(alignment - 1);
 
     if (!arena->head || arena->head->offset + size > arena->head->capacity) {
         /* Need a new block: choose capacity = max(DEFAULT_ARENA_SIZE,
