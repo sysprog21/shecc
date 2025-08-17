@@ -50,7 +50,7 @@ var_t *require_var(block_t *blk)
         var_list->elements = new_locals;
     }
 
-    var_t *var = arena_alloc(BLOCK_ARENA, sizeof(var_t));
+    var_t *var = arena_calloc(BLOCK_ARENA, 1, sizeof(var_t));
     var_list->elements[var_list->size++] = var;
     var->consumed = -1;
     var->base = var;
@@ -3232,7 +3232,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     else if (lex_accept(T_decrement))
         prefix_op = OP_sub;
     /* must be an identifier or asterisk (for pointer dereference) */
-    if (!lex_peek(T_identifier, token) && !lex_peek(T_asterisk, NULL))
+    bool has_asterisk = lex_peek(T_asterisk, NULL);
+    if (!lex_peek(T_identifier, token) && !has_asterisk)
         error("Unexpected token");
 
     /* handle macro parameter substitution for statements */
@@ -3350,14 +3351,16 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         return bb;
     }
 
-    /* is a function call? */
-    func = find_func(token);
-    if (func) {
-        lex_expect(T_identifier);
-        read_func_call(func, parent, &bb);
-        perform_side_effect(parent, bb);
-        lex_expect(T_semicolon);
-        return bb;
+    /* is a function call? Skip function call check when has_asterisk is true */
+    if (!has_asterisk) {
+        func = find_func(token);
+        if (func) {
+            lex_expect(T_identifier);
+            read_func_call(func, parent, &bb);
+            perform_side_effect(parent, bb);
+            lex_expect(T_semicolon);
+            return bb;
+        }
     }
 
     /* handle pointer dereference expressions like *ptr = value */
@@ -3792,7 +3795,7 @@ void parse_internal(void)
     /* set starting point of global stack manually */
     GLOBAL_FUNC = add_func("", true);
     GLOBAL_FUNC->stack_size = 4;
-    GLOBAL_FUNC->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
+    GLOBAL_FUNC->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
 
     /* built-in types */
     TY_void = add_named_type("void");
@@ -3829,7 +3832,7 @@ void parse_internal(void)
     func->return_def.type = TY_int;
     func->num_params = 0;
     func->va_args = 1;
-    func->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
+    func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
 
     /* lexer initialization */
     SOURCE->size = 0;
