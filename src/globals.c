@@ -308,17 +308,17 @@ symbol_t *arena_alloc_symbol(void)
 
 constant_t *arena_alloc_constant(void)
 {
-    return arena_alloc(GENERAL_ARENA, sizeof(constant_t));
+    return arena_calloc(GENERAL_ARENA, 1, sizeof(constant_t));
 }
 
 alias_t *arena_alloc_alias(void)
 {
-    return arena_alloc(GENERAL_ARENA, sizeof(alias_t));
+    return arena_calloc(GENERAL_ARENA, 1, sizeof(alias_t));
 }
 
 macro_t *arena_alloc_macro(void)
 {
-    return arena_alloc(GENERAL_ARENA, sizeof(macro_t));
+    return arena_calloc(GENERAL_ARENA, 1, sizeof(macro_t));
 }
 
 bb_traversal_args_t *arena_alloc_traversal_args(void)
@@ -614,7 +614,7 @@ ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 
 ph2_ir_t *add_ph2_ir(opcode_t op)
 {
-    ph2_ir_t *ph2_ir = arena_alloc(BB_ARENA, sizeof(ph2_ir_t));
+    ph2_ir_t *ph2_ir = arena_calloc(BB_ARENA, 1, sizeof(ph2_ir_t));
     ph2_ir->op = op;
     /* Set safe defaults; arch-lowering may annotate later */
     ph2_ir->next = NULL;
@@ -631,7 +631,7 @@ void set_var_liveout(var_t *var, int end)
 
 block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
 {
-    block_t *blk = arena_alloc(BLOCK_ARENA, sizeof(block_t));
+    block_t *blk = arena_calloc(BLOCK_ARENA, 1, sizeof(block_t));
 
     blk->parent = parent;
     blk->func = func;
@@ -885,7 +885,7 @@ func_t *find_func(char *func_name)
 /* Create a basic block and set the scope of variables to 'parent' block */
 basic_block_t *bb_create(block_t *parent)
 {
-    basic_block_t *bb = arena_alloc(BB_ARENA, sizeof(basic_block_t));
+    basic_block_t *bb = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
 
     for (int i = 0; i < MAX_BB_PRED; i++) {
         bb->prev[i].bb = NULL;
@@ -1001,7 +1001,7 @@ void add_insn(block_t *block,
 
     bb->scope = block;
 
-    insn_t *n = arena_alloc(INSN_ARENA, sizeof(insn_t));
+    insn_t *n = arena_calloc(INSN_ARENA, 1, sizeof(insn_t));
     n->opcode = op;
     n->rd = rd;
     n->rs1 = rs1;

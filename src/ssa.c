@@ -583,7 +583,7 @@ bool insert_phi_insn(basic_block_t *bb, var_t *var)
         return false;
 
     insn_t *head = bb->insn_list.head;
-    insn_t *n = arena_alloc(INSN_ARENA, sizeof(insn_t));
+    insn_t *n = arena_calloc(INSN_ARENA, 1, sizeof(insn_t));
     n->opcode = OP_phi;
     n->rd = var;
     n->rs1 = var;
@@ -805,7 +805,7 @@ void solve_phi_params(void)
 
 void append_unwound_phi_insn(basic_block_t *bb, var_t *dest, var_t *rs)
 {
-    insn_t *n = arena_alloc(INSN_ARENA, sizeof(insn_t));
+    insn_t *n = arena_calloc(INSN_ARENA, 1, sizeof(insn_t));
     n->opcode = OP_unwound_phi;
     n->rd = dest;
     n->rs1 = rs;

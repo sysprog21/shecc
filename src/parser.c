@@ -50,7 +50,7 @@ var_t *require_var(block_t *blk)
         var_list->elements = new_locals;
     }
 
-    var_t *var = arena_alloc(BLOCK_ARENA, sizeof(var_t));
+    var_t *var = arena_calloc(BLOCK_ARENA, 1, sizeof(var_t));
     var_list->elements[var_list->size++] = var;
     var->consumed = -1;
     var->base = var;
@@ -3792,7 +3792,7 @@ void parse_internal(void)
     /* set starting point of global stack manually */
     GLOBAL_FUNC = add_func("", true);
     GLOBAL_FUNC->stack_size = 4;
-    GLOBAL_FUNC->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
+    GLOBAL_FUNC->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
 
     /* built-in types */
     TY_void = add_named_type("void");
@@ -3829,7 +3829,7 @@ void parse_internal(void)
     func->return_def.type = TY_int;
     func->num_params = 0;
     func->va_args = 1;
-    func->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
+    func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
 
     /* lexer initialization */
     SOURCE->size = 0;

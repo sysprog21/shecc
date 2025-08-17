@@ -53,7 +53,7 @@ void refresh(basic_block_t *bb, insn_t *insn)
 
 ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
 {
-    ph2_ir_t *n = arena_alloc(BB_ARENA, sizeof(ph2_ir_t));
+    ph2_ir_t *n = arena_calloc(BB_ARENA, 1, sizeof(ph2_ir_t));
     n->op = op;
     /* Ensure deterministic defaults for newly created IR nodes */
     n->next = NULL;            /* well-formed singly linked list */
