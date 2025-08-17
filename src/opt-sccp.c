@@ -112,13 +112,19 @@ bool simple_sccp(func_t *func)
             case OP_add:
             case OP_sub:
             case OP_mul:
-                /* Fold binary operations with constants */
+            case OP_eq:
+            case OP_neq:
+            case OP_lt:
+            case OP_leq:
+            case OP_gt:
+            case OP_geq:
+                /* Unified constant folding for binary and comparison ops */
                 if (insn->rs1 && insn->rs1->is_const && insn->rs2 &&
-                    insn->rs2->is_const &&
-                    !insn->rd->is_global) { /* Don't modify globals */
+                    insn->rs2->is_const && !insn->rd->is_global) {
                     int result = 0;
                     int l = insn->rs1->init_val, r = insn->rs2->init_val;
 
+                    /* Compute result based on operation type */
                     switch (insn->opcode) {
                     case OP_add:
                         result = l + r;
@@ -129,35 +135,6 @@ bool simple_sccp(func_t *func)
                     case OP_mul:
                         result = l * r;
                         break;
-                    default:
-                        continue;
-                    }
-
-                    /* Convert to constant load */
-                    insn->opcode = OP_load_constant;
-                    insn->rd->is_const = true;
-                    insn->rd->init_val = result;
-                    insn->rs1 = NULL;
-                    insn->rs2 = NULL;
-                    changed = true;
-                }
-                break;
-
-            case OP_eq:
-            case OP_neq:
-            case OP_lt:
-            case OP_leq:
-            case OP_gt:
-            case OP_geq:
-                /* Fold comparison operations */
-                if (insn->rs1 && insn->rs1->is_const && insn->rs2 &&
-                    insn->rs2->is_const &&
-                    !insn->rd->is_global) { /* Don't modify globals */
-                    int result = 0;
-                    int l = insn->rs1->init_val;
-                    int r = insn->rs2->init_val;
-
-                    switch (insn->opcode) {
                     case OP_eq:
                         result = (l == r);
                         break;
