@@ -52,6 +52,11 @@ SNAPSHOTS := $(foreach SNAPSHOT_ARCH,$(ARCHS), $(patsubst tests/%.c, tests/snaps
 
 all: config bootstrap
 
+sanitizer: CFLAGS += -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -O0
+sanitizer: LDFLAGS += -fsanitize=address -fsanitize=undefined
+sanitizer: config $(OUT)/$(STAGE0)-sanitizer
+	$(VECHO) "  Built stage 0 compiler with sanitizers\n"
+
 ifeq (,$(filter $(ARCH),$(ARCHS)))
 $(error Support ARM and RISC-V only. Select the target with "ARCH=arm" or "ARCH=riscv")
 endif
@@ -80,6 +85,12 @@ check-stage0: $(OUT)/$(STAGE0) $(TESTBINS) tests/driver.sh
 check-stage2: $(OUT)/$(STAGE2) $(TESTBINS) tests/driver.sh
 	$(VECHO) "  TEST STAGE 2\n"
 	tests/driver.sh 2
+
+check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh
+	$(VECHO) "  TEST STAGE 0 (with sanitizers)\n"
+	$(Q)cp $(OUT)/$(STAGE0)-sanitizer $(OUT)/shecc
+	tests/driver.sh 0
+	$(Q)rm $(OUT)/shecc
 
 check-snapshots: $(OUT)/$(STAGE0) $(SNAPSHOTS) tests/check-snapshots.sh
 	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) --silent;)
@@ -123,7 +134,11 @@ $(OUT)/inliner: tools/inliner.c
 
 $(OUT)/$(STAGE0): $(OUT)/libc.inc $(OBJS)
 	$(VECHO) "  LD\t$@\n"
-	$(Q)$(CC) $(OBJS) -o $@
+	$(Q)$(CC) $(OBJS) $(LDFLAGS) -o $@
+
+$(OUT)/$(STAGE0)-sanitizer: $(OUT)/libc.inc $(OBJS)
+	$(VECHO) "  LD\t$@ (with sanitizers)\n"
+	$(Q)$(CC) $(OBJS) $(LDFLAGS) -o $@
 
 $(OUT)/$(STAGE1): $(OUT)/$(STAGE0)
 	$(Q)$(STAGE1_CHECK_CMD)
