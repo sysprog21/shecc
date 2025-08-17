@@ -3267,11 +3267,42 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     }
 
     /* is it a variable declaration? */
-    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-    if (find_type_flag == 1 && lex_accept(T_union)) {
-        find_type_flag = 2;
+    /* Special handling when statement starts with asterisk */
+    if (has_asterisk) {
+        /* For "*identifier", check if identifier is a type.
+         * If not, it's a dereference, not a declaration. */
+        int saved_size = SOURCE->size;
+        char saved_char = next_char;
+        int saved_token = next_token;
+
+        /* Skip the asterisk to peek at the identifier */
+        lex_accept(T_asterisk);
+        char next_ident[MAX_TOKEN_LEN];
+        bool could_be_type = false;
+
+        if (lex_peek(T_identifier, next_ident)) {
+            /* Check if it's a type name */
+            type = find_type(next_ident, 0);
+            if (type)
+                could_be_type = true;
+        }
+
+        /* Restore position */
+        SOURCE->size = saved_size;
+        next_char = saved_char;
+        next_token = saved_token;
+
+        /* If it's not a type, skip the declaration block */
+        if (!could_be_type)
+            type = NULL;
+    } else {
+        /* Normal type checking without asterisk */
+        int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+        if (find_type_flag == 1 && lex_accept(T_union))
+            find_type_flag = 2;
+        type = find_type(token, find_type_flag);
     }
-    type = find_type(token, find_type_flag);
+
     if (type) {
         var = require_typed_var(parent, type);
         read_full_var_decl(var, 0, 0);
@@ -3280,9 +3311,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         if (lex_accept(T_assign)) {
             if (lex_peek(T_open_curly, NULL) &&
                 (var->array_size > 0 || var->is_ptr > 0)) {
-                parse_array_init(
-                    var, parent, &bb,
-                    1); /* FIXED: Emit code for locals in functions */
+                parse_array_init(var, parent, &bb, 1);
             } else {
                 read_expr(parent, &bb);
                 read_ternary_operation(parent, &bb);
@@ -3305,8 +3334,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             if (lex_accept(T_assign)) {
                 if (lex_peek(T_open_curly, NULL) &&
                     (nv->array_size > 0 || nv->is_ptr > 0)) {
-                    parse_array_init(nv, parent, &bb,
-                                     1); /* FIXED: Emit code for locals */
+                    parse_array_init(nv, parent, &bb, 1);
                 } else {
                     read_expr(parent, &bb);
 
