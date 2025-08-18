@@ -461,6 +461,53 @@ items 3 "int x; int *y; x = 3; y = &x; return y[0];"
 items 5 "int b; int *a; b = 10; a = &b; a[0] = 5; return b;"
 items 2 "int x[2]; int y; x[1] = 2; y = *(x + 1); return y;"
 items 2 "int x; int *y; int z; z = 2; y = &z; x = *y; return x;"
+
+# pointer dereference immediately after declaration
+items 42 "int x; x = 10; int *p; p = &x; p[0] = 42; exit(x);"
+items 10 "int val; val = 5; int *ptr; ptr = &val; ptr[0] = 10; exit(val);"
+items 7 "int a; a = 3; int *b; b = &a; b[0] = 7; exit(a);"
+
+# asterisk dereference for reading after declaration
+items 42 "int x; x = 42; int *p; p = &x; int y; y = *p; exit(y);"
+items 15 "int val; val = 15; int *ptr; ptr = &val; exit(*ptr);"
+items 100 "int a; a = 100; int *b; b = &a; int c; c = *b; exit(c);"
+
+# complex pointer dereference patterns after declaration
+try_ 25 << EOF
+int main() {
+    int x;
+    int *p;
+    x = 10;
+    p = &x;       /* pointer declaration and assignment */
+    p[0] = 25;    /* array-style assignment immediately after */
+    return x;
+}
+EOF
+
+try_ 50 << EOF
+int main() {
+    int arr[3];
+    int *ptr;
+    arr[0] = 10; arr[1] = 20; arr[2] = 30;
+    ptr = arr;
+    ptr[0] = 50;  /* should modify arr[0] */
+    return arr[0];
+}
+EOF
+
+try_ 50 << EOF
+int main() {
+    int a, b;
+    int *p1, *p2;
+    a = 5; b = 15;
+    p1 = &a;
+    p2 = &b;
+    p1[0] = 100;  /* multiple pointer assignments in same block */
+    p2[0] = 200;
+    return p1[0] / 2;  /* 100 / 2 = 50 */
+}
+EOF
+
 try_ 10 << EOF
 void change_it(int *p) {
     if (p[0] == 0) {
