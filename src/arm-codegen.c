@@ -136,9 +136,9 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
 void cfg_flatten(void)
 {
     func_t *func = find_func("__syscall");
-    func->bbs->elf_offset = 44; /* offset of start + exit in codegen */
+    func->bbs->elf_offset = 48; /* offset of start + branch + exit in codegen */
 
-    elf_offset = 80; /* offset of start + exit + syscall in codegen */
+    elf_offset = 84; /* offset of start + branch + exit + syscall in codegen */
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
 
     for (ph2_ir_t *ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
@@ -457,6 +457,8 @@ void code_generate(void)
     emit(__sub_r(__AL, __sp, __sp, __r8));
     emit(__mov_r(__AL, __r12, __sp));
     emit(__bl(__AL, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
+    /* After global init, jump to main preparation */
+    emit(__b(__AL, 56)); /* PC+8: skip exit (24) + syscall (36) + ret (4) - 8 */
 
     /* exit */
     emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
@@ -490,7 +492,7 @@ void code_generate(void)
     emit(__add_i(__AL, __r1, __r8, 4));
     emit(__bl(__AL, MAIN_BB->elf_offset - elf_code->size));
 
-    /* exit with main's return value */
+    /* exit with main's return value - r0 already has the return value */
     emit(__mov_i(__AL, __r7, 1));
     emit(__svc());
 
