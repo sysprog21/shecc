@@ -14,6 +14,12 @@
 #define NUM_DIRECTIVES 11
 #define NUM_KEYWORDS 16
 
+/* Token mapping structure for elegant initialization */
+typedef struct {
+    char *name;
+    token_t token;
+} token_mapping_t;
+
 /* Preprocessor directive hash table using existing shecc hashmap */
 hashmap_t *DIRECTIVE_MAP = NULL;
 /* C keywords hash table */
@@ -29,41 +35,25 @@ void lex_init_directives()
 
     DIRECTIVE_MAP = hashmap_create(16); /* Small capacity for directives */
 
-    /* Initialization using indexed for-loop */
+    /* Initialization using struct compound literals for elegance */
     directive_tokens_storage =
         arena_alloc(GENERAL_ARENA, NUM_DIRECTIVES * sizeof(token_t));
 
-    char *names[NUM_DIRECTIVES];
-    token_t token_values[NUM_DIRECTIVES];
-
-    /* Populate arrays using index-based assignments for compatibility */
-    names[0] = "#define";
-    token_values[0] = T_cppd_define;
-    names[1] = "#elif";
-    token_values[1] = T_cppd_elif;
-    names[2] = "#else";
-    token_values[2] = T_cppd_else;
-    names[3] = "#endif";
-    token_values[3] = T_cppd_endif;
-    names[4] = "#error";
-    token_values[4] = T_cppd_error;
-    names[5] = "#if";
-    token_values[5] = T_cppd_if;
-    names[6] = "#ifdef";
-    token_values[6] = T_cppd_ifdef;
-    names[7] = "#ifndef";
-    token_values[7] = T_cppd_ifndef;
-    names[8] = "#include";
-    token_values[8] = T_cppd_include;
-    names[9] = "#pragma";
-    token_values[9] = T_cppd_pragma;
-    names[10] = "#undef";
-    token_values[10] = T_cppd_undef;
+    /* Use array compound literal for directive mappings */
+    token_mapping_t directives[] = {
+        {"#define", T_cppd_define},   {"#elif", T_cppd_elif},
+        {"#else", T_cppd_else},       {"#endif", T_cppd_endif},
+        {"#error", T_cppd_error},     {"#if", T_cppd_if},
+        {"#ifdef", T_cppd_ifdef},     {"#ifndef", T_cppd_ifndef},
+        {"#include", T_cppd_include}, {"#pragma", T_cppd_pragma},
+        {"#undef", T_cppd_undef},
+    };
 
     /* hashmap insertion */
     for (int i = 0; i < NUM_DIRECTIVES; i++) {
-        directive_tokens_storage[i] = token_values[i];
-        hashmap_put(DIRECTIVE_MAP, names[i], &directive_tokens_storage[i]);
+        directive_tokens_storage[i] = directives[i].token;
+        hashmap_put(DIRECTIVE_MAP, directives[i].name,
+                    &directive_tokens_storage[i]);
     }
 }
 
@@ -74,51 +64,34 @@ void lex_init_keywords()
 
     KEYWORD_MAP = hashmap_create(32); /* Capacity for keywords */
 
-    /* Initialization using indexed for-loop */
+    /* Initialization using struct compound literals for elegance */
     keyword_tokens_storage =
         arena_alloc(GENERAL_ARENA, NUM_KEYWORDS * sizeof(token_t));
 
-    char *names[NUM_KEYWORDS];
-    token_t token_values[NUM_KEYWORDS];
-
-    /* Populate arrays using index-based assignments for compatibility */
-    names[0] = "if";
-    token_values[0] = T_if;
-    names[1] = "while";
-    token_values[1] = T_while;
-    names[2] = "for";
-    token_values[2] = T_for;
-    names[3] = "do";
-    token_values[3] = T_do;
-    names[4] = "else";
-    token_values[4] = T_else;
-    names[5] = "return";
-    token_values[5] = T_return;
-    names[6] = "typedef";
-    token_values[6] = T_typedef;
-    names[7] = "enum";
-    token_values[7] = T_enum;
-    names[8] = "struct";
-    token_values[8] = T_struct;
-    names[9] = "sizeof";
-    token_values[9] = T_sizeof;
-    names[10] = "switch";
-    token_values[10] = T_switch;
-    names[11] = "case";
-    token_values[11] = T_case;
-    names[12] = "break";
-    token_values[12] = T_break;
-    names[13] = "default";
-    token_values[13] = T_default;
-    names[14] = "continue";
-    token_values[14] = T_continue;
-    names[15] = "union";
-    token_values[15] = T_union;
+    /* Use array compound literal for keyword mappings */
+    token_mapping_t keywords[] = {
+        {"if", T_if},
+        {"while", T_while},
+        {"for", T_for},
+        {"do", T_do},
+        {"else", T_else},
+        {"return", T_return},
+        {"typedef", T_typedef},
+        {"enum", T_enum},
+        {"struct", T_struct},
+        {"sizeof", T_sizeof},
+        {"switch", T_switch},
+        {"case", T_case},
+        {"break", T_break},
+        {"default", T_default},
+        {"continue", T_continue},
+        {"union", T_union},
+    };
 
     /* hashmap insertion */
     for (int i = 0; i < NUM_KEYWORDS; i++) {
-        keyword_tokens_storage[i] = token_values[i];
-        hashmap_put(KEYWORD_MAP, names[i], &keyword_tokens_storage[i]);
+        keyword_tokens_storage[i] = keywords[i].token;
+        hashmap_put(KEYWORD_MAP, keywords[i].name, &keyword_tokens_storage[i]);
     }
 }
 
