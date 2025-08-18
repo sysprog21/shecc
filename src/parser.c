@@ -30,6 +30,16 @@ int continue_pos_idx = 0;
 var_t *operand_stack[MAX_OPERAND_STACK_SIZE];
 int operand_stack_idx = 0;
 
+/* Forward declarations for helper functions */
+basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
+void perform_side_effect(block_t *parent, basic_block_t *bb);
+void read_inner_var_decl(var_t *vd, int anon, int is_param);
+void read_partial_var_decl(var_t *vd, var_t *template);
+void parse_array_init(var_t *var,
+                      block_t *parent,
+                      basic_block_t **bb,
+                      bool emit_code);
+
 char *gen_name_to(char *buf)
 {
     sprintf(buf, ".t%d", global_var_idx++);
@@ -671,189 +681,414 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb);
 /* Parse array initializer to determine size for implicit arrays and
  * optionally emit initialization code.
  */
+var_t *compute_element_address(block_t *parent,
+                               basic_block_t **bb,
+                               var_t *base_addr,
+                               int index,
+                               int elem_size)
+{
+    if (index == 0)
+        return base_addr;
+
+    var_t *offset = require_var(parent);
+    gen_name_to(offset->var_name);
+    offset->init_val = index * elem_size;
+    add_insn(parent, *bb, OP_load_constant, offset, NULL, NULL, 0, NULL);
+
+    var_t *addr = require_var(parent);
+    gen_name_to(addr->var_name);
+    add_insn(parent, *bb, OP_add, addr, base_addr, offset, 0, NULL);
+    return addr;
+}
+
+var_t *compute_field_address(block_t *parent,
+                             basic_block_t **bb,
+                             var_t *struct_addr,
+                             var_t *field)
+{
+    if (field->offset == 0)
+        return struct_addr;
+
+    var_t *offset = require_var(parent);
+    gen_name_to(offset->var_name);
+    offset->init_val = field->offset;
+    add_insn(parent, *bb, OP_load_constant, offset, NULL, NULL, 0, NULL);
+
+    var_t *addr = require_var(parent);
+    gen_name_to(addr->var_name);
+    add_insn(parent, *bb, OP_add, addr, struct_addr, offset, 0, NULL);
+    return addr;
+}
+
+var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
+{
+    var_t *val = NULL;
+
+    if (lex_peek(T_numeric, NULL) || lex_peek(T_minus, NULL)) {
+        bool is_neg = false;
+        if (lex_accept(T_minus))
+            is_neg = true;
+        char numtok[MAX_ID_LEN];
+        lex_ident(T_numeric, numtok);
+        int num_val = read_numeric_constant(numtok);
+        if (is_neg)
+            num_val = -num_val;
+
+        val = require_var(parent);
+        gen_name_to(val->var_name);
+        val->init_val = num_val;
+        add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
+    } else if (lex_peek(T_char, NULL)) {
+        char chtok[5];
+        lex_ident(T_char, chtok);
+
+        val = require_typed_var(parent, TY_char);
+        gen_name_to(val->var_name);
+        val->init_val = chtok[0];
+        add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
+    } else if (lex_peek(T_string, NULL)) {
+        lex_accept(T_string);
+        /* Strings not supported in struct fields */
+    } else {
+        error("Global array initialization requires constant values");
+    }
+
+    return val;
+}
+
+void consume_global_constant_syntax(void)
+{
+    if (lex_peek(T_numeric, NULL)) {
+        lex_accept(T_numeric);
+    } else if (lex_peek(T_minus, NULL)) {
+        lex_accept(T_minus);
+        lex_accept(T_numeric);
+    } else if (lex_peek(T_string, NULL)) {
+        lex_accept(T_string);
+    } else if (lex_peek(T_char, NULL)) {
+        lex_accept(T_char);
+    } else {
+        error("Global array initialization requires constant values");
+    }
+}
+
+void parse_struct_field_init(block_t *parent,
+                             basic_block_t **bb,
+                             type_t *struct_type,
+                             var_t *target_addr,
+                             bool emit_code)
+{
+    int field_idx = 0;
+
+    if (!lex_peek(T_close_curly, NULL)) {
+        for (;;) {
+            var_t *field_val_raw = NULL;
+
+            if (parent == GLOBAL_BLOCK) {
+                if (emit_code) {
+                    field_val_raw = parse_global_constant_value(parent, bb);
+                } else {
+                    consume_global_constant_syntax();
+                }
+            } else {
+                read_expr(parent, bb);
+                read_ternary_operation(parent, bb);
+                field_val_raw = opstack_pop();
+            }
+
+            if (field_val_raw && field_idx < struct_type->num_fields) {
+                var_t *field = &struct_type->fields[field_idx];
+
+                var_t target = {0};
+                target.type = field->type;
+                target.is_ptr = field->is_ptr;
+                var_t *field_val =
+                    resize_var(parent, bb, field_val_raw, &target);
+
+                var_t *field_addr =
+                    compute_field_address(parent, bb, target_addr, field);
+
+                int field_size = size_var(field);
+                add_insn(parent, *bb, OP_write, NULL, field_addr, field_val,
+                         field_size, NULL);
+            }
+
+            field_idx++;
+            if (!lex_accept(T_comma))
+                break;
+            if (lex_peek(T_close_curly, NULL))
+                break;
+        }
+    }
+}
+
+void parse_array_literal_expr(block_t *parent, basic_block_t **bb)
+{
+    var_t *array_var = require_var(parent);
+    gen_name_to(array_var->var_name);
+
+    int element_count = 0;
+    var_t *first_element = NULL;
+
+    if (!lex_peek(T_close_curly, NULL)) {
+        read_expr(parent, bb);
+        read_ternary_operation(parent, bb);
+        first_element = opstack_pop();
+        element_count = 1;
+
+        while (lex_accept(T_comma)) {
+            if (lex_peek(T_close_curly, NULL))
+                break;
+
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            opstack_pop();
+            element_count++;
+        }
+    }
+
+    lex_expect(T_close_curly);
+
+    array_var->array_size = element_count;
+    if (first_element) {
+        array_var->type = first_element->type;
+        array_var->init_val = first_element->init_val;
+    } else {
+        array_var->type = TY_int;
+        array_var->init_val = 0;
+    }
+
+    opstack_push(array_var);
+    add_insn(parent, *bb, OP_load_constant, array_var, NULL, NULL, 0, NULL);
+}
+
+basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
+{
+    if (lex_accept(T_semicolon)) {
+        add_insn(parent, bb, OP_return, NULL, NULL, NULL, 0, NULL);
+        bb_connect(bb, parent->func->exit, NEXT);
+        return NULL;
+    }
+
+    read_expr(parent, &bb);
+    read_ternary_operation(parent, &bb);
+    perform_side_effect(parent, bb);
+    lex_expect(T_semicolon);
+
+    var_t *rs1 = opstack_pop();
+    add_insn(parent, bb, OP_return, NULL, rs1, NULL, 0, NULL);
+    bb_connect(bb, parent->func->exit, NEXT);
+    return NULL;
+}
+
+basic_block_t *handle_if_statement(block_t *parent, basic_block_t *bb)
+{
+    basic_block_t *n = bb_create(parent);
+    bb_connect(bb, n, NEXT);
+    bb = n;
+
+    lex_expect(T_open_bracket);
+    read_expr(parent, &bb);
+    lex_expect(T_close_bracket);
+
+    var_t *vd = opstack_pop();
+    add_insn(parent, bb, OP_branch, NULL, vd, NULL, 0, NULL);
+
+    basic_block_t *then_ = bb_create(parent);
+    basic_block_t *else_ = bb_create(parent);
+    bb_connect(bb, then_, THEN);
+    bb_connect(bb, else_, ELSE);
+
+    basic_block_t *then_body = read_body_statement(parent, then_);
+    basic_block_t *then_next_ = NULL;
+    if (then_body) {
+        then_next_ = bb_create(parent);
+        bb_connect(then_body, then_next_, NEXT);
+    }
+
+    if (lex_accept(T_else)) {
+        basic_block_t *else_body = read_body_statement(parent, else_);
+        basic_block_t *else_next_ = NULL;
+        if (else_body) {
+            else_next_ = bb_create(parent);
+            bb_connect(else_body, else_next_, NEXT);
+        }
+
+        if (then_next_ && else_next_) {
+            basic_block_t *next_ = bb_create(parent);
+            bb_connect(then_next_, next_, NEXT);
+            bb_connect(else_next_, next_, NEXT);
+            return next_;
+        }
+
+        return then_next_ ? then_next_ : else_next_;
+    } else {
+        if (then_next_) {
+            bb_connect(else_, then_next_, NEXT);
+            return then_next_;
+        }
+        return else_;
+    }
+}
+
+basic_block_t *handle_while_statement(block_t *parent, basic_block_t *bb)
+{
+    basic_block_t *n = bb_create(parent);
+    bb_connect(bb, n, NEXT);
+    bb = n;
+
+    continue_bb[continue_pos_idx++] = bb;
+
+    basic_block_t *cond = bb;
+    lex_expect(T_open_bracket);
+    read_expr(parent, &bb);
+    lex_expect(T_close_bracket);
+
+    var_t *vd = opstack_pop();
+    add_insn(parent, bb, OP_branch, NULL, vd, NULL, 0, NULL);
+
+    basic_block_t *then_ = bb_create(parent);
+    basic_block_t *else_ = bb_create(parent);
+    bb_connect(bb, then_, THEN);
+    bb_connect(bb, else_, ELSE);
+    break_bb[break_exit_idx++] = else_;
+
+    basic_block_t *body_ = read_body_statement(parent, then_);
+
+    continue_pos_idx--;
+    break_exit_idx--;
+
+    if (body_)
+        bb_connect(body_, cond, NEXT);
+
+    return else_;
+}
+
+basic_block_t *handle_struct_variable_decl(block_t *parent,
+                                           basic_block_t *bb,
+                                           char *token)
+{
+    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+    if (find_type_flag == 1 && lex_accept(T_union)) {
+        find_type_flag = 2;
+    }
+
+    type_t *type = find_type(token, find_type_flag);
+    if (!type)
+        return bb;
+
+    var_t *var = require_typed_var(parent, type);
+    read_partial_var_decl(var, NULL);
+    add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
+    add_symbol(bb, var);
+
+    if (lex_accept(T_assign)) {
+        if (lex_peek(T_open_curly, NULL) &&
+            (var->array_size > 0 || var->is_ptr > 0)) {
+            parse_array_init(var, parent, &bb, 1);
+        } else if (lex_peek(T_open_curly, NULL) &&
+                   (var->type->base_type == TYPE_struct ||
+                    var->type->base_type == TYPE_typedef)) {
+            type_t *struct_type = var->type;
+            if (struct_type->base_type == TYPE_typedef &&
+                struct_type->base_struct)
+                struct_type = struct_type->base_struct;
+
+            var_t *struct_addr = require_var(parent);
+            gen_name_to(struct_addr->var_name);
+            add_insn(parent, bb, OP_address_of, struct_addr, var, NULL, 0,
+                     NULL);
+
+            lex_expect(T_open_curly);
+            parse_struct_field_init(parent, &bb, struct_type, struct_addr, 1);
+            lex_expect(T_close_curly);
+        } else {
+            read_expr(parent, &bb);
+            read_ternary_operation(parent, &bb);
+            var_t *rs1 = resize_var(parent, &bb, opstack_pop(), var);
+            add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+        }
+    }
+
+    while (lex_accept(T_comma)) {
+        var_t *nv = require_typed_var(parent, type);
+        read_inner_var_decl(nv, 0, 0);
+        add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
+        add_symbol(bb, nv);
+        if (lex_accept(T_assign)) {
+            if (lex_peek(T_open_curly, NULL) &&
+                (nv->array_size > 0 || nv->is_ptr > 0)) {
+                parse_array_init(nv, parent, &bb, 1);
+            } else if (lex_peek(T_open_curly, NULL) &&
+                       (nv->type->base_type == TYPE_struct ||
+                        nv->type->base_type == TYPE_typedef)) {
+                type_t *struct_type = nv->type;
+                if (struct_type->base_type == TYPE_typedef &&
+                    struct_type->base_struct)
+                    struct_type = struct_type->base_struct;
+
+                var_t *struct_addr = require_var(parent);
+                gen_name_to(struct_addr->var_name);
+                add_insn(parent, bb, OP_address_of, struct_addr, nv, NULL, 0,
+                         NULL);
+
+                lex_expect(T_open_curly);
+                parse_struct_field_init(parent, &bb, struct_type, struct_addr,
+                                        1);
+                lex_expect(T_close_curly);
+            } else {
+                read_expr(parent, &bb);
+                read_ternary_operation(parent, &bb);
+                var_t *rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
+            }
+        }
+    }
+
+    lex_expect(T_semicolon);
+    return bb;
+}
+
 void parse_array_init(var_t *var,
                       block_t *parent,
                       basic_block_t **bb,
-                      int emit_code)
+                      bool emit_code)
 {
     int elem_size = var->type->size;
     int count = 0;
     var_t *base_addr = NULL;
-
-    /* Store values if we need to emit code later for implicit arrays */
-    var_t *stored_vals[256]; /* Max 256 elements for now */
+    var_t *stored_vals[256];
     int is_implicit = (var->array_size == 0);
 
-    /* When emitting code, treat the array variable as its base address,
-     * even for implicit-size arrays. The allocator will size the storage
-     * once we know the element count; writes use the same base symbol.
-     */
-    if (emit_code) {
+    if (emit_code)
         base_addr = var;
-    }
 
     lex_expect(T_open_curly);
     if (!lex_peek(T_close_curly, NULL)) {
         for (;;) {
             var_t *val = NULL;
 
-            /* Check if this element is a nested compound literal for struct */
             if (lex_peek(T_open_curly, NULL) &&
                 (var->type->base_type == TYPE_struct ||
                  var->type->base_type == TYPE_typedef)) {
-                /* Parse struct compound literal for array element */
                 type_t *struct_type = var->type;
-
-                /* Handle typedef by getting actual struct type */
                 if (struct_type->base_type == TYPE_typedef &&
                     struct_type->base_struct)
                     struct_type = struct_type->base_struct;
 
-                /* For struct compound literals in arrays, write fields directly
-                 * to the destination address to avoid unsupported block copies
-                 */
                 if (emit_code) {
-                    /* Compute destination address for this array element */
-                    var_t *elem_addr = base_addr;
-                    if (count > 0) {
-                        var_t *offset = require_var(parent);
-                        gen_name_to(offset->var_name);
-                        offset->init_val = count * elem_size;
-                        add_insn(parent, *bb, OP_load_constant, offset, NULL,
-                                 NULL, 0, NULL);
-
-                        var_t *addr = require_var(parent);
-                        gen_name_to(addr->var_name);
-                        add_insn(parent, *bb, OP_add, addr, base_addr, offset,
-                                 0, NULL);
-                        elem_addr = addr;
-                    }
-
+                    var_t *elem_addr = compute_element_address(
+                        parent, bb, base_addr, count, elem_size);
                     lex_expect(T_open_curly);
-                    int field_idx = 0;
-
-                    if (!lex_peek(T_close_curly, NULL)) {
-                        for (;;) {
-                            /* Parse field value expression */
-                            var_t *field_val_raw = NULL;
-
-                            if (parent == GLOBAL_BLOCK) {
-                                /* Global scope: accept constants and emit loads
-                                 * if emit_code is true */
-                                if (lex_peek(T_numeric, NULL) ||
-                                    lex_peek(T_minus, NULL)) {
-                                    int is_neg = 0;
-                                    if (lex_accept(T_minus))
-                                        is_neg = 1;
-                                    char numtok[MAX_ID_LEN];
-                                    lex_ident(T_numeric, numtok);
-                                    int num_val = read_numeric_constant(numtok);
-                                    if (is_neg)
-                                        num_val = -num_val;
-
-                                    if (emit_code) {
-                                        field_val_raw = require_var(parent);
-                                        gen_name_to(field_val_raw->var_name);
-                                        field_val_raw->init_val = num_val;
-                                        add_insn(parent, *bb, OP_load_constant,
-                                                 field_val_raw, NULL, NULL, 0,
-                                                 NULL);
-                                    }
-                                } else if (lex_peek(T_char, NULL)) {
-                                    char chtok[5];
-                                    lex_ident(T_char, chtok);
-
-                                    if (emit_code) {
-                                        field_val_raw =
-                                            require_typed_var(parent, TY_char);
-                                        gen_name_to(field_val_raw->var_name);
-                                        field_val_raw->init_val = chtok[0];
-                                        add_insn(parent, *bb, OP_load_constant,
-                                                 field_val_raw, NULL, NULL, 0,
-                                                 NULL);
-                                    }
-                                } else if (lex_peek(T_string, NULL)) {
-                                    lex_accept(T_string);
-                                    /* Strings not supported in struct fields */
-                                } else {
-                                    error(
-                                        "Global array initialization requires "
-                                        "constant values");
-                                }
-                            } else {
-                                /* Local scope: parse full expressions */
-                                read_expr(parent, bb);
-                                read_ternary_operation(parent, bb);
-                                field_val_raw = opstack_pop();
-                            }
-
-                            /* Initialize field if within bounds */
-                            if (field_val_raw &&
-                                field_idx < struct_type->num_fields) {
-                                var_t *field = &struct_type->fields[field_idx];
-
-                                /* Create target variable for field */
-                                var_t target = {0};
-                                target.type = field->type;
-                                target.is_ptr = field->is_ptr;
-                                var_t *field_val = resize_var(
-                                    parent, bb, field_val_raw, &target);
-
-                                /* Compute field address: elem_addr +
-                                 * field_offset */
-                                var_t *field_addr = elem_addr;
-                                if (field->offset > 0) {
-                                    var_t *offset = require_var(parent);
-                                    gen_name_to(offset->var_name);
-                                    offset->init_val = field->offset;
-                                    add_insn(parent, *bb, OP_load_constant,
-                                             offset, NULL, NULL, 0, NULL);
-
-                                    var_t *addr = require_var(parent);
-                                    gen_name_to(addr->var_name);
-                                    add_insn(parent, *bb, OP_add, addr,
-                                             elem_addr, offset, 0, NULL);
-                                    field_addr = addr;
-                                }
-
-                                /* Write field value */
-                                int field_size = size_var(field);
-                                add_insn(parent, *bb, OP_write, NULL,
-                                         field_addr, field_val, field_size,
-                                         NULL);
-                            }
-
-                            field_idx++;
-                            if (!lex_accept(T_comma))
-                                break;
-                            if (lex_peek(T_close_curly, NULL))
-                                break;
-                        }
-                    }
+                    parse_struct_field_init(parent, bb, struct_type, elem_addr,
+                                            emit_code);
                     lex_expect(T_close_curly);
-
-                    /* Mark that we've handled this element */
                     val = NULL;
                 } else {
-                    /* If not emitting code, just consume the syntax */
                     lex_expect(T_open_curly);
                     while (!lex_peek(T_close_curly, NULL)) {
                         if (parent == GLOBAL_BLOCK) {
-                            /* Global scope: only accept constants */
-                            if (lex_peek(T_numeric, NULL)) {
-                                lex_accept(T_numeric);
-                            } else if (lex_peek(T_minus, NULL)) {
-                                lex_accept(T_minus);
-                                lex_accept(T_numeric);
-                            } else if (lex_peek(T_string, NULL)) {
-                                lex_accept(T_string);
-                            } else if (lex_peek(T_char, NULL)) {
-                                lex_accept(T_char);
-                            } else {
-                                error(
-                                    "Global array initialization requires "
-                                    "constant values");
-                            }
+                            consume_global_constant_syntax();
                         } else {
                             read_expr(parent, bb);
                             read_ternary_operation(parent, bb);
@@ -868,29 +1103,9 @@ void parse_array_init(var_t *var,
                     val = NULL;
                 }
             } else {
-                /* Parse regular element expression */
                 if (parent == GLOBAL_BLOCK) {
-                    /* Global scope: only accept constants */
-                    if (lex_peek(T_numeric, NULL)) {
-                        lex_accept(T_numeric);
-                        /* For now, just skip - we can't initialize globals yet
-                         */
-                        val = NULL;
-                    } else if (lex_peek(T_minus, NULL)) {
-                        lex_accept(T_minus);
-                        lex_accept(T_numeric);
-                        val = NULL;
-                    } else if (lex_peek(T_string, NULL)) {
-                        lex_accept(T_string);
-                        val = NULL;
-                    } else if (lex_peek(T_char, NULL)) {
-                        lex_accept(T_char);
-                        val = NULL;
-                    } else {
-                        error(
-                            "Global array initialization requires constant "
-                            "values");
-                    }
+                    consume_global_constant_syntax();
+                    val = NULL;
                 } else {
                     read_expr(parent, bb);
                     read_ternary_operation(parent, bb);
@@ -898,43 +1113,22 @@ void parse_array_init(var_t *var,
                 }
             }
 
-            /* Store value for implicit arrays */
             if (is_implicit && emit_code && count < 256)
                 stored_vals[count] = val;
 
-            /* Only write if val is not NULL (NULL means we already wrote struct
-             * fields directly) */
             if (val && emit_code && !is_implicit && count < var->array_size) {
-                /* Emit code for explicit size arrays */
                 var_t target = {0};
                 target.type = var->type;
                 target.is_ptr = 0;
                 var_t *v = resize_var(parent, bb, val, &target);
 
-                /* Compute element address: base + count*elem_size */
-                var_t *elem_addr = base_addr;
-                if (count > 0) {
-                    var_t *offset = require_var(parent);
-                    gen_name_to(offset->var_name);
-                    offset->init_val = count * elem_size;
-                    add_insn(parent, *bb, OP_load_constant, offset, NULL, NULL,
-                             0, NULL);
+                var_t *elem_addr = compute_element_address(
+                    parent, bb, base_addr, count, elem_size);
 
-                    var_t *addr = require_var(parent);
-                    gen_name_to(addr->var_name);
-                    add_insn(parent, *bb, OP_add, addr, base_addr, offset, 0,
-                             NULL);
-                    elem_addr = addr;
-                }
-
-                /* Write element - avoid block copies for structs > 4 bytes */
                 if (elem_size <= 4) {
                     add_insn(parent, *bb, OP_write, NULL, elem_addr, v,
                              elem_size, NULL);
                 } else {
-                    /* For large structs, this should have been handled by the
-                     * compound literal path above. If we reach here with a
-                     * large struct, it's an unsupported case. */
                     fatal("Unsupported: struct assignment > 4 bytes in array");
                 }
             }
@@ -948,41 +1142,25 @@ void parse_array_init(var_t *var,
     }
     lex_expect(T_close_curly);
 
-    /* For implicit size arrays, set the size and emit code */
     if (is_implicit) {
         if (var->is_ptr > 0)
             var->is_ptr = 0;
         var->array_size = count;
 
-        /* Now emit the code since we know the size */
         if (emit_code && count > 0) {
-            base_addr = var; /* Arrays are already addresses */
+            base_addr = var;
 
             for (int i = 0; i < count && i < 256; i++) {
                 if (!stored_vals[i])
-                    continue; /* element already initialized (e.g., struct) */
+                    continue;
                 var_t target = {0};
                 target.type = var->type;
                 target.is_ptr = 0;
                 var_t *v = resize_var(parent, bb, stored_vals[i], &target);
 
-                /* Compute element address */
-                var_t *elem_addr = base_addr;
-                if (i > 0) {
-                    var_t *offset = require_var(parent);
-                    gen_name_to(offset->var_name);
-                    offset->init_val = i * elem_size;
-                    add_insn(parent, *bb, OP_load_constant, offset, NULL, NULL,
-                             0, NULL);
+                var_t *elem_addr = compute_element_address(
+                    parent, bb, base_addr, i, elem_size);
 
-                    var_t *addr = require_var(parent);
-                    gen_name_to(addr->var_name);
-                    add_insn(parent, *bb, OP_add, addr, base_addr, offset, 0,
-                             NULL);
-                    elem_addr = addr;
-                }
-
-                /* Write element */
                 add_insn(parent, *bb, OP_write, NULL, elem_addr, v, elem_size,
                          NULL);
             }
@@ -1131,7 +1309,7 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     add_insn(parent, bb, OP_load_data_address, vd, NULL, NULL, 0, NULL);
 }
 
-void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
+void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
 {
     char token[MAX_ID_LEN];
     int value = 0;
@@ -1141,7 +1319,7 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, int is_neg)
     lex_ident(T_numeric, token);
 
     if (token[0] == '-') {
-        is_neg = 1 - is_neg;
+        is_neg = !is_neg;
         i++;
     }
     if (token[0] == '0') {
@@ -1278,10 +1456,11 @@ void read_lvalue(lvalue_t *lvalue,
 void read_expr_operand(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1;
-    int is_neg = 0, sz;
+    bool is_neg = false;
+    int sz;
 
     if (lex_accept(T_minus)) {
-        is_neg = 1;
+        is_neg = true;
         if (lex_peek(T_numeric, NULL) == 0 &&
             lex_peek(T_identifier, NULL) == 0 &&
             lex_peek(T_open_bracket, NULL) == 0) {
@@ -1799,51 +1978,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 opstack_push(vd);
             }
         } else if (lex_accept(T_open_curly)) {
-            /* Array initialization in expression context: {1, 2, 3, 4} */
-            /* This creates an anonymous array with the initialized values */
-            var_t *array_var = require_var(parent);
-            gen_name_to(array_var->var_name);
-
-            /* Parse array elements */
-            int element_count = 0;
-            var_t *first_element = NULL;
-
-            if (!lex_peek(T_close_curly, NULL)) {
-                /* Parse first element */
-                read_expr(parent, bb);
-                read_ternary_operation(parent, bb);
-                first_element = opstack_pop();
-                element_count = 1;
-
-                /* Parse remaining elements */
-                while (lex_accept(T_comma)) {
-                    if (lex_peek(T_close_curly, NULL))
-                        break; /* Trailing comma */
-
-                    read_expr(parent, bb);
-                    read_ternary_operation(parent, bb);
-                    opstack_pop(); /* Consume element value */
-                    element_count++;
-                }
-            }
-
-            lex_expect(T_close_curly);
-
-            /* Set up array variable with elements */
-            array_var->array_size = element_count;
-            if (first_element) {
-                /* Determine element type from first element */
-                array_var->type = first_element->type;
-                array_var->init_val = first_element->init_val;
-            } else {
-                /* Empty array */
-                array_var->type = TY_int;
-                array_var->init_val = 0;
-            }
-
-            opstack_push(array_var);
-            add_insn(parent, *bb, OP_load_constant, array_var, NULL, NULL, 0,
-                     NULL);
+            parse_array_literal_expr(parent, bb);
         } else {
             printf("%s\n", token);
             /* unknown expression */
@@ -3029,115 +3164,15 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         return read_code_block(parent->func, parent->macro, parent, bb);
 
     if (lex_accept(T_return)) {
-        /* return void */
-        if (lex_accept(T_semicolon)) {
-            add_insn(parent, bb, OP_return, NULL, NULL, NULL, 0, NULL);
-            bb_connect(bb, parent->func->exit, NEXT);
-            return NULL;
-        }
-
-        /* get expression value into return value */
-        read_expr(parent, &bb);
-        read_ternary_operation(parent, &bb);
-
-        /* apply side effect before function return */
-        perform_side_effect(parent, bb);
-        lex_expect(T_semicolon);
-
-        rs1 = opstack_pop();
-
-        add_insn(parent, bb, OP_return, NULL, rs1, NULL, 0, NULL);
-        bb_connect(bb, parent->func->exit, NEXT);
-        return NULL;
+        return handle_return_statement(parent, bb);
     }
 
     if (lex_accept(T_if)) {
-        basic_block_t *n = bb_create(parent);
-        bb_connect(bb, n, NEXT);
-        bb = n;
-
-        lex_expect(T_open_bracket);
-        read_expr(parent, &bb);
-        lex_expect(T_close_bracket);
-
-        vd = opstack_pop();
-        add_insn(parent, bb, OP_branch, NULL, vd, NULL, 0, NULL);
-
-        basic_block_t *then_ = bb_create(parent);
-        basic_block_t *else_ = bb_create(parent);
-        bb_connect(bb, then_, THEN);
-        bb_connect(bb, else_, ELSE);
-
-        basic_block_t *then_body = read_body_statement(parent, then_);
-        basic_block_t *then_next_ = NULL;
-        if (then_body) {
-            then_next_ = bb_create(parent);
-            bb_connect(then_body, then_next_, NEXT);
-        }
-        /* if we have an "else" block, jump to finish */
-        if (lex_accept(T_else)) {
-            basic_block_t *else_body = read_body_statement(parent, else_);
-            basic_block_t *else_next_ = NULL;
-            if (else_body) {
-                else_next_ = bb_create(parent);
-                bb_connect(else_body, else_next_, NEXT);
-            }
-
-            if (then_next_ && else_next_) {
-                basic_block_t *next_ = bb_create(parent);
-                bb_connect(then_next_, next_, NEXT);
-                bb_connect(else_next_, next_, NEXT);
-                return next_;
-            }
-
-            if (then_next_)
-                return then_next_;
-            if (else_next_)
-                return else_next_;
-
-            return NULL;
-        } else {
-            /* this is done, and link false jump */
-            if (then_next_) {
-                bb_connect(else_, then_next_, NEXT);
-                return then_next_;
-            }
-            return else_;
-        }
+        return handle_if_statement(parent, bb);
     }
 
     if (lex_accept(T_while)) {
-        basic_block_t *n = bb_create(parent);
-        bb_connect(bb, n, NEXT);
-        bb = n;
-
-        continue_bb[continue_pos_idx++] = bb;
-
-        basic_block_t *cond = bb_create(parent);
-        cond = bb;
-        lex_expect(T_open_bracket);
-        read_expr(parent, &bb);
-        lex_expect(T_close_bracket);
-
-        vd = opstack_pop();
-        add_insn(parent, bb, OP_branch, NULL, vd, NULL, 0, NULL);
-
-        basic_block_t *then_ = bb_create(parent);
-        basic_block_t *else_ = bb_create(parent);
-        bb_connect(bb, then_, THEN);
-        bb_connect(bb, else_, ELSE);
-        break_bb[break_exit_idx++] = else_;
-
-        basic_block_t *body_ = read_body_statement(parent, then_);
-
-        continue_pos_idx--;
-        break_exit_idx--;
-
-        /* return, break, continue */
-        if (body_)
-            bb_connect(body_, cond, NEXT);
-
-        return else_;
+        return handle_while_statement(parent, bb);
     }
 
     if (lex_accept(T_switch)) {
