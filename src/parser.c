@@ -738,18 +738,43 @@ void parse_array_init(var_t *var,
                             var_t *field_val_raw = NULL;
 
                             if (parent == GLOBAL_BLOCK) {
-                                /* Global scope: only accept constants */
-                                if (lex_peek(T_numeric, NULL)) {
-                                    lex_accept(T_numeric);
-                                    /* Skip the value - we can't initialize at
-                                     * global scope yet */
-                                } else if (lex_peek(T_minus, NULL)) {
-                                    lex_accept(T_minus);
-                                    lex_accept(T_numeric);
+                                /* Global scope: accept constants and emit loads
+                                 * if emit_code is true */
+                                if (lex_peek(T_numeric, NULL) ||
+                                    lex_peek(T_minus, NULL)) {
+                                    int is_neg = 0;
+                                    if (lex_accept(T_minus))
+                                        is_neg = 1;
+                                    char numtok[MAX_ID_LEN];
+                                    lex_ident(T_numeric, numtok);
+                                    int num_val = read_numeric_constant(numtok);
+                                    if (is_neg)
+                                        num_val = -num_val;
+
+                                    if (emit_code) {
+                                        field_val_raw = require_var(parent);
+                                        gen_name_to(field_val_raw->var_name);
+                                        field_val_raw->init_val = num_val;
+                                        add_insn(parent, *bb, OP_load_constant,
+                                                 field_val_raw, NULL, NULL, 0,
+                                                 NULL);
+                                    }
+                                } else if (lex_peek(T_char, NULL)) {
+                                    char chtok[5];
+                                    lex_ident(T_char, chtok);
+
+                                    if (emit_code) {
+                                        field_val_raw =
+                                            require_typed_var(parent, TY_char);
+                                        gen_name_to(field_val_raw->var_name);
+                                        field_val_raw->init_val = chtok[0];
+                                        add_insn(parent, *bb, OP_load_constant,
+                                                 field_val_raw, NULL, NULL, 0,
+                                                 NULL);
+                                    }
                                 } else if (lex_peek(T_string, NULL)) {
                                     lex_accept(T_string);
-                                } else if (lex_peek(T_char, NULL)) {
-                                    lex_accept(T_char);
+                                    /* Strings not supported in struct fields */
                                 } else {
                                     error(
                                         "Global array initialization requires "
@@ -3996,6 +4021,7 @@ void read_global_statement(void)
 
             /* one or more declarators */
             var_t *var = require_typed_var(block, decl_type);
+            var->is_global = true; /* Global struct variable */
             read_partial_var_decl(var, NULL);
             add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0,
                      NULL);
