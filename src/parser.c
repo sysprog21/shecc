@@ -1798,6 +1798,52 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 strcpy(vd->var_name, token);
                 opstack_push(vd);
             }
+        } else if (lex_accept(T_open_curly)) {
+            /* Array initialization in expression context: {1, 2, 3, 4} */
+            /* This creates an anonymous array with the initialized values */
+            var_t *array_var = require_var(parent);
+            gen_name_to(array_var->var_name);
+
+            /* Parse array elements */
+            int element_count = 0;
+            var_t *first_element = NULL;
+
+            if (!lex_peek(T_close_curly, NULL)) {
+                /* Parse first element */
+                read_expr(parent, bb);
+                read_ternary_operation(parent, bb);
+                first_element = opstack_pop();
+                element_count = 1;
+
+                /* Parse remaining elements */
+                while (lex_accept(T_comma)) {
+                    if (lex_peek(T_close_curly, NULL))
+                        break; /* Trailing comma */
+
+                    read_expr(parent, bb);
+                    read_ternary_operation(parent, bb);
+                    opstack_pop(); /* Consume element value */
+                    element_count++;
+                }
+            }
+
+            lex_expect(T_close_curly);
+
+            /* Set up array variable with elements */
+            array_var->array_size = element_count;
+            if (first_element) {
+                /* Determine element type from first element */
+                array_var->type = first_element->type;
+                array_var->init_val = first_element->init_val;
+            } else {
+                /* Empty array */
+                array_var->type = TY_int;
+                array_var->init_val = 0;
+            }
+
+            opstack_push(array_var);
+            add_insn(parent, *bb, OP_load_constant, array_var, NULL, NULL, 0,
+                     NULL);
         } else {
             printf("%s\n", token);
             /* unknown expression */
