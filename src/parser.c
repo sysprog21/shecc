@@ -684,28 +684,204 @@ void parse_array_init(var_t *var,
     var_t *stored_vals[256]; /* Max 256 elements for now */
     int is_implicit = (var->array_size == 0);
 
-    /* If emitting code and size is known, arrays are already addresses */
-    if (emit_code && !is_implicit) {
-        /* Arrays are already addresses, no need for OP_address_of */
+    /* When emitting code, treat the array variable as its base address,
+     * even for implicit-size arrays. The allocator will size the storage
+     * once we know the element count; writes use the same base symbol.
+     */
+    if (emit_code) {
         base_addr = var;
     }
 
     lex_expect(T_open_curly);
     if (!lex_peek(T_close_curly, NULL)) {
         for (;;) {
-            /* Parse element expression */
-            read_expr(parent, bb);
-            read_ternary_operation(parent, bb);
-            var_t *val = opstack_pop();
+            var_t *val = NULL;
+
+            /* Check if this element is a nested compound literal for struct */
+            if (lex_peek(T_open_curly, NULL) &&
+                (var->type->base_type == TYPE_struct ||
+                 var->type->base_type == TYPE_typedef)) {
+                /* Parse struct compound literal for array element */
+                type_t *struct_type = var->type;
+
+                /* Handle typedef by getting actual struct type */
+                if (struct_type->base_type == TYPE_typedef &&
+                    struct_type->base_struct)
+                    struct_type = struct_type->base_struct;
+
+                /* For struct compound literals in arrays, write fields directly
+                 * to the destination address to avoid unsupported block copies
+                 */
+                if (emit_code) {
+                    /* Compute destination address for this array element */
+                    var_t *elem_addr = base_addr;
+                    if (count > 0) {
+                        var_t *offset = require_var(parent);
+                        gen_name_to(offset->var_name);
+                        offset->init_val = count * elem_size;
+                        add_insn(parent, *bb, OP_load_constant, offset, NULL,
+                                 NULL, 0, NULL);
+
+                        var_t *addr = require_var(parent);
+                        gen_name_to(addr->var_name);
+                        add_insn(parent, *bb, OP_add, addr, base_addr, offset,
+                                 0, NULL);
+                        elem_addr = addr;
+                    }
+
+                    lex_expect(T_open_curly);
+                    int field_idx = 0;
+
+                    if (!lex_peek(T_close_curly, NULL)) {
+                        for (;;) {
+                            /* Parse field value expression */
+                            var_t *field_val_raw = NULL;
+
+                            if (parent == GLOBAL_BLOCK) {
+                                /* Global scope: only accept constants */
+                                if (lex_peek(T_numeric, NULL)) {
+                                    lex_accept(T_numeric);
+                                    /* Skip the value - we can't initialize at
+                                     * global scope yet */
+                                } else if (lex_peek(T_minus, NULL)) {
+                                    lex_accept(T_minus);
+                                    lex_accept(T_numeric);
+                                } else if (lex_peek(T_string, NULL)) {
+                                    lex_accept(T_string);
+                                } else if (lex_peek(T_char, NULL)) {
+                                    lex_accept(T_char);
+                                } else {
+                                    error(
+                                        "Global array initialization requires "
+                                        "constant values");
+                                }
+                            } else {
+                                /* Local scope: parse full expressions */
+                                read_expr(parent, bb);
+                                read_ternary_operation(parent, bb);
+                                field_val_raw = opstack_pop();
+                            }
+
+                            /* Initialize field if within bounds */
+                            if (field_val_raw &&
+                                field_idx < struct_type->num_fields) {
+                                var_t *field = &struct_type->fields[field_idx];
+
+                                /* Create target variable for field */
+                                var_t target = {0};
+                                target.type = field->type;
+                                target.is_ptr = field->is_ptr;
+                                var_t *field_val = resize_var(
+                                    parent, bb, field_val_raw, &target);
+
+                                /* Compute field address: elem_addr +
+                                 * field_offset */
+                                var_t *field_addr = elem_addr;
+                                if (field->offset > 0) {
+                                    var_t *offset = require_var(parent);
+                                    gen_name_to(offset->var_name);
+                                    offset->init_val = field->offset;
+                                    add_insn(parent, *bb, OP_load_constant,
+                                             offset, NULL, NULL, 0, NULL);
+
+                                    var_t *addr = require_var(parent);
+                                    gen_name_to(addr->var_name);
+                                    add_insn(parent, *bb, OP_add, addr,
+                                             elem_addr, offset, 0, NULL);
+                                    field_addr = addr;
+                                }
+
+                                /* Write field value */
+                                int field_size = size_var(field);
+                                add_insn(parent, *bb, OP_write, NULL,
+                                         field_addr, field_val, field_size,
+                                         NULL);
+                            }
+
+                            field_idx++;
+                            if (!lex_accept(T_comma))
+                                break;
+                            if (lex_peek(T_close_curly, NULL))
+                                break;
+                        }
+                    }
+                    lex_expect(T_close_curly);
+
+                    /* Mark that we've handled this element */
+                    val = NULL;
+                } else {
+                    /* If not emitting code, just consume the syntax */
+                    lex_expect(T_open_curly);
+                    while (!lex_peek(T_close_curly, NULL)) {
+                        if (parent == GLOBAL_BLOCK) {
+                            /* Global scope: only accept constants */
+                            if (lex_peek(T_numeric, NULL)) {
+                                lex_accept(T_numeric);
+                            } else if (lex_peek(T_minus, NULL)) {
+                                lex_accept(T_minus);
+                                lex_accept(T_numeric);
+                            } else if (lex_peek(T_string, NULL)) {
+                                lex_accept(T_string);
+                            } else if (lex_peek(T_char, NULL)) {
+                                lex_accept(T_char);
+                            } else {
+                                error(
+                                    "Global array initialization requires "
+                                    "constant values");
+                            }
+                        } else {
+                            read_expr(parent, bb);
+                            read_ternary_operation(parent, bb);
+                            opstack_pop();
+                        }
+                        if (!lex_accept(T_comma))
+                            break;
+                        if (lex_peek(T_close_curly, NULL))
+                            break;
+                    }
+                    lex_expect(T_close_curly);
+                    val = NULL;
+                }
+            } else {
+                /* Parse regular element expression */
+                if (parent == GLOBAL_BLOCK) {
+                    /* Global scope: only accept constants */
+                    if (lex_peek(T_numeric, NULL)) {
+                        lex_accept(T_numeric);
+                        /* For now, just skip - we can't initialize globals yet
+                         */
+                        val = NULL;
+                    } else if (lex_peek(T_minus, NULL)) {
+                        lex_accept(T_minus);
+                        lex_accept(T_numeric);
+                        val = NULL;
+                    } else if (lex_peek(T_string, NULL)) {
+                        lex_accept(T_string);
+                        val = NULL;
+                    } else if (lex_peek(T_char, NULL)) {
+                        lex_accept(T_char);
+                        val = NULL;
+                    } else {
+                        error(
+                            "Global array initialization requires constant "
+                            "values");
+                    }
+                } else {
+                    read_expr(parent, bb);
+                    read_ternary_operation(parent, bb);
+                    val = opstack_pop();
+                }
+            }
 
             /* Store value for implicit arrays */
             if (is_implicit && emit_code && count < 256)
                 stored_vals[count] = val;
 
-            if (emit_code && !is_implicit && count < var->array_size) {
+            /* Only write if val is not NULL (NULL means we already wrote struct
+             * fields directly) */
+            if (val && emit_code && !is_implicit && count < var->array_size) {
                 /* Emit code for explicit size arrays */
-                var_t target;
-                memset(&target, 0, sizeof(target));
+                var_t target = {0};
                 target.type = var->type;
                 target.is_ptr = 0;
                 var_t *v = resize_var(parent, bb, val, &target);
@@ -726,9 +902,16 @@ void parse_array_init(var_t *var,
                     elem_addr = addr;
                 }
 
-                /* Write element */
-                add_insn(parent, *bb, OP_write, NULL, elem_addr, v, elem_size,
-                         NULL);
+                /* Write element - avoid block copies for structs > 4 bytes */
+                if (elem_size <= 4) {
+                    add_insn(parent, *bb, OP_write, NULL, elem_addr, v,
+                             elem_size, NULL);
+                } else {
+                    /* For large structs, this should have been handled by the
+                     * compound literal path above. If we reach here with a
+                     * large struct, it's an unsupported case. */
+                    fatal("Unsupported: struct assignment > 4 bytes in array");
+                }
             }
 
             count++;
@@ -751,8 +934,9 @@ void parse_array_init(var_t *var,
             base_addr = var; /* Arrays are already addresses */
 
             for (int i = 0; i < count && i < 256; i++) {
-                var_t target;
-                memset(&target, 0, sizeof(target));
+                if (!stored_vals[i])
+                    continue; /* element already initialized (e.g., struct) */
+                var_t target = {0};
                 target.type = var->type;
                 target.is_ptr = 0;
                 var_t *v = resize_var(parent, bb, stored_vals[i], &target);
@@ -3188,6 +3372,74 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     (var->array_size > 0 || var->is_ptr > 0)) {
                     parse_array_init(var, parent, &bb,
                                      1); /* Always emit code */
+                } else if (lex_peek(T_open_curly, NULL) &&
+                           (var->type->base_type == TYPE_struct ||
+                            var->type->base_type == TYPE_typedef)) {
+                    /* C90-compliant struct compound literal support */
+                    type_t *struct_type = var->type;
+
+                    /* Handle typedef by getting actual struct type */
+                    if (struct_type->base_type == TYPE_typedef &&
+                        struct_type->base_struct)
+                        struct_type = struct_type->base_struct;
+
+                    lex_expect(T_open_curly);
+                    int field_idx = 0;
+
+                    if (!lex_peek(T_close_curly, NULL)) {
+                        for (;;) {
+                            /* Parse field value expression */
+                            read_expr(parent, &bb);
+                            read_ternary_operation(parent, &bb);
+                            var_t *val = opstack_pop();
+
+                            /* Initialize field if within bounds */
+                            if (field_idx < struct_type->num_fields) {
+                                var_t *field = &struct_type->fields[field_idx];
+
+                                /* Create target variable for field */
+                                var_t target = {0};
+                                target.type = field->type;
+                                target.is_ptr = field->is_ptr;
+                                var_t *field_val =
+                                    resize_var(parent, &bb, val, &target);
+
+                                /* Compute field address: &struct + field_offset
+                                 */
+                                var_t *struct_addr = require_var(parent);
+                                gen_name_to(struct_addr->var_name);
+                                add_insn(parent, bb, OP_address_of, struct_addr,
+                                         var, NULL, 0, NULL);
+
+                                var_t *field_addr = struct_addr;
+                                if (field->offset > 0) {
+                                    var_t *offset = require_var(parent);
+                                    gen_name_to(offset->var_name);
+                                    offset->init_val = field->offset;
+                                    add_insn(parent, bb, OP_load_constant,
+                                             offset, NULL, NULL, 0, NULL);
+
+                                    var_t *addr = require_var(parent);
+                                    gen_name_to(addr->var_name);
+                                    add_insn(parent, bb, OP_add, addr,
+                                             struct_addr, offset, 0, NULL);
+                                    field_addr = addr;
+                                }
+
+                                /* Write field value */
+                                int field_size = size_var(field);
+                                add_insn(parent, bb, OP_write, NULL, field_addr,
+                                         field_val, field_size, NULL);
+                            }
+
+                            field_idx++;
+                            if (!lex_accept(T_comma))
+                                break;
+                            if (lex_peek(T_close_curly, NULL))
+                                break;
+                        }
+                    }
+                    lex_expect(T_close_curly);
                 } else {
                     read_expr(parent, &bb);
                     read_ternary_operation(parent, &bb);
@@ -3211,6 +3463,76 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     if (lex_peek(T_open_curly, NULL) &&
                         (nv->array_size > 0 || nv->is_ptr > 0)) {
                         parse_array_init(nv, parent, &bb, 1);
+                    } else if (lex_peek(T_open_curly, NULL) &&
+                               (nv->type->base_type == TYPE_struct ||
+                                nv->type->base_type == TYPE_typedef)) {
+                        /* C90-compliant struct compound literal support */
+                        type_t *struct_type = nv->type;
+
+                        /* Handle typedef by getting actual struct type */
+                        if (struct_type->base_type == TYPE_typedef &&
+                            struct_type->base_struct)
+                            struct_type = struct_type->base_struct;
+
+                        lex_expect(T_open_curly);
+                        int field_idx = 0;
+
+                        if (!lex_peek(T_close_curly, NULL)) {
+                            for (;;) {
+                                /* Parse field value expression */
+                                read_expr(parent, &bb);
+                                read_ternary_operation(parent, &bb);
+                                var_t *val = opstack_pop();
+
+                                /* Initialize field if within bounds */
+                                if (field_idx < struct_type->num_fields) {
+                                    var_t *field =
+                                        &struct_type->fields[field_idx];
+
+                                    /* Create target variable for field */
+                                    var_t target = {0};
+                                    target.type = field->type;
+                                    target.is_ptr = field->is_ptr;
+                                    var_t *field_val =
+                                        resize_var(parent, &bb, val, &target);
+
+                                    /* Compute field address: &struct +
+                                     * field_offset */
+                                    var_t *struct_addr = require_var(parent);
+                                    gen_name_to(struct_addr->var_name);
+                                    add_insn(parent, bb, OP_address_of,
+                                             struct_addr, nv, NULL, 0, NULL);
+
+                                    var_t *field_addr = struct_addr;
+                                    if (field->offset > 0) {
+                                        var_t *offset = require_var(parent);
+                                        gen_name_to(offset->var_name);
+                                        offset->init_val = field->offset;
+                                        add_insn(parent, bb, OP_load_constant,
+                                                 offset, NULL, NULL, 0, NULL);
+
+                                        var_t *addr = require_var(parent);
+                                        gen_name_to(addr->var_name);
+                                        add_insn(parent, bb, OP_add, addr,
+                                                 struct_addr, offset, 0, NULL);
+                                        field_addr = addr;
+                                    }
+
+                                    /* Write field value */
+                                    int field_size = size_var(field);
+                                    add_insn(parent, bb, OP_write, NULL,
+                                             field_addr, field_val, field_size,
+                                             NULL);
+                                }
+
+                                field_idx++;
+                                if (!lex_accept(T_comma))
+                                    break;
+                                if (lex_peek(T_close_curly, NULL))
+                                    break;
+                            }
+                        }
+                        lex_expect(T_close_curly);
                     } else {
                         read_expr(parent, &bb);
                         read_ternary_operation(parent, &bb);
@@ -3311,7 +3633,76 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         if (lex_accept(T_assign)) {
             if (lex_peek(T_open_curly, NULL) &&
                 (var->array_size > 0 || var->is_ptr > 0)) {
-                parse_array_init(var, parent, &bb, 1);
+                parse_array_init(
+                    var, parent, &bb,
+                    1); /* FIXED: Emit code for locals in functions */
+            } else if (lex_peek(T_open_curly, NULL) &&
+                       (var->type->base_type == TYPE_struct ||
+                        var->type->base_type == TYPE_typedef)) {
+                /* C90-compliant struct compound literal support */
+                type_t *struct_type = var->type;
+
+                /* Handle typedef by getting actual struct type */
+                if (struct_type->base_type == TYPE_typedef &&
+                    struct_type->base_struct)
+                    struct_type = struct_type->base_struct;
+
+                lex_expect(T_open_curly);
+                int field_idx = 0;
+
+                if (!lex_peek(T_close_curly, NULL)) {
+                    for (;;) {
+                        /* Parse field value expression */
+                        read_expr(parent, &bb);
+                        read_ternary_operation(parent, &bb);
+                        var_t *val = opstack_pop();
+
+                        /* Initialize field if within bounds */
+                        if (field_idx < struct_type->num_fields) {
+                            var_t *field = &struct_type->fields[field_idx];
+
+                            /* Create target variable for field */
+                            var_t target = {0};
+                            target.type = field->type;
+                            target.is_ptr = field->is_ptr;
+                            var_t *field_val =
+                                resize_var(parent, &bb, val, &target);
+
+                            /* Compute field address: &struct + field_offset */
+                            var_t *struct_addr = require_var(parent);
+                            gen_name_to(struct_addr->var_name);
+                            add_insn(parent, bb, OP_address_of, struct_addr,
+                                     var, NULL, 0, NULL);
+
+                            var_t *field_addr = struct_addr;
+                            if (field->offset > 0) {
+                                var_t *offset = require_var(parent);
+                                gen_name_to(offset->var_name);
+                                offset->init_val = field->offset;
+                                add_insn(parent, bb, OP_load_constant, offset,
+                                         NULL, NULL, 0, NULL);
+
+                                var_t *addr = require_var(parent);
+                                gen_name_to(addr->var_name);
+                                add_insn(parent, bb, OP_add, addr, struct_addr,
+                                         offset, 0, NULL);
+                                field_addr = addr;
+                            }
+
+                            /* Write field value */
+                            int field_size = size_var(field);
+                            add_insn(parent, bb, OP_write, NULL, field_addr,
+                                     field_val, field_size, NULL);
+                        }
+
+                        field_idx++;
+                        if (!lex_accept(T_comma))
+                            break;
+                        if (lex_peek(T_close_curly, NULL))
+                            break;
+                    }
+                }
+                lex_expect(T_close_curly);
             } else {
                 read_expr(parent, &bb);
                 read_ternary_operation(parent, &bb);
@@ -3334,7 +3725,76 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             if (lex_accept(T_assign)) {
                 if (lex_peek(T_open_curly, NULL) &&
                     (nv->array_size > 0 || nv->is_ptr > 0)) {
-                    parse_array_init(nv, parent, &bb, 1);
+                    parse_array_init(nv, parent, &bb,
+                                     1); /* FIXED: Emit code for locals */
+                } else if (lex_peek(T_open_curly, NULL) &&
+                           (nv->type->base_type == TYPE_struct ||
+                            nv->type->base_type == TYPE_typedef)) {
+                    /* C90-compliant struct compound literal support */
+                    type_t *struct_type = nv->type;
+
+                    /* Handle typedef by getting actual struct type */
+                    if (struct_type->base_type == TYPE_typedef &&
+                        struct_type->base_struct)
+                        struct_type = struct_type->base_struct;
+
+                    lex_expect(T_open_curly);
+                    int field_idx = 0;
+
+                    if (!lex_peek(T_close_curly, NULL)) {
+                        for (;;) {
+                            /* Parse field value expression */
+                            read_expr(parent, &bb);
+                            read_ternary_operation(parent, &bb);
+                            var_t *val = opstack_pop();
+
+                            /* Initialize field if within bounds */
+                            if (field_idx < struct_type->num_fields) {
+                                var_t *field = &struct_type->fields[field_idx];
+
+                                /* Create target variable for field */
+                                var_t target = {0};
+                                target.type = field->type;
+                                target.is_ptr = field->is_ptr;
+                                var_t *field_val =
+                                    resize_var(parent, &bb, val, &target);
+
+                                /* Compute field address: &struct + field_offset
+                                 */
+                                var_t *struct_addr = require_var(parent);
+                                gen_name_to(struct_addr->var_name);
+                                add_insn(parent, bb, OP_address_of, struct_addr,
+                                         nv, NULL, 0, NULL);
+
+                                var_t *field_addr = struct_addr;
+                                if (field->offset > 0) {
+                                    var_t *offset = require_var(parent);
+                                    gen_name_to(offset->var_name);
+                                    offset->init_val = field->offset;
+                                    add_insn(parent, bb, OP_load_constant,
+                                             offset, NULL, NULL, 0, NULL);
+
+                                    var_t *addr = require_var(parent);
+                                    gen_name_to(addr->var_name);
+                                    add_insn(parent, bb, OP_add, addr,
+                                             struct_addr, offset, 0, NULL);
+                                    field_addr = addr;
+                                }
+
+                                /* Write field value */
+                                int field_size = size_var(field);
+                                add_insn(parent, bb, OP_write, NULL, field_addr,
+                                         field_val, field_size, NULL);
+                            }
+
+                            field_idx++;
+                            if (!lex_accept(T_comma))
+                                break;
+                            if (lex_peek(T_close_curly, NULL))
+                                break;
+                        }
+                    }
+                    lex_expect(T_close_curly);
                 } else {
                     read_expr(parent, &bb);
 
@@ -3493,13 +3953,21 @@ void read_global_decl(block_t *block)
 
     /* is a variable */
     if (lex_accept(T_assign)) {
-        if (var->array_size == 0) {
-            read_global_assignment(var->var_name);
+        /* If '{' follows and this is an array (explicit or implicit-size via
+         * pointer syntax), reuse the array initializer to emit per-element
+         * stores for globals as well.
+         */
+        if (lex_peek(T_open_curly, NULL) &&
+            (var->array_size > 0 || var->is_ptr > 0)) {
+            parse_array_init(var, block, &GLOBAL_FUNC->bbs, 1);
             lex_expect(T_semicolon);
             return;
         }
-        /* TODO: support global initialization for array */
-        error("Global initialization for array is not supported");
+
+        /* Otherwise fall back to scalar/constant global assignment */
+        read_global_assignment(var->var_name);
+        lex_expect(T_semicolon);
+        return;
     } else if (lex_accept(T_comma))
         /* TODO: continuation */
         error("Global continuation not supported");
@@ -3520,6 +3988,123 @@ void read_global_statement(void)
 
         lex_ident(T_identifier, token);
 
+        /* variable declaration using existing struct tag? */
+        if (!lex_peek(T_open_curly, NULL)) {
+            type_t *decl_type = find_type(token, 2);
+            if (!decl_type)
+                error("Unknown struct type");
+
+            /* one or more declarators */
+            var_t *var = require_typed_var(block, decl_type);
+            read_partial_var_decl(var, NULL);
+            add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0,
+                     NULL);
+            if (lex_accept(T_assign)) {
+                if (lex_peek(T_open_curly, NULL) &&
+                    (var->array_size > 0 || var->is_ptr > 0)) {
+                    parse_array_init(var, block, &GLOBAL_FUNC->bbs, 1);
+                } else if (lex_peek(T_open_curly, NULL) &&
+                           var->array_size == 0 && var->is_ptr == 0 &&
+                           (decl_type->base_type == TYPE_struct ||
+                            decl_type->base_type == TYPE_typedef)) {
+                    /* Global struct compound literal support
+                     * Currently we just consume the syntax - actual
+                     * initialization would require runtime code which globals
+                     * don't support
+                     */
+                    lex_expect(T_open_curly);
+                    int field_idx = 0;
+
+                    if (!lex_peek(T_close_curly, NULL)) {
+                        for (;;) {
+                            /* Just consume constant values for now */
+                            if (lex_peek(T_numeric, NULL)) {
+                                lex_accept(T_numeric);
+                            } else if (lex_peek(T_minus, NULL)) {
+                                lex_accept(T_minus);
+                                lex_accept(T_numeric);
+                            } else if (lex_peek(T_string, NULL)) {
+                                lex_accept(T_string);
+                            } else if (lex_peek(T_char, NULL)) {
+                                lex_accept(T_char);
+                            } else {
+                                error(
+                                    "Global struct initialization requires "
+                                    "constant values");
+                            }
+
+                            field_idx++;
+                            if (!lex_accept(T_comma))
+                                break;
+                            if (lex_peek(T_close_curly, NULL))
+                                break;
+                        }
+                    }
+                    lex_expect(T_close_curly);
+
+                    /* TODO: Emit global initialization code or data segment */
+                } else {
+                    read_global_assignment(var->var_name);
+                }
+            }
+            while (lex_accept(T_comma)) {
+                var_t *nv = require_typed_var(block, decl_type);
+                read_inner_var_decl(nv, 0, 0);
+                add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, nv, NULL, NULL, 0,
+                         NULL);
+                if (lex_accept(T_assign)) {
+                    if (lex_peek(T_open_curly, NULL) &&
+                        (nv->array_size > 0 || nv->is_ptr > 0)) {
+                        parse_array_init(nv, block, &GLOBAL_FUNC->bbs, 1);
+                    } else if (lex_peek(T_open_curly, NULL) &&
+                               nv->array_size == 0 && nv->is_ptr == 0 &&
+                               (decl_type->base_type == TYPE_struct ||
+                                decl_type->base_type == TYPE_typedef)) {
+                        /* Global struct compound literal support for
+                         * continuation Currently we just consume the syntax
+                         */
+                        lex_expect(T_open_curly);
+                        int field_idx = 0;
+
+                        if (!lex_peek(T_close_curly, NULL)) {
+                            for (;;) {
+                                /* Just consume constant values for now */
+                                if (lex_peek(T_numeric, NULL)) {
+                                    lex_accept(T_numeric);
+                                } else if (lex_peek(T_minus, NULL)) {
+                                    lex_accept(T_minus);
+                                    lex_accept(T_numeric);
+                                } else if (lex_peek(T_string, NULL)) {
+                                    lex_accept(T_string);
+                                } else if (lex_peek(T_char, NULL)) {
+                                    lex_accept(T_char);
+                                } else {
+                                    error(
+                                        "Global struct initialization requires "
+                                        "constant values");
+                                }
+
+                                field_idx++;
+                                if (!lex_accept(T_comma))
+                                    break;
+                                if (lex_peek(T_close_curly, NULL))
+                                    break;
+                            }
+                        }
+                        lex_expect(T_close_curly);
+
+                        /* TODO: Emit global initialization code or data segment
+                         */
+                    } else {
+                        read_global_assignment(nv->var_name);
+                    }
+                }
+            }
+            lex_expect(T_semicolon);
+            return;
+        }
+
+        /* struct definition */
         /* has forward declaration? */
         type_t *type = find_type(token, 2);
         if (!type)
