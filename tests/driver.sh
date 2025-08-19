@@ -359,6 +359,152 @@ int main() {
 }
 EOF
 
+# Enhanced compound literal tests - C99 features with non-standard extensions
+# These tests validate both standard C99 compound literals and the non-standard
+# behavior required by the test suite (array compound literals in scalar contexts)
+
+# Test: Array compound literal assigned to scalar int (non-standard)
+try_ 100 << EOF
+int main() {
+    /* Non-standard: Assigns first element of array to scalar int */
+    int x = (int[]){100, 200, 300};
+    return x;
+}
+EOF
+
+# Test: Array compound literal in arithmetic expression
+try_ 150 << EOF
+int main() {
+    int a = 50;
+    /* Non-standard: Uses first element (100) in addition */
+    int b = a + (int[]){100, 200};
+    return b;
+}
+EOF
+
+# Test: Mixed scalar and array compound literals
+try_ 35 << EOF
+int main() {
+    /* Scalar compound literals work normally */
+    /* Array compound literal contributes its first element (5) */
+    return (int){10} + (int){20} + (int[]){5, 15, 25};
+}
+EOF
+
+# Test: Return statement with array compound literal
+try_ 42 << EOF
+int main() {
+    /* Non-standard: Returns first element of array */
+    return (int[]){42, 84, 126};
+}
+EOF
+
+# Test: Multiple array compound literals in expression
+try_ 30 << EOF
+int main() {
+    /* Both arrays contribute their first elements: 10 + 20 = 30 */
+    int result = (int[]){10, 30, 50} + (int[]){20, 40, 60};
+    return result;
+}
+EOF
+
+# Test: Array compound literal with single element
+try_ 99 << EOF
+int main() {
+    int val = (int[]){99};
+    return val;
+}
+EOF
+
+# Test: Complex expression with compound literals
+try_ 77 << EOF
+int main() {
+    int a = 7;
+    /* (7 * 10) + (100 / 10) - 3 = 70 + 10 - 3 = 77 */
+    int b = (a * (int){10}) + ((int[]){100, 200} / 10) - (int[]){3};
+    return b;
+}
+EOF
+
+# Test: Compound literal in conditional expression
+try_ 25 << EOF
+int main() {
+    int flag = 1;
+    /* Ternary with compound literals */
+    int result = flag ? (int[]){25, 50} : (int){15};
+    return result;
+}
+EOF
+
+# Test: Nested compound literals in function calls
+try_ 15 << EOF
+int add(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    /* Function arguments with compound literals */
+    return add((int){5}, (int[]){10, 20, 30});
+}
+EOF
+
+# Test: Array compound literal with variable initialization
+try_ 60 << EOF
+int main() {
+    int x = (int[]){10, 20, 30};  /* x = 10 */
+    int y = (int[]){20, 40};      /* y = 20 */
+    int z = (int[]){30};           /* z = 30 */
+    return x + y + z;
+}
+EOF
+
+# Test: Compound assignment with array compound literal
+try_ 125 << EOF
+int main() {
+    int sum = 25;
+    sum += (int[]){100, 200};  /* sum += 100 */
+    return sum;
+}
+EOF
+
+# Test: Array compound literal in loop
+try_ 55 << EOF
+int main() {
+    int sum = 0;
+    for (int i = 0; i < 5; i++) {
+        /* Each iteration adds 10 (first element) to sum */
+        sum += (int[]){10, 20, 30};
+    }
+    return sum + (int[]){5};  /* 50 + 5 = 55 */
+}
+EOF
+
+# Test: Scalar compound literals (standard C99)
+try_ 42 << EOF
+int main() {
+    /* Standard scalar compound literals */
+    int a = (int){42};
+    return a;
+}
+EOF
+
+# Test: Char compound literals
+try_ 65 << EOF
+int main() {
+    char c = (char){'A'};  /* 'A' = 65 */
+    return c;
+}
+EOF
+
+# Test: Empty array compound literal (edge case)
+try_ 0 << EOF
+int main() {
+    /* Empty compound literal defaults to 0 */
+    int x = (int[]){};
+    return x;
+}
+EOF
+
 # variable with octal literals
 items 10 "int var; var = 012; return var;"
 items 100 "int var; var = 10 * 012; return var;"
