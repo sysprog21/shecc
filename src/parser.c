@@ -30,7 +30,7 @@ int continue_pos_idx = 0;
 var_t *operand_stack[MAX_OPERAND_STACK_SIZE];
 int operand_stack_idx = 0;
 
-/* Forward declarations for helper functions */
+/* Forward declarations */
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
 void perform_side_effect(block_t *parent, basic_block_t *bb);
 void read_inner_var_decl(var_t *vd, int anon, int is_param);
@@ -1465,11 +1465,182 @@ void read_lvalue(lvalue_t *lvalue,
 /* Maintain a stack of expression values and operators, depending on next
  * operators' priority. Either apply it or operator on stack first.
  */
+void handle_address_of_operator(block_t *parent, basic_block_t **bb)
+{
+    char token[MAX_VAR_LEN];
+    lvalue_t lvalue;
+    var_t *vd, *rs1;
+
+    lex_peek(T_identifier, token);
+    var_t *var = find_var(token, parent);
+    read_lvalue(&lvalue, var, parent, bb, false, OP_generic);
+
+    if (!lvalue.is_reference) {
+        rs1 = opstack_pop();
+        vd = require_ref_var(parent, lvalue.type, lvalue.is_ptr);
+        gen_name_to(vd->var_name);
+        opstack_push(vd);
+        add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
+    }
+}
+
+void handle_single_dereference(block_t *parent, basic_block_t **bb)
+{
+    var_t *vd, *rs1;
+    int sz;
+
+    if (lex_peek(T_open_bracket, NULL)) {
+        /* Handle general expression dereference: *(expr) */
+        lex_expect(T_open_bracket);
+        read_expr(parent, bb);
+        lex_expect(T_close_bracket);
+
+        rs1 = opstack_pop();
+        /* For pointer dereference, we need to determine the target type and
+         * size. Since we do not have full type tracking in expressions, use
+         * defaults
+         */
+        type_t *deref_type = rs1->type ? rs1->type : TY_int;
+        int deref_ptr = rs1->is_ptr > 0 ? rs1->is_ptr - 1 : 0;
+
+        vd = require_deref_var(parent, deref_type, deref_ptr);
+        if (deref_ptr > 0)
+            sz = PTR_SIZE;
+        else
+            sz = deref_type->size;
+        gen_name_to(vd->var_name);
+        opstack_push(vd);
+        add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+    } else {
+        /* Handle simple identifier dereference: *var */
+        char token[MAX_VAR_LEN];
+        lvalue_t lvalue;
+
+        lex_peek(T_identifier, token);
+        var_t *var = find_var(token, parent);
+        read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
+
+        rs1 = opstack_pop();
+        vd = require_deref_var(parent, var->type, var->is_ptr);
+        if (lvalue.is_ptr > 1)
+            sz = PTR_SIZE;
+        else
+            sz = lvalue.type->size;
+        gen_name_to(vd->var_name);
+        opstack_push(vd);
+        add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+    }
+}
+
+void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
+{
+    var_t *vd, *rs1;
+    int sz;
+
+    /* Handle consecutive asterisks for multiple dereference: **pp, ***ppp,
+     * ***(expr) */
+    int deref_count = 1; /* We already consumed one asterisk */
+    while (lex_accept(T_asterisk))
+        deref_count++;
+
+    /* Check if we have a parenthesized expression or simple identifier */
+    if (lex_peek(T_open_bracket, NULL)) {
+        /* Handle ***(expr) case */
+        lex_expect(T_open_bracket);
+        read_expr(parent, bb);
+        lex_expect(T_close_bracket);
+
+        /* Apply dereferences one by one */
+        for (int i = 0; i < deref_count; i++) {
+            rs1 = opstack_pop();
+            /* For expression dereference, use default type info */
+            type_t *deref_type = rs1->type ? rs1->type : TY_int;
+            int deref_ptr = rs1->is_ptr > 0 ? rs1->is_ptr - 1 : 0;
+
+            vd = require_deref_var(parent, deref_type, deref_ptr);
+            if (deref_ptr > 0)
+                sz = PTR_SIZE;
+            else
+                sz = deref_type->size;
+            gen_name_to(vd->var_name);
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+        }
+    } else {
+        /* Handle **pp, ***ppp case with simple identifier */
+        char token[MAX_VAR_LEN];
+        lvalue_t lvalue;
+
+        lex_peek(T_identifier, token);
+        var_t *var = find_var(token, parent);
+        read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
+
+        /* Apply dereferences one by one */
+        for (int i = 0; i < deref_count; i++) {
+            rs1 = opstack_pop();
+            vd = require_deref_var(
+                parent, var->type,
+                lvalue.is_ptr > i ? lvalue.is_ptr - i - 1 : 0);
+            if (lvalue.is_ptr > i + 1)
+                sz = PTR_SIZE;
+            else
+                sz = lvalue.type->size;
+            gen_name_to(vd->var_name);
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+        }
+    }
+}
+
+void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
+{
+    char token[MAX_TYPE_LEN];
+    int ptr_cnt = 0;
+    type_t *type = NULL;
+    var_t *vd;
+
+    lex_expect(T_open_bracket);
+
+    /* Check if this is sizeof(type) or sizeof(expression) */
+    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+    if (find_type_flag == 1 && lex_accept(T_union))
+        find_type_flag = 2;
+
+    if (lex_peek(T_identifier, token)) {
+        /* Try to parse as a type first */
+        type = find_type(token, find_type_flag);
+        if (type) {
+            /* sizeof(type) */
+            lex_expect(T_identifier);
+            while (lex_accept(T_asterisk))
+                ptr_cnt++;
+        }
+    }
+
+    if (!type) {
+        /* sizeof(expression) - parse the expression and get its type */
+        read_expr(parent, bb);
+        read_ternary_operation(parent, bb);
+        var_t *expr_var = opstack_pop();
+        type = expr_var->type;
+        ptr_cnt = expr_var->is_ptr;
+    }
+
+    if (!type)
+        error("Unable to determine type in sizeof");
+
+    vd = require_var(parent);
+    vd->init_val = ptr_cnt ? PTR_SIZE : type->size;
+    gen_name_to(vd->var_name);
+    opstack_push(vd);
+    lex_expect(T_close_bracket);
+    add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+}
+
 void read_expr_operand(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1;
     bool is_neg = false;
-    int sz;
 
     if (lex_accept(T_minus)) {
         is_neg = true;
@@ -1504,118 +1675,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         opstack_push(vd);
         add_insn(parent, *bb, OP_bit_not, vd, rs1, NULL, 0, NULL);
     } else if (lex_accept(T_ampersand)) {
-        char token[MAX_VAR_LEN];
-        lvalue_t lvalue;
-
-        lex_peek(T_identifier, token);
-        var_t *var = find_var(token, parent);
-        read_lvalue(&lvalue, var, parent, bb, false, OP_generic);
-
-        if (!lvalue.is_reference) {
-            rs1 = opstack_pop();
-            vd = require_ref_var(parent, lvalue.type, lvalue.is_ptr);
-            gen_name_to(vd->var_name);
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
-        }
+        handle_address_of_operator(parent, bb);
     } else if (lex_accept(T_asterisk)) {
         /* dereference */
-        if (lex_peek(T_open_bracket, NULL)) {
-            /* Handle general expression dereference: *(expr) */
-            lex_expect(T_open_bracket);
-            read_expr(parent, bb);
-            lex_expect(T_close_bracket);
-
-            rs1 = opstack_pop();
-            /* For pointer dereference, we need to determine the target type and
-             * size. Since we do not have full type tracking in expressions, use
-             * defaults
-             */
-            type_t *deref_type = rs1->type ? rs1->type : TY_int;
-            int deref_ptr = rs1->is_ptr > 0 ? rs1->is_ptr - 1 : 0;
-
-            vd = require_deref_var(parent, deref_type, deref_ptr);
-            if (deref_ptr > 0)
-                sz = PTR_SIZE;
-            else
-                sz = deref_type->size;
-            gen_name_to(vd->var_name);
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
-        } else if (lex_peek(T_asterisk, NULL)) {
-            /* Handle consecutive asterisks for multiple dereference: **pp,
-             * ***ppp, ***(expr)
-             */
-            int deref_count = 1; /* We already consumed one asterisk */
-            while (lex_accept(T_asterisk))
-                deref_count++;
-
-            /* Check if we have a parenthesized expression or simple identifier
-             */
-            if (lex_peek(T_open_bracket, NULL)) {
-                /* Handle ***(expr) case */
-                lex_expect(T_open_bracket);
-                read_expr(parent, bb);
-                lex_expect(T_close_bracket);
-
-                /* Apply dereferences one by one */
-                for (int i = 0; i < deref_count; i++) {
-                    rs1 = opstack_pop();
-                    /* For expression dereference, use default type info */
-                    type_t *deref_type = rs1->type ? rs1->type : TY_int;
-                    int deref_ptr = rs1->is_ptr > 0 ? rs1->is_ptr - 1 : 0;
-
-                    vd = require_deref_var(parent, deref_type, deref_ptr);
-                    if (deref_ptr > 0)
-                        sz = PTR_SIZE;
-                    else
-                        sz = deref_type->size;
-                    gen_name_to(vd->var_name);
-                    opstack_push(vd);
-                    add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
-                }
-            } else {
-                /* Handle **pp, ***ppp case with simple identifier */
-                char token[MAX_VAR_LEN];
-                lvalue_t lvalue;
-
-                lex_peek(T_identifier, token);
-                var_t *var = find_var(token, parent);
-                read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
-
-                /* Apply dereferences one by one */
-                for (int i = 0; i < deref_count; i++) {
-                    rs1 = opstack_pop();
-                    vd = require_deref_var(
-                        parent, var->type,
-                        lvalue.is_ptr > i ? lvalue.is_ptr - i - 1 : 0);
-                    if (lvalue.is_ptr > i + 1)
-                        sz = PTR_SIZE;
-                    else
-                        sz = lvalue.type->size;
-                    gen_name_to(vd->var_name);
-                    opstack_push(vd);
-                    add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
-                }
-            }
+        if (lex_peek(T_asterisk, NULL)) {
+            handle_multiple_dereference(parent, bb);
         } else {
-            /* Handle simple identifier dereference: *var */
-            char token[MAX_VAR_LEN];
-            lvalue_t lvalue;
-
-            lex_peek(T_identifier, token);
-            var_t *var = find_var(token, parent);
-            read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
-
-            rs1 = opstack_pop();
-            vd = require_deref_var(parent, var->type, var->is_ptr);
-            if (lvalue.is_ptr > 1)
-                sz = PTR_SIZE;
-            else
-                sz = lvalue.type->size;
-            gen_name_to(vd->var_name);
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+            handle_single_dereference(parent, bb);
         }
     } else if (lex_accept(T_open_bracket)) {
         /* Check if this is a cast, compound literal, or parenthesized
@@ -1897,46 +1963,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             lex_expect(T_close_bracket);
         }
     } else if (lex_accept(T_sizeof)) {
-        char token[MAX_TYPE_LEN];
-        int ptr_cnt = 0;
-        type_t *type = NULL;
-
-        lex_expect(T_open_bracket);
-
-        /* Check if this is sizeof(type) or sizeof(expression) */
-        int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-        if (find_type_flag == 1 && lex_accept(T_union))
-            find_type_flag = 2;
-
-        if (lex_peek(T_identifier, token)) {
-            /* Try to parse as a type first */
-            type = find_type(token, find_type_flag);
-            if (type) {
-                /* sizeof(type) */
-                lex_expect(T_identifier);
-                while (lex_accept(T_asterisk))
-                    ptr_cnt++;
-            }
-        }
-
-        if (!type) {
-            /* sizeof(expression) - parse the expression and get its type */
-            read_expr(parent, bb);
-            read_ternary_operation(parent, bb);
-            var_t *expr_var = opstack_pop();
-            type = expr_var->type;
-            ptr_cnt = expr_var->is_ptr;
-        }
-
-        if (!type)
-            error("Unable to determine type in sizeof");
-
-        vd = require_var(parent);
-        vd->init_val = ptr_cnt ? PTR_SIZE : type->size;
-        gen_name_to(vd->var_name);
-        opstack_push(vd);
-        lex_expect(T_close_bracket);
-        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        handle_sizeof_operator(parent, bb);
     } else {
         /* function call, constant or variable - read token and determine */
         opcode_t prefix_op = OP_generic;
@@ -4200,6 +4227,52 @@ void read_global_decl(block_t *block)
     error("Syntax error in global declaration");
 }
 
+void consume_global_compound_literal(void)
+{
+    lex_expect(T_open_curly);
+
+    if (!lex_peek(T_close_curly, NULL)) {
+        for (;;) {
+            /* Just consume constant values for now */
+            if (lex_peek(T_numeric, NULL)) {
+                lex_accept(T_numeric);
+            } else if (lex_peek(T_minus, NULL)) {
+                lex_accept(T_minus);
+                lex_accept(T_numeric);
+            } else if (lex_peek(T_string, NULL)) {
+                lex_accept(T_string);
+            } else if (lex_peek(T_char, NULL)) {
+                lex_accept(T_char);
+            } else {
+                error("Global struct initialization requires constant values");
+            }
+
+            if (!lex_accept(T_comma))
+                break;
+            if (lex_peek(T_close_curly, NULL))
+                break;
+        }
+    }
+    lex_expect(T_close_curly);
+}
+
+void initialize_struct_field(var_t *nv, var_t *v, int offset)
+{
+    nv->type = v->type;
+    nv->var_name[0] = '\0';
+    nv->is_ptr = 0;
+    nv->is_func = false;
+    nv->is_global = false;
+    nv->array_size = 0;
+    nv->offset = offset;
+    nv->init_val = 0;
+    nv->liveness = 0;
+    nv->in_loop = 0;
+    nv->base = NULL;
+    nv->subscript = 0;
+    nv->subscripts_idx = 0;
+}
+
 void read_global_statement(void)
 {
     char token[MAX_ID_LEN];
@@ -4235,35 +4308,7 @@ void read_global_statement(void)
                      * initialization would require runtime code which globals
                      * don't support
                      */
-                    lex_expect(T_open_curly);
-                    int field_idx = 0;
-
-                    if (!lex_peek(T_close_curly, NULL)) {
-                        for (;;) {
-                            /* Just consume constant values for now */
-                            if (lex_peek(T_numeric, NULL)) {
-                                lex_accept(T_numeric);
-                            } else if (lex_peek(T_minus, NULL)) {
-                                lex_accept(T_minus);
-                                lex_accept(T_numeric);
-                            } else if (lex_peek(T_string, NULL)) {
-                                lex_accept(T_string);
-                            } else if (lex_peek(T_char, NULL)) {
-                                lex_accept(T_char);
-                            } else {
-                                error(
-                                    "Global struct initialization requires "
-                                    "constant values");
-                            }
-
-                            field_idx++;
-                            if (!lex_accept(T_comma))
-                                break;
-                            if (lex_peek(T_close_curly, NULL))
-                                break;
-                        }
-                    }
-                    lex_expect(T_close_curly);
+                    consume_global_compound_literal();
                 } else {
                     read_global_assignment(var->var_name);
                 }
@@ -4284,35 +4329,7 @@ void read_global_statement(void)
                         /* Global struct compound literal support for
                          * continuation Currently we just consume the syntax
                          */
-                        lex_expect(T_open_curly);
-                        int field_idx = 0;
-
-                        if (!lex_peek(T_close_curly, NULL)) {
-                            for (;;) {
-                                /* Just consume constant values for now */
-                                if (lex_peek(T_numeric, NULL)) {
-                                    lex_accept(T_numeric);
-                                } else if (lex_peek(T_minus, NULL)) {
-                                    lex_accept(T_minus);
-                                    lex_accept(T_numeric);
-                                } else if (lex_peek(T_string, NULL)) {
-                                    lex_accept(T_string);
-                                } else if (lex_peek(T_char, NULL)) {
-                                    lex_accept(T_char);
-                                } else {
-                                    error(
-                                        "Global struct initialization requires "
-                                        "constant values");
-                                }
-
-                                field_idx++;
-                                if (!lex_accept(T_comma))
-                                    break;
-                                if (lex_peek(T_close_curly, NULL))
-                                    break;
-                            }
-                        }
-                        lex_expect(T_close_curly);
+                        consume_global_compound_literal();
                     } else {
                         read_global_assignment(nv->var_name);
                     }
@@ -4344,19 +4361,7 @@ void read_global_statement(void)
                     error("Too many struct fields");
 
                 var_t *nv = &type->fields[i++];
-                nv->type = v->type;
-                nv->var_name[0] = '\0';
-                nv->is_ptr = 0;
-                nv->is_func = false;
-                nv->is_global = false;
-                nv->array_size = 0;
-                nv->offset = 0;
-                nv->init_val = 0;
-                nv->liveness = 0;
-                nv->in_loop = 0;
-                nv->base = NULL;
-                nv->subscript = 0;
-                nv->subscripts_idx = 0;
+                initialize_struct_field(nv, v, 0);
                 read_inner_var_decl(nv, 0, 1);
                 nv->offset = size;
                 size += size_var(nv);
@@ -4396,19 +4401,8 @@ void read_global_statement(void)
                     error("Too many union fields");
 
                 var_t *nv = &type->fields[i++];
-                nv->type = v->type;
-                nv->var_name[0] = '\0';
-                nv->is_ptr = 0;
-                nv->is_func = false;
-                nv->is_global = false;
-                nv->array_size = 0;
-                nv->offset = 0; /* All union fields start at offset 0 */
-                nv->init_val = 0;
-                nv->liveness = 0;
-                nv->in_loop = 0;
-                nv->base = NULL;
-                nv->subscript = 0;
-                nv->subscripts_idx = 0;
+                /* All union fields start at offset 0 */
+                initialize_struct_field(nv, v, 0);
                 read_inner_var_decl(nv, 0, 1);
                 field_size = size_var(nv);
                 if (field_size > max_size)
@@ -4475,19 +4469,7 @@ void read_global_statement(void)
                             error("Too many struct fields");
 
                         var_t *nv = &type->fields[i++];
-                        nv->type = v->type;
-                        nv->var_name[0] = '\0';
-                        nv->is_ptr = 0;
-                        nv->is_func = false;
-                        nv->is_global = false;
-                        nv->array_size = 0;
-                        nv->offset = 0;
-                        nv->init_val = 0;
-                        nv->liveness = 0;
-                        nv->in_loop = 0;
-                        nv->base = NULL;
-                        nv->subscript = 0;
-                        nv->subscripts_idx = 0;
+                        initialize_struct_field(nv, v, 0);
                         read_inner_var_decl(nv, 0, 1);
                         nv->offset = size;
                         size += size_var(nv);
@@ -4551,19 +4533,8 @@ void read_global_statement(void)
                             error("Too many union fields");
 
                         var_t *nv = &type->fields[i++];
-                        nv->type = v->type;
-                        nv->var_name[0] = '\0';
-                        nv->is_ptr = 0;
-                        nv->is_func = false;
-                        nv->is_global = false;
-                        nv->array_size = 0;
-                        nv->offset = 0; /* All union fields start at offset 0 */
-                        nv->init_val = 0;
-                        nv->liveness = 0;
-                        nv->in_loop = 0;
-                        nv->base = NULL;
-                        nv->subscript = 0;
-                        nv->subscripts_idx = 0;
+                        /* All union fields start at offset 0 */
+                        initialize_struct_field(nv, v, 0);
                         read_inner_var_decl(nv, 0, 1);
                         field_size = size_var(nv);
                         if (field_size > max_size)
