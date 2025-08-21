@@ -331,9 +331,6 @@ bb_traversal_args_t *arena_alloc_traversal_args(void)
     return arena_calloc(GENERAL_ARENA, 1, sizeof(bb_traversal_args_t));
 }
 
-/* Free the given arena and all its blocks.
- * @arena: The arena to free. Must not be NULL.
- */
 void arena_free(arena_t *arena)
 {
     arena_block_t *block = arena->head, *next;
@@ -1145,6 +1142,98 @@ void global_init(void)
 
 /* Forward declaration for lexer cleanup */
 void lexer_cleanup(void);
+
+/* Free empty trailing blocks from an arena safely.
+ * This only frees blocks that come after the last used block,
+ * ensuring no pointers are invalidated.
+ *
+ * @arena: The arena to compact.
+ * Return: Bytes freed.
+ */
+int arena_free_trailing_blocks(arena_t *arena)
+{
+    if (!arena || !arena->head)
+        return 0;
+
+    /* Find the last block with actual allocations */
+    arena_block_t *last_used = NULL;
+    arena_block_t *block;
+
+    for (block = arena->head; block; block = block->next) {
+        if (block->offset > 0)
+            last_used = block;
+    }
+
+    /* If no blocks are used, keep just the head */
+    if (!last_used)
+        last_used = arena->head;
+
+    /* Free all blocks after last_used */
+    int freed = 0;
+    if (last_used->next) {
+        block = last_used->next;
+        last_used->next = NULL;
+
+        while (block) {
+            arena_block_t *next = block->next;
+            freed += block->capacity;
+            arena->total_bytes -= block->capacity;
+            arena_block_free(block);
+            block = next;
+        }
+    }
+
+    return freed;
+}
+
+/* Compact all arenas to reduce memory usage after compilation phases.
+ * This safely frees only trailing empty blocks without invalidating pointers.
+ *
+ * Return: Total bytes freed across all arenas.
+ */
+int compact_all_arenas(void)
+{
+    int total_saved = 0;
+
+    /* Free trailing blocks from each arena */
+    total_saved += arena_free_trailing_blocks(BLOCK_ARENA);
+    total_saved += arena_free_trailing_blocks(INSN_ARENA);
+    total_saved += arena_free_trailing_blocks(BB_ARENA);
+    total_saved += arena_free_trailing_blocks(HASHMAP_ARENA);
+    total_saved += arena_free_trailing_blocks(GENERAL_ARENA);
+
+    return total_saved;
+}
+
+/* Compact specific arenas based on compilation phase.
+ * Different phases have different memory usage patterns.
+ *
+ * @phase_mask: Bitmask using COMPACT_ARENA_* defines
+ *              to indicate which arenas to compact.
+ *
+ * Return: Total bytes freed.
+ */
+int compact_arenas_selective(int phase_mask)
+{
+    int total_saved = 0;
+
+    if (phase_mask & COMPACT_ARENA_BLOCK)
+        total_saved += arena_free_trailing_blocks(BLOCK_ARENA);
+
+    if (phase_mask & COMPACT_ARENA_INSN)
+        total_saved += arena_free_trailing_blocks(INSN_ARENA);
+
+    if (phase_mask & COMPACT_ARENA_BB)
+        total_saved += arena_free_trailing_blocks(BB_ARENA);
+
+    if (phase_mask & COMPACT_ARENA_HASHMAP)
+        total_saved += arena_free_trailing_blocks(HASHMAP_ARENA);
+
+    if (phase_mask & COMPACT_ARENA_GENERAL)
+        total_saved += arena_free_trailing_blocks(GENERAL_ARENA);
+
+    return total_saved;
+}
 
 void global_release(void)
 {
