@@ -19,6 +19,11 @@ token_t next_token;
 char next_char;
 bool skip_newline = true;
 
+/* Token memory management */
+token_pool_t *TOKEN_POOL;
+token_buffer_t *TOKEN_BUFFER;
+source_location_t current_location; /* Will be initialized at runtime */
+
 bool preproc_match;
 
 /* Point to the first character after where the macro has been called. It is
@@ -1120,6 +1125,13 @@ void global_init(void)
     SOURCE = strbuf_create(MAX_SOURCE);
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
+
+    /* Initialize token management globals */
+    current_location.line = 1;
+    current_location.column = 1;
+    current_location.filename = NULL;
+    TOKEN_POOL = NULL;
+    TOKEN_BUFFER = NULL;
     ALIASES_MAP = hashmap_create(MAX_ALIASES);
     CONSTANTS_MAP = hashmap_create(MAX_CONSTANTS);
 
@@ -1195,8 +1207,8 @@ void error(char *msg)
 
     strcpy(diagnostic + i, "^ Error occurs here");
 
-    /* TODO: figure out the corresponding C source file path and report line
-     * number.
+    /* TODO: Enhanced error reporting with location tracking will be added
+     * once self-hosting is stable with new token management
      */
     printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg,
            SOURCE->size, diagnostic);
