@@ -2266,10 +2266,96 @@ void read_expr(block_t *parent, basic_block_t **bb)
         opcode_t top_op = oper_stack[--oper_stack_idx];
         rs2 = opstack_pop();
         rs1 = opstack_pop();
-        vd = require_var(parent);
-        gen_name_to(vd->var_name);
-        opstack_push(vd);
-        add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+
+        /* Constant folding for binary operations */
+        if (rs1 && rs2 && rs1->init_val && !rs1->is_ptr && !rs1->is_global &&
+            rs2->init_val && !rs2->is_ptr && !rs2->is_global) {
+            /* Both operands are compile-time constants */
+            int result = 0;
+            bool folded = true;
+
+            switch (top_op) {
+            case OP_add:
+                result = rs1->init_val + rs2->init_val;
+                break;
+            case OP_sub:
+                result = rs1->init_val - rs2->init_val;
+                break;
+            case OP_mul:
+                result = rs1->init_val * rs2->init_val;
+                break;
+            case OP_div:
+                if (rs2->init_val != 0)
+                    result = rs1->init_val / rs2->init_val;
+                else
+                    folded = false; /* Division by zero */
+                break;
+            case OP_mod:
+                if (rs2->init_val != 0)
+                    result = rs1->init_val % rs2->init_val;
+                else
+                    folded = false; /* Modulo by zero */
+                break;
+            case OP_bit_and:
+                result = rs1->init_val & rs2->init_val;
+                break;
+            case OP_bit_or:
+                result = rs1->init_val | rs2->init_val;
+                break;
+            case OP_bit_xor:
+                result = rs1->init_val ^ rs2->init_val;
+                break;
+            case OP_lshift:
+                result = rs1->init_val << rs2->init_val;
+                break;
+            case OP_rshift:
+                result = rs1->init_val >> rs2->init_val;
+                break;
+            case OP_eq:
+                result = rs1->init_val == rs2->init_val;
+                break;
+            case OP_neq:
+                result = rs1->init_val != rs2->init_val;
+                break;
+            case OP_lt:
+                result = rs1->init_val < rs2->init_val;
+                break;
+            case OP_leq:
+                result = rs1->init_val <= rs2->init_val;
+                break;
+            case OP_gt:
+                result = rs1->init_val > rs2->init_val;
+                break;
+            case OP_geq:
+                result = rs1->init_val >= rs2->init_val;
+                break;
+            default:
+                folded = false;
+                break;
+            }
+
+            if (folded) {
+                /* Create constant result */
+                vd = require_var(parent);
+                gen_name_to(vd->var_name);
+                vd->init_val = result;
+                opstack_push(vd);
+                add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
+                         NULL);
+            } else {
+                /* Normal operation - folding failed or not supported */
+                vd = require_var(parent);
+                gen_name_to(vd->var_name);
+                opstack_push(vd);
+                add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+            }
+        } else {
+            /* Normal operation */
+            vd = require_var(parent);
+            gen_name_to(vd->var_name);
+            opstack_push(vd);
+            add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+        }
     }
     while (has_prev_log_op) {
         finalize_logical(
@@ -3038,16 +3124,16 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
         res = op1 != op2;
         break;
     case OP_lt:
-        res = op1 < op2 ? 1 : 0;
+        res = op1 < op2;
         break;
     case OP_gt:
-        res = op1 > op2 ? 1 : 0;
+        res = op1 > op2;
         break;
     case OP_leq:
-        res = op1 <= op2 ? 1 : 0;
+        res = op1 <= op2;
         break;
     case OP_geq:
-        res = op1 >= op2 ? 1 : 0;
+        res = op1 >= op2;
         break;
     default:
         error("The requested operation is not supported.");
