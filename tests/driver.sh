@@ -677,7 +677,8 @@ try_compile_error << EOF
 int main(void, int i) {}
 EOF
 
-# Unreachable declaration should not cause prog seg-falut (prog should leave normally with exit code 0)
+# Unreachable declaration should not cause prog segmentation fault
+# (prog should leave normally with exit code 0)
 try_ 0 << EOF
 int main()
 {
