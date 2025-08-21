@@ -21,11 +21,15 @@ void elf_write_str(strbuf_t *elf_array, char *vals)
      * If necessary, use elf_write_byte() to append the null character
      * after calling elf_write_str().
      */
+    if (!elf_array || !vals)
+        return;
     strbuf_puts(elf_array, vals);
 }
 
 void elf_write_byte(strbuf_t *elf_array, int val)
 {
+    if (!elf_array)
+        return;
     strbuf_putc(elf_array, val);
 }
 
@@ -36,12 +40,16 @@ char e_extract_byte(int v, int b)
 
 void elf_write_int(strbuf_t *elf_array, int val)
 {
+    if (!elf_array)
+        return;
     for (int i = 0; i < 4; i++)
         strbuf_putc(elf_array, e_extract_byte(val, i));
 }
 
 void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
 {
+    if (!elf_array || !blk || sz <= 0)
+        return;
     char *ptr = blk;
     for (int i = 0; i < sz; i++)
         strbuf_putc(elf_array, ptr[i]);
@@ -49,6 +57,12 @@ void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
 
 void elf_generate_header(void)
 {
+    /* Check for null pointers to prevent crashes */
+    if (!elf_code || !elf_data || !elf_symtab || !elf_strtab || !elf_header) {
+        error("ELF buffers not initialized");
+        return;
+    }
+
     elf32_hdr_t hdr;
     /*
      * The following table explains the meaning of each field in the
@@ -175,6 +189,12 @@ void elf_generate_header(void)
 
 void elf_generate_sections(void)
 {
+    /* Check for null pointers to prevent crashes */
+    if (!elf_symtab || !elf_strtab || !elf_section) {
+        error("ELF section buffers not initialized");
+        return;
+    }
+
     /* symtab section */
     for (int b = 0; b < elf_symtab->size; b++)
         elf_write_byte(elf_section, elf_symtab->elements[b]);
@@ -312,6 +332,12 @@ void elf_generate_sections(void)
 
 void elf_align(void)
 {
+    /* Check for null pointers to prevent crashes */
+    if (!elf_data || !elf_symtab || !elf_strtab) {
+        error("ELF buffers not initialized for alignment");
+        return;
+    }
+
     while (elf_data->size & 3)
         elf_write_byte(elf_data, 0);
 
@@ -324,6 +350,12 @@ void elf_align(void)
 
 void elf_add_symbol(char *symbol, int pc)
 {
+    /* Check for null pointers to prevent crashes */
+    if (!symbol || !elf_symtab || !elf_strtab) {
+        error("Invalid parameters for elf_add_symbol");
+        return;
+    }
+
     elf_write_int(elf_symtab, elf_strtab->size);
     elf_write_int(elf_symtab, pc);
     elf_write_int(elf_symtab, 0);
@@ -344,6 +376,11 @@ void elf_generate(char *outfile)
         outfile = "a.out";
 
     FILE *fp = fopen(outfile, "wb");
+    if (!fp) {
+        error("Unable to open output file for writing");
+        return;
+    }
+
     for (int i = 0; i < elf_header->size; i++)
         fputc(elf_header->elements[i], fp);
     for (int i = 0; i < elf_code->size; i++)

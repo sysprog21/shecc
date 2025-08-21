@@ -253,9 +253,18 @@ void reg_alloc(void)
         switch (global_insn->opcode) {
         case OP_allocat:
             if (global_insn->rd->array_size) {
+                /* Original scheme: pointer slot + backing region. Cache the
+                 * base offset of the backing region into init_val so later
+                 * global initializers can address elements without loading
+                 * the pointer.
+                 */
                 global_insn->rd->offset = GLOBAL_FUNC->stack_size;
                 GLOBAL_FUNC->stack_size += PTR_SIZE;
-                src0 = GLOBAL_FUNC->stack_size;
+                src0 = GLOBAL_FUNC->stack_size; /* base of backing region */
+
+                /* Stash base offset for this array variable */
+                global_insn->rd->init_val = src0;
+
                 if (global_insn->rd->is_ptr)
                     GLOBAL_FUNC->stack_size +=
                         align_size(PTR_SIZE * global_insn->rd->array_size);
@@ -302,8 +311,61 @@ void reg_alloc(void)
             REGS[src0].polluted = 0;
             REGS[src0].var = NULL;
             break;
+        case OP_add: {
+            /* Special-case address computation for globals: if rs1 is a global
+             * base and rs2 is a constant, propagate absolute offset to rd so
+             * OP_write can fold into OP_global_store.
+             */
+            if (global_insn->rs1 && global_insn->rs1->is_global &&
+                global_insn->rs2) {
+                int base_off = global_insn->rs1->offset;
+                /* For global arrays, use backing-region base cached in init_val
+                 */
+                if (global_insn->rs1->array_size > 0)
+                    base_off = global_insn->rs1->init_val;
+                global_insn->rd->offset = base_off + global_insn->rs2->init_val;
+                global_insn->rd->is_global = true;
+                break;
+            }
+            /* Fallback: generate an add */
+            int src1;
+            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
+            dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, src0, src1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_add);
+            ir->src0 = src0;
+            ir->src1 = src1;
+            ir->dest = dest;
+            break;
+        }
+        case OP_write: {
+            /* Fold (addr, val) where addr carries GP-relative offset */
+            if (global_insn->rs1 && (global_insn->rs1->is_global)) {
+                int vreg =
+                    prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
+                ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_store);
+                ir->src0 = vreg;
+                /* For array variables used as base, store to the backing
+                 * region's base offset (cached in init_val).
+                 */
+                int base_off = global_insn->rs1->offset;
+                if (global_insn->rs1->array_size > 0)
+                    base_off = global_insn->rs1->init_val;
+                ir->src1 = base_off;
+                break;
+            }
+            /* Fallback generic write */
+            int src1;
+            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_write);
+            ir->src0 = src0;
+            ir->src1 = src1;
+            ir->dest = global_insn->sz;
+            break;
+        }
         default:
-            printf("Unsupported global operation\n");
+            printf("Unsupported global operation: %d\n", global_insn->opcode);
             abort();
         }
     }
