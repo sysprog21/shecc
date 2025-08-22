@@ -2,65 +2,196 @@
 
 set -u
 
+# Configuration and Test Metrics
+
+# Test Configuration
+readonly VERBOSE_MODE="${VERBOSE:-0}"
+readonly SHOW_SUMMARY="${SHOW_SUMMARY:-1}"
+readonly SHOW_PROGRESS="${SHOW_PROGRESS:-1}"
+readonly COLOR_OUTPUT="${COLOR_OUTPUT:-1}"
+
+# Test Counters
+TOTAL_TESTS=0
+PASSED_TESTS=0
+FAILED_TESTS=0
+
+# Category Tracking
+declare -A CATEGORY_TESTS
+declare -A CATEGORY_PASSED
+declare -A CATEGORY_FAILED
+CURRENT_CATEGORY="Initialization"
+
+# Performance Metrics
+TEST_START_TIME=$(date +%s)
+PROGRESS_COUNT=0
+
+# Command Line Arguments
+
 if [ "$#" != 1 ]; then
     echo "Usage: $0 <stage>"
+    echo "  stage: 0 (host compiler), 1 (stage1), or 2 (stage2)"
+    echo ""
+    echo "Environment Variables:"
+    echo "  VERBOSE=1         Enable verbose output"
+    echo "  SHOW_SUMMARY=1    Show category summaries (default)"
+    echo "  SHOW_PROGRESS=1   Show progress dots (default)"
+    echo "  COLOR_OUTPUT=1    Enable colored output (default)"
     exit 1
 fi
 
 case "$1" in
     "0")
-        readonly SHECC="$PWD/out/shecc" ;;
+        readonly SHECC="$PWD/out/shecc"
+        readonly STAGE="Stage 0 (Host Compiler)" ;;
     "1")
-        readonly SHECC="$TARGET_EXEC $PWD/out/shecc-stage1.elf" ;;
+        readonly SHECC="${TARGET_EXEC:-} $PWD/out/shecc-stage1.elf"
+        readonly STAGE="Stage 1 (Cross-compiled)" ;;
     "2")
-        readonly SHECC="$TARGET_EXEC $PWD/out/shecc-stage2.elf" ;;
+        readonly SHECC="${TARGET_EXEC:-} $PWD/out/shecc-stage2.elf"
+        readonly STAGE="Stage 2 (Self-hosted)" ;;
     *)
         echo "$1 is not a valid stage"
         exit 1 ;;
 esac
 
-# try - test shecc with given code
-# Usage:
-# - try exit_code input_code
-# compile "input_code" with shecc and expect the compile program exit with
-# code "exit_code".
-#
-# - try exit_code expected_output input_code
-# compile "input_code" with shecc and expect the compile program output
-# "expected_output" and exit with code "exit_code".
+# Utility Functions
+
+# Color output functions
+function print_color() {
+    if [ "$COLOR_OUTPUT" = "1" ]; then
+        case "$1" in
+            green)  echo -ne "\033[32m$2\033[0m" ;;
+            red)    echo -ne "\033[31m$2\033[0m" ;;
+            yellow) echo -ne "\033[33m$2\033[0m" ;;
+            blue)   echo -ne "\033[34m$2\033[0m" ;;
+            bold)   echo -ne "\033[1m$2\033[0m" ;;
+            *)      echo -n "$2" ;;
+        esac
+    else
+        echo -n "$2"
+    fi
+}
+
+# Begin a new test category
+function begin_category() {
+    local category="$1"
+    local description="${2:-}"
+
+    # Save previous category summary if needed
+    if [ "$CURRENT_CATEGORY" != "Initialization" ] && [ "$SHOW_SUMMARY" = "1" ]; then
+        if [ "${CATEGORY_TESTS[$CURRENT_CATEGORY]:-0}" -gt 0 ]; then
+            local passed="${CATEGORY_PASSED[$CURRENT_CATEGORY]:-0}"
+            local total="${CATEGORY_TESTS[$CURRENT_CATEGORY]}"
+            if [ "$VERBOSE_MODE" = "1" ]; then
+                echo ""
+                echo "  Subtotal: $passed/$total tests passed"
+            fi
+        fi
+    fi
+
+    CURRENT_CATEGORY="$category"
+    CATEGORY_TESTS["$category"]=0
+    CATEGORY_PASSED["$category"]=0
+    CATEGORY_FAILED["$category"]=0
+
+    if [ "$VERBOSE_MODE" = "1" ] || [ "$SHOW_PROGRESS" = "1" ]; then
+        echo ""
+        print_color bold "=== "
+        print_color blue "$category"
+        if [ -n "$description" ]; then
+            echo " - $description"
+        else
+            echo ""
+        fi
+    fi
+}
+
+# Show progress indicator
+function show_progress() {
+    if [ "$SHOW_PROGRESS" = "1" ]; then
+        ((PROGRESS_COUNT++))
+        if [ $((PROGRESS_COUNT % 10)) -eq 0 ]; then
+            echo -n "."
+            if [ $((PROGRESS_COUNT % 50)) -eq 0 ]; then
+                echo ""
+            fi
+        fi
+    fi
+}
+
+# Core test failure reporting function (consolidated)
+function report_test_failure() {
+    local test_type="$1"
+    local tmp_in="$2"
+    local tmp_exe="$3"
+    local expected="$4"
+    local actual="$5"
+    local output="$6"
+    local expected_output="${7:-}"
+
+    ((FAILED_TESTS++))
+    ((CATEGORY_FAILED["$CURRENT_CATEGORY"]++))
+    echo ""
+    print_color red "FAILED $test_type in Category: $CURRENT_CATEGORY"
+    echo
+    echo "Expected exit code: $expected"
+    echo "Actual exit code: $actual"
+    if [ -n "$expected_output" ]; then
+        echo "Expected output: '$expected_output'"
+    fi
+    echo "Actual output: '$output'"
+    echo ""
+    print_color yellow "Complete Test Program Code:"
+    echo
+    echo "=================================================="
+    cat -n "$tmp_in"
+    echo "=================================================="
+    echo ""
+    echo "Compiler command: $SHECC -o $tmp_exe $tmp_in"
+    echo "Test files: input=$tmp_in, executable=$tmp_exe"
+    exit 1
+}
+
+# Main test execution function
 function try() {
     local expected="$1"
+    local expected_output=""
+    local input=""
+
     if [ $# -eq 2 ]; then
-        local input="$2"
+        input="$2"
     elif [ $# -eq 3 ]; then
-        local expected_output="$2"
-        local input="$3"
+        expected_output="$2"
+        input="$3"
     fi
 
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
-    $SHECC -o "$tmp_exe" "$tmp_in"
+    # Suppress compiler warnings by redirecting stderr
+    $SHECC -o "$tmp_exe" "$tmp_in" 2>/dev/null
     chmod +x $tmp_exe
 
     local output=''
-    output=$($TARGET_EXEC "$tmp_exe")
+    output=$(${TARGET_EXEC:-} "$tmp_exe")
     local actual="$?"
 
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+
     if [ "$actual" != "$expected" ]; then
-        echo "$input => $expected expected, but got $actual"
-        echo "input: $tmp_in"
-        echo "executable: $tmp_exe"
-        exit 1
-    elif [ "${expected_output+x}" != "" ] && [ "$output" != "$expected_output" ]; then
-        echo "$input => $expected_output expected, but got $output"
-        echo "input: $tmp_in"
-        echo "executable: $tmp_exe"
-        exit 2
+        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output"
+    elif [ -n "$expected_output" ] && [ "$output" != "$expected_output" ]; then
+        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output"
     else
-        echo "$input"
-        echo "exit code => $actual"
-        echo "output => $output"
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+        if [ "$VERBOSE_MODE" = "1" ]; then
+            echo "$input"
+            echo "exit code => $actual"
+            echo "output => $output"
+        fi
     fi
 }
 
@@ -89,16 +220,29 @@ function try_output() {
 # output an error message.
 function try_compile_error() {
     local input=$(cat)
-
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
-    $SHECC -o "$tmp_exe" "$tmp_in"
+    # Suppress compiler error output and "Aborted" messages completely
+    # Run in a subshell with job control disabled
+    (
+        set +m 2>/dev/null  # Disable job control messages
+        $SHECC -o "$tmp_exe" "$tmp_in" 2>&1
+    ) >/dev/null 2>&1
     local exit_code=$?
 
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+
     if [ 0 == $exit_code ]; then
-        echo "Error: compilation is passed."
-        exit 1
+        report_test_failure "COMPILE ERROR TEST" "$tmp_in" "$tmp_exe" "non-zero" "0" "Compilation succeeded unexpectedly"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+        if [ "$VERBOSE_MODE" = "1" ]; then
+            echo "Compilation error correctly detected"
+        fi
     fi
 }
 
@@ -112,6 +256,32 @@ function expr() {
     local expected="$1"
     local input="$2"
     items "$expected" "exit($input);"
+}
+
+# Batch test runners for common patterns
+function run_expr_tests() {
+    local -n tests_ref=$1
+    for test in "${tests_ref[@]}"; do
+        IFS=' ' read -r expected code <<< "$test"
+        expr "$expected" "$code"
+    done
+}
+
+function run_try_tests() {
+    local -n tests_ref=$1
+    for test in "${tests_ref[@]}"; do
+        local expected=$(echo "$test" | head -n1)
+        local code=$(echo "$test" | tail -n+2)
+        try_ "$expected" <<< "$code"
+    done
+}
+
+function run_items_tests() {
+    local -n tests_ref=$1
+    for test in "${tests_ref[@]}"; do
+        IFS=' ' read -r expected code <<< "$test"
+        items "$expected" "$code"
+    done
 }
 
 # try_large - test shecc with large return values (> 255)
@@ -137,21 +307,65 @@ int main() {
 }
 EOF
 
-    $SHECC -o "$tmp_exe" "$tmp_in"
+    # Suppress compiler warnings by redirecting stderr
+    $SHECC -o "$tmp_exe" "$tmp_in" 2>/dev/null
     chmod +x $tmp_exe
 
-    local output=$($TARGET_EXEC "$tmp_exe")
+    local output=$(${TARGET_EXEC:-} "$tmp_exe")
+    local exit_code=$?
 
-    if [ "$output" != "$expected" ]; then
-        echo "$input => $expected expected, but got $output"
-        echo "input: $tmp_in"
-        echo "executable: $tmp_exe"
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+
+    if [ "$exit_code" != "0" ] || [ "$output" != "$expected" ]; then
+        ((FAILED_TESTS++))
+        ((CATEGORY_FAILED["$CURRENT_CATEGORY"]++))
+        echo ""
+        print_color red "FAILED LARGE VALUE TEST in Category: $CURRENT_CATEGORY"
+        echo "Expected output: $expected"
+        echo "Actual output: $output"
+        echo "Exit code: $exit_code"
+        echo ""
+        print_color yellow "Complete Test Program Code:"
+        echo
+        echo "=================================================="
+        cat -n "$tmp_in"
+        echo "=================================================="
+        echo ""
+        print_color yellow "Original Input Code:"
+        echo
+        echo "--------------------------------------------------"
+        echo "$input"
+        echo "--------------------------------------------------"
+        echo ""
+        echo "Compiler command: $SHECC -o $tmp_exe $tmp_in"
+        echo "Test files: input=$tmp_in, executable=$tmp_exe"
         exit 1
     else
-        echo "Large value test: $expected"
-        echo "output => $output"
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+        if [ "$VERBOSE_MODE" = "1" ]; then
+            echo "Large value test: $expected (output => $output)"
+        fi
     fi
 }
+
+# Test Execution Begins
+
+echo "[[[ shecc Test Suite ]]]"
+echo ""
+echo "Date:     $(date '+%Y-%m-%d %H:%M:%S')"
+echo "Compiler: $SHECC"
+echo "Stage:    $STAGE"
+echo ""
+
+if [ "$SHOW_PROGRESS" = "1" ]; then
+    echo "Running tests..."
+fi
+
+# Category: Basic Literals and Constants
+begin_category "Literals and Constants" "Testing integer, character, and string literals"
 
 # just a number
 expr 0 0
@@ -161,61 +375,76 @@ expr 42 42
 expr 10 012
 expr 65 0101
 
-# arithmetic
-expr 42 "24 + 18"
-expr 30 "58 - 28"
-expr 10 "5 * 2"
-expr 4 "16 >> 2"
+# Category: Arithmetic Operations
+begin_category "Arithmetic Operations" "Testing +, -, *, /, % operators"
 
-expr 20 "8 + 3 * 4"
-expr 54 "(11 - 2) * 6"
-expr 10 "9 / 3 + 7"
-expr 8 "8 / (4 - 3)"
-expr 35 "8 + 3 * 5 + 2 * 6"
+declare -a arithmetic_tests=(
+    "42 24+18"
+    "30 58-28"
+    "10 5*2"
+    "4 16>>2"
+    "20 8+3*4"
+    "54 (11-2)*6"
+    "10 9/3+7"
+    "8 8/(4-3)"
+    "35 8+3*5+2*6"
+    "55 1+2+3+4+5+6+7+8+9+10"
+    "55 ((((((((1+2)+3)+4)+5)+6)+7)+8)+9)+10"
+    "55 1+(2+(3+(4+(5+(6+(7+(8+(9+10))))))))"
+    "210 1+(2+(3+(4+(5+(6+(7+(8+(9+(10+(11+(12+(13+(14+(15+(16+(17+(18+(19+20))))))))))))))))))"
+    "11 1+012"
+    "25 017+012"
+    "2 5%3"
+)
 
-expr 55 "1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10"
-expr 55 "((((((((1 + 2) + 3) + 4) + 5) + 6) + 7) + 8) + 9) + 10"
-expr 55 "1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + 10))))))))"
-expr 210 "1 + (2 + (3 + (4 + (5 + (6 + (7 + (8 + (9 + (10 + (11 + (12 + (13 + (14 + (15 + (16 + (17 + (18 + (19 + 20))))))))))))))))))"
-
-expr 11 "1 + 012"   # oct(012) = dec(10)
-expr 25 "017 + 012" # oct(017) = dec(15), oct(012) = dec(10)
-
-# expr 21 "+1+20"
-# expr 10 "-15+(+35-10)"
-
-expr 2 "5 % 3"
+run_expr_tests arithmetic_tests
 expr 6 "111 % 7"
 
-expr 1 "10 > 5"
-expr 1 "3+3 > 5"
-expr 0 "30 == 20"
-expr 0 "5 >= 10"
-expr 1 "5 >= 5"
-expr 1 "30 != 20"
+# Category: Comparison Operations
+begin_category "Comparison Operations" "Testing relational and equality operators"
 
-# value satisfying re(0[0-7]+) should be parsed as octal
-expr 1 "010 == 8"
-expr 1 "011 < 11"
-expr 0 "021 >= 21"
-expr 1 "(012 - 5) == 5"
-expr 16 "0100 >> 2"
+declare -a comparison_tests=(
+    "1 10>5"
+    "1 3+3>5"
+    "0 30==20"
+    "0 5>=10"
+    "1 5>=5"
+    "1 30!=20"
+    "1 010==8"
+    "1 011<11"
+    "0 021>=21"
+    "1 (012-5)==5"
+    "16 0100>>2"
+    "18 ~0355"
+)
 
-# oct(355) = bin(1110_1101), oct(~355) = bin(0001_0010) = dec(18)
-expr 18 "~0355"
+run_expr_tests comparison_tests
 
-expr 0 "!237"
-expr 18 "~237"
+# Category: Logical Operations
+begin_category "Logical Operations" "Testing logical AND, OR, NOT operators"
 
-expr 0 "0 || 0"
-expr 1 "1 || 0"
-expr 1 "1 || 1"
-expr 0 "0 && 0"
-expr 0 "1 && 0"
-expr 1 "1 && 1"
+declare -a logical_tests=(
+    "0 !237"
+    "18 ~237"
+    "0 0||0"
+    "1 1||0"
+    "1 1||1"
+    "0 0&&0"
+    "0 1&&0"
+    "1 1&&1"
+)
 
-expr 16 "2 << 3"
-expr 32 "256 >> 3"
+run_expr_tests logical_tests
+
+# Category: Bitwise Operations
+begin_category "Bitwise Operations" "Testing bitwise shift, AND, OR, XOR operators"
+
+declare -a bitwise_tests=(
+    "16 2<<3"
+    "32 256>>3"
+)
+
+run_expr_tests bitwise_tests
 try_output 0 "128 59926 -6 -4 -500283"  << EOF
 int main() {
   printf("%d %d %d %d %d", 32768 >> 8, 245458999 >> 12, -11 >> 1, -16 >> 2, -1000565 >> 1);
@@ -223,17 +452,36 @@ int main() {
 }
 EOF
 expr 239 "237 | 106"
-expr 135 "237 ^ 106"
-expr 104 "237 & 106"
+declare -a more_bitwise_tests=(
+    "135 237^106"
+    "104 237&106"
+)
 
-# return statements
-items 1 "return 1;";
-items 42 "return 2*21;";
+run_expr_tests more_bitwise_tests
 
-# variables
-items 10 "int var; var = 10; return var;"
-items 42 "int va; int vb; va = 11; vb = 31; int vc; vc = va + vb; return vc;"
-items 50 "int v; v = 30; v = 50; return v;"
+# Category: Return Statements
+begin_category "Return Statements" "Testing return statement functionality"
+
+declare -a return_tests=(
+    "1 return 1;"
+    "42 return 2*21;"
+)
+
+run_items_tests return_tests
+
+# Category: Variables and Assignments
+begin_category "Variables and Assignments" "Testing variable declarations and assignments"
+
+declare -a variable_tests=(
+    "10 int var; var = 10; return var;"
+    "42 int va; int vb; va = 11; vb = 31; int vc; vc = va + vb; return vc;"
+    "50 int v; v = 30; v = 50; return v;"
+)
+
+run_items_tests variable_tests
+
+# Category: Compound Literals
+begin_category "Compound Literals" "Testing C99 compound literal features"
 
 # Compound literal support - C90/C99 compliant implementation
 # Basic struct compound literals (verified working)
@@ -511,6 +759,9 @@ items 100 "int var; var = 10 * 012; return var;"
 items 32 "int var; var = 0100 / 2; return var;"
 items 65 "int var; var = 010 << 3; var += 1; return var;"
 
+# Category: Conditional Statements
+begin_category "Conditional Statements" "Testing if/else control flow"
+
 # if
 items 5 "if (1) return 5; else return 20;"
 items 10 "if (0) return 5; else if (0) return 20; else return 10;"
@@ -520,11 +771,17 @@ items 27 "int a; a = 15; int b; b = 2; if(a - 15) b = 10; else if (b) return a +
 items 8 "if (1) return 010; else return 11;"
 items 10 "int a; a = 012 - 10; int b; b = 0100 - 64; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
 
+# Category: Compound Statements
+begin_category "Compound Statements" "Testing block scoping and compound statements"
+
 # compound
 items 5 "{ return 5; }"
 items 10 "{ int a; a = 5; { a = 5 + a; } return a; }"
 items 20 "int a; a = 10; if (1) { a = 20; } else { a = 10; } return a;"
 items 30 "int a; a = 10; if (a) { if (a - 10) { a = a + 1; } else { a = a + 20; } a = a - 10; } else { a = a + 5; } return a + 10;"
+
+# Category: Loop Constructs
+begin_category "Loop Constructs" "Testing while, do-while, and for loops"
 
 # loop
 items 55 "int acc; int p; acc = 0; p = 10; while (p) { acc = acc + p; p = p - 1; } return acc;"
@@ -541,6 +798,9 @@ items 10 "for(;;) break; return 10;"
 items 0 "int x; for(x = 10; x > 0; x--); return x;"
 items 30 "int i; int acc; i = 0; acc = 0; do { i = i + 1; if (i - 1 < 5) continue; acc = acc + i; if (i == 9) break; } while (i < 10); return acc;"
 items 26 "int acc; acc = 0; int i; for (i = 0; i < 100; i++) { if (i < 5) continue; if (i == 9) break; acc = acc + i; } return acc;"
+
+# Category: Comments
+begin_category "Comments" "Testing C-style and C++-style comment parsing"
 
 # C-style comments / C++-style comments
 # Start
@@ -574,6 +834,9 @@ try_ 0 << EOF
 int main() { return 0; }
 // This is a test C++-style comments
 EOF
+
+# Category: Functions
+begin_category "Functions" "Testing function definitions, calls, and recursion"
 
 # functions
 try_ 0 << EOF
@@ -727,6 +990,9 @@ int main() {
 }
 EOF
 
+# Category: Pointer Operations
+begin_category "Pointer Operations" "Testing pointer declarations, dereferencing, and arithmetic"
+
 # pointers
 items 3 "int x; int *y; x = 3; y = &x; return y[0];"
 items 5 "int b; int *a; b = 10; a = &b; a[0] = 5; return b;"
@@ -798,6 +1064,9 @@ int main() {
 }
 EOF
 
+# Category: Function Pointers
+begin_category "Function Pointers" "Testing function pointer declarations and calls"
+
 # function pointers
 try_ 18 << EOF
 typedef struct {
@@ -828,6 +1097,9 @@ int main() {
     return c.size;
 }
 EOF
+
+# Category: Arrays
+begin_category "Arrays" "Testing array declarations, indexing, and operations"
 
 # arrays
 try_ 12 << EOF
@@ -896,6 +1168,9 @@ int main() {
 }
 EOF
 
+# Category: Global Variables
+begin_category "Global Variables" "Testing global variable initialization and access"
+
 # global initialization
 try_ 20 << EOF
 int a = 5 * 2;
@@ -906,9 +1181,15 @@ int main()
 }
 EOF
 
+# Category: Ternary Operator
+begin_category "Ternary Operator" "Testing conditional ?: operator"
+
 # conditional operator
 expr 10 "1 ? 10 : 5"
 expr 25 "0 ? 10 : 25"
+
+# Category: Compound Assignment
+begin_category "Compound Assignment" "Testing +=, -=, *=, /=, %=, <<=, >>=, ^= operators"
 
 # compound assignemnt
 items 5 "int a; a = 2; a += 3; return a;"
@@ -920,6 +1201,9 @@ items 4 "int a; a = 2; a <<= 1; return a;"
 items 2 "int a; a = 4; a >>= 1; return a;"
 items 1 "int a; a = 1; a ^= 0; return a;"
 items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; return p[0];"
+
+# Category: Sizeof Operator
+begin_category "Sizeof Operator" "Testing sizeof operator on various types"
 
 # sizeof
 expr 0 "sizeof(void)";
@@ -1003,15 +1287,24 @@ int main() {
 }
 EOF
 
+# Category: Switch Statements
+begin_category "Switch Statements" "Testing switch-case control flow"
+
 # switch-case
 items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } return a;"
 items 10 "int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } return a;"
+
+# Category: Enumerations
+begin_category "Enumerations" "Testing enum declarations and usage"
 
 # enum
 try_ 6 << EOF
 typedef enum { enum1 = 5, enum2 } enum_t;
 int main() { enum_t v = enum2; return v; }
 EOF
+
+# Category: Memory Management
+begin_category "Memory Management" "Testing malloc, free, and dynamic memory allocation"
 
 # malloc and free
 try_ 1 << EOF
@@ -1036,6 +1329,9 @@ int main()
     return (0 == strcmp(ptr, "hello")) == (!strcmp(ptr, "hello"));
 }
 EOF
+
+# Category: Preprocessor Directives
+begin_category "Preprocessor Directives" "Testing #define, #ifdef, #ifndef, #if, #elif, #else, #endif"
 
 # #ifdef...#else...#endif
 try_ 0 << EOF
@@ -1351,6 +1647,9 @@ int main() {
     return '\0';
 }
 EOF
+
+# Category: Function-like Macros
+begin_category "Function-like Macros" "Testing function-like macros and variadic macros"
 
 # function-like macro
 try_ 1 << EOF
@@ -4328,4 +4627,68 @@ int main() {
 }
 EOF
 
-echo OK
+# Test Results Summary
+
+echo ""
+if [ "$SHOW_PROGRESS" = "1" ]; then
+    echo ""  # New line after progress indicators
+fi
+
+TEST_END_TIME=$(date +%s)
+DURATION=$((TEST_END_TIME - TEST_START_TIME))
+
+echo ""
+echo "================================================================"
+echo "                     Final Test Results                        "
+echo "================================================================"
+echo ""
+echo "Execution Time: ${DURATION} seconds"
+echo ""
+echo "Overall Statistics:"
+echo "  Total Tests:    $TOTAL_TESTS"
+print_color green "  Passed:         $PASSED_TESTS"
+if [ "$PASSED_TESTS" -gt 0 ] && [ "$TOTAL_TESTS" -gt 0 ]; then
+    echo " ($(( PASSED_TESTS * 100 / TOTAL_TESTS ))%)"
+else
+    echo ""
+fi
+
+if [ "$FAILED_TESTS" -gt 0 ]; then
+    print_color red "  Failed:         $FAILED_TESTS"
+    echo " ($(( FAILED_TESTS * 100 / TOTAL_TESTS ))%)"
+else
+    echo "  Failed:         0"
+fi
+
+if [ "$SHOW_SUMMARY" = "1" ]; then
+    echo ""
+    echo "Category Breakdown:"
+    echo "  +-----------------------------+-------+-------+-------+"
+    echo "  | Category                    | Total | Pass  | Fail  |"
+    echo "  +-----------------------------+-------+-------+-------+"
+
+    for category in "${!CATEGORY_TESTS[@]}"; do
+        if [ "${CATEGORY_TESTS[$category]}" -gt 0 ]; then
+            printf "  | %-27s | %5d | " "$category" "${CATEGORY_TESTS[$category]}"
+            print_color green "$(printf "%5d" "${CATEGORY_PASSED[$category]}")"
+            printf " | "
+            if [ "${CATEGORY_FAILED[$category]}" -gt 0 ]; then
+                print_color red "$(printf "%5d" "${CATEGORY_FAILED[$category]}")"
+            else
+                printf "%5d" "${CATEGORY_FAILED[$category]}"
+            fi
+            echo " |"
+        fi
+    done | sort
+    echo "  +-----------------------------+-------+-------+-------+"
+fi
+
+echo ""
+if [ "$FAILED_TESTS" -eq 0 ]; then
+    print_color green "+======================================+\n"
+    print_color green "|    ALL TESTS PASSED!                 |\n"
+    print_color green "+======================================+\n"
+else
+    echo ""
+    exit 1
+fi
