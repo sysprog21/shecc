@@ -345,6 +345,7 @@ struct var {
     bool is_func;
     bool is_global;
     int array_size;
+    int array_dim1, array_dim2; /* first/second dimension size for 2D arrays */
     int offset;   /* offset from stack or frame, index 0 is reserved */
     int init_val; /* for global initialization */
     int liveness; /* live range */
