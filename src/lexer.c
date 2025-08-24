@@ -122,6 +122,142 @@ token_t lookup_keyword(char *token)
 }
 
 /* Cleanup function for lexer hashmaps */
+/* Token Memory Management Functions */
+
+/* Initialize token pool for memory reuse */
+void token_pool_init(void)
+{
+    if (TOKEN_POOL)
+        return;
+
+    TOKEN_POOL = arena_alloc(GENERAL_ARENA, sizeof(token_pool_t));
+    if (TOKEN_POOL) {
+        TOKEN_POOL->freelist = NULL;
+        TOKEN_POOL->allocated_count = 0;
+        TOKEN_POOL->reused_count = 0;
+    }
+}
+
+/* Allocate or reuse a token from the pool */
+token_info_t *token_pool_alloc(void)
+{
+    if (!TOKEN_POOL)
+        token_pool_init();
+
+    token_info_t *token;
+
+    if (TOKEN_POOL->freelist) {
+        /* Reuse from freelist */
+        token = TOKEN_POOL->freelist;
+        TOKEN_POOL->freelist = token->next;
+        TOKEN_POOL->reused_count++;
+    } else {
+        /* Allocate new token */
+        token = arena_alloc(GENERAL_ARENA, sizeof(token_info_t));
+        TOKEN_POOL->allocated_count++;
+    }
+
+    /* Clear token data */
+    token->type = T_eof;
+    token->value[0] = '\0';
+    /* Set location fields individually */
+    token->location.line = current_location.line;
+    token->location.column = current_location.column;
+    token->location.filename = current_location.filename;
+    token->next = NULL;
+
+    return token;
+}
+
+/* Return token to freelist for reuse */
+void token_pool_free(token_info_t *token)
+{
+    if (!token || !TOKEN_POOL)
+        return;
+
+    token->next = TOKEN_POOL->freelist;
+    TOKEN_POOL->freelist = token;
+}
+
+/* Initialize token buffer for lookahead */
+void token_buffer_init(void)
+{
+    if (TOKEN_BUFFER)
+        return;
+
+    TOKEN_BUFFER = arena_alloc(GENERAL_ARENA, sizeof(token_buffer_t));
+    TOKEN_BUFFER->head = 0;
+    TOKEN_BUFFER->tail = 0;
+    TOKEN_BUFFER->count = 0;
+
+    for (int i = 0; i < TOKEN_BUFFER_SIZE; i++)
+        TOKEN_BUFFER->tokens[i] = NULL;
+}
+
+/* Add token to buffer */
+void token_buffer_push(token_info_t *token)
+{
+    if (!TOKEN_BUFFER)
+        token_buffer_init();
+
+    if (TOKEN_BUFFER->count >= TOKEN_BUFFER_SIZE) {
+        /* Buffer full, free oldest token */
+        token_info_t *old = TOKEN_BUFFER->tokens[TOKEN_BUFFER->head];
+        token_pool_free(old);
+        TOKEN_BUFFER->head = (TOKEN_BUFFER->head + 1) % TOKEN_BUFFER_SIZE;
+        TOKEN_BUFFER->count--;
+    }
+
+    TOKEN_BUFFER->tokens[TOKEN_BUFFER->tail] = token;
+    TOKEN_BUFFER->tail = (TOKEN_BUFFER->tail + 1) % TOKEN_BUFFER_SIZE;
+    TOKEN_BUFFER->count++;
+}
+
+/* Look ahead N tokens without consuming */
+token_info_t *token_buffer_peek(int offset)
+{
+    if (!TOKEN_BUFFER || offset >= TOKEN_BUFFER->count)
+        return NULL;
+
+    int idx = (TOKEN_BUFFER->head + offset) % TOKEN_BUFFER_SIZE;
+    return TOKEN_BUFFER->tokens[idx];
+}
+
+/* Update source location tracking */
+void update_location(char c)
+{
+    if (c == '\n') {
+        current_location.line++;
+        current_location.column = 1;
+    } else if (c == '\t') {
+        current_location.column += 4; /* Assume 4-space tabs */
+    } else {
+        current_location.column++;
+    }
+}
+
+/* Set current filename for error reporting */
+void set_current_filename(char *filename)
+{
+    current_location.filename = filename;
+    current_location.line = 1;
+    current_location.column = 1;
+}
+
+/* Enhanced error reporting with location */
+void error_with_location(char *msg, source_location_t *loc)
+{
+    if (loc && loc->filename) {
+        printf("%s:%d:%d: error: %s\n", loc->filename, loc->line, loc->column,
+               msg);
+    } else if (loc) {
+        printf("line %d, column %d: error: %s\n", loc->line, loc->column, msg);
+    } else {
+        printf("error: %s\n", msg);
+    }
+    abort();
+}
+
 void lexer_cleanup()
 {
     if (DIRECTIVE_MAP) {
@@ -140,6 +276,11 @@ void lexer_cleanup()
      */
     directive_tokens_storage = NULL;
     keyword_tokens_storage = NULL;
+
+    /* Token pool and buffer are also arena-allocated, no explicit free needed
+     */
+    TOKEN_POOL = NULL;
+    TOKEN_BUFFER = NULL;
 }
 
 bool is_whitespace(char c)
@@ -231,6 +372,7 @@ char read_char(bool is_skip_space)
 {
     SOURCE->size++;
     next_char = SOURCE->elements[SOURCE->size];
+    /* TODO: Re-enable after self-hosting: update_location(next_char); */
     if (is_skip_space)
         skip_whitespace();
     return next_char;
@@ -807,12 +949,63 @@ token_t lex_token_internal(bool aliasing)
     return T_eof;
 }
 
+/* Enhanced lex_token that returns a full token_info structure */
+token_info_t *lex_token_enhanced(bool aliasing)
+{
+    token_info_t *token = token_pool_alloc();
+
+    /* Save location at start of token */
+    int saved_line = current_location.line;
+    int saved_column = current_location.column;
+    char *saved_filename = current_location.filename;
+
+    /* Get the token type using existing logic */
+    token->type = lex_token_internal(aliasing);
+
+    /* Copy token string value */
+    strcpy(token->value, token_str);
+
+    /* Restore saved location fields individually */
+    token->location.line = saved_line;
+    token->location.column = saved_column;
+    token->location.filename = saved_filename;
+
+    /* Add to buffer for lookahead capability */
+    token_buffer_push(token);
+
+    return token;
+}
+
 /* Lex next token and returns its token type. To disable aliasing on next
  * token, use 'lex_token_internal'.
  */
 token_t lex_token(void)
 {
     return lex_token_internal(true);
+}
+
+/* Advanced lookahead functions using token buffer */
+bool lex_peek_ahead(int offset, token_t expected_type)
+{
+    token_info_t *future_token = token_buffer_peek(offset);
+    return future_token && future_token->type == expected_type;
+}
+
+/* Check if next N tokens match a pattern */
+bool lex_match_sequence(token_t *pattern, int count)
+{
+    for (int i = 0; i < count; i++) {
+        if (!lex_peek_ahead(i, pattern[i]))
+            return false;
+    }
+    return true;
+}
+
+/* Get token value at offset for lookahead inspection */
+char *lex_peek_value(int offset)
+{
+    token_info_t *future_token = token_buffer_peek(offset);
+    return future_token ? future_token->value : NULL;
 }
 
 /* Skip the content. We only need the index where the macro body begins. */

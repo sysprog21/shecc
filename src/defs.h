@@ -19,8 +19,8 @@
 #define MAX_PARAMS 8
 #define MAX_LOCALS 1600
 #define MAX_FIELDS 64
-#define MAX_TYPES 128
-#define MAX_IR_INSTR 60000
+#define MAX_TYPES 256
+#define MAX_IR_INSTR 80000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_BB_RDOM_SUCC 256
@@ -179,6 +179,37 @@ typedef enum {
     T_cppd_ifndef,
     T_cppd_pragma
 } token_t;
+
+/* Source location tracking for better error reporting */
+typedef struct {
+    int line;
+    int column;
+    char *filename;
+} source_location_t;
+
+/* Token structure with metadata for enhanced lexing */
+typedef struct token_info {
+    token_t type;
+    char value[MAX_TOKEN_LEN];
+    source_location_t location;
+    struct token_info *next; /* For freelist management */
+} token_info_t;
+
+/* Token freelist for memory reuse */
+typedef struct {
+    token_info_t *freelist;
+    int allocated_count;
+    int reused_count; /* Statistics for debugging */
+} token_pool_t;
+
+/* Token buffer for improved lookahead */
+#define TOKEN_BUFFER_SIZE 8
+typedef struct {
+    token_info_t *tokens[TOKEN_BUFFER_SIZE];
+    int head;
+    int tail;
+    int count;
+} token_buffer_t;
 
 /* builtin types */
 typedef enum {
