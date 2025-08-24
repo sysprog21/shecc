@@ -47,6 +47,19 @@
 #define DEFAULT_FUNCS_SIZE 64
 #define DEFAULT_INCLUSIONS_SIZE 16
 
+/* Arena compaction bitmask flags for selective memory reclamation */
+#define COMPACT_ARENA_BLOCK 0x01   /* BLOCK_ARENA - variables/blocks */
+#define COMPACT_ARENA_INSN 0x02    /* INSN_ARENA - instructions */
+#define COMPACT_ARENA_BB 0x04      /* BB_ARENA - basic blocks */
+#define COMPACT_ARENA_HASHMAP 0x08 /* HASHMAP_ARENA - hash nodes */
+#define COMPACT_ARENA_GENERAL 0x10 /* GENERAL_ARENA - misc allocations */
+#define COMPACT_ARENA_ALL 0x1F     /* All arenas */
+
+/* Common arena compaction combinations for different compilation phases */
+#define COMPACT_PHASE_PARSING (COMPACT_ARENA_BLOCK | COMPACT_ARENA_GENERAL)
+#define COMPACT_PHASE_SSA (COMPACT_ARENA_INSN | COMPACT_ARENA_BB)
+#define COMPACT_PHASE_BACKEND (COMPACT_ARENA_BB | COMPACT_ARENA_GENERAL)
+
 #define ELF_START 0x10000
 #define PTR_SIZE 4
 

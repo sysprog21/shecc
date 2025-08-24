@@ -89,6 +89,9 @@ int main(int argc, char *argv[])
     /* load and parse source code into IR */
     parse(in);
 
+    /* Compact arenas after parsing to free temporary parse structures */
+    compact_all_arenas();
+
     ssa_build();
 
     /* dump first phase IR */
@@ -98,11 +101,21 @@ int main(int argc, char *argv[])
     /* SSA-based optimization */
     optimize();
 
+    /* Compact arenas after SSA optimization to free temporary SSA structures */
+    compact_all_arenas();
+
     /* SSA-based liveness analyses */
     liveness_analysis();
 
+    /* Compact after liveness analysis - mainly traversal args in GENERAL_ARENA
+     */
+    compact_arenas_selective(COMPACT_ARENA_GENERAL);
+
     /* allocate register from IR */
     reg_alloc();
+
+    /* Compact after register allocation - mainly INSN and BB arenas */
+    compact_arenas_selective(COMPACT_ARENA_INSN | COMPACT_ARENA_BB);
 
     peephole();
 
@@ -111,6 +124,9 @@ int main(int argc, char *argv[])
 
     /* flatten CFG to linear instruction */
     cfg_flatten();
+
+    /* Compact after CFG flattening - BB and GENERAL no longer needed */
+    compact_arenas_selective(COMPACT_ARENA_BB | COMPACT_ARENA_GENERAL);
 
     /* dump second phase IR */
     if (dump_ir)
