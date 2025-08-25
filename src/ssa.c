@@ -1937,6 +1937,37 @@ void bb_reset_live_kill_idx(func_t *func, basic_block_t *bb)
     bb->live_kill_idx = 0;
 }
 
+void add_live_gen(basic_block_t *bb, var_t *var);
+void update_consumed(insn_t *insn, var_t *var);
+
+/* Combined function to reset and solve locals in one pass */
+void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
+{
+    UNUSED(func);
+
+    /* Reset live_kill index */
+    bb->live_kill_idx = 0;
+
+    /* Solve locals */
+    int i = 0;
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+        insn->idx = i++;
+
+        if (insn->rs1) {
+            if (!var_check_killed(insn->rs1, bb))
+                add_live_gen(bb, insn->rs1);
+            update_consumed(insn, insn->rs1);
+        }
+        if (insn->rs2) {
+            if (!var_check_killed(insn->rs2, bb))
+                add_live_gen(bb, insn->rs2);
+            update_consumed(insn, insn->rs2);
+        }
+        if (insn->rd && insn->opcode != OP_unwound_phi)
+            bb_add_killed_var(bb, insn->rd);
+    }
+}
+
 void add_live_gen(basic_block_t *bb, var_t *var)
 {
     if (var->is_global)
@@ -2065,16 +2096,14 @@ void liveness_analysis(void)
         args->func = func;
         args->bb = func->bbs;
 
+        /* Combined traversal: reset and solve locals in one pass */
         func->visited++;
-        args->preorder_cb = bb_reset_live_kill_idx;
+        args->preorder_cb = bb_reset_and_solve_locals;
         bb_forward_traversal(args);
 
+        /* Add function parameters as killed in entry block */
         for (int i = 0; i < func->num_params; i++)
             bb_add_killed_var(func->bbs, func->param_defs[i].subscripts[0]);
-
-        func->visited++;
-        args->preorder_cb = bb_solve_locals;
-        bb_forward_traversal(args);
     }
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
