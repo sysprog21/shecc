@@ -902,7 +902,80 @@ token_t lex_token_internal(bool aliasing)
         token_str[i] = 0;
         skip_whitespace();
 
-        token_t keyword = lookup_keyword(token_str);
+        /* Fast path for common keywords - avoid hashmap lookup */
+        token_t keyword = T_identifier;
+        int token_len = i; /* Length of the token string */
+
+        /* Check most common keywords inline based on token length and first
+         * character.
+         */
+        switch (token_len) {
+        case 2: /* 2-letter keywords: if, do */
+            if (token_str[0] == 'i' && token_str[1] == 'f')
+                keyword = T_if;
+            else if (token_str[0] == 'd' && token_str[1] == 'o')
+                keyword = T_do;
+            break;
+
+        case 3: /* 3-letter keywords: for */
+            if (token_str[0] == 'f' && token_str[1] == 'o' &&
+                token_str[2] == 'r')
+                keyword = T_for;
+            break;
+
+        case 4: /* 4-letter keywords: else, enum, case */
+            if (token_str[0] == 'e') {
+                if (!memcmp(token_str, "else", 4))
+                    keyword = T_else;
+                else if (!memcmp(token_str, "enum", 4))
+                    keyword = T_enum;
+            } else if (!memcmp(token_str, "case", 4))
+                keyword = T_case;
+            break;
+
+        case 5: /* 5-letter keywords: while, break, union */
+            if (token_str[0] == 'w' && !memcmp(token_str, "while", 5))
+                keyword = T_while;
+            else if (token_str[0] == 'b' && !memcmp(token_str, "break", 5))
+                keyword = T_break;
+            else if (token_str[0] == 'u' && !memcmp(token_str, "union", 5))
+                keyword = T_union;
+            break;
+
+        case 6: /* 6-letter keywords: return, struct, switch, sizeof */
+            if (token_str[0] == 'r' && !memcmp(token_str, "return", 6))
+                keyword = T_return;
+            else if (token_str[0] == 's') {
+                if (!memcmp(token_str, "struct", 6))
+                    keyword = T_struct;
+                else if (!memcmp(token_str, "switch", 6))
+                    keyword = T_switch;
+                else if (!memcmp(token_str, "sizeof", 6))
+                    keyword = T_sizeof;
+            }
+            break;
+
+        case 7: /* 7-letter keywords: typedef, default */
+            if (!memcmp(token_str, "typedef", 7))
+                keyword = T_typedef;
+            else if (!memcmp(token_str, "default", 7))
+                keyword = T_default;
+            break;
+
+        case 8: /* 8-letter keywords: continue */
+            if (!memcmp(token_str, "continue", 8))
+                keyword = T_continue;
+            break;
+
+        default:
+            /* Keywords longer than 8 chars or identifiers - use hashmap */
+            break;
+        }
+
+        /* Fall back to hashmap for uncommon keywords */
+        if (keyword == T_identifier)
+            keyword = lookup_keyword(token_str);
+
         if (keyword != T_identifier)
             return keyword;
 
