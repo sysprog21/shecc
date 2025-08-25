@@ -13,6 +13,9 @@
 
 #include "defs.h"
 
+/* Forward declaration for string interning */
+char *intern_string(char *str);
+
 /* Lexer */
 char token_str[MAX_TOKEN_LEN];
 token_t next_token;
@@ -673,7 +676,8 @@ void add_alias(char *alias, char *value)
             printf("Failed to allocate alias_t\n");
             return;
         }
-        strcpy(al->alias, alias);
+        /* Use interned string for alias name */
+        strcpy(al->alias, intern_string(alias));
         hashmap_put(ALIASES_MAP, alias, al);
     }
     strcpy(al->value, value);
@@ -707,7 +711,8 @@ macro_t *add_macro(char *name)
             printf("Failed to allocate macro_t\n");
             return NULL;
         }
-        strcpy(ma->name, name);
+        /* Use interned string for macro name */
+        strcpy(ma->name, intern_string(name));
         hashmap_put(MACROS_MAP, name, ma);
     }
     ma->disabled = false;
@@ -733,6 +738,41 @@ bool remove_macro(char *name)
 }
 
 void error(char *msg);
+
+/* String pool global */
+string_pool_t *string_pool;
+string_literal_pool_t *string_literal_pool;
+
+/* Safe string interning that works with self-hosting */
+char *intern_string(char *str)
+{
+    char *existing;
+    char *interned;
+    int len;
+
+    /* Safety: return original if NULL */
+    if (!str)
+        return NULL;
+
+    /* Safety: can't intern before initialization */
+    if (!GENERAL_ARENA || !string_pool)
+        return str;
+
+    /* Check if already interned */
+    existing = hashmap_get(string_pool->strings, str);
+    if (existing)
+        return existing;
+
+    /* Allocate and store new string */
+    len = strlen(str) + 1;
+    interned = arena_alloc(GENERAL_ARENA, len);
+    strcpy(interned, str);
+
+    hashmap_put(string_pool->strings, interned, interned);
+
+    return interned;
+}
+
 int find_macro_param_src_idx(char *name, block_t *parent)
 {
     macro_t *macro = parent->macro;
@@ -761,7 +801,8 @@ type_t *add_type(void)
 type_t *add_named_type(char *name)
 {
     type_t *type = add_type();
-    strcpy(type->type_name, name);
+    /* Use interned string for type name */
+    strcpy(type->type_name, intern_string(name));
     return type;
 }
 
@@ -773,7 +814,8 @@ void add_constant(char alias[], int value)
         return;
     }
 
-    strcpy(constant->alias, alias);
+    /* Use interned string for constant name */
+    strcpy(constant->alias, intern_string(alias));
     constant->value = value;
     hashmap_put(CONSTANTS_MAP, alias, constant);
 }
@@ -877,7 +919,8 @@ func_t *add_func(char *func_name, bool synthesize)
 
     func = arena_alloc_func();
     hashmap_put(FUNC_MAP, func_name, func);
-    strcpy(func->return_def.var_name, func_name);
+    /* Use interned string for function name */
+    strcpy(func->return_def.var_name, intern_string(func_name));
     func->stack_size = 4;
 
     if (synthesize)
@@ -1042,7 +1085,7 @@ void add_insn(block_t *block,
     n->idx = 0;
 
     if (str)
-        strcpy(n->str, str);
+        strcpy(n->str, intern_string(str));
     else
         n->str[0] = '\0';
 
@@ -1151,6 +1194,16 @@ void global_init(void)
     TYPES = arena_alloc(GENERAL_ARENA, MAX_TYPES * sizeof(type_t));
     PH2_IR_FLATTEN =
         arena_alloc(GENERAL_ARENA, MAX_IR_INSTR * sizeof(ph2_ir_t *));
+
+    /* Initialize string pool for identifier deduplication */
+    string_pool = arena_alloc(GENERAL_ARENA, sizeof(string_pool_t));
+    string_pool->strings = hashmap_create(512);
+
+    /* Initialize string literal pool for deduplicating string constants */
+    string_literal_pool =
+        arena_alloc(GENERAL_ARENA, sizeof(string_literal_pool_t));
+    string_literal_pool->literals = hashmap_create(256);
+
     SOURCE = strbuf_create(MAX_SOURCE);
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
     INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
@@ -1273,6 +1326,13 @@ void global_release(void)
     lexer_cleanup();
 
     hashmap_free(MACROS_MAP);
+
+    /* Free string interning hashmaps */
+    if (string_pool && string_pool->strings)
+        hashmap_free(string_pool->strings);
+    if (string_literal_pool && string_literal_pool->literals)
+        hashmap_free(string_literal_pool->literals);
+
     arena_free(BLOCK_ARENA);
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
