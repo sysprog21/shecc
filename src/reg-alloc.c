@@ -461,6 +461,12 @@ void reg_alloc(void)
                     ir = bb_add_ph2_ir(bb, OP_address_of);
                     ir->src0 = src0;
                     ir->dest = dest;
+
+                    /* For arrays, store the base address just like global
+                     * arrays do
+                     */
+                    if (insn->rd->array_size)
+                        spill_var(bb, insn->rd, dest);
                     break;
                 case OP_load_constant:
                 case OP_load_data_address:
@@ -482,6 +488,7 @@ void reg_alloc(void)
 
                     break;
                 case OP_address_of:
+                case OP_global_address_of:
                     /* make sure variable is on stack */
                     if (!insn->rs1->offset) {
                         insn->rs1->offset = bb->belong_to->stack_size;
@@ -496,7 +503,8 @@ void reg_alloc(void)
                     }
 
                     dest = prepare_dest(bb, insn->rd, -1, -1);
-                    if (insn->rs1->is_global)
+                    if (insn->rs1->is_global ||
+                        insn->opcode == OP_global_address_of)
                         ir = bb_add_ph2_ir(bb, OP_global_address_of);
                     else
                         ir = bb_add_ph2_ir(bb, OP_address_of);
