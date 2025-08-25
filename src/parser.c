@@ -554,7 +554,7 @@ bool read_preproc_directive(void)
             while (lex_peek(T_identifier, alias)) {
                 lex_expect(T_identifier);
                 strcpy(macro->param_defs[macro->num_param_defs++].var_name,
-                       alias);
+                       intern_string(alias));
                 lex_accept(T_comma);
             }
             if (lex_accept(T_elipsis))
@@ -1192,14 +1192,18 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
     /* is it function pointer declaration? */
     if (lex_accept(T_open_bracket)) {
         func_t func;
+        char temp_name[MAX_VAR_LEN];
         lex_expect(T_asterisk);
-        lex_ident(T_identifier, vd->var_name);
+        lex_ident(T_identifier, temp_name);
+        strcpy(vd->var_name, intern_string(temp_name));
         lex_expect(T_close_bracket);
         read_parameter_list_decl(&func, 1);
         vd->is_func = true;
     } else {
         if (anon == 0) {
-            lex_ident(T_identifier, vd->var_name);
+            char temp_name[MAX_VAR_LEN];
+            lex_ident(T_identifier, temp_name);
+            strcpy(vd->var_name, intern_string(temp_name));
             if (!lex_peek(T_open_bracket, NULL) && !is_param) {
                 if (vd->is_global) {
                     opstack_push(vd);
@@ -2078,7 +2082,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 /* indirective function pointer assignment */
                 vd = require_var(parent);
                 vd->is_func = true;
-                strcpy(vd->var_name, token);
+                strcpy(vd->var_name, intern_string(token));
                 opstack_push(vd);
             }
         } else if (lex_accept(T_open_curly)) {
@@ -4431,7 +4435,7 @@ void read_global_statement(void)
         if (!type)
             type = add_type();
 
-        strcpy(type->type_name, token);
+        strcpy(type->type_name, intern_string(token));
         type->base_type = TYPE_struct;
 
         lex_expect(T_open_curly);
@@ -4469,7 +4473,7 @@ void read_global_statement(void)
         if (!type)
             type = add_type();
 
-        strcpy(type->type_name, token);
+        strcpy(type->type_name, intern_string(token));
         type->base_type = TYPE_union;
 
         lex_expect(T_open_curly);
@@ -4520,7 +4524,7 @@ void read_global_statement(void)
             } while (lex_accept(T_comma));
             lex_expect(T_close_curly);
             lex_ident(T_identifier, token);
-            strcpy(type->type_name, token);
+            strcpy(type->type_name, intern_string(token));
             lex_expect(T_semicolon);
         } else if (lex_accept(T_struct)) {
             int i = 0, size = 0, has_struct_def = 0;
@@ -4535,7 +4539,7 @@ void read_global_statement(void)
                 if (!tag) {
                     tag = add_type();
                     tag->base_type = TYPE_struct;
-                    strcpy(tag->type_name, token);
+                    strcpy(tag->type_name, intern_string(token));
                 }
             }
 
@@ -4574,7 +4578,7 @@ void read_global_statement(void)
                 strcpy(token, tag->type_name);
                 memcpy(tag, type, sizeof(type_t));
                 tag->base_type = TYPE_struct;
-                strcpy(tag->type_name, token);
+                strcpy(tag->type_name, intern_string(token));
             } else {
                 /* If it is a forward declaration, build a connection between
                  * structure tag and alias. In 'find_type', it will retrieve
@@ -4597,7 +4601,7 @@ void read_global_statement(void)
                 if (!tag) {
                     tag = add_type();
                     tag->base_type = TYPE_union;
-                    strcpy(tag->type_name, token);
+                    strcpy(tag->type_name, intern_string(token));
                 }
             }
 
@@ -4640,7 +4644,7 @@ void read_global_statement(void)
                 strcpy(token, tag->type_name);
                 memcpy(tag, type, sizeof(type_t));
                 tag->base_type = TYPE_union;
-                strcpy(tag->type_name, token);
+                strcpy(tag->type_name, intern_string(token));
             } else {
                 /* If it is a forward declaration, build a connection between
                  * union tag and alias. In 'find_type', it will retrieve

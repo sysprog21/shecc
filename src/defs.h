@@ -224,6 +224,16 @@ typedef struct {
     int count;
 } token_buffer_t;
 
+/* String pool for identifier deduplication */
+typedef struct {
+    hashmap_t *strings; /* Map string -> interned string */
+} string_pool_t;
+
+/* String literal pool for deduplicating string constants */
+typedef struct {
+    hashmap_t *literals; /* Map string literal -> ELF data offset */
+} string_literal_pool_t;
+
 /* builtin types */
 typedef enum {
     TYPE_void = 0,
