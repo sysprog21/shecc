@@ -313,12 +313,21 @@ symbol_t *arena_alloc_symbol(void)
 
 constant_t *arena_alloc_constant(void)
 {
-    return arena_calloc(GENERAL_ARENA, 1, sizeof(constant_t));
+    /* constant_t is simple, can avoid zeroing */
+    constant_t *c = arena_alloc(GENERAL_ARENA, sizeof(constant_t));
+    c->alias[0] = '\0';
+    c->value = 0;
+    return c;
 }
 
 alias_t *arena_alloc_alias(void)
 {
-    return arena_calloc(GENERAL_ARENA, 1, sizeof(alias_t));
+    /* alias_t is simple, can avoid zeroing */
+    alias_t *a = arena_alloc(GENERAL_ARENA, sizeof(alias_t));
+    a->alias[0] = '\0';
+    a->value[0] = '\0';
+    a->disabled = false;
+    return a;
 }
 
 macro_t *arena_alloc_macro(void)
@@ -328,6 +337,7 @@ macro_t *arena_alloc_macro(void)
 
 bb_traversal_args_t *arena_alloc_traversal_args(void)
 {
+    /* Keep using calloc for safety */
     return arena_calloc(GENERAL_ARENA, 1, sizeof(bb_traversal_args_t));
 }
 
@@ -616,11 +626,18 @@ ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 
 ph2_ir_t *add_ph2_ir(opcode_t op)
 {
-    ph2_ir_t *ph2_ir = arena_calloc(BB_ARENA, 1, sizeof(ph2_ir_t));
+    ph2_ir_t *ph2_ir = arena_alloc(BB_ARENA, sizeof(ph2_ir_t));
     ph2_ir->op = op;
-    /* Set safe defaults; arch-lowering may annotate later */
+    /* Initialize all fields explicitly */
     ph2_ir->next = NULL;
     ph2_ir->is_branch_detached = 0;
+    ph2_ir->src0 = 0;
+    ph2_ir->src1 = 0;
+    ph2_ir->dest = 0;
+    ph2_ir->func_name[0] = '\0';
+    ph2_ir->next_bb = NULL;
+    ph2_ir->then_bb = NULL;
+    ph2_ir->else_bb = NULL;
     return add_existed_ph2_ir(ph2_ir);
 }
 
@@ -633,14 +650,17 @@ void set_var_liveout(var_t *var, int end)
 
 block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
 {
-    block_t *blk = arena_calloc(BLOCK_ARENA, 1, sizeof(block_t));
+    block_t *blk = arena_alloc(BLOCK_ARENA, sizeof(block_t));
 
-    blk->parent = parent;
-    blk->func = func;
-    blk->macro = macro;
+    /* Initialize all fields explicitly */
+    blk->locals.size = 0;
     blk->locals.capacity = 16;
     blk->locals.elements =
         arena_alloc(BLOCK_ARENA, blk->locals.capacity * sizeof(var_t *));
+    blk->parent = parent;
+    blk->func = func;
+    blk->macro = macro;
+    blk->next = NULL;
     return blk;
 }
 
@@ -887,14 +907,19 @@ func_t *find_func(char *func_name)
 /* Create a basic block and set the scope of variables to 'parent' block */
 basic_block_t *bb_create(block_t *parent)
 {
+    /* Use arena_calloc for basic_block_t as it has many arrays that need
+     * zeroing (live_gen, live_kill, live_in, live_out, DF, RDF, dom_next, etc.)
+     * This is simpler and safer than manually initializing everything.
+     */
     basic_block_t *bb = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
 
-    for (int i = 0; i < MAX_BB_PRED; i++) {
-        bb->prev[i].bb = NULL;
-        bb->prev[i].type = NEXT;
-    }
+    /* Initialize non-zero fields */
     bb->scope = parent;
     bb->belong_to = parent->func;
+
+    /* Initialize prev array with NEXT type */
+    for (int i = 0; i < MAX_BB_PRED; i++)
+        bb->prev[i].type = NEXT;
 
     if (dump_ir)
         snprintf(bb->bb_label_name, MAX_VAR_LEN, ".label.%d", bb_label_idx++);
@@ -1003,16 +1028,23 @@ void add_insn(block_t *block,
 
     bb->scope = block;
 
-    insn_t *n = arena_calloc(INSN_ARENA, 1, sizeof(insn_t));
+    insn_t *n = arena_alloc(INSN_ARENA, sizeof(insn_t));
+    n->next = NULL;
+    n->prev = NULL;
     n->opcode = op;
     n->rd = rd;
     n->rs1 = rs1;
     n->rs2 = rs2;
     n->sz = sz;
+    n->useful = false;
     n->belong_to = bb;
+    n->phi_ops = NULL;
+    n->idx = 0;
 
     if (str)
         strcpy(n->str, str);
+    else
+        n->str[0] = '\0';
 
     if (!bb->insn_list.head)
         bb->insn_list.head = n;
