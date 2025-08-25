@@ -143,6 +143,19 @@ char *memcpy(char *dest, char *src, int count)
     return dest;
 }
 
+int memcmp(void *s1, void *s2, int n)
+{
+    char *p1 = (char *) s1, *p2 = (char *) s2;
+
+    for (int i = 0; i < n; i++) {
+        if (p1[i] < p2[i])
+            return -1;
+        if (p1[i] > p2[i])
+            return 1;
+    }
+    return 0;
+}
+
 void *memset(void *s, int c, int n)
 {
     int i = 0;
