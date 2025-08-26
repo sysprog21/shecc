@@ -530,6 +530,77 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
     return false;
 }
 
+/* Algebraic simplification: Apply mathematical identities to simplify
+ * expressions
+ *
+ * This function handles patterns that SSA cannot see:
+ * - Self-operations on registers (x-x, x^x, x|x, x&x)
+ * - These patterns emerge after register allocation when different
+ *   variables are assigned to the same register
+ *
+ * SSA handles: Constant folding with known values (5+3 → 8)
+ * Peephole handles: Register-based patterns (r1-r1 → 0)
+ *
+ * Returns true if optimization was applied
+ */
+bool algebraic_simplification(ph2_ir_t *ph2_ir)
+{
+    if (!ph2_ir)
+        return false;
+
+    /* NOTE: SSA's const_folding handles constant operations with known values.
+     * We focus on register-based patterns that appear after register
+     * allocation.
+     */
+
+    /* Pattern 1: Self-subtraction → 0
+     * x - x = 0 (for register operands)
+     */
+    if (ph2_ir->op == OP_sub && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = 0; /* result is 0 */
+        ph2_ir->src1 = 0; /* clear unused field */
+        return true;
+    }
+
+    /* Pattern 2: Self-XOR → 0
+     * x ^ x = 0 (for register operands)
+     */
+    if (ph2_ir->op == OP_bit_xor && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = 0; /* result is 0 */
+        ph2_ir->src1 = 0; /* clear unused field */
+        return true;
+    }
+
+    /* Pattern 3: Self-OR → x
+     * x | x = x (identity operation for register operands)
+     */
+    if (ph2_ir->op == OP_bit_or && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_assign;
+        /* src0 already contains x, just need to move it */
+        ph2_ir->src1 = 0; /* clear unused field */
+        return true;
+    }
+
+    /* Pattern 4: Self-AND → x
+     * x & x = x (identity operation for register operands)
+     */
+    if (ph2_ir->op == OP_bit_and && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_assign;
+        /* src0 already contains x, just need to move it */
+        ph2_ir->src1 = 0; /* clear unused field */
+        return true;
+    }
+
+    /* NOTE: Arithmetic identity patterns (x+0, x*1, x*0, x-0) are already
+     * handled by SSA's const_folding() function and insn_fusion().
+     * We focus on register-level patterns that SSA cannot see.
+     */
+
+    return false;
+}
+
 /* Main peephole optimization driver.
  * It iterates through all functions, basic blocks, and IR instructions to apply
  * local optimizations on adjacent instruction pairs.
