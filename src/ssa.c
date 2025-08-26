@@ -2003,16 +2003,50 @@ void compute_live_in(basic_block_t *bb)
 
 int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
 {
-    for (int i = 0; i < bb->live_in_idx; i++) {
-        int found = 0;
-        for (int j = 0; j < live_out_idx; j++) {
-            if (live_out[j] == bb->live_in[i]) {
-                found = 1;
-                break;
+    /* Early exit for empty live_in */
+    if (bb->live_in_idx == 0)
+        return live_out_idx;
+
+    /* Optimize for common case of small sets */
+    if (live_out_idx < 16) {
+        /* For small sets, simple linear search is fast enough */
+        for (int i = 0; i < bb->live_in_idx; i++) {
+            int found = 0;
+            for (int j = 0; j < live_out_idx; j++) {
+                if (live_out[j] == bb->live_in[i]) {
+                    found = 1;
+                    break;
+                }
             }
+            if (!found && live_out_idx < MAX_ANALYSIS_STACK_SIZE)
+                live_out[live_out_idx++] = bb->live_in[i];
         }
-        if (!found)
-            live_out[live_out_idx++] = bb->live_in[i];
+    } else {
+        /* For larger sets, check bounds and use optimized loop */
+        for (int i = 0; i < bb->live_in_idx; i++) {
+            int found = 0;
+            var_t *var = bb->live_in[i];
+            /* Unroll inner loop for better performance */
+            int j;
+            for (j = 0; j + 3 < live_out_idx; j += 4) {
+                if (live_out[j] == var || live_out[j + 1] == var ||
+                    live_out[j + 2] == var || live_out[j + 3] == var) {
+                    found = 1;
+                    break;
+                }
+            }
+            /* Handle remaining elements */
+            if (!found) {
+                for (; j < live_out_idx; j++) {
+                    if (live_out[j] == var) {
+                        found = 1;
+                        break;
+                    }
+                }
+            }
+            if (!found && live_out_idx < MAX_ANALYSIS_STACK_SIZE)
+                live_out[live_out_idx++] = var;
+        }
     }
     return live_out_idx;
 }
@@ -2022,6 +2056,7 @@ bool recompute_live_out(basic_block_t *bb)
     var_t *live_out[MAX_ANALYSIS_STACK_SIZE];
     int live_out_idx = 0;
 
+    /* Compute union of successor live_in sets */
     if (bb->next) {
         compute_live_in(bb->next);
         live_out_idx = merge_live_in(live_out, live_out_idx, bb->next);
@@ -2035,12 +2070,32 @@ bool recompute_live_out(basic_block_t *bb)
         live_out_idx = merge_live_in(live_out, live_out_idx, bb->else_);
     }
 
+    /* Quick check: if sizes differ, sets must be different */
     if (bb->live_out_idx != live_out_idx) {
         memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
         bb->live_out_idx = live_out_idx;
         return true;
     }
 
+    /* Size is same, need to check if contents are identical */
+    /* Optimize by checking if first few elements match (common case) */
+    if (live_out_idx > 0) {
+        /* Quick check first element */
+        bool first_found = false;
+        for (int j = 0; j < bb->live_out_idx; j++) {
+            if (live_out[0] == bb->live_out[j]) {
+                first_found = true;
+                break;
+            }
+        }
+        if (!first_found) {
+            memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
+            bb->live_out_idx = live_out_idx;
+            return true;
+        }
+    }
+
+    /* Full comparison */
     for (int i = 0; i < live_out_idx; i++) {
         int same = 0;
         for (int j = 0; j < bb->live_out_idx; j++) {
