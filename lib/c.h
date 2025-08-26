@@ -29,6 +29,7 @@ int strncmp(char *s1, char *s2, int len);
 char *strcpy(char *dest, char *src);
 char *strncpy(char *dest, char *src, int len);
 char *memcpy(char *dest, char *src, int count);
+int memcmp(void *s1, void *s2, int n);
 void *memset(void *s, int c, int n);
 
 /* formatted output string */
