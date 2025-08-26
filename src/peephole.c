@@ -855,6 +855,87 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
     return false;
 }
 
+/* Triple pattern optimization: Handle 3-instruction sequences
+ * These patterns are more complex but offer significant optimization
+ * opportunities Returns true if optimization was applied
+ */
+bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
+{
+    if (!ph2_ir || !ph2_ir->next || !ph2_ir->next->next)
+        return false;
+
+    ph2_ir_t *second = ph2_ir->next;
+    ph2_ir_t *third = second->next;
+
+    /* Pattern 1: Store-load-store elimination
+     * {store val1, addr; load r, addr; store val2, addr}
+     * The middle load is pointless if not used elsewhere
+     */
+    if (ph2_ir->op == OP_store && second->op == OP_load &&
+        third->op == OP_store &&
+        ph2_ir->src1 == second->src0 && /* same address */
+        ph2_ir->dest == second->src1 && /* same offset */
+        second->src0 == third->src1 &&  /* same address */
+        second->src1 == third->dest) {  /* same offset */
+        /* Check if the loaded value is used by the third store */
+        if (third->src0 != second->dest) {
+            /* The load result is not used, can eliminate it */
+            ph2_ir->next = third;
+            return true;
+        }
+    }
+
+    /* Pattern 2: Consecutive stores to same location
+     * {store v1, addr; store v2, addr; store v3, addr}
+     * Only the last store matters
+     */
+    if (ph2_ir->op == OP_store && second->op == OP_store &&
+        third->op == OP_store && ph2_ir->src1 == second->src1 &&
+        ph2_ir->dest == second->dest && second->src1 == third->src1 &&
+        second->dest == third->dest) {
+        /* All three stores go to the same location */
+        /* Only the last one matters, eliminate first two */
+        ph2_ir->src0 = third->src0; /* Use last value */
+        ph2_ir->next = third->next; /* Skip middle stores */
+        return true;
+    }
+
+    /* FIXME: Additional patterns for future implementation:
+     *
+     * Pattern 3: Load-op-store with same location
+     * {load r1, [addr]; op r2, r1, ...; store r2, [addr]}
+     * Can optimize to in-place operation if possible
+     * Requires architecture-specific support in codegen.
+     *
+     * Pattern 4: Redundant comparison after boolean operation
+     * {cmp a, b; load 1; load 0} → simplified when used in branch
+     * The comparison already produces 0 or 1, constants may be redundant
+     *
+     * Pattern 5: Consecutive loads that can be combined
+     * {load r1, [base+off1]; load r2, [base+off2]; op r3, r1, r2}
+     * Useful for struct member access patterns
+     * Needs alignment checking and architecture support.
+     *
+     * Pattern 6: Load-Load-Select pattern
+     * {load r1, c1; load r2, c2; select/cmov based on condition}
+     * Can optimize by loading only the needed value
+     * Requires control flow analysis.
+     *
+     * Pattern 7: Add-Add-Add chain simplification
+     * {add r1, r0, c1; add r2, r1, c2; add r3, r2, c3}
+     * Can be simplified if all are constants
+     * Requires tracking constant values through the chain.
+     *
+     * Pattern 8: Global load followed by immediate use
+     * {global_load r1; op r2, r1, ...; store r2}
+     * Track global access patterns
+     * Could optimize to atomic operations or direct memory ops.
+     * Needs careful synchronization analysis.
+     */
+
+    return false;
+}
+
 /* Main peephole optimization driver.
  * It iterates through all functions, basic blocks, and IR instructions to apply
  * local optimizations on adjacent instruction pairs.
