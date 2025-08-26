@@ -677,6 +677,82 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
     return false;
 }
 
+/* Comparison optimization: Simplify comparison patterns
+ * Focus on register-based patterns that SSA's SCCP misses
+ * Returns true if optimization was applied
+ */
+bool comparison_optimization(ph2_ir_t *ph2_ir)
+{
+    if (!ph2_ir)
+        return false;
+
+    /* NOTE: SSA's SCCP handles constant comparisons, so we focus on
+     * register-based self-comparisons after register allocation
+     */
+
+    /* Pattern 1: Self-comparison always false for !=
+     * x != x → 0 (for register operands)
+     */
+    if (ph2_ir->op == OP_neq && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = 0; /* always false */
+        ph2_ir->src1 = 0;
+        return true;
+    }
+
+    /* Pattern 2: Self-comparison always true for ==
+     * x == x → 1 (for register operands)
+     */
+    if (ph2_ir->op == OP_eq && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = 1; /* always true */
+        ph2_ir->src1 = 0;
+        return true;
+    }
+
+    /* Pattern 3: Self-comparison for less-than
+     * x < x → 0 (always false)
+     */
+    if (ph2_ir->op == OP_lt && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = 0; /* always false */
+        ph2_ir->src1 = 0;
+        return true;
+    }
+
+    /* Pattern 4: Self-comparison for greater-than
+     * x > x → 0 (always false)
+     */
+    if (ph2_ir->op == OP_gt && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = 0; /* always false */
+        ph2_ir->src1 = 0;
+        return true;
+    }
+
+    /* Pattern 5: Self-comparison for less-equal
+     * x <= x → 1 (always true)
+     */
+    if (ph2_ir->op == OP_leq && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = 1; /* always true */
+        ph2_ir->src1 = 0;
+        return true;
+    }
+
+    /* Pattern 6: Self-comparison for greater-equal
+     * x >= x → 1 (always true)
+     */
+    if (ph2_ir->op == OP_geq && ph2_ir->src0 == ph2_ir->src1) {
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = 1; /* always true */
+        ph2_ir->src1 = 0;
+        return true;
+    }
+
+    return false;
+}
+
 /* Main peephole optimization driver.
  * It iterates through all functions, basic blocks, and IR instructions to apply
  * local optimizations on adjacent instruction pairs.
