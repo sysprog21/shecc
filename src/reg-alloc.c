@@ -553,7 +553,8 @@ void reg_alloc(void)
                         strcpy(ir->func_name, insn->rs2->var_name);
                         if (dynlink) {
                             func_t *target_func = find_func(ir->func_name);
-                            target_func->is_used = true;
+                            if (target_func)
+                                target_func->is_used = true;
                         }
                     } else {
                         /* FIXME: Avoid outdated content in register after
@@ -605,7 +606,8 @@ void reg_alloc(void)
                     strcpy(ir->func_name, insn->str);
                     if (dynlink) {
                         func_t *target_func = find_func(ir->func_name);
-                        target_func->is_used = true;
+                        if (target_func)
+                            target_func->is_used = true;
                     }
 
                     is_pushing_args = 0;

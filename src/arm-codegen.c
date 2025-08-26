@@ -138,11 +138,13 @@ void cfg_flatten(void)
     func_t *func;
 
     if (dynlink)
-        elf_offset = 112; /* offset of start + branch + exit in codegen */
+        elf_offset =
+            88; /* offset of dynamic linking setup + global init call */
     else {
         func = find_func("__syscall");
         func->bbs->elf_offset = 48; /* offset of start + exit in codegen */
-        elf_offset = 84; /* offset of start + branch + exit + syscall in codegen */
+        elf_offset =
+            84; /* offset of start + branch + exit + syscall in codegen */
     }
 
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
@@ -154,7 +156,7 @@ void cfg_flatten(void)
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
     if (dynlink)
-        elf_offset += 20;
+        elf_offset += 20; /* 5 insns: restore r0/r1 from r9/r10, bl to main */
     else
         elf_offset += 32; /* 6 insns for main call + 2 for exit */
 
@@ -481,8 +483,22 @@ void code_generate(void)
         emit(__push_reg(__AL, __r0));
         emit(__mov_i(__AL, __r12, 0));
         emit(__push_reg(__AL, __r12));
-        emit(__movw(__AL, __r0, elf_code_start + 56));
-        emit(__movt(__AL, __r0, elf_code_start + 56));
+        /* Pass the address of our main wrapper function;
+         * After these two mov movw/movt, we have:
+         * - mov r3, #0
+         * - bl to __libc_start_main@plt
+         * - mov r0, #127
+         * - bl +28
+         * - (main wrapper starts here)
+         *
+         * Total offset = current + 8 + 16 = current + 24
+         *
+         * That is, the current code size + 24 is the starting address
+         * of main wrapper.
+         * */
+        int main_wrapper_offset = elf_code->size + 24;
+        emit(__movw(__AL, __r0, elf_code_start + main_wrapper_offset));
+        emit(__movt(__AL, __r0, elf_code_start + main_wrapper_offset));
         emit(__mov_i(__AL, __r3, 0));
         emit(__bl(__AL, (elf_plt_start + PLT_FIXUP_SIZE) -
                             (elf_code_start + elf_code->size)));
@@ -490,34 +506,33 @@ void code_generate(void)
         emit(__mov_i(__AL, __r0, 127));
         emit(__bl(__AL, 28));
 
-        /* If the compiled program is dynamic linking, the starting
-         * point of 'start' is located here.
-         *
-         * Preserve the 'argc' and 'argv' for the 'main' function.
+        /* If the compiled program is dynamic linking, it needs to
+         * preserve the 'argc' and 'argv' for the 'main' function.
          * */
         emit(__mov_r(__AL, __r9, __r0));
         emit(__mov_r(__AL, __r10, __r1));
     }
-    /* If the compiled program is static linking, the starting point
-     * of 'start' is here.
+    /* For both static and dynamic linking, we need to set up the stack
+     * and call the main function.
      * */
     emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
     emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
     emit(__sub_r(__AL, __sp, __sp, __r8));
     emit(__mov_r(__AL, __r12, __sp));
+    /* Calculate the branch offset to the global initialization code */
     emit(__bl(__AL, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
     /* After global init, jump to main preparation */
     emit(__b(__AL, 56)); /* PC+8: skip exit (24) + syscall (36) + ret (4) - 8 */
 
-    /* exit */
-    emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-    emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
-    emit(__add_r(__AL, __sp, __sp, __r8));
-    emit(__mov_r(__AL, __r0, __r0));
-    emit(__mov_i(__AL, __r7, 1));
-    emit(__svc());
-
     if (!dynlink) {
+        /* exit - only for statck linking */
+        emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
+        emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+        emit(__add_r(__AL, __sp, __sp, __r8));
+        emit(__mov_r(__AL, __r0, __r0));
+        emit(__mov_i(__AL, __r7, 1));
+        emit(__svc());
+
         /* syscall */
         emit(__mov_r(__AL, __r7, __r0));
         emit(__mov_r(__AL, __r0, __r1));

@@ -109,6 +109,7 @@ strbuf_t *elf_got;
 int elf_header_len;
 int elf_code_start;
 int elf_data_start;
+int elf_interp_start;
 int elf_relplt_start;
 int elf_plt_start;
 int elf_got_start;
