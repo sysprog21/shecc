@@ -101,13 +101,13 @@ typedef struct {
 typedef struct hashmap_node {
     char *key;
     void *val;
-    struct hashmap_node *next;
+    bool occupied;
 } hashmap_node_t;
 
 typedef struct {
     int size;
     int cap;
-    hashmap_node_t **buckets;
+    hashmap_node_t *table;
 } hashmap_t;
 
 /* lexer tokens */
