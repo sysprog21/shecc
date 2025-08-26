@@ -601,6 +601,82 @@ bool algebraic_simplification(ph2_ir_t *ph2_ir)
     return false;
 }
 
+/* Division/modulo strength reduction: Optimize division and modulo by
+ * power-of-2
+ *
+ * This pattern is unique to peephole optimizer.
+ * SSA cannot perform this optimization because it works on virtual registers
+ * before actual constant values are loaded.
+ *
+ * Returns true if optimization was applied
+ */
+bool strength_reduction(ph2_ir_t *ph2_ir)
+{
+    if (!ph2_ir || !ph2_ir->next)
+        return false;
+
+    ph2_ir_t *next = ph2_ir->next;
+
+    /* Check for constant load followed by division or modulo */
+    if (ph2_ir->op != OP_load_constant)
+        return false;
+
+    int value = ph2_ir->src0;
+
+    /* Check if value is a power of 2 */
+    if (value <= 0 || (value & (value - 1)) != 0)
+        return false;
+
+    /* Calculate shift amount for power of 2 */
+    int shift = 0;
+    int tmp = value;
+    while (tmp > 1) {
+        shift++;
+        tmp >>= 1;
+    }
+
+    /* Pattern 1: Division by power of 2 → right shift
+     * x / 2^n = x >> n (for unsigned)
+     */
+    if (next->op == OP_div && next->src1 == ph2_ir->dest) {
+        /* Convert division to right shift */
+        ph2_ir->src0 = shift; /* Load shift amount instead */
+        next->op = OP_rshift;
+        return true;
+    }
+
+    /* Pattern 2: Modulo by power of 2 → bitwise AND
+     * x % 2^n = x & (2^n - 1)
+     */
+    if (next->op == OP_mod && next->src1 == ph2_ir->dest) {
+        /* Convert modulo to bitwise AND */
+        ph2_ir->src0 = value - 1; /* Load mask (2^n - 1) */
+        next->op = OP_bit_and;
+        return true;
+    }
+
+    /* Pattern 3: Multiplication by power of 2 → left shift
+     * x * 2^n = x << n
+     */
+    if (next->op == OP_mul) {
+        if (next->src0 == ph2_ir->dest) {
+            /* 2^n * x = x << n */
+            ph2_ir->src0 = shift; /* Load shift amount */
+            next->op = OP_lshift;
+            next->src0 = next->src1;   /* Move x to src0 */
+            next->src1 = ph2_ir->dest; /* Shift amount in src1 */
+            return true;
+        } else if (next->src1 == ph2_ir->dest) {
+            /* x * 2^n = x << n */
+            ph2_ir->src0 = shift; /* Load shift amount */
+            next->op = OP_lshift;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /* Main peephole optimization driver.
  * It iterates through all functions, basic blocks, and IR instructions to apply
  * local optimizations on adjacent instruction pairs.
