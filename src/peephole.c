@@ -431,6 +431,105 @@ bool fold_constant_branches(func_t *func)
     return changed;
 }
 
+/* Load/store elimination for consecutive memory operations.
+ * Removes redundant loads and dead stores that access the same memory location.
+ * Conservative implementation to maintain bootstrap stability.
+ */
+bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
+{
+    ph2_ir_t *next = ph2_ir->next;
+    if (!next)
+        return false;
+
+    /* Only handle local loads/stores for now (not globals) to be safe */
+
+    /* Pattern 1: Consecutive stores to same local location
+     * {store [addr], val1; store [addr], val2} → {store [addr], val2}
+     * First store is dead if immediately overwritten
+     */
+    if (ph2_ir->op == OP_store && next->op == OP_store) {
+        /* Check if storing to same memory location */
+        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
+            ph2_ir->src0 >= 0 && ph2_ir->src1 >= 0) {
+            /* Remove first store - it's dead */
+            ph2_ir->dest = next->dest;
+            ph2_ir->next = next->next;
+            return true;
+        }
+    }
+
+    /* Pattern 2: Redundant consecutive loads from same local location
+     * {load rd1, [addr]; load rd2, [addr]} → {load rd1, [addr]; mov rd2, rd1}
+     * Second load can reuse the first load's result
+     * Only apply if addresses are simple (not complex expressions)
+     */
+    if (ph2_ir->op == OP_load && next->op == OP_load) {
+        /* Check if loading from same memory location */
+        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
+            ph2_ir->src0 >= 0 && ph2_ir->src1 >= 0) {
+            /* Replace second load with move */
+            next->op = OP_assign;
+            next->src0 = ph2_ir->dest; /* Result of first load */
+            next->src1 = 0;
+            return true;
+        }
+    }
+
+    /* Pattern 3: Store followed by load from same location (store-to-load
+     * forwarding) {store [addr], val; load rd, [addr]} → {store [addr], val;
+     * mov rd, val} The load can use the stored value directly
+     */
+    if (ph2_ir->op == OP_store && next->op == OP_load) {
+        /* Check if accessing same memory location */
+        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
+            ph2_ir->src0 >= 0 && ph2_ir->dest >= 0) {
+            /* Replace load with move of stored value */
+            next->op = OP_assign;
+            next->src0 = ph2_ir->dest; /* Value that was stored */
+            next->src1 = 0;
+            return true;
+        }
+    }
+
+    /* Pattern 4: Load followed by redundant store of same value
+     * {load rd, [addr]; store [addr], rd} → {load rd, [addr]}
+     * The store is redundant if storing back the just-loaded value
+     */
+    if (ph2_ir->op == OP_load && next->op == OP_store) {
+        /* Check if storing the value we just loaded from same location */
+        if (ph2_ir->dest == next->dest && ph2_ir->src0 == next->src0 &&
+            ph2_ir->src1 == next->src1 && ph2_ir->src0 >= 0) {
+            /* Remove redundant store */
+            ph2_ir->next = next->next;
+            return true;
+        }
+    }
+
+    /* Pattern 5: Global store/load optimizations (carefully enabled) */
+    if (ph2_ir->op == OP_global_store && next->op == OP_global_store) {
+        /* Consecutive global stores to same location */
+        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1) {
+            /* Remove first store - it's dead */
+            ph2_ir->dest = next->dest;
+            ph2_ir->next = next->next;
+            return true;
+        }
+    }
+
+    if (ph2_ir->op == OP_global_load && next->op == OP_global_load) {
+        /* Consecutive global loads from same location */
+        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1) {
+            /* Replace second load with move */
+            next->op = OP_assign;
+            next->src0 = ph2_ir->dest;
+            next->src1 = 0;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /* Main peephole optimization driver.
  * It iterates through all functions, basic blocks, and IR instructions to apply
  * local optimizations on adjacent instruction pairs.
@@ -465,6 +564,10 @@ void peephole(void)
 
                 /* Apply redundant move elimination */
                 if (redundant_move_elim(ir))
+                    continue;
+
+                /* Apply load/store elimination */
+                if (eliminate_load_store_pairs(ir))
                     continue;
             }
         }
