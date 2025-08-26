@@ -1064,6 +1064,212 @@ int main() {
 }
 EOF
 
+# typedef pointer tests - testing fixes for typedef pointer compilation issues
+# These tests verify typedef pointer functionality after:
+# 1. Removing incorrect pointer level inheritance in read_full_var_decl()
+# 2. Adding typedef pointer recognition in array indexing operations
+# 3. Implementing proper pointer arithmetic scaling for typedef pointers
+
+# Test 1: Basic typedef pointer declaration and dereference
+try_ 42 << EOF
+typedef int *int_ptr;
+int main() {
+    int x = 42;
+    int_ptr p = &x;
+    return *p;  /* Basic dereference - WORKING */
+}
+EOF
+
+# Test 2: Multiple typedef pointer variables
+try_ 55 << EOF
+typedef int *int_ptr;
+int main() {
+    int a = 55, b = 100;
+    int_ptr p1 = &a;
+    int_ptr p2 = &b;
+    return *p1;  /* Should return 55 - WORKING */
+}
+EOF
+
+# Test 3: Typedef pointer in function parameters
+try_ 30 << EOF
+typedef int *int_ptr;
+int add_via_ptr(int_ptr a, int_ptr b) {
+    return *a + *b;
+}
+int main() {
+    int x = 10, y = 20;
+    return add_via_ptr(&x, &y);  /* Function call with typedef pointers - WORKING */
+}
+EOF
+
+# Test 4: Multiple typedef declarations
+try_ 7 << EOF
+typedef int *int_ptr;
+typedef char *char_ptr;
+int main() {
+    int x = 7;
+    char c = 'A';
+    int_ptr ip = &x;
+    char_ptr cp = &c;
+    return *ip;  /* Different typedef pointer types - WORKING */
+}
+EOF
+
+# Test 5: Global typedef pointer
+try_ 88 << EOF
+typedef int *int_ptr;
+int global_value = 88;
+int_ptr global_ptr;
+int main() {
+    global_ptr = &global_value;
+    return *global_ptr;  /* Global typedef pointer - WORKING */
+}
+EOF
+
+# Test 6: Typedef pointer initialization
+try_ 100 << EOF
+typedef int *int_ptr;
+int main() {
+    int val = 100;
+    int_ptr p = &val;  /* Initialize at declaration */
+    int result = *p;
+    return result;  /* Indirect usage - WORKING */
+}
+EOF
+
+# Test 7: Nested typedef pointer usage in expressions
+try_ 15 << EOF
+typedef int *int_ptr;
+int main() {
+    int x = 5, y = 10;
+    int_ptr px = &x;
+    int_ptr py = &y;
+    return *px + *py;  /* Expression with multiple derefs - WORKING */
+}
+EOF
+
+# Test 8: Typedef pointer assignment after declaration
+try_ 25 << EOF
+typedef int *int_ptr;
+int main() {
+    int value = 25;
+    int_ptr ptr;
+    ptr = &value;  /* Assignment after declaration */
+    return *ptr;  /* WORKING */
+}
+EOF
+
+# Test 9: Typedef pointer array indexing
+try_ 100 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[3] = {42, 100, 200};
+    int_ptr p = values;
+    return p[1];  /* Array indexing - NOW WORKING with fix */
+}
+EOF
+
+# Test 10: Complex array indexing with typedef pointer
+try_ 90 << EOF
+typedef int *int_ptr;
+int main() {
+    int arr[5] = {10, 20, 30, 40, 50};
+    int_ptr p = arr;
+    return p[0] + p[2] + p[4];  /* Multiple array accesses */
+}
+EOF
+
+# Test 11: Typedef pointer arithmetic - increment
+try_ 20 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[3] = {10, 20, 30};
+    int_ptr p = values;
+    p++;  /* Move to next element */
+    return *p;  /* Should return 20 */
+}
+EOF
+
+# Test 12: Typedef pointer arithmetic - addition
+try_ 40 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[5] = {10, 20, 30, 40, 50};
+    int_ptr p = values;
+    p = p + 3;  /* Move forward by 3 elements */
+    return *p;  /* Should return 40 */
+}
+EOF
+
+# Test 13: Typedef pointer arithmetic - subtraction
+try_ 30 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[5] = {10, 20, 30, 40, 50};
+    int_ptr p = values + 4;  /* Point to last element */
+    p = p - 2;  /* Move back by 2 elements */
+    return *p;  /* Should return 30 */
+}
+EOF
+
+# Test 14: Typedef pointer arithmetic - prefix increment
+try_ 20 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[3] = {10, 20, 30};
+    int_ptr p = values;
+    ++p;  /* Prefix increment */
+    return *p;  /* Should return 20 */
+}
+EOF
+
+# Test 15: Typedef pointer arithmetic - postfix increment
+try_ 10 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[3] = {10, 20, 30};
+    int_ptr p = values;
+    int val = *p++;  /* Get value, then increment */
+    return val;  /* Should return 10 */
+}
+EOF
+
+# Test 16: Typedef pointer arithmetic - decrement
+try_ 20 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[3] = {10, 20, 30};
+    int_ptr p = values + 2;  /* Point to values[2] */
+    p--;  /* Move back one element */
+    return *p;  /* Should return 20 */
+}
+EOF
+
+# Test 17: Typedef char pointer arithmetic
+try_ 98 << EOF
+typedef char *char_ptr;
+int main() {
+    char chars[5] = {'a', 'b', 'c', 'd', 'e'};
+    char_ptr p = chars;
+    p = p + 1;  /* Move forward by 1 byte */
+    return *p;  /* Should return 'b' = 98 */
+}
+EOF
+
+# Test 18: Mixed typedef pointer operations
+try_ 35 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[10] = {5, 10, 15, 20, 25, 30, 35, 40, 45, 50};
+    int_ptr p = values;
+    p = p + 2;  /* Move to values[2] = 15 */
+    p++;        /* Move to values[3] = 20 */
+    p = p + 3;  /* Move to values[6] = 35 */
+    return *p;
+}
+EOF
+
 # Category: Function Pointers
 begin_category "Function Pointers" "Testing function pointer declarations and calls"
 

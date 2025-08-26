@@ -281,7 +281,8 @@ var_t *truncate_unchecked(block_t *block,
 var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
 {
     bool is_from_ptr = from->ptr_level || from->array_size,
-         is_to_ptr = to->ptr_level || to->array_size;
+         is_to_ptr = to->ptr_level || to->array_size ||
+                     (to->type && to->type->ptr_level > 0);
 
     if (is_from_ptr && is_to_ptr)
         return from;
@@ -1291,10 +1292,6 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
 
     vd->type = type;
 
-    /* Inherit pointer level from typedef */
-    if (type->ptr_level > 0)
-        vd->ptr_level = type->ptr_level;
-
     read_inner_var_decl(vd, anon, is_param);
 }
 
@@ -1569,8 +1566,28 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
         vd = require_deref_var(parent, var->type, var->ptr_level);
         if (lvalue.ptr_level > 1)
             sz = PTR_SIZE;
-        else
-            sz = lvalue.type->size;
+        else {
+            /* For typedef pointers, get the size of the pointed-to type */
+            if (lvalue.type && lvalue.type->ptr_level > 0) {
+                /* This is a typedef pointer */
+                switch (lvalue.type->base_type) {
+                case TYPE_char:
+                    sz = TY_char->size;
+                    break;
+                case TYPE_int:
+                    sz = TY_int->size;
+                    break;
+                case TYPE_void:
+                    sz = 1;
+                    break;
+                default:
+                    sz = lvalue.type->size;
+                    break;
+                }
+            } else {
+                sz = lvalue.type->size;
+            }
+        }
         gen_name_to(vd->var_name);
         opstack_push(vd);
         add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
@@ -1628,8 +1645,29 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                 lvalue.ptr_level > i ? lvalue.ptr_level - i - 1 : 0);
             if (lvalue.ptr_level > i + 1)
                 sz = PTR_SIZE;
-            else
-                sz = lvalue.type->size;
+            else {
+                /* For typedef pointers, get the size of the pointed-to type */
+                if (lvalue.type && lvalue.type->ptr_level > 0 &&
+                    i == deref_count - 1) {
+                    /* This is a typedef pointer on the final dereference */
+                    switch (lvalue.type->base_type) {
+                    case TYPE_char:
+                        sz = TY_char->size;
+                        break;
+                    case TYPE_int:
+                        sz = TY_int->size;
+                        break;
+                    case TYPE_void:
+                        sz = 1;
+                        break;
+                    default:
+                        sz = lvalue.type->size;
+                        break;
+                    }
+                } else {
+                    sz = lvalue.type->size;
+                }
+            }
             gen_name_to(vd->var_name);
             opstack_push(vd);
             add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
@@ -2197,6 +2235,99 @@ void read_expr(block_t *parent, basic_block_t **bb)
                 if (get_operator_prio(top_op) >= get_operator_prio(op)) {
                     rs2 = opstack_pop();
                     rs1 = opstack_pop();
+
+                    /* Handle pointer arithmetic for addition and subtraction */
+                    if ((top_op == OP_add || top_op == OP_sub) &&
+                        (rs1->ptr_level ||
+                         (rs1->type && rs1->type->ptr_level > 0) ||
+                         rs2->ptr_level ||
+                         (rs2->type && rs2->type->ptr_level > 0))) {
+                        var_t *ptr_var = NULL;
+                        var_t *int_var = NULL;
+                        int element_size = 0;
+
+                        /* Determine which operand is the pointer */
+                        if (rs1->ptr_level ||
+                            (rs1->type && rs1->type->ptr_level > 0)) {
+                            ptr_var = rs1;
+                            int_var = rs2;
+
+                            /* Calculate element size */
+                            if (rs1->ptr_level && rs1->type) {
+                                element_size = rs1->type->size;
+                            } else if (rs1->type && rs1->type->ptr_level > 0) {
+                                /* Typedef pointer */
+                                switch (rs1->type->base_type) {
+                                case TYPE_char:
+                                    element_size = TY_char->size;
+                                    break;
+                                case TYPE_int:
+                                    element_size = TY_int->size;
+                                    break;
+                                case TYPE_void:
+                                    element_size = 1;
+                                    break;
+                                default:
+                                    element_size =
+                                        rs1->type ? rs1->type->size : PTR_SIZE;
+                                    break;
+                                }
+                            }
+                        } else if (rs2->ptr_level ||
+                                   (rs2->type && rs2->type->ptr_level > 0)) {
+                            /* Only for addition (p + n == n + p) */
+                            if (top_op == OP_add) {
+                                ptr_var = rs2;
+                                int_var = rs1;
+
+                                /* Calculate element size */
+                                if (rs2->ptr_level && rs2->type) {
+                                    element_size = rs2->type->size;
+                                } else if (rs2->type &&
+                                           rs2->type->ptr_level > 0) {
+                                    /* Typedef pointer */
+                                    switch (rs2->type->base_type) {
+                                    case TYPE_char:
+                                        element_size = TY_char->size;
+                                        break;
+                                    case TYPE_int:
+                                        element_size = TY_int->size;
+                                        break;
+                                    case TYPE_void:
+                                        element_size = 1;
+                                        break;
+                                    default:
+                                        element_size = rs2->type
+                                                           ? rs2->type->size
+                                                           : PTR_SIZE;
+                                        break;
+                                    }
+                                }
+                                /* Swap operands so pointer is rs1 */
+                                rs1 = ptr_var;
+                                rs2 = int_var;
+                            }
+                        }
+
+                        /* If we need to scale the integer operand */
+                        if (ptr_var && element_size > 1) {
+                            /* Create multiplication by element size */
+                            var_t *size_const = require_var(parent);
+                            gen_name_to(size_const->var_name);
+                            size_const->init_val = element_size;
+                            add_insn(parent, *bb, OP_load_constant, size_const,
+                                     NULL, NULL, 0, NULL);
+
+                            var_t *scaled = require_var(parent);
+                            gen_name_to(scaled->var_name);
+                            add_insn(parent, *bb, OP_mul, scaled, int_var,
+                                     size_const, 0, NULL);
+
+                            /* Use scaled value as rs2 */
+                            rs2 = scaled;
+                        }
+                    }
+
                     vd = require_var(parent);
                     gen_name_to(vd->var_name);
                     opstack_push(vd);
@@ -2311,6 +2442,92 @@ void read_expr(block_t *parent, basic_block_t **bb)
         opcode_t top_op = oper_stack[--oper_stack_idx];
         rs2 = opstack_pop();
         rs1 = opstack_pop();
+
+        /* Handle pointer arithmetic for addition and subtraction */
+        if ((top_op == OP_add || top_op == OP_sub) &&
+            (rs1->ptr_level || (rs1->type && rs1->type->ptr_level > 0) ||
+             rs2->ptr_level || (rs2->type && rs2->type->ptr_level > 0))) {
+            var_t *ptr_var = NULL;
+            var_t *int_var = NULL;
+            int element_size = 0;
+
+            /* Determine which operand is the pointer */
+            if (rs1->ptr_level || (rs1->type && rs1->type->ptr_level > 0)) {
+                ptr_var = rs1;
+                int_var = rs2;
+
+                /* Calculate element size */
+                if (rs1->ptr_level && rs1->type) {
+                    element_size = rs1->type->size;
+                } else if (rs1->type && rs1->type->ptr_level > 0) {
+                    /* Typedef pointer */
+                    switch (rs1->type->base_type) {
+                    case TYPE_char:
+                        element_size = TY_char->size;
+                        break;
+                    case TYPE_int:
+                        element_size = TY_int->size;
+                        break;
+                    case TYPE_void:
+                        element_size = 1;
+                        break;
+                    default:
+                        element_size = rs1->type ? rs1->type->size : PTR_SIZE;
+                        break;
+                    }
+                }
+            } else if (rs2->ptr_level ||
+                       (rs2->type && rs2->type->ptr_level > 0)) {
+                /* Only for addition (p + n == n + p) */
+                if (top_op == OP_add) {
+                    ptr_var = rs2;
+                    int_var = rs1;
+
+                    /* Calculate element size */
+                    if (rs2->ptr_level && rs2->type) {
+                        element_size = rs2->type->size;
+                    } else if (rs2->type && rs2->type->ptr_level > 0) {
+                        /* Typedef pointer */
+                        switch (rs2->type->base_type) {
+                        case TYPE_char:
+                            element_size = TY_char->size;
+                            break;
+                        case TYPE_int:
+                            element_size = TY_int->size;
+                            break;
+                        case TYPE_void:
+                            element_size = 1;
+                            break;
+                        default:
+                            element_size =
+                                rs2->type ? rs2->type->size : PTR_SIZE;
+                            break;
+                        }
+                    }
+                    /* Swap operands so pointer is rs1 */
+                    rs1 = ptr_var;
+                    rs2 = int_var;
+                }
+            }
+
+            /* If we need to scale the integer operand */
+            if (ptr_var && element_size > 1) {
+                /* Create multiplication by element size */
+                var_t *size_const = require_var(parent);
+                gen_name_to(size_const->var_name);
+                size_const->init_val = element_size;
+                add_insn(parent, *bb, OP_load_constant, size_const, NULL, NULL,
+                         0, NULL);
+
+                var_t *scaled = require_var(parent);
+                gen_name_to(scaled->var_name);
+                add_insn(parent, *bb, OP_mul, scaled, int_var, size_const, 0,
+                         NULL);
+
+                /* Use scaled value as rs2 */
+                rs2 = scaled;
+            }
+        }
 
         /* Constant folding for binary operations */
         if (rs1 && rs2 && rs1->init_val && !rs1->ptr_level && !rs1->is_global &&
@@ -2462,11 +2679,16 @@ void read_lvalue(lvalue_t *lvalue,
             }
 
             /* var must be either a pointer or an array of some type */
-            if (var->ptr_level == 0 && var->array_size == 0)
+            /* For typedef pointers, check the type's ptr_level */
+            bool is_typedef_pointer = (var->type && var->type->ptr_level > 0);
+            if (var->ptr_level == 0 && var->array_size == 0 &&
+                !is_typedef_pointer)
                 error("Cannot apply square operator to non-pointer");
 
             /* if nested pointer, still pointer */
-            if (var->ptr_level <= 1 && var->array_size == 0) {
+            /* Also handle typedef pointers which have ptr_level == 0 */
+            if ((var->ptr_level <= 1 || is_typedef_pointer) &&
+                var->array_size == 0) {
                 /* For typedef pointers, get the size of the base type that the
                  * pointer points to
                  */
@@ -2695,7 +2917,31 @@ void read_lvalue(lvalue_t *lvalue,
             side_effect[se_idx].opcode = OP_load_constant;
             vd = require_var(parent);
             gen_name_to(vd->var_name);
-            vd->init_val = 1;
+
+            /* Calculate increment size based on pointer type */
+            int increment_size = 1;
+            if (lvalue->ptr_level && !lvalue->is_reference) {
+                increment_size = lvalue->type->size;
+            } else if (!lvalue->is_reference && lvalue->type &&
+                       lvalue->type->ptr_level > 0) {
+                /* This is a typedef pointer */
+                switch (lvalue->type->base_type) {
+                case TYPE_char:
+                    increment_size = TY_char->size;
+                    break;
+                case TYPE_int:
+                    increment_size = TY_int->size;
+                    break;
+                case TYPE_void:
+                    increment_size = 1;
+                    break;
+                default:
+                    increment_size = lvalue->type->size;
+                    break;
+                }
+            }
+            vd->init_val = increment_size;
+
             side_effect[se_idx].rd = vd;
             side_effect[se_idx].rs1 = NULL;
             side_effect[se_idx].rs2 = NULL;
@@ -3010,6 +3256,27 @@ bool read_body_assignment(char *token,
              */
             if (lvalue.ptr_level && !lvalue.is_reference)
                 increment_size = lvalue.type->size;
+            /* Also check for typedef pointers which have is_ptr == 0 */
+            else if (!lvalue.is_reference && lvalue.type &&
+                     lvalue.type->ptr_level > 0) {
+                /* This is a typedef pointer, get the base type size */
+                switch (lvalue.type->base_type) {
+                case TYPE_char:
+                    increment_size = TY_char->size;
+                    break;
+                case TYPE_int:
+                    increment_size = TY_int->size;
+                    break;
+                case TYPE_void:
+                    /* void pointers treated as byte pointers */
+                    increment_size = 1;
+                    break;
+                default:
+                    /* For struct pointers and other types */
+                    increment_size = lvalue.type->size;
+                    break;
+                }
+            }
 
             /* If operand is a reference, read the value and push to stack for
              * the incoming addition/subtraction. Otherwise, use the top element
