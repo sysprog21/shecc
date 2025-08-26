@@ -320,116 +320,6 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
     return false;
 }
 
-/* Simple dead instruction elimination within basic blocks.
- * Removes instructions whose results are never used (dead stores).
- * Works in conjunction with existing SSA-based DCE.
- */
-bool eliminate_dead_instructions(func_t *func)
-{
-    if (!func || !func->bbs)
-        return false;
-
-    bool changed = false;
-
-    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-        ph2_ir_t *ir = bb->ph2_ir_list.head;
-        while (ir && ir->next) {
-            ph2_ir_t *next = ir->next;
-
-            /* Check if next instruction immediately overwrites this one's
-             * result */
-            if (ir->op == OP_load_constant && next->op == OP_load_constant &&
-                ir->dest == next->dest) {
-                /* Consecutive constant loads to same register - first is dead
-                 */
-                ir->next = next->next;
-                if (next == bb->ph2_ir_list.tail) {
-                    bb->ph2_ir_list.tail = ir;
-                }
-                changed = true;
-                continue;
-            }
-
-            /* Check for dead arithmetic results */
-            if ((ir->op == OP_add || ir->op == OP_sub || ir->op == OP_mul) &&
-                next->op == OP_assign && ir->dest == next->dest) {
-                /* Arithmetic result immediately overwritten by assignment */
-                ir->next = next->next;
-                if (next == bb->ph2_ir_list.tail) {
-                    bb->ph2_ir_list.tail = ir;
-                }
-                changed = true;
-                continue;
-            }
-
-            ir = ir->next;
-        }
-    }
-
-    return changed;
-}
-
-/* Simple constant folding for branches after SCCP.
- * Converts branches with obvious constant conditions to jumps.
- * Very conservative to maintain bootstrap stability.
- */
-bool fold_constant_branches(func_t *func)
-{
-    if (!func || !func->bbs)
-        return false;
-
-    bool changed = false;
-
-    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-        if (!bb->ph2_ir_list.tail)
-            continue;
-
-        ph2_ir_t *last = bb->ph2_ir_list.tail;
-
-        /* Only handle branches */
-        if (last->op != OP_branch || last->src0 < 0)
-            continue;
-
-        /* Look for immediately preceding constant load to the same register */
-        ph2_ir_t *prev = bb->ph2_ir_list.head;
-        ph2_ir_t *found = NULL;
-
-        /* Find the most recent constant load to the branch condition register
-         */
-        while (prev && prev != last) {
-            if (prev->op == OP_load_constant && prev->dest == last->src0) {
-                found = prev;
-                /* Keep looking - want the most recent load */
-            }
-            /* Stop if we see any other write to this register */
-            else if (prev->dest == last->src0) {
-                found = NULL; /* Register was modified, can't fold */
-            }
-            prev = prev->next;
-        }
-
-        if (found) {
-            /* Found constant condition - convert branch to jump */
-            int const_val = found->src0;
-
-            /* Just change the opcode, don't modify CFG edges directly */
-            last->op = OP_jump;
-
-            if (const_val != 0) {
-                /* Always take then branch */
-                last->next_bb = bb->then_;
-            } else {
-                /* Always take else branch */
-                last->next_bb = bb->else_;
-            }
-
-            /* Don't modify src0 or CFG edges - let later passes handle it */
-            changed = true;
-        }
-    }
-
-    return changed;
-}
 
 /* Load/store elimination for consecutive memory operations.
  * Removes redundant loads and dead stores that access the same memory location.
@@ -937,17 +827,29 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
 }
 
 /* Main peephole optimization driver.
- * It iterates through all functions, basic blocks, and IR instructions to apply
- * local optimizations on adjacent instruction pairs.
+ *
+ * SSA Optimizer (insn_t, before register allocation):
+ * - Constant folding with known values (5+3 → 8, x+0 → x)
+ * - Common subexpression elimination
+ * - Self-assignment elimination (x = x)
+ * - Dead code elimination
+ * - Constant comparison folding (5 < 3 → 0)
+ *
+ * Peephole Optimizer (ph2_ir_t, after register allocation):
+ * - Register-based self-operations (r1-r1 → 0, r1^r1 → 0)
+ * - Bitwise operation optimization (SSA doesn't handle these)
+ * - Strength reduction for power-of-2 (needs actual constants loaded)
+ * - Load/store pattern elimination
+ * - Triple instruction sequence optimization
+ * - Architecture-specific instruction fusion
+ *
+ * This refined separation eliminates redundant optimizations while
+ * maintaining comprehensive coverage of optimization opportunities.
  */
 void peephole(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        /* Phase 1: Dead code elimination working with SCCP results */
-        eliminate_dead_instructions(func);
-        fold_constant_branches(func);
-
-        /* Phase 2: Local peephole optimizations */
+        /* Local peephole optimizations on post-register-allocation IR */
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
                 ph2_ir_t *next = ir->next;
@@ -955,17 +857,38 @@ void peephole(void)
                     continue;
 
                 /* Self-assignment elimination
-                 * Removes trivial assignments where destination equals source
-                 * Pattern: {mov x, x} → eliminated
-                 * Common in compiler-generated intermediate code
+                 * Keep this as a safety net: SSA handles most cases, but
+                 * register allocation might create new self-assignments
                  */
                 if (next->op == OP_assign && next->dest == next->src0) {
                     ir->next = next->next;
                     continue;
                 }
 
-                /* Try instruction fusion first */
+                /* Try triple pattern optimization first (3-instruction
+                 * sequences)
+                 */
+                if (triple_pattern_optimization(ir))
+                    continue;
+
+                /* Try instruction fusion (2-instruction sequences) */
                 if (insn_fusion(ir))
+                    continue;
+
+                /* Apply comparison optimization */
+                if (comparison_optimization(ir))
+                    continue;
+
+                /* Apply strength reduction for power-of-2 operations */
+                if (strength_reduction(ir))
+                    continue;
+
+                /* Apply algebraic simplification */
+                if (algebraic_simplification(ir))
+                    continue;
+
+                /* Apply bitwise operation optimizations */
+                if (bitwise_optimization(ir))
                     continue;
 
                 /* Apply redundant move elimination */
