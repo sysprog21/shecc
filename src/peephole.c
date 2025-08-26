@@ -753,6 +753,108 @@ bool comparison_optimization(ph2_ir_t *ph2_ir)
     return false;
 }
 
+/* Bitwise operation optimization: Simplify bitwise patterns
+ * Returns true if optimization was applied
+ */
+bool bitwise_optimization(ph2_ir_t *ph2_ir)
+{
+    if (!ph2_ir || !ph2_ir->next)
+        return false;
+
+    ph2_ir_t *next = ph2_ir->next;
+
+    /* Pattern 1: Double complement → identity
+     * ~(~x) = x
+     */
+    if (ph2_ir->op == OP_negate && next->op == OP_negate &&
+        next->src0 == ph2_ir->dest) {
+        /* Replace with simple assignment */
+        ph2_ir->op = OP_assign;
+        ph2_ir->dest = next->dest;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 2: AND with all-ones mask → identity
+     * x & 0xFFFFFFFF = x (for 32-bit)
+     */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
+        next->op == OP_bit_and && next->src1 == ph2_ir->dest) {
+        /* Replace AND with assignment */
+        next->op = OP_assign;
+        next->src1 = 0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 3: OR with zero → identity
+     * x | 0 = x
+     */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
+        next->op == OP_bit_or && next->src1 == ph2_ir->dest) {
+        /* Replace OR with assignment */
+        next->op = OP_assign;
+        next->src1 = 0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 4: XOR with zero → identity
+     * x ^ 0 = x
+     */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
+        next->op == OP_bit_xor && next->src1 == ph2_ir->dest) {
+        /* Replace XOR with assignment */
+        next->op = OP_assign;
+        next->src1 = 0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 5: AND with zero → zero
+     * x & 0 = 0
+     */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
+        next->op == OP_bit_and &&
+        (next->src0 == ph2_ir->dest || next->src1 == ph2_ir->dest)) {
+        /* Replace with constant load of 0 */
+        next->op = OP_load_constant;
+        next->src0 = 0;
+        next->src1 = 0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 6: OR with all-ones → all-ones
+     * x | 0xFFFFFFFF = 0xFFFFFFFF
+     */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
+        next->op == OP_bit_or &&
+        (next->src0 == ph2_ir->dest || next->src1 == ph2_ir->dest)) {
+        /* Replace with constant load of -1 */
+        next->op = OP_load_constant;
+        next->src0 = -1;
+        next->src1 = 0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 7: Shift by zero → identity
+     * x << 0 = x, x >> 0 = x
+     */
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
+        (next->op == OP_lshift || next->op == OP_rshift) &&
+        next->src1 == ph2_ir->dest) {
+        /* Replace shift with assignment */
+        next->op = OP_assign;
+        next->src1 = 0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    return false;
+}
+
 /* Main peephole optimization driver.
  * It iterates through all functions, basic blocks, and IR instructions to apply
  * local optimizations on adjacent instruction pairs.
