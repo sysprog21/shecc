@@ -242,6 +242,84 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
     return false;
 }
 
+/* Redundant move elimination
+ * Eliminates unnecessary move operations that are overwritten or redundant
+ */
+bool redundant_move_elim(ph2_ir_t *ph2_ir)
+{
+    ph2_ir_t *next = ph2_ir->next;
+    if (!next)
+        return false;
+
+    /* Pattern 1: Consecutive assignments to same destination
+     * {mov rd, rs1; mov rd, rs2} → {mov rd, rs2}
+     * The first move is completely overwritten by the second
+     */
+    if (ph2_ir->op == OP_assign && next->op == OP_assign &&
+        ph2_ir->dest == next->dest) {
+        /* Replace first move with second, skip second */
+        ph2_ir->src0 = next->src0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 2: Redundant load immediately overwritten
+     * {load rd, offset; mov rd, rs} → {mov rd, rs}
+     * Loading a value that's immediately replaced is wasteful
+     */
+    if ((ph2_ir->op == OP_load || ph2_ir->op == OP_global_load) &&
+        next->op == OP_assign && ph2_ir->dest == next->dest) {
+        /* Replace load with move */
+        ph2_ir->op = OP_assign;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->src1 = 0; /* Clear unused field */
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 3: Load constant immediately overwritten
+     * {li rd, imm; mov rd, rs} → {mov rd, rs}
+     * Loading a constant that's immediately replaced
+     */
+    if (ph2_ir->op == OP_load_constant && next->op == OP_assign &&
+        ph2_ir->dest == next->dest) {
+        /* Replace constant load with move */
+        ph2_ir->op = OP_assign;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 4: Consecutive loads to same register
+     * {load rd, offset1; load rd, offset2} → {load rd, offset2}
+     * First load is pointless if immediately overwritten
+     */
+    if ((ph2_ir->op == OP_load || ph2_ir->op == OP_global_load) &&
+        (next->op == OP_load || next->op == OP_global_load) &&
+        ph2_ir->dest == next->dest) {
+        /* Keep only the second load */
+        ph2_ir->op = next->op;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->src1 = next->src1;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 5: Consecutive constant loads (already handled in main loop
+     * but included here for completeness)
+     * {li rd, imm1; li rd, imm2} → {li rd, imm2}
+     */
+    if (ph2_ir->op == OP_load_constant && next->op == OP_load_constant &&
+        ph2_ir->dest == next->dest) {
+        /* Keep only the second constant */
+        ph2_ir->src0 = next->src0;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    return false;
+}
+
 /* Main peephole optimization driver.
  * It iterates through all functions, basic blocks, and IR instructions to apply
  * local optimizations on adjacent instruction pairs.
@@ -265,7 +343,13 @@ void peephole(void)
                     continue;
                 }
 
-                insn_fusion(ir);
+                /* Try instruction fusion first */
+                if (insn_fusion(ir))
+                    continue;
+
+                /* Apply redundant move elimination */
+                if (redundant_move_elim(ir))
+                    continue;
             }
         }
     }
