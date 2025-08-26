@@ -1064,6 +1064,136 @@ int main() {
 }
 EOF
 
+# Enhanced pointer arithmetic tests
+# Test pointer difference calculation
+try_ 7 << EOF
+int main() {
+    int arr[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    int *p = arr;
+    int *q = arr + 7;
+    int diff = q - p;  /* Should be 7 */
+    return diff;
+}
+EOF
+
+try_ 5 << EOF
+int main() {
+    int arr[20] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    int *start = arr + 2;
+    int *end = arr + 7;
+    return end - start;  /* Should be 5 */
+}
+EOF
+
+# Test pointer difference with char pointers
+try_ 10 << EOF
+int main() {
+    char str[20] = "Hello, World!";
+    char *p = str;
+    char *q = str + 10;
+    return q - p;  /* Should be 10 */
+}
+EOF
+
+# Test pointer difference in expressions
+try_ 7 << EOF
+int main() {
+    int arr[20] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    int *p = arr;
+    int *r = arr + 10;
+    int *s = arr + 3;
+    int v = *(p + (r - s));  /* p + 7 = arr[7] = 7 */
+    return v;
+}
+EOF
+
+# Test complex pointer arithmetic with parentheses
+try_ 10 << EOF
+int main() {
+    int arr[20] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    int *p = arr;
+    /* Parenthesizing arithmetic ensures correct evaluation */
+    int v = *(p + (5 - 2 + 3 * 2));  /* p + 9 = arr[9] = 10 */
+    return v;
+}
+EOF
+
+# Test offset computed separately
+try_ 10 << EOF
+int main() {
+    int arr[20] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    int *p = arr;
+    int offset = 5 - 2 + 3 * 2;  /* = 9 */
+    int v = *(p + offset);  /* arr[9] = 10 */
+    return v;
+}
+EOF
+
+# Test array notation
+try_ 10 << EOF
+int main() {
+    int arr[20] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    int *p = arr;
+    int v = p[5 - 2 + 3 * 2];  /* p[9] = arr[9] = 10 */
+    return v;
+}
+EOF
+
+# Test pointer arithmetic with variables
+try_ 8 << EOF
+int main() {
+    int arr[20] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    int *p = arr;
+    int idx = 3;
+    int multiplier = 2;
+    int base = 1;
+    int v = *(p + (base + (idx * multiplier)));  /* p + 7 = arr[7] = 8 */
+    return v;
+}
+EOF
+
+# Test standard pointer + integer
+try_ 6 << EOF
+int main() {
+    int arr[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    int *p = arr;
+    int v = *(p + 5);  /* arr[5] = 6 */
+    return v;
+}
+EOF
+
+# Test pointer subtraction with offset
+try_ 6 << EOF
+int main() {
+    int arr[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    int *q = arr + 8;
+    int v = *(q - 3);  /* q - 3 = arr[5] = 6 */
+    return v;
+}
+EOF
+
+# Test nested parentheses in pointer arithmetic
+try_ 11 << EOF
+int main() {
+    int arr[20] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    int *p = arr;
+    int v = *(p + ((2 + 3) * 2));  /* p + 10 = arr[10] = 11 */
+    return v;
+}
+EOF
+
+# Test multiple pointer variables
+try_ 6 << EOF
+int main() {
+    int arr[20] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    int *p = arr;
+    int *q = p + 5;
+    int *base = &arr[0];
+    int v = *(q + (p - base));  /* q is at arr[5], offset by 0, so arr[5] = 6 */
+    return v;
+}
+EOF
+
 # Category: Function Pointers
 begin_category "Function Pointers" "Testing function pointer declarations and calls"
 
