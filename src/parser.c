@@ -1216,6 +1216,7 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
             /* array with size */
             if (lex_peek(T_numeric, buffer)) {
                 vd->array_size = read_numeric_constant(buffer);
+                vd->array_dim1 = vd->array_size; /* Store first dimension */
                 lex_expect(T_numeric);
             } else {
                 /* array without size:
@@ -1224,8 +1225,46 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
                 vd->is_ptr++;
             }
             lex_expect(T_close_square);
+
+            /* Handle multi-dimensional arrays: int matrix[3][4] becomes array
+             * of 3*4=12 elements
+             */
+            if (lex_accept(T_open_square)) {
+                if (lex_peek(T_numeric, buffer)) {
+                    int next_dim = read_numeric_constant(buffer);
+                    lex_expect(T_numeric);
+                    vd->array_dim2 = next_dim; /* Store second dimension */
+                    if (vd->array_size > 0) {
+                        vd->array_size *=
+                            next_dim; /* multiply dimensions together */
+                    } else {
+                        vd->array_size = next_dim;
+                    }
+                } else {
+                    vd->is_ptr++;
+                }
+                lex_expect(T_close_square);
+
+                /* For now, only support 2D arrays */
+                while (lex_accept(T_open_square)) {
+                    if (lex_peek(T_numeric, buffer)) {
+                        int next_dim = read_numeric_constant(buffer);
+                        lex_expect(T_numeric);
+                        if (vd->array_size > 0) {
+                            vd->array_size *= next_dim;
+                        } else {
+                            vd->array_size = next_dim;
+                        }
+                    } else {
+                        vd->is_ptr++;
+                    }
+                    lex_expect(T_close_square);
+                }
+            }
         } else {
             vd->array_size = 0;
+            vd->array_dim1 = 0;
+            vd->array_dim2 = 0;
         }
         vd->is_func = false;
     }
@@ -2454,9 +2493,18 @@ void read_lvalue(lvalue_t *lvalue,
             read_expr(parent, bb);
 
             /* multiply by element size */
-            if (lvalue->size != 1) {
+            /* For 2D arrays, check if this is the first or second dimension */
+            int multiplier = lvalue->size;
+
+            /* If this is the first index of a 2D array, multiply by dim2 *
+             * element_size
+             */
+            if (!is_address_got && var->array_dim2 > 0)
+                multiplier = var->array_dim2 * lvalue->size;
+
+            if (multiplier != 1) {
                 vd = require_var(parent);
-                vd->init_val = lvalue->size;
+                vd->init_val = multiplier;
                 gen_name_to(vd->var_name);
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
