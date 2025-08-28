@@ -150,11 +150,6 @@ bool is_whitespace(char c)
 
 char peek_char(int offset);
 
-/* is it backslash-newline? */
-bool is_linebreak(char c)
-{
-    return c == '\\' && peek_char(1) == '\n';
-}
 
 bool is_newline(char c)
 {

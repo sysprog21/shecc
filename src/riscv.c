@@ -377,15 +377,6 @@ int __ecall(void)
     return rv_encode_I(rv_ecall, __zero, __zero, 0);
 }
 
-int __ebreak(void)
-{
-    return rv_encode_I(rv_ebreak, __zero, __zero, 1);
-}
-
-int __nop(void)
-{
-    return __addi(__zero, __zero, 0);
-}
 
 int __mul(rv_reg rd, rv_reg rs1, rv_reg rs2)
 {
