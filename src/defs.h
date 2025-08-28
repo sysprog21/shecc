@@ -212,7 +212,6 @@ typedef struct token_info {
 typedef struct {
     token_info_t *freelist;
     int allocated_count;
-    int reused_count; /* Statistics for debugging */
 } token_pool_t;
 
 /* Token buffer for improved lookahead */
