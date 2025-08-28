@@ -378,6 +378,8 @@ void reg_alloc(void)
     }
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
         func->visited++;
 
         if (!strcmp(func->return_def.var_name, "main"))
@@ -557,6 +559,11 @@ void reg_alloc(void)
                         ir = bb_add_ph2_ir(bb, OP_address_of_func);
                         ir->src0 = src0;
                         strcpy(ir->func_name, insn->rs2->var_name);
+                        if (dynlink) {
+                            func_t *target_func = find_func(ir->func_name);
+                            if (target_func)
+                                target_func->is_used = true;
+                        }
                     } else {
                         /* FIXME: Avoid outdated content in register after
                          * storing, but causing some redundant spilling.
@@ -605,6 +612,11 @@ void reg_alloc(void)
 
                     ir = bb_add_ph2_ir(bb, OP_call);
                     strcpy(ir->func_name, insn->str);
+                    if (dynlink) {
+                        func_t *target_func = find_func(ir->func_name);
+                        if (target_func)
+                            target_func->is_used = true;
+                    }
 
                     is_pushing_args = 0;
                     args = 0;

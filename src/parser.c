@@ -4772,7 +4772,13 @@ void parse_internal(void)
     func->return_def.type = TY_int;
     func->num_params = 0;
     func->va_args = 1;
-    func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    if (!dynlink) {
+        func->bbs = arena_alloc(BB_ARENA, sizeof(basic_block_t));
+    } else {
+        /* In dynlink mode. __syscall won't be implemented but needs to exist
+         * for parsing the built-in libc. It will be treated as external */
+        func->bbs = NULL;
+    }
 
     /* lexer initialization */
     SOURCE->size = 0;
