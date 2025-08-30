@@ -2198,7 +2198,164 @@ void read_expr(block_t *parent, basic_block_t **bb)
                     vd = require_var(parent);
                     gen_name_to(vd->var_name);
                     opstack_push(vd);
-                    add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+
+                    /* Handle pointer arithmetic:
+                     * - If both operands are pointers (subtraction), divide by
+                     * element size
+                     * - If one operand is a pointer, handle scaling
+                     * appropriately
+                     */
+                    if (top_op == OP_sub && rs1->is_ptr && rs2->is_ptr) {
+                        /* Subtracting two pointers - divide by element size */
+                        var_t *diff = require_var(parent);
+                        gen_name_to(diff->var_name);
+                        add_insn(parent, *bb, OP_sub, diff, rs1, rs2, 0, NULL);
+
+                        /* Get the element size */
+                        int elem_size = 4; /* Default to int size */
+                        if (rs1->type) {
+                            /* For pointers, check what they point to */
+                            if (rs1->is_ptr || rs1->type->ptr_level > 0) {
+                                switch (rs1->type->base_type) {
+                                case TYPE_char:
+                                    elem_size = 1;
+                                    break;
+                                case TYPE_int:
+                                    elem_size = 4;
+                                    break;
+                                default:
+                                    elem_size = 4;
+                                    break;
+                                }
+                            } else {
+                                /* For non-pointers, use the type size */
+                                if (rs1->type->size > 0) {
+                                    elem_size = rs1->type->size;
+                                } else {
+                                    elem_size = 4;
+                                }
+                            }
+                        }
+
+                        /* Divide by element size */
+                        if (elem_size > 1) {
+                            var_t *size_const = require_var(parent);
+                            size_const->init_val = elem_size;
+                            gen_name_to(size_const->var_name);
+                            add_insn(parent, *bb, OP_load_constant, size_const,
+                                     NULL, NULL, 0, NULL);
+                            add_insn(parent, *bb, OP_div, vd, diff, size_const,
+                                     0, NULL);
+                        } else {
+                            /* If element size is 1, no division needed - use
+                             * assignment */
+                            add_insn(parent, *bb, OP_assign, vd, diff, NULL, 0,
+                                     NULL);
+                        }
+                    } else if ((top_op == OP_add || top_op == OP_sub) &&
+                               (rs1->is_ptr ||
+                                (rs1->type && rs1->type->ptr_level > 0)) &&
+                               !rs2->is_ptr) {
+                        /* Pointer +/- integer: scale the integer by element
+                         * size */
+                        int elem_size = 4;
+                        if (rs1->type) {
+                            /* For pointers, check what they point to */
+                            if (rs1->is_ptr || rs1->type->ptr_level > 0) {
+                                switch (rs1->type->base_type) {
+                                case TYPE_char:
+                                    elem_size = 1;
+                                    break;
+                                case TYPE_int:
+                                    elem_size = 4;
+                                    break;
+                                default:
+                                    elem_size = 4;
+                                    break;
+                                }
+                            } else {
+                                /* For non-pointers, use the type size */
+                                if (rs1->type->size > 0) {
+                                    elem_size = rs1->type->size;
+                                } else {
+                                    elem_size = 4;
+                                }
+                            }
+                        }
+
+                        /* Scale the integer operand if needed */
+                        if (elem_size > 1) {
+                            var_t *scaled = require_var(parent);
+                            gen_name_to(scaled->var_name);
+                            var_t *size_const = require_var(parent);
+                            size_const->init_val = elem_size;
+                            gen_name_to(size_const->var_name);
+                            add_insn(parent, *bb, OP_load_constant, size_const,
+                                     NULL, NULL, 0, NULL);
+                            add_insn(parent, *bb, OP_mul, scaled, rs2,
+                                     size_const, 0, NULL);
+                            add_insn(parent, *bb, top_op, vd, rs1, scaled, 0,
+                                     NULL);
+                        } else {
+                            add_insn(parent, *bb, top_op, vd, rs1, rs2, 0,
+                                     NULL);
+                        }
+                        /* Result is still a pointer */
+                        vd->is_ptr = rs1->is_ptr;
+                        vd->type = rs1->type;
+                    } else if ((top_op == OP_add) && !rs1->is_ptr &&
+                               (rs2->is_ptr ||
+                                (rs2->type && rs2->type->ptr_level > 0))) {
+                        /* Integer + pointer: scale the integer by element size
+                         */
+                        int elem_size = 4;
+                        if (rs2->type) {
+                            /* For pointers, check what they point to */
+                            if (rs2->is_ptr || rs2->type->ptr_level > 0) {
+                                switch (rs2->type->base_type) {
+                                case TYPE_char:
+                                    elem_size = 1;
+                                    break;
+                                case TYPE_int:
+                                    elem_size = 4;
+                                    break;
+                                default:
+                                    elem_size = 4;
+                                    break;
+                                }
+                            } else {
+                                /* For non-pointers, use the type size */
+                                if (rs2->type->size > 0) {
+                                    elem_size = rs2->type->size;
+                                } else {
+                                    elem_size = 4;
+                                }
+                            }
+                        }
+
+                        /* Scale the integer operand if needed */
+                        if (elem_size > 1) {
+                            var_t *scaled = require_var(parent);
+                            gen_name_to(scaled->var_name);
+                            var_t *size_const = require_var(parent);
+                            size_const->init_val = elem_size;
+                            gen_name_to(size_const->var_name);
+                            add_insn(parent, *bb, OP_load_constant, size_const,
+                                     NULL, NULL, 0, NULL);
+                            add_insn(parent, *bb, OP_mul, scaled, rs1,
+                                     size_const, 0, NULL);
+                            add_insn(parent, *bb, top_op, vd, scaled, rs2, 0,
+                                     NULL);
+                        } else {
+                            add_insn(parent, *bb, top_op, vd, rs1, rs2, 0,
+                                     NULL);
+                        }
+                        /* Result is a pointer */
+                        vd->is_ptr = rs2->is_ptr;
+                        vd->type = rs2->type;
+                    } else {
+                        add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+                    }
 
                     oper_stack_idx--;
                 } else
@@ -2390,14 +2547,205 @@ void read_expr(block_t *parent, basic_block_t **bb)
                 vd = require_var(parent);
                 gen_name_to(vd->var_name);
                 opstack_push(vd);
-                add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+
+                /* Handle pointer subtraction */
+                if (top_op == OP_sub && rs1->is_ptr && rs2->is_ptr) {
+                    var_t *diff = require_var(parent);
+                    gen_name_to(diff->var_name);
+                    add_insn(parent, *bb, OP_sub, diff, rs1, rs2, 0, NULL);
+
+                    int elem_size = 4;
+                    if (rs1->type) {
+                        /* For pointers, check what they point to */
+                        if (rs1->is_ptr || rs1->type->ptr_level > 0) {
+                            switch (rs1->type->base_type) {
+                            case TYPE_char:
+                                elem_size = 1;
+                                break;
+                            case TYPE_int:
+                                elem_size = 4;
+                                break;
+                            default:
+                                elem_size = 4;
+                                break;
+                            }
+                        } else {
+                            /* For non-pointers, use the type size */
+                            if (rs1->type->size > 0) {
+                                elem_size = rs1->type->size;
+                            } else {
+                                elem_size = 4;
+                            }
+                        }
+                    }
+
+                    if (elem_size > 1) {
+                        var_t *size_const = require_var(parent);
+                        size_const->init_val = elem_size;
+                        gen_name_to(size_const->var_name);
+                        add_insn(parent, *bb, OP_load_constant, size_const,
+                                 NULL, NULL, 0, NULL);
+                        add_insn(parent, *bb, OP_div, vd, diff, size_const, 0,
+                                 NULL);
+                    } else {
+                        /* If element size is 1, no division needed - use
+                         * assignment */
+                        add_insn(parent, *bb, OP_assign, vd, diff, NULL, 0,
+                                 NULL);
+                    }
+                } else if ((top_op == OP_add || top_op == OP_sub) &&
+                           (rs1->is_ptr ||
+                            (rs1->type && rs1->type->ptr_level > 0)) &&
+                           !rs2->is_ptr) {
+                    /* Pointer +/- integer: scale the integer by element size */
+                    int elem_size = 4;
+                    if (rs1->type) {
+                        /* For pointers, check what they point to */
+                        if (rs1->is_ptr || rs1->type->ptr_level > 0) {
+                            switch (rs1->type->base_type) {
+                            case TYPE_char:
+                                elem_size = 1;
+                                break;
+                            case TYPE_int:
+                                elem_size = 4;
+                                break;
+                            default:
+                                elem_size = 4;
+                                break;
+                            }
+                        } else {
+                            /* For non-pointers, use the type size */
+                            if (rs1->type->size > 0) {
+                                elem_size = rs1->type->size;
+                            } else {
+                                elem_size = 4;
+                            }
+                        }
+                    }
+
+                    /* Scale the integer operand if needed */
+                    if (elem_size > 1) {
+                        var_t *scaled = require_var(parent);
+                        gen_name_to(scaled->var_name);
+                        var_t *size_const = require_var(parent);
+                        size_const->init_val = elem_size;
+                        gen_name_to(size_const->var_name);
+                        add_insn(parent, *bb, OP_load_constant, size_const,
+                                 NULL, NULL, 0, NULL);
+                        add_insn(parent, *bb, OP_mul, scaled, rs2, size_const,
+                                 0, NULL);
+                        add_insn(parent, *bb, top_op, vd, rs1, scaled, 0, NULL);
+                    } else {
+                        add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+                    }
+                    /* Result is still a pointer */
+                    vd->is_ptr = rs1->is_ptr;
+                    vd->type = rs1->type;
+                } else {
+                    add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+                }
             }
         } else {
             /* Normal operation */
             vd = require_var(parent);
             gen_name_to(vd->var_name);
             opstack_push(vd);
-            add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+
+            /* Handle pointer subtraction */
+            if (top_op == OP_sub && rs1->is_ptr && rs2->is_ptr) {
+                var_t *diff = require_var(parent);
+                gen_name_to(diff->var_name);
+                add_insn(parent, *bb, OP_sub, diff, rs1, rs2, 0, NULL);
+
+                int elem_size = 4;
+                if (rs1->type) {
+                    /* For pointers, check what they point to */
+                    if (rs1->is_ptr || rs1->type->ptr_level > 0) {
+                        switch (rs1->type->base_type) {
+                        case TYPE_char:
+                            elem_size = 1;
+                            break;
+                        case TYPE_int:
+                            elem_size = 4;
+                            break;
+                        default:
+                            elem_size = 4;
+                            break;
+                        }
+                    } else {
+                        /* For non-pointers, use the type size */
+                        if (rs1->type->size > 0) {
+                            elem_size = rs1->type->size;
+                        } else {
+                            elem_size = 4;
+                        }
+                    }
+                }
+
+                if (elem_size > 1) {
+                    var_t *size_const = require_var(parent);
+                    size_const->init_val = elem_size;
+                    gen_name_to(size_const->var_name);
+                    add_insn(parent, *bb, OP_load_constant, size_const, NULL,
+                             NULL, 0, NULL);
+                    add_insn(parent, *bb, OP_div, vd, diff, size_const, 0,
+                             NULL);
+                } else {
+                    /* If element size is 1, no division needed - use assignment
+                     */
+                    add_insn(parent, *bb, OP_assign, vd, diff, NULL, 0, NULL);
+                }
+            } else if ((top_op == OP_add || top_op == OP_sub) &&
+                       (rs1->is_ptr ||
+                        (rs1->type && rs1->type->ptr_level > 0)) &&
+                       !rs2->is_ptr) {
+                /* Pointer +/- integer: scale the integer by element size */
+                int elem_size = 4;
+                if (rs1->type) {
+                    /* For pointers, check what they point to */
+                    if (rs1->is_ptr || rs1->type->ptr_level > 0) {
+                        switch (rs1->type->base_type) {
+                        case TYPE_char:
+                            elem_size = 1;
+                            break;
+                        case TYPE_int:
+                            elem_size = 4;
+                            break;
+                        default:
+                            elem_size = 4;
+                            break;
+                        }
+                    } else {
+                        /* For non-pointers, use the type size */
+                        if (rs1->type->size > 0) {
+                            elem_size = rs1->type->size;
+                        } else {
+                            elem_size = 4;
+                        }
+                    }
+                }
+
+                /* Scale the integer operand if needed */
+                if (elem_size > 1) {
+                    var_t *scaled = require_var(parent);
+                    gen_name_to(scaled->var_name);
+                    var_t *size_const = require_var(parent);
+                    size_const->init_val = elem_size;
+                    gen_name_to(size_const->var_name);
+                    add_insn(parent, *bb, OP_load_constant, size_const, NULL,
+                             NULL, 0, NULL);
+                    add_insn(parent, *bb, OP_mul, scaled, rs2, size_const, 0,
+                             NULL);
+                    add_insn(parent, *bb, top_op, vd, rs1, scaled, 0, NULL);
+                } else {
+                    add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+                }
+                /* Result is still a pointer */
+                vd->is_ptr = rs1->is_ptr;
+                vd->type = rs1->type;
+            } else {
+                add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
+            }
         }
     }
     while (has_prev_log_op) {
