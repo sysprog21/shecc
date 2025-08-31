@@ -317,6 +317,35 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         return true;
     }
 
+    /* Pattern 6: Move followed by load
+     * {mov rd, rs; load rd, offset} → {load rd, offset}
+     * The move is pointless if immediately overwritten by load
+     */
+    if (ph2_ir->op == OP_assign &&
+        (next->op == OP_load || next->op == OP_global_load) &&
+        ph2_ir->dest == next->dest) {
+        /* Replace move+load with just the load */
+        ph2_ir->op = next->op;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->src1 = next->src1;
+        ph2_ir->next = next->next;
+        return true;
+    }
+
+    /* Pattern 7: Move followed by constant load
+     * {mov rd, rs; li rd, imm} → {li rd, imm}
+     * The move is pointless if immediately overwritten by constant
+     */
+    if (ph2_ir->op == OP_assign && next->op == OP_load_constant &&
+        ph2_ir->dest == next->dest) {
+        /* Replace move+li with just the li */
+        ph2_ir->op = OP_load_constant;
+        ph2_ir->src0 = next->src0;
+        ph2_ir->src1 = 0; /* Clear unused field */
+        ph2_ir->next = next->next;
+        return true;
+    }
+
     return false;
 }
 
