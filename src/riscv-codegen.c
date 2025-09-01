@@ -467,14 +467,16 @@ void code_generate(void)
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
     /* use original sp saved in s0 to get argc/argv */
-    emit(__addi(__t0, __s0, 0));
-    emit(__lw(__a0, __t0, 0));
-    emit(__addi(__a1, __t0, 4));
-    emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
+    if (MAIN_BB) {
+        emit(__addi(__t0, __s0, 0));
+        emit(__lw(__a0, __t0, 0));
+        emit(__addi(__a1, __t0, 4));
+        emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
 
-    /* exit with main's return value in a0 */
-    emit(__addi(__a7, __zero, 93));
-    emit(__ecall());
+        /* exit with main's return value in a0 */
+        emit(__addi(__a7, __zero, 93));
+        emit(__ecall());
+    }
 
     for (int i = 0; i < ph2_ir_idx; i++) {
         ph2_ir = PH2_IR_FLATTEN[i];

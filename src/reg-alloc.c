@@ -54,6 +54,19 @@ bool check_live_out(basic_block_t *bb, var_t *var)
     return false;
 }
 
+void track_var_use(var_t *var, int insn_idx)
+{
+    if (!var)
+        return;
+
+    var->use_count++;
+
+    if (var->first_use < 0)
+        var->first_use = insn_idx;
+
+    var->last_use = insn_idx;
+}
+
 void refresh(basic_block_t *bb, insn_t *insn)
 {
     for (int i = 0; i < REG_CNT; i++) {
@@ -93,18 +106,57 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     return n;
 }
 
+/* Calculate the cost of spilling a variable from a register.
+ * Higher cost means the variable is more valuable to keep in a register.
+ * The cost is computed based on multiple factors that affect performance.
+ */
 int calculate_spill_cost(var_t *var, basic_block_t *bb, int current_idx)
 {
-    if (check_live_out(bb, var))
-        return 1000;
+    int cost = 0;
 
+    /* Variables that are live-out of the basic block must be spilled anyway,
+     * so give them a high cost to prefer spilling them over others
+     */
+    if (check_live_out(bb, var))
+        cost += 1000;
+
+    /* Variables that will be used soon should have higher cost.
+     * The closer the next use, the higher the penalty for spilling
+     */
     if (var->consumed > current_idx) {
         int distance = var->consumed - current_idx;
         if (distance < 10)
-            return 100 - distance * 10;
+            cost += 100 - distance * 10; /* Max 100 points for immediate use */
     }
 
-    return 0;
+    /* Frequently used variables should stay in registers.
+     * Each use adds 5 points to the cost
+     */
+    if (var->use_count > 0)
+        cost += var->use_count * 5;
+
+    /* Variables inside loops are accessed repeatedly, so they should have much
+     * higher priority to stay in registers (200 points per level)
+     */
+    if (var->loop_depth > 0)
+        cost += var->loop_depth * 200;
+
+    /* Constants can be easily reloaded, so prefer spilling them by reducing
+     * their cost
+     */
+    if (var->is_const)
+        cost -= 50;
+
+    /* Variables with long live ranges may benefit from spilling to free up
+     * registers for other variables
+     */
+    if (var->first_use >= 0 && var->last_use >= 0) {
+        int range_length = var->last_use - var->first_use;
+        if (range_length > 100)
+            cost += 20; /* Small penalty for very long live ranges */
+    }
+
+    return cost;
 }
 
 int find_best_spill(basic_block_t *bb,
@@ -269,9 +321,8 @@ int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
         }
     }
 
-    if (REGS[spilled].var) {
+    if (REGS[spilled].var)
         vreg_clear_phys(REGS[spilled].var);
-    }
 
     spill_var(bb, REGS[spilled].var, spilled);
     REGS[spilled].var = var;
@@ -512,6 +563,7 @@ void reg_alloc(void)
 
                 switch (insn->opcode) {
                 case OP_unwound_phi:
+                    track_var_use(insn->rs1, insn->idx);
                     src0 = prepare_operand(bb, insn->rs1, -1);
 
                     if (!insn->rd->offset) {
@@ -610,6 +662,7 @@ void reg_alloc(void)
                     if (insn->rd->consumed == -1)
                         break;
 
+                    track_var_use(insn->rs1, insn->idx);
                     src0 = find_in_regs(insn->rs1);
 
                     /* If operand is loaded from stack, clear the original slot
@@ -754,6 +807,8 @@ void reg_alloc(void)
                 case OP_bit_and:
                 case OP_bit_or:
                 case OP_bit_xor:
+                    track_var_use(insn->rs1, insn->idx);
+                    track_var_use(insn->rs2, insn->idx);
                     src0 = prepare_operand(bb, insn->rs1, -1);
                     src1 = prepare_operand(bb, insn->rs2, src0);
                     dest = prepare_dest(bb, insn->rd, src0, src1);
