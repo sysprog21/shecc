@@ -371,7 +371,10 @@ struct var {
     int consumed;
     bool is_ternary_ret;
     bool is_logical_ret;
-    bool is_const; /* whether a constant representaion or not */
+    bool is_const;  /* whether a constant representaion or not */
+    int vreg_id;    /* Virtual register ID */
+    int phys_reg;   /* Physical register assignment (-1 if unassigned) */
+    int vreg_flags; /* VReg flags */
 };
 
 typedef struct {
