@@ -584,8 +584,8 @@ void hashmap_free(hashmap_t *map)
 
 /* options */
 
-int dump_ir = 0;
-int hard_mul_div = 0;
+bool dump_ir = false;
+bool hard_mul_div = false;
 
 /* Find the type by the given name.
  * @type_name: The name to be searched.
@@ -883,7 +883,7 @@ var_t *find_var(char *token, block_t *parent)
 int size_var(var_t *var)
 {
     int size;
-    if (var->is_ptr > 0 || var->is_func) {
+    if (var->ptr_level > 0 || var->is_func) {
         size = 4;
     } else {
         type_t *type = var->type;
@@ -1426,7 +1426,7 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             print_indent(1);
             printf("allocat %s", rd->type->type_name);
 
-            for (int i = 0; i < rd->is_ptr; i++)
+            for (int i = 0; i < rd->ptr_level; i++)
                 printf("*");
 
             printf(" %%%s", rd->var_name);
@@ -1636,7 +1636,7 @@ void dump_insn(void)
 
         printf("def %s", func->return_def.type->type_name);
 
-        for (int i = 0; i < func->return_def.is_ptr; i++)
+        for (int i = 0; i < func->return_def.ptr_level; i++)
             printf("*");
         printf(" @%s(", func->return_def.var_name);
 
@@ -1645,7 +1645,7 @@ void dump_insn(void)
                 printf(", ");
             printf("%s", func->param_defs[i].type->type_name);
 
-            for (int k = 0; k < func->param_defs[i].is_ptr; k++)
+            for (int k = 0; k < func->param_defs[i].ptr_level; k++)
                 printf("*");
             printf(" %%%s", func->param_defs[i].var_name);
         }

@@ -33,7 +33,7 @@ int operand_stack_idx = 0;
 /* Forward declarations */
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
 void perform_side_effect(block_t *parent, basic_block_t *bb);
-void read_inner_var_decl(var_t *vd, int anon, int is_param);
+void read_inner_var_decl(var_t *vd, bool anon, bool is_param);
 void read_partial_var_decl(var_t *vd, var_t *template);
 void parse_array_init(var_t *var,
                       block_t *parent,
@@ -81,7 +81,7 @@ var_t *require_typed_var(block_t *blk, type_t *type)
 var_t *require_typed_ptr_var(block_t *blk, type_t *type, int ptr)
 {
     var_t *var = require_typed_var(blk, type);
-    var->is_ptr = ptr;
+    var->ptr_level = ptr;
     return var;
 }
 
@@ -91,7 +91,7 @@ var_t *require_ref_var(block_t *blk, type_t *type, int ptr)
         error("Cannot reference variable from NULL type");
 
     var_t *var = require_typed_var(blk, type);
-    var->is_ptr = ptr + 1;
+    var->ptr_level = ptr + 1;
     return var;
 }
 
@@ -109,7 +109,7 @@ var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
         error("Cannot dereference from non-pointer typed variable");
 
     var_t *var = require_typed_var(blk, type);
-    var->is_ptr = ptr - 1;
+    var->ptr_level = ptr - 1;
     return var;
 }
 
@@ -135,7 +135,7 @@ int write_symbol(char *data)
 
 int get_size(var_t *var)
 {
-    if (var->is_ptr || var->is_func)
+    if (var->ptr_level || var->is_func)
         return PTR_SIZE;
     return var->type->size;
 }
@@ -253,10 +253,11 @@ var_t *promote(block_t *block,
                int target_ptr)
 {
     /* Effectively checking whether var has size of int */
-    if (var->type->size == target_type->size || var->is_ptr || var->array_size)
+    if (var->type->size == target_type->size || var->ptr_level ||
+        var->array_size)
         return var;
 
-    if (var->type->size > TY_int->size && !var->is_ptr) {
+    if (var->type->size > TY_int->size && !var->ptr_level) {
         printf("Warning: Suspicious type promotion %s\n", var->type->type_name);
         return var;
     }
@@ -279,8 +280,8 @@ var_t *truncate_unchecked(block_t *block,
 
 var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
 {
-    bool is_from_ptr = from->is_ptr || from->array_size,
-         is_to_ptr = to->is_ptr || to->array_size;
+    bool is_from_ptr = from->ptr_level || from->array_size,
+         is_to_ptr = to->ptr_level || to->array_size;
 
     if (is_from_ptr && is_to_ptr)
         return from;
@@ -289,12 +290,12 @@ var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
 
     if (from_size > to_size) {
         /* Truncation */
-        return truncate_unchecked(block, bb, from, to->type, to->is_ptr);
+        return truncate_unchecked(block, bb, from, to->type, to->ptr_level);
     }
 
     if (from_size < to_size) {
         /* Sign extend */
-        return promote_unchecked(block, bb, from, to->type, to->is_ptr);
+        return promote_unchecked(block, bb, from, to->type, to->ptr_level);
     }
 
     return from;
@@ -673,7 +674,7 @@ bool read_preproc_directive(void)
     return false;
 }
 
-void read_parameter_list_decl(func_t *func, int anon);
+void read_parameter_list_decl(func_t *func, bool anon);
 
 /* Forward declaration for ternary handling used by initializers */
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
@@ -801,7 +802,7 @@ void parse_struct_field_init(block_t *parent,
 
                 var_t target = {0};
                 target.type = field->type;
-                target.is_ptr = field->is_ptr;
+                target.ptr_level = field->ptr_level;
                 var_t *field_val =
                     resize_var(parent, bb, field_val_raw, &target);
 
@@ -997,8 +998,8 @@ basic_block_t *handle_struct_variable_decl(block_t *parent,
 
     if (lex_accept(T_assign)) {
         if (lex_peek(T_open_curly, NULL) &&
-            (var->array_size > 0 || var->is_ptr > 0)) {
-            parse_array_init(var, parent, &bb, 1);
+            (var->array_size > 0 || var->ptr_level > 0)) {
+            parse_array_init(var, parent, &bb, true);
         } else if (lex_peek(T_open_curly, NULL) &&
                    (var->type->base_type == TYPE_struct ||
                     var->type->base_type == TYPE_typedef)) {
@@ -1013,7 +1014,8 @@ basic_block_t *handle_struct_variable_decl(block_t *parent,
                      NULL);
 
             lex_expect(T_open_curly);
-            parse_struct_field_init(parent, &bb, struct_type, struct_addr, 1);
+            parse_struct_field_init(parent, &bb, struct_type, struct_addr,
+                                    true);
             lex_expect(T_close_curly);
         } else {
             read_expr(parent, &bb);
@@ -1025,13 +1027,13 @@ basic_block_t *handle_struct_variable_decl(block_t *parent,
 
     while (lex_accept(T_comma)) {
         var_t *nv = require_typed_var(parent, type);
-        read_inner_var_decl(nv, 0, 0);
+        read_inner_var_decl(nv, false, false);
         add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
         add_symbol(bb, nv);
         if (lex_accept(T_assign)) {
             if (lex_peek(T_open_curly, NULL) &&
-                (nv->array_size > 0 || nv->is_ptr > 0)) {
-                parse_array_init(nv, parent, &bb, 1);
+                (nv->array_size > 0 || nv->ptr_level > 0)) {
+                parse_array_init(nv, parent, &bb, true);
             } else if (lex_peek(T_open_curly, NULL) &&
                        (nv->type->base_type == TYPE_struct ||
                         nv->type->base_type == TYPE_typedef)) {
@@ -1071,7 +1073,7 @@ void parse_array_init(var_t *var,
     int count = 0;
     var_t *base_addr = NULL;
     var_t *stored_vals[256];
-    int is_implicit = (var->array_size == 0);
+    bool is_implicit = (var->array_size == 0);
 
     if (emit_code)
         base_addr = var;
@@ -1132,7 +1134,7 @@ void parse_array_init(var_t *var,
             if (val && emit_code && !is_implicit && count < var->array_size) {
                 var_t target = {0};
                 target.type = var->type;
-                target.is_ptr = 0;
+                target.ptr_level = 0;
                 var_t *v = resize_var(parent, bb, val, &target);
 
                 var_t *elem_addr = compute_element_address(
@@ -1156,8 +1158,8 @@ void parse_array_init(var_t *var,
     lex_expect(T_close_curly);
 
     if (is_implicit) {
-        if (var->is_ptr > 0)
-            var->is_ptr = 0;
+        if (var->ptr_level > 0)
+            var->ptr_level = 0;
         var->array_size = count;
 
         if (emit_code && count > 0) {
@@ -1168,7 +1170,7 @@ void parse_array_init(var_t *var,
                     continue;
                 var_t target = {0};
                 target.type = var->type;
-                target.is_ptr = 0;
+                target.ptr_level = 0;
                 var_t *v = resize_var(parent, bb, stored_vals[i], &target);
 
                 var_t *elem_addr = compute_element_address(
@@ -1181,13 +1183,13 @@ void parse_array_init(var_t *var,
     }
 }
 
-void read_inner_var_decl(var_t *vd, int anon, int is_param)
+void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 {
     vd->init_val = 0;
     /* Preserve typedef pointer level - don't reset if already inherited */
 
     while (lex_accept(T_asterisk))
-        vd->is_ptr++;
+        vd->ptr_level++;
 
     /* is it function pointer declaration? */
     if (lex_accept(T_open_bracket)) {
@@ -1197,10 +1199,10 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
         lex_ident(T_identifier, temp_name);
         strcpy(vd->var_name, intern_string(temp_name));
         lex_expect(T_close_bracket);
-        read_parameter_list_decl(&func, 1);
+        read_parameter_list_decl(&func, true);
         vd->is_func = true;
     } else {
-        if (anon == 0) {
+        if (!anon) {
             char temp_name[MAX_VAR_LEN];
             lex_ident(T_identifier, temp_name);
             strcpy(vd->var_name, intern_string(temp_name));
@@ -1222,7 +1224,7 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
                 /* array without size:
                  * regarded as a pointer although could be nested
                  */
-                vd->is_ptr++;
+                vd->ptr_level++;
             }
             lex_expect(T_close_square);
 
@@ -1241,7 +1243,7 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
                         vd->array_size = next_dim;
                     }
                 } else {
-                    vd->is_ptr++;
+                    vd->ptr_level++;
                 }
                 lex_expect(T_close_square);
 
@@ -1256,7 +1258,7 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
                             vd->array_size = next_dim;
                         }
                     } else {
-                        vd->is_ptr++;
+                        vd->ptr_level++;
                     }
                     lex_expect(T_close_square);
                 }
@@ -1271,7 +1273,7 @@ void read_inner_var_decl(var_t *vd, int anon, int is_param)
 }
 
 /* starting next_token, need to check the type */
-void read_full_var_decl(var_t *vd, int anon, int is_param)
+void read_full_var_decl(var_t *vd, bool anon, bool is_param)
 {
     char type_name[MAX_TYPE_LEN];
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
@@ -1291,7 +1293,7 @@ void read_full_var_decl(var_t *vd, int anon, int is_param)
 
     /* Inherit pointer level from typedef */
     if (type->ptr_level > 0)
-        vd->is_ptr = type->ptr_level;
+        vd->ptr_level = type->ptr_level;
 
     read_inner_var_decl(vd, anon, is_param);
 }
@@ -1299,10 +1301,10 @@ void read_full_var_decl(var_t *vd, int anon, int is_param)
 /* starting next_token, need to check the type */
 void read_partial_var_decl(var_t *vd, var_t *template)
 {
-    read_inner_var_decl(vd, 0, 0);
+    read_inner_var_decl(vd, false, false);
 }
 
-void read_parameter_list_decl(func_t *func, int anon)
+void read_parameter_list_decl(func_t *func, bool anon)
 {
     int vn = 0;
     lex_expect(T_open_bracket);
@@ -1313,8 +1315,8 @@ void read_parameter_list_decl(func_t *func, int anon)
         if (lex_accept(T_close_bracket))
             return;
         func->param_defs[vn].type = TY_void;
-        read_inner_var_decl(&func->param_defs[vn], anon, 1);
-        if (!func->param_defs[vn].is_ptr && !func->param_defs[vn].is_func &&
+        read_inner_var_decl(&func->param_defs[vn], anon, true);
+        if (!func->param_defs[vn].ptr_level && !func->param_defs[vn].is_func &&
             !func->param_defs[vn].array_size)
             error("'void' must be the only parameter and unnamed");
         vn++;
@@ -1322,7 +1324,7 @@ void read_parameter_list_decl(func_t *func, int anon)
     }
 
     while (lex_peek(T_identifier, NULL) == 1) {
-        read_full_var_decl(&func->param_defs[vn++], anon, 1);
+        read_full_var_decl(&func->param_defs[vn++], anon, true);
         lex_accept(T_comma);
     }
     func->num_params = vn;
@@ -1358,7 +1360,7 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
 
     int index = write_symbol(combined);
 
-    var_t *vd = require_typed_ptr_var(parent, TY_char, 1);
+    var_t *vd = require_typed_ptr_var(parent, TY_char, true);
     gen_name_to(vd->var_name);
     vd->init_val = index;
     opstack_push(vd);
@@ -1520,7 +1522,7 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
 
     if (!lvalue.is_reference) {
         rs1 = opstack_pop();
-        vd = require_ref_var(parent, lvalue.type, lvalue.is_ptr);
+        vd = require_ref_var(parent, lvalue.type, lvalue.ptr_level);
         gen_name_to(vd->var_name);
         opstack_push(vd);
         add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
@@ -1544,7 +1546,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
          * defaults
          */
         type_t *deref_type = rs1->type ? rs1->type : TY_int;
-        int deref_ptr = rs1->is_ptr > 0 ? rs1->is_ptr - 1 : 0;
+        int deref_ptr = rs1->ptr_level > 0 ? rs1->ptr_level - 1 : 0;
 
         vd = require_deref_var(parent, deref_type, deref_ptr);
         if (deref_ptr > 0)
@@ -1564,8 +1566,8 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
         read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
 
         rs1 = opstack_pop();
-        vd = require_deref_var(parent, var->type, var->is_ptr);
-        if (lvalue.is_ptr > 1)
+        vd = require_deref_var(parent, var->type, var->ptr_level);
+        if (lvalue.ptr_level > 1)
             sz = PTR_SIZE;
         else
             sz = lvalue.type->size;
@@ -1598,7 +1600,7 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
             rs1 = opstack_pop();
             /* For expression dereference, use default type info */
             type_t *deref_type = rs1->type ? rs1->type : TY_int;
-            int deref_ptr = rs1->is_ptr > 0 ? rs1->is_ptr - 1 : 0;
+            int deref_ptr = rs1->ptr_level > 0 ? rs1->ptr_level - 1 : 0;
 
             vd = require_deref_var(parent, deref_type, deref_ptr);
             if (deref_ptr > 0)
@@ -1623,8 +1625,8 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
             rs1 = opstack_pop();
             vd = require_deref_var(
                 parent, var->type,
-                lvalue.is_ptr > i ? lvalue.is_ptr - i - 1 : 0);
-            if (lvalue.is_ptr > i + 1)
+                lvalue.ptr_level > i ? lvalue.ptr_level - i - 1 : 0);
+            if (lvalue.ptr_level > i + 1)
                 sz = PTR_SIZE;
             else
                 sz = lvalue.type->size;
@@ -1666,7 +1668,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         read_ternary_operation(parent, bb);
         var_t *expr_var = opstack_pop();
         type = expr_var->type;
-        ptr_cnt = expr_var->is_ptr;
+        ptr_cnt = expr_var->ptr_level;
     }
 
     if (!type)
@@ -1730,15 +1732,15 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         /* Check if this is a cast, compound literal, or parenthesized
          * expression */
         char lookahead_token[MAX_TYPE_LEN];
-        int is_compound_literal = 0;
-        int is_cast = 0;
+        bool is_compound_literal = false;
+        bool is_cast = false;
         type_t *cast_or_literal_type = NULL;
         int cast_ptr_level = 0;
 
         /* Look ahead to see if we have a typename followed by ) */
         if (lex_peek(T_identifier, lookahead_token)) {
             /* Check if it's a basic type or typedef */
-            type_t *type = find_type(lookahead_token, 1);
+            type_t *type = find_type(lookahead_token, true);
 
             if (type) {
                 /* Save current position to backtrack if needed */
@@ -1756,9 +1758,9 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 }
 
                 /* Check for array brackets: [size] or [] */
-                int is_array = 0;
+                bool is_array = false;
                 if (lex_accept(T_open_square)) {
-                    is_array = 1;
+                    is_array = true;
                     /* Skip array size if present */
                     if (lex_peek(T_numeric, NULL)) {
                         char size_buffer[10];
@@ -1771,7 +1773,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 if (lex_accept(T_close_bracket)) {
                     if (lex_peek(T_open_curly, NULL)) {
                         /* (type){...} - compound literal */
-                        is_compound_literal = 1;
+                        is_compound_literal = true;
                         cast_or_literal_type = type;
                         cast_ptr_level = ptr_level;
                         /* Store is_array flag in cast_ptr_level if it's an
@@ -1783,7 +1785,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                         }
                     } else {
                         /* (type)expr - cast expression */
-                        is_cast = 1;
+                        is_cast = true;
                         cast_or_literal_type = type;
                         cast_ptr_level = ptr_level;
                     }
@@ -1826,14 +1828,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             gen_name_to(compound_var->var_name);
 
             /* Check if this is an array compound literal (int[]){...} */
-            int is_array_literal = (cast_ptr_level == -1);
+            bool is_array_literal = (cast_ptr_level == -1);
             if (is_array_literal)
                 cast_ptr_level = 0; /* Reset for normal processing */
 
             /* Check if this is a pointer compound literal */
             if (cast_ptr_level > 0) {
                 /* Pointer compound literal: (int*){&x} */
-                compound_var->is_ptr = cast_ptr_level;
+                compound_var->ptr_level = cast_ptr_level;
 
                 /* Parse the pointer value (should be an address) */
                 if (!lex_peek(T_close_curly, NULL)) {
@@ -1870,7 +1872,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
                 /* Initialize struct compound literal */
                 compound_var->init_val = 0;
-                compound_var->is_ptr = 0;
+                compound_var->ptr_level = 0;
 
                 /* Parse first field value */
                 if (!lex_peek(T_close_curly, NULL)) {
@@ -1961,7 +1963,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
                             /* Calculate address of element */
                             var_t *elem_addr = require_var(parent);
-                            elem_addr->is_ptr = 1;
+                            elem_addr->ptr_level = 1;
                             gen_name_to(elem_addr->var_name);
                             add_insn(parent, *bb, OP_add, elem_addr,
                                      compound_var, elem_offset, 0, NULL);
@@ -1983,7 +1985,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                         var_t *result_var = require_var(parent);
                         gen_name_to(result_var->var_name);
                         result_var->type = compound_var->type;
-                        result_var->is_ptr = 0;
+                        result_var->ptr_level = 0;
                         result_var->array_size = 0;
 
                         /* Read first element from the array */
@@ -2113,7 +2115,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 read_func_call(func, parent, bb);
 
                 vd = require_typed_ptr_var(parent, func->return_def.type,
-                                           func->return_def.is_ptr);
+                                           func->return_def.ptr_level);
                 gen_name_to(vd->var_name);
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_func_ret, vd, NULL, NULL, 0, NULL);
@@ -2311,8 +2313,8 @@ void read_expr(block_t *parent, basic_block_t **bb)
         rs1 = opstack_pop();
 
         /* Constant folding for binary operations */
-        if (rs1 && rs2 && rs1->init_val && !rs1->is_ptr && !rs1->is_global &&
-            rs2->init_val && !rs2->is_ptr && !rs2->is_global) {
+        if (rs1 && rs2 && rs1->init_val && !rs1->ptr_level && !rs1->is_global &&
+            rs2->init_val && !rs2->ptr_level && !rs2->is_global) {
             /* Both operands are compile-time constants */
             int result = 0;
             bool folded = true;
@@ -2433,7 +2435,7 @@ void read_lvalue(lvalue_t *lvalue,
 
     lvalue->type = var->type;
     lvalue->size = get_size(var);
-    lvalue->is_ptr = var->is_ptr;
+    lvalue->ptr_level = var->ptr_level;
     lvalue->is_func = var->is_func;
     lvalue->is_reference = false;
 
@@ -2451,7 +2453,7 @@ void read_lvalue(lvalue_t *lvalue,
              * e.g., dereference of "->" in "data->raw[0]" would be performed
              * here.
              */
-            if (lvalue->is_reference && lvalue->is_ptr && is_member) {
+            if (lvalue->is_reference && lvalue->ptr_level && is_member) {
                 rs1 = opstack_pop();
                 vd = require_var(parent);
                 gen_name_to(vd->var_name);
@@ -2460,11 +2462,11 @@ void read_lvalue(lvalue_t *lvalue,
             }
 
             /* var must be either a pointer or an array of some type */
-            if (var->is_ptr == 0 && var->array_size == 0)
+            if (var->ptr_level == 0 && var->array_size == 0)
                 error("Cannot apply square operator to non-pointer");
 
             /* if nested pointer, still pointer */
-            if (var->is_ptr <= 1 && var->array_size == 0) {
+            if (var->ptr_level <= 1 && var->array_size == 0) {
                 /* For typedef pointers, get the size of the base type that the
                  * pointer points to
                  */
@@ -2563,7 +2565,7 @@ void read_lvalue(lvalue_t *lvalue,
             /* change type currently pointed to */
             var = find_member(token, lvalue->type);
             lvalue->type = var->type;
-            lvalue->is_ptr = var->is_ptr;
+            lvalue->ptr_level = var->ptr_level;
             lvalue->is_func = var->is_func;
             lvalue->size = get_size(var);
 
@@ -2599,9 +2601,9 @@ void read_lvalue(lvalue_t *lvalue,
      * been dereferenced. After array indexing like arr[0], we have a value, not
      * a pointer.
      */
-    if (lex_peek(T_plus, NULL) && (var->is_ptr || var->array_size) &&
+    if (lex_peek(T_plus, NULL) && (var->ptr_level || var->array_size) &&
         !lvalue->is_reference) {
-        while (lex_peek(T_plus, NULL) && (var->is_ptr || var->array_size)) {
+        while (lex_peek(T_plus, NULL) && (var->ptr_level || var->array_size)) {
             lex_expect(T_plus);
             if (lvalue->is_reference) {
                 rs1 = opstack_pop();
@@ -2658,7 +2660,7 @@ void read_lvalue(lvalue_t *lvalue,
             gen_name_to(vd->var_name);
             /* For pointer arithmetic, increment by the size of pointed-to type
              */
-            if (lvalue->is_ptr)
+            if (lvalue->ptr_level)
                 vd->init_val = lvalue->type->size;
             else
                 vd->init_val = 1;
@@ -3006,7 +3008,7 @@ bool read_body_assignment(char *token,
             /* But not if we are operating on a dereferenced value (array
              * indexing)
              */
-            if (lvalue.is_ptr && !lvalue.is_reference)
+            if (lvalue.ptr_level && !lvalue.is_reference)
                 increment_size = lvalue.type->size;
 
             /* If operand is a reference, read the value and push to stack for
@@ -3415,7 +3417,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     }
 
     if (lex_accept(T_switch)) {
-        int is_default = 0;
+        bool is_default = false;
 
         basic_block_t *n = bb_create(parent);
         bb_connect(bb, n, NEXT);
@@ -3433,7 +3435,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         lex_expect(T_open_curly);
         while (lex_peek(T_default, NULL) || lex_peek(T_case, NULL)) {
             if (lex_accept(T_default))
-                is_default = 1;
+                is_default = true;
             else {
                 int case_val;
 
@@ -3564,7 +3566,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             type = find_type(token, find_type_flag);
             if (type) {
                 var = require_typed_var(blk, type);
-                read_full_var_decl(var, 0, 0);
+                read_full_var_decl(var, false, false);
                 add_insn(blk, setup, OP_allocat, var, NULL, NULL, 0, NULL);
                 add_symbol(setup, var);
                 if (lex_accept(T_assign)) {
@@ -3714,7 +3716,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             add_symbol(bb, var);
             if (lex_accept(T_assign)) {
                 if (lex_peek(T_open_curly, NULL) &&
-                    (var->array_size > 0 || var->is_ptr > 0)) {
+                    (var->array_size > 0 || var->ptr_level > 0)) {
                     parse_array_init(var, parent, &bb,
                                      1); /* Always emit code */
                 } else if (lex_peek(T_open_curly, NULL) &&
@@ -3745,7 +3747,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                 /* Create target variable for field */
                                 var_t target = {0};
                                 target.type = field->type;
-                                target.is_ptr = field->is_ptr;
+                                target.ptr_level = field->ptr_level;
                                 var_t *field_val =
                                     resize_var(parent, &bb, val, &target);
 
@@ -3797,7 +3799,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                      * address.
                      */
                     if (expr_result && expr_result->array_size > 0 &&
-                        !var->is_ptr && var->array_size == 0 && var->type &&
+                        !var->ptr_level && var->array_size == 0 && var->type &&
                         var->type->base_type == TYPE_int &&
                         expr_result->var_name[0] == '.') {
                         var_t *first_elem = require_var(parent);
@@ -3822,13 +3824,13 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
                 /* multiple (partial) declarations */
                 nv = require_typed_var(parent, type);
-                read_inner_var_decl(nv, 0, 0);
+                read_inner_var_decl(nv, false, false);
                 add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
                 add_symbol(bb, nv);
                 if (lex_accept(T_assign)) {
                     if (lex_peek(T_open_curly, NULL) &&
-                        (nv->array_size > 0 || nv->is_ptr > 0)) {
-                        parse_array_init(nv, parent, &bb, 1);
+                        (nv->array_size > 0 || nv->ptr_level > 0)) {
+                        parse_array_init(nv, parent, &bb, true);
                     } else if (lex_peek(T_open_curly, NULL) &&
                                (nv->type->base_type == TYPE_struct ||
                                 nv->type->base_type == TYPE_typedef)) {
@@ -3858,7 +3860,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                     /* Create target variable for field */
                                     var_t target = {0};
                                     target.type = field->type;
-                                    target.is_ptr = field->is_ptr;
+                                    target.ptr_level = field->ptr_level;
                                     var_t *field_val =
                                         resize_var(parent, &bb, val, &target);
 
@@ -3993,12 +3995,12 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
     if (type) {
         var = require_typed_var(parent, type);
-        read_full_var_decl(var, 0, 0);
+        read_full_var_decl(var, false, false);
         add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
         add_symbol(bb, var);
         if (lex_accept(T_assign)) {
             if (lex_peek(T_open_curly, NULL) &&
-                (var->array_size > 0 || var->is_ptr > 0)) {
+                (var->array_size > 0 || var->ptr_level > 0)) {
                 parse_array_init(
                     var, parent, &bb,
                     1); /* FIXED: Emit code for locals in functions */
@@ -4030,7 +4032,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                             /* Create target variable for field */
                             var_t target = {0};
                             target.type = field->type;
-                            target.is_ptr = field->is_ptr;
+                            target.ptr_level = field->ptr_level;
                             var_t *field_val =
                                 resize_var(parent, &bb, val, &target);
 
@@ -4077,7 +4079,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
                 /* Handle array compound literal to scalar assignment */
                 if (expr_result && expr_result->array_size > 0 &&
-                    !var->is_ptr && var->array_size == 0 && var->type &&
+                    !var->ptr_level && var->array_size == 0 && var->type &&
                     var->type->base_type == TYPE_int &&
                     expr_result->var_name[0] == '.') {
                     /* Extract first element from compound literal array */
@@ -4111,7 +4113,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             add_symbol(bb, nv);
             if (lex_accept(T_assign)) {
                 if (lex_peek(T_open_curly, NULL) &&
-                    (nv->array_size > 0 || nv->is_ptr > 0)) {
+                    (nv->array_size > 0 || nv->ptr_level > 0)) {
                     parse_array_init(nv, parent, &bb,
                                      1); /* FIXED: Emit code for locals */
                 } else if (lex_peek(T_open_curly, NULL) &&
@@ -4142,7 +4144,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                 /* Create target variable for field */
                                 var_t target = {0};
                                 target.type = field->type;
-                                target.is_ptr = field->is_ptr;
+                                target.ptr_level = field->ptr_level;
                                 var_t *field_val =
                                     resize_var(parent, &bb, val, &target);
 
@@ -4318,7 +4320,7 @@ void read_global_decl(block_t *block)
     var->is_global = true;
 
     /* new function, or variables under parent */
-    read_full_var_decl(var, 0, 0);
+    read_full_var_decl(var, false, false);
 
     if (lex_peek(T_open_bracket, NULL)) {
         /* function */
@@ -4345,8 +4347,8 @@ void read_global_decl(block_t *block)
          * stores for globals as well.
          */
         if (lex_peek(T_open_curly, NULL) &&
-            (var->array_size > 0 || var->is_ptr > 0)) {
-            parse_array_init(var, block, &GLOBAL_FUNC->bbs, 1);
+            (var->array_size > 0 || var->ptr_level > 0)) {
+            parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
             lex_expect(T_semicolon);
             return;
         }
@@ -4398,7 +4400,7 @@ void initialize_struct_field(var_t *nv, var_t *v, int offset)
 {
     nv->type = v->type;
     nv->var_name[0] = '\0';
-    nv->is_ptr = 0;
+    nv->ptr_level = 0;
     nv->is_func = false;
     nv->is_global = false;
     nv->array_size = 0;
@@ -4435,10 +4437,10 @@ void read_global_statement(void)
                      NULL);
             if (lex_accept(T_assign)) {
                 if (lex_peek(T_open_curly, NULL) &&
-                    (var->array_size > 0 || var->is_ptr > 0)) {
-                    parse_array_init(var, block, &GLOBAL_FUNC->bbs, 1);
+                    (var->array_size > 0 || var->ptr_level > 0)) {
+                    parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
                 } else if (lex_peek(T_open_curly, NULL) &&
-                           var->array_size == 0 && var->is_ptr == 0 &&
+                           var->array_size == 0 && var->ptr_level == 0 &&
                            (decl_type->base_type == TYPE_struct ||
                             decl_type->base_type == TYPE_typedef)) {
                     /* Global struct compound literal support
@@ -4453,15 +4455,15 @@ void read_global_statement(void)
             }
             while (lex_accept(T_comma)) {
                 var_t *nv = require_typed_var(block, decl_type);
-                read_inner_var_decl(nv, 0, 0);
+                read_inner_var_decl(nv, false, false);
                 add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, nv, NULL, NULL, 0,
                          NULL);
                 if (lex_accept(T_assign)) {
                     if (lex_peek(T_open_curly, NULL) &&
-                        (nv->array_size > 0 || nv->is_ptr > 0)) {
-                        parse_array_init(nv, block, &GLOBAL_FUNC->bbs, 1);
+                        (nv->array_size > 0 || nv->ptr_level > 0)) {
+                        parse_array_init(nv, block, &GLOBAL_FUNC->bbs, true);
                     } else if (lex_peek(T_open_curly, NULL) &&
-                               nv->array_size == 0 && nv->is_ptr == 0 &&
+                               nv->array_size == 0 && nv->ptr_level == 0 &&
                                (decl_type->base_type == TYPE_struct ||
                                 decl_type->base_type == TYPE_typedef)) {
                         /* Global struct compound literal support for
@@ -4489,7 +4491,7 @@ void read_global_statement(void)
         lex_expect(T_open_curly);
         do {
             var_t *v = &type->fields[i++];
-            read_full_var_decl(v, 0, 1);
+            read_full_var_decl(v, false, true);
             v->offset = size;
             size += size_var(v);
 
@@ -4500,7 +4502,7 @@ void read_global_statement(void)
 
                 var_t *nv = &type->fields[i++];
                 initialize_struct_field(nv, v, 0);
-                read_inner_var_decl(nv, 0, 1);
+                read_inner_var_decl(nv, false, true);
                 nv->offset = size;
                 size += size_var(nv);
             }
@@ -4527,7 +4529,7 @@ void read_global_statement(void)
         lex_expect(T_open_curly);
         do {
             var_t *v = &type->fields[i++];
-            read_full_var_decl(v, 0, 1);
+            read_full_var_decl(v, false, true);
             v->offset = 0; /* All union fields start at offset 0 */
             int field_size = size_var(v);
             if (field_size > max_size)
@@ -4541,7 +4543,7 @@ void read_global_statement(void)
                 var_t *nv = &type->fields[i++];
                 /* All union fields start at offset 0 */
                 initialize_struct_field(nv, v, 0);
-                read_inner_var_decl(nv, 0, 1);
+                read_inner_var_decl(nv, false, true);
                 field_size = size_var(nv);
                 if (field_size > max_size)
                     max_size = field_size;
@@ -4575,7 +4577,8 @@ void read_global_statement(void)
             strcpy(type->type_name, intern_string(token));
             lex_expect(T_semicolon);
         } else if (lex_accept(T_struct)) {
-            int i = 0, size = 0, has_struct_def = 0;
+            int i = 0, size = 0;
+            bool has_struct_def = false;
             type_t *tag = NULL, *type = add_type();
 
             /* is struct definition? */
@@ -4593,10 +4596,10 @@ void read_global_statement(void)
 
             /* typedef with struct definition */
             if (lex_accept(T_open_curly)) {
-                has_struct_def = 1;
+                has_struct_def = true;
                 do {
                     var_t *v = &type->fields[i++];
-                    read_full_var_decl(v, 0, 1);
+                    read_full_var_decl(v, false, true);
                     v->offset = size;
                     size += size_var(v);
 
@@ -4608,7 +4611,7 @@ void read_global_statement(void)
 
                         var_t *nv = &type->fields[i++];
                         initialize_struct_field(nv, v, 0);
-                        read_inner_var_decl(nv, 0, 1);
+                        read_inner_var_decl(nv, false, true);
                         nv->offset = size;
                         size += size_var(nv);
                     }
@@ -4637,7 +4640,8 @@ void read_global_statement(void)
 
             lex_expect(T_semicolon);
         } else if (lex_accept(T_union)) {
-            int i = 0, max_size = 0, has_union_def = 0;
+            int i = 0, max_size = 0;
+            bool has_union_def = false;
             type_t *tag = NULL, *type = add_type();
 
             /* is union definition? */
@@ -4655,10 +4659,10 @@ void read_global_statement(void)
 
             /* typedef with union definition */
             if (lex_accept(T_open_curly)) {
-                has_union_def = 1;
+                has_union_def = true;
                 do {
                     var_t *v = &type->fields[i++];
-                    read_full_var_decl(v, 0, 1);
+                    read_full_var_decl(v, false, true);
                     v->offset = 0; /* All union fields start at offset 0 */
                     int field_size = size_var(v);
                     if (field_size > max_size)
@@ -4673,7 +4677,7 @@ void read_global_statement(void)
                         var_t *nv = &type->fields[i++];
                         /* All union fields start at offset 0 */
                         initialize_struct_field(nv, v, 0);
-                        read_inner_var_decl(nv, 0, 1);
+                        read_inner_var_decl(nv, false, true);
                         field_size = size_var(nv);
                         if (field_size > max_size)
                             max_size = field_size;
@@ -4707,7 +4711,7 @@ void read_global_statement(void)
             type_t *base;
             type_t *type = add_type();
             lex_ident(T_identifier, base_type);
-            base = find_type(base_type, 1);
+            base = find_type(base_type, true);
             if (!base)
                 error("Unable to find base type");
             type->base_type = base->base_type;

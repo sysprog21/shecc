@@ -350,7 +350,7 @@ typedef struct var_list {
 struct var {
     type_t *type;
     char var_name[MAX_VAR_LEN];
-    int is_ptr;
+    int ptr_level;
     bool is_func;
     bool is_global;
     int array_size;
@@ -439,7 +439,7 @@ struct type {
 /* lvalue details */
 typedef struct {
     int size;
-    int is_ptr;
+    int ptr_level;
     bool is_func;
     bool is_reference;
     type_t *type;

@@ -154,14 +154,14 @@ int rv_encode_S(rv_op op, rv_reg rs1, rv_reg rs2, int imm)
 
 int rv_encode_B(rv_op op, rv_reg rs1, rv_reg rs2, int imm)
 {
-    int sign = 0;
+    bool sign = false;
 
     /* 13 signed bits, with bit zero ignored */
     if (imm > 4095 || imm < -4096)
         error("Offset too large");
 
     if (imm < 0)
-        sign = 1;
+        sign = true;
 
     return op + (rs1 << 15) + (rs2 << 20) + rv_extract_bits(imm, 11, 11, 7, 7) +
            rv_extract_bits(imm, 1, 4, 8, 11) +
@@ -170,10 +170,10 @@ int rv_encode_B(rv_op op, rv_reg rs1, rv_reg rs2, int imm)
 
 int rv_encode_J(rv_op op, rv_reg rd, int imm)
 {
-    int sign = 0;
+    bool sign = false;
 
     if (imm < 0) {
-        sign = 1;
+        sign = true;
         imm = -imm;
         imm = (1 << 21) - imm;
     }

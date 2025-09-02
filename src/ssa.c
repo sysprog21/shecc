@@ -2042,10 +2042,10 @@ int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
     if (live_out_idx < 16) {
         /* For small sets, simple linear search is fast enough */
         for (int i = 0; i < bb->live_in_idx; i++) {
-            int found = 0;
+            bool found = false;
             for (int j = 0; j < live_out_idx; j++) {
                 if (live_out[j] == bb->live_in[i]) {
-                    found = 1;
+                    found = true;
                     break;
                 }
             }
@@ -2055,14 +2055,14 @@ int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
     } else {
         /* For larger sets, check bounds and use optimized loop */
         for (int i = 0; i < bb->live_in_idx; i++) {
-            int found = 0;
+            bool found = false;
             var_t *var = bb->live_in[i];
             /* Unroll inner loop for better performance */
             int j;
             for (j = 0; j + 3 < live_out_idx; j += 4) {
                 if (live_out[j] == var || live_out[j + 1] == var ||
                     live_out[j + 2] == var || live_out[j + 3] == var) {
-                    found = 1;
+                    found = true;
                     break;
                 }
             }
@@ -2070,7 +2070,7 @@ int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
             if (!found) {
                 for (; j < live_out_idx; j++) {
                     if (live_out[j] == var) {
-                        found = 1;
+                        found = true;
                         break;
                     }
                 }

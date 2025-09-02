@@ -272,7 +272,7 @@ void reg_alloc(void)
                 /* Stash base offset for this array variable */
                 global_insn->rd->init_val = src0;
 
-                if (global_insn->rd->is_ptr)
+                if (global_insn->rd->ptr_level)
                     GLOBAL_FUNC->stack_size +=
                         align_size(PTR_SIZE * global_insn->rd->array_size);
                 else {
@@ -288,7 +288,7 @@ void reg_alloc(void)
                 spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
             } else {
                 global_insn->rd->offset = GLOBAL_FUNC->stack_size;
-                if (global_insn->rd->is_ptr)
+                if (global_insn->rd->ptr_level)
                     GLOBAL_FUNC->stack_size += PTR_SIZE;
                 else if (global_insn->rd->type != TY_int &&
                          global_insn->rd->type != TY_char &&
@@ -408,7 +408,8 @@ void reg_alloc(void)
         }
 
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            int is_pushing_args = 0, args = 0;
+            bool is_pushing_args = false;
+            int args = 0;
 
             bb->visited++;
 
@@ -445,7 +446,7 @@ void reg_alloc(void)
                     func->stack_size += PTR_SIZE;
                     src0 = func->stack_size;
 
-                    if (insn->rd->is_ptr)
+                    if (insn->rd->ptr_level)
                         sz = PTR_SIZE;
                     else {
                         sz = insn->rd->type->size;
@@ -588,7 +589,7 @@ void reg_alloc(void)
 
                     if (!is_pushing_args) {
                         spill_alive(bb, insn);
-                        is_pushing_args = 1;
+                        is_pushing_args = true;
                     }
 
                     src0 = prepare_operand(bb, insn->rs1, -1);
@@ -606,7 +607,7 @@ void reg_alloc(void)
                     ir = bb_add_ph2_ir(bb, OP_call);
                     strcpy(ir->func_name, insn->str);
 
-                    is_pushing_args = 0;
+                    is_pushing_args = false;
                     args = 0;
 
                     for (int i = 0; i < REG_CNT; i++)
@@ -623,7 +624,7 @@ void reg_alloc(void)
 
                     bb_add_ph2_ir(bb, OP_indirect);
 
-                    is_pushing_args = 0;
+                    is_pushing_args = false;
                     args = 0;
                     break;
                 case OP_func_ret:

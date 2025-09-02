@@ -48,16 +48,16 @@
 
 int main(int argc, char *argv[])
 {
-    int libc = 1;
+    bool libc = true;
     char *out = NULL, *in = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
-            dump_ir = 1;
+            dump_ir = true;
         else if (!strcmp(argv[i], "+m"))
-            hard_mul_div = 1;
+            hard_mul_div = true;
         else if (!strcmp(argv[i], "--no-libc"))
-            libc = 0;
+            libc = false;
         else if (!strcmp(argv[i], "-o")) {
             if (i + 1 < argc) {
                 out = argv[i + 1];
