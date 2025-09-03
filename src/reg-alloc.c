@@ -110,9 +110,18 @@ int find_in_regs(var_t *var)
 
 void load_var(basic_block_t *bb, var_t *var, int idx)
 {
-    ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_load)
-                                  : bb_add_ph2_ir(bb, OP_load);
-    ir->src0 = var->offset;
+    ph2_ir_t *ir;
+
+    /* Load constants directly, others from memory */
+    if (var->is_const) {
+        ir = bb_add_ph2_ir(bb, OP_load_constant);
+        ir->src0 = var->init_val;
+    } else {
+        ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_load)
+                            : bb_add_ph2_ir(bb, OP_load);
+        ir->src0 = var->offset;
+    }
+
     ir->dest = idx;
     REGS[idx].var = var;
     REGS[idx].polluted = 0;
@@ -120,8 +129,9 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
 
 int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 {
+    /* Force reload for address-taken variables (may be modified via pointer) */
     int i = find_in_regs(var);
-    if (i > -1)
+    if (i > -1 && !var->address_taken)
         return i;
 
     for (i = 0; i < REG_CNT; i++) {
@@ -207,6 +217,16 @@ int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
 
 void spill_alive(basic_block_t *bb, insn_t *insn)
 {
+    /* Spill all locals on pointer writes (conservative aliasing handling) */
+    if (insn && insn->opcode == OP_write) {
+        for (int i = 0; i < REG_CNT; i++) {
+            if (REGS[i].var && !REGS[i].var->is_global)
+                spill_var(bb, REGS[i].var, i);
+        }
+        return;
+    }
+
+    /* Standard spilling for non-pointer operations */
     for (int i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var)
             continue;
@@ -471,9 +491,6 @@ void reg_alloc(void)
                     break;
                 case OP_load_constant:
                 case OP_load_data_address:
-                    if (insn->rd->consumed == -1)
-                        break;
-
                     dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = insn->rd->init_val;
@@ -490,6 +507,12 @@ void reg_alloc(void)
                     break;
                 case OP_address_of:
                 case OP_global_address_of:
+                    /* Mark variable as address-taken, disable constant
+                     * optimization
+                     */
+                    insn->rs1->address_taken = true;
+                    insn->rs1->is_const = false;
+
                     /* make sure variable is on stack */
                     if (!insn->rs1->offset) {
                         insn->rs1->offset = bb->belong_to->stack_size;
@@ -500,6 +523,8 @@ void reg_alloc(void)
                                 ir = bb_add_ph2_ir(bb, OP_store);
                                 ir->src0 = i;
                                 ir->src1 = insn->rs1->offset;
+                                /* Clear stale register tracking */
+                                REGS[i].var = NULL;
                             }
                     }
 
@@ -792,7 +817,7 @@ void dump_ph2_ir(void)
             printf("\t%%x%c = (%%x%c)", rd, rs1);
             break;
         case OP_write:
-            printf("\t(%%x%c) = %%x%c", rs2, rs1);
+            printf("\t(%%x%c) = %%x%c", rs1, rs2);
             break;
         case OP_address_of_func:
             printf("\t(%%x%c) = @%s", rs1, ph2_ir->func_name);
