@@ -63,6 +63,11 @@ var_t *require_var(block_t *blk)
     var_t *var = arena_calloc(BLOCK_ARENA, 1, sizeof(var_t));
     var_list->elements[var_list->size++] = var;
     var->consumed = -1;
+    var->phys_reg = -1;
+    var->first_use = -1;
+    var->last_use = -1;
+    var->loop_depth = 0;
+    var->use_count = 0;
     var->base = var;
     var->type = TY_int;
     return var;

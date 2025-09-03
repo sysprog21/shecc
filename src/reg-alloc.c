@@ -12,10 +12,27 @@
  * dead variable and does NOT wrtie it back to the stack.
  */
 
-#include <stdbool.h>
-
 #include "defs.h"
 #include "globals.c"
+
+void vreg_map_to_phys(var_t *var, int phys_reg)
+{
+    if (var)
+        var->phys_reg = phys_reg;
+}
+
+int vreg_get_phys(var_t *var)
+{
+    if (var)
+        return var->phys_reg;
+    return -1;
+}
+
+void vreg_clear_phys(var_t *var)
+{
+    if (var)
+        var->phys_reg = -1;
+}
 
 /* Aligns size to nearest multiple of 4, this meets ARMv7's alignment
  * requirement.
@@ -37,6 +54,19 @@ bool check_live_out(basic_block_t *bb, var_t *var)
     return false;
 }
 
+void track_var_use(var_t *var, int insn_idx)
+{
+    if (!var)
+        return;
+
+    var->use_count++;
+
+    if (var->first_use < 0)
+        var->first_use = insn_idx;
+
+    var->last_use = insn_idx;
+}
+
 void refresh(basic_block_t *bb, insn_t *insn)
 {
     for (int i = 0; i < REG_CNT; i++) {
@@ -45,6 +75,7 @@ void refresh(basic_block_t *bb, insn_t *insn)
         if (check_live_out(bb, REGS[i].var))
             continue;
         if (REGS[i].var->consumed < insn->idx) {
+            vreg_clear_phys(REGS[i].var);
             REGS[i].var = NULL;
             REGS[i].polluted = 0;
         }
@@ -75,6 +106,85 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     return n;
 }
 
+/* Calculate the cost of spilling a variable from a register.
+ * Higher cost means the variable is more valuable to keep in a register.
+ * The cost is computed based on multiple factors that affect performance.
+ */
+int calculate_spill_cost(var_t *var, basic_block_t *bb, int current_idx)
+{
+    int cost = 0;
+
+    /* Variables that are live-out of the basic block must be spilled anyway,
+     * so give them a high cost to prefer spilling them over others
+     */
+    if (check_live_out(bb, var))
+        cost += 1000;
+
+    /* Variables that will be used soon should have higher cost.
+     * The closer the next use, the higher the penalty for spilling
+     */
+    if (var->consumed > current_idx) {
+        int distance = var->consumed - current_idx;
+        if (distance < 10)
+            cost += 100 - distance * 10; /* Max 100 points for immediate use */
+    }
+
+    /* Frequently used variables should stay in registers.
+     * Each use adds 5 points to the cost
+     */
+    if (var->use_count > 0)
+        cost += var->use_count * 5;
+
+    /* Variables inside loops are accessed repeatedly, so they should have much
+     * higher priority to stay in registers (200 points per level)
+     */
+    if (var->loop_depth > 0)
+        cost += var->loop_depth * 200;
+
+    /* Constants can be easily reloaded, so prefer spilling them by reducing
+     * their cost
+     */
+    if (var->is_const)
+        cost -= 50;
+
+    /* Variables with long live ranges may benefit from spilling to free up
+     * registers for other variables
+     */
+    if (var->first_use >= 0 && var->last_use >= 0) {
+        int range_length = var->last_use - var->first_use;
+        if (range_length > 100)
+            cost += 20; /* Small penalty for very long live ranges */
+    }
+
+    return cost;
+}
+
+int find_best_spill(basic_block_t *bb,
+                    int current_idx,
+                    int avoid_reg1,
+                    int avoid_reg2)
+{
+    int best_reg = -1;
+    int min_cost = 99999;
+
+    for (int i = 0; i < REG_CNT; i++) {
+        if (i == avoid_reg1 || i == avoid_reg2)
+            continue;
+
+        if (!REGS[i].var)
+            continue;
+
+        int cost = calculate_spill_cost(REGS[i].var, bb, current_idx);
+
+        if (cost < min_cost) {
+            min_cost = cost;
+            best_reg = i;
+        }
+    }
+
+    return best_reg;
+}
+
 /* Priority of spilling:
  * - live_out variable
  * - farthest local variable
@@ -83,6 +193,7 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
 {
     if (!REGS[idx].polluted) {
         REGS[idx].var = NULL;
+        vreg_clear_phys(var);
         return;
     }
 
@@ -96,6 +207,7 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
     ir->src1 = var->offset;
     REGS[idx].var = NULL;
     REGS[idx].polluted = 0;
+    vreg_clear_phys(var);
 }
 
 /* Return the index of register for given variable. Otherwise, return -1. */
@@ -125,52 +237,65 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
     ir->dest = idx;
     REGS[idx].var = var;
     REGS[idx].polluted = 0;
+    vreg_map_to_phys(var, idx);
 }
 
 int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 {
+    /* Check VReg mapping first for O(1) lookup */
+    int phys_reg = vreg_get_phys(var);
+    if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var)
+        return phys_reg;
+
     /* Force reload for address-taken variables (may be modified via pointer) */
     int i = find_in_regs(var);
-    if (i > -1 && !var->address_taken)
+    if (i > -1 && !var->address_taken) {
+        vreg_map_to_phys(var, i);
         return i;
+    }
 
     for (i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var) {
             load_var(bb, var, i);
+            vreg_map_to_phys(var, i);
             return i;
         }
     }
 
-    for (i = 0; i < REG_CNT; i++) {
-        if (i == operand_0)
-            continue;
-        if (check_live_out(bb, REGS[i].var)) {
-            spill_var(bb, REGS[i].var, i);
-            load_var(bb, var, i);
-            return i;
+    int spilled = find_best_spill(
+        bb, bb->insn_list.tail ? bb->insn_list.tail->idx : 0, operand_0, -1);
+
+    if (spilled < 0) {
+        for (i = 0; i < REG_CNT; i++) {
+            if (i != operand_0 && REGS[i].var) {
+                spilled = i;
+                break;
+            }
         }
     }
 
-    /* spill farthest local */
-    int spilled = 0;
-    for (i = 0; i < REG_CNT; i++) {
-        if (!REGS[i].var)
-            continue;
-        if (REGS[i].var->consumed > REGS[spilled].var->consumed)
-            spilled = i;
-    }
+    if (REGS[spilled].var)
+        vreg_clear_phys(REGS[spilled].var);
 
     spill_var(bb, REGS[spilled].var, spilled);
     load_var(bb, var, spilled);
+    vreg_map_to_phys(var, spilled);
 
     return spilled;
 }
 
 int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
 {
+    int phys_reg = vreg_get_phys(var);
+    if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var) {
+        REGS[phys_reg].polluted = 1;
+        return phys_reg;
+    }
+
     int i = find_in_regs(var);
     if (i > -1) {
         REGS[i].polluted = 1;
+        vreg_map_to_phys(var, i);
         return i;
     }
 
@@ -178,39 +303,31 @@ int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
         if (!REGS[i].var) {
             REGS[i].var = var;
             REGS[i].polluted = 1;
+            vreg_map_to_phys(var, i);
             return i;
         }
     }
 
-    for (i = 0; i < REG_CNT; i++) {
-        if (i == operand_0)
-            continue;
-        if (i == operand_1)
-            continue;
-        if (check_live_out(bb, REGS[i].var)) {
-            spill_var(bb, REGS[i].var, i);
-            REGS[i].var = var;
-            REGS[i].polluted = 1;
-            return i;
+    int spilled =
+        find_best_spill(bb, bb->insn_list.tail ? bb->insn_list.tail->idx : 0,
+                        operand_0, operand_1);
+
+    if (spilled < 0) {
+        for (i = 0; i < REG_CNT; i++) {
+            if (i != operand_0 && i != operand_1 && REGS[i].var) {
+                spilled = i;
+                break;
+            }
         }
     }
 
-    /* spill farthest local */
-    int spilled = 0;
-    for (i = 0; i < REG_CNT; i++) {
-        if (i == operand_0)
-            continue;
-        if (i == operand_1)
-            continue;
-        if (!REGS[i].var)
-            continue;
-        if (REGS[i].var->consumed > REGS[spilled].var->consumed)
-            spilled = i;
-    }
+    if (REGS[spilled].var)
+        vreg_clear_phys(REGS[spilled].var);
 
     spill_var(bb, REGS[spilled].var, spilled);
     REGS[spilled].var = var;
     REGS[spilled].polluted = 1;
+    vreg_map_to_phys(var, spilled);
 
     return spilled;
 }
@@ -247,11 +364,13 @@ void spill_live_out(basic_block_t *bb)
         if (!REGS[i].var)
             continue;
         if (!check_live_out(bb, REGS[i].var)) {
+            vreg_clear_phys(REGS[i].var);
             REGS[i].var = NULL;
             REGS[i].polluted = 0;
             continue;
         }
         if (!var_check_killed(REGS[i].var, bb)) {
+            vreg_clear_phys(REGS[i].var);
             REGS[i].var = NULL;
             REGS[i].polluted = 0;
             continue;
@@ -336,6 +455,7 @@ void reg_alloc(void)
             spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
             /* release the unused constant number in register manually */
             REGS[src0].polluted = 0;
+            vreg_clear_phys(REGS[src0].var);
             REGS[src0].var = NULL;
             break;
         case OP_add: {
@@ -443,6 +563,7 @@ void reg_alloc(void)
 
                 switch (insn->opcode) {
                 case OP_unwound_phi:
+                    track_var_use(insn->rs1, insn->idx);
                     src0 = prepare_operand(bb, insn->rs1, -1);
 
                     if (!insn->rd->offset) {
@@ -541,6 +662,7 @@ void reg_alloc(void)
                     if (insn->rd->consumed == -1)
                         break;
 
+                    track_var_use(insn->rs1, insn->idx);
                     src0 = find_in_regs(insn->rs1);
 
                     /* If operand is loaded from stack, clear the original slot
@@ -565,8 +687,10 @@ void reg_alloc(void)
                         REGS[dest].polluted = 0;
                     }
 
-                    if (clear_reg)
+                    if (clear_reg) {
+                        vreg_clear_phys(REGS[src0].var);
                         REGS[src0].var = NULL;
+                    }
 
                     break;
                 case OP_read:
@@ -683,6 +807,8 @@ void reg_alloc(void)
                 case OP_bit_and:
                 case OP_bit_or:
                 case OP_bit_xor:
+                    track_var_use(insn->rs1, insn->idx);
+                    track_var_use(insn->rs2, insn->idx);
                     src0 = prepare_operand(bb, insn->rs1, -1);
                     src1 = prepare_operand(bb, insn->rs2, src0);
                     dest = prepare_dest(bb, insn->rd, src0, src1);

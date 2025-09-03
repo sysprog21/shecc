@@ -371,7 +371,14 @@ struct var {
     int consumed;
     bool is_ternary_ret;
     bool is_logical_ret;
-    bool is_const; /* whether a constant representaion or not */
+    bool is_const;  /* whether a constant representaion or not */
+    int vreg_id;    /* Virtual register ID */
+    int phys_reg;   /* Physical register assignment (-1 if unassigned) */
+    int vreg_flags; /* VReg flags */
+    int first_use;  /* First instruction index where variable is used */
+    int last_use;   /* Last instruction index where variable is used */
+    int loop_depth; /* Nesting depth if variable is in a loop */
+    int use_count;  /* Number of times variable is used */
 };
 
 typedef struct {
