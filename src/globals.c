@@ -1089,6 +1089,14 @@ void add_insn(block_t *block,
     else
         n->str[0] = '\0';
 
+    /* Mark variables as address-taken to prevent incorrect constant
+     * optimization
+     */
+    if ((op == OP_address_of || op == OP_global_address_of) && rs1) {
+        rs1->address_taken = true;
+        rs1->is_const = false; /* disable constant optimization */
+    }
+
     if (!bb->insn_list.head)
         bb->insn_list.head = n;
     else
