@@ -1884,7 +1884,41 @@ void optimize(void)
                     }
                 }
 
-                /* TODO: Dead load elimination */
+                /* Safety guards for division and modulo optimizations */
+                if (insn->rs1 && insn->rs2 && insn->rs1 == insn->rs2) {
+                    /* x / x = 1 (with zero-check guard) */
+                    if (insn->opcode == OP_div && insn->rd) {
+                        /* Only optimize if we can prove x is non-zero */
+                        bool is_safe = false;
+                        if (insn->rs1->is_const && insn->rs1->init_val != 0) {
+                            is_safe = true;
+                        }
+
+                        if (is_safe) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = 1;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                    /* x % x = 0 (with zero-check guard) */
+                    else if (insn->opcode == OP_mod && insn->rd) {
+                        /* Only optimize if we can prove x is non-zero */
+                        bool is_safe = false;
+                        if (insn->rs1->is_const && insn->rs1->init_val != 0) {
+                            is_safe = true;
+                        }
+
+                        if (is_safe) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = 0;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                }
 
                 /* more optimizations */
             }
