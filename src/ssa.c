@@ -1920,6 +1920,137 @@ void optimize(void)
                     }
                 }
 
+                /* Enhanced algebraic simplifications */
+                /* Self-operation optimizations */
+                if (insn->rs1 && insn->rs2 && insn->rs1 == insn->rs2) {
+                    /* x - x = 0 */
+                    if (insn->opcode == OP_sub && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 0;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x ^ x = 0 */
+                    else if (insn->opcode == OP_bit_xor && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 0;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x & x = x */
+                    else if (insn->opcode == OP_bit_and && insn->rd) {
+                        insn->opcode = OP_assign;
+                        insn->rs2 = NULL;
+                    }
+                    /* x | x = x */
+                    else if (insn->opcode == OP_bit_or && insn->rd) {
+                        insn->opcode = OP_assign;
+                        insn->rs2 = NULL;
+                    }
+                    /* x == x = 1 */
+                    else if (insn->opcode == OP_eq && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 1;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x != x = 0 */
+                    else if (insn->opcode == OP_neq && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 0;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x < x = 0, x > x = 0 */
+                    else if ((insn->opcode == OP_lt || insn->opcode == OP_gt) &&
+                             insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 0;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x <= x = 1, x >= x = 1 */
+                    else if ((insn->opcode == OP_leq ||
+                              insn->opcode == OP_geq) &&
+                             insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 1;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                }
+
+                /* Identity and constant optimizations */
+                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                    int val = insn->rs2->init_val;
+
+                    /* x + 0 = x, x - 0 = x, x | 0 = x, x ^ 0 = x */
+                    if (val == 0) {
+                        if (insn->opcode == OP_add || insn->opcode == OP_sub ||
+                            insn->opcode == OP_bit_or ||
+                            insn->opcode == OP_bit_xor) {
+                            insn->opcode = OP_assign;
+                            insn->rs2 = NULL;
+                        }
+                        /* x * 0 = 0, x & 0 = 0 */
+                        else if (insn->opcode == OP_mul ||
+                                 insn->opcode == OP_bit_and) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = 0;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                        /* x << 0 = x, x >> 0 = x */
+                        else if (insn->opcode == OP_lshift ||
+                                 insn->opcode == OP_rshift) {
+                            insn->opcode = OP_assign;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                    /* x * 1 = x, x / 1 = x */
+                    else if (val == 1) {
+                        if (insn->opcode == OP_mul || insn->opcode == OP_div) {
+                            insn->opcode = OP_assign;
+                            insn->rs2 = NULL;
+                        }
+                        /* x % 1 = 0 */
+                        else if (insn->opcode == OP_mod) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = 0;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                    /* x & -1 = x (all bits set) */
+                    else if (val == -1) {
+                        if (insn->opcode == OP_bit_and) {
+                            insn->opcode = OP_assign;
+                            insn->rs2 = NULL;
+                        }
+                        /* x | -1 = -1 */
+                        else if (insn->opcode == OP_bit_or) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = -1;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                        /* x * -1 = -x */
+                        else if (insn->opcode == OP_mul) {
+                            insn->opcode = OP_negate;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                }
+
                 /* more optimizations */
             }
         }
