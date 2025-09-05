@@ -1159,7 +1159,7 @@ bool strbuf_putc(strbuf_t *src, char value)
     return true;
 }
 
-bool strbuf_puts(strbuf_t *src, char *value)
+bool strbuf_puts(strbuf_t *src, const char *value)
 {
     int len = strlen(value);
 

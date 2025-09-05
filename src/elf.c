@@ -13,7 +13,7 @@
 
 int elf_symbol_index;
 
-void elf_write_str(strbuf_t *elf_array, char *vals)
+void elf_write_str(strbuf_t *elf_array, const char *vals)
 {
     /*
      * Note that strbuf_puts() does not push the null character.
@@ -348,7 +348,7 @@ void elf_align(void)
         elf_write_byte(elf_strtab, 0);
 }
 
-void elf_add_symbol(char *symbol, int pc)
+void elf_add_symbol(const char *symbol, int pc)
 {
     /* Check for null pointers to prevent crashes */
     if (!symbol || !elf_symtab || !elf_strtab) {
@@ -366,7 +366,7 @@ void elf_add_symbol(char *symbol, int pc)
     elf_symbol_index++;
 }
 
-void elf_generate(char *outfile)
+void elf_generate(const char *outfile)
 {
     elf_align();
     elf_generate_header();

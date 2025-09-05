@@ -179,6 +179,7 @@ typedef enum {
     T_break,
     T_default,
     T_continue,
+    T_const, /* const qualifier */
     /* C pre-processor directives */
     T_cppd_include,
     T_cppd_define,
@@ -353,7 +354,8 @@ struct var {
     int ptr_level;
     bool is_func;
     bool is_global;
-    bool address_taken; /* true if variable address was taken (&var) */
+    bool is_const_qualified; /* true if variable has const qualifier */
+    bool address_taken;      /* true if variable address was taken (&var) */
     int array_size;
     int array_dim1, array_dim2; /* first/second dimension size for 2D arrays */
     int offset;   /* offset from stack or frame, index 0 is reserved */
