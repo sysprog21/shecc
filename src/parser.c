@@ -1750,18 +1750,40 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         read_expr_operand(parent, bb);
 
         rs1 = opstack_pop();
-        vd = require_var(parent);
-        gen_name_to(vd->var_name);
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_log_not, vd, rs1, NULL, 0, NULL);
+
+        /* Constant folding for logical NOT */
+        if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
+            vd = require_var(parent);
+            gen_name_to(vd->var_name);
+            vd->is_const = true;
+            vd->init_val = !rs1->init_val;
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        } else {
+            vd = require_var(parent);
+            gen_name_to(vd->var_name);
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_log_not, vd, rs1, NULL, 0, NULL);
+        }
     } else if (lex_accept(T_bit_not)) {
         read_expr_operand(parent, bb);
 
         rs1 = opstack_pop();
-        vd = require_var(parent);
-        gen_name_to(vd->var_name);
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_bit_not, vd, rs1, NULL, 0, NULL);
+
+        /* Constant folding for bitwise NOT */
+        if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
+            vd = require_var(parent);
+            gen_name_to(vd->var_name);
+            vd->is_const = true;
+            vd->init_val = ~rs1->init_val;
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        } else {
+            vd = require_var(parent);
+            gen_name_to(vd->var_name);
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_bit_not, vd, rs1, NULL, 0, NULL);
+        }
     } else if (lex_accept(T_ampersand)) {
         handle_address_of_operator(parent, bb);
     } else if (lex_accept(T_asterisk)) {
@@ -2179,10 +2201,22 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
         if (is_neg) {
             rs1 = opstack_pop();
-            vd = require_var(parent);
-            gen_name_to(vd->var_name);
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_negate, vd, rs1, NULL, 0, NULL);
+
+            /* Constant folding for negation */
+            if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
+                vd = require_var(parent);
+                gen_name_to(vd->var_name);
+                vd->is_const = true;
+                vd->init_val = -rs1->init_val;
+                opstack_push(vd);
+                add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
+                         NULL);
+            } else {
+                vd = require_var(parent);
+                gen_name_to(vd->var_name);
+                opstack_push(vd);
+                add_insn(parent, *bb, OP_negate, vd, rs1, NULL, 0, NULL);
+            }
         }
     }
 }
