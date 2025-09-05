@@ -18,6 +18,9 @@
 #define PHI_WORKLIST_SIZE 64
 #define DCE_WORKLIST_SIZE 2048
 
+/* Dead store elimination window size */
+#define OVERWRITE_WINDOW 3
+
 /* cfront does not accept structure as an argument, pass pointer */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
@@ -1836,36 +1839,398 @@ void optimize(void)
                     continue;
                 }
 
-                /* Dead store elimination - conservative */
-                if (insn->opcode == OP_store || insn->opcode == OP_write) {
-                    /* Only eliminate if target is local and immediately
-                     * overwritten
-                     */
-                    if (insn->rd && !insn->rd->is_global && insn->next) {
-                        insn_t *next_insn = insn->next;
+                /* Improved dead store elimination */
+                if (insn->opcode == OP_store || insn->opcode == OP_write ||
+                    insn->opcode == OP_global_store) {
+                    if (insn->rd && !insn->rd->is_global) {
+                        /* Look for overwrites within a small window */
+                        insn_t *check = insn->next;
+                        int distance = 0;
+                        bool found_overwrite = false;
 
-                        /* Check for immediate overwrite with no intervening
-                         * instructions
-                         */
-                        if ((next_insn->opcode == OP_store ||
-                             next_insn->opcode == OP_write) &&
-                            next_insn->rd == insn->rd) {
-                            /* Eliminate only immediate overwrites */
-                            insn->rd = NULL;
+                        while (check && distance < OVERWRITE_WINDOW) {
+                            /* Stop at control flow changes */
+                            if (check->opcode == OP_branch ||
+                                check->opcode == OP_jump ||
+                                check->opcode == OP_call ||
+                                check->opcode == OP_return) {
+                                break;
+                            }
+
+                            /* Check if there's a use of the stored location */
+                            if ((check->opcode == OP_load ||
+                                 check->opcode == OP_read) &&
+                                check->rs1 == insn->rd) {
+                                break; /* Store is needed */
+                            }
+
+                            /* Found overwrite */
+                            if ((check->opcode == OP_store ||
+                                 check->opcode == OP_write ||
+                                 check->opcode == OP_global_store) &&
+                                check->rd == insn->rd) {
+                                found_overwrite = true;
+                                break;
+                            }
+
+                            check = check->next;
+                            distance++;
+                        }
+
+                        if (found_overwrite) {
+                            /* Mark for removal by DCE */
+                            insn->useful = false;
+                        }
+                    }
+                }
+
+                /* Safety guards for division and modulo optimizations */
+                if (insn->rs1 && insn->rs2 && insn->rs1 == insn->rs2) {
+                    /* x / x = 1 (with zero-check guard) */
+                    if (insn->opcode == OP_div && insn->rd) {
+                        /* Only optimize if we can prove x is non-zero */
+                        bool is_safe = false;
+                        if (insn->rs1->is_const && insn->rs1->init_val != 0) {
+                            is_safe = true;
+                        }
+
+                        if (is_safe) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = 1;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                    /* x % x = 0 (with zero-check guard) */
+                    else if (insn->opcode == OP_mod && insn->rd) {
+                        /* Only optimize if we can prove x is non-zero */
+                        bool is_safe = false;
+                        if (insn->rs1->is_const && insn->rs1->init_val != 0) {
+                            is_safe = true;
+                        }
+
+                        if (is_safe) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = 0;
                             insn->rs1 = NULL;
                             insn->rs2 = NULL;
                         }
                     }
                 }
 
-                /* TODO: Dead load elimination */
+                /* Enhanced algebraic simplifications */
+                /* Self-operation optimizations */
+                if (insn->rs1 && insn->rs2 && insn->rs1 == insn->rs2) {
+                    /* x - x = 0 */
+                    if (insn->opcode == OP_sub && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 0;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x ^ x = 0 */
+                    else if (insn->opcode == OP_bit_xor && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 0;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x & x = x */
+                    else if (insn->opcode == OP_bit_and && insn->rd) {
+                        insn->opcode = OP_assign;
+                        insn->rs2 = NULL;
+                    }
+                    /* x | x = x */
+                    else if (insn->opcode == OP_bit_or && insn->rd) {
+                        insn->opcode = OP_assign;
+                        insn->rs2 = NULL;
+                    }
+                    /* x == x = 1 */
+                    else if (insn->opcode == OP_eq && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 1;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x != x = 0 */
+                    else if (insn->opcode == OP_neq && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 0;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x < x = 0, x > x = 0 */
+                    else if ((insn->opcode == OP_lt || insn->opcode == OP_gt) &&
+                             insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 0;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                    /* x <= x = 1, x >= x = 1 */
+                    else if ((insn->opcode == OP_leq ||
+                              insn->opcode == OP_geq) &&
+                             insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = 1;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                    }
+                }
+
+                /* Identity and constant optimizations */
+                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                    int val = insn->rs2->init_val;
+
+                    /* x + 0 = x, x - 0 = x, x | 0 = x, x ^ 0 = x */
+                    if (val == 0) {
+                        if (insn->opcode == OP_add || insn->opcode == OP_sub ||
+                            insn->opcode == OP_bit_or ||
+                            insn->opcode == OP_bit_xor) {
+                            insn->opcode = OP_assign;
+                            insn->rs2 = NULL;
+                        }
+                        /* x * 0 = 0, x & 0 = 0 */
+                        else if (insn->opcode == OP_mul ||
+                                 insn->opcode == OP_bit_and) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = 0;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                        /* x << 0 = x, x >> 0 = x */
+                        else if (insn->opcode == OP_lshift ||
+                                 insn->opcode == OP_rshift) {
+                            insn->opcode = OP_assign;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                    /* x * 1 = x, x / 1 = x */
+                    else if (val == 1) {
+                        if (insn->opcode == OP_mul || insn->opcode == OP_div) {
+                            insn->opcode = OP_assign;
+                            insn->rs2 = NULL;
+                        }
+                        /* x % 1 = 0 */
+                        else if (insn->opcode == OP_mod) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = 0;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                    /* x & -1 = x (all bits set) */
+                    else if (val == -1) {
+                        if (insn->opcode == OP_bit_and) {
+                            insn->opcode = OP_assign;
+                            insn->rs2 = NULL;
+                        }
+                        /* x | -1 = -1 */
+                        else if (insn->opcode == OP_bit_or) {
+                            insn->opcode = OP_load_constant;
+                            insn->rd->is_const = true;
+                            insn->rd->init_val = -1;
+                            insn->rs1 = NULL;
+                            insn->rs2 = NULL;
+                        }
+                        /* x * -1 = -x */
+                        else if (insn->opcode == OP_mul) {
+                            insn->opcode = OP_negate;
+                            insn->rs2 = NULL;
+                        }
+                    }
+                }
+
+                /* Multi-instruction analysis and optimization */
+                /* Store-to-load forwarding */
+                if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
+                    insn_t *search = insn->prev;
+                    int search_limit = 10; /* Look back up to 10 instructions */
+
+                    while (search && search_limit > 0) {
+                        /* Found a recent store to the same location */
+                        if ((search->opcode == OP_store ||
+                             search->opcode == OP_write ||
+                             search->opcode == OP_global_store) &&
+                            search->rd == insn->rs1 && search->rs1) {
+                            /* Check for intervening calls or branches */
+                            bool safe_to_forward = true;
+                            insn_t *check = search->next;
+
+                            while (check && check != insn) {
+                                if (check->opcode == OP_call ||
+                                    check->opcode == OP_indirect ||
+                                    check->opcode == OP_branch ||
+                                    check->opcode == OP_jump) {
+                                    safe_to_forward = false;
+                                    break;
+                                }
+                                check = check->next;
+                            }
+
+                            if (safe_to_forward) {
+                                /* Forward the stored value */
+                                insn->opcode = OP_assign;
+                                insn->rs1 = search->rs1;
+                                insn->rs2 = NULL;
+                                break;
+                            }
+                        }
+
+                        /* Stop at control flow changes */
+                        if (search->opcode == OP_call ||
+                            search->opcode == OP_branch ||
+                            search->opcode == OP_jump ||
+                            search->opcode == OP_indirect) {
+                            break;
+                        }
+
+                        search = search->prev;
+                        search_limit--;
+                    }
+                }
+
+                /* Redundant load elimination */
+                if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
+                    insn_t *search = bb->insn_list.head;
+
+                    while (search && search != insn) {
+                        /* Found an earlier load from the same location */
+                        if (search->opcode == OP_load &&
+                            search->rs1 == insn->rs1 && search->rd) {
+                            /* Check if location wasn't modified between loads
+                             */
+                            bool safe_to_reuse = true;
+                            insn_t *check = search->next;
+
+                            while (check && check != insn) {
+                                /* Check for stores to the same location */
+                                if ((check->opcode == OP_store ||
+                                     check->opcode == OP_global_store ||
+                                     check->opcode == OP_write) &&
+                                    check->rd == insn->rs1) {
+                                    safe_to_reuse = false;
+                                    break;
+                                }
+                                /* Function calls might modify memory */
+                                if (check->opcode == OP_call ||
+                                    check->opcode == OP_indirect) {
+                                    safe_to_reuse = false;
+                                    break;
+                                }
+                                check = check->next;
+                            }
+
+                            if (safe_to_reuse) {
+                                /* Replace with assignment from previous load */
+                                insn->opcode = OP_assign;
+                                insn->rs1 = search->rd;
+                                insn->rs2 = NULL;
+                                break;
+                            }
+                        }
+                        search = search->next;
+                    }
+                }
+
+                /* Strength reduction for power-of-2 operations */
+                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                    int val = insn->rs2->init_val;
+
+                    /* Check if value is power of 2 */
+                    if (val > 0 && (val & (val - 1)) == 0) {
+                        /* Count trailing zeros to get shift amount */
+                        int shift = 0;
+                        int temp = val;
+                        while ((temp & 1) == 0) {
+                            temp >>= 1;
+                            shift++;
+                        }
+
+                        /* x * power_of_2 = x << shift */
+                        if (insn->opcode == OP_mul) {
+                            insn->opcode = OP_lshift;
+                            insn->rs2->init_val = shift;
+                        }
+                        /* x / power_of_2 = x >> shift (unsigned) */
+                        else if (insn->opcode == OP_div) {
+                            insn->opcode = OP_rshift;
+                            insn->rs2->init_val = shift;
+                        }
+                        /* x % power_of_2 = x & (power_of_2 - 1) */
+                        else if (insn->opcode == OP_mod) {
+                            insn->opcode = OP_bit_and;
+                            insn->rs2->init_val = val - 1;
+                        }
+                    }
+                }
 
                 /* more optimizations */
             }
         }
     }
 
-    /* TODO: Phi node optimization */
+    /* Phi node optimization - eliminate trivial phi nodes */
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+                if (insn->opcode == OP_phi && insn->phi_ops) {
+                    /* Count unique operands and check if all are the same */
+                    var_t *first_var = insn->phi_ops->var;
+                    bool all_same = true;
+                    bool all_const = true;
+                    int const_val = 0;
+                    int num_ops = 0;
+
+                    for (phi_operand_t *op = insn->phi_ops; op; op = op->next) {
+                        num_ops++;
+                        /* Check if all same variable */
+                        if (op->var != first_var) {
+                            all_same = false;
+                        }
+                        /* Check if all same constant */
+                        if (op->var && op->var->is_const) {
+                            if (op == insn->phi_ops) {
+                                const_val = op->var->init_val;
+                            } else if (op->var->init_val != const_val) {
+                                all_const = false;
+                            }
+                        } else {
+                            all_const = false;
+                        }
+                    }
+
+                    /* Trivial phi: all operands are the same variable */
+                    if (all_same && first_var && insn->rd) {
+                        insn->opcode = OP_assign;
+                        insn->rs1 = first_var;
+                        insn->rs2 = NULL;
+                        insn->phi_ops = NULL;
+                    }
+                    /* Constant phi: all operands have the same constant value
+                     */
+                    else if (all_const && num_ops > 0 && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = const_val;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                        insn->phi_ops = NULL;
+                    }
+                }
+            }
+        }
+    }
 
     /* Mark useful instructions */
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
