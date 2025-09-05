@@ -1311,20 +1311,15 @@ int main() {
 }
 EOF
 
-# Character pointer differences work correctly because element size is 1.
-# Integer and other typed pointer differences face challenges due to type
-# information loss during the compilation pipeline.
-#
-# FIXME: when pointer variables are used in expressions, they become temporaries
-# without sufficient type information for proper scaling.
-# workaround: For integer pointer differences, cast to char* and divide manually
+# Pointer arithmetic tests
+
+# Basic integer pointer difference
 try_ 7 << EOF
 int main() {
     int arr[10];
     int *p = arr;
     int *q = arr + 7;
-    /* Workaround: cast to char* and divide by sizeof(int) */
-    return ((char*)q - (char*)p) / sizeof(int);  /* Returns 7 */
+    return q - p;
 }
 EOF
 
@@ -1334,7 +1329,7 @@ int main() {
     char text[50];
     char *start = text;
     char *end = text + 10;
-    return end - start;  /* char pointers work correctly */
+    return end - start;
 }
 EOF
 
@@ -1367,24 +1362,93 @@ int main() {
 }
 EOF
 
-# Additional integer pointer
+# Integer pointer with array indexing
 try_ 3 << EOF
 int main() {
     int nums[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
     int *first = &nums[2];
     int *second = &nums[5];
-    /* Workaround using char* cast */
-    return ((char*)second - (char*)first) / sizeof(int); /* (5-2) = 3 */
+    return second - first;  /* Direct subtraction: (5-2) = 3 */
 }
 EOF
 
+# Larger integer pointer difference
 try_ 10 << EOF
 int main() {
     int values[20];
     int *p = values;
     int *q = values + 10;
-    /* Another workaround approach */
-    return ((char*)q - (char*)p) / sizeof(int);
+    return q - p;  /* Direct pointer arithmetic */
+}
+EOF
+
+# Negative pointer difference
+try_ 251 << EOF
+int main() {
+    int arr[10];
+    int *p = arr + 8;
+    int *q = arr + 3;
+    return q - p;  /* 3 - 8 = -5, wraps to 251 in exit code */
+}
+EOF
+
+# Zero pointer difference
+try_ 0 << EOF
+int main() {
+    int data[10];
+    int *p1 = data + 5;
+    int *p2 = data + 5;
+    return p2 - p1;  /* Same position = 0 */
+}
+EOF
+
+# Struct pointer arithmetic
+try_ 4 << EOF
+struct point {
+    int x;
+    int y;
+    int z;
+};
+
+int main() {
+    struct point pts[10];
+    struct point *p1 = pts;
+    struct point *p2 = pts + 4;
+    return p2 - p1;  /* Struct pointer difference */
+}
+EOF
+
+# Mixed pointer arithmetic operations
+try_ 16 << EOF
+int main() {
+    int arr[20];
+    int *start = arr;
+    int *mid = arr + 10;
+    int *end = arr + 18;
+    return (end - mid) + (mid - start) - 2;  /* (18-10) + (10-0) - 2 = 8 + 10 - 2 = 16 */
+}
+EOF
+
+# Pointer arithmetic with typedef
+try_ 6 << EOF
+typedef int* int_ptr;
+int main() {
+    int data[15];
+    int_ptr p1 = data + 2;
+    int_ptr p2 = data + 8;
+    return p2 - p1;  /* Typedef pointer difference: 8 - 2 = 6 */
+}
+EOF
+
+# Complex expression with pointer differences
+try_ 13 << EOF
+int main() {
+    int vals[30];
+    int *a = vals;
+    int *b = vals + 5;
+    int *c = vals + 9;
+    int *d = vals + 15;
+    return (d - a) - (c - b) + 2;  /* (15-0) - (9-5) + 2 = 15 - 4 + 2 = 13 */
 }
 EOF
 

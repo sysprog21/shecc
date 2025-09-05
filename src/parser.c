@@ -2265,7 +2265,6 @@ void handle_pointer_difference(block_t *parent,
         var_t *result = require_var(parent);
         gen_name_to(result->var_name);
         add_insn(parent, *bb, OP_div, result, vd, size_const, 0, NULL);
-
         /* Push the result */
         opstack_push(result);
     } else {
@@ -2285,16 +2284,8 @@ void handle_pointer_arithmetic(block_t *parent,
     var_t *int_var = NULL;
     int element_size = 0;
 
-    /* FIXME: Integer pointer differences are not fully supported.
-     * The type information needed to determine element size is lost
-     * when pointer variables are loaded for use in expressions.
-     * Character pointer differences work because element size is 1.
-     *
-     * Current workaround: Cast to char* and divide by sizeof(type)
-     * Example: ((char*)q - (char*)p) / sizeof(int)
-     *
-     * Attempted fixes include looking up original variable declarations,
-     * but the fundamental issue remains in the compilation pipeline.
+    /* Pointer arithmetic: differences (char*, int*, struct*, etc.),
+     * addition/increment with scaling, and array indexing.
      */
 
     /* Check if both operands are pointers (pointer difference) */
@@ -2320,6 +2311,16 @@ void handle_pointer_arithmetic(block_t *parent,
                           (orig_rs1->type && orig_rs1->type->ptr_level > 0);
         bool rs2_is_ptr = (orig_rs2->ptr_level > 0) ||
                           (orig_rs2->type && orig_rs2->type->ptr_level > 0);
+
+        /* If variable lookup failed, check the passed variables directly */
+        if (!rs1_is_ptr) {
+            rs1_is_ptr =
+                (rs1->ptr_level > 0) || (rs1->type && rs1->type->ptr_level > 0);
+        }
+        if (!rs2_is_ptr) {
+            rs2_is_ptr =
+                (rs2->ptr_level > 0) || (rs2->type && rs2->type->ptr_level > 0);
+        }
 
         if (rs1_is_ptr && rs2_is_ptr) {
             /* Both are pointers - this is pointer difference */
@@ -2427,6 +2428,11 @@ void handle_pointer_arithmetic(block_t *parent,
 
     /* Perform the operation */
     var_t *vd = require_var(parent);
+    /* Preserve pointer type metadata on results of pointer arithmetic */
+    if (ptr_var) {
+        vd->type = ptr_var->type;
+        vd->ptr_level = ptr_var->ptr_level;
+    }
     gen_name_to(vd->var_name);
     opstack_push(vd);
     add_insn(parent, *bb, op, vd, rs1, rs2, 0, NULL);
@@ -2459,41 +2465,6 @@ bool is_pointer_var(var_t *v, block_t *parent)
     if (orig &&
         (orig->ptr_level > 0 || (orig->type && orig->type->ptr_level > 0)))
         return true;
-
-    return false;
-}
-
-/* Helper function to check if it's a pointer difference operation */
-bool is_pointer_difference(opcode_t op, var_t *rs1, var_t *rs2)
-{
-    if (op != OP_sub)
-        return false;
-
-    /* Check if both operands are pointers or have pointer types */
-    bool rs1_is_ptr =
-        rs1->ptr_level > 0 || (rs1->type && rs1->type->ptr_level > 0);
-    bool rs2_is_ptr =
-        rs2->ptr_level > 0 || (rs2->type && rs2->type->ptr_level > 0);
-
-    /* If both explicitly marked as pointers, it's pointer difference */
-    if (rs1_is_ptr && rs2_is_ptr)
-        return true;
-
-    /* If both variables have the same type and that type has base_type set
-     * (indicating they're related to typed data), assume it is pointer
-     * subtraction.
-     */
-    if (rs1->type && rs2->type) {
-        /* If they have the same type object or same base type, and the
-         * base type is not void, treat as pointer difference.
-         */
-        if ((rs1->type == rs2->type ||
-             rs1->type->base_type == rs2->type->base_type) &&
-            rs1->type->base_type != TYPE_void &&
-            rs1->type->base_type != TYPE_struct) {
-            return true;
-        }
-    }
 
     return false;
 }
@@ -2544,14 +2515,10 @@ void read_expr(block_t *parent, basic_block_t **bb)
 
                     /* Handle pointer arithmetic for addition and subtraction */
                     if (is_pointer_operation(top_op, rs1, rs2)) {
-                        if (is_pointer_difference(top_op, rs1, rs2)) {
-                            /* Special case: pointer - pointer difference */
-                            handle_pointer_difference(parent, bb, rs1, rs2);
-                        } else {
-                            /* Regular pointer arithmetic with scaling */
-                            handle_pointer_arithmetic(parent, bb, top_op, rs1,
-                                                      rs2);
-                        }
+                        /* handle_pointer_arithmetic handles both pointer
+                         * differences and regular pointer arithmetic internally
+                         */
+                        handle_pointer_arithmetic(parent, bb, top_op, rs1, rs2);
                         oper_stack_idx--;
                         continue;
                     }
@@ -2671,90 +2638,10 @@ void read_expr(block_t *parent, basic_block_t **bb)
         rs2 = opstack_pop();
         rs1 = opstack_pop();
 
-        /* Handle pointer arithmetic for addition and subtraction */
-        if ((top_op == OP_add || top_op == OP_sub) &&
-            (rs1->ptr_level || (rs1->type && rs1->type->ptr_level > 0) ||
-             rs2->ptr_level || (rs2->type && rs2->type->ptr_level > 0))) {
-            var_t *ptr_var = NULL;
-            var_t *int_var = NULL;
-            int element_size = 0;
-
-            /* Determine which operand is the pointer */
-            if (rs1->ptr_level || (rs1->type && rs1->type->ptr_level > 0)) {
-                ptr_var = rs1;
-                int_var = rs2;
-
-                /* Calculate element size */
-                if (rs1->ptr_level && rs1->type) {
-                    element_size = rs1->type->size;
-                } else if (rs1->type && rs1->type->ptr_level > 0) {
-                    /* Typedef pointer */
-                    switch (rs1->type->base_type) {
-                    case TYPE_char:
-                        element_size = TY_char->size;
-                        break;
-                    case TYPE_int:
-                        element_size = TY_int->size;
-                        break;
-                    case TYPE_void:
-                        element_size = 1;
-                        break;
-                    default:
-                        element_size = rs1->type ? rs1->type->size : PTR_SIZE;
-                        break;
-                    }
-                }
-            } else if (rs2->ptr_level ||
-                       (rs2->type && rs2->type->ptr_level > 0)) {
-                /* Only for addition (p + n == n + p) */
-                if (top_op == OP_add) {
-                    ptr_var = rs2;
-                    int_var = rs1;
-
-                    /* Calculate element size */
-                    if (rs2->ptr_level && rs2->type) {
-                        element_size = rs2->type->size;
-                    } else if (rs2->type && rs2->type->ptr_level > 0) {
-                        /* Typedef pointer */
-                        switch (rs2->type->base_type) {
-                        case TYPE_char:
-                            element_size = TY_char->size;
-                            break;
-                        case TYPE_int:
-                            element_size = TY_int->size;
-                            break;
-                        case TYPE_void:
-                            element_size = 1;
-                            break;
-                        default:
-                            element_size =
-                                rs2->type ? rs2->type->size : PTR_SIZE;
-                            break;
-                        }
-                    }
-                    /* Swap operands so pointer is rs1 */
-                    rs1 = ptr_var;
-                    rs2 = int_var;
-                }
-            }
-
-            /* If we need to scale the integer operand */
-            if (ptr_var && element_size > 1) {
-                /* Create multiplication by element size */
-                var_t *size_const = require_var(parent);
-                gen_name_to(size_const->var_name);
-                size_const->init_val = element_size;
-                add_insn(parent, *bb, OP_load_constant, size_const, NULL, NULL,
-                         0, NULL);
-
-                var_t *scaled = require_var(parent);
-                gen_name_to(scaled->var_name);
-                add_insn(parent, *bb, OP_mul, scaled, int_var, size_const, 0,
-                         NULL);
-
-                /* Use scaled value as rs2 */
-                rs2 = scaled;
-            }
+        /* Pointer arithmetic handling */
+        if (is_pointer_operation(top_op, rs1, rs2)) {
+            handle_pointer_arithmetic(parent, bb, top_op, rs1, rs2);
+            continue; /* skip normal processing */
         }
 
         /* Constant folding for binary operations */
@@ -4496,9 +4383,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         if (lex_accept(T_assign)) {
             if (lex_peek(T_open_curly, NULL) &&
                 (var->array_size > 0 || var->ptr_level > 0)) {
-                parse_array_init(
-                    var, parent, &bb,
-                    1); /* FIXED: Emit code for locals in functions */
+                /* Emit code for locals in functions */
+                parse_array_init(var, parent, &bb, 1);
             } else if (lex_peek(T_open_curly, NULL) &&
                        (var->type->base_type == TYPE_struct ||
                         var->type->base_type == TYPE_typedef)) {
@@ -4609,8 +4495,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             if (lex_accept(T_assign)) {
                 if (lex_peek(T_open_curly, NULL) &&
                     (nv->array_size > 0 || nv->ptr_level > 0)) {
-                    parse_array_init(nv, parent, &bb,
-                                     1); /* FIXED: Emit code for locals */
+                    /* Emit code for locals */
+                    parse_array_init(nv, parent, &bb, 1);
                 } else if (lex_peek(T_open_curly, NULL) &&
                            (nv->type->base_type == TYPE_struct ||
                             nv->type->base_type == TYPE_typedef)) {
