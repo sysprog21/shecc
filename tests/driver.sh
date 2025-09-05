@@ -1775,6 +1775,197 @@ int main()
 }
 EOF
 
+# Category: Const Qualifiers
+begin_category "Const Qualifiers" "Testing const qualifier support for variables and parameters"
+
+# Test 1: Basic const local variable
+try_ 42 << EOF
+int main() {
+    const int x = 42;
+    return x;
+}
+EOF
+
+# Test 2: Const global variable
+try_ 100 << EOF
+const int global_const = 100;
+int main() {
+    return global_const;
+}
+EOF
+
+# Test 3: Multiple const variables
+try_ 30 << EOF
+int main() {
+    const int a = 10;
+    const int b = 20;
+    return a + b;
+}
+EOF
+
+# Test 4: Const parameter in function
+try_ 15 << EOF
+int add_five(const int x) {
+    return x + 5;
+}
+int main() {
+    return add_five(10);
+}
+EOF
+
+# Test 5: Const pointer value (simplified)
+try_ 25 << EOF
+int main() {
+    const int value = 25;
+    const int *ptr = &value;
+    return *ptr;
+}
+EOF
+
+# Test 6: Non-const pointer to const data  
+try_ 35 << EOF
+int main() {
+    const int value = 35;
+    int *ptr = &value;
+    return *ptr;
+}
+EOF
+
+# Test 7: Const in arithmetic expressions
+try_ 60 << EOF
+int main() {
+    const int x = 20;
+    const int y = 30;
+    const int z = 10;
+    return x + y + z;
+}
+EOF
+
+# Test 8: Const with initialization from expression
+try_ 50 << EOF
+int main() {
+    int a = 10;
+    const int b = a * 5;
+    return b;
+}
+EOF
+
+# Test 9: Function returning through const variable
+try_ 77 << EOF
+int compute() {
+    const int result = 77;
+    return result;
+}
+int main() {
+    return compute();
+}
+EOF
+
+# Test 10: Const array element access
+try_ 30 << EOF
+int main() {
+    const int arr[3] = {10, 20, 30};
+    return arr[2];
+}
+EOF
+
+# Test 11: Mixed const and non-const
+try_ 45 << EOF
+int main() {
+    const int x = 15;
+    int y = 20;
+    const int z = 10;
+    return x + y + z;
+}
+EOF
+
+# Test 12: Const with conditional
+try_ 40 << EOF
+int main() {
+    const int x = 40;
+    const int y = 50;
+    return (x < y) ? x : y;
+}
+EOF
+
+# Test 13: Const value from struct (simplified)
+try_ 99 << EOF
+struct Point {
+    int x;
+    int y;
+};
+int main() {
+    struct Point p = {99, 100};
+    const int val = p.x;
+    return val;
+}
+EOF
+
+# Test 14: Const char array (string)
+try_ 72 << EOF
+int main() {
+    const char str[] = "Hello";
+    return str[0];  /* 'H' = 72 */
+}
+EOF
+
+# Test 15: Multiple const on same line
+try_ 55 << EOF
+int main() {
+    const int a = 10, b = 20, c = 25;
+    return a + b + c;
+}
+EOF
+
+# Test 16: Const with typedef
+try_ 88 << EOF
+typedef int myint;
+int main() {
+    const myint value = 88;
+    return value;
+}
+EOF
+
+# Test 17: Const void pointer
+try_ 12 << EOF
+int main() {
+    int val = 12;
+    const void *ptr = &val;
+    const int *iptr = ptr;
+    return *iptr;
+}
+EOF
+
+# Test 18: Nested const usage
+try_ 18 << EOF
+int get_value(const int x) {
+    const int multiplier = 2;
+    return x * multiplier;
+}
+int main() {
+    const int input = 9;
+    return get_value(input);
+}
+EOF
+
+# Test 19: Const with pointer arithmetic
+try_ 30 << EOF
+int main() {
+    const int arr[] = {10, 20, 30, 40};
+    const int *ptr = arr;
+    ptr = ptr + 2;
+    return *ptr;
+}
+EOF
+
+# Test 20: Const with literal value
+try_ 3 << EOF
+int main() {
+    const int x = 3;
+    return x;
+}
+EOF
+
 # Category: Ternary Operator
 begin_category "Ternary Operator" "Testing conditional ?: operator"
 
