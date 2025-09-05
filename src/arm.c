@@ -329,6 +329,12 @@ int __blx(arm_cond_t cond, arm_reg rd)
     return arm_encode(cond, 18, 15, 15, rd + 3888);
 }
 
+int __bx(arm_cond_t cond, arm_reg rm)
+{
+    /* BX: Branch and Exchange */
+    return (cond << 28) | 0x012FFF10 | rm;
+}
+
 int __mul(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
 {
     return arm_encode(cond, 0, rd, 0, (r1 << 8) + 144 + r2);
