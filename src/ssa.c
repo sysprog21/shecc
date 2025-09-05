@@ -2056,7 +2056,57 @@ void optimize(void)
         }
     }
 
-    /* TODO: Phi node optimization */
+    /* Phi node optimization - eliminate trivial phi nodes */
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+                if (insn->opcode == OP_phi && insn->phi_ops) {
+                    /* Count unique operands and check if all are the same */
+                    var_t *first_var = insn->phi_ops->var;
+                    bool all_same = true;
+                    bool all_const = true;
+                    int const_val = 0;
+                    int num_ops = 0;
+
+                    for (phi_operand_t *op = insn->phi_ops; op; op = op->next) {
+                        num_ops++;
+                        /* Check if all same variable */
+                        if (op->var != first_var) {
+                            all_same = false;
+                        }
+                        /* Check if all same constant */
+                        if (op->var && op->var->is_const) {
+                            if (op == insn->phi_ops) {
+                                const_val = op->var->init_val;
+                            } else if (op->var->init_val != const_val) {
+                                all_const = false;
+                            }
+                        } else {
+                            all_const = false;
+                        }
+                    }
+
+                    /* Trivial phi: all operands are the same variable */
+                    if (all_same && first_var && insn->rd) {
+                        insn->opcode = OP_assign;
+                        insn->rs1 = first_var;
+                        insn->rs2 = NULL;
+                        insn->phi_ops = NULL;
+                    }
+                    /* Constant phi: all operands have the same constant value
+                     */
+                    else if (all_const && num_ops > 0 && insn->rd) {
+                        insn->opcode = OP_load_constant;
+                        insn->rd->is_const = true;
+                        insn->rd->init_val = const_val;
+                        insn->rs1 = NULL;
+                        insn->rs2 = NULL;
+                        insn->phi_ops = NULL;
+                    }
+                }
+            }
+        }
+    }
 
     /* Mark useful instructions */
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
