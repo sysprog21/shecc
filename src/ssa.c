@@ -18,6 +18,9 @@
 #define PHI_WORKLIST_SIZE 64
 #define DCE_WORKLIST_SIZE 2048
 
+/* Dead store elimination window size */
+#define OVERWRITE_WINDOW 3
+
 /* cfront does not accept structure as an argument, pass pointer */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
@@ -1836,24 +1839,47 @@ void optimize(void)
                     continue;
                 }
 
-                /* Dead store elimination - conservative */
-                if (insn->opcode == OP_store || insn->opcode == OP_write) {
-                    /* Only eliminate if target is local and immediately
-                     * overwritten
-                     */
-                    if (insn->rd && !insn->rd->is_global && insn->next) {
-                        insn_t *next_insn = insn->next;
+                /* Improved dead store elimination */
+                if (insn->opcode == OP_store || insn->opcode == OP_write ||
+                    insn->opcode == OP_global_store) {
+                    if (insn->rd && !insn->rd->is_global) {
+                        /* Look for overwrites within a small window */
+                        insn_t *check = insn->next;
+                        int distance = 0;
+                        bool found_overwrite = false;
 
-                        /* Check for immediate overwrite with no intervening
-                         * instructions
-                         */
-                        if ((next_insn->opcode == OP_store ||
-                             next_insn->opcode == OP_write) &&
-                            next_insn->rd == insn->rd) {
-                            /* Eliminate only immediate overwrites */
-                            insn->rd = NULL;
-                            insn->rs1 = NULL;
-                            insn->rs2 = NULL;
+                        while (check && distance < OVERWRITE_WINDOW) {
+                            /* Stop at control flow changes */
+                            if (check->opcode == OP_branch ||
+                                check->opcode == OP_jump ||
+                                check->opcode == OP_call ||
+                                check->opcode == OP_return) {
+                                break;
+                            }
+
+                            /* Check if there's a use of the stored location */
+                            if ((check->opcode == OP_load ||
+                                 check->opcode == OP_read) &&
+                                check->rs1 == insn->rd) {
+                                break; /* Store is needed */
+                            }
+
+                            /* Found overwrite */
+                            if ((check->opcode == OP_store ||
+                                 check->opcode == OP_write ||
+                                 check->opcode == OP_global_store) &&
+                                check->rd == insn->rd) {
+                                found_overwrite = true;
+                                break;
+                            }
+
+                            check = check->next;
+                            distance++;
+                        }
+
+                        if (found_overwrite) {
+                            /* Mark for removal by DCE */
+                            insn->useful = false;
                         }
                     }
                 }
