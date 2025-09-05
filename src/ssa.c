@@ -2051,6 +2051,130 @@ void optimize(void)
                     }
                 }
 
+                /* Multi-instruction analysis and optimization */
+                /* Store-to-load forwarding */
+                if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
+                    insn_t *search = insn->prev;
+                    int search_limit = 10; /* Look back up to 10 instructions */
+
+                    while (search && search_limit > 0) {
+                        /* Found a recent store to the same location */
+                        if ((search->opcode == OP_store ||
+                             search->opcode == OP_write ||
+                             search->opcode == OP_global_store) &&
+                            search->rd == insn->rs1 && search->rs1) {
+                            /* Check for intervening calls or branches */
+                            bool safe_to_forward = true;
+                            insn_t *check = search->next;
+
+                            while (check && check != insn) {
+                                if (check->opcode == OP_call ||
+                                    check->opcode == OP_indirect ||
+                                    check->opcode == OP_branch ||
+                                    check->opcode == OP_jump) {
+                                    safe_to_forward = false;
+                                    break;
+                                }
+                                check = check->next;
+                            }
+
+                            if (safe_to_forward) {
+                                /* Forward the stored value */
+                                insn->opcode = OP_assign;
+                                insn->rs1 = search->rs1;
+                                insn->rs2 = NULL;
+                                break;
+                            }
+                        }
+
+                        /* Stop at control flow changes */
+                        if (search->opcode == OP_call ||
+                            search->opcode == OP_branch ||
+                            search->opcode == OP_jump ||
+                            search->opcode == OP_indirect) {
+                            break;
+                        }
+
+                        search = search->prev;
+                        search_limit--;
+                    }
+                }
+
+                /* Redundant load elimination */
+                if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
+                    insn_t *search = bb->insn_list.head;
+
+                    while (search && search != insn) {
+                        /* Found an earlier load from the same location */
+                        if (search->opcode == OP_load &&
+                            search->rs1 == insn->rs1 && search->rd) {
+                            /* Check if location wasn't modified between loads
+                             */
+                            bool safe_to_reuse = true;
+                            insn_t *check = search->next;
+
+                            while (check && check != insn) {
+                                /* Check for stores to the same location */
+                                if ((check->opcode == OP_store ||
+                                     check->opcode == OP_global_store ||
+                                     check->opcode == OP_write) &&
+                                    check->rd == insn->rs1) {
+                                    safe_to_reuse = false;
+                                    break;
+                                }
+                                /* Function calls might modify memory */
+                                if (check->opcode == OP_call ||
+                                    check->opcode == OP_indirect) {
+                                    safe_to_reuse = false;
+                                    break;
+                                }
+                                check = check->next;
+                            }
+
+                            if (safe_to_reuse) {
+                                /* Replace with assignment from previous load */
+                                insn->opcode = OP_assign;
+                                insn->rs1 = search->rd;
+                                insn->rs2 = NULL;
+                                break;
+                            }
+                        }
+                        search = search->next;
+                    }
+                }
+
+                /* Strength reduction for power-of-2 operations */
+                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                    int val = insn->rs2->init_val;
+
+                    /* Check if value is power of 2 */
+                    if (val > 0 && (val & (val - 1)) == 0) {
+                        /* Count trailing zeros to get shift amount */
+                        int shift = 0;
+                        int temp = val;
+                        while ((temp & 1) == 0) {
+                            temp >>= 1;
+                            shift++;
+                        }
+
+                        /* x * power_of_2 = x << shift */
+                        if (insn->opcode == OP_mul) {
+                            insn->opcode = OP_lshift;
+                            insn->rs2->init_val = shift;
+                        }
+                        /* x / power_of_2 = x >> shift (unsigned) */
+                        else if (insn->opcode == OP_div) {
+                            insn->opcode = OP_rshift;
+                            insn->rs2->init_val = shift;
+                        }
+                        /* x % power_of_2 = x & (power_of_2 - 1) */
+                        else if (insn->opcode == OP_mod) {
+                            insn->opcode = OP_bit_and;
+                            insn->rs2->init_val = val - 1;
+                        }
+                    }
+                }
+
                 /* more optimizations */
             }
         }
