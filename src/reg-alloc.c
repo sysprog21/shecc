@@ -887,9 +887,9 @@ void dump_ph2_ir(void)
     for (int i = 0; i < ph2_ir_idx; i++) {
         ph2_ir_t *ph2_ir = PH2_IR_FLATTEN[i];
 
-        int rd = ph2_ir->dest + 48;
-        int rs1 = ph2_ir->src0 + 48;
-        int rs2 = ph2_ir->src1 + 48;
+        const int rd = ph2_ir->dest + 48;
+        const int rs1 = ph2_ir->src0 + 48;
+        const int rs2 = ph2_ir->src1 + 48;
 
         switch (ph2_ir->op) {
         case OP_define:

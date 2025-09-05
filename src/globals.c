@@ -173,16 +173,16 @@ void *arena_alloc(arena_t *arena, int size)
     }
 
     /* Align to sizeof(void*) bytes for host compatibility */
-    int alignment = sizeof(void *);
+    const int alignment = sizeof(void *);
     size = (size + alignment - 1) & ~(alignment - 1);
 
     if (!arena->head || arena->head->offset + size > arena->head->capacity) {
         /* Need a new block: choose capacity = max(DEFAULT_ARENA_SIZE,
          * arena->block_size, size) */
-        int base =
+        const int base =
             (arena->block_size > DEFAULT_ARENA_SIZE ? arena->block_size
                                                     : DEFAULT_ARENA_SIZE);
-        int new_capacity = (size > base ? size : base);
+        const int new_capacity = (size > base ? size : base);
         arena_block_t *new_block = arena_block_create(new_capacity);
         new_block->next = arena->head;
         arena->head = new_block;
@@ -282,7 +282,7 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
  */
 char *arena_strdup(arena_t *arena, char *str)
 {
-    int n = strlen(str);
+    const int n = strlen(str);
     char *dup = arena_alloc(arena, n + 1);
     memcpy(dup, str, n);
     dup[n] = '\0';
@@ -368,14 +368,14 @@ void arena_free(arena_t *arena)
  */
 int hashmap_hash_index(int size, char *key)
 {
-    int hash = 0x811c9dc5, mask;
+    int hash = 0x811c9dc5;
 
     for (; *key; key++) {
         hash ^= *key;
         hash *= 0x01000193;
     }
 
-    mask = hash >> 31;
+    const int mask = hash >> 31;
     return ((hash ^ mask) - mask) & (size - 1);
 }
 
@@ -431,7 +431,7 @@ hashmap_node_t *hashmap_node_new(char *key, void *val)
     if (!key)
         return NULL;
 
-    int len = strlen(key);
+    const int len = strlen(key);
     hashmap_node_t *node = arena_alloc(HASHMAP_ARENA, sizeof(hashmap_node_t));
 
 
@@ -1159,7 +1159,7 @@ bool strbuf_putc(strbuf_t *src, char value)
     return true;
 }
 
-bool strbuf_puts(strbuf_t *src, char *value)
+bool strbuf_puts(strbuf_t *src, const char *value)
 {
     int len = strlen(value);
 
