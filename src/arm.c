@@ -230,8 +230,12 @@ int __sll_amt(arm_cond_t cond,
 
 int __sra(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
 {
+    /* Arithmetic right shift with register
+     * Bit 4 = 1 (register-specified shift)
+     * Bits 5-6 = arith_rs (2) for arithmetic right shift
+     */
     return arm_encode(cond, 0 + (arm_mov << 1) + (0 << 5), 0, rd,
-                      rm + (5 << 4) + (rs << 8));
+                      rm + (1 << 4) + (arith_rs << 5) + (rs << 8));
 }
 
 int __add_i(arm_cond_t cond, arm_reg rd, arm_reg rs, int imm)
