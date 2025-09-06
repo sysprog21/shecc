@@ -132,7 +132,7 @@ void read_expr(block_t *parent, basic_block_t **bb);
 
 int write_symbol(const char *data)
 {
-    int start_len = elf_data->size;
+    const int start_len = elf_data->size;
     elf_write_str(elf_data, data);
     elf_write_byte(elf_data, 0);
     return start_len;
@@ -1367,7 +1367,7 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
         combined_len += literal_len;
     }
 
-    int index = write_symbol(combined);
+    const int index = write_symbol(combined);
 
     var_t *vd = require_typed_ptr_var(parent, TY_char, true);
     gen_name_to(vd->var_name);

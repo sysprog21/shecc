@@ -188,9 +188,9 @@ void emit(int code)
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
 {
     func_t *func;
-    int rd = ph2_ir->dest;
-    int rn = ph2_ir->src0;
-    int rm = ph2_ir->src1;
+    const int rd = ph2_ir->dest;
+    const int rn = ph2_ir->src0;
+    const int rm = ph2_ir->src1;
     int ofs;
 
     /* Prepare this variable to reuse code for:
