@@ -132,9 +132,10 @@ void read_expr(block_t *parent, basic_block_t **bb);
 
 int write_symbol(const char *data)
 {
-    const int start_len = elf_data->size;
-    elf_write_str(elf_data, data);
-    elf_write_byte(elf_data, 0);
+    /* Write string literals to .rodata section instead of .data */
+    const int start_len = elf_rodata->size;
+    elf_write_str(elf_rodata, data);
+    elf_write_byte(elf_rodata, 0);
     return start_len;
 }
 
@@ -1373,7 +1374,8 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     gen_name_to(vd->var_name);
     vd->init_val = index;
     opstack_push(vd);
-    add_insn(parent, bb, OP_load_data_address, vd, NULL, NULL, 0, NULL);
+    /* String literals are now in .rodata section */
+    add_insn(parent, bb, OP_load_rodata_address, vd, NULL, NULL, 0, NULL);
 }
 
 void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
@@ -3647,13 +3649,22 @@ bool read_global_assignment(char *token)
     if (var) {
         if (lex_peek(T_string, NULL)) {
             /* String literal global initialization:
-             * Current implementation stores strings inline rather than in
-             * '.rodata'. Pointer vs array semantics handled by assignment logic
-             * below. mutate the size of var here.
+             * String literals are now stored in .rodata section.
+             * For global pointers, we need to store the runtime address
+             * of the string in the .data section.
              */
             read_literal_param(parent, bb);
             rs1 = opstack_pop();
             vd = var;
+
+            /* For global pointer initialization with string literal,
+             * we need special handling to write the rodata address to .data
+             */
+            if (var->ptr_level > 0) {
+                /* This is a pointer - store the address in .data */
+                var->init_val = rs1->init_val;    /* Store rodata offset */
+                var->is_global_rodata_ref = true; /* Mark as rodata reference */
+            }
             add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
             return true;
         }

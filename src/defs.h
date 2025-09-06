@@ -261,8 +261,9 @@ typedef enum {
 
     OP_allocat, /* allocate space on stack */
     OP_assign,
-    OP_load_constant,     /* load constant */
-    OP_load_data_address, /* lookup address of a constant in data section */
+    OP_load_constant,       /* load constant */
+    OP_load_data_address,   /* lookup address of a constant in data section */
+    OP_load_rodata_address, /* lookup address of a constant in rodata section */
 
     /* control flow */
     OP_branch,   /* conditional jump */
@@ -360,6 +361,8 @@ struct var {
     int array_dim1, array_dim2; /* first/second dimension size for 2D arrays */
     int offset;   /* offset from stack or frame, index 0 is reserved */
     int init_val; /* for global initialization */
+    /* true if global pointer initialized with rodata address */
+    bool is_global_rodata_ref;
     int liveness; /* live range */
     int in_loop;
     struct var *base;
