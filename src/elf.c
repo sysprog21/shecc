@@ -64,8 +64,7 @@ void elf_generate_header(void)
     }
 
     elf32_hdr_t hdr;
-    /*
-     * The following table explains the meaning of each field in the
+    /* The following table explains the meaning of each field in the
      * ELF32 file header.
      *
      * Notice that the following values are hexadecimal.
@@ -134,11 +133,18 @@ void elf_generate_header(void)
     hdr.e_version = 1;                        /* ELF version */
     hdr.e_entry = ELF_START + elf_header_len; /* entry point */
     hdr.e_phoff = 0x34;                       /* program header offset */
-    hdr.e_shoff = elf_header_len + elf_code->size + elf_data->size + 39 +
-                  elf_symtab->size +
-                  elf_strtab->size; /* section header offset */
-    hdr.e_flags = ELF_FLAGS;        /* flags */
-    hdr.e_ehsize[0] = (char) 0x34;  /* header size */
+    /* Section header offset: The section headers come after symtab, strtab, and
+     * shstrtab which are all written as part of elf_section buffer.
+     * shstrtab size = 1 (null) + 10 (.shstrtab\0) + 6 (.text\0) + 6 (.data\0) +
+     *                 8 (.rodata\0) + 5 (.bss\0) + 8 (.symtab\0) + 8
+     * (.strtab\0) + 1 (padding) = 53
+     */
+    const int shstrtab_size = 53; /* section header string table with padding */
+    hdr.e_shoff = elf_header_len + elf_code->size + elf_data->size +
+                  elf_rodata->size + elf_symtab->size + elf_strtab->size +
+                  shstrtab_size;
+    hdr.e_flags = ELF_FLAGS;       /* flags */
+    hdr.e_ehsize[0] = (char) 0x34; /* header size */
     hdr.e_ehsize[1] = 0;
     hdr.e_phentsize[0] = (char) 0x20; /* program header size */
     hdr.e_phentsize[1] = 0;
@@ -146,14 +152,15 @@ void elf_generate_header(void)
     hdr.e_phnum[1] = 0;
     hdr.e_shentsize[0] = (char) 0x28; /* section header size */
     hdr.e_shentsize[1] = 0;
-    hdr.e_shnum[0] = 6; /* number of section headers */
+    /* number of section headers: .rodata and .bss included */
+    hdr.e_shnum[0] = 8;
     hdr.e_shnum[1] = 0;
-    hdr.e_shstrndx[0] = 5; /* section index with names */
+    /* section index with names: updated for new sections */
+    hdr.e_shstrndx[0] = 7;
     hdr.e_shstrndx[1] = 0;
     elf_write_blk(elf_header, &hdr, sizeof(elf32_hdr_t));
 
-    /*
-     * Explain the meaning of each field in the ELF32 program header.
+    /* Explain the meaning of each field in the ELF32 program header.
      *
      *    |  Program       |                                                 |
      *  & |  Header bytes  | Explanation                                     |
@@ -176,14 +183,16 @@ void elf_generate_header(void)
      */
     /* program header - code and data combined */
     elf32_phdr_t phdr;
-    phdr.p_type = 1;                                 /* PT_LOAD */
-    phdr.p_offset = elf_header_len;                  /* offset of segment */
-    phdr.p_vaddr = ELF_START + elf_header_len;       /* virtual address */
-    phdr.p_paddr = ELF_START + elf_header_len;       /* physical address */
-    phdr.p_filesz = elf_code->size + elf_data->size; /* size in file */
-    phdr.p_memsz = elf_code->size + elf_data->size;  /* size in memory */
-    phdr.p_flags = 7;                                /* flags */
-    phdr.p_align = 4;                                /* alignment */
+    phdr.p_type = 1;                           /* PT_LOAD */
+    phdr.p_offset = elf_header_len;            /* offset of segment */
+    phdr.p_vaddr = ELF_START + elf_header_len; /* virtual address */
+    phdr.p_paddr = ELF_START + elf_header_len; /* physical address */
+    phdr.p_filesz = elf_code->size + elf_data->size +
+                    elf_rodata->size; /* size in file - includes .rodata */
+    phdr.p_memsz = elf_code->size + elf_data->size + elf_rodata->size +
+                   elf_bss_size; /* size in memory - includes .bss */
+    phdr.p_flags = 7;            /* flags */
+    phdr.p_align = 4;            /* alignment */
     elf_write_blk(elf_header, &phdr, sizeof(elf32_phdr_t));
 }
 
@@ -195,15 +204,21 @@ void elf_generate_sections(void)
         return;
     }
 
+    int section_data_size = 0;
+    int shstrtab_start = 0; /* Track start of shstrtab */
+
     /* symtab section */
     for (int b = 0; b < elf_symtab->size; b++)
         elf_write_byte(elf_section, elf_symtab->elements[b]);
+    section_data_size += elf_symtab->size;
 
     /* strtab section */
     for (int b = 0; b < elf_strtab->size; b++)
         elf_write_byte(elf_section, elf_strtab->elements[b]);
+    section_data_size += elf_strtab->size;
 
-    /* shstr section; len = 39 */
+    /* shstr section - compute size dynamically */
+    shstrtab_start = elf_section->size;
     elf_write_byte(elf_section, 0);
     elf_write_str(elf_section, ".shstrtab");
     elf_write_byte(elf_section, 0);
@@ -211,10 +226,17 @@ void elf_generate_sections(void)
     elf_write_byte(elf_section, 0);
     elf_write_str(elf_section, ".data");
     elf_write_byte(elf_section, 0);
+    elf_write_str(elf_section, ".rodata");
+    elf_write_byte(elf_section, 0);
+    elf_write_str(elf_section, ".bss");
+    elf_write_byte(elf_section, 0);
     elf_write_str(elf_section, ".symtab");
     elf_write_byte(elf_section, 0);
     elf_write_str(elf_section, ".strtab");
     elf_write_byte(elf_section, 0);
+    /* Add padding byte for alignment - some tools expect this */
+    elf_write_byte(elf_section, 0);
+    int shstrtab_size = elf_section->size - shstrtab_start;
 
     /* section header table */
     elf32_shdr_t shdr;
@@ -288,14 +310,43 @@ void elf_generate_sections(void)
     elf_write_blk(elf_section, &shdr, sizeof(elf32_shdr_t));
     ofs += elf_data->size;
 
+    /* .rodata */
+    shdr.sh_name = 0x17; /* Offset in shstrtab for ".rodata" */
+    shdr.sh_type = 1;    /* SHT_PROGBITS */
+    shdr.sh_flags = 2;   /* SHF_ALLOC only (read-only) */
+    shdr.sh_addr = elf_code_start + elf_code->size + elf_data->size;
+    shdr.sh_offset = ofs;
+    shdr.sh_size = elf_rodata->size;
+    shdr.sh_link = 0;
+    shdr.sh_info = 0;
+    shdr.sh_addralign = 4;
+    shdr.sh_entsize = 0;
+    elf_write_blk(elf_section, &shdr, sizeof(elf32_shdr_t));
+    ofs += elf_rodata->size;
+
+    /* .bss */
+    shdr.sh_name = 0x1f; /* Offset in shstrtab for ".bss" */
+    shdr.sh_type = 8;    /* SHT_NOBITS */
+    shdr.sh_flags = 3;   /* SHF_ALLOC | SHF_WRITE */
+    shdr.sh_addr =
+        elf_code_start + elf_code->size + elf_data->size + elf_rodata->size;
+    shdr.sh_offset = ofs; /* File offset (not actually used for NOBITS) */
+    shdr.sh_size = elf_bss_size;
+    shdr.sh_link = 0;
+    shdr.sh_info = 0;
+    shdr.sh_addralign = 4;
+    shdr.sh_entsize = 0;
+    elf_write_blk(elf_section, &shdr, sizeof(elf32_shdr_t));
+    /* Note: .bss is not written to file (SHT_NOBITS) */
+
     /* .symtab */
-    shdr.sh_name = 0x17;
+    shdr.sh_name = 0x24; /* Updated offset for ".symtab" */
     shdr.sh_type = 2;
     shdr.sh_flags = 0;
     shdr.sh_addr = 0;
     shdr.sh_offset = ofs;
     shdr.sh_size = elf_symtab->size;
-    shdr.sh_link = 4;
+    shdr.sh_link = 6; /* Link to .strtab (section 6) */
     shdr.sh_info = elf_symbol_index;
     shdr.sh_addralign = 4;
     shdr.sh_entsize = 16;
@@ -303,7 +354,7 @@ void elf_generate_sections(void)
     ofs += elf_symtab->size;
 
     /* .strtab */
-    shdr.sh_name = 0x1f;
+    shdr.sh_name = 0x2c; /* Updated offset for ".strtab" */
     shdr.sh_type = 3;
     shdr.sh_flags = 0;
     shdr.sh_addr = 0;
@@ -322,7 +373,7 @@ void elf_generate_sections(void)
     shdr.sh_flags = 0;
     shdr.sh_addr = 0;
     shdr.sh_offset = ofs;
-    shdr.sh_size = 39;
+    shdr.sh_size = shstrtab_size; /* Computed dynamically */
     shdr.sh_link = 0;
     shdr.sh_info = 0;
     shdr.sh_addralign = 1;
@@ -333,13 +384,16 @@ void elf_generate_sections(void)
 void elf_align(void)
 {
     /* Check for null pointers to prevent crashes */
-    if (!elf_data || !elf_symtab || !elf_strtab) {
+    if (!elf_data || !elf_rodata || !elf_symtab || !elf_strtab) {
         error("ELF buffers not initialized for alignment");
         return;
     }
 
     while (elf_data->size & 3)
         elf_write_byte(elf_data, 0);
+
+    while (elf_rodata->size & 3)
+        elf_write_byte(elf_rodata, 0);
 
     while (elf_symtab->size & 3)
         elf_write_byte(elf_symtab, 0);
@@ -387,6 +441,9 @@ void elf_generate(const char *outfile)
         fputc(elf_code->elements[i], fp);
     for (int i = 0; i < elf_data->size; i++)
         fputc(elf_data->elements[i], fp);
+    for (int i = 0; i < elf_rodata->size; i++)
+        fputc(elf_rodata->elements[i], fp);
+    /* Note: .bss is not written to file (SHT_NOBITS) */
     for (int i = 0; i < elf_section->size; i++)
         fputc(elf_section->elements[i], fp);
     fclose(fp);

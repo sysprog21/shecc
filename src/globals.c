@@ -93,6 +93,7 @@ hashmap_t *INCLUSION_MAP;
 /* ELF sections */
 strbuf_t *elf_code;
 strbuf_t *elf_data;
+strbuf_t *elf_rodata;
 strbuf_t *elf_header;
 strbuf_t *elf_symtab;
 strbuf_t *elf_strtab;
@@ -100,6 +101,9 @@ strbuf_t *elf_section;
 int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
 int elf_code_start;
 int elf_data_start;
+int elf_rodata_start;
+int elf_bss_start;
+int elf_bss_size;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -1227,10 +1231,12 @@ void global_init(void)
 
     elf_code = strbuf_create(MAX_CODE);
     elf_data = strbuf_create(MAX_DATA);
+    elf_rodata = strbuf_create(MAX_DATA);
     elf_header = strbuf_create(MAX_HEADER);
     elf_symtab = strbuf_create(MAX_SYMTAB);
     elf_strtab = strbuf_create(MAX_STRTAB);
     elf_section = strbuf_create(MAX_SECTION);
+    elf_bss_size = 0;
 }
 
 /* Forward declaration for lexer cleanup */
@@ -1350,6 +1356,7 @@ void global_release(void)
     strbuf_free(SOURCE);
     strbuf_free(elf_code);
     strbuf_free(elf_data);
+    strbuf_free(elf_rodata);
     strbuf_free(elf_header);
     strbuf_free(elf_symtab);
     strbuf_free(elf_strtab);
@@ -1451,6 +1458,11 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             print_indent(1);
             /* offset from .data section */
             printf("%%%s = .data (%d)", rd->var_name, rd->init_val);
+            break;
+        case OP_load_rodata_address:
+            print_indent(1);
+            /* offset from .rodata section */
+            printf("%%%s = .rodata (%d)", rd->var_name, rd->init_val);
             break;
         case OP_address_of:
             print_indent(1);

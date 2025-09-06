@@ -132,9 +132,10 @@ void read_expr(block_t *parent, basic_block_t **bb);
 
 int write_symbol(const char *data)
 {
-    const int start_len = elf_data->size;
-    elf_write_str(elf_data, data);
-    elf_write_byte(elf_data, 0);
+    /* Write string literals to .rodata section */
+    const int start_len = elf_rodata->size;
+    elf_write_str(elf_rodata, data);
+    elf_write_byte(elf_rodata, 0);
     return start_len;
 }
 
@@ -1333,7 +1334,7 @@ void read_parameter_list_decl(func_t *func, bool anon)
         lex_accept(T_comma);
     }
 
-    while (lex_peek(T_identifier, NULL) == 1 || lex_peek(T_const, NULL)) {
+    while (lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL)) {
         /* Check for const qualifier */
         bool is_const = false;
         if (lex_accept(T_const))
@@ -1381,7 +1382,8 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     gen_name_to(vd->var_name);
     vd->init_val = index;
     opstack_push(vd);
-    add_insn(parent, bb, OP_load_data_address, vd, NULL, NULL, 0, NULL);
+    /* String literals are now in .rodata section */
+    add_insn(parent, bb, OP_load_rodata_address, vd, NULL, NULL, 0, NULL);
 }
 
 void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
@@ -1747,9 +1749,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
     if (lex_accept(T_minus)) {
         is_neg = true;
-        if (lex_peek(T_numeric, NULL) == 0 &&
-            lex_peek(T_identifier, NULL) == 0 &&
-            lex_peek(T_open_bracket, NULL) == 0) {
+        if (!lex_peek(T_numeric, NULL) && !lex_peek(T_identifier, NULL) &&
+            !lex_peek(T_open_bracket, NULL)) {
             error("Unexpected token after unary minus");
         }
     }
@@ -3655,9 +3656,9 @@ bool read_global_assignment(char *token)
     if (var) {
         if (lex_peek(T_string, NULL)) {
             /* String literal global initialization:
-             * Current implementation stores strings inline rather than in
-             * '.rodata'. Pointer vs array semantics handled by assignment logic
-             * below. mutate the size of var here.
+             * String literals are now stored in .rodata section.
+             * TODO: Full support for global pointer initialization with
+             * rodata addresses requires compile-time address resolution.
              */
             read_literal_param(parent, bb);
             rs1 = opstack_pop();
