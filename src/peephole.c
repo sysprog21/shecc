@@ -34,6 +34,7 @@ bool is_fusible_insn(ph2_ir_t *ph2_ir)
     case OP_load:   /* Memory operations */
     case OP_global_load:
     case OP_load_data_address:
+    case OP_load_rodata_address:
         return true;
     default:
         return false;

@@ -122,7 +122,7 @@ bool simple_sccp(func_t *func)
                 if (insn->rs1 && insn->rs1->is_const && insn->rs2 &&
                     insn->rs2->is_const && !insn->rd->is_global) {
                     int result = 0;
-                    int l = insn->rs1->init_val, r = insn->rs2->init_val;
+                    const int l = insn->rs1->init_val, r = insn->rs2->init_val;
 
                     /* Compute result based on operation type */
                     switch (insn->opcode) {
