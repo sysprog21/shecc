@@ -111,7 +111,7 @@ typedef struct {
 
 /* lexer tokens */
 typedef enum {
-    T_start, /* FIXME: it was intended to start the state machine. */
+    T_start, /* FIXME: Unused, intended for lexer state machine init */
     T_numeric,
     T_identifier,
     T_comma,  /* , */

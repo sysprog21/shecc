@@ -440,7 +440,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__and_i(__AL, rd, rn, rm));
         return;
     case OP_sign_ext:
-        /* TODO: Allow to sign extends to other types */
+        /* TODO: Support sign extension to types other than int */
         emit(__sxtb(__AL, rd, rn, 0));
         return;
     case OP_cast:

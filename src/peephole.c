@@ -350,7 +350,6 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
     return false;
 }
 
-
 /* Load/store elimination for consecutive memory operations.
  * Removes redundant loads and dead stores that access the same memory location.
  * Conservative implementation to maintain bootstrap stability.
@@ -820,7 +819,7 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* FIXME: Additional patterns for future implementation:
+    /* FIXME: Additional optimization patterns to implement:
      *
      * Pattern 3: Load-op-store with same location
      * {load r1, [addr]; op r2, r1, ...; store r2, [addr]}

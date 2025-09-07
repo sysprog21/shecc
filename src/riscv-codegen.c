@@ -425,11 +425,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__andi(rd, rs1, rs2));
         return;
     case OP_sign_ext:
-        /* TODO: Allow to sign extends to other types */
+        /* TODO: Support sign extension to types other than int */
         emit(__andi(rd, rs1, 0xFF));
         emit(__slli(rd, rd, 24));
         emit(__srai(rd, rd, 24));
-        /* TODO: Allow user to switch to Zbb extension if needed */
+        /* TODO: Consider Zbb extension for improved bit manipulation */
         /* emit(__sext_b(rd, rs1)); */
         return;
     case OP_cast:

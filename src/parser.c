@@ -756,7 +756,9 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
     } else if (lex_peek(T_string, NULL)) {
         lex_accept(T_string);
-        /* Strings not supported in struct fields */
+        /* TODO: String fields in structs not yet supported - requires proper
+         * handling of string literals as initializers
+         */
     } else {
         error("Global array initialization requires constant values");
     }
@@ -3657,8 +3659,9 @@ bool read_global_assignment(char *token)
         if (lex_peek(T_string, NULL)) {
             /* String literal global initialization:
              * String literals are now stored in .rodata section.
-             * TODO: Full support for global pointer initialization with
-             * rodata addresses requires compile-time address resolution.
+             * TODO: Implement compile-time address resolution for global
+             * pointer initialization with rodata addresses
+             * (e.g., char *p = "str";)
              */
             read_literal_param(parent, bb);
             rs1 = opstack_pop();
@@ -4801,7 +4804,9 @@ void read_global_decl(block_t *block, bool is_const)
         lex_expect(T_semicolon);
         return;
     } else if (lex_accept(T_comma)) {
-        /* TODO: Global variable continuation syntax not yet implemented */
+        /* TODO: Implement global variable continuation syntax for multiple
+         * declarations in single statement (e.g., int a = 1, b = 2;)
+         */
         error("Global continuation not supported");
     } else if (lex_accept(T_semicolon)) {
         opstack_pop();

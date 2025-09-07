@@ -799,7 +799,9 @@ void solve_phi_params(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         for (int i = 0; i < func->num_params; i++) {
-            /* FIXME: Rename arguments directly, might be not good here. */
+            /* FIXME: Direct argument renaming in SSA construction phase may
+             * interfere with later optimization passes
+             */
             var_t *var = require_var(func->bbs->scope);
             var_t *base = &func->param_defs[i];
             memcpy(var, base, sizeof(var_t));
@@ -857,7 +859,8 @@ void bb_unwind_phi(func_t *func, basic_block_t *bb)
         for (phi_operand_t *operand = insn->phi_ops; operand;
              operand = operand->next)
             append_unwound_phi_insn(operand->from, insn->rd, operand->var);
-        /* TODO: Release dangling phi instruction */
+        /* TODO: Release memory allocated for phi instruction to prevent leaks
+         */
     }
 
     bb->insn_list.head = insn;

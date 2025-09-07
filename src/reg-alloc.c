@@ -8,8 +8,8 @@
 /* Allocate registers from IR. The linear-scan algorithm now expects a minimum
  * of 7 available registers (typical for RISC-style architectures).
  *
- * TODO: Implement the "-O level" option. This allocator now always drops the
- * dead variable and does NOT wrtie it back to the stack.
+ * TODO: Implement "-O level" optimization control. Currently the allocator
+ * always performs dead variable elimination without writing back to stack.
  */
 
 #include "defs.h"
@@ -390,7 +390,9 @@ void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
 
 void reg_alloc(void)
 {
-    /* TODO: .bss and .data section */
+    /* TODO: Add proper .bss and .data section support for uninitialized /
+     * initialized globals
+     */
     for (insn_t *global_insn = GLOBAL_FUNC->bbs->insn_list.head; global_insn;
          global_insn = global_insn->next) {
         ph2_ir_t *ir;
@@ -710,8 +712,10 @@ void reg_alloc(void)
                         ir->src0 = src0;
                         strcpy(ir->func_name, insn->rs2->var_name);
                     } else {
-                        /* FIXME: Avoid outdated content in register after
-                         * storing, but causing some redundant spilling.
+                        /* FIXME: Register content becomes stale after store
+                         * operation. Current workaround causes redundant
+                         * spilling - need better register invalidation
+                         * strategy.
                          */
                         spill_alive(bb, insn);
                         src0 = prepare_operand(bb, insn->rs1, -1);

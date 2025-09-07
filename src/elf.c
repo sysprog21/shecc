@@ -15,8 +15,7 @@ int elf_symbol_index;
 
 void elf_write_str(strbuf_t *elf_array, const char *vals)
 {
-    /*
-     * Note that strbuf_puts() does not push the null character.
+    /* Note that strbuf_puts() does not push the null character.
      *
      * If necessary, use elf_write_byte() to append the null character
      * after calling elf_write_str().

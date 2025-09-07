@@ -839,7 +839,9 @@ token_t lex_token_impl(bool aliasing)
         if (aliasing) {
             alias = find_alias(token_str);
             if (alias) {
-                /* FIXME: comparison with string "bool" is a temporary hack */
+                /* FIXME: Special-casing _Bool alias handling is a workaround.
+                 * Should integrate properly with type system.
+                 */
                 token_t t;
 
                 if (is_numeric(alias)) {

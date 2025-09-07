@@ -91,19 +91,16 @@ strbuf_t *SOURCE;
 hashmap_t *INCLUSION_MAP;
 
 /* ELF sections */
-strbuf_t *elf_code;
-strbuf_t *elf_data;
+strbuf_t *elf_code, *elf_data;
 strbuf_t *elf_rodata;
 strbuf_t *elf_header;
 strbuf_t *elf_symtab;
 strbuf_t *elf_strtab;
 strbuf_t *elf_section;
 int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
-int elf_code_start;
-int elf_data_start;
+int elf_code_start, elf_data_start;
 int elf_rodata_start;
-int elf_bss_start;
-int elf_bss_size;
+int elf_bss_start, elf_bss_size;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -1403,8 +1400,8 @@ void error(char *msg)
 
     strcpy(diagnostic + i, "^ Error occurs here");
 
-    /* TODO: Enhanced error reporting with location tracking will be added
-     * once self-hosting is stable with new token management
+    /* TODO: Implement line/column tracking for precise error location
+     * reporting. Current implementation only shows source position offset.
      */
     printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg,
            SOURCE->size, diagnostic);
