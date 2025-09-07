@@ -235,6 +235,12 @@ int fib(int n)       def int @fib(int %n)
 }                    }
 ```
 
+## C99 Compliance
+
+shecc implements a subset of C99 suitable for self-hosting and systems programming.
+For detailed information about supported features, missing functionality, and non-standard behaviors,
+see [COMPLIANCE.md](COMPLIANCE.md).
+
 ## Known Issues
 
 2. Full `<stdarg.h>` support is not available. Variadic functions work via direct pointer arithmetic.

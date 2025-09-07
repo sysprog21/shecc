@@ -31,6 +31,13 @@ we might request an issue to be filed to facilitate discussion on broader design
 
 Visit our [Issues page on GitHub](https://github.com/sysprog21/shecc/issues) to search and submit.
 
+## Language Compliance
+
+Before contributing new language features or modifications to the compiler frontend,
+please review [COMPLIANCE.md](COMPLIANCE.md) to understand shecc's current C99 compliance status,
+supported features, and known limitations. This document helps ensure that contributions
+align with the project's subset implementation philosophy.
+
 ## Coding Convention
 
 Contributions from developers across corporations, academia, and individuals are welcome.
