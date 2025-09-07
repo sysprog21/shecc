@@ -446,7 +446,6 @@ void code_generate(void)
     elf_data_start = elf_code_start + elf_offset;
     elf_rodata_start = elf_data_start + elf_data->size;
     elf_bss_start = elf_rodata_start + elf_rodata->size;
-    func_t *func;
 
     /* start: save original sp in s0; allocate global stack; run init */
     emit(__addi(__s0, __sp, 0));
