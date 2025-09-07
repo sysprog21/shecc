@@ -77,6 +77,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             elf_offset += 108;
         return;
     case OP_load_data_address:
+    case OP_load_rodata_address:
     case OP_neq:
     case OP_geq:
     case OP_leq:
@@ -260,6 +261,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__lui(rd, rv_hi(elf_data_start + ph2_ir->src0)));
         emit(__addi(rd, rd, rv_lo(elf_data_start + ph2_ir->src0)));
         return;
+    case OP_load_rodata_address:
+        emit(__lui(rd, rv_hi(elf_rodata_start + ph2_ir->src0)));
+        emit(__addi(rd, rd, rv_lo(elf_rodata_start + ph2_ir->src0)));
+        return;
     case OP_address_of_func:
         func = find_func(ph2_ir->func_name);
         ofs = elf_code_start + func->bbs->elf_offset;
@@ -439,7 +444,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 void code_generate(void)
 {
     elf_data_start = elf_code_start + elf_offset;
-    func_t *func;
+    elf_rodata_start = elf_data_start + elf_data->size;
+    elf_bss_start = elf_rodata_start + elf_rodata->size;
 
     /* start: save original sp in s0; allocate global stack; run init */
     emit(__addi(__s0, __sp, 0));

@@ -237,7 +237,6 @@ int fib(int n)       def int @fib(int %n)
 
 ## Known Issues
 
-1. The generated ELF lacks .bss and .rodata sections
 2. Full `<stdarg.h>` support is not available. Variadic functions work via direct pointer arithmetic.
    See the `printf` implementation in `lib/c.c` for the supported approach.
 3. The C front-end operates directly on token streams without building a full AST.

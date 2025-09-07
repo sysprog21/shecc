@@ -130,11 +130,12 @@ var_t *opstack_pop(void)
 
 void read_expr(block_t *parent, basic_block_t **bb);
 
-int write_symbol(char *data)
+int write_symbol(const char *data)
 {
-    int start_len = elf_data->size;
-    elf_write_str(elf_data, data);
-    elf_write_byte(elf_data, 0);
+    /* Write string literals to .rodata section */
+    const int start_len = elf_rodata->size;
+    elf_write_str(elf_rodata, data);
+    elf_write_byte(elf_rodata, 0);
     return start_len;
 }
 
@@ -1191,11 +1192,19 @@ void parse_array_init(var_t *var,
 
 void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 {
-    vd->init_val = 0;
     /* Preserve typedef pointer level - don't reset if already inherited */
+    vd->init_val = 0;
 
-    while (lex_accept(T_asterisk))
+    while (lex_accept(T_asterisk)) {
         vd->ptr_level++;
+        /* Check for const after asterisk (e.g., int * const ptr).
+         * For now, we just consume const qualifiers after pointer.
+         * Full support would require tracking const-ness of the pointer
+         * itself vs the pointed-to data separately.
+         */
+        while (lex_peek(T_const, NULL))
+            lex_accept(T_const);
+    }
 
     /* is it function pointer declaration? */
     if (lex_accept(T_open_bracket)) {
@@ -1325,8 +1334,15 @@ void read_parameter_list_decl(func_t *func, bool anon)
         lex_accept(T_comma);
     }
 
-    while (lex_peek(T_identifier, NULL) == 1) {
-        read_full_var_decl(&func->param_defs[vn++], anon, true);
+    while (lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL)) {
+        /* Check for const qualifier */
+        bool is_const = false;
+        if (lex_accept(T_const))
+            is_const = true;
+
+        read_full_var_decl(&func->param_defs[vn], anon, true);
+        func->param_defs[vn].is_const_qualified = is_const;
+        vn++;
         lex_accept(T_comma);
     }
     func->num_params = vn;
@@ -1360,13 +1376,14 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
         combined_len += literal_len;
     }
 
-    int index = write_symbol(combined);
+    const int index = write_symbol(combined);
 
     var_t *vd = require_typed_ptr_var(parent, TY_char, true);
     gen_name_to(vd->var_name);
     vd->init_val = index;
     opstack_push(vd);
-    add_insn(parent, bb, OP_load_data_address, vd, NULL, NULL, 0, NULL);
+    /* String literals are now in .rodata section */
+    add_insn(parent, bb, OP_load_rodata_address, vd, NULL, NULL, 0, NULL);
 }
 
 void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
@@ -1732,9 +1749,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
     if (lex_accept(T_minus)) {
         is_neg = true;
-        if (lex_peek(T_numeric, NULL) == 0 &&
-            lex_peek(T_identifier, NULL) == 0 &&
-            lex_peek(T_open_bracket, NULL) == 0) {
+        if (!lex_peek(T_numeric, NULL) && !lex_peek(T_identifier, NULL) &&
+            !lex_peek(T_open_bracket, NULL)) {
             error("Unexpected token after unary minus");
         }
     }
@@ -3640,9 +3656,9 @@ bool read_global_assignment(char *token)
     if (var) {
         if (lex_peek(T_string, NULL)) {
             /* String literal global initialization:
-             * Current implementation stores strings inline rather than in
-             * '.rodata'. Pointer vs array semantics handled by assignment logic
-             * below. mutate the size of var here.
+             * String literals are now stored in .rodata section.
+             * TODO: Full support for global pointer initialization with
+             * rodata addresses requires compile-time address resolution.
              */
             read_literal_param(parent, bb);
             rs1 = opstack_pop();
@@ -3808,6 +3824,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     type_t *type;
     var_t *vd, *rs1, *rs2, *var;
     opcode_t prefix_op = OP_generic;
+    bool is_const = false;
 
     if (!bb)
         printf("Warning: unreachable code detected\n");
@@ -4127,6 +4144,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         type = find_type(token, find_type_flag);
         if (type) {
             var = require_typed_var(parent, type);
+            var->is_const_qualified = is_const;
             read_partial_var_decl(var, NULL);
             add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
             add_symbol(bb, var);
@@ -4332,14 +4350,22 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         error("Unknown struct/union type");
     }
 
+    /* Handle const qualifier for local variable declarations */
+    if (lex_accept(T_const)) {
+        is_const = true;
+        /* After const, we expect a type */
+        if (!lex_peek(T_identifier, token))
+            error("Expected type after const");
+    }
+
     /* statement with prefix */
-    if (lex_accept(T_increment))
+    if (!is_const && lex_accept(T_increment))
         prefix_op = OP_add;
-    else if (lex_accept(T_decrement))
+    else if (!is_const && lex_accept(T_decrement))
         prefix_op = OP_sub;
     /* must be an identifier or asterisk (for pointer dereference) */
     bool has_asterisk = lex_peek(T_asterisk, NULL);
-    if (!lex_peek(T_identifier, token) && !has_asterisk)
+    if (!is_const && !lex_peek(T_identifier, token) && !has_asterisk)
         error("Unexpected token");
 
     /* handle macro parameter substitution for statements */
@@ -4411,6 +4437,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
     if (type) {
         var = require_typed_var(parent, type);
+        var->is_const_qualified = is_const;
         read_full_var_decl(var, false, false);
         add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
         add_symbol(bb, var);
@@ -4729,10 +4756,11 @@ void read_func_body(func_t *func)
 }
 
 /* if first token is type */
-void read_global_decl(block_t *block)
+void read_global_decl(block_t *block, bool is_const)
 {
     var_t *var = require_var(block);
     var->is_global = true;
+    var->is_const_qualified = is_const;
 
     /* new function, or variables under parent */
     read_full_var_decl(var, false, false);
@@ -4818,6 +4846,7 @@ void initialize_struct_field(var_t *nv, var_t *v, int offset)
     nv->ptr_level = 0;
     nv->is_func = false;
     nv->is_global = false;
+    nv->is_const_qualified = false;
     nv->array_size = 0;
     nv->offset = offset;
     nv->init_val = 0;
@@ -4832,6 +4861,11 @@ void read_global_statement(void)
 {
     char token[MAX_ID_LEN];
     block_t *block = GLOBAL_BLOCK; /* global block */
+    bool is_const = false;
+
+    /* Handle const qualifier */
+    if (lex_accept(T_const))
+        is_const = true;
 
     if (lex_accept(T_struct)) {
         int i = 0, size = 0;
@@ -4847,6 +4881,7 @@ void read_global_statement(void)
             /* one or more declarators */
             var_t *var = require_typed_var(block, decl_type);
             var->is_global = true; /* Global struct variable */
+            var->is_const_qualified = is_const;
             read_partial_var_decl(var, NULL);
             add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0,
                      NULL);
@@ -5144,7 +5179,7 @@ void read_global_statement(void)
             lex_expect(T_semicolon);
         }
     } else if (lex_peek(T_identifier, NULL)) {
-        read_global_decl(block);
+        read_global_decl(block, is_const);
     } else
         error("Syntax error in global statement");
 }
@@ -5155,6 +5190,7 @@ void parse_internal(void)
     GLOBAL_FUNC = add_func("", true);
     GLOBAL_FUNC->stack_size = 4;
     GLOBAL_FUNC->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    GLOBAL_FUNC->bbs->belong_to = GLOBAL_FUNC; /* Prevent nullptr deref in RA */
 
     /* built-in types */
     TY_void = add_named_type("void");

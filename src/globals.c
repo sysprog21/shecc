@@ -93,6 +93,7 @@ hashmap_t *INCLUSION_MAP;
 /* ELF sections */
 strbuf_t *elf_code;
 strbuf_t *elf_data;
+strbuf_t *elf_rodata;
 strbuf_t *elf_header;
 strbuf_t *elf_symtab;
 strbuf_t *elf_strtab;
@@ -100,6 +101,9 @@ strbuf_t *elf_section;
 int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
 int elf_code_start;
 int elf_data_start;
+int elf_rodata_start;
+int elf_bss_start;
+int elf_bss_size;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -173,16 +177,16 @@ void *arena_alloc(arena_t *arena, int size)
     }
 
     /* Align to sizeof(void*) bytes for host compatibility */
-    int alignment = sizeof(void *);
+    const int alignment = sizeof(void *);
     size = (size + alignment - 1) & ~(alignment - 1);
 
     if (!arena->head || arena->head->offset + size > arena->head->capacity) {
         /* Need a new block: choose capacity = max(DEFAULT_ARENA_SIZE,
          * arena->block_size, size) */
-        int base =
+        const int base =
             (arena->block_size > DEFAULT_ARENA_SIZE ? arena->block_size
                                                     : DEFAULT_ARENA_SIZE);
-        int new_capacity = (size > base ? size : base);
+        const int new_capacity = (size > base ? size : base);
         arena_block_t *new_block = arena_block_create(new_capacity);
         new_block->next = arena->head;
         arena->head = new_block;
@@ -282,7 +286,7 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
  */
 char *arena_strdup(arena_t *arena, char *str)
 {
-    int n = strlen(str);
+    const int n = strlen(str);
     char *dup = arena_alloc(arena, n + 1);
     memcpy(dup, str, n);
     dup[n] = '\0';
@@ -368,14 +372,14 @@ void arena_free(arena_t *arena)
  */
 int hashmap_hash_index(int size, char *key)
 {
-    int hash = 0x811c9dc5, mask;
+    int hash = 0x811c9dc5;
 
     for (; *key; key++) {
         hash ^= *key;
         hash *= 0x01000193;
     }
 
-    mask = hash >> 31;
+    const int mask = hash >> 31;
     return ((hash ^ mask) - mask) & (size - 1);
 }
 
@@ -431,7 +435,7 @@ hashmap_node_t *hashmap_node_new(char *key, void *val)
     if (!key)
         return NULL;
 
-    int len = strlen(key);
+    const int len = strlen(key);
     hashmap_node_t *node = arena_alloc(HASHMAP_ARENA, sizeof(hashmap_node_t));
 
 
@@ -1159,7 +1163,7 @@ bool strbuf_putc(strbuf_t *src, char value)
     return true;
 }
 
-bool strbuf_puts(strbuf_t *src, char *value)
+bool strbuf_puts(strbuf_t *src, const char *value)
 {
     int len = strlen(value);
 
@@ -1227,10 +1231,12 @@ void global_init(void)
 
     elf_code = strbuf_create(MAX_CODE);
     elf_data = strbuf_create(MAX_DATA);
+    elf_rodata = strbuf_create(MAX_DATA);
     elf_header = strbuf_create(MAX_HEADER);
     elf_symtab = strbuf_create(MAX_SYMTAB);
     elf_strtab = strbuf_create(MAX_STRTAB);
     elf_section = strbuf_create(MAX_SECTION);
+    elf_bss_size = 0;
 }
 
 /* Forward declaration for lexer cleanup */
@@ -1350,6 +1356,7 @@ void global_release(void)
     strbuf_free(SOURCE);
     strbuf_free(elf_code);
     strbuf_free(elf_data);
+    strbuf_free(elf_rodata);
     strbuf_free(elf_header);
     strbuf_free(elf_symtab);
     strbuf_free(elf_strtab);
@@ -1451,6 +1458,11 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             print_indent(1);
             /* offset from .data section */
             printf("%%%s = .data (%d)", rd->var_name, rd->init_val);
+            break;
+        case OP_load_rodata_address:
+            print_indent(1);
+            /* offset from .rodata section */
+            printf("%%%s = .rodata (%d)", rd->var_name, rd->init_val);
             break;
         case OP_address_of:
             print_indent(1);

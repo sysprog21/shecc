@@ -1029,6 +1029,11 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
                         insn->rd->var_name, insn->rd->subscript,
                         insn->rd->init_val);
                 break;
+            case OP_load_rodata_address:
+                sprintf(str, "<%s<SUB>%d</SUB> := [.rodata] + %d>",
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rd->init_val);
+                break;
             case OP_address_of:
                 sprintf(str, "<%s<SUB>%d</SUB> := &amp;%s<SUB>%d</SUB>>",
                         insn->rd->var_name, insn->rd->subscript,

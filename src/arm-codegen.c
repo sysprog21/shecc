@@ -98,6 +98,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 116;
         return;
     case OP_load_data_address:
+    case OP_load_rodata_address:
         elf_offset += 8;
         return;
     case OP_address_of_func:
@@ -188,9 +189,9 @@ void emit(int code)
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
 {
     func_t *func;
-    int rd = ph2_ir->dest;
-    int rn = ph2_ir->src0;
-    int rm = ph2_ir->src1;
+    const int rd = ph2_ir->dest;
+    const int rn = ph2_ir->src0;
+    int rm = ph2_ir->src1; /* Not const because OP_trunc modifies it */
     int ofs;
 
     /* Prepare this variable to reuse code for:
@@ -288,6 +289,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__movw(__AL, rd, ph2_ir->src0 + elf_data_start));
         emit(__movt(__AL, rd, ph2_ir->src0 + elf_data_start));
         return;
+    case OP_load_rodata_address:
+        emit(__movw(__AL, rd, ph2_ir->src0 + elf_rodata_start));
+        emit(__movt(__AL, rd, ph2_ir->src0 + elf_rodata_start));
+        return;
     case OP_address_of_func:
         func = find_func(ph2_ir->func_name);
         ofs = elf_code_start + func->bbs->elf_offset;
@@ -310,7 +315,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__movt(__AL, __r8, ph2_ir->src1 + 4));
         emit(__add_r(__AL, __sp, __sp, __r8));
         emit(__lw(__AL, __lr, __sp, -4));
-        emit(__blx(__AL, __lr));
+        emit(__bx(__AL, __lr));
         return;
     case OP_add:
         emit(__add_r(__AL, rd, rn, rm));
@@ -450,6 +455,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 void code_generate(void)
 {
     elf_data_start = elf_code_start + elf_offset;
+    elf_rodata_start = elf_data_start + elf_data->size;
+    elf_bss_start = elf_rodata_start + elf_rodata->size;
 
     /* start */
     emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
@@ -477,7 +484,7 @@ void code_generate(void)
     emit(__mov_r(__AL, __r4, __r5));
     emit(__mov_r(__AL, __r5, __r6));
     emit(__svc());
-    emit(__mov_r(__AL, __pc, __lr));
+    emit(__bx(__AL, __lr));
 
     ph2_ir_t *ph2_ir;
     for (ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
