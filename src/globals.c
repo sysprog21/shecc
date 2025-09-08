@@ -91,16 +91,19 @@ strbuf_t *SOURCE;
 hashmap_t *INCLUSION_MAP;
 
 /* ELF sections */
-strbuf_t *elf_code, *elf_data;
+strbuf_t *elf_code;
+strbuf_t *elf_data;
 strbuf_t *elf_rodata;
 strbuf_t *elf_header;
 strbuf_t *elf_symtab;
 strbuf_t *elf_strtab;
 strbuf_t *elf_section;
 int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
-int elf_code_start, elf_data_start;
+int elf_code_start;
+int elf_data_start;
 int elf_rodata_start;
-int elf_bss_start, elf_bss_size;
+int elf_bss_start;
+int elf_bss_size;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -347,7 +350,8 @@ bb_traversal_args_t *arena_alloc_traversal_args(void)
 
 void arena_free(arena_t *arena)
 {
-    arena_block_t *block = arena->head, *next;
+    arena_block_t *block = arena->head;
+    arena_block_t *next;
 
     while (block) {
         next = block->next;
@@ -472,7 +476,9 @@ void hashmap_rehash(hashmap_t *map)
     }
 
     for (int i = 0; i < old_cap; i++) {
-        hashmap_node_t *cur = old_buckets[i], *next, *target_cur;
+        hashmap_node_t *cur = old_buckets[i];
+        hashmap_node_t *next;
+        hashmap_node_t *target_cur;
 
         while (cur) {
             next = cur->next;
@@ -1649,6 +1655,10 @@ void dump_insn(void)
     printf("==<START OF INSN DUMP>==\n");
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        /* Skip function declarations without bodies */
+        if (!func->bbs)
+            continue;
+
         bool at_func_start = true;
 
         printf("def %s", func->return_def.type->type_name);

@@ -17,6 +17,10 @@
 void arm_lower(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        /* Skip function declarations without bodies */
+        if (!func->bbs)
+            continue;
+
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {
@@ -37,6 +41,10 @@ void arm_lower(void)
 void riscv_lower(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        /* Skip function declarations without bodies */
+        if (!func->bbs)
+            continue;
+
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {

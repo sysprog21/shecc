@@ -151,6 +151,10 @@ void cfg_flatten(void)
     elf_offset += 32; /* 6 insns for main call + 2 for exit */
 
     for (func = FUNC_LIST.head; func; func = func->next) {
+        /* Skip function declarations without bodies */
+        if (!func->bbs)
+            continue;
+
         /* reserve stack */
         ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = func->stack_size;

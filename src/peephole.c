@@ -878,6 +878,10 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
 void peephole(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        /* Skip function declarations without bodies */
+        if (!func->bbs)
+            continue;
+
         /* Local peephole optimizations on post-register-allocation IR */
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
