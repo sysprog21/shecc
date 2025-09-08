@@ -49,7 +49,8 @@
 int main(int argc, char *argv[])
 {
     bool libc = true;
-    char *out = NULL, *in = NULL;
+    char *out = NULL;
+    char *in = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
