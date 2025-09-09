@@ -96,6 +96,8 @@ var_t *require_var(block_t *blk)
     var->use_count = 0;
     var->base = var;
     var->type = TY_int;
+    var->space_is_allocated = false;
+    var->ofs_based_on_stack_top = false;
     return var;
 }
 
@@ -5523,6 +5525,12 @@ void parse_internal(void)
         /* Otherwise, allocate a basic block to implement in static mode. */
         func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
     }
+
+    /* Add a global object to the .data section.
+     *
+     * This object is used to save the global stack pointer.
+     */
+    elf_write_int(elf_data, 0);
 
     /* lexer initialization */
     SOURCE->size = 0;

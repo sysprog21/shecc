@@ -643,6 +643,7 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->next_bb = NULL;
     ph2_ir->then_bb = NULL;
     ph2_ir->else_bb = NULL;
+    ph2_ir->ofs_based_on_stack_top = false;
     return add_existed_ph2_ir(ph2_ir);
 }
 
@@ -923,7 +924,33 @@ func_t *add_func(char *func_name, bool synthesize)
     hashmap_put(FUNC_MAP, func_name, func);
     /* Use interned string for function name */
     strcpy(func->return_def.var_name, intern_string(func_name));
-    func->stack_size = 4;
+    /* Prepare space for function arguments.
+     *
+     * For Arm architecture, the first four arguments (arg1 ~ arg4) are
+     * passed to r0 ~ r3, and any additional arguments (arg5+) are passed
+     * to the stack.
+     *
+     * +-------------+
+     * | local vars  |
+     * +-------------+
+     * |    ...      |
+     * +-------------+ <-- sp + 16
+     * |    arg 8    |
+     * +-------------+ <-- sp + 12
+     * |    arg 7    |
+     * +-------------+ <-- sp + 8
+     * |    arg 6    |
+     * +-------------+ <-- sp + 4
+     * |    arg 5    |
+     * +-------------+ <-- sp
+     *
+     * If the target architecture is RISC-V, arg1 ~ arg8 are passed to
+     * registers and arg9+ are passed to the stack.
+     *
+     * We allocate (MAX_PARAMS - MAX_ARGS_IN_REG) * 4 bytes for all functions
+     * so that each of them can use the space to pass extra arguments.
+     */
+    func->stack_size = (MAX_PARAMS - MAX_ARGS_IN_REG) * 4;
 
     if (synthesize)
         return func;

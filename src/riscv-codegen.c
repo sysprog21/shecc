@@ -154,6 +154,9 @@ void cfg_flatten(void)
 
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {
+                /* TODO: recalculate the offset for instructions with the
+                 * 'ofs_based_on_stack_top' flag set.
+                 */
                 flatten_ir = add_existed_ph2_ir(insn);
 
                 if (insn->op == OP_return) {
@@ -190,10 +193,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     switch (ph2_ir->op) {
     case OP_define:
+        emit(__sw(__ra, __sp, -4));
         emit(__lui(__t0, rv_hi(ph2_ir->src0 + 4)));
         emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0 + 4)));
         emit(__sub(__sp, __sp, __t0));
-        emit(__sw(__ra, __sp, 0));
         return;
     case OP_load_constant:
         if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
@@ -299,10 +302,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__addi(__zero, __zero, 0));
         else
             emit(__addi(__a0, rs1, 0));
-        emit(__lw(__ra, __sp, 0));
         emit(__lui(__t0, rv_hi(ph2_ir->src1 + 4)));
         emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1 + 4)));
         emit(__add(__sp, __sp, __t0));
+        emit(__lw(__ra, __sp, -4));
         emit(__jalr(__zero, __ra, 0));
         return;
     case OP_add:

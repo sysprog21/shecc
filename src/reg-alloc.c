@@ -197,14 +197,16 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
         return;
     }
 
-    if (!var->offset) {
+    if (!var->space_is_allocated) {
         var->offset = bb->belong_to->stack_size;
+        var->space_is_allocated = true;
         bb->belong_to->stack_size += 4;
     }
     ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_store)
                                   : bb_add_ph2_ir(bb, OP_store);
     ir->src0 = idx;
     ir->src1 = var->offset;
+    ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
     REGS[idx].var = NULL;
     REGS[idx].polluted = 0;
     vreg_clear_phys(var);
@@ -232,6 +234,7 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
         ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_load)
                             : bb_add_ph2_ir(bb, OP_load);
         ir->src0 = var->offset;
+        ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
     }
 
     ir->dest = idx;
@@ -388,6 +391,33 @@ void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
         var->consumed = insn->idx + offset;
 }
 
+/* Return whether extra arguments are pushed onto stack. */
+bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
+{
+    int num_of_args = 0;
+    int stack_args = 0;
+    while (insn && insn->opcode == OP_push) {
+        num_of_args += 1;
+        insn = insn->next;
+    }
+
+    if (num_of_args <= MAX_ARGS_IN_REG)
+        return false;
+
+    insn = insn->prev;
+    stack_args = num_of_args - MAX_ARGS_IN_REG;
+    while (stack_args) {
+        load_var(bb, insn->rs1, MAX_ARGS_IN_REG - 1);
+        ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
+        ir->src0 = MAX_ARGS_IN_REG - 1;
+        ir->src1 = (stack_args - 1) * 4;
+        stack_args -= 1;
+        insn = insn->prev;
+    }
+    REGS[MAX_ARGS_IN_REG - 1].var = NULL;
+    return true;
+}
+
 void reg_alloc(void)
 {
     /* TODO: Add proper .bss and .data section support for uninitialized /
@@ -407,6 +437,7 @@ void reg_alloc(void)
                  * the pointer.
                  */
                 global_insn->rd->offset = GLOBAL_FUNC->stack_size;
+                global_insn->rd->space_is_allocated = true;
                 GLOBAL_FUNC->stack_size += PTR_SIZE;
                 src0 = GLOBAL_FUNC->stack_size; /* base of backing region */
 
@@ -429,6 +460,7 @@ void reg_alloc(void)
                 spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
             } else {
                 global_insn->rd->offset = GLOBAL_FUNC->stack_size;
+                global_insn->rd->space_is_allocated = true;
                 if (global_insn->rd->ptr_level)
                     GLOBAL_FUNC->stack_size += PTR_SIZE;
                 else if (global_insn->rd->type != TY_int &&
@@ -475,6 +507,7 @@ void reg_alloc(void)
                 if (global_insn->rs1->array_size > 0)
                     base_off = global_insn->rs1->init_val;
                 global_insn->rd->offset = base_off + global_insn->rs2->init_val;
+                global_insn->rd->space_is_allocated = true;
                 global_insn->rd->is_global = true;
                 break;
             }
@@ -535,28 +568,92 @@ void reg_alloc(void)
             REGS[i].var = NULL;
 
         /* set arguments available */
-        for (int i = 0; i < func->num_params; i++) {
+        int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
+                                                             : MAX_ARGS_IN_REG;
+        for (int i = 0; i < args_in_reg; i++) {
             REGS[i].var = func->param_defs[i].subscripts[0];
             REGS[i].polluted = 1;
         }
 
         /* variadic function implementation */
         if (func->va_args) {
+            /* When encountering a variadic function, allocate space for all
+             * arguments on the local stack to ensure their addresses are
+             * contiguous.
+             */
             for (int i = 0; i < MAX_PARAMS; i++) {
-                ph2_ir_t *ir = bb_add_ph2_ir(func->bbs, OP_store);
+                ph2_ir_t *ir;
+                int src0 = i;
 
-                if (i < func->num_params)
+                if (i >= MAX_ARGS_IN_REG) {
+                    /* Callee should access caller's stack to obtain the
+                     * extra arguments.
+                     */
+                    ir = bb_add_ph2_ir(func->bbs, OP_load);
+                    ir->dest = MAX_ARGS_IN_REG;
+                    ir->src0 = (i - MAX_ARGS_IN_REG) * 4;
+                    ir->ofs_based_on_stack_top = true;
+                    src0 = MAX_ARGS_IN_REG;
+                }
+
+                if (i < args_in_reg) {
                     func->param_defs[i].subscripts[0]->offset =
                         func->stack_size;
+                    func->param_defs[i].subscripts[0]->space_is_allocated =
+                        true;
+                }
 
-                ir->src0 = i;
+                ir = bb_add_ph2_ir(func->bbs, OP_store);
+                ir->src0 = src0;
                 ir->src1 = func->stack_size;
                 func->stack_size += 4;
+            }
+        } else {
+            /* If the number of function arguments is fixed, the extra arguments
+             * are directly placed in the caller's stack space instead of the
+             * callee's.
+             *
+             *     +---------->  +---------------+
+             *     |             | local vars    |
+             *     |             +---------------+
+             *     |             | extra arg 4   |
+             *     |             +---------------+ <-- sp + stack_size + 12
+             *  caller's space   | extra arg 3   |
+             *     |             +---------------+ <-- sp + stack_size + 8
+             *     |             | extra arg 2   |
+             *     |             +---------------+ <-- sp + stack_size + 4
+             *     |             | extra arg 1   |
+             *     +---------->  +---------------+ <-- sp + stack_size
+             *     |             | local vars    |
+             *     |             +---------------+ <-- sp + 16
+             *  callee's space   | Next callee's |
+             *     |             | additional    |
+             *     |             | arguments     |
+             *     +---------->  +---------------+ <-- sp
+             *
+             * Note that:
+             * - For the Arm architecture, extra arg1 ~ argX correspond to
+             *   arg5 ~ arg(X + 4).
+             * - For the RISC-V architecture, extra arg1 ~ argX correspond to
+             *   arg9 ~ arg(X + 8).
+             *
+             * If any instruction use one of these additional arguments, it
+             * inherits 'offset' and 'ofs_based_on_stack_top'. When calling
+             * cfg_flatten(), the operand's offset will be recalculated by
+             * adding the function's stack size.
+             */
+            for (int i = MAX_ARGS_IN_REG; i < func->num_params; i++) {
+                func->param_defs[i].subscripts[0]->offset =
+                    (i - MAX_ARGS_IN_REG) * 4;
+                func->param_defs[i].subscripts[0]->space_is_allocated = true;
+                func->param_defs[i].subscripts[0]->ofs_based_on_stack_top =
+                    true;
             }
         }
 
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            bool is_pushing_args = false;
+            bool is_pushing_args = false, handle_abi = false,
+                 args_on_stack = false;
             int args = 0;
 
             bb->visited++;
@@ -574,14 +671,17 @@ void reg_alloc(void)
                     track_var_use(insn->rs1, insn->idx);
                     src0 = prepare_operand(bb, insn->rs1, -1);
 
-                    if (!insn->rd->offset) {
+                    if (!insn->rd->space_is_allocated) {
                         insn->rd->offset = bb->belong_to->stack_size;
+                        insn->rd->space_is_allocated = true;
                         bb->belong_to->stack_size += 4;
                     }
 
                     ir = bb_add_ph2_ir(bb, OP_store);
                     ir->src0 = src0;
                     ir->src1 = insn->rd->offset;
+                    ir->ofs_based_on_stack_top =
+                        insn->rd->ofs_based_on_stack_top;
                     break;
                 case OP_allocat:
                     if ((insn->rd->type == TY_void ||
@@ -593,6 +693,7 @@ void reg_alloc(void)
                         break;
 
                     insn->rd->offset = func->stack_size;
+                    insn->rd->space_is_allocated = true;
                     func->stack_size += PTR_SIZE;
                     src0 = func->stack_size;
 
@@ -612,6 +713,8 @@ void reg_alloc(void)
                     ir = bb_add_ph2_ir(bb, OP_address_of);
                     ir->src0 = src0;
                     ir->dest = dest;
+                    ir->ofs_based_on_stack_top =
+                        insn->rd->ofs_based_on_stack_top;
 
                     /* For arrays, store the base address just like global
                      * arrays do
@@ -645,8 +748,9 @@ void reg_alloc(void)
                     insn->rs1->is_const = false;
 
                     /* make sure variable is on stack */
-                    if (!insn->rs1->offset) {
+                    if (!insn->rs1->space_is_allocated) {
                         insn->rs1->offset = bb->belong_to->stack_size;
+                        insn->rs1->space_is_allocated = true;
                         bb->belong_to->stack_size += 4;
 
                         for (int i = 0; i < REG_CNT; i++)
@@ -654,6 +758,8 @@ void reg_alloc(void)
                                 ir = bb_add_ph2_ir(bb, OP_store);
                                 ir->src0 = i;
                                 ir->src1 = insn->rs1->offset;
+                                ir->ofs_based_on_stack_top =
+                                    insn->rs1->ofs_based_on_stack_top;
                                 /* Clear stale register tracking */
                                 REGS[i].var = NULL;
                             }
@@ -667,6 +773,8 @@ void reg_alloc(void)
                         ir = bb_add_ph2_ir(bb, OP_address_of);
                     ir->src0 = insn->rs1->offset;
                     ir->dest = dest;
+                    ir->ofs_based_on_stack_top =
+                        insn->rs1->ofs_based_on_stack_top;
                     break;
                 case OP_assign:
                     if (insn->rd->consumed == -1)
@@ -757,6 +865,13 @@ void reg_alloc(void)
                         spill_alive(bb, insn);
                         is_pushing_args = true;
                     }
+                    if (!handle_abi) {
+                        args_on_stack = abi_lower_call_args(bb, insn);
+                        handle_abi = true;
+                    }
+
+                    if (args_on_stack && args >= MAX_ARGS_IN_REG)
+                        break;
 
                     src0 = prepare_operand(bb, insn->rs1, -1);
                     ir = bb_add_ph2_ir(bb, OP_assign);
@@ -778,6 +893,7 @@ void reg_alloc(void)
 
                     is_pushing_args = false;
                     args = 0;
+                    handle_abi = false;
 
                     for (int i = 0; i < REG_CNT; i++)
                         REGS[i].var = NULL;
@@ -795,6 +911,7 @@ void reg_alloc(void)
 
                     is_pushing_args = false;
                     args = 0;
+                    handle_abi = false;
                     break;
                 case OP_func_ret:
                     dest = prepare_dest(bb, insn->rd, -1, -1);

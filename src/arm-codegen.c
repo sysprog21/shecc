@@ -13,6 +13,7 @@
 
 void update_elf_offset(ph2_ir_t *ph2_ir)
 {
+    func_t *func;
     switch (ph2_ir->op) {
     case OP_load_constant:
         /* ARMv7 uses 12 bits to encode immediate value, but the higher 4 bits
@@ -70,7 +71,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_read:
     case OP_write:
     case OP_jump:
-    case OP_call:
     case OP_load_func:
     case OP_indirect:
     case OP_add:
@@ -84,6 +84,25 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_negate:
     case OP_bit_not:
         elf_offset += 4;
+        return;
+    case OP_call:
+        func = find_func(ph2_ir->func_name);
+        if (func->bbs)
+            elf_offset += 4;
+        else if (dynlink) {
+            /* When calling external functions in dynamic linking mode,
+             * the following instructions are required:
+             * - movw + movt: set r8 to 'elf_data_start'
+             * - ldr: load a word from the address 'elf_data_start' into r12.
+             *        (restore the global stack pointer.)
+             *
+             * Therefore, the total offset is 16 bytes (4 instructions).
+             */
+            elf_offset += 16;
+        } else {
+            printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            abort();
+        }
         return;
     case OP_div:
     case OP_mod:
@@ -143,12 +162,12 @@ void cfg_flatten(void)
 
     if (dynlink)
         elf_offset =
-            88; /* offset of __libc_start_main + main_wrapper in codegen */
+            100; /* offset of __libc_start_main + main_wrapper in codegen */
     else {
         func = find_func("__syscall");
-        func->bbs->elf_offset = 48; /* offset of start + exit in codegen */
+        func->bbs->elf_offset = 60; /* offset of start + exit in codegen */
         elf_offset =
-            84; /* offset of start + branch + exit + syscall in codegen */
+            112; /* offset of start + branch + exit + syscall in codegen */
     }
 
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
@@ -174,16 +193,48 @@ void cfg_flatten(void)
         flatten_ir->src0 = func->stack_size;
         strncpy(flatten_ir->func_name, func->return_def.var_name, MAX_VAR_LEN);
 
+        /* The actual offset of the top of the local stack is the sum of:
+         * - 36 bytes (pushing registers r4-r11 and lr onto the stack)
+         * - 4 bytes
+         *   (to ensure 8-byte alignment after pushing the 9 registers)
+         * - ALIGN_UP(func->stack_size, 8)
+         *
+         * Note that func->stack_size does not include the 36 + 4 bytes,
+         * so an additional 40 bytes should be added to
+         * ALIGN_UP(func->stack_size, 8).
+         */
+        int stack_top_ofs = ALIGN_UP(func->stack_size, MIN_ALIGNMENT) + 40;
+
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             bb->elf_offset = elf_offset;
 
             if (bb == func->bbs) {
-                /* save ra, sp */
-                elf_offset += 16;
+                /* retrieve the global stack pointer and save ra, sp */
+                elf_offset += 28;
             }
 
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {
+                /* For the instructions whose ofs_based_on_stack_top is set,
+                 * recalculate the operand's offset by adding stack_top_ofs.
+                 */
+                if (insn->ofs_based_on_stack_top) {
+                    switch (insn->op) {
+                    case OP_load:
+                    case OP_address_of:
+                        insn->src0 = insn->src0 + stack_top_ofs;
+                        break;
+                    case OP_store:
+                        insn->src1 = insn->src1 + stack_top_ofs;
+                        break;
+                    default:
+                        /* Ignore opcodes with the ofs_based_on_stack_top
+                         * flag set since only the three opcodes above needs
+                         * to access a variable's address.
+                         */
+                        break;
+                    }
+                }
                 flatten_ir = add_existed_ph2_ir(insn);
 
                 if (insn->op == OP_return) {
@@ -211,6 +262,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     const int rn = ph2_ir->src0;
     int rm = ph2_ir->src1; /* Not const because OP_trunc modifies it */
     int ofs;
+    bool is_external_call = false;
 
     /* Prepare this variable to reuse code for:
      * 1. division and modulo operations
@@ -221,9 +273,31 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     switch (ph2_ir->op) {
     case OP_define:
-        emit(__sw(__AL, __lr, __sp, -4));
-        emit(__movw(__AL, __r8, ph2_ir->src0 + 4));
-        emit(__movt(__AL, __r8, ph2_ir->src0 + 4));
+        /* We should handle the function entry point carefully due to the
+         * following constraints:
+         * - according to AAPCS, the callee must preserve r4-r11 for the caller,
+         *   and the stack must always be 8-byte aligned.
+         * - lr must be pushed because it may be modified when the function
+         *   calls another function.
+         * - since external functions may call internal functions, r12 may not
+         *   hold the global stack pointer.
+         *
+         * Therefore, we perform the following operations:
+         * 1. use a __stmdb instruction to push r4-r11 and lr onto the stack
+         *    first.
+         * 2. retrieve the global stack pointer from the 4-byte global object
+         *    located at 'elf_data_start' to ensure correct access to the global
+         *    stack.
+         * 3. set ofs to align(ph2_ir->src0, 8) + 4, and prepare a local
+         *    stack for the callee by subtracting ofs from sp.
+         */
+        emit(__stmdb(__AL, 1, __sp, 0x4FF0));
+        emit(__movw(__AL, __r8, elf_data_start));
+        emit(__movt(__AL, __r8, elf_data_start));
+        emit(__lw(__AL, __r12, __r8, 0));
+        ofs = ALIGN_UP(ph2_ir->src0, MIN_ALIGNMENT) + 4;
+        emit(__movw(__AL, __r8, ofs));
+        emit(__movt(__AL, __r8, ofs));
         emit(__sub_r(__AL, __sp, __sp, __r8));
         return;
     case OP_load_constant:
@@ -307,14 +381,36 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         func = find_func(ph2_ir->func_name);
         if (func->bbs)
             ofs = func->bbs->elf_offset - elf_code->size;
-        else if (dynlink)
+        else if (dynlink) {
             ofs = (dynamic_sections.elf_plt_start + func->plt_offset) -
                   (elf_code_start + elf_code->size);
-        else {
+            is_external_call = true;
+        } else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
             abort();
         }
+
+        /* When calling external functions in dynamic linking mode,
+         * the following instructions are required:
+         * - movw + movt: set r8 to 'elf_data_start'
+         * - ldr: load a word from the address 'elf_data_start' to r12.
+         *        (restore the global stack pointer.)
+         *
+         * Since shecc uses r12 to store a global stack pointer and external
+         * functions can freely modify r12, causing internal functions to
+         * access global variables incorrectly, additional instructions are
+         * needed to restore r12 from the global object after the external
+         * function returns.
+         *
+         * Otherwise, only a 'bl' instruction is generated to call internal
+         * functions because shecc guarantees they do not modify r12.
+         */
         emit(__bl(__AL, ofs));
+        if (is_external_call) {
+            emit(__movw(__AL, __r8, elf_data_start));
+            emit(__movt(__AL, __r8, elf_data_start));
+            emit(__lw(__AL, __r12, __r8, 0));
+        }
         return;
     case OP_load_data_address:
         emit(__movw(__AL, rd, ph2_ir->src0 + elf_data_start));
@@ -349,10 +445,21 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__mov_r(__AL, __r0, __r0));
         else
             emit(__mov_r(__AL, __r0, rn));
-        emit(__movw(__AL, __r8, ph2_ir->src1 + 4));
-        emit(__movt(__AL, __r8, ph2_ir->src1 + 4));
+
+        /* When calling a function, the following operations are performed:
+         * 1. push r4-r11 and lr onto the stack.
+         * 2. retrieve the global stack pointer from the 4-byte global object.
+         * 3. decrement the stack by ALIGN_UP(stack_size, 8) + 4.
+         *
+         * Except for step 2, the reversed operations should be performed to
+         * upon returning to restore the stack and the contents of r4-r11 and
+         * lr.
+         */
+        ofs = ALIGN_UP(ph2_ir->src1, MIN_ALIGNMENT) + 4;
+        emit(__movw(__AL, __r8, ofs));
+        emit(__movt(__AL, __r8, ofs));
         emit(__add_r(__AL, __sp, __sp, __r8));
-        emit(__lw(__AL, __lr, __sp, -4));
+        emit(__ldm(__AL, 1, __sp, 0x4FF0));
         emit(__bx(__AL, __lr));
         return;
     case OP_add:
@@ -500,6 +607,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 void plt_generate(void);
 void code_generate(void)
 {
+    int ofs;
+
     if (dynlink) {
         plt_generate();
         /* Call __libc_start_main() */
@@ -536,11 +645,29 @@ void code_generate(void)
     }
     /* For both static and dynamic linking, we need to set up the stack
      * and call the main function.
+     *
+     * To ensure that the stack remains 8-byte aligned after adjustment,
+     * 'ofs' is to align(GLOBAL_FUNC->stack_size, 8) to allocate space
+     * for the global stack.
+     *
+     * In dynamic linking mode, since the preceding __stmdb instruction
+     * pushes 9 registers onto stack, 'ofs' must be increased by 4 to
+     * prevent the stack from becoming misaligned.
      */
-    emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-    emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+    ofs = ALIGN_UP(GLOBAL_FUNC->stack_size, MIN_ALIGNMENT);
+    if (dynlink)
+        ofs += 4;
+    emit(__movw(__AL, __r8, ofs));
+    emit(__movt(__AL, __r8, ofs));
     emit(__sub_r(__AL, __sp, __sp, __r8));
     emit(__mov_r(__AL, __r12, __sp));
+    /* The first object in the .data section is used to store the global
+     * stack pointer. Therefore, store r12 at the address 'elf_data_start'
+     * after the global stack has been prepared.
+     */
+    emit(__movw(__AL, __r8, elf_data_start));
+    emit(__movt(__AL, __r8, elf_data_start));
+    emit(__sw(__AL, __r12, __r8, 0));
 
     if (!dynlink) {
         emit(__bl(__AL, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
@@ -549,14 +676,24 @@ void code_generate(void)
                  56)); /* PC+8: skip exit (24) + syscall (36) + ret (4) - 8 */
 
         /* exit - only for static linking */
-        emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-        emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+        emit(__movw(__AL, __r8, ofs));
+        emit(__movt(__AL, __r8, ofs));
         emit(__add_r(__AL, __sp, __sp, __r8));
         emit(__mov_r(__AL, __r0, __r0));
         emit(__mov_i(__AL, __r7, 1));
         emit(__svc());
 
-        /* syscall */
+        /* __syscall - only for static linking
+         *
+         * If the number of arguments is greater than 4, the additional
+         * arguments need to be retrieved from the stack. Since __syscall
+         * doesn't require a local stack, it can directly use sp to obtain
+         * the extra arguments.
+         */
+        emit(__lw(__AL, __r4, __sp, 0));
+        emit(__lw(__AL, __r5, __sp, 4));
+        emit(__lw(__AL, __r6, __sp, 8));
+        emit(__lw(__AL, __r7, __sp, 12));
         emit(__mov_r(__AL, __r7, __r0));
         emit(__mov_r(__AL, __r0, __r1));
         emit(__mov_r(__AL, __r1, __r2));
@@ -586,13 +723,13 @@ void code_generate(void)
              * preserved lr.
              */
             emit(__bl(__AL, MAIN_BB->elf_offset - elf_code->size));
-            emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-            emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+            emit(__movw(__AL, __r8, ofs));
+            emit(__movt(__AL, __r8, ofs));
             emit(__add_r(__AL, __sp, __sp, __r8));
             emit(__ldm(__AL, 1, __sp, 0x8FF0));
         } else {
-            emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-            emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+            emit(__movw(__AL, __r8, ofs));
+            emit(__movt(__AL, __r8, ofs));
             emit(__add_r(__AL, __r8, __r12, __r8));
             emit(__lw(__AL, __r0, __r8, 0));
             emit(__add_i(__AL, __r1, __r8, 4));

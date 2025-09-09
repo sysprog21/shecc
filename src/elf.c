@@ -857,7 +857,8 @@ void elf_preprocess(void)
         }
 
         /* Set the starting addresses of the three sections. */
-        int elf_interp_size = (strlen(DYN_LINKER) + 1 + 3) & ~3;
+        int elf_interp_size = strlen(DYN_LINKER) + 1;
+        elf_interp_size = ALIGN_UP(elf_interp_size, 4);
         dynamic_sections.elf_interp_start = elf_bss_start + elf_bss_size;
         dynamic_sections.elf_relplt_start =
             dynamic_sections.elf_interp_start + elf_interp_size;

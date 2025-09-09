@@ -92,6 +92,14 @@
 #define HOST_PTR_SIZE __SIZEOF_POINTER__
 #endif
 
+#ifndef MIN_ALIGNMENT
+#define MIN_ALIGNMENT 8
+#endif
+
+#ifndef ALIGN_UP
+#define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
+#endif
+
 /* Common data structures */
 typedef struct arena_block {
     char *memory;
@@ -396,6 +404,12 @@ struct var {
     int last_use;   /* Last instruction index where variable is used */
     int loop_depth; /* Nesting depth if variable is in a loop */
     int use_count;  /* Number of times variable is used */
+    bool space_is_allocated; /* whether space is allocated for this variable */
+
+    /* This flag is used to indicate to the compiler that the offset of
+     * the variable is based on the top of the local stack.
+     */
+    bool ofs_based_on_stack_top;
 };
 
 typedef struct {
@@ -446,6 +460,16 @@ struct ph2_ir {
     basic_block_t *else_bb;
     struct ph2_ir *next;
     bool is_branch_detached;
+
+    /* When an instruction uses a variable that its offset is based on
+     * the top of the stack, this instruction's flag is also set to
+     * indicate the compiler to recalculate the offset after the function's
+     * stack size has been determined.
+     *
+     * Currently, only OP_load, OP_store and OP_address_of need this flag
+     * to recompute the offset.
+     */
+    bool ofs_based_on_stack_top;
 };
 
 typedef struct ph2_ir ph2_ir_t;
@@ -589,7 +613,7 @@ struct func {
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
-    int stack_size; /* stack always starts at offset 4 for convenience */
+    int stack_size;
 
     /* SSA info */
     basic_block_t *bbs;
