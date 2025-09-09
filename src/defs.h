@@ -268,6 +268,7 @@ typedef enum {
     OP_call,     /* function call */
     OP_indirect, /* indirect call with function pointer */
     OP_return,   /* explicit return */
+    OP_pop,      /* eliminate arguments */
 
     OP_allocat, /* allocate space on stack */
     OP_assign,

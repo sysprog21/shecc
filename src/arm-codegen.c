@@ -69,6 +69,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_read:
     case OP_write:
+    case OP_push:
+    case OP_pop:
     case OP_jump:
     case OP_call:
     case OP_load_func:
@@ -283,6 +285,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__sw(__AL, rm, rn, 0));
         else
             abort();
+        return;
+    case OP_push:
+        emit(__stmdb(__AL, 1, __sp, rn));
+        return;
+    case OP_pop:
+        emit(__add_i(__AL, __sp, __sp, rn * 4));
         return;
     case OP_branch:
         emit(__teq(rn));
