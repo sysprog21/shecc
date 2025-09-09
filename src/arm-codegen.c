@@ -13,6 +13,7 @@
 
 void update_elf_offset(ph2_ir_t *ph2_ir)
 {
+    func_t *func;
     switch (ph2_ir->op) {
     case OP_load_constant:
         /* ARMv7 uses 12 bits to encode immediate value, but the higher 4 bits
@@ -70,7 +71,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_read:
     case OP_write:
     case OP_jump:
-    case OP_call:
     case OP_load_func:
     case OP_indirect:
     case OP_add:
@@ -84,6 +84,17 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_negate:
     case OP_bit_not:
         elf_offset += 4;
+        return;
+    case OP_call:
+        func = find_func(ph2_ir->func_name);
+        if (func->bbs)
+            elf_offset += 4;
+        else if (dynlink)
+            elf_offset += 12;
+        else {
+            printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            abort();
+        }
         return;
     case OP_div:
     case OP_mod:
@@ -211,6 +222,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     const int rn = ph2_ir->src0;
     int rm = ph2_ir->src1; /* Not const because OP_trunc modifies it */
     int ofs;
+    bool is_external_call = false;
 
     /* Prepare this variable to reuse code for:
      * 1. division and modulo operations
@@ -307,14 +319,23 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         func = find_func(ph2_ir->func_name);
         if (func->bbs)
             ofs = func->bbs->elf_offset - elf_code->size;
-        else if (dynlink)
+        else if (dynlink) {
             ofs = (dynamic_sections.elf_plt_start + func->plt_offset) -
-                  (elf_code_start + elf_code->size);
-        else {
+                  (elf_code_start + elf_code->size + 4);
+            is_external_call = true;
+        } else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
             abort();
         }
+
+        /* If the callee is external, save __r12 at [sp + 16] and
+         * restore it after the function returns.
+         */
+        if (is_external_call)
+            emit(__sw(__AL, __r12, __sp, 16));
         emit(__bl(__AL, ofs));
+        if (is_external_call)
+            emit(__lw(__AL, __r12, __sp, 16));
         return;
     case OP_load_data_address:
         emit(__movw(__AL, rd, ph2_ir->src0 + elf_data_start));

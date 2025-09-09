@@ -11,5 +11,6 @@ ARCH_DEFS = \
     \#define PLT_FIXUP_SIZE 20\n$\
     \#define PLT_ENT_SIZE 12\n$\
     \#define R_ARCH_JUMP_SLOT 0x16\n$\
+    \#define MAX_ARGS_IN_REG 4\n$\
     "
 RUNNER_LD_PREFIX=-L /usr/arm-linux-gnueabihf/

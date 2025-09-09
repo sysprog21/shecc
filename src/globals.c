@@ -935,7 +935,31 @@ func_t *add_func(char *func_name, bool synthesize)
     hashmap_put(FUNC_MAP, func_name, func);
     /* Use interned string for function name */
     strcpy(func->return_def.var_name, intern_string(func_name));
-    func->stack_size = 4;
+    /* Prepare space for function arguments and global pointer.
+     *
+     * For Arm architecture, the first four arguments are passed to r0 ~ r3,
+     * and any additional arguments are passed to the stack.
+     *
+     * +-------------+ <-- sp + 20
+     * | (val of ip) |
+     * +-------------+ <-- sp + 16
+     * |    arg 8    |
+     * +-------------+ <-- sp + 12
+     * |    arg 7    |
+     * +-------------+ <-- sp + 8
+     * |    arg 6    |
+     * +-------------+ <-- sp + 4
+     * |    arg 5    |
+     * +-------------+ <-- sp
+     *
+     * However, register r12 (ip) holds the global pointer that points to
+     * global stack, but this register may be changed after an external call.
+     *
+     * Therefore, the current strategy is preparing additional space for ip,
+     * saves its original value to the stack before an external call, and
+     * restores it from the stack after the external function returns.
+     */
+    func->stack_size = 20;
 
     if (synthesize)
         return func;
