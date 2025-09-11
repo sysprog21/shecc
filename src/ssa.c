@@ -903,8 +903,6 @@ void bb_unwind_phi(func_t *func, basic_block_t *bb)
         for (phi_operand_t *operand = insn->phi_ops; operand;
              operand = operand->next)
             append_unwound_phi_insn(operand->from, insn->rd, operand->var);
-        /* TODO: Release memory allocated for phi instruction to prevent leaks
-         */
     }
 
     bb->insn_list.head = insn;
