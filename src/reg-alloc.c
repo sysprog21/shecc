@@ -715,6 +715,11 @@ void reg_alloc(void)
                         ir = bb_add_ph2_ir(bb, OP_address_of_func);
                         ir->src0 = src0;
                         strcpy(ir->func_name, insn->rs2->var_name);
+                        if (dynlink) {
+                            func_t *target_fn = find_func(ir->func_name);
+                            if (target_fn)
+                                target_fn->is_used = true;
+                        }
                     } else {
                         /* FIXME: Register content becomes stale after store
                          * operation. Current workaround causes redundant
@@ -763,8 +768,28 @@ void reg_alloc(void)
                     if (!callee_func->num_params)
                         spill_alive(bb, insn);
 
+                    if (dynlink) {
+                        callee_func->is_used = true;
+                        /* Push args to stack for Arm output */
+                        if (!callee_func->bbs && args > 4) {
+                            int regs = 0;
+                            for (int i = 4; i < args; i++)
+                                regs |= (1 << i);
+                            ir = bb_add_ph2_ir(bb, OP_push);
+                            ir->src0 = regs;
+                        }
+                    }
+
                     ir = bb_add_ph2_ir(bb, OP_call);
                     strcpy(ir->func_name, insn->str);
+
+                    if (dynlink) {
+                        /* Pop args from stack for Arm output */
+                        if (!callee_func->bbs && args > 4) {
+                            ir = bb_add_ph2_ir(bb, OP_pop);
+                            ir->src0 = args - 4;
+                        }
+                    }
 
                     is_pushing_args = false;
                     args = 0;

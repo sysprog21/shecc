@@ -31,8 +31,18 @@
 #define MAX_SYMTAB 65536
 #define MAX_STRTAB 65536
 #define MAX_HEADER 1024
+#define MAX_PROGRAM_HEADER 1024
 #define MAX_SECTION 1024
 #define MAX_ALIASES 128
+#define MAX_SECTION_HEADER 1024
+#define MAX_SHSTR 1024
+#define MAX_INTERP 1024
+#define MAX_DYNAMIC 1024
+#define MAX_DYNSYM 1024
+#define MAX_DYNSTR 1024
+#define MAX_RELPLT 1024
+#define MAX_PLT 1024
+#define MAX_GOTPLT 1024
 #define MAX_CONSTANTS 1024
 #define MAX_CASES 128
 #define MAX_NESTING 128
@@ -258,6 +268,7 @@ typedef enum {
     OP_call,     /* function call */
     OP_indirect, /* indirect call with function pointer */
     OP_return,   /* explicit return */
+    OP_pop,      /* eliminate arguments */
 
     OP_allocat, /* allocate space on stack */
     OP_assign,
@@ -581,6 +592,11 @@ struct func {
     int bb_cnt;
     int visited;
 
+    /* Information used for dynamic linking */
+    bool is_used;
+    int plt_offset;
+    int got_offset;
+
     struct func *next;
 };
 
@@ -643,3 +659,26 @@ typedef struct {
     int sh_addralign;
     int sh_entsize;
 } elf32_shdr_t;
+
+/* Structures for dynamic linked program */
+/* For .dynsym section. */
+typedef struct {
+    int st_name;
+    int st_value;
+    int st_size;
+    char st_info;
+    char st_other;
+    char st_shndx[2];
+} elf32_sym_t;
+
+/* For .rel.plt section */
+typedef struct {
+    int r_offset;
+    int r_info;
+} elf32_rel_t;
+
+/* For .dynamic section */
+typedef struct {
+    int d_tag;
+    int d_un;
+} elf32_dyn_t;

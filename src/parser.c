@@ -5232,7 +5232,13 @@ void parse_internal(void)
     func->return_def.type = TY_int;
     func->num_params = 0;
     func->va_args = 1;
-    func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    /* In dynamic mode, __syscall won't be implemented but needs to exist
+     * for parsing the built-in libc. It will be treated as external. */
+    func->bbs = NULL;
+    if (!dynlink) {
+        /* Otherwise, allocate a basic block to implement in static mode. */
+        func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    }
 
     /* lexer initialization */
     SOURCE->size = 0;
