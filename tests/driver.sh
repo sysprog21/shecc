@@ -27,9 +27,10 @@ PROGRESS_COUNT=0
 
 # Command Line Arguments
 
-if [ "$#" != 1 ]; then
-    echo "Usage: $0 <stage>"
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 <stage> [<dynlink>]"
     echo "  stage: 0 (host compiler), 1 (stage1), or 2 (stage2)"
+    echo "  dynlink: 0 (static linking), 1 (dynamic linking)"
     echo ""
     echo "Environment Variables:"
     echo "  VERBOSE=1         Enable verbose output"
@@ -53,6 +54,12 @@ case "$1" in
         echo "$1 is not a valid stage"
         exit 1 ;;
 esac
+
+if [ $# -ge 2 ] && [ "$2" = "1" ]; then
+    readonly SHECC_CFLAGS="--dynlink"
+else
+    readonly SHECC_CFLAGS=""
+fi
 
 # Utility Functions
 
@@ -147,7 +154,7 @@ function report_test_failure() {
     cat -n "$tmp_in"
     echo "=================================================="
     echo ""
-    echo "Compiler command: $SHECC -o $tmp_exe $tmp_in"
+    echo "Compiler command: $SHECC $SHECC_CFLAGS -o $tmp_exe $tmp_in"
     echo "Test files: input=$tmp_in, executable=$tmp_exe"
     exit 1
 }
@@ -169,7 +176,7 @@ function try() {
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
     # Suppress compiler warnings by redirecting stderr
-    $SHECC -o "$tmp_exe" "$tmp_in" 2>/dev/null
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>/dev/null
     chmod +x $tmp_exe
 
     local output=''
@@ -227,7 +234,7 @@ function try_compile_error() {
     # Run in a subshell with job control disabled
     (
         set +m 2>/dev/null  # Disable job control messages
-        $SHECC -o "$tmp_exe" "$tmp_in" 2>&1
+        $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>&1
     ) >/dev/null 2>&1
     local exit_code=$?
 
@@ -308,7 +315,7 @@ int main() {
 EOF
 
     # Suppress compiler warnings by redirecting stderr
-    $SHECC -o "$tmp_exe" "$tmp_in" 2>/dev/null
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>/dev/null
     chmod +x $tmp_exe
 
     local output=$(${TARGET_EXEC:-} "$tmp_exe")
@@ -338,7 +345,7 @@ EOF
         echo "$input"
         echo "--------------------------------------------------"
         echo ""
-        echo "Compiler command: $SHECC -o $tmp_exe $tmp_in"
+        echo "Compiler command: $SHECC $SHECC_CFLAGS -o $tmp_exe $tmp_in"
         echo "Test files: input=$tmp_in, executable=$tmp_exe"
         exit 1
     else
