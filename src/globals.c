@@ -18,8 +18,8 @@ char *intern_string(char *str);
 
 /* Lexer */
 char token_str[MAX_TOKEN_LEN];
-token_t next_token;
-char next_char;
+token_t next_token = 0;
+char next_char = 0;
 bool skip_newline = true;
 
 /* Token memory management */
@@ -32,7 +32,7 @@ bool preproc_match;
 /* Point to the first character after where the macro has been called. It is
  * needed when returning from the macro body.
  */
-int macro_return_idx;
+int macro_return_idx = 0;
 
 /* Global objects */
 
@@ -1215,7 +1215,9 @@ void strbuf_free(strbuf_t *src)
  */
 void global_init(void)
 {
-    elf_code_start = ELF_START + elf_header_len;
+    FUNC_LIST.head = NULL;
+    FUNC_LIST.tail = NULL;
+    memset(REGS, 0, sizeof(regfile_t) * REG_CNT);
 
     MACROS_MAP = hashmap_create(MAX_ALIASES);
 
