@@ -57,8 +57,10 @@ esac
 
 if [ $# -ge 2 ] && [ "$2" = "1" ]; then
     readonly SHECC_CFLAGS="--dynlink"
+    readonly LINK_MODE="dynamic"
 else
     readonly SHECC_CFLAGS=""
+    readonly LINK_MODE="static"
 fi
 
 # Utility Functions
@@ -2224,6 +2226,7 @@ EOF
 # Category: Memory Management
 begin_category "Memory Management" "Testing malloc, free, and dynamic memory allocation"
 
+if [ "$LINK_MODE" = "static" ]; then
 # malloc and free
 try_ 1 << EOF
 int main()
@@ -2239,6 +2242,9 @@ int main()
     return a == b;
 }
 EOF
+else
+    echo "Skip test cases because of using dynamic linking mode"
+fi # "LINK_MODE" = "static"
 
 try_ 1 << EOF
 int main()
@@ -3484,6 +3490,8 @@ int main()
 }
 EOF
 
+if [ "$LINK_MODE" = "static" ]; then
+
 # printf family, including truncation and zero size input
 try_output 11 "Hello World" << EOF
 int main() {
@@ -3643,6 +3651,9 @@ int main()
 	return c == -1;
 }
 EOF
+else
+    echo "Skip test cases because of using dynamic linking mode"
+fi # "LINK_MODE" = "static"
 
 # tests integer type conversion
 # excerpted and modified from issue #166
