@@ -1257,6 +1257,51 @@ void parse_array_init(var_t *var,
                 break;
         }
     }
+
+    if (parent != GLOBAL_BLOCK && emit_code && !is_implicit) {
+        /* e.g.:
+         *
+         * 1.
+         *      int main()
+         *      {
+         *          int a[5] = {};
+         *          return a[0] + a[1] + a[2] + a[3] + a[4];
+         *      }
+         *
+         * 2.
+         *      int main()
+         *      {
+         *          int a[5] = {5, 10}
+         *          return a[0] + a[1] + a[2] + a[3] + a[4];
+         *      }
+         *
+         * The initializer should set the value of the first elements, and
+         * initialize other elements without explicit assignments to 0.
+         *
+         * Therefore, the first and second cases return 0 and 15, respectively.
+         * */
+        for (; count < var->array_size; count++) {
+            var_t *val = require_var(parent);
+            gen_name_to(val->var_name);
+            val->init_val = 0;
+            add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
+
+            var_t target = {0};
+            target.type = var->type;
+            target.ptr_level = 0;
+            var_t *v = resize_var(parent, bb, val, &target);
+
+            var_t *elem_addr = compute_element_address(parent, bb, base_addr,
+                                                       count, elem_size);
+
+            if (elem_size <= 4) {
+                add_insn(parent, *bb, OP_write, NULL, elem_addr, v, elem_size,
+                         NULL);
+            } else {
+                fatal("Unsupported: struct assignment > 4 bytes in array");
+            }
+        }
+    }
     lex_expect(T_close_curly);
 
     if (is_implicit) {
