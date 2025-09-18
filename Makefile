@@ -62,7 +62,8 @@ OBJS := $(SRCS:%.c=$(OUT)/%.o)
 deps := $(OBJS:%.o=%.o.d)
 TESTS := $(wildcard tests/*.c)
 TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
-SNAPSHOTS := $(foreach SNAPSHOT_ARCH,$(ARCHS), $(patsubst tests/%.c, tests/snapshots/%-$(SNAPSHOT_ARCH).json, $(TESTS)))
+SNAPSHOTS = $(foreach SNAPSHOT_ARCH,$(ARCHS), $(patsubst tests/%.c, tests/snapshots/%-$(SNAPSHOT_ARCH)-static.json, $(TESTS)))
+SNAPSHOTS += $(patsubst tests/%.c, tests/snapshots/%-arm-dynamic.json, $(TESTS))
 
 all: config bootstrap
 
@@ -107,23 +108,25 @@ check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh
 	$(Q)rm $(OUT)/shecc
 
 check-snapshots: $(OUT)/$(STAGE0) $(SNAPSHOTS) tests/check-snapshots.sh
-	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) --silent;)
-	$(VECHO) "Switching backend back to %s\n" $(ARCH)
-	$(Q)$(MAKE) distclean config ARCH=$(ARCH) --silent
+	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
+	$(Q)$(MAKE) distclean config check-snapshot ARCH=arm DYNLINK=1 --silent
+	$(VECHO) "Switching backend back to %s (DYNLINK=0)\n" arm
+	$(Q)$(MAKE) distclean config ARCH=arm DYNLINK=0 --silent
 
 check-snapshot: $(OUT)/$(STAGE0) tests/check-snapshots.sh
-	$(VECHO) "Checking snapshot for %s\n" $(ARCH)
-	tests/check-snapshots.sh $(ARCH)
+	$(VECHO) "Checking snapshot for %s (DYNLINK=%s)\n" $(ARCH) $(DYNLINK)
+	tests/check-snapshots.sh $(ARCH) $(DYNLINK)
 	$(VECHO) "  OK\n"
 
 update-snapshots: tests/update-snapshots.sh
-	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) --silent;)
-	$(VECHO) "Switching backend back to %s\n" $(ARCH)
-	$(Q)$(MAKE) distclean config ARCH=$(ARCH) --silent
+	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
+	$(Q)$(MAKE) distclean config update-snapshot ARCH=arm DYNLINK=1 --silent
+	$(VECHO) "Switching backend back to %s (DYNLINK=0)\n" arm
+	$(Q)$(MAKE) distclean config ARCH=arm DYNLINK=0 --silent
 
 update-snapshot: $(OUT)/$(STAGE0) tests/update-snapshots.sh
-	$(VECHO) "Updating snapshot for %s\n" $(ARCH)
-	tests/update-snapshots.sh $(ARCH)
+	$(VECHO) "Updating snapshot for %s (DYNLINK=%s)\n" $(ARCH) $(DYNLINK)
+	tests/update-snapshots.sh $(ARCH) $(DYNLINK)
 	$(VECHO) "  OK\n"
 
 $(OUT)/%.o: %.c
