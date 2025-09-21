@@ -11,6 +11,10 @@
 #include "defs.h"
 #include "globals.c"
 
+#ifndef PAGESIZE
+#define PAGESIZE 4096
+#endif
+
 int elf_symbol_index = 0;
 
 void elf_write_str(strbuf_t *elf_array, const char *vals)
@@ -84,11 +88,11 @@ void elf_generate_header(void)
             dynamic_sections.elf_dynamic->size;
     } else {
         /* In static linking mode:
-         * - number of program headers = 1
+         * - number of program headers = 2
          * - number of section headers = 8
          * - section header index of .shstrtab = 7
          */
-        phnum = 1;
+        phnum = 2;
         shnum = 8;
         shstrndx = 7;
         shoff = elf_header_len + elf_code->size + elf_data->size +
@@ -216,63 +220,84 @@ void elf_generate_program_headers(void)
      * ---+----------------+-------------------------------------------------+
      * 54 |                |                                                 |
      */
-    /* program header - code and data combined */
-    phdr.p_type = 1;                          /* PT_LOAD */
-    phdr.p_offset = elf_header_len;           /* offset of segment */
-    phdr.p_vaddr = ELF_START + phdr.p_offset; /* virtual address */
-    phdr.p_paddr = ELF_START + phdr.p_offset; /* physical address */
+    /* program header - read-only segment */
+    phdr.p_type = 1;          /* PT_LOAD */
+    phdr.p_offset = 0;        /* offset of segment */
+    phdr.p_vaddr = ELF_START; /* virtual address */
+    phdr.p_paddr = ELF_START; /* physical address */
     phdr.p_filesz =
-        elf_code->size + elf_data->size + elf_rodata->size; /* size in file */
-    phdr.p_memsz = elf_code->size + elf_data->size + elf_rodata->size +
-                   elf_bss_size; /* size in memory */
-    phdr.p_flags = 7;            /* flags */
-    phdr.p_align = 4;            /* alignment */
-    elf_write_blk(elf_program_header, &phdr, sizeof(elf32_phdr_t));
+        elf_header_len + elf_code->size + elf_rodata->size; /* size in file */
+    phdr.p_memsz =
+        elf_header_len + elf_code->size + elf_rodata->size; /* size in memory */
+    phdr.p_flags = 5;                                       /* flags */
+    phdr.p_align = PAGESIZE;                                /* alignment */
     if (dynlink) {
-        /* program header - all dynamic sections combined */
-        phdr.p_type = 1; /* PT_LOAD */
-        phdr.p_offset = elf_header_len + elf_code->size + elf_data->size +
-                        elf_rodata->size;         /* offset of segment */
-        phdr.p_vaddr = ELF_START + phdr.p_offset; /* virtual address */
-        phdr.p_paddr = ELF_START + phdr.p_offset; /* physical address */
-        phdr.p_filesz =
-            dynamic_sections.elf_interp->size +
-            dynamic_sections.elf_relplt->size + dynamic_sections.elf_plt->size +
-            dynamic_sections.elf_got->size + dynamic_sections.elf_dynstr->size +
-            dynamic_sections.elf_dynsym->size +
-            dynamic_sections.elf_dynamic->size; /* size in file */
-        phdr.p_memsz =
-            dynamic_sections.elf_interp->size +
-            dynamic_sections.elf_relplt->size + dynamic_sections.elf_plt->size +
-            dynamic_sections.elf_got->size + dynamic_sections.elf_dynstr->size +
-            dynamic_sections.elf_dynsym->size +
-            dynamic_sections.elf_dynamic->size; /* size in memory */
-        phdr.p_flags = 7;                       /* flags */
-        phdr.p_align = 4;                       /* alignment */
-        elf_write_blk(elf_program_header, &phdr, sizeof(elf32_phdr_t));
+        phdr.p_filesz +=
+            dynamic_sections.elf_relplt->size + dynamic_sections.elf_plt->size;
+        phdr.p_memsz +=
+            dynamic_sections.elf_relplt->size + dynamic_sections.elf_plt->size;
+    }
+    elf_write_blk(elf_program_header, &phdr, sizeof(elf32_phdr_t));
 
+    /* program header - readable and writable segment */
+    phdr.p_type = 1; /* PT_LOAD */
+    phdr.p_offset = elf_header_len + elf_code->size +
+                    elf_rodata->size;             /* offset of segment */
+    phdr.p_vaddr = elf_data_start;                /* virtual address */
+    phdr.p_paddr = elf_data_start;                /* physical address */
+    phdr.p_filesz = elf_data->size;               /* size in file */
+    phdr.p_memsz = elf_data->size + elf_bss_size; /* size in memory */
+    phdr.p_flags = 6;                             /* flags */
+    phdr.p_align = PAGESIZE;                      /* alignment */
+    if (dynlink) {
+        phdr.p_offset +=
+            dynamic_sections.elf_relplt->size + dynamic_sections.elf_plt->size;
+        phdr.p_vaddr = dynamic_sections.elf_interp_start;
+        phdr.p_paddr = dynamic_sections.elf_interp_start;
+        phdr.p_filesz += dynamic_sections.elf_interp->size +
+                         dynamic_sections.elf_got->size +
+                         dynamic_sections.elf_dynstr->size +
+                         dynamic_sections.elf_dynsym->size +
+                         dynamic_sections.elf_dynamic->size;
+        phdr.p_memsz += dynamic_sections.elf_interp->size +
+                        dynamic_sections.elf_got->size +
+                        dynamic_sections.elf_dynstr->size +
+                        dynamic_sections.elf_dynsym->size +
+                        dynamic_sections.elf_dynamic->size;
+    }
+    elf_write_blk(elf_program_header, &phdr, sizeof(elf32_phdr_t));
+
+
+    if (dynlink) {
         /* program header - program interpreter (.interp section) */
         phdr.p_type = 3; /* PT_INTERP */
-        phdr.p_offset = elf_header_len + elf_code->size + elf_data->size +
-                        elf_rodata->size;         /* offset of segment */
-        phdr.p_vaddr = ELF_START + phdr.p_offset; /* virtual address */
-        phdr.p_paddr = ELF_START + phdr.p_offset; /* physical address */
-        phdr.p_filesz = strlen(DYN_LINKER) + 1;   /* size in file */
-        phdr.p_memsz = strlen(DYN_LINKER) + 1;    /* size in memory */
-        phdr.p_flags = 4;                         /* flags */
-        phdr.p_align = 1;                         /* alignment */
+        phdr.p_offset = elf_header_len + elf_code->size + elf_rodata->size +
+                        dynamic_sections.elf_relplt->size +
+                        dynamic_sections.elf_plt->size; /* offset of segment */
+        phdr.p_vaddr = dynamic_sections.elf_interp_start; /* virtual address */
+        phdr.p_paddr = dynamic_sections.elf_interp_start; /* physical address */
+        phdr.p_filesz = strlen(DYN_LINKER) + 1;           /* size in file */
+        phdr.p_memsz = strlen(DYN_LINKER) + 1;            /* size in memory */
+        phdr.p_flags = 4;                                 /* flags */
+        phdr.p_align = 1;                                 /* alignment */
         elf_write_blk(elf_program_header, &phdr, sizeof(elf32_phdr_t));
 
         /* program header - .dynamic section */
         phdr.p_type = 2; /* PT_DYNAMIC */
         phdr.p_offset =
-            elf_header_len + elf_code->size + elf_data->size +
-            elf_rodata->size + dynamic_sections.elf_interp->size +
+            elf_header_len + elf_code->size + elf_rodata->size +
             dynamic_sections.elf_relplt->size + dynamic_sections.elf_plt->size +
-            dynamic_sections.elf_got->size + dynamic_sections.elf_dynstr->size +
-            dynamic_sections.elf_dynsym->size;    /* offset of segment */
-        phdr.p_vaddr = ELF_START + phdr.p_offset; /* virtual address */
-        phdr.p_paddr = ELF_START + phdr.p_offset; /* physical address */
+            dynamic_sections.elf_interp->size + dynamic_sections.elf_got->size +
+            dynamic_sections.elf_dynstr->size +
+            dynamic_sections.elf_dynsym->size; /* offset of segment */
+        phdr.p_vaddr = dynamic_sections.elf_got_start +
+                       dynamic_sections.elf_got->size +
+                       dynamic_sections.elf_dynstr->size +
+                       dynamic_sections.elf_dynsym->size; /* virtual address */
+        phdr.p_paddr = dynamic_sections.elf_got_start +
+                       dynamic_sections.elf_got->size +
+                       dynamic_sections.elf_dynstr->size +
+                       dynamic_sections.elf_dynsym->size; /* physical address */
         phdr.p_filesz = dynamic_sections.elf_dynamic->size; /* size in file */
         phdr.p_memsz = dynamic_sections.elf_dynamic->size;  /* size in memory */
         phdr.p_flags = 6;                                   /* flags */
@@ -355,21 +380,6 @@ void elf_generate_section_headers(void)
     ofs += elf_code->size;
     sh_name += strlen(".text") + 1;
 
-    /* .data */
-    shdr.sh_name = sh_name;
-    shdr.sh_type = 1;
-    shdr.sh_flags = 3;
-    shdr.sh_addr = elf_data_start;
-    shdr.sh_offset = ofs;
-    shdr.sh_size = elf_data->size;
-    shdr.sh_link = 0;
-    shdr.sh_info = 0;
-    shdr.sh_addralign = 4;
-    shdr.sh_entsize = 0;
-    elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
-    ofs += elf_data->size;
-    sh_name += strlen(".data") + 1;
-
     /* .rodata */
     shdr.sh_name = sh_name; /* Offset in shstrtab for ".rodata" */
     shdr.sh_type = 1;       /* SHT_PROGBITS */
@@ -385,37 +395,7 @@ void elf_generate_section_headers(void)
     ofs += elf_rodata->size;
     sh_name += strlen(".rodata") + 1;
 
-    /* .bss */
-    shdr.sh_name = sh_name; /* Offset in shstrtab for ".bss" */
-    shdr.sh_type = 8;       /* SHT_NOBITS */
-    shdr.sh_flags = 3;      /* SHF_ALLOC | SHF_WRITE */
-    shdr.sh_addr = elf_bss_start;
-    shdr.sh_offset = ofs; /* File offset (not actually used for NOBITS) */
-    shdr.sh_size = elf_bss_size;
-    shdr.sh_link = 0;
-    shdr.sh_info = 0;
-    shdr.sh_addralign = 4;
-    shdr.sh_entsize = 0;
-    elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
-    sh_name += strlen(".bss") + 1;
-    /* Note: .bss is not written to file (SHT_NOBITS) */
-
     if (dynlink) {
-        /* .interp */
-        shdr.sh_name = sh_name;
-        shdr.sh_type = 1;
-        shdr.sh_flags = 0x2;
-        shdr.sh_addr = dynamic_sections.elf_interp_start;
-        shdr.sh_offset = ofs;
-        shdr.sh_size = strlen(DYN_LINKER) + 1;
-        shdr.sh_link = 0;
-        shdr.sh_info = 0;
-        shdr.sh_addralign = 1;
-        shdr.sh_entsize = 0;
-        elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
-        ofs += dynamic_sections.elf_interp->size;
-        sh_name += strlen(".interp") + 1;
-
         /* .rel.plt */
         shdr.sh_name = sh_name;
         shdr.sh_type = 9;     /* SHT_REL */
@@ -423,8 +403,8 @@ void elf_generate_section_headers(void)
         shdr.sh_addr = dynamic_sections.elf_relplt_start;
         shdr.sh_offset = ofs;
         shdr.sh_size = dynamic_sections.elf_relplt->size;
-        shdr.sh_link = 10; /* The section header index of .dynsym. */
-        shdr.sh_info = 8;  /* The section header index of .got. */
+        shdr.sh_link = 8; /* The section header index of .dynsym. */
+        shdr.sh_info = 6; /* The section header index of .got. */
         shdr.sh_addralign = 4;
         shdr.sh_entsize = sizeof(elf32_rel_t);
         elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
@@ -445,6 +425,21 @@ void elf_generate_section_headers(void)
         elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
         ofs += dynamic_sections.elf_plt->size;
         sh_name += strlen(".plt") + 1;
+
+        /* .interp */
+        shdr.sh_name = sh_name;
+        shdr.sh_type = 1;
+        shdr.sh_flags = 0x2;
+        shdr.sh_addr = dynamic_sections.elf_interp_start;
+        shdr.sh_offset = ofs;
+        shdr.sh_size = strlen(DYN_LINKER) + 1;
+        shdr.sh_link = 0;
+        shdr.sh_info = 0;
+        shdr.sh_addralign = 1;
+        shdr.sh_entsize = 0;
+        elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
+        ofs += dynamic_sections.elf_interp->size;
+        sh_name += strlen(".interp") + 1;
 
         /* .got */
         shdr.sh_name = sh_name;
@@ -486,7 +481,7 @@ void elf_generate_section_headers(void)
                        dynamic_sections.elf_dynstr->size;
         shdr.sh_offset = ofs;
         shdr.sh_size = dynamic_sections.elf_dynsym->size;
-        shdr.sh_link = 9; /* The section header index of .dynstr. */
+        shdr.sh_link = 7; /* The section header index of .dynstr. */
         shdr.sh_info = 1; /* The index of the first non-local symbol. */
         shdr.sh_addralign = 4;
         shdr.sh_entsize = sizeof(elf32_sym_t);
@@ -504,7 +499,7 @@ void elf_generate_section_headers(void)
                        dynamic_sections.elf_dynsym->size;
         shdr.sh_offset = ofs;
         shdr.sh_size = dynamic_sections.elf_dynamic->size;
-        shdr.sh_link = 9; /* The section header index of .dynstr. */
+        shdr.sh_link = 7; /* The section header index of .dynstr. */
         shdr.sh_info = 0;
         shdr.sh_addralign = 4;
         shdr.sh_entsize = 0;
@@ -512,6 +507,36 @@ void elf_generate_section_headers(void)
         ofs += dynamic_sections.elf_dynamic->size;
         sh_name += strlen(".dynamic") + 1;
     }
+
+    /* .data */
+    shdr.sh_name = sh_name;
+    shdr.sh_type = 1;
+    shdr.sh_flags = 3;
+    shdr.sh_addr = elf_data_start;
+    shdr.sh_offset = ofs;
+    shdr.sh_size = elf_data->size;
+    shdr.sh_link = 0;
+    shdr.sh_info = 0;
+    shdr.sh_addralign = 4;
+    shdr.sh_entsize = 0;
+    elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
+    ofs += elf_data->size;
+    sh_name += strlen(".data") + 1;
+
+    /* .bss */
+    shdr.sh_name = sh_name; /* Offset in shstrtab for ".bss" */
+    shdr.sh_type = 8;       /* SHT_NOBITS */
+    shdr.sh_flags = 3;      /* SHF_ALLOC | SHF_WRITE */
+    shdr.sh_addr = elf_bss_start;
+    shdr.sh_offset = ofs; /* File offset (not actually used for NOBITS) */
+    shdr.sh_size = elf_bss_size;
+    shdr.sh_link = 0;
+    shdr.sh_info = 0;
+    shdr.sh_addralign = 4;
+    shdr.sh_entsize = 0;
+    elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
+    sh_name += strlen(".bss") + 1;
+    /* Note: .bss is not written to file (SHT_NOBITS) */
 
     /* .symtab */
     shdr.sh_name = sh_name;
@@ -761,18 +786,14 @@ void elf_generate_sections(void)
     elf_write_byte(elf_shstrtab, 0);
     elf_write_str(elf_shstrtab, ".text");
     elf_write_byte(elf_shstrtab, 0);
-    elf_write_str(elf_shstrtab, ".data");
-    elf_write_byte(elf_shstrtab, 0);
     elf_write_str(elf_shstrtab, ".rodata");
     elf_write_byte(elf_shstrtab, 0);
-    elf_write_str(elf_shstrtab, ".bss");
-    elf_write_byte(elf_shstrtab, 0);
     if (dynlink) {
-        elf_write_str(elf_shstrtab, ".interp");
-        elf_write_byte(elf_shstrtab, 0);
         elf_write_str(elf_shstrtab, ".rel.plt");
         elf_write_byte(elf_shstrtab, 0);
         elf_write_str(elf_shstrtab, ".plt");
+        elf_write_byte(elf_shstrtab, 0);
+        elf_write_str(elf_shstrtab, ".interp");
         elf_write_byte(elf_shstrtab, 0);
         elf_write_str(elf_shstrtab, ".got");
         elf_write_byte(elf_shstrtab, 0);
@@ -783,6 +804,10 @@ void elf_generate_sections(void)
         elf_write_str(elf_shstrtab, ".dynamic");
         elf_write_byte(elf_shstrtab, 0);
     }
+    elf_write_str(elf_shstrtab, ".data");
+    elf_write_byte(elf_shstrtab, 0);
+    elf_write_str(elf_shstrtab, ".bss");
+    elf_write_byte(elf_shstrtab, 0);
     elf_write_str(elf_shstrtab, ".symtab");
     elf_write_byte(elf_shstrtab, 0);
     elf_write_str(elf_shstrtab, ".strtab");
@@ -811,15 +836,13 @@ void elf_add_symbol(const char *symbol, int pc)
 
 void elf_preprocess(void)
 {
-    elf_header_len = sizeof(elf32_hdr_t) + sizeof(elf32_phdr_t);
+    elf_header_len = sizeof(elf32_hdr_t) + (sizeof(elf32_phdr_t) << 1);
     if (dynlink)
-        elf_header_len += (sizeof(elf32_phdr_t) * 3);
+        elf_header_len += (sizeof(elf32_phdr_t) << 1);
     elf_align(elf_data);
     elf_align(elf_rodata);
     elf_code_start = ELF_START + elf_header_len;
-    elf_data_start = elf_code_start + elf_offset;
-    elf_rodata_start = elf_data_start + elf_data->size;
-    elf_bss_start = elf_rodata_start + elf_rodata->size;
+    elf_rodata_start = elf_code_start + elf_offset;
     if (dynlink) {
         /* Precalculate the sizes of .rel.plt, .plt and .got sections.
          *
@@ -859,15 +882,34 @@ void elf_preprocess(void)
         /* Set the starting addresses of the three sections. */
         int elf_interp_size = strlen(DYN_LINKER) + 1;
         elf_interp_size = ALIGN_UP(elf_interp_size, 4);
-        dynamic_sections.elf_interp_start = elf_bss_start + elf_bss_size;
-        dynamic_sections.elf_relplt_start =
-            dynamic_sections.elf_interp_start + elf_interp_size;
+        dynamic_sections.elf_relplt_start = elf_rodata_start + elf_rodata->size;
         dynamic_sections.elf_plt_start =
             dynamic_sections.elf_relplt_start + dynamic_sections.relplt_size;
+        /* Since the first section of the second load segment is .interp
+         * when using dynamic linking mode, adding PAGESIZE to elf_interp_start
+         * is to ensure that two load segments don't share a common page.
+         */
+        dynamic_sections.elf_interp_start = dynamic_sections.elf_plt_start +
+                                            dynamic_sections.plt_size +
+                                            PAGESIZE;
         dynamic_sections.elf_got_start =
-            dynamic_sections.elf_plt_start + dynamic_sections.plt_size;
+            dynamic_sections.elf_interp_start + elf_interp_size;
     }
     elf_generate_sections();
+    if (dynlink) {
+        elf_data_start = dynamic_sections.elf_got_start +
+                         dynamic_sections.elf_got->size +
+                         dynamic_sections.elf_dynstr->size +
+                         dynamic_sections.elf_dynsym->size +
+                         dynamic_sections.elf_dynamic->size;
+    } else {
+        /* To prevent two load segments from sharing a common page, add
+         * PAGESIZE to elf_data_start, since the first section of the second
+         * load segment is .data in static linking mode.
+         */
+        elf_data_start = elf_rodata_start + elf_rodata->size + PAGESIZE;
+    }
+    elf_bss_start = elf_data_start + elf_data->size;
     elf_align(elf_symtab);
     elf_align(elf_strtab);
 }
@@ -894,20 +936,21 @@ void elf_generate(const char *outfile)
         fputc(elf_header->elements[i], fp);
     for (int i = 0; i < elf_program_header->size; i++)
         fputc(elf_program_header->elements[i], fp);
+    /* Read-only sections */
     for (int i = 0; i < elf_code->size; i++)
         fputc(elf_code->elements[i], fp);
-    for (int i = 0; i < elf_data->size; i++)
-        fputc(elf_data->elements[i], fp);
     for (int i = 0; i < elf_rodata->size; i++)
         fputc(elf_rodata->elements[i], fp);
-    /* Note: .bss is not written to file (SHT_NOBITS) */
+
     if (dynlink) {
-        for (int i = 0; i < dynamic_sections.elf_interp->size; i++)
-            fputc(dynamic_sections.elf_interp->elements[i], fp);
+        /* Read-only sections */
         for (int i = 0; i < dynamic_sections.elf_relplt->size; i++)
             fputc(dynamic_sections.elf_relplt->elements[i], fp);
         for (int i = 0; i < dynamic_sections.elf_plt->size; i++)
             fputc(dynamic_sections.elf_plt->elements[i], fp);
+        /* Readable and writable sections */
+        for (int i = 0; i < dynamic_sections.elf_interp->size; i++)
+            fputc(dynamic_sections.elf_interp->elements[i], fp);
         for (int i = 0; i < dynamic_sections.elf_got->size; i++)
             fputc(dynamic_sections.elf_got->elements[i], fp);
         for (int i = 0; i < dynamic_sections.elf_dynstr->size; i++)
@@ -917,6 +960,12 @@ void elf_generate(const char *outfile)
         for (int i = 0; i < dynamic_sections.elf_dynamic->size; i++)
             fputc(dynamic_sections.elf_dynamic->elements[i], fp);
     }
+    /* Readable and writable sections */
+    for (int i = 0; i < elf_data->size; i++)
+        fputc(elf_data->elements[i], fp);
+    /* Note: .bss is not written to file (SHT_NOBITS) */
+
+    /* Other sections and section headers */
     for (int i = 0; i < elf_symtab->size; i++)
         fputc(elf_symtab->elements[i], fp);
     for (int i = 0; i < elf_strtab->size; i++)
