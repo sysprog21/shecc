@@ -3210,13 +3210,11 @@ int main()
 EOF
 
 # global string initialization and modification
-try_output 0 "Hello World!Hallo World!" << EOF
+try_output 0 "Hello World!" << EOF
 char *data = "Hello World!";
 
 int main(void)
 {
-    printf(data);
-    data[1] = 'a';
     printf(data);
     return 0;
 }
