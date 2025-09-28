@@ -234,8 +234,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     switch (ph2_ir->op) {
     case OP_define:
         emit(__sw(__AL, __lr, __sp, -4));
-        emit(__movw(__AL, __r8, ph2_ir->src0 + 4));
-        emit(__movt(__AL, __r8, ph2_ir->src0 + 4));
+        ofs = ALIGN_UP(ph2_ir->src0 + 4, MIN_ALIGNMENT);
+        emit(__movw(__AL, __r8, ofs));
+        emit(__movt(__AL, __r8, ofs));
         emit(__sub_r(__AL, __sp, __sp, __r8));
         return;
     case OP_load_constant:
@@ -370,8 +371,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__mov_r(__AL, __r0, __r0));
         else
             emit(__mov_r(__AL, __r0, rn));
-        emit(__movw(__AL, __r8, ph2_ir->src1 + 4));
-        emit(__movt(__AL, __r8, ph2_ir->src1 + 4));
+        ofs = ALIGN_UP(ph2_ir->src1 + 4, MIN_ALIGNMENT);
+        emit(__movw(__AL, __r8, ofs));
+        emit(__movt(__AL, __r8, ofs));
         emit(__add_r(__AL, __sp, __sp, __r8));
         emit(__lw(__AL, __lr, __sp, -4));
         emit(__bx(__AL, __lr));
@@ -521,6 +523,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 void plt_generate(void);
 void code_generate(void)
 {
+    int ofs;
+
     if (dynlink) {
         plt_generate();
         /* Call __libc_start_main() */
@@ -557,9 +561,14 @@ void code_generate(void)
     }
     /* For both static and dynamic linking, we need to set up the stack
      * and call the main function.
+     *
+     * Since the previous __stmdb instruction pushes nine registers onto
+     * stack, set ofs to align(GLOBAL_FUNC->stack_size, 8) + 4 to ensure
+     * the stack remains 8-byte aligned after adjustment.
      */
-    emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-    emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+    ofs = ALIGN_UP(GLOBAL_FUNC->stack_size, MIN_ALIGNMENT) + 4;
+    emit(__movw(__AL, __r8, ofs));
+    emit(__movt(__AL, __r8, ofs));
     emit(__sub_r(__AL, __sp, __sp, __r8));
     emit(__mov_r(__AL, __r12, __sp));
 
@@ -570,8 +579,8 @@ void code_generate(void)
                  56)); /* PC+8: skip exit (24) + syscall (36) + ret (4) - 8 */
 
         /* exit - only for static linking */
-        emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-        emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+        emit(__movw(__AL, __r8, ofs));
+        emit(__movt(__AL, __r8, ofs));
         emit(__add_r(__AL, __sp, __sp, __r8));
         emit(__mov_r(__AL, __r0, __r0));
         emit(__mov_i(__AL, __r7, 1));
@@ -607,13 +616,13 @@ void code_generate(void)
              * preserved lr.
              */
             emit(__bl(__AL, MAIN_BB->elf_offset - elf_code->size));
-            emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-            emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+            emit(__movw(__AL, __r8, ofs));
+            emit(__movt(__AL, __r8, ofs));
             emit(__add_r(__AL, __sp, __sp, __r8));
             emit(__ldm(__AL, 1, __sp, 0x8FF0));
         } else {
-            emit(__movw(__AL, __r8, GLOBAL_FUNC->stack_size));
-            emit(__movt(__AL, __r8, GLOBAL_FUNC->stack_size));
+            emit(__movw(__AL, __r8, ofs));
+            emit(__movt(__AL, __r8, ofs));
             emit(__add_r(__AL, __r8, __r12, __r8));
             emit(__lw(__AL, __r0, __r8, 0));
             emit(__add_i(__AL, __r1, __r8, 4));

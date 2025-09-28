@@ -92,6 +92,14 @@
 #define HOST_PTR_SIZE __SIZEOF_POINTER__
 #endif
 
+#ifndef MIN_ALIGNMENT
+#define MIN_ALIGNMENT 8
+#endif
+
+#ifndef ALIGN_UP
+#define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
+#endif
+
 /* Common data structures */
 typedef struct arena_block {
     char *memory;
