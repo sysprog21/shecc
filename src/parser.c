@@ -45,6 +45,10 @@ void parse_array_init(var_t *var,
                       block_t *parent,
                       basic_block_t **bb,
                       bool emit_code);
+// TODO 2: helper function announce
+static void emit_struct_brace_initializer(block_t *parent, basic_block_t **bb,
+                                          var_t *dest, type_t *struct_type);
+
 
 
 label_t *find_label(char *name)
@@ -851,6 +855,9 @@ void parse_struct_field_init(block_t *parent,
                 var_t *field_val =
                     resize_var(parent, bb, field_val_raw, &target);
 
+                fprintf(stderr, "[DBG] Initializing field %d (%s): value=%d, offset=%d\n", 
+                        field_idx, field->var_name, field_val->init_val, field->offset);
+
                 var_t *field_addr =
                     compute_field_address(parent, bb, target_addr, field);
 
@@ -1093,6 +1100,7 @@ basic_block_t *handle_struct_variable_decl(block_t *parent,
 
     var_t *var = require_typed_var(parent, type);
     read_partial_var_decl(var, NULL);
+    fprintf(stderr, "[DBG] Created struct variable: %s, type=%s\n", var->var_name, type->type_name);
     add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
     add_symbol(bb, var);
 
@@ -1114,13 +1122,16 @@ basic_block_t *handle_struct_variable_decl(block_t *parent,
                      NULL);
 
             lex_expect(T_open_curly);
+            fprintf(stderr, "[DBG] Parsing struct field initialization for %s\n", var->var_name);
             parse_struct_field_init(parent, &bb, struct_type, struct_addr,
                                     true);
             lex_expect(T_close_curly);
         } else {
+            fprintf(stderr, "[DBG] Assigning compound literal to %s\n", var->var_name);
             read_expr(parent, &bb);
             read_ternary_operation(parent, &bb);
             var_t *rs1 = resize_var(parent, &bb, opstack_pop(), var);
+            fprintf(stderr, "[DBG] Compound literal value: %d\n", rs1->init_val);
             add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
         }
     }
@@ -1846,6 +1857,69 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     lex_expect(T_close_bracket);
     add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 }
+// TODO 4: helper for copy struct
+static void emit_struct_copy(block_t *parent, basic_block_t **bb,
+                             var_t *dst, var_t *src, int size_bytes)
+{
+    // 取 &dst, &src
+    var_t *dst_addr = require_var(parent);
+    gen_name_to(dst_addr->var_name);
+    add_insn(parent, *bb, OP_address_of, dst_addr, dst, NULL, 0, NULL);
+
+    var_t *src_addr = require_var(parent);
+    gen_name_to(src_addr->var_name);
+    add_insn(parent, *bb, OP_address_of, src_addr, src, NULL, 0, NULL);
+
+    // 4-byte 塊拷貝
+    int n4 = size_bytes / 4;
+    int rem = size_bytes % 4;
+    for (int i = 0; i < n4; ++i) {
+        // offset 常數
+        var_t *off = require_var(parent);
+        gen_name_to(off->var_name);
+        off->init_val = i * 4;
+        add_insn(parent, *bb, OP_load_constant, off, NULL, NULL, 0, NULL);
+
+        // src+off → tmp
+        var_t *saddr = require_var(parent);
+        gen_name_to(saddr->var_name);
+        add_insn(parent, *bb, OP_add, saddr, src_addr, off, 0, NULL);
+
+        var_t *tmp = require_var(parent);
+        gen_name_to(tmp->var_name);
+        add_insn(parent, *bb, OP_read, tmp, saddr, NULL, 4, NULL);
+
+        // dst+off ← tmp
+        var_t *daddr = require_var(parent);
+        gen_name_to(daddr->var_name);
+        add_insn(parent, *bb, OP_add, daddr, dst_addr, off, 0, NULL);
+
+        add_insn(parent, *bb, OP_write, NULL, daddr, tmp, 4, NULL);
+    }
+    // 剩餘 bytes
+    for (int i = n4 * 4; i < size_bytes; ++i) {
+        var_t *off = require_var(parent);
+        gen_name_to(off->var_name);
+        off->init_val = i;
+        add_insn(parent, *bb, OP_load_constant, off, NULL, NULL, 0, NULL);
+
+        var_t *saddr = require_var(parent);
+        gen_name_to(saddr->var_name);
+        add_insn(parent, *bb, OP_add, saddr, src_addr, off, 0, NULL);
+
+        var_t *tmp = require_var(parent);
+        gen_name_to(tmp->var_name);
+        add_insn(parent, *bb, OP_read, tmp, saddr, NULL, 1, NULL);
+
+        var_t *daddr = require_var(parent);
+        gen_name_to(daddr->var_name);
+        add_insn(parent, *bb, OP_add, daddr, dst_addr, off, 0, NULL);
+
+        add_insn(parent, *bb, OP_write, NULL, daddr, tmp, 1, NULL);
+    }
+}
+
+// TODO 4:end
 
 void read_expr_operand(block_t *parent, basic_block_t **bb)
 {
@@ -1924,6 +1998,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         int cast_ptr_level = 0;
 
         /* Look ahead to see if we have a typename followed by ) */
+        //TODO 3:
         if (lex_peek(T_identifier, lookahead_token)) {
             /* Check if it's a basic type or typedef */
             type_t *type = find_type(lookahead_token, true);
@@ -1983,7 +2058,74 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 }
             }
         }
+        //TODO 3：同一層級開始加入else if 判斷
+        else if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
+            /* 嘗試解析 (struct/union T){...} 或 (struct/union T)expr */
+            int saved_pos = SOURCE->size;
+            char saved_char = next_char;
+            token_t saved_token = next_token;
 
+            int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+            if (find_type_flag == 1 && lex_accept(T_union)) {
+                find_type_flag = 2;
+            }
+
+            char tag_name[MAX_TYPE_LEN];
+            if (!lex_peek(T_identifier, tag_name)) {
+                /* 不是合法的 (struct/union 標識) —— 還原，當作 (expr) */
+                SOURCE->size = saved_pos;
+                next_char    = saved_char;
+                next_token   = saved_token;
+            } else {
+                /* 讀取 tag 並找出對應型別 */
+                lex_expect(T_identifier);
+                type_t *type = find_type(tag_name, find_type_flag);
+                if (!type) {
+                    /* 找不到型別 —— 還原，當作 (expr) */
+                    SOURCE->size = saved_pos;
+                    next_char    = saved_char;
+                    next_token   = saved_token;
+                } else {
+                    /* 處理指標層級：struct P * / ** 等 */
+                    int ptr_level = 0;
+                    while (lex_accept(T_asterisk)) ptr_level++;
+
+                    /* 處理 (struct P[]){...} 這種語法： */
+                    bool is_array = false;
+                    if (lex_accept(T_open_square)) {
+                        is_array = true;
+                        if (lex_peek(T_numeric, NULL)) {
+                            char size_buffer[10];
+                            lex_ident(T_numeric, size_buffer); /* 若有大小就吃掉 */
+                        }
+                        lex_expect(T_close_square);
+                    }
+
+                    /* 關閉 ')' 並根據後面是否是 '{' 來判斷 */
+                    if (lex_accept(T_close_bracket)) {
+                        if (lex_peek(T_open_curly, NULL)) {
+                            /* (struct P){...} → compound literal */
+                            is_compound_literal = true;
+                            cast_or_literal_type = type;
+                            cast_ptr_level = is_array ? -1 : ptr_level;
+                            fprintf(stderr, "[DBG] mark is_compound_literal; next is '{'\n");
+                        } else {
+                            /* (struct P)expr → cast */
+                            is_cast = true;
+                            cast_or_literal_type = type;
+                            cast_ptr_level = ptr_level;
+                        }
+                    } else {
+                        /* 不是 (type) 的語法 —— 還原，當作 (expr) */
+                        SOURCE->size = saved_pos;
+                        next_char    = saved_char;
+                        next_token   = saved_token;
+                    }
+                }
+            }
+        }
+
+        //TODO 3: end
         if (is_cast) {
             /* Process cast: (type)expr */
             /* Parse the expression to be cast */
@@ -2003,10 +2145,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
             /* Push the cast result */
             opstack_push(cast_var);
-
         } else if (is_compound_literal) {
             /* Process compound literal */
-            lex_expect(T_open_curly);
+            // Loretta: helper will handle the '{' and '}'
+            // lex_expect(T_open_curly);
+            
 
             /* Create variable for compound literal result */
             var_t *compound_var =
@@ -2019,9 +2162,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 cast_ptr_level = 0; /* Reset for normal processing */
 
             /* Check if this is a pointer compound literal */
+            //Loretta: if 0
+            
             if (cast_ptr_level > 0) {
+            
                 /* Pointer compound literal: (int*){&x} */
                 compound_var->ptr_level = cast_ptr_level;
+                //Loretta: ptr 你先自己吃
+                lex_expect(T_open_curly); 
 
                 /* Parse the pointer value (should be an address) */
                 if (!lex_peek(T_close_curly, NULL)) {
@@ -2045,43 +2193,60 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                     /* Empty pointer compound literal: (int*){} */
                     compound_var->init_val = 0; /* NULL pointer */
                 }
-
+                // Loretta: end
+                lex_expect(T_close_curly);
                 /* Generate code for pointer compound literal */
                 opstack_push(compound_var);
                 add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
                          NULL, 0, NULL);
             } else if (cast_or_literal_type->base_type == TYPE_struct ||
                        cast_or_literal_type->base_type == TYPE_typedef) {
-                /* Struct compound literal support (including typedef structs)
-                 */
-                /* For typedef structs, the actual struct info is in the type */
-
-                /* Initialize struct compound literal */
+                /* Struct compound literal support (following proposed solution pattern) */
+                
+                /* Resolve typedef to actual struct type */
+                type_t *struct_type = cast_or_literal_type;
+                if (struct_type->base_type == TYPE_typedef && struct_type->base_struct)
+                    struct_type = struct_type->base_struct;
+                
+                /* Create temporary variable for compound literal */
+                compound_var = require_typed_var(parent, struct_type);
+                gen_name_to(compound_var->var_name);
+                fprintf(stderr, "[DBG] Created compound literal var: %s\n", compound_var->var_name);
                 compound_var->init_val = 0;
                 compound_var->ptr_level = 0;
+                
+                /* Allocate storage for the compound literal */
+                add_insn(parent, *bb, OP_allocat, compound_var, NULL, NULL, 0, NULL);
+                
+                /* Parse compound literal using the helper function */
+                emit_struct_brace_initializer(parent, bb, compound_var, struct_type);
+                
+                /* Push result onto operand stack */
+                opstack_push(compound_var);
+                return;
 
-                /* Parse first field value */
-                if (!lex_peek(T_close_curly, NULL)) {
-                    read_expr(parent, bb);
-                    read_ternary_operation(parent, bb);
-                    var_t *first_field = opstack_pop();
-                    compound_var->init_val = first_field->init_val;
+                // if (!lex_peek(T_close_curly, NULL)) {
+                //     read_expr(parent, bb);
+                //     read_ternary_operation(parent, bb);
+                //     var_t *first_field = opstack_pop();
+                //     compound_var->init_val = first_field->init_val;
 
-                    /* Consume additional fields if present */
-                    while (lex_accept(T_comma)) {
-                        if (lex_peek(T_close_curly, NULL)) {
-                            break;
-                        }
-                        read_expr(parent, bb);
-                        read_ternary_operation(parent, bb);
-                        opstack_pop(); /* Consume additional field values */
-                    }
-                }
+                //     /* Consume additional fields if present */
+                    
+                //     while (lex_accept(T_comma)) {
+                //         if (lex_peek(T_close_curly, NULL)) {
+                //             break;
+                //         }
+                //         read_expr(parent, bb);
+                //         read_ternary_operation(parent, bb);
+                //         opstack_pop(); /* Consume additional field values */
+                //     }
+                // }
 
                 /* Generate code for struct compound literal */
-                opstack_push(compound_var);
-                add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
-                         NULL, 0, NULL);
+                // opstack_push(compound_var);
+                // add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
+                //          NULL, 0, NULL);
             } else if (cast_or_literal_type->base_type == TYPE_int ||
                        cast_or_literal_type->base_type == TYPE_short ||
                        cast_or_literal_type->base_type == TYPE_char) {
@@ -2352,6 +2517,66 @@ bool is_logical(opcode_t op)
 {
     return op == OP_log_and || op == OP_log_or;
 }
+
+// TODO 2: helper func
+static void emit_struct_brace_initializer(block_t *parent, basic_block_t **bb,
+                                          var_t *dest, type_t *struct_type) {
+    
+    if (struct_type->base_type == TYPE_typedef && struct_type->base_struct)
+        struct_type = struct_type->base_struct;
+
+    
+    lex_expect(T_open_curly);
+
+    int field_idx = 0;
+    if (!lex_peek(T_close_curly, NULL)) {
+        for (;;) {
+            // 讀一個欄位的初始值
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            var_t *val = opstack_pop();
+
+            if (field_idx < struct_type->num_fields) {
+                var_t *field = &struct_type->fields[field_idx];
+
+                // Debug: print field information
+                fprintf(stderr, "[DBG] Field %d: name=%s, offset=%d, init_val=%d\n", 
+                        field_idx, field->var_name, field->offset, val->init_val);
+
+                // 把 val 調整成欄位型別
+                var_t target = {0};
+                target.type = field->type;
+                target.ptr_level = field->ptr_level;
+                var_t *field_val = resize_var(parent, bb, val, &target);
+
+                fprintf(stderr, "[DBG] After resize: field_val->init_val=%d\n", field_val->init_val);
+
+                // 直接用現成 helper 算欄位位址
+                var_t *field_addr = compute_field_address(parent, bb, dest, field);
+
+                // 寫入欄位
+                int field_size = size_var(field);
+                add_insn(parent, *bb, OP_write, NULL, field_addr, field_val, field_size, NULL);
+                fprintf(stderr, "[DBG] Wrote field %s with value %d at offset %d\n", 
+                        field->var_name, field_val->init_val, field->offset);
+                
+                // fprintf(stderr, "[DBG] Wrote field %d with value %d at offset %d\n", 
+                        // field_idx, field_val->init_val, field->offset);
+            }
+
+            field_idx++;
+            if (!lex_accept(T_comma)) break;
+            if (lex_peek(T_close_curly, NULL)) break;
+        }
+    }
+
+
+    lex_expect(T_close_curly);
+
+   
+}
+
+//TODO 2: end
 
 /* Helper function to calculate element size for pointer operations */
 int get_pointer_element_size(var_t *ptr_var)
@@ -3070,6 +3295,15 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* change type currently pointed to */
             var = find_member(token, lvalue->type);
+            if (strcmp(token, "x") == 0 || strcmp(token, "y") == 0) {
+                fprintf(stderr, "[DBG] Accessing field '%s' on variable, offset=%d\n", token, var ? var->offset : -1);
+                if (var) {
+                    fprintf(stderr, "[DBG] Field found: name=%s, offset=%d, type=%s\n", 
+                            var->var_name, var->offset, var->type ? var->type->type_name : "NULL");
+                } else {
+                    fprintf(stderr, "[DBG] ERROR: Field '%s' not found!\n", token);
+                }
+            }
             lvalue->type = var->type;
             lvalue->ptr_level = var->ptr_level;
             lvalue->is_func = var->is_func;
@@ -3159,7 +3393,13 @@ void read_lvalue(lvalue_t *lvalue,
             t = require_var(parent);
             gen_name_to(t->var_name);
             opstack_push(t);
+            if (strstr(rs1->var_name, "p") || strstr(t->var_name, "p")) {
+                fprintf(stderr, "[DBG] Reading from address %s into %s, size=%d\n", rs1->var_name, t->var_name, lvalue->size);
+            }
             add_insn(parent, *bb, OP_read, t, rs1, NULL, lvalue->size, NULL);
+            if (strstr(rs1->var_name, "p") || strstr(t->var_name, "p")) {
+                fprintf(stderr, "[DBG] After OP_READ: result variable %s has init_val=%d\n", t->var_name, t->init_val);
+            }
         }
         if (prefix_op != OP_generic) {
             vd = require_var(parent);
@@ -4275,6 +4515,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             var = require_typed_var(parent, type);
             var->is_const_qualified = is_const;
             read_partial_var_decl(var, NULL);
+            fprintf(stderr, "[DBG] Creating struct variable in read_body_statement: %s, type=%s\n", var->var_name, type->type_name);
             add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
             add_symbol(bb, var);
             if (lex_accept(T_assign)) {
@@ -4351,21 +4592,80 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     }
                     lex_expect(T_close_curly);
                 } else {
+                    fprintf(stderr, "[DBG] Assigning expression to struct variable %s\n", var->var_name);
                     read_expr(parent, &bb);
                     read_ternary_operation(parent, &bb);
 
                     var_t *expr_result = opstack_pop();
+                    fprintf(stderr, "[DBG] Expression result: var_name=%s, init_val=%d, array_size=%d\n", 
+                            expr_result->var_name, expr_result->init_val, expr_result->array_size);
 
-                    /* Handle array compound literal to scalar assignment.
-                     * When assigning array compound literals to scalar
-                     * variables, use the first element value rather than array
-                     * address.
-                     */
-                    if (expr_result && expr_result->array_size > 0 &&
+                    /* Handle struct compound literal assignment */
+                    if (expr_result && expr_result->var_name[0] == '.' && 
+                        var->type && var->type->base_type == TYPE_struct &&
+                        expr_result->type && expr_result->type->base_type == TYPE_struct) {
+                        
+                        fprintf(stderr, "[DBG] Detected struct compound literal - trying offset adjustment\n");
+                        
+                        /* Try copying with a -4 byte offset to compensate for the shift */
+                        int struct_size = var->type->size;
+                        
+                        /* Get source and destination addresses */
+                        var_t *src_addr = require_var(parent);
+                        gen_name_to(src_addr->var_name);
+                        add_insn(parent, bb, OP_address_of, src_addr, expr_result, NULL, 0, NULL);
+                        
+                        /* Try reading from src_addr + 4 */
+                        var_t *offset_correction = require_var(parent);
+                        gen_name_to(offset_correction->var_name);
+                        offset_correction->init_val = 4;
+                        add_insn(parent, bb, OP_load_constant, offset_correction, NULL, NULL, 0, NULL);
+                        
+                        var_t *adjusted_src_addr = require_var(parent);
+                        gen_name_to(adjusted_src_addr->var_name);
+                        add_insn(parent, bb, OP_add, adjusted_src_addr, src_addr, offset_correction, 0, NULL);
+                        
+                        var_t *dst_addr = require_var(parent);
+                        gen_name_to(dst_addr->var_name);
+                        add_insn(parent, bb, OP_address_of, dst_addr, var, NULL, 0, NULL);
+                        
+                        /* Copy in 4-byte words */
+                        int num_words = struct_size / 4;
+                        for (int i = 0; i < num_words; i++) {
+                            var_t *offset = require_var(parent);
+                            gen_name_to(offset->var_name);
+                            offset->init_val = i * 4;
+                            add_insn(parent, bb, OP_load_constant, offset, NULL, NULL, 0, NULL);
+                            
+                            var_t *src_word_addr = require_var(parent);
+                            gen_name_to(src_word_addr->var_name);
+                            add_insn(parent, bb, OP_add, src_word_addr, adjusted_src_addr, offset, 0, NULL);
+                            
+                            var_t *word_val = require_var(parent);
+                            gen_name_to(word_val->var_name);
+                            add_insn(parent, bb, OP_read, word_val, src_word_addr, NULL, 4, NULL);
+                            
+                            var_t *dst_word_addr = require_var(parent);
+                            gen_name_to(dst_word_addr->var_name);
+                            add_insn(parent, bb, OP_add, dst_word_addr, dst_addr, offset, 0, NULL);
+                            
+                            add_insn(parent, bb, OP_write, NULL, dst_word_addr, word_val, 4, NULL);
+                            
+                            fprintf(stderr, "[DBG] Copied word %d with +4 offset adjustment\n", i);
+                        }
+                        
+                        fprintf(stderr, "[DBG] Offset-adjusted struct copy completed\n");
+                        
+                    } else if (expr_result && expr_result->array_size > 0 &&
                         !var->ptr_level && var->array_size == 0 && var->type &&
                         (var->type->base_type == TYPE_int ||
                          var->type->base_type == TYPE_short) &&
                         expr_result->var_name[0] == '.') {
+                        /* Handle array compound literal to scalar assignment.
+                         * When assigning array compound literals to scalar
+                         * variables, use the first element value rather than array
+                         * address.
+                         */
                         var_t *first_elem = require_var(parent);
                         first_elem->type = var->type;
                         gen_name_to(first_elem->var_name);
@@ -4374,10 +4674,18 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                         add_insn(parent, bb, OP_read, first_elem, expr_result,
                                  NULL, var->type->size, NULL);
                         expr_result = first_elem;
+                        
+                        rs1 = resize_var(parent, &bb, expr_result, var);
+                        fprintf(stderr, "[DBG] Final assignment: %s = %s (init_val=%d)\n", 
+                                var->var_name, rs1->var_name, rs1->init_val);
+                        add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+                    } else {
+                        /* Normal assignment */
+                        rs1 = resize_var(parent, &bb, expr_result, var);
+                        fprintf(stderr, "[DBG] Final assignment: %s = %s (init_val=%d)\n", 
+                                var->var_name, rs1->var_name, rs1->init_val);
+                        add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
                     }
-
-                    rs1 = resize_var(parent, &bb, expr_result, var);
-                    add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
                 }
             }
             while (lex_accept(T_comma)) {
