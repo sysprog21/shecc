@@ -1381,36 +1381,91 @@ void fatal(char *msg)
 /* Reports an error and specifying a position */
 void error(char *msg)
 {
-    /* Construct error source diagnostics, enabling precise identification of
-     * syntax and logic issues within the code.
-     */
-    int offset, start_idx, i = 0;
-    char diagnostic[512 /* MAX_LINE_LEN * 2 */];
-
-    for (offset = SOURCE->size; offset >= 0 && SOURCE->elements[offset] != '\n';
-         offset--)
-        ;
-
-    start_idx = offset + 1;
-
-    for (offset = 0;
-         offset < MAX_SOURCE && SOURCE->elements[start_idx + offset] != '\n';
-         offset++) {
-        diagnostic[i++] = SOURCE->elements[start_idx + offset];
+    /* Safety check for NULL message */
+    if (!msg) {
+        printf("[Error]: Unknown error occurred\n");
+        abort();
     }
-    diagnostic[i++] = '\n';
 
-    for (offset = start_idx; offset < SOURCE->size; offset++) {
+    /* Safety check for SOURCE buffer */
+    if (!SOURCE || !SOURCE->elements || SOURCE->size < 0) {
+        printf("[Error]: %s\nSource location unavailable (invalid source buffer)\n", msg);
+        abort();
+    }
+
+    /* Handle empty source case */
+    if (SOURCE->size == 0) {
+        printf("[Error]: %s\nOccurs at start of file\n", msg);
+        abort();
+    }
+
+    /* Construct error source diagnostics */
+    int current_pos = SOURCE->size;
+    int line_start, line_end;
+    int i = 0;
+    char diagnostic[512]; /* MAX_LINE_LEN * 2 */
+
+    /* Ensure current_pos is within bounds */
+    if (current_pos >= SOURCE->size) {
+        current_pos = SOURCE->size - 1;
+    }
+
+    /* Find the start of the current line (scan backwards to find '\n') */
+    line_start = current_pos;
+    while (line_start > 0 && SOURCE->elements[line_start - 1] != '\n') {
+        line_start--;
+    }
+
+    /* Find the end of the current line (scan forwards to find '\n' or end) */
+    line_end = current_pos;
+    while (line_end < SOURCE->size && SOURCE->elements[line_end] != '\n') {
+        line_end++;
+    }
+
+    /* Copy the current line to diagnostic buffer with bounds checking */
+    for (int pos = line_start; pos < line_end && i < (int)sizeof(diagnostic) - 50; pos++) {
+        diagnostic[i++] = SOURCE->elements[pos];
+    }
+    
+    /* Add newline after the source line */
+    if (i < (int)sizeof(diagnostic) - 30) {
+        diagnostic[i++] = '\n';
+    }
+
+    /* Add spaces to point to the error position */
+    int error_column = current_pos - line_start;
+    for (int spaces = 0; spaces < error_column && i < (int)sizeof(diagnostic) - 20; spaces++) {
         diagnostic[i++] = ' ';
     }
 
-    strcpy(diagnostic + i, "^ Error occurs here");
+    /* Add the error pointer with bounds checking */
+    const char *pointer_text = "^ Error occurs here";
+    int pointer_len = strlen(pointer_text);
+    if (i + pointer_len < (int)sizeof(diagnostic)) {
+        strcpy(diagnostic + i, pointer_text);
+        i += pointer_len;
+    }
+    
+    /* Null terminate */
+    if (i < (int)sizeof(diagnostic)) {
+        diagnostic[i] = '\0';
+    } else {
+        diagnostic[sizeof(diagnostic) - 1] = '\0';
+    }
 
-    /* TODO: Implement line/column tracking for precise error location
-     * reporting. Current implementation only shows source position offset.
-     */
-    printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg,
-           SOURCE->size, diagnostic);
+    /* Calculate line number for better error reporting */
+    int line_number = 1;
+    for (int pos = 0; pos < current_pos && pos < SOURCE->size; pos++) {
+        if (SOURCE->elements[pos] == '\n') {
+            line_number++;
+        }
+    }
+
+    /* Output the error with improved formatting */
+    printf("[Error]: %s\n", msg);
+    printf("At line %d, column %d (source position %d):\n", 
+           line_number, error_column + 1, current_pos);
+    printf("%s\n", diagnostic);
     abort();
 }
 
