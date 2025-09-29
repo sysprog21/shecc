@@ -152,8 +152,11 @@ $(OUT)/$(STAGE2): $(OUT)/$(STAGE1)
 
 bootstrap: $(OUT)/$(STAGE2)
 	$(Q)chmod 775 $(OUT)/$(STAGE2)
-	$(Q)if ! diff -q $(OUT)/$(STAGE1) $(OUT)/$(STAGE2); then \
-	echo "Unable to bootstrap. Aborting"; false; \
+	$(Q)if cmp -s $(OUT)/$(STAGE1) $(OUT)/$(STAGE2); then \
+		echo "Bootstrap successful: Stage 1 and Stage 2 are identical"; \
+	else \
+		echo "ERROR: Bootstrap failed - Stage 1 and Stage 2 differ"; \
+		exit 1; \
 	fi
 
 $(BUILD_SESSION):
