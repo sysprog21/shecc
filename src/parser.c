@@ -46,7 +46,7 @@ void parse_array_init(var_t *var,
                       basic_block_t **bb,
                       bool emit_code);
 /* helper function to emit struct brace initializers */
-static void emit_struct_brace_initializer(block_t *parent,
+void emit_struct_brace_initializer(block_t *parent,
                                           basic_block_t **bb,
                                           var_t *dest,
                                           type_t *struct_type);
@@ -856,8 +856,6 @@ void parse_struct_field_init(block_t *parent,
                 target.ptr_level = field->ptr_level;
                 var_t *field_val =
                     resize_var(parent, bb, field_val_raw, &target);
-
-
 
                 var_t *field_addr =
                     compute_field_address(parent, bb, target_addr, field);
@@ -1856,72 +1854,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     lex_expect(T_close_bracket);
     add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 }
-#if 0
-static void emit_struct_copy(block_t *parent,
-                             basic_block_t **bb,
-                             var_t *dst,
-                             var_t *src,
-                             int size_bytes)
-{
-    // 取 &dst, &src
-    var_t *dst_addr = require_var(parent);
-    gen_name_to(dst_addr->var_name);
-    add_insn(parent, *bb, OP_address_of, dst_addr, dst, NULL, 0, NULL);
 
-    var_t *src_addr = require_var(parent);
-    gen_name_to(src_addr->var_name);
-    add_insn(parent, *bb, OP_address_of, src_addr, src, NULL, 0, NULL);
-
-    // 4-byte 塊拷貝
-    int n4 = size_bytes / 4;
-    int rem = size_bytes % 4;
-    for (int i = 0; i < n4; ++i) {
-        // offset 常數
-        var_t *off = require_var(parent);
-        gen_name_to(off->var_name);
-        off->init_val = i * 4;
-        add_insn(parent, *bb, OP_load_constant, off, NULL, NULL, 0, NULL);
-
-        // src+off → tmp
-        var_t *saddr = require_var(parent);
-        gen_name_to(saddr->var_name);
-        add_insn(parent, *bb, OP_add, saddr, src_addr, off, 0, NULL);
-
-        var_t *tmp = require_var(parent);
-        gen_name_to(tmp->var_name);
-        add_insn(parent, *bb, OP_read, tmp, saddr, NULL, 4, NULL);
-
-        // dst+off ← tmp
-        var_t *daddr = require_var(parent);
-        gen_name_to(daddr->var_name);
-        add_insn(parent, *bb, OP_add, daddr, dst_addr, off, 0, NULL);
-
-        add_insn(parent, *bb, OP_write, NULL, daddr, tmp, 4, NULL);
-    }
-    // 剩餘 bytes
-    for (int i = n4 * 4; i < size_bytes; ++i) {
-        var_t *off = require_var(parent);
-        gen_name_to(off->var_name);
-        off->init_val = i;
-        add_insn(parent, *bb, OP_load_constant, off, NULL, NULL, 0, NULL);
-
-        var_t *saddr = require_var(parent);
-        gen_name_to(saddr->var_name);
-        add_insn(parent, *bb, OP_add, saddr, src_addr, off, 0, NULL);
-
-        var_t *tmp = require_var(parent);
-        gen_name_to(tmp->var_name);
-        add_insn(parent, *bb, OP_read, tmp, saddr, NULL, 1, NULL);
-
-        var_t *daddr = require_var(parent);
-        gen_name_to(daddr->var_name);
-        add_insn(parent, *bb, OP_add, daddr, dst_addr, off, 0, NULL);
-
-        add_insn(parent, *bb, OP_write, NULL, daddr, tmp, 1, NULL);
-    }
-}
-
-#endif
 
 void read_expr_operand(block_t *parent, basic_block_t **bb)
 {
