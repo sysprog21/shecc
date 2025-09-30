@@ -1967,8 +1967,9 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
                 /* Check what follows the closing ) */
                 if (lex_accept(T_close_bracket)) {
+            
                     if (lex_peek(T_open_curly, NULL)) {
-                        /* (type){...} - compound literal */
+                        /* (type){...} - compound literal */            
                         is_compound_literal = true;
                         cast_or_literal_type = type;
                         cast_ptr_level = ptr_level;
@@ -1994,7 +1995,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             }
         }
 
-        /* add struct/union support (loretta) */
+        /* add struct/union support */
         else if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
             /* Check for (struct/union T){...} or (struct/union T)expr */
             int saved_pos = SOURCE->size;
@@ -2175,6 +2176,9 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             } else if (cast_or_literal_type->base_type == TYPE_int ||
                        cast_or_literal_type->base_type == TYPE_short ||
                        cast_or_literal_type->base_type == TYPE_char) {
+                /* Consume the opening { token */
+                lex_expect(T_open_curly);
+                
                 /* Handle empty compound literals */
                 if (lex_peek(T_close_curly, NULL)) {
                     /* Empty compound literal: (int){} */
@@ -2443,8 +2447,8 @@ bool is_logical(opcode_t op)
     return op == OP_log_and || op == OP_log_or;
 }
 
-/* Helper function to emit struct brace initializer(loretta) */
-static void emit_struct_brace_initializer(block_t *parent,
+/* Helper function to emit struct brace initializer */
+void emit_struct_brace_initializer(block_t *parent,
                                           basic_block_t **bb,
                                           var_t *dest,
                                           type_t *struct_type)
