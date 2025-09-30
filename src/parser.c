@@ -2143,6 +2143,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 opstack_push(compound_var);
                 add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
                          NULL, 0, NULL);
+                return;
             } else if (cast_or_literal_type->base_type == TYPE_struct ||
                        cast_or_literal_type->base_type == TYPE_typedef) {
                 /* Struct compound literal support (following proposed solution
@@ -2258,21 +2259,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                         /* Store first element value for array-to-scalar */
                         compound_var->init_val = first_element->init_val;
 
-                        /* Create result that provides first element access.
-                         * This enables array compound literals in scalar
-                         * contexts: int x = (int[]){1,2,3};  // x gets 1 int y
-                         * = 5 + (int[]){10}; // adds 5 + 10
+                        /* Return the array itself, let normal array decay handle conversion.
+                         * This enables both scalar and pointer contexts:
+                         * int x = (int[]){1,2,3};     // array decays to first element
+                         * int *p = (int[]){1,2,3};    // array decays to pointer
                          */
-                        var_t *result_var = require_var(parent);
-                        gen_name_to(result_var->var_name);
-                        result_var->type = compound_var->type;
-                        result_var->ptr_level = 0;
-                        result_var->array_size = 0;
-
-                        /* Read first element from the array */
-                        add_insn(parent, *bb, OP_read, result_var, compound_var,
-                                 NULL, compound_var->type->size, NULL);
-                        opstack_push(result_var);
+                        compound_var->array_size = element_count;
+                        compound_var->ptr_level = 0;
+                        opstack_push(compound_var);
                     } else {
                         /* Single value: (int){42} - scalar compound literal */
                         compound_var = opstack_pop();
