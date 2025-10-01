@@ -432,6 +432,7 @@ void reg_alloc(void)
                 if (global_insn->rd->ptr_level)
                     GLOBAL_FUNC->stack_size += PTR_SIZE;
                 else if (global_insn->rd->type != TY_int &&
+                         global_insn->rd->type != TY_short &&
                          global_insn->rd->type != TY_char &&
                          global_insn->rd->type != TY_bool) {
                     GLOBAL_FUNC->stack_size +=
@@ -585,6 +586,7 @@ void reg_alloc(void)
                 case OP_allocat:
                     if ((insn->rd->type == TY_void ||
                          insn->rd->type == TY_int ||
+                         insn->rd->type == TY_short ||
                          insn->rd->type == TY_char ||
                          insn->rd->type == TY_bool) &&
                         insn->rd->array_size == 0)

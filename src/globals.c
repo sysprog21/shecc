@@ -54,6 +54,7 @@ type_t *TY_void;
 type_t *TY_char;
 type_t *TY_bool;
 type_t *TY_int;
+type_t *TY_short;
 
 /* Arenas */
 

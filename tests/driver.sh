@@ -400,6 +400,37 @@ declare -a arithmetic_tests=(
 run_expr_tests arithmetic_tests
 expr 6 "111 % 7"
 
+# Category: Overflow Behavior
+begin_category "Overflow Behavior" "Testing integer overflow handling"
+
+try_output 0 "-2147483647" << EOF
+int main()
+{
+    int a = 2147483647;
+    a += 2;
+    printf("%d\n", a);
+    return 0;
+}
+EOF
+
+try_output 0 "-32767" << EOF
+int main() {
+    short a = 32767;
+    a += 2;
+    printf("%d\n", a);
+    return 0;
+}
+EOF
+
+try_output 0 "-127" << EOF
+int main() {
+    char a = 127;
+    a += 2;
+    printf("%d\n", a);
+    return 0;
+}
+EOF
+
 # Category: Comparison Operations
 begin_category "Comparison Operations" "Testing relational and equality operators"
 
@@ -476,6 +507,8 @@ declare -a variable_tests=(
     "10 int var; var = 10; return var;"
     "42 int va; int vb; va = 11; vb = 31; int vc; vc = va + vb; return vc;"
     "50 int v; v = 30; v = 50; return v;"
+    "25 short s; s = 25; return s;"
+    "50 short sa = 20; short sb = 30; short sc = sa + sb; return sc;"
 )
 
 run_items_tests variable_tests
@@ -487,6 +520,14 @@ begin_category "Compound Literals" "Testing C99 compound literal features"
 # Basic struct compound literals (verified working)
 try_ 42 << EOF
 typedef struct { int x; int y; } point_t;
+int main() {
+    point_t p = {42, 100};
+    return p.x;
+}
+EOF
+
+try_ 42 << EOF
+typedef struct { short x; short y; } point_t;
 int main() {
     point_t p = {42, 100};
     return p.x;
@@ -620,12 +661,31 @@ int main() {
 }
 EOF
 
+# Test: Array compound literal assigned to scalar short (non-standard)
+try_ 100 << EOF
+int main() {
+    /* Non-standard: Assigns first element of array to scalar short */
+    short x = (short[]){100, 200, 300};
+    return x;
+}
+EOF
+
 # Test: Array compound literal in arithmetic expression
 try_ 150 << EOF
 int main() {
     int a = 50;
     /* Non-standard: Uses first element (100) in addition */
     int b = a + (int[]){100, 200};
+    return b;
+}
+EOF
+
+# Test: Array compound literal in arithmetic expression
+try_ 150 << EOF
+int main() {
+    short a = 50;
+    /* Non-standard: Uses first element (100) in addition */
+    short b = a + (short[]){100, 200};
     return b;
 }
 EOF
@@ -905,6 +965,17 @@ int test_function() {
 }
 EOF
 
+# Test function with short parameters and return type
+try_ 35 << EOF
+short add_shorts(short a, short b) {
+    return a + b;
+}
+
+int main() {
+    return add_shorts(15, 20);
+}
+EOF
+
 # Test other large values
 try_large 1000 << EOF
 int test_function() {
@@ -998,6 +1069,7 @@ items 3 "int x; int *y; x = 3; y = &x; return y[0];"
 items 5 "int b; int *a; b = 10; a = &b; a[0] = 5; return b;"
 items 2 "int x[2]; int y; x[1] = 2; y = *(x + 1); return y;"
 items 2 "int x; int *y; int z; z = 2; y = &z; x = *y; return x;"
+items 2 "short x; short *y; short z; z = 2; y = &z; x = *y; return x;"
 
 # pointer dereference immediately after declaration
 items 42 "int x; x = 10; int *p; p = &x; p[0] = 42; exit(x);"
@@ -1464,6 +1536,35 @@ int main() {
 }
 EOF
 
+# Test short pointer
+try_ 150 << EOF
+int main() {
+    short value = 150;
+    short *ptr = &value;
+    return *ptr;
+}
+EOF
+
+# Test short pointer arithmetic
+try_ 20 << EOF
+int main() {
+    short arr[3] = {10, 20, 30};
+    short *p = arr;
+    p++;
+    return *p;
+}
+EOF
+
+# Test short pointer difference
+try_ 2 << EOF
+int main() {
+    short data[5] = {1, 2, 3, 4, 5};
+    short *start = data + 1;
+    short *end = data + 3;
+    return end - start;
+}
+EOF
+
 # Category: Function Pointers
 begin_category "Function Pointers" "Testing function pointer declarations and calls"
 
@@ -1522,6 +1623,14 @@ int main() {
     v1 = nth_of(ary, 2);
     v2 = nth_of(ary, 4);
     return v0 + v1 + v2;
+}
+EOF
+
+# Test short array
+try_ 25 << EOF
+int main() {
+    short arr[4] = {10, 15, 20, 25};
+    return arr[3];
 }
 EOF
 
@@ -1986,6 +2095,9 @@ items 4 "int a; a = 2; a <<= 1; return a;"
 items 2 "int a; a = 4; a >>= 1; return a;"
 items 1 "int a; a = 1; a ^= 0; return a;"
 items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; return p[0];"
+items 8 "short s; s = 5; s += 3; return s;"
+items 15 "short s; s = 20; s -= 5; return s;"
+items 24 "short s; s = 6; s *= 4; return s;"
 
 # Category: Sizeof Operator
 begin_category "Sizeof Operator" "Testing sizeof operator on various types"
@@ -1994,16 +2106,19 @@ begin_category "Sizeof Operator" "Testing sizeof operator on various types"
 expr 0 "sizeof(void)";
 expr 1 "sizeof(_Bool)";
 expr 1 "sizeof(char)";
+expr 2 "sizeof(short)";
 expr 4 "sizeof(int)";
 # sizeof pointers
 expr 4 "sizeof(void*)";
 expr 4 "sizeof(_Bool*)";
 expr 4 "sizeof(char*)";
+expr 4 "sizeof(short*)";
 expr 4 "sizeof(int*)";
 # sizeof multi-level pointer
 expr 4 "sizeof(void**)";
 expr 4 "sizeof(_Bool**)";
 expr 4 "sizeof(char**)";
+expr 4 "sizeof(short**)";
 expr 4 "sizeof(int**)";
 # sizeof struct
 try_ 4 << EOF
@@ -2013,6 +2128,16 @@ typedef struct {
 } struct_t;
 int main() { return sizeof(struct_t*); }
 EOF
+
+try_ 6 << EOF
+typedef struct {
+    int x;
+    short y;
+} struct_t;
+
+int main() { return sizeof(struct_t); }
+EOF
+
 # sizeof enum
 try_ 4 << EOF
 typedef enum {
@@ -2027,6 +2152,7 @@ items 4 "int x = 42; return sizeof(x);"
 items 4 "int arr[5]; return sizeof(arr[0]);"
 items 4 "int x = 10; int *ptr = &x; return sizeof(*ptr);"
 items 1 "char c = 'A'; return sizeof(c);"
+items 2 "short s = 100; return sizeof(s);"
 items 4 "int a = 1, b = 2; return sizeof(a + b);"
 
 # sizeof with complex expressions
@@ -4677,6 +4803,17 @@ int main() {
 }
 EOF
 
+try_ 2 << EOF
+typedef union {
+    short s;    /* 2 bytes */
+    char c;     /* 1 byte */
+} size_union_t;
+
+int main() {
+    return sizeof(size_union_t);  /* Returns 2 (size of short) */
+}
+EOF
+
 # Union with different data types
 try_output 0 "Value as int: 1094795585, as char: 65" << EOF
 typedef union {
@@ -4973,6 +5110,17 @@ EOF
 
 # Type Casting Tests
 echo "Testing type casting functionality..."
+
+declare -a cast_tests=(
+    "42 int var; var = (int)42; return var;"
+    "10 int var; var = (short)10; return var;"
+    "5 short s; s = (short)5; return s;"
+    "20 short s; s = (int)20; return s;"
+    "15 short sa = 10; short sb = (short)5; return sa + sb;"
+    "30 int ia = 10; int ib = (int)20; return ia + ib;"
+)
+
+run_items_tests cast_tests
 
 # Basic int to char cast
 try_ 65 << EOF

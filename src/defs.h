@@ -239,6 +239,7 @@ typedef enum {
     TYPE_void = 0,
     TYPE_int,
     TYPE_char,
+    TYPE_short,
     TYPE_struct,
     TYPE_union,
     TYPE_typedef

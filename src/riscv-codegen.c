@@ -95,10 +95,18 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 24;
         return;
     case OP_trunc:
-        elf_offset += 4;
+        if (ph2_ir->src1 == 2)
+            elf_offset += 8;
+        else
+            elf_offset += 4;
         return;
     case OP_sign_ext:
-        elf_offset += 12;
+        /* Decode source size from upper 16 bits */
+        int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
+        if (source_size == 2)
+            elf_offset += 8; /* short extension: 2 instructions */
+        else
+            elf_offset += 12; /* byte extension: 3 instructions */
         return;
     case OP_cast:
         elf_offset += 4;
@@ -233,6 +241,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_read:
         if (ph2_ir->src1 == 1)
             emit(__lb(rd, rs1, 0));
+        else if (ph2_ir->src1 == 2)
+            emit(__lh(rd, rs1, 0));
         else if (ph2_ir->src1 == 4)
             emit(__lw(rd, rs1, 0));
         else
@@ -241,6 +251,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_write:
         if (ph2_ir->dest == 1)
             emit(__sb(rs2, rs1, 0));
+        else if (ph2_ir->dest == 2)
+            emit(__sh(rs2, rs1, 0));
         else if (ph2_ir->dest == 4)
             emit(__sw(rs2, rs1, 0));
         else
@@ -417,24 +429,45 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__xori(rd, rd, 1));
         return;
     case OP_trunc:
-        if (ph2_ir->src1 == 1)
-            rs2 = 0xFF;
-        else if (ph2_ir->src1 == 2)
-            rs2 = 0xFFFF;
-        else if (ph2_ir->src1 == 4)
-            rs2 = 0xFFFFFFFF;
-        else
+        if (ph2_ir->src1 == 1) {
+            emit(__andi(rd, rs1, 0xFF));
+        } else if (ph2_ir->src1 == 2) {
+            /* For short truncation,
+             * use shift operations since 0xFFFF is too large
+             */
+            emit(__slli(rd, rs1, 16)); /* Shift left 16 bits */
+            emit(__srli(rd, rd, 16));  /* Shift right 16 bits logical */
+        } else if (ph2_ir->src1 == 4) {
+            /* No truncation needed for 32-bit values */
+            emit(__add(rd, rs1, __zero));
+        } else {
             fatal("Unsupported truncation operation with invalid target size");
-
-        emit(__andi(rd, rs1, rs2));
+        }
         return;
     case OP_sign_ext:
-        /* TODO: Support sign extension to types other than int */
-        emit(__andi(rd, rs1, 0xFF));
-        emit(__slli(rd, rd, 24));
-        emit(__srai(rd, rd, 24));
-        /* TODO: Consider Zbb extension for improved bit manipulation */
-        /* emit(__sext_b(rd, rs1)); */
+        /* Decode size information:
+         * Lower 16 bits: target size
+         * Upper 16 bits: source size
+         */
+        int target_size = ph2_ir->src1 & 0xFFFF;
+        int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
+
+        /* Calculate shift amount based on target and source sizes */
+        int shift_amount = (target_size - source_size) * 8;
+
+        if (source_size == 2) {
+            /* Sign extend from short to word (16-bit shift)
+             * For 16-bit sign extension, use only shift operations
+             * since 0xFFFF is too large for RISC-V immediate field
+             */
+            emit(__slli(rd, rs1, shift_amount));
+            emit(__srai(rd, rd, shift_amount));
+        } else {
+            /* Fallback for other sizes */
+            emit(__andi(rd, rs1, 0xFF));
+            emit(__slli(rd, rd, shift_amount));
+            emit(__srai(rd, rd, shift_amount));
+        }
         return;
     case OP_cast:
         /* Generic cast operation - for now, just move the value */

@@ -247,8 +247,18 @@ var_t *promote_unchecked(block_t *block,
 {
     var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
     gen_name_to(rd->var_name);
-    add_insn(block, *bb, OP_sign_ext, rd, var, NULL,
-             target_ptr ? PTR_SIZE : target_type->size, NULL);
+    /* Encode both source and target sizes in src1:
+     * Lower 16 bits: target size
+     * Upper 16 bits: source size
+     * This allows codegen to distinguish between different promotion types
+     * without changing IR semantics.
+     */
+    int encoded_size = ((var->type->size) << 16);
+    if (target_ptr)
+        encoded_size |= PTR_SIZE;
+    else
+        encoded_size |= target_type->size;
+    add_insn(block, *bb, OP_sign_ext, rd, var, NULL, encoded_size, NULL);
     return rd;
 }
 
@@ -1598,6 +1608,9 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
                 case TYPE_char:
                     sz = TY_char->size;
                     break;
+                case TYPE_short:
+                    sz = TY_short->size;
+                    break;
                 case TYPE_int:
                     sz = TY_int->size;
                     break;
@@ -1677,6 +1690,9 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                     switch (lvalue.type->base_type) {
                     case TYPE_char:
                         sz = TY_char->size;
+                        break;
+                    case TYPE_short:
+                        sz = TY_short->size;
                         break;
                     case TYPE_int:
                         sz = TY_int->size;
@@ -1980,6 +1996,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
                          NULL, 0, NULL);
             } else if (cast_or_literal_type->base_type == TYPE_int ||
+                       cast_or_literal_type->base_type == TYPE_short ||
                        cast_or_literal_type->base_type == TYPE_char) {
                 /* Handle empty compound literals */
                 if (lex_peek(T_close_curly, NULL)) {
@@ -2266,6 +2283,8 @@ int get_pointer_element_size(var_t *ptr_var)
         switch (ptr_var->type->base_type) {
         case TYPE_char:
             return TY_char->size;
+        case TYPE_short:
+            return TY_short->size;
         case TYPE_int:
             return TY_int->size;
         case TYPE_void:
@@ -2280,6 +2299,8 @@ int get_pointer_element_size(var_t *ptr_var)
         switch (ptr_var->type->base_type) {
         case TYPE_char:
             return TY_char->size;
+        case TYPE_short:
+            return TY_short->size;
         case TYPE_int:
             return TY_int->size;
         case TYPE_void:
@@ -2388,6 +2409,9 @@ void handle_pointer_arithmetic(block_t *parent,
                     case TYPE_char:
                         element_size = 1;
                         break;
+                    case TYPE_short:
+                        element_size = 2;
+                        break;
                     case TYPE_int:
                         element_size = 4;
                         break;
@@ -2405,6 +2429,9 @@ void handle_pointer_arithmetic(block_t *parent,
                     switch (orig_rs1->type->base_type) {
                     case TYPE_char:
                         element_size = 1;
+                        break;
+                    case TYPE_short:
+                        element_size = 2;
                         break;
                     case TYPE_int:
                         element_size = 4;
@@ -2865,6 +2892,9 @@ void read_lvalue(lvalue_t *lvalue,
                     case TYPE_char:
                         lvalue->size = TY_char->size;
                         break;
+                    case TYPE_short:
+                        lvalue->size = TY_short->size;
+                        break;
                     case TYPE_int:
                         lvalue->size = TY_int->size;
                         break;
@@ -3095,6 +3125,9 @@ void read_lvalue(lvalue_t *lvalue,
                 switch (lvalue->type->base_type) {
                 case TYPE_char:
                     increment_size = TY_char->size;
+                    break;
+                case TYPE_short:
+                    increment_size = TY_short->size;
                     break;
                 case TYPE_int:
                     increment_size = TY_int->size;
@@ -3430,6 +3463,9 @@ bool read_body_assignment(char *token,
                 switch (lvalue.type->base_type) {
                 case TYPE_char:
                     increment_size = TY_char->size;
+                    break;
+                case TYPE_short:
+                    increment_size = TY_short->size;
                     break;
                 case TYPE_int:
                     increment_size = TY_int->size;
@@ -4237,7 +4273,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                      */
                     if (expr_result && expr_result->array_size > 0 &&
                         !var->ptr_level && var->array_size == 0 && var->type &&
-                        var->type->base_type == TYPE_int &&
+                        (var->type->base_type == TYPE_int ||
+                         var->type->base_type == TYPE_short) &&
                         expr_result->var_name[0] == '.') {
                         var_t *first_elem = require_var(parent);
                         first_elem->type = var->type;
@@ -4525,7 +4562,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 /* Handle array compound literal to scalar assignment */
                 if (expr_result && expr_result->array_size > 0 &&
                     !var->ptr_level && var->array_size == 0 && var->type &&
-                    var->type->base_type == TYPE_int &&
+                    (var->type->base_type == TYPE_int ||
+                     var->type->base_type == TYPE_short) &&
                     expr_result->var_name[0] == '.') {
                     /* Extract first element from compound literal array */
                     var_t *first_elem = require_var(parent);
@@ -5209,6 +5247,10 @@ void parse_internal(void)
     TY_int = add_named_type("int");
     TY_int->base_type = TYPE_int;
     TY_int->size = 4;
+
+    TY_short = add_named_type("short");
+    TY_short->base_type = TYPE_short;
+    TY_short->size = 2;
 
     /* builtin type _Bool was introduced in C99 specification, it is more
      * well-known as macro type bool, which is defined in <std_bool.h> (in

@@ -265,6 +265,39 @@ int __zero(int rd)
     return __mov_i(__AL, rd, 0);
 }
 
+/* ARM halfword transfer (immediate offset) using special encoding
+ * For halfword: bits[11:8] = imm4H, bits[7:4] = encoding, bits[3:0] = imm4L
+ * imm4H: upper 4 bits of offset
+ * imm4L: lower 4 bits of offset
+ * encoding: 0b1011 for unsigned halfword, 0b1111 for signed halfword
+ */
+int arm_halfword_transfer(arm_cond_t cond,
+                          int l,
+                          arm_reg rn,
+                          arm_reg rd,
+                          int ofs,
+                          int signed_op)
+{
+    int opcode = 16 + 8 + 4 + l;
+
+    if (ofs < 0) {
+        opcode -= 8;
+        ofs = -ofs;
+    }
+
+    if (ofs > 255)
+        error("Halfword offset too large");
+
+    /* Halfword encoding: split offset into 4-bit high and low parts */
+    int imm4H = ((ofs >> 4) & 0xF) << 8;
+    int imm4L = ofs & 0xF;
+
+    /* Encode lower 8 bits: 1011xxxx for unsigned, 1111xxxx for signed */
+    int encoded_ofs = imm4H | 0xB0 | imm4L | (signed_op << 6);
+
+    return arm_encode(cond, opcode, rn, rd, encoded_ofs);
+}
+
 int arm_transfer(arm_cond_t cond,
                  int l,
                  int size,
@@ -300,6 +333,18 @@ int __sw(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 int __sb(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 {
     return arm_transfer(cond, 0, 1, rn, rd, ofs);
+}
+
+/* ARM signed halfword load (LDRSH) */
+int __lh(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
+{
+    return arm_halfword_transfer(cond, 1, rn, rd, ofs, 1);
+}
+
+/* ARM halfword store (STRH) */
+int __sh(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
+{
+    return arm_halfword_transfer(cond, 0, rn, rd, ofs, 0);
 }
 
 int __stmdb(arm_cond_t cond, int w, arm_reg rn, int reg_list)
@@ -371,5 +416,14 @@ int __sxtb(arm_cond_t cond, arm_reg rd, arm_reg rm, int rotation)
         fatal("SXTB rotation must be 0, 8, 16, or 24");
 
     return arm_encode(cond, 106, 0xF, rd,
+                      rm | ((rotation >> 3) << 10) | (0x7 << 4));
+}
+
+int __sxth(arm_cond_t cond, arm_reg rd, arm_reg rm, int rotation)
+{
+    if (rotation != 0 && rotation != 8 && rotation != 16 && rotation != 24)
+        fatal("SXTH rotation must be 0, 8, 16, or 24");
+
+    return arm_encode(cond, 107, 0xF, rd,
                       rm | ((rotation >> 3) << 10) | (0x7 << 4));
 }
