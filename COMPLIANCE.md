@@ -7,7 +7,7 @@ This document tracks compliance gaps and non-standard behaviors.
 ## Implemented Features
 
 ### Core Language
-- Basic types: `int`, `char`, `void`, `_Bool`
+- Basic types: `int`, `short`, `char`, `void`, `_Bool`
 - Structures and unions with nested definitions
 - Enumerations with automatic value assignment
 - Function definitions and declarations
@@ -58,7 +58,6 @@ This document tracks compliance gaps and non-standard behaviors.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `short` | Missing | Only 4-byte integers |
 | `long` | Missing | Only 4-byte integers |
 | `long long` | Missing | No 64-bit integers |
 | `unsigned` | Missing | All integers are signed |

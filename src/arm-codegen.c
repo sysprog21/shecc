@@ -121,7 +121,10 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 24;
         return;
     case OP_trunc:
-        elf_offset += 4;
+        if (ph2_ir->src1 == 2)
+            elf_offset += 8;
+        else
+            elf_offset += 4;
         return;
     case OP_sign_ext:
         elf_offset += 4;
@@ -261,6 +264,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_read:
         if (ph2_ir->src1 == 1)
             emit(__lb(__AL, rd, rn, 0));
+        else if (ph2_ir->src1 == 2)
+            emit(__lh(__AL, rd, rn, 0));
         else if (ph2_ir->src1 == 4)
             emit(__lw(__AL, rd, rn, 0));
         else
@@ -269,6 +274,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_write:
         if (ph2_ir->dest == 1)
             emit(__sb(__AL, rm, rn, 0));
+        else if (ph2_ir->dest == 2)
+            emit(__sh(__AL, rm, rn, 0));
         else if (ph2_ir->dest == 4)
             emit(__sw(__AL, rm, rn, 0));
         else
@@ -432,20 +439,27 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mov_i(__EQ, rd, 1));
         return;
     case OP_trunc:
-        if (rm == 1)
-            rm = 0xFF;
-        else if (rm == 2)
-            rm = 0xFFFF;
-        else if (rm == 4)
-            rm = 0xFFFFFFFF;
-        else
+        if (rm == 1) {
+            emit(__and_i(__AL, rd, rn, 0xFF));
+        } else if (rm == 2) {
+            emit(__sll_amt(__AL, 0, logic_ls, rd, rn, 16));
+            emit(__sll_amt(__AL, 0, logic_rs, rd, rd, 16));
+        } else if (rm == 4) {
+            emit(__mov_r(__AL, rd, rn));
+        } else {
             fatal("Unsupported truncation operation with invalid target size");
-
-        emit(__and_i(__AL, rd, rn, rm));
+        }
         return;
-    case OP_sign_ext:
-        /* TODO: Support sign extension to types other than int */
-        emit(__sxtb(__AL, rd, rn, 0));
+    case OP_sign_ext: {
+        /* Decode source size from upper 16 bits */
+        int source_size = (rm >> 16) & 0xFFFF;
+        if (source_size == 2) {
+            emit(__sxth(__AL, rd, rn, 0));
+        } else {
+            /* For other cases, use byte extension (original behavior) */
+            emit(__sxtb(__AL, rd, rn, 0));
+        }
+    }
         return;
     case OP_cast:
         /* Generic cast operation - for now, just move the value */
