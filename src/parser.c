@@ -26,6 +26,12 @@ int break_exit_idx = 0;
 basic_block_t *continue_bb[MAX_NESTING];
 int continue_pos_idx = 0;
 
+/* Label utilities */
+label_t labels[MAX_LABELS];
+int label_idx = 0;
+basic_block_t *backpatch_bb[MAX_LABELS];
+int backpatch_bb_idx = 0;
+
 /* stack of the operands of 3AC */
 var_t *operand_stack[MAX_OPERAND_STACK_SIZE];
 int operand_stack_idx = 0;
@@ -39,6 +45,26 @@ void parse_array_init(var_t *var,
                       block_t *parent,
                       basic_block_t **bb,
                       bool emit_code);
+
+
+label_t *find_label(char *name)
+{
+    for (int i = 0; i < label_idx; i++) {
+        if (!strcmp(name, labels[i].label_name))
+            return &labels[i];
+    }
+    return NULL;
+}
+
+void add_label(char *name, basic_block_t *bb)
+{
+    if (label_idx > MAX_LABELS - 1)
+        error("Too many labels in function");
+
+    label_t *l = &labels[label_idx++];
+    strncpy(l->label_name, name, MAX_ID_LEN);
+    l->bb = bb;
+}
 
 char *gen_name_to(char *buf)
 {
@@ -994,6 +1020,61 @@ basic_block_t *handle_while_statement(block_t *parent, basic_block_t *bb)
     if (body_)
         bb_connect(body_, cond, NEXT);
 
+    return else_;
+}
+
+basic_block_t *handle_goto_statement(block_t *parent, basic_block_t *bb)
+{
+    /* Since a goto splits the current program into two basic blocks and makes
+     * the subsequent basic block unreachable, this causes problems for later
+     * CFG operations. Therefore, we create a fake if that always executes to
+     * wrap the goto, and connect the unreachable basic block to the else
+     * branch. Finally, return this else block.
+     *
+     * after:
+     * a = b + c;
+     * goto label;
+     * c *= d;
+     *
+     * before:
+     * a = b + c;
+     * if (1)
+     *     goto label;
+     * c *= d;
+     */
+
+    char token[MAX_ID_LEN];
+    if (!lex_peek(T_identifier, token))
+        error("Expected identifier after 'goto'");
+
+    lex_expect(T_identifier);
+    lex_expect(T_semicolon);
+
+    basic_block_t *fake_if = bb_create(parent);
+    bb_connect(bb, fake_if, NEXT);
+    var_t *val = require_var(parent);
+    gen_name_to(val->var_name);
+    val->init_val = 1;
+    add_insn(parent, fake_if, OP_load_constant, val, NULL, NULL, 0, NULL);
+    add_insn(parent, fake_if, OP_branch, NULL, val, NULL, 0, NULL);
+
+    basic_block_t *then_ = bb_create(parent);
+    basic_block_t *else_ = bb_create(parent);
+    bb_connect(fake_if, then_, THEN);
+    bb_connect(fake_if, else_, ELSE);
+
+    add_insn(parent, then_, OP_jump, NULL, NULL, NULL, 0, token);
+    label_t *label = find_label(token);
+    if (label) {
+        label->used = true;
+        bb_connect(then_, label->bb, NEXT);
+        return else_;
+    }
+
+    if (backpatch_bb_idx > MAX_LABELS - 1)
+        error("Too many forward-referenced labels");
+
+    backpatch_bb[backpatch_bb_idx++] = then_;
     return else_;
 }
 
@@ -4169,6 +4250,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         return do_while_end;
     }
 
+    if (lex_accept(T_goto))
+        return handle_goto_statement(parent, bb);
+
     /* empty statement */
     if (lex_accept(T_semicolon))
         return bb;
@@ -4753,6 +4837,21 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         return bb;
     }
 
+    if (lex_peek(T_identifier, token)) {
+        lex_accept(T_identifier);
+        if (lex_accept(T_colon)) {
+            label_t *l = find_label(token);
+            if (l)
+                error("label redefinition");
+
+            basic_block_t *n = bb_create(parent);
+            bb_connect(bb, n, NEXT);
+            add_label(token, n);
+            add_insn(parent, n, OP_label, NULL, NULL, NULL, 0, token);
+            return n;
+        }
+    }
+
     error("Unrecognized statement token");
     return NULL;
 }
@@ -4794,6 +4893,28 @@ void read_func_body(func_t *func)
     basic_block_t *body = read_code_block(func, NULL, NULL, func->bbs);
     if (body)
         bb_connect(body, func->exit, NEXT);
+
+    for (int i = 0; i < backpatch_bb_idx; i++) {
+        basic_block_t *bb = backpatch_bb[i];
+        insn_t *g = bb->insn_list.tail;
+        label_t *label = find_label(g->str);
+        if (!label)
+            error("goto label undefined");
+
+        label->used = true;
+        bb_connect(bb, label->bb, NEXT);
+    }
+
+    for (int i = 0; i < label_idx; i++) {
+        label_t *label = &labels[i];
+        if (label->used)
+            continue;
+
+        printf("Warning: unused label %s\n", label->label_name);
+    }
+
+    backpatch_bb_idx = 0;
+    label_idx = 0;
 }
 
 /* if first token is type */

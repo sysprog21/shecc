@@ -12,7 +12,7 @@
 
 /* Hash table constants */
 #define NUM_DIRECTIVES 11
-#define NUM_KEYWORDS 17
+#define NUM_KEYWORDS 18
 
 /* Token mapping structure for elegant initialization */
 typedef struct {
@@ -85,6 +85,7 @@ void lex_init_keywords()
         {"break", T_break},
         {"default", T_default},
         {"continue", T_continue},
+        {"goto", T_goto},
         {"union", T_union},
         {"const", T_const},
     };
@@ -786,6 +787,8 @@ token_t lex_token_impl(bool aliasing)
                     keyword = T_enum;
             } else if (!memcmp(token_str, "case", 4))
                 keyword = T_case;
+            else if (!memcmp(token_str, "goto", 4))
+                keyword = T_goto;
             break;
 
         case 5: /* 5-letter keywords: while, break, union, const */

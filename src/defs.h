@@ -20,6 +20,7 @@
 #define MAX_LOCALS 1600
 #define MAX_FIELDS 64
 #define MAX_TYPES 256
+#define MAX_LABELS 256
 #define MAX_IR_INSTR 80000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
@@ -179,6 +180,7 @@ typedef enum {
     T_break,
     T_default,
     T_continue,
+    T_goto,
     T_const, /* const qualifier */
     /* C pre-processor directives */
     T_cppd_include,
@@ -270,6 +272,7 @@ typedef enum {
     OP_branch,   /* conditional jump */
     OP_jump,     /* unconditional jump */
     OP_func_ret, /* returned value */
+    OP_label,    /* for goto label */
 
     /* function pointer */
     OP_address_of_func, /* resolve function entry */
@@ -567,6 +570,13 @@ struct ref_block {
  * type, parameters) with SSA-related information (e.g., basic blocks, control
  * flow) to support parsing, analysis, optimization, and code generation.
  */
+
+typedef struct {
+    char label_name[MAX_ID_LEN];
+    basic_block_t *bb;
+    bool used;
+} label_t;
+
 struct func {
     /* Syntatic info */
     var_t return_def;
