@@ -2559,6 +2559,136 @@ int main() {
 }
 EOF
 
+begin_category "Goto statements" "Testing goto and label statements"
+
+# label undeclaration
+try_compile_error << EOF
+int main()
+{
+    goto label;
+}
+EOF
+
+# label redefinition
+try_compile_error << EOF
+int main()
+{
+    goto label;
+label:
+label:
+}
+EOF
+
+# test label namespace
+try_ 1 << EOF
+int main()
+{
+    goto label;
+label:
+    int label = 1;
+    return label;
+}
+EOF
+
+try_ 0 << EOF
+int main() {
+    int x = 0;
+    goto skip;
+    x = 1;
+skip:
+    return x;  /* Should return 0 */
+}
+EOF
+
+# Forward reference
+try_compile_error << EOF
+int main()
+{
+    goto end;
+    return 1;
+end:
+    return 0;
+}
+EOF
+
+# Simple loop
+try_ 10 << EOF
+int main()
+{
+    int vars0;
+
+    vars0 = 0;
+BB1:
+    if (!(vars0 < 10)) goto BB6;
+    vars0++;
+    goto BB1;
+BB6:
+    return vars0;
+}
+EOF
+
+# Complex loop
+ans="0
+0012345678910123456789201234567893012345678940123456789
+1
+0012345678910123456789201234567893012345678940123456789
+3
+0012345678910123456789201234567893012345678940123456789
+4
+0012345678910123456789201234567893012345678940123456789
+5
+0012345678910123456789201234567893012345678940123456789
+6
+0012345678910123456789201234567893012345678940123456789
+7
+0012345678910123456789201234567893012345678940123456789
+8
+0012345678910123456789201234567893012345678940123456789
+9
+0012345678910123456789201234567893012345678940123456789"
+try_output 0 "$ans" << EOF
+int main()
+{
+    int vars0;
+    int vars1;
+    int vars2;
+    int vars3;
+
+    vars0 = 0;
+BB1:
+    if (!(vars0 < 10)) goto BB47;
+    if (vars0 == 2) goto BB45;
+    printf("%d\n", vars0);
+    vars1 = 0;
+BB10:
+    if (!(vars1 < 10)) goto BB27;
+    if (vars1 == 5) goto BB27;
+    printf("%d", vars1);
+    vars2 = 0;
+BB19:
+    if (!(vars2 < 10)) goto BB25;
+    printf("%d", vars2);
+    vars2++;
+    goto BB19;
+BB25:
+    vars1++;
+    goto BB10;
+BB27:
+    printf("\n");
+    vars3 = 5;
+BB29:
+    if (vars3 == 2) goto BB29;
+    if (vars3 == 3) goto BB45;
+    vars3--;
+    if (vars3 > 0) goto BB29;
+BB45:
+    vars0++;
+    goto BB1;
+BB47:
+    return 0;
+}
+EOF
+
 # Category: Function-like Macros
 begin_category "Function-like Macros" "Testing function-like macros and variadic macros"
 
