@@ -374,6 +374,9 @@ void arena_free(arena_t *arena)
  */
 int hashmap_hash_index(int size, char *key)
 {
+    if (!key)
+        return 0;
+
     int hash = 0x811c9dc5;
 
     for (; *key; key++) {
@@ -415,10 +418,10 @@ hashmap_t *hashmap_create(int cap)
 
     map->size = 0;
     map->cap = round_up_pow2(cap);
-    map->buckets = calloc(map->cap, sizeof(hashmap_node_t *));
+    map->table = calloc(map->cap, sizeof(hashmap_node_t));
 
-    if (!map->buckets) {
-        printf("Failed to allocate buckets in hashmap_t\n");
+    if (!map->table) {
+        printf("Failed to allocate table in hashmap_t\n");
         free(map);
         return NULL;
     }
@@ -426,37 +429,6 @@ hashmap_t *hashmap_create(int cap)
     return map;
 }
 
-/* Create a hashmap node on heap.
- * @key: The key of node. Must not be NULL.
- * @val: The value of node. Could be NULL.
- *
- * Return: The pointer of created node.
- */
-hashmap_node_t *hashmap_node_new(char *key, void *val)
-{
-    if (!key)
-        return NULL;
-
-    const int len = strlen(key);
-    hashmap_node_t *node = arena_alloc(HASHMAP_ARENA, sizeof(hashmap_node_t));
-
-
-    if (!node) {
-        printf("Failed to allocate hashmap_node_t\n");
-        return NULL;
-    }
-
-    node->key = arena_alloc(HASHMAP_ARENA, len + 1);
-    if (!node->key) {
-        printf("Failed to allocate hashmap_node_t key with size %d\n", len + 1);
-        return NULL;
-    }
-
-    strcpy(node->key, key);
-    node->val = val;
-    node->next = NULL;
-    return node;
-}
 
 void hashmap_rehash(hashmap_t *map)
 {
@@ -464,41 +436,43 @@ void hashmap_rehash(hashmap_t *map)
         return;
 
     int old_cap = map->cap;
-    hashmap_node_t **old_buckets = map->buckets;
+    hashmap_node_t *old_table = map->table;
 
     map->cap <<= 1;
-    map->buckets = calloc(map->cap, sizeof(hashmap_node_t *));
+    map->table = calloc(map->cap, sizeof(hashmap_node_t));
 
-    if (!map->buckets) {
-        printf("Failed to allocate new buckets in hashmap_t\n");
-        map->buckets = old_buckets;
+    if (!map->table) {
+        printf("Failed to allocate new table in hashmap_t\n");
+        map->table = old_table;
         map->cap = old_cap;
         return;
     }
 
+    map->size = 0;
+
     for (int i = 0; i < old_cap; i++) {
-        hashmap_node_t *cur = old_buckets[i];
-        hashmap_node_t *next;
-        hashmap_node_t *target_cur;
+        if (old_table[i].occupied) {
+            char *key = old_table[i].key;
+            void *val = old_table[i].val;
 
-        while (cur) {
-            next = cur->next;
-            cur->next = NULL;
-            int index = hashmap_hash_index(map->cap, cur->key);
-            target_cur = map->buckets[index];
+            int index = hashmap_hash_index(map->cap, key);
+            int start = index;
 
-            if (!target_cur) {
-                map->buckets[index] = cur;
-            } else {
-                cur->next = target_cur;
-                map->buckets[index] = cur;
+            while (map->table[index].occupied) {
+                index = (index + 1) & (map->cap - 1);
+                if (index == start) {
+                    printf("Error: New table is full during rehash\n");
+                    abort();
+                }
             }
 
-            cur = next;
+            map->table[index].key = key;
+            map->table[index].val = val;
+            map->table[index].occupied = true;
+            map->size++;
         }
     }
-
-    free(old_buckets);
+    free(old_table);
 }
 
 /* Put a key-value pair into given hashmap.
@@ -514,22 +488,30 @@ void hashmap_put(hashmap_t *map, char *key, void *val)
     if (!map)
         return;
 
-    int index = hashmap_hash_index(map->cap, key);
-    hashmap_node_t *cur = map->buckets[index],
-                   *new_node = hashmap_node_new(key, val);
+    /* Check if size of map exceeds load factor 50% (or 1/2 of capacity) */
+    if ((map->cap >> 1) <= map->size)
+        hashmap_rehash(map);
 
-    if (!cur) {
-        map->buckets[index] = new_node;
-    } else {
-        while (cur->next)
-            cur = cur->next;
-        cur->next = new_node;
+    int index = hashmap_hash_index(map->cap, key);
+    int start = index;
+
+    while (map->table[index].occupied) {
+        if (!strcmp(map->table[index].key, key)) {
+            map->table[index].val = val;
+            return;
+        }
+
+        index = (index + 1) & (map->cap - 1);
+        if (index == start) {
+            printf("Error: Hashmap is full\n");
+            abort();
+        }
     }
 
+    map->table[index].key = arena_strdup(HASHMAP_ARENA, key);
+    map->table[index].val = val;
+    map->table[index].occupied = true;
     map->size++;
-    /* Check if size of map exceeds load factor 75% (or 3/4 of capacity) */
-    if ((map->cap >> 2) + (map->cap >> 1) <= map->size)
-        hashmap_rehash(map);
 }
 
 /* Get key-value pair node from hashmap from given key.
@@ -545,10 +527,16 @@ hashmap_node_t *hashmap_get_node(hashmap_t *map, char *key)
         return NULL;
 
     int index = hashmap_hash_index(map->cap, key);
+    int start = index;
 
-    for (hashmap_node_t *cur = map->buckets[index]; cur; cur = cur->next)
-        if (!strcmp(cur->key, key))
-            return cur;
+    while (map->table[index].occupied) {
+        if (!strcmp(map->table[index].key, key))
+            return &map->table[index];
+
+        index = (index + 1) & (map->cap - 1);
+        if (index == start)
+            return NULL;
+    }
 
     return NULL;
 }
@@ -586,7 +574,7 @@ void hashmap_free(hashmap_t *map)
     if (!map)
         return;
 
-    free(map->buckets);
+    free(map->table);
     free(map);
 }
 
