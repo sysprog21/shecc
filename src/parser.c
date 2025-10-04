@@ -1287,6 +1287,12 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 {
     /* Preserve typedef pointer level - don't reset if already inherited */
     vd->init_val = 0;
+    if (is_param) {
+        /* However, if the parsed variable is a function parameter,
+         * reset its pointer level to zero.
+         */
+        vd->ptr_level = 0;
+    }
 
     while (lex_accept(T_asterisk)) {
         vd->ptr_level++;
@@ -4917,6 +4923,49 @@ void read_func_body(func_t *func)
     label_idx = 0;
 }
 
+void print_ptr_level(int level)
+{
+    while (level > 0) {
+        printf("*");
+        level--;
+    }
+}
+
+void print_func_decl(func_t *func, const char *prefix, bool newline)
+{
+    if (prefix)
+        printf("%s", prefix);
+
+    if (func->return_def.is_const_qualified)
+        printf("const ");
+    printf("%s ", func->return_def.type->type_name);
+    print_ptr_level(func->return_def.ptr_level -
+                    func->return_def.type->ptr_level);
+    printf("%s(", func->return_def.var_name);
+
+    for (int i = 0; i < func->num_params; i++) {
+        var_t *var = &func->param_defs[i];
+
+        if (var->is_const_qualified)
+            printf("const ");
+        printf("%s ", var->type->type_name);
+
+        print_ptr_level(var->ptr_level - var->type->ptr_level);
+
+        printf("%s", var->var_name);
+
+        if (i != func->num_params - 1)
+            printf(", ");
+    }
+
+    if (func->va_args)
+        printf(", ...");
+    printf(")");
+
+    if (newline)
+        printf("\n");
+}
+
 /* if first token is type */
 void read_global_decl(block_t *block, bool is_const)
 {
@@ -4929,11 +4978,68 @@ void read_global_decl(block_t *block, bool is_const)
 
     if (lex_peek(T_open_bracket, NULL)) {
         /* function */
-        func_t *func = add_func(var->var_name, false);
+        func_t *func = find_func(var->var_name);
+        func_t func_tmp;
+        bool check_decl = false;
+
+        if (func) {
+            memcpy(&func_tmp, func, sizeof(func_t));
+            check_decl = true;
+        } else
+            func = add_func(var->var_name, false);
+
         memcpy(&func->return_def, var, sizeof(var_t));
         block->locals.size--;
-
         read_parameter_list_decl(func, 0);
+
+        if (check_decl) {
+            /* Validate whether the previous declaration and the current
+             * one differ.
+             */
+            if ((func->return_def.type != func_tmp.return_def.type) ||
+                (func->return_def.ptr_level != func_tmp.return_def.ptr_level) ||
+                (func->return_def.is_const_qualified !=
+                 func_tmp.return_def.is_const_qualified)) {
+                printf("Error: conflicting types for the function %s.\n",
+                       func->return_def.var_name);
+                print_func_decl(&func_tmp, "before: ", true);
+                print_func_decl(func, "after: ", true);
+                abort();
+            }
+
+            if (func->num_params != func_tmp.num_params) {
+                printf(
+                    "Error: confilcting number of arguments for the function "
+                    "%s.\n",
+                    func->return_def.var_name);
+                print_func_decl(&func_tmp, "before: ", true);
+                print_func_decl(func, "after: ", true);
+                abort();
+            }
+
+            for (int i = 0; i < func->num_params; i++) {
+                var_t *func_var = &func->param_defs[i];
+                var_t *func_tmp_var = &func_tmp.param_defs[i];
+                if ((func_var->type != func_tmp_var->type) ||
+                    (func_var->ptr_level != func_tmp_var->ptr_level) ||
+                    (func_var->is_const_qualified !=
+                     func_tmp_var->is_const_qualified)) {
+                    printf("Error: confilcting types for the function %s.\n",
+                           func->return_def.var_name);
+                    print_func_decl(&func_tmp, "before: ", true);
+                    print_func_decl(func, "after: ", true);
+                    abort();
+                }
+            }
+
+            if (func->va_args != func_tmp.va_args) {
+                printf("Error: conflicting types for the function %s.\n",
+                       func->return_def.var_name);
+                print_func_decl(&func_tmp, "before: ", true);
+                print_func_decl(func, "after: ", true);
+                abort();
+            }
+        }
 
         if (lex_peek(T_open_curly, NULL)) {
             read_func_body(func);
