@@ -5690,6 +5690,123 @@ int main() {
 }
 EOF
 
+begin_category "Function parsing" "Forward declaration and implementation"
+
+# Normal case
+try_output 0 "Hello" << EOF
+void func(char *ptr);
+
+void func(char *ptr)
+{
+    while (*ptr) {
+        printf("%c", *ptr);
+        ptr++;
+    }
+}
+
+int main()
+{
+    func("Hello");
+    return 0;
+}
+EOF
+
+# Incorrect function returning type
+try_compile_error << EOF
+void func(void);
+
+int **func(void)
+{
+    return 3;
+}
+
+int main()
+{
+    func();
+    return 0;
+}
+EOF
+
+# Incorrect number of parameters
+try_compile_error << EOF
+void func(void *a);
+
+void func(void *a, int x)
+{
+    return 3;
+}
+
+int main()
+{
+    func();
+    return 0;
+}
+EOF
+
+# Conflicting parameter types
+try_compile_error << EOF
+void func(void *a, char x);
+
+void func(void *a, int x)
+{
+    return 3;
+}
+
+int main()
+{
+    func();
+    return 0;
+}
+EOF
+
+# Conflicting parameter types (variadic parameters)
+try_compile_error << EOF
+void func(void *a);
+
+void func(void *a, ...)
+{
+    return 3;
+}
+
+int main()
+{
+    func();
+    return 0;
+}
+EOF
+
+# Incorrect function returning type (const)
+try_compile_error << EOF
+void *func(int *a, char x);
+
+const void *func(int *a, char x)
+{
+    return 3;
+}
+
+int main()
+{
+    func();
+    return 0;
+}
+EOF
+
+# Conflicting parameter types (const)
+try_compile_error << EOF
+void func(int *a, char x);
+
+void func(const int *a, char x)
+{
+    return 3;
+}
+
+int main()
+{
+    func();
+    return 0;
+}
+EOF
+
 # Test Results Summary
 
 echo ""
