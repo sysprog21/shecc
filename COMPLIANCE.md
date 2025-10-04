@@ -17,6 +17,7 @@ This document tracks compliance gaps and non-standard behaviors.
 
 ### Control Flow
 - `if`/`else` statements
+- `goto` and label statements
 - `while`, `do-while`, `for` loops
 - `switch`/`case`/`default` statements
 - `break`, `continue`, `return` statements
@@ -96,7 +97,6 @@ This document tracks compliance gaps and non-standard behaviors.
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| `goto` and labels | Missing | No arbitrary jumps |
 | Designated initializers | Missing | No `.field = value` syntax |
 | Compound literals | Partial | Limited support |
 | Flexible array members | Missing | No `[]` at struct end |
@@ -115,6 +115,7 @@ This document tracks compliance gaps and non-standard behaviors.
 - Escape sequence: `\e` for ESC character
 - `void*` arithmetic (treated as `char*`)
 - `sizeof(void)` returns 0 (should be error)
+- Computed goto
 
 ### Implementation-Specific
 - Array compound literals in scalar context use first element

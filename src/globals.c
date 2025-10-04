@@ -1481,6 +1481,14 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
             printf("br %%%s, %s, %s", rs1->var_name, bb->then_->bb_label_name,
                    bb->else_->bb_label_name);
             break;
+        case OP_jump:
+            print_indent(1);
+            printf("jmp %s", bb->next->bb_label_name);
+            break;
+        case OP_label:
+            print_indent(0);
+            printf("%s:", insn->str);
+            break;
         case OP_push:
             print_indent(1);
             printf("push %%%s", rs1->var_name);

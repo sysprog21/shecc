@@ -929,6 +929,82 @@ void unwind_phi(void)
     }
 }
 
+bool is_dominate(basic_block_t *pred, basic_block_t *succ)
+{
+    int i;
+    bool found = false;
+    for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
+        if (!pred->dom_next[i])
+            break;
+        if (pred->dom_next[i] == succ) {
+            found = true;
+            break;
+        }
+        found |= is_dominate(pred->dom_next[i], succ);
+    }
+
+    return found;
+}
+
+/*
+ * For any variable, the basic block that defines it must dominate all the
+ * basic blocks where it is used; otherwise, it is an invalid cross-block
+ * initialization.
+ */
+void bb_check_var_cross_init(func_t *func, basic_block_t *bb)
+{
+    UNUSED(func);
+
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+        if (insn->opcode != OP_allocat)
+            continue;
+
+        var_t *var = insn->rd;
+        ref_block_t *ref;
+        for (ref = var->ref_block_list.head; ref; ref = ref->next) {
+            if (ref->bb == bb)
+                continue;
+
+            if (!is_dominate(bb, ref->bb))
+                printf("Warning: Variable '%s' cross-initialized\n",
+                       var->var_name);
+        }
+    }
+}
+
+/**
+ * A variable's initialization lives in a basic block that does not dominate
+ * all of its uses, so control flow can reach a use without first passing
+ * through its initialization (i.e., a possibly-uninitialized use).
+ *
+ * For Example:
+ * // Jumps directly to 'label', skipping the declaration below
+ * goto label;
+ * if (1) {
+ *     // This line is never executed when 'goto' is taken
+ *     int x;
+ * label:
+ *     // Uses 'x' after its declaration was bypassed
+ *     x = 5;
+ * }
+ */
+void check_var_cross_init()
+{
+    bb_traversal_args_t *args = arena_alloc_traversal_args();
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        /* Skip function declarations without bodies */
+        if (!func->bbs)
+            continue;
+
+        args->func = func;
+        args->bb = func->bbs;
+
+        func->visited++;
+        args->postorder_cb = bb_check_var_cross_init;
+        bb_forward_traversal(args);
+    }
+}
+
 #ifdef __SHECC__
 #else
 void bb_dump_connection(FILE *fd,
@@ -1112,6 +1188,12 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
                 sprintf(str, "<BRANCH %s<SUB>%d</SUB>>", insn->rs1->var_name,
                         insn->rs1->subscript);
                 break;
+            case OP_jump:
+                sprintf(str, "<JUMP>");
+                break;
+            case OP_label:
+                sprintf(str, "<LABEL>");
+                break;
             case OP_push:
                 sprintf(str, "<PUSH %s<SUB>%d</SUB>>", insn->rs1->var_name,
                         insn->rs1->subscript);
@@ -1281,6 +1363,9 @@ void ssa_build(void)
     build_df();
 
     solve_globals();
+
+    check_var_cross_init();
+
     solve_phi_insertion();
     solve_phi_params();
 
