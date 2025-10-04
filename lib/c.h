@@ -14,6 +14,41 @@
 #define true 1
 #define false 0
 
+#define INT_MAX 0x7fffffff
+#define INT_MIN 0x80000000
+
+#if defined(__arm__)
+#define __SIZEOF_POINTER__ 4
+#define __syscall_exit 1
+#define __syscall_read 3
+#define __syscall_write 4
+#define __syscall_close 6
+#define __syscall_open 5
+#define __syscall_mmap2 192
+#define __syscall_munmap 91
+
+#elif defined(__riscv)
+#define __SIZEOF_POINTER__ 4
+#define __syscall_exit 93
+#define __syscall_read 63
+#define __syscall_write 64
+#define __syscall_close 57
+#define __syscall_open 1024
+#define __syscall_openat 56
+#define __syscall_mmap2 222
+#define __syscall_munmap 215
+
+#else /* Only Arm32 and RV32 are supported */
+#error "Unsupported architecture"
+#endif
+
+/* Non-portable: Assume page size is 4KiB */
+#define PAGESIZE 4096
+
+/* Minimum alignment for all memory allocations. */
+#define MIN_ALIGNMENT 8
+#define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
+
 /* va_list support for variadic functions */
 typedef int *va_list;
 

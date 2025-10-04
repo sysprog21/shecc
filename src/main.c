@@ -86,8 +86,11 @@ int main(int argc, char *argv[])
     global_init();
 
     /* include libc */
-    if (libc)
-        libc_generate();
+    if (libc) {
+        libc_decl();
+        if (!dynlink)
+            libc_impl();
+    }
 
     /* load and parse source code into IR */
     parse(in);
