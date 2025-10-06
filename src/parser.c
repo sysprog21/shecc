@@ -46,9 +46,9 @@ void parse_array_init(var_t *var,
                       basic_block_t **bb,
                       bool emit_code);
 void parse_array_compound_literal(var_t *var,
-                               block_t *parent,
-                               basic_block_t **bb,
-                               bool emit_code);
+                                  block_t *parent,
+                                  basic_block_t **bb,
+                                  bool emit_code);
 
 label_t *find_label(char *name)
 {
@@ -1287,9 +1287,9 @@ void parse_array_init(var_t *var,
 }
 
 void parse_array_compound_literal(var_t *var,
-                               block_t *parent,
-                               basic_block_t **bb,
-                               bool emit_code)
+                                  block_t *parent,
+                                  basic_block_t **bb,
+                                  bool emit_code)
 {
     int elem_size = var->type->size;
     int count = 0;
@@ -1307,8 +1307,8 @@ void parse_array_compound_literal(var_t *var,
                 target.type = var->type;
                 target.ptr_level = 0;
                 var_t *store_val = resize_var(parent, bb, value, &target);
-                var_t *elem_addr = compute_element_address(
-                    parent, bb, var, count, elem_size);
+                var_t *elem_addr =
+                    compute_element_address(parent, bb, var, count, elem_size);
                 add_insn(parent, *bb, OP_write, NULL, elem_addr, store_val,
                          elem_size, NULL);
             }
@@ -1321,6 +1321,35 @@ void parse_array_compound_literal(var_t *var,
     }
     lex_expect(T_close_curly);
     var->array_size = count;
+}
+static bool is_array_literal_temp(var_t *var)
+{
+    return var && var->array_size > 0 && var->var_name[0] == '.';
+}
+
+static var_t *scalarize_array_literal(block_t *parent,
+                                      basic_block_t **bb,
+                                      var_t *array_var,
+                                      type_t *hint_type)
+{
+    if (!is_array_literal_temp(array_var))
+        return array_var;
+
+    type_t *elem_type = hint_type ? hint_type : array_var->type;
+    if (!elem_type)
+        elem_type = TY_int;
+
+    int elem_size = elem_type->size;
+    if (elem_size <= 0)
+        elem_size = TY_int->size;
+
+    var_t *scalar = require_typed_var(parent, elem_type);
+    scalar->ptr_level = 0;
+    gen_name_to(scalar->var_name);
+    scalar->init_val = array_var->init_val;
+
+    add_insn(parent, *bb, OP_read, scalar, array_var, NULL, elem_size, NULL);
+    return scalar;
 }
 void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 {
@@ -1614,7 +1643,16 @@ void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
         read_ternary_operation(parent, bb);
 
         param = opstack_pop();
-
+        if (func) {
+            if (param_num < func->num_params) {
+                var_t *target = &func->param_defs[param_num];
+                if (!target->ptr_level && !target->array_size)
+                    param = scalarize_array_literal(parent, bb, param,
+                                                    target->type);
+            } else if (func->va_args) {
+                param = scalarize_array_literal(parent, bb, param, TY_int);
+            }
+        }
         /* Handle parameter type conversion for direct calls.
          * Indirect calls currently don't provide function instance.
          */
@@ -2857,6 +2895,16 @@ void read_expr(block_t *parent, basic_block_t **bb)
             continue; /* skip normal processing */
         }
 
+        bool rs1_is_ptr_like = rs1 && (rs1->ptr_level || rs1->array_size);
+        bool rs2_is_ptr_like = rs2 && (rs2->ptr_level || rs2->array_size);
+
+        if (is_array_literal_temp(rs1) && !rs2_is_ptr_like)
+            rs1 = scalarize_array_literal(parent, bb, rs1,
+                                          rs2 && rs2->type ? rs2->type : NULL);
+
+        if (is_array_literal_temp(rs2) && !rs1_is_ptr_like)
+            rs2 = scalarize_array_literal(parent, bb, rs2,
+                                          rs1 && rs1->type ? rs1->type : NULL);
         /* Constant folding for binary operations */
         if (rs1 && rs2 && rs1->init_val && !rs1->ptr_level && !rs1->is_global &&
             rs2->init_val && !rs2->ptr_level && !rs2->is_global) {
@@ -3477,7 +3525,7 @@ void finalize_logical(opcode_t op,
 
 void read_ternary_operation(block_t *parent, basic_block_t **bb)
 {
-    var_t *vd, *rs1;
+    var_t *vd;
 
     if (!lex_accept(T_question))
         return;
@@ -3502,17 +3550,39 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
         abort();
     }
 
-    rs1 = opstack_pop();
-    vd = require_var(parent);
-    gen_name_to(vd->var_name);
-    add_insn(parent, then_, OP_assign, vd, rs1, NULL, 0, NULL);
+    var_t *true_val = opstack_pop();
 
     /* false branch */
     read_expr(parent, &else_);
     bb_connect(*bb, else_, ELSE);
+    var_t *false_val = opstack_pop();
+    bool true_array = is_array_literal_temp(true_val);
+    bool false_array = is_array_literal_temp(false_val);
 
-    rs1 = opstack_pop();
-    add_insn(parent, else_, OP_assign, vd, rs1, NULL, 0, NULL);
+    if (true_array && !false_array)
+        true_val = scalarize_array_literal(parent, &then_, true_val,
+                                           false_val ? false_val->type : NULL);
+
+    if (false_array && !true_array)
+        false_val = scalarize_array_literal(parent, &else_, false_val,
+                                            true_val ? true_val->type : NULL);
+
+    vd = require_var(parent);
+    gen_name_to(vd->var_name);
+    add_insn(parent, then_, OP_assign, vd, true_val, NULL, 0, NULL);
+    add_insn(parent, else_, OP_assign, vd, false_val, NULL, 0, NULL);
+
+    var_t *array_ref = NULL;
+    if (is_array_literal_temp(true_val))
+        array_ref = true_val;
+    else if (is_array_literal_temp(false_val))
+        array_ref = false_val;
+
+    if (array_ref) {
+        vd->array_size = array_ref->array_size;
+        vd->init_val = array_ref->init_val;
+        vd->type = array_ref->type;
+    }
 
     vd->is_ternary_ret = true;
     opstack_push(vd);
@@ -3661,6 +3731,11 @@ bool read_body_assignment(char *token,
 
                 read_expr(parent, bb);
 
+                var_t *rhs_val = opstack_pop();
+                if (!lvalue.ptr_level && !lvalue.is_reference)
+                    rhs_val = scalarize_array_literal(parent, bb, rhs_val,
+                                                      lvalue.type);
+                opstack_push(rhs_val);
                 vd = require_var(parent);
                 vd->init_val = increment_size;
                 gen_name_to(vd->var_name);
@@ -4403,27 +4478,12 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
                     var_t *expr_result = opstack_pop();
 
-                    /* Handle array compound literal to scalar assignment.
-                     * When assigning array compound literals to scalar
-                     * variables, use the first element value rather than array
-                     * address.
-                     */
-                    if (expr_result && expr_result->array_size > 0 &&
-                        !var->ptr_level && var->array_size == 0 && var->type &&
-                        (var->type->base_type == TYPE_int ||
-                         var->type->base_type == TYPE_short) &&
-                        expr_result->var_name[0] == '.') {
-                        var_t *first_elem = require_var(parent);
-                        first_elem->type = var->type;
-                        gen_name_to(first_elem->var_name);
+                    var_t *rhs = expr_result;
+                    if (!var->ptr_level && var->array_size == 0)
+                        rhs =
+                            scalarize_array_literal(parent, bb, rhs, var->type);
 
-                        /* Extract first element from compound literal array */
-                        add_insn(parent, bb, OP_read, first_elem, expr_result,
-                                 NULL, var->type->size, NULL);
-                        expr_result = first_elem;
-                    }
-
-                    rs1 = resize_var(parent, &bb, expr_result, var);
+                    rs1 = resize_var(parent, &bb, rhs, var);
                     add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
                 }
             }
@@ -4515,8 +4575,13 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     } else {
                         read_expr(parent, &bb);
                         read_ternary_operation(parent, &bb);
+                        var_t *expr_result = opstack_pop();
+                        var_t *rhs = expr_result;
+                        if (!nv->ptr_level && nv->array_size == 0)
+                            rhs = scalarize_array_literal(parent, bb, rhs,
+                                                          nv->type);
 
-                        rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                        rs1 = resize_var(parent, &bb, rhs, nv);
                         add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
                     }
                 }
