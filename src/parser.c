@@ -1319,15 +1319,16 @@ void parse_array_compound_literal(var_t *var,
                 break;
         }
     }
+
     lex_expect(T_close_curly);
     var->array_size = count;
 }
-static bool is_array_literal_temp(var_t *var)
+bool is_array_literal_temp(var_t *var)
 {
     return var && var->array_size > 0 && var->var_name[0] == '.';
 }
 
-static var_t *scalarize_array_literal(block_t *parent,
+var_t *scalarize_array_literal(block_t *parent,
                                       basic_block_t **bb,
                                       var_t *array_var,
                                       type_t *hint_type)
