@@ -45,7 +45,10 @@ void parse_array_init(var_t *var,
                       block_t *parent,
                       basic_block_t **bb,
                       bool emit_code);
-
+void parse_array_compound_literal(var_t *var,
+                               block_t *parent,
+                               basic_block_t **bb,
+                               bool emit_code);
 
 label_t *find_label(char *name)
 {
@@ -1283,6 +1286,42 @@ void parse_array_init(var_t *var,
     }
 }
 
+void parse_array_compound_literal(var_t *var,
+                               block_t *parent,
+                               basic_block_t **bb,
+                               bool emit_code)
+{
+    int elem_size = var->type->size;
+    int count = 0;
+    var->array_size = 0;
+    var->init_val = 0;
+    if (!lex_peek(T_close_curly, NULL)) {
+        for (;;) {
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            var_t *value = opstack_pop();
+            if (count == 0)
+                var->init_val = value->init_val;
+            if (emit_code) {
+                var_t target = {0};
+                target.type = var->type;
+                target.ptr_level = 0;
+                var_t *store_val = resize_var(parent, bb, value, &target);
+                var_t *elem_addr = compute_element_address(
+                    parent, bb, var, count, elem_size);
+                add_insn(parent, *bb, OP_write, NULL, elem_addr, store_val,
+                         elem_size, NULL);
+            }
+            count++;
+            if (!lex_accept(T_comma))
+                break;
+            if (lex_peek(T_close_curly, NULL))
+                break;
+        }
+    }
+    lex_expect(T_close_curly);
+    var->array_size = count;
+}
 void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 {
     /* Preserve typedef pointer level - don't reset if already inherited */
@@ -2017,9 +2056,16 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             bool is_array_literal = (cast_ptr_level == -1);
             if (is_array_literal)
                 cast_ptr_level = 0; /* Reset for normal processing */
-
+            bool consumed_close_brace = false;
             /* Check if this is a pointer compound literal */
-            if (cast_ptr_level > 0) {
+            if (is_array_literal) {
+                compound_var->array_size = 0;
+                add_insn(parent, *bb, OP_allocat, compound_var, NULL, NULL, 0,
+                         NULL);
+                parse_array_compound_literal(compound_var, parent, bb, true);
+                opstack_push(compound_var);
+                consumed_close_brace = true;
+            } else if (cast_ptr_level > 0) {
                 /* Pointer compound literal: (int*){&x} */
                 compound_var->ptr_level = cast_ptr_level;
 
@@ -2187,7 +2233,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 }
             }
 
-            lex_expect(T_close_curly);
+            if (!consumed_close_brace)
+                lex_expect(T_close_curly);
         } else {
             /* Regular parenthesized expression */
             read_expr(parent, bb);
