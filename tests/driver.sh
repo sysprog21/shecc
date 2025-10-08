@@ -724,6 +724,28 @@ int main() {
 }
 EOF
 
+# Test: Array compound literal decay to pointer in initializer
+try_ 0 << EOF
+int main(void) {
+    int *arr = (int[]){1, 2, 3, 4, 5};
+    return arr[0] != 1 || arr[4] != 5;
+}
+EOF
+
+# Test: Passing array compound literal as pointer argument
+try_ 0 << EOF
+int sum(int *p, int n) {
+    int s = 0;
+    for (int i = 0; i < n; i++)
+        s += p[i];
+    return s;
+}
+int main(void) {
+    int s = sum((int[]){1, 2, 3, 0, 0}, 3);
+    return s != 6;
+}
+EOF
+
 # Test: Complex expression with compound literals
 try_ 77 << EOF
 int main() {
