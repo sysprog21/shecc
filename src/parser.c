@@ -1334,9 +1334,9 @@ bool is_compound_literal_array_temp(var_t *var)
 }
 
 var_t *scalarize_array_literal(block_t *parent,
-                                      basic_block_t **bb,
-                                      var_t *array_var,
-                                      type_t *hint_type)
+                               basic_block_t **bb,
+                               var_t *array_var,
+                               type_t *hint_type)
 {
     if (!is_compound_literal_array_temp(array_var))
         return array_var;
@@ -4486,8 +4486,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
                     var_t *rhs = expr_result;
                     if (!var->ptr_level && var->array_size == 0)
-                        rhs =
-                            scalarize_array_literal(parent, bb, rhs, var->type);
+                        rhs = scalarize_array_literal(parent, &bb, rhs,
+                                                      var->type);
 
                     rs1 = resize_var(parent, &bb, rhs, var);
                     add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
@@ -4584,7 +4584,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                         var_t *expr_result = opstack_pop();
                         var_t *rhs = expr_result;
                         if (!nv->ptr_level && nv->array_size == 0)
-                            rhs = scalarize_array_literal(parent, bb, rhs,
+                            rhs = scalarize_array_literal(parent, &bb, rhs,
                                                           nv->type);
 
                         rs1 = resize_var(parent, &bb, rhs, nv);
