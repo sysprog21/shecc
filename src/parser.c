@@ -1327,7 +1327,7 @@ void parse_array_compound_literal(var_t *var,
  * Parsing assigns these temporaries synthetic names via gen_name_to (".tN")
  * and they keep array metadata without pointer indirection.
  */
-bool is_compound_literal_array_temp(var_t *var)
+bool is_array_literal_placeholder(var_t *var)
 {
     return var && var->array_size > 0 && !var->ptr_level &&
            var->var_name[0] == '.';
@@ -1338,7 +1338,7 @@ var_t *scalarize_array_literal(block_t *parent,
                                var_t *array_var,
                                type_t *hint_type)
 {
-    if (!is_compound_literal_array_temp(array_var))
+    if (!is_array_literal_placeholder(array_var))
         return array_var;
 
     type_t *elem_type = hint_type ? hint_type : array_var->type;
@@ -2904,11 +2904,11 @@ void read_expr(block_t *parent, basic_block_t **bb)
         bool rs1_is_ptr_like = rs1 && (rs1->ptr_level || rs1->array_size);
         bool rs2_is_ptr_like = rs2 && (rs2->ptr_level || rs2->array_size);
 
-        if (is_compound_literal_array_temp(rs1) && !rs2_is_ptr_like)
+        if (is_array_literal_placeholder(rs1) && !rs2_is_ptr_like)
             rs1 = scalarize_array_literal(parent, bb, rs1,
                                           rs2 && rs2->type ? rs2->type : NULL);
 
-        if (is_compound_literal_array_temp(rs2) && !rs1_is_ptr_like)
+        if (is_array_literal_placeholder(rs2) && !rs1_is_ptr_like)
             rs2 = scalarize_array_literal(parent, bb, rs2,
                                           rs1 && rs1->type ? rs1->type : NULL);
         /* Constant folding for binary operations */
@@ -3562,8 +3562,8 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     read_expr(parent, &else_);
     bb_connect(*bb, else_, ELSE);
     var_t *false_val = opstack_pop();
-    bool true_array = is_compound_literal_array_temp(true_val);
-    bool false_array = is_compound_literal_array_temp(false_val);
+    bool true_array = is_array_literal_placeholder(true_val);
+    bool false_array = is_array_literal_placeholder(false_val);
 
     if (true_array && !false_array)
         true_val = scalarize_array_literal(parent, &then_, true_val,
@@ -3579,9 +3579,9 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     add_insn(parent, else_, OP_assign, vd, false_val, NULL, 0, NULL);
 
     var_t *array_ref = NULL;
-    if (is_compound_literal_array_temp(true_val))
+    if (is_array_literal_placeholder(true_val))
         array_ref = true_val;
-    else if (is_compound_literal_array_temp(false_val))
+    else if (is_array_literal_placeholder(false_val))
         array_ref = false_val;
 
     if (array_ref) {
