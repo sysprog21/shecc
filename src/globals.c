@@ -1395,7 +1395,8 @@ void error(char *msg)
     start_idx = offset + 1;
 
     for (offset = 0;
-         offset < MAX_SOURCE && SOURCE->elements[start_idx + offset] != '\n';
+         offset < MAX_SOURCE && (start_idx + offset) < SOURCE->size &&
+         SOURCE->elements[start_idx + offset] != '\n';
          offset++) {
         diagnostic[i++] = SOURCE->elements[start_idx + offset];
     }
