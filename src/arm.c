@@ -357,6 +357,16 @@ int __ldm(arm_cond_t cond, int w, arm_reg rn, int reg_list)
     return arm_encode(cond, arm_ldm + (0x2 << 6) + (w << 1), rn, 0, reg_list);
 }
 
+int __push_reg(arm_cond_t cond, arm_reg rt)
+{
+    return arm_encode(cond, (0x5 << 4) | 0x2, 0xd, rt, 0x4);
+}
+
+int __pop_word(arm_cond_t cond, arm_reg rt)
+{
+    return arm_encode(cond, (0x4 << 4) | 0x9, 0xd, rt, 0x4);
+}
+
 int __b(arm_cond_t cond, int ofs)
 {
     int o = (ofs - 8) >> 2;

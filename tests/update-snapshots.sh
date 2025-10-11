@@ -4,20 +4,29 @@ set -u
 
 readonly SHECC="$PWD/out/shecc"
 
-if [ "$#" != 1 ]; then
-    echo "Usage: $0 <architecture>"
+if [ "$#" != 2 ]; then
+    echo "Usage: $0 <architecture> <dynlink>"
     exit 1
 fi
 
 readonly ARCH="$1"
+readonly DYNLINK="$2"
+
+if [ "$DYNLINK" = "1" ]; then
+    readonly SHECC_CFLAGS="--dynlink"
+    readonly MODE="dynamic"
+else
+    readonly SHECC_CFLAGS=""
+    readonly MODE="static"
+fi
 
 function update_snapshot() {
     local source="$1"
-    local dest="tests/snapshots/$(basename $source .c)-$ARCH.json"
+    local dest="tests/snapshots/$(basename $source .c)-$ARCH-$MODE.json"
     local temp_exe=$(mktemp)
     local temp_json=$(mktemp --suffix .json)
 
-    $SHECC --dump-ir -o $temp_exe $source &>/dev/null
+    $SHECC $SHECC_CFLAGS --dump-ir -o $temp_exe $source &>/dev/null
     dot -Tdot_json -o $temp_json CFG.dot
     sed -i -E "/0x[0-9a-f]+/d" $temp_json
     jq -S -c '.edges |= sort_by(._gvid) | .objects |= sort_by(._gvid) |
