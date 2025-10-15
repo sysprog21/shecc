@@ -388,6 +388,39 @@ void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
         var->consumed = insn->idx + offset;
 }
 
+/* Return whether extra arguments are pushed onto stack. */
+bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
+{
+    int num_of_args = 0;
+    int stack_args = 0;
+    while (insn && insn->opcode == OP_push) {
+        num_of_args += 1;
+        insn = insn->next;
+    }
+
+    if (insn && insn->opcode == OP_call) {
+        func_t *func = find_func(insn->str);
+        if (func->bbs)
+            return false;
+    }
+
+    if (num_of_args <= MAX_ARGS_IN_REG)
+        return false;
+
+    insn = insn->prev;
+    stack_args = num_of_args - MAX_ARGS_IN_REG;
+    while (stack_args) {
+        load_var(bb, insn->rs1, MAX_ARGS_IN_REG - 1);
+        ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
+        ir->src0 = MAX_ARGS_IN_REG - 1;
+        ir->src1 = (stack_args - 1) * 4;
+        stack_args -= 1;
+        insn = insn->prev;
+    }
+    REGS[MAX_ARGS_IN_REG - 1].var = NULL;
+    return true;
+}
+
 void reg_alloc(void)
 {
     /* TODO: Add proper .bss and .data section support for uninitialized /
@@ -556,7 +589,8 @@ void reg_alloc(void)
         }
 
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            bool is_pushing_args = false;
+            bool is_pushing_args = false, handle_abi = false,
+                 args_on_stack = false;
             int args = 0;
 
             bb->visited++;
@@ -717,6 +751,11 @@ void reg_alloc(void)
                         ir = bb_add_ph2_ir(bb, OP_address_of_func);
                         ir->src0 = src0;
                         strcpy(ir->func_name, insn->rs2->var_name);
+                        if (dynlink) {
+                            func_t *target_fn = find_func(ir->func_name);
+                            if (target_fn)
+                                target_fn->is_used = true;
+                        }
                     } else {
                         /* FIXME: Register content becomes stale after store
                          * operation. Current workaround causes redundant
@@ -752,6 +791,13 @@ void reg_alloc(void)
                         spill_alive(bb, insn);
                         is_pushing_args = true;
                     }
+                    if (dynlink && !handle_abi) {
+                        args_on_stack = abi_lower_call_args(bb, insn);
+                        handle_abi = true;
+                    }
+
+                    if (dynlink && args_on_stack && args >= MAX_ARGS_IN_REG)
+                        break;
 
                     src0 = prepare_operand(bb, insn->rs1, -1);
                     ir = bb_add_ph2_ir(bb, OP_assign);
@@ -765,11 +811,15 @@ void reg_alloc(void)
                     if (!callee_func->num_params)
                         spill_alive(bb, insn);
 
+                    if (dynlink)
+                        callee_func->is_used = true;
+
                     ir = bb_add_ph2_ir(bb, OP_call);
                     strcpy(ir->func_name, insn->str);
 
                     is_pushing_args = false;
                     args = 0;
+                    handle_abi = false;
 
                     for (int i = 0; i < REG_CNT; i++)
                         REGS[i].var = NULL;
@@ -787,6 +837,7 @@ void reg_alloc(void)
 
                     is_pushing_args = false;
                     args = 0;
+                    handle_abi = false;
                     break;
                 case OP_func_ret:
                     dest = prepare_dest(bb, insn->rd, -1, -1);
