@@ -47,8 +47,8 @@ int align_size(int i)
 
 bool check_live_out(basic_block_t *bb, var_t *var)
 {
-    for (int i = 0; i < bb->live_out_idx; i++) {
-        if (bb->live_out[i] == var)
+    for (int i = 0; i < bb->live_out.size; i++) {
+        if (bb->live_out.elements[i] == var)
             return true;
     }
     return false;
