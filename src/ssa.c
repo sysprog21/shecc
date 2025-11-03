@@ -21,6 +21,43 @@
 /* Dead store elimination window size */
 #define OVERWRITE_WINDOW 3
 
+void var_list_ensure_capacity(var_list_t *list, int min_capacity)
+{
+    if (list->capacity >= min_capacity)
+        return;
+
+    int new_capacity = list->capacity ? list->capacity : HOST_PTR_SIZE;
+
+    while (new_capacity < min_capacity)
+        new_capacity <<= 1;
+
+    var_t **new_elements = arena_alloc(BB_ARENA, new_capacity * HOST_PTR_SIZE);
+
+    if (list->elements)
+        memcpy(new_elements, list->elements, list->size * HOST_PTR_SIZE);
+
+    list->elements = new_elements;
+    list->capacity = new_capacity;
+}
+
+void var_list_add_var(var_list_t *list, var_t *var)
+{
+    for (int i = 0; i < list->size; i++) {
+        if (list->elements[i] == var)
+            return;
+    }
+
+    var_list_ensure_capacity(list, list->size + 1);
+    list->elements[list->size++] = var;
+}
+
+void var_list_assign_array(var_list_t *list, var_t **data, int count)
+{
+    var_list_ensure_capacity(list, count);
+    memcpy(list->elements, data, count * HOST_PTR_SIZE);
+    list->size = count;
+}
+
 /* cfront does not accept structure as an argument, pass pointer */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
@@ -484,8 +521,8 @@ void use_chain_build(void)
 
 bool var_check_killed(var_t *var, basic_block_t *bb)
 {
-    for (int i = 0; i < bb->live_kill_idx; i++) {
-        if (bb->live_kill[i] == var)
+    for (int i = 0; i < bb->live_kill.size; i++) {
+        if (bb->live_kill.elements[i] == var)
             return true;
     }
     return false;
@@ -493,17 +530,7 @@ bool var_check_killed(var_t *var, basic_block_t *bb)
 
 void bb_add_killed_var(basic_block_t *bb, var_t *var)
 {
-    bool found = false;
-    for (int i = 0; i < bb->live_kill_idx; i++) {
-        if (bb->live_kill[i] == var) {
-            found = true;
-            break;
-        }
-    }
-    if (found)
-        return;
-
-    bb->live_kill[bb->live_kill_idx++] = var;
+    var_list_add_var(&bb->live_kill, var);
 }
 
 void var_add_killed_bb(var_t *var, basic_block_t *bb)
@@ -2475,7 +2502,7 @@ void build_reversed_rpo(void)
 void bb_reset_live_kill_idx(func_t *func, basic_block_t *bb)
 {
     UNUSED(func);
-    bb->live_kill_idx = 0;
+    bb->live_kill.size = 0;
 }
 
 void add_live_gen(basic_block_t *bb, var_t *var);
@@ -2486,8 +2513,8 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
 {
     UNUSED(func);
 
-    /* Reset live_kill index */
-    bb->live_kill_idx = 0;
+    /* Reset live_kill list */
+    bb->live_kill.size = 0;
 
     /* Solve locals */
     int i = 0;
@@ -2514,11 +2541,7 @@ void add_live_gen(basic_block_t *bb, var_t *var)
     if (var->is_global)
         return;
 
-    for (int i = 0; i < bb->live_gen_idx; i++) {
-        if (bb->live_gen[i] == var)
-            return;
-    }
-    bb->live_gen[bb->live_gen_idx++] = var;
+    var_list_add_var(&bb->live_gen, var);
 }
 
 void update_consumed(insn_t *insn, var_t *var)
@@ -2553,51 +2576,49 @@ void bb_solve_locals(func_t *func, basic_block_t *bb)
 
 void add_live_in(basic_block_t *bb, var_t *var)
 {
-    for (int i = 0; i < bb->live_in_idx; i++) {
-        if (bb->live_in[i] == var)
-            return;
-    }
-    bb->live_in[bb->live_in_idx++] = var;
+    var_list_add_var(&bb->live_in, var);
 }
 
 void compute_live_in(basic_block_t *bb)
 {
-    bb->live_in_idx = 0;
+    bb->live_in.size = 0;
 
-    for (int i = 0; i < bb->live_out_idx; i++) {
-        if (var_check_killed(bb->live_out[i], bb))
+    for (int i = 0; i < bb->live_out.size; i++) {
+        var_t *var = bb->live_out.elements[i];
+        if (var_check_killed(var, bb))
             continue;
-        add_live_in(bb, bb->live_out[i]);
+        add_live_in(bb, var);
     }
-    for (int i = 0; i < bb->live_gen_idx; i++)
-        add_live_in(bb, bb->live_gen[i]);
+    for (int i = 0; i < bb->live_gen.size; i++)
+        add_live_in(bb, bb->live_gen.elements[i]);
 }
 
 int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
 {
     /* Early exit for empty live_in */
-    if (bb->live_in_idx == 0)
+    if (bb->live_in.size == 0)
         return live_out_idx;
 
     /* Optimize for common case of small sets */
     if (live_out_idx < 16) {
         /* For small sets, simple linear search is fast enough */
-        for (int i = 0; i < bb->live_in_idx; i++) {
+        for (int i = 0; i < bb->live_in.size; i++) {
             bool found = false;
+            var_t *var = bb->live_in.elements[i];
             for (int j = 0; j < live_out_idx; j++) {
-                if (live_out[j] == bb->live_in[i]) {
+                if (live_out[j] == var) {
                     found = true;
                     break;
                 }
             }
             if (!found && live_out_idx < MAX_ANALYSIS_STACK_SIZE)
-                live_out[live_out_idx++] = bb->live_in[i];
+                live_out[live_out_idx++] = var;
         }
     } else {
         /* For larger sets, check bounds and use optimized loop */
-        for (int i = 0; i < bb->live_in_idx; i++) {
+        for (int i = 0; i < bb->live_in.size; i++) {
             bool found = false;
-            var_t *var = bb->live_in[i];
+            var_t *var = bb->live_in.elements[i];
             /* Unroll inner loop for better performance */
             int j;
             for (j = 0; j + 3 < live_out_idx; j += 4) {
@@ -2643,9 +2664,8 @@ bool recompute_live_out(basic_block_t *bb)
     }
 
     /* Quick check: if sizes differ, sets must be different */
-    if (bb->live_out_idx != live_out_idx) {
-        memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
-        bb->live_out_idx = live_out_idx;
+    if (bb->live_out.size != live_out_idx) {
+        var_list_assign_array(&bb->live_out, live_out, live_out_idx);
         return true;
     }
 
@@ -2654,15 +2674,14 @@ bool recompute_live_out(basic_block_t *bb)
     if (live_out_idx > 0) {
         /* Quick check first element */
         bool first_found = false;
-        for (int j = 0; j < bb->live_out_idx; j++) {
-            if (live_out[0] == bb->live_out[j]) {
+        for (int j = 0; j < bb->live_out.size; j++) {
+            if (live_out[0] == bb->live_out.elements[j]) {
                 first_found = true;
                 break;
             }
         }
         if (!first_found) {
-            memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
-            bb->live_out_idx = live_out_idx;
+            var_list_assign_array(&bb->live_out, live_out, live_out_idx);
             return true;
         }
     }
@@ -2670,15 +2689,14 @@ bool recompute_live_out(basic_block_t *bb)
     /* Full comparison */
     for (int i = 0; i < live_out_idx; i++) {
         int same = 0;
-        for (int j = 0; j < bb->live_out_idx; j++) {
-            if (live_out[i] == bb->live_out[j]) {
+        for (int j = 0; j < bb->live_out.size; j++) {
+            if (live_out[i] == bb->live_out.elements[j]) {
                 same = 1;
                 break;
             }
         }
         if (!same) {
-            memcpy(bb->live_out, live_out, HOST_PTR_SIZE * live_out_idx);
-            bb->live_out_idx = live_out_idx;
+            var_list_assign_array(&bb->live_out, live_out, live_out_idx);
             return true;
         }
     }

@@ -535,14 +535,10 @@ struct basic_block {
     struct basic_block *r_idom;
     struct basic_block *rpo_next;
     struct basic_block *rpo_r_next;
-    var_t *live_gen[MAX_ANALYSIS_STACK_SIZE];
-    int live_gen_idx;
-    var_t *live_kill[MAX_ANALYSIS_STACK_SIZE];
-    int live_kill_idx;
-    var_t *live_in[MAX_ANALYSIS_STACK_SIZE];
-    int live_in_idx;
-    var_t *live_out[MAX_ANALYSIS_STACK_SIZE];
-    int live_out_idx;
+    var_list_t live_gen;
+    var_list_t live_kill;
+    var_list_t live_in;
+    var_list_t live_out;
     int rpo;
     int rpo_r;
     struct basic_block *DF[64];
