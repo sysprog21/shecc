@@ -91,7 +91,7 @@ $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
 	chmod +x $@ ; $(PRINTF) "Running $@ ...\n"
 	$(Q)$(TARGET_EXEC) $@ && $(call pass)
 
-check: check-stage0 check-stage2
+check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2
 
 check-stage0: $(OUT)/$(STAGE0) $(TESTBINS) tests/driver.sh
 	$(VECHO) "  TEST STAGE 0\n"
@@ -117,6 +117,21 @@ check-snapshot: $(OUT)/$(STAGE0) tests/check-snapshots.sh
 	$(VECHO) "Checking snapshot for %s (DYNLINK=%s)\n" $(ARCH) $(DYNLINK)
 	tests/check-snapshots.sh $(ARCH) $(DYNLINK)
 	$(VECHO) "  OK\n"
+
+# TODO: Add an ABI conformance test suite for the RISC-V architecture
+check-abi-stage0: $(OUT)/$(STAGE0)
+	$(Q)if [ "$(ARCH)" = "arm" ]; then \
+		tests/$(ARCH)-abi.sh 0 $(DYNLINK); \
+	else \
+		echo "Skip ABI compliance validation"; \
+	fi
+
+check-abi-stage2: $(OUT)/$(STAGE2)
+	$(Q)if [ "$(ARCH)" = "arm" ]; then \
+		tests/$(ARCH)-abi.sh 2 $(DYNLINK); \
+	else \
+		echo "Skip ABI compliance validation"; \
+	fi
 
 update-snapshots: tests/update-snapshots.sh
 	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
