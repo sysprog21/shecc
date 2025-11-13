@@ -6,7 +6,6 @@
  */
 
 /* Translate IR to target machine code */
-
 #include "defs.h"
 #include "globals.c"
 #include "riscv.c"
@@ -100,7 +99,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         else
             elf_offset += 4;
         return;
-    case OP_sign_ext:
+    case OP_sign_ext: {
         /* Decode source size from upper 16 bits */
         int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
         if (source_size == 2)
@@ -108,6 +107,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         else
             elf_offset += 12; /* byte extension: 3 instructions */
         return;
+    }
     case OP_cast:
         elf_offset += 4;
         return;
@@ -447,7 +447,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             fatal("Unsupported truncation operation with invalid target size");
         }
         return;
-    case OP_sign_ext:
+    case OP_sign_ext: {
         /* Decode size information:
          * Lower 16 bits: target size
          * Upper 16 bits: source size
@@ -472,6 +472,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__srai(rd, rd, shift_amount));
         }
         return;
+    }
     case OP_cast:
         /* Generic cast operation - for now, just move the value */
         emit(__addi(rd, rs1, 0));

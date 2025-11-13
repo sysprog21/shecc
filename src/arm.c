@@ -104,7 +104,7 @@ arm_cond_t arm_get_cond(opcode_t op)
     case OP_leq:
         return __LE;
     default:
-        error("Unsupported condition IR opcode");
+        fatal("Unsupported condition IR opcode");
     }
     return __AL;
 }
@@ -113,7 +113,7 @@ int arm_extract_bits(int imm, int i_start, int i_end, int d_start, int d_end)
 {
     if (((d_end - d_start) != (i_end - i_start)) || (i_start > i_end) ||
         (d_start > d_end))
-        error("Invalid bit copy");
+        fatal("Invalid bit copy");
 
     int v = imm >> i_start;
     v &= ((2 << (i_end - i_start)) - 1);
@@ -143,7 +143,7 @@ int __mov(arm_cond_t cond, int io, int opcode, int s, int rn, int rd, int op2)
         }
         if (op2 > 255)
             /* value spans more than 8 bits */
-            error("Unable to represent value");
+            fatal("Unable to represent value");
     }
     return arm_encode(cond, s + (opcode << 1) + (io << 5), rn, rd,
                       (shift << 8) + (op2 & 255));
@@ -286,7 +286,7 @@ int arm_halfword_transfer(arm_cond_t cond,
     }
 
     if (ofs > 255)
-        error("Halfword offset too large");
+        fatal("Halfword offset too large");
 
     /* Halfword encoding: split offset into 4-bit high and low parts */
     int imm4H = ((ofs >> 4) & 0xF) << 8;
