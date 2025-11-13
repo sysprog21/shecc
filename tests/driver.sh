@@ -5342,14 +5342,14 @@ EOF
 # String literal and escape coverage (additional)
 try_output 0 "AZ" << 'EOF'
 int main() {
-    printf("%s", "\\x41Z"); /* hex escape then normal char */
+    printf("%s", "\x41Z"); /* hex escape then normal char */
     return 0;
 }
 EOF
 
 try_output 0 "AZ" << 'EOF'
 int main() {
-    printf("%s", "A\\132"); /* octal escape for 'Z' */
+    printf("%s", "A\132"); /* octal escape for 'Z' */
     return 0;
 }
 EOF

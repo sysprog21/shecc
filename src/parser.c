@@ -4,7 +4,6 @@
  * shecc is freely redistributable under the BSD 2 clause license. See the
  * file "LICENSE" for information on usage and redistribution of this file.
  */
-
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +36,9 @@ var_t *operand_stack[MAX_OPERAND_STACK_SIZE];
 int operand_stack_idx = 0;
 
 /* Forward declarations */
+source_location_t *cur_token_loc();
+source_location_t *next_token_loc();
+
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
 void perform_side_effect(block_t *parent, basic_block_t *bb);
 void read_inner_var_decl(var_t *vd, bool anon, bool is_param);
@@ -59,7 +61,7 @@ label_t *find_label(char *name)
 void add_label(char *name, basic_block_t *bb)
 {
     if (label_idx > MAX_LABELS - 1)
-        error("Too many labels in function");
+        error_at("Too many labels in function", cur_token_loc());
 
     label_t *l = &labels[label_idx++];
     strncpy(l->label_name, name, MAX_ID_LEN);
@@ -102,7 +104,7 @@ var_t *require_var(block_t *blk)
 var_t *require_typed_var(block_t *blk, type_t *type)
 {
     if (!type)
-        error("Type must not be NULL");
+        error_at("Type must not be NULL", cur_token_loc());
 
     var_t *var = require_var(blk);
     var->type = type;
@@ -119,7 +121,7 @@ var_t *require_typed_ptr_var(block_t *blk, type_t *type, int ptr)
 var_t *require_ref_var(block_t *blk, type_t *type, int ptr)
 {
     if (!type)
-        error("Cannot reference variable from NULL type");
+        error_at("Cannot reference variable from NULL type", cur_token_loc());
 
     var_t *var = require_typed_var(blk, type);
     var->ptr_level = ptr + 1;
@@ -129,7 +131,7 @@ var_t *require_ref_var(block_t *blk, type_t *type, int ptr)
 var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
 {
     if (!type)
-        error("Cannot dereference variable from NULL type");
+        error_at("Cannot dereference variable from NULL type", cur_token_loc());
 
     /* Allowing integer dereferencing */
     if (!ptr && type->base_type != TYPE_struct &&
@@ -137,7 +139,8 @@ var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
         return require_var(blk);
 
     if (!ptr)
-        error("Cannot dereference from non-pointer typed variable");
+        error_at("Cannot dereference from non-pointer typed variable",
+                 cur_token_loc());
 
     var_t *var = require_typed_var(blk, type);
     var->ptr_level = ptr - 1;
@@ -196,6 +199,9 @@ int get_operator_prio(opcode_t op)
     case OP_gt:
     case OP_geq:
         return 10;
+    case OP_lshift:
+    case OP_rshift:
+        return 11;
     case OP_add:
     case OP_sub:
         return 12;
@@ -344,6 +350,7 @@ var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
     return from;
 }
 
+/* FIXME: Deprecated */
 int read_numeric_constant(char buffer[])
 {
     int i = 0;
@@ -380,341 +387,6 @@ int read_numeric_constant(char buffer[])
             value = value * 10 + buffer[i++] - '0';
     }
     return value;
-}
-
-int read_constant_expr_operand(void)
-{
-    char buffer[MAX_ID_LEN];
-    int value;
-
-    if (lex_peek(T_numeric, buffer)) {
-        lex_expect(T_numeric);
-        return read_numeric_constant(buffer);
-    }
-
-    if (lex_accept(T_open_bracket)) {
-        value = read_constant_expr_operand();
-        lex_expect(T_close_bracket);
-        return value;
-    }
-
-    if (lex_peek(T_identifier, buffer) && !strcmp(buffer, "defined")) {
-        char lookup_alias[MAX_TOKEN_LEN];
-
-        lex_expect(T_identifier); /* defined */
-        lex_expect_internal(T_open_bracket, 0);
-        lex_ident(T_identifier, lookup_alias);
-        lex_expect(T_close_bracket);
-
-        return find_alias(lookup_alias) ? 1 : 0;
-    }
-
-    error("Unexpected token while evaluating constant");
-    return -1;
-}
-
-int read_constant_infix_expr(int precedence)
-{
-    int lhs, rhs;
-
-    /* Evaluate unary expression first */
-    opcode_t op = get_operator();
-    int current_precedence = get_unary_operator_prio(op);
-    if (current_precedence != 0 && current_precedence >= precedence) {
-        lhs = read_constant_infix_expr(current_precedence);
-
-        switch (op) {
-        case OP_add:
-            break;
-        case OP_sub:
-            lhs = -lhs;
-            break;
-        case OP_bit_not:
-            lhs = ~lhs;
-            break;
-        case OP_log_not:
-            lhs = !lhs;
-            break;
-        default:
-            error("Unexpected unary token while evaluating constant");
-        }
-    } else {
-        lhs = read_constant_expr_operand();
-    }
-
-    while (true) {
-        op = get_operator();
-        current_precedence = get_operator_prio(op);
-
-        if (current_precedence == 0 || current_precedence <= precedence) {
-            break;
-        }
-
-        rhs = read_constant_infix_expr(current_precedence);
-
-        switch (op) {
-        case OP_add:
-            lhs += rhs;
-            break;
-        case OP_sub:
-            lhs -= rhs;
-            break;
-        case OP_mul:
-            lhs *= rhs;
-            break;
-        case OP_div:
-            lhs /= rhs;
-            break;
-        case OP_bit_and:
-            lhs &= rhs;
-            break;
-        case OP_bit_or:
-            lhs |= rhs;
-            break;
-        case OP_bit_xor:
-            lhs ^= rhs;
-            break;
-        case OP_lshift:
-            lhs <<= rhs;
-            break;
-        case OP_rshift:
-            lhs >>= rhs;
-            break;
-        case OP_gt:
-            lhs = lhs > rhs;
-            break;
-        case OP_geq:
-            lhs = lhs >= rhs;
-            break;
-        case OP_lt:
-            lhs = lhs < rhs;
-            break;
-        case OP_leq:
-            lhs = lhs <= rhs;
-            break;
-        case OP_eq:
-            lhs = lhs == rhs;
-            break;
-        case OP_neq:
-            lhs = lhs != rhs;
-            break;
-        case OP_log_and:
-            lhs = lhs && rhs;
-            break;
-        case OP_log_or:
-            lhs = lhs || rhs;
-            break;
-        default:
-            error("Unexpected infix token while evaluating constant");
-        }
-
-        op = get_operator();
-    }
-
-    return lhs;
-}
-
-int read_constant_expr(void)
-{
-    return read_constant_infix_expr(0);
-}
-
-/* Skips lines where preprocessor match is false, this will stop once next
- * token is either 'T_cppd_elif', 'T_cppd_else' or 'cppd_endif'.
- */
-void cppd_control_flow_skip_lines(void)
-{
-    while (!lex_peek(T_cppd_elif, NULL) && !lex_peek(T_cppd_else, NULL) &&
-           !lex_peek(T_cppd_endif, NULL)) {
-        next_token = lex_token();
-    }
-    skip_whitespace();
-}
-
-void check_def(char *alias, bool expected)
-{
-    if ((find_alias(alias) != NULL) == expected)
-        preproc_match = true;
-}
-
-void read_defined_macro(void)
-{
-    char lookup_alias[MAX_TOKEN_LEN];
-
-    lex_expect(T_identifier); /* defined */
-    lex_expect_internal(T_open_bracket, 0);
-    lex_ident(T_identifier, lookup_alias);
-    lex_expect(T_close_bracket);
-
-    check_def(lookup_alias, true);
-}
-
-/* read preprocessor directive at each potential positions: e.g., global
- * statement / body statement
- */
-bool read_preproc_directive(void)
-{
-    char token[MAX_ID_LEN];
-
-    if (lex_peek(T_cppd_include, token)) {
-        lex_expect(T_cppd_include);
-
-        /* Basic #define syntax validation */
-        if (lex_peek(T_string, NULL)) {
-            /* #define "header.h" */
-            lex_expect(T_string);
-        } else {
-            /* #define <stdlib.h> */
-            lex_expect(T_lt);
-
-            while (!lex_peek(T_gt, NULL)) {
-                next_token = lex_token();
-            }
-
-            lex_expect(T_gt);
-        }
-
-        return true;
-    }
-    if (lex_accept(T_cppd_define)) {
-        char alias[MAX_VAR_LEN];
-        char value[MAX_VAR_LEN];
-
-        lex_ident_internal(T_identifier, alias, false);
-
-        if (lex_peek(T_numeric, value)) {
-            lex_expect(T_numeric);
-            add_alias(alias, value);
-        } else if (lex_peek(T_string, value)) {
-            lex_expect(T_string);
-            add_alias(alias, value);
-        } else if (lex_peek(T_identifier, value)) {
-            lex_expect(T_identifier);
-            add_alias(alias, value);
-        } else if (lex_accept(T_open_bracket)) { /* function-like macro */
-            macro_t *macro = add_macro(alias);
-
-            skip_newline = false;
-            while (lex_peek(T_identifier, alias)) {
-                lex_expect(T_identifier);
-                strcpy(macro->param_defs[macro->num_param_defs++].var_name,
-                       intern_string(alias));
-                lex_accept(T_comma);
-            }
-            if (lex_accept(T_elipsis))
-                macro->is_variadic = true;
-
-            macro->start_source_idx = SOURCE->size;
-            skip_macro_body();
-        } else {
-            /* Empty alias, may be dummy alias serves as include guard */
-            value[0] = 0;
-            add_alias(alias, value);
-        }
-
-        return true;
-    }
-    if (lex_peek(T_cppd_undef, token)) {
-        char alias[MAX_VAR_LEN];
-
-        lex_expect_internal(T_cppd_undef, false);
-        lex_peek(T_identifier, alias);
-        lex_expect(T_identifier);
-
-        remove_alias(alias);
-        remove_macro(alias);
-        return true;
-    }
-    if (lex_peek(T_cppd_error, NULL)) {
-        int i = 0;
-        char error_diagnostic[MAX_LINE_LEN];
-
-        do {
-            error_diagnostic[i++] = next_char;
-        } while (read_char(false) != '\n');
-        error_diagnostic[i] = 0;
-
-        error(error_diagnostic);
-    }
-    if (lex_accept(T_cppd_if)) {
-        preproc_match = read_constant_expr() != 0;
-
-        if (preproc_match) {
-            skip_whitespace();
-        } else {
-            cppd_control_flow_skip_lines();
-        }
-
-        return true;
-    }
-    if (lex_accept(T_cppd_elif)) {
-        if (preproc_match) {
-            while (!lex_peek(T_cppd_endif, NULL)) {
-                next_token = lex_token();
-            }
-            return true;
-        }
-
-        preproc_match = read_constant_expr() != 0;
-
-        if (preproc_match) {
-            skip_whitespace();
-        } else {
-            cppd_control_flow_skip_lines();
-        }
-
-        return true;
-    }
-    if (lex_accept(T_cppd_else)) {
-        /* reach here has 2 possible cases:
-         * 1. reach #ifdef preprocessor directive
-         * 2. conditional expression in #elif is false
-         */
-        if (!preproc_match) {
-            skip_whitespace();
-            return true;
-        }
-
-        cppd_control_flow_skip_lines();
-        return true;
-    }
-    if (lex_accept(T_cppd_endif)) {
-        preproc_match = false;
-        skip_whitespace();
-        return true;
-    }
-    if (lex_accept_internal(T_cppd_ifdef, false)) {
-        preproc_match = false;
-        lex_ident(T_identifier, token);
-        check_def(token, true);
-
-        if (preproc_match) {
-            skip_whitespace();
-            return true;
-        }
-
-        cppd_control_flow_skip_lines();
-        return true;
-    }
-    if (lex_accept_internal(T_cppd_ifndef, false)) {
-        preproc_match = false;
-        lex_ident(T_identifier, token);
-        check_def(token, false);
-
-        if (preproc_match) {
-            skip_whitespace();
-            return true;
-        }
-
-        cppd_control_flow_skip_lines();
-        return true;
-    }
-    if (lex_accept_internal(T_cppd_pragma, false)) {
-        lex_expect(T_identifier);
-        return true;
-    }
-
-    return false;
 }
 
 void read_parameter_list_decl(func_t *func, bool anon);
@@ -783,12 +455,13 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         val->init_val = num_val;
         add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
     } else if (lex_peek(T_char, NULL)) {
-        char chtok[5];
+        char chtok[MAX_TOKEN_LEN], unescaped[MAX_TOKEN_LEN];
         lex_ident(T_char, chtok);
+        unescape_string(chtok, unescaped, MAX_TOKEN_LEN);
 
         val = require_typed_var(parent, TY_char);
         gen_name_to(val->var_name);
-        val->init_val = chtok[0];
+        val->init_val = unescaped[0];
         add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
     } else if (lex_peek(T_string, NULL)) {
         lex_accept(T_string);
@@ -796,7 +469,8 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
          * handling of string literals as initializers
          */
     } else {
-        error("Global array initialization requires constant values");
+        error_at("Global array initialization requires constant values",
+                 next_token_loc());
     }
 
     return val;
@@ -814,7 +488,8 @@ void consume_global_constant_syntax(void)
     } else if (lex_peek(T_char, NULL)) {
         lex_accept(T_char);
     } else {
-        error("Global array initialization requires constant values");
+        error_at("Global array initialization requires constant values",
+                 next_token_loc());
     }
 }
 
@@ -1045,7 +720,7 @@ basic_block_t *handle_goto_statement(block_t *parent, basic_block_t *bb)
 
     char token[MAX_ID_LEN];
     if (!lex_peek(T_identifier, token))
-        error("Expected identifier after 'goto'");
+        error_at("Expected identifier after 'goto'", next_token_loc());
 
     lex_expect(T_identifier);
     lex_expect(T_semicolon);
@@ -1072,7 +747,7 @@ basic_block_t *handle_goto_statement(block_t *parent, basic_block_t *bb)
     }
 
     if (backpatch_bb_idx > MAX_LABELS - 1)
-        error("Too many forward-referenced labels");
+        error_at("Too many forward-referenced labels", cur_token_loc());
 
     backpatch_bb[backpatch_bb_idx++] = then_;
     return else_;
@@ -1421,14 +1096,15 @@ void read_parameter_list_decl(func_t *func, bool anon)
 
     char token[MAX_TYPE_LEN];
     if (lex_peek(T_identifier, token) && !strncmp(token, "void", 4)) {
-        next_token = lex_token();
+        lex_next();
         if (lex_accept(T_close_bracket))
             return;
         func->param_defs[vn].type = TY_void;
         read_inner_var_decl(&func->param_defs[vn], anon, true);
         if (!func->param_defs[vn].ptr_level && !func->param_defs[vn].is_func &&
             !func->param_defs[vn].array_size)
-            error("'void' must be the only parameter and unnamed");
+            error_at("'void' must be the only parameter and unnamed",
+                     cur_token_loc());
         vn++;
         lex_accept(T_comma);
     }
@@ -1455,24 +1131,25 @@ void read_parameter_list_decl(func_t *func, bool anon)
 
 void read_literal_param(block_t *parent, basic_block_t *bb)
 {
-    char literal[MAX_TOKEN_LEN];
-    char combined[MAX_TOKEN_LEN];
+    char literal[MAX_TOKEN_LEN], unescaped[MAX_TOKEN_LEN],
+        combined[MAX_LINE_LEN];
     int combined_len = 0;
 
     /* Read first string literal */
     lex_ident(T_string, literal);
-    strcpy(combined, literal);
-    combined_len = strlen(literal);
+    unescape_string(literal, combined, MAX_LINE_LEN);
+    combined_len = strlen(combined);
 
     /* Check for adjacent string literals and concatenate them */
     while (lex_peek(T_string, NULL)) {
         lex_ident(T_string, literal);
-        int literal_len = strlen(literal);
-        if (combined_len + literal_len >= MAX_TOKEN_LEN - 1)
-            error("Concatenated string literal too long");
+        unescape_string(literal, unescaped, MAX_LINE_LEN - combined_len);
+        int unescaped_len = strlen(unescaped);
+        if (combined_len + unescaped_len >= MAX_LINE_LEN - 1)
+            error_at("Concatenated string literal too long", cur_token_loc());
 
-        strcpy(combined + combined_len, literal);
-        combined_len += literal_len;
+        strcpy(combined + combined_len, unescaped);
+        combined_len += unescaped_len;
     }
 
     const int index = write_symbol(combined);
@@ -1510,7 +1187,7 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
                     if (c >= 'a' && c <= 'f')
                         c = (c - 'a') + 10;
                     else
-                        error("Invalid numeric constant");
+                        error_at("Invalid numeric constant", cur_token_loc());
                 }
 
                 value = (value * 16) + c;
@@ -1520,7 +1197,7 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
             do {
                 c = token[i++];
                 if (c != '0' && c != '1')
-                    error("Invalid binary constant");
+                    error_at("Invalid binary constant", cur_token_loc());
                 c -= '0';
                 value = (value * 2) + c;
             } while (token[i] == '0' || token[i] == '1');
@@ -1528,7 +1205,7 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
             do {
                 c = token[i++];
                 if (c > '7')
-                    error("Invalid numeric constant");
+                    error_at("Invalid numeric constant", cur_token_loc());
                 c -= '0';
                 value = (value * 8) + c;
             } while (is_digit(token[i]));
@@ -1552,13 +1229,14 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
 
 void read_char_param(block_t *parent, basic_block_t *bb)
 {
-    char token[5];
+    char literal[MAX_TOKEN_LEN], unescaped[MAX_TOKEN_LEN];
 
-    lex_ident(T_char, token);
+    lex_ident(T_char, literal);
+    unescape_string(literal, unescaped, MAX_TOKEN_LEN);
 
     var_t *vd = require_typed_var(parent, TY_char);
     gen_name_to(vd->var_name);
-    vd->init_val = token[0];
+    vd->init_val = unescaped[0];
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 }
@@ -1806,6 +1484,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 {
     char token[MAX_TYPE_LEN];
     int ptr_cnt = 0;
+    token_t *sizeof_tk = cur_token;
     type_t *type = NULL;
     var_t *vd;
 
@@ -1837,7 +1516,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     }
 
     if (!type)
-        error("Unable to determine type in sizeof");
+        error_at("Unable to determine type in sizeof", &sizeof_tk->location);
 
     vd = require_var(parent);
     vd->init_val = ptr_cnt ? PTR_SIZE : type->size;
@@ -1856,7 +1535,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         is_neg = true;
         if (!lex_peek(T_numeric, NULL) && !lex_peek(T_identifier, NULL) &&
             !lex_peek(T_open_bracket, NULL)) {
-            error("Unexpected token after unary minus");
+            error_at("Unexpected token after unary minus", next_token_loc());
         }
     }
 
@@ -1930,9 +1609,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
             if (type) {
                 /* Save current position to backtrack if needed */
-                int saved_pos = SOURCE->size;
-                char saved_char = next_char;
-                token_t saved_token = next_token;
+                token_t *saved_token = cur_token;
 
                 /* Try to parse as typename */
                 lex_expect(T_identifier);
@@ -1977,9 +1654,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                     }
                 } else {
                     /* Not a cast or compound literal - backtrack */
-                    SOURCE->size = saved_pos;
-                    next_char = saved_char;
-                    next_token = saved_token;
+                    cur_token = saved_token;
                 }
             }
         }
@@ -2212,69 +1887,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         constant_t *con = find_constant(token);
         var_t *var = find_var(token, parent);
         func_t *func = find_func(token);
-        int macro_param_idx = find_macro_param_src_idx(token, parent);
-        macro_t *mac = find_macro(token);
 
-        if (!strcmp(token, "__VA_ARGS__")) {
-            /* 'size' has pointed at the character after __VA_ARGS__ */
-            int remainder, t = SOURCE->size;
-            macro_t *macro = parent->macro;
-
-            if (!macro)
-                error("The '__VA_ARGS__' identifier can only be used in macro");
-            if (!macro->is_variadic)
-                error("Unexpected identifier '__VA_ARGS__'");
-
-            remainder = macro->num_params - macro->num_param_defs;
-            for (int i = 0; i < remainder; i++) {
-                SOURCE->size = macro->params[macro->num_params - remainder + i];
-                next_char = SOURCE->elements[SOURCE->size];
-                next_token = lex_token();
-                read_expr(parent, bb);
-            }
-            SOURCE->size = t;
-            next_char = SOURCE->elements[SOURCE->size];
-            next_token = lex_token();
-        } else if (mac) {
-            if (parent->macro)
-                error("Nested macro is not yet supported");
-
-            parent->macro = mac;
-            mac->num_params = 0;
-            lex_expect(T_identifier);
-
-            /* 'size' has pointed at the first parameter */
-            while (!lex_peek(T_close_bracket, NULL)) {
-                mac->params[mac->num_params++] = SOURCE->size;
-                do {
-                    next_token = lex_token();
-                } while (next_token != T_comma &&
-                         next_token != T_close_bracket);
-            }
-            /* move 'size' to the macro body */
-            macro_return_idx = SOURCE->size;
-            SOURCE->size = mac->start_source_idx;
-            next_char = SOURCE->elements[SOURCE->size];
-            lex_expect(T_close_bracket);
-
-            skip_newline = 0;
-            read_expr(parent, bb);
-
-            /* cleanup */
-            skip_newline = 1;
-            parent->macro = NULL;
-            macro_return_idx = 0;
-        } else if (macro_param_idx) {
-            /* "expand" the argument from where it comes from */
-            int t = SOURCE->size;
-            SOURCE->size = macro_param_idx;
-            next_char = SOURCE->elements[SOURCE->size];
-            next_token = lex_token();
-            read_expr(parent, bb);
-            SOURCE->size = t;
-            next_char = SOURCE->elements[SOURCE->size];
-            next_token = lex_token();
-        } else if (con) {
+        if (con) {
             vd = require_var(parent);
             vd->init_val = con->value;
             gen_name_to(vd->var_name);
@@ -2316,9 +1930,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         } else if (lex_accept(T_open_curly)) {
             parse_array_literal_expr(parent, bb);
         } else {
-            printf("%s\n", token);
             /* unknown expression */
-            error("Unrecognized expression token");
+            error_at("Unrecognized expression token", next_token_loc());
         }
 
         if (is_neg) {
@@ -2964,7 +2577,8 @@ void read_lvalue(lvalue_t *lvalue,
             bool is_typedef_pointer = (var->type && var->type->ptr_level > 0);
             if (var->ptr_level == 0 && var->array_size == 0 &&
                 !is_typedef_pointer)
-                error("Cannot apply square operator to non-pointer");
+                error_at("Cannot apply square operator to non-pointer",
+                         cur_token_loc());
 
             /* if nested pointer, still pointer */
             /* Also handle typedef pointers which have ptr_level == 0 */
@@ -3277,7 +2891,8 @@ void read_logical(opcode_t op, block_t *parent, basic_block_t **bb)
     var_t *vd;
 
     if (op != OP_log_and && op != OP_log_or)
-        error("encounter an invalid logical opcode in read_logical()");
+        error_at("encounter an invalid logical opcode in read_logical()",
+                 cur_token_loc());
 
     /* Test the operand before the logical-and/or operator */
     vd = opstack_pop();
@@ -3377,7 +2992,8 @@ void finalize_logical(opcode_t op,
         bb_connect(else_if, else_bb, ELSE);
         bb_connect(then, end, NEXT);
     } else
-        error("encounter an invalid logical opcode in finalize_logical()");
+        error_at("encounter an invalid logical opcode in finalize_logical()",
+                 cur_token_loc());
     bb_connect(else_bb, end, NEXT);
 
     /* Create the branch instruction for final logical-and/or operand */
@@ -3670,7 +3286,7 @@ int read_primary_constant(void)
 {
     /* return signed constant */
     int isneg = 0, res;
-    char buffer[10];
+    char buffer[MAX_TOKEN_LEN];
     if (lex_accept(T_minus))
         isneg = 1;
     if (lex_accept(T_open_bracket)) {
@@ -3680,10 +3296,12 @@ int read_primary_constant(void)
         res = read_numeric_constant(buffer);
         lex_expect(T_numeric);
     } else if (lex_peek(T_char, buffer)) {
-        res = buffer[0];
+        char unescaped[MAX_TOKEN_LEN];
+        unescape_string(buffer, unescaped, MAX_TOKEN_LEN);
+        res = unescaped[0];
         lex_expect(T_char);
     } else
-        error("Invalid value after assignment");
+        error_at("Invalid value after assignment", next_token_loc());
     if (isneg)
         return (-1) * res;
     return res;
@@ -3747,7 +3365,7 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
         res = op1 >= op2;
         break;
     default:
-        error("The requested operation is not supported.");
+        error_at("The requested operation is not supported.", cur_token_loc());
     }
     return res;
 }
@@ -3756,8 +3374,8 @@ bool read_global_assignment(char *token);
 void eval_ternary_imm(int cond, char *token)
 {
     if (cond == 0) {
-        while (next_token != T_colon) {
-            next_token = lex_token();
+        while (!lex_peek(T_colon, NULL)) {
+            lex_next();
         }
         lex_accept(T_colon);
         read_global_assignment(token);
@@ -3765,7 +3383,7 @@ void eval_ternary_imm(int cond, char *token)
         read_global_assignment(token);
         lex_expect(T_colon);
         while (!lex_peek(T_semicolon, NULL)) {
-            next_token = lex_token();
+            lex_next();
         }
     }
 }
@@ -3938,14 +3556,12 @@ void perform_side_effect(block_t *parent, basic_block_t *bb)
 }
 
 basic_block_t *read_code_block(func_t *func,
-                               macro_t *macro,
                                block_t *parent,
                                basic_block_t *bb);
 
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 {
     char token[MAX_ID_LEN];
-    macro_t *mac;
     func_t *func;
     type_t *type;
     var_t *vd, *rs1, *rs2, *var;
@@ -3961,7 +3577,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
      */
 
     if (lex_peek(T_open_curly, NULL))
-        return read_code_block(parent->func, parent->macro, parent, bb);
+        return read_code_block(parent->func, parent, bb);
 
     if (lex_accept(T_return)) {
         return handle_return_statement(parent, bb);
@@ -3999,16 +3615,20 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 int case_val;
 
                 lex_accept(T_case);
-                if (lex_peek(T_numeric, NULL)) {
-                    case_val = read_numeric_constant(token_str);
-                    lex_expect(T_numeric); /* already read it */
+                if (lex_peek(T_numeric, token)) {
+                    case_val = read_numeric_constant(token);
+                    lex_expect(T_numeric);
                 } else if (lex_peek(T_char, token)) {
-                    case_val = token[0];
+                    char unescaped[MAX_TOKEN_LEN];
+                    unescape_string(token, unescaped, MAX_TOKEN_LEN);
+                    case_val = unescaped[0];
                     lex_expect(T_char);
-                } else {
-                    constant_t *cd = find_constant(token_str);
+                } else if (lex_peek(T_identifier, token)) {
+                    constant_t *cd = find_constant(token);
                     case_val = cd->value;
-                    lex_expect(T_identifier); /* already read it */
+                    lex_expect(T_identifier);
+                } else {
+                    fatal("Not a valid case value");
                 }
 
                 vd = require_var(parent);
@@ -4053,7 +3673,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
             if (!lex_peek(T_close_curly, NULL)) {
                 if (is_default)
-                    error("Label default should be the last one");
+                    error_at("Label default should be the last one",
+                             next_token_loc());
 
                 /* create a new conditional block for next case */
                 n = bb_create(parent);
@@ -4108,7 +3729,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         lex_expect(T_open_bracket);
 
         /* synthesize for loop block */
-        block_t *blk = add_block(parent, parent->func, parent->macro);
+        block_t *blk = add_block(parent, parent->func);
 
         /* setup - execute once */
         basic_block_t *setup = bb_create(blk);
@@ -4116,7 +3737,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
         if (!lex_accept(T_semicolon)) {
             if (!lex_peek(T_identifier, token))
-                error("Unexpected token");
+                error_at("Unexpected token when parsing for loop",
+                         next_token_loc());
 
             int find_type_flag = lex_accept(T_struct) ? 2 : 1;
             if (find_type_flag == 1 && lex_accept(T_union)) {
@@ -4477,7 +4099,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             lex_expect(T_semicolon);
             return bb;
         }
-        error("Unknown struct/union type");
+        error_at("Unknown struct/union type", next_token_loc());
     }
 
     /* Handle const qualifier for local variable declarations */
@@ -4485,7 +4107,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         is_const = true;
         /* After const, we expect a type */
         if (!lex_peek(T_identifier, token))
-            error("Expected type after const");
+            error_at("Expected type after const", next_token_loc());
     }
 
     /* statement with prefix */
@@ -4496,46 +4118,14 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     /* must be an identifier or asterisk (for pointer dereference) */
     bool has_asterisk = lex_peek(T_asterisk, NULL);
     if (!is_const && !lex_peek(T_identifier, token) && !has_asterisk)
-        error("Unexpected token");
-
-    /* handle macro parameter substitution for statements */
-    int macro_param_idx = find_macro_param_src_idx(token, parent);
-    if (macro_param_idx && parent->macro) {
-        /* save current state */
-        int saved_size = SOURCE->size;
-        char saved_char = next_char;
-        int saved_token = next_token;
-
-        /* jump to parameter value */
-        SOURCE->size = macro_param_idx;
-        next_char = SOURCE->elements[SOURCE->size];
-        next_token = lex_token();
-
-        /* extract the parameter value as identifier token */
-        if (lex_peek(T_identifier, token)) {
-            lex_expect(T_identifier);
-        } else {
-            /* parameter is not a simple identifier, restore state and continue
-             */
-            SOURCE->size = saved_size;
-            next_char = saved_char;
-            next_token = saved_token;
-        }
-
-        /* restore source position */
-        SOURCE->size = saved_size;
-        next_char = saved_char;
-        next_token = saved_token;
-    }
+        error_at("Unexpected token", next_token_loc());
 
     /* is it a variable declaration? */
     /* Special handling when statement starts with asterisk */
     if (has_asterisk) {
         /* For "*identifier", check if identifier is a type.
          * If not, it's a dereference, not a declaration. */
-        int saved_size = SOURCE->size;
-        char saved_char = next_char;
-        int saved_token = next_token;
+        token_t *saved_token = cur_token;
 
         /* Skip the asterisk to peek at the identifier */
         lex_accept(T_asterisk);
@@ -4550,9 +4140,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         }
 
         /* Restore position */
-        SOURCE->size = saved_size;
-        next_char = saved_char;
-        next_token = saved_token;
+        cur_token = saved_token;
 
         /* If it's not a type, skip the declaration block */
         if (!could_be_type)
@@ -4769,38 +4357,6 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         return bb;
     }
 
-    mac = find_macro(token);
-    if (mac) {
-        if (parent->macro)
-            error("Nested macro is not yet supported");
-
-        parent->macro = mac;
-        mac->num_params = 0;
-        lex_expect(T_identifier);
-
-        /* 'size' has pointed at the first parameter */
-        while (!lex_peek(T_close_bracket, NULL)) {
-            mac->params[mac->num_params++] = SOURCE->size;
-            do {
-                next_token = lex_token();
-            } while (next_token != T_comma && next_token != T_close_bracket);
-        }
-        /* move 'size' to the macro body */
-        macro_return_idx = SOURCE->size;
-        SOURCE->size = mac->start_source_idx;
-        next_char = SOURCE->elements[SOURCE->size];
-        lex_expect(T_close_bracket);
-
-        skip_newline = 0;
-        bb = read_body_statement(parent, bb);
-
-        /* cleanup */
-        skip_newline = 1;
-        parent->macro = NULL;
-        macro_return_idx = 0;
-        return bb;
-    }
-
     /* is a function call? Skip function call check when has_asterisk is true */
     if (!has_asterisk) {
         func = find_func(token);
@@ -4827,7 +4383,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
             /* Generate OP_write for pointer dereference assignment */
             add_insn(parent, bb, OP_write, NULL, lvalue, rvalue,
-                     rvalue->type ? rvalue->type->size : PTR_SIZE, NULL);
+                     get_size(rvalue), NULL);
         } else {
             /* Expression statement without assignment */
             perform_side_effect(parent, bb);
@@ -4845,10 +4401,11 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
     if (lex_peek(T_identifier, token)) {
         lex_accept(T_identifier);
+        token_t *id_tk = cur_token;
         if (lex_accept(T_colon)) {
             label_t *l = find_label(token);
             if (l)
-                error("label redefinition");
+                error_at("label redefinition", &id_tk->location);
 
             basic_block_t *n = bb_create(parent);
             bb_connect(bb, n, NEXT);
@@ -4858,23 +4415,18 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         }
     }
 
-    error("Unrecognized statement token");
+    error_at("Unrecognized statement token", next_token_loc());
     return NULL;
 }
 
-basic_block_t *read_code_block(func_t *func,
-                               macro_t *macro,
-                               block_t *parent,
-                               basic_block_t *bb)
+basic_block_t *read_code_block(func_t *func, block_t *parent, basic_block_t *bb)
 {
-    block_t *blk = add_block(parent, func, macro);
+    block_t *blk = add_block(parent, func);
     bb->scope = blk;
 
     lex_expect(T_open_curly);
 
     while (!lex_accept(T_close_curly)) {
-        if (read_preproc_directive())
-            continue;
         bb = read_body_statement(blk, bb);
         perform_side_effect(blk, bb);
     }
@@ -4886,7 +4438,7 @@ void var_add_killed_bb(var_t *var, basic_block_t *bb);
 
 void read_func_body(func_t *func)
 {
-    block_t *blk = add_block(NULL, func, NULL);
+    block_t *blk = add_block(NULL, func);
     func->bbs = bb_create(blk);
     func->exit = bb_create(blk);
 
@@ -4896,7 +4448,7 @@ void read_func_body(func_t *func)
         func->param_defs[i].base = &func->param_defs[i];
         var_add_killed_bb(&func->param_defs[i], func->bbs);
     }
-    basic_block_t *body = read_code_block(func, NULL, NULL, func->bbs);
+    basic_block_t *body = read_code_block(func, NULL, func->bbs);
     if (body)
         bb_connect(body, func->exit, NEXT);
 
@@ -4905,7 +4457,7 @@ void read_func_body(func_t *func)
         insn_t *g = bb->insn_list.tail;
         label_t *label = find_label(g->str);
         if (!label)
-            error("goto label undefined");
+            error_at("goto label undefined", cur_token_loc());
 
         label->used = true;
         bb_connect(bb, label->bb, NEXT);
@@ -5047,7 +4599,7 @@ void read_global_decl(block_t *block, bool is_const)
         }
         if (lex_accept(T_semicolon)) /* forward definition */
             return;
-        error("Syntax error in global declaration");
+        error_at("Syntax error in global declaration", next_token_loc());
     } else
         add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
 
@@ -5072,12 +4624,12 @@ void read_global_decl(block_t *block, bool is_const)
         /* TODO: Implement global variable continuation syntax for multiple
          * declarations in single statement (e.g., int a = 1, b = 2;)
          */
-        error("Global continuation not supported");
+        error_at("Global continuation not supported", cur_token_loc());
     } else if (lex_accept(T_semicolon)) {
         opstack_pop();
         return;
     }
-    error("Syntax error in global declaration");
+    error_at("Syntax error in global declaration", next_token_loc());
 }
 
 void consume_global_compound_literal(void)
@@ -5097,7 +4649,9 @@ void consume_global_compound_literal(void)
             } else if (lex_peek(T_char, NULL)) {
                 lex_accept(T_char);
             } else {
-                error("Global struct initialization requires constant values");
+                error_at(
+                    "Global struct initialization requires constant values",
+                    next_token_loc());
             }
 
             if (!lex_accept(T_comma))
@@ -5141,12 +4695,13 @@ void read_global_statement(void)
         int i = 0, size = 0;
 
         lex_ident(T_identifier, token);
+        token_t *id_tk = cur_token;
 
         /* variable declaration using existing struct tag? */
         if (!lex_peek(T_open_curly, NULL)) {
             type_t *decl_type = find_type(token, 2);
             if (!decl_type)
-                error("Unknown struct type");
+                error_at("Unknown struct type", &id_tk->location);
 
             /* one or more declarators */
             var_t *var = require_typed_var(block, decl_type);
@@ -5218,7 +4773,7 @@ void read_global_statement(void)
             /* Handle multiple variable declarations with same base type */
             while (lex_accept(T_comma)) {
                 if (i >= MAX_FIELDS)
-                    error("Too many struct fields");
+                    error_at("Too many struct fields", cur_token_loc());
 
                 var_t *nv = &type->fields[i++];
                 initialize_struct_field(nv, v, 0);
@@ -5258,7 +4813,7 @@ void read_global_statement(void)
             /* Handle multiple variable declarations with same base type */
             while (lex_accept(T_comma)) {
                 if (i >= MAX_FIELDS)
-                    error("Too many union fields");
+                    error_at("Too many union fields", cur_token_loc());
 
                 var_t *nv = &type->fields[i++];
                 /* All union fields start at offset 0 */
@@ -5327,7 +4882,7 @@ void read_global_statement(void)
                      */
                     while (lex_accept(T_comma)) {
                         if (i >= MAX_FIELDS)
-                            error("Too many struct fields");
+                            error_at("Too many struct fields", cur_token_loc());
 
                         var_t *nv = &type->fields[i++];
                         initialize_struct_field(nv, v, 0);
@@ -5392,7 +4947,7 @@ void read_global_statement(void)
                      */
                     while (lex_accept(T_comma)) {
                         if (i >= MAX_FIELDS)
-                            error("Too many union fields");
+                            error_at("Too many union fields", cur_token_loc());
 
                         var_t *nv = &type->fields[i++];
                         /* All union fields start at offset 0 */
@@ -5433,7 +4988,7 @@ void read_global_statement(void)
             lex_ident(T_identifier, base_type);
             base = find_type(base_type, true);
             if (!base)
-                error("Unable to find base type");
+                error_at("Unable to find base type", cur_token_loc());
             type->base_type = base->base_type;
             type->size = base->size;
             type->num_fields = 0;
@@ -5451,7 +5006,7 @@ void read_global_statement(void)
     } else if (lex_peek(T_identifier, NULL)) {
         read_global_decl(block, is_const);
     } else
-        error("Syntax error in global statement");
+        error_at("Syntax error in global statement", next_token_loc());
 }
 
 void parse_internal(void)
@@ -5487,14 +5042,8 @@ void parse_internal(void)
     TY_bool->base_type = TYPE_char;
     TY_bool->size = 1;
 
-    GLOBAL_BLOCK = add_block(NULL, NULL, NULL); /* global block */
-    elf_add_symbol("", 0);                      /* undef symbol */
-
-    /* architecture defines */
-    add_alias(ARCH_PREDEFINED, "1");
-
-    /* shecc run-time defines */
-    add_alias("__SHECC__", "1");
+    GLOBAL_BLOCK = add_block(NULL, NULL); /* global block */
+    elf_add_symbol("", 0);                /* undef symbol */
 
     /* Linux syscall */
     func_t *func = add_func("__syscall", true);
@@ -5504,58 +5053,17 @@ void parse_internal(void)
     func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
 
     /* lexer initialization */
-    SOURCE->size = 0;
-    next_char = SOURCE->elements[0];
-    lex_expect(T_start);
-
     do {
-        if (read_preproc_directive())
-            continue;
         read_global_statement();
     } while (!lex_accept(T_eof));
 }
 
-/* Load specified source file and referred inclusion recursively */
-void load_source_file(char *file)
+void parse(token_t *tk)
 {
-    char buffer[MAX_LINE_LEN];
+    token_t head;
+    head.kind = T_start;
+    head.next = tk;
+    cur_token = &head;
 
-    FILE *f = fopen(file, "rb");
-    if (!f)
-        abort();
-
-    for (;;) {
-        if (!fgets(buffer, MAX_LINE_LEN, f)) {
-            break;
-        }
-        if (!strncmp(buffer, "#pragma once", 12) &&
-            hashmap_contains(INCLUSION_MAP, file)) {
-            fclose(f);
-            return;
-        }
-        if (!strncmp(buffer, "#include ", 9) && (buffer[9] == '"')) {
-            char path[MAX_LINE_LEN];
-            int c = strlen(file) - 1, inclusion_path_len = strlen(buffer) - 11;
-            while (c > 0 && file[c] != '/')
-                c--;
-            if (c) {
-                /* prepend directory name */
-                snprintf(path, c + 2, "%s", file);
-            }
-
-            snprintf(path + c + 1, inclusion_path_len, "%s", buffer + 10);
-            load_source_file(path);
-        } else {
-            strbuf_puts(SOURCE, buffer);
-        }
-    }
-
-    hashmap_put(INCLUSION_MAP, file, NULL);
-    fclose(f);
-}
-
-void parse(char *file)
-{
-    load_source_file(file);
     parse_internal();
 }
