@@ -179,7 +179,7 @@ int main(int argc, char *argv[])
      *   __c("}\n");
      */
     write_str("void __c(char *src) {\n");
-    write_str("    strbuf_puts(SOURCE, src);\n");
+    write_str("    strbuf_puts(LIBC_SRC, src);\n");
     write_str("}\n");
 
     write_str("void libc_impl() {\n");

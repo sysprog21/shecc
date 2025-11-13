@@ -2724,6 +2724,25 @@ BB47:
 }
 EOF
 
+# Category: Built-in macros
+begin_category "Built-in Macros" "Testing macros defined by standard, e.g. __LINE__"
+
+try_output 0 "3" << EOF
+int main()
+{
+    printf("%d", __LINE__);
+    return 0;
+}
+EOF
+
+try_ 1 << EOF
+int main()
+{
+    char *file_name = __FILE__;
+    return !strcmp(file_name + strlen(file_name) - 2, ".c");
+}
+EOF
+
 # Category: Function-like Macros
 begin_category "Function-like Macros" "Testing function-like macros and variadic macros"
 
@@ -2826,6 +2845,20 @@ try_ 0 << EOF
 int main()
 {
     return A;
+}
+EOF
+
+# recursive macro expansion
+try_ 4 << EOF
+int A(int x)
+{
+    return 2;
+}
+#define A(x) x + B(x)
+#define B(x) x + A(x)
+int main()
+{
+    return A(1);
 }
 EOF
 
@@ -5418,14 +5451,14 @@ EOF
 # String literal and escape coverage (additional)
 try_output 0 "AZ" << 'EOF'
 int main() {
-    printf("%s", "\\x41Z"); /* hex escape then normal char */
+    printf("%s", "\x41Z"); /* hex escape then normal char */
     return 0;
 }
 EOF
 
 try_output 0 "AZ" << 'EOF'
 int main() {
-    printf("%s", "A\\132"); /* octal escape for 'Z' */
+    printf("%s", "A\132"); /* octal escape for 'Z' */
     return 0;
 }
 EOF
