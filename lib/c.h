@@ -17,6 +17,10 @@
 #define INT_MAX 0x7fffffff
 #define INT_MIN 0x80000000
 
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
 #if defined(__arm__)
 #define __SIZEOF_POINTER__ 4
 #define __syscall_exit 1
@@ -24,6 +28,7 @@
 #define __syscall_write 4
 #define __syscall_close 6
 #define __syscall_open 5
+#define __syscall_lseek 19
 #define __syscall_mmap2 192
 #define __syscall_munmap 91
 
@@ -35,6 +40,7 @@
 #define __syscall_close 57
 #define __syscall_open 1024
 #define __syscall_openat 56
+#define __syscall_lseek 62
 #define __syscall_mmap2 222
 #define __syscall_munmap 215
 
@@ -52,6 +58,13 @@
 /* va_list support for variadic functions */
 typedef int *va_list;
 
+/* Character predicate functions */
+int isdigit(int c);
+int isalpha(int c);
+int isalnum(int c);
+int isxdigit(int c);
+int isblank(int c);
+
 /* File I/O */
 typedef int FILE;
 FILE *fopen(char *filename, char *mode);
@@ -59,6 +72,8 @@ int fclose(FILE *stream);
 int fgetc(FILE *stream);
 char *fgets(char *str, int n, FILE *stream);
 int fputc(int c, FILE *stream);
+int fseek(FILE *stream, int offset, int whence);
+int ftell(FILE *stream);
 
 /* string-related functions */
 int strlen(char *str);
