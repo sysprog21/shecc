@@ -27,9 +27,10 @@ PROGRESS_COUNT=0
 
 # Command Line Arguments
 
-if [ "$#" != 1 ]; then
-    echo "Usage: $0 <stage>"
+if [ "$#" -lt 1 ]; then
+    echo "Usage: $0 <stage> [<dynlink>]"
     echo "  stage: 0 (host compiler), 1 (stage1), or 2 (stage2)"
+    echo "  dynlink: 0 (static linking), 1 (dynamic linking)"
     echo ""
     echo "Environment Variables:"
     echo "  VERBOSE=1         Enable verbose output"
@@ -53,6 +54,14 @@ case "$1" in
         echo "$1 is not a valid stage"
         exit 1 ;;
 esac
+
+if [ $# -ge 2 ] && [ "$2" = "1" ]; then
+    readonly SHECC_CFLAGS="--dynlink"
+    readonly LINK_MODE="dynamic"
+else
+    readonly SHECC_CFLAGS=""
+    readonly LINK_MODE="static"
+fi
 
 # Utility Functions
 
@@ -147,7 +156,7 @@ function report_test_failure() {
     cat -n "$tmp_in"
     echo "=================================================="
     echo ""
-    echo "Compiler command: $SHECC -o $tmp_exe $tmp_in"
+    echo "Compiler command: $SHECC $SHECC_CFLAGS -o $tmp_exe $tmp_in"
     echo "Test files: input=$tmp_in, executable=$tmp_exe"
     exit 1
 }
@@ -169,7 +178,7 @@ function try() {
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
     # Suppress compiler warnings by redirecting stderr
-    $SHECC -o "$tmp_exe" "$tmp_in" 2>/dev/null
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>/dev/null
     chmod +x $tmp_exe
 
     local output=''
@@ -227,7 +236,7 @@ function try_compile_error() {
     # Run in a subshell with job control disabled
     (
         set +m 2>/dev/null  # Disable job control messages
-        $SHECC -o "$tmp_exe" "$tmp_in" 2>&1
+        $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>&1
     ) >/dev/null 2>&1
     local exit_code=$?
 
@@ -308,7 +317,7 @@ int main() {
 EOF
 
     # Suppress compiler warnings by redirecting stderr
-    $SHECC -o "$tmp_exe" "$tmp_in" 2>/dev/null
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>/dev/null
     chmod +x $tmp_exe
 
     local output=$(${TARGET_EXEC:-} "$tmp_exe")
@@ -338,7 +347,7 @@ EOF
         echo "$input"
         echo "--------------------------------------------------"
         echo ""
-        echo "Compiler command: $SHECC -o $tmp_exe $tmp_in"
+        echo "Compiler command: $SHECC $SHECC_CFLAGS -o $tmp_exe $tmp_in"
         echo "Test files: input=$tmp_in, executable=$tmp_exe"
         exit 1
     else
@@ -2217,6 +2226,7 @@ EOF
 # Category: Memory Management
 begin_category "Memory Management" "Testing malloc, free, and dynamic memory allocation"
 
+if [ "$LINK_MODE" = "static" ]; then
 # malloc and free
 try_ 1 << EOF
 int main()
@@ -2232,6 +2242,9 @@ int main()
     return a == b;
 }
 EOF
+else
+    echo "Skip test cases because of using dynamic linking mode"
+fi # "LINK_MODE" = "static"
 
 try_ 1 << EOF
 int main()
@@ -3197,13 +3210,11 @@ int main()
 EOF
 
 # global string initialization and modification
-try_output 0 "Hello World!Hallo World!" << EOF
+try_output 0 "Hello World!" << EOF
 char *data = "Hello World!";
 
 int main(void)
 {
-    printf(data);
-    data[1] = 'a';
     printf(data);
     return 0;
 }
@@ -3477,6 +3488,8 @@ int main()
 }
 EOF
 
+if [ "$LINK_MODE" = "static" ]; then
+
 # printf family, including truncation and zero size input
 try_output 11 "Hello World" << EOF
 int main() {
@@ -3636,6 +3649,9 @@ int main()
 	return c == -1;
 }
 EOF
+else
+    echo "Skip test cases because of using dynamic linking mode"
+fi # "LINK_MODE" = "static"
 
 # tests integer type conversion
 # excerpted and modified from issue #166

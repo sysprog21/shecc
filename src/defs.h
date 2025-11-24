@@ -32,8 +32,18 @@
 #define MAX_SYMTAB 65536
 #define MAX_STRTAB 65536
 #define MAX_HEADER 1024
+#define MAX_PROGRAM_HEADER 1024
 #define MAX_SECTION 1024
 #define MAX_ALIASES 128
+#define MAX_SECTION_HEADER 1024
+#define MAX_SHSTR 1024
+#define MAX_INTERP 1024
+#define MAX_DYNAMIC 1024
+#define MAX_DYNSYM 1024
+#define MAX_DYNSTR 1024
+#define MAX_RELPLT 1024
+#define MAX_PLT 1024
+#define MAX_GOTPLT 1024
 #define MAX_CONSTANTS 1024
 #define MAX_CASES 128
 #define MAX_NESTING 128
@@ -80,6 +90,14 @@
 #define UNUSED(x) (void) (x)
 /* configure host data model when using 'memcpy'. */
 #define HOST_PTR_SIZE __SIZEOF_POINTER__
+#endif
+
+#ifndef MIN_ALIGNMENT
+#define MIN_ALIGNMENT 8
+#endif
+
+#ifndef ALIGN_UP
+#define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
 #endif
 
 /* Common data structures */
@@ -386,6 +404,12 @@ struct var {
     int last_use;   /* Last instruction index where variable is used */
     int loop_depth; /* Nesting depth if variable is in a loop */
     int use_count;  /* Number of times variable is used */
+    bool space_is_allocated; /* whether space is allocated for this variable */
+
+    /* This flag is used to indicate to the compiler that the offset of
+     * the variable is based on the top of the local stack.
+     */
+    bool ofs_based_on_stack_top;
 };
 
 typedef struct {
@@ -436,6 +460,16 @@ struct ph2_ir {
     basic_block_t *else_bb;
     struct ph2_ir *next;
     bool is_branch_detached;
+
+    /* When an instruction uses a variable that its offset is based on
+     * the top of the stack, this instruction's flag is also set to
+     * indicate the compiler to recalculate the offset after the function's
+     * stack size has been determined.
+     *
+     * Currently, only OP_load, OP_store and OP_address_of need this flag
+     * to recompute the offset.
+     */
+    bool ofs_based_on_stack_top;
 };
 
 typedef struct ph2_ir ph2_ir_t;
@@ -579,7 +613,7 @@ struct func {
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
-    int stack_size; /* stack always starts at offset 4 for convenience */
+    int stack_size;
 
     /* SSA info */
     basic_block_t *bbs;
@@ -587,6 +621,10 @@ struct func {
     symbol_list_t global_sym_list;
     int bb_cnt;
     int visited;
+
+    /* Information used for dynamic linking */
+    bool is_used;
+    int plt_offset, got_offset;
 
     struct func *next;
 };
@@ -650,3 +688,46 @@ typedef struct {
     int sh_addralign;
     int sh_entsize;
 } elf32_shdr_t;
+
+/* Structures for dynamic linked program */
+/* ELF buffers for dynamic sections */
+typedef struct {
+    strbuf_t *elf_interp;
+    strbuf_t *elf_dynamic;
+    strbuf_t *elf_dynsym;
+    strbuf_t *elf_dynstr;
+    strbuf_t *elf_relplt;
+    strbuf_t *elf_plt;
+    strbuf_t *elf_got;
+    int elf_interp_start;
+    int elf_relplt_start;
+    int elf_plt_start;
+    int elf_got_start;
+    int relplt_size;
+    int plt_size;
+    int got_size;
+} dynamic_sections_t;
+
+/* For .dynsym section. */
+typedef struct {
+    int st_name;
+    int st_value;
+    int st_size;
+    char st_info;
+    char st_other;
+    char st_shndx[2];
+} elf32_sym_t;
+
+/* For .rel.plt section */
+typedef struct {
+    int r_offset;
+    int r_info;
+} elf32_rel_t;
+
+/* For .dynamic section */
+typedef struct {
+    int d_tag;
+    int d_un;
+} elf32_dyn_t;
+
+#define ELF32_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))

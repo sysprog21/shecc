@@ -96,6 +96,8 @@ var_t *require_var(block_t *blk)
     var->use_count = 0;
     var->base = var;
     var->type = TY_int;
+    var->space_is_allocated = false;
+    var->ofs_based_on_stack_top = false;
     return var;
 }
 
@@ -1253,6 +1255,51 @@ void parse_array_init(var_t *var,
                 break;
             if (lex_peek(T_close_curly, NULL))
                 break;
+        }
+    }
+
+    if (parent != GLOBAL_BLOCK && emit_code && !is_implicit) {
+        /* e.g.:
+         *
+         * 1.
+         *      int main()
+         *      {
+         *          int a[5] = {};
+         *          return a[0] + a[1] + a[2] + a[3] + a[4];
+         *      }
+         *
+         * 2.
+         *      int main()
+         *      {
+         *          int a[5] = {5, 10}
+         *          return a[0] + a[1] + a[2] + a[3] + a[4];
+         *      }
+         *
+         * The initializer should set the value of the first elements, and
+         * initialize other elements without explicit assignments to 0.
+         *
+         * Therefore, the first and second cases return 0 and 15, respectively.
+         * */
+        for (; count < var->array_size; count++) {
+            var_t *val = require_var(parent);
+            gen_name_to(val->var_name);
+            val->init_val = 0;
+            add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
+
+            var_t target = {0};
+            target.type = var->type;
+            target.ptr_level = 0;
+            var_t *v = resize_var(parent, bb, val, &target);
+
+            var_t *elem_addr = compute_element_address(parent, bb, base_addr,
+                                                       count, elem_size);
+
+            if (elem_size <= 4) {
+                add_insn(parent, *bb, OP_write, NULL, elem_addr, v, elem_size,
+                         NULL);
+            } else {
+                fatal("Unsupported: struct assignment > 4 bytes in array");
+            }
         }
     }
     lex_expect(T_close_curly);
@@ -5496,12 +5543,39 @@ void parse_internal(void)
     /* shecc run-time defines */
     add_alias("__SHECC__", "1");
 
-    /* Linux syscall */
-    func_t *func = add_func("__syscall", true);
-    func->return_def.type = TY_int;
-    func->num_params = 0;
-    func->va_args = 1;
-    func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    if (dynlink) {
+        /* In dynamic mode, __syscall won't be implemented.
+         *
+         * Simply declare a 'syscall' function as follows if the program
+         * needs to use 'syscall':
+         *
+         * int syscall(int number, ...);
+         *
+         * shecc will treat it as an external function, and the compiled
+         * program will eventually use the implementation provided by
+         * the external C library.
+         *
+         * If shecc supports the 'long' data type in the future, it would be
+         * better to declare syscall using its original prototype:
+         *
+         * long syscall(long number, ...);
+         * */
+    } else {
+        /* Linux syscall */
+        func_t *func = add_func("__syscall", true);
+        func->return_def.type = TY_int;
+        func->num_params = 0;
+        func->va_args = 1;
+        func->bbs = NULL;
+        /* Otherwise, allocate a basic block to implement in static mode. */
+        func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    }
+
+    /* Add a global object to the .data section.
+     *
+     * This object is used to save the global stack pointer.
+     */
+    elf_write_int(elf_data, 0);
 
     /* lexer initialization */
     SOURCE->size = 0;

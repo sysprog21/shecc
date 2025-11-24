@@ -74,10 +74,19 @@ To execute the snapshot test, install the packages below:
 $ sudo apt-get install graphviz jq
 ```
 
+Additionally, because `shecc` supports the dynamic linking mode for the Arm architecture,
+it needs to install the ARM GNU toolchain to obtain the ELF interpreter and other dependencies:
+```shell
+$ sudo apt-get install gcc-arm-linux-gnueabihf
+```
+Another approach is to manually download and install the toolchain from [ARM Developer website](https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads).
+
+Select "x86_64 Linux hosted cross toolchains" - "AArch32 GNU/Linux target with hard float (arm-none-linux-gnueabihf)" to download the toolchain.
+
 ## Build and Verify
 
 Configure which backend you want, `shecc` supports ARMv7-A and RV32IM backend:
-```
+```shell
 $ make config ARCH=arm
 # Target machine code switch to Arm
 
@@ -86,13 +95,29 @@ $ make config ARCH=riscv
 ```
 
 Run `make` and you should see this:
-```
+```shell
+$ make
   CC+LD	out/inliner
   GEN	out/libc.inc
   CC	out/src/main.o
   LD	out/shecc
   SHECC	out/shecc-stage1.elf
   SHECC	out/shecc-stage2.elf
+```
+
+Run `make DYNLINK=1` to use the dynamic linking mode and generate the dynamically linked compiler:
+```shell
+# If using the dynamic linking mode, you should add 'DYNLINK=1' for each 'make' command.
+$ make DYNLINK=1
+  CC+LD	out/inliner
+  GEN	out/libc.inc
+  CC	out/src/main.o
+  LD	out/shecc
+  SHECC	out/shecc-stage1.elf
+  SHECC	out/shecc-stage2.elf
+
+$ file out/shecc-stage2.elf
+out/shecc-stage2.elf: ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-armhf.so.3, not stripped
 ```
 
 For development builds with memory safety checks:
@@ -103,7 +128,7 @@ $ make check-sanitizer
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```shell
-$ shecc [-o output] [+m] [--no-libc] [--dump-ir] <infile.c>
+$ shecc [-o output] [+m] [--no-libc] [--dump-ir] [--dynlink] <infile.c>
 ```
 
 Compiler options:
@@ -111,12 +136,22 @@ Compiler options:
 - `+m` : Use hardware multiplication/division instructions (default: disabled)
 - `--no-libc` : Exclude embedded C library (default: embedded)
 - `--dump-ir` : Dump intermediate representation (IR)
+- `--dynlink` : Use dynamic linking (default: disabled)
 
-Example:
+Example 1: static linking mode
 ```shell
 $ out/shecc -o fib tests/fib.c
 $ chmod +x fib
 $ qemu-arm fib
+```
+
+Example 2: dynamic linking mode
+
+Notice that `/usr/arm-linux-gnueabihf` is the ELF interpreter prefix. Since the path may be different if you manually install the ARM GNU toolchain instead of using `apt-get`, you should set the prefix to the actual path.
+```shell
+$ out/shecc --dynlink -o fib tests/fib.c
+$ chmod +x fib
+$ qemu-arm -L /usr/arm-linux-gnueabihf fib
 ```
 
 ### IR Regression Tests
@@ -142,6 +177,7 @@ use `update-snapshot` / `check-snapshot` instead.
 
 `shecc` comes with a comprehensive test suite (200+ test cases). To run the tests:
 ```shell
+# Add 'DYNLINK=1' if using the dynamic linking mode.
 $ make check          # Run all tests (stage 0 and stage 2)
 $ make check-stage0   # Test stage 0 compiler only
 $ make check-stage2   # Test stage 2 compiler only

@@ -18,8 +18,8 @@ char *intern_string(char *str);
 
 /* Lexer */
 char token_str[MAX_TOKEN_LEN];
-token_t next_token;
-char next_char;
+token_t next_token = 0;
+char next_char = 0;
 bool skip_newline = true;
 
 /* Token memory management */
@@ -32,7 +32,7 @@ bool preproc_match;
 /* Point to the first character after where the macro has been called. It is
  * needed when returning from the macro body.
  */
-int macro_return_idx;
+int macro_return_idx = 0;
 
 /* Global objects */
 
@@ -96,15 +96,21 @@ strbuf_t *elf_code;
 strbuf_t *elf_data;
 strbuf_t *elf_rodata;
 strbuf_t *elf_header;
+strbuf_t *elf_program_header;
 strbuf_t *elf_symtab;
 strbuf_t *elf_strtab;
-strbuf_t *elf_section;
-int elf_header_len = 0x54; /* ELF fixed: 0x34 + 1 * 0x20 */
+strbuf_t *elf_section_header;
+strbuf_t *elf_shstrtab;
+int elf_header_len;
 int elf_code_start;
 int elf_data_start;
 int elf_rodata_start;
 int elf_bss_start;
 int elf_bss_size;
+dynamic_sections_t dynamic_sections;
+
+/* Dynamic linking flag */
+bool dynlink = false;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -637,6 +643,7 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->next_bb = NULL;
     ph2_ir->then_bb = NULL;
     ph2_ir->else_bb = NULL;
+    ph2_ir->ofs_based_on_stack_top = false;
     return add_existed_ph2_ir(ph2_ir);
 }
 
@@ -917,7 +924,33 @@ func_t *add_func(char *func_name, bool synthesize)
     hashmap_put(FUNC_MAP, func_name, func);
     /* Use interned string for function name */
     strcpy(func->return_def.var_name, intern_string(func_name));
-    func->stack_size = 4;
+    /* Prepare space for function arguments.
+     *
+     * For Arm architecture, the first four arguments (arg1 ~ arg4) are
+     * passed to r0 ~ r3, and any additional arguments (arg5+) are passed
+     * to the stack.
+     *
+     * +-------------+
+     * | local vars  |
+     * +-------------+
+     * |    ...      |
+     * +-------------+ <-- sp + 16
+     * |    arg 8    |
+     * +-------------+ <-- sp + 12
+     * |    arg 7    |
+     * +-------------+ <-- sp + 8
+     * |    arg 6    |
+     * +-------------+ <-- sp + 4
+     * |    arg 5    |
+     * +-------------+ <-- sp
+     *
+     * If the target architecture is RISC-V, arg1 ~ arg8 are passed to
+     * registers and arg9+ are passed to the stack.
+     *
+     * We allocate (MAX_PARAMS - MAX_ARGS_IN_REG) * 4 bytes for all functions
+     * so that each of them can use the space to pass extra arguments.
+     */
+    func->stack_size = (MAX_PARAMS - MAX_ARGS_IN_REG) * 4;
 
     if (synthesize)
         return func;
@@ -1182,7 +1215,9 @@ void strbuf_free(strbuf_t *src)
  */
 void global_init(void)
 {
-    elf_code_start = ELF_START + elf_header_len;
+    FUNC_LIST.head = NULL;
+    FUNC_LIST.tail = NULL;
+    memset(REGS, 0, sizeof(regfile_t) * REG_CNT);
 
     MACROS_MAP = hashmap_create(MAX_ALIASES);
 
@@ -1225,10 +1260,19 @@ void global_init(void)
     elf_data = strbuf_create(MAX_DATA);
     elf_rodata = strbuf_create(MAX_DATA);
     elf_header = strbuf_create(MAX_HEADER);
+    elf_program_header = strbuf_create(MAX_PROGRAM_HEADER);
     elf_symtab = strbuf_create(MAX_SYMTAB);
     elf_strtab = strbuf_create(MAX_STRTAB);
-    elf_section = strbuf_create(MAX_SECTION);
     elf_bss_size = 0;
+    elf_shstrtab = strbuf_create(MAX_SHSTR);
+    elf_section_header = strbuf_create(MAX_SECTION_HEADER);
+    dynamic_sections.elf_interp = strbuf_create(MAX_INTERP);
+    dynamic_sections.elf_dynamic = strbuf_create(MAX_DYNAMIC);
+    dynamic_sections.elf_dynsym = strbuf_create(MAX_DYNSYM);
+    dynamic_sections.elf_dynstr = strbuf_create(MAX_DYNSTR);
+    dynamic_sections.elf_relplt = strbuf_create(MAX_RELPLT);
+    dynamic_sections.elf_plt = strbuf_create(MAX_PLT);
+    dynamic_sections.elf_got = strbuf_create(MAX_GOTPLT);
 }
 
 /* Forward declaration for lexer cleanup */
@@ -1344,20 +1388,28 @@ void global_release(void)
     arena_free(BB_ARENA);
     arena_free(HASHMAP_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
+    hashmap_free(FUNC_MAP);
+    hashmap_free(INCLUSION_MAP);
+    hashmap_free(ALIASES_MAP);
+    hashmap_free(CONSTANTS_MAP);
 
     strbuf_free(SOURCE);
     strbuf_free(elf_code);
     strbuf_free(elf_data);
     strbuf_free(elf_rodata);
     strbuf_free(elf_header);
+    strbuf_free(elf_program_header);
     strbuf_free(elf_symtab);
     strbuf_free(elf_strtab);
-    strbuf_free(elf_section);
-
-    hashmap_free(FUNC_MAP);
-    hashmap_free(INCLUSION_MAP);
-    hashmap_free(ALIASES_MAP);
-    hashmap_free(CONSTANTS_MAP);
+    strbuf_free(elf_shstrtab);
+    strbuf_free(elf_section_header);
+    strbuf_free(dynamic_sections.elf_interp);
+    strbuf_free(dynamic_sections.elf_dynamic);
+    strbuf_free(dynamic_sections.elf_dynsym);
+    strbuf_free(dynamic_sections.elf_dynstr);
+    strbuf_free(dynamic_sections.elf_relplt);
+    strbuf_free(dynamic_sections.elf_plt);
+    strbuf_free(dynamic_sections.elf_got);
 }
 
 /* Reports an error without specifying a position */
@@ -1412,6 +1464,8 @@ void print_indent(int indent)
 
 void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
 {
+    if (!bb)
+        return;
     var_t *rd, *rs1, *rs2;
 
     if (bb != func->bbs && bb->insn_list.head) {
@@ -1642,7 +1696,7 @@ void dump_bb_insn_by_dom(func_t *func, basic_block_t *bb, bool *at_func_start)
 {
     dump_bb_insn(func, bb, at_func_start);
     for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
-        if (!bb->dom_next[i])
+        if (!bb || !bb->dom_next[i])
             break;
         dump_bb_insn_by_dom(func, bb->dom_next[i], at_func_start);
     }
@@ -1680,6 +1734,8 @@ void dump_insn(void)
 
         /* Handle implicit return */
         for (int i = 0; i < MAX_BB_PRED; i++) {
+            if (!func->exit)
+                break;
             basic_block_t *bb = func->exit->prev[i].bb;
             if (!bb)
                 continue;
