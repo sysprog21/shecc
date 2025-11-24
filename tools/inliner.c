@@ -173,10 +173,11 @@ int main(int argc, char *argv[])
      *   __c("}\n");
      */
     write_str("void __c(char *src) {\n");
-    write_str("    strbuf_puts(SOURCE, src);\n");
+    write_str("    strbuf_puts(LIBC_SRC, src);\n");
     write_str("}\n");
 
     write_str("void libc_generate() {\n");
+    write_str("  LIBC_SRC = strbuf_create(4096);\n");
     load_from(argv[1]);
     write_str("}\n");
     save_to(argv[2]);

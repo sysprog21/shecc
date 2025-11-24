@@ -16,6 +16,10 @@
 #define INT_MAX 0x7fffffff
 #define INT_MIN 0x80000000
 
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
 #if defined(__arm__)
 #define __SIZEOF_POINTER__ 4
 #define __syscall_exit 1
@@ -23,6 +27,7 @@
 #define __syscall_write 4
 #define __syscall_close 6
 #define __syscall_open 5
+#define __syscall_lseek 19
 #define __syscall_mmap2 192
 #define __syscall_munmap 91
 
@@ -34,6 +39,7 @@
 #define __syscall_close 57
 #define __syscall_open 1024
 #define __syscall_openat 56
+#define __syscall_lseek 62
 #define __syscall_mmap2 222
 #define __syscall_munmap 215
 
@@ -582,6 +588,30 @@ int fputc(int c, FILE *stream)
     if (__syscall(__syscall_write, stream, &c, 1) < 0)
         return -1;
     return c;
+}
+
+int fseek(FILE *stream, int offset, int whence)
+{
+#if defined(__arm__)
+    __syscall(__syscall_lseek, stream, offset, whence);
+#elif defined(__riscv)
+    /* No need to offset */
+    __syscall(__syscall_lseek, stream, 0, offset, NULL, whence);
+#endif
+    return 0;
+}
+
+int ftell(FILE *stream)
+{
+#if defined(__arm__)
+    return __syscall(__syscall_lseek, stream, 0, SEEK_CUR);
+#elif defined(__riscv)
+    int result;
+    __syscall(__syscall_lseek, stream, 0, 0, &result, SEEK_CUR);
+    return result;
+#else
+#error "Unsupported ftell support for current platform"
+#endif
 }
 
 /* Non-portable: Assume page size is 4KiB */
