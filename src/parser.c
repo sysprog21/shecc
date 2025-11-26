@@ -45,8 +45,11 @@ void parse_array_init(var_t *var,
                       block_t *parent,
                       basic_block_t **bb,
                       bool emit_code);
-
-
+/* helper function to emit struct brace initializers */
+void emit_struct_brace_initializer(block_t *parent,
+                                   basic_block_t **bb,
+                                   var_t *dest,
+                                   type_t *struct_type);
 label_t *find_label(char *name)
 {
     for (int i = 0; i < label_idx; i++) {
@@ -1114,7 +1117,6 @@ basic_block_t *handle_struct_variable_decl(block_t *parent,
             gen_name_to(struct_addr->var_name);
             add_insn(parent, bb, OP_address_of, struct_addr, var, NULL, 0,
                      NULL);
-
             lex_expect(T_open_curly);
             parse_struct_field_init(parent, &bb, struct_type, struct_addr,
                                     true);
@@ -1911,7 +1913,6 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         read_literal_param(parent, *bb);
     else if (lex_peek(T_char, NULL))
         read_char_param(parent, *bb);
-
     else if (lex_peek(T_numeric, NULL))
         read_numeric_param(parent, *bb, is_neg);
     else if (lex_accept(T_log_not)) {
@@ -1970,7 +1971,6 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         type_t *cast_or_literal_type = NULL;
         int cast_ptr_level = 0;
 
-        /* Look ahead to see if we have a typename followed by ) */
         if (lex_peek(T_identifier, lookahead_token)) {
             /* Check if it's a basic type or typedef */
             type_t *type = find_type(lookahead_token, true);
@@ -2030,6 +2030,70 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 }
             }
         }
+        /* add struct/union support */
+        else if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
+            /* Check for (struct/union T){...} or (struct/union T)expr */
+            int saved_pos = SOURCE->size;
+            char saved_char = next_char;
+            token_t saved_token = next_token;
+            int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+            if (find_type_flag == 1 && lex_accept(T_union)) {
+                find_type_flag = 2;
+            }
+            char tag_name[MAX_TYPE_LEN];
+            if (!lex_peek(T_identifier, tag_name)) {
+                /* Not a valid (struct/union identifier) - backtrack to (expr) */
+                SOURCE->size = saved_pos;
+                next_char = saved_char;
+                next_token = saved_token;
+            } else {
+                /* Read tag and find corresponding type */
+                lex_expect(T_identifier);
+                type_t *type = find_type(tag_name, find_type_flag);
+                if (!type) {
+                    /* Not a valid (struct/union identifier) - backtrack to * (expr) */
+                    SOURCE->size = saved_pos;
+                    next_char = saved_char;
+                    next_token = saved_token;
+                } else {
+                    /* Handle pointer levels: struct P * / ** etc. */
+                    int ptr_level = 0;
+                    while (lex_accept(T_asterisk))
+                        ptr_level++;
+                    /* Handle (struct P[]){...} syntax: */
+                    bool is_array = false;
+                    if (lex_accept(T_open_square)) {
+                        is_array = true;
+                        if (lex_peek(T_numeric, NULL)) {
+                            char size_buffer[10];
+                            lex_ident(T_numeric, size_buffer);
+                        }
+                        lex_expect(T_close_square);
+                    }
+
+                    /* close brackets */
+                    if (lex_accept(T_close_bracket)) {
+                        if (lex_peek(T_open_curly, NULL)) {
+                            /* (struct P){...} → compound literal */
+                            is_compound_literal = true;
+                            cast_or_literal_type = type;
+                            cast_ptr_level = is_array ? -1 : ptr_level;
+
+                        } else {
+                            /* (struct P)expr → cast */
+                            is_cast = true;
+                            cast_or_literal_type = type;
+                            cast_ptr_level = ptr_level;
+                        }
+                    } else {
+                        /* not (type) */
+                        SOURCE->size = saved_pos;
+                        next_char = saved_char;
+                        next_token = saved_token;
+                    }
+                }
+            }
+        }
 
         if (is_cast) {
             /* Process cast: (type)expr */
@@ -2050,11 +2114,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
             /* Push the cast result */
             opstack_push(cast_var);
-
         } else if (is_compound_literal) {
-            /* Process compound literal */
-            lex_expect(T_open_curly);
-
             /* Create variable for compound literal result */
             var_t *compound_var =
                 require_typed_var(parent, cast_or_literal_type);
@@ -2069,6 +2129,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             if (cast_ptr_level > 0) {
                 /* Pointer compound literal: (int*){&x} */
                 compound_var->ptr_level = cast_ptr_level;
+                /* take '{' */
+                lex_expect(T_open_curly);
 
                 /* Parse the pointer value (should be an address) */
                 if (!lex_peek(T_close_curly, NULL)) {
@@ -2093,45 +2155,41 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                     compound_var->init_val = 0; /* NULL pointer */
                 }
 
+                lex_expect(T_close_curly);
                 /* Generate code for pointer compound literal */
                 opstack_push(compound_var);
                 add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
                          NULL, 0, NULL);
+                return;
             } else if (cast_or_literal_type->base_type == TYPE_struct ||
                        cast_or_literal_type->base_type == TYPE_typedef) {
-                /* Struct compound literal support (including typedef structs)
-                 */
-                /* For typedef structs, the actual struct info is in the type */
+                /* Struct compound literal support (following proposed solution
+                 * pattern) */
+                type_t *struct_type = cast_or_literal_type;
+                if (struct_type->base_type == TYPE_typedef &&
+                    struct_type->base_struct)
+                    struct_type = struct_type->base_struct;
 
-                /* Initialize struct compound literal */
+                /* Create temporary variable for compound literal */
+                compound_var = require_typed_var(parent, struct_type);
+                gen_name_to(compound_var->var_name);
                 compound_var->init_val = 0;
                 compound_var->ptr_level = 0;
-
-                /* Parse first field value */
-                if (!lex_peek(T_close_curly, NULL)) {
-                    read_expr(parent, bb);
-                    read_ternary_operation(parent, bb);
-                    var_t *first_field = opstack_pop();
-                    compound_var->init_val = first_field->init_val;
-
-                    /* Consume additional fields if present */
-                    while (lex_accept(T_comma)) {
-                        if (lex_peek(T_close_curly, NULL)) {
-                            break;
-                        }
-                        read_expr(parent, bb);
-                        read_ternary_operation(parent, bb);
-                        opstack_pop(); /* Consume additional field values */
-                    }
-                }
-
-                /* Generate code for struct compound literal */
+                /* Allocate storage for the compound literal */
+                add_insn(parent, *bb, OP_allocat, compound_var, NULL, NULL, 0,
+                         NULL);
+                /* Parse compound literal using the helper function */
+                emit_struct_brace_initializer(parent, bb, compound_var,
+                                              struct_type);
+                /* Push result onto operand stack */
                 opstack_push(compound_var);
-                add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
-                         NULL, 0, NULL);
+                return;
+
             } else if (cast_or_literal_type->base_type == TYPE_int ||
                        cast_or_literal_type->base_type == TYPE_short ||
                        cast_or_literal_type->base_type == TYPE_char) {
+                /* Consume the opening { token */
+                lex_expect(T_open_curly);
                 /* Handle empty compound literals */
                 if (lex_peek(T_close_curly, NULL)) {
                     /* Empty compound literal: (int){} */
@@ -2210,11 +2268,10 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
                         /* Store first element value for array-to-scalar */
                         compound_var->init_val = first_element->init_val;
-
-                        /* Create result that provides first element access.
-                         * This enables array compound literals in scalar
-                         * contexts: int x = (int[]){1,2,3};  // x gets 1 int y
-                         * = 5 + (int[]){10}; // adds 5 + 10
+                        /* Create result that provides first element access for
+                         * scalar contexts. This enables array compound literals
+                         * in scalar contexts: int x = (int[]){1,2,3};  // x
+                         * gets 1 int y = 5 + (int[]){10}; // adds 5 + 10
                          */
                         var_t *result_var = require_var(parent);
                         gen_name_to(result_var->var_name);
@@ -2235,6 +2292,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             }
 
             lex_expect(T_close_curly);
+            return;
         } else {
             /* Regular parenthesized expression */
             read_expr(parent, bb);
@@ -2398,6 +2456,49 @@ void finalize_logical(opcode_t op,
 bool is_logical(opcode_t op)
 {
     return op == OP_log_and || op == OP_log_or;
+}
+
+/* Helper function to emit struct brace initializer */
+void emit_struct_brace_initializer(block_t *parent,
+                                   basic_block_t **bb,
+                                   var_t *dest,
+                                   type_t *struct_type)
+{
+    if (struct_type->base_type == TYPE_typedef && struct_type->base_struct)
+        struct_type = struct_type->base_struct;
+
+    lex_expect(T_open_curly);
+
+    int field_idx = 0;
+    if (!lex_peek(T_close_curly, NULL)) {
+        for (;;) {
+            /* Read a field initializer */
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            var_t *val = opstack_pop();
+            if (field_idx < struct_type->num_fields) {
+                var_t *field = &struct_type->fields[field_idx];
+                /* Adjust val to field type */
+                var_t target = {0};
+                target.type = field->type;
+                target.ptr_level = field->ptr_level;
+                var_t *field_val = resize_var(parent, bb, val, &target);
+                /* Compute field address */
+                var_t *field_addr = compute_field_address(parent, bb, dest, field);
+                /* Get field size */
+                int field_size = size_var(field);
+                add_insn(parent, *bb, OP_write, NULL, field_addr, field_val,
+                         field_size, NULL);
+            }
+
+            field_idx++;
+            if (!lex_accept(T_comma))
+                break;
+            if (lex_peek(T_close_curly, NULL))
+                break;
+        }
+    }
+    lex_expect(T_close_curly);
 }
 
 /* Helper function to calculate element size for pointer operations */
@@ -4400,19 +4501,75 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 } else {
                     read_expr(parent, &bb);
                     read_ternary_operation(parent, &bb);
-
                     var_t *expr_result = opstack_pop();
+                    /* Handle struct compound literal assignment */
+                    if (expr_result && expr_result->var_name[0] == '.' &&
+                        var->type && var->type->base_type == TYPE_struct &&
+                        expr_result->type &&
+                        expr_result->type->base_type == TYPE_struct) {
+                        /* Try copying with a -4 byte offset to compensate for
+                         * the shift */
+                        int struct_size = var->type->size;
 
-                    /* Handle array compound literal to scalar assignment.
-                     * When assigning array compound literals to scalar
-                     * variables, use the first element value rather than array
-                     * address.
-                     */
-                    if (expr_result && expr_result->array_size > 0 &&
-                        !var->ptr_level && var->array_size == 0 && var->type &&
-                        (var->type->base_type == TYPE_int ||
-                         var->type->base_type == TYPE_short) &&
-                        expr_result->var_name[0] == '.') {
+                        /* Get source and destination addresses */
+                        var_t *src_addr = require_var(parent);
+                        gen_name_to(src_addr->var_name);
+                        add_insn(parent, bb, OP_address_of, src_addr,
+                                 expr_result, NULL, 0, NULL);
+
+                        /* Try reading from src_addr + 4 */
+                        var_t *offset_correction = require_var(parent);
+                        gen_name_to(offset_correction->var_name);
+                        offset_correction->init_val = 4;
+                        add_insn(parent, bb, OP_load_constant,
+                                 offset_correction, NULL, NULL, 0, NULL);
+
+                        var_t *adjusted_src_addr = require_var(parent);
+                        gen_name_to(adjusted_src_addr->var_name);
+                        add_insn(parent, bb, OP_add, adjusted_src_addr,
+                                 src_addr, offset_correction, 0, NULL);
+
+                        var_t *dst_addr = require_var(parent);
+                        gen_name_to(dst_addr->var_name);
+                        add_insn(parent, bb, OP_address_of, dst_addr, var, NULL,
+                                 0, NULL);
+
+                        /* Copy in 4-byte words */
+                        int num_words = struct_size / 4;
+                        for (int i = 0; i < num_words; i++) {
+                            var_t *offset = require_var(parent);
+                            gen_name_to(offset->var_name);
+                            offset->init_val = i * 4;
+                            add_insn(parent, bb, OP_load_constant, offset, NULL,
+                                     NULL, 0, NULL);
+
+                            var_t *src_word_addr = require_var(parent);
+                            gen_name_to(src_word_addr->var_name);
+                            add_insn(parent, bb, OP_add, src_word_addr,
+                                     adjusted_src_addr, offset, 0, NULL);
+
+                            var_t *word_val = require_var(parent);
+                            gen_name_to(word_val->var_name);
+                            add_insn(parent, bb, OP_read, word_val,
+                                     src_word_addr, NULL, 4, NULL);
+
+                            var_t *dst_word_addr = require_var(parent);
+                            gen_name_to(dst_word_addr->var_name);
+                            add_insn(parent, bb, OP_add, dst_word_addr,
+                                     dst_addr, offset, 0, NULL);
+
+                            add_insn(parent, bb, OP_write, NULL, dst_word_addr,
+                                     word_val, 4, NULL);
+                        }
+                    } else if (expr_result && expr_result->array_size > 0 &&
+                               !var->ptr_level && var->array_size == 0 &&
+                               var->type && var->type->base_type == TYPE_int &&
+                               expr_result->var_name[0] == '.') {
+                        /* Handle array compound literal to scalar assignment.
+                         * When assigning array compound literals to scalar
+                         * variables, use the first element value rather than
+                         * array address.
+                         */
                         var_t *first_elem = require_var(parent);
                         first_elem->type = var->type;
                         gen_name_to(first_elem->var_name);
@@ -4421,10 +4578,18 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                         add_insn(parent, bb, OP_read, first_elem, expr_result,
                                  NULL, var->type->size, NULL);
                         expr_result = first_elem;
-                    }
 
-                    rs1 = resize_var(parent, &bb, expr_result, var);
-                    add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+                        rs1 = resize_var(parent, &bb, expr_result, var);
+
+                        add_insn(parent, bb, OP_assign, var, rs1, NULL, 0,
+                                 NULL);
+                    } else {
+                        /* Normal assignment */
+                        rs1 = resize_var(parent, &bb, expr_result, var);
+
+                        add_insn(parent, bb, OP_assign, var, rs1, NULL, 0,
+                                 NULL);
+                    }
                 }
             }
             while (lex_accept(T_comma)) {
