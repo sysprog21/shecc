@@ -1448,11 +1448,16 @@ void error(char *msg)
 
     strcpy(diagnostic + i, "^ Error occurs here");
 
-    /* TODO: Implement line/column tracking for precise error location
-     * reporting. Current implementation only shows source position offset.
-     */
-    printf("[Error]: %s\nOccurs at source location %d.\n%s\n", msg,
-           SOURCE->size, diagnostic);
+    /* Backtrack SOURCE to find line of position */
+    int line = 1;
+    for (i = 0; i < start_idx; i++) {
+        if (SOURCE->elements[i] == '\n')
+            line++;
+    }
+    int column = SOURCE->size - start_idx + 1;
+
+    printf("[Error]: %s\nOccurs at source location %d:%d.\n%s\n", msg, line,
+           column, diagnostic);
     abort();
 }
 
