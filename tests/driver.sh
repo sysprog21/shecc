@@ -733,6 +733,28 @@ int main() {
 }
 EOF
 
+# Test: Array compound literal decay to pointer in initializer
+try_ 0 << EOF
+int main(void) {
+    int *arr = (int[]){1, 2, 3, 4, 5};
+    return arr[0] != 1 || arr[4] != 5;
+}
+EOF
+
+# Test: Passing array compound literal as pointer argument
+try_ 0 << EOF
+int sum(int *p, int n) {
+    int s = 0;
+    for (int i = 0; i < n; i++)
+        s += p[i];
+    return s;
+}
+int main(void) {
+    int s = sum((int[]){1, 2, 3, 0, 0}, 3);
+    return s != 6;
+}
+EOF
+
 # Test: Complex expression with compound literals
 try_ 77 << EOF
 int main() {
@@ -4734,6 +4756,36 @@ int main() {
     int a = (int[]){25, 35, 45};
     int b = (int[]){50, 60, 70};
     return a + b; /* 25 + 50 = 75 */
+}
+EOF
+
+try_ 200 << EOF
+int main(void) {
+    char *s = (char[]){'A', 'B', 'C', 'D', 'E'};
+    return s[0] + s[1] + s[4]; /* 65 + 66 + 69 */
+}
+EOF
+
+try_ 6 << EOF
+int main(void) {
+    short *s = (short[]){1, 2, 3, 4, 5};
+    return s[0] + s[4];
+}
+EOF
+
+try_ 60 << EOF
+int main(void) {
+    int arr[] = {10, 20, 30, 40, 50};
+    int *selected = 1 ? arr : (int[]){1, 2, 3, 4, 5};
+    return selected[0] + selected[4];
+}
+EOF
+
+try_ 6 << EOF
+int main(void) {
+    int arr[] = {10, 20, 30, 40, 50};
+    int *selected = 0 ? arr : (int[]){1, 2, 3, 4, 5};
+    return selected[0] + selected[4];
 }
 EOF
 
