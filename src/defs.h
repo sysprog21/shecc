@@ -14,7 +14,7 @@
 #define MAX_TOKEN_LEN 256
 #define MAX_ID_LEN 64
 #define MAX_LINE_LEN 256
-#define MAX_VAR_LEN 32
+#define MAX_VAR_LEN 128
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
 #define MAX_LOCALS 1600
@@ -410,6 +410,11 @@ struct var {
      * the variable is based on the top of the local stack.
      */
     bool ofs_based_on_stack_top;
+
+    /* True when this variable was synthesized to hold a compound literal
+     * (e.g., array or struct literal temporaries).
+     */
+    bool is_compound_literal;
 };
 
 typedef struct {
