@@ -96,6 +96,7 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->next_bb = NULL;
     n->then_bb = NULL;
     n->else_bb = NULL;
+    n->ofs_based_on_stack_top = false;
 
     if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;

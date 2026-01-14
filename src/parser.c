@@ -46,7 +46,6 @@ void parse_array_init(var_t *var,
                       basic_block_t **bb,
                       bool emit_code);
 
-
 label_t *find_label(char *name)
 {
     for (int i = 0; i < label_idx; i++) {
@@ -874,6 +873,7 @@ void parse_array_literal_expr(block_t *parent, basic_block_t **bb)
 {
     var_t *array_var = require_var(parent);
     gen_name_to(array_var->var_name);
+    array_var->is_compound_literal = true;
 
     int element_count = 0;
     var_t *first_element = NULL;
@@ -1330,6 +1330,115 @@ void parse_array_init(var_t *var,
     }
 }
 
+void parse_array_compound_literal(var_t *var,
+                                  block_t *parent,
+                                  basic_block_t **bb)
+{
+    int elem_size = var->type->size;
+    int count = 0;
+    var->array_size = 0;
+    var->init_val = 0;
+    if (!lex_peek(T_close_curly, NULL)) {
+        for (;;) {
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            var_t *value = opstack_pop();
+            if (count == 0)
+                var->init_val = value->init_val;
+
+            var_t target = {0};
+            target.type = var->type;
+            target.ptr_level = 0;
+            var_t *store_val = resize_var(parent, bb, value, &target);
+            var_t *elem_addr =
+                compute_element_address(parent, bb, var, count, elem_size);
+            add_insn(parent, *bb, OP_write, NULL, elem_addr, store_val,
+                     elem_size, NULL);
+
+            count++;
+            if (!lex_accept(T_comma))
+                break;
+            if (lex_peek(T_close_curly, NULL))
+                break;
+        }
+    }
+
+    lex_expect(T_close_curly);
+    var->array_size = count;
+}
+/* Identify compiler-emitted temporaries that hold array compound literals.
+ * They keep array metadata without pointer indirection and are marked via
+ * is_compound_literal when synthesized.
+ */
+bool is_array_literal_placeholder(var_t *var)
+{
+    return var && var->array_size > 0 && !var->ptr_level &&
+           var->is_compound_literal;
+}
+
+bool is_pointer_like_value(var_t *var)
+{
+    return var && (var->ptr_level || var->array_size ||
+                   (var->type && var->type->ptr_level > 0));
+}
+
+/* Lower a compiler-emitted array literal placeholder (marked via
+ * is_compound_literal) into a scalar temporary when later IR expects a plain
+ * value instead of addressable storage. This keeps SSA joins uniform when only
+ * one branch originates from an array literal.
+ */
+var_t *scalarize_array_literal(block_t *parent,
+                               basic_block_t **bb,
+                               var_t *array_var,
+                               type_t *hint_type)
+{
+    if (!is_array_literal_placeholder(array_var))
+        return array_var;
+
+    /* Array literal placeholders carry the literal's natural type; default to
+     * int when the parser left the type unset.
+     */
+    type_t *literal_type = array_var->type ? array_var->type : TY_int;
+    int literal_size = literal_type->size;
+    if (literal_size <= 0)
+        literal_size = TY_int->size;
+
+    /* A caller-provided hint (e.g., assignment target) dictates the result
+     * type when available so we reuse wider/narrower scalar destinations.
+     */
+    type_t *result_type = hint_type ? hint_type : literal_type;
+    if (!result_type)
+        result_type = TY_int;
+
+    /* Create a new scalar temporary, giving it a unique name and copying over
+     * the literal data so downstream code can treat it like a normal value.
+     */
+    var_t *scalar = require_typed_var(parent, result_type);
+    scalar->ptr_level = 0;
+    gen_name_to(scalar->var_name);
+    scalar->init_val = array_var->init_val;
+
+    /* Materialize the literal data into the scalar temporary via an OP_read. */
+    add_insn(parent, *bb, OP_read, scalar, array_var, NULL, literal_size, NULL);
+
+    return scalar;
+}
+
+/* Centralized guard for lowering array literal placeholders when a scalar
+ * value is expected, keeping the scattered special cases consistent.
+ */
+var_t *scalarize_array_literal_if_needed(block_t *parent,
+                                         basic_block_t **bb,
+                                         var_t *value,
+                                         type_t *hint_type,
+                                         bool needs_scalar)
+{
+    if (!needs_scalar)
+        return value;
+
+    return scalarize_array_literal(parent, bb, value, hint_type);
+}
+
 void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 {
     /* Preserve typedef pointer level - don't reset if already inherited */
@@ -1622,17 +1731,24 @@ void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
         read_ternary_operation(parent, bb);
 
         param = opstack_pop();
-
+        if (func && param_num < func->num_params) {
+            var_t *target = &func->param_defs[param_num];
+            if (!target->ptr_level && !target->array_size)
+                param =
+                    scalarize_array_literal(parent, bb, param, target->type);
+        }
         /* Handle parameter type conversion for direct calls.
          * Indirect calls currently don't provide function instance.
          */
-        if (func) {
-            if (param_num >= func->num_params && func->va_args) {
+        if (func && param_num >= func->num_params && func->va_args) {
+            /* Default promotions apply to scalar varargs, but pointer-like
+             * values (including array literals) must flow through unchanged so
+             * "%p" and friends see an address rather than a scalarized value.
+             */
+            if (!is_pointer_like_value(param))
                 param = promote(parent, bb, param, TY_int, 0);
-            } else {
-                param =
-                    resize_var(parent, bb, param, &func->param_defs[param_num]);
-            }
+        } else if (func) {
+            param = resize_var(parent, bb, param, &func->param_defs[param_num]);
         }
 
         params[param_num++] = param;
@@ -2059,14 +2175,28 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             var_t *compound_var =
                 require_typed_var(parent, cast_or_literal_type);
             gen_name_to(compound_var->var_name);
+            compound_var->is_compound_literal = true;
 
             /* Check if this is an array compound literal (int[]){...} */
             bool is_array_literal = (cast_ptr_level == -1);
             if (is_array_literal)
                 cast_ptr_level = 0; /* Reset for normal processing */
-
+            bool consumed_close_brace = false;
             /* Check if this is a pointer compound literal */
-            if (cast_ptr_level > 0) {
+            if (is_array_literal) {
+                compound_var->array_size = 0;
+                add_insn(parent, *bb, OP_allocat, compound_var, NULL, NULL, 0,
+                         NULL);
+                parse_array_compound_literal(compound_var, parent, bb);
+
+                if (compound_var->array_size == 0) {
+                    compound_var->init_val = 0;
+                    add_insn(parent, *bb, OP_load_constant, compound_var, NULL,
+                             NULL, 0, NULL);
+                }
+                opstack_push(compound_var);
+                consumed_close_brace = true;
+            } else if (cast_ptr_level > 0) {
                 /* Pointer compound literal: (int*){&x} */
                 compound_var->ptr_level = cast_ptr_level;
 
@@ -2234,7 +2364,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 }
             }
 
-            lex_expect(T_close_curly);
+            if (!consumed_close_brace)
+                lex_expect(T_close_curly);
         } else {
             /* Regular parenthesized expression */
             read_expr(parent, bb);
@@ -2514,20 +2645,14 @@ void handle_pointer_arithmetic(block_t *parent,
         }
 
         /* Check if both have ptr_level or typedef pointer type */
-        bool rs1_is_ptr = (orig_rs1->ptr_level > 0) ||
-                          (orig_rs1->type && orig_rs1->type->ptr_level > 0);
-        bool rs2_is_ptr = (orig_rs2->ptr_level > 0) ||
-                          (orig_rs2->type && orig_rs2->type->ptr_level > 0);
+        bool rs1_is_ptr = is_pointer_like_value(orig_rs1);
+        bool rs2_is_ptr = is_pointer_like_value(orig_rs2);
 
         /* If variable lookup failed, check the passed variables directly */
-        if (!rs1_is_ptr) {
-            rs1_is_ptr =
-                (rs1->ptr_level > 0) || (rs1->type && rs1->type->ptr_level > 0);
-        }
-        if (!rs2_is_ptr) {
-            rs2_is_ptr =
-                (rs2->ptr_level > 0) || (rs2->type && rs2->type->ptr_level > 0);
-        }
+        if (!rs1_is_ptr)
+            rs1_is_ptr = is_pointer_like_value(rs1);
+        if (!rs2_is_ptr)
+            rs2_is_ptr = is_pointer_like_value(rs2);
 
         if (rs1_is_ptr && rs2_is_ptr) {
             /* Both are pointers - this is pointer difference */
@@ -2606,11 +2731,11 @@ void handle_pointer_arithmetic(block_t *parent,
         }
     }
     /* Determine which operand is the pointer for regular pointer arithmetic */
-    if (rs1->ptr_level || (rs1->type && rs1->type->ptr_level > 0)) {
+    if (is_pointer_like_value(rs1)) {
         ptr_var = rs1;
         int_var = rs2;
         element_size = get_pointer_element_size(rs1);
-    } else if (rs2->ptr_level || (rs2->type && rs2->type->ptr_level > 0)) {
+    } else if (is_pointer_like_value(rs2)) {
         /* Only for addition (p + n == n + p) */
         if (op == OP_add) {
             ptr_var = rs2;
@@ -2657,8 +2782,7 @@ bool is_pointer_operation(opcode_t op, var_t *rs1, var_t *rs2)
     if (op != OP_add && op != OP_sub)
         return false;
 
-    return (rs1->ptr_level || (rs1->type && rs1->type->ptr_level > 0) ||
-            rs2->ptr_level || (rs2->type && rs2->type->ptr_level > 0));
+    return is_pointer_like_value(rs1) || is_pointer_like_value(rs2);
 }
 
 /* Helper function to check if a variable is a pointer based on its declaration
@@ -2851,12 +2975,31 @@ void read_expr(block_t *parent, basic_block_t **bb)
         rs2 = opstack_pop();
         rs1 = opstack_pop();
 
+        bool rs1_is_placeholder = is_array_literal_placeholder(rs1);
+        bool rs2_is_placeholder = is_array_literal_placeholder(rs2);
+        bool rs1_is_ptr_like = is_pointer_like_value(rs1);
+        bool rs2_is_ptr_like = is_pointer_like_value(rs2);
+        bool pointer_context = (rs1_is_ptr_like && !rs1_is_placeholder) ||
+                               (rs2_is_ptr_like && !rs2_is_placeholder);
+
         /* Pointer arithmetic handling */
-        if (is_pointer_operation(top_op, rs1, rs2)) {
+        if (pointer_context && is_pointer_operation(top_op, rs1, rs2)) {
             handle_pointer_arithmetic(parent, bb, top_op, rs1, rs2);
             continue; /* skip normal processing */
         }
 
+        if (rs1_is_placeholder && rs2_is_placeholder) {
+            rs1 = scalarize_array_literal(parent, bb, rs1, NULL);
+            rs2 = scalarize_array_literal(parent, bb, rs2, NULL);
+        } else {
+            if (rs1_is_placeholder && !rs2_is_ptr_like)
+                rs1 = scalarize_array_literal(
+                    parent, bb, rs1, rs2 && rs2->type ? rs2->type : NULL);
+
+            if (rs2_is_placeholder && !rs1_is_ptr_like)
+                rs2 = scalarize_array_literal(
+                    parent, bb, rs2, rs1 && rs1->type ? rs1->type : NULL);
+        }
         /* Constant folding for binary operations */
         if (rs1 && rs2 && rs1->init_val && !rs1->ptr_level && !rs1->is_global &&
             rs2->init_val && !rs2->ptr_level && !rs2->is_global) {
@@ -3477,7 +3620,7 @@ void finalize_logical(opcode_t op,
 
 void read_ternary_operation(block_t *parent, basic_block_t **bb)
 {
-    var_t *vd, *rs1;
+    var_t *vd;
 
     if (!lex_accept(T_question))
         return;
@@ -3502,17 +3645,50 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
         abort();
     }
 
-    rs1 = opstack_pop();
-    vd = require_var(parent);
-    gen_name_to(vd->var_name);
-    add_insn(parent, then_, OP_assign, vd, rs1, NULL, 0, NULL);
+    var_t *true_val = opstack_pop();
 
     /* false branch */
     read_expr(parent, &else_);
     bb_connect(*bb, else_, ELSE);
+    var_t *false_val = opstack_pop();
+    bool true_array = is_array_literal_placeholder(true_val);
+    bool false_array = is_array_literal_placeholder(false_val);
+    bool true_ptr_like = is_pointer_like_value(true_val);
+    bool false_ptr_like = is_pointer_like_value(false_val);
 
-    rs1 = opstack_pop();
-    add_insn(parent, else_, OP_assign, vd, rs1, NULL, 0, NULL);
+    /* The ternary result must look like whichever side is pointer-like. If the
+     * "true" expression is still a raw array literal but the "false" side is a
+     * plain scalar, materialize the literal now so both branches produce
+     * comparable scalar SSA values.
+     */
+    true_val = scalarize_array_literal_if_needed(
+        parent, &then_, true_val, false_val ? false_val->type : NULL,
+        true_array && !false_ptr_like);
+
+    /* Apply the same conversion symmetrically when only the false branch is a
+     * literal array. This prevents OP_assign from trying to move array storage
+     * into a scalar destination later in code generation.
+     */
+    false_val = scalarize_array_literal_if_needed(
+        parent, &else_, false_val, true_val ? true_val->type : NULL,
+        false_array && !true_ptr_like);
+
+    vd = require_var(parent);
+    gen_name_to(vd->var_name);
+    add_insn(parent, then_, OP_assign, vd, true_val, NULL, 0, NULL);
+    add_insn(parent, else_, OP_assign, vd, false_val, NULL, 0, NULL);
+
+    var_t *array_ref = NULL;
+    if (is_array_literal_placeholder(true_val))
+        array_ref = true_val;
+    else if (is_array_literal_placeholder(false_val))
+        array_ref = false_val;
+
+    if (array_ref) {
+        vd->array_size = array_ref->array_size;
+        vd->init_val = array_ref->init_val;
+        vd->type = array_ref->type;
+    }
 
     vd->is_ternary_ret = true;
     opstack_push(vd);
@@ -3661,6 +3837,11 @@ bool read_body_assignment(char *token,
 
                 read_expr(parent, bb);
 
+                var_t *rhs_val = opstack_pop();
+                rhs_val = scalarize_array_literal_if_needed(
+                    parent, bb, rhs_val, lvalue.type,
+                    !lvalue.ptr_level && !lvalue.is_reference);
+                opstack_push(rhs_val);
                 vd = require_var(parent);
                 vd->init_val = increment_size;
                 gen_name_to(vd->var_name);
@@ -4401,29 +4582,12 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     read_expr(parent, &bb);
                     read_ternary_operation(parent, &bb);
 
-                    var_t *expr_result = opstack_pop();
+                    var_t *rhs = opstack_pop();
+                    rhs = scalarize_array_literal_if_needed(
+                        parent, &bb, rhs, var->type,
+                        !var->ptr_level && var->array_size == 0);
 
-                    /* Handle array compound literal to scalar assignment.
-                     * When assigning array compound literals to scalar
-                     * variables, use the first element value rather than array
-                     * address.
-                     */
-                    if (expr_result && expr_result->array_size > 0 &&
-                        !var->ptr_level && var->array_size == 0 && var->type &&
-                        (var->type->base_type == TYPE_int ||
-                         var->type->base_type == TYPE_short) &&
-                        expr_result->var_name[0] == '.') {
-                        var_t *first_elem = require_var(parent);
-                        first_elem->type = var->type;
-                        gen_name_to(first_elem->var_name);
-
-                        /* Extract first element from compound literal array */
-                        add_insn(parent, bb, OP_read, first_elem, expr_result,
-                                 NULL, var->type->size, NULL);
-                        expr_result = first_elem;
-                    }
-
-                    rs1 = resize_var(parent, &bb, expr_result, var);
+                    rs1 = resize_var(parent, &bb, rhs, var);
                     add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
                 }
             }
@@ -4515,8 +4679,12 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     } else {
                         read_expr(parent, &bb);
                         read_ternary_operation(parent, &bb);
+                        var_t *rhs = opstack_pop();
+                        rhs = scalarize_array_literal_if_needed(
+                            parent, &bb, rhs, nv->type,
+                            !nv->ptr_level && nv->array_size == 0);
 
-                        rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                        rs1 = resize_var(parent, &bb, rhs, nv);
                         add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
                     }
                 }
@@ -5172,6 +5340,7 @@ void initialize_struct_field(var_t *nv, var_t *v, int offset)
     nv->base = NULL;
     nv->subscript = 0;
     nv->subscripts_idx = 0;
+    nv->is_compound_literal = false;
 }
 
 void read_global_statement(void)
