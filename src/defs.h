@@ -10,6 +10,9 @@
 
 /* definitions */
 
+/* Common macro functions */
+#define is_newline(c) (c == '\r' || c == '\n')
+
 /* Limitations */
 #define MAX_TOKEN_LEN 256
 #define MAX_ID_LEN 64
@@ -26,7 +29,6 @@
 #define MAX_BB_DOM_SUCC 64
 #define MAX_BB_RDOM_SUCC 256
 #define MAX_GLOBAL_IR 256
-#define MAX_SOURCE 1048576
 #define MAX_CODE 262144
 #define MAX_DATA 262144
 #define MAX_SYMTAB 65536
@@ -34,7 +36,6 @@
 #define MAX_HEADER 1024
 #define MAX_PROGRAM_HEADER 1024
 #define MAX_SECTION 1024
-#define MAX_ALIASES 128
 #define MAX_SECTION_HEADER 1024
 #define MAX_SHSTR 1024
 #define MAX_INTERP 1024
@@ -56,7 +57,7 @@
 #define SMALL_ARENA_SIZE 65536    /* 64 KiB - for small allocations */
 #define LARGE_ARENA_SIZE 524288   /* 512 KiB - for instruction arena */
 #define DEFAULT_FUNCS_SIZE 64
-#define DEFAULT_INCLUSIONS_SIZE 16
+#define DEFAULT_SRC_FILE_COUNT 8
 
 /* Arena compaction bitmask flags for selective memory reclamation */
 #define COMPACT_ARENA_BLOCK 0x01   /* BLOCK_ARENA - variables/blocks */
@@ -131,6 +132,7 @@ typedef struct {
 /* lexer tokens */
 typedef enum {
     T_start, /* FIXME: Unused, intended for lexer state machine init */
+    T_eof,   /* end-of-file (EOF) */
     T_numeric,
     T_identifier,
     T_comma,  /* , */
@@ -179,7 +181,6 @@ typedef enum {
     T_question,      /* ? */
     T_colon,         /* : */
     T_semicolon,     /* ; */
-    T_eof,           /* end-of-file (EOF) */
     T_ampersand,     /* & */
     T_return,
     T_if,
@@ -211,38 +212,36 @@ typedef enum {
     T_cppd_endif,
     T_cppd_ifdef,
     T_cppd_ifndef,
-    T_cppd_pragma
-} token_t;
+    T_cppd_pragma,
+    /* C pre-processor specific, these kinds
+     * will be removed after pre-processing is done.
+     */
+    T_newline,
+    T_backslash,
+    T_whitespace,
+    T_tab
+} token_kind_t;
 
 /* Source location tracking for better error reporting */
 typedef struct {
+    int pos; /* raw source file position */
+    int len; /* length of token */
     int line;
     int column;
     char *filename;
 } source_location_t;
 
-/* Token structure with metadata for enhanced lexing */
-typedef struct token_info {
-    token_t type;
-    char value[MAX_TOKEN_LEN];
+typedef struct token {
+    token_kind_t kind;
+    char *literal;
     source_location_t location;
-    struct token_info *next; /* For freelist management */
-} token_info_t;
+    struct token *next;
+} token_t;
 
-/* Token freelist for memory reuse */
-typedef struct {
-    token_info_t *freelist;
-    int allocated_count;
-} token_pool_t;
-
-/* Token buffer for improved lookahead */
-#define TOKEN_BUFFER_SIZE 8
-typedef struct {
-    token_info_t *tokens[TOKEN_BUFFER_SIZE];
-    int head;
-    int tail;
-    int count;
-} token_buffer_t;
+typedef struct token_stream {
+    token_t *head;
+    token_t *tail;
+} token_stream_t;
 
 /* String pool for identifier deduplication */
 typedef struct {
@@ -387,7 +386,7 @@ struct var {
     int in_loop;
     struct var *base;
     int subscript;
-    struct var *subscripts[64];
+    struct var *subscripts[128];
     int subscripts_idx;
     rename_t rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
@@ -417,17 +416,6 @@ struct var {
     bool is_compound_literal;
 };
 
-typedef struct {
-    char name[MAX_VAR_LEN];
-    bool is_variadic;
-    int start_source_idx;
-    var_t param_defs[MAX_PARAMS];
-    int num_param_defs;
-    int params[MAX_PARAMS];
-    int num_params;
-    bool disabled;
-} macro_t;
-
 typedef struct func func_t;
 
 /* block definition */
@@ -435,7 +423,6 @@ struct block {
     var_list_t locals;
     struct block *parent;
     func_t *func;
-    macro_t *macro;
     struct block *next;
 };
 
@@ -498,13 +485,6 @@ typedef struct {
     bool is_reference;
     type_t *type;
 } lvalue_t;
-
-/* alias for #defines */
-typedef struct {
-    char alias[MAX_VAR_LEN];
-    char value[MAX_VAR_LEN];
-    bool disabled;
-} alias_t;
 
 /* constants for enums */
 typedef struct {

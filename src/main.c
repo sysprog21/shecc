@@ -25,6 +25,9 @@
 /* C language lexical analyzer */
 #include "lexer.c"
 
+/* C language pre-processor */
+#include "preprocessor.c"
+
 /* C language syntactic analyzer */
 #include "parser.c"
 
@@ -48,9 +51,10 @@
 
 int main(int argc, char *argv[])
 {
-    bool libc = true;
     char *out = NULL;
     char *in = NULL;
+    token_stream_t *libc_token_stream, *token_stream;
+    token_t *tk;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
@@ -61,6 +65,8 @@ int main(int argc, char *argv[])
             libc = false;
         else if (!strcmp(argv[i], "--dynlink"))
             dynlink = true;
+        else if (!strcmp(argv[i], "-E"))
+            expand_only = true;
         else if (!strcmp(argv[i], "-o")) {
             if (i + 1 < argc) {
                 out = argv[i + 1];
@@ -78,8 +84,9 @@ int main(int argc, char *argv[])
         printf("Missing source file!\n");
         printf(
             "Usage: shecc [-o output] [+m] [--dump-ir] [--no-libc] [--dynlink] "
+            "[-E]"
             "<input.c>\n");
-        return -1;
+        exit(-1);
     }
 
     /* initialize global objects */
@@ -90,10 +97,26 @@ int main(int argc, char *argv[])
         libc_decl();
         if (!dynlink)
             libc_impl();
+        libc_token_stream = gen_libc_token_stream();
+    }
+
+    token_stream = gen_file_token_stream(in);
+
+    /* concat libc's and input file's token stream */
+    if (libc) {
+        libc_token_stream->tail->next = token_stream->head;
+        token_stream = libc_token_stream;
+    }
+
+    tk = preprocess(token_stream->head);
+
+    if (expand_only) {
+        emit_preprocessed_token(tk);
+        exit(0);
     }
 
     /* load and parse source code into IR */
-    parse(in);
+    parse(tk);
 
     /* Compact arenas after parsing to free temporary parse structures */
     compact_all_arenas();

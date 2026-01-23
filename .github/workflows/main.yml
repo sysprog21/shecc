@@ -88,6 +88,34 @@ jobs:
           make check-sanitizer DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
           make check DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
 
+  preprocessor-host:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+        architecture: [arm, riscv]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Download dependencies
+        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y graphviz jq
+          sudo apt-get install -q -y qemu-user
+          sudo apt-get install -q -y build-essential
+      - name: Configurate config
+        run: |
+          make distclean config ARCH=${{ matrix.architecture }}
+      - name: Preprocess stage 1 source code
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          make out/shecc
+          ./out/shecc -E src/main.c > ./out/out.c
+      - name: Build stage 1 artifact
+        run: |
+          ./out/shecc --no-libc -o out/shecc-stage1.elf ./out/out.c
+
   coding-style:
     runs-on: ubuntu-24.04
     steps:

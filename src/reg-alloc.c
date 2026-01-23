@@ -11,7 +11,6 @@
  * TODO: Implement "-O level" optimization control. Currently the allocator
  * always performs dead variable elimination without writing back to stack.
  */
-
 #include "defs.h"
 #include "globals.c"
 
