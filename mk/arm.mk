@@ -1,4 +1,4 @@
-ARCH_NAME = armv7l
+ARCH_NAME = armv7l aarch64
 ARCH_RUNNER = qemu-arm
 ARCH_DEFS = \
     "/* target: ARM */\n$\
@@ -23,7 +23,7 @@ ARCH_DEFS = \
 # Therefore, the following process first locates find the correct
 # sysroot of the toolchain, and then generate the ELF interpreter
 # prefix for later use.
-ifneq ($(HOST_ARCH),$(ARCH_NAME))
+ifeq ($(filter $(HOST_ARCH),$(ARCH_NAME)),)
     ifeq ($(DYNLINK),1)
         CROSS_COMPILE = arm-none-linux-gnueabihf-
         ARM_CC = $(CROSS_COMPILE)gcc
