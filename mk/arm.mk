@@ -1,4 +1,10 @@
-ARCH_NAME = armv7l
+# Allow the following machines to use native execution
+#
+# - Beaglebone Black (Cortex-A8)
+# - Raspberry Pi 3 (Cortex-A53)
+# - Raspberry Pi 4 (Cortex-A72)
+# - Raspberry Pi 5 (Cortex-A76)
+ALLOW_MACHINES = BeagleBone-Black Raspberry-Pi-3 Raspberry-Pi-4 Raspberry-Pi-5
 ARCH_RUNNER = qemu-arm
 ARCH_DEFS = \
     "/* target: ARM */\n$\
@@ -14,6 +20,39 @@ ARCH_DEFS = \
     \#define MAX_ARGS_IN_REG 4\n$\
     "
 
+# If the running machine has the "fastfetch" tool installed, the build
+# system will verify whether native execution can be performed.
+ifneq ($(shell which fastfetch),)
+    # 1. Replace whitespaces with hyphens after retrieving the host
+    #    machine name via the "fastfetch" tool.
+    #
+    # 2. If at least one machine name in the allowlist is found in
+    #    the host machine name, it can perform native execution.
+    #
+    #    Therefore, set USE_QEMU to 0.
+    HOST_MACHINE = $(shell fastfetch --logo none --structure Host | sed 's/ /-/g')
+    USE_QEMU = $(if $(strip $(foreach MACHINE, $(ALLOW_MACHINES), $(findstring $(MACHINE),$(HOST_MACHINE)))),0,1)
+
+    # Special case: GitHub workflows on Arm64 runners
+    #
+    # When an Arm-hosted runner executes "fastfetch --logo none --structure Host",
+    # it produces the following output:
+    # 
+    #     Host: Virtual Machine (Hyper-V UEFI Release v4.1)
+    #
+    # Arm-hosted runners are also capable of performing native execution. However,
+    # directly adding "Virtual-Machine" to the allowlist would be ambiguous.
+    # Therefore, the build system instead checks the CPU name using the
+    # "fastfetch --logo none --structure CPU" command.
+    #
+    # If the detected CPU is "Neoverse-N2", the build system treats the running
+    # machine as an Arm-hosted runner and enable native execution.
+    ifeq ($(USE_QEMU),1)
+        HOST_CPU = $(shell fastfetch --logo none --structure CPU | sed 's/ /-/g')
+        USE_QEMU = $(if $(strip $(findstring Neoverse-N2,$(HOST_CPU))),0,1)
+    endif
+endif
+
 # Find the sysroot of the ARM GNU toolchain if using dynamic linking.
 #
 # Since developers may install the toolchain manually instead of
@@ -23,7 +62,7 @@ ARCH_DEFS = \
 # Therefore, the following process first locates find the correct
 # sysroot of the toolchain, and then generate the ELF interpreter
 # prefix for later use.
-ifneq ($(HOST_ARCH),$(ARCH_NAME))
+ifeq ($(USE_QEMU),1)
     ifeq ($(DYNLINK),1)
         CROSS_COMPILE = arm-none-linux-gnueabihf-
         ARM_CC = $(CROSS_COMPILE)gcc
