@@ -37,8 +37,10 @@ This document tracks compliance gaps and non-standard behaviors.
 - `#define` for object-like and function-like macros
 - `#ifdef`, `#ifndef`, `#if`, `#elif`, `#else`, `#endif`
 - `#undef` for macro removal
+- `#pragma once`, other `#pragma` options will be ignored
 - `defined()` operator
 - `__VA_ARGS__` for variadic macros
+- `__FILE__`, `__LINE__` built-in macros
 
 ## Missing Features
 
@@ -83,15 +85,12 @@ This document tracks compliance gaps and non-standard behaviors.
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| `#include` | Parsed only | No file inclusion |
+| `#include` | Partial | Local file inclusion is supported, but lack of capability to include system files |
 | Token pasting (`##`) | Missing | Cannot concatenate tokens |
 | Stringizing (`#`) | Missing | Cannot convert to string |
-| `__FILE__` | Missing | No file name macro |
-| `__LINE__` | Missing | No line number macro |
 | `__DATE__` | Missing | No compile date |
 | `__TIME__` | Missing | No compile time |
 | `__STDC__` | Missing | No standard compliance indicator |
-| `#pragma` | Ignored | Accepted but no effect |
 
 ### Advanced Features
 

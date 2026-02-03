@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,32 +18,15 @@
 char *intern_string(char *str);
 
 /* Lexer */
-char token_str[MAX_TOKEN_LEN];
-token_t next_token = 0;
-char next_char = 0;
-bool skip_newline = true;
-
-/* Token memory management */
-token_pool_t *TOKEN_POOL;
-token_buffer_t *TOKEN_BUFFER;
-source_location_t current_location; /* Will be initialized at runtime */
-
-bool preproc_match;
-
-/* Point to the first character after where the macro has been called. It is
- * needed when returning from the macro body.
- */
-int macro_return_idx = 0;
+token_t *cur_token;
+/* TOKEN_CACHE maps filename to the corresponding computed token stream */
+hashmap_t *TOKEN_CACHE;
+strbuf_t *LIBC_SRC;
 
 /* Global objects */
 
-/* FUNC_MAP is used to integrate function storing and boost lookup
- * performance, currently it uses FNV-1a hash function to hash function
- * name.
- */
-hashmap_t *MACROS_MAP;
+hashmap_t *SRC_FILE_MAP;
 hashmap_t *FUNC_MAP;
-hashmap_t *ALIASES_MAP;
 hashmap_t *CONSTANTS_MAP;
 
 /* Types */
@@ -69,6 +53,10 @@ arena_t *BLOCK_ARENA;
 /* BB_ARENA is responsible for basic_block_t / ph2_ir_t allocation */
 arena_t *BB_ARENA;
 
+/* TOKEN_ARENA is responsible for token_t (including literal) /
+ * source_location_t allocation */
+arena_t *TOKEN_ARENA;
+
 /* GENERAL_ARENA is responsible for functions, symbols, constants, aliases,
  * macros, and traversal args
  */
@@ -86,8 +74,6 @@ basic_block_t *MAIN_BB;
 int elf_offset = 0;
 
 regfile_t REGS[REG_CNT];
-
-strbuf_t *SOURCE;
 
 hashmap_t *INCLUSION_MAP;
 
@@ -109,8 +95,12 @@ int elf_bss_start;
 int elf_bss_size;
 dynamic_sections_t dynamic_sections;
 
-/* Dynamic linking flag */
+/* Command line compilation flags */
 bool dynlink = false;
+bool libc = true;
+bool expand_only = false;
+bool dump_ir = false;
+bool hard_mul_div = false;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -332,21 +322,6 @@ constant_t *arena_alloc_constant(void)
     c->alias[0] = '\0';
     c->value = 0;
     return c;
-}
-
-alias_t *arena_alloc_alias(void)
-{
-    /* alias_t is simple, can avoid zeroing */
-    alias_t *a = arena_alloc(GENERAL_ARENA, sizeof(alias_t));
-    a->alias[0] = '\0';
-    a->value[0] = '\0';
-    a->disabled = false;
-    return a;
-}
-
-macro_t *arena_alloc_macro(void)
-{
-    return arena_calloc(GENERAL_ARENA, 1, sizeof(macro_t));
 }
 
 bb_traversal_args_t *arena_alloc_traversal_args(void)
@@ -584,11 +559,6 @@ void hashmap_free(hashmap_t *map)
     free(map);
 }
 
-/* options */
-
-bool dump_ir = false;
-bool hard_mul_div = false;
-
 /* Find the type by the given name.
  * @type_name: The name to be searched.
  * @flag:
@@ -654,7 +624,7 @@ void set_var_liveout(var_t *var, int end)
     var->liveness = end;
 }
 
-block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
+block_t *add_block(block_t *parent, func_t *func)
 {
     block_t *blk = arena_alloc(BLOCK_ARENA, sizeof(block_t));
 
@@ -665,82 +635,9 @@ block_t *add_block(block_t *parent, func_t *func, macro_t *macro)
         arena_alloc(BLOCK_ARENA, blk->locals.capacity * sizeof(var_t *));
     blk->parent = parent;
     blk->func = func;
-    blk->macro = macro;
     blk->next = NULL;
     return blk;
 }
-
-void add_alias(char *alias, char *value)
-{
-    alias_t *al = hashmap_get(ALIASES_MAP, alias);
-    if (!al) {
-        al = arena_alloc_alias();
-        if (!al) {
-            printf("Failed to allocate alias_t\n");
-            return;
-        }
-        /* Use interned string for alias name */
-        strcpy(al->alias, intern_string(alias));
-        hashmap_put(ALIASES_MAP, alias, al);
-    }
-    strcpy(al->value, value);
-    al->disabled = false;
-}
-
-char *find_alias(char alias[])
-{
-    alias_t *al = hashmap_get(ALIASES_MAP, alias);
-    if (al && !al->disabled)
-        return al->value;
-    return NULL;
-}
-
-bool remove_alias(char *alias)
-{
-    alias_t *al = hashmap_get(ALIASES_MAP, alias);
-    if (al && !al->disabled) {
-        al->disabled = true;
-        return true;
-    }
-    return false;
-}
-
-macro_t *add_macro(char *name)
-{
-    macro_t *ma = hashmap_get(MACROS_MAP, name);
-    if (!ma) {
-        ma = arena_alloc_macro();
-        if (!ma) {
-            printf("Failed to allocate macro_t\n");
-            return NULL;
-        }
-        /* Use interned string for macro name */
-        strcpy(ma->name, intern_string(name));
-        hashmap_put(MACROS_MAP, name, ma);
-    }
-    ma->disabled = false;
-    return ma;
-}
-
-macro_t *find_macro(char *name)
-{
-    macro_t *ma = hashmap_get(MACROS_MAP, name);
-    if (ma && !ma->disabled)
-        return ma;
-    return NULL;
-}
-
-bool remove_macro(char *name)
-{
-    macro_t *ma = hashmap_get(MACROS_MAP, name);
-    if (ma) {
-        ma->disabled = true;
-        return true;
-    }
-    return false;
-}
-
-void error(char *msg);
 
 /* String pool global */
 string_pool_t *string_pool;
@@ -776,20 +673,173 @@ char *intern_string(char *str)
     return interned;
 }
 
-int find_macro_param_src_idx(char *name, block_t *parent)
+int hex_digit_value(char c)
 {
-    macro_t *macro = parent->macro;
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
 
-    if (!parent)
-        error("The macro expansion is not supported in the global scope");
-    if (!parent->macro)
-        return 0;
+int unescape_string(const char *input, char *output, int output_size)
+{
+    if (!input || !output || output_size == 0)
+        return -1;
 
-    for (int i = 0; i < macro->num_param_defs; i++) {
-        if (!strcmp(macro->param_defs[i].var_name, name))
-            return macro->params[i];
+    int i = 0, j = 0;
+
+    while (input[i] != '\0' && j < output_size - 1) {
+        if (input[i] != '\\') {
+            /* Regular characters */
+            output[j++] = input[i++];
+            continue;
+        }
+
+        i++;
+
+        switch (input[i]) {
+        case 'a':
+            output[j++] = '\a';
+            i++;
+            break;
+        case 'b':
+            output[j++] = '\b';
+            i++;
+            break;
+        case 'f':
+            output[j++] = '\f';
+            i++;
+            break;
+        case 'e':
+            output[j++] = 27;
+            i++;
+            break;
+        case 'n':
+            output[j++] = '\n';
+            i++;
+            break;
+        case 'r':
+            output[j++] = '\r';
+            i++;
+            break;
+        case 't':
+            output[j++] = '\t';
+            i++;
+            break;
+        case 'v':
+            output[j++] = '\v';
+            i++;
+            break;
+        case '\\':
+            output[j++] = '\\';
+            i++;
+            break;
+        case '\'':
+            output[j++] = '\'';
+            i++;
+            break;
+        case '"':
+            output[j++] = '"';
+            i++;
+            break;
+        case '?':
+            output[j++] = '\?';
+            i++;
+            break;
+        case 'x': {
+            /* Hexadecimal escape sequence: \xhh */
+            i++; /* Skips 'x' */
+
+            if (!isxdigit(input[i]))
+                return -1;
+
+            int value = 0;
+            int count = 0;
+
+            while (isxdigit(input[i]) && count < 2) {
+                value = (value << 4) + hex_digit_value(input[i]);
+                i++;
+                count++;
+            }
+
+            output[j++] = (char) value;
+            break;
+        }
+        case '0':
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7': {
+            /* Octal escape sequence: \ooo (up to 3 digits) */
+            int value = 0;
+            int digit_count = 0;
+
+            while (input[i] >= '0' && input[i] <= '7' && digit_count < 3) {
+                value = value * 8 + (input[i] - '0');
+                i++;
+                digit_count++;
+            }
+
+            output[j++] = (char) value;
+            break;
+        }
+        default:
+            /* Unknown escape sequence - treat as literal character */
+            output[j++] = input[i++];
+            break;
+        }
     }
-    return 0;
+
+    output[j] = '\0';
+
+    /* Check if we ran out of output space */
+    if (input[i] != '\0')
+        return -1;
+
+    return j;
+}
+
+int parse_numeric_constant(char *buffer)
+{
+    int i = 0;
+    int value = 0;
+    while (buffer[i]) {
+        if (i == 1 && (buffer[i] | 32) == 'x') { /* hexadecimal */
+            value = 0;
+            i = 2;
+            while (buffer[i]) {
+                char c = buffer[i++];
+                value <<= 4;
+                if (isdigit(c))
+                    value += c - '0';
+                c |= 32; /* convert to lower case */
+                if (c >= 'a' && c <= 'f')
+                    value += (c - 'a') + 10;
+            }
+            return value;
+        }
+        if (i == 1 && (buffer[i] | 32) == 'b') { /* binary */
+            value = 0;
+            i = 2;
+            while (buffer[i]) {
+                char c = buffer[i++];
+                value <<= 1;
+                value += (c == '1');
+            }
+            return value;
+        }
+        if (buffer[0] == '0') /* octal */
+            value = value * 8 + buffer[i++] - '0';
+        else
+            value = value * 10 + buffer[i++] - '0';
+    }
+    return value;
 }
 
 type_t *add_type(void)
@@ -1159,7 +1209,7 @@ bool strbuf_extend(strbuf_t *src, int len)
     if (new_size < src->capacity)
         return true;
 
-    if (new_size > src->capacity << 1)
+    if (new_size > (src->capacity << 1))
         src->capacity = new_size;
     else
         src->capacity <<= 1;
@@ -1219,13 +1269,12 @@ void global_init(void)
     FUNC_LIST.tail = NULL;
     memset(REGS, 0, sizeof(regfile_t) * REG_CNT);
 
-    MACROS_MAP = hashmap_create(MAX_ALIASES);
-
     /* Initialize arenas first so we can use them for allocation */
     BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Variables/blocks */
     INSN_ARENA = arena_init(LARGE_ARENA_SIZE); /* Instructions - high usage */
     BB_ARENA = arena_init(SMALL_ARENA_SIZE);   /* Basic blocks - low usage */
     HASHMAP_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Hash nodes */
+    TOKEN_ARENA = arena_init(LARGE_ARENA_SIZE);
     GENERAL_ARENA =
         arena_init(DEFAULT_ARENA_SIZE); /* For TYPES and PH2_IR_FLATTEN */
 
@@ -1243,19 +1292,12 @@ void global_init(void)
         arena_alloc(GENERAL_ARENA, sizeof(string_literal_pool_t));
     string_literal_pool->literals = hashmap_create(256);
 
-    SOURCE = strbuf_create(MAX_SOURCE);
+    TOKEN_CACHE = hashmap_create(DEFAULT_SRC_FILE_COUNT);
+    SRC_FILE_MAP = hashmap_create(DEFAULT_SRC_FILE_COUNT);
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
-    INCLUSION_MAP = hashmap_create(DEFAULT_INCLUSIONS_SIZE);
-
-    /* Initialize token management globals */
-    current_location.line = 1;
-    current_location.column = 1;
-    current_location.filename = NULL;
-    TOKEN_POOL = NULL;
-    TOKEN_BUFFER = NULL;
-    ALIASES_MAP = hashmap_create(MAX_ALIASES);
     CONSTANTS_MAP = hashmap_create(MAX_CONSTANTS);
 
+    LIBC_SRC = strbuf_create(4096);
     elf_code = strbuf_create(MAX_CODE);
     elf_data = strbuf_create(MAX_DATA);
     elf_rodata = strbuf_create(MAX_DATA);
@@ -1375,8 +1417,6 @@ void global_release(void)
     /* Cleanup lexer hashmaps */
     lexer_cleanup();
 
-    hashmap_free(MACROS_MAP);
-
     /* Free string interning hashmaps */
     if (string_pool && string_pool->strings)
         hashmap_free(string_pool->strings);
@@ -1387,13 +1427,15 @@ void global_release(void)
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     arena_free(HASHMAP_ARENA);
+    arena_free(TOKEN_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
+    hashmap_free(TOKEN_CACHE);
+    hashmap_free(SRC_FILE_MAP);
     hashmap_free(FUNC_MAP);
     hashmap_free(INCLUSION_MAP);
-    hashmap_free(ALIASES_MAP);
     hashmap_free(CONSTANTS_MAP);
 
-    strbuf_free(SOURCE);
+    strbuf_free(LIBC_SRC);
     strbuf_free(elf_code);
     strbuf_free(elf_data);
     strbuf_free(elf_rodata);
@@ -1419,45 +1461,60 @@ void fatal(char *msg)
     abort();
 }
 
-/* Reports an error and specifying a position */
-void error(char *msg)
+/* Reports error and prints occurred position context,
+ * if the given location is NULL or source file is missing,
+ * then fallbacks to fatal(char *).
+ */
+void error_at(char *msg, source_location_t *loc)
 {
-    /* Construct error source diagnostics, enabling precise identification of
-     * syntax and logic issues within the code.
-     */
-    int offset, start_idx, i = 0;
-    char diagnostic[512 /* MAX_LINE_LEN * 2 */];
+    int offset, start_idx, i = 0, len, pos;
+    char diagnostic[MAX_LINE_LEN];
 
-    for (offset = SOURCE->size; offset >= 0 && SOURCE->elements[offset] != '\n';
-         offset--)
+    if (!loc)
+        fatal(msg);
+
+    len = loc->len;
+    pos = loc->pos;
+
+    strbuf_t *src = hashmap_get(SRC_FILE_MAP, loc->filename);
+
+    if (!src)
+        fatal(msg);
+
+    if (len < 1)
+        len = 1;
+
+    printf("%s:%d:%d: [Error]: %s\n", loc->filename, loc->line, loc->column,
+           msg);
+    printf("%6d |  ", loc->line);
+
+    /* Finds line's start position */
+    for (offset = pos; offset >= 0 && src->elements[offset] != '\n'; offset--)
         ;
 
     start_idx = offset + 1;
 
-    for (offset = 0;
-         offset < MAX_SOURCE && (start_idx + offset) < SOURCE->size &&
-         SOURCE->elements[start_idx + offset] != '\n';
+    /* Copies whole line to diagnostic buffer */
+    for (offset = start_idx;
+         offset < src->capacity && src->elements[offset] != '\n' &&
+         src->elements[offset] != '\0';
          offset++) {
-        diagnostic[i++] = SOURCE->elements[start_idx + offset];
+        diagnostic[i++] = src->elements[offset];
     }
-    diagnostic[i++] = '\n';
+    diagnostic[i] = '\0';
 
-    for (offset = start_idx; offset < SOURCE->size; offset++) {
+    printf("%s\n", diagnostic);
+    printf("%6c |  ", ' ');
+
+    i = 0;
+    for (offset = start_idx; offset < pos; offset++)
         diagnostic[i++] = ' ';
-    }
+    diagnostic[i++] = '^';
+    for (; len > 1; len--)
+        diagnostic[i++] = '~';
 
-    strcpy(diagnostic + i, "^ Error occurs here");
-
-    /* Backtrack SOURCE to find line of position */
-    int line = 1;
-    for (i = 0; i < start_idx; i++) {
-        if (SOURCE->elements[i] == '\n')
-            line++;
-    }
-    int column = SOURCE->size - start_idx + 1;
-
-    printf("[Error]: %s\nOccurs at source location %d:%d.\n%s\n", msg, line,
-           column, diagnostic);
+    strcpy(diagnostic + i, " Error occurs here");
+    printf("%s\n", diagnostic);
     abort();
 }
 

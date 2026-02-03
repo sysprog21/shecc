@@ -62,7 +62,7 @@ void elf_generate_header(void)
 {
     /* Check for null pointers to prevent crashes */
     if (!elf_code || !elf_data || !elf_symtab || !elf_strtab || !elf_header) {
-        error("ELF buffers not initialized");
+        fatal("ELF buffers not initialized");
         return;
     }
 
@@ -193,7 +193,7 @@ void elf_generate_program_headers(void)
           !dynamic_sections.elf_plt || !dynamic_sections.elf_got ||
           !dynamic_sections.elf_dynstr || !dynamic_sections.elf_dynsym ||
           !dynamic_sections.elf_dynamic))) {
-        error("ELF section buffers not initialized");
+        fatal("ELF section buffers not initialized");
         return;
     }
 
@@ -316,7 +316,7 @@ void elf_generate_section_headers(void)
           !dynamic_sections.elf_plt || !dynamic_sections.elf_got ||
           !dynamic_sections.elf_dynstr || !dynamic_sections.elf_dynsym ||
           !dynamic_sections.elf_dynamic))) {
-        error("ELF section buffers not initialized");
+        fatal("ELF section buffers not initialized");
         return;
     }
 
@@ -587,7 +587,7 @@ void elf_align(strbuf_t *elf_array)
 {
     /* Check for null pointers to prevent crashes */
     if (!elf_array) {
-        error("ELF buffers not initialized for alignment");
+        fatal("ELF buffers not initialized for alignment");
         return;
     }
 
@@ -603,7 +603,7 @@ void elf_generate_sections(void)
           !dynamic_sections.elf_plt || !dynamic_sections.elf_got ||
           !dynamic_sections.elf_dynstr || !dynamic_sections.elf_dynsym ||
           !dynamic_sections.elf_dynamic))) {
-        error("ELF section buffers not initialized");
+        fatal("ELF section buffers not initialized");
         return;
     }
 
@@ -820,7 +820,7 @@ void elf_add_symbol(const char *symbol, int pc)
 {
     /* Check for null pointers to prevent crashes */
     if (!symbol || !elf_symtab || !elf_strtab) {
-        error("Invalid parameters for elf_add_symbol");
+        fatal("Invalid parameters for elf_add_symbol");
         return;
     }
 
@@ -928,7 +928,7 @@ void elf_generate(const char *outfile)
 
     FILE *fp = fopen(outfile, "wb");
     if (!fp) {
-        error("Unable to open output file for writing");
+        fatal("Unable to open output file for writing");
         return;
     }
 

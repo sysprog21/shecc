@@ -9,6 +9,36 @@
 #include "c.h"
 #define INT_BUF_LEN 16
 
+#define __is_alpha(c) ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+#define __is_digit(c) ((c >= '0' && c <= '9'))
+#define __is_hex(c) \
+    (__is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+
+int isdigit(int c)
+{
+    return __is_digit(c);
+}
+
+int isalpha(int c)
+{
+    return __is_alpha(c);
+}
+
+int isalnum(int c)
+{
+    return __is_alpha(c) || __is_digit(c);
+}
+
+int isxdigit(int c)
+{
+    return __is_hex(c);
+}
+
+int isblank(int c)
+{
+    return c == ' ' || c == '\t';
+}
+
 int strlen(char *str)
 {
     /* process the string by checking 4 characters (a 32-bit word) at a time */
@@ -541,6 +571,33 @@ int fputc(int c, FILE *stream)
     if (__syscall(__syscall_write, stream, &c, 1) < 0)
         return -1;
     return c;
+}
+
+int fseek(FILE *stream, int offset, int whence)
+{
+    int result;
+#if defined(__arm__)
+    result = __syscall(__syscall_lseek, stream, offset, whence);
+#elif defined(__riscv)
+    /* No need to offset */
+    result = __syscall(__syscall_lseek, stream, 0, offset, NULL, whence);
+#else
+#error "Unsupported fseek support for current platform"
+#endif
+    return result == -1;
+}
+
+int ftell(FILE *stream)
+{
+#if defined(__arm__)
+    return __syscall(__syscall_lseek, stream, 0, SEEK_CUR);
+#elif defined(__riscv)
+    int result;
+    __syscall(__syscall_lseek, stream, 0, 0, &result, SEEK_CUR);
+    return result;
+#else
+#error "Unsupported ftell support for current platform"
+#endif
 }
 
 #define CHUNK_SIZE_FREED_MASK 1

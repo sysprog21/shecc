@@ -4,7 +4,6 @@
  * shecc is freely redistributable under the BSD 2 clause license. See the
  * file "LICENSE" for information on usage and redistribution of this file.
  */
-
 #include <stdio.h>
 #include <string.h>
 
@@ -15,7 +14,7 @@
 #include "opt-sccp.c"
 
 /* Configuration constants - replace magic numbers */
-#define PHI_WORKLIST_SIZE 64
+#define PHI_WORKLIST_SIZE 128
 #define DCE_WORKLIST_SIZE 2048
 
 /* Dead store elimination window size */
