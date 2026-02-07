@@ -25,7 +25,7 @@ pass = $(PRINTF) "$(PASS_COLOR)$1 Passed$(NO_COLOR)\n"
 # Check the prerequisites
 PREREQ_LIST := dot jq
 TARGET_EXEC ?=
-ifneq ($(HOST_ARCH),$(ARCH_NAME))
+ifeq ($(USE_QEMU),1)
     # Add qemu to the list if the host and target architectures differ
     PREREQ_LIST += $(ARCH_RUNNER)
     ifeq ($(filter $(ARCH_RUNNER),$(notdir $(shell which $(ARCH_RUNNER)))),)

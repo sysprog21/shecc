@@ -55,37 +55,44 @@ jobs:
           make check DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
 
   host-arm:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
         link_mode: [static, dynamic]
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Determine static or dynamic linking mode
-      id: determine-mode
-      run: |
-        if [ "${{ matrix.link_mode }}" = "dynamic" ]; then
-          echo "Use dynamic linking mode"
-          echo "DYNLINK=1" >> "$GITHUB_OUTPUT"
-        else
-          echo "Use static linking mode"
-          echo "DYNLINK=0" >> "$GITHUB_OUTPUT"
-        fi
-    - name: Build artifacts
-      # The GitHub Action for non-x86 CPU
-      # https://github.com/uraimo/run-on-arch-action
-      uses: uraimo/run-on-arch-action@v3
-      with:
-        arch: armv7
-        distro: ubuntu24.04
-        githubToken: ${{ github.token }}
-        install: |
-          apt-get update -qq -y
-          apt-get install -yqq build-essential
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download dependencies
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y graphviz jq
+          sudo apt-get install -q -y build-essential libc6:armhf
+          sudo wget https://github.com/fastfetch-cli/fastfetch/releases/download/2.58.0/fastfetch-linux-aarch64.deb
+          sudo dpkg -i fastfetch-linux-aarch64.deb
+
+      - name: Determine static or dynamic linking mode
+        id: determine-mode
+        run: |
+          if [ "${{ matrix.link_mode }}" = "dynamic" ]; then
+            echo "Use dynamic linking mode"
+            echo "DYNLINK=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "Use static linking mode"
+            echo "DYNLINK=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build artifacts
         run: |
           make ARCH=arm DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }}
+
+      - name: Sanitizer-enabled stage 0 tests
+        run: |
           make check-sanitizer DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
+
+      - name: Unit tests
+        run: |
           make check DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
 
   preprocessor-host:

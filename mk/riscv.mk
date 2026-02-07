@@ -1,5 +1,5 @@
-# Enforce the use qemu of by setting the ARCH_NAME variable to empty
-ARCH_NAME =
+# Enforce the use qemu of by setting the ALLOW_MACHINES variable to empty
+ALLOW_MACHINES =
 ARCH_RUNNER = qemu-riscv32
 ARCH_DEFS = \
     "/* target: RISCV */\n$\
