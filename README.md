@@ -66,6 +66,11 @@ emulation on GNU/Linux:
 $ sudo apt-get install qemu-user
 ```
 
+The build system is able to verify whether the running machine can perform native
+execution without QEMU. The host machine may install the prebuilt
+[fastfetch](https://github.com/fastfetch-cli/fastfetch/), which allows the build
+system to determine whether native execution can be enabled.
+
 It is still possible to build `shecc` on macOS or Microsoft Windows. However,
 the second stage bootstrapping would fail due to `qemu-arm` absence.
 

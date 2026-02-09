@@ -36,10 +36,10 @@ STAGE0 := shecc
 STAGE1 := shecc-stage1.elf
 STAGE2 := shecc-stage2.elf
 
+USE_QEMU ?= 1
 OUT ?= out
 ARCHS = arm riscv
 ARCH ?= $(firstword $(ARCHS))
-HOST_ARCH = $(shell arch 2>/dev/null)
 SRCDIR := $(shell find src -type d)
 LIBDIR := $(shell find lib -type d)
 
