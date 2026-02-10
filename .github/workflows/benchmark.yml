@@ -1,0 +1,40 @@
+name: Benchmark
+
+on: [push, pull_request_target, workflow_dispatch]
+
+jobs:
+  benchmark:
+    name: Performance check
+    if: contains(toJSON(github.event.head_commit.message), 'Merge pull request ') == false
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v47
+        with:
+          files: |
+            src/*.c
+            src/*.h
+            lib/c.h
+            lib/c.c
+
+      - name: Download dependencies
+        if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y graphviz jq
+          sudo apt-get install -q -y build-essential libc6:armhf
+          sudo wget https://github.com/fastfetch-cli/fastfetch/releases/download/2.58.0/fastfetch-linux-aarch64.deb
+          sudo dpkg -i fastfetch-linux-aarch64.deb
+          sudo apt-get install -q -y python3
+
+      - name: Measure execution time and memory use for bootstrapping
+        if: steps.changed-files.outputs.any_changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          make bench CC=gcc
+          make bench CC=gcc DYNLINK=1
