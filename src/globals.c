@@ -1412,6 +1412,24 @@ int compact_arenas_selective(int phase_mask)
     return total_saved;
 }
 
+static void free_src_file_map_values(void)
+{
+    if (!SRC_FILE_MAP)
+        return;
+
+    for (int i = 0; i < SRC_FILE_MAP->cap; i++) {
+        if (!SRC_FILE_MAP->table[i].occupied)
+            continue;
+
+        strbuf_t *src = SRC_FILE_MAP->table[i].val;
+        if (!src || src == LIBC_SRC)
+            continue;
+
+        strbuf_free(src);
+        SRC_FILE_MAP->table[i].val = NULL;
+    }
+}
+
 void global_release(void)
 {
     /* Cleanup lexer hashmaps */
@@ -1430,6 +1448,7 @@ void global_release(void)
     arena_free(TOKEN_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
     hashmap_free(TOKEN_CACHE);
+    free_src_file_map_values();
     hashmap_free(SRC_FILE_MAP);
     hashmap_free(FUNC_MAP);
     hashmap_free(INCLUSION_MAP);
