@@ -49,10 +49,6 @@ STAGE0_FLAGS ?= --dump-ir
 STAGE1_FLAGS ?=
 DYNLINK ?= 0
 ifeq ($(DYNLINK),1)
-    ifeq ($(ARCH),riscv)
-        # TODO: implement dynamic linking for RISC-V.
-        $(error "Dynamic linking mode is not implemented for RISC-V")
-    endif
     STAGE0_FLAGS += --dynlink
     STAGE1_FLAGS += --dynlink
 endif
