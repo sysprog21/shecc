@@ -59,9 +59,9 @@ void riscv_lower(void)
 /* Entry point: dispatch to the active architecture. */
 void arch_lower(void)
 {
-#if ELF_MACHINE == 0x28 /* ARM */
+#if ELF_MACHINE == ELF_MACHINE_ARM32
     arm_lower();
-#elif ELF_MACHINE == 0xf3 /* RISC-V */
+#elif ELF_MACHINE == ELF_MACHINE_RV32
     riscv_lower();
 #else
     /* Unknown architecture: keep behavior as-is. */

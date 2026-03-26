@@ -101,6 +101,9 @@
 #define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
 #endif
 
+#define ELF_MACHINE_ARM32 0x28
+#define ELF_MACHINE_RV32 0xf3
+
 /* Common data structures */
 typedef struct arena_block {
     char *memory;
