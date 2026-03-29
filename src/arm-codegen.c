@@ -165,9 +165,8 @@ void cfg_flatten(void)
             100; /* offset of __libc_start_main + main_wrapper in codegen */
     else {
         func = find_func("__syscall");
-        func->bbs->elf_offset = 60; /* offset of start + exit in codegen */
-        elf_offset =
-            112; /* offset of start + branch + exit + syscall in codegen */
+        func->bbs->elf_offset = 32; /* offset of start + branch in codegen */
+        elf_offset = 92; /* offset of start + branch + syscall in codegen */
     }
 
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
@@ -670,30 +669,52 @@ void code_generate(void)
     emit(__sw(__AL, __r12, __r8, 0));
 
     if (!dynlink) {
-        emit(__bl(__AL, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
-        /* After global init, jump to main preparation */
-        emit(__b(__AL,
-                 56)); /* PC+8: skip exit (24) + syscall (36) + ret (4) - 8 */
-
-        /* exit - only for static linking */
-        emit(__movw(__AL, __r8, ofs));
-        emit(__movt(__AL, __r8, ofs));
-        emit(__add_r(__AL, __sp, __sp, __r8));
-        emit(__mov_r(__AL, __r0, __r0));
-        emit(__mov_i(__AL, __r7, 1));
-        emit(__svc());
+        /* Jump directly to the main preparation and then execute the
+         * main function.
+         *
+         * In static linking mode, when the main function completes its
+         * execution, it will invoke the '_exit' syscall to terminate
+         * the program.
+         *
+         * That is, the execution flow is:
+         *
+         *               +------------------+
+         *               | movw r8 <ofs>    |
+         * 'start'       | ...              |
+         *               | b <global init>  | (1) jump to global init --+
+         *               +------------------+                           |
+         *               | push {r4 ... r7} |                           |
+         * '__syscall'   | ...              |                           |
+         *               | bx lr            |                           |
+         *               +------------------+                           |
+         *               | ...              | (2) global init    <------+
+         *               | (global init)    |
+         *               | ...              |
+         * global init   | movw r8 <ofs>    |
+         *     +         | movt r8 <ofs>    |
+         * call main()   | ...              |
+         *               | bl <main func>   | (3) call main()
+         *               | mov r7 #1        |
+         *               | svc 0x00000000   | (4) call '_exit' after main()
+         *               +------------------+     returns
+         */
+        emit(__b(__AL, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
 
         /* __syscall - only for static linking
          *
          * If the number of arguments is greater than 4, the additional
-         * arguments need to be retrieved from the stack. Since __syscall
-         * doesn't require a local stack, it can directly use sp to obtain
-         * the extra arguments.
+         * arguments need to be retrieved from the stack. However, this
+         * process must modify the contents of registers r4-r7.
+         *
+         * Therefore, __syscall needs to preserve the contents of these
+         * registers before invoking a syscall, and restore them after
+         * the syscall has completed.
          */
-        emit(__lw(__AL, __r4, __sp, 0));
-        emit(__lw(__AL, __r5, __sp, 4));
-        emit(__lw(__AL, __r6, __sp, 8));
-        emit(__lw(__AL, __r7, __sp, 12));
+        emit(__stmdb(__AL, 1, __sp, 0x00F0));
+        emit(__lw(__AL, __r4, __sp, 16));
+        emit(__lw(__AL, __r5, __sp, 20));
+        emit(__lw(__AL, __r6, __sp, 24));
+        emit(__lw(__AL, __r7, __sp, 28));
         emit(__mov_r(__AL, __r7, __r0));
         emit(__mov_r(__AL, __r0, __r1));
         emit(__mov_r(__AL, __r1, __r2));
@@ -702,6 +723,7 @@ void code_generate(void)
         emit(__mov_r(__AL, __r4, __r5));
         emit(__mov_r(__AL, __r5, __r6));
         emit(__svc());
+        emit(__ldm(__AL, 1, __sp, 0x00F0));
         emit(__bx(__AL, __lr));
     }
 
