@@ -30,6 +30,10 @@ bool simple_sccp(func_t *func)
             if (!insn->rd)
                 continue;
 
+            if (insn->opcode == OP_load_constant) {
+                insn->rd->is_const = true;
+            }
+
             /* Handle simple constant propagation */
             switch (insn->opcode) {
             case OP_assign:
