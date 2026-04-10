@@ -684,7 +684,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
     /* Pattern 1: Double complement → identity
      * ~(~x) = x
      */
-    if (ph2_ir->op == OP_negate && next->op == OP_negate &&
+    if (ph2_ir->op == OP_bit_not && next->op == OP_bit_not &&
         next->src0 == ph2_ir->dest) {
         /* Replace with simple assignment */
         ph2_ir->op = OP_assign;
