@@ -1049,25 +1049,25 @@ token_t *preprocess(token_t *tk)
     synth_built_in_loc.line = 1;
     synth_built_in_loc.filename = "<built-in>";
 
-    macro_t *macro = calloc(1, sizeof(macro_t));
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = "__FILE__";
     macro->handler = file_macro_handler;
     hashmap_put(MACROS, "__FILE__", macro);
 
-    macro = calloc(1, sizeof(macro_t));
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = "__LINE__";
     macro->handler = line_macro_handler;
     hashmap_put(MACROS, "__LINE__", macro);
 
     /* architecture defines */
-    macro = calloc(1, sizeof(macro_t));
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = ARCH_PREDEFINED;
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
     macro->replacement->literal = "1";
     hashmap_put(MACROS, ARCH_PREDEFINED, macro);
 
     /* shecc run-time defines */
-    macro = calloc(1, sizeof(macro_t));
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = "__SHECC__";
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
     macro->replacement->literal = "1";
