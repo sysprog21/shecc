@@ -104,8 +104,10 @@ check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh
 	$(Q)rm $(OUT)/shecc
 
 check-snapshots: $(OUT)/$(STAGE0) $(SNAPSHOTS) tests/check-snapshots.sh
+	# static linking
 	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
-	$(Q)$(MAKE) distclean config check-snapshot ARCH=arm DYNLINK=1 --silent
+	# dynamic linking
+	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=1 --silent;)
 	$(VECHO) "Switching backend back to %s (DYNLINK=0)\n" arm
 	$(Q)$(MAKE) distclean config ARCH=arm DYNLINK=0 --silent
 
@@ -130,8 +132,10 @@ check-abi-stage2: $(OUT)/$(STAGE2)
 	fi
 
 update-snapshots: tests/update-snapshots.sh
+	# static linking
 	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
-	$(Q)$(MAKE) distclean config update-snapshot ARCH=arm DYNLINK=1 --silent
+	# dynamic linking
+	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=1 --silent;)
 	$(VECHO) "Switching backend back to %s (DYNLINK=0)\n" arm
 	$(Q)$(MAKE) distclean config ARCH=arm DYNLINK=0 --silent
 
