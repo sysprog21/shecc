@@ -43,6 +43,7 @@
 #define MAX_DYNSYM 1024
 #define MAX_DYNSTR 1024
 #define MAX_RELPLT 1024
+#define MAX_RELAPLT 1024
 #define MAX_PLT 1024
 #define MAX_GOTPLT 1024
 #define MAX_CONSTANTS 1024
@@ -100,6 +101,9 @@
 #ifndef ALIGN_UP
 #define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
 #endif
+
+#define ELF_MACHINE_ARM32 0x28
+#define ELF_MACHINE_RV32 0xf3
 
 /* Common data structures */
 typedef struct arena_block {
@@ -682,15 +686,28 @@ typedef struct {
     strbuf_t *elf_dynsym;
     strbuf_t *elf_dynstr;
     strbuf_t *elf_relplt;
+    strbuf_t *elf_relaplt;
     strbuf_t *elf_plt;
     strbuf_t *elf_got;
     int elf_interp_start;
     int elf_relplt_start;
+    int elf_relaplt_start;
     int elf_plt_start;
     int elf_got_start;
     int relplt_size;
+    int relaplt_size;
     int plt_size;
     int got_size;
+
+    /* Currently, we don't consider the scenarios involving
+     * a mixture of REL and RELA relocation entries.
+     *
+     * Therefore, use a flag to determine the type of
+     * relocation entries to be processed:
+     * - true: use RELA relocation entries
+     * - false: use REL relocation entries
+     */
+    bool use_relaplt;
 } dynamic_sections_t;
 
 /* For .dynsym section. */
@@ -708,6 +725,12 @@ typedef struct {
     int r_offset;
     int r_info;
 } elf32_rel_t;
+
+typedef struct {
+    int r_offset;
+    int r_info;
+    int r_addend;
+} elf32_rela_t;
 
 /* For .dynamic section */
 typedef struct {

@@ -10,6 +10,8 @@
 #include "globals.c"
 #include "riscv.c"
 
+#define RV32_ALIGNMENT 16
+
 void update_elf_offset(ph2_ir_t *ph2_ir)
 {
     switch (ph2_ir->op) {
@@ -118,12 +120,19 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
 
 void cfg_flatten(void)
 {
-    func_t *func = find_func("__syscall");
-    /* Prologue ~ 6 instructions (24 bytes). Place __syscall right after. */
-    func->bbs->elf_offset = 24;
+    func_t *func;
 
-    /* Reserve space for prologue (24) + syscall trampoline (36) = 60 bytes. */
-    elf_offset = 60;
+    if (dynlink)
+        elf_offset = 68;
+    else {
+        func = find_func("__syscall");
+        /* Prologue ~ 6 instructions (24 bytes). Place __syscall right after. */
+        func->bbs->elf_offset = 24;
+        /* Reserve space for prologue (24) + syscall trampoline (36) = 60 bytes.
+         */
+        elf_offset = 60;
+    }
+
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
 
     for (ph2_ir_t *ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
@@ -132,7 +141,10 @@ void cfg_flatten(void)
     }
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
-    elf_offset += 24;
+    if (dynlink)
+        elf_offset += 32;
+    else
+        elf_offset += 24;
 
     for (func = FUNC_LIST.head; func; func = func->next) {
         /* Skip function declarations without bodies */
@@ -144,6 +156,14 @@ void cfg_flatten(void)
         flatten_ir->src0 = func->stack_size;
         strncpy(flatten_ir->func_name, func->return_def.var_name, MAX_VAR_LEN);
 
+        /* Except for local variables, it must allocate additional space
+         * to preserve the content of ra at each function entry point.
+         *
+         * 'stack_size' doesn't include the additional space, so an extra
+         * number '4' is added to 'stack_size'.
+         */
+        int stack_top_ofs = ALIGN_UP(func->stack_size + 4, RV32_ALIGNMENT);
+
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             bb->elf_offset = elf_offset;
 
@@ -154,9 +174,23 @@ void cfg_flatten(void)
 
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {
-                /* TODO: recalculate the offset for instructions with the
-                 * 'ofs_based_on_stack_top' flag set.
-                 */
+                if (insn->ofs_based_on_stack_top) {
+                    switch (insn->op) {
+                    case OP_load:
+                    case OP_address_of:
+                        insn->src0 = insn->src0 + stack_top_ofs;
+                        break;
+                    case OP_store:
+                        insn->src1 = insn->src1 + stack_top_ofs;
+                        break;
+                    default:
+                        /* Ignore opcodes with the ofs_based_on_stack_top
+                         * flag set since only the three opcodes above needs
+                         * to access a variable's address.
+                         */
+                        break;
+                    }
+                }
                 flatten_ir = add_existed_ph2_ir(insn);
 
                 if (insn->op == OP_return) {
@@ -193,9 +227,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     switch (ph2_ir->op) {
     case OP_define:
+        ofs = ALIGN_UP(ph2_ir->src0 + 4, RV32_ALIGNMENT);
         emit(__sw(__ra, __sp, -4));
-        emit(__lui(__t0, rv_hi(ph2_ir->src0 + 4)));
-        emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0 + 4)));
+        emit(__lui(__t0, rv_hi(ofs)));
+        emit(__addi(__t0, __t0, rv_lo(ofs)));
         emit(__sub(__sp, __sp, __t0));
         return;
     case OP_load_constant:
@@ -274,7 +309,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_call:
         func = find_func(ph2_ir->func_name);
-        emit(__jal(__ra, func->bbs->elf_offset - elf_code->size));
+        if (func->bbs)
+            ofs = func->bbs->elf_offset - elf_code->size;
+        else if (dynlink) {
+            ofs = (dynamic_sections.elf_plt_start + func->plt_offset) -
+                  (elf_code_start + elf_code->size);
+        } else {
+            printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            abort();
+        }
+        emit(__jal(__ra, ofs));
         return;
     case OP_load_data_address:
         emit(__lui(rd, rv_hi(elf_data_start + ph2_ir->src0)));
@@ -286,7 +330,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_address_of_func:
         func = find_func(ph2_ir->func_name);
-        ofs = elf_code_start + func->bbs->elf_offset;
+        if (func->bbs)
+            ofs = elf_code_start + func->bbs->elf_offset;
+        else if (dynlink)
+            ofs = dynamic_sections.elf_plt_start + func->plt_offset;
+        else {
+            printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            abort();
+        }
         emit(__lui(__t0, rv_hi(ofs)));
         emit(__addi(__t0, __t0, rv_lo(ofs)));
         emit(__sw(__t0, rs1, 0));
@@ -302,8 +353,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__addi(__zero, __zero, 0));
         else
             emit(__addi(__a0, rs1, 0));
-        emit(__lui(__t0, rv_hi(ph2_ir->src1 + 4)));
-        emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1 + 4)));
+        ofs = ALIGN_UP(ph2_ir->src1 + 4, RV32_ALIGNMENT);
+        emit(__lui(__t0, rv_hi(ofs)));
+        emit(__addi(__t0, __t0, rv_lo(ofs)));
         emit(__add(__sp, __sp, __t0));
         emit(__lw(__ra, __sp, -4));
         emit(__jalr(__zero, __ra, 0));
@@ -482,26 +534,100 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     }
 }
 
+void plt_generate(void);
 void code_generate(void)
 {
-    /* start: save original sp in s0; allocate global stack; run init */
-    emit(__addi(__s0, __sp, 0));
-    emit(__lui(__t0, rv_hi(GLOBAL_FUNC->stack_size)));
-    emit(__addi(__t0, __t0, rv_lo(GLOBAL_FUNC->stack_size)));
+    int ofs;
+
+    if (dynlink) {
+        plt_generate();
+        /* - Initial stack layout when the program starts:
+         *
+         *      +----------------+ (high address)
+         *      | ...            |
+         *      +----------------+
+         *      | argv[argc - 1] |
+         *      +----------------+
+         *      | ...            |
+         *      +----------------+
+         *      | argv[0]        |
+         *      +----------------+
+         *      | argc           |
+         *      +----------------+ <- sp points to this location.
+         *
+         * - At the program entry point, it must call __libc_start_main()
+         *   under dynamic linking. The function prototype is as follows:
+         *
+         *   int __libc_start_main(int (*main) (int, char **, char **),
+         *                         int argc, char **argv,
+         *                         void (*init) (void),
+         *                         void (*fini) (void),
+         *                         void (*rtld_fini) (void),
+         *                         void (*stack_end));
+         *
+         * Currently, to execute a dynamically linked program with the
+         * minimal effort required, we perform the following call:
+         * -> __libc_start_main(main_wrapper, argc, argv, NULL,
+         *                      NULL, NULL, stack_end)
+         */
+        emit(__lui(__a0, rv_hi(elf_code_start + 36)));
+        emit(__addi(__a0, __a0, rv_lo(elf_code_start + 36)));
+        emit(__lw(__a1, __sp, 0));
+        emit(__addi(__a2, __sp, 4));
+        emit(__addi(__a3, __zero, 0));
+        emit(__addi(__a4, __zero, 0));
+        emit(__addi(__a5, __zero, 0));
+        emit(__addi(__a6, __sp, 0));
+
+        /* Call __libc_start_main() via PLT[1] */
+        ofs = (dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE) -
+              (elf_code_start + elf_code->size);
+        emit(__jal(__ra, ofs));
+
+        /* The main wrapper is located here under the dynamic linking mode
+         *
+         * Use t1 and t2 registers to temporarily store 'argc' and 'argv',
+         * while preserving ra on the stack.
+         *
+         * After the main function completes its execution, it must use
+         * the content of ra to transfer control back to __libc_start_main().
+         */
+        emit(__addi(__t1, __a0, 0));
+        emit(__addi(__t2, __a1, 0));
+        emit(__sw(__ra, __sp, -4));
+        ofs = ALIGN_UP(GLOBAL_FUNC->stack_size + 4, RV32_ALIGNMENT);
+    } else {
+        /* When using static linking, the starting address
+         * of the main wrapper is here.
+         *
+         * Save original sp in s0 first.
+         */
+        ofs = ALIGN_UP(GLOBAL_FUNC->stack_size, RV32_ALIGNMENT);
+        emit(__addi(__s0, __sp, 0));
+    }
+    /* Next, the main wrapper performs:
+     *   1. allocate global stack
+     *   2. run init
+     *   3. call the main function
+     */
+    emit(__lui(__t0, rv_hi(ofs)));
+    emit(__addi(__t0, __t0, rv_lo(ofs)));
     emit(__sub(__sp, __sp, __t0));
     emit(__addi(__gp, __sp, 0)); /* Set up global pointer */
     emit(__jal(__ra, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
 
-    /* syscall trampoline for __syscall - must be at offset 24 */
-    emit(__addi(__a7, __a0, 0));
-    emit(__addi(__a0, __a1, 0));
-    emit(__addi(__a1, __a2, 0));
-    emit(__addi(__a2, __a3, 0));
-    emit(__addi(__a3, __a4, 0));
-    emit(__addi(__a4, __a5, 0));
-    emit(__addi(__a5, __a6, 0));
-    emit(__ecall());
-    emit(__jalr(__zero, __ra, 0));
+    if (!dynlink) {
+        /* syscall trampoline for __syscall */
+        emit(__addi(__a7, __a0, 0));
+        emit(__addi(__a0, __a1, 0));
+        emit(__addi(__a1, __a2, 0));
+        emit(__addi(__a2, __a3, 0));
+        emit(__addi(__a3, __a4, 0));
+        emit(__addi(__a4, __a5, 0));
+        emit(__addi(__a5, __a6, 0));
+        emit(__ecall());
+        emit(__jalr(__zero, __ra, 0));
+    }
 
     ph2_ir_t *ph2_ir;
     for (ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
@@ -509,20 +635,95 @@ void code_generate(void)
         emit_ph2_ir(ph2_ir);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
-    /* use original sp saved in s0 to get argc/argv */
     if (MAIN_BB) {
-        emit(__addi(__t0, __s0, 0));
-        emit(__lw(__a0, __t0, 0));
-        emit(__addi(__a1, __t0, 4));
-        emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
+        if (dynlink) {
+            emit(__addi(__a0, __t1, 0));
+            emit(__addi(__a1, __t2, 0));
+            emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
 
-        /* exit with main's return value in a0 */
-        emit(__addi(__a7, __zero, 93));
-        emit(__ecall());
+            /* Restore sp and transfer control back to __libc_start_main()
+             * using the preserved ra.
+             */
+            emit(__lui(__t0, rv_hi(ofs)));
+            emit(__addi(__t0, __t0, rv_lo(ofs)));
+            emit(__add(__sp, __sp, __t0));
+            emit(__lw(__ra, __sp, -4));
+            emit(__jalr(__zero, __ra, 0));
+        } else {
+            /* use original sp saved in s0 to get argc/argv */
+            emit(__addi(__t0, __s0, 0));
+            emit(__lw(__a0, __t0, 0));
+            emit(__addi(__a1, __t0, 4));
+            emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
+
+            /* exit with main's return value in a0 */
+            emit(__addi(__a7, __zero, 93));
+            emit(__ecall());
+        }
     }
 
     for (int i = 0; i < ph2_ir_idx; i++) {
         ph2_ir = PH2_IR_FLATTEN[i];
         emit_ph2_ir(ph2_ir);
+    }
+}
+
+void plt_generate()
+{
+    int addr_of_plt = dynamic_sections.elf_plt_start;
+    int addr_of_got = dynamic_sections.elf_got_start;
+    int end = dynamic_sections.plt_size - PLT_FIXUP_SIZE;
+    int ofs, pcrel_hi, pcrel_lo;
+
+    ofs = addr_of_got - addr_of_plt;
+    pcrel_hi = ofs & ~0xFFF;
+    pcrel_lo = ofs & 0xFFF;
+    if (pcrel_lo > 2047) {
+        pcrel_hi += 1;
+        pcrel_lo -= 0x1000;
+    }
+
+    /* t0 -> link map (GOT[1])
+     * t1 -> .got offset
+     * t2 -> %pcrel_hi(.got.plt) (but it is unused)
+     * t3 -> _dl_runtime_resolve (GOT[0])
+     */
+    elf_write_int(dynamic_sections.elf_plt, __auipc(__t2, pcrel_hi));
+    elf_write_int(dynamic_sections.elf_plt, __sub(__t1, __t1, __t3));
+    elf_write_int(dynamic_sections.elf_plt, __lw(__t3, __t2, pcrel_lo));
+    elf_write_int(dynamic_sections.elf_plt, __addi(__t1, __t1, -44));
+    elf_write_int(dynamic_sections.elf_plt, __addi(__t0, __t2, pcrel_lo));
+    elf_write_int(dynamic_sections.elf_plt, __srli(__t1, __t1, 2));
+    elf_write_int(dynamic_sections.elf_plt, __lw(__t0, __t0, 4));
+    elf_write_int(dynamic_sections.elf_plt, __jalr(__zero, __t3, 0));
+    for (int i = 0; i * PLT_ENT_SIZE < end; i++) {
+        /* elf_generate() ensures that the .got section is placed
+         * a higher memory address than the plt section.
+         *
+         * Consequently, 'ofs' must always be positive.
+         *
+         * t1 = &PLT[N] + 12 (address of the 'nop' instruction)
+         *
+         * First call:
+         * t3 = &PLT[0]
+         *
+         * Subsequent calls:
+         * t3 = Address of the function
+         */
+        addr_of_plt =
+            dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE + PLT_ENT_SIZE * i;
+        addr_of_got = dynamic_sections.elf_got_start + PTR_SIZE * (i + 2);
+        ofs = addr_of_got - addr_of_plt;
+        pcrel_hi = ofs & ~0xFFF;
+        pcrel_lo = ofs & 0xFFF;
+        if (pcrel_lo > 2047) {
+            pcrel_hi += 1;
+            pcrel_lo -= 0x1000;
+        }
+
+        elf_write_int(dynamic_sections.elf_plt, __auipc(__t3, pcrel_hi));
+        elf_write_int(dynamic_sections.elf_plt, __lw(__t3, __t3, pcrel_lo));
+        elf_write_int(dynamic_sections.elf_plt, __jalr(__t1, __t3, 0));
+        elf_write_int(dynamic_sections.elf_plt, __addi(__zero, __zero, 0));
     }
 }

@@ -16,6 +16,7 @@ ARCH_DEFS = \
     \#define LIBC_SO \"libc.so.6\"\n$\
     \#define PLT_FIXUP_SIZE 20\n$\
     \#define PLT_ENT_SIZE 12\n$\
+    \#define RESERVED_GOT_NUM 3\n$\
     \#define R_ARCH_JUMP_SLOT 0x16\n$\
     \#define MAX_ARGS_IN_REG 4\n$\
     "

@@ -1308,11 +1308,23 @@ void global_init(void)
     elf_bss_size = 0;
     elf_shstrtab = strbuf_create(MAX_SHSTR);
     elf_section_header = strbuf_create(MAX_SECTION_HEADER);
+
+    switch (ELF_MACHINE) {
+    case ELF_MACHINE_ARM32:
+        dynamic_sections.use_relaplt = false;
+        break;
+    case ELF_MACHINE_RV32:
+        dynamic_sections.use_relaplt = true;
+        break;
+    }
     dynamic_sections.elf_interp = strbuf_create(MAX_INTERP);
     dynamic_sections.elf_dynamic = strbuf_create(MAX_DYNAMIC);
     dynamic_sections.elf_dynsym = strbuf_create(MAX_DYNSYM);
     dynamic_sections.elf_dynstr = strbuf_create(MAX_DYNSTR);
-    dynamic_sections.elf_relplt = strbuf_create(MAX_RELPLT);
+    if (dynamic_sections.use_relaplt)
+        dynamic_sections.elf_relaplt = strbuf_create(MAX_RELAPLT);
+    else
+        dynamic_sections.elf_relplt = strbuf_create(MAX_RELPLT);
     dynamic_sections.elf_plt = strbuf_create(MAX_PLT);
     dynamic_sections.elf_got = strbuf_create(MAX_GOTPLT);
 }
@@ -1449,7 +1461,10 @@ void global_release(void)
     strbuf_free(dynamic_sections.elf_dynamic);
     strbuf_free(dynamic_sections.elf_dynsym);
     strbuf_free(dynamic_sections.elf_dynstr);
-    strbuf_free(dynamic_sections.elf_relplt);
+    if (dynamic_sections.use_relaplt)
+        strbuf_free(dynamic_sections.elf_relaplt);
+    else
+        strbuf_free(dynamic_sections.elf_relplt);
     strbuf_free(dynamic_sections.elf_plt);
     strbuf_free(dynamic_sections.elf_got);
 }
