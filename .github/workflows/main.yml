@@ -9,14 +9,7 @@ jobs:
       matrix:
         compiler: [gcc, clang]
         architecture: [arm, riscv]
-        link_mode: [static]
-        include:
-          - compiler: gcc
-            architecture: arm
-            link_mode: dynamic
-          - compiler: clang
-            architecture: arm
-            link_mode: dynamic
+        link_mode: [static, dynamic]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,6 +20,9 @@ jobs:
           sudo apt-get install -q -y qemu-user
           sudo apt-get install -q -y build-essential
           sudo apt-get install -q -y gcc-arm-linux-gnueabihf
+          sudo wget -q https://github.com/riscv-collab/riscv-gnu-toolchain/releases/download/2026.04.05/riscv32-glibc-ubuntu-24.04-gcc.tar.xz
+          sudo tar Jxf riscv32-glibc-ubuntu-24.04-gcc.tar.xz -C /opt
+          echo "/opt/riscv/bin" >> "$GITHUB_PATH"
       - name: Determine static or dynamic linking mode
         id: determine-mode
         run: |
