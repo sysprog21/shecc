@@ -99,6 +99,7 @@ var_t *require_var(block_t *blk)
     var->base = var;
     var->type = TY_int;
     var->space_is_allocated = false;
+    var->has_backing_storage = false;
     var->ofs_based_on_stack_top = false;
     return var;
 }
@@ -110,6 +111,17 @@ var_t *require_typed_var(block_t *blk, type_t *type)
 
     var_t *var = require_var(blk);
     var->type = type;
+    return var;
+}
+
+/* Function-address operands carry a function name, but are not declarations
+ * in the current scope.  Keeping them out of the local lookup list lets
+ * find_var() distinguish a resolved function-pointer variable from a
+ * generated function symbol. */
+var_t *require_func_symbol_var(block_t *blk)
+{
+    var_t *var = require_var(blk);
+    blk->locals.size--;
     return var;
 }
 
@@ -2062,7 +2074,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 add_insn(parent, *bb, OP_func_ret, vd, NULL, NULL, 0, NULL);
             } else {
                 /* indirective function pointer assignment */
-                vd = require_var(parent);
+                vd = require_func_symbol_var(parent);
                 vd->is_func = true;
                 strcpy(vd->var_name, intern_string(token));
                 opstack_push(vd);
@@ -3319,12 +3331,17 @@ bool read_body_assignment(char *token,
         } else if (lex_accept(T_andeq)) {
             op = OP_bit_and;
         } else if (lex_peek(T_open_bracket, NULL)) {
-            /* dereference lvalue into function address */
-            rs1 = opstack_pop();
-            vd = require_var(parent);
-            gen_name_to(vd->var_name);
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_read, vd, rs1, NULL, PTR_SIZE, NULL);
+            /* Dereference lvalue first if lvalue is a member access; otherwise,
+             * pass the function pointer value on the stack to
+             * read_indirect_call.
+             */
+            if (lvalue.is_reference) {
+                rs1 = opstack_pop();
+                vd = require_var(parent);
+                gen_name_to(vd->var_name);
+                opstack_push(vd);
+                add_insn(parent, *bb, OP_read, vd, rs1, NULL, PTR_SIZE, NULL);
+            }
 
             read_indirect_call(parent, bb);
             return true;
@@ -3455,6 +3472,34 @@ bool read_body_assignment(char *token,
             if (lvalue.is_func) {
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
+
+                /* is_func labels both function symbols and function-pointer
+                 * variables. A variable on the RHS must contribute its
+                 * stored pointer value, rather than its identifier being
+                 * lowered as a function address. */
+                if (rs2->is_func && find_var(rs2->var_name, parent) == rs2) {
+                    t = require_ref_var(parent, rs2->type, rs2->ptr_level);
+                    gen_name_to(t->var_name);
+                    add_insn(parent, *bb, OP_address_of, t, rs2, NULL, 0, NULL);
+
+                    vd = require_var(parent);
+                    gen_name_to(vd->var_name);
+                    add_insn(parent, *bb, OP_read, vd, t, NULL, PTR_SIZE, NULL);
+                    rs2 = vd;
+                }
+
+                /* Acquire destination address of lvalue if lvalue is a
+                 * local variable.
+                 */
+                if (!lvalue.is_reference) {
+                    var_t *addr =
+                        require_ref_var(parent, lvalue.type, lvalue.ptr_level);
+                    gen_name_to(addr->var_name);
+                    add_insn(parent, *bb, OP_address_of, addr, rs1, NULL, 0,
+                             NULL);
+                    rs1 = addr;
+                }
+
                 add_insn(parent, *bb, OP_write, NULL, rs1, rs2, PTR_SIZE, NULL);
             } else if (lvalue.is_reference) {
                 rs2 = opstack_pop();
@@ -4565,7 +4610,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     }
 
     /* is a function call? Skip function call check when has_asterisk is true */
-    if (!has_asterisk) {
+    if (!has_asterisk && !find_local_var(token, parent)) {
         func = find_func(token);
         if (func) {
             lex_expect(T_identifier);

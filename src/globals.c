@@ -1279,7 +1279,7 @@ void global_init(void)
         arena_init(DEFAULT_ARENA_SIZE); /* For TYPES and PH2_IR_FLATTEN */
 
     /* Use arena allocation for better memory management */
-    TYPES = arena_alloc(GENERAL_ARENA, MAX_TYPES * sizeof(type_t));
+    TYPES = arena_calloc(GENERAL_ARENA, MAX_TYPES, sizeof(type_t));
     PH2_IR_FLATTEN =
         arena_alloc(GENERAL_ARENA, MAX_IR_INSTR * sizeof(ph2_ir_t *));
 

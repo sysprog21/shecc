@@ -1643,6 +1643,103 @@ int main() {
 }
 EOF
 
+# Local function pointer, direct struct member, and pointer-to-struct member.
+# The first path must use the pointer value directly; the latter two must load
+# the pointer from the member slot.
+try_ 6 << EOF
+typedef struct {
+    int (*fn)(int);
+} holder_t;
+
+int suc(int x) { return x + 1; }
+
+int main() {
+    int (*local)(int);
+    holder_t h;
+    holder_t *p = &h;
+
+    local = suc;
+    h.fn = suc;
+    p->fn = suc;
+
+    return local(1) + h.fn(1) + p->fn(1);
+}
+EOF
+
+# Assignment between function-pointer variables copies the stored function
+# address; it must not treat the RHS variable name as a function symbol.
+try_ 5 << EOF
+int suc(int x) { return x + 1; }
+
+int main() {
+    int (*first)(int);
+    int (*second)(int);
+
+    first = suc;
+    second = first;
+    return second(4);
+}
+EOF
+
+# A local function pointer shadows a global function.  Copying it must load
+# the local variable's stored target, rather than materializing the global
+# function's address.
+try_ 9 << EOF
+int target(int x) { return x + 3; }
+int replacement(int x) { return x + 8; }
+
+int main() {
+    int (*target)(int);
+    int (*copy)(int);
+
+    target = replacement;
+    copy = target;
+    return copy(1);
+}
+EOF
+
+# An indirect call with two arguments must not leave stale argument-register
+# mappings visible to a later one-argument call.
+try_ 155 << EOF
+typedef struct {
+    int (*add)(int, int);
+} pair_holder_t;
+
+int add(int a, int b) { return a + b; }
+int one(int x) { return x + 100; }
+int get_right() { return 20; }
+
+int main() {
+    pair_holder_t h;
+    int left = 10;
+    int right = get_right();
+    h.add = add;
+    return h.add(left, right) + one(5) + right;
+}
+EOF
+
+
+# Addressing a pointer to a function-pointer aggregate must return the
+# pointer variable's address, not backing storage for its pointee.
+try_ 5 << EOF
+typedef struct {
+    int (*fn)(int);
+} holder_t;
+
+int suc(int x) { return x + 1; }
+
+int call(holder_t *direct) {
+    holder_t **indirect = &direct;
+    return direct == *indirect ? direct->fn(4) : 1;
+}
+
+int main() {
+    holder_t h;
+    h.fn = suc;
+    return call(&h);
+}
+EOF
+
 # struct with multiple pointer declarations in same line
 try_ 42 << EOF
 typedef struct chunk {

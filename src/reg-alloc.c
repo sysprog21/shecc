@@ -44,6 +44,46 @@ int align_size(int i)
     return i <= 4 ? 4 : (i + 3) & ~3;
 }
 
+bool aggregate_has_function_pointer_seen(type_t *type,
+                                         type_t **seen,
+                                         int seen_count)
+{
+    if (!type)
+        return false;
+
+    for (int i = 0; i < seen_count; i++)
+        if (seen[i] == type)
+            return false;
+
+    if (seen_count >= MAX_TYPES)
+        return false;
+    seen[seen_count++] = type;
+
+    if (type->base_type == TYPE_typedef && type->base_struct)
+        type = type->base_struct;
+
+    for (int i = 0; i < type->num_fields; i++) {
+        var_t *field = &type->fields[i];
+        if (field->is_func)
+            return true;
+
+        if (!field->ptr_level && field->type && !field->type->ptr_level &&
+            (field->type->base_type == TYPE_struct ||
+             field->type->base_type == TYPE_union ||
+             field->type->base_type == TYPE_typedef) &&
+            aggregate_has_function_pointer_seen(field->type, seen, seen_count))
+            return true;
+    }
+
+    return false;
+}
+
+bool aggregate_has_function_pointer(type_t *type)
+{
+    type_t *seen[MAX_TYPES];
+    return aggregate_has_function_pointer_seen(type, seen, 0);
+}
+
 bool check_live_out(basic_block_t *bb, var_t *var)
 {
     for (int i = 0; i < bb->live_out.size; i++) {
@@ -709,6 +749,11 @@ void reg_alloc(void)
                     else
                         func->stack_size += align_size(sz);
 
+                    if (!insn->rd->is_global &&
+                        aggregate_has_function_pointer(insn->rd->type)) {
+                        insn->rd->has_backing_storage = true;
+                    }
+
                     dest = prepare_dest(bb, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_address_of);
                     ir->src0 = src0;
@@ -746,6 +791,43 @@ void reg_alloc(void)
                      */
                     insn->rs1->address_taken = true;
                     insn->rs1->is_const = false;
+
+                    /* OP_allocat puts a local aggregate's spill slot before
+                     * its backing storage. &aggregate must name the backing
+                     * storage, not the spill slot.
+                     *
+                     * FIXME: This does not support aggregate parameter for now.
+                     */
+                    bool is_pointer =
+                        insn->rs1->ptr_level ||
+                        (insn->rs1->type && insn->rs1->type->ptr_level);
+                    if (!insn->rs1->is_global && !is_pointer &&
+                        aggregate_has_function_pointer(insn->rs1->type)) {
+                        if (!insn->rs1->has_backing_storage) {
+                            insn->rs1->offset = func->stack_size;
+                            insn->rs1->space_is_allocated = true;
+                            insn->rs1->ofs_based_on_stack_top = false;
+                            func->stack_size += PTR_SIZE;
+                            if (insn->rs1->ptr_level)
+                                sz = PTR_SIZE;
+                            else
+                                sz = insn->rs1->type->size;
+                            if (insn->rs1->array_size)
+                                func->stack_size +=
+                                    align_size(insn->rs1->array_size * sz);
+                            else
+                                func->stack_size += align_size(sz);
+                            insn->rs1->has_backing_storage = true;
+                        }
+
+                        dest = prepare_dest(bb, insn->rd, -1, -1);
+                        ir = bb_add_ph2_ir(bb, OP_address_of);
+                        ir->src0 = insn->rs1->offset + PTR_SIZE;
+                        ir->dest = dest;
+                        ir->ofs_based_on_stack_top =
+                            insn->rs1->ofs_based_on_stack_top;
+                        break;
+                    }
 
                     /* make sure variable is on stack */
                     if (!insn->rs1->space_is_allocated) {
@@ -912,6 +994,9 @@ void reg_alloc(void)
                     is_pushing_args = false;
                     args = 0;
                     handle_abi = false;
+
+                    for (int i = 0; i < REG_CNT; i++)
+                        REGS[i].var = NULL;
                     break;
                 case OP_func_ret:
                     dest = prepare_dest(bb, insn->rd, -1, -1);
