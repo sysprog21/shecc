@@ -408,6 +408,7 @@ struct var {
     int loop_depth; /* Nesting depth if variable is in a loop */
     int use_count;  /* Number of times variable is used */
     bool space_is_allocated; /* whether space is allocated for this variable */
+    bool has_backing_storage;
 
     /* This flag is used to indicate to the compiler that the offset of
      * the variable is based on the top of the local stack.
