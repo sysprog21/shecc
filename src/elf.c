@@ -49,6 +49,25 @@ void elf_write_int(strbuf_t *elf_array, int val)
         strbuf_putc(elf_array, e_extract_byte(val, i));
 }
 
+/* Write a 16-bit little-endian value. */
+void elf_write_short(strbuf_t *elf_array, int val)
+{
+    strbuf_putc(elf_array, val & 0xff);
+    strbuf_putc(elf_array, (val >> 8) & 0xff);
+}
+
+/* Write a 64-bit little-endian value from a 32-bit quantity.
+ *
+ * shecc has no 64-bit integer type, and every address and size this compiler
+ * emits fits in 32 bits (ELF_START is 0x10000), so the upper word is always
+ * zero.
+ */
+void elf_write_quad(strbuf_t *elf_array, int val)
+{
+    elf_write_int(elf_array, val);
+    elf_write_int(elf_array, 0);
+}
+
 void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
 {
     if (!elf_array || !blk || sz <= 0)
@@ -56,6 +75,138 @@ void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
     char *ptr = blk;
     for (int i = 0; i < sz; i++)
         strbuf_putc(elf_array, ptr[i]);
+}
+
+/* The dynamic-linking tables differ only in width between the two ELF
+ * classes, so the generator below writes them through these helpers rather
+ * than memcpy-ing a struct: shecc has no 64-bit integer type, so an ELF64
+ * entry cannot be expressed as a C struct here at all.
+ */
+
+int elf_sym_size(void)
+{
+#if ELF_IS_64 == 1
+    return 24;
+#else
+    return sizeof(elf32_sym_t);
+#endif
+}
+
+int elf_jmprel_size(void)
+{
+#if ELF_IS_64 == 1
+    return 24; /* Elf64_Rela */
+#else
+    if (dynamic_sections.use_relaplt)
+        return sizeof(elf32_rela_t);
+    return sizeof(elf32_rel_t);
+#endif
+}
+
+/* One entry of the dynamic table. */
+void elf_write_dyn(strbuf_t *buf, int tag, int val)
+{
+#if ELF_IS_64 == 1
+    elf_write_quad(buf, tag);
+    elf_write_quad(buf, val);
+#else
+    elf_write_int(buf, tag);
+    elf_write_int(buf, val);
+#endif
+}
+
+/* One .dynsym entry. The two classes order the fields differently. */
+void elf_write_dynsym(strbuf_t *buf, int st_name, int st_info, int st_value)
+{
+#if ELF_IS_64 == 1
+    elf_write_int(buf, st_name);
+    elf_write_byte(buf, st_info);
+    elf_write_byte(buf, 0);  /* st_other */
+    elf_write_short(buf, 0); /* st_shndx */
+    elf_write_quad(buf, st_value);
+    elf_write_quad(buf, 0); /* st_size */
+#else
+    elf_write_int(buf, st_name);
+    elf_write_int(buf, st_value);
+    elf_write_int(buf, 0); /* st_size */
+    elf_write_byte(buf, st_info);
+    elf_write_byte(buf, 0);  /* st_other */
+    elf_write_short(buf, 0); /* st_shndx */
+#endif
+}
+
+/* One PLT relocation naming a dynamic symbol. */
+void elf_write_jmprel(strbuf_t *buf, int offset, int sym_idx)
+{
+#if ELF_IS_64 == 1
+    elf_write_quad(buf, offset);
+    /* r_info is (symbol << 32) | type, so the two halves are written in
+     * little-endian order as type followed by symbol index.
+     */
+    elf_write_int(buf, R_ARCH_JUMP_SLOT);
+    elf_write_int(buf, sym_idx);
+    elf_write_quad(buf, 0); /* r_addend */
+#else
+    elf_write_int(buf, offset);
+    elf_write_int(buf, (sym_idx << 8) | R_ARCH_JUMP_SLOT);
+    if (dynamic_sections.use_relaplt)
+        elf_write_int(buf, 0); /* r_addend */
+#endif
+}
+
+/* One GOT slot. */
+void elf_write_got_slot(strbuf_t *buf, int val)
+{
+#if ELF_IS_64 == 1
+    elf_write_quad(buf, val);
+#else
+    elf_write_int(buf, val);
+#endif
+}
+
+/* Place the dynamic sections. Every start is derived from the end of .rodata,
+ * so a backend whose final code size is only known after emission can call
+ * this again once it is.
+ */
+void elf_layout_dynamic(void)
+{
+    int relplt_bytes = dynamic_sections.use_relaplt
+                           ? dynamic_sections.relaplt_size
+                           : dynamic_sections.relplt_size;
+    int interp_bytes = strlen(DYN_LINKER) + 1;
+    interp_bytes = ALIGN_UP(interp_bytes, PTR_SIZE);
+
+    int ro_end = elf_rodata_start + elf_rodata->size;
+    if (dynamic_sections.use_relaplt)
+        dynamic_sections.elf_relaplt_start = ro_end;
+    else
+        dynamic_sections.elf_relplt_start = ro_end;
+    dynamic_sections.elf_plt_start = ro_end + relplt_bytes;
+
+    /* .interp opens the second load segment, so start it a page clear of the
+     * first: the two must not share a page, and the offset must stay
+     * congruent to the address modulo the page size.
+     */
+    dynamic_sections.elf_interp_start =
+        dynamic_sections.elf_plt_start + dynamic_sections.plt_size + PAGESIZE;
+    dynamic_sections.elf_got_start =
+        dynamic_sections.elf_interp_start + interp_bytes;
+}
+
+/* Address of .dynamic, which follows .got, .dynstr and .dynsym. */
+int elf_dynamic_start(void)
+{
+    return dynamic_sections.elf_got_start + dynamic_sections.elf_got->size +
+           dynamic_sections.elf_dynstr->size +
+           dynamic_sections.elf_dynsym->size;
+}
+
+/* The PLT relocation buffer, whichever form this target uses. */
+strbuf_t *elf_relplt_buf(void)
+{
+    if (dynamic_sections.use_relaplt)
+        return dynamic_sections.elf_relaplt;
+    return dynamic_sections.elf_relplt;
 }
 
 void elf_generate_header(void)
@@ -66,6 +217,38 @@ void elf_generate_header(void)
         return;
     }
 
+#if ELF_IS_64 == 1
+    /* ELF64 executable header, 64 bytes, little-endian.
+     *
+     * No section headers are emitted, so e_shoff, e_shnum and e_shstrndx are
+     * all zero: a loader needs only the program headers to execute the image,
+     * and the dynamic loader reads PT_DYNAMIC rather than the section table.
+     */
+    int phnum64 = 2;
+    if (dynlink)
+        phnum64 = 4; /* the two PT_LOADs plus PT_INTERP and PT_DYNAMIC */
+    elf_write_byte(elf_header, 0x7f);
+    elf_write_str(elf_header, "ELF");
+    elf_write_byte(elf_header, 2); /* EI_CLASS   = ELFCLASS64 */
+    elf_write_byte(elf_header, 1); /* EI_DATA    = ELFDATA2LSB */
+    elf_write_byte(elf_header, 1); /* EI_VERSION = EV_CURRENT */
+    for (int i = 0; i < 9; i++)    /* EI_OSABI, EI_ABIVERSION, padding */
+        elf_write_byte(elf_header, 0);
+
+    elf_write_short(elf_header, 2);           /* e_type    = ET_EXEC */
+    elf_write_short(elf_header, ELF_MACHINE); /* e_machine */
+    elf_write_int(elf_header, 1);             /* e_version = EV_CURRENT */
+    elf_write_quad(elf_header, elf_code_start + elf_entry_offset); /* e_entry */
+    elf_write_quad(elf_header, 64);       /* e_phoff: right after header */
+    elf_write_quad(elf_header, 0);        /* e_shoff: no section headers */
+    elf_write_int(elf_header, ELF_FLAGS); /* e_flags */
+    elf_write_short(elf_header, 64);      /* e_ehsize */
+    elf_write_short(elf_header, 56);      /* e_phentsize */
+    elf_write_short(elf_header, phnum64); /* e_phnum */
+    elf_write_short(elf_header, 0);       /* e_shentsize */
+    elf_write_short(elf_header, 0);       /* e_shnum */
+    elf_write_short(elf_header, 0);       /* e_shstrndx */
+#else
     elf32_hdr_t hdr;
     int phnum, shnum, shstrndx, shoff;
 
@@ -178,13 +361,12 @@ void elf_generate_header(void)
     hdr.e_shnum = shnum;                    /* number of section headers */
     hdr.e_shstrndx = shstrndx;              /* section index with names */
     elf_write_blk(elf_header, &hdr, sizeof(elf32_hdr_t));
+#endif
 }
 
 void elf_generate_program_headers(void)
 {
-    strbuf_t *elf_relplt = dynamic_sections.use_relaplt
-                               ? dynamic_sections.elf_relaplt
-                               : dynamic_sections.elf_relplt;
+    strbuf_t *elf_relplt = elf_relplt_buf();
     if (!elf_program_header || !elf_code || !elf_data || !elf_rodata ||
         (dynlink &&
          (!dynamic_sections.elf_interp || !elf_relplt ||
@@ -195,6 +377,85 @@ void elf_generate_program_headers(void)
         return;
     }
 
+#if ELF_IS_64 == 1
+    /* Two ELF64 PT_LOAD segments, 56 bytes each. Field order differs from
+     * ELF32: p_flags sits immediately after p_type rather than before
+     * p_align.
+     */
+    int ro_size = elf_header_len + elf_code->size + elf_rodata->size;
+    if (dynlink)
+        ro_size += elf_relplt->size + dynamic_sections.elf_plt->size;
+
+    /* read-only, executable segment: headers + .text + .rodata */
+    elf_write_int(elf_program_header, 1);          /* p_type  = PT_LOAD */
+    elf_write_int(elf_program_header, 5);          /* p_flags = R|X */
+    elf_write_quad(elf_program_header, 0);         /* p_offset */
+    elf_write_quad(elf_program_header, ELF_START); /* p_vaddr */
+    elf_write_quad(elf_program_header, ELF_START); /* p_paddr */
+    elf_write_quad(elf_program_header, ro_size);   /* p_filesz */
+    elf_write_quad(elf_program_header, ro_size);   /* p_memsz */
+    elf_write_quad(elf_program_header, PAGESIZE);  /* p_align */
+
+    /* read-write segment. Statically linked it holds .data (plus .bss, which
+     * occupies no file space) and starts at the next page boundary so that
+     * p_vaddr === p_offset (mod p_align), which the kernel enforces.
+     * Dynamically linked it begins at .interp and covers everything the
+     * loader needs, which elf_preprocess() has already placed a page clear of
+     * the read-only segment.
+     */
+    int data_file_ofs = ALIGN_UP(ro_size, PAGESIZE);
+    int rw_vaddr = elf_data_start;
+    int rw_filesz = elf_data->size;
+    int rw_memsz = elf_data->size + elf_bss_size;
+
+    if (dynlink) {
+        int dyn_extra = dynamic_sections.elf_interp->size +
+                        dynamic_sections.elf_got->size +
+                        dynamic_sections.elf_dynstr->size +
+                        dynamic_sections.elf_dynsym->size +
+                        dynamic_sections.elf_dynamic->size;
+        data_file_ofs = ro_size;
+        rw_vaddr = dynamic_sections.elf_interp_start;
+        rw_filesz += dyn_extra;
+        rw_memsz += dyn_extra;
+    }
+
+    elf_write_int(elf_program_header, 1);              /* p_type  = PT_LOAD */
+    elf_write_int(elf_program_header, 6);              /* p_flags = R|W */
+    elf_write_quad(elf_program_header, data_file_ofs); /* p_offset */
+    elf_write_quad(elf_program_header, rw_vaddr);
+    elf_write_quad(elf_program_header, rw_vaddr);
+    elf_write_quad(elf_program_header, rw_filesz);
+    elf_write_quad(elf_program_header, rw_memsz);
+    elf_write_quad(elf_program_header, PAGESIZE);
+
+    if (dynlink) {
+        /* PT_INTERP: names the dynamic loader. */
+        elf_write_int(elf_program_header, 3); /* p_type  = PT_INTERP */
+        elf_write_int(elf_program_header, 4); /* p_flags = R */
+        elf_write_quad(elf_program_header, ro_size);
+        elf_write_quad(elf_program_header, dynamic_sections.elf_interp_start);
+        elf_write_quad(elf_program_header, dynamic_sections.elf_interp_start);
+        elf_write_quad(elf_program_header, strlen(DYN_LINKER) + 1);
+        elf_write_quad(elf_program_header, strlen(DYN_LINKER) + 1);
+        elf_write_quad(elf_program_header, 1);
+
+        /* PT_DYNAMIC: the table the loader walks. */
+        int dynamic_ofs = ro_size + dynamic_sections.elf_interp->size +
+                          dynamic_sections.elf_got->size +
+                          dynamic_sections.elf_dynstr->size +
+                          dynamic_sections.elf_dynsym->size;
+        int dynamic_addr = elf_dynamic_start();
+        elf_write_int(elf_program_header, 2); /* p_type  = PT_DYNAMIC */
+        elf_write_int(elf_program_header, 6); /* p_flags = R|W */
+        elf_write_quad(elf_program_header, dynamic_ofs);
+        elf_write_quad(elf_program_header, dynamic_addr);
+        elf_write_quad(elf_program_header, dynamic_addr);
+        elf_write_quad(elf_program_header, dynamic_sections.elf_dynamic->size);
+        elf_write_quad(elf_program_header, dynamic_sections.elf_dynamic->size);
+        elf_write_quad(elf_program_header, 8);
+    }
+#else
     elf32_phdr_t phdr;
 
     /* Explain the meaning of each field in the ELF32 program header.
@@ -299,13 +560,20 @@ void elf_generate_program_headers(void)
         phdr.p_align = 4;                                   /* alignment */
         elf_write_blk(elf_program_header, &phdr, sizeof(elf32_phdr_t));
     }
+#endif
 }
 
 void elf_generate_section_headers(void)
 {
-    strbuf_t *elf_relplt = dynamic_sections.use_relaplt
-                               ? dynamic_sections.elf_relaplt
-                               : dynamic_sections.elf_relplt;
+#if ELF_IS_64 == 0
+    /* x86-64 output carries no section headers; the program headers alone
+     * are sufficient to load and run the image. The body below is therefore
+     * compiled out entirely for that target -- leaving it after an early
+     * return would make it unreachable code, which shecc's own parser
+     * rejects when it compiles this file.
+     */
+
+    strbuf_t *elf_relplt = elf_relplt_buf();
     /* Check for null pointers to prevent crashes */
     if (!elf_section_header || !elf_code || !elf_data || !elf_rodata ||
         !elf_symtab || !elf_strtab || !elf_shstrtab ||
@@ -596,6 +864,7 @@ void elf_generate_section_headers(void)
     shdr.sh_entsize = 0;
     elf_write_blk(elf_section_header, &shdr, sizeof(elf32_shdr_t));
     sh_name += strlen(".shstrtab") + 1;
+#endif
 }
 
 void elf_align(strbuf_t *elf_array)
@@ -610,11 +879,210 @@ void elf_align(strbuf_t *elf_array)
         elf_write_byte(elf_array, 0);
 }
 
+/* Lay out .interp, .dynsym, .dynstr, .rela.plt (.rel.plt), .got and .dynamic.
+ *
+ * Separated out because a backend whose instruction lengths are only known
+ * after emission has to place these a second time, once the final code size
+ * fixes their addresses.
+ */
+void elf_generate_dynamic_sections(void)
+{
+    strbuf_t *elf_relplt = elf_relplt_buf();
+
+    /* In dynamic linking mode, elf_generate_sections() also generates
+     * .interp, .dynsym, .dynstr, .rel.plt (.rela.plt), .got and dynamic
+     * sections.
+     *
+     * .plt section is generated at the code generation phase.
+     */
+    int dymsym_idx = 1, func_plt_ofs, st_name = 0;
+    int rel_offset;
+
+    /* .interp section */
+    elf_write_str(dynamic_sections.elf_interp, DYN_LINKER);
+    elf_write_byte(dynamic_sections.elf_interp, 0);
+    /* .got follows .interp and the loader writes pointers into it, so pad
+     * to a pointer boundary rather than the usual four bytes.
+     */
+    while (dynamic_sections.elf_interp->size % PTR_SIZE)
+        elf_write_byte(dynamic_sections.elf_interp, 0);
+
+    /* Add first symbol table entry (STN_UNDEF) to .dynsym section. */
+    elf_write_dynsym(dynamic_sections.elf_dynsym, 0, 0, 0);
+
+    /* Add first NULL byte to .dynstr section.  */
+    elf_write_byte(dynamic_sections.elf_dynstr, 0);
+    st_name += 1;
+
+    /* Add "libc.so.6" to .dynstr section. */
+    elf_write_str(dynamic_sections.elf_dynstr, LIBC_SO);
+    elf_write_byte(dynamic_sections.elf_dynstr, 0);
+    st_name += strlen(LIBC_SO) + 1;
+
+    /* Perform the following steps for each external function.
+     * - Add a new PLT relocation entry to .relplt section.
+     * - Add a new dynamic symbol entry to .dynsym section.
+     * - Append the external function name to .dynstr section.
+     * - Set plt_offset for the external function.
+     *
+     * Since __libc_start_main is not added to the function list,
+     * it must be handled additionally first.
+     */
+    rel_offset = dynamic_sections.elf_got_start + PTR_SIZE * RESERVED_GOT_NUM;
+    elf_write_jmprel(elf_relplt, rel_offset, dymsym_idx);
+
+    /* STB_GLOBAL = 1, STT_FUNC = 2 */
+    elf_write_dynsym(dynamic_sections.elf_dynsym, st_name, ELF32_ST_INFO(1, 2),
+                     0);
+    dymsym_idx += 1;
+
+    elf_write_str(dynamic_sections.elf_dynstr, "__libc_start_main");
+    elf_write_byte(dynamic_sections.elf_dynstr, 0);
+    st_name += strlen("__libc_start_main") + 1;
+
+    /* Because PLT[1] is reserved for __libc_start_main, its plt_offset
+     * must be PLT_FIXUP_SIZE. Therefore, no offset assignment is
+     * required for this function.
+     */
+
+    func_plt_ofs = PLT_FIXUP_SIZE + PLT_ENT_SIZE;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->is_used || func->bbs)
+            continue;
+        /* If the function is used and has no basic block,
+         * consider it to be an external function.
+         */
+        rel_offset += PTR_SIZE;
+        elf_write_jmprel(elf_relplt, rel_offset, dymsym_idx);
+
+        elf_write_dynsym(dynamic_sections.elf_dynsym, st_name,
+                         ELF32_ST_INFO(1, 2), 0);
+        dymsym_idx += 1;
+
+        elf_write_str(dynamic_sections.elf_dynstr, func->return_def.var_name);
+        elf_write_byte(dynamic_sections.elf_dynstr, 0);
+        st_name += strlen(func->return_def.var_name) + 1;
+
+        func->plt_offset = func_plt_ofs;
+
+        func_plt_ofs += PLT_ENT_SIZE;
+    }
+    /* Ensure proper alignment for .dynstr section. */
+    elf_align(dynamic_sections.elf_dynstr);
+
+    /* .got section
+     *
+     * - Arm architecture:
+     *   - GOT[0] holds the virtual address of .dynamic section.
+     *   - GOT[1] and GOT[2] are reserved for link_map and resolver,
+     *     and are initialized to 0.
+     * - RISC-V architecture:
+     *   - GOT[0] and GOT[1] are reserved for resolver and link_map,
+     *     and are initialized to 0.
+     * - x86-64:
+     *   - GOT[0] holds the virtual address of .dynamic section, and
+     *     GOT[1] and GOT[2] are filled in by the loader.
+     * - The remaining entries are initialized to &PLT[0].
+     */
+    switch (ELF_MACHINE) {
+    case ELF_MACHINE_ARM32:
+    case ELF_MACHINE_X86_64:
+        /* GOT[0] holds the address of .dynamic. The GOT is still being
+         * built, so its final size comes from got_size rather than the
+         * buffer.
+         */
+        elf_write_got_slot(dynamic_sections.elf_got,
+                           dynamic_sections.elf_got_start +
+                               dynamic_sections.got_size +
+                               dynamic_sections.elf_dynstr->size +
+                               dynamic_sections.elf_dynsym->size);
+        elf_write_got_slot(dynamic_sections.elf_got, 0);
+        elf_write_got_slot(dynamic_sections.elf_got, 0);
+        break;
+    case ELF_MACHINE_RV32:
+        elf_write_got_slot(dynamic_sections.elf_got, 0);
+        elf_write_got_slot(dynamic_sections.elf_got, 0);
+        break;
+    }
+    int got_idx = 0;
+    for (int i = PTR_SIZE * RESERVED_GOT_NUM; i < dynamic_sections.got_size;
+         i += PTR_SIZE) {
+        int slot = dynamic_sections.elf_plt_start;
+        if (ELF_MACHINE == ELF_MACHINE_X86_64)
+            /* x86-64 reaches the resolver through the push in its own PLT
+             * entry, which supplies the relocation index, rather than
+             * jumping straight to PLT[0].
+             */
+            slot = dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE +
+                   got_idx * PLT_ENT_SIZE + 6;
+        elf_write_got_slot(dynamic_sections.elf_got, slot);
+        got_idx++;
+    }
+
+    /* .dynamic section */
+    int dynstr_addr =
+        dynamic_sections.elf_got_start + dynamic_sections.got_size;
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0x5, dynstr_addr);
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0xa,
+                  dynamic_sections.elf_dynstr->size);
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0x6,
+                  dynstr_addr + dynamic_sections.elf_dynstr->size);
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0xb, elf_sym_size());
+
+    if (dynamic_sections.use_relaplt) {
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x7,
+                      dynamic_sections.elf_relaplt_start);
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x8,
+                      dynamic_sections.relaplt_size);
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x9, elf_jmprel_size());
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x2,
+                      dynamic_sections.relaplt_size);
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x14, 0x7);
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x17,
+                      dynamic_sections.elf_relaplt_start);
+    } else {
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x11,
+                      dynamic_sections.elf_relplt_start);
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x12,
+                      dynamic_sections.relplt_size);
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x13, elf_jmprel_size());
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x2,
+                      dynamic_sections.relplt_size);
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x14, 0x11);
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x17,
+                      dynamic_sections.elf_relplt_start);
+    }
+
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0x3,
+                  dynamic_sections.elf_got_start);
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, 0x1);
+#if DYN_BIND_NOW == 1
+    /* Resolve every PLT entry at load time. This target's PLT[0] does not
+     * arrange the GOT[1]/GOT[2] hand-off the lazy resolver needs, so the
+     * loader writes the final addresses straight into the GOT instead.
+     */
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0x18, 0x0); /* DT_BIND_NOW */
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0x1e, 0x8); /* DF_BIND_NOW */
+#endif
+    elf_write_dyn(dynamic_sections.elf_dynamic, 0x0, 0x0);
+}
+
+/* Discard previously generated dynamic content so it can be rebuilt. */
+void elf_reset_dynamic_sections(void)
+{
+    dynamic_sections.elf_interp->size = 0;
+    dynamic_sections.elf_dynsym->size = 0;
+    dynamic_sections.elf_dynstr->size = 0;
+    dynamic_sections.elf_dynamic->size = 0;
+    dynamic_sections.elf_got->size = 0;
+    dynamic_sections.elf_plt->size = 0;
+    strbuf_t *relplt_buf = elf_relplt_buf();
+    relplt_buf->size = 0;
+}
+
 void elf_generate_sections(void)
 {
-    strbuf_t *elf_relplt = dynamic_sections.use_relaplt
-                               ? dynamic_sections.elf_relaplt
-                               : dynamic_sections.elf_relplt;
+    strbuf_t *elf_relplt = elf_relplt_buf();
     if (!elf_shstrtab ||
         (dynlink &&
          (!dynamic_sections.elf_interp || !elf_relplt ||
@@ -625,251 +1093,8 @@ void elf_generate_sections(void)
         return;
     }
 
-    if (dynlink) {
-        /* In dynamic linking mode, elf_generate_sections() also generates
-         * .interp, .dynsym, .dynstr, .rel.plt (.rela.plt), .got and dynamic
-         * sections.
-         *
-         * .plt section is generated at the code generation phase.
-         */
-        elf32_sym_t sym;
-        elf32_dyn_t dyn;
-        elf32_rel_t rel;
-        elf32_rela_t rela;
-        int dymsym_idx = 1, func_plt_ofs, st_name = 0;
-        memset(&sym, 0, sizeof(elf32_sym_t));
-        memset(&dyn, 0, sizeof(elf32_dyn_t));
-        memset(&rel, 0, sizeof(elf32_rel_t));
-        memset(&rela, 0, sizeof(elf32_rela_t));
-
-        /* .interp section */
-        elf_write_str(dynamic_sections.elf_interp, DYN_LINKER);
-        elf_write_byte(dynamic_sections.elf_interp, 0);
-        elf_align(dynamic_sections.elf_interp);
-
-        /* Add first symbol table entry (STN_UNDEF) to .dynsym section. */
-        elf_write_blk(dynamic_sections.elf_dynsym, &sym, sizeof(elf32_sym_t));
-
-        /* Add first NULL byte to .dynstr section.  */
-        elf_write_byte(dynamic_sections.elf_dynstr, 0);
-        st_name += 1;
-
-        /* Add "libc.so.6" to .dynstr section. */
-        elf_write_str(dynamic_sections.elf_dynstr, LIBC_SO);
-        elf_write_byte(dynamic_sections.elf_dynstr, 0);
-        st_name += strlen(LIBC_SO) + 1;
-
-        /* Perform the following steps for each external function.
-         * - Add a new PLT relocation entry to .relplt section.
-         * - Add a new dynamic symbol entry to .dynsym section.
-         * - Append the external function name to .dynstr section.
-         * - Set plt_offset for the external function.
-         *
-         * Since __libc_start_main is not added to the function list,
-         * it must be handled additionally first.
-         */
-        if (dynamic_sections.use_relaplt) {
-            rela.r_offset =
-                dynamic_sections.elf_got_start + PTR_SIZE * RESERVED_GOT_NUM;
-            rela.r_info = (dymsym_idx << 8) | R_ARCH_JUMP_SLOT;
-            rela.r_addend = 0;
-            elf_write_blk(dynamic_sections.elf_relaplt, &rela,
-                          sizeof(elf32_rela_t));
-        } else {
-            rel.r_offset =
-                dynamic_sections.elf_got_start + PTR_SIZE * RESERVED_GOT_NUM;
-            rel.r_info = (dymsym_idx << 8) | R_ARCH_JUMP_SLOT;
-            elf_write_blk(dynamic_sections.elf_relplt, &rel,
-                          sizeof(elf32_rel_t));
-        }
-
-        sym.st_name = st_name;
-        sym.st_info = ELF32_ST_INFO(1, 2); /* STB_GLOBAL = 1, STT_FUNC = 2 */
-        elf_write_blk(dynamic_sections.elf_dynsym, &sym, sizeof(elf32_sym_t));
-        dymsym_idx += 1;
-
-        elf_write_str(dynamic_sections.elf_dynstr, "__libc_start_main");
-        elf_write_byte(dynamic_sections.elf_dynstr, 0);
-        st_name += strlen("__libc_start_main") + 1;
-
-        /* Because PLT[1] is reserved for __libc_start_main, its plt_offset
-         * must be PLT_FIXUP_SIZE. Therefore, no offset assignment is
-         * required for this function.
-         */
-
-        func_plt_ofs = PLT_FIXUP_SIZE + PLT_ENT_SIZE;
-        for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-            if (!func->is_used || func->bbs)
-                continue;
-            /* If the function is used and has no basic block,
-             * consider it to be an external function.
-             */
-
-            if (dynamic_sections.use_relaplt) {
-                rela.r_offset += PTR_SIZE;
-                rela.r_info = (dymsym_idx << 8) | R_ARCH_JUMP_SLOT;
-                rela.r_addend = 0;
-                elf_write_blk(dynamic_sections.elf_relaplt, &rela,
-                              sizeof(elf32_rela_t));
-            } else {
-                rel.r_offset += PTR_SIZE;
-                rel.r_info = (dymsym_idx << 8) | R_ARCH_JUMP_SLOT;
-                elf_write_blk(dynamic_sections.elf_relplt, &rel,
-                              sizeof(elf32_rel_t));
-            }
-
-            sym.st_name = st_name;
-            sym.st_info =
-                ELF32_ST_INFO(1, 2); /* STB_GLOBAL = 1, STT_FUNC = 2 */
-            elf_write_blk(dynamic_sections.elf_dynsym, &sym,
-                          sizeof(elf32_sym_t));
-            dymsym_idx += 1;
-
-            elf_write_str(dynamic_sections.elf_dynstr,
-                          func->return_def.var_name);
-            elf_write_byte(dynamic_sections.elf_dynstr, 0);
-            st_name += strlen(func->return_def.var_name) + 1;
-
-            func->plt_offset = func_plt_ofs;
-
-            func_plt_ofs += PLT_ENT_SIZE;
-        }
-        /* Ensure proper alignment for .dynstr section. */
-        elf_align(dynamic_sections.elf_dynstr);
-
-        /* .got section
-         *
-         * - Arm architecture:
-         *   - GOT[0] holds the virtual address of .dynamic section.
-         *   - GOT[1] and GOT[2] are reserved for link_map and resolver,
-         *     and are initialized to 0.
-         * - RISC-V architecture:
-         *   - GOT[0] and GOT[1] are reserved for resolver and link_map,
-         *     and are initialized to 0.
-         * - The remaining entries are initialized to &PLT[0].
-         */
-        switch (ELF_MACHINE) {
-        case ELF_MACHINE_ARM32:
-            elf_write_int(dynamic_sections.elf_got,
-                          dynamic_sections.elf_got_start +
-                              dynamic_sections.got_size +
-                              dynamic_sections.elf_dynstr->size +
-                              dynamic_sections.elf_dynsym->size);
-            elf_write_int(dynamic_sections.elf_got, 0);
-            elf_write_int(dynamic_sections.elf_got, 0);
-            break;
-        case ELF_MACHINE_RV32:
-            elf_write_int(dynamic_sections.elf_got, 0);
-            elf_write_int(dynamic_sections.elf_got, 0);
-            break;
-        }
-        for (int i = PTR_SIZE * RESERVED_GOT_NUM; i < dynamic_sections.got_size;
-             i += PTR_SIZE)
-            elf_write_int(dynamic_sections.elf_got,
-                          dynamic_sections.elf_plt_start);
-
-        /* .dynamic section */
-        dyn.d_tag = 0x5; /* DT_STRTAB */
-        dyn.d_un =
-            dynamic_sections.elf_got_start +
-            dynamic_sections.got_size; /* The virtual address of .dynstr. */
-        elf_write_blk(dynamic_sections.elf_dynamic, &dyn, sizeof(elf32_dyn_t));
-
-        dyn.d_tag = 0xa; /* DT_STRSZ */
-        dyn.d_un = dynamic_sections.elf_dynstr->size;
-        elf_write_blk(dynamic_sections.elf_dynamic, &dyn, sizeof(elf32_dyn_t));
-
-        dyn.d_tag = 0x6; /* DT_SYMTAB */
-        dyn.d_un = dynamic_sections.elf_got_start + dynamic_sections.got_size +
-                   dynamic_sections.elf_dynstr
-                       ->size; /* The virtual address of .dynsym. */
-        elf_write_blk(dynamic_sections.elf_dynamic, &dyn, sizeof(elf32_dyn_t));
-
-        dyn.d_tag = 0xb;                /* DT_SYMENT */
-        dyn.d_un = sizeof(elf32_sym_t); /* Size of an entry. */
-        elf_write_blk(dynamic_sections.elf_dynamic, &dyn, sizeof(elf32_dyn_t));
-
-        if (dynamic_sections.use_relaplt) {
-            dyn.d_tag = 0x7; /* DT_RELA */
-            dyn.d_un =
-                dynamic_sections
-                    .elf_relaplt_start; /* The virtual address of .rela.plt. */
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            dyn.d_tag = 0x8; /* DT_RELASZ */
-            dyn.d_un = dynamic_sections.relaplt_size;
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            dyn.d_tag = 0x9; /* DT_RELAENT */
-            dyn.d_un = sizeof(elf32_rela_t);
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            dyn.d_tag = 0x2; /* DT_PLTRELSZ */
-            dyn.d_un = dynamic_sections.relaplt_size;
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            dyn.d_tag = 0x14; /* DT_PLTREL */
-            dyn.d_un = 0x7;   /* DT_RELA */
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            /* The virtual address of .rela.plt. */
-            dyn.d_tag = 0x17; /* DT_JMPREL */
-            dyn.d_un = dynamic_sections.elf_relaplt_start;
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-        } else {
-            dyn.d_tag = 0x11; /* DT_REL */
-            dyn.d_un =
-                dynamic_sections
-                    .elf_relplt_start; /* The virtual address of .rel.plt. */
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            dyn.d_tag = 0x12; /* DT_RELSZ */
-            dyn.d_un = dynamic_sections.relplt_size;
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            dyn.d_tag = 0x13; /* DT_RELENT */
-            dyn.d_un = sizeof(elf32_rel_t);
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            dyn.d_tag = 0x2; /* DT_PLTRELSZ */
-            dyn.d_un = dynamic_sections.relplt_size;
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            dyn.d_tag = 0x14; /* DT_PLTREL */
-            dyn.d_un = 0x11;  /* DT_REL */
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-
-            /* The virtual address of .rel.plt. */
-            dyn.d_tag = 0x17; /* DT_JMPREL */
-            dyn.d_un = dynamic_sections.elf_relplt_start;
-            elf_write_blk(dynamic_sections.elf_dynamic, &dyn,
-                          sizeof(elf32_dyn_t));
-        }
-
-        dyn.d_tag = 0x3; /* DT_PLTGOT */
-        dyn.d_un =
-            dynamic_sections.elf_got_start; /* The virtual address of .got.*/
-        elf_write_blk(dynamic_sections.elf_dynamic, &dyn, sizeof(elf32_dyn_t));
-
-        dyn.d_tag = 0x1; /* DT_NEEDED */
-        dyn.d_un = 0x1;  /* The index of "libc.so.6" in .dynstr. */
-        elf_write_blk(dynamic_sections.elf_dynamic, &dyn, sizeof(elf32_dyn_t));
-
-        dyn.d_tag = 0x0; /* DT_NULL */
-        dyn.d_un = 0x0;
-        elf_write_blk(dynamic_sections.elf_dynamic, &dyn, sizeof(elf32_dyn_t));
-    }
+    if (dynlink)
+        elf_generate_dynamic_sections();
 
     /* shstr section; len = 53
      * If using dynamic linking, len = 105.
@@ -930,9 +1155,18 @@ void elf_add_symbol(const char *symbol, int pc)
 
 void elf_preprocess(void)
 {
+#if ELF_IS_64 == 1
+    /* ELF64 header (64) plus two program headers (56 each), and two more --
+     * PT_INTERP and PT_DYNAMIC -- when linking dynamically.
+     */
+    elf_header_len = 64 + (56 << 1);
+    if (dynlink)
+        elf_header_len += (56 << 1);
+#else
     elf_header_len = sizeof(elf32_hdr_t) + (sizeof(elf32_phdr_t) << 1);
     if (dynlink)
         elf_header_len += (sizeof(elf32_phdr_t) << 1);
+#endif
     elf_align(elf_data);
     elf_align(elf_rodata);
     elf_code_start = ELF_START + elf_header_len;
@@ -968,54 +1202,28 @@ void elf_preprocess(void)
          * function.
          */
         if (dynamic_sections.use_relaplt)
-            dynamic_sections.relaplt_size = sizeof(elf32_rela_t);
+            dynamic_sections.relaplt_size = elf_jmprel_size();
         else
-            dynamic_sections.relplt_size = sizeof(elf32_rel_t);
+            dynamic_sections.relplt_size = elf_jmprel_size();
         dynamic_sections.plt_size = PLT_FIXUP_SIZE + PLT_ENT_SIZE;
         dynamic_sections.got_size = PTR_SIZE * RESERVED_GOT_NUM + PTR_SIZE;
         for (func_t *func = FUNC_LIST.head; func; func = func->next) {
             if (!func->is_used || func->bbs)
                 continue;
             if (dynamic_sections.use_relaplt)
-                dynamic_sections.relaplt_size += sizeof(elf32_rela_t);
+                dynamic_sections.relaplt_size += elf_jmprel_size();
             else
-                dynamic_sections.relplt_size += sizeof(elf32_rel_t);
+                dynamic_sections.relplt_size += elf_jmprel_size();
             dynamic_sections.plt_size += PLT_ENT_SIZE;
             dynamic_sections.got_size += PTR_SIZE;
         }
 
-        /* Set the starting addresses of the three sections. */
-        int elf_interp_size = strlen(DYN_LINKER) + 1;
-        elf_interp_size = ALIGN_UP(elf_interp_size, 4);
-        if (dynamic_sections.use_relaplt) {
-            dynamic_sections.elf_relaplt_start =
-                elf_rodata_start + elf_rodata->size;
-            dynamic_sections.elf_plt_start =
-                dynamic_sections.elf_relaplt_start +
-                dynamic_sections.relaplt_size;
-        } else {
-            dynamic_sections.elf_relplt_start =
-                elf_rodata_start + elf_rodata->size;
-            dynamic_sections.elf_plt_start = dynamic_sections.elf_relplt_start +
-                                             dynamic_sections.relplt_size;
-        }
-        /* Since the first section of the second load segment is .interp
-         * when using dynamic linking mode, adding PAGESIZE to elf_interp_start
-         * is to ensure that two load segments don't share a common page.
-         */
-        dynamic_sections.elf_interp_start = dynamic_sections.elf_plt_start +
-                                            dynamic_sections.plt_size +
-                                            PAGESIZE;
-        dynamic_sections.elf_got_start =
-            dynamic_sections.elf_interp_start + elf_interp_size;
+        elf_layout_dynamic();
     }
     elf_generate_sections();
     if (dynlink) {
-        elf_data_start = dynamic_sections.elf_got_start +
-                         dynamic_sections.elf_got->size +
-                         dynamic_sections.elf_dynstr->size +
-                         dynamic_sections.elf_dynsym->size +
-                         dynamic_sections.elf_dynamic->size;
+        elf_data_start =
+            elf_dynamic_start() + dynamic_sections.elf_dynamic->size;
     } else {
         /* To prevent two load segments from sharing a common page, add
          * PAGESIZE to elf_data_start, since the first section of the second
@@ -1079,12 +1287,32 @@ void elf_generate(const char *outfile)
         for (int i = 0; i < dynamic_sections.elf_dynamic->size; i++)
             fputc(dynamic_sections.elf_dynamic->elements[i], fp);
     }
+#if ELF_IS_64 == 1
+    /* Statically linked, .data begins the second load segment and has to start
+     * on a page boundary so that p_vaddr === p_offset (mod p_align). Linked
+     * dynamically that segment starts back at .interp, and everything from
+     * .interp to .data has already been written contiguously, so padding here
+     * would push .data past the offset the program header advertises.
+     */
+    if (!dynlink) {
+        int ro_written = elf_header_len + elf_code->size + elf_rodata->size;
+        int data_ofs = ALIGN_UP(ro_written, PAGESIZE);
+        for (int i = ro_written; i < data_ofs; i++)
+            fputc(0, fp);
+    }
+#endif
     /* Readable and writable sections */
     for (int i = 0; i < elf_data->size; i++)
         fputc(elf_data->elements[i], fp);
-    /* Note: .bss is not written to file (SHT_NOBITS) */
 
-    /* Other sections and section headers */
+        /* Note: .bss is not written to file (SHT_NOBITS) */
+
+        /* Other sections and section headers.
+         *
+         * ELF64 output emits no section headers, so the symbol and string
+         * tables have nothing to reference and are left out of the image.
+         */
+#if ELF_IS_64 == 0
     for (int i = 0; i < elf_symtab->size; i++)
         fputc(elf_symtab->elements[i], fp);
     for (int i = 0; i < elf_strtab->size; i++)
@@ -1093,5 +1321,6 @@ void elf_generate(const char *outfile)
         fputc(elf_shstrtab->elements[i], fp);
     for (int i = 0; i < elf_section_header->size; i++)
         fputc(elf_section_header->elements[i], fp);
+#endif
     fclose(fp);
 }

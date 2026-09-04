@@ -93,6 +93,8 @@ int elf_data_start;
 int elf_rodata_start;
 int elf_bss_start;
 int elf_bss_size;
+/* Offset of the entry point within the code section (0 = start of code). */
+int elf_entry_offset = 0;
 dynamic_sections_t dynamic_sections;
 
 /* Command line compilation flags */
@@ -240,7 +242,7 @@ void *arena_calloc(arena_t *arena, int n, int size)
 void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
 {
     /* act like malloc */
-    if (oldptr == NULL) {
+    if (!oldptr) {
         if (oldsz != 0) {
             printf("arena_realloc: oldptr == NULL requires oldsz == 0\n");
             abort();
@@ -288,20 +290,6 @@ char *arena_strdup(arena_t *arena, char *str)
     memcpy(dup, str, n);
     dup[n] = '\0';
     return dup;
-}
-
-/* Duplicate a block of memory into the arena.
- * Allocates size bytes within the arena and copies data from the input pointer.
- *
- * @arena: a Pointer to the arena. Must not be NULL.
- * @data: data Pointer to the source memory. Must not be NULL.
- * @size: size Number of bytes to copy. Must be non-negative.
- *
- * Return: The pointer to the duplicated memory stored in the arena.
- */
-void *arena_memdup(arena_t *arena, void *data, int size)
-{
-    return memcpy(arena_alloc(arena, size), data, size);
 }
 
 /* Typed allocators for consistent memory management */
@@ -595,6 +583,10 @@ type_t *find_type(char *type_name, int flag)
 
 ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 {
+    if (ph2_ir_idx >= MAX_IR_INSTR) {
+        printf("Error: too many phase-2 IR instructions\n");
+        abort();
+    }
     PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
     return ph2_ir;
 }
@@ -614,14 +606,13 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->then_bb = NULL;
     ph2_ir->else_bb = NULL;
     ph2_ir->ofs_based_on_stack_top = false;
+    /* Default to the full slot. Slots are PTR_SIZE wide, so a wide access is
+     * always valid; only an address-taken narrow scalar may be written behind
+     * the allocator's back, and reg-alloc narrows those explicitly.
+     */
+    ph2_ir->size_bytes = PTR_SIZE;
+    ph2_ir->is_pointer = false;
     return add_existed_ph2_ir(ph2_ir);
-}
-
-void set_var_liveout(var_t *var, int end)
-{
-    if (var->liveness >= end)
-        return;
-    var->liveness = end;
 }
 
 block_t *add_block(block_t *parent, func_t *func)
@@ -937,7 +928,10 @@ int size_var(var_t *var)
 {
     int size;
     if (var->ptr_level > 0 || var->is_func) {
-        size = 4;
+        /* Pointers and function pointers occupy a target pointer, which is
+         * 8 bytes on LP64 targets and 4 on the 32-bit ones.
+         */
+        size = PTR_SIZE;
     } else {
         type_t *type = var->type;
         if (type->size == 0)
@@ -997,10 +991,13 @@ func_t *add_func(char *func_name, bool synthesize)
      * If the target architecture is RISC-V, arg1 ~ arg8 are passed to
      * registers and arg9+ are passed to the stack.
      *
-     * We allocate (MAX_PARAMS - MAX_ARGS_IN_REG) * 4 bytes for all functions
-     * so that each of them can use the space to pass extra arguments.
+     * We reserve one slot per stack-passed argument at the bottom of every
+     * frame so that each function can use the space to pass extra arguments.
+     * The slot is pointer-sized, matching what abi_lower_call_args() stores:
+     * sizing it at 4 on an LP64 target leaves the reservation short, and the
+     * outgoing arguments then overwrite the first locals allocated above it.
      */
-    func->stack_size = (MAX_PARAMS - MAX_ARGS_IN_REG) * 4;
+    func->stack_size = (MAX_PARAMS - MAX_ARGS_IN_REG) * PTR_SIZE;
 
     if (synthesize)
         return func;
@@ -1038,10 +1035,11 @@ basic_block_t *bb_create(block_t *parent)
     /* Initialize non-zero fields */
     bb->scope = parent;
     bb->belong_to = parent->func;
-
-    /* Initialize prev array with NEXT type */
-    for (int i = 0; i < MAX_BB_PRED; i++)
-        bb->prev[i].type = NEXT;
+    /* -1 marks "no machine code emitted for this block yet". Backends assign
+     * a real offset as they emit; 0 is a legitimate offset, so it cannot
+     * double as the sentinel.
+     */
+    bb->elf_offset = -1;
 
     if (dump_ir)
         snprintf(bb->bb_label_name, MAX_VAR_LEN, ".label.%d", bb_label_idx++);
@@ -1050,6 +1048,76 @@ basic_block_t *bb_create(block_t *parent)
 }
 
 /* The pred-succ pair must have only one connection */
+/* Bumped once per compute_live_in() call; a variable belongs to the set being
+ * built when its stamp equals the current value.
+ */
+int liveness_gen;
+
+/* Bumped once per recompute_live_out() call, stamping the union of successor
+ * live_in sets as it is assembled.
+ */
+int live_merge_gen;
+
+/* Record another SSA version of @v, growing the version array as needed. */
+void var_add_subscript(var_t *v, var_t *sub)
+{
+    if (v->subscripts_idx >= v->subscripts_cap) {
+        int new_cap = v->subscripts_cap ? v->subscripts_cap << 1 : 4;
+        v->subscripts = arena_realloc(BLOCK_ARENA, (char *) v->subscripts,
+                                      v->subscripts_cap * sizeof(var_t *),
+                                      new_cap * sizeof(var_t *));
+        v->subscripts_cap = new_cap;
+    }
+    v->subscripts[v->subscripts_idx++] = sub;
+}
+
+/* The first SSA version of @v, or NULL when it has none. Callers relied on the
+ * old array being zero-filled to get NULL here.
+ */
+var_t *var_subscript0(var_t *v)
+{
+    if (!v->subscripts_idx)
+        return NULL;
+    return v->subscripts[0];
+}
+
+/* Detach @v from any version array it inherited from a by-value copy. */
+void var_reset_subscripts(var_t *v)
+{
+    v->subscripts = NULL;
+    v->subscripts_idx = 0;
+    v->subscripts_cap = 0;
+}
+
+/* Append to a basic block's dominance frontier, growing the array as needed.
+ * The array starts unallocated, so a block that never contributes to a frontier
+ * costs nothing beyond the pointer.
+ */
+void bb_add_df(basic_block_t *bb, basic_block_t *df)
+{
+    if (bb->df_idx >= bb->df_cap) {
+        int new_cap = bb->df_cap ? bb->df_cap << 1 : 8;
+        bb->DF = arena_realloc(BB_ARENA, (char *) bb->DF,
+                               bb->df_cap * sizeof(basic_block_t *),
+                               new_cap * sizeof(basic_block_t *));
+        bb->df_cap = new_cap;
+    }
+    bb->DF[bb->df_idx++] = df;
+}
+
+/* The reverse-dominance-frontier counterpart of bb_add_df(). */
+void bb_add_rdf(basic_block_t *bb, basic_block_t *rdf)
+{
+    if (bb->rdf_idx >= bb->rdf_cap) {
+        int new_cap = bb->rdf_cap ? bb->rdf_cap << 1 : 8;
+        bb->RDF = arena_realloc(BB_ARENA, (char *) bb->RDF,
+                                bb->rdf_cap * sizeof(basic_block_t *),
+                                new_cap * sizeof(basic_block_t *));
+        bb->rdf_cap = new_cap;
+    }
+    bb->RDF[bb->rdf_idx++] = rdf;
+}
+
 void bb_connect(basic_block_t *pred,
                 basic_block_t *succ,
                 bb_connection_type_t type)
@@ -1070,6 +1138,8 @@ void bb_connect(basic_block_t *pred,
 
     succ->prev[i].bb = pred;
     succ->prev[i].type = type;
+    if (i >= succ->prev_idx)
+        succ->prev_idx = i + 1;
 
     switch (type) {
     case NEXT:
@@ -1089,7 +1159,7 @@ void bb_connect(basic_block_t *pred,
 /* The pred-succ pair must have only one connection */
 void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
 {
-    for (int i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < succ->prev_idx; i++) {
         if (succ->prev[i].bb == pred) {
             switch (succ->prev[i].type) {
             case NEXT:
@@ -1316,6 +1386,10 @@ void global_init(void)
     case ELF_MACHINE_RV32:
         dynamic_sections.use_relaplt = true;
         break;
+    case ELF_MACHINE_X86_64:
+        /* x86-64 uses RELA throughout. */
+        dynamic_sections.use_relaplt = true;
+        break;
     }
     dynamic_sections.elf_interp = strbuf_create(MAX_INTERP);
     dynamic_sections.elf_dynamic = strbuf_create(MAX_DYNAMIC);
@@ -1473,6 +1547,11 @@ void global_release(void)
 void fatal(char *msg)
 {
     printf("[Error]: %s\n", msg);
+    /* abort() does not flush, so a diagnostic written to a pipe -- a build
+     * log, or any invocation whose output is captured -- is discarded and the
+     * compiler appears to die silently.
+     */
+    fflush(stdout);
     abort();
 }
 
@@ -1509,10 +1588,13 @@ void error_at(char *msg, source_location_t *loc)
 
     start_idx = offset + 1;
 
-    /* Copies whole line to diagnostic buffer */
+    /* Copies whole line to diagnostic buffer. The source line, the caret column
+     * and the underline length all come from the input, so every write here has
+     * to stop at the end of the buffer.
+     */
     for (offset = start_idx;
          offset < src->capacity && src->elements[offset] != '\n' &&
-         src->elements[offset] != '\0';
+         src->elements[offset] != '\0' && i < MAX_LINE_LEN - 1;
          offset++) {
         diagnostic[i++] = src->elements[offset];
     }
@@ -1521,15 +1603,21 @@ void error_at(char *msg, source_location_t *loc)
     printf("%s\n", diagnostic);
     printf("%6c |  ", ' ');
 
+    /* Keep room for the note appended after the underline. */
+    char *note = " Error occurs here";
+    int limit = MAX_LINE_LEN - strlen(note) - 1;
+
     i = 0;
-    for (offset = start_idx; offset < pos; offset++)
+    for (offset = start_idx; offset < pos && i < limit; offset++)
         diagnostic[i++] = ' ';
-    diagnostic[i++] = '^';
-    for (; len > 1; len--)
+    if (i < limit)
+        diagnostic[i++] = '^';
+    for (; len > 1 && i < limit; len--)
         diagnostic[i++] = '~';
 
-    strcpy(diagnostic + i, " Error occurs here");
+    strcpy(diagnostic + i, note);
     printf("%s\n", diagnostic);
+    fflush(stdout); /* see fatal(): abort() discards buffered output */
     abort();
 }
 
@@ -1810,9 +1898,7 @@ void dump_insn(void)
         dump_bb_insn_by_dom(func, func->bbs, &at_func_start);
 
         /* Handle implicit return */
-        for (int i = 0; i < MAX_BB_PRED; i++) {
-            if (!func->exit)
-                break;
+        for (int i = 0; func->exit && i < func->exit->prev_idx; i++) {
             basic_block_t *bb = func->exit->prev[i].bb;
             if (!bb)
                 continue;

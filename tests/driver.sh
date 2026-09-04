@@ -10,6 +10,17 @@ readonly SHOW_SUMMARY="${SHOW_SUMMARY:-1}"
 readonly SHOW_PROGRESS="${SHOW_PROGRESS:-1}"
 readonly COLOR_OUTPUT="${COLOR_OUTPUT:-1}"
 
+# Pointer width of the configured target. The sizeof tests below assert on it,
+# and it differs between the 32-bit targets and x86-64.
+PTR_SZ=$(sed -n 's/^#define PTR_SIZE \([0-9]*\).*/\1/p' \
+    "$(dirname "$0")/../config" 2>/dev/null | head -1)
+[ -n "${PTR_SZ}" ] || PTR_SZ=4
+
+# Variadic arguments occupy one pointer-sized slot each, so an int-based walk
+# over them advances this many int elements per argument: 1 on the 32-bit
+# targets, 2 on LP64.
+VS=$((PTR_SZ / 4))
+
 # Test Counters
 TOTAL_TESTS=0
 PASSED_TESTS=0
@@ -2264,19 +2275,19 @@ expr 1 "sizeof(char)";
 expr 2 "sizeof(short)";
 expr 4 "sizeof(int)";
 # sizeof pointers
-expr 4 "sizeof(void*)";
-expr 4 "sizeof(_Bool*)";
-expr 4 "sizeof(char*)";
-expr 4 "sizeof(short*)";
-expr 4 "sizeof(int*)";
+expr $PTR_SZ "sizeof(void*)";
+expr $PTR_SZ "sizeof(_Bool*)";
+expr $PTR_SZ "sizeof(char*)";
+expr $PTR_SZ "sizeof(short*)";
+expr $PTR_SZ "sizeof(int*)";
 # sizeof multi-level pointer
-expr 4 "sizeof(void**)";
-expr 4 "sizeof(_Bool**)";
-expr 4 "sizeof(char**)";
-expr 4 "sizeof(short**)";
-expr 4 "sizeof(int**)";
+expr $PTR_SZ "sizeof(void**)";
+expr $PTR_SZ "sizeof(_Bool**)";
+expr $PTR_SZ "sizeof(char**)";
+expr $PTR_SZ "sizeof(short**)";
+expr $PTR_SZ "sizeof(int**)";
 # sizeof struct
-try_ 4 << EOF
+try_ $PTR_SZ << EOF
 typedef struct {
     int a;
     int b;
@@ -2294,7 +2305,7 @@ int main() { return sizeof(struct_t); }
 EOF
 
 # sizeof enum
-try_ 4 << EOF
+try_ $PTR_SZ << EOF
 typedef enum {
     A,
     B
@@ -4182,10 +4193,10 @@ int calculate_sum(int count, ...)
     int *p;
 
     p = &count;
-    p++;
+    p += $VS;
 
     for (i = 0; i < count; i++)
-        sum += p[i];
+        sum += p[i * $VS];
 
     return sum;
 }
@@ -4207,11 +4218,11 @@ void multi_arg_test(int first, ...)
 
     /* Point to variadic arguments */
     p = &first;
-    p++;
+    p += $VS;
 
     /* Get integer values */
     val1 = p[0];
-    val2 = p[1];
+    val2 = p[1 * $VS];
 
     printf("Multi: %d %d %d", first, val1, val2);
 }
@@ -4230,10 +4241,10 @@ void print_args(int count, ...)
     int *p = &count;
     int i;
 
-    p++;
+    p += $VS;
     printf("Args:");
     for (i = 0; i < count; i++)
-        printf(" %d=%d", i + 1, p[i]);
+        printf(" %d=%d", i + 1, p[i * $VS]);
 }
 
 int main()
@@ -4250,9 +4261,12 @@ void mixed_args(int first, ...)
     int *p = &first;
 
     printf("Values: %d", first);
-    printf(" %d", *(++p));
-    printf(" %d", *(++p));
-    printf(" %d", *(++p));
+    p += $VS;
+    printf(" %d", *p);
+    p += $VS;
+    printf(" %d", *p);
+    p += $VS;
+    printf(" %d", *p);
 }
 
 int main()
@@ -4269,13 +4283,13 @@ void find_min_max(int count, ...)
     int *p = &count;
     int i, min, max;
 
-    p++;
+    p += $VS;
     min = p[0];
     max = p[0];
 
     for (i = 1; i < count; i++) {
-        if (p[i] < min) min = p[i];
-        if (p[i] > max) max = p[i];
+        if (p[i * $VS] < min) min = p[i * $VS];
+        if (p[i * $VS] > max) max = p[i * $VS];
     }
 
     printf("Min: %d, Max: %d", min, max);
@@ -4307,7 +4321,7 @@ try_output 0 "Single extra: 123" << EOF
 void single_extra(int base, ...)
 {
     int *p = &base;
-    p++;
+    p += $VS;
     printf("Single extra: %d", *p);
 }
 
@@ -4340,12 +4354,12 @@ int arithmetic_va(int count, ...)
     int result = 0;
     int i;
 
-    p++;
+    p += $VS;
     for (i = 0; i < count; i++) {
         if (i % 2 == 0)
-            result += p[i];
+            result += p[i * $VS];
         else
-            result -= p[i];
+            result -= p[i * $VS];
     }
     return result;
 }
@@ -4364,8 +4378,8 @@ int sum_three(int a, ...)
 {
     int *p = &a;
     int v1 = p[0];
-    int v2 = p[1];
-    int v3 = p[2];
+    int v2 = p[1 * $VS];
+    int v3 = p[2 * $VS];
     return v1 + v2 + v3;
 }
 
@@ -5328,8 +5342,9 @@ int main() {
 }
 EOF
 
-# Sizeof union with mixed types
-try_ 4 << EOF
+# Sizeof union with mixed types. The largest member is the pointer, so the
+# union is one pointer wide: 4 on the 32-bit targets, 8 on LP64.
+try_ $PTR_SZ << EOF
 typedef union {
     char c;
     int i;
@@ -5337,7 +5352,7 @@ typedef union {
 } mixed_union_t;
 
 int main() {
-    return sizeof(mixed_union_t);  /* Returns 4 (size of largest member) */
+    return sizeof(mixed_union_t);  /* size of the largest member */
 }
 EOF
 

@@ -38,7 +38,12 @@ STAGE2 := shecc-stage2.elf
 
 USE_QEMU ?= 1
 OUT ?= out
-ARCHS = arm riscv
+# Every architecture that can be selected as a build target. The first is the
+# default when ARCH is not given.
+ARCHS = arm riscv x64
+# The subset carrying reference IR snapshots. x64 has none yet, so the snapshot
+# targets skip it; it is still a fully supported build target.
+SNAPSHOT_ARCHS = arm riscv
 ARCH ?= $(firstword $(ARCHS))
 SRCDIR := $(shell find src -type d)
 LIBDIR := $(shell find lib -type d)
@@ -58,7 +63,7 @@ OBJS := $(SRCS:%.c=$(OUT)/%.o)
 deps := $(OBJS:%.o=%.o.d)
 TESTS := $(wildcard tests/*.c)
 TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
-SNAPSHOTS = $(foreach SNAPSHOT_ARCH,$(ARCHS), $(patsubst tests/%.c, tests/snapshots/%-$(SNAPSHOT_ARCH)-static.json, $(TESTS)))
+SNAPSHOTS = $(foreach SNAPSHOT_ARCH,$(SNAPSHOT_ARCHS), $(patsubst tests/%.c, tests/snapshots/%-$(SNAPSHOT_ARCH)-static.json, $(TESTS)))
 SNAPSHOTS += $(patsubst tests/%.c, tests/snapshots/%-arm-dynamic.json, $(TESTS))
 
 all: config bootstrap
@@ -69,16 +74,54 @@ sanitizer: config $(OUT)/$(STAGE0)-sanitizer
 	$(VECHO) "  Built stage 0 compiler with sanitizers\n"
 
 ifeq (,$(filter $(ARCH),$(ARCHS)))
-$(error Support ARM and RISC-V only. Select the target with "ARCH=arm" or "ARCH=riscv")
+$(error Unsupported ARCH "$(ARCH)". Select one of: $(ARCHS))
 endif
+
+# The tree carries the selected architecture in two generated files: "config",
+# which the compiler sources include, and the build session below. Both are
+# written together by the config target. Building with a different ARCH than the
+# one on record would pair this architecture's Makefile settings with the
+# previous architecture's generated config, so require an explicit reconfigure
+# instead.
+#
+# Naming "config" or "distclean" anywhere in the goals is that reconfigure: the
+# record is about to be rewritten or removed, so the architecture it still holds
+# does not apply and the check must not fire. Testing for their presence rather
+# than filtering them out is what lets a goal list combine them with real work
+# -- check-snapshots and update-snapshots recurse with exactly
+# "distclean config check-snapshot ARCH=...". "clean" touches no generated
+# config, so a mismatch cannot affect it either.
+CONFIGURED_ARCH := $(shell sed -n 's/^ARCH=//p' $(BUILD_SESSION) 2>/dev/null)
+ifneq (,$(CONFIGURED_ARCH))
+ifeq (,$(filter config distclean,$(MAKECMDGOALS)))
+ifneq (,$(filter-out clean,$(or $(MAKECMDGOALS),all)))
+ifneq ($(CONFIGURED_ARCH),$(ARCH))
+$(error Tree is configured for ARCH=$(CONFIGURED_ARCH). Run "make config ARCH=$(ARCH)" to switch)
+endif
+endif
+endif
+endif
+
 include mk/$(ARCH).mk
 include mk/common.mk
 
+# Selecting a target rewrites every file that records the choice, so switching
+# architectures never needs a manual clean first: the codegen symlink is
+# replaced in place, and the build session is rewritten rather than left saying
+# whatever the previous selection said.
+# "config" names a generated file, but selecting an architecture has to run
+# even when that file already exists -- otherwise "make config ARCH=..." on a
+# configured tree reports the file up to date and switches nothing. The
+# generated definitions are moved into place only when they actually differ, so
+# reasserting the current selection does not restamp the file and force a
+# rebuild of every source that includes it.
+.PHONY: config
 config:
-	$(Q)ln -s $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
-	$(Q)$(PRINTF) $(ARCH_DEFS) > $@
+	$(Q)ln -sf $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
+	$(Q)$(PRINTF) $(ARCH_DEFS) > $@.tmp
+	$(Q)if cmp -s $@.tmp $@; then $(RM) $@.tmp; else mv $@.tmp $@; fi
+	$(Q)$(PRINTF) "ARCH=$(ARCH)" > $(BUILD_SESSION)
 	$(VECHO) "Target machine code switch to %s\n" $(ARCH)
-	$(Q)$(MAKE) $(BUILD_SESSION) --silent
 	$(Q)$(CONFIG_CHECK_CMD)
 
 $(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
@@ -105,9 +148,9 @@ check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh
 
 check-snapshots: $(OUT)/$(STAGE0) $(SNAPSHOTS) tests/check-snapshots.sh
 	# static linking
-	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
+	$(Q)$(foreach SNAPSHOT_ARCH, $(SNAPSHOT_ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
 	# dynamic linking
-	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=1 --silent;)
+	$(Q)$(foreach SNAPSHOT_ARCH, $(SNAPSHOT_ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=1 --silent;)
 	$(VECHO) "Switching backend back to %s (DYNLINK=0)\n" arm
 	$(Q)$(MAKE) distclean config ARCH=arm DYNLINK=0 --silent
 
@@ -124,9 +167,9 @@ check-abi-stage2: $(OUT)/$(STAGE2)
 
 update-snapshots: tests/update-snapshots.sh
 	# static linking
-	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
+	$(Q)$(foreach SNAPSHOT_ARCH, $(SNAPSHOT_ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
 	# dynamic linking
-	$(Q)$(foreach SNAPSHOT_ARCH, $(ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=1 --silent;)
+	$(Q)$(foreach SNAPSHOT_ARCH, $(SNAPSHOT_ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=1 --silent;)
 	$(VECHO) "Switching backend back to %s (DYNLINK=0)\n" arm
 	$(Q)$(MAKE) distclean config ARCH=arm DYNLINK=0 --silent
 
@@ -180,9 +223,6 @@ bootstrap: $(OUT)/$(STAGE2)
 	echo "Unable to bootstrap. Aborting"; false; \
 	fi
 
-$(BUILD_SESSION):
-	$(PRINTF) "ARCH=$(ARCH)" > $@
-
 .PHONY: clean
 clean:
 	-$(RM) $(OUT)/$(STAGE0) $(OUT)/$(STAGE1) $(OUT)/$(STAGE2)
@@ -192,7 +232,7 @@ clean:
 	-$(RM) $(OUT)/libc.inc
 
 distclean: clean
-	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config $(BUILD_SESSION)
+	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config config.tmp $(BUILD_SESSION)
 	-$(RM) DOM.dot CFG.dot
 
 -include $(deps)

@@ -49,16 +49,6 @@ token_t *pp_lex_expect_token(token_t *tk, token_kind_t kind, bool skip_space)
     return tk;
 }
 
-token_t *lex_ident_token(token_t *tk,
-                         token_kind_t kind,
-                         char *dest,
-                         bool skip_space)
-{
-    tk = pp_lex_expect_token(tk, kind, skip_space);
-    strcpy(dest, tk->literal);
-    return tk;
-}
-
 /* Copies and isolate the given copied token */
 token_t *copy_token(token_t *tk)
 {
@@ -151,15 +141,6 @@ bool hide_set_contains(hide_set_t *hs, char *name)
         if (!strcmp(hs->name, name))
             return true;
     return false;
-}
-
-void hide_set_free(hide_set_t *hs)
-{
-    for (hide_set_t *tmp; hs;) {
-        tmp = hs;
-        hs = hs->next;
-        free(tmp);
-    }
 }
 
 typedef enum { CK_if_then, CK_elif_then, CK_else_then } cond_kind_t;
@@ -847,6 +828,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 tk = pp_lex_next_token(tk, false);
                 while (pp_lex_peek_token(tk, T_identifier, true)) {
                     tk = pp_lex_next_token(tk, true);
+                    if (macro->param_num >= MAX_PARAMS)
+                        error_at("Too many macro parameters", &tk->location);
                     macro->param_names[macro->param_num++] = copy_token(tk);
 
                     if (pp_lex_peek_token(tk, T_comma, true)) {

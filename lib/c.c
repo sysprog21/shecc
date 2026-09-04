@@ -94,6 +94,37 @@ char *strcpy(char *dest, char *src)
     return dest;
 }
 
+char *strcat(char *dest, char *src)
+{
+    strcpy(&dest[strlen(dest)], src);
+    return dest;
+}
+
+char *strncat(char *dest, char *src, int len)
+{
+    int i = strlen(dest), j = 0;
+    while (j < len && src[j]) {
+        dest[i] = src[j];
+        i++;
+        j++;
+    }
+    dest[i] = 0;
+    return dest;
+}
+
+char *strchr(char *str, int ch)
+{
+    int i = 0;
+    while (str[i]) {
+        if (str[i] == ch)
+            return str + i;
+        i++;
+    }
+    if (!ch)
+        return str + i;
+    return NULL;
+}
+
 char *strncpy(char *dest, char *src, int len)
 {
     int i = 0;
@@ -176,13 +207,25 @@ void *memset(void *s, int c, int n)
  * This approach avoids expensive division instructions by using a series of
  * bitwise shifts and additions to calculate the quotient and remainder.
  */
+/* Pointer width of the target, held in a variable rather than tested with
+ * the preprocessor: shecc must be able to compile this file for either
+ * target, and a constant condition would leave statically dead code behind.
+ */
+int __ptr_width = __SIZEOF_POINTER__;
+
 void __str_base10(char *pb, int val)
 {
     int neg = 0;
     int q, r, t;
     int i = INT_BUF_LEN - 1;
 
-    if (val == -2147483648) {
+    /* On a 32-bit target, negating INT_MIN overflows and the digit loop below
+     * cannot make progress, so the value is spelled out directly. On LP64 the
+     * negation happens in a 64-bit register and the normal path is exact.
+     * This is an ordinary constant expression rather than a preprocessor
+     * conditional so that shecc can compile this file for either target.
+     */
+    if (__ptr_width == 4 && val == -2147483648) {
         strncpy(pb + INT_BUF_LEN - 11, "-2147483648", 11);
         return;
     }
@@ -392,13 +435,17 @@ void __format(fmtbuf_t *fmtbuf,
 void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
 {
     int si = 0, pi = 0;
+    /* A pointer-width view of the same argument area, for %s. Reading a
+     * pointer argument through an int would truncate it on LP64.
+     */
+    char **var_args_p = (char **) var_args;
 
     while (format[si]) {
         if (format[si] != '%') {
             __fmtbuf_write_char(fmtbuf, format[si]);
             si++;
         } else {
-            int w = 0, zp = 0, pp = 0, v = var_args[pi], l;
+            int w = 0, zp = 0, pp = 0, v = var_args[pi * VA_INT_STEP], l;
 
             si++;
             if (format[si] == '#') {
@@ -420,9 +467,9 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
             }
             switch (format[si]) {
             case 's':
-                /* append param pi as string */
-                l = strlen((char *) v);
-                __fmtbuf_write_str(fmtbuf, (char *) v, l);
+                /* append param pi as string; read it at pointer width */
+                l = strlen(var_args_p[pi]);
+                __fmtbuf_write_str(fmtbuf, var_args_p[pi], l);
                 break;
             case 'c':
                 /* append param pi as char */
@@ -464,7 +511,7 @@ int printf(char *str, ...)
     fmtbuf.buf = buffer;
     fmtbuf.n = INT_MAX;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 4);
+    __format_to_buf(&fmtbuf, str, &str + 1);
     return __syscall(__syscall_write, 1, buffer, fmtbuf.len);
 }
 
@@ -475,7 +522,7 @@ int sprintf(char *buffer, char *str, ...)
     fmtbuf.buf = buffer;
     fmtbuf.n = INT_MAX;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 4);
+    __format_to_buf(&fmtbuf, str, &str + 1);
     return fmtbuf.len;
 }
 
@@ -486,11 +533,29 @@ int snprintf(char *buffer, int n, char *str, ...)
     fmtbuf.buf = buffer;
     fmtbuf.n = n;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 4);
+    __format_to_buf(&fmtbuf, str, &str + 1);
     return fmtbuf.len;
 }
 
 int __free_all(void);
+
+int fprintf(FILE *stream, char *str, ...)
+{
+    char buffer[200];
+    fmtbuf_t fmtbuf;
+
+    fmtbuf.buf = buffer;
+    fmtbuf.n = INT_MAX;
+    fmtbuf.len = 0;
+    __format_to_buf(&fmtbuf, str, &str + 1);
+    return __syscall(__syscall_write, stream, buffer, fmtbuf.len);
+}
+
+int fflush(FILE *stream)
+{
+    /* shecc's libc performs no user-space buffering. */
+    return 0;
+}
 
 void exit(int exit_code)
 {
@@ -512,6 +577,8 @@ FILE *fopen(char *filename, char *mode)
 #elif defined(__riscv)
         /* FIXME: mode not work currently in RISC-V */
         return __syscall(__syscall_openat, -100, filename, 65, 0x1fd);
+#elif defined(__x86_64__)
+        return __syscall(__syscall_open, filename, 65, 0x1fd);
 #endif
     }
     if (!strcmp(mode, "rb")) {
@@ -519,6 +586,8 @@ FILE *fopen(char *filename, char *mode)
         return __syscall(__syscall_open, filename, 0, 0);
 #elif defined(__riscv)
         return __syscall(__syscall_openat, -100, filename, 0, 0);
+#elif defined(__x86_64__)
+        return __syscall(__syscall_open, filename, 0, 0);
 #endif
     }
     return NULL;
@@ -581,6 +650,9 @@ int fseek(FILE *stream, int offset, int whence)
 #elif defined(__riscv)
     /* No need to offset */
     result = __syscall(__syscall_lseek, stream, 0, offset, NULL, whence);
+#elif defined(__x86_64__)
+    /* x86-64 lseek(2) takes (fd, offset, whence) directly. */
+    result = __syscall(__syscall_lseek, stream, offset, whence);
 #else
 #error "Unsupported fseek support for current platform"
 #endif
@@ -595,6 +667,8 @@ int ftell(FILE *stream)
     int result;
     __syscall(__syscall_lseek, stream, 0, 0, &result, SEEK_CUR);
     return result;
+#elif defined(__x86_64__)
+    return __syscall(__syscall_lseek, stream, 0, SEEK_CUR);
 #else
 #error "Unsupported ftell support for current platform"
 #endif
@@ -644,6 +718,8 @@ void *malloc(int size)
         chunk_t *tmp =
             __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t)), prot,
                       flags, -1, 0);
+        if (tmp == (void *) -1)
+            return NULL;
         __alloc_head = tmp;
         __alloc_tail = tmp;
         __alloc_head->next = NULL;
@@ -655,6 +731,8 @@ void *malloc(int size)
         chunk_t *tmp =
             __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t)), prot,
                       flags, -1, 0);
+        if (tmp == (void *) -1)
+            return NULL;
         __freelist_head = tmp;
         __freelist_head->next = NULL;
         __freelist_head->prev = NULL;
@@ -695,6 +773,8 @@ void *malloc(int size)
         allocated =
             __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t) + size),
                       prot, flags, -1, 0);
+        if (allocated == (void *) -1)
+            return NULL;
         allocated->size = __align_up(sizeof(chunk_t) + size);
     }
 

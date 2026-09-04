@@ -20,11 +20,11 @@
 #define MAX_VAR_LEN 128
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
-#define MAX_LOCALS 1600
+#define MAX_LOCALS 3200
 #define MAX_FIELDS 64
 #define MAX_TYPES 256
 #define MAX_LABELS 256
-#define MAX_IR_INSTR 80000
+#define MAX_IR_INSTR 120000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_BB_RDOM_SUCC 256
@@ -50,7 +50,7 @@
 #define MAX_CASES 128
 #define MAX_NESTING 128
 #define MAX_OPERAND_STACK_SIZE 32
-#define MAX_ANALYSIS_STACK_SIZE 800
+#define MAX_ANALYSIS_STACK_SIZE 1600
 
 /* Default capacities for common data structures */
 /* Arena sizes optimized based on typical usage patterns */
@@ -74,10 +74,16 @@
 #define COMPACT_PHASE_BACKEND (COMPACT_ARENA_BB | COMPACT_ARENA_GENERAL)
 
 #define ELF_START 0x10000
+#ifndef PTR_SIZE
 #define PTR_SIZE 4
+#endif
 
-/* Number of the available registers. Either 7 or 8 is accepted now. */
+/* Registers the allocator may hand out. A target with more spare registers can
+ * raise this from its own configuration.
+ */
+#ifndef REG_CNT
 #define REG_CNT 8
+#endif
 
 /* This macro will be automatically defined at shecc run-time. */
 #ifdef __SHECC__
@@ -86,7 +92,11 @@
     do {          \
         ;         \
     } while (0)
-#define HOST_PTR_SIZE 4
+/* shecc runs on the target it compiles for, so the host pointer width is
+ * the target's. This must not be hardcoded to 4: on an LP64 target the
+ * var_list allocations and memcpy sizes below would be half what they need.
+ */
+#define HOST_PTR_SIZE PTR_SIZE
 #else
 /* suppress GCC/Clang warnings */
 #define UNUSED(x) (void) (x)
@@ -102,8 +112,25 @@
 #define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
 #endif
 
+/* Targets whose PLT has no lazy-resolution path ask the loader to bind every
+ * PLT entry at load time.
+ */
+#ifndef DYN_BIND_NOW
+#define DYN_BIND_NOW 0
+#endif
+
 #define ELF_MACHINE_ARM32 0x28
 #define ELF_MACHINE_RV32 0xf3
+#define ELF_MACHINE_X86_64 0x3e
+
+/* ELF class of the active target. x86-64 emits ELF64; the 32-bit targets
+ * emit ELF32. Used to select the header/segment writers in elf.c.
+ */
+#if ELF_MACHINE == ELF_MACHINE_X86_64
+#define ELF_IS_64 1
+#else
+#define ELF_IS_64 0
+#endif
 
 /* Common data structures */
 typedef struct arena_block {
@@ -344,9 +371,14 @@ typedef enum {
 } opcode_t;
 
 /* variable definition */
+/* Depth of the SSA renaming stack: how many definitions of one variable can be
+ * live along a single dominator path.
+ */
+#define MAX_RENAME_STACK 64
+
 typedef struct {
     int counter;
-    int stack[64];
+    int stack[MAX_RENAME_STACK];
     int stack_idx;
 } rename_t;
 
@@ -387,11 +419,25 @@ struct var {
     int offset;   /* offset from stack or frame, index 0 is reserved */
     int init_val; /* for global initialization */
     int liveness; /* live range */
+    /* Generation stamps used by compute_live_in() to test set membership in
+     * constant time instead of rescanning live_kill and live_in per element.
+     */
+    int kill_gen;
+    int in_gen;
+    /* Stamp for the successor-union set merge_live_in() builds. */
+    int merge_gen;
     int in_loop;
     struct var *base;
     int subscript;
-    struct var *subscripts[128];
+    /* Every SSA version of this variable, grown on demand. A fixed 128-entry
+     * array made every var_t 1 KiB heavier -- and var_t is embedded by value in
+     * type_t's field table and in every function's parameter list -- while the
+     * append was unchecked, so a variable assigned more than 128 times in one
+     * function wrote past the end.
+     */
+    struct var **subscripts;
     int subscripts_idx;
+    int subscripts_cap;
     rename_t rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
     use_chain_t *users_head, *users_tail;
@@ -467,6 +513,9 @@ struct ph2_ir {
      * to recompute the offset.
      */
     bool ofs_based_on_stack_top;
+    /* Type information for LP64 support */
+    int size_bytes;  /* Size in bytes for load/store/read/write operations */
+    bool is_pointer; /* True if this operation involves a pointer type */
 };
 
 typedef struct ph2_ir ph2_ir_t;
@@ -550,6 +599,28 @@ struct basic_block {
     insn_list_t insn_list;
     ph2_ir_list_t ph2_ir_list;
     bb_connection_t prev[MAX_BB_PRED];
+    /* One past the highest slot bb_connect() has ever filled. Scans of prev[]
+     * stop here instead of walking all MAX_BB_PRED slots; a block typically has
+     * one or two predecessors, so the difference is two orders of magnitude.
+     * Disconnecting clears a slot without lowering this, so it stays an upper
+     * bound and the NULL checks in each loop still skip the holes.
+     */
+    int prev_idx;
+    /* Register file on entry to this block, captured by reg_alloc() at the end
+     * of the predecessor it falls out of. Only meaningful when has_entry_regs
+     * is set, and bb_export_regs() sets it only for an edge that is all three
+     * of: the predecessor's single successor, that predecessor's rpo_next, and
+     * this block's single predecessor. A sole predecessor alone is NOT enough
+     * -- a branch target is emitted wherever the backend's linear walk puts
+     * it, so the registers reaching it are not the ones the branch left.
+     */
+    struct var *entry_regs[REG_CNT];
+    bool has_entry_regs;
+    /* Index of this block's first instruction in PH2_IR_FLATTEN, or -1 when it
+     * emitted none. Recorded while that mapping is built so the backend need
+     * not search for it.
+     */
+    int ph2_base;
     /* Used in instruction dumping when ir_dump is enabled. */
     char bb_label_name[MAX_VAR_LEN];
     struct basic_block *next;  /* normal BB */
@@ -565,15 +636,27 @@ struct basic_block {
     var_list_t live_out;
     int rpo;
     int rpo_r;
-    struct basic_block *DF[64];
-    struct basic_block *RDF[64];
+    /* Dominance and reverse-dominance frontiers. These were fixed worst-case
+     * arrays sized MAX_BB_DOM_SUCC / MAX_BB_RDOM_SUCC, which cost 2560 bytes in
+     * every basic block while a typical block uses a handful of entries. Worse,
+     * the appends were unchecked and a self-compile really does push df_idx to
+     * 72, overrunning a 64-entry DF into the RDF that followed it. Growing them
+     * on demand removes both the waste and the fixed ceiling.
+     */
+    struct basic_block **DF;
+    struct basic_block **RDF;
     int df_idx;
     int rdf_idx;
+    int df_cap;
+    int rdf_cap;
     int visited;
     bool useful; /* indicate whether this BB contains useful instructions */
     struct basic_block *dom_next[64];
     struct basic_block *dom_prev;
-    struct basic_block *rdom_next[256];
+    /* Nothing ever walks the reverse-dominator children, so only their count is
+     * kept; the 256-entry array this replaces cost 2 KiB in every basic block.
+     */
+    int rdom_count;
     struct basic_block *rdom_prev;
     func_t *belong_to;
     block_t *scope;
@@ -611,6 +694,11 @@ struct func {
     symbol_list_t global_sym_list;
     int bb_cnt;
     int visited;
+
+    /* How many callee-saved registers this function's prologue must preserve,
+     * counted from RBX upward. Functions that never need them pay nothing.
+     */
+    int saved_regs;
 
     /* Information used for dynamic linking */
     bool is_used;

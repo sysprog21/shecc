@@ -15,6 +15,25 @@
  */
 
 /* Simple constant propagation within basic blocks */
+/* Narrow a constant to 'size' bytes, keeping its sign. Every integer type in
+ * this language is signed -- there is no 'unsigned' keyword -- and widening
+ * sign-extends, so masking alone would make "char c = -1" compare as 255.
+ * A size the caller does not narrow is returned unchanged.
+ */
+int sign_extend_const(int value, int size)
+{
+    if (size == 1) {
+        value = value & 0xFF;
+        if (value & 0x80)
+            value = value | ~0xFF;
+    } else if (size == 2) {
+        value = value & 0xFFFF;
+        if (value & 0x8000)
+            value = value | ~0xFFFF;
+    }
+    return value;
+}
+
 bool simple_sccp(func_t *func)
 {
     if (!func || !func->bbs)
@@ -50,20 +69,9 @@ bool simple_sccp(func_t *func)
                     int value = insn->rs1->init_val;
                     int result = value;
 
-                    /* Perform truncation based on size */
-                    if (insn->sz == 1) {
-                        /* Truncate to 8 bits */
-                        result = value & 0xFF;
-                    } else if (insn->sz == 2) {
-                        /* Truncate to 16 bits */
-                        result = value & 0xFFFF;
-                    } else if (insn->sz == 4) {
-                        /* No truncation needed for 32-bit */
-                        result = value;
-                    } else {
-                        /* Invalid size, skip */
-                        break;
-                    }
+                    if (insn->sz != 1 && insn->sz != 2 && insn->sz != 4)
+                        break; /* not a width we narrow to */
+                    result = sign_extend_const(value, insn->sz);
 
                     /* Convert to constant load */
                     insn->opcode = OP_load_constant;
@@ -82,22 +90,9 @@ bool simple_sccp(func_t *func)
                     int value = insn->rs1->init_val;
                     int result = value;
 
-                    /* Perform sign extension based on source size */
-                    if (insn->sz == 1) {
-                        /* Sign extend from 8 bits */
-                        result = (value & 0x80) ? (value | 0xFFFFFF00)
-                                                : (value & 0xFF);
-                    } else if (insn->sz == 2) {
-                        /* Sign extend from 16 bits */
-                        result = (value & 0x8000) ? (value | 0xFFFF0000)
-                                                  : (value & 0xFFFF);
-                    } else if (insn->sz == 4) {
-                        /* No sign extension needed for 32-bit */
-                        result = value;
-                    } else {
-                        /* Invalid size, skip */
-                        break;
-                    }
+                    if (insn->sz != 1 && insn->sz != 2 && insn->sz != 4)
+                        break; /* not a width we extend from */
+                    result = sign_extend_const(value, insn->sz);
 
                     /* Convert to constant load */
                     insn->opcode = OP_load_constant;
@@ -225,20 +220,10 @@ bool optimize_constant_casts(func_t *func)
                 int value = insn->rd->init_val;
                 int result = value;
 
-                /* Perform truncation based on size */
-                if (next_insn->sz == 1) {
-                    /* Truncate to 8 bits */
-                    result = value & 0xFF;
-                } else if (next_insn->sz == 2) {
-                    /* Truncate to 16 bits */
-                    result = value & 0xFFFF;
-                } else if (next_insn->sz == 4) {
-                    /* No truncation needed for 32-bit */
-                    result = value;
-                } else {
-                    /* Invalid size, skip */
-                    continue;
-                }
+                if (next_insn->sz != 1 && next_insn->sz != 2 &&
+                    next_insn->sz != 4)
+                    continue; /* not a width we narrow to */
+                result = sign_extend_const(value, next_insn->sz);
 
                 /* Optimize: Replace both instructions with single const */
                 insn->rd = next_insn->rd; /* Update dest to final target */

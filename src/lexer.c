@@ -507,15 +507,11 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
 
         ch = read_char(buf);
         while (ch != '"' || special) {
-            if ((sz > 0) && (token_buffer[sz - 1] == '\\')) {
-                token_buffer[sz++] = ch;
-            } else {
-                if (sz >= MAX_TOKEN_LEN - 1) {
-                    loc->len = sz + 1;
-                    error_at("String literal too long", loc);
-                }
-                token_buffer[sz++] = ch;
+            if (sz >= MAX_TOKEN_LEN - 1) {
+                loc->len = sz + 1;
+                error_at("String literal too long", loc);
             }
+            token_buffer[sz++] = ch;
 
             if (ch == '\\')
                 special = true;
@@ -543,6 +539,10 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
             ch = read_char(buf);
 
             do {
+                if (sz >= MAX_TOKEN_LEN - 1) {
+                    loc->len = sz + 1;
+                    error_at("Character literal too long", loc);
+                }
                 token_buffer[sz++] = ch;
                 ch = read_char(buf);
                 escaped = true;

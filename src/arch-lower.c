@@ -64,7 +64,9 @@ void arch_lower(void)
 #elif ELF_MACHINE == ELF_MACHINE_RV32
     riscv_lower();
 #else
-    /* Unknown architecture: keep behavior as-is. */
-    (void) 0;
+    /* Other targets need no lowering. The branch is left empty rather than
+     * holding a "(void) 0;" no-op, which shecc's own parser cannot accept
+     * when it compiles this file for such a target.
+     */
 #endif
 }

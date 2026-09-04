@@ -14,6 +14,47 @@
 #include "defs.h"
 #include "globals.c"
 
+/* A value is pointer-like if it is a pointer itself or its type is.
+ * On LP64 targets these occupy PTR_SIZE bytes rather than 4.
+ */
+bool is_pointer_like(var_t *v)
+{
+    return v && (v->ptr_level > 0 || (v->type && v->type->ptr_level > 0));
+}
+
+/* Width of the value a local's frame slot actually holds.
+ *
+ * Slots are pointer-sized, but a scalar occupies only its low bytes. Reading
+ * the whole slot back would pick up stale bytes whenever the variable was
+ * written through a pointer, so loads must use the declared width. Anything
+ * not a known scalar -- pointers, arrays, aggregates, functions -- keeps a
+ * full pointer in its slot and is reported as such.
+ */
+int var_slot_size(var_t *v)
+{
+    if (!v || v->ptr_level || v->is_func || v->array_size)
+        return PTR_SIZE;
+    /* Only a variable whose address escaped can have its slot written behind
+     * the allocator's back, at the pointee's width rather than the slot's.
+     * Everything else is written and read through this same path, so the
+     * full slot is always valid and the wider access is safe.
+     */
+    if (!v->address_taken)
+        return PTR_SIZE;
+    if (!v->type)
+        return PTR_SIZE;
+    /* Classify by the stored width rather than by type identity: an enum is
+     * a distinct type_t that still stores as a 4-byte int, and a store
+     * through an enum pointer writes only those 4 bytes. Reading the slot
+     * any wider then picks up whatever the stack happened to hold above it.
+     */
+    if (v->type->base_type == TYPE_struct)
+        return PTR_SIZE;
+    if (v->type->size == 1 || v->type->size == 2 || v->type->size == 4)
+        return v->type->size;
+    return PTR_SIZE;
+}
+
 void vreg_map_to_phys(var_t *var, int phys_reg)
 {
     if (var)
@@ -136,6 +177,8 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->then_bb = NULL;
     n->else_bb = NULL;
     n->ofs_based_on_stack_top = false;
+    n->size_bytes = PTR_SIZE; /* default to the full slot; see add_ph2_ir */
+    n->is_pointer = false;
 
     if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;
@@ -229,24 +272,248 @@ int find_best_spill(basic_block_t *bb,
  * - live_out variable
  * - farthest local variable
  */
-void spill_var(basic_block_t *bb, var_t *var, int idx)
+/* Slots reg_alloc() hands out inside the current function, in allocation order
+ * and therefore ascending by offset: both places that call slot_var_track()
+ * assign var->offset = stack_size and then grow the frame. Only these are
+ * candidates for the two cleanups below; every other address in the frame
+ * belongs to something a pointer may legally reach.
+ *
+ * The parallel arrays are indexed by position in slot_vars and are filled once
+ * per function by slot_scan().
+ */
+var_t *slot_vars[MAX_LOCALS];
+int slot_var_count;
+char slot_private[MAX_LOCALS];
+char slot_stores[MAX_LOCALS]; /* saturates at 2: only "exactly one" matters */
+char slot_loads[MAX_LOCALS];
+basic_block_t *slot_home[MAX_LOCALS];
+
+void slot_var_track(var_t *var)
 {
-    if (!REGS[idx].polluted) {
-        REGS[idx].var = NULL;
-        vreg_clear_phys(var);
-        return;
+    if (slot_var_count < MAX_LOCALS)
+        slot_vars[slot_var_count++] = var;
+}
+
+/* Whether the slot's address cannot have escaped, so that the stores and loads
+ * naming it are the only accesses to it. address_taken covers &var; array_size
+ * and has_backing_storage cover aggregates whose interior is reached by
+ * pointer arithmetic. A store through a pointer is invisible to these scans,
+ * so anything else in the frame is left alone.
+ */
+bool slot_is_private(var_t *var)
+{
+    if (var->address_taken || var->array_size || var->has_backing_storage)
+        return false;
+    if (var->is_global || var->ofs_based_on_stack_top)
+        return false;
+    return true;
+}
+
+/* Position of the slot at @offset in slot_vars, or -1 when the offset does not
+ * name one. The array is sorted, so this is a binary search.
+ */
+int slot_lookup(int offset)
+{
+    int lo = 0, hi = slot_var_count - 1;
+
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        int at = slot_vars[mid]->offset;
+
+        if (at == offset)
+            return mid;
+        if (at < offset)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
+    return -1;
+}
+
+/* Tally the accesses to every tracked slot in one walk of the function.
+ *
+ * Both cleanups below need to know how often a slot is stored and loaded.
+ * Asking that question per slot means re-walking the whole function once for
+ * each of them, which is quadratic and, on shecc's own larger functions, was
+ * the single most expensive thing the compiler did.
+ */
+void slot_scan(func_t *func)
+{
+    for (int i = 0; i < slot_var_count; i++) {
+        slot_private[i] = slot_is_private(slot_vars[i]);
+        slot_stores[i] = 0;
+        slot_loads[i] = 0;
+        slot_home[i] = NULL;
     }
 
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+            if (ir->ofs_based_on_stack_top)
+                continue;
+            if (ir->op == OP_store) {
+                int i = slot_lookup(ir->src1);
+                if (i < 0)
+                    continue;
+                if (slot_stores[i] < 2)
+                    slot_stores[i]++;
+                slot_home[i] = bb;
+            } else if (ir->op == OP_load) {
+                int i = slot_lookup(ir->src0);
+                if (i < 0)
+                    continue;
+                if (slot_loads[i] < 2)
+                    slot_loads[i]++;
+                if (slot_home[i] != bb)
+                    slot_home[i] = NULL;
+            }
+        }
+    }
+}
+
+/* Unlink @ir, whose predecessor in @bb's list is @prev (NULL at the head). */
+void ph2_list_remove(basic_block_t *bb, ph2_ir_t *prev, ph2_ir_t *ir)
+{
+    if (prev)
+        prev->next = ir->next;
+    else
+        bb->ph2_ir_list.head = ir->next;
+    if (bb->ph2_ir_list.tail == ir)
+        bb->ph2_ir_list.tail = prev;
+}
+
+/* Whether @ir leaves @reg holding something other than what it held before. */
+bool ph2_writes_reg(ph2_ir_t *ir, int reg)
+{
+    switch (ir->op) {
+    case OP_store:
+    case OP_global_store:
+    case OP_write:
+    case OP_branch:
+    case OP_jump:
+    case OP_return:
+    case OP_push:
+        return false;
+    case OP_call:
+    case OP_indirect:
+        return true; /* the call clobbers the caller-saved registers */
+    default:
+        return ir->dest == reg;
+    }
+}
+
+/* Collapse a value that goes out to a stack slot and comes straight back.
+ *
+ * Unwinding a phi writes the value to the phi's own slot, and the next
+ * instruction reads it back to copy it into the variable's slot -- a round trip
+ * through memory that also hides the "s = s + x" pattern from
+ * try_fold_alu_to_slot(), which would otherwise emit a single add to the slot.
+ * When the slot is written once and read once in the same block, and the source
+ * register survives in between, the load is just a register move and the store
+ * is dead.
+ */
+void collapse_slot_roundtrip(func_t *func)
+{
+    for (int i = 0; i < slot_var_count; i++) {
+        if (!slot_private[i] || slot_stores[i] != 1 || slot_loads[i] != 1)
+            continue;
+
+        basic_block_t *home = slot_home[i];
+        if (!home)
+            continue;
+
+        int offset = slot_vars[i]->offset;
+        ph2_ir_t *store = NULL, *load = NULL, *prev_store = NULL,
+                 *prev_load = NULL, *prev = NULL;
+        bool ok = false;
+
+        /* The store has to come first, and its register has to still hold the
+         * value when the load would have run. Both are unique in the function,
+         * so the first of each seen here is the one.
+         */
+        for (ph2_ir_t *ir = home->ph2_ir_list.head; ir; ir = ir->next) {
+            if (!ir->ofs_based_on_stack_top) {
+                if (!store && ir->op == OP_store && ir->src1 == offset) {
+                    store = ir;
+                    prev_store = prev;
+                    prev = ir;
+                    continue;
+                }
+                if (ir->op == OP_load && ir->src0 == offset) {
+                    load = ir;
+                    prev_load = prev;
+                    ok = store != NULL;
+                    break;
+                }
+            }
+            if (store && ph2_writes_reg(ir, store->src0))
+                break;
+            prev = ir;
+        }
+        if (!ok)
+            continue;
+
+        load->op = OP_assign;
+        load->src0 = store->src0;
+
+        /* Removing the store first would leave prev_load stale when the store
+         * is the load's predecessor, so drop the later one first.
+         */
+        if (load->dest == load->src0)
+            ph2_list_remove(home, prev_load, load);
+        ph2_list_remove(home, prev_store, store);
+    }
+}
+
+/* Drop stores to a slot that nothing in the function ever loads.
+ *
+ * Unwinding a phi copies the value into the phi's slot, and the source SSA
+ * temp is written to a slot of its own that no one reads -- one wasted store
+ * per phi operand, on every iteration of a loop.
+ */
+void dead_store_elim(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        ph2_ir_t *prev = NULL, *next;
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = next) {
+            next = ir->next;
+            if (ir->op == OP_store && !ir->ofs_based_on_stack_top) {
+                int i = slot_lookup(ir->src1);
+                if (i >= 0 && slot_private[i] && !slot_loads[i]) {
+                    ph2_list_remove(bb, prev, ir);
+                    continue;
+                }
+            }
+            prev = ir;
+        }
+    }
+}
+
+/* Write the register back to the variable's stack slot, allocating the slot on
+ * first use.  The register keeps holding the value; only memory is made
+ * coherent, so callers decide separately whether to drop the association.
+ */
+void store_var(basic_block_t *bb, var_t *var, int idx)
+{
     if (!var->space_is_allocated) {
         var->offset = bb->belong_to->stack_size;
         var->space_is_allocated = true;
-        bb->belong_to->stack_size += 4;
+        bb->belong_to->stack_size += PTR_SIZE;
+        slot_var_track(var);
     }
     ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_store)
                                   : bb_add_ph2_ir(bb, OP_store);
     ir->src0 = idx;
     ir->src1 = var->offset;
     ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
+    ir->is_pointer = is_pointer_like(var);
+    ir->size_bytes = var_slot_size(var);
+    REGS[idx].polluted = 0;
+}
+
+void spill_var(basic_block_t *bb, var_t *var, int idx)
+{
+    if (REGS[idx].polluted)
+        store_var(bb, var, idx);
     REGS[idx].var = NULL;
     REGS[idx].polluted = 0;
     vreg_clear_phys(var);
@@ -278,6 +545,8 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
     }
 
     ir->dest = idx;
+    ir->is_pointer = is_pointer_like(var);
+    ir->size_bytes = var_slot_size(var);
     REGS[idx].var = var;
     REGS[idx].polluted = 0;
     vreg_map_to_phys(var, idx);
@@ -422,6 +691,89 @@ void spill_live_out(basic_block_t *bb)
     }
 }
 
+/* Count the predecessors still wired to 'bb'.  bb_disconnect() leaves holes in
+ * prev[], so prev_idx is only a high-water mark and the entries must be
+ * counted rather than trusted.
+ */
+int bb_pred_count(basic_block_t *bb)
+{
+    int n = 0;
+    for (int i = 0; i < bb->prev_idx; i++) {
+        if (bb->prev[i].bb)
+            n++;
+    }
+    return n;
+}
+
+/* End a block the way spill_live_out() does -- every live-out variable written
+ * here is flushed to its stack slot, so memory is coherent for every path out
+ * of 'bb' -- but keep the register associations instead of dropping them.  What
+ * survives the boundary is decided per successor by bb_export_regs().
+ */
+void spill_live_out_keep(basic_block_t *bb)
+{
+    for (int i = 0; i < REG_CNT; i++) {
+        var_t *var = REGS[i].var;
+        if (!var)
+            continue;
+        if (!check_live_out(bb, var)) {
+            vreg_clear_phys(var);
+            REGS[i].var = NULL;
+            REGS[i].polluted = 0;
+            continue;
+        }
+        if (REGS[i].polluted)
+            store_var(bb, var, i);
+    }
+}
+
+/* Hand the register file to the successor when it is the only way out of 'bb'
+ * and the only way in to the successor: control then reaches it with exactly
+ * these registers, so it can read them in place rather than reloading from the
+ * slots just written.
+ *
+ * Only the fall-through edge qualifies. A branch target is emitted wherever the
+ * backend's linear walk puts it, and a block the walk misses is re-emitted
+ * later -- that second copy is reached with unrelated registers, so a register
+ * file handed across a branch edge does not hold for every path that runs the
+ * block's code. The fall-through successor is always emitted contiguously.
+ */
+void bb_export_regs(basic_block_t *bb)
+{
+    basic_block_t *succ = bb->next;
+
+    if (!succ || bb->then_ || bb->else_)
+        return;
+    /* The successor must also be the block reg_alloc() visits next, so that the
+     * file it inherits is the one just built here.
+     */
+    if (succ != bb->rpo_next || succ->has_entry_regs)
+        return;
+    if (bb_pred_count(succ) != 1)
+        return;
+
+    for (int i = 0; i < REG_CNT; i++)
+        succ->entry_regs[i] = REGS[i].var;
+    succ->has_entry_regs = true;
+}
+
+/* Install the register file this block starts with: the predecessor's file when
+ * it handed one over, an empty one otherwise.  Everything handed over has just
+ * been written back, so nothing is polluted on entry.
+ */
+void load_entry_regs(basic_block_t *bb)
+{
+    for (int i = 0; i < REG_CNT; i++) {
+        var_t *var = bb->has_entry_regs ? bb->entry_regs[i] : NULL;
+
+        if (REGS[i].var && REGS[i].var != var)
+            vreg_clear_phys(REGS[i].var);
+        REGS[i].var = var;
+        REGS[i].polluted = 0;
+        vreg_map_to_phys(var, i);
+    }
+}
+
 /* The operand of 'OP_push' should not been killed until function called. */
 void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
 {
@@ -450,7 +802,8 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
         load_var(bb, insn->rs1, MAX_ARGS_IN_REG - 1);
         ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
         ir->src0 = MAX_ARGS_IN_REG - 1;
-        ir->src1 = (stack_args - 1) * 4;
+        /* One pointer-sized slot per stack-passed argument. */
+        ir->src1 = (stack_args - 1) * PTR_SIZE;
         stack_args -= 1;
         insn = insn->prev;
     }
@@ -497,6 +850,8 @@ void reg_alloc(void)
                 ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
                 ir->src0 = src0;
                 ir->dest = dest;
+                ir->is_pointer = true;
+                ir->size_bytes = PTR_SIZE;
                 spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
             } else {
                 global_insn->rd->offset = GLOBAL_FUNC->stack_size;
@@ -511,7 +866,7 @@ void reg_alloc(void)
                         align_size(global_insn->rd->type->size);
                 } else
                     /* 'char' is aligned to one byte for the convenience */
-                    GLOBAL_FUNC->stack_size += 4;
+                    GLOBAL_FUNC->stack_size += PTR_SIZE;
             }
             break;
         case OP_load_constant:
@@ -588,6 +943,20 @@ void reg_alloc(void)
             ir->dest = global_insn->sz;
             break;
         }
+        case OP_trunc:
+        case OP_sign_ext:
+        case OP_cast:
+            /* A narrowing initializer such as "char g[] = {65, 66}" reaches
+             * the global block as a conversion, so it has to be lowered here
+             * exactly as it is inside a function.
+             */
+            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, src0, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
+            ir->src0 = src0;
+            ir->src1 = global_insn->sz;
+            ir->dest = dest;
+            break;
         default:
             printf("Unsupported global operation: %d\n", global_insn->opcode);
             abort();
@@ -607,11 +976,13 @@ void reg_alloc(void)
         for (int i = 0; i < REG_CNT; i++)
             REGS[i].var = NULL;
 
+        slot_var_count = 0;
+
         /* set arguments available */
         int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
                                                              : MAX_ARGS_IN_REG;
         for (int i = 0; i < args_in_reg; i++) {
-            REGS[i].var = func->param_defs[i].subscripts[0];
+            REGS[i].var = var_subscript0(&func->param_defs[i]);
             REGS[i].polluted = 1;
         }
 
@@ -631,22 +1002,21 @@ void reg_alloc(void)
                      */
                     ir = bb_add_ph2_ir(func->bbs, OP_load);
                     ir->dest = MAX_ARGS_IN_REG;
-                    ir->src0 = (i - MAX_ARGS_IN_REG) * 4;
+                    ir->src0 = (i - MAX_ARGS_IN_REG) * PTR_SIZE;
                     ir->ofs_based_on_stack_top = true;
                     src0 = MAX_ARGS_IN_REG;
                 }
 
                 if (i < args_in_reg) {
-                    func->param_defs[i].subscripts[0]->offset =
-                        func->stack_size;
-                    func->param_defs[i].subscripts[0]->space_is_allocated =
-                        true;
+                    var_t *param = var_subscript0(&func->param_defs[i]);
+                    param->offset = func->stack_size;
+                    param->space_is_allocated = true;
                 }
 
                 ir = bb_add_ph2_ir(func->bbs, OP_store);
                 ir->src0 = src0;
                 ir->src1 = func->stack_size;
-                func->stack_size += 4;
+                func->stack_size += PTR_SIZE;
             }
         } else {
             /* If the number of function arguments is fixed, the extra arguments
@@ -683,11 +1053,10 @@ void reg_alloc(void)
              * adding the function's stack size.
              */
             for (int i = MAX_ARGS_IN_REG; i < func->num_params; i++) {
-                func->param_defs[i].subscripts[0]->offset =
-                    (i - MAX_ARGS_IN_REG) * 4;
-                func->param_defs[i].subscripts[0]->space_is_allocated = true;
-                func->param_defs[i].subscripts[0]->ofs_based_on_stack_top =
-                    true;
+                var_t *param = var_subscript0(&func->param_defs[i]);
+                param->offset = (i - MAX_ARGS_IN_REG) * PTR_SIZE;
+                param->space_is_allocated = true;
+                param->ofs_based_on_stack_top = true;
             }
         }
 
@@ -697,6 +1066,13 @@ void reg_alloc(void)
             int args = 0;
 
             bb->visited++;
+
+            /* The entry block starts with the incoming arguments already in
+             * their registers; every other block takes what its predecessor
+             * handed over, or nothing.
+             */
+            if (bb != func->bbs)
+                load_entry_regs(bb);
 
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
                 func_t *callee_func;
@@ -714,7 +1090,8 @@ void reg_alloc(void)
                     if (!insn->rd->space_is_allocated) {
                         insn->rd->offset = bb->belong_to->stack_size;
                         insn->rd->space_is_allocated = true;
-                        bb->belong_to->stack_size += 4;
+                        bb->belong_to->stack_size += PTR_SIZE;
+                        slot_var_track(insn->rd);
                     }
 
                     ir = bb_add_ph2_ir(bb, OP_store);
@@ -833,7 +1210,7 @@ void reg_alloc(void)
                     if (!insn->rs1->space_is_allocated) {
                         insn->rs1->offset = bb->belong_to->stack_size;
                         insn->rs1->space_is_allocated = true;
-                        bb->belong_to->stack_size += 4;
+                        bb->belong_to->stack_size += PTR_SIZE;
 
                         for (int i = 0; i < REG_CNT; i++)
                             if (REGS[i].var == insn->rs1) {
@@ -1038,6 +1415,14 @@ void reg_alloc(void)
                     ir->src0 = src0;
                     ir->src1 = src1;
                     ir->dest = dest;
+                    /* Record whether the result is an address. On LP64 an
+                     * int-typed result has to wrap at 32 bits, while a
+                     * pointer must keep all 64. The backend cannot tell the
+                     * two apart without this.
+                     */
+                    ir->is_pointer = is_pointer_like(insn->rd) ||
+                                     is_pointer_like(insn->rs1) ||
+                                     is_pointer_like(insn->rs2);
                     break;
                 case OP_negate:
                 case OP_bit_not:
@@ -1064,8 +1449,10 @@ void reg_alloc(void)
                 }
             }
 
-            if (bb->next)
-                spill_live_out(bb);
+            if (bb->next) {
+                spill_live_out_keep(bb);
+                bb_export_regs(bb);
+            }
 
             if (bb == func->exit)
                 continue;
@@ -1086,7 +1473,7 @@ void reg_alloc(void)
         }
 
         /* handle implicit return */
-        for (int i = 0; i < MAX_BB_PRED; i++) {
+        for (int i = 0; i < func->exit->prev_idx; i++) {
             basic_block_t *bb = func->exit->prev[i].bb;
             if (!bb)
                 continue;
@@ -1101,6 +1488,10 @@ void reg_alloc(void)
             ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_return);
             ir->src0 = -1;
         }
+
+        slot_scan(func);
+        collapse_slot_roundtrip(func);
+        dead_store_elim(func);
     }
 }
 

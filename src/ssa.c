@@ -50,6 +50,15 @@ void var_list_add_var(var_list_t *list, var_t *var)
     list->elements[list->size++] = var;
 }
 
+/* Append without the membership scan var_list_add_var() performs. Callers that
+ * use this must establish uniqueness themselves.
+ */
+void var_list_append(var_list_t *list, var_t *var)
+{
+    var_list_ensure_capacity(list, list->size + 1);
+    list->elements[list->size++] = var;
+}
+
 void var_list_assign_array(var_list_t *list, var_t **data, int count)
 {
     var_list_ensure_capacity(list, count);
@@ -100,7 +109,7 @@ void bb_backward_traversal(bb_traversal_args_t *args)
     if (args->preorder_cb)
         args->preorder_cb(args->func, args->bb);
 
-    for (int i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < args->bb->prev_idx; i++) {
         if (!args->bb->prev[i].bb)
             continue;
         if (args->bb->prev[i].bb->visited < args->func->visited) {
@@ -213,7 +222,7 @@ void build_idom(void)
                  bb = bb->rpo_next) {
                 /* pick one predecessor */
                 basic_block_t *pred;
-                for (int i = 0; i < MAX_BB_PRED; i++) {
+                for (int i = 0; i < bb->prev_idx; i++) {
                     if (!bb->prev[i].bb)
                         continue;
                     if (!bb->prev[i].bb->idom)
@@ -222,7 +231,7 @@ void build_idom(void)
                     break;
                 }
 
-                for (int i = 0; i < MAX_BB_PRED; i++) {
+                for (int i = 0; i < bb->prev_idx; i++) {
                     if (!bb->prev[i].bb)
                         continue;
                     if (bb->prev[i].bb == pred)
@@ -292,18 +301,18 @@ void bb_build_df(func_t *func, basic_block_t *bb)
     UNUSED(func);
 
     int cnt = 0;
-    for (int i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < bb->prev_idx; i++) {
         if (bb->prev[i].bb)
             cnt++;
     }
     if (cnt <= 0)
         return;
 
-    for (int i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < bb->prev_idx; i++) {
         if (bb->prev[i].bb) {
             for (basic_block_t *curr = bb->prev[i].bb; curr != bb->idom;
                  curr = curr->idom)
-                curr->DF[curr->df_idx++] = bb;
+                bb_add_df(curr, bb);
         }
     }
 }
@@ -379,21 +388,16 @@ void build_r_idom(void)
 
 bool rdom_connect(basic_block_t *pred, basic_block_t *succ)
 {
+    /* A block is attached to the reverse-dominator tree at most once, so the
+     * rdom_prev guard above already rules out a duplicate edge.
+     */
     if (succ->rdom_prev)
         return false;
 
-    int i;
-    for (i = 0; i < MAX_BB_RDOM_SUCC; i++) {
-        if (pred->rdom_next[i] == succ)
-            return false;
-        if (!pred->rdom_next[i])
-            break;
-    }
-
-    if (i > MAX_BB_RDOM_SUCC - 1)
+    if (pred->rdom_count >= MAX_BB_RDOM_SUCC)
         fatal("Too many predecessors in reverse dominator tree");
 
-    pred->rdom_next[i++] = succ;
+    pred->rdom_count++;
     succ->rdom_prev = pred;
     return true;
 }
@@ -442,17 +446,17 @@ void bb_build_rdf(func_t *func, basic_block_t *bb)
     if (bb->next) {
         for (basic_block_t *curr = bb->next; curr != bb->r_idom;
              curr = curr->r_idom)
-            curr->RDF[curr->rdf_idx++] = bb;
+            bb_add_rdf(curr, bb);
     }
     if (bb->else_) {
         for (basic_block_t *curr = bb->else_; curr != bb->r_idom;
              curr = curr->r_idom)
-            curr->RDF[curr->rdf_idx++] = bb;
+            bb_add_rdf(curr, bb);
     }
     if (bb->then_) {
         for (basic_block_t *curr = bb->then_; curr != bb->r_idom;
              curr = curr->r_idom)
-            curr->RDF[curr->rdf_idx++] = bb;
+            bb_add_rdf(curr, bb);
     }
 }
 
@@ -484,22 +488,6 @@ void use_chain_add_tail(insn_t *i, var_t *var)
         var->users_tail->next = u;
     u->prev = var->users_tail;
     var->users_tail = u;
-}
-
-void use_chain_delete(use_chain_t *u, var_t *var)
-{
-    if (u->prev)
-        u->prev->next = u->next;
-    else {
-        var->users_head = u->next;
-        u->next->prev = NULL;
-    }
-    if (u->next)
-        u->next->prev = u->prev;
-    else {
-        var->users_tail = u->prev;
-        u->prev->next = NULL;
-    }
 }
 
 void use_chain_build(void)
@@ -753,12 +741,15 @@ void new_name(block_t *block, var_t **var)
         return;
 
     int i = v->base->rename.counter++;
+    if (v->base->rename.stack_idx >= MAX_RENAME_STACK)
+        fatal("Too many nested definitions of a variable");
     v->base->rename.stack[v->base->rename.stack_idx++] = i;
     var_t *vd = require_var(block);
     memcpy(vd, *var, sizeof(var_t));
+    var_reset_subscripts(vd); /* the copy shares nothing with its base */
     vd->base = *var;
     vd->subscript = i;
-    v->subscripts[v->subscripts_idx++] = vd;
+    var_add_subscript(v, vd);
     var[0] = vd;
 }
 
@@ -877,12 +868,15 @@ void solve_phi_params(void)
             var_t *var = require_var(func->bbs->scope);
             var_t *base = &func->param_defs[i];
             memcpy(var, base, sizeof(var_t));
+            var_reset_subscripts(var); /* the copy shares nothing with base */
             var->base = base;
             var->subscript = 0;
 
+            if (base->rename.stack_idx >= MAX_RENAME_STACK)
+                fatal("Too many nested definitions of a variable");
             base->rename.stack[base->rename.stack_idx++] =
                 base->rename.counter++;
-            base->subscripts[base->subscripts_idx++] = var;
+            var_add_subscript(base, var);
         }
 
         bb_solve_phi_params(func->bbs);
@@ -1261,13 +1255,16 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
             case OP_bit_xor:
             case OP_log_and:
             case OP_log_or:
-                sprintf(
-                    str,
-                    "<%s<SUB>%d</SUB> := %s<SUB>%d</SUB> %s %s<SUB>%d</SUB>>",
-                    insn->rd->var_name, insn->rd->subscript,
-                    insn->rs1->var_name, insn->rs1->subscript,
-                    get_insn_op(insn), insn->rs2->var_name,
-                    insn->rs2->subscript);
+                /* Split in two: a single call would pass nine arguments, one
+                 * more than MAX_PARAMS, and the last one -- rs2's subscript --
+                 * came out as garbage.
+                 */
+                sprintf(str, "<%s<SUB>%d</SUB> := %s<SUB>%d</SUB> %s ",
+                        insn->rd->var_name, insn->rd->subscript,
+                        insn->rs1->var_name, insn->rs1->subscript,
+                        get_insn_op(insn));
+                sprintf(str + strlen(str), "%s<SUB>%d</SUB>>",
+                        insn->rs2->var_name, insn->rs2->subscript);
                 break;
             case OP_negate:
                 sprintf(str, "<%s<SUB>%d</SUB> := -%s<SUB>%d</SUB>>",
@@ -1324,7 +1321,7 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
         bb_dump_connection(fd, bb, bb->else_, ELSE);
     }
 
-    for (int i = 0; i < MAX_BB_PRED; i++)
+    for (int i = 0; i < bb->prev_idx; i++)
         if (bb->prev[i].bb)
             bb_dump_connection(fd, bb->prev[i].bb, bb, bb->prev[i].type);
 }
@@ -2500,12 +2497,6 @@ void build_reversed_rpo(void)
     }
 }
 
-void bb_reset_live_kill_idx(func_t *func, basic_block_t *bb)
-{
-    UNUSED(func);
-    bb->live_kill.size = 0;
-}
-
 void add_live_gen(basic_block_t *bb, var_t *var);
 void update_consumed(insn_t *insn, var_t *var);
 
@@ -2551,96 +2542,51 @@ void update_consumed(insn_t *insn, var_t *var)
         var->consumed = insn->idx;
 }
 
-void bb_solve_locals(func_t *func, basic_block_t *bb)
-{
-    UNUSED(func);
-
-    int i = 0;
-    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-        insn->idx = i++;
-
-        if (insn->rs1) {
-            if (!var_check_killed(insn->rs1, bb))
-                add_live_gen(bb, insn->rs1);
-            update_consumed(insn, insn->rs1);
-        }
-        if (insn->rs2) {
-            if (!var_check_killed(insn->rs2, bb))
-                add_live_gen(bb, insn->rs2);
-            update_consumed(insn, insn->rs2);
-        }
-        if (insn->rd)
-            if (insn->opcode != OP_unwound_phi)
-                bb_add_killed_var(bb, insn->rd);
-    }
-}
-
-void add_live_in(basic_block_t *bb, var_t *var)
-{
-    var_list_add_var(&bb->live_in, var);
-}
-
 void compute_live_in(basic_block_t *bb)
 {
     bb->live_in.size = 0;
 
+    /* This runs to a fixed point over every block, so the two membership tests
+     * below used to dominate the pass: one linear scan of live_kill per
+     * candidate, plus one linear scan of live_in per insertion. Stamping both
+     * sets with the current generation makes each test a single comparison.
+     */
+    liveness_gen++;
+    for (int i = 0; i < bb->live_kill.size; i++)
+        bb->live_kill.elements[i]->kill_gen = liveness_gen;
+
     for (int i = 0; i < bb->live_out.size; i++) {
         var_t *var = bb->live_out.elements[i];
-        if (var_check_killed(var, bb))
+        if (var->kill_gen == liveness_gen)
             continue;
-        add_live_in(bb, var);
+        if (var->in_gen == liveness_gen)
+            continue;
+        var->in_gen = liveness_gen;
+        var_list_append(&bb->live_in, var);
     }
-    for (int i = 0; i < bb->live_gen.size; i++)
-        add_live_in(bb, bb->live_gen.elements[i]);
+    for (int i = 0; i < bb->live_gen.size; i++) {
+        var_t *var = bb->live_gen.elements[i];
+        if (var->in_gen == liveness_gen)
+            continue;
+        var->in_gen = liveness_gen;
+        var_list_append(&bb->live_in, var);
+    }
 }
 
+/* Add bb's live_in to the successor union being built in @live_out, skipping
+ * variables already there. Membership is a stamp comparison rather than a scan
+ * of the union, which this used to do for every candidate.
+ */
 int merge_live_in(var_t *live_out[], int live_out_idx, basic_block_t *bb)
 {
-    /* Early exit for empty live_in */
-    if (bb->live_in.size == 0)
-        return live_out_idx;
-
-    /* Optimize for common case of small sets */
-    if (live_out_idx < 16) {
-        /* For small sets, simple linear search is fast enough */
-        for (int i = 0; i < bb->live_in.size; i++) {
-            bool found = false;
-            var_t *var = bb->live_in.elements[i];
-            for (int j = 0; j < live_out_idx; j++) {
-                if (live_out[j] == var) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found && live_out_idx < MAX_ANALYSIS_STACK_SIZE)
-                live_out[live_out_idx++] = var;
-        }
-    } else {
-        /* For larger sets, check bounds and use optimized loop */
-        for (int i = 0; i < bb->live_in.size; i++) {
-            bool found = false;
-            var_t *var = bb->live_in.elements[i];
-            /* Unroll inner loop for better performance */
-            int j;
-            for (j = 0; j + 3 < live_out_idx; j += 4) {
-                if (live_out[j] == var || live_out[j + 1] == var ||
-                    live_out[j + 2] == var || live_out[j + 3] == var) {
-                    found = true;
-                    break;
-                }
-            }
-            /* Handle remaining elements */
-            if (!found) {
-                for (; j < live_out_idx; j++) {
-                    if (live_out[j] == var) {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if (!found && live_out_idx < MAX_ANALYSIS_STACK_SIZE)
-                live_out[live_out_idx++] = var;
-        }
+    for (int i = 0; i < bb->live_in.size; i++) {
+        var_t *var = bb->live_in.elements[i];
+        if (var->merge_gen == live_merge_gen)
+            continue;
+        if (live_out_idx >= MAX_ANALYSIS_STACK_SIZE)
+            break;
+        var->merge_gen = live_merge_gen;
+        live_out[live_out_idx++] = var;
     }
     return live_out_idx;
 }
@@ -2649,6 +2595,8 @@ bool recompute_live_out(basic_block_t *bb)
 {
     var_t *live_out[MAX_ANALYSIS_STACK_SIZE];
     int live_out_idx = 0;
+
+    live_merge_gen++;
 
     /* Compute union of successor live_in sets */
     if (bb->next) {
@@ -2722,7 +2670,7 @@ void liveness_analysis(void)
 
         /* Add function parameters as killed in entry block */
         for (int i = 0; i < func->num_params; i++)
-            bb_add_killed_var(func->bbs, func->param_defs[i].subscripts[0]);
+            bb_add_killed_var(func->bbs, var_subscript0(&func->param_defs[i]));
     }
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
