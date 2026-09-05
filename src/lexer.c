@@ -221,8 +221,24 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
     loc->pos = buf->size;
 
     if (ch == '#') {
-        if (loc->column != 1)
-            error_at("Directive must be on the start of line", loc);
+        /* Inside a macro replacement list '#' stringifies the parameter that
+         * follows and '##' pastes its neighbours. Neither can be a directive,
+         * which only exists at the start of a line.
+         */
+        if (peek_char(buf, 1) == '#') {
+            read_char(buf);
+            read_char(buf);
+            token = new_token(T_hashhash, loc, 2);
+            loc->column += 2;
+            return token;
+        }
+
+        if (loc->column != 1) {
+            read_char(buf);
+            token = new_token(T_hash, loc, 1);
+            loc->column++;
+            return token;
+        }
 
         int sz = 0;
 

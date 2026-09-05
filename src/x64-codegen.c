@@ -3207,7 +3207,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     }
 
-    case OP_address_of:
+    case OP_address_of: {
         /* LEA rd, [rsp + src0] */
         int rex29 = REX_W;
         if (rd >= 8)
@@ -3216,6 +3216,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(0x8D);
         emit_rsp_mem(rd, ph2_ir->src0);
         return;
+    }
 
     case OP_load:
         /* Load a local from its frame slot at the width of its type.

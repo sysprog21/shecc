@@ -250,7 +250,12 @@ typedef enum {
     T_newline,
     T_backslash,
     T_whitespace,
-    T_tab
+    T_tab,
+    /* '#' and '##' inside a macro replacement list. Resolved while the macro
+     * is expanded, so neither ever reaches the parser.
+     */
+    T_hash,
+    T_hashhash
 } token_kind_t;
 
 /* Source location tracking for better error reporting */

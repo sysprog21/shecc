@@ -1768,6 +1768,71 @@ EOF
 # Category: Arrays
 begin_category "Arrays" "Testing array declarations, indexing, and operations"
 
+# a parameter whose first dimension is omitted is still a 2-D array: "int
+# a[][4]" must index exactly like "int a[3][4]", not like "int **"
+try_ 66 << EOF
+int sum2(int a[][4], int rows)
+{
+    int t = 0;
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < 4; j++)
+            t += a[i][j];
+    return t;
+}
+int main()
+{
+    int m[3][4];
+    int c = 0;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++) {
+            m[i][j] = c;
+            c++;
+        }
+    return sum2(m, 3);
+}
+EOF
+
+# the sized form keeps working, and both agree
+try_ 66 << EOF
+int sum2(int a[3][4], int rows)
+{
+    int t = 0;
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < 4; j++)
+            t += a[i][j];
+    return t;
+}
+int main()
+{
+    int m[3][4];
+    int c = 0;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++) {
+            m[i][j] = c;
+            c++;
+        }
+    return sum2(m, 3);
+}
+EOF
+
+# a single omitted dimension is still a plain pointer
+try_ 66 << EOF
+int sum1(int a[], int n)
+{
+    int t = 0;
+    for (int i = 0; i < n; i++)
+        t += a[i];
+    return t;
+}
+int main()
+{
+    int m[12];
+    for (int i = 0; i < 12; i++)
+        m[i] = i;
+    return sum1(m, 12);
+}
+EOF
+
 # arrays
 try_ 12 << EOF
 int nth_of(int *a, int i) {
@@ -2880,6 +2945,142 @@ EOF
 
 # Category: Function-like Macros
 begin_category "Function-like Macros" "Testing function-like macros and variadic macros"
+
+# stringification: '#' spells the argument as it was written
+try_output 0 "hello world" << EOF
+#define STR(x) #x
+int main()
+{
+    printf("%s\n", STR(hello world));
+    return 0;
+}
+EOF
+
+# '#' does not expand its operand, but an extra level of macro does
+try_output 0 "VER 3" << EOF
+#define STR(x) #x
+#define XSTR(x) STR(x)
+#define VER 3
+int main()
+{
+    printf("%s %s\n", STR(VER), XSTR(VER));
+    return 0;
+}
+EOF
+
+# a quote or backslash in the argument survives stringification
+try_output 0 '["q\\b"]' << EOF
+#define STR(x) #x
+int main()
+{
+    printf("[%s]\n", STR("q\\\\b"));
+    return 0;
+}
+EOF
+
+# an empty argument stringifies to an empty string
+try_output 0 "[]" << EOF
+#define STR(x) #x
+int main()
+{
+    printf("[%s]\n", STR());
+    return 0;
+}
+EOF
+
+# token pasting builds an identifier
+try_ 11 << EOF
+#define CAT(a, b) a##b
+int foobar()
+{
+    return 11;
+}
+int main()
+{
+    return CAT(foo, bar)();
+}
+EOF
+
+# pasting chains left to right, and works on numbers
+try_ 123 << EOF
+#define JOIN3(a, b, c) a##b##c
+int main()
+{
+    return JOIN3(1, 2, 3);
+}
+EOF
+
+# pasting in an object-like macro, and pasting an operator
+try_ 42 << EOF
+#define PLUSEQ +##=
+#define OBJ pre##fix
+int prefix = 41;
+int main()
+{
+    int x = 1;
+    x PLUSEQ prefix;
+    return x;
+}
+EOF
+
+# an empty operand leaves the other side of '##' standing alone
+try_ 3 << EOF
+#define CAT(a, b) a##b
+int main()
+{
+    return CAT(1, ) + CAT(, 2);
+}
+EOF
+
+# an omitted argument substitutes nothing rather than its own name
+try_ 3 << EOF
+#define TAIL(x, y) x y
+int main()
+{
+    return TAIL(3, );
+}
+EOF
+
+# a comma inside parentheses belongs to the argument, not the argument list
+try_ 5 << EOF
+#define ID(x) x
+int add(int p, int q)
+{
+    return p + q;
+}
+int main()
+{
+    return ID(add(2, 3));
+}
+EOF
+
+# '#' outside a macro definition is not a directive and must be rejected
+try_compile_error << EOF
+int main()
+{
+    int a = 1 # 2;
+    return a;
+}
+EOF
+
+# '##' with nothing on its left is rejected
+try_compile_error << EOF
+#define P(a) ##a
+int main()
+{
+    return P(1);
+}
+EOF
+
+# a paste that does not form a single token is rejected
+try_compile_error << EOF
+#define Q(a, b) a##b
+int main()
+{
+    int Q(x, +) = 1;
+    return 0;
+}
+EOF
 
 # function-like macro
 try_ 1 << EOF

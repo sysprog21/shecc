@@ -20,6 +20,21 @@ token_t *pp_lex_skip_space(token_t *tk)
     return tk;
 }
 
+/* Whether @tk is whitespace, a tab or a newline. */
+bool pp_is_layout(token_t *tk)
+{
+    return tk->kind == T_whitespace || tk->kind == T_newline ||
+           tk->kind == T_tab;
+}
+
+/* The first token after @tk that is not layout, or NULL at the end. */
+token_t *pp_next_significant(token_t *tk)
+{
+    token_t *before = pp_lex_skip_space(tk);
+
+    return before->next;
+}
+
 token_t *pp_lex_next_token(token_t *tk, bool skip_space)
 {
     if (skip_space)
@@ -534,6 +549,228 @@ token_t *pp_skip_cond_incl(token_t *tk)
     return tk;
 }
 
+/* Spell an argument's tokens as a string literal, for '#'.
+ *
+ * T_string literals are stored with their escapes intact and unescaped later
+ * by the parser, so a quote or a backslash coming from the argument has to be
+ * escaped again here. Tokens are separated by a single space, with none at
+ * either end.
+ */
+token_t *pp_stringify(token_t *arg, source_location_t *loc)
+{
+    char text[MAX_TOKEN_LEN], scratch[MAX_TOKEN_LEN];
+    int n = 0;
+    bool pending_space = false;
+
+    for (token_t *tk = arg; tk; tk = tk->next) {
+        if (pp_is_layout(tk)) {
+            pending_space = n > 0;
+            continue;
+        }
+
+        char *spelling = token_to_string(tk, scratch);
+        if (!spelling)
+            continue;
+
+        if (pending_space) {
+            if (n >= MAX_TOKEN_LEN - 1)
+                error_at("Stringified argument too long", loc);
+            text[n++] = ' ';
+            pending_space = false;
+        }
+
+        for (int i = 0; spelling[i]; i++) {
+            if (spelling[i] == '"' || spelling[i] == '\\') {
+                if (n >= MAX_TOKEN_LEN - 1)
+                    error_at("Stringified argument too long", loc);
+                text[n++] = '\\';
+            }
+            if (n >= MAX_TOKEN_LEN - 1)
+                error_at("Stringified argument too long", loc);
+            text[n++] = spelling[i];
+        }
+    }
+    text[n] = 0;
+
+    token_t *out = new_token(T_string, loc, n);
+    out->literal = arena_strdup(TOKEN_ARENA, text);
+    return out;
+}
+
+/* Join two tokens into one, as '##' requires.
+ *
+ * Pasting is textual, so the result has to be scanned again: "a" and "1" give
+ * the single identifier a1, not two tokens that happen to sit next to each
+ * other. A join that does not scan as exactly one token is not a token at all,
+ * and is reported rather than quietly splitting back in two.
+ */
+token_t *pp_paste_tokens(token_t *lhs, token_t *rhs, source_location_t *loc)
+{
+    char lbuf[MAX_TOKEN_LEN], rbuf[MAX_TOKEN_LEN], joined[MAX_TOKEN_LEN];
+    char *l = token_to_string(lhs, lbuf);
+    char *r = token_to_string(rhs, rbuf);
+
+    if (!l || !r)
+        error_at("Operand of '##' cannot be pasted", loc);
+    if (strlen(l) + strlen(r) >= MAX_TOKEN_LEN)
+        error_at("Pasted token too long", loc);
+
+    strcpy(joined, l);
+    strcat(joined, r);
+
+    /* Hand the text to the lexer the way a source file is handed to it:
+     * capacity marks the end of the input and size is the read cursor.
+     */
+    int len = strlen(joined);
+    strbuf_t *buf = strbuf_create(len + 1);
+    strbuf_puts(buf, joined);
+    buf->elements[len] = 0;
+    buf->capacity = len + 1;
+    buf->size = 0;
+
+    source_location_t scan_loc;
+    memcpy(&scan_loc, loc, sizeof(source_location_t));
+    token_t *pasted = lex_token(buf, &scan_loc);
+    bool whole = buf->size == len;
+    strbuf_free(buf);
+
+    if (!whole)
+        error_at("'##' does not produce a single token", loc);
+
+    pasted->next = NULL;
+    memcpy(&pasted->location, loc, sizeof(source_location_t));
+    pasted->location.len = len;
+    return pasted;
+}
+
+/* Apply '#' and '##' to a macro's replacement list, before it is rescanned.
+ *
+ * Both operate on an argument as it was written rather than on its expansion,
+ * so they cannot wait for the expansion loop: by the time that loop reaches a
+ * parameter it has already expanded it. @args is NULL for an object-like
+ * macro, which has no parameters to stringify but may still paste.
+ *
+ * An argument with no tokens in it is not "no argument": '#' spells it as the
+ * empty string, and pasting against it leaves the other operand standing on
+ * its own. Membership in @args, rather than a non-empty value, is what makes a
+ * name a parameter.
+ */
+token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
+{
+    token_t head;
+    token_t *tail = &head, *tail_prev = NULL;
+    /* Whether anything at all precedes a '##' here, and whether that something
+     * was an argument that turned out to be empty.
+     */
+    bool lhs_present = false, lhs_empty = false;
+
+    head.next = NULL;
+
+    for (token_t *tk = rep; tk; tk = tk->next) {
+        if (tk->kind == T_hash && args) {
+            token_t *operand = pp_next_significant(tk);
+
+            if (!operand || operand->kind != T_identifier ||
+                !hashmap_contains(args, operand->literal))
+                error_at("'#' must be followed by a macro parameter",
+                         &tk->location);
+
+            tail_prev = tail;
+            tail->next = pp_stringify(hashmap_get(args, operand->literal),
+                                      &tk->location);
+            tail = tail->next;
+            lhs_present = true;
+            lhs_empty = false;
+            tk = operand;
+            continue;
+        }
+
+        if (tk->kind == T_hashhash) {
+            token_t *operand = pp_next_significant(tk);
+
+            if (!lhs_present || !operand)
+                error_at("'##' needs a token on each side", &tk->location);
+
+            /* The right operand joins as written; a parameter contributes its
+             * argument rather than its expansion.
+             */
+            token_t *rhs = operand;
+            if (args && operand->kind == T_identifier &&
+                hashmap_contains(args, operand->literal))
+                rhs = hashmap_get(args, operand->literal);
+
+            /* An argument arrives with the spacing it was written with. The
+             * join is between real tokens, so that spacing is not an operand.
+             */
+            while (rhs && pp_is_layout(rhs))
+                rhs = rhs->next;
+
+            if (rhs) {
+                if (lhs_empty) {
+                    /* Nothing to join to, so the right operand stands alone. */
+                    tail_prev = tail;
+                    tail->next = copy_token(rhs);
+                    tail = tail->next;
+                } else {
+                    tail_prev->next = pp_paste_tokens(tail, rhs, &tk->location);
+                    tail = tail_prev->next;
+                }
+
+                /* Only the first token of a multi-token argument is joined;
+                 * the rest follow it.
+                 */
+                for (token_t *rest = rhs->next; rest; rest = rest->next) {
+                    if (pp_is_layout(rest))
+                        continue;
+                    tail_prev = tail;
+                    tail->next = copy_token(rest);
+                    tail = tail->next;
+                }
+                lhs_empty = false;
+            }
+            tk = operand;
+            continue;
+        }
+
+        /* A parameter the next '##' will join is substituted here, unexpanded
+         * -- letting the expansion loop reach it would expand it first.
+         */
+        token_t *after = pp_next_significant(tk);
+
+        if (args && tk->kind == T_identifier && after &&
+            after->kind == T_hashhash && hashmap_contains(args, tk->literal)) {
+            token_t *arg = hashmap_get(args, tk->literal);
+            bool any = false;
+
+            for (token_t *t = arg; t; t = t->next) {
+                if (pp_is_layout(t))
+                    continue;
+                tail_prev = tail;
+                tail->next = copy_token(t);
+                tail = tail->next;
+                any = true;
+            }
+            lhs_present = true;
+            lhs_empty = !any;
+            continue;
+        }
+
+        /* Layout next to a '##' is not an operand either: the join is between
+         * the tokens on each side of it.
+         */
+        if (pp_is_layout(tk) && after && after->kind == T_hashhash)
+            continue;
+
+        tail_prev = tail;
+        tail->next = copy_token(tk);
+        tail = tail->next;
+        lhs_present = true;
+        lhs_empty = false;
+    }
+
+    return head.next;
+}
+
 token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
 {
     token_t head;
@@ -559,22 +796,37 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
 
             /* Check if this identifier is a macro parameter (argument)
              * If we're currently expanding a macro body, parameters should be
-             * replaced with their supplied arguments */
-            if (ctx->macro_args)
+             * replaced with their supplied arguments.
+             *
+             * Membership decides this, not a non-empty value: an argument with
+             * no tokens in it still names a parameter, and substituting
+             * nothing for it is what "M(a,)" means. Testing the value would
+             * leave the parameter's own name standing in the output.
+             *
+             * '#' and '##' were already resolved by pp_subst_hash(), which had
+             * to run before this expansion could reach their operands.
+             */
+            bool is_macro_param =
+                ctx->macro_args &&
+                hashmap_contains(ctx->macro_args, tk->literal);
+
+            if (is_macro_param)
                 macro_arg_replcaement =
                     hashmap_get(ctx->macro_args, tk->literal);
 
-            if (macro_arg_replcaement) {
-                /* Recursively expand the argument to handle nested macros
-                 * TODO: We should consider ## (token concatenation) here */
-                expansion_ctx.hide_set = ctx->hide_set;
-                expansion_ctx.macro_args =
-                    NULL; /* Don't take account of macro arguments, this might
-                             run into infinite loop */
-                macro_arg_replcaement = pp_preprocess_internal(
-                    macro_arg_replcaement, &expansion_ctx);
-                cur->next = macro_arg_replcaement;
-                cur = expansion_ctx.end_of_token;
+            if (is_macro_param) {
+                if (macro_arg_replcaement) {
+                    /* Recursively expand the argument to handle nested macros
+                     */
+                    expansion_ctx.hide_set = ctx->hide_set;
+                    expansion_ctx.macro_args =
+                        NULL; /* Don't take account of macro arguments, this
+                                 might run into infinite loop */
+                    macro_arg_replcaement = pp_preprocess_internal(
+                        macro_arg_replcaement, &expansion_ctx);
+                    cur->next = macro_arg_replcaement;
+                    cur = expansion_ctx.end_of_token;
+                }
                 tk = pp_lex_next_token(tk, false);
                 continue;
             }
@@ -605,6 +857,12 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 token_t *arg_cur = &arg_head;
                 int arg_idx = 0;
                 int bracket_depth = 0;
+
+                /* An argument with no tokens in it -- "M()" -- never assigns
+                 * this, and the empty list has to read as empty rather than as
+                 * whatever the stack happened to hold.
+                 */
+                arg_head.next = NULL;
 
                 /* Add macro name to hide set to prevent re-expansion of itself
                  * during its own body expansion */
@@ -649,13 +907,19 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                         }
                     }
 
-                    /* Accumulate argument tokens until delimiter
+                    /* Accumulate argument tokens until a delimiter.
                      *
-                     * Collect all tokens between commas or parentheses as part
-                     * of the current argument */
-                    if (bracket_depth >= 0 &&
-                        !pp_lex_peek_token(tk, T_comma, false) &&
-                        !pp_lex_peek_token(tk, T_close_bracket, false)) {
+                     * Only the outermost level delimits: a comma nested inside
+                     * parentheses belongs to the argument, as in "M(f(a, b))",
+                     * and so does the bracket that closes them. The argument
+                     * list itself ends at the bracket that takes the depth
+                     * below where it started.
+                     */
+                    bool delimits = bracket_depth < 0 ||
+                                    (!bracket_depth &&
+                                     pp_lex_peek_token(tk, T_comma, false));
+
+                    if (!delimits) {
                         tk = pp_lex_next_token(tk, false);
                         arg_cur->next = copy_token(tk);
                         arg_cur = arg_cur->next;
@@ -707,6 +971,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
 
                     /* Reset for next argument collection */
                     arg_cur = &arg_head;
+                    arg_head.next = NULL;
 
                     if (pp_lex_peek_token(tk, T_comma, false)) {
                         tk = pp_lex_next_token(tk, false);
@@ -725,8 +990,9 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
 
                 /* Expand macro body with collected arguments
                  * Replace parameter references with supplied argument tokens */
-                cur->next =
-                    pp_preprocess_internal(macro->replacement, &expansion_ctx);
+                cur->next = pp_preprocess_internal(
+                    pp_subst_hash(macro->replacement, expansion_ctx.macro_args),
+                    &expansion_ctx);
                 cur = expansion_ctx.end_of_token;
 
                 hashmap_free(expansion_ctx.macro_args);
@@ -736,14 +1002,23 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                  * this macro name added to prevent re-expansion */
                 expansion_ctx.hide_set =
                     hide_set_union(ctx->hide_set, new_hide_set(tk->literal));
-                cur->next =
-                    pp_preprocess_internal(macro->replacement, &expansion_ctx);
+                cur->next = pp_preprocess_internal(
+                    pp_subst_hash(macro->replacement, NULL), &expansion_ctx);
                 cur = expansion_ctx.end_of_token;
             }
 
             tk = pp_lex_next_token(tk, false);
             continue;
         }
+        case T_hash:
+        case T_hashhash:
+            /* Every '#' a macro body owns is resolved by pp_subst_hash()
+             * before that body is rescanned, so one arriving here is loose in
+             * ordinary code.
+             */
+            error_at("'#' is only meaningful inside a macro definition",
+                     &tk->location);
+            break;
         case T_cppd_include: {
             char inclusion_path[MAX_LINE_LEN];
             token_stream_t *file_tks = NULL;

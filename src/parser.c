@@ -1214,12 +1214,25 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
         /* Every dimension multiplies into array_size, so "int matrix[3][4]"
          * becomes an array of 12 elements. The first two are kept separately
          * as well, because indexing needs the row length; further dimensions
-         * only contribute to the total. A dimension left empty is a pointer
-         * rather than a size, and contributes nothing.
+         * only contribute to the total. A dimension left empty contributes no
+         * size.
          */
+        bool first_dim_empty = false;
+        int dims = 0;
+
         for (int dim = 0; lex_accept(T_open_square); dim++) {
             if (lex_peek(T_close_square, NULL)) {
-                vd->ptr_level++;
+                /* An omitted leading size is only a pointer when nothing
+                 * follows it: "int a[]" is "int *", but "int a[][4]" points at
+                 * rows of four and is indexed exactly like "int a[3][4]".
+                 * Raising the pointer level for the latter would scale the row
+                 * index by a pointer instead of by the row, and add a
+                 * dereference that is not there.
+                 */
+                if (dim == 0)
+                    first_dim_empty = true;
+                else
+                    vd->ptr_level++;
             } else {
                 int next_dim = read_const_expr();
 
@@ -1236,7 +1249,10 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
                 }
             }
             lex_expect(T_close_square);
+            dims++;
         }
+        if (first_dim_empty && dims == 1)
+            vd->ptr_level++;
         vd->is_func = false;
     }
 }
