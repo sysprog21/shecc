@@ -28,14 +28,12 @@
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_BB_RDOM_SUCC 256
-#define MAX_GLOBAL_IR 256
 #define MAX_CODE 262144
 #define MAX_DATA 262144
 #define MAX_SYMTAB 65536
 #define MAX_STRTAB 65536
 #define MAX_HEADER 1024
 #define MAX_PROGRAM_HEADER 1024
-#define MAX_SECTION 1024
 #define MAX_SECTION_HEADER 1024
 #define MAX_SHSTR 1024
 #define MAX_INTERP 1024
@@ -47,7 +45,6 @@
 #define MAX_PLT 1024
 #define MAX_GOTPLT 1024
 #define MAX_CONSTANTS 1024
-#define MAX_CASES 128
 #define MAX_NESTING 128
 /* Recursion limits for nesting in the input. The parser descends recursively
  * for each of these, so a deeply nested program would otherwise exhaust the
@@ -72,12 +69,6 @@
 #define COMPACT_ARENA_BB 0x04      /* BB_ARENA - basic blocks */
 #define COMPACT_ARENA_HASHMAP 0x08 /* HASHMAP_ARENA - hash nodes */
 #define COMPACT_ARENA_GENERAL 0x10 /* GENERAL_ARENA - misc allocations */
-#define COMPACT_ARENA_ALL 0x1F     /* All arenas */
-
-/* Common arena compaction combinations for different compilation phases */
-#define COMPACT_PHASE_PARSING (COMPACT_ARENA_BLOCK | COMPACT_ARENA_GENERAL)
-#define COMPACT_PHASE_SSA (COMPACT_ARENA_INSN | COMPACT_ARENA_BB)
-#define COMPACT_PHASE_BACKEND (COMPACT_ARENA_BB | COMPACT_ARENA_GENERAL)
 
 #define ELF_START 0x10000
 #ifndef PTR_SIZE
@@ -438,9 +429,9 @@ struct var {
     bool is_const_qualified; /* true if variable has const qualifier */
     bool address_taken;      /* true if variable address was taken (&var) */
     int array_size;
-    int array_dim1, array_dim2; /* first/second dimension size for 2D arrays */
-    int offset;   /* offset from stack or frame, index 0 is reserved */
-    int init_val; /* for global initialization */
+    int array_dim2; /* second dimension size for 2D arrays */
+    int offset;     /* offset from stack or frame, index 0 is reserved */
+    int init_val;   /* for global initialization */
     /* Generation stamps used by compute_live_in() to test set membership in
      * constant time instead of rescanning live_kill and live_in per element.
      */
@@ -472,14 +463,12 @@ struct var {
     int consumed;
     bool is_ternary_ret;
     bool is_logical_ret;
-    bool is_const;  /* whether a constant representaion or not */
-    int vreg_id;    /* Virtual register ID */
-    int phys_reg;   /* Physical register assignment (-1 if unassigned) */
-    int vreg_flags; /* VReg flags */
-    int first_use;  /* First instruction index where variable is used */
-    int last_use;   /* Last instruction index where variable is used */
-    int loop_depth; /* Nesting depth if variable is in a loop */
-    int use_count;  /* Number of times variable is used */
+    bool is_const; /* whether a constant representaion or not */
+    int vreg_id;   /* Virtual register ID */
+    int phys_reg;  /* Physical register assignment (-1 if unassigned) */
+    int first_use; /* First instruction index where variable is used */
+    int last_use;  /* Last instruction index where variable is used */
+    int use_count; /* Number of times variable is used */
     bool space_is_allocated; /* whether space is allocated for this variable */
     bool has_backing_storage;
 

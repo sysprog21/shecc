@@ -23,31 +23,21 @@ typedef enum {
     /* I type */
     rv_addi = 19 /* 0b0010011 */,
     rv_xori = 16403 /* 0b0010011 + (4 << 12) */,
-    rv_ori = 24595 /* 0b0010011 + (6 << 12) */,
     rv_andi = 28691 /* 0b0010011 + (7 << 12) */,
     rv_slli = 4115 /* 0b0010011 + (1 << 12) */,
     rv_srli = 20499 /* 0b0010011 + (5 << 12) */,
     rv_srai = 1073762323 /* 0b0010011 + (5 << 12) + (0x20 << 25) */,
-    rv_slti = 8211 /* 0b0010011 + (2 << 12) */,
-    rv_sltiu = 12307 /* 0b0010011 + (3 << 12) */,
-    rv_sext_b =
-        1614811155 /* 0b0010011 + (1 << 12) + (0x604 << 20) (imm included)*/,
     /* load/store */
     rv_lb = 3 /* 0b11 */,
     rv_lh = 4099 /* 0b11 + (1 << 12) */,
     rv_lw = 8195 /* 0b11 + (2 << 12) */,
-    rv_lbu = 16387 /* 0b11 + (4 << 12) */,
-    rv_lhu = 20483 /* 0b11 + (5 << 12) */,
     rv_sb = 35 /* 0b0100011 */,
     rv_sh = 4131 /* 0b0100011 + (1 << 12) */,
     rv_sw = 8227 /* 0b0100011 + (2 << 12) */,
     /* branch */
     rv_beq = 99 /* 0b1100011 */,
     rv_bne = 4195 /* 0b1100011 + (1 << 12) */,
-    rv_blt = 16483 /* 0b1100011 + (4 << 12) */,
-    rv_bge = 20579 /* 0b1100011 + (5 << 12) */,
     rv_bltu = 24675 /* 0b1100011 + (6 << 12) */,
-    rv_bgeu = 28771 /* 0b1100011 + (7 << 12) */,
     /* jumps */
     rv_jal = 111 /* 0b1101111 */,
     rv_jalr = 103 /* 0b1100111 */,
@@ -251,11 +241,6 @@ int __xori(rv_reg rd, rv_reg rs1, int imm)
     return rv_encode_I(rv_xori, rd, rs1, imm);
 }
 
-int __ori(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_ori, rd, rs1, imm);
-}
-
 int __andi(rv_reg rd, rv_reg rs1, int imm)
 {
     return rv_encode_I(rv_andi, rd, rs1, imm);
@@ -276,16 +261,6 @@ int __srai(rv_reg rd, rv_reg rs1, int imm)
     return rv_encode_I(rv_srai, rd, rs1, imm);
 }
 
-int __slti(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_slti, rd, rs1, imm);
-}
-
-int __sltiu(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_sltiu, rd, rs1, imm);
-}
-
 int __lb(rv_reg rd, rv_reg rs1, int imm)
 {
     return rv_encode_I(rv_lb, rd, rs1, imm);
@@ -299,16 +274,6 @@ int __lh(rv_reg rd, rv_reg rs1, int imm)
 int __lw(rv_reg rd, rv_reg rs1, int imm)
 {
     return rv_encode_I(rv_lw, rd, rs1, imm);
-}
-
-int __lbu(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_lbu, rd, rs1, imm);
-}
-
-int __lhu(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_lhu, rd, rs1, imm);
 }
 
 int __sb(rv_reg rd, rv_reg rs1, int imm)
@@ -336,24 +301,9 @@ int __bne(rv_reg rs1, rv_reg rs2, int imm)
     return rv_encode_B(rv_bne, rs1, rs2, imm);
 }
 
-int __blt(rv_reg rs1, rv_reg rs2, int imm)
-{
-    return rv_encode_B(rv_blt, rs1, rs2, imm);
-}
-
-int __bge(rv_reg rs1, rv_reg rs2, int imm)
-{
-    return rv_encode_B(rv_bge, rs1, rs2, imm);
-}
-
 int __bltu(rv_reg rs1, rv_reg rs2, int imm)
 {
     return rv_encode_B(rv_bltu, rs1, rs2, imm);
-}
-
-int __bgeu(rv_reg rs1, rv_reg rs2, int imm)
-{
-    return rv_encode_B(rv_bgeu, rs1, rs2, imm);
 }
 
 int __jal(rv_reg rd, int imm)
@@ -395,9 +345,4 @@ int __div(rv_reg rd, rv_reg rs1, rv_reg rs2)
 int __mod(rv_reg rd, rv_reg rs1, rv_reg rs2)
 {
     return rv_encode_R(rv_mod, rd, rs1, rs2);
-}
-
-int __sext_b(rv_reg rd, rv_reg rs)
-{
-    return rv_encode_I(rv_sext_b, rd, rs, 0);
 }

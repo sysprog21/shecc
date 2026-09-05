@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 /* Allocate registers from IR. The linear-scan algorithm now expects a minimum
@@ -14,8 +14,8 @@
 #include "defs.h"
 #include "globals.c"
 
-/* A value is pointer-like if it is a pointer itself or its type is.
- * On LP64 targets these occupy PTR_SIZE bytes rather than 4.
+/* A value is pointer-like if it is a pointer itself or its type is. On LP64
+ * targets these occupy PTR_SIZE bytes rather than 4.
  */
 bool is_pointer_like(var_t *v)
 {
@@ -26,18 +26,19 @@ bool is_pointer_like(var_t *v)
  *
  * Slots are pointer-sized, but a scalar occupies only its low bytes. Reading
  * the whole slot back would pick up stale bytes whenever the variable was
- * written through a pointer, so loads must use the declared width. Anything
- * not a known scalar -- pointers, arrays, aggregates, functions -- keeps a
- * full pointer in its slot and is reported as such.
+ * written through a pointer, so loads must use the declared width. Anything not
+ * a known scalar -- pointers, arrays, aggregates, functions -- keeps a full
+ * pointer in its slot and is reported as such.
  */
 int var_slot_size(var_t *v)
 {
     if (!v || v->ptr_level || v->is_func || v->array_size)
         return PTR_SIZE;
+
     /* Only a variable whose address escaped can have its slot written behind
      * the allocator's back, at the pointee's width rather than the slot's.
-     * Everything else is written and read through this same path, so the
-     * full slot is always valid and the wider access is safe.
+     * Everything else is written and read through this same path, so the full
+     * slot is always valid and the wider access is safe.
      *
      * Narrowing these to the declared width does not work: an SSA temporary
      * carries the type of the expression that made it, which for pointer
@@ -47,10 +48,11 @@ int var_slot_size(var_t *v)
         return PTR_SIZE;
     if (!v->type)
         return PTR_SIZE;
-    /* Classify by the stored width rather than by type identity: an enum is
-     * a distinct type_t that still stores as a 4-byte int, and a store
-     * through an enum pointer writes only those 4 bytes. Reading the slot
-     * any wider then picks up whatever the stack happened to hold above it.
+
+    /* Classify by the stored width rather than by type identity: an enum is a
+     * distinct type_t that still stores as a 4-byte int, and a store through an
+     * enum pointer writes only those 4 bytes. Reading the slot any wider then
+     * picks up whatever the stack happened to hold above it.
      */
     if (v->type->base_type == TYPE_struct)
         return PTR_SIZE;
@@ -199,22 +201,22 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     return n;
 }
 
-/* Calculate the cost of spilling a variable from a register.
- * Higher cost means the variable is more valuable to keep in a register.
- * The cost is computed based on multiple factors that affect performance.
+/* Calculate the cost of spilling a variable from a register. Higher cost means
+ * the variable is more valuable to keep in a register. The cost is computed
+ * based on multiple factors that affect performance.
  */
 int calculate_spill_cost(var_t *var, basic_block_t *bb, int current_idx)
 {
     int cost = 0;
 
-    /* Variables that are live-out of the basic block must be spilled anyway,
-     * so give them a high cost to prefer spilling them over others
+    /* Variables that are live-out of the basic block must be spilled anyway, so
+     * give them a high cost to prefer spilling them over others
      */
     if (check_live_out(bb, var))
         cost += 1000;
 
-    /* Variables that will be used soon should have higher cost.
-     * The closer the next use, the higher the penalty for spilling
+    /* Variables that will be used soon should have higher cost. The closer the
+     * next use, the higher the penalty for spilling
      */
     if (var->consumed > current_idx) {
         int distance = var->consumed - current_idx;
@@ -222,17 +224,11 @@ int calculate_spill_cost(var_t *var, basic_block_t *bb, int current_idx)
             cost += 100 - distance * 10; /* Max 100 points for immediate use */
     }
 
-    /* Frequently used variables should stay in registers.
-     * Each use adds 5 points to the cost
+    /* Frequently used variables should stay in registers. Each use adds 5
+     * points to the cost
      */
     if (var->use_count > 0)
         cost += var->use_count * 5;
-
-    /* Variables inside loops are accessed repeatedly, so they should have much
-     * higher priority to stay in registers (200 points per level)
-     */
-    if (var->loop_depth > 0)
-        cost += var->loop_depth * 200;
 
     /* Constants can be easily reloaded, so prefer spilling them by reducing
      * their cost
@@ -280,13 +276,11 @@ int find_best_spill(basic_block_t *bb,
 
 /* Priority of spilling:
  * - live_out variable
- * - farthest local variable
- */
-/* Slots reg_alloc() hands out inside the current function, in allocation order
- * and therefore ascending by offset: both places that call slot_var_track()
- * assign var->offset = stack_size and then grow the frame. Only these are
- * candidates for the two cleanups below; every other address in the frame
- * belongs to something a pointer may legally reach.
+ * - farthest local variable Slots reg_alloc() hands out inside the current
+ * function, in allocation order and therefore ascending by offset: both places
+ * that call slot_var_track() assign var->offset = stack_size and then grow the
+ * frame. Only these are candidates for the two cleanups below; every other
+ * address in the frame belongs to something a pointer may legally reach.
  *
  * The parallel arrays are indexed by position in slot_vars and are filled once
  * per function by slot_scan().
@@ -297,10 +291,11 @@ char slot_private[MAX_LOCALS];
 char slot_stores[MAX_LOCALS]; /* saturates at 2: only "exactly one" matters */
 char slot_loads[MAX_LOCALS];
 basic_block_t *slot_home[MAX_LOCALS];
-/* The first store to and the first load from each slot, and the list node
- * that precedes the store. collapse_slot_roundtrip() needs all three, and
- * slot_scan() already walks past them, so recording them here saves it a
- * search from the head of the block for every slot it considers.
+
+/* The first store to and the first load from each slot, and the list node that
+ * precedes the store. collapse_slot_roundtrip() needs all three, and
+ * slot_scan() already walks past them, so recording them here saves it a search
+ * from the head of the block for every slot it considers.
  */
 ph2_ir_t *slot_store_ir[MAX_LOCALS];
 ph2_ir_t *slot_store_prev[MAX_LOCALS];
@@ -314,9 +309,9 @@ void slot_var_track(var_t *var)
 
 /* Whether the slot's address cannot have escaped, so that the stores and loads
  * naming it are the only accesses to it. address_taken covers &var; array_size
- * and has_backing_storage cover aggregates whose interior is reached by
- * pointer arithmetic. A store through a pointer is invisible to these scans,
- * so anything else in the frame is left alone.
+ * and has_backing_storage cover aggregates whose interior is reached by pointer
+ * arithmetic. A store through a pointer is invisible to these scans, so
+ * anything else in the frame is left alone.
  */
 bool slot_is_private(var_t *var)
 {
@@ -416,6 +411,7 @@ void ph2_list_remove(basic_block_t *bb, ph2_ir_t *prev, ph2_ir_t *ir)
         bb->ph2_ir_list.head = ir->next;
     if (bb->ph2_ir_list.tail == ir)
         bb->ph2_ir_list.tail = prev;
+
     /* Clearing the link marks the node as gone. One left pointing at its old
      * successor still looks like that successor's predecessor, and
      * collapse_slot_roundtrip() decides whether the predecessor it recorded is
@@ -488,11 +484,11 @@ void collapse_slot_roundtrip(func_t *func)
 
         if (linked) {
             /* The store has to come first, and its register has to still hold
-             * the value when the load would have run. Walking from the store
-             * to the load settles both: a load placed ahead of the store is
-             * never reached, and a clobber on the way stops the walk short.
-             * The walk passes the load's predecessor, so that comes from here
-             * rather than from a search.
+             * the value when the load would have run. Walking from the store to
+             * the load settles both: a load placed ahead of the store is never
+             * reached, and a clobber on the way stops the walk short. The walk
+             * passes the load's predecessor, so that comes from here rather
+             * than from a search.
              */
             ph2_ir_t *prev = store;
 
@@ -549,9 +545,9 @@ void collapse_slot_roundtrip(func_t *func)
 
 /* Drop stores to a slot that nothing in the function ever loads.
  *
- * Unwinding a phi copies the value into the phi's slot, and the source SSA
- * temp is written to a slot of its own that no one reads -- one wasted store
- * per phi operand, on every iteration of a loop.
+ * Unwinding a phi copies the value into the phi's slot, and the source SSA temp
+ * is written to a slot of its own that no one reads -- one wasted store per phi
+ * operand, on every iteration of a loop.
  */
 void dead_store_elim(func_t *func)
 {
@@ -572,15 +568,14 @@ void dead_store_elim(func_t *func)
 }
 
 /* Write the register back to the variable's stack slot, allocating the slot on
- * first use.  The register keeps holding the value; only memory is made
+ * first use. The register keeps holding the value; only memory is made
  * coherent, so callers decide separately whether to drop the association.
- */
-/* Reserve @var's stack slot in @func's frame.
+ * Reserve @var's stack slot in @func's frame.
  *
- * A variable whose address escapes is reached through a pointer that carries
- * no information about what it points to, so give it the alignment any object
- * type could need rather than only its own. Slots stay in increasing offset
- * order, which slot_lookup()'s binary search relies on.
+ * A variable whose address escapes is reached through a pointer that carries no
+ * information about what it points to, so give it the alignment any object type
+ * could need rather than only its own. Slots stay in increasing offset order,
+ * which slot_lookup()'s binary search relies on.
  */
 void alloc_var_slot(func_t *func, var_t *var)
 {
@@ -713,9 +708,9 @@ bool is_pushing_args;
  *
  * var->consumed is the last use anywhere in the function, which says nothing
  * about this block: a value whose only remaining reader sits on a path this
- * block does not reach is dead here, and every value that outlives the block
- * is in its live-out set. Asking the block directly is what makes the two
- * arms of an if-else able to reuse the same register.
+ * block does not reach is dead here, and every value that outlives the block is
+ * in its live-out set. Asking the block directly is what makes the two arms of
+ * an if-else able to reuse the same register.
  */
 bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, var_t *var)
 {
@@ -726,9 +721,9 @@ bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, var_t *var)
     return false;
 }
 
-/* x86 ALU instructions are two-operand: "rd = rs1 OP rs2" is emitted as
- * "MOV rd, rs1" followed by "OP rd, rs2", and the MOV disappears entirely when
- * rd already names rs1's register. So when a source operand is dead after this
+/* x86 ALU instructions are two-operand: "rd = rs1 OP rs2" is emitted as "MOV
+ * rd, rs1" followed by "OP rd, rs2", and the MOV disappears entirely when rd
+ * already names rs1's register. So when a source operand is dead after this
  * instruction, its register is the best possible home for the destination.
  *
  * Only a plain local qualifies. A global or an address-taken variable is
@@ -743,10 +738,10 @@ int coalesce_candidate(basic_block_t *bb, insn_t *insn, int reg)
     if (!insn)
         return -1;
 
-    /* Restricted to the pure ALU forms, whose lowering is exactly
-     * "MOV rd, rs1; OP rd, rs2". Everything else -- loads, calls, address
-     * arithmetic the backend folds into addressing modes -- has its own
-     * register expectations and is left alone.
+    /* Restricted to the pure ALU forms, whose lowering is exactly "MOV rd, rs1;
+     * OP rd, rs2". Everything else -- loads, calls, address arithmetic the
+     * backend folds into addressing modes -- has its own register expectations
+     * and is left alone.
      */
     switch (insn->opcode) {
     case OP_add:
@@ -796,9 +791,9 @@ int prepare_dest(basic_block_t *bb,
         return i;
     }
 
-    /* Reuse a dying source operand's register so the two-operand lowering
-     * needs no MOV. Taking a free register instead would cost one on every
-     * such instruction.
+    /* Reuse a dying source operand's register so the two-operand lowering needs
+     * no MOV. Taking a free register instead would cost one on every such
+     * instruction.
      */
     i = coalesce_candidate(bb, insn, operand_0);
     if (i < 0)
@@ -891,9 +886,9 @@ void spill_live_out(basic_block_t *bb)
     }
 }
 
-/* Count the predecessors still wired to 'bb'.  bb_disconnect() leaves holes in
- * prev[], so prev_idx is only a high-water mark and the entries must be
- * counted rather than trusted.
+/* Count the predecessors still wired to 'bb'. bb_disconnect() leaves holes in
+ * prev[], so prev_idx is only a high-water mark and the entries must be counted
+ * rather than trusted.
  */
 int bb_pred_count(basic_block_t *bb)
 {
@@ -907,7 +902,7 @@ int bb_pred_count(basic_block_t *bb)
 
 /* End a block the way spill_live_out() does -- every live-out variable written
  * here is flushed to its stack slot, so memory is coherent for every path out
- * of 'bb' -- but keep the register associations instead of dropping them.  What
+ * of 'bb' -- but keep the register associations instead of dropping them. What
  * survives the boundary is decided per successor by bb_export_regs().
  */
 void spill_live_out_keep(basic_block_t *bb)
@@ -944,6 +939,7 @@ void bb_export_regs(basic_block_t *bb)
 
     if (!succ || bb->then_ || bb->else_)
         return;
+
     /* The successor must also be the block reg_alloc() visits next, so that the
      * file it inherits is the one just built here.
      */
@@ -958,7 +954,7 @@ void bb_export_regs(basic_block_t *bb)
 }
 
 /* Install the register file this block starts with: the predecessor's file when
- * it handed one over, an empty one otherwise.  Everything handed over has just
+ * it handed one over, an empty one otherwise. Everything handed over has just
  * been written back, so nothing is polluted on entry.
  */
 void load_entry_regs(basic_block_t *bb)
@@ -1012,15 +1008,15 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
 }
 
 /* The half-open range of instruction indices in @bb over which @var holds a
- * value, written into *lo and *hi. Returns false when @var is not live
- * anywhere in @bb.
+ * value, written into *lo and *hi.
+ *
+ * Returns false when @var is not live anywhere in @bb.
  *
  * A value live on entry starts before the first instruction; one defined here
  * starts just after the instruction that writes it, so that a value read by
  * that same instruction has already ended. It ends at its last read, or past
- * the last instruction when it is live on exit.
- */
-/* Where a phi-coalescing candidate is live, inverted once per function.
+ * the last instruction when it is live on exit. Where a phi-coalescing
+ * candidate is live, inverted once per function.
  *
  * phi_slot_conflicts() and vars_interfere() each ask, for one variable at a
  * time, which blocks it is live in, and the only way to answer that from the
@@ -1045,9 +1041,9 @@ int phi_cand_tail[MAX_LOCALS];
 int phi_cand_num;
 int phi_cand_gen;
 
-/* The block records, chained per candidate through live_blk_next. The buffer
- * is kept between functions and only ever grows, so the whole compile pays for
- * the largest function once.
+/* The block records, chained per candidate through live_blk_next. The buffer is
+ * kept between functions and only ever grows, so the whole compile pays for the
+ * largest function once.
  */
 basic_block_t **live_blk_bb;
 int *live_blk_next;
@@ -1062,9 +1058,9 @@ int live_blk_num;
 #define LIVE_REC_IN 1
 #define LIVE_REC_OUT 2
 
-/* Where each candidate is written and last read inside the block being
- * indexed, filled by one walk of that block's instructions and read back only
- * for the candidates that block records.
+/* Where each candidate is written and last read inside the block being indexed,
+ * filled by one walk of that block's instructions and read back only for the
+ * candidates that block records.
  */
 int phi_cand_def[MAX_LOCALS];
 int phi_cand_last[MAX_LOCALS];
@@ -1175,9 +1171,9 @@ void phi_live_mark_out(basic_block_t *bb, var_t *var)
         live_blk_flags[tail] |= LIVE_REC_OUT;
 }
 
-/* Collect the variables this pass will ask about -- the destination and
- * operand of every unwound phi -- and work out, for each block one of them is
- * live in, the range of instruction indices it holds a value over.
+/* Collect the variables this pass will ask about -- the destination and operand
+ * of every unwound phi -- and work out, for each block one of them is live in,
+ * the range of instruction indices it holds a value over.
  *
  * The ranges are what phi_slot_conflicts() and vars_interfere() compare, and
  * computing them here means one walk of each block for all of its candidates
@@ -1210,8 +1206,9 @@ void phi_live_index_build(func_t *func)
             phi_live_note(bb, bb->live_in.elements[i], LIVE_REC_IN);
         for (int i = 0; i < bb->live_kill.size; i++)
             phi_live_note(bb, bb->live_kill.elements[i], 0);
-        /* Live on exit adds no block: a value live out that this block does
-         * not write is live in as well, so its record already exists. Marking
+
+        /* Live on exit adds no block: a value live out that this block does not
+         * write is live in as well, so its record already exists. Marking
          * rather than recording keeps that invariant from turning a dataflow
          * inconsistency into a range for a block the variable is not live in.
          */
@@ -1249,8 +1246,8 @@ void phi_live_index_build(func_t *func)
 
         /* A value live on entry starts before the first instruction; one
          * defined here starts just after the instruction that writes it, so a
-         * value read by that same instruction has already ended. It ends at
-         * its last read, or past the last instruction when it is live on exit.
+         * value read by that same instruction has already ended. It ends at its
+         * last read, or past the last instruction when it is live on exit.
          */
         for (int r = first; r < last; r++) {
             int c = live_blk_cand[r];
@@ -1335,8 +1332,8 @@ bool live_iter_next(live_iter_t *it)
 
 /* Advance *@cursor to @bb's record for the candidate whose chain it walks, or
  * past it when that candidate is not live there. The chains and every caller's
- * outer walk run in the block order of func->bbs, which is increasing rpo, so
- * a cursor only ever moves forward.
+ * outer walk run in the block order of func->bbs, which is increasing rpo, so a
+ * cursor only ever moves forward.
  */
 bool live_rec_seek(int *cursor, basic_block_t *bb)
 {
@@ -1352,12 +1349,12 @@ bool var_range_in_bb(basic_block_t *bb, var_t *var, int *lo, int *hi)
 {
     bool live_in = var_list_holds(&bb->live_in, var);
 
-    /* A value the block neither receives nor writes cannot be live anywhere
-     * in it: any read would have made it live on entry, and anything live on
-     * exit without being written here is live on entry too. Settling that
-     * from the liveness sets keeps the walk below off the blocks -- the large
-     * majority -- where the variable never appears, which is what stops this
-     * pass from costing a quarter of the compiler.
+    /* A value the block neither receives nor writes cannot be live anywhere in
+     * it: any read would have made it live on entry, and anything live on exit
+     * without being written here is live on entry too. Settling that from the
+     * liveness sets keeps the walk below off the blocks -- the large majority
+     * -- where the variable never appears, which is what stops this pass from
+     * costing a quarter of the compiler.
      */
     if (!live_in && !var_check_killed(var, bb))
         return false;
@@ -1395,8 +1392,8 @@ bool vars_interfere(func_t *func, var_t *a, var_t *b)
     live_iter_t it;
     live_iter_init(&it, func, a);
 
-    /* Both chains run in block order, so @b's is walked with a cursor that
-     * only moves forward rather than searched from the start for each of @a's
+    /* Both chains run in block order, so @b's is walked with a cursor that only
+     * moves forward rather than searched from the start for each of @a's
      * blocks.
      */
     int b_idx = phi_live_ready ? phi_cand_index(b) : -1;
@@ -1429,25 +1426,23 @@ bool vars_interfere(func_t *func, var_t *a, var_t *b)
 /* Give a phi operand the same stack slot as the phi it feeds.
  *
  * Leaving SSA turns each phi into a store of the operand into the phi's slot,
- * one per predecessor. The operand is a value of its own, so it is spilled to
- * a slot of its own first, and the phi store then reads it back -- a load and
- * a store on every path into the join, and on every iteration of a loop. When
- * the two never hold values at the same time they can share one slot: the
- * operand is written straight into the phi's slot, and the copy the phi would
- * make is a load and store of the same address, which the peephole drops.
- */
-/* The variables this pass has already placed, so a newcomer can be checked
- * against everything sharing the slot it is about to join rather than against
- * one member of it.
+ * one per predecessor. The operand is a value of its own, so it is spilled to a
+ * slot of its own first, and the phi store then reads it back -- a load and a
+ * store on every path into the join, and on every iteration of a loop. When the
+ * two never hold values at the same time they can share one slot: the operand
+ * is written straight into the phi's slot, and the copy the phi would make is a
+ * load and store of the same address, which the peephole drops. The variables
+ * this pass has already placed, so a newcomer can be checked against everything
+ * sharing the slot it is about to join rather than against one member of it.
  */
 var_t *phi_slot_vars[MAX_LOCALS];
 int phi_slot_count;
 
 void phi_slot_record(var_t *var)
 {
-    /* Dropping a member silently would leave later joiners checked against
-     * only part of the group sharing their slot, so overflow has to stop the
-     * compile rather than quietly produce an unsound placement.
+    /* Dropping a member silently would leave later joiners checked against only
+     * part of the group sharing their slot, so overflow has to stop the compile
+     * rather than quietly produce an unsound placement.
      */
     if (phi_slot_count >= MAX_LOCALS)
         fatal("Too many coalesced phi slots");
@@ -1479,6 +1474,7 @@ bool phi_slot_conflicts(func_t *func, int offset, var_t *v)
 
             phi_group_a[group] = other;
             phi_group_cursor[group] = idx >= 0 ? phi_cand_head[idx] : -1;
+
             /* A member the index cannot answer for is marked with a cursor of
              * -2 so the walk below falls back to the scanning form for it.
              */
@@ -1597,11 +1593,10 @@ void coalesce_phi_slots(func_t *func)
                 continue;
             }
 
-            /* Exactly one side has a slot by now, or neither does. Chained
-             * phis are met operand-first, so it may be the operand that is
-             * already placed; whichever side has the slot is the one joined,
-             * and when neither does the phi takes a fresh slot for the
-             * operand to join.
+            /* Exactly one side has a slot by now, or neither does. Chained phis
+             * are met operand-first, so it may be the operand that is already
+             * placed; whichever side has the slot is the one joined, and when
+             * neither does the phi takes a fresh slot for the operand to join.
              */
             var_t *have, *want;
             if (s->space_is_allocated) {
@@ -1644,8 +1639,8 @@ void reg_alloc(void)
             if (global_insn->rd->array_size) {
                 /* Original scheme: pointer slot + backing region. Cache the
                  * base offset of the backing region into init_val so later
-                 * global initializers can address elements without loading
-                 * the pointer.
+                 * global initializers can address elements without loading the
+                 * pointer.
                  */
                 global_insn->rd->offset = GLOBAL_FUNC->stack_size;
                 global_insn->rd->space_is_allocated = true;
@@ -1718,6 +1713,7 @@ void reg_alloc(void)
             if (global_insn->rs1 && global_insn->rs1->is_global &&
                 global_insn->rs2) {
                 int base_off = global_insn->rs1->offset;
+
                 /* For global arrays, use backing-region base cached in init_val
                  */
                 if (global_insn->rs1->array_size > 0)
@@ -1746,6 +1742,7 @@ void reg_alloc(void)
                     prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
                 ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_store);
                 ir->src0 = vreg;
+
                 /* For array variables used as base, store to the backing
                  * region's base offset (cached in init_val).
                  */
@@ -1768,8 +1765,8 @@ void reg_alloc(void)
         case OP_trunc:
         case OP_sign_ext:
         case OP_cast:
-            /* A narrowing initializer such as "char g[] = {65, 66}" reaches
-             * the global block as a conversion, so it has to be lowered here
+            /* A narrowing initializer such as "char g[] = {65, 66}" reaches the
+             * global block as a conversion, so it has to be lowered here
              * exactly as it is inside a function.
              */
             src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
@@ -1821,8 +1818,8 @@ void reg_alloc(void)
                 int src0 = i;
 
                 if (i >= MAX_ARGS_IN_REG) {
-                    /* Callee should access caller's stack to obtain the
-                     * extra arguments.
+                    /* Callee should access caller's stack to obtain the extra
+                     * arguments.
                      */
                     ir = bb_add_ph2_ir(func->bbs, OP_load);
                     ir->dest = MAX_ARGS_IN_REG;
@@ -1916,9 +1913,9 @@ void reg_alloc(void)
 
                     /* Sharing a slot with the phi turns the copy into a write
                      * of the operand into the place it already lives. Only a
-                     * register the block has changed still needs storing --
-                     * and reading the slot back first, as the general path
-                     * would, is a load whose value goes straight home again.
+                     * register the block has changed still needs storing -- and
+                     * reading the slot back first, as the general path would,
+                     * is a load whose value goes straight home again.
                      */
                     if (insn->rs1->space_is_allocated &&
                         insn->rs1->offset == insn->rd->offset &&
@@ -2010,8 +2007,8 @@ void reg_alloc(void)
                     insn->rs1->address_taken = true;
                     insn->rs1->is_const = false;
 
-                    /* OP_allocat puts a local aggregate's spill slot before
-                     * its backing storage. &aggregate must name the backing
+                    /* OP_allocat puts a local aggregate's spill slot before its
+                     * backing storage. &aggregate must name the backing
                      * storage, not the spill slot.
                      *
                      * FIXME: This does not support aggregate parameter for now.
@@ -2254,10 +2251,11 @@ void reg_alloc(void)
                     ir->src0 = src0;
                     ir->src1 = src1;
                     ir->dest = dest;
+
                     /* Record whether the result is an address. On LP64 an
-                     * int-typed result has to wrap at 32 bits, while a
-                     * pointer must keep all 64. The backend cannot tell the
-                     * two apart without this.
+                     * int-typed result has to wrap at 32 bits, while a pointer
+                     * must keep all 64. The backend cannot tell the two apart
+                     * without this.
                      */
                     ir->is_pointer = is_pointer_like(insn->rd) ||
                                      is_pointer_like(insn->rs1) ||

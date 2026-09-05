@@ -119,7 +119,6 @@ var_t *require_var(block_t *blk)
     var->phys_reg = -1;
     var->first_use = -1;
     var->last_use = -1;
-    var->loop_depth = 0;
     var->use_count = 0;
     var->base = var;
     var->type = TY_int;
@@ -1248,7 +1247,6 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
         }
         if (!lex_peek(T_open_square, NULL)) {
             vd->array_size = 0;
-            vd->array_dim1 = 0;
             vd->array_dim2 = 0;
         }
 
@@ -1278,7 +1276,6 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
                 int next_dim = read_const_expr();
 
                 if (dim == 0) {
-                    vd->array_dim1 = next_dim;
                     vd->array_size = next_dim;
                 } else {
                     if (dim == 1)
@@ -2343,10 +2340,8 @@ bool accept_compound_assign_op(opcode_t *op)
 
 int get_pointer_element_size(var_t *ptr_var)
 {
-    int element_size = PTR_SIZE; /* Default to pointer size */
-
     if (!ptr_var || !ptr_var->type)
-        return element_size;
+        return PTR_SIZE; /* Default to pointer size */
 
     /* Direct pointer with type info.
      *
@@ -2363,38 +2358,20 @@ int get_pointer_element_size(var_t *ptr_var)
     }
 
     /* Typedef pointer or array-derived pointer */
-    if (ptr_var->type && ptr_var->type->ptr_level > 0) {
-        switch (ptr_var->type->base_type) {
-        case TYPE_char:
-            return TY_char->size;
-        case TYPE_short:
-            return TY_short->size;
-        case TYPE_int:
-            return TY_int->size;
-        case TYPE_void:
-            return 1;
-        default:
-            return ptr_var->type->size ? ptr_var->type->size : PTR_SIZE;
-        }
+    switch (ptr_var->type->base_type) {
+    case TYPE_char:
+        return TY_char->size;
+    case TYPE_short:
+        return TY_short->size;
+    case TYPE_int:
+        return TY_int->size;
+    case TYPE_void:
+        return 1;
+    default:
+        break;
     }
 
-    /* Array-derived pointer without ptr_level set */
-    if (ptr_var->type) {
-        switch (ptr_var->type->base_type) {
-        case TYPE_char:
-            return TY_char->size;
-        case TYPE_short:
-            return TY_short->size;
-        case TYPE_int:
-            return TY_int->size;
-        case TYPE_void:
-            return 1;
-        default:
-            return ptr_var->type->size ? ptr_var->type->size : PTR_SIZE;
-        }
-    }
-
-    return element_size;
+    return ptr_var->type->size ? ptr_var->type->size : PTR_SIZE;
 }
 
 /* Helper function to handle pointer arithmetic (add/sub with scaling) */

@@ -255,11 +255,6 @@ int __sub_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
     return __mov(cond, 0, arm_sub, 0, rs, rd, ro);
 }
 
-int __and_i(arm_cond_t cond, arm_reg rd, arm_reg rs, int imm)
-{
-    return __mov(cond, 1, arm_and, 0, rs, rd, imm);
-}
-
 int __zero(int rd)
 {
     return __mov_i(__AL, rd, 0);
