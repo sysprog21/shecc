@@ -927,18 +927,39 @@ void spill_live_out_keep(basic_block_t *bb)
  * these registers, so it can read them in place rather than reloading from the
  * slots just written.
  *
- * Only the fall-through edge qualifies. A branch target is emitted wherever the
- * backend's linear walk puts it, and a block the walk misses is re-emitted
- * later -- that second copy is reached with unrelated registers, so a register
- * file handed across a branch edge does not hold for every path that runs the
- * block's code. The fall-through successor is always emitted contiguously.
+ * Requiring the successor to be next in reverse post-order is what makes
+ * "emitted immediately after" true: cfg_flatten() walks the same rpo_next
+ * chain the allocator does, so the two orders are the same traversal.
+ *
+ * Only a successor emitted immediately after this block qualifies. A branch
+ * target is emitted wherever the backend's linear walk puts it, and a block
+ * the walk misses is re-emitted later -- that second copy is reached with
+ * unrelated registers, so a file handed to it would not hold on every path
+ * that runs its code. Requiring the successor to be the next block in reverse
+ * post-order is what rules that out, since that is the order the walk emits.
+ *
+ * A conditional branch falls through as well: the backend jumps to one
+ * successor and lets control run on into the other, which is emitted
+ * contiguously exactly as a plain successor is. That edge therefore qualifies
+ * on the same terms, and it is the one that matters -- it is where an
+ * if/else chain would otherwise reload on every arm what the test just had in
+ * a register.
  */
 void bb_export_regs(basic_block_t *bb)
 {
     basic_block_t *succ = bb->next;
 
-    if (!succ || bb->then_ || bb->else_)
-        return;
+    if (!succ) {
+        /* Take whichever arm the walk placed next; the checks below confirm
+         * it really is contiguous and has no other way in.
+         */
+        if (bb->then_ == bb->rpo_next)
+            succ = bb->then_;
+        else if (bb->else_ == bb->rpo_next)
+            succ = bb->else_;
+        else
+            return;
+    }
 
     /* The successor must also be the block reg_alloc() visits next, so that the
      * file it inherits is the one just built here.
@@ -949,8 +970,17 @@ void bb_export_regs(basic_block_t *bb)
         return;
 
     succ->entry_regs = arena_alloc(BB_ARENA, REG_CNT * sizeof(var_t *));
-    for (int i = 0; i < REG_CNT; i++)
-        succ->entry_regs[i] = REGS[i].var;
+    for (int i = 0; i < REG_CNT; i++) {
+        var_t *var = REGS[i].var;
+
+        /* Hand over only what the successor is going to read: pinning a
+         * register it has no use for keeps the value live across the boundary
+         * for nothing, and the backend then has to materialise it where it
+         * would otherwise have folded it into its consumer.
+         */
+        succ->entry_regs[i] =
+            var && var_list_holds(&succ->live_in, var) ? var : NULL;
+    }
 }
 
 /* Install the register file this block starts with: the predecessor's file when
@@ -2145,8 +2175,14 @@ void reg_alloc(void)
 
                     /* REGS[src0].var had been set to NULL, but the actual
                      * content is still holded in the register.
+                     *
+                     * Write every live-out value back but keep it in its
+                     * register: the arm reached by the jump starts with an
+                     * empty file and loads from the slots just written, while
+                     * the arm that falls through can inherit the registers
+                     * through bb_export_regs().
                      */
-                    spill_live_out(bb);
+                    spill_live_out_keep(bb);
 
                     ir = bb_add_ph2_ir(bb, OP_branch);
                     ir->src0 = src0;
@@ -2288,6 +2324,11 @@ void reg_alloc(void)
 
             if (bb->next) {
                 spill_live_out_keep(bb);
+                bb_export_regs(bb);
+            } else if (bb->then_ || bb->else_) {
+                /* A conditional branch has already written its live-out values
+                 * back at OP_branch; only the handover is left.
+                 */
                 bb_export_regs(bb);
             }
 

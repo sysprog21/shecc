@@ -1839,6 +1839,31 @@ basic_block_t *bb_sole_pred(basic_block_t *bb)
     return only;
 }
 
+/* The block whose code actually runs before @bb, when there is exactly one.
+ *
+ * A block that emits nothing leaves the registers as its own predecessor left
+ * them, so the search walks back through empty blocks. Without this, the arm a
+ * conditional branch falls into looks like it has an unrelated predecessor
+ * whenever the CFG puts an empty block on that edge, and everything the
+ * registers hold is discarded for no reason.
+ */
+basic_block_t *bb_sole_code_pred(basic_block_t *bb)
+{
+    basic_block_t *pred = bb_sole_pred(bb);
+    int guard = 0;
+
+    /* A chain of empty blocks that led back to itself would spin here. Every
+     * cycle needs a jump or a branch, and a block holding one is not empty, so
+     * this should not arise -- but the walk is cheap to bound and the failure
+     * would be a hang rather than a wrong answer.
+     */
+    while (pred && !pred->ph2_ir_list.head && guard < MAX_BB_DOM_SUCC) {
+        pred = bb_sole_pred(pred);
+        guard++;
+    }
+    return pred;
+}
+
 /* CMP rs1 against rs2, or against the slot a folded load named instead. */
 void emit_cmp(int rs1, int rs2)
 {
@@ -4328,7 +4353,7 @@ void code_generate(void)
                  * the taken side is a jump target and does not.
                  */
                 if (!emit_fell_through || current_instr_bb->is_branch_target ||
-                    bb_sole_pred(current_instr_bb) != prev_emitted_bb) {
+                    bb_sole_code_pred(current_instr_bb) != prev_emitted_bb) {
                     frame_mirror_reset();
                     const_track_reset();
                     shift_cache_reset();
