@@ -990,12 +990,24 @@ void emit_nop_bytes(int n)
  */
 bool emit_lea_disp(int rd, int base, int disp)
 {
-    if (reg_low3(base) == 4 || disp < -128 || disp > 127)
+    /* RSP and R12 need a SIB byte to be addressed at all, so they are left to
+     * the two-instruction form.
+     */
+    if (reg_low3(base) == 4)
         return false;
+
     emit_rex(1, rd, base);
     emit_byte(0x8D);
-    emit_byte(modrm(MOD_DISP8, reg_low3(rd), reg_low3(base)));
-    emit_byte(disp);
+    if (disp >= -128 && disp <= 127) {
+        emit_byte(modrm(MOD_DISP8, reg_low3(rd), reg_low3(base)));
+        emit_byte(disp);
+        return true;
+    }
+    /* A wider displacement is still one instruction, and still shorter than
+     * copying the source and then adding to it.
+     */
+    emit_byte(modrm(MOD_DISP32, reg_low3(rd), reg_low3(base)));
+    emit_dword(disp);
     return true;
 }
 
@@ -2343,13 +2355,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          */
         if (src1_const_known) {
             /* If the only consumer is the load right after, that load can carry
-             * the displacement and this address never needs a register.
+             * the displacement and this address never needs a register. The
+             * memory operand picks a byte or a doubleword displacement for
+             * itself, so the constant does not have to be a small one.
              */
             if (!addr_fold && emit_next_ir &&
                 (emit_next_ir->op == OP_read || emit_next_ir->op == OP_write) &&
                 emit_next_ir->src0 == ph2_ir->dest &&
-                emit_next_ir->src1 != ph2_ir->dest && src1_const >= -128 &&
-                src1_const <= 127 && reg_low3(rs1) != 4 &&
+                emit_next_ir->src1 != ph2_ir->dest && reg_low3(rs1) != 4 &&
                 reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
                 addr_fold = true;
                 addr_fold_base = rs1;
