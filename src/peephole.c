@@ -186,23 +186,12 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
      */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 > 0 &&
         next->op == OP_mul && ph2_ir->dest == next->src1) {
-        int power = ph2_ir->src0;
-        /* Detect power-of-2 using bit manipulation: (n & (n-1)) == 0 for powers
-         * of 2
-         */
-        if (power && (power & (power - 1)) == 0) {
-            /* Calculate log2(power) to determine shift amount */
-            int shift_amount = 0;
-            int tmp = power;
-            while (tmp > 1) {
-                tmp >>= 1;
-                shift_amount++;
-            }
+        int shift_amount = exact_log2(ph2_ir->src0);
+        if (shift_amount >= 0) {
             /* Pattern: {li 2^n; mul x, 2^n} → {li n; shl x, n}
              * Example: {li t1, 4; mul result, var, t1} →
              *          {li t1, 2; shl result, var, t1}
              */
-            ph2_ir->op = OP_load_constant;
             ph2_ir->src0 = shift_amount;
             next->op = OP_lshift;
             return true;
@@ -366,11 +355,15 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
      * First store is dead if immediately overwritten
      */
     if (ph2_ir->op == OP_store && next->op == OP_store) {
-        /* Check if storing to same memory location */
-        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
-            ph2_ir->src0 >= 0 && ph2_ir->src1 >= 0) {
-            /* Remove first store - it's dead */
-            ph2_ir->dest = next->dest;
+        /* Same slot written twice in a row: only the second is observable.
+         * Rewrite this one into the second and drop it, which keeps the list
+         * links the caller is holding valid.
+         */
+        if (ph2_ir->src1 == next->src1 && ph2_ir->src1 >= 0 &&
+            ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
+            ph2_ir->src0 = next->src0;
+            ph2_ir->size_bytes = next->size_bytes;
+            ph2_ir->is_pointer = next->is_pointer;
             ph2_ir->next = next->next;
             return true;
         }
@@ -394,30 +387,35 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
     }
 
     /* Pattern 3: Store followed by load from same location (store-to-load
-     * forwarding) {store [addr], val; load rd, [addr]} → {store [addr], val;
-     * mov rd, val} The load can use the stored value directly
+     * forwarding) {store [ofs], reg; load rd, [ofs]} → {store [ofs], reg;
+     * mov rd, reg} The load can use the stored value directly.
+     *
+     * A store names its value in src0 and its slot in src1, while a load names
+     * its slot in src0 -- so the two have to be matched field by field, and
+     * only at equal width, since a store narrower than the slot leaves the
+     * load sign-extending fewer bits than the register holds.
      */
     if (ph2_ir->op == OP_store && next->op == OP_load) {
-        /* Check if accessing same memory location */
-        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
-            ph2_ir->src0 >= 0 && ph2_ir->dest >= 0) {
-            /* Replace load with move of stored value */
+        if (ph2_ir->src1 == next->src0 && ph2_ir->src0 >= 0 &&
+            ph2_ir->size_bytes == next->size_bytes &&
+            ph2_ir->is_pointer == next->is_pointer &&
+            ph2_ir->size_bytes >= PTR_SIZE &&
+            ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
             next->op = OP_assign;
-            next->src0 = ph2_ir->dest; /* Value that was stored */
+            next->src0 = ph2_ir->src0; /* the register that was stored */
             next->src1 = 0;
             return true;
         }
     }
 
-    /* Pattern 4: Load followed by redundant store of same value
-     * {load rd, [addr]; store [addr], rd} → {load rd, [addr]}
-     * The store is redundant if storing back the just-loaded value
+    /* Pattern 4: Load followed by a store of the value just loaded back into
+     * the slot it came from. {load rd, [ofs]; store [ofs], rd} → {load rd,
+     * [ofs]} -- the slot already holds that value.
      */
     if (ph2_ir->op == OP_load && next->op == OP_store) {
-        /* Check if storing the value we just loaded from same location */
-        if (ph2_ir->dest == next->dest && ph2_ir->src0 == next->src0 &&
-            ph2_ir->src1 == next->src1 && ph2_ir->src0 >= 0) {
-            /* Remove redundant store */
+        if (ph2_ir->dest == next->src0 && ph2_ir->src0 == next->src1 &&
+            ph2_ir->src0 >= 0 &&
+            ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
             ph2_ir->next = next->next;
             return true;
         }

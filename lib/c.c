@@ -572,13 +572,18 @@ void abort(void)
 FILE *fopen(char *filename, char *mode)
 {
     if (!strcmp(mode, "wb")) {
+        /* O_WRONLY | O_CREAT | O_TRUNC. Without O_TRUNC, writing a shorter
+         * file over a longer one leaves the old tail in place -- which turns
+         * a rebuilt executable into the new image followed by a fragment of
+         * the previous one.
+         */
 #if defined(__arm__)
-        return __syscall(__syscall_open, filename, 65, 0x1fd);
+        return __syscall(__syscall_open, filename, 577, 0x1fd);
 #elif defined(__riscv)
         /* FIXME: mode not work currently in RISC-V */
-        return __syscall(__syscall_openat, -100, filename, 65, 0x1fd);
+        return __syscall(__syscall_openat, -100, filename, 577, 0x1fd);
 #elif defined(__x86_64__)
-        return __syscall(__syscall_open, filename, 65, 0x1fd);
+        return __syscall(__syscall_open, filename, 577, 0x1fd);
 #endif
     }
     if (!strcmp(mode, "rb")) {

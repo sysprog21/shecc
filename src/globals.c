@@ -209,8 +209,12 @@ void *arena_alloc(arena_t *arena, int size)
  */
 void *arena_calloc(arena_t *arena, int n, int size)
 {
-    if (n * size == 0) {
-        printf("arena_calloc: cannot allocate 0 bytes\n");
+    /* Reject a count and size whose product does not fit, rather than
+     * allocating the wrapped-around amount and letting the caller write past
+     * it.
+     */
+    if (n <= 0 || size <= 0 || n > 0x7fffffff / size) {
+        printf("arena_calloc: invalid allocation size\n");
         abort();
     }
 
@@ -842,11 +846,26 @@ type_t *add_type(void)
     return &TYPES[types_idx++];
 }
 
+/* Record a struct, union or enum tag's name.
+ *
+ * type_name is a fixed array, and an identifier may be up to MAX_ID_LEN long,
+ * so a longer tag would run past it into the fields that follow. Refuse it
+ * rather than corrupting the type.
+ */
+void fatal(char *msg);
+
+void set_type_name(type_t *type, char *name)
+{
+    if (strlen(name) >= MAX_TYPE_LEN)
+        fatal("Type name too long");
+    strcpy(type->type_name, intern_string(name));
+}
+
 type_t *add_named_type(char *name)
 {
     type_t *type = add_type();
     /* Use interned string for type name */
-    strcpy(type->type_name, intern_string(name));
+    set_type_name(type, name);
     return type;
 }
 
@@ -1041,8 +1060,10 @@ basic_block_t *bb_create(block_t *parent)
      */
     bb->elf_offset = -1;
 
-    if (dump_ir)
+    if (dump_ir) {
+        bb->bb_label_name = arena_alloc(GENERAL_ARENA, MAX_VAR_LEN);
         snprintf(bb->bb_label_name, MAX_VAR_LEN, ".label.%d", bb_label_idx++);
+    }
 
     return bb;
 }
@@ -1058,16 +1079,48 @@ int liveness_gen;
  */
 int live_merge_gen;
 
+/* log2 of @v when it is a power of two, otherwise -1. */
+int exact_log2(int v)
+{
+    int k = 0;
+
+    if (v <= 0 || (v & (v - 1)))
+        return -1;
+    while (v > 1) {
+        v = v >> 1;
+        k++;
+    }
+    return k;
+}
+
+/* Grow a doubling array held in @arena from @cap elements of @elem_sz to the
+ * next capacity, starting at @first while it is still unallocated. A non-zero
+ * @limit caps the growth, with @what naming the array in the diagnostic.
+ * Returns the (possibly moved) array and writes the new capacity back to @cap.
+ */
+void *arena_grow(arena_t *arena,
+                 char *ptr,
+                 int *cap,
+                 int elem_sz,
+                 int first,
+                 int limit,
+                 char *what)
+{
+    int new_cap = *cap ? *cap << 1 : first;
+    if (limit && new_cap > limit)
+        fatal(what);
+    void *grown = arena_realloc(arena, ptr, *cap * elem_sz, new_cap * elem_sz);
+    *cap = new_cap;
+    return grown;
+}
+
 /* Record another SSA version of @v, growing the version array as needed. */
 void var_add_subscript(var_t *v, var_t *sub)
 {
-    if (v->subscripts_idx >= v->subscripts_cap) {
-        int new_cap = v->subscripts_cap ? v->subscripts_cap << 1 : 4;
-        v->subscripts = arena_realloc(BLOCK_ARENA, (char *) v->subscripts,
-                                      v->subscripts_cap * sizeof(var_t *),
-                                      new_cap * sizeof(var_t *));
-        v->subscripts_cap = new_cap;
-    }
+    if (v->subscripts_idx >= v->subscripts_cap)
+        v->subscripts =
+            arena_grow(BLOCK_ARENA, (char *) v->subscripts, &v->subscripts_cap,
+                       sizeof(var_t *), 4, 0, NULL);
     v->subscripts[v->subscripts_idx++] = sub;
 }
 
@@ -1095,26 +1148,18 @@ void var_reset_subscripts(var_t *v)
  */
 void bb_add_df(basic_block_t *bb, basic_block_t *df)
 {
-    if (bb->df_idx >= bb->df_cap) {
-        int new_cap = bb->df_cap ? bb->df_cap << 1 : 8;
-        bb->DF = arena_realloc(BB_ARENA, (char *) bb->DF,
-                               bb->df_cap * sizeof(basic_block_t *),
-                               new_cap * sizeof(basic_block_t *));
-        bb->df_cap = new_cap;
-    }
+    if (bb->df_idx >= bb->df_cap)
+        bb->DF = arena_grow(BB_ARENA, (char *) bb->DF, &bb->df_cap,
+                            sizeof(basic_block_t *), 8, 0, NULL);
     bb->DF[bb->df_idx++] = df;
 }
 
 /* The reverse-dominance-frontier counterpart of bb_add_df(). */
 void bb_add_rdf(basic_block_t *bb, basic_block_t *rdf)
 {
-    if (bb->rdf_idx >= bb->rdf_cap) {
-        int new_cap = bb->rdf_cap ? bb->rdf_cap << 1 : 8;
-        bb->RDF = arena_realloc(BB_ARENA, (char *) bb->RDF,
-                                bb->rdf_cap * sizeof(basic_block_t *),
-                                new_cap * sizeof(basic_block_t *));
-        bb->rdf_cap = new_cap;
-    }
+    if (bb->rdf_idx >= bb->rdf_cap)
+        bb->RDF = arena_grow(BB_ARENA, (char *) bb->RDF, &bb->rdf_cap,
+                             sizeof(basic_block_t *), 8, 0, NULL);
     bb->RDF[bb->rdf_idx++] = rdf;
 }
 
@@ -1127,14 +1172,17 @@ void bb_connect(basic_block_t *pred,
     if (!succ)
         abort();
 
+    /* bb_disconnect() leaves holes, so reuse the first free slot before
+     * extending. prev_idx is one past the highest slot ever filled.
+     */
     int i = 0;
-    while (succ->prev[i].bb)
+    while (i < succ->prev_idx && succ->prev[i].bb)
         i++;
 
-    if (i > MAX_BB_PRED - 1) {
-        printf("Error: too many predecessors\n");
-        abort();
-    }
+    if (i >= succ->prev_cap)
+        succ->prev = arena_grow(BB_ARENA, (char *) succ->prev, &succ->prev_cap,
+                                sizeof(bb_connection_t), 4, MAX_BB_PRED,
+                                "Too many predecessors");
 
     succ->prev[i].bb = pred;
     succ->prev[i].type = type;
@@ -1860,11 +1908,8 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
 void dump_bb_insn_by_dom(func_t *func, basic_block_t *bb, bool *at_func_start)
 {
     dump_bb_insn(func, bb, at_func_start);
-    for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
-        if (!bb || !bb->dom_next[i])
-            break;
+    for (int i = 0; bb && i < bb->dom_next_idx; i++)
         dump_bb_insn_by_dom(func, bb->dom_next[i], at_func_start);
-    }
 }
 
 void dump_insn(void)

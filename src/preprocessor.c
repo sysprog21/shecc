@@ -52,7 +52,11 @@ token_t *pp_lex_expect_token(token_t *tk, token_kind_t kind, bool skip_space)
 /* Copies and isolate the given copied token */
 token_t *copy_token(token_t *tk)
 {
-    token_t *new_tk = arena_calloc(TOKEN_ARENA, 1, sizeof(token_t));
+    /* The copy overwrites every byte, so zeroing the allocation first would
+     * be wasted work -- and this runs once per token of every macro
+     * expansion.
+     */
+    token_t *new_tk = arena_alloc(TOKEN_ARENA, sizeof(token_t));
     memcpy(new_tk, tk, sizeof(token_t));
     new_tk->next = NULL;
     return new_tk;
@@ -1011,6 +1015,34 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
         error_at("Unterminated conditional directive", &ci->tk->location);
 
     ctx->end_of_token = cur;
+    return head.next;
+}
+
+/* Drop the whitespace, tab and newline tokens from a fully preprocessed
+ * stream, on the way into the parser.
+ *
+ * They carry no meaning to the parser, which never names those kinds, and
+ * every token is created before this runs, so once they are gone the parser
+ * never meets one again. That is what let the skip-over-layout walk in front
+ * of each token access -- more than a million iterations over a self-compile
+ * -- be removed outright. Preprocessed output (-E) still needs them to
+ * separate one token from the next, so the stripping belongs here and not in
+ * preprocess() itself.
+ */
+token_t *pp_strip_layout(token_t *tk)
+{
+    token_t head;
+    token_t *cur = &head;
+
+    head.next = NULL;
+    for (; tk; tk = tk->next) {
+        if (tk->kind == T_whitespace || tk->kind == T_newline ||
+            tk->kind == T_tab)
+            continue;
+        cur->next = tk;
+        cur = tk;
+    }
+    cur->next = NULL;
     return head.next;
 }
 

@@ -253,18 +253,18 @@ bool dom_connect(basic_block_t *pred, basic_block_t *succ)
     if (succ->dom_prev)
         return false;
 
-    int i;
-    for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
+    for (int i = 0; i < pred->dom_next_idx; i++) {
         if (pred->dom_next[i] == succ)
             return false;
-        if (!pred->dom_next[i])
-            break;
     }
 
-    if (i > MAX_BB_DOM_SUCC - 1)
-        fatal("Too many predecessors in dominator tree");
+    if (pred->dom_next_idx >= pred->dom_next_cap)
+        pred->dom_next =
+            arena_grow(BB_ARENA, (char *) pred->dom_next, &pred->dom_next_cap,
+                       sizeof(basic_block_t *), 4, MAX_BB_DOM_SUCC,
+                       "Too many children in dominator tree");
 
-    pred->dom_next[i++] = succ;
+    pred->dom_next[pred->dom_next_idx++] = succ;
     succ->dom_prev = pred;
     return true;
 }
@@ -310,7 +310,14 @@ void bb_build_df(func_t *func, basic_block_t *bb)
 
     for (int i = 0; i < bb->prev_idx; i++) {
         if (bb->prev[i].bb) {
-            for (basic_block_t *curr = bb->prev[i].bb; curr != bb->idom;
+            /* Walk up from the predecessor to this block's immediate
+             * dominator. The walk normally stops there, since a block's
+             * immediate dominator dominates all of its predecessors -- but an
+             * edge the dominator tree does not account for runs off the top
+             * instead, so stop at the root as well. Ending early only widens
+             * the frontier, which costs a phi that turns out to be trivial.
+             */
+            for (basic_block_t *curr = bb->prev[i].bb; curr && curr != bb->idom;
                  curr = curr->idom)
                 bb_add_df(curr, bb);
         }
@@ -443,18 +450,22 @@ void bb_build_rdf(func_t *func, basic_block_t *bb)
     if (cnt <= 0)
         return;
 
+    /* As in bb_build_df(), the walk up the post-dominator tree stops at this
+     * block's immediate post-dominator, and at the root when an edge the tree
+     * does not account for takes it past that.
+     */
     if (bb->next) {
-        for (basic_block_t *curr = bb->next; curr != bb->r_idom;
+        for (basic_block_t *curr = bb->next; curr && curr != bb->r_idom;
              curr = curr->r_idom)
             bb_add_rdf(curr, bb);
     }
     if (bb->else_) {
-        for (basic_block_t *curr = bb->else_; curr != bb->r_idom;
+        for (basic_block_t *curr = bb->else_; curr && curr != bb->r_idom;
              curr = curr->r_idom)
             bb_add_rdf(curr, bb);
     }
     if (bb->then_) {
-        for (basic_block_t *curr = bb->then_; curr != bb->r_idom;
+        for (basic_block_t *curr = bb->then_; curr && curr != bb->r_idom;
              curr = curr->r_idom)
             bb_add_rdf(curr, bb);
     }
@@ -732,6 +743,17 @@ void solve_phi_insertion(void)
 
 var_t *require_var(block_t *blk);
 
+/* Push a fresh subscript onto @base's renaming stack, growing it as needed. */
+void rename_stack_push(var_t *base, int sub)
+{
+    if (base->rename.stack_idx >= base->rename.stack_cap)
+        base->rename.stack = arena_grow(
+            BLOCK_ARENA, (char *) base->rename.stack, &base->rename.stack_cap,
+            sizeof(int), 8, MAX_RENAME_STACK,
+            "Too many nested definitions of a variable");
+    base->rename.stack[base->rename.stack_idx++] = sub;
+}
+
 void new_name(block_t *block, var_t **var)
 {
     var_t *v = *var;
@@ -741,9 +763,7 @@ void new_name(block_t *block, var_t **var)
         return;
 
     int i = v->base->rename.counter++;
-    if (v->base->rename.stack_idx >= MAX_RENAME_STACK)
-        fatal("Too many nested definitions of a variable");
-    v->base->rename.stack[v->base->rename.stack_idx++] = i;
+    rename_stack_push(v->base, i);
     var_t *vd = require_var(block);
     memcpy(vd, *var, sizeof(var_t));
     var_reset_subscripts(vd); /* the copy shares nothing with its base */
@@ -840,11 +860,8 @@ void bb_solve_phi_params(basic_block_t *bb)
         }
     }
 
-    for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
-        if (!bb->dom_next[i])
-            break;
+    for (int i = 0; i < bb->dom_next_idx; i++)
         bb_solve_phi_params(bb->dom_next[i]);
-    }
 
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         if (insn->opcode == OP_phi)
@@ -872,10 +889,7 @@ void solve_phi_params(void)
             var->base = base;
             var->subscript = 0;
 
-            if (base->rename.stack_idx >= MAX_RENAME_STACK)
-                fatal("Too many nested definitions of a variable");
-            base->rename.stack[base->rename.stack_idx++] =
-                base->rename.counter++;
+            rename_stack_push(base, base->rename.counter++);
             var_add_subscript(base, var);
         }
 
@@ -953,11 +967,8 @@ void unwind_phi(void)
 
 bool is_dominate(basic_block_t *pred, basic_block_t *succ)
 {
-    int i;
     bool found = false;
-    for (i = 0; i < MAX_BB_DOM_SUCC; i++) {
-        if (!pred->dom_next[i])
-            break;
+    for (int i = 0; i < pred->dom_next_idx; i++) {
         if (pred->dom_next[i] == succ) {
             found = true;
             break;
@@ -1350,9 +1361,7 @@ void dump_cfg(char name[])
 void dom_dump(FILE *fd, basic_block_t *bb)
 {
     fprintf(fd, "\"%p\"\n", bb);
-    for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
-        if (!bb->dom_next[i])
-            break;
+    for (int i = 0; i < bb->dom_next_idx; i++) {
         dom_dump(fd, bb->dom_next[i]);
         fprintf(fd, "\"%p\":s->\"%p\":n\n", bb, bb->dom_next[i]);
     }
@@ -2335,17 +2344,9 @@ void optimize(void)
                 /* Strength reduction for power-of-2 operations */
                 if (insn->rs2 && insn->rs2->is_const && insn->rd) {
                     int val = insn->rs2->init_val;
+                    int shift = exact_log2(val);
 
-                    /* Check if value is power of 2 */
-                    if (val > 0 && (val & (val - 1)) == 0) {
-                        /* Count trailing zeros to get shift amount */
-                        int shift = 0;
-                        int temp = val;
-                        while ((temp & 1) == 0) {
-                            temp >>= 1;
-                            shift++;
-                        }
-
+                    if (shift >= 0) {
                         /* x * power_of_2 = x << shift */
                         if (insn->opcode == OP_mul) {
                             insn->opcode = OP_lshift;
@@ -2523,7 +2524,7 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
                 add_live_gen(bb, insn->rs2);
             update_consumed(insn, insn->rs2);
         }
-        if (insn->rd && insn->opcode != OP_unwound_phi)
+        if (insn->rd)
             bb_add_killed_var(bb, insn->rd);
     }
 }

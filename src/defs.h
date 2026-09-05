@@ -378,8 +378,13 @@ typedef enum {
 
 typedef struct {
     int counter;
-    int stack[MAX_RENAME_STACK];
+    /* Grown on demand: only a base variable is ever renamed, so the SSA
+     * versions copied from it -- the large majority of all variables -- would
+     * otherwise each carry an unused MAX_RENAME_STACK array.
+     */
+    int *stack;
     int stack_idx;
+    int stack_cap;
 } rename_t;
 
 typedef struct ref_block ref_block_t;
@@ -418,7 +423,6 @@ struct var {
     int array_dim1, array_dim2; /* first/second dimension size for 2D arrays */
     int offset;   /* offset from stack or frame, index 0 is reserved */
     int init_val; /* for global initialization */
-    int liveness; /* live range */
     /* Generation stamps used by compute_live_in() to test set membership in
      * constant time instead of rescanning live_kill and live_in per element.
      */
@@ -426,7 +430,6 @@ struct var {
     int in_gen;
     /* Stamp for the successor-union set merge_live_in() builds. */
     int merge_gen;
-    int in_loop;
     struct var *base;
     int subscript;
     /* Every SSA version of this variable, grown on demand. A fixed 128-entry
@@ -598,7 +601,12 @@ typedef struct {
 struct basic_block {
     insn_list_t insn_list;
     ph2_ir_list_t ph2_ir_list;
-    bb_connection_t prev[MAX_BB_PRED];
+    /* Predecessor edges, grown on demand. A fixed MAX_BB_PRED array cost two
+     * kilobytes in every basic block -- by far the largest thing in one --
+     * while almost every block has one or two predecessors.
+     */
+    bb_connection_t *prev;
+    int prev_cap;
     /* One past the highest slot bb_connect() has ever filled. Scans of prev[]
      * stop here instead of walking all MAX_BB_PRED slots; a block typically has
      * one or two predecessors, so the difference is two orders of magnitude.
@@ -621,8 +629,18 @@ struct basic_block {
      * not search for it.
      */
     int ph2_base;
-    /* Used in instruction dumping when ir_dump is enabled. */
-    char bb_label_name[MAX_VAR_LEN];
+    /* Whether any emitted branch or jump names this block as its target. A
+     * block no edge jumps to is reached only by falling out of the block
+     * emitted before it, which is what lets the backend carry what the
+     * registers hold across the boundary.
+     */
+    bool is_branch_target;
+    /* Used in instruction dumping when ir_dump is enabled, and allocated only
+     * then: a fixed array here is 128 bytes on every one of the tens of
+     * thousands of blocks a self-compile creates, all of it zeroed for
+     * nothing in the default path.
+     */
+    char *bb_label_name;
     struct basic_block *next;  /* normal BB */
     struct basic_block *then_; /* conditional BB */
     struct basic_block *else_;
@@ -651,7 +669,12 @@ struct basic_block {
     int rdf_cap;
     int visited;
     bool useful; /* indicate whether this BB contains useful instructions */
-    struct basic_block *dom_next[64];
+    /* Dominator-tree children, grown on demand for the same reason as prev[]
+     * and the frontiers: a fixed array cost half a kilobyte in every block.
+     */
+    struct basic_block **dom_next;
+    int dom_next_idx;
+    int dom_next_cap;
     struct basic_block *dom_prev;
     /* Nothing ever walks the reverse-dominator children, so only their count is
      * kept; the 256-entry array this replaces cost 2 KiB in every basic block.

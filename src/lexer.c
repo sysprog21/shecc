@@ -200,8 +200,14 @@ strbuf_t *get_file_buf(char *filename)
 
 token_t *new_token(token_kind_t kind, source_location_t *loc, int len)
 {
-    token_t *token = arena_calloc(TOKEN_ARENA, 1, sizeof(token_t));
+    /* Every field is written here, so the allocation does not need zeroing
+     * first -- and tokens are the single largest source of allocations in the
+     * compiler.
+     */
+    token_t *token = arena_alloc(TOKEN_ARENA, sizeof(token_t));
     token->kind = kind;
+    token->literal = NULL;
+    token->next = NULL;
     memcpy(&token->location, loc, sizeof(source_location_t));
     token->location.len = len;
     return token;
@@ -821,9 +827,16 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
     if (isalnum(ch) || ch == '_') {
         int sz = 0;
         do {
-            if (sz >= MAX_TOKEN_LEN - 1) {
+            /* Bounded by the smallest buffer an identifier is ever copied
+             * into, not by the token buffer's own size: lex_ident() and
+             * lex_peek() strcpy into caller arrays of MAX_ID_LEN, so a longer
+             * name would run off the end of one. Diagnosing it here is what
+             * keeps a long identifier in the input from corrupting the
+             * compiler's stack.
+             */
+            if (sz >= MAX_ID_LEN - 1) {
                 loc->len = sz;
-                error_at("Token too long", loc);
+                error_at("Identifier too long", loc);
             }
             token_buffer[sz++] = ch;
             ch = read_char(buf);
@@ -1021,31 +1034,17 @@ token_stream_t *gen_libc_token_stream()
     return tks;
 }
 
-void skip_unused_token(void)
-{
-    while (cur_token && cur_token->next) {
-        if (cur_token->next->kind == T_whitespace ||
-            cur_token->next->kind == T_newline ||
-            cur_token->next->kind == T_tab)
-            cur_token = cur_token->next;
-        else
-            break;
-    }
-}
-
 /* Fetches current token's location. */
 source_location_t *cur_token_loc()
 {
     return &cur_token->location;
 }
 
-/* Finds next token's location, whitespace, tab, and newline tokens are skipped,
- * if current token is eof, then returns eof token's location instead.
+/* Finds next token's location; if the current token is eof, returns the eof
+ * token's location instead.
  */
 source_location_t *next_token_loc()
 {
-    skip_unused_token();
-
     if (cur_token->kind == T_eof)
         return &cur_token->location;
 
@@ -1055,7 +1054,6 @@ source_location_t *next_token_loc()
 /* Lex next token with aliasing enabled */
 token_kind_t lex_next(void)
 {
-    skip_unused_token();
     /* if reached eof, we always return eof token to avoid any advancement */
     if (cur_token->kind == T_eof)
         return T_eof;
@@ -1067,7 +1065,6 @@ token_kind_t lex_next(void)
 /* Accepts next token if token types are matched. */
 bool lex_accept(token_kind_t kind)
 {
-    skip_unused_token();
     if (cur_token->next && cur_token->next->kind == kind) {
         lex_next();
         return true;
@@ -1080,7 +1077,6 @@ bool lex_accept(token_kind_t kind)
  */
 bool lex_peek(token_kind_t kind, char *value)
 {
-    skip_unused_token();
     if (cur_token->next && cur_token->next->kind == kind) {
         if (!value)
             return true;
@@ -1090,12 +1086,40 @@ bool lex_peek(token_kind_t kind, char *value)
     return false;
 }
 
+/* Copies a token literal into a caller buffer of n bytes. Identifiers are
+ * bounded by MAX_ID_LEN when scanned, but some destinations are narrower --
+ * 'type_name' is only MAX_TYPE_LEN -- so the bound has to travel with the
+ * destination rather than be assumed from the source.
+ */
+void lex_copy_literal(token_t *tk, char *value, int n)
+{
+    int len = strlen(tk->literal);
+
+    if (len >= n)
+        error_at("Identifier too long", &tk->location);
+    strcpy(value, tk->literal);
+}
+
+/* Strictly match next token with given token type and copy token's literal to
+ * value, which is n bytes wide.
+ */
+void lex_ident_n(token_kind_t token, char *value, int n)
+{
+    if (cur_token->next && cur_token->next->kind == token) {
+        lex_next();
+        if (value)
+            lex_copy_literal(cur_token, value, n);
+        return;
+    }
+    token_t *tk = cur_token->next ? cur_token->next : cur_token;
+    error_at("Unexpected token", &tk->location);
+}
+
 /* Strictly match next token with given token type and copy token's literal to
  * value.
  */
 void lex_ident(token_kind_t token, char *value)
 {
-    skip_unused_token();
     if (cur_token->next && cur_token->next->kind == token) {
         lex_next();
         if (value)
@@ -1110,7 +1134,6 @@ void lex_ident(token_kind_t token, char *value)
  */
 void lex_expect(token_kind_t token)
 {
-    skip_unused_token();
     if (cur_token->next && cur_token->next->kind == token) {
         lex_next();
         return;

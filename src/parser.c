@@ -1053,6 +1053,115 @@ var_t *scalarize_array_literal_if_needed(block_t *parent,
     return scalarize_array_literal(parent, bb, value, hint_type);
 }
 
+/* Integer constant-expression parser.
+ *
+ * Array dimensions, and other places C requires an integer constant
+ * expression, accept far more than a bare literal. These evaluate such an
+ * expression at parse time without emitting any IR, folding through the same
+ * precedence table (get_operator_prio()) and the same operator semantics
+ * (eval_expression_imm()) the rest of the parser already uses, so there is
+ * only one statement of what C's operators mean.
+ */
+#define MAX_CONST_EXPR_OPS 16
+
+int eval_expression_imm(opcode_t op, int op1, int op2);
+int read_const_expr(void);
+
+int read_const_expr_operand(void)
+{
+    char buffer[MAX_TOKEN_LEN];
+
+    if (lex_accept(T_minus))
+        return -read_const_expr_operand();
+    if (lex_accept(T_plus))
+        return read_const_expr_operand();
+    if (lex_accept(T_bit_not))
+        return ~read_const_expr_operand();
+    if (lex_accept(T_log_not))
+        return !read_const_expr_operand();
+
+    if (lex_accept(T_open_bracket)) {
+        int res = read_const_expr();
+        lex_expect(T_close_bracket);
+        return res;
+    }
+    if (lex_peek(T_numeric, buffer)) {
+        lex_expect(T_numeric);
+        return parse_numeric_constant(buffer);
+    }
+    if (lex_peek(T_char, buffer)) {
+        char unescaped[MAX_TOKEN_LEN];
+        lex_expect(T_char);
+        unescape_string(buffer, unescaped, MAX_TOKEN_LEN);
+        return unescaped[0];
+    }
+    if (lex_peek(T_identifier, buffer)) {
+        lex_expect(T_identifier);
+        constant_t *con = find_constant(buffer);
+        if (con)
+            return con->value;
+        error_at("Identifier is not an integer constant", next_token_loc());
+    }
+    error_at("Expected an integer constant expression", next_token_loc());
+    return 0;
+}
+
+int read_const_expr(void)
+{
+    opcode_t op_stack[MAX_CONST_EXPR_OPS];
+    int val_stack[MAX_CONST_EXPR_OPS];
+    int op_n = 0, val_n = 0;
+
+    val_stack[val_n++] = read_const_expr_operand();
+
+    while (true) {
+        opcode_t op = get_operator();
+
+        if (op == OP_generic)
+            break;
+
+        /* The conditional binds loosest, so everything folded so far is its
+         * condition, and its arms are whole constant expressions of their own.
+         */
+        if (op == OP_ternary) {
+            while (op_n > 0) {
+                val_n--;
+                op_n--;
+                val_stack[val_n - 1] = eval_expression_imm(
+                    op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
+            }
+            lex_expect(T_question);
+            int then_val = read_const_expr();
+            lex_expect(T_colon);
+            int else_val = read_const_expr();
+            return val_stack[0] ? then_val : else_val;
+        }
+
+        /* Everything at least as tight as the operator just read is complete,
+         * so fold it before pushing.
+         */
+        int prio = get_operator_prio(op);
+        while (op_n > 0 && get_operator_prio(op_stack[op_n - 1]) >= prio) {
+            val_n--;
+            op_n--;
+            val_stack[val_n - 1] = eval_expression_imm(
+                op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
+        }
+        if (op_n >= MAX_CONST_EXPR_OPS - 1)
+            error_at("Constant expression nests too deeply", next_token_loc());
+        op_stack[op_n++] = op;
+        val_stack[val_n++] = read_const_expr_operand();
+    }
+
+    while (op_n > 0) {
+        val_n--;
+        op_n--;
+        val_stack[val_n - 1] = eval_expression_imm(
+            op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
+    }
+    return val_stack[0];
+}
+
 void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 {
     /* Preserve typedef pointer level - don't reset if already inherited */
@@ -1096,61 +1205,37 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
                 }
             }
         }
-        if (lex_accept(T_open_square)) {
-            char buffer[10];
-
-            /* array with size */
-            if (lex_peek(T_numeric, buffer)) {
-                vd->array_size = parse_numeric_constant(buffer);
-                vd->array_dim1 = vd->array_size; /* Store first dimension */
-                lex_expect(T_numeric);
-            } else {
-                /* array without size:
-                 * regarded as a pointer although could be nested
-                 */
-                vd->ptr_level++;
-            }
-            lex_expect(T_close_square);
-
-            /* Handle multi-dimensional arrays: int matrix[3][4] becomes array
-             * of 3*4=12 elements
-             */
-            if (lex_accept(T_open_square)) {
-                if (lex_peek(T_numeric, buffer)) {
-                    int next_dim = parse_numeric_constant(buffer);
-                    lex_expect(T_numeric);
-                    vd->array_dim2 = next_dim; /* Store second dimension */
-                    if (vd->array_size > 0) {
-                        vd->array_size *=
-                            next_dim; /* multiply dimensions together */
-                    } else {
-                        vd->array_size = next_dim;
-                    }
-                } else {
-                    vd->ptr_level++;
-                }
-                lex_expect(T_close_square);
-
-                /* For now, only support 2D arrays */
-                while (lex_accept(T_open_square)) {
-                    if (lex_peek(T_numeric, buffer)) {
-                        int next_dim = parse_numeric_constant(buffer);
-                        lex_expect(T_numeric);
-                        if (vd->array_size > 0) {
-                            vd->array_size *= next_dim;
-                        } else {
-                            vd->array_size = next_dim;
-                        }
-                    } else {
-                        vd->ptr_level++;
-                    }
-                    lex_expect(T_close_square);
-                }
-            }
-        } else {
+        if (!lex_peek(T_open_square, NULL)) {
             vd->array_size = 0;
             vd->array_dim1 = 0;
             vd->array_dim2 = 0;
+        }
+
+        /* Every dimension multiplies into array_size, so "int matrix[3][4]"
+         * becomes an array of 12 elements. The first two are kept separately
+         * as well, because indexing needs the row length; further dimensions
+         * only contribute to the total. A dimension left empty is a pointer
+         * rather than a size, and contributes nothing.
+         */
+        for (int dim = 0; lex_accept(T_open_square); dim++) {
+            if (lex_peek(T_close_square, NULL)) {
+                vd->ptr_level++;
+            } else {
+                int next_dim = read_const_expr();
+
+                if (dim == 0) {
+                    vd->array_dim1 = next_dim;
+                    vd->array_size = next_dim;
+                } else {
+                    if (dim == 1)
+                        vd->array_dim2 = next_dim;
+                    if (vd->array_size > 0)
+                        vd->array_size *= next_dim;
+                    else
+                        vd->array_size = next_dim;
+                }
+            }
+            lex_expect(T_close_square);
         }
         vd->is_func = false;
     }
@@ -1159,7 +1244,7 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 /* starting next_token, need to check the type */
 void read_full_var_decl(var_t *vd, bool anon, bool is_param)
 {
-    char type_name[MAX_TYPE_LEN];
+    char type_name[MAX_ID_LEN];
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union)) {
         find_type_flag = 2;
@@ -1189,7 +1274,7 @@ void read_parameter_list_decl(func_t *func, bool anon)
     int vn = 0;
     lex_expect(T_open_bracket);
 
-    char token[MAX_TYPE_LEN];
+    char token[MAX_ID_LEN];
     if (lex_peek(T_identifier, token) && !strncmp(token, "void", 4)) {
         lex_next();
         if (lex_accept(T_close_bracket))
@@ -1656,7 +1741,7 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
 
 void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 {
-    char token[MAX_TYPE_LEN];
+    char token[MAX_ID_LEN];
     int ptr_cnt = 0;
     token_t *sizeof_tk = cur_token;
     type_t *type = NULL;
@@ -1770,7 +1855,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
     } else if (lex_accept(T_open_bracket)) {
         /* Check if this is a cast, compound literal, or parenthesized
          * expression */
-        char lookahead_token[MAX_TYPE_LEN];
+        char lookahead_token[MAX_ID_LEN];
         bool is_compound_literal = false;
         bool is_cast = false;
         type_t *cast_or_literal_type = NULL;
@@ -3665,6 +3750,15 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
     case OP_geq:
         res = op1 >= op2;
         break;
+    case OP_bit_and:
+        res = op1 & op2;
+        break;
+    case OP_bit_or:
+        res = op1 | op2;
+        break;
+    case OP_bit_xor:
+        res = op1 ^ op2;
+        break;
     default:
         error_at("The requested operation is not supported.", cur_token_loc());
     }
@@ -5032,8 +5126,6 @@ void initialize_struct_field(var_t *nv, var_t *v, int offset)
     nv->array_size = 0;
     nv->offset = offset;
     nv->init_val = 0;
-    nv->liveness = 0;
-    nv->in_loop = 0;
     nv->base = NULL;
     nv->subscript = 0;
     var_reset_subscripts(nv);
@@ -5119,7 +5211,7 @@ void read_global_statement(void)
         if (!type)
             type = add_type();
 
-        strcpy(type->type_name, intern_string(token));
+        set_type_name(type, token);
         type->base_type = TYPE_struct;
 
         lex_expect(T_open_curly);
@@ -5157,7 +5249,7 @@ void read_global_statement(void)
         if (!type)
             type = add_type();
 
-        strcpy(type->type_name, intern_string(token));
+        set_type_name(type, token);
         type->base_type = TYPE_union;
 
         lex_expect(T_open_curly);
@@ -5208,7 +5300,7 @@ void read_global_statement(void)
             } while (lex_accept(T_comma));
             lex_expect(T_close_curly);
             lex_ident(T_identifier, token);
-            strcpy(type->type_name, intern_string(token));
+            set_type_name(type, token);
             lex_expect(T_semicolon);
         } else if (lex_accept(T_struct)) {
             int i = 0, size = 0;
@@ -5224,7 +5316,7 @@ void read_global_statement(void)
                 if (!tag) {
                     tag = add_type();
                     tag->base_type = TYPE_struct;
-                    strcpy(tag->type_name, intern_string(token));
+                    set_type_name(tag, token);
                 }
             }
 
@@ -5254,7 +5346,7 @@ void read_global_statement(void)
                 } while (!lex_accept(T_close_curly));
             }
 
-            lex_ident(T_identifier, type->type_name);
+            lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
             type->size = size;
             type->num_fields = i;
             type->base_type = TYPE_typedef;
@@ -5263,7 +5355,7 @@ void read_global_statement(void)
                 strcpy(token, tag->type_name);
                 memcpy(tag, type, sizeof(type_t));
                 tag->base_type = TYPE_struct;
-                strcpy(tag->type_name, intern_string(token));
+                set_type_name(tag, token);
             } else {
                 /* If it is a forward declaration, build a connection between
                  * structure tag and alias. In 'find_type', it will retrieve
@@ -5287,7 +5379,7 @@ void read_global_statement(void)
                 if (!tag) {
                     tag = add_type();
                     tag->base_type = TYPE_union;
-                    strcpy(tag->type_name, intern_string(token));
+                    set_type_name(tag, token);
                 }
             }
 
@@ -5321,7 +5413,7 @@ void read_global_statement(void)
                 } while (!lex_accept(T_close_curly));
             }
 
-            lex_ident(T_identifier, type->type_name);
+            lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
             type->size = max_size;
             type->num_fields = i;
             type->base_type = TYPE_typedef;
@@ -5330,7 +5422,7 @@ void read_global_statement(void)
                 strcpy(token, tag->type_name);
                 memcpy(tag, type, sizeof(type_t));
                 tag->base_type = TYPE_union;
-                strcpy(tag->type_name, intern_string(token));
+                set_type_name(tag, token);
             } else {
                 /* If it is a forward declaration, build a connection between
                  * union tag and alias. In 'find_type', it will retrieve
@@ -5341,7 +5433,7 @@ void read_global_statement(void)
 
             lex_expect(T_semicolon);
         } else {
-            char base_type[MAX_TYPE_LEN];
+            char base_type[MAX_ID_LEN];
             type_t *base;
             type_t *type = add_type();
             lex_ident(T_identifier, base_type);
@@ -5359,7 +5451,7 @@ void read_global_statement(void)
                 type->size = PTR_SIZE;
             }
 
-            lex_ident(T_identifier, type->type_name);
+            lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
             lex_expect(T_semicolon);
         }
     } else if (lex_peek(T_identifier, NULL)) {

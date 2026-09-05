@@ -38,6 +38,10 @@ int var_slot_size(var_t *v)
      * the allocator's back, at the pointee's width rather than the slot's.
      * Everything else is written and read through this same path, so the
      * full slot is always valid and the wider access is safe.
+     *
+     * Narrowing these to the declared width does not work: an SSA temporary
+     * carries the type of the expression that made it, which for pointer
+     * arithmetic is still int, and a four-byte slot truncates the address.
      */
     if (!v->address_taken)
         return PTR_SIZE;
@@ -125,13 +129,19 @@ bool aggregate_has_function_pointer(type_t *type)
     return aggregate_has_function_pointer_seen(type, seen, 0);
 }
 
-bool check_live_out(basic_block_t *bb, var_t *var)
+/* Whether @var appears in @list. */
+bool var_list_holds(var_list_t *list, var_t *var)
 {
-    for (int i = 0; i < bb->live_out.size; i++) {
-        if (bb->live_out.elements[i] == var)
+    for (int i = 0; i < list->size; i++) {
+        if (list->elements[i] == var)
             return true;
     }
     return false;
+}
+
+bool check_live_out(basic_block_t *bb, var_t *var)
+{
+    return var_list_holds(&bb->live_out, var);
 }
 
 void track_var_use(var_t *var, int insn_idx)
@@ -492,13 +502,27 @@ void dead_store_elim(func_t *func)
  * first use.  The register keeps holding the value; only memory is made
  * coherent, so callers decide separately whether to drop the association.
  */
+/* Reserve @var's stack slot in @func's frame.
+ *
+ * A variable whose address escapes is reached through a pointer that carries
+ * no information about what it points to, so give it the alignment any object
+ * type could need rather than only its own. Slots stay in increasing offset
+ * order, which slot_lookup()'s binary search relies on.
+ */
+void alloc_var_slot(func_t *func, var_t *var)
+{
+    if (var->address_taken)
+        func->stack_size = ALIGN_UP(func->stack_size, 16);
+    var->offset = func->stack_size;
+    var->space_is_allocated = true;
+    func->stack_size += PTR_SIZE;
+    slot_var_track(var);
+}
+
 void store_var(basic_block_t *bb, var_t *var, int idx)
 {
     if (!var->space_is_allocated) {
-        var->offset = bb->belong_to->stack_size;
-        var->space_is_allocated = true;
-        bb->belong_to->stack_size += PTR_SIZE;
-        slot_var_track(var);
+        alloc_var_slot(bb->belong_to, var);
     }
     ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_store)
                                   : bb_add_ph2_ir(bb, OP_store);
@@ -536,6 +560,15 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
     /* Load constants directly, others from memory */
     if (var->is_const) {
         ir = bb_add_ph2_ir(bb, OP_load_constant);
+        ir->src0 = var->init_val;
+    } else if (var->is_global && var->array_size) {
+        /* A global array's address is fixed for the life of the program, and
+         * the initialiser recorded where its storage sits. Computing it beats
+         * loading back the pointer that was stored there: the address is an
+         * addition rather than a memory read, so it does not have to wait on
+         * the data cache on every trip round a loop.
+         */
+        ir = bb_add_ph2_ir(bb, OP_global_address_of);
         ir->src0 = var->init_val;
     } else {
         ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_load)
@@ -596,7 +629,86 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
     return spilled;
 }
 
-int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
+/* Set while lowering the run of OP_push that stages a call's arguments. The
+ * pushed values have to stay put until the call consumes them, and that
+ * liveness is recorded on var->consumed rather than in the block's remaining
+ * instructions, so no register may be reused for anything here.
+ */
+bool is_pushing_args;
+
+/* Whether @var is read again before the end of @bb.
+ *
+ * var->consumed is the last use anywhere in the function, which says nothing
+ * about this block: a value whose only remaining reader sits on a path this
+ * block does not reach is dead here, and every value that outlives the block
+ * is in its live-out set. Asking the block directly is what makes the two
+ * arms of an if-else able to reuse the same register.
+ */
+bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, var_t *var)
+{
+    for (insn_t *insn = from; insn; insn = insn->next) {
+        if (insn->rs1 == var || insn->rs2 == var)
+            return true;
+    }
+    return false;
+}
+
+/* x86 ALU instructions are two-operand: "rd = rs1 OP rs2" is emitted as
+ * "MOV rd, rs1" followed by "OP rd, rs2", and the MOV disappears entirely when
+ * rd already names rs1's register. So when a source operand is dead after this
+ * instruction, its register is the best possible home for the destination.
+ *
+ * Only a plain local qualifies. A global or an address-taken variable is
+ * reachable through memory, so its register cannot simply be repurposed even
+ * once the SSA name is dead.
+ */
+int coalesce_candidate(basic_block_t *bb, insn_t *insn, int reg)
+{
+    if (reg < 0 || reg >= REG_CNT)
+        return -1;
+
+    if (!insn)
+        return -1;
+
+    /* Restricted to the pure ALU forms, whose lowering is exactly
+     * "MOV rd, rs1; OP rd, rs2". Everything else -- loads, calls, address
+     * arithmetic the backend folds into addressing modes -- has its own
+     * register expectations and is left alone.
+     */
+    switch (insn->opcode) {
+    case OP_add:
+    case OP_sub:
+    case OP_mul:
+    case OP_bit_and:
+    case OP_bit_or:
+    case OP_bit_xor:
+    case OP_lshift:
+    case OP_rshift:
+    case OP_negate:
+    case OP_bit_not:
+        break;
+    default:
+        return -1;
+    }
+
+    if (is_pushing_args)
+        return -1;
+
+    var_t *v = REGS[reg].var;
+    if (!v || v->is_global || v->address_taken)
+        return -1;
+    if (check_live_out(bb, v))
+        return -1;
+    if (var_read_later_in_bb(bb, insn->next, v))
+        return -1;
+    return reg;
+}
+
+int prepare_dest(basic_block_t *bb,
+                 insn_t *insn,
+                 var_t *var,
+                 int operand_0,
+                 int operand_1)
 {
     int phys_reg = vreg_get_phys(var);
     if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var) {
@@ -606,6 +718,21 @@ int prepare_dest(basic_block_t *bb, var_t *var, int operand_0, int operand_1)
 
     int i = find_in_regs(var);
     if (i > -1) {
+        REGS[i].polluted = 1;
+        vreg_map_to_phys(var, i);
+        return i;
+    }
+
+    /* Reuse a dying source operand's register so the two-operand lowering
+     * needs no MOV. Taking a free register instead would cost one on every
+     * such instruction.
+     */
+    i = coalesce_candidate(bb, insn, operand_0);
+    if (i < 0)
+        i = coalesce_candidate(bb, insn, operand_1);
+    if (i > -1) {
+        vreg_clear_phys(REGS[i].var);
+        REGS[i].var = var;
         REGS[i].polluted = 1;
         vreg_map_to_phys(var, i);
         return i;
@@ -811,6 +938,216 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
     return true;
 }
 
+/* The half-open range of instruction indices in @bb over which @var holds a
+ * value, written into *lo and *hi. Returns false when @var is not live
+ * anywhere in @bb.
+ *
+ * A value live on entry starts before the first instruction; one defined here
+ * starts just after the instruction that writes it, so that a value read by
+ * that same instruction has already ended. It ends at its last read, or past
+ * the last instruction when it is live on exit.
+ */
+bool var_range_in_bb(basic_block_t *bb, var_t *var, int *lo, int *hi)
+{
+    bool live_in = var_list_holds(&bb->live_in, var);
+
+    /* A value the block neither receives nor writes cannot be live anywhere
+     * in it: any read would have made it live on entry, and anything live on
+     * exit without being written here is live on entry too. Settling that
+     * from the liveness sets keeps the walk below off the blocks -- the large
+     * majority -- where the variable never appears, which is what stops this
+     * pass from costing a quarter of the compiler.
+     */
+    if (!live_in && !var_check_killed(var, bb))
+        return false;
+
+    bool live_out = var_list_holds(&bb->live_out, var);
+    int def = -1, last_read = -1, n = 0;
+
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+        if (insn->rs1 == var || insn->rs2 == var)
+            last_read = n;
+        if (insn->rd == var && def < 0)
+            def = n;
+        n++;
+    }
+
+    if (live_in || def < 0)
+        *lo = -1;
+    else
+        *lo = def + 1;
+
+    if (live_out)
+        *hi = n;
+    else if (last_read >= 0)
+        *hi = last_read;
+    else
+        *hi = *lo;
+    return true;
+}
+
+/* Whether @a and @b are ever live at the same point in @func, and so cannot
+ * share one stack slot.
+ */
+bool vars_interfere(func_t *func, var_t *a, var_t *b)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        int alo, ahi, blo, bhi;
+
+        if (!var_range_in_bb(bb, a, &alo, &ahi))
+            continue;
+        if (!var_range_in_bb(bb, b, &blo, &bhi))
+            continue;
+        if (alo <= bhi && blo <= ahi)
+            return true;
+    }
+    return false;
+}
+
+/* Give a phi operand the same stack slot as the phi it feeds.
+ *
+ * Leaving SSA turns each phi into a store of the operand into the phi's slot,
+ * one per predecessor. The operand is a value of its own, so it is spilled to
+ * a slot of its own first, and the phi store then reads it back -- a load and
+ * a store on every path into the join, and on every iteration of a loop. When
+ * the two never hold values at the same time they can share one slot: the
+ * operand is written straight into the phi's slot, and the copy the phi would
+ * make is a load and store of the same address, which the peephole drops.
+ */
+/* The variables this pass has already placed, so a newcomer can be checked
+ * against everything sharing the slot it is about to join rather than against
+ * one member of it.
+ */
+var_t *phi_slot_vars[MAX_LOCALS];
+int phi_slot_count;
+
+void phi_slot_record(var_t *var)
+{
+    /* Dropping a member silently would leave later joiners checked against
+     * only part of the group sharing their slot, so overflow has to stop the
+     * compile rather than quietly produce an unsound placement.
+     */
+    if (phi_slot_count >= MAX_LOCALS)
+        fatal("Too many coalesced phi slots");
+    phi_slot_vars[phi_slot_count++] = var;
+}
+
+/* Whether @v is live at the same time as anything already sharing @offset. */
+bool phi_slot_conflicts(func_t *func, int offset, var_t *v)
+{
+    /* Blocks are the outer loop so that @v's range in each is worked out once
+     * rather than once per variable compared against; @v occupies few blocks,
+     * and the rest are skipped without looking at the group at all.
+     */
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        int vlo, vhi;
+
+        if (!var_range_in_bb(bb, v, &vlo, &vhi))
+            continue;
+
+        for (int i = 0; i < phi_slot_count; i++) {
+            var_t *other = phi_slot_vars[i];
+            int olo, ohi;
+
+            if (other == v || other->offset != offset)
+                continue;
+            if (!var_range_in_bb(bb, other, &olo, &ohi))
+                continue;
+            if (vlo <= ohi && olo <= vhi)
+                return true;
+        }
+    }
+    return false;
+}
+
+bool phi_slot_compatible(var_t *d, var_t *s)
+{
+    if (!slot_is_private(d) || !slot_is_private(s))
+        return false;
+    if (var_slot_size(d) != var_slot_size(s))
+        return false;
+    if (is_pointer_like(d) != is_pointer_like(s))
+        return false;
+    return d->ofs_based_on_stack_top == s->ofs_based_on_stack_top;
+}
+
+/* Move everything sharing @from onto @to, once no member of one group is ever
+ * live at the same time as a member of the other. Chained phis reach here as
+ * two groups that were built independently -- "x = phi(...)" placed with its
+ * own operands before "y = phi(x, ...)" was seen -- and merging them is what
+ * puts a whole loop-carried variable in one slot.
+ */
+bool phi_slot_merge(func_t *func, int to, int from)
+{
+    if (to == from)
+        return true;
+
+    for (int i = 0; i < phi_slot_count; i++) {
+        if (phi_slot_vars[i]->offset != to)
+            continue;
+        for (int j = 0; j < phi_slot_count; j++) {
+            if (phi_slot_vars[j]->offset != from)
+                continue;
+            if (vars_interfere(func, phi_slot_vars[i], phi_slot_vars[j]))
+                return false;
+        }
+    }
+
+    for (int j = 0; j < phi_slot_count; j++) {
+        if (phi_slot_vars[j]->offset == from)
+            phi_slot_vars[j]->offset = to;
+    }
+    return true;
+}
+
+void coalesce_phi_slots(func_t *func)
+{
+    phi_slot_count = 0;
+
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            if (insn->opcode != OP_unwound_phi)
+                continue;
+
+            var_t *d = insn->rd, *s = insn->rs1;
+            if (!d || !s || d == s)
+                continue;
+            if (!phi_slot_compatible(d, s))
+                continue;
+
+            if (d->space_is_allocated && s->space_is_allocated) {
+                phi_slot_merge(func, d->offset, s->offset);
+                continue;
+            }
+
+            /* Exactly one side has a slot by now, or neither does. Chained
+             * phis are met operand-first, so it may be the operand that is
+             * already placed; whichever side has the slot is the one joined,
+             * and when neither does the phi takes a fresh slot for the
+             * operand to join.
+             */
+            var_t *have, *want;
+            if (s->space_is_allocated) {
+                have = s;
+                want = d;
+            } else {
+                if (!d->space_is_allocated) {
+                    alloc_var_slot(func, d);
+                    phi_slot_record(d);
+                }
+                have = d;
+                want = s;
+            }
+
+            if (phi_slot_conflicts(func, have->offset, want))
+                continue;
+            want->offset = have->offset;
+            want->space_is_allocated = true;
+            phi_slot_record(want);
+        }
+    }
+}
+
 void reg_alloc(void)
 {
     /* TODO: Add proper .bss and .data section support for uninitialized /
@@ -820,6 +1157,10 @@ void reg_alloc(void)
          global_insn = global_insn->next) {
         ph2_ir_t *ir;
         int dest, src0;
+
+        /* Global initializers carry no liveness information, so no operand
+         * register may be reused as a destination here.
+         */
 
         switch (global_insn->opcode) {
         case OP_allocat:
@@ -846,7 +1187,8 @@ void reg_alloc(void)
                                    global_insn->rd->type->size);
                 }
 
-                dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, -1, -1);
+                dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1,
+                                    -1);
                 ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
                 ir->src0 = src0;
                 ir->dest = dest;
@@ -872,14 +1214,16 @@ void reg_alloc(void)
         case OP_load_constant:
         case OP_load_data_address:
         case OP_load_rodata_address:
-            dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, -1, -1);
+            dest =
+                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
             ir->src0 = global_insn->rd->init_val;
             ir->dest = dest;
             break;
         case OP_assign:
             src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
-            dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, src0, -1);
+            dest =
+                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_assign);
             ir->src0 = src0;
             ir->dest = dest;
@@ -910,7 +1254,8 @@ void reg_alloc(void)
             int src1;
             src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
             src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
-            dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, src0, src1);
+            dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0,
+                                src1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_add);
             ir->src0 = src0;
             ir->src1 = src1;
@@ -951,7 +1296,8 @@ void reg_alloc(void)
              * exactly as it is inside a function.
              */
             src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
-            dest = prepare_dest(GLOBAL_FUNC->bbs, global_insn->rd, src0, -1);
+            dest =
+                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
             ir->src0 = src0;
             ir->src1 = global_insn->sz;
@@ -977,6 +1323,7 @@ void reg_alloc(void)
             REGS[i].var = NULL;
 
         slot_var_count = 0;
+        coalesce_phi_slots(func);
 
         /* set arguments available */
         int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
@@ -1061,8 +1408,9 @@ void reg_alloc(void)
         }
 
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            bool is_pushing_args = false, handle_abi = false,
-                 args_on_stack = false;
+            bool handle_abi = false, args_on_stack = false;
+
+            is_pushing_args = false;
             int args = 0;
 
             bb->visited++;
@@ -1085,20 +1433,36 @@ void reg_alloc(void)
                 switch (insn->opcode) {
                 case OP_unwound_phi:
                     track_var_use(insn->rs1, insn->idx);
-                    src0 = prepare_operand(bb, insn->rs1, -1);
 
-                    if (!insn->rd->space_is_allocated) {
-                        insn->rd->offset = bb->belong_to->stack_size;
-                        insn->rd->space_is_allocated = true;
-                        bb->belong_to->stack_size += PTR_SIZE;
-                        slot_var_track(insn->rd);
+                    if (!insn->rd->space_is_allocated)
+                        alloc_var_slot(bb->belong_to, insn->rd);
+
+                    /* Sharing a slot with the phi turns the copy into a write
+                     * of the operand into the place it already lives. Only a
+                     * register the block has changed still needs storing --
+                     * and reading the slot back first, as the general path
+                     * would, is a load whose value goes straight home again.
+                     */
+                    if (insn->rs1->space_is_allocated &&
+                        insn->rs1->offset == insn->rd->offset &&
+                        insn->rs1->ofs_based_on_stack_top ==
+                            insn->rd->ofs_based_on_stack_top) {
+                        int held = find_in_regs(insn->rs1);
+
+                        if (held < 0 || !REGS[held].polluted)
+                            break; /* the slot already holds the value */
+                        store_var(bb, insn->rs1, held);
+                        break;
                     }
 
+                    src0 = prepare_operand(bb, insn->rs1, -1);
                     ir = bb_add_ph2_ir(bb, OP_store);
                     ir->src0 = src0;
                     ir->src1 = insn->rd->offset;
                     ir->ofs_based_on_stack_top =
                         insn->rd->ofs_based_on_stack_top;
+                    ir->is_pointer = is_pointer_like(insn->rd);
+                    ir->size_bytes = var_slot_size(insn->rd);
                     break;
                 case OP_allocat:
                     if ((insn->rd->type == TY_void ||
@@ -1131,7 +1495,7 @@ void reg_alloc(void)
                         insn->rd->has_backing_storage = true;
                     }
 
-                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    dest = prepare_dest(bb, insn, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_address_of);
                     ir->src0 = src0;
                     ir->dest = dest;
@@ -1147,7 +1511,7 @@ void reg_alloc(void)
                 case OP_load_constant:
                 case OP_load_data_address:
                 case OP_load_rodata_address:
-                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    dest = prepare_dest(bb, insn, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = insn->rd->init_val;
                     ir->dest = dest;
@@ -1197,7 +1561,7 @@ void reg_alloc(void)
                             insn->rs1->has_backing_storage = true;
                         }
 
-                        dest = prepare_dest(bb, insn->rd, -1, -1);
+                        dest = prepare_dest(bb, insn, insn->rd, -1, -1);
                         ir = bb_add_ph2_ir(bb, OP_address_of);
                         ir->src0 = insn->rs1->offset + PTR_SIZE;
                         ir->dest = dest;
@@ -1208,9 +1572,7 @@ void reg_alloc(void)
 
                     /* make sure variable is on stack */
                     if (!insn->rs1->space_is_allocated) {
-                        insn->rs1->offset = bb->belong_to->stack_size;
-                        insn->rs1->space_is_allocated = true;
-                        bb->belong_to->stack_size += PTR_SIZE;
+                        alloc_var_slot(bb->belong_to, insn->rs1);
 
                         for (int i = 0; i < REG_CNT; i++)
                             if (REGS[i].var == insn->rs1) {
@@ -1224,7 +1586,7 @@ void reg_alloc(void)
                             }
                     }
 
-                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    dest = prepare_dest(bb, insn, insn->rd, -1, -1);
                     if (insn->rs1->is_global ||
                         insn->opcode == OP_global_address_of)
                         ir = bb_add_ph2_ir(bb, OP_global_address_of);
@@ -1251,7 +1613,7 @@ void reg_alloc(void)
                         clear_reg = 1;
                         src0 = prepare_operand(bb, insn->rs1, -1);
                     }
-                    dest = prepare_dest(bb, insn->rd, src0, -1);
+                    dest = prepare_dest(bb, insn, insn->rd, src0, -1);
                     ir = bb_add_ph2_ir(bb, OP_assign);
                     ir->src0 = src0;
                     ir->dest = dest;
@@ -1272,7 +1634,7 @@ void reg_alloc(void)
                     break;
                 case OP_read:
                     src0 = prepare_operand(bb, insn->rs1, -1);
-                    dest = prepare_dest(bb, insn->rd, src0, -1);
+                    dest = prepare_dest(bb, insn, insn->rd, src0, -1);
                     ir = bb_add_ph2_ir(bb, OP_read);
                     ir->src0 = src0;
                     ir->src1 = insn->sz;
@@ -1376,7 +1738,7 @@ void reg_alloc(void)
                         REGS[i].var = NULL;
                     break;
                 case OP_func_ret:
-                    dest = prepare_dest(bb, insn->rd, -1, -1);
+                    dest = prepare_dest(bb, insn, insn->rd, -1, -1);
                     ir = bb_add_ph2_ir(bb, OP_assign);
                     ir->src0 = 0;
                     ir->dest = dest;
@@ -1410,7 +1772,7 @@ void reg_alloc(void)
                     track_var_use(insn->rs2, insn->idx);
                     src0 = prepare_operand(bb, insn->rs1, -1);
                     src1 = prepare_operand(bb, insn->rs2, src0);
-                    dest = prepare_dest(bb, insn->rd, src0, src1);
+                    dest = prepare_dest(bb, insn, insn->rd, src0, src1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = src0;
                     ir->src1 = src1;
@@ -1428,7 +1790,7 @@ void reg_alloc(void)
                 case OP_bit_not:
                 case OP_log_not:
                     src0 = prepare_operand(bb, insn->rs1, -1);
-                    dest = prepare_dest(bb, insn->rd, src0, -1);
+                    dest = prepare_dest(bb, insn, insn->rd, src0, -1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src0 = src0;
                     ir->dest = dest;
@@ -1437,7 +1799,7 @@ void reg_alloc(void)
                 case OP_sign_ext:
                 case OP_cast:
                     src0 = prepare_operand(bb, insn->rs1, -1);
-                    dest = prepare_dest(bb, insn->rd, src0, -1);
+                    dest = prepare_dest(bb, insn, insn->rd, src0, -1);
                     ir = bb_add_ph2_ir(bb, insn->opcode);
                     ir->src1 = insn->sz;
                     ir->src0 = src0;

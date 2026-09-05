@@ -28,6 +28,10 @@
 #define MOD_DISP32 0x80   /* [reg + disp32] */
 #define MOD_DIRECT 0xC0   /* reg */
 
+/* ModR/M opcode extensions selecting which shift 0xC1 encodes */
+#define SHIFT_EXT_SHL 4
+#define SHIFT_EXT_SAR 7
+
 /* ModR/M byte construction: mod (2 bits) | reg (3 bits) | r/m (3 bits)
  * Use a helper function instead of macro to avoid complex macro expansion
  * during stage0 parsing.
@@ -43,7 +47,6 @@ int reg_low3(int reg)
     return reg & 0x07;
 }
 
-
 /* Helper to emit bytes to the code buffer */
 void emit_byte(char byte)
 {
@@ -55,16 +58,26 @@ void emit_byte(char byte)
  * caller naming a high register (r8-r15) gets REX.R or REX.B automatically.
  * Pass -1 for a field the instruction does not use.
  */
-void emit_rex(int w, int reg, int rm)
+/* REX prefix for reg/rm, and for the SIB index when there is one. @index of
+ * -1 means the operand names no index.
+ */
+void emit_rex_sib(int w, int reg, int rm, int index)
 {
     int rex = REX_BASE;
     if (w)
         rex = rex | REX_W;
     if (reg >= 8)
         rex = rex | REX_R;
+    if (index >= 8)
+        rex = rex | REX_X;
     if (rm >= 8)
         rex = rex | REX_B;
     emit_byte(rex);
+}
+
+void emit_rex(int w, int reg, int rm)
+{
+    emit_rex_sib(w, reg, rm, -1);
 }
 
 void emit_dword(int dword)
@@ -111,6 +124,12 @@ int x64_frame_bytes(int stack_size, int saved)
  */
 /* Set while a copy of another block is being emitted at a back edge. */
 bool in_dup_block;
+
+/* Whether the instruction just emitted leaves control running into whatever
+ * comes next, rather than transferring it away. Only then can the next block
+ * inherit what the registers hold.
+ */
+bool emit_fell_through;
 /* Set while emitting instructions whose position in PH2_IR_FLATTEN is unknown.
  * The forward scans below are indexed off emit_ir_index, so without this they
  * would read a stretch of some unrelated block and answer about that.
@@ -369,12 +388,6 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     }
 }
 
-/* Main code emission function */
-void emit(int code)
-{
-    elf_write_int(elf_code, code);
-}
-
 /* Narrow an integer result in rd to 32 bits, matching shecc's 32-bit int.
  *
  * Values live in 64-bit registers here, so arithmetic would otherwise never
@@ -443,6 +456,24 @@ void emit_mem_base(int reg_field, int base, int disp, bool have_disp)
         emit_dword(disp);
 }
 
+/* ModRM and SIB naming [base + index * (1 << scale) + disp]. */
+void emit_mem_sib(int reg_field, int base, int index, int scale, int disp)
+{
+    int b = reg_low3(base);
+    int mod = MOD_INDIRECT;
+
+    /* RBP and R13 have no zero-displacement form, so spell one out. */
+    if (disp || b == 5)
+        mod = (disp >= -128 && disp <= 127) ? MOD_DISP8 : MOD_DISP32;
+
+    emit_byte(modrm(mod, reg_low3(reg_field), 4)); /* rm = 100: SIB follows */
+    emit_byte((scale << 6) | (reg_low3(index) << 3) | b);
+    if (mod == MOD_DISP8)
+        emit_byte(disp);
+    else if (mod == MOD_DISP32)
+        emit_dword(disp);
+}
+
 void emit_rsp_mem(int reg_field, int ofs)
 {
     int r = reg_low3(reg_field);
@@ -456,7 +487,6 @@ void emit_rsp_mem(int reg_field, int ofs)
         emit_dword(ofs);
     }
 }
-
 
 /* Store a little-endian value into already-emitted code. */
 void patch_dword(int at, int val)
@@ -563,8 +593,6 @@ typedef struct forward_ref {
 forward_ref_t forward_refs[FORWARD_REF_MAX];
 int forward_ref_count = 0;
 
-
-
 /* Track current basic block during emission */
 basic_block_t *current_bb = NULL;
 func_t *current_func = NULL;
@@ -577,24 +605,13 @@ void add_forward_ref(basic_block_t *target_bb)
 {
     if (forward_ref_count >= FORWARD_REF_MAX)
         fatal("x64: too many forward branch relocations");
-    if (forward_ref_count < FORWARD_REF_MAX) {
-        forward_refs[forward_ref_count].patch_location =
-            elf_code->size; /* This will be where emit_dword places the value */
-        forward_refs[forward_ref_count].target_bb = target_bb;
-        forward_refs[forward_ref_count].instruction_offset =
-            0; /* Not needed - we calculate directly */
-        forward_ref_count++;
 
-    } else {
-        /* Avoid hard-abort: cap forward refs and continue */
-        fprintf(
-            stderr,
-            "WARN: forward reference table overflow (max=%d) — skipping ref\n",
-            FORWARD_REF_MAX);
-        return;
-    }
+    /* patch_location is where emit_dword will place the displacement. */
+    forward_refs[forward_ref_count].patch_location = elf_code->size;
+    forward_refs[forward_ref_count].target_bb = target_bb;
+    forward_refs[forward_ref_count].instruction_offset = 0;
+    forward_ref_count++;
 }
-
 
 /* Emit x86-64 instructions for each IR operation Map an IR register (0-7) onto
  * its x86-64 register, in System V argument order first -- RDI, RSI, RDX, RCX,
@@ -671,8 +688,42 @@ int branch_cc_for(opcode_t op)
 /* Emit a rel32 displacement to @bb, deferring to the patch list when the block
  * has not been placed yet.
  */
+/* Resolve an edge to the block that actually holds the code it reaches.
+ *
+ * A block the allocator left with no instructions occupies no space: the walk
+ * never places it, and control arriving there continues into whatever the walk
+ * emits next. Following the chain to the first block with instructions names
+ * that position explicitly, so both the branch target and the fall-through test
+ * below agree on where the edge lands.
+ */
+basic_block_t *bb_code_target(basic_block_t *bb)
+{
+    /* Chains are short in practice; the bound is only there so that a cycle
+     * of jumps cannot spin here.
+     */
+    for (int guard = 0; bb && guard < 16; guard++) {
+        ph2_ir_t *only = bb->ph2_ir_list.head;
+
+        if (!only) {
+            bb = bb->rpo_next;
+            continue;
+        }
+        /* A block that does nothing but jump adds a taken branch to every
+         * path through it. Nested if-else chains join through several of
+         * these in a row, so name the block the chain really ends at.
+         */
+        if (only->op == OP_jump && !only->next) {
+            bb = only->next_bb;
+            continue;
+        }
+        break;
+    }
+    return bb;
+}
+
 void emit_bb_rel32(basic_block_t *bb)
 {
+    bb = bb_code_target(bb);
     if (bb && bb->elf_offset >= 0 && bb->elf_offset < elf_code->size) {
         emit_dword(bb->elf_offset - (elf_code->size + 4));
         return;
@@ -692,25 +743,9 @@ bool emit_lea_sum(int rd, int base, int index)
 {
     if (reg_low3(base) == 5 || reg_low3(index) == 4)
         return false;
-    emit_byte(REX_BASE | REX_W | (((rd >> 3) & 1) << 2) |
-              (((index >> 3) & 1) << 1) | ((base >> 3) & 1));
+    emit_rex_sib(1, rd, base, index);
     emit_byte(0x8D);
-    emit_byte(modrm(MOD_INDIRECT, reg_low3(rd), 4));
-    emit_byte((reg_low3(index) << 3) | reg_low3(base));
-    return true;
-}
-
-/* LEA rd, [index * (1 << shift)] for shift 1..3. */
-bool emit_lea_scale(int rd, int index, int shift)
-{
-    if (reg_low3(index) == 4)
-        return false;
-    emit_byte(REX_BASE | REX_W | (((rd >> 3) & 1) << 2) |
-              (((index >> 3) & 1) << 1));
-    emit_byte(0x8D);
-    emit_byte(modrm(MOD_INDIRECT, reg_low3(rd), 4));
-    emit_byte((shift << 6) | (reg_low3(index) << 3) | 5);
-    emit_dword(0);
+    emit_mem_sib(rd, base, index, 0, 0);
     return true;
 }
 
@@ -721,6 +756,11 @@ bool emit_lea_scale(int rd, int index, int shift)
 int reg_mirror_slot[REG_CNT];
 int reg_mirror_size[REG_CNT];
 bool reg_mirror_valid[REG_CNT];
+/* Set when the register mirrors a slot narrower than itself, so reproducing
+ * the load means sign-extending the register rather than simply copying it.
+ * A mirror recorded from a load is already the loaded value and clears this.
+ */
+bool reg_mirror_sext[REG_CNT];
 
 /* The width OP_load actually reads, matching the emitter's own bucketing. */
 int load_width(ph2_ir_t *ir)
@@ -781,6 +821,55 @@ void frame_mirror_reset(void)
         reg_mirror_valid[i] = false;
 }
 
+/* Move @src into @dst keeping only its low @width bytes, sign-extended, when
+ * @narrow says the upper ones do not belong to the value; otherwise copy it
+ * whole. @width of 8 is always a plain copy.
+ *
+ * This is both what a narrowing conversion emits and how a register that
+ * mirrors a slot narrower than itself is read back: a store narrower than the
+ * register wrote only its low bytes, and OP_load reads those sign-extended, so
+ * sign-extending the register does the same thing without going near memory.
+ */
+void emit_narrow_move(int dst, int src, int width, bool narrow)
+{
+    if (!narrow || width >= 8) {
+        if (dst == src)
+            return;
+        emit_rex(1, src, dst); /* MOV dst, src */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(dst)));
+        return;
+    }
+    if (width == 4) {
+        emit_rex(1, dst, src); /* MOVSXD dst, src32 */
+        emit_byte(0x63);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(dst), reg_low3(src)));
+        return;
+    }
+    /* MOVSX dst, src8 / src16 */
+    emit_rex(1, dst, src);
+    emit_byte(0x0F);
+    emit_byte(width == 1 ? 0xBE : 0xBF);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(dst), reg_low3(src)));
+}
+
+/* MOV dst, src, or nothing when the value is already in the destination. */
+void emit_mov_reg(int dst, int src)
+{
+    emit_narrow_move(dst, src, 8, false);
+}
+
+/* Shift @reg by an immediate count. @ext picks the shift: SHIFT_EXT_SHL or
+ * SHIFT_EXT_SAR.
+ */
+void emit_shift_imm(int reg, int ext, int imm)
+{
+    emit_rex(1, -1, reg);
+    emit_byte(0xC1);
+    emit_byte(modrm(MOD_DIRECT, ext, reg_low3(reg)));
+    emit_byte(imm);
+}
+
 /* Opcodes that neither write memory nor transfer control, so what a register
  * mirrors survives them. Anything not listed drops every mirror, which keeps
  * this conservative by default.
@@ -817,9 +906,70 @@ bool op_keeps_frame_mirrors(opcode_t op)
     case OP_address_of:
     case OP_trunc:
     case OP_sign_ext:
+    /* Transferring control writes no register and touches no memory. What the
+     * registers hold is still true on the other side; whether it is usable
+     * there is decided when the next block is entered, which starts from
+     * nothing unless that block has this one as its only predecessor. Keeping
+     * them here is what lets the rotated copy of a loop header read the
+     * induction variable the body just wrote instead of reloading its slot.
+     */
+    case OP_jump:
+    case OP_branch:
         return true;
     default:
         return false;
+    }
+}
+
+/* Pad with @n bytes that do nothing.
+ *
+ * x86 has a multi-byte NOP, so a run of padding costs one instruction instead
+ * of one per byte -- which matters because alignment padding in front of a
+ * loop header is executed on every entry to the loop. The encodings are
+ * spelled out rather than tabulated because shecc cannot compile the
+ * initialiser such a table needs, and this file builds under shecc itself.
+ */
+void emit_nop_bytes(int n)
+{
+    while (n > 0) {
+        int chunk = n > 9 ? 9 : n;
+        n -= chunk;
+
+        /* The 6- and 9-byte forms are the 5- and 8-byte ones behind an
+         * operand-size prefix.
+         */
+        if (chunk == 6 || chunk == 9) {
+            emit_byte(0x66);
+            chunk--;
+        }
+        if (chunk == 1) {
+            emit_byte(0x90);
+            continue;
+        }
+        if (chunk == 2) {
+            emit_byte(0x66);
+            emit_byte(0x90);
+            continue;
+        }
+        emit_byte(0x0F);
+        emit_byte(0x1F);
+        if (chunk == 3)
+            emit_byte(0x00);
+        else if (chunk == 4) {
+            emit_byte(0x40);
+            emit_byte(0x00);
+        } else if (chunk == 5) {
+            emit_byte(0x44);
+            emit_byte(0x00);
+            emit_byte(0x00);
+        } else if (chunk == 7) {
+            emit_byte(0x80);
+            emit_dword(0);
+        } else { /* 8 */
+            emit_byte(0x84);
+            emit_byte(0x00);
+            emit_dword(0);
+        }
     }
 }
 
@@ -870,8 +1020,67 @@ bool addr_fold;
 int addr_fold_base; /* physical register */
 int addr_fold_disp;
 
-/* Instructions already accounted for by a folded memory-destination form. */
-int emit_skip;
+/* An array subscript folded into the next access's addressing mode: the
+ * element address is base + index * (1 << scale), which one memory operand
+ * expresses, so neither the scaling shift nor the addition needs an
+ * instruction of its own.
+ */
+bool addr_sib;
+int addr_sib_base;  /* physical register */
+int addr_sib_index; /* physical register */
+int addr_sib_scale; /* 0..3, a shift count */
+int addr_sib_disp;  /* byte offset added to the base */
+
+/* Hand the pending addressing mode, if any, to the access consuming it. */
+bool sib_take(int *base, int *index, int *scale, int *disp)
+{
+    if (!addr_sib)
+        return false;
+    *base = addr_sib_base;
+    *index = addr_sib_index;
+    *scale = addr_sib_scale;
+    *disp = addr_sib_disp;
+    addr_sib = false;
+    return true;
+}
+
+/* Whether base and index can appear together in one SIB operand. RSP and R12
+ * share the encoding that means "no index", so neither can be the index.
+ */
+bool sib_regs_ok(int base, int index)
+{
+    return reg_low3(index) != 4 && base != index;
+}
+
+/* Instructions the walk should emit nothing for, named by index in the
+ * flattened stream rather than by a distance, so a fold can drop instructions
+ * that are not the very next one. An address fold claims up to two -- the
+ * addition it absorbed and the base that addition was given -- and a
+ * memory-destination fold up to two more.
+ */
+#define MAX_SKIP_IR 4
+int skip_ir_index[MAX_SKIP_IR];
+
+void skip_ir_reset(void)
+{
+    for (int i = 0; i < MAX_SKIP_IR; i++)
+        skip_ir_index[i] = -1;
+}
+
+/* Claim @idx so the walk emits nothing when it reaches it. Losing a claim
+ * would emit an instruction a fold has already accounted for, so running out
+ * of room has to stop the compile.
+ */
+void skip_ir_add(int idx)
+{
+    for (int i = 0; i < MAX_SKIP_IR; i++) {
+        if (skip_ir_index[i] < 0) {
+            skip_ir_index[i] = idx;
+            return;
+        }
+    }
+    fatal("Too many folded instructions to skip");
+}
 
 /* When a load was satisfied by a register that already held the slot and its
  * only consumer is the instruction right after, that instruction names the
@@ -985,6 +1194,14 @@ bool op_src1_is_reg(opcode_t op)
     }
 }
 
+/* Whether @ir reads @reg as an operand. */
+bool ir_reads_reg(ph2_ir_t *ir, int reg)
+{
+    if (op_src0_is_reg(ir->op) && ir->src0 == reg)
+        return true;
+    return op_src1_is_reg(ir->op) && ir->src1 == reg;
+}
+
 /* How far the forward scans below look. They answer "is this register dead
  * from here?", and a definite answer is only useful near the instruction being
  * emitted; scanning whole blocks made these quadratic in block size and cost
@@ -1057,9 +1274,7 @@ bool reg_dead_after(int idx, int reg)
         if (j >= MAX_IR_INSTR || instruction_to_bb[j] != bb)
             return !reg_live_out_of_bb(bb, reg);
         ph2_ir_t *ir = PH2_IR_FLATTEN[j];
-        if (op_src0_is_reg(ir->op) && ir->src0 == reg)
-            return false;
-        if (op_src1_is_reg(ir->op) && ir->src1 == reg)
+        if (ir_reads_reg(ir, reg))
             return false;
         if (op_writes_dest(ir->op) && ir->dest == reg)
             return true;
@@ -1121,8 +1336,7 @@ bool reg_feeds_address_only(int idx, int reg)
         if (j >= MAX_IR_INSTR || instruction_to_bb[j] != bb)
             return false; /* leaves the block: cannot tell */
         ph2_ir_t *ir = PH2_IR_FLATTEN[j];
-        bool reads = (op_src0_is_reg(ir->op) && ir->src0 == reg) ||
-                     (op_src1_is_reg(ir->op) && ir->src1 == reg);
+        bool reads = ir_reads_reg(ir, reg);
         if (reads) {
             if (ir->op != OP_add || !ir->is_pointer)
                 return false;
@@ -1132,6 +1346,401 @@ bool reg_feeds_address_only(int idx, int reg)
             return false; /* overwritten before ever being used */
     }
     return false;
+}
+
+/* True when no reader of @reg from @idx onward looks at bits above 31, so the
+ * instruction that produced it need not narrow it back to int width.
+ *
+ * An int computed in a 64-bit register can carry bits an int would have
+ * dropped, and MOVSXD after every such instruction is what keeps that from
+ * being observed. It is only observable through a reader that uses the whole
+ * register: a comparison, an address, a full-width store. A reader that is
+ * itself int arithmetic computes its low 32 bits from the low 32 bits of its
+ * operands, so the stray bits stay invisible as long as something downstream
+ * narrows -- which multiplication and the shifts do to their own results.
+ * Following that chain removes the intermediate narrowing from every array
+ * index expression.
+ */
+bool reg_low32_sufficient(int idx, int reg, int depth)
+{
+    if (folds_off || idx < 0 || depth > 3)
+        return false;
+    basic_block_t *bb = idx < MAX_IR_INSTR ? instruction_to_bb[idx] : NULL;
+    if (!bb)
+        return false;
+    int stop = idx + LIVENESS_SCAN_LIMIT;
+    if (stop > ph2_ir_idx)
+        stop = ph2_ir_idx;
+    for (int j = idx; j < stop; j++) {
+        if (j >= MAX_IR_INSTR || instruction_to_bb[j] != bb)
+            return false; /* leaves the block: cannot tell */
+        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        bool reads = ir_reads_reg(ir, reg);
+        if (reads) {
+            /* An address is used at full width, so its offset has to be
+             * exact. So does anything this table does not name.
+             */
+            if (ir->is_pointer)
+                return false;
+            if (ir->op == OP_mul) {
+                /* Narrows its own result, so the stray bits stop here. */
+            } else if (ir->op == OP_lshift || ir->op == OP_rshift) {
+                /* Also narrows, unless it is the one case that deliberately
+                 * does not: a shift feeding a pointer add straight away keeps
+                 * its full width, and then the bits going into it do matter.
+                 */
+                if (reg_feeds_address_only(j + 1, ir->dest))
+                    return false;
+            } else if (ir->op == OP_add || ir->op == OP_sub ||
+                       ir->op == OP_bit_and || ir->op == OP_bit_or ||
+                       ir->op == OP_bit_xor) {
+                /* Carries the stray bits into its own result, so whether they
+                 * matter is decided by what reads that.
+                 */
+                if (!reg_low32_sufficient(j + 1, ir->dest, depth + 1))
+                    return false;
+            } else
+                return false;
+            if (op_writes_dest(ir->op) && ir->dest == reg)
+                return true;
+            continue;
+        }
+        if (op_writes_dest(ir->op) && ir->dest == reg)
+            return true; /* overwritten with no further reader */
+    }
+    return false;
+}
+
+/* Whether @ir can sit between a scaling shift and the addition that consumes
+ * it without disturbing the fold below. These only materialise a value into
+ * their own destination; nothing here rewrites more than one instruction, so
+ * the addition stays where the scan found it.
+ */
+bool sib_gap_ok(ph2_ir_t *ir)
+{
+    switch (ir->op) {
+    case OP_global_load:
+    case OP_global_address_of:
+    case OP_load_data_address:
+    case OP_load_rodata_address:
+    case OP_address_of:
+    case OP_load_constant:
+    case OP_assign:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* The load or store that consumes the address in @addr, searching forward
+ * from @from within @bb, or -1 when the address is used for anything else.
+ *
+ * Materialising the value a store writes, or the literal an index needs, can
+ * come between the address and the access. Those only define registers of
+ * their own, so the fold still holds as long as none of them overwrites a
+ * register the addressing mode names.
+ */
+int sib_find_access(basic_block_t *bb,
+                    int from,
+                    int addr,
+                    int base_ir,
+                    int index_ir)
+{
+    int stop = from + 4;
+
+    if (stop > ph2_ir_idx)
+        stop = ph2_ir_idx;
+    if (stop > MAX_IR_INSTR)
+        stop = MAX_IR_INSTR;
+    for (int j = from; j < stop; j++) {
+        if (instruction_to_bb[j] != bb)
+            return -1;
+
+        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        bool reads = ir_reads_reg(ir, addr);
+        if (reads) {
+            if ((ir->op == OP_read || ir->op == OP_write) && ir->src0 == addr &&
+                !(ir->op == OP_write && ir->src1 == addr))
+                return j;
+            return -1;
+        }
+        if (op_writes_dest(ir->op) &&
+            (ir->dest == addr || ir->dest == base_ir || ir->dest == index_ir))
+            return -1;
+        if (!sib_gap_ok(ir))
+            return -1;
+    }
+    return -1;
+}
+
+/* Last immediate loaded into each IR register, valid only until that register
+ * is written again or control flow leaves the block. Strength reduction turns
+ * array indexing into a shift by a literal, but the literal arrives in a
+ * register via its own OP_load_constant, so without this the backend has to
+ * assume a variable count and stage it through CL.
+ */
+int const_reg_val[REG_CNT];
+bool const_reg_valid[REG_CNT];
+
+void const_track_reset(void)
+{
+    for (int i = 0; i < REG_CNT; i++)
+        const_reg_valid[i] = false;
+}
+
+/* Whether @reg still holds "the global area plus a constant", and what that
+ * constant is, by finding the instruction in @bb that last wrote it before
+ * @before.
+ *
+ * R15 already holds the area's base and an addressing mode has room for the
+ * constant, so an address built this way needs no register of its own in the
+ * access that consumes it -- which also means the fold does not depend on the
+ * register surviving until then.
+ */
+bool gaddr_def_ofs(basic_block_t *bb, int before, int reg, int *ofs)
+{
+    if (!bb || bb->ph2_base < 0 || reg < 0 || reg >= REG_CNT)
+        return false;
+    if (before > MAX_IR_INSTR)
+        before = MAX_IR_INSTR;
+    /* The definition being looked for is always close by; the same cap the
+     * other scans use keeps a long block from making this quadratic.
+     */
+    int stop = before - LIVENESS_SCAN_LIMIT;
+    if (stop < bb->ph2_base)
+        stop = bb->ph2_base;
+    for (int j = before - 1; j >= stop; j--) {
+        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+
+        if (!op_writes_dest(ir->op) || ir->dest != reg)
+            continue;
+        if (ir->op != OP_global_address_of)
+            return false;
+        *ofs = ir->src0;
+        return true;
+    }
+    return false;
+}
+
+/* Put the sign-extended subscript in @rd and record the addressing mode the
+ * access behind it will use, along with the instructions that no longer need
+ * emitting: the addition at @sum_at, and the base it was given at @gaddr_at
+ * when that folded into the displacement (-1 when it did not).
+ *
+ * MOVSXD is what makes @rd the value a load of the int would have produced,
+ * since the subscript enters the addressing mode at full width.
+ */
+void sib_emit_index(int rd,
+                    int rs1,
+                    int base,
+                    int scale,
+                    int disp,
+                    int sum_at,
+                    int gaddr_at)
+{
+    emit_rex(1, rd, rs1); /* MOVSXD rd, rs1_32 */
+    emit_byte(0x63);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
+
+    addr_sib = true;
+    addr_sib_base = base;
+    addr_sib_index = rd;
+    addr_sib_scale = scale;
+    addr_sib_disp = disp;
+    skip_ir_add(sum_at);
+    if (gaddr_at >= 0)
+        skip_ir_add(gaddr_at);
+}
+
+/* Fold "D = I << k; A = base + D; read/write through A" into the addressing
+ * mode of the access, when k scales by 1, 2, 4 or 8 and neither intermediate
+ * outlives the access.
+ *
+ * The addition need not follow the shift immediately -- loading the array's
+ * base commonly sits between them -- so the scan looks ahead past instructions
+ * that only define a register of their own. The access itself must come
+ * directly after the addition, since that is what carries the operand.
+ *
+ * The index is sign-extended before scaling rather than after, where the
+ * separate instructions would scale first and narrow the product. The two
+ * differ only when the scaled subscript overflows an int, which is already
+ * undefined, and this is what gcc does as well.
+ *
+ * Returns true when the shift emitted the sign extension and recorded the
+ * operand, leaving the addition to emit nothing.
+ */
+bool try_fold_sib(ph2_ir_t *shift, int rd, int rs1, int scale)
+{
+    if (folds_off || addr_fold || addr_sib || emit_ir_index < 0)
+        return false;
+    if (scale < 1 || scale > 3)
+        return false;
+
+    basic_block_t *bb = instruction_to_bb[emit_ir_index];
+    if (!bb)
+        return false;
+
+    /* Look ahead for the addition that turns the scaled index into an
+     * address. Four instructions is enough for the base to be materialised.
+     */
+    int sum_at = -1;
+    int limit = emit_ir_index + 5;
+    if (limit > ph2_ir_idx)
+        limit = ph2_ir_idx;
+    if (limit > MAX_IR_INSTR)
+        limit = MAX_IR_INSTR;
+    for (int j = emit_ir_index + 1; j < limit; j++) {
+        if (instruction_to_bb[j] != bb)
+            return false;
+        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        bool reads = ir_reads_reg(ir, shift->dest);
+        if (reads) {
+            sum_at = j;
+            break;
+        }
+        if (op_writes_dest(ir->op) && ir->dest == shift->dest)
+            return false;
+        if (!sib_gap_ok(ir))
+            return false;
+    }
+    if (sum_at < 0)
+        return false;
+    ph2_ir_t *sum = PH2_IR_FLATTEN[sum_at];
+    if (sum->op != OP_add)
+        return false;
+
+    int base_ir;
+    if (sum->src0 == shift->dest)
+        base_ir = sum->src1;
+    else if (sum->src1 == shift->dest)
+        base_ir = sum->src0;
+    else
+        return false;
+    if (base_ir == shift->dest)
+        return false;
+
+    /* Find the access first without insisting the base register survive; a
+     * base that turns into a displacement below does not need it to.
+     */
+    int acc_at = sib_find_access(bb, sum_at + 1, sum->dest, -1, shift->dest);
+    if (acc_at < 0)
+        return false;
+
+    /* The scaled index and the element address exist only for this access.
+     * The addition commonly writes the same register it scaled, which ends
+     * the scaled value there and needs no separate check.
+     */
+    if (sum->dest != shift->dest && !reg_dead_after(sum_at + 1, shift->dest))
+        return false;
+    if (!reg_dead_after(acc_at + 1, sum->dest))
+        return false;
+
+    /* A base that is just "the global area plus a constant" needs no register
+     * of its own: R15 already holds that area, and the constant becomes the
+     * addressing mode's displacement. Every global array is addressed this
+     * way, and it also frees the fold from needing the base register to
+     * survive to the access -- the allocator often reuses it in between.
+     */
+    int base = map_ir_reg(base_ir);
+    int disp = 0;
+    int gaddr_at = -1;
+
+    if (gaddr_def_ofs(bb, emit_ir_index, base_ir, &disp)) {
+        base = 15; /* R15 */
+        sib_emit_index(rd, rs1, base, scale, disp, sum_at, gaddr_at);
+        return true;
+    }
+    disp = 0;
+
+    for (int j = emit_ir_index + 1; j < sum_at; j++) {
+        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+
+        if (ir->op == OP_global_address_of && ir->dest == base_ir) {
+            gaddr_at = j;
+            disp = ir->src0;
+            continue;
+        }
+        /* Anything else reading the base means the address it holds is
+         * wanted for more than this one access.
+         */
+        if (ir_reads_reg(ir, base_ir))
+            gaddr_at = -1;
+    }
+    if (gaddr_at >= 0 && reg_dead_after(sum_at + 1, base_ir)) {
+        base = 15; /* R15 */
+    } else {
+        gaddr_at = -1;
+        disp = 0;
+        /* A register that only ever held a literal may never have been
+         * materialised, because the literal was expected to become an
+         * immediate.
+         */
+        if (base_ir >= 0 && base_ir < REG_CNT && const_reg_valid[base_ir])
+            return false;
+        if (sib_find_access(bb, sum_at + 1, sum->dest, base_ir, shift->dest) !=
+            acc_at)
+            return false;
+    }
+    if (!sib_regs_ok(base, rd))
+        return false;
+
+    sib_emit_index(rd, rs1, base, scale, disp, sum_at, gaddr_at);
+    return true;
+}
+
+/* The unscaled counterpart of try_fold_sib(): an addition whose only reader is
+ * the access right behind it supplies the base and index of that access's
+ * addressing mode, and so needs no instruction of its own. Reports whether it
+ * folded.
+ */
+bool try_fold_sib_add(ph2_ir_t *ph2_ir, int rs1, int rs2)
+{
+    if (folds_off || addr_fold || addr_sib || emit_ir_index < 0 ||
+        emit_ir_index >= MAX_IR_INSTR || rs1 == rs2)
+        return false;
+    if (const_reg_valid[ph2_ir->src0] || const_reg_valid[ph2_ir->src1])
+        return false;
+
+    basic_block_t *bb = instruction_to_bb[emit_ir_index];
+    int acc_at = bb ? sib_find_access(bb, emit_ir_index + 1, ph2_ir->dest,
+                                      ph2_ir->src0, ph2_ir->src1)
+                    : -1;
+    if (acc_at < 0 || !reg_dead_after(acc_at + 1, ph2_ir->dest))
+        return false;
+
+    /* A base that the instruction before computed as "the global area plus a
+     * constant" becomes a displacement, the same way try_fold_sib() handles a
+     * scaled subscript.
+     */
+    int base = rs1, index = rs2, disp = 0;
+    bool folded_base = false;
+
+    if (gaddr_def_ofs(bb, emit_ir_index, ph2_ir->src0, &disp)) {
+        base = 15; /* R15 */
+        index = rs2;
+        folded_base = true;
+    } else if (gaddr_def_ofs(bb, emit_ir_index, ph2_ir->src1, &disp)) {
+        base = 15; /* R15 */
+        index = rs1;
+        folded_base = true;
+    }
+
+    /* RSP and R12 share the encoding that means "no index", so whichever
+     * operand is one of those has to be the base.
+     */
+    if (!folded_base && reg_low3(index) == 4) {
+        base = rs2;
+        index = rs1;
+    }
+    if (reg_low3(index) == 4)
+        return false;
+
+    addr_sib = true;
+    addr_sib_base = base;
+    addr_sib_index = index;
+    addr_sib_scale = 0;
+    addr_sib_disp = disp;
+    return true;
 }
 
 /* True when the only remaining reads of @reg in this block are shift counts
@@ -1149,6 +1758,7 @@ bool const_load_dead(int idx, int reg, int val)
     int stop = idx + LIVENESS_SCAN_LIMIT;
     if (stop > ph2_ir_idx)
         stop = ph2_ir_idx;
+    bool folds_ok = true;
     for (int j = idx; j < stop; j++) {
         if (j >= MAX_IR_INSTR || instruction_to_bb[j] != bb)
             return !reg_live_out_of_bb(bb, reg);
@@ -1162,23 +1772,32 @@ bool const_load_dead(int idx, int reg, int val)
             if (ir->op == OP_add || ir->op == OP_sub || ir->op == OP_bit_and ||
                 ir->op == OP_bit_or || ir->op == OP_bit_xor)
                 folded_count = true;
+            /* The three-operand IMUL carries its multiplier as an immediate. */
+            if (ir->op == OP_mul)
+                folded_count = true;
             if (branch_cc_for(ir->op))
                 folded_count = true;
         }
         if (op_src0_is_reg(ir->op) && ir->src0 == reg)
             return false;
-        if (!folded_count && op_src1_is_reg(ir->op) && ir->src1 == reg)
+        if (!(folds_ok && folded_count) && op_src1_is_reg(ir->op) &&
+            ir->src1 == reg)
             return false;
         if (op_writes_dest(ir->op) && ir->dest == reg)
             return true;
-        /* Past anything that clears the constant table, a later shift can no
-         * longer fold the value, so the register would have to hold it after
-         * all -- unless the block ends here, where every register dies.
+        /* Past anything that clears the constant table, a later use can no
+         * longer become an immediate. A store through a pointer reads only
+         * the registers it names, so a register nothing reads again is still
+         * dead across it and the scan can go on. Anything else may read
+         * registers this walk cannot see -- a call takes its arguments in
+         * them -- so stop rather than drop a value it would consume.
          */
         if (!op_keeps_frame_mirrors(ir->op)) {
             if (ir->op == OP_branch || ir->op == OP_jump || ir->op == OP_return)
                 return !reg_live_out_of_bb(bb, reg);
-            return false;
+            if (ir->op != OP_write)
+                return false;
+            folds_ok = false;
         }
     }
     /* Ran out of scan budget: assume the register is still needed. */
@@ -1243,22 +1862,8 @@ void emit_cmp(int rs1, int rs2)
  */
 bool bb_falls_through(basic_block_t *bb)
 {
+    bb = bb_code_target(bb);
     return bb && emit_next_ir && bb->ph2_ir_list.head == emit_next_ir;
-}
-
-/* Last immediate loaded into each IR register, valid only until that register
- * is written again or control flow leaves the block. Strength reduction turns
- * array indexing into a shift by a literal, but the literal arrives in a
- * register via its own OP_load_constant, so without this the backend has to
- * assume a variable count and stage it through CL.
- */
-int const_reg_val[REG_CNT];
-bool const_reg_valid[REG_CNT];
-
-void const_track_reset(void)
-{
-    for (int i = 0; i < REG_CNT; i++)
-        const_reg_valid[i] = false;
 }
 
 /* Collapse "load slot; op result, loaded, x; store result to the same slot"
@@ -1329,7 +1934,8 @@ bool try_fold_mem_dest(ph2_ir_t *ld)
         if (reg_mirror_valid[i] && reg_mirror_slot[i] == ld->src0)
             reg_mirror_valid[i] = false;
     }
-    emit_skip = 2;
+    skip_ir_add(emit_ir_index + 1);
+    skip_ir_add(emit_ir_index + 2);
     return true;
 }
 
@@ -1385,15 +1991,79 @@ bool try_fold_alu_to_slot(ph2_ir_t *alu)
             reg_mirror_valid[i] = false;
     }
     shift_cache_kill(alu->dest);
-    emit_skip = 1;
+    skip_ir_add(emit_ir_index + 1);
     return true;
+}
+
+/* Emit "rd = rs1 * c" using something cheaper than IMUL where the multiplier
+ * allows it, and report whether it did.
+ *
+ * IMUL takes three cycles, which is the whole of a loop-carried chain like
+ * "h = h * 31 + c". A shift, an LEA, or a shift with one correction computes
+ * the same product in one or two, so a multiplier that is a power of two, one
+ * away from one, or small enough for LEA's scale is worth spelling out.
+ */
+bool emit_mul_by_const(int rd, int rs1, int c)
+{
+    int k = exact_log2(c);
+
+    if (c == 0) {
+        emit_rex(1, rd, rd); /* XOR rd, rd */
+        emit_byte(0x31);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rd)));
+        return true;
+    }
+    /* LEA computes rs1 + rs1 * s for s of 1, 2, 4 or 8 in one instruction,
+     * covering multipliers of 2, 3, 5 and 9 without touching rs1.
+     */
+    if ((c == 2 || c == 3 || c == 5 || c == 9) && reg_low3(rs1) != 4) {
+        emit_rex_sib(1, rd, rs1, rs1);
+        emit_byte(0x8D);
+        emit_mem_sib(rd, rs1, rs1, exact_log2(c - 1), 0);
+        return true;
+    }
+    /* A power of two is a shift, and one is that shift by nothing. */
+    if (k >= 0) {
+        emit_mov_reg(rd, rs1);
+        if (k) {
+            emit_shift_imm(rd, SHIFT_EXT_SHL, k);
+        }
+        return true;
+    }
+    /* One away from a power of two: shift, then correct by the original
+     * value. Two instructions where IMUL is one, but two cycles where IMUL is
+     * three -- worth it exactly when the product feeds back into its own
+     * operand, which is what an accumulator like "h = h * 31 + c" looks like
+     * once the destination has been coalesced onto the source. Elsewhere the
+     * extra instruction is not paid for.
+     */
+    if (rd == rs1) {
+        int up = exact_log2(c - 1), down = exact_log2(c + 1);
+
+        if (up > 1 || down > 1) {
+            /* R10 is outside the allocator's file, so it can hold the
+             * original value across the shift that overwrites it.
+             */
+            emit_byte(REX_W | REX_B | (rs1 >= 8 ? REX_R : 0));
+            emit_byte(0x89); /* MOV r10, rs1 */
+            emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 2));
+            emit_shift_imm(rd, SHIFT_EXT_SHL, up > 1 ? up : down);
+            emit_byte(REX_W | REX_R | (rd >= 8 ? REX_B : 0));
+            emit_byte(up > 1 ? 0x01 : 0x29); /* ADD/SUB rd, r10 */
+            emit_byte(modrm(MOD_DIRECT, 2, reg_low3(rd)));
+            return true;
+        }
+    }
+    return false;
 }
 
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
 {
-    if (emit_skip > 0) {
-        emit_skip--;
-        return;
+    for (int i = 0; i < MAX_SKIP_IR; i++) {
+        if (skip_ir_index[i] >= 0 && skip_ir_index[i] == emit_ir_index) {
+            skip_ir_index[i] = -1;
+            return;
+        }
     }
     if (try_fold_mem_dest(ph2_ir))
         return;
@@ -1456,7 +2126,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
     }
 
-
     if (!op_keeps_frame_mirrors(ph2_ir->op)) {
         frame_mirror_reset();
     } else {
@@ -1465,26 +2134,31 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             int want = load_width(ph2_ir);
             if (reg_mirror_valid[ph2_ir->dest] &&
                 reg_mirror_slot[ph2_ir->dest] == ph2_ir->src0 &&
-                reg_mirror_size[ph2_ir->dest] == want)
+                reg_mirror_size[ph2_ir->dest] == want &&
+                !reg_mirror_sext[ph2_ir->dest])
                 return; /* the register still holds this slot */
             /* Some other register may already hold it. Copying between
              * registers costs the same instruction but avoids waiting on the
              * store-to-load forwarding this slot would otherwise require.
              */
             for (int i = 0; i < REG_CNT; i++) {
-                if (i == ph2_ir->dest || !reg_mirror_valid[i] ||
+                if (!reg_mirror_valid[i] ||
                     reg_mirror_slot[i] != ph2_ir->src0 ||
                     reg_mirror_size[i] != want)
+                    continue;
+                if (i == ph2_ir->dest && !reg_mirror_sext[i])
                     continue;
                 int held = map_ir_reg(i);
                 /* If this value exists only to be stored straight back out,
                  * let the store read the register that already holds it.
+                 * Only sound when the register is bit-identical to what the
+                 * load would produce, so a narrower mirror is excluded.
                  */
                 /* Only when the consumer is the very next instruction: a
                  * later one could be skipped by another fold, and the copy
                  * would already be gone.
                  */
-                if (src0_override < 0 && emit_next_ir &&
+                if (!reg_mirror_sext[i] && src0_override < 0 && emit_next_ir &&
                     op_src0_is_reg(emit_next_ir->op) &&
                     emit_next_ir->src0 == ph2_ir->dest &&
                     emit_next_ir->src1 != ph2_ir->dest &&
@@ -1493,12 +2167,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                     src0_override_at = emit_ir_index + 1;
                     return;
                 }
-                emit_rex(1, held, rd); /* MOV rd, held */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(held), reg_low3(rd)));
+                emit_narrow_move(rd, held, want, reg_mirror_sext[i]);
                 reg_mirror_valid[ph2_ir->dest] = true;
                 reg_mirror_slot[ph2_ir->dest] = ph2_ir->src0;
                 reg_mirror_size[ph2_ir->dest] = want;
+                reg_mirror_sext[ph2_ir->dest] = false;
                 const_reg_valid[ph2_ir->dest] = false;
                 return;
             }
@@ -1512,7 +2185,23 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             reg_mirror_valid[ph2_ir->dest] = true;
             reg_mirror_slot[ph2_ir->dest] = ph2_ir->src0;
             reg_mirror_size[ph2_ir->dest] = load_width(ph2_ir);
+            reg_mirror_sext[ph2_ir->dest] = false;
         } else if (ph2_ir->op == OP_store) {
+            /* Storing a register into the slot it already mirrors writes the
+             * bytes that are there. Coalescing a phi with its operand makes
+             * this common: the value's own write-back and the phi's copy
+             * become the same store.
+             */
+            if (ph2_ir->src0 >= 0 && ph2_ir->src0 < REG_CNT &&
+                reg_mirror_valid[ph2_ir->src0] &&
+                reg_mirror_slot[ph2_ir->src0] == ph2_ir->src1) {
+                int keep = ph2_ir->size_bytes;
+                if (ph2_ir->is_pointer && keep != PTR_SIZE)
+                    keep = PTR_SIZE;
+                if (reg_mirror_size[ph2_ir->src0] == keep)
+                    return;
+            }
+
             /* The slot takes a new value, so any register mirroring it is now
              * stale. */
             for (int i = 0; i < REG_CNT; i++) {
@@ -1520,16 +2209,22 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                     reg_mirror_valid[i] = false;
             }
 
-            /* A full 64-bit store leaves the slot holding exactly the source
-             * register, so that register now mirrors it. A narrower store does
-             * not: the slot keeps fewer bits than the register has, and a later
-             * load would sign-extend them.
+            /* The slot now holds the source register's low bytes, so that
+             * register mirrors it. A full-width store leaves the two
+             * bit-identical; a narrower one does not, and a later load of the
+             * slot sign-extends what was written -- which the sext flag
+             * records, so the reload becomes a MOVSX rather than a copy.
              */
-            if (store_width(ph2_ir) == 8 && ph2_ir->src0 >= 0 &&
-                ph2_ir->src0 < REG_CNT) {
-                reg_mirror_valid[ph2_ir->src0] = true;
-                reg_mirror_slot[ph2_ir->src0] = ph2_ir->src1;
-                reg_mirror_size[ph2_ir->src0] = 8;
+            if (ph2_ir->src0 >= 0 && ph2_ir->src0 < REG_CNT) {
+                int eff = ph2_ir->size_bytes;
+                if (ph2_ir->is_pointer && eff != PTR_SIZE)
+                    eff = PTR_SIZE;
+                if (eff == 1 || eff == 2 || eff == 4 || eff == 8) {
+                    reg_mirror_valid[ph2_ir->src0] = true;
+                    reg_mirror_slot[ph2_ir->src0] = ph2_ir->src1;
+                    reg_mirror_size[ph2_ir->src0] = eff;
+                    reg_mirror_sext[ph2_ir->src0] = eff < 8;
+                }
             }
         }
     }
@@ -1545,6 +2240,30 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_next_ir->src0 == ph2_ir->dest) {
         emit_cmp(rs1, rs2);
         fused_cc = fuse_cc;
+        fused_cc_pending = true;
+        return;
+    }
+
+    /* "if (x & mask)" needs no destination register: TEST leaves exactly the
+     * flags AND would, and the branch reads nothing else. This drops the AND,
+     * the MOV that staged its destination, and the TEST the branch would
+     * otherwise emit -- three instructions down to one. Only when the masked
+     * value is dead afterwards, since TEST does not write it.
+     */
+    if (ph2_ir->op == OP_bit_and && emit_next_ir &&
+        emit_next_ir->op == OP_branch && emit_next_ir->src0 == ph2_ir->dest &&
+        emit_ir_index >= 0 && reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
+        if (src1_const_known) {
+            emit_rex(1, 0, rs1);
+            emit_byte(0xF7); /* TEST rs1, imm32 */
+            emit_byte(modrm(MOD_DIRECT, 0, reg_low3(rs1)));
+            emit_dword(src1_const);
+        } else {
+            emit_rex(1, rs2, rs1);
+            emit_byte(0x85); /* TEST rs1, rs2 */
+            emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), reg_low3(rs1)));
+        }
+        fused_cc = 0x85; /* JNZ */
         fused_cc_pending = true;
         return;
     }
@@ -1606,14 +2325,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             }
             if (rd != rs1 && emit_lea_disp(rd, rs1, src1_const))
                 return;
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd); /* MOV rd, rs1 */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
+            emit_mov_reg(rd, rs1);
             emit_alu_imm(rd, 0, src1_const); /* ADD rd, imm */
             return;
         }
+        if (try_fold_sib_add(ph2_ir, rs1, rs2))
+            return;
+
         /* x64 only has 2-operand ADD, so for rd = rs1 + rs2: MOV rd, rs1 ADD
          * rd, rs2
          *
@@ -1656,11 +2374,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         if (src1_const_known) {
             if (rd != rs1 && emit_lea_disp(rd, rs1, -src1_const))
                 return;
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd); /* MOV rd, rs1 */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
+            emit_mov_reg(rd, rs1);
             emit_alu_imm(rd, 5, src1_const); /* SUB rd, imm */
             return;
         }
@@ -1671,11 +2385,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * is read. Every other case subtracts in place.
          */
         if (rd != rs2) {
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd); /* MOV rd, rs1 */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
+            emit_mov_reg(rd, rs1);
             emit_rex(1, rs2, rd); /* SUB rd, rs2 */
             emit_byte(0x29);
             emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), reg_low3(rd)));
@@ -1708,24 +2418,38 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * are never multiplied, and pointer scaling (index * element size) is
          * far inside 32 bits, so narrowing here is safe.
          */
-        if (rd == rs2 && rd != rs1) {
+        if (src1_const_known && emit_mul_by_const(rd, rs1, src1_const)) {
+            /* nothing further: the product is already in rd */
+        } else if (src1_const_known) {
+            /* The three-operand IMUL takes the multiplier as an immediate and
+             * writes a different register, so neither the literal nor the MOV
+             * that would stage it needs an instruction.
+             */
+            emit_rex(1, rd, rs1);
+            if (src1_const >= -128 && src1_const <= 127) {
+                emit_byte(0x6B); /* IMUL rd, rs1, imm8 */
+                emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
+                emit_byte(src1_const);
+            } else {
+                emit_byte(0x69); /* IMUL rd, rs1, imm32 */
+                emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
+                emit_dword(src1_const);
+            }
+        } else if (rd == rs2 && rd != rs1) {
             /* IMUL is commutative, so multiply by rs1 in place. */
             emit_rex(1, rd, rs1);
             emit_byte(0x0F);
             emit_byte(0xAF);
             emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
         } else {
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd);
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
+            emit_mov_reg(rd, rs1);
             emit_rex(1, rd, rs2);
             emit_byte(0x0F);
             emit_byte(0xAF);
             emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs2)));
         }
-        wrap_to_int(rd, ph2_ir->is_pointer);
+        if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+            wrap_to_int(rd, ph2_ir->is_pointer);
         return;
     }
     case OP_div:
@@ -1777,11 +2501,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * instruction that materialised it dead.
          */
         if (src1_const_known) {
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd); /* MOV rd, rs1 */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
+            emit_mov_reg(rd, rs1);
             emit_alu_imm(rd, 4, src1_const); /* AND rd, imm */
             return;
         }
@@ -1821,11 +2541,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * instruction that materialised it dead.
          */
         if (src1_const_known) {
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd); /* MOV rd, rs1 */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
+            emit_mov_reg(rd, rs1);
             emit_alu_imm(rd, 1, src1_const); /* OR rd, imm */
             return;
         }
@@ -1865,11 +2581,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * instruction that materialised it dead.
          */
         if (src1_const_known) {
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd); /* MOV rd, rs1 */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
+            emit_mov_reg(rd, rs1);
             emit_alu_imm(rd, 6, src1_const); /* XOR rd, imm */
             return;
         }
@@ -1908,11 +2620,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* rd = NOT rs1. Copy first: rd and rs1 differ whenever the operand is
          * not already in the destination register.
          */
-        if (rd != rs1) {
-            emit_rex(1, rs1, rd);
-            emit_byte(0x89);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-        }
+        emit_mov_reg(rd, rs1);
         int rex16 = REX_W;
         if (rd >= 8)
             rex16 = rex16 | REX_B;
@@ -1925,11 +2633,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* rd = NEG rs1. Copy first: rd and rs1 differ whenever the operand is
          * not already in the destination register.
          */
-        if (rd != rs1) {
-            emit_rex(1, rs1, rd);
-            emit_byte(0x89);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-        }
+        emit_mov_reg(rd, rs1);
         int rex18 = REX_W;
         if (rd >= 8)
             rex18 = rex18 | REX_B;
@@ -1953,9 +2657,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                     shift_imm[i] != src1_const || i == dest_ir)
                     continue;
                 int held = map_ir_reg(i);
-                emit_rex(1, held, rd); /* MOV rd, held */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(held), reg_low3(rd)));
+                emit_mov_reg(rd, held);
                 if (dest_ir >= 0 && dest_ir < REG_CNT) {
                     shift_valid[dest_ir] = true;
                     shift_src[dest_ir] = want_src;
@@ -1963,6 +2665,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                 }
                 return;
             }
+            /* "index << k; add base; read/write" is one x86 addressing mode.
+             * Folding it away removes both the shift and the addition, which
+             * is every array subscript in the program.
+             */
+            if (try_fold_sib(ph2_ir, rd, rs1, src1_const))
+                return;
+
             /* Narrowing back to int matters when the result is a value, but a
              * scaled index feeding pointer arithmetic is only ever added to an
              * address. Overflowing it is already undefined, and gcc likewise
@@ -1970,16 +2679,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
              */
             bool addr_only =
                 reg_feeds_address_only(emit_ir_index + 1, ph2_ir->dest);
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd); /* MOV rd, rs1 */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
-            emit_rex(1, -1, rd); /* SHL rd, imm8 */
-            emit_byte(0xC1);
-            emit_byte(modrm(MOD_DIRECT, 4, reg_low3(rd)));
-            emit_byte(src1_const);
-            if (!addr_only)
+            emit_mov_reg(rd, rs1);
+            emit_shift_imm(rd, SHIFT_EXT_SHL, src1_const);
+            if (!addr_only &&
+                !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
                 wrap_to_int(rd, ph2_ir->is_pointer);
             /* Recording needs the shift source to still be intact: if the
              * result landed in it, the pairing no longer describes anything.
@@ -2036,16 +2739,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * the save/restore around it: SAR r64, imm8 is one instruction.
          */
         if (src1_const_known && src1_const >= 0 && src1_const < 32) {
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd); /* MOV rd, rs1 */
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
-            emit_rex(1, -1, rd); /* SAR rd, imm8 */
-            emit_byte(0xC1);
-            emit_byte(modrm(MOD_DIRECT, 7, reg_low3(rd)));
-            emit_byte(src1_const);
-            wrap_to_int(rd, ph2_ir->is_pointer);
+            emit_mov_reg(rd, rs1);
+            emit_shift_imm(rd, SHIFT_EXT_SAR, src1_const);
+            if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+                wrap_to_int(rd, ph2_ir->is_pointer);
             return;
         }
 
@@ -2257,6 +2954,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_jump: {
         if (bb_falls_through(ph2_ir->next_bb))
             return;
+        /* Everything below either jumps away or emits a rotated copy of the
+         * target block, whose own control flow this walk does not model. Treat
+         * the next block as unreachable from here either way.
+         */
+        emit_fell_through = false;
         /* Rotate the loop. Jumping back to a small block that tests the
          * condition and branches costs two taken branches per iteration, where
          * a bottom-tested loop costs one. Emitting that test here instead makes
@@ -2305,20 +3007,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         if (bb_falls_through(ph2_ir->next_bb))
             return;
 
-        /* JMP rel32 */
+        /* JMP rel32, through the same target resolution the conditional
+         * edges use, so a jump landing on nothing but another jump goes
+         * straight to where that one ends up.
+         */
         emit_byte(0xE9);
-
-        if (ph2_ir->next_bb && ph2_ir->next_bb->elf_offset > 0 &&
-            ph2_ir->next_bb->elf_offset < elf_code->size) {
-            /* Backward jump - BB already emitted */
-            int displacement =
-                ph2_ir->next_bb->elf_offset - (elf_code->size + 4);
-            emit_dword(displacement);
-        } else {
-            /* Forward jump or unknown - add to patch list */
-            add_forward_ref(ph2_ir->next_bb);
-            emit_dword(0); /* Placeholder - will be patched */
-        }
+        emit_bb_rel32(ph2_ir->next_bb);
         return;
     }
 
@@ -2332,6 +3026,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             if (!bb_falls_through(ph2_ir->else_bb)) {
                 emit_byte(0xE9); /* JMP rel32 -> else_bb */
                 emit_bb_rel32(ph2_ir->else_bb);
+                emit_fell_through = false;
             }
             return;
         }
@@ -2358,6 +3053,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         if (!bb_falls_through(ph2_ir->else_bb)) {
             emit_byte(0xE9); /* JMP rel32 -> else_bb */
             emit_bb_rel32(ph2_ir->else_bb);
+            emit_fell_through = false;
         }
         return;
     }
@@ -2417,10 +3113,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
 
     case OP_return:
+        emit_fell_through = false;
         /* If there's a return value in src0, move it to RAX */
         if (ph2_ir->src0 >= 0) {
-            /* src0 needs to be mapped through reg_map like other registers */
-            int ret_reg = map_ir_reg(ph2_ir->src0);
+            /* rs1 already names the physical register, including the case
+             * where a folded load redirected this instruction to read the
+             * register that still holds the value. Re-deriving it from src0
+             * here would ignore that redirection and return a stale register.
+             */
+            int ret_reg = rs1;
             /* Debug output MOV rax, ret_reg - only if not already in RAX */
             if (ret_reg != 0) { /* 0 is RAX, no move needed */
                 /* MOV RAX, ret_reg.
@@ -2609,19 +3310,24 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             int rsize = ph2_ir->src1;
             int mem_disp = 0;
             bool have_disp = false;
+            int sib_base, sib_index, sib_scale, sib_disp;
+            bool sib = sib_take(&sib_base, &sib_index, &sib_scale, &sib_disp);
             if (addr_fold) {
                 rs1 = addr_fold_base;
                 mem_disp = addr_fold_disp;
                 have_disp = true;
                 addr_fold = false;
             }
+            if (sib)
+                emit_rex_sib(1, rd, sib_base, sib_index);
+            else
+                emit_rex(1, rd, rs1);
             if (rsize == 1) {
                 /* MOVSX r64, BYTE PTR [rs1]: char is signed here, as it is for
                  * every other narrow type, and RISC-V already uses lb rather
                  * than lbu. Zero-extending made a negative char read back
                  * through a pointer as a large positive value.
                  */
-                emit_rex(1, rd, rs1);
                 emit_byte(0x0F);
                 emit_byte(0xBE);
             } else if (rsize == 2) {
@@ -2630,21 +3336,21 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                  * here; zero-extending made a negative short read back as a
                  * large positive value.
                  */
-                emit_rex(1, rd, rs1);
                 emit_byte(0x0F);
                 emit_byte(0xBF);
             } else if (rsize == 4) {
                 /* MOVSXD r64, DWORD PTR [rs1]: int is signed, so the upper half
                  * must be a sign extension, not zero.
                  */
-                emit_rex(1, rd, rs1);
                 emit_byte(0x63);
             } else {
                 /* MOV r64, [rs1] */
-                emit_rex(1, rd, rs1);
                 emit_byte(0x8B);
             }
-            emit_mem_base(rd, rs1, mem_disp, have_disp);
+            if (sib)
+                emit_mem_sib(rd, sib_base, sib_index, sib_scale, sib_disp);
+            else
+                emit_mem_base(rd, rs1, mem_disp, have_disp);
         }
         return;
 
@@ -2655,6 +3361,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             int val_reg = rs2;
             int wr_disp = 0;
             bool wr_have_disp = false;
+            int wsib_base, wsib_index, wsib_scale, wsib_disp;
+            bool wsib =
+                sib_take(&wsib_base, &wsib_index, &wsib_scale, &wsib_disp);
             if (addr_fold) {
                 addr_reg = addr_fold_base;
                 wr_disp = addr_fold_disp;
@@ -2681,21 +3390,31 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                 /* MOV r/m8, r8. A REX prefix is mandatory once the source is
                  * RSP/RBP/RSI/RDI, otherwise the encoding names AH/CH/DH/BH.
                  */
-                if (val_reg >= 4 || addr_reg >= 8)
+                if (wsib)
+                    emit_rex_sib(0, val_reg, wsib_base, wsib_index);
+                else if (val_reg >= 4 || addr_reg >= 8)
                     emit_byte(REX_BASE | (val_reg >= 8 ? REX_R : 0) |
                               (addr_reg >= 8 ? REX_B : 0));
                 emit_byte(0x88);
             } else if (wsize == 2) {
                 emit_byte(0x66); /* operand-size override */
-                if (val_reg >= 8 || addr_reg >= 8)
+                if (wsib)
+                    emit_rex_sib(0, val_reg, wsib_base, wsib_index);
+                else if (val_reg >= 8 || addr_reg >= 8)
                     emit_byte(REX_BASE | (val_reg >= 8 ? REX_R : 0) |
                               (addr_reg >= 8 ? REX_B : 0));
                 emit_byte(0x89);
             } else if (wsize == 4) {
-                if (val_reg >= 8 || addr_reg >= 8)
+                if (wsib) {
+                    if (val_reg >= 8 || wsib_base >= 8 || wsib_index >= 8)
+                        emit_rex_sib(0, val_reg, wsib_base, wsib_index);
+                } else if (val_reg >= 8 || addr_reg >= 8)
                     emit_byte(REX_BASE | (val_reg >= 8 ? REX_R : 0) |
                               (addr_reg >= 8 ? REX_B : 0));
                 emit_byte(0x89); /* MOV r/m32, r32 */
+            } else if (wsib) {
+                emit_rex_sib(1, val_reg, wsib_base, wsib_index);
+                emit_byte(0x89); /* MOV r/m64, r64 */
             } else {
                 /* Built with statements rather than a conditional expression:
                  * folding the register tests into the argument of emit_byte
@@ -2706,7 +3425,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                 emit_rex(1, val_reg, addr_reg);
                 emit_byte(0x89); /* MOV r/m64, r64 */
             }
-            emit_mem_base(val_reg, addr_reg, wr_disp, wr_have_disp);
+            if (wsib)
+                emit_mem_sib(val_reg, wsib_base, wsib_index, wsib_scale,
+                             wsib_disp);
+            else
+                emit_mem_base(val_reg, addr_reg, wr_disp, wr_have_disp);
         }
         return;
 
@@ -2838,7 +3561,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* Use R15-relative addressing for globals (like ARM uses R12) MOV [R15
          * + offset], src_reg
          */
-        int src_reg = map_ir_reg(ph2_ir->src0);
+        int src_reg = rs1; /* honours a redirected source, as OP_store does */
 
         /* Pointers must always be stored as 64-bit */
         int eff_size = ph2_ir->size_bytes;
@@ -3031,39 +3754,18 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          */
         int src_size = (ph2_ir->src1 >> 16) & 0xFFFF;
         int dst_size = ph2_ir->src1 & 0xFFFF;
+        int width = src_size;
 
-        if (dst_size == PTR_SIZE && PTR_SIZE == 8) {
-            /* Widening to a pointer. The register already holds a complete
-             * 64-bit address, so sign-extending it from 32 bits would discard
-             * the upper half and destroy every stack address. Move instead.
-             */
-            if (rd != rs1) {
-                emit_rex(1, rs1, rd);
-                emit_byte(0x89);
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            }
-        } else if (src_size == 1) {
-            /* MOVSX r64, r8 */
-            emit_rex(1, rd, rs1);
-            emit_byte(0x0F);
-            emit_byte(0xBE);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
-        } else if (src_size == 2) {
-            /* MOVSX r64, r16 */
-            emit_rex(1, rd, rs1);
-            emit_byte(0x0F);
-            emit_byte(0xBF);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
-        } else if (src_size == 4) {
-            /* MOVSXD r64, r32 */
-            emit_rex(1, rd, rs1);
-            emit_byte(0x63);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
-        } else if (rd != rs1) {
-            emit_rex(1, rs1, rd);
-            emit_byte(0x89);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-        }
+        /* Widening to a pointer. The register already holds a complete 64-bit
+         * address, so sign-extending it from 32 bits would discard the upper
+         * half and destroy every stack address. Copy it instead, which is
+         * also what a source that is already full width wants.
+         */
+        if (dst_size == PTR_SIZE && PTR_SIZE == 8)
+            width = 8;
+        else if (width != 1 && width != 2 && width != 4)
+            width = 8;
+        emit_narrow_move(rd, rs1, width, true);
     }
         return;
 
@@ -3084,15 +3786,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         {
             func_t *func = find_func(ph2_ir->func_name);
             if (func && func->bbs) {
-                /* Emit a short NOP sled before recording entry to improve
-                 * alignment and reduce chances of mid-instruction landing.
-                 */
-                if (!strcmp(func->return_def.var_name, "main")) {
-                    emit_byte(0x90); /* NOP */
-                    emit_byte(0x90); /* NOP */
-                    emit_byte(0x90); /* NOP */
-                    emit_byte(0x90); /* NOP */
-                }
                 func->bbs->elf_offset = elf_code->size;
                 /* Track current function and its first basic block */
                 current_func = func;
@@ -3145,19 +3838,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                 emit_byte(modrm(MOD_DIRECT, 5, rsp_reg3));
                 emit_dword(aligned_size);
             }
-        }
-        /* If this is main, record the exact entry after prologue emission */
-        if (!strcmp(ph2_ir->func_name, "main")) {
-            /* Post-prologue NOP sled to stabilize entry */
-            emit_byte(0x90);
-            emit_byte(0x90);
-            emit_byte(0x90);
-            emit_byte(0x90);
-            emit_byte(0x90);
-            emit_byte(0x90);
-            emit_byte(0x90);
-            emit_byte(0x90);
-            /* Debug code removed - was outputting 'm' to stdout */
         }
         return;
 
@@ -3365,6 +4045,8 @@ void code_generate(void)
     src0_override_at = -1;
     cmp_mem_slot = -1;
     addr_fold = false;
+    addr_sib = false;
+    skip_ir_reset();
     /* Where the dynamic-mode main wrapper's operands sit, filled in once the
      * final layout fixes the global base and main's offset.
      */
@@ -3375,15 +4057,12 @@ void code_generate(void)
         fprintf(stderr, "[x64] codegen begin\n");
     forward_ref_count = 0;
 
-
-
     /* Don't clear BB offsets from cfg_flatten - they are calculated correctly.
      * The emission process will update them only when necessary during actual
      * code generation. Don't set elf_data_start here - elf_offset is just an
      * estimate from calc_ir_size elf_data_start will be set correctly after all
      * code is emitted elf_data_start = elf_code_start + elf_offset;
      */
-
 
     /* Generate code for the global function */
     ph2_ir_t *ph2_ir;
@@ -3487,13 +4166,16 @@ void code_generate(void)
     /* DEBUG: mark leaving __syscall - DISABLED due to stack corruption RET */
     emit_byte(0xC3);
 
-
     /* Emit all flattened IR - this includes all functions We need to track and
      * update basic block offsets as we emit them
      */
     /* Track current function and basic block during emission */
     func_t *emit_func = NULL;
     basic_block_t *emit_bb = NULL;
+    /* The last block the walk emitted. Unlike emit_bb it survives the branch
+     * that ends a block, so the block falling out of that branch can tell that
+     * it is the one being fallen into. */
+    basic_block_t *prev_emitted_bb = NULL;
 
     /* Keep track of all BBs we encounter to set their offsets */
     basic_block_t *pending_bbs[MAX_PENDING_BBS];
@@ -3512,6 +4194,7 @@ void code_generate(void)
             instruction_to_bb[instr_idx] = NULL;
         instr_idx++;
 
+        int blocks_base = instr_idx;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             bb->ph2_base = bb->ph2_ir_list.head ? instr_idx : -1;
 
@@ -3521,6 +4204,53 @@ void code_generate(void)
                 if (instr_idx < MAX_IR_INSTR)
                     instruction_to_bb[instr_idx] = bb;
                 instr_idx++;
+            }
+        }
+
+        /* Record which blocks an edge actually jumps to, so the rest are known
+         * to be reachable only by falling out of the block before them.
+         *
+         * A conditional branch's taken side is always a jump; its other side
+         * is a jump only when the walk does not place it next. An
+         * unconditional jump names its target -- and when that target is a
+         * loop header the walk rotates, the copy emitted inline repeats the
+         * header's branch, so both of the header's successors are jumped to as
+         * well.
+         */
+        int mark_idx = blocks_base;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
+                 insn = insn->next) {
+                basic_block_t *t;
+
+                mark_idx++;
+                if (insn->op == OP_branch) {
+                    t = bb_code_target(insn->then_bb);
+                    if (t)
+                        t->is_branch_target = true;
+                    t = bb_code_target(insn->else_bb);
+                    if (t && t->ph2_base != mark_idx)
+                        t->is_branch_target = true;
+                    continue;
+                }
+                if (insn->op != OP_jump)
+                    continue;
+                t = bb_code_target(insn->next_bb);
+                if (!t)
+                    continue;
+                if (t->ph2_base != mark_idx)
+                    t->is_branch_target = true;
+                for (ph2_ir_t *tail = t->ph2_ir_list.head; tail;
+                     tail = tail->next) {
+                    if (tail->next || tail->op != OP_branch)
+                        continue;
+                    basic_block_t *d = bb_code_target(tail->then_bb);
+                    if (d)
+                        d->is_branch_target = true;
+                    d = bb_code_target(tail->else_bb);
+                    if (d)
+                        d->is_branch_target = true;
+                }
             }
         }
     }
@@ -3569,10 +4299,8 @@ void code_generate(void)
                  * an unrelated change in code size upstream can triple the
                  * branch misses of a tight loop.
                  */
-                if (bb_is_loop_header(current_instr_bb)) {
-                    while (elf_code->size & 15)
-                        emit_byte(0x90); /* NOP */
-                }
+                if (bb_is_loop_header(current_instr_bb))
+                    emit_nop_bytes((16 - (elf_code->size & 15)) & 15);
 
                 /* Entering a new basic block: record where it starts. A block
                  * can be reached from several predecessors, so nothing learned
@@ -3583,24 +4311,28 @@ void code_generate(void)
                 /* What the registers hold survives only when control can reach
                  * this block exactly one way: out of the block just emitted.
                  * Any join point has to start from nothing.
+                 *
+                 * The block just emitted is tracked separately from emit_bb,
+                 * which is cleared after a branch. The block a conditional
+                 * branch falls into is still reached only by falling out of
+                 * that branch's block, so it keeps what the registers hold;
+                 * the taken side is a jump target and does not.
                  */
-                /* A block with several predecessors has no sole pred, and
-                 * emit_bb is NULL after a branch or jump -- so comparing the
-                 * two would find NULL == NULL and skip the reset at exactly
-                 * the join points that need it.
-                 */
-                if (!emit_bb || bb_sole_pred(current_instr_bb) != emit_bb) {
+                if (!emit_fell_through || current_instr_bb->is_branch_target ||
+                    bb_sole_pred(current_instr_bb) != prev_emitted_bb) {
                     frame_mirror_reset();
                     const_track_reset();
                     shift_cache_reset();
                 }
                 emit_bb = current_instr_bb;
+                prev_emitted_bb = current_instr_bb;
                 fused_cc_pending = false;
-                emit_skip = 0;
                 src0_override = -1;
                 src0_override_at = -1;
                 cmp_mem_slot = -1;
                 addr_fold = false;
+                addr_sib = false;
+                skip_ir_reset();
             }
         }
 
@@ -3670,6 +4402,7 @@ void code_generate(void)
         }
         if (x64_debug)
             fprintf(stderr, "[x64] emit op=%d\n", ph2_ir->op);
+        emit_fell_through = true;
         emit_ph2_ir(ph2_ir);
         if (x64_debug)
             fprintf(stderr, "[x64] done op=%d\n", ph2_ir->op);
@@ -3708,6 +4441,14 @@ void code_generate(void)
                 fprintf(stderr, "[x64] late-emit unreached BB at 0x%x\n",
                         elf_code->size);
             bb->elf_offset = elf_code->size;
+
+            /* Nothing reaches this block by falling into it -- it is placed
+             * here only because the walk never got to it -- so it starts from
+             * nothing.
+             */
+            frame_mirror_reset();
+            const_track_reset();
+            shift_cache_reset();
 
             /* Emit all instructions in this BB */
             folds_off = true;
