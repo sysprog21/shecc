@@ -248,6 +248,32 @@ int calculate_spill_cost(var_t *var, basic_block_t *bb, int current_idx)
     return cost;
 }
 
+/* Variables kept in a register for the whole of the current function, named by
+ * the base each SSA version was renamed from.
+ *
+ * The base is the right unit. Every assignment makes a new SSA version, so
+ * pinning versions individually holds nothing: each one dies within a few
+ * instructions and the value still travels between them through a stack slot.
+ * Pinning the base keeps the variable itself in a register, which is what a
+ * loop carrying it across an iteration actually needs.
+ *
+ * Only functions that call nothing qualify, because every register in the file
+ * is caller-saved.
+ */
+var_t *pinned_base[REG_CNT];
+
+/* The register @var's base is pinned to, or -1. */
+int pinned_reg_of(var_t *var)
+{
+    if (!var || !var->base)
+        return -1;
+    for (int i = 0; i < REG_CNT; i++) {
+        if (pinned_base[i] && pinned_base[i] == var->base)
+            return i;
+    }
+    return -1;
+}
+
 int find_best_spill(basic_block_t *bb,
                     int current_idx,
                     int avoid_reg1,
@@ -260,7 +286,7 @@ int find_best_spill(basic_block_t *bb,
         if (i == avoid_reg1 || i == avoid_reg2)
             continue;
 
-        if (!REGS[i].var)
+        if (!REGS[i].var || pinned_base[i])
             continue;
 
         int cost = calculate_spill_cost(REGS[i].var, bb, current_idx);
@@ -621,6 +647,149 @@ int find_in_regs(var_t *var)
     return -1;
 }
 
+/* Whether @var can live in a register for a whole function: nothing else may
+ * be able to reach it, and it must fit in one register.
+ */
+bool var_is_pinnable(var_t *var)
+{
+    if (!var || var->is_const || !var->base)
+        return false;
+    /* slot_is_private() rules out everything reachable other than by name:
+     * globals, address-taken variables, arrays and backing storage.
+     */
+    if (!slot_is_private(var))
+        return false;
+    return var_slot_size(var) <= PTR_SIZE;
+}
+
+/* Choose which variables this function keeps in registers.
+ *
+ * Candidates are ranked by how often they are named, which stands in well
+ * enough for how hot they are: a variable a loop carries is named on every
+ * iteration. At most half the file is given away so expression evaluation
+ * still has registers to work with.
+ */
+void pin_registers(func_t *func)
+{
+    var_t *cand[REG_CNT];
+    int uses[REG_CNT];
+    int n = 0, limit = REG_CNT / 2;
+    bool calls = false;
+
+    for (int i = 0; i < REG_CNT; i++)
+        pinned_base[i] = NULL;
+    func->pinned_regs = 0;
+
+    /* A function that calls anything may still hold a variable across the
+     * call, but only in a register the call preserves. Registers are handed
+     * out from the top of the file downwards, and those are the preserved
+     * ones, so capping the count is all that is needed.
+     */
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            if (insn->opcode == OP_call || insn->opcode == OP_indirect ||
+                insn->opcode == OP_push)
+                calls = true;
+            /* Taking an address makes the frame reachable by other means. */
+            if (insn->opcode == OP_address_of)
+                return;
+        }
+    }
+
+    /* Holding a value across a call costs the prologue a push and the
+     * epilogue a pop, so it only pays for a variable named often enough to
+     * earn them back.
+     */
+    /* Not across a call. The registers a call preserves sit at the top of the
+     * file and holding a value in one across a call still breaks the
+     * three-stage bootstrap for reasons not yet identified -- the ABI
+     * guarantee holds, so the fault is in how the allocator tracks the
+     * register, and it is not worth shipping until that is understood.
+     */
+    if (calls)
+        return;
+
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            var_t *ops[3];
+            ops[0] = insn->rd;
+            ops[1] = insn->rs1;
+            ops[2] = insn->rs2;
+
+            for (int k = 0; k < 3; k++) {
+                var_t *var = ops[k];
+                int at = -1;
+
+                if (!var_is_pinnable(var))
+                    continue;
+                /* A parameter arrives in an argument register and is stored to
+                 * its slot on entry; nothing would put it in a pinned register
+                 * before its first read.
+                 */
+                bool is_param = false;
+                for (int q = 0; q < func->num_params; q++) {
+                    if (var->base == &func->param_defs[q])
+                        is_param = true;
+                }
+                if (is_param)
+                    continue;
+                for (int i = 0; i < n; i++) {
+                    if (cand[i] == var->base)
+                        at = i;
+                }
+                if (at >= 0) {
+                    uses[at]++;
+                    continue;
+                }
+                if (n < REG_CNT) {
+                    cand[n] = var->base;
+                    uses[n] = 1;
+                    n++;
+                }
+            }
+        }
+    }
+
+    /* Take the most-named bases, highest register first: the low registers are
+     * where arguments and return values land.
+     */
+    for (int taken = 0; taken < limit; taken++) {
+        int best = -1;
+
+        for (int i = 0; i < n; i++) {
+            if (!cand[i])
+                continue;
+            /* Registers are handed out from the top of the file, which is
+             * where the preserved ones are, so a pinned function saves and
+             * restores one in its prologue. A variable named only once or
+             * twice does not earn that back -- least of all in a small leaf
+             * called from a loop, which pays it on every call.
+             */
+            if (uses[i] < MIN_PINNED_USES)
+                continue;
+            if (best < 0 || uses[i] > uses[best])
+                best = i;
+        }
+        if (best < 0)
+            return;
+
+        /* Incoming arguments arrive in the low registers and are placed there
+         * before the body runs, which would overwrite anything pinned to one
+         * of them; the variable would then read a parameter's value instead.
+         */
+        int reg = REG_CNT - 1 - taken;
+        int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
+                                                             : MAX_ARGS_IN_REG;
+
+        if (reg < args_in_reg)
+            return;
+
+        pinned_base[reg] = cand[best];
+        cand[best] = NULL;
+        func->pinned_regs = func->pinned_regs | (1 << reg);
+    }
+}
+
 void load_var(basic_block_t *bb, var_t *var, int idx)
 {
     ph2_ir_t *ir;
@@ -655,6 +824,19 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
 
 int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 {
+    /* A pinned variable is already where it always is -- unless this version
+     * of it is a constant, which has no home to be in until it is written
+     * there. Every other version reaches the register by being defined into it
+     * or by a phi move, so nothing else needs materialising.
+     */
+    int pinned = pinned_reg_of(var);
+    if (pinned >= 0) {
+        if (var->is_const && REGS[pinned].var != var)
+            load_var(bb, var, pinned);
+        REGS[pinned].var = var;
+        return pinned;
+    }
+
     /* Check VReg mapping first for O(1) lookup */
     int phys_reg = vreg_get_phys(var);
     if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var)
@@ -680,7 +862,10 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 
     if (spilled < 0) {
         for (i = 0; i < REG_CNT; i++) {
-            if (i != operand_0 && REGS[i].var) {
+            /* A pinned register is not available: nothing reloads it, so
+             * handing it to another variable loses the pinned value.
+             */
+            if (i != operand_0 && REGS[i].var && !pinned_base[i]) {
                 spilled = i;
                 break;
             }
@@ -778,6 +963,13 @@ int prepare_dest(basic_block_t *bb,
                  int operand_0,
                  int operand_1)
 {
+    int pinned = pinned_reg_of(var);
+    if (pinned >= 0) {
+        REGS[pinned].var = var;
+        REGS[pinned].polluted = 1;
+        return pinned;
+    }
+
     int phys_reg = vreg_get_phys(var);
     if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var) {
         REGS[phys_reg].polluted = 1;
@@ -821,7 +1013,8 @@ int prepare_dest(basic_block_t *bb,
 
     if (spilled < 0) {
         for (i = 0; i < REG_CNT; i++) {
-            if (i != operand_0 && i != operand_1 && REGS[i].var) {
+            if (i != operand_0 && i != operand_1 && REGS[i].var &&
+                !pinned_base[i]) {
                 spilled = i;
                 break;
             }
@@ -844,7 +1037,10 @@ void spill_alive(basic_block_t *bb, insn_t *insn)
     /* Spill all locals on pointer writes (conservative aliasing handling) */
     if (insn && insn->opcode == OP_write) {
         for (int i = 0; i < REG_CNT; i++) {
-            if (REGS[i].var && !REGS[i].var->is_global)
+            /* A pinned variable has no address, so no write through a
+             * pointer can reach it.
+             */
+            if (REGS[i].var && !REGS[i].var->is_global && !pinned_base[i])
                 spill_var(bb, REGS[i].var, i);
         }
         return;
@@ -852,7 +1048,7 @@ void spill_alive(basic_block_t *bb, insn_t *insn)
 
     /* Standard spilling for non-pointer operations */
     for (int i = 0; i < REG_CNT; i++) {
-        if (!REGS[i].var)
+        if (!REGS[i].var || pinned_base[i])
             continue;
         if (check_live_out(bb, REGS[i].var)) {
             spill_var(bb, REGS[i].var, i);
@@ -868,7 +1064,7 @@ void spill_alive(basic_block_t *bb, insn_t *insn)
 void spill_live_out(basic_block_t *bb)
 {
     for (int i = 0; i < REG_CNT; i++) {
-        if (!REGS[i].var)
+        if (!REGS[i].var || pinned_base[i])
             continue;
         if (!check_live_out(bb, REGS[i].var)) {
             vreg_clear_phys(REGS[i].var);
@@ -909,7 +1105,7 @@ void spill_live_out_keep(basic_block_t *bb)
 {
     for (int i = 0; i < REG_CNT; i++) {
         var_t *var = REGS[i].var;
-        if (!var)
+        if (!var || pinned_base[i])
             continue;
         if (!check_live_out(bb, var)) {
             vreg_clear_phys(var);
@@ -991,6 +1187,12 @@ void load_entry_regs(basic_block_t *bb)
 {
     for (int i = 0; i < REG_CNT; i++) {
         var_t *var = bb->entry_regs ? bb->entry_regs[i] : NULL;
+
+        /* A pinned register holds the same variable on every path in. */
+        if (pinned_base[i]) {
+            REGS[i].polluted = 0;
+            continue;
+        }
 
         if (REGS[i].var && REGS[i].var != var)
             vreg_clear_phys(REGS[i].var);
@@ -1828,6 +2030,7 @@ void reg_alloc(void)
 
         slot_var_count = 0;
         coalesce_phi_slots(func);
+        pin_registers(func);
 
         /* set arguments available */
         int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
@@ -1937,6 +2140,26 @@ void reg_alloc(void)
                 switch (insn->opcode) {
                 case OP_unwound_phi:
                     track_var_use(insn->rs1, insn->idx);
+
+                    /* A pinned destination lives in the same register on every
+                     * path, so the copy this phi stands for is a register move
+                     * rather than a write into a slot nothing reads back.
+                     */
+                    if (pinned_reg_of(insn->rd) >= 0) {
+                        int to = pinned_reg_of(insn->rd);
+
+                        src0 = prepare_operand(bb, insn->rs1, -1);
+                        if (src0 != to) {
+                            ir = bb_add_ph2_ir(bb, OP_assign);
+                            ir->src0 = src0;
+                            ir->dest = to;
+                            ir->is_pointer = is_pointer_like(insn->rd);
+                            ir->size_bytes = var_slot_size(insn->rd);
+                        }
+                        REGS[to].var = insn->rd;
+                        REGS[to].polluted = 1;
+                        break;
+                    }
 
                     if (!insn->rd->space_is_allocated)
                         alloc_var_slot(bb->belong_to, insn->rd);
@@ -2079,7 +2302,7 @@ void reg_alloc(void)
                         alloc_var_slot(bb->belong_to, insn->rs1);
 
                         for (int i = 0; i < REG_CNT; i++)
-                            if (REGS[i].var == insn->rs1) {
+                            if (REGS[i].var == insn->rs1 && !pinned_base[i]) {
                                 ir = bb_add_ph2_ir(bb, OP_store);
                                 ir->src0 = i;
                                 ir->src1 = insn->rs1->offset;
@@ -2226,8 +2449,18 @@ void reg_alloc(void)
                     args = 0;
                     handle_abi = false;
 
-                    for (int i = 0; i < REG_CNT; i++)
-                        REGS[i].var = NULL;
+                    /* The call clobbers every register the callee does not
+                     * preserve. A pinned one it does preserve still holds its
+                     * variable, and forgetting that would leave the register
+                     * looking free for the allocator to hand to something
+                     * else, losing the value the call went to the trouble of
+                     * keeping.
+                     */
+                    for (int i = 0; i < REG_CNT; i++) {
+                        REGS[i].var = pinned_base[i] ? REGS[i].var : NULL;
+                        if (!REGS[i].var)
+                            REGS[i].polluted = 0;
+                    }
 
                     break;
                 case OP_indirect:
@@ -2244,8 +2477,18 @@ void reg_alloc(void)
                     args = 0;
                     handle_abi = false;
 
-                    for (int i = 0; i < REG_CNT; i++)
-                        REGS[i].var = NULL;
+                    /* The call clobbers every register the callee does not
+                     * preserve. A pinned one it does preserve still holds its
+                     * variable, and forgetting that would leave the register
+                     * looking free for the allocator to hand to something
+                     * else, losing the value the call went to the trouble of
+                     * keeping.
+                     */
+                    for (int i = 0; i < REG_CNT; i++) {
+                        REGS[i].var = pinned_base[i] ? REGS[i].var : NULL;
+                        if (!REGS[i].var)
+                            REGS[i].polluted = 0;
+                    }
                     break;
                 case OP_func_ret:
                     dest = prepare_dest(bb, insn, insn->rd, -1, -1);

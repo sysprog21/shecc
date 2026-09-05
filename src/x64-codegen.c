@@ -139,6 +139,12 @@ bool folds_off;
 /* Callee-saved registers the function being emitted preserves. */
 int cur_saved_regs;
 
+/* Registers the allocator is holding a variable in for the whole of the
+ * function being emitted, one bit each. Such a register is live everywhere, so
+ * nothing that writes it may be dropped as dead.
+ */
+int cur_pinned_regs;
+
 /* PUSH/POP of any of the sixteen registers. */
 void emit_push_reg(int reg)
 {
@@ -650,10 +656,12 @@ int map_ir_reg(int ir_reg)
     case 7:
         return 3; /* rbx */
     case 8:
-        return 12; /* r12 */
-    case 9:
-        return 13; /* r13 */
-    case 10:
+        /* R14 rather than R12 or R13: the low three bits of those two are the
+         * SIB and disp32 escapes in ModR/M, so naming them needs a special
+         * case at every addressing site. R14 has no such collision, and like
+         * RBX it is callee-saved, so the allocator gains a register that
+         * survives a call.
+         */
         return 14; /* r14 */
     default:
         return ir_reg;
@@ -1236,6 +1244,15 @@ bool ir_reads_reg(ph2_ir_t *ir, int reg)
 int func_saved_regs(func_t *func)
 {
     int top = X64_FIRST_CALLEE_SAVED - 1;
+
+    /* A register pinned for the whole function must be preserved even if the
+     * scan below were to miss it: its value has to survive the calls this
+     * function makes.
+     */
+    for (int i = 0; i < REG_CNT; i++) {
+        if (((func->pinned_regs >> i) & 1) && i > top)
+            top = i;
+    }
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
         for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
             if (op_writes_dest(ir->op) && ir->dest > top)
@@ -1265,6 +1282,12 @@ bool reg_live_out_of_bb(basic_block_t *bb, int reg)
 
     if (!bb || reg < 0 || reg >= REG_CNT)
         return false;
+
+    /* A register the allocator pinned holds its variable on every path, so it
+     * is live out of every block regardless of what the successors record.
+     */
+    if ((cur_pinned_regs >> reg) & 1)
+        return true;
 
     succs[0] = bb->next;
     succs[1] = bb->then_;
@@ -4322,6 +4345,7 @@ void code_generate(void)
         if (ph2_ir->op == OP_define) {
             emit_func = find_func(ph2_ir->func_name);
             cur_saved_regs = emit_func ? emit_func->saved_regs : 1;
+            cur_pinned_regs = emit_func ? emit_func->pinned_regs : 0;
             if (emit_func && emit_func->bbs) {
                 emit_bb = emit_func->bbs;
 

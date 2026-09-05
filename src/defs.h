@@ -46,6 +46,10 @@
 #define MAX_GOTPLT 1024
 #define MAX_CONSTANTS 1024
 #define MAX_NESTING 128
+/* How often a variable must be named before holding it in a register for a
+ * whole function is worth the push and pop that saving one costs.
+ */
+#define MIN_PINNED_USES 4
 /* Recursion limits for nesting in the input. The parser descends recursively
  * for each of these, so a deeply nested program would otherwise exhaust the
  * machine stack before any diagnostic could be produced.
@@ -762,6 +766,14 @@ struct func {
      * counted from RBX upward. Functions that never need them pay nothing.
      */
     int saved_regs;
+
+    /* Registers holding a variable for the whole function, one bit each. The
+     * backend needs these: its notion of what is live out of a block comes
+     * from the successor's entry registers, which say nothing about a variable
+     * that is resident everywhere, and it would otherwise drop the code that
+     * puts a value into one as dead.
+     */
+    int pinned_regs;
 
     /* Information used for dynamic linking */
     bool is_used;

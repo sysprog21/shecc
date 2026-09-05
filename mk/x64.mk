@@ -15,6 +15,6 @@ ARCH_DEFS = \
     \#define PLT_ENT_SIZE 16\n$\
     \#define RESERVED_GOT_NUM 3\n$\
     \#define R_ARCH_JUMP_SLOT 7 /* R_X86_64_JUMP_SLOT */\n$\
-    \#define REG_CNT 8 /* rdi rsi rdx rcx r8 r9 rax rbx */\n$\
+    \#define REG_CNT 9 /* rdi rsi rdx rcx r8 r9 rax rbx r14 */\n$\
     \#define DYN_BIND_NOW 1 /* this PLT has no lazy-resolution path */\n$\
     "
