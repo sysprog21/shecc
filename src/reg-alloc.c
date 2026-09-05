@@ -297,6 +297,14 @@ char slot_private[MAX_LOCALS];
 char slot_stores[MAX_LOCALS]; /* saturates at 2: only "exactly one" matters */
 char slot_loads[MAX_LOCALS];
 basic_block_t *slot_home[MAX_LOCALS];
+/* The first store to and the first load from each slot, and the list node
+ * that precedes the store. collapse_slot_roundtrip() needs all three, and
+ * slot_scan() already walks past them, so recording them here saves it a
+ * search from the head of the block for every slot it considers.
+ */
+ph2_ir_t *slot_store_ir[MAX_LOCALS];
+ph2_ir_t *slot_store_prev[MAX_LOCALS];
+ph2_ir_t *slot_load_ir[MAX_LOCALS];
 
 void slot_var_track(var_t *var)
 {
@@ -354,28 +362,47 @@ void slot_scan(func_t *func)
         slot_stores[i] = 0;
         slot_loads[i] = 0;
         slot_home[i] = NULL;
+        slot_store_ir[i] = NULL;
+        slot_store_prev[i] = NULL;
+        slot_load_ir[i] = NULL;
     }
 
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        ph2_ir_t *prev = NULL;
         for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
-            if (ir->ofs_based_on_stack_top)
+            if (ir->ofs_based_on_stack_top) {
+                prev = ir;
                 continue;
+            }
             if (ir->op == OP_store) {
                 int i = slot_lookup(ir->src1);
-                if (i < 0)
+                if (i < 0) {
+                    prev = ir;
                     continue;
-                if (slot_stores[i] < 2)
+                }
+                if (slot_stores[i] < 2) {
+                    if (!slot_stores[i]) {
+                        slot_store_ir[i] = ir;
+                        slot_store_prev[i] = prev;
+                    }
                     slot_stores[i]++;
+                }
                 slot_home[i] = bb;
             } else if (ir->op == OP_load) {
                 int i = slot_lookup(ir->src0);
-                if (i < 0)
+                if (i < 0) {
+                    prev = ir;
                     continue;
-                if (slot_loads[i] < 2)
+                }
+                if (slot_loads[i] < 2) {
+                    if (!slot_loads[i])
+                        slot_load_ir[i] = ir;
                     slot_loads[i]++;
+                }
                 if (slot_home[i] != bb)
                     slot_home[i] = NULL;
             }
+            prev = ir;
         }
     }
 }
@@ -389,6 +416,12 @@ void ph2_list_remove(basic_block_t *bb, ph2_ir_t *prev, ph2_ir_t *ir)
         bb->ph2_ir_list.head = ir->next;
     if (bb->ph2_ir_list.tail == ir)
         bb->ph2_ir_list.tail = prev;
+    /* Clearing the link marks the node as gone. One left pointing at its old
+     * successor still looks like that successor's predecessor, and
+     * collapse_slot_roundtrip() decides whether the predecessor it recorded is
+     * still usable by asking exactly that.
+     */
+    ir->next = NULL;
 }
 
 /* Whether @ir leaves @reg holding something other than what it held before. */
@@ -432,32 +465,72 @@ void collapse_slot_roundtrip(func_t *func)
             continue;
 
         int offset = slot_vars[i]->offset;
-        ph2_ir_t *store = NULL, *load = NULL, *prev_store = NULL,
-                 *prev_load = NULL, *prev = NULL;
+        ph2_ir_t *store = slot_store_ir[i], *load = slot_load_ir[i];
+        ph2_ir_t *prev_store = slot_store_prev[i], *prev_load = NULL;
         bool ok = false;
 
-        /* The store has to come first, and its register has to still hold the
-         * value when the load would have run. Both are unique in the function,
-         * so the first of each seen here is the one.
+        /* slot_scan() already walked past this slot's only store and its only
+         * load, so the search that used to start at the head of the block is
+         * needed only when an earlier collapse in this same block unlinked the
+         * node the store was recorded behind. A removed node still points at
+         * its old successor, which is why the check is that the recorded
+         * predecessor is still in the list rather than that it still points
+         * here: ph2_list_remove() clears the link of whatever it takes out.
          */
-        for (ph2_ir_t *ir = home->ph2_ir_list.head; ir; ir = ir->next) {
-            if (!ir->ofs_based_on_stack_top) {
-                if (!store && ir->op == OP_store && ir->src1 == offset) {
-                    store = ir;
-                    prev_store = prev;
-                    prev = ir;
-                    continue;
-                }
-                if (ir->op == OP_load && ir->src0 == offset) {
-                    load = ir;
+        bool linked = store && load;
+        if (linked) {
+            if (prev_store) {
+                if (prev_store->next != store)
+                    linked = false;
+            } else if (home->ph2_ir_list.head != store)
+                linked = false;
+        }
+
+        if (linked) {
+            /* The store has to come first, and its register has to still hold
+             * the value when the load would have run. Walking from the store
+             * to the load settles both: a load placed ahead of the store is
+             * never reached, and a clobber on the way stops the walk short.
+             * The walk passes the load's predecessor, so that comes from here
+             * rather than from a search.
+             */
+            ph2_ir_t *prev = store;
+
+            for (ph2_ir_t *ir = store->next; ir; ir = ir->next) {
+                if (ir == load) {
                     prev_load = prev;
-                    ok = store != NULL;
+                    ok = true;
                     break;
                 }
+                if (ph2_writes_reg(ir, store->src0))
+                    break;
+                prev = ir;
             }
-            if (store && ph2_writes_reg(ir, store->src0))
-                break;
-            prev = ir;
+        } else {
+            ph2_ir_t *prev = NULL;
+
+            store = NULL;
+            load = NULL;
+            prev_store = NULL;
+            for (ph2_ir_t *ir = home->ph2_ir_list.head; ir; ir = ir->next) {
+                if (!ir->ofs_based_on_stack_top) {
+                    if (!store && ir->op == OP_store && ir->src1 == offset) {
+                        store = ir;
+                        prev_store = prev;
+                        prev = ir;
+                        continue;
+                    }
+                    if (ir->op == OP_load && ir->src0 == offset) {
+                        load = ir;
+                        prev_load = prev;
+                        ok = store != NULL;
+                        break;
+                    }
+                }
+                if (store && ph2_writes_reg(ir, store->src0))
+                    break;
+                prev = ir;
+            }
         }
         if (!ok)
             continue;
@@ -947,6 +1020,334 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
  * that same instruction has already ended. It ends at its last read, or past
  * the last instruction when it is live on exit.
  */
+/* Where a phi-coalescing candidate is live, inverted once per function.
+ *
+ * phi_slot_conflicts() and vars_interfere() each ask, for one variable at a
+ * time, which blocks it is live in, and the only way to answer that from the
+ * liveness sets is to walk every block of the function and scan that block's
+ * live_in and live_kill for the variable. A self-compile asks 1.59 million
+ * times and 97% of the answers are "nowhere in this block", so nearly all of
+ * that scanning finds nothing.
+ *
+ * Turning the sets inside out once per function -- from "which variables does
+ * this block hold" into "which blocks hold this variable" -- costs one pass
+ * over the sets and reduces every later query to a walk of the handful of
+ * blocks the variable really occupies.
+ *
+ * Candidacy is marked on the variable itself, reusing the stamp pair
+ * compute_live_in() left behind: liveness analysis has finished by the time
+ * register allocation runs, so kill_gen and in_gen are dead, and bumping the
+ * same liveness_gen counter keeps this pass's stamps distinct from the values
+ * that analysis wrote.
+ */
+int phi_cand_head[MAX_LOCALS];
+int phi_cand_tail[MAX_LOCALS];
+int phi_cand_num;
+int phi_cand_gen;
+
+/* The block records, chained per candidate through live_blk_next. The buffer
+ * is kept between functions and only ever grows, so the whole compile pays for
+ * the largest function once.
+ */
+basic_block_t **live_blk_bb;
+int *live_blk_next;
+int *live_blk_cand;
+int *live_blk_lo;
+int *live_blk_hi;
+char *live_blk_flags;
+int live_blk_cap;
+int live_blk_num;
+
+/* Bits of live_blk_flags. */
+#define LIVE_REC_IN 1
+#define LIVE_REC_OUT 2
+
+/* Where each candidate is written and last read inside the block being
+ * indexed, filled by one walk of that block's instructions and read back only
+ * for the candidates that block records.
+ */
+int phi_cand_def[MAX_LOCALS];
+int phi_cand_last[MAX_LOCALS];
+
+/* False once a function outgrows the candidate table; every query then falls
+ * back to walking all blocks, which is what this pass did before the index.
+ */
+bool phi_live_ready;
+
+/* The candidate number of @var under the current function's stamp, or -1 when
+ * @var is not one.
+ */
+int phi_cand_index(var_t *var)
+{
+    if (!var)
+        return -1;
+    if (var->kill_gen != phi_cand_gen)
+        return -1;
+    return var->in_gen;
+}
+
+void phi_cand_add(var_t *var)
+{
+    if (!var)
+        return;
+    if (var->kill_gen == phi_cand_gen)
+        return;
+    if (phi_cand_num >= MAX_LOCALS) {
+        phi_live_ready = false;
+        return;
+    }
+    var->kill_gen = phi_cand_gen;
+    var->in_gen = phi_cand_num;
+    phi_cand_head[phi_cand_num] = -1;
+    phi_cand_tail[phi_cand_num] = -1;
+    phi_cand_num++;
+}
+
+void live_blk_reserve(int want)
+{
+    if (want <= live_blk_cap)
+        return;
+
+    int cap = live_blk_cap;
+    if (cap < 1024)
+        cap = 1024;
+    while (cap < want)
+        cap = cap << 1;
+
+    live_blk_bb = arena_realloc(GENERAL_ARENA, (char *) live_blk_bb,
+                                live_blk_cap * sizeof(basic_block_t *),
+                                cap * sizeof(basic_block_t *));
+    live_blk_next =
+        arena_realloc(GENERAL_ARENA, (char *) live_blk_next,
+                      live_blk_cap * sizeof(int), cap * sizeof(int));
+    live_blk_cand =
+        arena_realloc(GENERAL_ARENA, (char *) live_blk_cand,
+                      live_blk_cap * sizeof(int), cap * sizeof(int));
+    live_blk_lo = arena_realloc(GENERAL_ARENA, (char *) live_blk_lo,
+                                live_blk_cap * sizeof(int), cap * sizeof(int));
+    live_blk_hi = arena_realloc(GENERAL_ARENA, (char *) live_blk_hi,
+                                live_blk_cap * sizeof(int), cap * sizeof(int));
+    live_blk_flags =
+        arena_realloc(GENERAL_ARENA, live_blk_flags, live_blk_cap, cap);
+    live_blk_cap = cap;
+}
+
+/* Record that @var is live somewhere in @bb, returning that block's record for
+ * @var. Blocks arrive in order, so a variable already recorded for this block
+ * -- it is in both live_in and live_kill -- is caught by looking at the tail of
+ * its chain rather than by searching.
+ */
+int phi_live_note(basic_block_t *bb, var_t *var, int flags)
+{
+    int idx = phi_cand_index(var);
+    if (idx < 0)
+        return -1;
+
+    int tail = phi_cand_tail[idx];
+    if (tail >= 0 && live_blk_bb[tail] == bb) {
+        live_blk_flags[tail] |= flags;
+        return tail;
+    }
+
+    live_blk_reserve(live_blk_num + 1);
+    int rec = live_blk_num++;
+    live_blk_bb[rec] = bb;
+    live_blk_next[rec] = -1;
+    live_blk_cand[rec] = idx;
+    live_blk_flags[rec] = flags;
+    if (tail < 0)
+        phi_cand_head[idx] = rec;
+    else
+        live_blk_next[tail] = rec;
+    phi_cand_tail[idx] = rec;
+    return rec;
+}
+
+/* Note that @var is live on exit from @bb, when @bb already records it. */
+void phi_live_mark_out(basic_block_t *bb, var_t *var)
+{
+    int idx = phi_cand_index(var);
+    if (idx < 0)
+        return;
+
+    int tail = phi_cand_tail[idx];
+    if (tail >= 0 && live_blk_bb[tail] == bb)
+        live_blk_flags[tail] |= LIVE_REC_OUT;
+}
+
+/* Collect the variables this pass will ask about -- the destination and
+ * operand of every unwound phi -- and work out, for each block one of them is
+ * live in, the range of instruction indices it holds a value over.
+ *
+ * The ranges are what phi_slot_conflicts() and vars_interfere() compare, and
+ * computing them here means one walk of each block for all of its candidates
+ * instead of a walk per candidate per query.
+ */
+void phi_live_index_build(func_t *func)
+{
+    phi_cand_num = 0;
+    live_blk_num = 0;
+    phi_live_ready = true;
+    liveness_gen++;
+    phi_cand_gen = liveness_gen;
+
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            if (insn->opcode != OP_unwound_phi)
+                continue;
+            phi_cand_add(insn->rd);
+            phi_cand_add(insn->rs1);
+        }
+    }
+
+    if (!phi_live_ready)
+        return;
+
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        int first = live_blk_num;
+
+        for (int i = 0; i < bb->live_in.size; i++)
+            phi_live_note(bb, bb->live_in.elements[i], LIVE_REC_IN);
+        for (int i = 0; i < bb->live_kill.size; i++)
+            phi_live_note(bb, bb->live_kill.elements[i], 0);
+        /* Live on exit adds no block: a value live out that this block does
+         * not write is live in as well, so its record already exists. Marking
+         * rather than recording keeps that invariant from turning a dataflow
+         * inconsistency into a range for a block the variable is not live in.
+         */
+        for (int i = 0; i < bb->live_out.size; i++)
+            phi_live_mark_out(bb, bb->live_out.elements[i]);
+
+        int last = live_blk_num;
+        if (first == last)
+            continue;
+
+        for (int r = first; r < last; r++) {
+            int c = live_blk_cand[r];
+
+            phi_cand_def[c] = -1;
+            phi_cand_last[c] = -1;
+        }
+
+        /* Anything a block's instructions name is in that block's live_in or
+         * live_kill, so every candidate touched below has a record above and
+         * its scratch has just been cleared.
+         */
+        int n = 0;
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            int c = phi_cand_index(insn->rs1);
+            if (c >= 0)
+                phi_cand_last[c] = n;
+            c = phi_cand_index(insn->rs2);
+            if (c >= 0)
+                phi_cand_last[c] = n;
+            c = phi_cand_index(insn->rd);
+            if (c >= 0 && phi_cand_def[c] < 0)
+                phi_cand_def[c] = n;
+            n++;
+        }
+
+        /* A value live on entry starts before the first instruction; one
+         * defined here starts just after the instruction that writes it, so a
+         * value read by that same instruction has already ended. It ends at
+         * its last read, or past the last instruction when it is live on exit.
+         */
+        for (int r = first; r < last; r++) {
+            int c = live_blk_cand[r];
+            int def = phi_cand_def[c], last_read = phi_cand_last[c];
+            int lo, hi;
+
+            if ((live_blk_flags[r] & LIVE_REC_IN) || def < 0)
+                lo = -1;
+            else
+                lo = def + 1;
+
+            if (live_blk_flags[r] & LIVE_REC_OUT)
+                hi = n;
+            else if (last_read >= 0)
+                hi = last_read;
+            else
+                hi = lo;
+
+            live_blk_lo[r] = lo;
+            live_blk_hi[r] = hi;
+        }
+    }
+}
+
+/* A walk of the blocks a variable can be live in. Backed by the index when it
+ * has an answer for the variable, and by every block of the function when it
+ * does not, so the two produce the same results.
+ */
+typedef struct {
+    basic_block_t *bb;
+    int cur; /* the record just returned, -1 when walking every block */
+    int rec;
+    basic_block_t *all;
+    bool indexed;
+} live_iter_t;
+
+void live_iter_init(live_iter_t *it, func_t *func, var_t *var)
+{
+    int idx = -1;
+
+    if (phi_live_ready)
+        idx = phi_cand_index(var);
+
+    if (idx < 0) {
+        it->indexed = false;
+        it->rec = -1;
+        it->all = func->bbs;
+    } else {
+        it->indexed = true;
+        it->rec = phi_cand_head[idx];
+        it->all = NULL;
+    }
+    it->bb = NULL;
+    it->cur = -1;
+}
+
+bool live_iter_next(live_iter_t *it)
+{
+    if (it->indexed) {
+        int rec = it->rec;
+        if (rec < 0) {
+            it->bb = NULL;
+            it->cur = -1;
+            return false;
+        }
+        it->bb = live_blk_bb[rec];
+        it->cur = rec;
+        it->rec = live_blk_next[rec];
+        return true;
+    }
+
+    basic_block_t *bb = it->all;
+    if (!bb) {
+        it->bb = NULL;
+        it->cur = -1;
+        return false;
+    }
+    it->bb = bb;
+    it->all = bb->rpo_next;
+    return true;
+}
+
+/* Advance *@cursor to @bb's record for the candidate whose chain it walks, or
+ * past it when that candidate is not live there. The chains and every caller's
+ * outer walk run in the block order of func->bbs, which is increasing rpo, so
+ * a cursor only ever moves forward.
+ */
+bool live_rec_seek(int *cursor, basic_block_t *bb)
+{
+    int rec = *cursor;
+
+    while (rec >= 0 && live_blk_bb[rec]->rpo < bb->rpo)
+        rec = live_blk_next[rec];
+    *cursor = rec;
+    return rec >= 0 && live_blk_bb[rec] == bb;
+}
+
 bool var_range_in_bb(basic_block_t *bb, var_t *var, int *lo, int *hi)
 {
     bool live_in = var_list_holds(&bb->live_in, var);
@@ -991,13 +1392,34 @@ bool var_range_in_bb(basic_block_t *bb, var_t *var, int *lo, int *hi)
  */
 bool vars_interfere(func_t *func, var_t *a, var_t *b)
 {
-    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+    live_iter_t it;
+    live_iter_init(&it, func, a);
+
+    /* Both chains run in block order, so @b's is walked with a cursor that
+     * only moves forward rather than searched from the start for each of @a's
+     * blocks.
+     */
+    int b_idx = phi_live_ready ? phi_cand_index(b) : -1;
+    int b_cur = b_idx >= 0 ? phi_cand_head[b_idx] : -1;
+
+    while (live_iter_next(&it)) {
+        basic_block_t *bb = it.bb;
         int alo, ahi, blo, bhi;
 
-        if (!var_range_in_bb(bb, a, &alo, &ahi))
+        if (it.cur >= 0) {
+            alo = live_blk_lo[it.cur];
+            ahi = live_blk_hi[it.cur];
+        } else if (!var_range_in_bb(bb, a, &alo, &ahi))
             continue;
-        if (!var_range_in_bb(bb, b, &blo, &bhi))
+
+        if (b_idx >= 0) {
+            if (!live_rec_seek(&b_cur, bb))
+                continue;
+            blo = live_blk_lo[b_cur];
+            bhi = live_blk_hi[b_cur];
+        } else if (!var_range_in_bb(bb, b, &blo, &bhi))
             continue;
+
         if (alo <= bhi && blo <= ahi)
             return true;
     }
@@ -1032,27 +1454,71 @@ void phi_slot_record(var_t *var)
     phi_slot_vars[phi_slot_count++] = var;
 }
 
+/* Scratch lists of the variables sharing one slot, gathered before the block
+ * walks below so that neither has to filter the whole placement table on every
+ * step of its own loop.
+ */
+var_t *phi_group_a[MAX_LOCALS];
+var_t *phi_group_b[MAX_LOCALS];
+
+/* One cursor per member of the group being checked, so each member's chain is
+ * walked once across the whole query instead of being searched per block.
+ */
+int phi_group_cursor[MAX_LOCALS];
+
 /* Whether @v is live at the same time as anything already sharing @offset. */
 bool phi_slot_conflicts(func_t *func, int offset, var_t *v)
 {
+    int group = 0;
+
+    for (int i = 0; i < phi_slot_count; i++) {
+        var_t *other = phi_slot_vars[i];
+
+        if (other != v && other->offset == offset) {
+            int idx = phi_live_ready ? phi_cand_index(other) : -1;
+
+            phi_group_a[group] = other;
+            phi_group_cursor[group] = idx >= 0 ? phi_cand_head[idx] : -1;
+            /* A member the index cannot answer for is marked with a cursor of
+             * -2 so the walk below falls back to the scanning form for it.
+             */
+            if (idx < 0)
+                phi_group_cursor[group] = -2;
+            group++;
+        }
+    }
+    if (!group)
+        return false;
+
     /* Blocks are the outer loop so that @v's range in each is worked out once
      * rather than once per variable compared against; @v occupies few blocks,
      * and the rest are skipped without looking at the group at all.
      */
-    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+    live_iter_t it;
+    live_iter_init(&it, func, v);
+
+    while (live_iter_next(&it)) {
+        basic_block_t *bb = it.bb;
         int vlo, vhi;
 
-        if (!var_range_in_bb(bb, v, &vlo, &vhi))
+        if (it.cur >= 0) {
+            vlo = live_blk_lo[it.cur];
+            vhi = live_blk_hi[it.cur];
+        } else if (!var_range_in_bb(bb, v, &vlo, &vhi))
             continue;
 
-        for (int i = 0; i < phi_slot_count; i++) {
-            var_t *other = phi_slot_vars[i];
+        for (int i = 0; i < group; i++) {
             int olo, ohi;
 
-            if (other == v || other->offset != offset)
-                continue;
-            if (!var_range_in_bb(bb, other, &olo, &ohi))
-                continue;
+            if (phi_group_cursor[i] == -2) {
+                if (!var_range_in_bb(bb, phi_group_a[i], &olo, &ohi))
+                    continue;
+            } else {
+                if (!live_rec_seek(&phi_group_cursor[i], bb))
+                    continue;
+                olo = live_blk_lo[phi_group_cursor[i]];
+                ohi = live_blk_hi[phi_group_cursor[i]];
+            }
             if (vlo <= ohi && olo <= vhi)
                 return true;
         }
@@ -1082,27 +1548,38 @@ bool phi_slot_merge(func_t *func, int to, int from)
     if (to == from)
         return true;
 
+    /* One pass splits the table into the two groups; the pairwise test then
+     * walks only those, instead of rescanning every placement to find the
+     * partner for each candidate.
+     */
+    int nto = 0, nfrom = 0;
     for (int i = 0; i < phi_slot_count; i++) {
-        if (phi_slot_vars[i]->offset != to)
-            continue;
-        for (int j = 0; j < phi_slot_count; j++) {
-            if (phi_slot_vars[j]->offset != from)
-                continue;
-            if (vars_interfere(func, phi_slot_vars[i], phi_slot_vars[j]))
+        var_t *var = phi_slot_vars[i];
+
+        if (var->offset == to)
+            phi_group_a[nto++] = var;
+        else if (var->offset == from)
+            phi_group_b[nfrom++] = var;
+    }
+    if (!nfrom)
+        return true;
+
+    for (int i = 0; i < nto; i++) {
+        for (int j = 0; j < nfrom; j++) {
+            if (vars_interfere(func, phi_group_a[i], phi_group_b[j]))
                 return false;
         }
     }
 
-    for (int j = 0; j < phi_slot_count; j++) {
-        if (phi_slot_vars[j]->offset == from)
-            phi_slot_vars[j]->offset = to;
-    }
+    for (int j = 0; j < nfrom; j++)
+        phi_group_b[j]->offset = to;
     return true;
 }
 
 void coalesce_phi_slots(func_t *func)
 {
     phi_slot_count = 0;
+    phi_live_index_build(func);
 
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
         for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {

@@ -68,63 +68,73 @@ void var_list_assign_array(var_list_t *list, var_t **data, int count)
 }
 
 /* cfront does not accept structure as an argument, pass pointer */
+/* The only thing a step of either traversal changes in the argument block is
+ * the block it names, so a step sets that field and puts it back on the way
+ * out. Copying the whole structure per edge instead -- which is what these did
+ * -- costs a copy on every block of every traversal, and the traversals are
+ * how nearly every analysis in the middle end walks a function.
+ */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
-    args->bb->visited++;
+    basic_block_t *bb = args->bb;
+    func_t *func = args->func;
+
+    bb->visited++;
 
     if (args->preorder_cb)
-        args->preorder_cb(args->func, args->bb);
+        args->preorder_cb(func, bb);
 
-    /* 'args' is a reference, do not modify it */
-    bb_traversal_args_t next_args;
-    memcpy(&next_args, args, sizeof(bb_traversal_args_t));
+    if (bb->next) {
+        if (bb->next->visited < func->visited) {
+            args->bb = bb->next;
+            bb_forward_traversal(args);
+        }
+    }
+    if (bb->then_) {
+        if (bb->then_->visited < func->visited) {
+            args->bb = bb->then_;
+            bb_forward_traversal(args);
+        }
+    }
+    if (bb->else_) {
+        if (bb->else_->visited < func->visited) {
+            args->bb = bb->else_;
+            bb_forward_traversal(args);
+        }
+    }
 
-    if (args->bb->next) {
-        if (args->bb->next->visited < args->func->visited) {
-            next_args.bb = args->bb->next;
-            bb_forward_traversal(&next_args);
-        }
-    }
-    if (args->bb->then_) {
-        if (args->bb->then_->visited < args->func->visited) {
-            next_args.bb = args->bb->then_;
-            bb_forward_traversal(&next_args);
-        }
-    }
-    if (args->bb->else_) {
-        if (args->bb->else_->visited < args->func->visited) {
-            next_args.bb = args->bb->else_;
-            bb_forward_traversal(&next_args);
-        }
-    }
+    args->bb = bb;
 
     if (args->postorder_cb)
-        args->postorder_cb(args->func, args->bb);
+        args->postorder_cb(func, bb);
 }
 
 /* cfront does not accept structure as an argument, pass pointer */
 void bb_backward_traversal(bb_traversal_args_t *args)
 {
-    args->bb->visited++;
+    basic_block_t *bb = args->bb;
+    func_t *func = args->func;
+
+    bb->visited++;
 
     if (args->preorder_cb)
-        args->preorder_cb(args->func, args->bb);
+        args->preorder_cb(func, bb);
 
-    for (int i = 0; i < args->bb->prev_idx; i++) {
-        if (!args->bb->prev[i].bb)
+    for (int i = 0; i < bb->prev_idx; i++) {
+        basic_block_t *pred = bb->prev[i].bb;
+
+        if (!pred)
             continue;
-        if (args->bb->prev[i].bb->visited < args->func->visited) {
-            /* 'args' is a reference, do not modify it */
-            bb_traversal_args_t next_args;
-            memcpy(&next_args, args, sizeof(bb_traversal_args_t));
-
-            next_args.bb = args->bb->prev[i].bb;
-            bb_backward_traversal(&next_args);
+        if (pred->visited < func->visited) {
+            args->bb = pred;
+            bb_backward_traversal(args);
         }
     }
 
+    args->bb = bb;
+
     if (args->postorder_cb)
-        args->postorder_cb(args->func, args->bb);
+        args->postorder_cb(func, bb);
 }
 
 void bb_index_rpo(func_t *func, basic_block_t *bb)
@@ -1407,6 +1417,144 @@ void dump_dom(char name[])
 }
 #endif
 
+int func_marked_count;
+
+/* Mark @var's function as reachable when @var names one, so a function reached
+ * only through a pointer is not mistaken for dead.
+ */
+void func_mark_addressed(var_t *var)
+{
+    if (!var || !var->is_func)
+        return;
+
+    /* is_func labels function-pointer variables too, and those names match no
+     * function; find_func() answering NULL is the ordinary case here.
+     */
+    func_t *target = find_func(var->var_name);
+    if (target && !target->is_used) {
+        target->is_used = true;
+        func_marked_count++;
+    }
+}
+
+/* Mark everything the code in @bbs names: the target of every direct call, and
+ * every function whose address it takes.
+ *
+ * A function symbol only ever reaches the IR as an operand -- never as a
+ * destination, since nothing assigns to a function -- so the two source slots
+ * are the only ones worth looking at.
+ */
+void func_mark_reached_from(basic_block_t *bbs)
+{
+    for (basic_block_t *bb = bbs; bb; bb = bb->rpo_next) {
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            if (insn->opcode == OP_call) {
+                func_t *callee = find_func(insn->str);
+                if (callee && !callee->is_used) {
+                    callee->is_used = true;
+                    func_marked_count++;
+                }
+                continue;
+            }
+            func_mark_addressed(insn->rs1);
+            func_mark_addressed(insn->rs2);
+        }
+    }
+}
+
+/* Drop the functions no call can reach.
+ *
+ * Every compile prepends the whole of lib/c.c, so a program that prints one
+ * line had registers allocated and machine code emitted for every function the
+ * library defines. Nothing calls those, and both the work and the bytes they
+ * occupy in the output are wasted: on a small input this is most of what the
+ * compiler does.
+ *
+ * Reachability starts at main and at every function whose address is taken
+ * anywhere -- an indirect call names no callee, so a function reached that way
+ * has to be kept on the strength of the address alone. Functions with no body
+ * stay either way: they are declarations, and the dynamic linker path looks
+ * them up by name.
+ *
+ * is_used carries the mark. It belongs to the dynamic linker, which sets it
+ * later during register allocation, so this pass leaves it as it found it.
+ */
+void prune_unused_funcs(void)
+{
+    func_t *entry = find_func("main");
+    if (!entry)
+        return;
+
+    int count = 0;
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        func->is_used = false;
+        count++;
+    }
+
+    /* Expanded once each: a body is scanned no more than once however many
+     * times the sweep below passes over the list.
+     */
+    char *expanded = arena_alloc(GENERAL_ARENA, count);
+    for (int i = 0; i < count; i++)
+        expanded[i] = 0;
+
+    entry->is_used = true;
+    func_marked_count = 1;
+
+    /* Global initializers run before main and can name a function, so they are
+     * a root in their own right.
+     */
+    if (GLOBAL_FUNC)
+        func_mark_reached_from(GLOBAL_FUNC->bbs);
+
+    /* Once every function in the list is marked there is nothing left to
+     * discover, and the bodies not yet expanded need not be read at all. That
+     * is the usual case when the input is a large program rather than a small
+     * one carrying the library along: the sweep stops instead of walking the
+     * whole IR.
+     */
+    bool changed = true;
+    while (changed && func_marked_count < count) {
+        changed = false;
+
+        int idx = 0;
+        for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+            int at = idx++;
+
+            if (!func->is_used || expanded[at])
+                continue;
+            expanded[at] = 1;
+            changed = true;
+            func_mark_reached_from(func->bbs);
+            if (func_marked_count >= count)
+                break;
+        }
+    }
+
+    func_t *head = NULL, *tail = NULL;
+    for (func_t *func = FUNC_LIST.head; func;) {
+        func_t *next = func->next;
+
+        func->next = NULL;
+        if (func->bbs && !func->is_used) {
+            func = next;
+            continue;
+        }
+
+        if (!head)
+            head = func;
+        else
+            tail->next = func;
+        tail = func;
+        func = next;
+    }
+    FUNC_LIST.head = head;
+    FUNC_LIST.tail = tail;
+
+    for (func_t *func = FUNC_LIST.head; func; func = func->next)
+        func->is_used = false;
+}
+
 void ssa_build(void)
 {
     build_rpo();
@@ -2527,23 +2675,48 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
     /* Reset live_kill list */
     bb->live_kill.size = 0;
 
+    /* Both sets are asked about once per operand and once per destination, and
+     * answering from the lists themselves means a scan of one of them for
+     * every one of a block's instructions -- quadratic in the size of the
+     * block, which is what made this the most expensive part of the analysis
+     * on shecc's own longer functions. Stamping a variable as it enters a set
+     * turns each of those questions into one comparison. live_kill was just
+     * emptied, so nothing carries a stale stamp; live_gen is not, so what it
+     * already holds is stamped first.
+     */
+    liveness_gen++;
+    int gen = liveness_gen;
+    for (int k = 0; k < bb->live_gen.size; k++)
+        bb->live_gen.elements[k]->in_gen = gen;
+
     /* Solve locals */
     int i = 0;
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         insn->idx = i++;
 
-        if (insn->rs1) {
-            if (!var_check_killed(insn->rs1, bb))
-                add_live_gen(bb, insn->rs1);
-            update_consumed(insn, insn->rs1);
+        var_t *rs1 = insn->rs1;
+        if (rs1) {
+            if (rs1->kill_gen != gen && !rs1->is_global && rs1->in_gen != gen) {
+                rs1->in_gen = gen;
+                var_list_append(&bb->live_gen, rs1);
+            }
+            update_consumed(insn, rs1);
         }
-        if (insn->rs2) {
-            if (!var_check_killed(insn->rs2, bb))
-                add_live_gen(bb, insn->rs2);
-            update_consumed(insn, insn->rs2);
+
+        var_t *rs2 = insn->rs2;
+        if (rs2) {
+            if (rs2->kill_gen != gen && !rs2->is_global && rs2->in_gen != gen) {
+                rs2->in_gen = gen;
+                var_list_append(&bb->live_gen, rs2);
+            }
+            update_consumed(insn, rs2);
         }
-        if (insn->rd)
-            bb_add_killed_var(bb, insn->rd);
+
+        var_t *rd = insn->rd;
+        if (rd && rd->kill_gen != gen) {
+            rd->kill_gen = gen;
+            var_list_append(&bb->live_kill, rd);
+        }
     }
 }
 

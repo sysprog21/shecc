@@ -160,9 +160,37 @@ char read_char(strbuf_t *buf)
     return buf->elements[buf->size];
 }
 
+/* Fill @dst with @len bytes of @f, returning how many arrived.
+ *
+ * The whole file is wanted and its size is already known, so it is asked for in
+ * one piece. Reading it a line at a time instead cost a library call and a
+ * second copy for every line of every source file -- and shecc's own libc has
+ * no buffer behind fgets(), so each of those lines was a read(2) as well.
+ */
+#ifdef __SHECC__
+int file_read_all(FILE *f, char *dst, int len)
+{
+    int got = 0;
+
+    while (got < len) {
+        int n = __syscall(__syscall_read, f, dst + got, len - got);
+        if (n <= 0)
+            return got;
+        got += n;
+    }
+    return got;
+}
+#else
+int file_read_all(FILE *f, char *dst, int len)
+{
+    if (len <= 0)
+        return 0;
+    return fread(dst, 1, len, f);
+}
+#endif
+
 strbuf_t *read_file(char *filename)
 {
-    char buffer[MAX_LINE_LEN];
     FILE *f = fopen(filename, "rb");
     strbuf_t *src;
 
@@ -176,8 +204,7 @@ strbuf_t *read_file(char *filename)
     src = strbuf_create(len + 1);
     fseek(f, 0, SEEK_SET);
 
-    while (fgets(buffer, MAX_LINE_LEN, f))
-        strbuf_puts(src, buffer);
+    src->size = file_read_all(f, src->elements, len);
 
     fclose(f);
     src->elements[len] = '\0';
@@ -935,8 +962,12 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
             break;
         }
 
-        /* Fall back to hashmap for uncommon keywords */
-        if (kind == T_identifier)
+        /* Fall back to the hashmap for anything the switch does not name.
+         * No keyword is shorter than two characters or longer than eight, so a
+         * name outside that range cannot be one and needs no lookup -- which
+         * is most of the identifiers in a real program.
+         */
+        if (kind == T_identifier && sz >= 2 && sz <= 8)
             kind = lookup_keyword(token_buffer);
 
         token = new_token(kind, loc, sz);

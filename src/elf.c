@@ -1243,6 +1243,33 @@ void elf_postprocess(void)
     elf_generate_section_headers();
 }
 
+/* Hand a whole section to the operating system at once.
+ *
+ * The image was written a byte at a time through fputc(), which costs a call
+ * into the C library for every one of the several hundred thousand bytes of a
+ * self-compile -- and, once shecc is compiled by itself, a write(2) for each
+ * of them, because its own libc has no buffer behind fputc().
+ */
+#ifdef __SHECC__
+void elf_write_all(FILE *fp, char *buf, int len)
+{
+    int off = 0;
+
+    while (off < len) {
+        int n = __syscall(__syscall_write, fp, buf + off, len - off);
+        if (n <= 0)
+            return;
+        off += n;
+    }
+}
+#else
+void elf_write_all(FILE *fp, char *buf, int len)
+{
+    if (len > 0)
+        fwrite(buf, 1, len, fp);
+}
+#endif
+
 void elf_generate(const char *outfile)
 {
     if (!outfile)
@@ -1254,38 +1281,34 @@ void elf_generate(const char *outfile)
         return;
     }
 
-    for (int i = 0; i < elf_header->size; i++)
-        fputc(elf_header->elements[i], fp);
-    for (int i = 0; i < elf_program_header->size; i++)
-        fputc(elf_program_header->elements[i], fp);
+    elf_write_all(fp, elf_header->elements, elf_header->size);
+    elf_write_all(fp, elf_program_header->elements, elf_program_header->size);
     /* Read-only sections */
-    for (int i = 0; i < elf_code->size; i++)
-        fputc(elf_code->elements[i], fp);
-    for (int i = 0; i < elf_rodata->size; i++)
-        fputc(elf_rodata->elements[i], fp);
+    elf_write_all(fp, elf_code->elements, elf_code->size);
+    elf_write_all(fp, elf_rodata->elements, elf_rodata->size);
 
     if (dynlink) {
         /* Read-only sections */
         if (dynamic_sections.use_relaplt)
-            for (int i = 0; i < dynamic_sections.elf_relaplt->size; i++)
-                fputc(dynamic_sections.elf_relaplt->elements[i], fp);
+            elf_write_all(fp, dynamic_sections.elf_relaplt->elements,
+                          dynamic_sections.elf_relaplt->size);
         else {
-            for (int i = 0; i < dynamic_sections.elf_relplt->size; i++)
-                fputc(dynamic_sections.elf_relplt->elements[i], fp);
+            elf_write_all(fp, dynamic_sections.elf_relplt->elements,
+                          dynamic_sections.elf_relplt->size);
         }
-        for (int i = 0; i < dynamic_sections.elf_plt->size; i++)
-            fputc(dynamic_sections.elf_plt->elements[i], fp);
+        elf_write_all(fp, dynamic_sections.elf_plt->elements,
+                      dynamic_sections.elf_plt->size);
         /* Readable and writable sections */
-        for (int i = 0; i < dynamic_sections.elf_interp->size; i++)
-            fputc(dynamic_sections.elf_interp->elements[i], fp);
-        for (int i = 0; i < dynamic_sections.elf_got->size; i++)
-            fputc(dynamic_sections.elf_got->elements[i], fp);
-        for (int i = 0; i < dynamic_sections.elf_dynstr->size; i++)
-            fputc(dynamic_sections.elf_dynstr->elements[i], fp);
-        for (int i = 0; i < dynamic_sections.elf_dynsym->size; i++)
-            fputc(dynamic_sections.elf_dynsym->elements[i], fp);
-        for (int i = 0; i < dynamic_sections.elf_dynamic->size; i++)
-            fputc(dynamic_sections.elf_dynamic->elements[i], fp);
+        elf_write_all(fp, dynamic_sections.elf_interp->elements,
+                      dynamic_sections.elf_interp->size);
+        elf_write_all(fp, dynamic_sections.elf_got->elements,
+                      dynamic_sections.elf_got->size);
+        elf_write_all(fp, dynamic_sections.elf_dynstr->elements,
+                      dynamic_sections.elf_dynstr->size);
+        elf_write_all(fp, dynamic_sections.elf_dynsym->elements,
+                      dynamic_sections.elf_dynsym->size);
+        elf_write_all(fp, dynamic_sections.elf_dynamic->elements,
+                      dynamic_sections.elf_dynamic->size);
     }
 #if ELF_IS_64 == 1
     /* Statically linked, .data begins the second load segment and has to start
@@ -1297,30 +1320,28 @@ void elf_generate(const char *outfile)
     if (!dynlink) {
         int ro_written = elf_header_len + elf_code->size + elf_rodata->size;
         int data_ofs = ALIGN_UP(ro_written, PAGESIZE);
-        for (int i = ro_written; i < data_ofs; i++)
-            fputc(0, fp);
+        char pad[PAGESIZE];
+
+        for (int i = 0; i < PAGESIZE; i++)
+            pad[i] = 0;
+        elf_write_all(fp, pad, data_ofs - ro_written);
     }
 #endif
     /* Readable and writable sections */
-    for (int i = 0; i < elf_data->size; i++)
-        fputc(elf_data->elements[i], fp);
+    elf_write_all(fp, elf_data->elements, elf_data->size);
 
-        /* Note: .bss is not written to file (SHT_NOBITS) */
+    /* Note: .bss is not written to file (SHT_NOBITS) */
 
-        /* Other sections and section headers.
-         *
-         * ELF64 output emits no section headers, so the symbol and string
-         * tables have nothing to reference and are left out of the image.
-         */
+    /* Other sections and section headers.
+     *
+     * ELF64 output emits no section headers, so the symbol and string
+     * tables have nothing to reference and are left out of the image.
+     */
 #if ELF_IS_64 == 0
-    for (int i = 0; i < elf_symtab->size; i++)
-        fputc(elf_symtab->elements[i], fp);
-    for (int i = 0; i < elf_strtab->size; i++)
-        fputc(elf_strtab->elements[i], fp);
-    for (int i = 0; i < elf_shstrtab->size; i++)
-        fputc(elf_shstrtab->elements[i], fp);
-    for (int i = 0; i < elf_section_header->size; i++)
-        fputc(elf_section_header->elements[i], fp);
+    elf_write_all(fp, elf_symtab->elements, elf_symtab->size);
+    elf_write_all(fp, elf_strtab->elements, elf_strtab->size);
+    elf_write_all(fp, elf_shstrtab->elements, elf_shstrtab->size);
+    elf_write_all(fp, elf_section_header->elements, elf_section_header->size);
 #endif
     fclose(fp);
 }

@@ -70,11 +70,30 @@ void add_label(char *name, basic_block_t *bb)
 
 /* Name for a compiler-generated temporary, interned so that the var_t only
  * has to hold a pointer to it.
+ *
+ * This is the parser's most frequent call by a wide margin -- one per
+ * temporary value -- and sprintf() spends most of a call parsing a format
+ * string that never changes. Writing the fixed prefix and the decimal digits
+ * directly produces the same name for a fraction of the work.
  */
 char *gen_name(void)
 {
-    char buf[MAX_ID_LEN];
-    sprintf(buf, ".t%d", global_var_idx++);
+    char buf[MAX_ID_LEN], digits[16];
+    int val = global_var_idx++;
+    int len = 0, i = 2;
+
+    buf[0] = '.';
+    buf[1] = 't';
+
+    if (!val)
+        digits[len++] = '0';
+    while (val) {
+        digits[len++] = '0' + val % 10;
+        val /= 10;
+    }
+    while (len)
+        buf[i++] = digits[--len];
+    buf[i] = 0;
     return arena_strdup(GENERAL_ARENA, buf);
 }
 

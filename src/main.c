@@ -132,6 +132,11 @@ int main(int argc, char *argv[])
     if (dump_ir)
         dump_insn();
 
+    /* Nothing beyond this point should spend time on functions no call can
+     * reach; on a small input, almost all of the embedded libc is that.
+     */
+    prune_unused_funcs();
+
     /* SSA-based optimization */
     optimize();
 

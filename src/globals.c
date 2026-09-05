@@ -562,7 +562,11 @@ void hashmap_free(hashmap_t *map)
  */
 type_t *find_type(char *type_name, int flag)
 {
+    char head = type_name[0];
+
     for (int i = 0; i < types_idx; i++) {
+        if (TYPES[i].type_name[0] != head)
+            continue;
         if (TYPES[i].base_type == TYPE_struct ||
             TYPES[i].base_type == TYPE_union) {
             if (flag == 1)
@@ -903,29 +907,48 @@ var_t *find_member(char token[], type_t *type)
     if (type->size == 0)
         type = type->base_struct;
 
+    char head = token[0];
+
     for (int i = 0; i < type->num_fields; i++) {
+        if (type->fields[i].var_name[0] != head)
+            continue;
         if (!strcmp(type->fields[i].var_name, token))
             return &type->fields[i];
     }
     return NULL;
 }
 
+/* Name lookup is the parser's inner loop: every identifier walks the enclosing
+ * scopes, then the parameter list, then the globals, and all but the one match
+ * is a strcmp against a name that differs immediately. A call into the C
+ * library's vectorized strcmp costs far more than the comparison it performs on
+ * such names, so each scan settles the common case -- a different first letter
+ * -- before making the call. Names are never empty, so reading the first byte
+ * of either side is always in bounds.
+ */
 var_t *find_local_var(char *token, block_t *block)
 {
     func_t *func = block->func;
+    char head = token[0];
 
     for (; block; block = block->parent) {
         var_list_t *var_list = &block->locals;
         for (int i = 0; i < var_list->size; i++) {
-            if (!strcmp(var_list->elements[i]->var_name, token))
-                return var_list->elements[i];
+            var_t *var = var_list->elements[i];
+            if (var->var_name[0] != head)
+                continue;
+            if (!strcmp(var->var_name, token))
+                return var;
         }
     }
 
     if (func) {
         for (int i = 0; i < func->num_params; i++) {
-            if (!strcmp(func->param_defs[i].var_name, token))
-                return &func->param_defs[i];
+            var_t *param = &func->param_defs[i];
+            if (param->var_name[0] != head)
+                continue;
+            if (!strcmp(param->var_name, token))
+                return param;
         }
     }
     return NULL;
@@ -934,10 +957,14 @@ var_t *find_local_var(char *token, block_t *block)
 var_t *find_global_var(char *token)
 {
     var_list_t *var_list = &GLOBAL_BLOCK->locals;
+    char head = token[0];
 
     for (int i = 0; i < var_list->size; i++) {
-        if (!strcmp(var_list->elements[i]->var_name, token))
-            return var_list->elements[i];
+        var_t *var = var_list->elements[i];
+        if (var->var_name[0] != head)
+            continue;
+        if (!strcmp(var->var_name, token))
+            return var;
     }
     return NULL;
 }
@@ -1357,8 +1384,15 @@ bool strbuf_extend(strbuf_t *src, int len)
 
 bool strbuf_putc(strbuf_t *src, char value)
 {
-    if (!strbuf_extend(src, 1))
-        return false;
+    /* Appending one byte is how the whole of the generated machine code and
+     * every ELF header reaches memory, several hundred thousand times per
+     * compile, and all but a handful of those have room already. Testing for
+     * the room here keeps the call to the growth path off that route.
+     */
+    if (src->size + 1 >= src->capacity) {
+        if (!strbuf_extend(src, 1))
+            return false;
+    }
 
     src->elements[src->size] = value;
     src->size++;
@@ -1370,8 +1404,10 @@ bool strbuf_puts(strbuf_t *src, const char *value)
 {
     int len = strlen(value);
 
-    if (!strbuf_extend(src, len))
-        return false;
+    if (src->size + len >= src->capacity) {
+        if (!strbuf_extend(src, len))
+            return false;
+    }
 
     strncpy(src->elements + src->size, value, len);
     src->size += len;
