@@ -605,7 +605,7 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->src0 = 0;
     ph2_ir->src1 = 0;
     ph2_ir->dest = 0;
-    ph2_ir->func_name[0] = '\0';
+    ph2_ir->func_name = NULL;
     ph2_ir->next_bb = NULL;
     ph2_ir->then_bb = NULL;
     ph2_ir->else_bb = NULL;
@@ -843,7 +843,14 @@ type_t *add_type(void)
         printf("Error: Maximum number of types (%d) exceeded\n", MAX_TYPES);
         abort();
     }
-    return &TYPES[types_idx++];
+    type_t *t = &TYPES[types_idx++];
+    t->fields = arena_calloc(GENERAL_ARENA, MAX_FIELDS, sizeof(var_t));
+    /* The field variables come out of a zeroed allocation, so give their
+     * interned name pointers the empty string a reader can dereference.
+     */
+    for (int i = 0; i < MAX_FIELDS; i++)
+        t->fields[i].var_name = "";
+    return t;
 }
 
 /* Record a struct, union or enum tag's name.
@@ -985,8 +992,10 @@ func_t *add_func(char *func_name, bool synthesize)
 
     func = arena_alloc_func();
     hashmap_put(FUNC_MAP, func_name, func);
+    for (int i = 0; i < MAX_PARAMS; i++)
+        func->param_defs[i].var_name = "";
     /* Use interned string for function name */
-    strcpy(func->return_def.var_name, intern_string(func_name));
+    func->return_def.var_name = intern_string(func_name);
     /* Prepare space for function arguments.
      *
      * For Arm architecture, the first four arguments (arg1 ~ arg4) are
@@ -1137,6 +1146,10 @@ var_t *var_subscript0(var_t *v)
 /* Detach @v from any version array it inherited from a by-value copy. */
 void var_reset_subscripts(var_t *v)
 {
+    /* memcpy'd from a base, so the copy would otherwise alias the base's
+     * renaming state as well as its version list.
+     */
+    v->rename = NULL;
     v->subscripts = NULL;
     v->subscripts_idx = 0;
     v->subscripts_cap = 0;
@@ -1281,10 +1294,7 @@ void add_insn(block_t *block,
     n->phi_ops = NULL;
     n->idx = 0;
 
-    if (str)
-        strcpy(n->str, intern_string(str));
-    else
-        n->str[0] = '\0';
+    n->str = str ? intern_string(str) : NULL;
 
     /* Mark variables as address-taken to prevent incorrect constant
      * optimization
@@ -1458,6 +1468,15 @@ void lexer_cleanup(void);
  * This only frees blocks that come after the last used block,
  * ensuring no pointers are invalidated.
  *
+ * NOTE: measured over a self-compile, this reclaims nothing. arena_alloc()
+ * prepends each new block at the head, so the list runs newest-to-oldest and
+ * every block behind the head is full by construction: last_used is always the
+ * tail and there is never anything after it to free. The only case that ever
+ * fires is an arena whose very first allocation was larger than its initial
+ * block, leaving that block at offset 0 behind a newer one. Reclaiming a
+ * bump allocator's memory needs a phase boundary that can drop a whole arena
+ * -- see release_token_arena() -- not a scan for empty blocks.
+ *
  * @arena: The arena to compact.
  * Return: Bytes freed.
  */
@@ -1495,6 +1514,26 @@ int arena_free_trailing_blocks(arena_t *arena)
     }
 
     return freed;
+}
+
+/* Release the whole token arena and the source buffers behind it.
+ *
+ * Every token, macro, hide set and conditional-inclusion record lives in
+ * TOKEN_ARENA, and nothing survives parsing: identifiers and string literals
+ * reach the parser through intern_string(), which copies into GENERAL_ARENA,
+ * and every parser entry point copies a token's text into a local buffer
+ * before storing it. So once parse() returns, all 17 MiB of it is garbage that
+ * would otherwise stay resident through the memory peak in reg_alloc().
+ *
+ * The source buffers in SRC_FILE_MAP exist only to quote a line in a parse
+ * error, so they go at the same time.
+ */
+void release_token_arena(void)
+{
+    if (TOKEN_ARENA) {
+        arena_free(TOKEN_ARENA);
+        TOKEN_ARENA = NULL;
+    }
 }
 
 /* Compact all arenas to reduce memory usage after compilation phases.
@@ -1561,7 +1600,8 @@ void global_release(void)
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     arena_free(HASHMAP_ARENA);
-    arena_free(TOKEN_ARENA);
+    if (TOKEN_ARENA)
+        arena_free(TOKEN_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
     hashmap_free(TOKEN_CACHE);
     hashmap_free(SRC_FILE_MAP);

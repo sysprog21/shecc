@@ -30,12 +30,13 @@ void var_list_ensure_capacity(var_list_t *list, int min_capacity)
     while (new_capacity < min_capacity)
         new_capacity <<= 1;
 
-    var_t **new_elements = arena_alloc(BB_ARENA, new_capacity * HOST_PTR_SIZE);
-
-    if (list->elements)
-        memcpy(new_elements, list->elements, list->size * HOST_PTR_SIZE);
-
-    list->elements = new_elements;
+    /* arena_realloc() extends the block in place when this list was the last
+     * thing allocated, which the liveness sets often are; allocating a fresh
+     * array and copying abandoned the old one in the arena every time.
+     */
+    list->elements = arena_realloc(BB_ARENA, (char *) list->elements,
+                                   list->capacity * HOST_PTR_SIZE,
+                                   new_capacity * HOST_PTR_SIZE);
     list->capacity = new_capacity;
 }
 
@@ -401,10 +402,10 @@ bool rdom_connect(basic_block_t *pred, basic_block_t *succ)
     if (succ->rdom_prev)
         return false;
 
-    if (pred->rdom_count >= MAX_BB_RDOM_SUCC)
-        fatal("Too many predecessors in reverse dominator tree");
-
-    pred->rdom_count++;
+    /* rdom_count only ever guarded a MAX_BB_RDOM_SUCC ceiling on an array of
+     * reverse-dominator children that no longer exists -- nothing reads the
+     * count, and nothing walks those children -- so the field is gone.
+     */
     succ->rdom_prev = pred;
     return true;
 }
@@ -743,15 +744,23 @@ void solve_phi_insertion(void)
 
 var_t *require_var(block_t *blk);
 
+/* The renaming state of @v, created on first use. */
+rename_t *var_rename(var_t *v)
+{
+    if (!v->rename)
+        v->rename = arena_calloc(BLOCK_ARENA, 1, sizeof(rename_t));
+    return v->rename;
+}
+
 /* Push a fresh subscript onto @base's renaming stack, growing it as needed. */
 void rename_stack_push(var_t *base, int sub)
 {
-    if (base->rename.stack_idx >= base->rename.stack_cap)
-        base->rename.stack = arena_grow(
-            BLOCK_ARENA, (char *) base->rename.stack, &base->rename.stack_cap,
-            sizeof(int), 8, MAX_RENAME_STACK,
-            "Too many nested definitions of a variable");
-    base->rename.stack[base->rename.stack_idx++] = sub;
+    rename_t *r = var_rename(base);
+    if (r->stack_idx >= r->stack_cap)
+        r->stack = arena_grow(BLOCK_ARENA, (char *) r->stack, &r->stack_cap,
+                              sizeof(int), 8, MAX_RENAME_STACK,
+                              "Too many nested definitions of a variable");
+    r->stack[r->stack_idx++] = sub;
 }
 
 void new_name(block_t *block, var_t **var)
@@ -762,7 +771,8 @@ void new_name(block_t *block, var_t **var)
     if (v->is_global)
         return;
 
-    int i = v->base->rename.counter++;
+    rename_t *r = var_rename(v->base);
+    int i = r->counter++;
     rename_stack_push(v->base, i);
     var_t *vd = require_var(block);
     memcpy(vd, *var, sizeof(var_t));
@@ -775,10 +785,11 @@ void new_name(block_t *block, var_t **var)
 
 var_t *get_stack_top_subscript_var(var_t *var)
 {
-    if (var->base->rename.stack_idx < 1)
+    rename_t *r = var_rename(var->base);
+    if (r->stack_idx < 1)
         return var; /* fallback: use base when no prior definition */
 
-    int sub = var->base->rename.stack[var->base->rename.stack_idx - 1];
+    int sub = r->stack[r->stack_idx - 1];
     for (int i = 0; i < var->base->subscripts_idx; i++) {
         if (var->base->subscripts[i]->subscript == sub)
             return var->base->subscripts[i];
@@ -803,7 +814,13 @@ void pop_name(var_t *var)
 {
     if (var->is_global)
         return;
-    var->base->rename.stack_idx--;
+    /* Pop unconditionally, creating the state if the variable has none: the
+     * inline rename_t this replaced was always present, so a pop with nothing
+     * pushed drove stack_idx to -1, and the next push then landed one slot
+     * below the stack. Preserve that exactly.
+     */
+    rename_t *r = var_rename(var->base);
+    r->stack_idx--;
 }
 
 void append_phi_operand(insn_t *insn, var_t *var, basic_block_t *bb_from)
@@ -889,7 +906,8 @@ void solve_phi_params(void)
             var->base = base;
             var->subscript = 0;
 
-            rename_stack_push(base, base->rename.counter++);
+            rename_t *r = var_rename(base);
+            rename_stack_push(base, r->counter++);
             var_add_subscript(base, var);
         }
 

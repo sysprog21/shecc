@@ -68,10 +68,14 @@ void add_label(char *name, basic_block_t *bb)
     l->bb = bb;
 }
 
-char *gen_name_to(char *buf)
+/* Name for a compiler-generated temporary, interned so that the var_t only
+ * has to hold a pointer to it.
+ */
+char *gen_name(void)
 {
+    char buf[MAX_ID_LEN];
     sprintf(buf, ".t%d", global_var_idx++);
-    return buf;
+    return arena_strdup(GENERAL_ARENA, buf);
 }
 
 var_t *require_var(block_t *blk)
@@ -79,17 +83,19 @@ var_t *require_var(block_t *blk)
     var_list_t *var_list = &blk->locals;
 
     if (var_list->size >= var_list->capacity) {
+        int old_cap = var_list->capacity;
         var_list->capacity <<= 1;
-
-        var_t **new_locals =
-            arena_alloc(BLOCK_ARENA, var_list->capacity * sizeof(var_t *));
-        memcpy(new_locals, var_list->elements,
-               var_list->size * sizeof(var_t *));
-        var_list->elements = new_locals;
+        var_list->elements = arena_realloc(
+            BLOCK_ARENA, (char *) var_list->elements, old_cap * sizeof(var_t *),
+            var_list->capacity * sizeof(var_t *));
     }
 
     var_t *var = arena_calloc(BLOCK_ARENA, 1, sizeof(var_t));
     var_list->elements[var_list->size++] = var;
+    /* var_name is a pointer now; every reader dereferences it unconditionally,
+     * so an unnamed variable points at the empty string rather than NULL.
+     */
+    var->var_name = "";
     var->consumed = -1;
     var->phys_reg = -1;
     var->first_use = -1;
@@ -315,7 +321,7 @@ var_t *promote_unchecked(block_t *block,
                          int target_ptr)
 {
     var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
-    gen_name_to(rd->var_name);
+    rd->var_name = gen_name();
     /* Encode both source and target sizes in src1:
      * Lower 16 bits: target size
      * Upper 16 bits: source size
@@ -357,7 +363,7 @@ var_t *truncate_unchecked(block_t *block,
                           int target_ptr)
 {
     var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
-    gen_name_to(rd->var_name);
+    rd->var_name = gen_name();
     add_insn(block, *bb, OP_trunc, rd, var, NULL,
              target_ptr ? PTR_SIZE : target_type->size, NULL);
     return rd;
@@ -417,12 +423,12 @@ var_t *compute_element_address(block_t *parent,
         return base_addr;
 
     var_t *offset = require_var(parent);
-    gen_name_to(offset->var_name);
+    offset->var_name = gen_name();
     offset->init_val = index * elem_size;
     add_insn(parent, *bb, OP_load_constant, offset, NULL, NULL, 0, NULL);
 
     var_t *addr = require_var(parent);
-    gen_name_to(addr->var_name);
+    addr->var_name = gen_name();
     add_insn(parent, *bb, OP_add, addr, base_addr, offset, 0, NULL);
     return addr;
 }
@@ -436,12 +442,12 @@ var_t *compute_field_address(block_t *parent,
         return struct_addr;
 
     var_t *offset = require_var(parent);
-    gen_name_to(offset->var_name);
+    offset->var_name = gen_name();
     offset->init_val = field->offset;
     add_insn(parent, *bb, OP_load_constant, offset, NULL, NULL, 0, NULL);
 
     var_t *addr = require_var(parent);
-    gen_name_to(addr->var_name);
+    addr->var_name = gen_name();
     add_insn(parent, *bb, OP_add, addr, struct_addr, offset, 0, NULL);
     return addr;
 }
@@ -461,7 +467,7 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
             num_val = -num_val;
 
         val = require_var(parent);
-        gen_name_to(val->var_name);
+        val->var_name = gen_name();
         val->init_val = num_val;
         add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
     } else if (lex_peek(T_char, NULL)) {
@@ -470,7 +476,7 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         unescape_string(chtok, unescaped, MAX_TOKEN_LEN);
 
         val = require_typed_var(parent, TY_char);
-        gen_name_to(val->var_name);
+        val->var_name = gen_name();
         val->init_val = unescaped[0];
         add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
     } else if (lex_peek(T_string, NULL)) {
@@ -556,7 +562,7 @@ void parse_struct_field_init(block_t *parent,
 void parse_array_literal_expr(block_t *parent, basic_block_t **bb)
 {
     var_t *array_var = require_var(parent);
-    gen_name_to(array_var->var_name);
+    array_var->var_name = gen_name();
     array_var->is_compound_literal = true;
 
     int element_count = 0;
@@ -615,7 +621,7 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
         var_t *val = require_var(parent);
         val->type = rs1->type;
         val->init_val = rs1->init_val;
-        gen_name_to(val->var_name);
+        val->var_name = gen_name();
         add_insn(parent, bb, OP_load_constant, val, NULL, NULL, 0, NULL);
         rs1 = val;
     }
@@ -629,7 +635,7 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
         var_t *snapshot = require_var(parent);
         snapshot->type = rs1->type;
         snapshot->ptr_level = rs1->ptr_level;
-        gen_name_to(snapshot->var_name);
+        snapshot->var_name = gen_name();
         add_insn(parent, bb, OP_assign, snapshot, rs1, NULL, 0, NULL);
         rs1 = snapshot;
     }
@@ -753,7 +759,7 @@ basic_block_t *handle_goto_statement(block_t *parent, basic_block_t *bb)
     basic_block_t *fake_if = bb_create(parent);
     bb_connect(bb, fake_if, NEXT);
     var_t *val = require_var(parent);
-    gen_name_to(val->var_name);
+    val->var_name = gen_name();
     val->init_val = 1;
     add_insn(parent, fake_if, OP_load_constant, val, NULL, NULL, 0, NULL);
     add_insn(parent, fake_if, OP_branch, NULL, val, NULL, 0, NULL);
@@ -912,7 +918,7 @@ void parse_array_init(var_t *var,
          * */
         for (; count < var->array_size; count++) {
             var_t *val = require_var(parent);
-            gen_name_to(val->var_name);
+            val->var_name = gen_name();
             val->init_val = 0;
             add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
 
@@ -1045,7 +1051,7 @@ var_t *scalarize_array_literal(block_t *parent,
      */
     var_t *scalar = require_typed_var(parent, result_type);
     scalar->ptr_level = 0;
-    gen_name_to(scalar->var_name);
+    scalar->var_name = gen_name();
     scalar->init_val = array_var->init_val;
 
     /* Materialize the literal data into the scalar temporary via an OP_read. */
@@ -1206,7 +1212,7 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
         char temp_name[MAX_VAR_LEN];
         lex_expect(T_asterisk);
         lex_ident(T_identifier, temp_name);
-        strcpy(vd->var_name, intern_string(temp_name));
+        vd->var_name = intern_string(temp_name);
         lex_expect(T_close_bracket);
         read_parameter_list_decl(&func, true);
         vd->is_func = true;
@@ -1214,7 +1220,7 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
         if (!anon) {
             char temp_name[MAX_VAR_LEN];
             lex_ident(T_identifier, temp_name);
-            strcpy(vd->var_name, intern_string(temp_name));
+            vd->var_name = intern_string(temp_name);
             if (!lex_peek(T_open_bracket, NULL) && !is_param) {
                 if (vd->is_global) {
                     opstack_push(vd);
@@ -1228,10 +1234,10 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
         }
 
         /* Every dimension multiplies into array_size, so "int matrix[3][4]"
-         * becomes an array of 12 elements. The first two are kept separately
-         * as well, because indexing needs the row length; further dimensions
-         * only contribute to the total. A dimension left empty contributes no
-         * size.
+         * becomes an array of 12 elements. The second dimension is kept
+         * separately as well, because indexing needs the row length; further
+         * dimensions only contribute to the total. A dimension left empty
+         * contributes no size.
          */
         bool first_dim_empty = false;
         int dims = 0;
@@ -1369,7 +1375,7 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     const int index = write_symbol(combined);
 
     var_t *vd = require_typed_ptr_var(parent, TY_char, true);
-    gen_name_to(vd->var_name);
+    vd->var_name = gen_name();
     vd->init_val = index;
     opstack_push(vd);
     /* String literals are now in .rodata section */
@@ -1435,7 +1441,7 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
         value = -value;
 
     var_t *vd = require_var(parent);
-    gen_name_to(vd->var_name);
+    vd->var_name = gen_name();
     vd->init_val = value;
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
@@ -1449,7 +1455,7 @@ void read_char_param(block_t *parent, basic_block_t *bb)
     unescape_string(literal, unescaped, MAX_TOKEN_LEN);
 
     var_t *vd = require_typed_var(parent, TY_char);
-    gen_name_to(vd->var_name);
+    vd->var_name = gen_name();
     vd->init_val = unescaped[0];
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
@@ -1557,7 +1563,7 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
     if (!lvalue.is_reference) {
         rs1 = opstack_pop();
         vd = require_ref_var(parent, lvalue.type, lvalue.ptr_level);
-        gen_name_to(vd->var_name);
+        vd->var_name = gen_name();
         opstack_push(vd);
         add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
     }
@@ -1593,7 +1599,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             sz = PTR_SIZE;
         else
             sz = deref_type->size;
-        gen_name_to(vd->var_name);
+        vd->var_name = gen_name();
         opstack_push(vd);
         add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
     } else {
@@ -1634,7 +1640,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
                 sz = lvalue.type->size;
             }
         }
-        gen_name_to(vd->var_name);
+        vd->var_name = gen_name();
         opstack_push(vd);
         add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
     }
@@ -1719,7 +1725,7 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                 sz = PTR_SIZE;
             else
                 sz = deref_type->size;
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
         }
@@ -1766,7 +1772,7 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                     sz = lvalue.type->size;
                 }
             }
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
         }
@@ -1813,7 +1819,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
     vd = require_var(parent);
     vd->init_val = ptr_cnt ? PTR_SIZE : type->size;
-    gen_name_to(vd->var_name);
+    vd->var_name = gen_name();
     opstack_push(vd);
     lex_expect(T_close_bracket);
     add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
@@ -1847,14 +1853,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         /* Constant folding for logical NOT */
         if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             vd->is_const = true;
             vd->init_val = !rs1->init_val;
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
         } else {
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, OP_log_not, vd, rs1, NULL, 0, NULL);
         }
@@ -1866,14 +1872,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         /* Constant folding for bitwise NOT */
         if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             vd->is_const = true;
             vd->init_val = ~rs1->init_val;
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
         } else {
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, OP_bit_not, vd, rs1, NULL, 0, NULL);
         }
@@ -1963,7 +1969,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             /* Create variable for cast result */
             var_t *cast_var = require_typed_ptr_var(
                 parent, cast_or_literal_type, cast_ptr_level);
-            gen_name_to(cast_var->var_name);
+            cast_var->var_name = gen_name();
 
             /* Generate cast IR. A cast down to a narrower type has to discard
              * the high bits: OP_cast is only a move, so "(char) 300" kept the
@@ -1988,7 +1994,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             /* Create variable for compound literal result */
             var_t *compound_var =
                 require_typed_var(parent, cast_or_literal_type);
-            gen_name_to(compound_var->var_name);
+            compound_var->var_name = gen_name();
             compound_var->is_compound_literal = true;
 
             /* Check if this is an array compound literal (int[]){...} */
@@ -2135,14 +2141,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                             var_t *elem_offset = require_var(parent);
                             elem_offset->init_val =
                                 i * cast_or_literal_type->size;
-                            gen_name_to(elem_offset->var_name);
+                            elem_offset->var_name = gen_name();
                             add_insn(parent, *bb, OP_load_constant, elem_offset,
                                      NULL, NULL, 0, NULL);
 
                             /* Calculate address of element */
                             var_t *elem_addr = require_var(parent);
                             elem_addr->ptr_level = 1;
-                            gen_name_to(elem_addr->var_name);
+                            elem_addr->var_name = gen_name();
                             add_insn(parent, *bb, OP_add, elem_addr,
                                      compound_var, elem_offset, 0, NULL);
 
@@ -2161,7 +2167,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                          * = 5 + (int[]){10}; // adds 5 + 10
                          */
                         var_t *result_var = require_var(parent);
-                        gen_name_to(result_var->var_name);
+                        result_var->var_name = gen_name();
                         result_var->type = compound_var->type;
                         result_var->ptr_level = 0;
                         result_var->array_size = 0;
@@ -2208,7 +2214,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         if (con) {
             vd = require_var(parent);
             vd->init_val = con->value;
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             lex_expect(T_identifier);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
@@ -2222,7 +2228,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 read_indirect_call(parent, bb);
 
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_func_ret, vd, NULL, NULL, 0, NULL);
             }
@@ -2234,14 +2240,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
                 vd = require_typed_ptr_var(parent, func->return_def.type,
                                            func->return_def.ptr_level);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_func_ret, vd, NULL, NULL, 0, NULL);
             } else {
                 /* indirective function pointer assignment */
                 vd = require_func_symbol_var(parent);
                 vd->is_func = true;
-                strcpy(vd->var_name, intern_string(token));
+                vd->var_name = intern_string(token);
                 opstack_push(vd);
             }
         } else if (lex_accept(T_open_curly)) {
@@ -2257,7 +2263,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             /* Constant folding for negation */
             if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 vd->is_const = true;
                 vd->init_val = -rs1->init_val;
                 opstack_push(vd);
@@ -2265,7 +2271,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                          NULL);
             } else {
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_negate, vd, rs1, NULL, 0, NULL);
             }
@@ -2469,19 +2475,19 @@ void handle_pointer_arithmetic(block_t *parent,
 
             /* Perform subtraction first */
             var_t *diff = require_var(parent);
-            gen_name_to(diff->var_name);
+            diff->var_name = gen_name();
             add_insn(parent, *bb, OP_sub, diff, rs1, rs2, 0, NULL);
 
             /* Then divide by element size if needed */
             if (element_size > 1) {
                 var_t *size_const = require_var(parent);
-                gen_name_to(size_const->var_name);
+                size_const->var_name = gen_name();
                 size_const->init_val = element_size;
                 add_insn(parent, *bb, OP_load_constant, size_const, NULL, NULL,
                          0, NULL);
 
                 var_t *result = require_var(parent);
-                gen_name_to(result->var_name);
+                result->var_name = gen_name();
                 add_insn(parent, *bb, OP_div, result, diff, size_const, 0,
                          NULL);
                 opstack_push(result);
@@ -2512,13 +2518,13 @@ void handle_pointer_arithmetic(block_t *parent,
     if (ptr_var && element_size > 1) {
         /* Create multiplication by element size */
         var_t *size_const = require_var(parent);
-        gen_name_to(size_const->var_name);
+        size_const->var_name = gen_name();
         size_const->init_val = element_size;
         add_insn(parent, *bb, OP_load_constant, size_const, NULL, NULL, 0,
                  NULL);
 
         var_t *scaled = require_var(parent);
-        gen_name_to(scaled->var_name);
+        scaled->var_name = gen_name();
         add_insn(parent, *bb, OP_mul, scaled, int_var, size_const, 0, NULL);
 
         /* Use scaled value as rs2 */
@@ -2532,7 +2538,7 @@ void handle_pointer_arithmetic(block_t *parent,
         vd->type = ptr_var->type;
         vd->ptr_level = ptr_var->ptr_level;
     }
-    gen_name_to(vd->var_name);
+    vd->var_name = gen_name();
     opstack_push(vd);
     add_insn(parent, *bb, op, vd, rs1, rs2, 0, NULL);
 }
@@ -2604,7 +2610,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
                     }
 
                     vd = require_var(parent);
-                    gen_name_to(vd->var_name);
+                    vd->var_name = gen_name();
                     opstack_push(vd);
                     add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
 
@@ -2816,7 +2822,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
             if (folded) {
                 /* Create constant result */
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 vd->init_val = result;
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
@@ -2824,14 +2830,14 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
             } else {
                 /* Normal operation - folding failed or not supported */
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
             }
         } else {
             /* Normal operation */
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
         }
@@ -2906,7 +2912,7 @@ void read_lvalue(lvalue_t *lvalue,
             if (lvalue->is_reference && lvalue->ptr_level && is_member) {
                 rs1 = opstack_pop();
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_read, vd, rs1, NULL, PTR_SIZE, NULL);
             }
@@ -2966,7 +2972,7 @@ void read_lvalue(lvalue_t *lvalue,
             if (multiplier != 1) {
                 vd = require_var(parent);
                 vd->init_val = multiplier;
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
                          NULL);
@@ -2974,7 +2980,7 @@ void read_lvalue(lvalue_t *lvalue,
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_mul, vd, rs1, rs2, 0, NULL);
             }
@@ -2982,7 +2988,7 @@ void read_lvalue(lvalue_t *lvalue,
             rs2 = opstack_pop();
             rs1 = opstack_pop();
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, OP_add, vd, rs1, rs2, 0, NULL);
 
@@ -3000,7 +3006,7 @@ void read_lvalue(lvalue_t *lvalue,
                 if (is_member) {
                     rs1 = opstack_pop();
                     vd = require_var(parent);
-                    gen_name_to(vd->var_name);
+                    vd->var_name = gen_name();
                     opstack_push(vd);
                     add_insn(parent, *bb, OP_read, vd, rs1, NULL, PTR_SIZE,
                              NULL);
@@ -3011,7 +3017,7 @@ void read_lvalue(lvalue_t *lvalue,
                 if (!is_address_got) {
                     rs1 = opstack_pop();
                     vd = require_var(parent);
-                    gen_name_to(vd->var_name);
+                    vd->var_name = gen_name();
                     opstack_push(vd);
                     add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0,
                              NULL);
@@ -3037,7 +3043,7 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* move pointer to offset of structure */
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             vd->init_val = var->offset;
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
@@ -3045,7 +3051,7 @@ void read_lvalue(lvalue_t *lvalue,
             rs2 = opstack_pop();
             rs1 = opstack_pop();
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, OP_add, vd, rs1, rs2, 0, NULL);
 
@@ -3068,7 +3074,7 @@ void read_lvalue(lvalue_t *lvalue,
             if (lvalue->is_reference) {
                 rs1 = opstack_pop();
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_read, vd, rs1, NULL, lvalue->size,
                          NULL);
@@ -3087,7 +3093,7 @@ void read_lvalue(lvalue_t *lvalue,
 
             if (lvalue->size > 1) {
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 vd->init_val = lvalue->size;
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
@@ -3096,7 +3102,7 @@ void read_lvalue(lvalue_t *lvalue,
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_mul, vd, rs1, rs2, 0, NULL);
             }
@@ -3117,7 +3123,7 @@ void read_lvalue(lvalue_t *lvalue,
                 vd->type = lvalue->type;
                 vd->ptr_level = var->ptr_level;
             }
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, OP_add, vd, rs1, rs2, 0, NULL);
         }
@@ -3131,13 +3137,13 @@ void read_lvalue(lvalue_t *lvalue,
         if (lvalue->is_reference) {
             rs1 = operand_stack[operand_stack_idx - 1];
             t = require_var(parent);
-            gen_name_to(t->var_name);
+            t->var_name = gen_name();
             opstack_push(t);
             add_insn(parent, *bb, OP_read, t, rs1, NULL, lvalue->size, NULL);
         }
         if (prefix_op != OP_generic) {
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             /* For pointer arithmetic, increment by the size of pointed-to type
              */
             if (lvalue->ptr_level)
@@ -3153,7 +3159,7 @@ void read_lvalue(lvalue_t *lvalue,
             else
                 rs1 = operand_stack[operand_stack_idx - 1];
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             add_insn(parent, *bb, prefix_op, vd, rs1, rs2, 0, NULL);
 
             if (lvalue->is_reference) {
@@ -3174,7 +3180,7 @@ void read_lvalue(lvalue_t *lvalue,
         } else if (lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) {
             side_effect[se_idx].opcode = OP_load_constant;
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
 
             /* Calculate increment size based on pointer type */
             int increment_size = 1;
@@ -3226,7 +3232,7 @@ void read_lvalue(lvalue_t *lvalue,
             else
                 side_effect[se_idx].rs1 = operand_stack[operand_stack_idx - 1];
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             side_effect[se_idx].rd = vd;
             se_idx++;
 
@@ -3379,13 +3385,13 @@ void finalize_logical(opcode_t op,
      * operation.
      * */
     vd = require_var(parent);
-    gen_name_to(vd->var_name);
+    vd->var_name = gen_name();
     vd->init_val = op == OP_log_and;
     add_insn(parent, op == OP_log_and ? then_next : else_bb, OP_load_constant,
              vd, NULL, NULL, 0, NULL);
 
     log_op_res = require_var(parent);
-    gen_name_to(log_op_res->var_name);
+    log_op_res->var_name = gen_name();
     add_insn(parent, op == OP_log_and ? then_next : else_bb, OP_assign,
              log_op_res, vd, NULL, 0, NULL);
 
@@ -3400,7 +3406,7 @@ void finalize_logical(opcode_t op,
      * a true value for a logical-or operation.
      */
     vd = require_var(parent);
-    gen_name_to(vd->var_name);
+    vd->var_name = gen_name();
     vd->init_val = op != OP_log_and;
     add_insn(parent, op == OP_log_and ? else_bb : then, OP_load_constant, vd,
              NULL, NULL, 0, NULL);
@@ -3470,7 +3476,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
         false_array && !true_ptr_like);
 
     vd = require_var(parent);
-    gen_name_to(vd->var_name);
+    vd->var_name = gen_name();
     add_insn(parent, then_, OP_assign, vd, true_val, NULL, 0, NULL);
     add_insn(parent, else_, OP_assign, vd, false_val, NULL, 0, NULL);
 
@@ -3526,7 +3532,7 @@ bool read_body_assignment(char *token,
             if (lvalue.is_reference) {
                 rs1 = opstack_pop();
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_read, vd, rs1, NULL, PTR_SIZE, NULL);
             }
@@ -3582,7 +3588,7 @@ bool read_body_assignment(char *token,
                 if (lvalue.is_reference) {
                     t = opstack_pop();
                     vd = require_var(parent);
-                    gen_name_to(vd->var_name);
+                    vd->var_name = gen_name();
                     opstack_push(vd);
                     add_insn(parent, *bb, OP_read, vd, t, NULL, lvalue.size,
                              NULL);
@@ -3590,7 +3596,7 @@ bool read_body_assignment(char *token,
                     t = operand_stack[operand_stack_idx - 1];
 
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 vd->init_val = increment_size;
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
                          NULL);
@@ -3598,7 +3604,7 @@ bool read_body_assignment(char *token,
                 rs2 = vd;
                 rs1 = opstack_pop();
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 add_insn(parent, *bb, op, vd, rs1, rs2, 0, NULL);
 
                 if (lvalue.is_reference) {
@@ -3611,7 +3617,7 @@ bool read_body_assignment(char *token,
                 if (lvalue.is_reference) {
                     t = opstack_pop();
                     vd = require_var(parent);
-                    gen_name_to(vd->var_name);
+                    vd->var_name = gen_name();
                     opstack_push(vd);
                     add_insn(parent, *bb, OP_read, vd, t, NULL, lvalue.size,
                              NULL);
@@ -3627,7 +3633,7 @@ bool read_body_assignment(char *token,
                 opstack_push(rhs_val);
                 vd = require_var(parent);
                 vd->init_val = increment_size;
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
                          NULL);
@@ -3635,14 +3641,14 @@ bool read_body_assignment(char *token,
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_mul, vd, rs1, rs2, 0, NULL);
 
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 add_insn(parent, *bb, op, vd, rs1, rs2, 0, NULL);
 
                 if (lvalue.is_reference) {
@@ -3667,11 +3673,11 @@ bool read_body_assignment(char *token,
                  * lowered as a function address. */
                 if (rs2->is_func && find_var(rs2->var_name, parent) == rs2) {
                     t = require_ref_var(parent, rs2->type, rs2->ptr_level);
-                    gen_name_to(t->var_name);
+                    t->var_name = gen_name();
                     add_insn(parent, *bb, OP_address_of, t, rs2, NULL, 0, NULL);
 
                     vd = require_var(parent);
-                    gen_name_to(vd->var_name);
+                    vd->var_name = gen_name();
                     add_insn(parent, *bb, OP_read, vd, t, NULL, PTR_SIZE, NULL);
                     rs2 = vd;
                 }
@@ -3682,7 +3688,7 @@ bool read_body_assignment(char *token,
                 if (!lvalue.is_reference) {
                     var_t *addr =
                         require_ref_var(parent, lvalue.type, lvalue.ptr_level);
-                    gen_name_to(addr->var_name);
+                    addr->var_name = gen_name();
                     add_insn(parent, *bb, OP_address_of, addr, rs1, NULL, 0,
                              NULL);
                     rs1 = addr;
@@ -3866,7 +3872,7 @@ bool read_global_assignment(char *token)
         /* only one value after assignment */
         if (op == OP_generic) {
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             vd->init_val = operand1;
             add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
@@ -3885,7 +3891,7 @@ bool read_global_assignment(char *token)
         if (next_op == OP_generic) {
             /* only two operands, apply and return */
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             vd->init_val = eval_expression_imm(op, operand1, operand2);
             add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
@@ -3957,7 +3963,7 @@ bool read_global_assignment(char *token)
                     eval_ternary_imm(val_stack[0], token);
                 } else {
                     vd = require_var(parent);
-                    gen_name_to(vd->var_name);
+                    vd->var_name = gen_name();
                     vd->init_val = val_stack[0];
                     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0,
                              NULL);
@@ -3977,7 +3983,7 @@ bool read_global_assignment(char *token)
             eval_ternary_imm(val_stack[0], token);
         } else {
             vd = require_var(parent);
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             vd->init_val = val_stack[0];
             add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant, vd, NULL, NULL,
                      0, NULL);
@@ -4082,13 +4088,13 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 }
 
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 vd->init_val = case_val;
                 opstack_push(vd);
                 add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
                 vd = require_var(parent);
-                gen_name_to(vd->var_name);
+                vd->var_name = gen_name();
                 rs1 = opstack_pop();
                 rs2 = operand_stack[operand_stack_idx - 1];
                 add_insn(parent, bb, OP_eq, vd, rs1, rs2, 0, NULL);
@@ -4250,7 +4256,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             /* always true */
             vd = require_var(blk);
             vd->init_val = 1;
-            gen_name_to(vd->var_name);
+            vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(blk, cond_, OP_load_constant, vd, NULL, NULL, 0, NULL);
         }
@@ -4410,20 +4416,20 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                 /* Compute field address: &struct + field_offset
                                  */
                                 var_t *struct_addr = require_var(parent);
-                                gen_name_to(struct_addr->var_name);
+                                struct_addr->var_name = gen_name();
                                 add_insn(parent, bb, OP_address_of, struct_addr,
                                          var, NULL, 0, NULL);
 
                                 var_t *field_addr = struct_addr;
                                 if (field->offset > 0) {
                                     var_t *offset = require_var(parent);
-                                    gen_name_to(offset->var_name);
+                                    offset->var_name = gen_name();
                                     offset->init_val = field->offset;
                                     add_insn(parent, bb, OP_load_constant,
                                              offset, NULL, NULL, 0, NULL);
 
                                     var_t *addr = require_var(parent);
-                                    gen_name_to(addr->var_name);
+                                    addr->var_name = gen_name();
                                     add_insn(parent, bb, OP_add, addr,
                                              struct_addr, offset, 0, NULL);
                                     field_addr = addr;
@@ -4507,20 +4513,20 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                     /* Compute field address: &struct +
                                      * field_offset */
                                     var_t *struct_addr = require_var(parent);
-                                    gen_name_to(struct_addr->var_name);
+                                    struct_addr->var_name = gen_name();
                                     add_insn(parent, bb, OP_address_of,
                                              struct_addr, nv, NULL, 0, NULL);
 
                                     var_t *field_addr = struct_addr;
                                     if (field->offset > 0) {
                                         var_t *offset = require_var(parent);
-                                        gen_name_to(offset->var_name);
+                                        offset->var_name = gen_name();
                                         offset->init_val = field->offset;
                                         add_insn(parent, bb, OP_load_constant,
                                                  offset, NULL, NULL, 0, NULL);
 
                                         var_t *addr = require_var(parent);
-                                        gen_name_to(addr->var_name);
+                                        addr->var_name = gen_name();
                                         add_insn(parent, bb, OP_add, addr,
                                                  struct_addr, offset, 0, NULL);
                                         field_addr = addr;
@@ -4656,20 +4662,20 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
                             /* Compute field address: &struct + field_offset */
                             var_t *struct_addr = require_var(parent);
-                            gen_name_to(struct_addr->var_name);
+                            struct_addr->var_name = gen_name();
                             add_insn(parent, bb, OP_address_of, struct_addr,
                                      var, NULL, 0, NULL);
 
                             var_t *field_addr = struct_addr;
                             if (field->offset > 0) {
                                 var_t *offset = require_var(parent);
-                                gen_name_to(offset->var_name);
+                                offset->var_name = gen_name();
                                 offset->init_val = field->offset;
                                 add_insn(parent, bb, OP_load_constant, offset,
                                          NULL, NULL, 0, NULL);
 
                                 var_t *addr = require_var(parent);
-                                gen_name_to(addr->var_name);
+                                addr->var_name = gen_name();
                                 add_insn(parent, bb, OP_add, addr, struct_addr,
                                          offset, 0, NULL);
                                 field_addr = addr;
@@ -4704,7 +4710,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     /* Extract first element from compound literal array */
                     var_t *first_elem = require_var(parent);
                     first_elem->type = var->type;
-                    gen_name_to(first_elem->var_name);
+                    first_elem->var_name = gen_name();
 
                     /* Read first element from array at offset 0
                      * expr_result is the array itself, so we can read
@@ -4770,20 +4776,20 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                 /* Compute field address: &struct + field_offset
                                  */
                                 var_t *struct_addr = require_var(parent);
-                                gen_name_to(struct_addr->var_name);
+                                struct_addr->var_name = gen_name();
                                 add_insn(parent, bb, OP_address_of, struct_addr,
                                          nv, NULL, 0, NULL);
 
                                 var_t *field_addr = struct_addr;
                                 if (field->offset > 0) {
                                     var_t *offset = require_var(parent);
-                                    gen_name_to(offset->var_name);
+                                    offset->var_name = gen_name();
                                     offset->init_val = field->offset;
                                     add_insn(parent, bb, OP_load_constant,
                                              offset, NULL, NULL, 0, NULL);
 
                                     var_t *addr = require_var(parent);
-                                    gen_name_to(addr->var_name);
+                                    addr->var_name = gen_name();
                                     add_insn(parent, bb, OP_add, addr,
                                              struct_addr, offset, 0, NULL);
                                     field_addr = addr;
@@ -4859,11 +4865,11 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
             if (compound_op != OP_generic) {
                 /* "*p op= v" reads the pointee, combines, and writes back. */
                 var_t *cur = require_var(parent);
-                gen_name_to(cur->var_name);
+                cur->var_name = gen_name();
                 add_insn(parent, bb, OP_read, cur, addr, NULL, store_sz, NULL);
 
                 var_t *combined = require_var(parent);
-                gen_name_to(combined->var_name);
+                combined->var_name = gen_name();
                 add_insn(parent, bb, compound_op, combined, cur, rvalue, 0,
                          NULL);
                 rvalue = combined;
@@ -5185,7 +5191,7 @@ void consume_global_compound_literal(void)
 void initialize_struct_field(var_t *nv, var_t *v, int offset)
 {
     nv->type = v->type;
-    nv->var_name[0] = '\0';
+    nv->var_name = "";
     nv->ptr_level = 0;
     nv->is_func = false;
     nv->is_global = false;

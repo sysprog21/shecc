@@ -188,7 +188,7 @@ void cfg_flatten(void)
         /* reserve stack */
         ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = func->stack_size;
-        strncpy(flatten_ir->func_name, func->return_def.var_name, MAX_VAR_LEN);
+        flatten_ir->func_name = intern_string(func->return_def.var_name);
 
         /* The actual offset of the top of the local stack is the sum of:
          * - 36 bytes (pushing registers r4-r11 and lr onto the stack)

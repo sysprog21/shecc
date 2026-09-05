@@ -182,7 +182,7 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->src0 = 0;
     n->src1 = 0;
     n->dest = 0;
-    n->func_name[0] = '\0';
+    n->func_name = NULL;
     n->next_bb = NULL;
     n->then_bb = NULL;
     n->else_bb = NULL;
@@ -874,14 +874,14 @@ void bb_export_regs(basic_block_t *bb)
     /* The successor must also be the block reg_alloc() visits next, so that the
      * file it inherits is the one just built here.
      */
-    if (succ != bb->rpo_next || succ->has_entry_regs)
+    if (succ != bb->rpo_next || succ->entry_regs)
         return;
     if (bb_pred_count(succ) != 1)
         return;
 
+    succ->entry_regs = arena_alloc(BB_ARENA, REG_CNT * sizeof(var_t *));
     for (int i = 0; i < REG_CNT; i++)
         succ->entry_regs[i] = REGS[i].var;
-    succ->has_entry_regs = true;
 }
 
 /* Install the register file this block starts with: the predecessor's file when
@@ -891,7 +891,7 @@ void bb_export_regs(basic_block_t *bb)
 void load_entry_regs(basic_block_t *bb)
 {
     for (int i = 0; i < REG_CNT; i++) {
-        var_t *var = bb->has_entry_regs ? bb->entry_regs[i] : NULL;
+        var_t *var = bb->entry_regs ? bb->entry_regs[i] : NULL;
 
         if (REGS[i].var && REGS[i].var != var)
             vreg_clear_phys(REGS[i].var);
@@ -1645,7 +1645,7 @@ void reg_alloc(void)
                         src0 = prepare_operand(bb, insn->rs1, -1);
                         ir = bb_add_ph2_ir(bb, OP_address_of_func);
                         ir->src0 = src0;
-                        strcpy(ir->func_name, insn->rs2->var_name);
+                        ir->func_name = intern_string(insn->rs2->var_name);
                         if (dynlink) {
                             func_t *target_fn = find_func(ir->func_name);
                             if (target_fn)
@@ -1710,7 +1710,7 @@ void reg_alloc(void)
                         callee_func->is_used = true;
 
                     ir = bb_add_ph2_ir(bb, OP_call);
-                    strcpy(ir->func_name, insn->str);
+                    ir->func_name = intern_string(insn->str);
 
                     is_pushing_args = false;
                     args = 0;
@@ -1894,7 +1894,7 @@ void dump_ph2_ir(void)
             printf("\tbr %%x%c", rs1);
             break;
         case OP_jump:
-            printf("\tj %s", ph2_ir->func_name);
+            printf("\tj %s", ph2_ir->func_name ? ph2_ir->func_name : "");
             break;
         case OP_call:
             printf("\tcall @%s", ph2_ir->func_name);

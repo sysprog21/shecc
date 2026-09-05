@@ -1259,7 +1259,7 @@ bool reg_live_out_of_bb(basic_block_t *bb, int reg)
     succs[2] = bb->else_;
 
     for (int i = 0; i < 3; i++) {
-        if (succs[i] && succs[i]->has_entry_regs && succs[i]->entry_regs[reg])
+        if (succs[i] && succs[i]->entry_regs && succs[i]->entry_regs[reg])
             return true;
     }
     return false;
@@ -3960,7 +3960,7 @@ void cfg_flatten(void)
         /* Reserve stack: account prologue via OP_define */
         ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = func->stack_size;
-        strncpy(flatten_ir->func_name, func->return_def.var_name, MAX_VAR_LEN);
+        flatten_ir->func_name = intern_string(func->return_def.var_name);
         update_elf_offset(flatten_ir);
 
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {

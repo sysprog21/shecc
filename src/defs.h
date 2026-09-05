@@ -424,7 +424,14 @@ typedef struct var_list {
 
 struct var {
     type_t *type;
-    char var_name[MAX_VAR_LEN];
+    /* Interned, not copied. A MAX_VAR_LEN array was 128 of this struct's 312
+     * bytes on every one of the ~86k variables a self-compile creates, and
+     * var_t is embedded by value MAX_FIELDS times in each type_t and
+     * MAX_PARAMS times in each func_t, so the array cost another 8 KiB per
+     * type. Generated temporary names come from gen_name(); source-level names
+     * come from intern_string(). Never NULL -- an unnamed variable holds "".
+     */
+    char *var_name;
     int ptr_level;
     bool is_func;
     bool is_global;
@@ -452,7 +459,13 @@ struct var {
     struct var **subscripts;
     int subscripts_idx;
     int subscripts_cap;
-    rename_t rename;
+    /* SSA renaming state, allocated on first use by var_rename(). Only a base
+     * variable is ever renamed, so the versions copied from it -- the large
+     * majority of all variables -- each carried an unused 24-byte rename_t
+     * inline. Field order here is load-bearing: reordering var_t breaks the
+     * bootstrap, so the pointer stays where the struct sat.
+     */
+    rename_t *rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
     use_chain_t *users_head, *users_tail;
     struct insn *last_assign;
@@ -507,17 +520,29 @@ typedef struct {
 
 /* phase-2 IR definition */
 struct ph2_ir {
-    opcode_t op;
-    int src0;
-    int src1;
-    int dest;
-    char func_name[MAX_VAR_LEN];
+    /* Grouped by width so the struct carries no interior padding: mixed in
+     * declaration order it was 72 bytes for 63 bytes of fields, on all ~101k
+     * of them a self-compile emits.
+     */
+    /* Callee / definition name, interned in GENERAL_ARENA rather than copied.
+     * A MAX_VAR_LEN array here was 128 of this struct's 192 bytes while only
+     * OP_define, OP_call and OP_address_of_func ever name anything. NULL when
+     * unused.
+     */
+    char *func_name;
     basic_block_t *next_bb;
     basic_block_t *then_bb;
     basic_block_t *else_bb;
     struct ph2_ir *next;
-    bool is_branch_detached;
 
+    opcode_t op;
+    int src0;
+    int src1;
+    int dest;
+    /* Type information for LP64 support */
+    int size_bytes; /* Size in bytes for load/store/read/write operations */
+
+    bool is_branch_detached;
     /* When an instruction uses a variable that its offset is based on
      * the top of the stack, this instruction's flag is also set to
      * indicate the compiler to recalculate the offset after the function's
@@ -527,8 +552,6 @@ struct ph2_ir {
      * to recompute the offset.
      */
     bool ofs_based_on_stack_top;
-    /* Type information for LP64 support */
-    int size_bytes;  /* Size in bytes for load/store/read/write operations */
     bool is_pointer; /* True if this operation involves a pointer type */
 };
 
@@ -540,7 +563,12 @@ struct type {
     base_type_t base_type;
     struct type *base_struct;
     int size;
-    var_t fields[MAX_FIELDS];
+    /* Member table, allocated when the type is created rather than inlined.
+     * A MAX_FIELDS array of var_t by value made type_t 12 KiB, and TYPES is a
+     * flat MAX_TYPES array that global_init() zeroes up front -- 3 MiB of
+     * resident memory for the 90 types a self-compile actually declares.
+     */
+    var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
 };
@@ -579,7 +607,12 @@ struct insn {
     bool useful; /* Used in DCE process. Set true if instruction is useful. */
     basic_block_t *belong_to;
     phi_operand_t *phi_ops;
-    char str[64];
+    /* Callee or goto-label name, interned rather than copied. add_insn()
+     * already interned the text before copying it in, so the array was 64 of
+     * this struct's 136 bytes for a string the pool owns anyway, on all ~73k
+     * instructions a self-compile builds. NULL when the opcode names nothing.
+     */
+    char *str;
 };
 
 typedef struct {
@@ -610,42 +643,37 @@ typedef struct {
 } symbol_list_t;
 
 struct basic_block {
+    /* Members are grouped by width -- 16-byte lists, then pointers, then ints,
+     * then the flags -- so the struct carries no interior padding. Mixed in
+     * declaration order it was 320 bytes for 302 bytes of fields, on every one
+     * of the ~51k blocks a self-compile creates.
+     */
     insn_list_t insn_list;
     ph2_ir_list_t ph2_ir_list;
+    var_list_t live_gen;
+    var_list_t live_kill;
+    var_list_t live_in;
+    var_list_t live_out;
+    symbol_list_t symbol_list; /* variable declaration */
+
     /* Predecessor edges, grown on demand. A fixed MAX_BB_PRED array cost two
      * kilobytes in every basic block -- by far the largest thing in one --
      * while almost every block has one or two predecessors.
      */
     bb_connection_t *prev;
-    int prev_cap;
-    /* One past the highest slot bb_connect() has ever filled. Scans of prev[]
-     * stop here instead of walking all MAX_BB_PRED slots; a block typically has
-     * one or two predecessors, so the difference is two orders of magnitude.
-     * Disconnecting clears a slot without lowering this, so it stays an upper
-     * bound and the NULL checks in each loop still skip the holes.
-     */
-    int prev_idx;
     /* Register file on entry to this block, captured by reg_alloc() at the end
-     * of the predecessor it falls out of. Only meaningful when has_entry_regs
-     * is set, and bb_export_regs() sets it only for an edge that is all three
+     * of the predecessor it falls out of. Non-NULL only when a file was handed
+     * over, and bb_export_regs() does that only for an edge that is all three
      * of: the predecessor's single successor, that predecessor's rpo_next, and
      * this block's single predecessor. A sole predecessor alone is NOT enough
      * -- a branch target is emitted wherever the backend's linear walk puts
      * it, so the registers reaching it are not the ones the branch left.
+     *
+     * Allocated only for a block that actually inherits a file: fewer than one
+     * block in thirteen does, so a REG_CNT array here cost 64 bytes on all
+     * ~51k blocks to serve 7% of them.
      */
-    struct var *entry_regs[REG_CNT];
-    bool has_entry_regs;
-    /* Index of this block's first instruction in PH2_IR_FLATTEN, or -1 when it
-     * emitted none. Recorded while that mapping is built so the backend need
-     * not search for it.
-     */
-    int ph2_base;
-    /* Whether any emitted branch or jump names this block as its target. A
-     * block no edge jumps to is reached only by falling out of the block
-     * emitted before it, which is what lets the backend carry what the
-     * registers hold across the boundary.
-     */
-    bool is_branch_target;
+    struct var **entry_regs;
     /* Used in instruction dumping when ir_dump is enabled, and allocated only
      * then: a fixed array here is 128 bytes on every one of the tens of
      * thousands of blocks a self-compile creates, all of it zeroed for
@@ -659,12 +687,6 @@ struct basic_block {
     struct basic_block *r_idom;
     struct basic_block *rpo_next;
     struct basic_block *rpo_r_next;
-    var_list_t live_gen;
-    var_list_t live_kill;
-    var_list_t live_in;
-    var_list_t live_out;
-    int rpo;
-    int rpo_r;
     /* Dominance and reverse-dominance frontiers. These were fixed worst-case
      * arrays sized MAX_BB_DOM_SUCC / MAX_BB_RDOM_SUCC, which cost 2560 bytes in
      * every basic block while a typical block uses a handful of entries. Worse,
@@ -674,28 +696,46 @@ struct basic_block {
      */
     struct basic_block **DF;
     struct basic_block **RDF;
+    /* Dominator-tree children, grown on demand for the same reason as prev[]
+     * and the frontiers: a fixed array cost half a kilobyte in every block.
+     */
+    struct basic_block **dom_next;
+    struct basic_block *dom_prev;
+    struct basic_block *rdom_prev;
+    func_t *belong_to;
+    block_t *scope;
+
+    int prev_cap;
+    /* One past the highest slot bb_connect() has ever filled. Scans of prev[]
+     * stop here instead of walking all MAX_BB_PRED slots; a block typically has
+     * one or two predecessors, so the difference is two orders of magnitude.
+     * Disconnecting clears a slot without lowering this, so it stays an upper
+     * bound and the NULL checks in each loop still skip the holes.
+     */
+    int prev_idx;
+    /* Index of this block's first instruction in PH2_IR_FLATTEN, or -1 when it
+     * emitted none. Recorded while that mapping is built so the backend need
+     * not search for it.
+     */
+    int ph2_base;
+    int rpo;
+    int rpo_r;
     int df_idx;
     int rdf_idx;
     int df_cap;
     int rdf_cap;
     int visited;
-    bool useful; /* indicate whether this BB contains useful instructions */
-    /* Dominator-tree children, grown on demand for the same reason as prev[]
-     * and the frontiers: a fixed array cost half a kilobyte in every block.
-     */
-    struct basic_block **dom_next;
     int dom_next_idx;
     int dom_next_cap;
-    struct basic_block *dom_prev;
-    /* Nothing ever walks the reverse-dominator children, so only their count is
-     * kept; the 256-entry array this replaces cost 2 KiB in every basic block.
-     */
-    int rdom_count;
-    struct basic_block *rdom_prev;
-    func_t *belong_to;
-    block_t *scope;
-    symbol_list_t symbol_list; /* variable declaration */
     int elf_offset;
+
+    /* Whether any emitted branch or jump names this block as its target. A
+     * block no edge jumps to is reached only by falling out of the block
+     * emitted before it, which is what lets the backend carry what the
+     * registers hold across the boundary.
+     */
+    bool is_branch_target;
+    bool useful; /* indicate whether this BB contains useful instructions */
 };
 
 struct ref_block {
