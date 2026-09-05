@@ -161,6 +161,22 @@ var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
     return var;
 }
 
+/* The next free field slot of @type.
+ *
+ * Struct and union bodies fill these in from two places -- one field per
+ * declaration, and one more per comma in a multiple declarator -- so the bound
+ * belongs here rather than being repeated, and missed, at each of them.
+ */
+var_t *type_add_field(type_t *type, int *idx)
+{
+    int i = *idx;
+
+    if (i >= MAX_FIELDS)
+        error_at("Too many fields in struct or union", cur_token_loc());
+    *idx = i + 1;
+    return &type->fields[i];
+}
+
 void opstack_push(var_t *var)
 {
     if (operand_stack_idx >= MAX_OPERAND_STACK_SIZE)
@@ -1311,6 +1327,8 @@ void read_parameter_list_decl(func_t *func, bool anon)
         if (lex_accept(T_const))
             is_const = true;
 
+        if (vn >= MAX_PARAMS)
+            error_at("Too many parameters", cur_token_loc());
         read_full_var_decl(&func->param_defs[vn], anon, true);
         func->param_defs[vn].is_const_qualified = is_const;
         vn++;
@@ -2528,7 +2546,7 @@ bool is_pointer_operation(opcode_t op, var_t *rs1, var_t *rs2)
     return is_pointer_like_value(rs1) || is_pointer_like_value(rs2);
 }
 
-void read_expr(block_t *parent, basic_block_t **bb)
+void read_expr_body(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1, *rs2;
     opcode_t oper_stack[10];
@@ -2828,6 +2846,22 @@ void read_expr(block_t *parent, basic_block_t **bb)
         pprev_log_op = 0;
     }
 }
+
+/* Nesting counter for read_expr(). The expression grammar descends recursively
+ * through read_expr_operand(), so input nested deeply enough would run out of
+ * machine stack before any diagnostic could be printed.
+ */
+int expr_depth = 0;
+
+void read_expr(block_t *parent, basic_block_t **bb)
+{
+    expr_depth++;
+    if (expr_depth > MAX_EXPR_DEPTH)
+        error_at("Expression nesting too deep", cur_token_loc());
+    read_expr_body(parent, bb);
+    expr_depth--;
+}
+
 
 /* Return the address that an expression points to, or evaluate its value.
  *   x =;
@@ -4038,6 +4072,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     lex_expect(T_char);
                 } else if (lex_peek(T_identifier, token)) {
                     constant_t *cd = find_constant(token);
+                    if (!cd)
+                        error_at("Unknown constant in case label",
+                                 cur_token_loc());
                     case_val = cd->value;
                     lex_expect(T_identifier);
                 } else {
@@ -4127,12 +4164,16 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     }
 
     if (lex_accept(T_break)) {
+        if (!break_exit_idx)
+            error_at("'break' outside of a loop or switch", cur_token_loc());
         bb_connect(bb, break_bb[break_exit_idx - 1], NEXT);
         lex_expect(T_semicolon);
         return NULL;
     }
 
     if (lex_accept(T_continue)) {
+        if (!continue_pos_idx)
+            error_at("'continue' outside of a loop", cur_token_loc());
         bb_connect(bb, continue_bb[continue_pos_idx - 1], NEXT);
         lex_expect(T_semicolon);
         return NULL;
@@ -4866,10 +4907,19 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     return NULL;
 }
 
+/* Nesting counter for read_code_block(), which recurses through
+ * read_body_statement() for every nested block.
+ */
+int block_depth = 0;
+
 basic_block_t *read_code_block(func_t *func, block_t *parent, basic_block_t *bb)
 {
     block_t *blk = add_block(parent, func);
     bb->scope = blk;
+
+    block_depth++;
+    if (block_depth > MAX_BLOCK_DEPTH)
+        error_at("Block nesting too deep", cur_token_loc());
 
     lex_expect(T_open_curly);
 
@@ -4878,6 +4928,7 @@ basic_block_t *read_code_block(func_t *func, block_t *parent, basic_block_t *bb)
         perform_side_effect(blk, bb);
     }
 
+    block_depth--;
     return bb;
 }
 
@@ -5232,17 +5283,14 @@ void read_global_statement(void)
 
         lex_expect(T_open_curly);
         do {
-            var_t *v = &type->fields[i++];
+            var_t *v = type_add_field(type, &i);
             read_full_var_decl(v, false, true);
             v->offset = size;
             size += size_var(v);
 
             /* Handle multiple variable declarations with same base type */
             while (lex_accept(T_comma)) {
-                if (i >= MAX_FIELDS)
-                    error_at("Too many struct fields", cur_token_loc());
-
-                var_t *nv = &type->fields[i++];
+                var_t *nv = type_add_field(type, &i);
                 initialize_struct_field(nv, v, 0);
                 read_inner_var_decl(nv, false, true);
                 nv->offset = size;
@@ -5270,7 +5318,7 @@ void read_global_statement(void)
 
         lex_expect(T_open_curly);
         do {
-            var_t *v = &type->fields[i++];
+            var_t *v = type_add_field(type, &i);
             read_full_var_decl(v, false, true);
             v->offset = 0; /* All union fields start at offset 0 */
             int field_size = size_var(v);
@@ -5279,10 +5327,7 @@ void read_global_statement(void)
 
             /* Handle multiple variable declarations with same base type */
             while (lex_accept(T_comma)) {
-                if (i >= MAX_FIELDS)
-                    error_at("Too many union fields", cur_token_loc());
-
-                var_t *nv = &type->fields[i++];
+                var_t *nv = type_add_field(type, &i);
                 /* All union fields start at offset 0 */
                 initialize_struct_field(nv, v, 0);
                 read_inner_var_decl(nv, false, true);
@@ -5340,7 +5385,7 @@ void read_global_statement(void)
             if (lex_accept(T_open_curly)) {
                 has_struct_def = true;
                 do {
-                    var_t *v = &type->fields[i++];
+                    var_t *v = type_add_field(type, &i);
                     read_full_var_decl(v, false, true);
                     v->offset = size;
                     size += size_var(v);
@@ -5348,10 +5393,7 @@ void read_global_statement(void)
                     /* Handle multiple variable declarations with same base type
                      */
                     while (lex_accept(T_comma)) {
-                        if (i >= MAX_FIELDS)
-                            error_at("Too many struct fields", cur_token_loc());
-
-                        var_t *nv = &type->fields[i++];
+                        var_t *nv = type_add_field(type, &i);
                         initialize_struct_field(nv, v, 0);
                         read_inner_var_decl(nv, false, true);
                         nv->offset = size;
@@ -5403,7 +5445,7 @@ void read_global_statement(void)
             if (lex_accept(T_open_curly)) {
                 has_union_def = true;
                 do {
-                    var_t *v = &type->fields[i++];
+                    var_t *v = type_add_field(type, &i);
                     read_full_var_decl(v, false, true);
                     v->offset = 0; /* All union fields start at offset 0 */
                     int field_size = size_var(v);
@@ -5413,10 +5455,7 @@ void read_global_statement(void)
                     /* Handle multiple variable declarations with same base type
                      */
                     while (lex_accept(T_comma)) {
-                        if (i >= MAX_FIELDS)
-                            error_at("Too many union fields", cur_token_loc());
-
-                        var_t *nv = &type->fields[i++];
+                        var_t *nv = type_add_field(type, &i);
                         /* All union fields start at offset 0 */
                         initialize_struct_field(nv, v, 0);
                         read_inner_var_decl(nv, false, true);

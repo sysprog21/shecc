@@ -488,12 +488,20 @@ void emit_rsp_mem(int reg_field, int ofs)
     }
 }
 
-/* Store a little-endian value into already-emitted code. */
+/* Store a little-endian value into already-emitted code.
+ *
+ * A patch site sits at whatever offset the instruction that needs it happened
+ * to land on, so a wider store there is misaligned; writing the four bytes
+ * explicitly also stops the encoding depending on the host's byte order.
+ */
 void patch_dword(int at, int val)
 {
     char *code_ptr = elf_code->elements + at;
-    int *int_ptr = (int *) code_ptr;
-    int_ptr[0] = val;
+
+    code_ptr[0] = val & 0xFF;
+    code_ptr[1] = (val >> 8) & 0xFF;
+    code_ptr[2] = (val >> 16) & 0xFF;
+    code_ptr[3] = (val >> 24) & 0xFF;
 }
 
 void patch_qword(int at, int val)
@@ -4826,9 +4834,7 @@ void code_generate(void)
                     relative_offset, ref->patch_location, target_offset);
         }
 
-        char *code_ptr = elf_code->elements + ref->patch_location;
-        int *int_ptr = (int *) code_ptr;
-        int_ptr[0] = relative_offset; /* see note on int_ptr[0] above */
+        patch_dword(ref->patch_location, relative_offset);
     }
 
     /* Debug: dump first bytes of main entry to help diagnose crashes */

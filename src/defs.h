@@ -49,6 +49,12 @@
 #define MAX_CONSTANTS 1024
 #define MAX_CASES 128
 #define MAX_NESTING 128
+/* Recursion limits for nesting in the input. The parser descends recursively
+ * for each of these, so a deeply nested program would otherwise exhaust the
+ * machine stack before any diagnostic could be produced.
+ */
+#define MAX_EXPR_DEPTH 256
+#define MAX_BLOCK_DEPTH 256
 #define MAX_OPERAND_STACK_SIZE 32
 #define MAX_ANALYSIS_STACK_SIZE 1600
 
