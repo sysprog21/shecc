@@ -1050,6 +1050,19 @@ token_stream_t *gen_libc_token_stream()
     if (!hashmap_contains(SRC_FILE_MAP, filename))
         hashmap_put(SRC_FILE_MAP, filename, LIBC_SRC);
 
+    /* This buffer was built by appending, so its capacity is whatever the
+     * doubling left and runs past the text into memory that was never
+     * written -- while the scan below, like the one over a file, stops at
+     * capacity. Terminate it the way read_file() leaves a file: the text, a
+     * NUL, and capacity naming one past the text. Without this the lexer reads
+     * uninitialised bytes, and what it finds there depends on the allocator,
+     * which is enough to make the compiler emit different code from one build
+     * to the next.
+     */
+    if (!buf->size || buf->elements[buf->size - 1])
+        strbuf_putc(buf, 0);
+    buf->capacity = buf->size;
+
     /* Borrows strbuf_t#size to use as source index */
     buf->size = 0;
 

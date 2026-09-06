@@ -633,7 +633,13 @@ bool var_check_in_scope(var_t *var, block_t *block)
     func_t *func = block->func;
 
     while (block) {
-        for (int i = 0; i < block->locals.capacity; i++) {
+        /* Only the first 'size' entries hold a variable; the rest of the
+         * allocation was never written. Reading them compares against whatever
+         * the allocator left there, and a stray match puts a variable in scope
+         * that is not, which changes where phis are inserted and so what code
+         * comes out -- differently from one build to the next.
+         */
+        for (int i = 0; i < block->locals.size; i++) {
             if (var == block->locals.elements[i])
                 return true;
         }
