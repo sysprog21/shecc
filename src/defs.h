@@ -144,10 +144,13 @@
 #define ELF_MACHINE_RV32 0xf3
 #define ELF_MACHINE_X86_64 0x3e
 
-/* ELF class of the active target. x86-64 emits ELF64; the 32-bit targets
- * emit ELF32. Used to select the header/segment writers in elf.c.
+/* ELF class of the active target: a 64-bit pointer means ELF64, and every
+ * 32-bit target means ELF32. Used to select the header/segment writers in
+ * elf.c. Deriving it from the pointer width rather than listing machines means
+ * a new target gets the right class from the PTR_SIZE its mk file already
+ * states.
  */
-#if ELF_MACHINE == ELF_MACHINE_X86_64
+#if PTR_SIZE == 8
 #define ELF_IS_64 1
 #else
 #define ELF_IS_64 0
@@ -187,19 +190,18 @@
 #define LOOP_USE_WEIGHT 8
 #define MAX_WEIGHTED_LOOP_DEPTH 3
 
-#if ELF_MACHINE == ELF_MACHINE_X86_64
-/* Whether the target can select between two values without branching. Only
- * where it can is flattening an if into a select worthwhile.
- */
-#define HAVE_COND_MOVE 1
 /* How many registers at the top of the allocator's file a call preserves.
  * Only such a register can hold a value across a call, so only these may be
- * given to a variable for the whole of a function that calls anything. The
- * x86-64 file ends with RBX, R14, R12 and R13, which the prologue pushes; the
- * other targets are left alone until their files are checked the same way.
+ * given to a variable for the whole of a function that calls anything. A
+ * target states its own count in mk/<arch>.mk, beside the REG_CNT that fixes
+ * the file it counts from; a target that has not had its file checked this way
+ * keeps none.
+ *
+ * HAVE_COND_MOVE comes from the same place and says whether the target can
+ * select between two values without branching, which is what makes flattening
+ * an if into a select worthwhile.
  */
-#define CALLEE_SAVED_REGS 4
-#else
+#ifndef CALLEE_SAVED_REGS
 #define CALLEE_SAVED_REGS 0
 #endif
 

@@ -131,16 +131,6 @@ bool aggregate_has_function_pointer(type_t *type)
     return aggregate_has_function_pointer_seen(type, seen, 0);
 }
 
-/* Whether @var appears in @list. */
-bool var_list_holds(var_list_t *list, var_t *var)
-{
-    for (int i = 0; i < list->size; i++) {
-        if (list->elements[i] == var)
-            return true;
-    }
-    return false;
-}
-
 bool check_live_out(basic_block_t *bb, var_t *var)
 {
     return var_list_holds(&bb->live_out, var);
@@ -1016,6 +1006,21 @@ bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, var_t *var)
             return true;
     }
     return false;
+}
+
+/* Forget every register a call does not preserve.
+ *
+ * A pinned register the callee preserves still holds its variable, and
+ * forgetting that would leave it looking free for the allocator to hand to
+ * something else, losing the value the call went to the trouble of keeping.
+ */
+void clobber_caller_saved(void)
+{
+    for (int i = 0; i < REG_CNT; i++) {
+        REGS[i].var = pinned_base[i] ? REGS[i].var : NULL;
+        if (!REGS[i].var)
+            REGS[i].polluted = 0;
+    }
 }
 
 /* x86 ALU instructions are two-operand: "rd = rs1 OP rs2" is emitted as "MOV
@@ -2299,9 +2304,8 @@ void reg_alloc(void)
                      * path, so the copy this phi stands for is a register move
                      * rather than a write into a slot nothing reads back.
                      */
-                    if (pinned_reg_of(insn->rd) >= 0) {
-                        int to = pinned_reg_of(insn->rd);
-
+                    int to = pinned_reg_of(insn->rd);
+                    if (to >= 0) {
                         src0 = prepare_operand(bb, insn->rs1, -1);
                         if (src0 != to) {
                             ir = bb_add_ph2_ir(bb, OP_assign);
@@ -2664,24 +2668,14 @@ void reg_alloc(void)
                         callee_func->is_used = true;
 
                     ir = bb_add_ph2_ir(bb, OP_call);
-                    ir->func_name = intern_string(insn->str);
+                    /* add_insn() interned this when the call was created. */
+                    ir->func_name = insn->str;
 
                     is_pushing_args = false;
                     args = 0;
                     handle_abi = false;
 
-                    /* The call clobbers every register the callee does not
-                     * preserve. A pinned one it does preserve still holds its
-                     * variable, and forgetting that would leave the register
-                     * looking free for the allocator to hand to something
-                     * else, losing the value the call went to the trouble of
-                     * keeping.
-                     */
-                    for (int i = 0; i < REG_CNT; i++) {
-                        REGS[i].var = pinned_base[i] ? REGS[i].var : NULL;
-                        if (!REGS[i].var)
-                            REGS[i].polluted = 0;
-                    }
+                    clobber_caller_saved();
 
                     break;
                 case OP_indirect:
@@ -2698,18 +2692,7 @@ void reg_alloc(void)
                     args = 0;
                     handle_abi = false;
 
-                    /* The call clobbers every register the callee does not
-                     * preserve. A pinned one it does preserve still holds its
-                     * variable, and forgetting that would leave the register
-                     * looking free for the allocator to hand to something
-                     * else, losing the value the call went to the trouble of
-                     * keeping.
-                     */
-                    for (int i = 0; i < REG_CNT; i++) {
-                        REGS[i].var = pinned_base[i] ? REGS[i].var : NULL;
-                        if (!REGS[i].var)
-                            REGS[i].polluted = 0;
-                    }
+                    clobber_caller_saved();
                     break;
                 case OP_func_ret:
                     dest = prepare_dest(bb, insn, insn->rd, -1, -1);

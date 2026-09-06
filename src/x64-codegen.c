@@ -8,11 +8,6 @@
 /* Translate IR to x86-64 machine code */
 #include <stdio.h>
 
-/* Tracing disabled: no-op stub kept so existing call sites still link. The
- * parameters are deliberately unused; shecc's parser does not accept "(void)
- * x;" discard statements, so they are simply left alone.
- */
-
 /* x64.c definitions inlined to avoid parsing issues */
 
 /* REX prefix bits */
@@ -82,13 +77,7 @@ void emit_rex(int w, int reg, int rm)
 
 void emit_dword(int dword)
 {
-    emit_byte(dword & 0xFF);
-    int shifted8 = dword >> 8;
-    emit_byte(shifted8 & 0xFF);
-    int shifted16 = dword >> 16;
-    emit_byte(shifted16 & 0xFF);
-    int shifted24 = dword >> 24;
-    emit_byte(shifted24 & 0xFF);
+    elf_write_int(elf_code, dword);
 }
 
 /* The allocator's register file, in the order map_ir_reg() assigns it: IR
@@ -166,244 +155,6 @@ int x64_incoming_arg_base(int stack_size, int saved)
     return x64_frame_bytes(stack_size, saved) + saved * 8 + 8 + 8;
 }
 
-/* Calculate instruction sizes for ELF offset updates */
-void update_elf_offset(ph2_ir_t *ph2_ir)
-{
-    switch (ph2_ir->op) {
-    case OP_load_constant:
-        /* MOV r64, imm32 (sign-extended): REX.W + opcode + ModR/M + imm32 = 7
-         * bytes Since src0 is int type, it always fits in 32-bit, so we always
-         * use the 7-byte form
-         */
-        elf_offset += 7;
-        return;
-
-    case OP_address_of:
-    case OP_global_address_of:
-        /* LEA r64, [rbp+offset]: REX.W + opcode + ModR/M + disp32 = 7 bytes */
-        elf_offset += 7;
-        return;
-
-    case OP_assign:
-        if (ph2_ir->dest != ph2_ir->src0) {
-            /* MOV r64, r64: REX.W + opcode + ModR/M = 3 bytes */
-            elf_offset += 3;
-        }
-        return;
-
-    case OP_load:
-    case OP_global_load:
-        /* MOV r64, [rbp+offset]: REX.W + opcode + ModR/M + disp32 = 7 bytes */
-        elf_offset += 7;
-        return;
-
-    case OP_store:
-    case OP_global_store:
-        /* MOV [rbp+offset], r64: REX.W + opcode + ModR/M + disp32 = 7 bytes */
-        elf_offset += 7;
-        return;
-
-    case OP_read:
-    case OP_write:
-        /* For byte-sized ops we use MOVZX/MOVSX or 8-bit encodings which are
-         * longer. */
-        if (ph2_ir->size_bytes == 1)
-            elf_offset += 4; /* REX + 0F + B6/BE + ModR/M */
-        else
-            elf_offset += 3; /* REX.W + opcode + ModR/M */
-        return;
-
-    case OP_jump:
-        /* JMP rel32: opcode + rel32 = 5 bytes */
-        elf_offset += 5;
-        return;
-
-    case OP_branch:
-        /* TEST (3) + JNZ rel32 (6) + JMP rel32 (5); both edges are always
-         * emitted explicitly, so the size does not depend on block order.
-         */
-        elf_offset += 14;
-        return;
-    case OP_call:
-        /* CALL rel32 (5) + MOV RDI, RAX (3) to place the result in register 0
-         */
-        elf_offset += 8;
-        return;
-
-    case OP_return:
-        /* Size calculation (R15 is reserved for global base pointer):
-         * - Optional MOV rax, src_reg: 3 bytes (if return value and not already
-         * in RAX)
-         * - Optional ADD rsp, imm: 4 bytes (if stack size > 0)
-         * - POP r13: 2 bytes
-         * - POP r12: 2 bytes
-         * - POP rbx: 1 byte
-         * - POP rbp: 1 byte
-         * - RET: 1 byte Total without optional parts: 7 bytes Conservative
-         * estimate: 14 bytes to cover all cases
-         */
-        elf_offset += 14;
-        return;
-
-    case OP_func_ret:
-        /* Should not reach x64 backend - no code generated */
-        return;
-
-    case OP_indirect:
-        /* CALL r64: REX + FF /2 = 3 bytes */
-        elf_offset += 3;
-        return;
-
-    case OP_load_func:
-    case OP_global_load_func:
-        /* MOV r64, imm64 (function address): 10 bytes */
-        elf_offset += 10;
-        return;
-
-    case OP_cmov:
-        /* TEST cond,cond (3) + CMOVcc rd, x (4), plus MOV rd, other (3) when
-         * the destination does not already name one of the two arms. Like
-         * every other case here this is the worst case, and it has to be:
-         * branch targets come from elf_code->size as the code is emitted, but
-         * elf_preprocess() still places .rodata at elf_code_start + elf_offset,
-         * so an estimate below the real size would put data on top of code.
-         */
-        elf_offset += 10;
-        return;
-
-    case OP_add:
-    case OP_sub:
-    case OP_bit_and:
-    case OP_bit_or:
-    case OP_bit_xor:
-        /* Two-operand form may require MOV rd, rs1 (3) + ALU rd, rs2 (3) */
-        elf_offset += 6;
-        return;
-
-    case OP_mul:
-        /* Worst case: MOV rd, rs1 (3) + IMUL rd, rs2 (4) = 7 bytes */
-        elf_offset += 7;
-        return;
-
-    case OP_div:
-    case OP_mod:
-        /* MOV rax, dividend (3) + CQO (2) + IDIV divisor (3) + MOV result (3) =
-         * 11 bytes */
-        elf_offset += 11;
-        return;
-
-    case OP_lshift:
-    case OP_rshift:
-        /* MOV rd, rs1 (3) + MOV rcx, rs2 (3) + SHL/SAR rd, cl (3) = 9 bytes */
-        elf_offset += 9;
-        return;
-
-    case OP_negate:
-        /* NEG r64: REX.W + opcode + ModR/M = 3 bytes */
-        elf_offset += 3;
-        return;
-
-    case OP_bit_not:
-        /* NOT r64: REX.W + opcode + ModR/M = 3 bytes */
-        elf_offset += 3;
-        return;
-
-    case OP_log_not:
-        /* TEST (3) + SETE (3) + MOVZX (4) = 10 bytes */
-        elf_offset += 10;
-        return;
-
-    case OP_eq:
-    case OP_neq:
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-        /* CMP + SETcc + MOVZX: 3 + 3 + 4 = 10 bytes */
-        elf_offset += 10;
-        return;
-
-    case OP_log_and:
-    case OP_log_or:
-        /* TEST + conditional jumps + result: ~15 bytes */
-        elf_offset += 15;
-        return;
-
-    case OP_allocat:
-        /* SUB rsp, size: 4-7 bytes depending on immediate size */
-        elf_offset += 7;
-        return;
-
-    case OP_load_data_address:
-        /* LEA r64, [rip+offset]: 7 bytes */
-        elf_offset += 7;
-        return;
-
-    case OP_load_rodata_address:
-        /* LEA r64, [rip+offset]: 7 bytes */
-        elf_offset += 10; /* MOVABS r64, imm64 */
-        return;
-
-    case OP_address_of_func:
-        /* MOV r64, imm64: 10 bytes */
-        elf_offset += 10;
-        return;
-
-    case OP_trunc:
-        /* MOVZX or MOVSX: 4 bytes */
-        elf_offset += 4;
-        return;
-
-    case OP_sign_ext:
-        /* MOVSX: 4 bytes */
-        elf_offset += 4;
-        return;
-
-    case OP_cast:
-        /* Usually just register move: 3 bytes */
-        elf_offset += 3;
-        return;
-
-    case OP_define:
-        /* Prologue: PUSH rbp (1) + MOV rbp,rsp (3) + PUSH rbx (1) + PUSH r12
-         * (2) + PUSH r13 (2) = 9 Optional SUB rsp,imm = 4 (imm8) or 7 (imm32)
-         */
-        if (ph2_ir->src0 > 0) {
-            int aligned_size = x64_frame_bytes(ph2_ir->src0, cur_saved_regs);
-            if (aligned_size <= 128)
-                elf_offset += 13; /* 9 + SUB imm8 */
-            else
-                elf_offset += 16; /* 9 + SUB imm32 */
-        } else {
-            /* No locals: prologue only */
-            elf_offset += 9;
-        }
-        return;
-
-    case OP_ternary:
-        /* Usually lowered to branches, but if not, just a move: 3 bytes */
-        elf_offset += 3;
-        return;
-
-    case OP_start:
-        /* NOP: 1 byte */
-        elf_offset += 1;
-        return;
-
-    case OP_push:
-        /* PUSH r64: 1-2 bytes (1 byte + optional REX prefix) */
-        if (ph2_ir->src0 >= 8)
-            elf_offset += 2;
-        else
-            elf_offset += 1;
-        return;
-
-    default:
-        /* Placeholder for unimplemented operations */
-        elf_offset += 1;
-        return;
-    }
-}
 
 /* Narrow an integer result in rd to 32 bits, matching shecc's 32-bit int.
  *
@@ -421,34 +172,6 @@ void wrap_to_int(int rd, bool is_ptr)
     emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rd)));
 }
 
-/* Emit the ModRM/displacement bytes for a [R15 + ofs] memory operand.
- *
- * R15 holds the base of the global area. Its low three bits are 7, so no SIB
- * byte is needed and offset 0 can use the plain indirect form.
- */
-void emit_r15_mem(int reg_low, int ofs)
-{
-    if (ofs == 0) {
-        emit_byte(modrm(MOD_INDIRECT, reg_low, 7)); /* [R15] */
-    } else if (ofs < 128) {
-        emit_byte(modrm(MOD_DISP8, reg_low, 7)); /* [R15 + disp8] */
-        emit_byte(ofs);
-    } else {
-        emit_byte(modrm(MOD_DISP32, reg_low, 7)); /* [R15 + disp32] */
-        emit_dword(ofs);
-    }
-}
-
-/* Emit the ModRM/SIB/displacement bytes for a [RSP + ofs] memory operand.
- *
- * The shared phase-2 IR addresses locals as "sp + offset", with offsets growing
- * upward, so the backend must too: an array at sp+16 has its second element at
- * sp+24. Using RBP with negated offsets would invert that and make b[i] walk
- * backwards over neighbouring slots.
- *
- * RSP as a base register always requires a SIB byte; 0x24 encodes "base = RSP,
- * no index".
- */
 /* ModRM (plus SIB and displacement as needed) naming [base] or [base + disp].
  * R12 and RSP share the low three bits that mean "a SIB byte follows", and R13
  * and RBP share the ones that mean "RIP-relative"; both therefore need a longer
@@ -491,18 +214,29 @@ void emit_mem_sib(int reg_field, int base, int index, int scale, int disp)
         emit_dword(disp);
 }
 
+/* Emit the ModRM/displacement bytes for a [R15 + ofs] memory operand.
+ *
+ * R15 holds the base of the global area. Its low three bits are 7, so no SIB
+ * byte is needed and offset 0 can use the plain indirect form.
+ */
+void emit_r15_mem(int reg_low, int ofs)
+{
+    emit_mem_base(reg_low, 15, ofs, ofs != 0);
+}
+
+/* Emit the ModRM/SIB/displacement bytes for a [RSP + ofs] memory operand.
+ *
+ * The shared phase-2 IR addresses locals as "sp + offset", with offsets growing
+ * upward, so the backend must too: an array at sp+16 has its second element at
+ * sp+24. Using RBP with negated offsets would invert that and make b[i] walk
+ * backwards over neighbouring slots.
+ *
+ * RSP as a base register always requires a SIB byte; 0x24 encodes "base = RSP,
+ * no index".
+ */
 void emit_rsp_mem(int reg_field, int ofs)
 {
-    int r = reg_low3(reg_field);
-    if (ofs >= -128 && ofs <= 127) {
-        emit_byte(modrm(MOD_DISP8, r, 4));
-        emit_byte(0x24);
-        emit_byte(ofs);
-    } else {
-        emit_byte(modrm(MOD_DISP32, r, 4));
-        emit_byte(0x24);
-        emit_dword(ofs);
-    }
+    emit_mem_base(reg_field, 4, ofs, true);
 }
 
 /* Store a little-endian value into already-emitted code.
@@ -533,12 +267,8 @@ void patch_qword(int at, int val)
 bool x64_debug = false;
 
 /* Print a function -> address map on stderr; used to locate faults in the
- * emitted binary, which carries no symbol table. Basic blocks whose offsets are
- * patched after emission. Sized for a self-hosting build, where the compiler
- * itself is the largest input.
+ * emitted binary, which carries no symbol table.
  */
-#define MAX_PENDING_BBS 65536
-
 bool x64_map = false;
 
 /* Offset of main's entry within the code section, recorded as it is emitted.
@@ -608,20 +338,12 @@ int funcaddr_ref_count = 0;
 typedef struct forward_ref {
     int patch_location;       /* Where to patch the offset in the code */
     basic_block_t *target_bb; /* Which basic block we're targeting */
-    int instruction_offset;   /* Offset adjustment for instruction length */
 } forward_ref_t;
-
-/* Control-flow tracing removed for production build */
 
 /* Allow many forward references for large programs */
 #define FORWARD_REF_MAX 49152
 forward_ref_t forward_refs[FORWARD_REF_MAX];
 int forward_ref_count = 0;
-
-/* Track current basic block during emission */
-basic_block_t *current_bb = NULL;
-func_t *current_func = NULL;
-/* Record precise entry position for main, after prologue emission */
 
 /* Add a forward reference to be patched later - call this right before
  * emit_dword Currently unused but will be needed for proper control flow
@@ -634,7 +356,6 @@ void add_forward_ref(basic_block_t *target_bb)
     /* patch_location is where emit_dword will place the displacement. */
     forward_refs[forward_ref_count].patch_location = elf_code->size;
     forward_refs[forward_ref_count].target_bb = target_bb;
-    forward_refs[forward_ref_count].instruction_offset = 0;
     forward_ref_count++;
 }
 
@@ -698,6 +419,25 @@ bool fused_cc_pending;
  * CMP is emitted as "cmp rs1, rs2", so the sense matches the SETcc already used
  * by the unfused path.
  */
+/* Materialise a condition as 0 or 1 in @rd, given a SETcc opcode byte.
+ *
+ * SETcc lands in R11B and is then zero-extended into rd. R11 is outside
+ * reg_map, so staging through it cannot clobber an allocated register the way
+ * AL -- which is reg_map[6] -- would.
+ */
+void emit_setcc_bool(int rd, int setcc)
+{
+    emit_byte(REX_BASE | REX_B);
+    emit_byte(0x0F);
+    emit_byte(setcc);
+    emit_byte(modrm(MOD_DIRECT, 0, 3));
+
+    emit_rex(1, rd, 11); /* MOVZX rd, r11b */
+    emit_byte(0x0F);
+    emit_byte(0xB6);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
+}
+
 int branch_cc_for(opcode_t op)
 {
     switch (op) {
@@ -1989,7 +1729,7 @@ void emit_cmp(int rs1, int rs2)
         cmp_mem_slot = -1;
         return;
     }
-    emit_byte(REX_W | (((rs2 >> 3) & 1) << 2) | ((rs1 >> 3) & 1));
+    emit_rex(1, rs2, rs1);
     emit_byte(0x39); /* CMP rs1, rs2 */
     emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), reg_low3(rs1)));
 }
@@ -2183,11 +1923,11 @@ bool emit_mul_by_const(int rd, int rs1, int c)
             /* R10 is outside the allocator's file, so it can hold the
              * original value across the shift that overwrites it.
              */
-            emit_byte(REX_W | REX_B | (rs1 >= 8 ? REX_R : 0));
+            emit_rex(1, rs1, 10);
             emit_byte(0x89); /* MOV r10, rs1 */
             emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 2));
             emit_shift_imm(rd, SHIFT_EXT_SHL, up > 1 ? up : down);
-            emit_byte(REX_W | REX_R | (rd >= 8 ? REX_B : 0));
+            emit_rex(1, 10, rd);
             emit_byte(up > 1 ? 0x01 : 0x29); /* ADD/SUB rd, r10 */
             emit_byte(modrm(MOD_DIRECT, 2, reg_low3(rd)));
             return true;
@@ -2427,10 +2167,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             if (const_load_dead(emit_ir_index + 1, ph2_ir->dest, ph2_ir->src0))
                 return;
         }
-        int rex2 = REX_W;
-        if (rd >= 8)
-            rex2 = rex2 | REX_B;
-        emit_byte(rex2);
+        emit_rex(1, -1, rd);
         emit_byte(0xC7);
         emit_byte(modrm(MOD_DIRECT, 0, reg_low3(rd)));
         emit_dword(ph2_ir->src0);
@@ -2438,14 +2175,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     }
 
     case OP_assign: {
-        if (rd != rs1) {
-            /* MOV rd, rs1 */
-            emit_rex(1, rs1, rd);
-            emit_byte(0x89);
-            int reg_rs1 = reg_low3(rs1);
-            int reg_rd = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-        }
+        emit_mov_reg(rd, rs1);
         return;
     }
 
@@ -2495,14 +2225,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             /* Three distinct registers: one LEA replaces MOV plus ADD. */
         } else {
             /* Normal case: MOV rd, rs1; ADD rd, rs2 */
-            if (rd != rs1) {
-                /* MOV rd, rs1 */
-                emit_rex(1, rs1, rd);
-                emit_byte(0x89);
-                int reg_rs1 = reg_low3(rs1);
-                int reg_rd = reg_low3(rd);
-                emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-            }
+            emit_mov_reg(rd, rs1);
             /* ADD rd, rs2 */
             emit_rex(1, rs2, rd);
             emit_byte(0x01);
@@ -2540,15 +2263,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* rd == rs2: stage through R11, which reg_map never hands out, so any
          * aliasing is harmless. MOV r11, rs1
          */
-        emit_byte(REX_W | REX_B | (rs1 >= 8 ? REX_R : 0));
+        emit_rex(1, rs1, 11);
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
         /* SUB r11, rs2 */
-        emit_byte(REX_W | REX_B | (rs2 >= 8 ? REX_R : 0));
+        emit_rex(1, rs2, 11);
         emit_byte(0x29);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
         /* MOV rd, r11 */
-        emit_byte(REX_W | REX_R | (rd >= 8 ? REX_B : 0));
+        emit_rex(1, 11, rd);
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
         return;
@@ -2612,14 +2335,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(REX_W | REX_B); /* MOV r10, rax  (save) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 0, 2));
-        emit_push_reg(2); /* PUSH rdx  (save) */
-        emit_byte(REX_W | REX_B | (rs2 >= 8 ? REX_R : 0)); /* MOV r11, rs2 */
+        emit_push_reg(2);     /* PUSH rdx  (save) */
+        emit_rex(1, rs2, 11); /* MOV r11, rs2 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
-        int rex8 = REX_W;
-        if (rs1 >= 8)
-            rex8 = rex8 | REX_R;
-        emit_byte(rex8); /* MOV rax, rs1 */
+        emit_rex(1, rs1, -1); /* MOV rax, rs1 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 0));
         emit_byte(REX_W); /* CQO */
@@ -2635,129 +2355,42 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(REX_W | REX_R); /* MOV rax, r10  (restore) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 0));
-        emit_pop_reg(2); /* POP rdx  (restore) */
-        emit_byte(REX_W | REX_R | (rd >= 8 ? REX_B : 0)); /* MOV rd, r11 */
+        emit_pop_reg(2);     /* POP rdx  (restore) */
+        emit_rex(1, 11, rd); /* MOV rd, r11 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
         return;
     }
-    case OP_bit_and: {
-        /* A tracked literal becomes an immediate, which also makes the
-         * instruction that materialised it dead.
-         */
-        if (src1_const_known) {
-            emit_mov_reg(rd, rs1);
-            emit_alu_imm(rd, 4, src1_const); /* AND rd, imm */
-            return;
-        }
-        /* x64 AND is 2-operand, so for rd = rs1 & rs2: MOV rd, rs1 AND rd, rs2
-         *
-         * Special case: if rd == rs2, use commutative property
-         */
-        if (rd == rs2 && rd != rs1) {
-            /* AND rd, rs1 (since AND is commutative) */
-            emit_rex(1, rs1, rd);
-            emit_byte(0x21);
-            int reg_rs1 = reg_low3(rs1);
-            int reg_rd = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-        } else {
-            /* Normal case: MOV rd, rs1; AND rd, rs2 */
-            if (rd != rs1) {
-                /* MOV rd, rs1 */
-                emit_rex(1, rs1, rd);
-                emit_byte(0x89);
-                int reg_rs1 = reg_low3(rs1);
-                int reg_rd = reg_low3(rd);
-                emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-            }
-            /* AND rd, rs2 */
-            emit_rex(1, rs2, rd);
-            emit_byte(0x21);
-            int reg_rs2 = reg_low3(rs2);
-            int reg_rd2 = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs2, reg_rd2));
-        }
-        return;
-    }
-
-    case OP_bit_or: {
-        /* A tracked literal becomes an immediate, which also makes the
-         * instruction that materialised it dead.
-         */
-        if (src1_const_known) {
-            emit_mov_reg(rd, rs1);
-            emit_alu_imm(rd, 1, src1_const); /* OR rd, imm */
-            return;
-        }
-        /* x64 OR is 2-operand, so for rd = rs1 | rs2: MOV rd, rs1 OR rd, rs2
-         *
-         * Special case: if rd == rs2, use commutative property
-         */
-        if (rd == rs2 && rd != rs1) {
-            /* OR rd, rs1 (since OR is commutative) */
-            emit_rex(1, rs1, rd);
-            emit_byte(0x09);
-            int reg_rs1 = reg_low3(rs1);
-            int reg_rd = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-        } else {
-            /* Normal case: MOV rd, rs1; OR rd, rs2 */
-            if (rd != rs1) {
-                /* MOV rd, rs1 */
-                emit_rex(1, rs1, rd);
-                emit_byte(0x89);
-                int reg_rs1 = reg_low3(rs1);
-                int reg_rd = reg_low3(rd);
-                emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-            }
-            /* OR rd, rs2 */
-            emit_rex(1, rs2, rd);
-            emit_byte(0x09);
-            int reg_rs2 = reg_low3(rs2);
-            int reg_rd2 = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs2, reg_rd2));
-        }
-        return;
-    }
-
+    case OP_bit_and:
+    case OP_bit_or:
     case OP_bit_xor: {
+        /* The three bitwise operations differ only in the immediate group's
+         * opcode extension and the r/m opcode byte, which alu_ext_for() and
+         * alu_mem_opcode() already supply; all three are commutative.
+         */
+        int ext = alu_ext_for(ph2_ir->op);
+
         /* A tracked literal becomes an immediate, which also makes the
          * instruction that materialised it dead.
          */
         if (src1_const_known) {
             emit_mov_reg(rd, rs1);
-            emit_alu_imm(rd, 6, src1_const); /* XOR rd, imm */
+            emit_alu_imm(rd, ext, src1_const);
             return;
         }
-        /* x64 XOR is 2-operand, so for rd = rs1 ^ rs2: MOV rd, rs1 XOR rd, rs2
-         *
-         * Special case: if rd == rs2, use commutative property
+
+        /* Two-operand form: "rd = rs1 OP rs2" is MOV rd, rs1 followed by
+         * OP rd, rs2. When rd already names rs2, commutativity lets the MOV
+         * go and rs1 becomes the source instead.
          */
-        if (rd == rs2 && rd != rs1) {
-            /* XOR rd, rs1 (since XOR is commutative) */
-            emit_rex(1, rs1, rd);
-            emit_byte(0x31);
-            int reg_rs1 = reg_low3(rs1);
-            int reg_rd = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-        } else {
-            /* Normal case: MOV rd, rs1; XOR rd, rs2 */
-            if (rd != rs1) {
-                /* MOV rd, rs1 */
-                emit_rex(1, rs1, rd);
-                emit_byte(0x89);
-                int reg_rs1 = reg_low3(rs1);
-                int reg_rd = reg_low3(rd);
-                emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-            }
-            /* XOR rd, rs2 */
-            emit_rex(1, rs2, rd);
-            emit_byte(0x31);
-            int reg_rs2 = reg_low3(rs2);
-            int reg_rd2 = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs2, reg_rd2));
-        }
+        int src = rs2;
+        if (rd == rs2 && rd != rs1)
+            src = rs1;
+        else
+            emit_mov_reg(rd, rs1);
+        emit_rex(1, src, rd);
+        emit_byte(alu_mem_opcode(ext));
+        emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(rd)));
         return;
     }
 
@@ -2766,10 +2399,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * not already in the destination register.
          */
         emit_mov_reg(rd, rs1);
-        int rex16 = REX_W;
-        if (rd >= 8)
-            rex16 = rex16 | REX_B;
-        emit_byte(rex16);
+        emit_rex(1, -1, rd);
         emit_byte(0xF7);
         emit_byte(modrm(MOD_DIRECT, 2, reg_low3(rd)));
         return;
@@ -2779,10 +2409,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * not already in the destination register.
          */
         emit_mov_reg(rd, rs1);
-        int rex18 = REX_W;
-        if (rd >= 8)
-            rex18 = rex18 | REX_B;
-        emit_byte(rex18);
+        emit_rex(1, -1, rd);
         emit_byte(0xF7);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
         return;
@@ -2852,13 +2479,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(REX_W | REX_B); /* MOV r10, rcx */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 1, 2));
-        emit_byte(REX_W | REX_B | (rs1 >= 8 ? REX_R : 0)); /* MOV r11, rs1 */
+        emit_rex(1, rs1, 11); /* MOV r11, rs1 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
-        int rex19 = REX_W;
-        if (rs2 >= 8)
-            rex19 = rex19 | REX_R;
-        emit_byte(rex19); /* MOV rcx, rs2 */
+        emit_rex(1, rs2, -1); /* MOV rcx, rs2 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
         emit_byte(REX_W | REX_B); /* SHL r11, cl */
@@ -2867,7 +2491,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(REX_W | REX_R); /* MOV rcx, r10 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 1));
-        emit_byte(REX_W | REX_R | (rd >= 8 ? REX_B : 0)); /* MOV rd, r11 */
+        emit_rex(1, 11, rd); /* MOV rd, r11 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
 
@@ -2902,13 +2526,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(REX_W | REX_B); /* MOV r10, rcx */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 1, 2));
-        emit_byte(REX_W | REX_B | (rs1 >= 8 ? REX_R : 0)); /* MOV r11, rs1 */
+        emit_rex(1, rs1, 11); /* MOV r11, rs1 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
-        int rex20 = REX_W;
-        if (rs2 >= 8)
-            rex20 = rex20 | REX_R;
-        emit_byte(rex20); /* MOV rcx, rs2 */
+        emit_rex(1, rs2, -1); /* MOV rcx, rs2 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
         emit_byte(REX_W | REX_B); /* SAR r11, cl */
@@ -2917,183 +2538,23 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(REX_W | REX_R); /* MOV rcx, r10 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 1));
-        emit_byte(REX_W | REX_R | (rd >= 8 ? REX_B : 0)); /* MOV rd, r11 */
+        emit_rex(1, 11, rd); /* MOV rd, r11 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
         return;
     }
-    case OP_eq: {
-        /* CMP rs1, rs2; SETE al; MOVZX rd, al Register numbers are 0..15, so
-         * the REX extension bit of each is just bit 3. Deriving it
-         * arithmetically avoids the branches: built from tests, this prefix
-         * lost its REX.B on one comparison when shecc compiled itself, and the
-         * CMP then named RAX instead of R8.
+    case OP_eq:
+    case OP_neq:
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+        /* CMP rs1, rs2, then turn the flags into 0 or 1 in rd. The six
+         * comparisons differ only in the condition, and SETcc is the matching
+         * Jcc opcode plus 0x10, so branch_cc_for() supplies both forms.
          */
         emit_cmp(rs1, rs2);
-
-        /* SETcc r11b, then zero-extend into rd. R11 is outside reg_map; using
-         * AL here would silently clobber reg_map[6].
-         */
-        emit_byte(REX_BASE | REX_B);
-        emit_byte(0x0F);
-        emit_byte(0x94);
-        emit_byte(modrm(MOD_DIRECT, 0, 3));
-
-        /* REX.R must be set exactly when rd is one of r8..r15. Derived
-         * arithmetically from bit 3 of the register number (REX_R adds 0x04 on
-         * top of the 0x40 already in REX_W), which keeps the emitted byte
-         * independent of how a conditional is compiled.
-         */
-        emit_byte(REX_W | REX_B | (((rd >> 3) & 1) << 2));
-        emit_byte(0x0F);
-        emit_byte(0xB6);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
-    }
-        return;
-
-    case OP_neq: {
-        /* CMP rs1, rs2; SETNE al; MOVZX rd, al Register numbers are 0..15, so
-         * the REX extension bit of each is just bit 3. Deriving it
-         * arithmetically avoids the branches: built from tests, this prefix
-         * lost its REX.B on one comparison when shecc compiled itself, and the
-         * CMP then named RAX instead of R8.
-         */
-        emit_cmp(rs1, rs2);
-
-        /* SETcc r11b, then zero-extend into rd. R11 is outside reg_map; using
-         * AL here would silently clobber reg_map[6].
-         */
-        emit_byte(REX_BASE | REX_B);
-        emit_byte(0x0F);
-        emit_byte(0x95);
-        emit_byte(modrm(MOD_DIRECT, 0, 3));
-
-        /* REX.R must be set exactly when rd is one of r8..r15. Derived
-         * arithmetically from bit 3 of the register number (REX_R adds 0x04 on
-         * top of the 0x40 already in REX_W), which keeps the emitted byte
-         * independent of how a conditional is compiled.
-         */
-        emit_byte(REX_W | REX_B | (((rd >> 3) & 1) << 2));
-        emit_byte(0x0F);
-        emit_byte(0xB6);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
-    }
-        return;
-
-    case OP_lt: {
-        /* CMP rs1, rs2; SETL al; MOVZX rd, al Register numbers are 0..15, so
-         * the REX extension bit of each is just bit 3. Deriving it
-         * arithmetically avoids the branches: built from tests, this prefix
-         * lost its REX.B on one comparison when shecc compiled itself, and the
-         * CMP then named RAX instead of R8.
-         */
-        emit_cmp(rs1, rs2);
-
-        /* SETcc r11b, then zero-extend into rd. R11 is outside reg_map; using
-         * AL here would silently clobber reg_map[6].
-         */
-        emit_byte(REX_BASE | REX_B);
-        emit_byte(0x0F);
-        emit_byte(0x9C);
-        emit_byte(modrm(MOD_DIRECT, 0, 3));
-
-        /* REX.R must be set exactly when rd is one of r8..r15. Derived
-         * arithmetically from bit 3 of the register number (REX_R adds 0x04 on
-         * top of the 0x40 already in REX_W), which keeps the emitted byte
-         * independent of how a conditional is compiled.
-         */
-        emit_byte(REX_W | REX_B | (((rd >> 3) & 1) << 2));
-        emit_byte(0x0F);
-        emit_byte(0xB6);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
-    }
-        return;
-
-    case OP_leq: {
-        /* CMP rs1, rs2; SETLE al; MOVZX rd, al Register numbers are 0..15, so
-         * the REX extension bit of each is just bit 3. Deriving it
-         * arithmetically avoids the branches: built from tests, this prefix
-         * lost its REX.B on one comparison when shecc compiled itself, and the
-         * CMP then named RAX instead of R8.
-         */
-        emit_cmp(rs1, rs2);
-
-        /* SETcc r11b, then zero-extend into rd. R11 is outside reg_map; using
-         * AL here would silently clobber reg_map[6].
-         */
-        emit_byte(REX_BASE | REX_B);
-        emit_byte(0x0F);
-        emit_byte(0x9E);
-        emit_byte(modrm(MOD_DIRECT, 0, 3));
-
-        /* REX.R must be set exactly when rd is one of r8..r15. Derived
-         * arithmetically from bit 3 of the register number (REX_R adds 0x04 on
-         * top of the 0x40 already in REX_W), which keeps the emitted byte
-         * independent of how a conditional is compiled.
-         */
-        emit_byte(REX_W | REX_B | (((rd >> 3) & 1) << 2));
-        emit_byte(0x0F);
-        emit_byte(0xB6);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
-    }
-        return;
-
-    case OP_gt: {
-        /* CMP rs1, rs2; SETG al; MOVZX rd, al Register numbers are 0..15, so
-         * the REX extension bit of each is just bit 3. Deriving it
-         * arithmetically avoids the branches: built from tests, this prefix
-         * lost its REX.B on one comparison when shecc compiled itself, and the
-         * CMP then named RAX instead of R8.
-         */
-        emit_cmp(rs1, rs2);
-
-        /* SETcc r11b, then zero-extend into rd. R11 is outside reg_map; using
-         * AL here would silently clobber reg_map[6].
-         */
-        emit_byte(REX_BASE | REX_B);
-        emit_byte(0x0F);
-        emit_byte(0x9F);
-        emit_byte(modrm(MOD_DIRECT, 0, 3));
-
-        /* REX.R must be set exactly when rd is one of r8..r15. Derived
-         * arithmetically from bit 3 of the register number (REX_R adds 0x04 on
-         * top of the 0x40 already in REX_W), which keeps the emitted byte
-         * independent of how a conditional is compiled.
-         */
-        emit_byte(REX_W | REX_B | (((rd >> 3) & 1) << 2));
-        emit_byte(0x0F);
-        emit_byte(0xB6);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
-    }
-        return;
-
-    case OP_geq: {
-        /* CMP rs1, rs2; SETGE al; MOVZX rd, al Register numbers are 0..15, so
-         * the REX extension bit of each is just bit 3. Deriving it
-         * arithmetically avoids the branches: built from tests, this prefix
-         * lost its REX.B on one comparison when shecc compiled itself, and the
-         * CMP then named RAX instead of R8.
-         */
-        emit_cmp(rs1, rs2);
-
-        /* SETcc r11b, then zero-extend into rd. R11 is outside reg_map; using
-         * AL here would silently clobber reg_map[6].
-         */
-        emit_byte(REX_BASE | REX_B);
-        emit_byte(0x0F);
-        emit_byte(0x9D);
-        emit_byte(modrm(MOD_DIRECT, 0, 3));
-
-        /* REX.R must be set exactly when rd is one of r8..r15. Derived
-         * arithmetically from bit 3 of the register number (REX_R adds 0x04 on
-         * top of the 0x40 already in REX_W), which keeps the emitted byte
-         * independent of how a conditional is compiled.
-         */
-        emit_byte(REX_W | REX_B | (((rd >> 3) & 1) << 2));
-        emit_byte(0x0F);
-        emit_byte(0xB6);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
-    }
+        emit_setcc_bool(rd, branch_cc_for(ph2_ir->op) + 0x10);
         return;
 
     case OP_jump: {
@@ -3278,10 +2739,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                  * emitted "MOV r8, rax", the exact opposite of what is
                  * intended.
                  */
-                int rex28 = REX_W;
-                if (ret_reg >= 8)
-                    rex28 = rex28 | REX_R;
-                emit_byte(rex28); /* REX.R for source reg >= 8 */
+                emit_rex(1, ret_reg, -1); /* REX.R for source reg >= 8 */
                 emit_byte(0x89);
                 int ret_reg_low = reg_low3(ret_reg);
                 int rax_reg3 = 0;
@@ -3354,10 +2812,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     case OP_address_of: {
         /* LEA rd, [rsp + src0] */
-        int rex29 = REX_W;
-        if (rd >= 8)
-            rex29 = rex29 | REX_R;
-        emit_byte(rex29);
+        emit_rex(1, rd, -1);
         emit_byte(0x8D);
         emit_rsp_mem(rd, ph2_ir->src0);
         return;
@@ -3417,31 +2872,19 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                 /* MOVSX rd, BYTE PTR [rsp+ofs]. char is signed here, and a
                  * _Bool only ever holds 0 or 1, which sign-extends to itself.
                  */
-                int rex30 = REX_W;
-                if (rd >= 8)
-                    rex30 = rex30 | REX_R;
-                emit_byte(rex30);
+                emit_rex(1, rd, -1);
                 emit_byte(0x0F);
                 emit_byte(0xBE);
             } else if (eff_size == 2) {
-                int rex31 = REX_W;
-                if (rd >= 8)
-                    rex31 = rex31 | REX_R;
-                emit_byte(rex31);
+                emit_rex(1, rd, -1);
                 emit_byte(0x0F);
                 emit_byte(0xBF);
             } else if (eff_size == 4) {
                 /* MOVSXD rd, DWORD PTR [rsp+ofs]: int is signed */
-                int rex32 = REX_W;
-                if (rd >= 8)
-                    rex32 = rex32 | REX_R;
-                emit_byte(rex32);
+                emit_rex(1, rd, -1);
                 emit_byte(0x63);
             } else {
-                int rex33 = REX_W;
-                if (rd >= 8)
-                    rex33 = rex33 | REX_R;
-                emit_byte(rex33);
+                emit_rex(1, rd, -1);
                 emit_byte(0x8B);
             }
             emit_rsp_mem(rd, stack_offset);
@@ -3472,10 +2915,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                     emit_byte(REX_R);
             } else {
                 /* Pointers and anything slot-width keep the 64-bit form. */
-                int rex34 = REX_W;
-                if (src_reg >= 8)
-                    rex34 = rex34 | REX_R;
-                emit_byte(rex34);
+                emit_rex(1, src_reg, -1);
             }
             emit_byte(0x89);
             emit_rsp_mem(src_reg, stack_offset);
@@ -3577,24 +3017,21 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                 if (wsib)
                     emit_rex_sib(0, val_reg, wsib_base, wsib_index);
                 else if (val_reg >= 4 || addr_reg >= 8)
-                    emit_byte(REX_BASE | (val_reg >= 8 ? REX_R : 0) |
-                              (addr_reg >= 8 ? REX_B : 0));
+                    emit_rex(0, val_reg, addr_reg);
                 emit_byte(0x88);
             } else if (wsize == 2) {
                 emit_byte(0x66); /* operand-size override */
                 if (wsib)
                     emit_rex_sib(0, val_reg, wsib_base, wsib_index);
                 else if (val_reg >= 8 || addr_reg >= 8)
-                    emit_byte(REX_BASE | (val_reg >= 8 ? REX_R : 0) |
-                              (addr_reg >= 8 ? REX_B : 0));
+                    emit_rex(0, val_reg, addr_reg);
                 emit_byte(0x89);
             } else if (wsize == 4) {
                 if (wsib) {
                     if (val_reg >= 8 || wsib_base >= 8 || wsib_index >= 8)
                         emit_rex_sib(0, val_reg, wsib_base, wsib_index);
                 } else if (val_reg >= 8 || addr_reg >= 8)
-                    emit_byte(REX_BASE | (val_reg >= 8 ? REX_R : 0) |
-                              (addr_reg >= 8 ? REX_B : 0));
+                    emit_rex(0, val_reg, addr_reg);
                 emit_byte(0x89); /* MOV r/m32, r32 */
             } else if (wsib) {
                 emit_rex_sib(1, val_reg, wsib_base, wsib_index);
@@ -3633,7 +3070,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* Stage the callee address in R11 for the OP_indirect that follows. R11
          * is outside reg_map, so nothing the allocator owns is disturbed.
          */
-        emit_byte(REX_W | REX_B | (rs1 >= 8 ? REX_R : 0));
+        emit_rex(1, rs1, 11);
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
         return;
@@ -3760,23 +3197,23 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             /* MOV BYTE [r15 + ofs], src8. REX is mandatory so that source
              * registers 4..7 name SPL/BPL/SIL/DIL rather than AH..BH.
              */
-            emit_byte(REX_B | (src_reg >= 8 ? REX_R : 0));
+            emit_rex(0, src_reg, 15);
             emit_byte(0x88);
             emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
         } else if (eff_size == 2 && !ph2_ir->is_pointer) {
             /* MOV WORD [r15 + ofs], src16 */
             emit_byte(0x66); /* operand-size override, before REX */
-            emit_byte(REX_B | (src_reg >= 8 ? REX_R : 0));
+            emit_rex(0, src_reg, 15);
             emit_byte(0x89);
             emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
         } else if (eff_size == 4 && !ph2_ir->is_pointer) {
             /* MOV DWORD [r15 + ofs], src32 */
-            emit_byte(REX_B | (src_reg >= 8 ? REX_R : 0));
+            emit_rex(0, src_reg, 15);
             emit_byte(0x89);
             emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
         } else {
             /* MOV QWORD [r15 + ofs], src64 */
-            emit_byte(REX_W | REX_B | (src_reg >= 8 ? REX_R : 0));
+            emit_rex(1, src_reg, 15);
             emit_byte(0x89);
             emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
         }
@@ -3824,10 +3261,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* MOVABS rd, imm64 with a placeholder address, recorded for patching
          * once .rodata's final location is known.
          */
-        int rex41 = REX_W;
-        if (rd >= 8)
-            rex41 = rex41 | REX_B;
-        emit_byte(rex41);
+        emit_rex(1, -1, rd);
         emit_byte(0xB8 + reg_low3(rd));
         {
             if (rodata_ref_count >= RODATA_REF_MAX)
@@ -3854,23 +3288,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(0x85);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rs1)));
 
-        /* SETcc r11b, then zero-extend into rd. R11 is outside reg_map; using
-         * AL here would silently clobber reg_map[6].
-         */
-        emit_byte(REX_BASE | REX_B);
-        emit_byte(0x0F);
-        emit_byte(0x94);
-        emit_byte(modrm(MOD_DIRECT, 0, 3));
-
-        /* REX.R must be set exactly when rd is one of r8..r15. Derived
-         * arithmetically from bit 3 of the register number (REX_R adds 0x04 on
-         * top of the 0x40 already in REX_W), which keeps the emitted byte
-         * independent of how a conditional is compiled.
-         */
-        emit_byte(REX_W | REX_B | (((rd >> 3) & 1) << 2));
-        emit_byte(0x0F);
-        emit_byte(0xB6);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
+        emit_setcc_bool(rd, 0x94); /* SETE */
     }
         return;
 
@@ -3878,10 +3296,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* Logical AND: result = (rs1 != 0) && (rs2 != 0) For now, just set
          * result to 1 - proper implementation needs control flow
          */
-        int rex43 = REX_W;
-        if (rd >= 8)
-            rex43 = rex43 | REX_B;
-        emit_byte(rex43);
+        emit_rex(1, -1, rd);
         emit_byte(0xC7); /* MOV rd, imm32 */
         int rd_low_and = reg_low3(rd);
         emit_byte(modrm(MOD_DIRECT, 0, rd_low_and));
@@ -3893,10 +3308,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* Logical OR: result = (rs1 != 0) || (rs2 != 0) */
         /* For now, just set result to 1 - proper implementation needs control
          * flow */
-        int rex44 = REX_W;
-        if (rd >= 8)
-            rex44 = rex44 | REX_B;
-        emit_byte(rex44);
+        emit_rex(1, -1, rd);
         emit_byte(0xC7); /* MOV rd, imm32 */
         int rd_low_or = reg_low3(rd);
         emit_byte(modrm(MOD_DIRECT, 0, rd_low_or));
@@ -3955,13 +3367,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     case OP_cast: {
         /* Usually just a register move */
-        if (rd != rs1) {
-            emit_rex(1, rs1, rd);
-            emit_byte(0x89);
-            int reg_rs1 = reg_low3(rs1);
-            int reg_rd = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-        }
+        emit_mov_reg(rd, rs1);
     }
         return;
 
@@ -3971,9 +3377,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             func_t *func = find_func(ph2_ir->func_name);
             if (func && func->bbs) {
                 func->bbs->elf_offset = elf_code->size;
-                /* Track current function and its first basic block */
-                current_func = func;
-                current_bb = func->bbs;
             }
         }
 
@@ -4030,13 +3433,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * typically lowered to branches in earlier phases For now, just move
          * rs1 to rd
          */
-        if (rd != rs1) {
-            emit_rex(1, rs1, rd);
-            emit_byte(0x89);
-            int reg_rs1 = reg_low3(rs1);
-            int reg_rd = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-        }
+        emit_mov_reg(rd, rs1);
         return;
 
     case OP_start:
@@ -4044,7 +3441,6 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         if (ph2_ir->next_bb) {
             /* This marks the start of a new basic block */
             ph2_ir->next_bb->elf_offset = elf_code->size;
-            current_bb = ph2_ir->next_bb;
         }
         /* NOP for alignment */
         emit_byte(0x90);
@@ -4104,14 +3500,9 @@ void cfg_flatten(void)
         GLOBAL_FUNC->bbs->elf_offset = elf_offset;
     }
 
-    if (GLOBAL_FUNC && GLOBAL_FUNC->bbs) {
-        for (ph2_ir_t *ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
-             ph2_ir = ph2_ir->next) {
-            update_elf_offset(ph2_ir);
-        }
-        /* Account for RET instruction at end of global function */
+    /* Account for the RET at the end of the global function */
+    if (GLOBAL_FUNC && GLOBAL_FUNC->bbs)
         elf_offset += 1;
-    }
 
     /* Entry already fully accounted for above. No extra fudge needed. */
 
@@ -4136,7 +3527,6 @@ void cfg_flatten(void)
         ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = func->stack_size;
         flatten_ir->func_name = intern_string(func->return_def.var_name);
-        update_elf_offset(flatten_ir);
 
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             /* Do not preset BB offsets here; set them at emission time when we
@@ -4161,14 +3551,7 @@ void cfg_flatten(void)
                     /* restore sp */
                     flatten_ir->src1 = bb->belong_to->stack_size;
                 }
-
-                update_elf_offset(flatten_ir);
-                /* elf_offset is now updated to account for this instruction */
             }
-
-            /* After processing all instructions in this basic block, elf_offset
-             * now points to the start of the next basic block
-             */
         }
     }
 }
@@ -4241,11 +3624,10 @@ void code_generate(void)
         fprintf(stderr, "[x64] codegen begin\n");
     forward_ref_count = 0;
 
-    /* Don't clear BB offsets from cfg_flatten - they are calculated correctly.
-     * The emission process will update them only when necessary during actual
-     * code generation. Don't set elf_data_start here - elf_offset is just an
-     * estimate from calc_ir_size elf_data_start will be set correctly after all
-     * code is emitted elf_data_start = elf_code_start + elf_offset;
+    /* Block offsets are filled in as the code is emitted, and every section
+     * address is recomputed from the real code size once it is. Nothing is
+     * placed from an estimate here: x86-64 instructions are variable length,
+     * so an estimate would be wrong for every section that followed it.
      */
 
     /* Generate code for the global function */
@@ -4371,8 +3753,6 @@ void code_generate(void)
     basic_block_t *prev_emitted_bb = NULL;
 
     /* Keep track of all BBs we encounter to set their offsets */
-    basic_block_t *pending_bbs[MAX_PENDING_BBS];
-    int pending_bb_count = 0;
 
     /* Track which BB each instruction belongs to. This is built during
      * cfg_flatten and used during emission, so it must cover as many
@@ -4433,6 +3813,12 @@ void code_generate(void)
                     continue;
                 if (t->ph2_base != mark_idx)
                     t->is_branch_target = true;
+                /* Walk to the block's last instruction rather than reading
+                 * ph2_ir_list.tail: peephole() drops an instruction by
+                 * relinking its predecessor's next pointer, and does not
+                 * maintain the tail, so a block whose last instruction it
+                 * removed has a tail pointing at that removed node.
+                 */
                 for (ph2_ir_t *tail = t->ph2_ir_list.head; tail;
                      tail = tail->next) {
                     if (tail->next || tail->op != OP_branch)
@@ -4547,22 +3933,6 @@ void code_generate(void)
                  * handle it.
                  */
             }
-            /* Add to pending list to check later */
-            if (pending_bb_count < MAX_PENDING_BBS) {
-                pending_bbs[pending_bb_count++] = ph2_ir->next_bb;
-            }
-        }
-
-        /* Also check then_bb and else_bb for branches */
-        if (ph2_ir->then_bb && ph2_ir->then_bb->elf_offset == -1) {
-            if (pending_bb_count < MAX_PENDING_BBS) {
-                pending_bbs[pending_bb_count++] = ph2_ir->then_bb;
-            }
-        }
-        if (ph2_ir->else_bb && ph2_ir->else_bb->elf_offset == -1) {
-            if (pending_bb_count < MAX_PENDING_BBS) {
-                pending_bbs[pending_bb_count++] = ph2_ir->else_bb;
-            }
         }
 
         /* After a branch/jump, track BB changes */
@@ -4609,48 +3979,51 @@ void code_generate(void)
      * happen for blocks only reachable by forward jumps
      */
 
-    /* Emit any block that is still unplaced. A block can appear in the list
-     * more than once; the second visit sees the offset assigned by the first
-     * and skips it, so no separate deduplication pass is needed.
+    /* Emit any block the walk above never placed. Asking the blocks
+     * themselves costs one pass over the CFG and cannot miss one, where
+     * collecting candidates as they were referenced pushed a block once per
+     * instruction naming it and silently dropped the rest once the list
+     * filled.
      */
-    for (int i = 0; i < pending_bb_count && i < MAX_PENDING_BBS; i++) {
-        basic_block_t *bb = pending_bbs[i];
-        if (!bb || bb->elf_offset >= 0)
-            continue;
+    for (func_t *lf = FUNC_LIST.head; lf; lf = lf->next) {
+        for (basic_block_t *bb = lf->bbs; bb; bb = bb->rpo_next) {
+            if (bb->elf_offset >= 0)
+                continue;
 
-        /* At this point, bb is non-null and has offset < 0 Count instructions
-         * in this BB */
-        int insn_count = 0;
-        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
-            insn_count++;
-        }
-
-        if (insn_count == 0) {
-            /* Empty and unreached: leave it unplaced. A forward jump to it is
-             * an error that patching will catch.
-             */
-        } else {
-            /* This BB has instructions - emit them */
-            if (x64_debug)
-                fprintf(stderr, "[x64] late-emit unreached BB at 0x%x\n",
-                        elf_code->size);
-            bb->elf_offset = elf_code->size;
-
-            /* Nothing reaches this block by falling into it -- it is placed
-             * here only because the walk never got to it -- so it starts from
-             * nothing.
-             */
-            frame_mirror_reset();
-            const_track_reset();
-            shift_cache_reset();
-
-            /* Emit all instructions in this BB */
-            folds_off = true;
+            /* At this point, bb is non-null and has offset < 0 Count
+             * instructions in this BB */
+            int insn_count = 0;
             for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
-                emit_next_ir = NULL;
-                emit_ph2_ir(ir);
+                insn_count++;
             }
-            folds_off = false;
+
+            if (insn_count == 0) {
+                /* Empty and unreached: leave it unplaced. A forward jump to it
+                 * is an error that patching will catch.
+                 */
+            } else {
+                /* This BB has instructions - emit them */
+                if (x64_debug)
+                    fprintf(stderr, "[x64] late-emit unreached BB at 0x%x\n",
+                            elf_code->size);
+                bb->elf_offset = elf_code->size;
+
+                /* Nothing reaches this block by falling into it -- it is placed
+                 * here only because the walk never got to it -- so it starts
+                 * from nothing.
+                 */
+                frame_mirror_reset();
+                const_track_reset();
+                shift_cache_reset();
+
+                /* Emit all instructions in this BB */
+                folds_off = true;
+                for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+                    emit_next_ir = NULL;
+                    emit_ph2_ir(ir);
+                }
+                folds_off = false;
+            }
         }
     }
 
@@ -4680,9 +4053,10 @@ void code_generate(void)
         elf_entry_offset = entry_start; /* Entry relative to code start */
 
         /* Debug: check if any BB has this offset */
-        for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        for (func_t *func = x64_debug ? FUNC_LIST.head : NULL; func;
+             func = func->next) {
             for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-                if (x64_debug && bb->elf_offset == entry_start) {
+                if (bb->elf_offset == entry_start) {
                     fprintf(stderr,
                             "[x64] ERROR: a basic block shares the entry "
                             "stub's offset (0x%x); jumps to it will land on "
@@ -4828,10 +4202,8 @@ void code_generate(void)
          * .rodata to a pointer boundary keeps every following section aligned
          * without special-casing each one.
          */
-        while (elf_code->size % PTR_SIZE)
-            emit_byte(0);
-        while (elf_rodata->size % PTR_SIZE)
-            elf_write_byte(elf_rodata, 0);
+        elf_align_to(elf_code, PTR_SIZE);
+        elf_align_to(elf_rodata, PTR_SIZE);
     }
 
     elf_rodata_start = elf_code_start + elf_code->size;
@@ -4889,21 +4261,13 @@ void code_generate(void)
     for (int i = 0; i < funcaddr_ref_count; i++) {
         int at = funcaddr_refs[i].patch_location;
         int addr = elf_code_start + funcaddr_refs[i].target_bb->elf_offset;
-        patch_dword(at, addr);
-        elf_code->elements[at + 4] = 0;
-        elf_code->elements[at + 5] = 0;
-        elf_code->elements[at + 6] = 0;
-        elf_code->elements[at + 7] = 0;
+        patch_qword(at, addr);
     }
 
     for (int i = 0; i < rodata_ref_count; i++) {
         int at = rodata_refs[i].patch_location;
         int addr = elf_rodata_start + rodata_refs[i].rodata_offset;
-        patch_dword(at, addr);
-        elf_code->elements[at + 4] = 0;
-        elf_code->elements[at + 5] = 0;
-        elf_code->elements[at + 6] = 0;
-        elf_code->elements[at + 7] = 0;
+        patch_qword(at, addr);
     }
 
     /* Set BSS size to accommodate global variables */
@@ -4917,17 +4281,7 @@ void code_generate(void)
          * section's runtime address is elf_data_start (which includes load
          * address)
          */
-        int data_addr = elf_data_start;
-        /* Lower 32 bits */
-        elf_code->elements[r15_patch_offset] = (data_addr & 0xFF);
-        elf_code->elements[r15_patch_offset + 1] = ((data_addr >> 8) & 0xFF);
-        elf_code->elements[r15_patch_offset + 2] = ((data_addr >> 16) & 0xFF);
-        elf_code->elements[r15_patch_offset + 3] = ((data_addr >> 24) & 0xFF);
-        /* Upper 32 bits - for addresses below 4GB, these are 0 */
-        elf_code->elements[r15_patch_offset + 4] = 0;
-        elf_code->elements[r15_patch_offset + 5] = 0;
-        elf_code->elements[r15_patch_offset + 6] = 0;
-        elf_code->elements[r15_patch_offset + 7] = 0;
+        patch_qword(r15_patch_offset, elf_data_start);
     }
 
     /* No RIP-relative patching needed when using RSP-based globals */

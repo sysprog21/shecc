@@ -818,8 +818,6 @@ basic_block_t *handle_goto_statement(block_t *parent, basic_block_t *bb)
     if (backpatch_bb_idx > MAX_LABELS - 1)
         error_at("Too many forward-referenced labels", cur_token_loc());
 
-    if (backpatch_bb_idx >= MAX_LABELS)
-        fatal("Too many pending labels");
     backpatch_bb[backpatch_bb_idx++] = then_;
     return else_;
 }
@@ -1569,7 +1567,8 @@ void read_lvalue(lvalue_t *lvalue,
                  block_t *parent,
                  basic_block_t **bb,
                  bool eval,
-                 opcode_t op);
+                 opcode_t op,
+                 bool allow_ptr_arith);
 
 /* Maintain a stack of expression values and operators, depending on next
  * operators' priority. Either apply it or operator on stack first.
@@ -1582,7 +1581,7 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
 
     lex_peek(T_identifier, token);
     var_t *var = find_var(token, parent);
-    read_lvalue(&lvalue, var, parent, bb, false, OP_generic);
+    read_lvalue(&lvalue, var, parent, bb, false, OP_generic, true);
 
     if (!lvalue.is_reference) {
         rs1 = opstack_pop();
@@ -1592,18 +1591,6 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
         add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
     }
 }
-
-/* Set by the dereference handlers around the read_lvalue() call that parses
- * the pointer being dereferenced.
- *
- * read_lvalue() otherwise swallows a following "+ expr" as pointer arithmetic,
- * scaling the addend by the element size. That is right for "p + 1" but wrong
- * for "*p + 1": unary '*' binds tighter than '+', so the sum belongs to the
- * enclosing expression and shecc was reading p[1] instead of adding one to
- * p[0]. read_lvalue() consumes and clears the flag on entry, so lvalues parsed
- * further in (a subscript, a call argument) keep the normal behaviour.
- */
-bool no_ptr_arith = false;
 
 void handle_single_dereference(block_t *parent, basic_block_t **bb)
 {
@@ -1645,8 +1632,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
 
         lex_peek(T_identifier, token);
         var_t *var = find_var(token, parent);
-        no_ptr_arith = true;
-        read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
+        read_lvalue(&lvalue, var, parent, bb, true, OP_generic, false);
 
         rs1 = opstack_pop();
         vd = require_deref_var(parent, var->type, var->ptr_level);
@@ -1773,8 +1759,7 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
 
         lex_peek(T_identifier, token);
         var_t *var = find_var(token, parent);
-        no_ptr_arith = true;
-        read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
+        read_lvalue(&lvalue, var, parent, bb, true, OP_generic, false);
 
         /* Apply dereferences one by one */
         for (int i = 0; i < deref_count; i++) {
@@ -2259,7 +2244,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         } else if (var) {
             /* evalue lvalue expression */
             lvalue_t lvalue;
-            read_lvalue(&lvalue, var, parent, bb, true, prefix_op);
+            read_lvalue(&lvalue, var, parent, bb, true, prefix_op, true);
 
             /* is it an indirect call with function pointer? */
             if (lex_peek(T_open_bracket, NULL)) {
@@ -2892,20 +2877,26 @@ void read_expr(block_t *parent, basic_block_t **bb)
  *   x[<expr>] =;
  *   x[expr].field =;
  *   x[expr]->field =;
+ *
+ * @allow_ptr_arith says whether a following "+ expr" belongs to this lvalue.
+ * Normally it does, and the addend is scaled by the element size. The
+ * dereference handlers pass false, because unary '*' binds tighter than '+':
+ * in "*p + 1" the sum belongs to the enclosing expression, and reading it as
+ * pointer arithmetic gives p[1] instead of one more than p[0]. It applies to
+ * this lvalue alone -- an lvalue parsed further in, as a subscript or a call
+ * argument, gets the normal behaviour from its own call.
  */
 void read_lvalue(lvalue_t *lvalue,
                  var_t *var,
                  block_t *parent,
                  basic_block_t **bb,
                  bool eval,
-                 opcode_t prefix_op)
+                 opcode_t prefix_op,
+                 bool allow_ptr_arith)
 {
     var_t *vd, *rs1, *rs2;
     bool is_address_got = false;
     bool is_member = false;
-
-    bool allow_ptr_arith = !no_ptr_arith;
-    no_ptr_arith = false;
 
     /* already peeked and have the variable */
     lex_expect(T_identifier);
@@ -3534,7 +3525,7 @@ bool read_body_assignment(char *token,
         int size = 0;
 
         /* has memory address that we want to set */
-        read_lvalue(&lvalue, var, parent, bb, false, OP_generic);
+        read_lvalue(&lvalue, var, parent, bb, false, OP_generic, true);
         size = lvalue.size;
 
         if (lex_accept(T_increment)) {

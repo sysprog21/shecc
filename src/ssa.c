@@ -40,12 +40,20 @@ void var_list_ensure_capacity(var_list_t *list, int min_capacity)
     list->capacity = new_capacity;
 }
 
-void var_list_add_var(var_list_t *list, var_t *var)
+/* Whether @var appears in @list. */
+bool var_list_holds(var_list_t *list, var_t *var)
 {
     for (int i = 0; i < list->size; i++) {
         if (list->elements[i] == var)
-            return;
+            return true;
     }
+    return false;
+}
+
+void var_list_add_var(var_list_t *list, var_t *var)
+{
+    if (var_list_holds(list, var))
+        return;
 
     var_list_ensure_capacity(list, list->size + 1);
     list->elements[list->size++] = var;
@@ -4201,7 +4209,6 @@ void build_reversed_rpo(void)
     }
 }
 
-void add_live_gen(basic_block_t *bb, var_t *var);
 void update_consumed(insn_t *insn, var_t *var);
 
 /* Combined function to reset and solve locals in one pass */
@@ -4231,34 +4238,22 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         insn->idx = i++;
 
-        var_t *rs1 = insn->rs1;
-        if (rs1) {
-            if (rs1->kill_gen != gen && !rs1->is_global && rs1->in_gen != gen) {
-                rs1->in_gen = gen;
-                var_list_append(&bb->live_gen, rs1);
-            }
-            update_consumed(insn, rs1);
-        }
-
-        var_t *rs2 = insn->rs2;
-        if (rs2) {
-            if (rs2->kill_gen != gen && !rs2->is_global && rs2->in_gen != gen) {
-                rs2->in_gen = gen;
-                var_list_append(&bb->live_gen, rs2);
-            }
-            update_consumed(insn, rs2);
-        }
-
-        /* A select reads a third operand: the value it keeps when the
-         * condition does not hold.
+        /* The three source operands are treated alike; the third is the value
+         * a select keeps when its condition does not hold.
          */
-        var_t *rs3 = insn->rs3;
-        if (rs3) {
-            if (rs3->kill_gen != gen && !rs3->is_global && rs3->in_gen != gen) {
-                rs3->in_gen = gen;
-                var_list_append(&bb->live_gen, rs3);
+        var_t *srcs[3];
+        srcs[0] = insn->rs1;
+        srcs[1] = insn->rs2;
+        srcs[2] = insn->rs3;
+        for (int k = 0; k < 3; k++) {
+            var_t *src = srcs[k];
+            if (!src)
+                continue;
+            if (src->kill_gen != gen && !src->is_global && src->in_gen != gen) {
+                src->in_gen = gen;
+                var_list_append(&bb->live_gen, src);
             }
-            update_consumed(insn, rs3);
+            update_consumed(insn, src);
         }
 
         var_t *rd = insn->rd;
@@ -4267,14 +4262,6 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
             var_list_append(&bb->live_kill, rd);
         }
     }
-}
-
-void add_live_gen(basic_block_t *bb, var_t *var)
-{
-    if (var->is_global)
-        return;
-
-    var_list_add_var(&bb->live_gen, var);
 }
 
 void update_consumed(insn_t *insn, var_t *var)

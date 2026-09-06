@@ -1128,7 +1128,6 @@ basic_block_t *bb_create(block_t *parent)
     return bb;
 }
 
-/* The pred-succ pair must have only one connection */
 /* Bumped once per compute_live_in() call; a variable belongs to the set being
  * built when its stamp equals the current value.
  */
@@ -1227,6 +1226,7 @@ void bb_add_rdf(basic_block_t *bb, basic_block_t *rdf)
     bb->RDF[bb->rdf_idx++] = rdf;
 }
 
+/* The pred-succ pair must have only one connection */
 void bb_connect(basic_block_t *pred,
                 basic_block_t *succ,
                 bb_connection_type_t type)

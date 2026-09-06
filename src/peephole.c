@@ -539,11 +539,9 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
     return false;
 }
 
-/* Comparison optimization: Simplify comparison patterns Focus on register-based
- * patterns that SSA's SCCP misses
- * Returns true if optimization was applied Bitwise operation optimization:
- * Simplify bitwise patterns
- * Returns true if optimization was applied
+/* Simplify bitwise patterns the SSA optimizer's SCCP cannot see, because they
+ * only become visible once registers are assigned. Returns true when it
+ * rewrote something.
  */
 bool bitwise_optimization(ph2_ir_t *ph2_ir)
 {
@@ -710,23 +708,17 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
 
 /* Main peephole optimization driver.
  *
- * SSA Optimizer (insn_t, before register allocation):
- * - Constant folding with known values (5+3 → 8, x+0 → x)
- * - Common subexpression elimination
- * - Self-assignment elimination (x = x)
- * - Dead code elimination
- * - Constant comparison folding (5 < 3 → 0)
+ * This runs on ph2_ir_t, after register allocation, and so sees only what
+ * assigning registers makes visible. Constant folding, common subexpression
+ * elimination and dead code elimination have already run over insn_t in the
+ * SSA optimizer and are not repeated here.
  *
- * Peephole Optimizer (ph2_ir_t, after register allocation):
- * - Register-based self-operations (r1-r1 → 0, r1^r1 → 0)
- * - Bitwise operation optimization (SSA doesn't handle these)
- * - Strength reduction for power-of-2 (needs actual constants loaded)
- * - Load/store pattern elimination
- * - Triple instruction sequence optimization
- * - Architecture-specific instruction fusion
- *
- * This refined separation eliminates redundant optimizations while maintaining
- * comprehensive coverage of optimization opportunities.
+ * What is left to do at this level:
+ * - self-assignment elimination, for assignments allocation itself created
+ * - instruction fusion, including strength reduction for a power of two, which
+ *   needs the constant actually loaded into a register
+ * - bitwise identities on registers
+ * - load/store pattern elimination
  */
 void peephole(void)
 {
