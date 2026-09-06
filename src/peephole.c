@@ -353,8 +353,14 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
         /* Same slot written twice in a row: only the second is observable.
          * Rewrite this one into the second and drop it, which keeps the list
          * links the caller is holding valid.
+         *
+         * Only at equal width. A wide store followed by a narrow one to the
+         * same slot leaves the bytes the second does not cover holding what
+         * the first put there, so dropping the first loses them.
          */
         if (ph2_ir->src1 == next->src1 && ph2_ir->src1 >= 0 &&
+            ph2_ir->size_bytes == next->size_bytes &&
+            ph2_ir->is_pointer == next->is_pointer &&
             ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
             ph2_ir->src0 = next->src0;
             ph2_ir->size_bytes = next->size_bytes;
@@ -406,10 +412,15 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
     /* Pattern 4: Load followed by a store of the value just loaded back into
      * the slot it came from. {load rd, [ofs]; store [ofs], rd} → {load rd,
      * [ofs]} -- the slot already holds that value.
+     *
+     * Only at equal width, since a load narrower than the store brings back a
+     * sign-extended byte and the store writes that extension over bytes the
+     * load never read.
      */
     if (ph2_ir->op == OP_load && next->op == OP_store) {
         if (ph2_ir->dest == next->src0 && ph2_ir->src0 == next->src1 &&
-            ph2_ir->src0 >= 0 &&
+            ph2_ir->src0 >= 0 && ph2_ir->size_bytes == next->size_bytes &&
+            ph2_ir->is_pointer == next->is_pointer &&
             ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
             ph2_ir->next = next->next;
             return true;
