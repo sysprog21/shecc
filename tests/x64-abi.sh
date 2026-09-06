@@ -20,6 +20,7 @@ SKIPPED_TESTS=0
 declare -A CATEGORY_TESTS
 declare -A CATEGORY_PASSED
 declare -A CATEGORY_FAILED
+declare -A CATEGORY_SKIPPED
 CURRENT_CATEGORY="Parameter Passing"
 
 # Performance Metrics
@@ -82,18 +83,21 @@ echo ""
 # Helper Functions
 update_category_stats() {
     local category="$1"
-    local result="$2"  # "pass" or "fail"
+    local result="$2"  # "pass", "fail" or "skip"
 
     if [[ -z "${CATEGORY_TESTS[$category]:-}" ]]; then
         CATEGORY_TESTS[$category]=0
         CATEGORY_PASSED[$category]=0
         CATEGORY_FAILED[$category]=0
+        CATEGORY_SKIPPED[$category]=0
     fi
 
     CATEGORY_TESTS[$category]=$((${CATEGORY_TESTS[$category]} + 1))
 
     if [[ "$result" == "pass" ]]; then
         CATEGORY_PASSED[$category]=$((${CATEGORY_PASSED[$category]} + 1))
+    elif [[ "$result" == "skip" ]]; then
+        CATEGORY_SKIPPED[$category]=$((${CATEGORY_SKIPPED[$category]} + 1))
     else
         CATEGORY_FAILED[$category]=$((${CATEGORY_FAILED[$category]} + 1))
     fi
@@ -126,6 +130,7 @@ run_abi_test() {
             echo -e "${YELLOW}SKIP${NC}: $test_name (requires dynamic linking)"
         fi
         SKIPPED_TESTS=$((SKIPPED_TESTS + 1))
+        update_category_stats "$category" "skip"
         show_progress
         return
     fi
@@ -283,9 +288,16 @@ int main() {
 }
 
 # Stack Alignment Tests
+#
+# The AMD64 ABI requires RSP to be 16-byte aligned at a call site, which C gives
+# no way to observe directly. What these two check instead is shecc's own x86-64
+# frame layout, which 16-aligns the slots it hands out, so that a frame change
+# that would also break the call-site guarantee shows up here. Read a failure as
+# "the frame layout moved", not as a conformance verdict: the ABI does not
+# require an int local to sit on a 16-byte boundary.
 
 test_stack_alignment_basic() {
-    run_abi_test "Basic stack alignment" "Stack Alignment" '
+    run_abi_test "Frame slot alignment" "Stack Alignment" '
 #include <stdio.h>
 int is_aligned(void *ptr) {
     int addr = (int)ptr;
@@ -307,7 +319,7 @@ int main() {
 }
 
 test_stack_alignment_extended() {
-    run_abi_test "Stack alignment with extended args" "Stack Alignment" '
+    run_abi_test "Frame slot alignment with stack-passed args" "Stack Alignment" '
 #include <stdio.h>
 int is_aligned(void *ptr) {
     int addr = (int)ptr;
@@ -535,17 +547,20 @@ test_return_int
 test_return_pointer
 
 echo ""
+
+# Always run these. Each passes skip_static=1, so under DYNLINK=0 run_abi_test
+# skips it through the one path that keeps TOTAL_TESTS and the category counts
+# in step with the skip count.
 if [[ "$DYNLINK" == "1" ]]; then
     echo -e "${CYAN}Running External Function Call Tests...${NC}"
-    test_printf_one_arg
-    test_printf_multi_args
-    test_strlen
-    test_strcpy
-    test_memcpy
 else
     echo -e "${YELLOW}Skipping External Function Call Tests (requires dynamic linking)${NC}"
-    SKIPPED_TESTS=$((SKIPPED_TESTS + 5))
 fi
+test_printf_one_arg
+test_printf_multi_args
+test_strlen
+test_strcpy
+test_memcpy
 
 echo ""
 echo -e "${CYAN}Running Register Preservation Tests...${NC}"
@@ -570,16 +585,30 @@ if [[ "$SHOW_SUMMARY" == "1" ]]; then
         total="${CATEGORY_TESTS[$category]}"
         passed="${CATEGORY_PASSED[$category]}"
         failed="${CATEGORY_FAILED[$category]}"
-        pct=0
-        if [[ $total -gt 0 ]]; then
-            pct=$((passed * 100 / total))
-        fi
+        skipped="${CATEGORY_SKIPPED[$category]:-0}"
+        ran=$((total - skipped))
 
         printf "%-25s: " "$category"
+
+        # A category none of whose tests ran has no pass ratio to state.
+        # Printing "0/0 PASSED (0%)" for it reads as an empty or failed run
+        # rather than as one that was never attempted.
+        if [[ $ran -eq 0 ]]; then
+            echo -e "${YELLOW}not run${NC} ($skipped SKIPPED)"
+            continue
+        fi
+
+        pct=$((passed * 100 / ran))
+
+        suffix=""
+        if [[ $skipped -gt 0 ]]; then
+            suffix=", $skipped SKIPPED"
+        fi
+
         if [[ $failed -eq 0 ]]; then
-            echo -e "${GREEN}$passed/$total PASSED${NC} (${pct}%%)"
+            echo -e "${GREEN}$passed/$ran PASSED${NC} (${pct}%%)$suffix"
         else
-            echo -e "${RED}$passed/$total PASSED${NC}, ${RED}$failed FAILED${NC} (${pct}%%)"
+            echo -e "${RED}$passed/$ran PASSED${NC}, ${RED}$failed FAILED${NC} (${pct}%%)$suffix"
         fi
     done
     echo ""
