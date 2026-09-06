@@ -2301,12 +2301,23 @@ bool sr_collect_chain(func_t *func, var_t *var, insn_t **chain, int *len)
     return true;
 }
 
-/* Add "@var += @step" to the end of @latch. */
+/* Add "@var += @step" immediately before @latch's terminator. */
 void sr_emit_advance(basic_block_t *latch, var_t *var, int step)
 {
     block_t *scope = latch->scope;
     var_t *amount = require_var(scope);
     var_t *sum = require_var(scope);
+    insn_t *after = latch->insn_list.tail;
+    insn_t *load;
+    insn_t *add;
+    insn_t *assign;
+
+    /* A loop latch ends in the jump back to its header.  Appending the
+     * advance after that jump leaves it unreachable, so place the whole
+     * sequence before the terminator instead. */
+    if (after && (after->opcode == OP_branch || after->opcode == OP_jump ||
+                  after->opcode == OP_return || after->opcode == OP_func_ret))
+        after = after->prev;
 
     amount->var_name = gen_name();
     amount->is_const = true;
@@ -2315,9 +2326,12 @@ void sr_emit_advance(basic_block_t *latch, var_t *var, int step)
     sum->type = var->type;
     sum->ptr_level = var->ptr_level;
 
-    bb_append_insn(latch, new_insn(OP_load_constant, amount, NULL, NULL));
-    bb_append_insn(latch, new_insn(OP_add, sum, var, amount));
-    bb_append_insn(latch, new_insn(OP_assign, var, sum, NULL));
+    load = new_insn(OP_load_constant, amount, NULL, NULL);
+    add = new_insn(OP_add, sum, var, amount);
+    assign = new_insn(OP_assign, var, sum, NULL);
+    bb_insert_after(latch, after, load);
+    bb_insert_after(latch, load, add);
+    bb_insert_after(latch, add, assign);
 }
 
 /* Turn the address @use reads or writes into a pointer the loop advances.
