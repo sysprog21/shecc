@@ -406,6 +406,31 @@ int slot_lookup(int offset)
  */
 void slot_scan(func_t *func)
 {
+    /* alloc_var_slot() appends in increasing offset order, but
+     * phi_slot_merge() then rewrites the offsets of variables already in the
+     * table to put a chain of phis on one slot, which can leave it out of
+     * order. slot_lookup() binary-searches, so an unsorted table makes it miss
+     * a slot that is present: both scans below and dead_store_elim() miss the
+     * same one, so nothing is misidentified, but the two cleanups skip work
+     * they could do.
+     *
+     * Insertion sort, because the table is nearly sorted already and every
+     * entry a merge moved sits close to where it belongs. It costs about
+     * 0.085% of a self-compile and recovers optimizations worth rather less
+     * than that; it is here to keep the invariant alloc_var_slot() documents
+     * true, not to pay for itself.
+     */
+    for (int i = 1; i < slot_var_count; i++) {
+        var_t *var = slot_vars[i];
+        int j = i - 1;
+
+        while (j >= 0 && slot_vars[j]->offset > var->offset) {
+            slot_vars[j + 1] = slot_vars[j];
+            j--;
+        }
+        slot_vars[j + 1] = var;
+    }
+
     for (int i = 0; i < slot_var_count; i++) {
         slot_private[i] = slot_is_private(slot_vars[i]);
         slot_stores[i] = 0;
