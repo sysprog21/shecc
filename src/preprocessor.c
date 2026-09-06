@@ -695,9 +695,12 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
              * argument rather than its expansion.
              */
             token_t *rhs = operand;
+            bool rhs_is_arg = false;
             if (args && operand->kind == T_identifier &&
-                hashmap_contains(args, operand->literal))
+                hashmap_contains(args, operand->literal)) {
                 rhs = hashmap_get(args, operand->literal);
+                rhs_is_arg = true;
+            }
 
             /* An argument arrives with the spacing it was written with. The
              * join is between real tokens, so that spacing is not an operand.
@@ -717,14 +720,20 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
                 }
 
                 /* Only the first token of a multi-token argument is joined;
-                 * the rest follow it.
+                 * the rest follow it. An argument is a list of its own, so it
+                 * ends where the argument does. A literal operand is not: its
+                 * successor is the next token of the replacement list, which
+                 * the loop below still has to walk, so copying from here would
+                 * emit the remainder of the macro body twice.
                  */
-                for (token_t *rest = rhs->next; rest; rest = rest->next) {
-                    if (pp_is_layout(rest))
-                        continue;
-                    tail_prev = tail;
-                    tail->next = copy_token(rest);
-                    tail = tail->next;
+                if (rhs_is_arg) {
+                    for (token_t *rest = rhs->next; rest; rest = rest->next) {
+                        if (pp_is_layout(rest))
+                            continue;
+                        tail_prev = tail;
+                        tail->next = copy_token(rest);
+                        tail = tail->next;
+                    }
                 }
                 lhs_empty = false;
             }
