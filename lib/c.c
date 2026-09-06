@@ -115,12 +115,26 @@ char *strncat(char *dest, char *src, int len)
 char *strchr(char *str, int ch)
 {
     int i = 0;
+    /* Compare both sides as bytes.
+     *
+     * A byte above 0x7F is the whole difficulty: comparing str[i] against the
+     * int the caller passed fails wherever char is signed, since one side is
+     * negative and the other is not. Converting the search value to a char is
+     * not enough either -- the arm backend widens a char loaded from memory
+     * and a char held in a variable differently, so the two disagree even
+     * though each promotes to -61 on its own. Masking both to 0..255 leaves
+     * nothing to disagree about, on any target.
+     *
+     * The terminator counts as part of the string, and a masked zero still
+     * finds it.
+     */
+    int want = ch & 0xFF;
     while (str[i]) {
-        if (str[i] == ch)
+        if ((str[i] & 0xFF) == want)
             return str + i;
         i++;
     }
-    if (!ch)
+    if (!want)
         return str + i;
     return NULL;
 }
