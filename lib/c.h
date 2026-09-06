@@ -100,6 +100,12 @@ int fclose(FILE *stream);
 int fgetc(FILE *stream);
 char *fgets(char *str, int n, FILE *stream);
 int fputc(int c, FILE *stream);
+/* Only under dynamic linking, where the host libc supplies them and buffers
+ * behind them. A statically linked program has neither, and moves whole
+ * blocks through '__syscall' instead.
+ */
+int fread(char *ptr, int size, int nmemb, FILE *stream);
+int fwrite(char *ptr, int size, int nmemb, FILE *stream);
 int fseek(FILE *stream, int offset, int whence);
 int ftell(FILE *stream);
 

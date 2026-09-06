@@ -1363,6 +1363,18 @@ token_t *preprocess(token_t *tk)
     macro->replacement->literal = "1";
     hashmap_put(MACROS, "__SHECC__", macro);
 
+    /* Tells the source being compiled that the embedded libc is not part of
+     * the output, so the functions lib/c.c would have supplied -- '__syscall'
+     * above all -- are unavailable and libc resolves through the PLT instead.
+     */
+    if (dynlink) {
+        macro = calloc(1, sizeof(macro_t));
+        macro->name = "__SHECC_DYNLINK__";
+        macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
+        macro->replacement->literal = "1";
+        hashmap_put(MACROS, "__SHECC_DYNLINK__", macro);
+    }
+
     tk = pp_preprocess_internal(tk, &ctx);
 
     hashmap_free(MACROS);

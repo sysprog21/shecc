@@ -13,6 +13,24 @@
 /* Common macro functions */
 #define is_newline(c) (c == '\r' || c == '\n')
 
+/* Whether the C library in the output buffers its own stream I/O, so that a
+ * whole block can be handed to fread() or fwrite() in one call.
+ *
+ * A host compiler's runtime does, and so does the one a dynamically linked
+ * shecc reaches through the PLT. The embedded lib/c.c does not: it has no
+ * buffer behind fgets() or fputc(), so every byte would become its own
+ * read(2) or write(2). Those builds call the kernel directly instead, which
+ * is available on exactly the same condition, since '__syscall' is
+ * synthesized only for static linking.
+ */
+#ifdef __SHECC__
+#ifdef __SHECC_DYNLINK__
+#define HOST_BUFFERED_STDIO
+#endif
+#else
+#define HOST_BUFFERED_STDIO
+#endif
+
 /* Limitations */
 #define MAX_TOKEN_LEN 256
 #define MAX_ID_LEN 64

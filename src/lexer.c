@@ -167,7 +167,14 @@ char read_char(strbuf_t *buf)
  * second copy for every line of every source file -- and shecc's own libc has
  * no buffer behind fgets(), so each of those lines was a read(2) as well.
  */
-#ifdef __SHECC__
+#ifdef HOST_BUFFERED_STDIO
+int file_read_all(FILE *f, char *dst, int len)
+{
+    if (len <= 0)
+        return 0;
+    return fread(dst, 1, len, f);
+}
+#else
 int file_read_all(FILE *f, char *dst, int len)
 {
     int got = 0;
@@ -179,13 +186,6 @@ int file_read_all(FILE *f, char *dst, int len)
         got += n;
     }
     return got;
-}
-#else
-int file_read_all(FILE *f, char *dst, int len)
-{
-    if (len <= 0)
-        return 0;
-    return fread(dst, 1, len, f);
 }
 #endif
 

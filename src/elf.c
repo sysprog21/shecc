@@ -1249,8 +1249,19 @@ void elf_postprocess(void)
  * into the C library for every one of the several hundred thousand bytes of a
  * self-compile -- and, once shecc is compiled by itself, a write(2) for each
  * of them, because its own libc has no buffer behind fputc().
+ *
+ * That reasoning holds only where lib/c.c is the libc in the output. A host
+ * compiler's runtime already buffers fwrite(), and so does the one a
+ * dynamically linked shecc resolves through the PLT; neither build has
+ * '__syscall' to call, since it is synthesized only for static linking.
  */
-#ifdef __SHECC__
+#ifdef HOST_BUFFERED_STDIO
+void elf_write_all(FILE *fp, char *buf, int len)
+{
+    if (len > 0)
+        fwrite(buf, 1, len, fp);
+}
+#else
 void elf_write_all(FILE *fp, char *buf, int len)
 {
     int off = 0;
@@ -1261,12 +1272,6 @@ void elf_write_all(FILE *fp, char *buf, int len)
             return;
         off += n;
     }
-}
-#else
-void elf_write_all(FILE *fp, char *buf, int len)
-{
-    if (len > 0)
-        fwrite(buf, 1, len, fp);
 }
 #endif
 
