@@ -13,6 +13,24 @@
 /* Common macro functions */
 #define is_newline(c) (c == '\r' || c == '\n')
 
+/* Whether the C library in the output buffers its own stream I/O, so that a
+ * whole block can be handed to fread() or fwrite() in one call.
+ *
+ * A host compiler's runtime does, and so does the one a dynamically linked
+ * shecc reaches through the PLT. The embedded lib/c.c does not: it has no
+ * buffer behind fgets() or fputc(), so every byte would become its own
+ * read(2) or write(2). Those builds call the kernel directly instead, which
+ * is available on exactly the same condition, since '__syscall' is
+ * synthesized only for static linking.
+ */
+#ifdef __SHECC__
+#ifdef __SHECC_DYNLINK__
+#define HOST_BUFFERED_STDIO
+#endif
+#else
+#define HOST_BUFFERED_STDIO
+#endif
+
 /* Limitations */
 #define MAX_TOKEN_LEN 256
 #define MAX_ID_LEN 64
@@ -20,22 +38,20 @@
 #define MAX_VAR_LEN 128
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
-#define MAX_LOCALS 1600
+#define MAX_LOCALS 3200
 #define MAX_FIELDS 64
 #define MAX_TYPES 256
 #define MAX_LABELS 256
-#define MAX_IR_INSTR 80000
+#define MAX_IR_INSTR 120000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_BB_RDOM_SUCC 256
-#define MAX_GLOBAL_IR 256
 #define MAX_CODE 262144
 #define MAX_DATA 262144
 #define MAX_SYMTAB 65536
 #define MAX_STRTAB 65536
 #define MAX_HEADER 1024
 #define MAX_PROGRAM_HEADER 1024
-#define MAX_SECTION 1024
 #define MAX_SECTION_HEADER 1024
 #define MAX_SHSTR 1024
 #define MAX_INTERP 1024
@@ -47,10 +63,21 @@
 #define MAX_PLT 1024
 #define MAX_GOTPLT 1024
 #define MAX_CONSTANTS 1024
-#define MAX_CASES 128
 #define MAX_NESTING 128
+/* How many instructions an if may speculate when flattened into a select, and
+ * how many blocks one of its arms may span. Beyond a handful, running the arm
+ * that would have been skipped costs more than the misprediction it avoids.
+ */
+#define MAX_SPECULATED_INSNS 8
+#define MAX_IF_ARM_BLOCKS 4
+/* Recursion limits for nesting in the input. The parser descends recursively
+ * for each of these, so a deeply nested program would otherwise exhaust the
+ * machine stack before any diagnostic could be produced.
+ */
+#define MAX_EXPR_DEPTH 256
+#define MAX_BLOCK_DEPTH 256
 #define MAX_OPERAND_STACK_SIZE 32
-#define MAX_ANALYSIS_STACK_SIZE 800
+#define MAX_ANALYSIS_STACK_SIZE 1600
 
 /* Default capacities for common data structures */
 /* Arena sizes optimized based on typical usage patterns */
@@ -66,18 +93,18 @@
 #define COMPACT_ARENA_BB 0x04      /* BB_ARENA - basic blocks */
 #define COMPACT_ARENA_HASHMAP 0x08 /* HASHMAP_ARENA - hash nodes */
 #define COMPACT_ARENA_GENERAL 0x10 /* GENERAL_ARENA - misc allocations */
-#define COMPACT_ARENA_ALL 0x1F     /* All arenas */
-
-/* Common arena compaction combinations for different compilation phases */
-#define COMPACT_PHASE_PARSING (COMPACT_ARENA_BLOCK | COMPACT_ARENA_GENERAL)
-#define COMPACT_PHASE_SSA (COMPACT_ARENA_INSN | COMPACT_ARENA_BB)
-#define COMPACT_PHASE_BACKEND (COMPACT_ARENA_BB | COMPACT_ARENA_GENERAL)
 
 #define ELF_START 0x10000
+#ifndef PTR_SIZE
 #define PTR_SIZE 4
+#endif
 
-/* Number of the available registers. Either 7 or 8 is accepted now. */
+/* Registers the allocator may hand out. A target with more spare registers can
+ * raise this from its own configuration.
+ */
+#ifndef REG_CNT
 #define REG_CNT 8
+#endif
 
 /* This macro will be automatically defined at shecc run-time. */
 #ifdef __SHECC__
@@ -86,7 +113,11 @@
     do {          \
         ;         \
     } while (0)
-#define HOST_PTR_SIZE 4
+/* shecc runs on the target it compiles for, so the host pointer width is
+ * the target's. This must not be hardcoded to 4: on an LP64 target the
+ * var_list allocations and memcpy sizes below would be half what they need.
+ */
+#define HOST_PTR_SIZE PTR_SIZE
 #else
 /* suppress GCC/Clang warnings */
 #define UNUSED(x) (void) (x)
@@ -102,8 +133,77 @@
 #define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
 #endif
 
+/* Targets whose PLT has no lazy-resolution path ask the loader to bind every
+ * PLT entry at load time.
+ */
+#ifndef DYN_BIND_NOW
+#define DYN_BIND_NOW 0
+#endif
+
 #define ELF_MACHINE_ARM32 0x28
 #define ELF_MACHINE_RV32 0xf3
+#define ELF_MACHINE_X86_64 0x3e
+
+/* ELF class of the active target: a 64-bit pointer means ELF64, and every
+ * 32-bit target means ELF32. Used to select the header/segment writers in
+ * elf.c. Deriving it from the pointer width rather than listing machines means
+ * a new target gets the right class from the PTR_SIZE its mk file already
+ * states.
+ */
+#if PTR_SIZE == 8
+#define ELF_IS_64 1
+#else
+#define ELF_IS_64 0
+#endif
+
+/* Ceilings for strength_reduce(): how long a chain of instructions may compute
+ * one address, and how many rounds the step analysis takes to settle.
+ */
+#define MAX_IV_CHAIN 12
+#define MAX_IV_ROUNDS 4
+
+/* A pointer the loop advances costs a register for the whole loop and an
+ * addition at the bottom of it, so it only pays where it replaces more work
+ * than that -- and only a couple of them fit before the loop's own variables
+ * start going to the frame instead.
+ */
+#define MIN_IV_CHAIN 3
+#define MAX_IV_PER_LOOP 2
+
+/* How many blocks one natural loop's walk keeps in hand at once. Past this
+ * the walk stops widening, which can only understate a depth.
+ */
+#define MAX_LOOP_WALK 512
+
+/* Limits on copying a function into its callers: how big a body is worth
+ * copying, how many distinct variables one such body may name, and how many
+ * times the pass sweeps the program so that a function which becomes copyable
+ * only after its own callee was copied into it still gets copied.
+ */
+#define MAX_INLINE_INSNS 16
+#define MAX_INLINE_VARS 32
+#define MAX_INLINE_ROUNDS 3
+
+/* What a naming inside one loop is worth against one in straight-line code,
+ * and how many nesting levels still multiply it.
+ */
+#define LOOP_USE_WEIGHT 8
+#define MAX_WEIGHTED_LOOP_DEPTH 3
+
+/* How many registers at the top of the allocator's file a call preserves.
+ * Only such a register can hold a value across a call, so only these may be
+ * given to a variable for the whole of a function that calls anything. A
+ * target states its own count in mk/<arch>.mk, beside the REG_CNT that fixes
+ * the file it counts from; a target that has not had its file checked this way
+ * keeps none.
+ *
+ * HAVE_COND_MOVE comes from the same place and says whether the target can
+ * select between two values without branching, which is what makes flattening
+ * an if into a select worthwhile.
+ */
+#ifndef CALLEE_SAVED_REGS
+#define CALLEE_SAVED_REGS 0
+#endif
 
 /* Common data structures */
 typedef struct arena_block {
@@ -223,7 +323,12 @@ typedef enum {
     T_newline,
     T_backslash,
     T_whitespace,
-    T_tab
+    T_tab,
+    /* '#' and '##' inside a macro replacement list. Resolved while the macro
+     * is expanded, so neither ever reaches the parser.
+     */
+    T_hash,
+    T_hashhash
 } token_kind_t;
 
 /* Source location tracking for better error reporting */
@@ -275,6 +380,8 @@ typedef enum {
 
     OP_phi,
     OP_unwound_phi, /* work like address_of + store */
+    /* rd = rs2 ? rs1 : rs3 -- select without a branch. */
+    OP_cmov,
 
     /* calling convention */
     OP_define,   /* function entry point */
@@ -344,10 +451,20 @@ typedef enum {
 } opcode_t;
 
 /* variable definition */
+/* Depth of the SSA renaming stack: how many definitions of one variable can be
+ * live along a single dominator path.
+ */
+#define MAX_RENAME_STACK 64
+
 typedef struct {
     int counter;
-    int stack[64];
+    /* Grown on demand: only a base variable is ever renamed, so the SSA
+     * versions copied from it -- the large majority of all variables -- would
+     * otherwise each carry an unused MAX_RENAME_STACK array.
+     */
+    int *stack;
     int stack_idx;
+    int stack_cap;
 } rename_t;
 
 typedef struct ref_block ref_block_t;
@@ -376,37 +493,88 @@ typedef struct var_list {
 
 struct var {
     type_t *type;
-    char var_name[MAX_VAR_LEN];
+    /* Interned, not copied. A MAX_VAR_LEN array was 128 of this struct's 312
+     * bytes on every one of the ~86k variables a self-compile creates, and
+     * var_t is embedded by value MAX_FIELDS times in each type_t and
+     * MAX_PARAMS times in each func_t, so the array cost another 8 KiB per
+     * type. Generated temporary names come from gen_name(); source-level names
+     * come from intern_string(). Never NULL -- an unnamed variable holds "".
+     */
+    char *var_name;
     int ptr_level;
     bool is_func;
     bool is_global;
     bool is_const_qualified; /* true if variable has const qualifier */
     bool address_taken;      /* true if variable address was taken (&var) */
+    /* Working state for strength_reduce(): how many instructions in the
+     * function write the variable, whether it is written inside the loop being
+     * examined, and how much its value moves per iteration when it does.
+     * All three are recomputed per loop; nothing outside that pass reads them.
+     */
+    int def_cnt;
+    int loop_stamp;
+    int iv_gen;
+    int iv_step;
+    /* pin_registers()'s tally for the variable: what its namings are worth
+     * weighted by loop depth, the reverse-post-order number of the last block
+     * that named it, whether it was
+     * ever named in two, and whether a loop named it. Stamped per function so
+     * that no array has to hold the candidates -- the file has a handful of
+     * registers and a function names hundreds of variables, and the one worth
+     * a register is not reliably among the first few met.
+     */
+    int pin_gen;
+    int pin_weight;
+    int pin_blk;
+    bool pin_cross;
+    bool pin_hot;
+    /* Defined inside an arm that if_convert() flattened into a select. The
+     * register its variable is pinned to still holds the value flowing into
+     * the select, which the arms read and the select overwrites, so a value
+     * computed on the way there must go somewhere else.
+     */
+    bool in_select_arm;
     int array_size;
-    int array_dim1, array_dim2; /* first/second dimension size for 2D arrays */
-    int offset;   /* offset from stack or frame, index 0 is reserved */
-    int init_val; /* for global initialization */
-    int liveness; /* live range */
-    int in_loop;
+    int array_dim2; /* second dimension size for 2D arrays */
+    int offset;     /* offset from stack or frame, index 0 is reserved */
+    int init_val;   /* for global initialization */
+    /* Generation stamps used by compute_live_in() to test set membership in
+     * constant time instead of rescanning live_kill and live_in per element.
+     */
+    int kill_gen;
+    int in_gen;
+    /* Stamp for the successor-union set merge_live_in() builds. */
+    int merge_gen;
     struct var *base;
     int subscript;
-    struct var *subscripts[128];
+    /* Every SSA version of this variable, grown on demand. A fixed 128-entry
+     * array made every var_t 1 KiB heavier -- and var_t is embedded by value in
+     * type_t's field table and in every function's parameter list -- while the
+     * append was unchecked, so a variable assigned more than 128 times in one
+     * function wrote past the end.
+     */
+    struct var **subscripts;
     int subscripts_idx;
-    rename_t rename;
+    int subscripts_cap;
+    /* SSA renaming state, allocated on first use by var_rename(). Only a base
+     * variable is ever renamed, so the versions copied from it -- the large
+     * majority of all variables -- each carried an unused 24-byte rename_t
+     * inline. Field order here is load-bearing: reordering var_t breaks the
+     * bootstrap, so the pointer stays where the struct sat.
+     */
+    rename_t *rename;
     ref_block_list_t ref_block_list; /* blocks which kill variable */
     use_chain_t *users_head, *users_tail;
     struct insn *last_assign;
     int consumed;
     bool is_ternary_ret;
     bool is_logical_ret;
-    bool is_const;  /* whether a constant representaion or not */
-    int vreg_id;    /* Virtual register ID */
-    int phys_reg;   /* Physical register assignment (-1 if unassigned) */
-    int vreg_flags; /* VReg flags */
-    int first_use;  /* First instruction index where variable is used */
-    int last_use;   /* Last instruction index where variable is used */
-    int loop_depth; /* Nesting depth if variable is in a loop */
-    int use_count;  /* Number of times variable is used */
+    bool is_const; /* whether a constant representaion or not */
+    int vreg_id;   /* Virtual register ID */
+    int phys_reg;  /* Physical register assignment (-1 if unassigned) */
+    int first_use; /* First instruction index where variable is used */
+    int last_use;  /* Last instruction index where variable is used */
+    int use_count; /* Number of times variable is used */
     bool space_is_allocated; /* whether space is allocated for this variable */
     bool has_backing_storage;
 
@@ -447,17 +615,31 @@ typedef struct {
 
 /* phase-2 IR definition */
 struct ph2_ir {
-    opcode_t op;
-    int src0;
-    int src1;
-    int dest;
-    char func_name[MAX_VAR_LEN];
+    /* Grouped by width so the struct carries no interior padding: mixed in
+     * declaration order it was 72 bytes for 63 bytes of fields, on all ~101k
+     * of them a self-compile emits.
+     */
+    /* Callee / definition name, interned in GENERAL_ARENA rather than copied.
+     * A MAX_VAR_LEN array here was 128 of this struct's 192 bytes while only
+     * OP_define, OP_call and OP_address_of_func ever name anything. NULL when
+     * unused.
+     */
+    char *func_name;
     basic_block_t *next_bb;
     basic_block_t *then_bb;
     basic_block_t *else_bb;
     struct ph2_ir *next;
-    bool is_branch_detached;
 
+    opcode_t op;
+    int src0;
+    int src1;
+    /* The register OP_cmov keeps when its condition does not hold. */
+    int src2;
+    int dest;
+    /* Type information for LP64 support */
+    int size_bytes; /* Size in bytes for load/store/read/write operations */
+
+    bool is_branch_detached;
     /* When an instruction uses a variable that its offset is based on
      * the top of the stack, this instruction's flag is also set to
      * indicate the compiler to recalculate the offset after the function's
@@ -467,6 +649,7 @@ struct ph2_ir {
      * to recompute the offset.
      */
     bool ofs_based_on_stack_top;
+    bool is_pointer; /* True if this operation involves a pointer type */
 };
 
 typedef struct ph2_ir ph2_ir_t;
@@ -477,7 +660,12 @@ struct type {
     base_type_t base_type;
     struct type *base_struct;
     int size;
-    var_t fields[MAX_FIELDS];
+    /* Member table, allocated when the type is created rather than inlined.
+     * A MAX_FIELDS array of var_t by value made type_t 12 KiB, and TYPES is a
+     * flat MAX_TYPES array that global_init() zeroes up front -- 3 MiB of
+     * resident memory for the 90 types a self-compile actually declares.
+     */
+    var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
 };
@@ -512,11 +700,21 @@ struct insn {
     var_t *rd;
     var_t *rs1;
     var_t *rs2;
+    /* The value OP_cmov keeps when its condition does not hold. A select needs
+     * three inputs and the two source fields are taken by the chosen value and
+     * the condition; every other opcode leaves this NULL.
+     */
+    var_t *rs3;
     int sz;
     bool useful; /* Used in DCE process. Set true if instruction is useful. */
     basic_block_t *belong_to;
     phi_operand_t *phi_ops;
-    char str[64];
+    /* Callee or goto-label name, interned rather than copied. add_insn()
+     * already interned the text before copying it in, so the array was 64 of
+     * this struct's 136 bytes for a string the pool owns anyway, on all ~73k
+     * instructions a self-compile builds. NULL when the opcode names nothing.
+     */
+    char *str;
 };
 
 typedef struct {
@@ -547,11 +745,43 @@ typedef struct {
 } symbol_list_t;
 
 struct basic_block {
+    /* Members are grouped by width -- 16-byte lists, then pointers, then ints,
+     * then the flags -- so the struct carries no interior padding. Mixed in
+     * declaration order it was 320 bytes for 302 bytes of fields, on every one
+     * of the ~51k blocks a self-compile creates.
+     */
     insn_list_t insn_list;
     ph2_ir_list_t ph2_ir_list;
-    bb_connection_t prev[MAX_BB_PRED];
-    /* Used in instruction dumping when ir_dump is enabled. */
-    char bb_label_name[MAX_VAR_LEN];
+    var_list_t live_gen;
+    var_list_t live_kill;
+    var_list_t live_in;
+    var_list_t live_out;
+    symbol_list_t symbol_list; /* variable declaration */
+
+    /* Predecessor edges, grown on demand. A fixed MAX_BB_PRED array cost two
+     * kilobytes in every basic block -- by far the largest thing in one --
+     * while almost every block has one or two predecessors.
+     */
+    bb_connection_t *prev;
+    /* Register file on entry to this block, captured by reg_alloc() at the end
+     * of the predecessor it falls out of. Non-NULL only when a file was handed
+     * over, and bb_export_regs() does that only for an edge that is all three
+     * of: the predecessor's single successor, that predecessor's rpo_next, and
+     * this block's single predecessor. A sole predecessor alone is NOT enough
+     * -- a branch target is emitted wherever the backend's linear walk puts
+     * it, so the registers reaching it are not the ones the branch left.
+     *
+     * Allocated only for a block that actually inherits a file: fewer than one
+     * block in thirteen does, so a REG_CNT array here cost 64 bytes on all
+     * ~51k blocks to serve 7% of them.
+     */
+    struct var **entry_regs;
+    /* Used in instruction dumping when ir_dump is enabled, and allocated only
+     * then: a fixed array here is 128 bytes on every one of the tens of
+     * thousands of blocks a self-compile creates, all of it zeroed for
+     * nothing in the default path.
+     */
+    char *bb_label_name;
     struct basic_block *next;  /* normal BB */
     struct basic_block *then_; /* conditional BB */
     struct basic_block *else_;
@@ -559,26 +789,71 @@ struct basic_block {
     struct basic_block *r_idom;
     struct basic_block *rpo_next;
     struct basic_block *rpo_r_next;
-    var_list_t live_gen;
-    var_list_t live_kill;
-    var_list_t live_in;
-    var_list_t live_out;
-    int rpo;
-    int rpo_r;
-    struct basic_block *DF[64];
-    struct basic_block *RDF[64];
-    int df_idx;
-    int rdf_idx;
-    int visited;
-    bool useful; /* indicate whether this BB contains useful instructions */
-    struct basic_block *dom_next[64];
+    /* Dominance and reverse-dominance frontiers. These were fixed worst-case
+     * arrays sized MAX_BB_DOM_SUCC / MAX_BB_RDOM_SUCC, which cost 2560 bytes in
+     * every basic block while a typical block uses a handful of entries. Worse,
+     * the appends were unchecked and a self-compile really does push df_idx to
+     * 72, overrunning a 64-entry DF into the RDF that followed it. Growing them
+     * on demand removes both the waste and the fixed ceiling.
+     */
+    struct basic_block **DF;
+    struct basic_block **RDF;
+    /* Dominator-tree children, grown on demand for the same reason as prev[]
+     * and the frontiers: a fixed array cost half a kilobyte in every block.
+     */
+    struct basic_block **dom_next;
     struct basic_block *dom_prev;
-    struct basic_block *rdom_next[256];
     struct basic_block *rdom_prev;
     func_t *belong_to;
     block_t *scope;
-    symbol_list_t symbol_list; /* variable declaration */
+
+    int prev_cap;
+    /* One past the highest slot bb_connect() has ever filled. Scans of prev[]
+     * stop here instead of walking all MAX_BB_PRED slots; a block typically has
+     * one or two predecessors, so the difference is two orders of magnitude.
+     * Disconnecting clears a slot without lowering this, so it stays an upper
+     * bound and the NULL checks in each loop still skip the holes.
+     */
+    int prev_idx;
+    /* Index of this block's first instruction in PH2_IR_FLATTEN, or -1 when it
+     * emitted none. Recorded while that mapping is built so the backend need
+     * not search for it.
+     */
+    int ph2_base;
+    int rpo;
+    int rpo_r;
+    /* How many loops enclose the block.
+     * pin_registers() weights a variable's uses by it: a name inside a loop
+     * stands for as many reads as the loop has iterations, and ranking by the
+     * plain count gave a register to a variable named four times in
+     * straight-line code over one named once in the innermost loop.
+     */
+    int loop_depth;
+    /* What one naming of a variable in this block is worth to pin_registers(),
+     * derived from loop_depth once rather than on every operand of every
+     * instruction the tally walks.
+     */
+    int loop_weight;
+    /* Stamp marking the block as already counted for the loop being walked,
+     * so that one loop raises its depth once however many ways in there are.
+     */
+    int loop_mark;
+    int df_idx;
+    int rdf_idx;
+    int df_cap;
+    int rdf_cap;
+    int visited;
+    int dom_next_idx;
+    int dom_next_cap;
     int elf_offset;
+
+    /* Whether any emitted branch or jump names this block as its target. A
+     * block no edge jumps to is reached only by falling out of the block
+     * emitted before it, which is what lets the backend carry what the
+     * registers hold across the boundary.
+     */
+    bool is_branch_target;
+    bool useful; /* indicate whether this BB contains useful instructions */
 };
 
 struct ref_block {
@@ -603,6 +878,13 @@ struct func {
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
+    /* inline_calls()'s verdict on this body and the return that ends it,
+     * stamped with the round that reached them: a body is examined once per
+     * round rather than once per call site that names it.
+     */
+    int inline_gen;
+    bool inline_ok;
+    struct insn *inline_ret;
     int stack_size;
 
     /* SSA info */
@@ -611,6 +893,19 @@ struct func {
     symbol_list_t global_sym_list;
     int bb_cnt;
     int visited;
+
+    /* How many callee-saved registers this function's prologue must preserve,
+     * counted from RBX upward. Functions that never need them pay nothing.
+     */
+    int saved_regs;
+
+    /* Registers holding a variable for the whole function, one bit each. The
+     * backend needs these: its notion of what is live out of a block comes
+     * from the successor's entry registers, which say nothing about a variable
+     * that is resident everywhere, and it would otherwise drop the code that
+     * puts a value into one as dead.
+     */
+    int pinned_regs;
 
     /* Information used for dynamic linking */
     bool is_used;

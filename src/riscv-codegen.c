@@ -164,7 +164,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 24;
         return;
     case OP_trunc:
-        if (ph2_ir->src1 == 2)
+        /* A byte and a short each need a shift pair to keep the sign. */
+        if (ph2_ir->src1 == 1 || ph2_ir->src1 == 2)
             elf_offset += 8;
         else
             elf_offset += 4;
@@ -233,7 +234,7 @@ void cfg_flatten(void)
         /* reserve stack */
         ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = func->stack_size;
-        strncpy(flatten_ir->func_name, func->return_def.var_name, MAX_VAR_LEN);
+        flatten_ir->func_name = intern_string(func->return_def.var_name);
 
         /* Except for local variables, it must allocate additional space
          * to preserve the content of ra at each function entry point.
@@ -563,14 +564,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__xori(rd, rd, 1));
         return;
     case OP_trunc:
+        /* Narrowing keeps the sign: there are no unsigned types. */
         if (ph2_ir->src1 == 1) {
-            emit(__andi(rd, rs1, 0xFF));
+            emit(__slli(rd, rs1, 24));
+            emit(__srai(rd, rd, 24));
         } else if (ph2_ir->src1 == 2) {
-            /* For short truncation,
-             * use shift operations since 0xFFFF is too large
-             */
-            emit(__slli(rd, rs1, 16)); /* Shift left 16 bits */
-            emit(__srli(rd, rd, 16));  /* Shift right 16 bits logical */
+            emit(__slli(rd, rs1, 16));
+            emit(__srai(rd, rd, 16));
         } else if (ph2_ir->src1 == 4) {
             /* No truncation needed for 32-bit values */
             emit(__add(rd, rs1, __zero));

@@ -44,7 +44,23 @@
 #define __syscall_mmap2 222
 #define __syscall_munmap 215
 
-#else /* Only Arm32 and RV32 are supported */
+#elif defined(__x86_64__)
+#define __SIZEOF_POINTER__ 8
+#define __syscall_exit 60
+#define __syscall_read 0
+#define __syscall_write 1
+#define __syscall_close 3
+#define __syscall_open 2
+#define __syscall_openat 257
+#define __syscall_lseek 8
+#define __syscall_mmap 9
+#define __syscall_munmap 11
+/* x86-64 provides no mmap2. Every call site passes offset 0, so mmap2's
+ * page-granular offset is indistinguishable from mmap's byte offset here.
+ */
+#define __syscall_mmap2 9
+
+#else /* Only Arm32, RV32, and x86-64 are supported */
 #error "Unsupported architecture"
 #endif
 
@@ -58,6 +74,12 @@
 /* va_list support for variadic functions */
 typedef int *va_list;
 
+/* Every variadic argument occupies one pointer-sized stack slot, so an
+ * int-based va_list must advance this many elements per argument: one on
+ * the 32-bit targets, two on LP64.
+ */
+#define VA_INT_STEP (__SIZEOF_POINTER__ / 4)
+
 /* Character predicate functions */
 int isdigit(int c);
 int isalpha(int c);
@@ -67,11 +89,23 @@ int isblank(int c);
 
 /* File I/O */
 typedef int FILE;
+
+/* Standard streams, as raw file descriptors */
+#define stdin 0
+#define stdout 1
+#define stderr 2
+
 FILE *fopen(char *filename, char *mode);
 int fclose(FILE *stream);
 int fgetc(FILE *stream);
 char *fgets(char *str, int n, FILE *stream);
 int fputc(int c, FILE *stream);
+/* Only under dynamic linking, where the host libc supplies them and buffers
+ * behind them. A statically linked program has neither, and moves whole
+ * blocks through '__syscall' instead.
+ */
+int fread(char *ptr, int size, int nmemb, FILE *stream);
+int fwrite(char *ptr, int size, int nmemb, FILE *stream);
 int fseek(FILE *stream, int offset, int whence);
 int ftell(FILE *stream);
 
@@ -81,6 +115,9 @@ int strcmp(char *s1, char *s2);
 int strncmp(char *s1, char *s2, int len);
 char *strcpy(char *dest, char *src);
 char *strncpy(char *dest, char *src, int len);
+char *strcat(char *dest, char *src);
+char *strncat(char *dest, char *src, int len);
+char *strchr(char *str, int ch);
 char *memcpy(char *dest, char *src, int count);
 int memcmp(void *s1, void *s2, int n);
 void *memset(void *s, int c, int n);
@@ -89,6 +126,8 @@ void *memset(void *s, int c, int n);
 int printf(char *str, ...);
 int sprintf(char *buffer, char *str, ...);
 int snprintf(char *buffer, int n, char *str, ...);
+int fprintf(FILE *stream, char *str, ...);
+int fflush(FILE *stream);
 
 /* Terminating program */
 void exit(int exit_code);

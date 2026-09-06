@@ -160,9 +160,37 @@ char read_char(strbuf_t *buf)
     return buf->elements[buf->size];
 }
 
+/* Fill @dst with @len bytes of @f, returning how many arrived.
+ *
+ * The whole file is wanted and its size is already known, so it is asked for in
+ * one piece. Reading it a line at a time instead cost a library call and a
+ * second copy for every line of every source file -- and shecc's own libc has
+ * no buffer behind fgets(), so each of those lines was a read(2) as well.
+ */
+#ifdef HOST_BUFFERED_STDIO
+int file_read_all(FILE *f, char *dst, int len)
+{
+    if (len <= 0)
+        return 0;
+    return fread(dst, 1, len, f);
+}
+#else
+int file_read_all(FILE *f, char *dst, int len)
+{
+    int got = 0;
+
+    while (got < len) {
+        int n = __syscall(__syscall_read, f, dst + got, len - got);
+        if (n <= 0)
+            return got;
+        got += n;
+    }
+    return got;
+}
+#endif
+
 strbuf_t *read_file(char *filename)
 {
-    char buffer[MAX_LINE_LEN];
     FILE *f = fopen(filename, "rb");
     strbuf_t *src;
 
@@ -176,8 +204,7 @@ strbuf_t *read_file(char *filename)
     src = strbuf_create(len + 1);
     fseek(f, 0, SEEK_SET);
 
-    while (fgets(buffer, MAX_LINE_LEN, f))
-        strbuf_puts(src, buffer);
+    src->size = file_read_all(f, src->elements, len);
 
     fclose(f);
     src->elements[len] = '\0';
@@ -200,8 +227,14 @@ strbuf_t *get_file_buf(char *filename)
 
 token_t *new_token(token_kind_t kind, source_location_t *loc, int len)
 {
-    token_t *token = arena_calloc(TOKEN_ARENA, 1, sizeof(token_t));
+    /* Every field is written here, so the allocation does not need zeroing
+     * first -- and tokens are the single largest source of allocations in the
+     * compiler.
+     */
+    token_t *token = arena_alloc(TOKEN_ARENA, sizeof(token_t));
     token->kind = kind;
+    token->literal = NULL;
+    token->next = NULL;
     memcpy(&token->location, loc, sizeof(source_location_t));
     token->location.len = len;
     return token;
@@ -215,8 +248,24 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
     loc->pos = buf->size;
 
     if (ch == '#') {
-        if (loc->column != 1)
-            error_at("Directive must be on the start of line", loc);
+        /* Inside a macro replacement list '#' stringifies the parameter that
+         * follows and '##' pastes its neighbours. Neither can be a directive,
+         * which only exists at the start of a line.
+         */
+        if (peek_char(buf, 1) == '#') {
+            read_char(buf);
+            read_char(buf);
+            token = new_token(T_hashhash, loc, 2);
+            loc->column += 2;
+            return token;
+        }
+
+        if (loc->column != 1) {
+            read_char(buf);
+            token = new_token(T_hash, loc, 1);
+            loc->column++;
+            return token;
+        }
 
         int sz = 0;
 
@@ -507,15 +556,11 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
 
         ch = read_char(buf);
         while (ch != '"' || special) {
-            if ((sz > 0) && (token_buffer[sz - 1] == '\\')) {
-                token_buffer[sz++] = ch;
-            } else {
-                if (sz >= MAX_TOKEN_LEN - 1) {
-                    loc->len = sz + 1;
-                    error_at("String literal too long", loc);
-                }
-                token_buffer[sz++] = ch;
+            if (sz >= MAX_TOKEN_LEN - 1) {
+                loc->len = sz + 1;
+                error_at("String literal too long", loc);
             }
+            token_buffer[sz++] = ch;
 
             if (ch == '\\')
                 special = true;
@@ -543,6 +588,10 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
             ch = read_char(buf);
 
             do {
+                if (sz >= MAX_TOKEN_LEN - 1) {
+                    loc->len = sz + 1;
+                    error_at("Character literal too long", loc);
+                }
                 token_buffer[sz++] = ch;
                 ch = read_char(buf);
                 escaped = true;
@@ -821,9 +870,16 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
     if (isalnum(ch) || ch == '_') {
         int sz = 0;
         do {
-            if (sz >= MAX_TOKEN_LEN - 1) {
+            /* Bounded by the smallest buffer an identifier is ever copied
+             * into, not by the token buffer's own size: lex_ident() and
+             * lex_peek() strcpy into caller arrays of MAX_ID_LEN, so a longer
+             * name would run off the end of one. Diagnosing it here is what
+             * keeps a long identifier in the input from corrupting the
+             * compiler's stack.
+             */
+            if (sz >= MAX_ID_LEN - 1) {
                 loc->len = sz;
-                error_at("Token too long", loc);
+                error_at("Identifier too long", loc);
             }
             token_buffer[sz++] = ch;
             ch = read_char(buf);
@@ -906,8 +962,12 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
             break;
         }
 
-        /* Fall back to hashmap for uncommon keywords */
-        if (kind == T_identifier)
+        /* Fall back to the hashmap for anything the switch does not name.
+         * No keyword is shorter than two characters or longer than eight, so a
+         * name outside that range cannot be one and needs no lookup -- which
+         * is most of the identifiers in a real program.
+         */
+        if (kind == T_identifier && sz >= 2 && sz <= 8)
             kind = lookup_keyword(token_buffer);
 
         token = new_token(kind, loc, sz);
@@ -990,6 +1050,19 @@ token_stream_t *gen_libc_token_stream()
     if (!hashmap_contains(SRC_FILE_MAP, filename))
         hashmap_put(SRC_FILE_MAP, filename, LIBC_SRC);
 
+    /* This buffer was built by appending, so its capacity is whatever the
+     * doubling left and runs past the text into memory that was never
+     * written -- while the scan below, like the one over a file, stops at
+     * capacity. Terminate it the way read_file() leaves a file: the text, a
+     * NUL, and capacity naming one past the text. Without this the lexer reads
+     * uninitialised bytes, and what it finds there depends on the allocator,
+     * which is enough to make the compiler emit different code from one build
+     * to the next.
+     */
+    if (!buf->size || buf->elements[buf->size - 1])
+        strbuf_putc(buf, 0);
+    buf->capacity = buf->size;
+
     /* Borrows strbuf_t#size to use as source index */
     buf->size = 0;
 
@@ -1021,31 +1094,17 @@ token_stream_t *gen_libc_token_stream()
     return tks;
 }
 
-void skip_unused_token(void)
-{
-    while (cur_token && cur_token->next) {
-        if (cur_token->next->kind == T_whitespace ||
-            cur_token->next->kind == T_newline ||
-            cur_token->next->kind == T_tab)
-            cur_token = cur_token->next;
-        else
-            break;
-    }
-}
-
 /* Fetches current token's location. */
 source_location_t *cur_token_loc()
 {
     return &cur_token->location;
 }
 
-/* Finds next token's location, whitespace, tab, and newline tokens are skipped,
- * if current token is eof, then returns eof token's location instead.
+/* Finds next token's location; if the current token is eof, returns the eof
+ * token's location instead.
  */
 source_location_t *next_token_loc()
 {
-    skip_unused_token();
-
     if (cur_token->kind == T_eof)
         return &cur_token->location;
 
@@ -1055,7 +1114,6 @@ source_location_t *next_token_loc()
 /* Lex next token with aliasing enabled */
 token_kind_t lex_next(void)
 {
-    skip_unused_token();
     /* if reached eof, we always return eof token to avoid any advancement */
     if (cur_token->kind == T_eof)
         return T_eof;
@@ -1067,7 +1125,6 @@ token_kind_t lex_next(void)
 /* Accepts next token if token types are matched. */
 bool lex_accept(token_kind_t kind)
 {
-    skip_unused_token();
     if (cur_token->next && cur_token->next->kind == kind) {
         lex_next();
         return true;
@@ -1080,7 +1137,6 @@ bool lex_accept(token_kind_t kind)
  */
 bool lex_peek(token_kind_t kind, char *value)
 {
-    skip_unused_token();
     if (cur_token->next && cur_token->next->kind == kind) {
         if (!value)
             return true;
@@ -1090,12 +1146,40 @@ bool lex_peek(token_kind_t kind, char *value)
     return false;
 }
 
+/* Copies a token literal into a caller buffer of n bytes. Identifiers are
+ * bounded by MAX_ID_LEN when scanned, but some destinations are narrower --
+ * 'type_name' is only MAX_TYPE_LEN -- so the bound has to travel with the
+ * destination rather than be assumed from the source.
+ */
+void lex_copy_literal(token_t *tk, char *value, int n)
+{
+    int len = strlen(tk->literal);
+
+    if (len >= n)
+        error_at("Identifier too long", &tk->location);
+    strcpy(value, tk->literal);
+}
+
+/* Strictly match next token with given token type and copy token's literal to
+ * value, which is n bytes wide.
+ */
+void lex_ident_n(token_kind_t token, char *value, int n)
+{
+    if (cur_token->next && cur_token->next->kind == token) {
+        lex_next();
+        if (value)
+            lex_copy_literal(cur_token, value, n);
+        return;
+    }
+    token_t *tk = cur_token->next ? cur_token->next : cur_token;
+    error_at("Unexpected token", &tk->location);
+}
+
 /* Strictly match next token with given token type and copy token's literal to
  * value.
  */
 void lex_ident(token_kind_t token, char *value)
 {
-    skip_unused_token();
     if (cur_token->next && cur_token->next->kind == token) {
         lex_next();
         if (value)
@@ -1110,7 +1194,6 @@ void lex_ident(token_kind_t token, char *value)
  */
 void lex_expect(token_kind_t token)
 {
-    skip_unused_token();
     if (cur_token->next && cur_token->next->kind == token) {
         lex_next();
         return;

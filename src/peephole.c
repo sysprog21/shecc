@@ -1,17 +1,17 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 #include <stdbool.h>
 
 #include "defs.h"
 #include "globals.c"
 
-/* Determines if an instruction can be fused with a following OP_assign.
- * Fusible instructions are those whose results can be directly written
- * to the final destination register, eliminating intermediate moves.
+/* Determines if an instruction can be fused with a following OP_assign. Fusible
+ * instructions are those whose results can be directly written to the final
+ * destination register, eliminating intermediate moves.
  */
 bool is_fusible_insn(ph2_ir_t *ph2_ir)
 {
@@ -40,8 +40,8 @@ bool is_fusible_insn(ph2_ir_t *ph2_ir)
     }
 }
 
-/* Main peephole optimization function that applies pattern matching
- * and transformation rules to consecutive IR instructions.
+/* Main peephole optimization function that applies pattern matching and
+ * transformation rules to consecutive IR instructions.
  * Returns true if any optimization was applied, false otherwise.
  */
 bool insn_fusion(ph2_ir_t *ph2_ir)
@@ -50,10 +50,9 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
     if (!next)
         return false;
 
-    /* ALU instruction fusion.
-     * Eliminates redundant move operations following arithmetic/logical
-     * operations. This is the most fundamental optimization that removes
-     * temporary register usage.
+    /* ALU instruction fusion. Eliminates redundant move operations following
+     * arithmetic/logical operations. This is the most fundamental optimization
+     * that removes temporary register usage.
      */
     if (next->op == OP_assign) {
         if (is_fusible_insn(ph2_ir) && ph2_ir->dest == next->src0) {
@@ -126,10 +125,9 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1) {
         if (next->op == OP_mul &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
-            /* Pattern: {li 1; mul x, 1} → {mov x} (multiplicative identity:
-             * x * 1 = x)
-             * Example: {li t1, 1; mul result, var, t1} → {mov result, var}
-             * Handles both operand positions due to multiplication
+            /* Pattern: {li 1; mul x, 1} → {mov x} (multiplicative identity: x *
+             * 1 = x) Example: {li t1, 1; mul result, var, t1} → {mov result,
+             * var} Handles both operand positions due to multiplication
              * commutativity
              */
             ph2_ir->op = OP_assign;
@@ -143,9 +141,9 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
     /* Bitwise identity operations */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
         next->op == OP_bit_and && ph2_ir->dest == next->src1) {
-        /* Pattern: {li -1; and x, -1} → {mov x} (x & 0xFFFFFFFF = x)
-         * Example: {li t1, -1; and result, var, t1} → {mov result, var}
-         * Eliminates bitwise AND with all-ones mask
+        /* Pattern: {li -1; and x, -1} → {mov x} (x & 0xFFFFFFFF = x) Example:
+         * {li t1, -1; and result, var, t1} → {mov result, var} Eliminates
+         * bitwise AND with all-ones mask
          */
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
@@ -170,9 +168,9 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
 
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
         next->op == OP_bit_or && ph2_ir->dest == next->src1) {
-        /* Pattern: {li 0; or x, 0} → {mov x} (x | 0 = x)
-         * Example: {li t1, 0; or result, var, t1} → {mov result, var}
-         * Eliminates bitwise OR with zero (identity element)
+        /* Pattern: {li 0; or x, 0} → {mov x} (x | 0 = x) Example: {li t1, 0; or
+         * result, var, t1} → {mov result, var} Eliminates bitwise OR with zero
+         * (identity element)
          */
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
@@ -181,28 +179,17 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Power-of-2 multiplication to shift conversion.
-     * Shift operations are significantly faster than multiplication
+    /* Power-of-2 multiplication to shift conversion. Shift operations are
+     * significantly faster than multiplication
      */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 > 0 &&
         next->op == OP_mul && ph2_ir->dest == next->src1) {
-        int power = ph2_ir->src0;
-        /* Detect power-of-2 using bit manipulation: (n & (n-1)) == 0 for powers
-         * of 2
-         */
-        if (power && (power & (power - 1)) == 0) {
-            /* Calculate log2(power) to determine shift amount */
-            int shift_amount = 0;
-            int tmp = power;
-            while (tmp > 1) {
-                tmp >>= 1;
-                shift_amount++;
-            }
-            /* Pattern: {li 2^n; mul x, 2^n} → {li n; shl x, n}
-             * Example: {li t1, 4; mul result, var, t1} →
+        int shift_amount = exact_log2(ph2_ir->src0);
+        if (shift_amount >= 0) {
+            /* Pattern: {li 2^n; mul x, 2^n} → {li n; shl x, n} Example: {li t1,
+             * 4; mul result, var, t1} →
              *          {li t1, 2; shl result, var, t1}
              */
-            ph2_ir->op = OP_load_constant;
             ph2_ir->src0 = shift_amount;
             next->op = OP_lshift;
             return true;
@@ -212,9 +199,9 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
     /* XOR identity operation */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
         next->op == OP_bit_xor && ph2_ir->dest == next->src1) {
-        /* Pattern: {li 0; xor x, 0} → {mov x} (x ^ 0 = x)
-         * Example: {li t1, 0; xor result, var, t1} → {mov result, var}
-         * Completes bitwise identity optimization coverage
+        /* Pattern: {li 0; xor x, 0} → {mov x} (x ^ 0 = x) Example: {li t1, 0;
+         * xor result, var, t1} → {mov result, var} Completes bitwise identity
+         * optimization coverage
          */
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
@@ -223,14 +210,14 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Extended multiplicative identity (operand position variant)
-     * Handles the case where constant 1 is in src0 position of multiplication
+    /* Extended multiplicative identity (operand position variant) Handles the
+     * case where constant 1 is in src0 position of multiplication
      */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1 &&
         next->op == OP_mul && ph2_ir->dest == next->src0) {
-        /* Pattern: {li 1; mul 1, x} → {mov x} (1 * x = x)
-         * Example: {li t1, 1; mul result, t1, var} → {mov result, var}
-         * Covers multiplication commutativity edge case
+        /* Pattern: {li 1; mul 1, x} → {mov x} (1 * x = x) Example: {li t1, 1;
+         * mul result, t1, var} → {mov result, var} Covers multiplication
+         * commutativity edge case
          */
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src1;
@@ -242,8 +229,8 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
     return false;
 }
 
-/* Redundant move elimination
- * Eliminates unnecessary move operations that are overwritten or redundant
+/* Redundant move elimination Eliminates unnecessary move operations that are
+ * overwritten or redundant
  */
 bool redundant_move_elim(ph2_ir_t *ph2_ir)
 {
@@ -251,9 +238,9 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
     if (!next)
         return false;
 
-    /* Pattern 1: Consecutive assignments to same destination
-     * {mov rd, rs1; mov rd, rs2} → {mov rd, rs2}
-     * The first move is completely overwritten by the second
+    /* Pattern 1: Consecutive assignments to same destination {mov rd, rs1; mov
+     * rd, rs2} → {mov rd, rs2} The first move is completely overwritten by the
+     * second
      */
     if (ph2_ir->op == OP_assign && next->op == OP_assign &&
         ph2_ir->dest == next->dest) {
@@ -263,9 +250,9 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 2: Redundant load immediately overwritten
-     * {load rd, offset; mov rd, rs} → {mov rd, rs}
-     * Loading a value that's immediately replaced is wasteful
+    /* Pattern 2: Redundant load immediately overwritten {load rd, offset; mov
+     * rd, rs} → {mov rd, rs} Loading a value that's immediately replaced is
+     * wasteful
      */
     if ((ph2_ir->op == OP_load || ph2_ir->op == OP_global_load) &&
         next->op == OP_assign && ph2_ir->dest == next->dest) {
@@ -277,9 +264,8 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 3: Load constant immediately overwritten
-     * {li rd, imm; mov rd, rs} → {mov rd, rs}
-     * Loading a constant that's immediately replaced
+    /* Pattern 3: Load constant immediately overwritten {li rd, imm; mov rd, rs}
+     * → {mov rd, rs} Loading a constant that's immediately replaced
      */
     if (ph2_ir->op == OP_load_constant && next->op == OP_assign &&
         ph2_ir->dest == next->dest) {
@@ -290,9 +276,9 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 4: Consecutive loads to same register
-     * {load rd, offset1; load rd, offset2} → {load rd, offset2}
-     * First load is pointless if immediately overwritten
+    /* Pattern 4: Consecutive loads to same register {load rd, offset1; load rd,
+     * offset2} → {load rd, offset2} First load is pointless if immediately
+     * overwritten
      */
     if ((ph2_ir->op == OP_load || ph2_ir->op == OP_global_load) &&
         (next->op == OP_load || next->op == OP_global_load) &&
@@ -305,9 +291,9 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 5: Consecutive constant loads (already handled in main loop
-     * but included here for completeness)
-     * {li rd, imm1; li rd, imm2} → {li rd, imm2}
+    /* Pattern 5: Consecutive constant loads (already handled in main loop but
+     * included here for completeness) {li rd, imm1; li rd, imm2} → {li rd,
+     * imm2}
      */
     if (ph2_ir->op == OP_load_constant && next->op == OP_load_constant &&
         ph2_ir->dest == next->dest) {
@@ -317,9 +303,8 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 6: Move followed by load
-     * {mov rd, rs; load rd, offset} → {load rd, offset}
-     * The move is pointless if immediately overwritten by load
+    /* Pattern 6: Move followed by load {mov rd, rs; load rd, offset} → {load
+     * rd, offset} The move is pointless if immediately overwritten by load
      */
     if (ph2_ir->op == OP_assign &&
         (next->op == OP_load || next->op == OP_global_load) &&
@@ -332,9 +317,8 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 7: Move followed by constant load
-     * {mov rd, rs; li rd, imm} → {li rd, imm}
-     * The move is pointless if immediately overwritten by constant
+    /* Pattern 7: Move followed by constant load {mov rd, rs; li rd, imm} → {li
+     * rd, imm} The move is pointless if immediately overwritten by constant
      */
     if (ph2_ir->op == OP_assign && next->op == OP_load_constant &&
         ph2_ir->dest == next->dest) {
@@ -349,9 +333,9 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
     return false;
 }
 
-/* Load/store elimination for consecutive memory operations.
- * Removes redundant loads and dead stores that access the same memory location.
- * Conservative implementation to maintain bootstrap stability.
+/* Load/store elimination for consecutive memory operations. Removes redundant
+ * loads and dead stores that access the same memory location. Conservative
+ * implementation to maintain bootstrap stability.
  */
 bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
 {
@@ -361,25 +345,35 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
 
     /* Only handle local loads/stores for now (not globals) to be safe */
 
-    /* Pattern 1: Consecutive stores to same local location
-     * {store [addr], val1; store [addr], val2} → {store [addr], val2}
-     * First store is dead if immediately overwritten
+    /* Pattern 1: Consecutive stores to same local location {store [addr], val1;
+     * store [addr], val2} → {store [addr], val2} First store is dead if
+     * immediately overwritten
      */
     if (ph2_ir->op == OP_store && next->op == OP_store) {
-        /* Check if storing to same memory location */
-        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
-            ph2_ir->src0 >= 0 && ph2_ir->src1 >= 0) {
-            /* Remove first store - it's dead */
-            ph2_ir->dest = next->dest;
+        /* Same slot written twice in a row: only the second is observable.
+         * Rewrite this one into the second and drop it, which keeps the list
+         * links the caller is holding valid.
+         *
+         * Only at equal width. A wide store followed by a narrow one to the
+         * same slot leaves the bytes the second does not cover holding what
+         * the first put there, so dropping the first loses them.
+         */
+        if (ph2_ir->src1 == next->src1 && ph2_ir->src1 >= 0 &&
+            ph2_ir->size_bytes == next->size_bytes &&
+            ph2_ir->is_pointer == next->is_pointer &&
+            ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
+            ph2_ir->src0 = next->src0;
+            ph2_ir->size_bytes = next->size_bytes;
+            ph2_ir->is_pointer = next->is_pointer;
             ph2_ir->next = next->next;
             return true;
         }
     }
 
-    /* Pattern 2: Redundant consecutive loads from same local location
-     * {load rd1, [addr]; load rd2, [addr]} → {load rd1, [addr]; mov rd2, rd1}
-     * Second load can reuse the first load's result
-     * Only apply if addresses are simple (not complex expressions)
+    /* Pattern 2: Redundant consecutive loads from same local location {load
+     * rd1, [addr]; load rd2, [addr]} → {load rd1, [addr]; mov rd2, rd1} Second
+     * load can reuse the first load's result Only apply if addresses are simple
+     * (not complex expressions)
      */
     if (ph2_ir->op == OP_load && next->op == OP_load) {
         /* Check if loading from same memory location */
@@ -394,30 +388,40 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
     }
 
     /* Pattern 3: Store followed by load from same location (store-to-load
-     * forwarding) {store [addr], val; load rd, [addr]} → {store [addr], val;
-     * mov rd, val} The load can use the stored value directly
+     * forwarding) {store [ofs], reg; load rd, [ofs]} → {store [ofs], reg; mov
+     * rd, reg} The load can use the stored value directly.
+     *
+     * A store names its value in src0 and its slot in src1, while a load names
+     * its slot in src0 -- so the two have to be matched field by field, and
+     * only at equal width, since a store narrower than the slot leaves the load
+     * sign-extending fewer bits than the register holds.
      */
     if (ph2_ir->op == OP_store && next->op == OP_load) {
-        /* Check if accessing same memory location */
-        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
-            ph2_ir->src0 >= 0 && ph2_ir->dest >= 0) {
-            /* Replace load with move of stored value */
+        if (ph2_ir->src1 == next->src0 && ph2_ir->src0 >= 0 &&
+            ph2_ir->size_bytes == next->size_bytes &&
+            ph2_ir->is_pointer == next->is_pointer &&
+            ph2_ir->size_bytes >= PTR_SIZE &&
+            ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
             next->op = OP_assign;
-            next->src0 = ph2_ir->dest; /* Value that was stored */
+            next->src0 = ph2_ir->src0; /* the register that was stored */
             next->src1 = 0;
             return true;
         }
     }
 
-    /* Pattern 4: Load followed by redundant store of same value
-     * {load rd, [addr]; store [addr], rd} → {load rd, [addr]}
-     * The store is redundant if storing back the just-loaded value
+    /* Pattern 4: Load followed by a store of the value just loaded back into
+     * the slot it came from. {load rd, [ofs]; store [ofs], rd} → {load rd,
+     * [ofs]} -- the slot already holds that value.
+     *
+     * Only at equal width, since a load narrower than the store brings back a
+     * sign-extended byte and the store writes that extension over bytes the
+     * load never read.
      */
     if (ph2_ir->op == OP_load && next->op == OP_store) {
-        /* Check if storing the value we just loaded from same location */
-        if (ph2_ir->dest == next->dest && ph2_ir->src0 == next->src0 &&
-            ph2_ir->src1 == next->src1 && ph2_ir->src0 >= 0) {
-            /* Remove redundant store */
+        if (ph2_ir->dest == next->src0 && ph2_ir->src0 == next->src1 &&
+            ph2_ir->src0 >= 0 && ph2_ir->size_bytes == next->size_bytes &&
+            ph2_ir->is_pointer == next->is_pointer &&
+            ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
             ph2_ir->next = next->next;
             return true;
         }
@@ -456,75 +460,17 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
  * - These patterns emerge after register allocation when different
  *   variables are assigned to the same register
  *
- * SSA handles: Constant folding with known values (5+3 → 8)
- * Peephole handles: Register-based patterns (r1-r1 → 0)
+ * SSA handles: Constant folding with known values (5+3 → 8) Peephole handles:
+ * Register-based patterns (r1-r1 → 0)
  *
  * Returns true if optimization was applied
  */
-bool algebraic_simplification(ph2_ir_t *ph2_ir)
-{
-    if (!ph2_ir)
-        return false;
-
-    /* NOTE: SSA's const_folding handles constant operations with known values.
-     * We focus on register-based patterns that appear after register
-     * allocation.
-     */
-
-    /* Pattern 1: Self-subtraction → 0
-     * x - x = 0 (for register operands)
-     */
-    if (ph2_ir->op == OP_sub && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_load_constant;
-        ph2_ir->src0 = 0; /* result is 0 */
-        ph2_ir->src1 = 0; /* clear unused field */
-        return true;
-    }
-
-    /* Pattern 2: Self-XOR → 0
-     * x ^ x = 0 (for register operands)
-     */
-    if (ph2_ir->op == OP_bit_xor && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_load_constant;
-        ph2_ir->src0 = 0; /* result is 0 */
-        ph2_ir->src1 = 0; /* clear unused field */
-        return true;
-    }
-
-    /* Pattern 3: Self-OR → x
-     * x | x = x (identity operation for register operands)
-     */
-    if (ph2_ir->op == OP_bit_or && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_assign;
-        /* src0 already contains x, just need to move it */
-        ph2_ir->src1 = 0; /* clear unused field */
-        return true;
-    }
-
-    /* Pattern 4: Self-AND → x
-     * x & x = x (identity operation for register operands)
-     */
-    if (ph2_ir->op == OP_bit_and && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_assign;
-        /* src0 already contains x, just need to move it */
-        ph2_ir->src1 = 0; /* clear unused field */
-        return true;
-    }
-
-    /* NOTE: Arithmetic identity patterns (x+0, x*1, x*0, x-0) are already
-     * handled by SSA's const_folding() function and insn_fusion().
-     * We focus on register-level patterns that SSA cannot see.
-     */
-
-    return false;
-}
-
 /* Division/modulo strength reduction: Optimize division and modulo by
  * power-of-2
  *
- * This pattern is unique to peephole optimizer.
- * SSA cannot perform this optimization because it works on virtual registers
- * before actual constant values are loaded.
+ * This pattern is unique to peephole optimizer. SSA cannot perform this
+ * optimization because it works on virtual registers before actual constant
+ * values are loaded.
  *
  * Returns true if optimization was applied
  */
@@ -553,8 +499,8 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
         tmp >>= 1;
     }
 
-    /* Pattern 1: Division by power of 2 → right shift
-     * x / 2^n = x >> n (for unsigned)
+    /* Pattern 1: Division by power of 2 → right shift x / 2^n = x >> n (for
+     * unsigned)
      */
     if (next->op == OP_div && next->src1 == ph2_ir->dest) {
         /* Convert division to right shift */
@@ -563,9 +509,7 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 2: Modulo by power of 2 → bitwise AND
-     * x % 2^n = x & (2^n - 1)
-     */
+    /* Pattern 2: Modulo by power of 2 → bitwise AND x % 2^n = x & (2^n - 1) */
     if (next->op == OP_mod && next->src1 == ph2_ir->dest) {
         /* Convert modulo to bitwise AND */
         ph2_ir->src0 = value - 1; /* Load mask (2^n - 1) */
@@ -595,84 +539,9 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
     return false;
 }
 
-/* Comparison optimization: Simplify comparison patterns
- * Focus on register-based patterns that SSA's SCCP misses
- * Returns true if optimization was applied
- */
-bool comparison_optimization(ph2_ir_t *ph2_ir)
-{
-    if (!ph2_ir)
-        return false;
-
-    /* NOTE: SSA's SCCP handles constant comparisons, so we focus on
-     * register-based self-comparisons after register allocation
-     */
-
-    /* Pattern 1: Self-comparison always false for !=
-     * x != x → 0 (for register operands)
-     */
-    if (ph2_ir->op == OP_neq && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_load_constant;
-        ph2_ir->src0 = 0; /* always false */
-        ph2_ir->src1 = 0;
-        return true;
-    }
-
-    /* Pattern 2: Self-comparison always true for ==
-     * x == x → 1 (for register operands)
-     */
-    if (ph2_ir->op == OP_eq && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_load_constant;
-        ph2_ir->src0 = 1; /* always true */
-        ph2_ir->src1 = 0;
-        return true;
-    }
-
-    /* Pattern 3: Self-comparison for less-than
-     * x < x → 0 (always false)
-     */
-    if (ph2_ir->op == OP_lt && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_load_constant;
-        ph2_ir->src0 = 0; /* always false */
-        ph2_ir->src1 = 0;
-        return true;
-    }
-
-    /* Pattern 4: Self-comparison for greater-than
-     * x > x → 0 (always false)
-     */
-    if (ph2_ir->op == OP_gt && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_load_constant;
-        ph2_ir->src0 = 0; /* always false */
-        ph2_ir->src1 = 0;
-        return true;
-    }
-
-    /* Pattern 5: Self-comparison for less-equal
-     * x <= x → 1 (always true)
-     */
-    if (ph2_ir->op == OP_leq && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_load_constant;
-        ph2_ir->src0 = 1; /* always true */
-        ph2_ir->src1 = 0;
-        return true;
-    }
-
-    /* Pattern 6: Self-comparison for greater-equal
-     * x >= x → 1 (always true)
-     */
-    if (ph2_ir->op == OP_geq && ph2_ir->src0 == ph2_ir->src1) {
-        ph2_ir->op = OP_load_constant;
-        ph2_ir->src0 = 1; /* always true */
-        ph2_ir->src1 = 0;
-        return true;
-    }
-
-    return false;
-}
-
-/* Bitwise operation optimization: Simplify bitwise patterns
- * Returns true if optimization was applied
+/* Simplify bitwise patterns the SSA optimizer's SCCP cannot see, because they
+ * only become visible once registers are assigned. Returns true when it
+ * rewrote something.
  */
 bool bitwise_optimization(ph2_ir_t *ph2_ir)
 {
@@ -681,9 +550,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
 
     ph2_ir_t *next = ph2_ir->next;
 
-    /* Pattern 1: Double complement → identity
-     * ~(~x) = x
-     */
+    /* Pattern 1: Double complement → identity ~(~x) = x */
     if (ph2_ir->op == OP_bit_not && next->op == OP_bit_not &&
         next->src0 == ph2_ir->dest) {
         /* Replace with simple assignment */
@@ -693,8 +560,8 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 2: AND with all-ones mask → identity
-     * x & 0xFFFFFFFF = x (for 32-bit)
+    /* Pattern 2: AND with all-ones mask → identity x & 0xFFFFFFFF = x (for
+     * 32-bit)
      */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
         next->op == OP_bit_and && next->src1 == ph2_ir->dest) {
@@ -705,9 +572,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 3: OR with zero → identity
-     * x | 0 = x
-     */
+    /* Pattern 3: OR with zero → identity x | 0 = x */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
         next->op == OP_bit_or && next->src1 == ph2_ir->dest) {
         /* Replace OR with assignment */
@@ -717,9 +582,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 4: XOR with zero → identity
-     * x ^ 0 = x
-     */
+    /* Pattern 4: XOR with zero → identity x ^ 0 = x */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
         next->op == OP_bit_xor && next->src1 == ph2_ir->dest) {
         /* Replace XOR with assignment */
@@ -729,9 +592,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 5: AND with zero → zero
-     * x & 0 = 0
-     */
+    /* Pattern 5: AND with zero → zero x & 0 = 0 */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
         next->op == OP_bit_and &&
         (next->src0 == ph2_ir->dest || next->src1 == ph2_ir->dest)) {
@@ -743,9 +604,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         return true;
     }
 
-    /* Pattern 6: OR with all-ones → all-ones
-     * x | 0xFFFFFFFF = 0xFFFFFFFF
-     */
+    /* Pattern 6: OR with all-ones → all-ones x | 0xFFFFFFFF = 0xFFFFFFFF */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
         next->op == OP_bit_or &&
         (next->src0 == ph2_ir->dest || next->src1 == ph2_ir->dest)) {
@@ -773,9 +632,9 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
     return false;
 }
 
-/* Triple pattern optimization: Handle 3-instruction sequences
- * These patterns are more complex but offer significant optimization
- * opportunities Returns true if optimization was applied
+/* Triple pattern optimization: Handle 3-instruction sequences These patterns
+ * are more complex but offer significant optimization opportunities Returns
+ * true if optimization was applied
  */
 bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
 {
@@ -785,9 +644,8 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
     ph2_ir_t *second = ph2_ir->next;
     ph2_ir_t *third = second->next;
 
-    /* Pattern 1: Store-load-store elimination
-     * {store val1, addr; load r, addr; store val2, addr}
-     * The middle load is pointless if not used elsewhere
+    /* Pattern 1: Store-load-store elimination {store val1, addr; load r, addr;
+     * store val2, addr} The middle load is pointless if not used elsewhere
      */
     if (ph2_ir->op == OP_store && second->op == OP_load &&
         third->op == OP_store &&
@@ -803,16 +661,16 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
         }
     }
 
-    /* Pattern 2: Consecutive stores to same location
-     * {store v1, addr; store v2, addr; store v3, addr}
-     * Only the last store matters
+    /* Pattern 2: Consecutive stores to same location {store v1, addr; store v2,
+     * addr; store v3, addr} Only the last store matters
      */
     if (ph2_ir->op == OP_store && second->op == OP_store &&
         third->op == OP_store && ph2_ir->src1 == second->src1 &&
         ph2_ir->dest == second->dest && second->src1 == third->src1 &&
         second->dest == third->dest) {
-        /* All three stores go to the same location */
-        /* Only the last one matters, eliminate first two */
+        /* All three stores go to the same location Only the last one matters,
+         * eliminate first two
+         */
         ph2_ir->src0 = third->src0; /* Use last value */
         ph2_ir->next = third->next; /* Skip middle stores */
         return true;
@@ -820,35 +678,29 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
 
     /* FIXME: Additional optimization patterns to implement:
      *
-     * Pattern 3: Load-op-store with same location
-     * {load r1, [addr]; op r2, r1, ...; store r2, [addr]}
-     * Can optimize to in-place operation if possible
+     * Pattern 3: Load-op-store with same location {load r1, [addr]; op r2, r1,
+     * ...; store r2, [addr]} Can optimize to in-place operation if possible
      * Requires architecture-specific support in codegen.
      *
-     * Pattern 4: Redundant comparison after boolean operation
-     * {cmp a, b; load 1; load 0} → simplified when used in branch
-     * The comparison already produces 0 or 1, constants may be redundant
+     * Pattern 4: Redundant comparison after boolean operation {cmp a, b; load
+     * 1; load 0} → simplified when used in branch The comparison already
+     * produces 0 or 1, constants may be redundant
      *
-     * Pattern 5: Consecutive loads that can be combined
-     * {load r1, [base+off1]; load r2, [base+off2]; op r3, r1, r2}
-     * Useful for struct member access patterns
-     * Needs alignment checking and architecture support.
+     * Pattern 5: Consecutive loads that can be combined {load r1, [base+off1];
+     * load r2, [base+off2]; op r3, r1, r2} Useful for struct member access
+     * patterns Needs alignment checking and architecture support.
      *
-     * Pattern 6: Load-Load-Select pattern
-     * {load r1, c1; load r2, c2; select/cmov based on condition}
-     * Can optimize by loading only the needed value
-     * Requires control flow analysis.
+     * Pattern 6: Load-Load-Select pattern {load r1, c1; load r2, c2;
+     * select/cmov based on condition} Can optimize by loading only the needed
+     * value Requires control flow analysis.
      *
-     * Pattern 7: Add-Add-Add chain simplification
-     * {add r1, r0, c1; add r2, r1, c2; add r3, r2, c3}
-     * Can be simplified if all are constants
-     * Requires tracking constant values through the chain.
+     * Pattern 7: Add-Add-Add chain simplification {add r1, r0, c1; add r2, r1,
+     * c2; add r3, r2, c3} Can be simplified if all are constants Requires
+     * tracking constant values through the chain.
      *
-     * Pattern 8: Global load followed by immediate use
-     * {global_load r1; op r2, r1, ...; store r2}
-     * Track global access patterns
-     * Could optimize to atomic operations or direct memory ops.
-     * Needs careful synchronization analysis.
+     * Pattern 8: Global load followed by immediate use {global_load r1; op r2,
+     * r1, ...; store r2} Track global access patterns Could optimize to atomic
+     * operations or direct memory ops. Needs careful synchronization analysis.
      */
 
     return false;
@@ -856,23 +708,17 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
 
 /* Main peephole optimization driver.
  *
- * SSA Optimizer (insn_t, before register allocation):
- * - Constant folding with known values (5+3 → 8, x+0 → x)
- * - Common subexpression elimination
- * - Self-assignment elimination (x = x)
- * - Dead code elimination
- * - Constant comparison folding (5 < 3 → 0)
+ * This runs on ph2_ir_t, after register allocation, and so sees only what
+ * assigning registers makes visible. Constant folding, common subexpression
+ * elimination and dead code elimination have already run over insn_t in the
+ * SSA optimizer and are not repeated here.
  *
- * Peephole Optimizer (ph2_ir_t, after register allocation):
- * - Register-based self-operations (r1-r1 → 0, r1^r1 → 0)
- * - Bitwise operation optimization (SSA doesn't handle these)
- * - Strength reduction for power-of-2 (needs actual constants loaded)
- * - Load/store pattern elimination
- * - Triple instruction sequence optimization
- * - Architecture-specific instruction fusion
- *
- * This refined separation eliminates redundant optimizations while
- * maintaining comprehensive coverage of optimization opportunities.
+ * What is left to do at this level:
+ * - self-assignment elimination, for assignments allocation itself created
+ * - instruction fusion, including strength reduction for a power of two, which
+ *   needs the constant actually loaded into a register
+ * - bitwise identities on registers
+ * - load/store pattern elimination
  */
 void peephole(void)
 {
@@ -888,14 +734,26 @@ void peephole(void)
                 if (!next)
                     continue;
 
-                /* Self-assignment elimination
-                 * Keep this as a safety net: SSA handles most cases, but
-                 * register allocation might create new self-assignments
+                /* Self-assignment elimination Keep this as a safety net: SSA
+                 * handles most cases, but register allocation might create new
+                 * self-assignments
                  */
                 if (next->op == OP_assign && next->dest == next->src0) {
                     ir->next = next->next;
                     continue;
                 }
+
+                /* Every rewrite below moves this instruction's result to
+                 * the destination of the one after it, dropping the write to
+                 * the register it named. That is fine for a temporary, whose
+                 * value nothing wants again, and wrong for a pinned register:
+                 * a variable lives there for the whole function and nothing
+                 * else ever reloads it, so "li rbx, 0; add rax, rsi, rbx" must
+                 * not become "mov rax, rsi" and leave rbx unwritten.
+                 */
+                if (ir->dest >= 0 && ir->dest < REG_CNT &&
+                    ((func->pinned_regs >> ir->dest) & 1))
+                    continue;
 
                 /* Try triple pattern optimization first (3-instruction
                  * sequences)
@@ -907,16 +765,8 @@ void peephole(void)
                 if (insn_fusion(ir))
                     continue;
 
-                /* Apply comparison optimization */
-                if (comparison_optimization(ir))
-                    continue;
-
                 /* Apply strength reduction for power-of-2 operations */
                 if (strength_reduction(ir))
-                    continue;
-
-                /* Apply algebraic simplification */
-                if (algebraic_simplification(ir))
                     continue;
 
                 /* Apply bitwise operation optimizations */

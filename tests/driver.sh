@@ -10,6 +10,17 @@ readonly SHOW_SUMMARY="${SHOW_SUMMARY:-1}"
 readonly SHOW_PROGRESS="${SHOW_PROGRESS:-1}"
 readonly COLOR_OUTPUT="${COLOR_OUTPUT:-1}"
 
+# Pointer width of the configured target. The sizeof tests below assert on it,
+# and it differs between the 32-bit targets and x86-64.
+PTR_SZ=$(sed -n 's/^#define PTR_SIZE \([0-9]*\).*/\1/p' \
+    "$(dirname "$0")/../config" 2>/dev/null | head -1)
+[ -n "${PTR_SZ}" ] || PTR_SZ=4
+
+# Variadic arguments occupy one pointer-sized slot each, so an int-based walk
+# over them advances this many int elements per argument: 1 on the 32-bit
+# targets, 2 on LP64.
+VS=$((PTR_SZ / 4))
+
 # Test Counters
 TOTAL_TESTS=0
 PASSED_TESTS=0
@@ -882,6 +893,25 @@ items 27 "int a; a = 15; int b; b = 2; if(a - 15) b = 10; else if (b) return a +
 
 items 8 "if (1) return 010; else return 11;"
 items 10 "int a; a = 012 - 10; int b; b = 0100 - 64; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
+
+# The values on both sides of the select, its condition, and unrelated values
+# are all used after the join.  This keeps the register file full when the
+# allocator has to choose the select result's register.
+try_ 30 << EOF
+int pick(int a, int b, int c, int d, int e, int f, int g) {
+    int selected;
+    int hold = g;
+    if (a)
+        selected = b;
+    else
+        selected = c;
+    return a + b + c + d + e + f + hold + selected;
+}
+
+int main() {
+    return pick(1, 2, 3, 4, 5, 6, 7);
+}
+EOF
 
 # Category: Compound Statements
 begin_category "Compound Statements" "Testing block scoping and compound statements"
@@ -1757,6 +1787,71 @@ EOF
 # Category: Arrays
 begin_category "Arrays" "Testing array declarations, indexing, and operations"
 
+# a parameter whose first dimension is omitted is still a 2-D array: "int
+# a[][4]" must index exactly like "int a[3][4]", not like "int **"
+try_ 66 << EOF
+int sum2(int a[][4], int rows)
+{
+    int t = 0;
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < 4; j++)
+            t += a[i][j];
+    return t;
+}
+int main()
+{
+    int m[3][4];
+    int c = 0;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++) {
+            m[i][j] = c;
+            c++;
+        }
+    return sum2(m, 3);
+}
+EOF
+
+# the sized form keeps working, and both agree
+try_ 66 << EOF
+int sum2(int a[3][4], int rows)
+{
+    int t = 0;
+    for (int i = 0; i < rows; i++)
+        for (int j = 0; j < 4; j++)
+            t += a[i][j];
+    return t;
+}
+int main()
+{
+    int m[3][4];
+    int c = 0;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++) {
+            m[i][j] = c;
+            c++;
+        }
+    return sum2(m, 3);
+}
+EOF
+
+# a single omitted dimension is still a plain pointer
+try_ 66 << EOF
+int sum1(int a[], int n)
+{
+    int t = 0;
+    for (int i = 0; i < n; i++)
+        t += a[i];
+    return t;
+}
+int main()
+{
+    int m[12];
+    for (int i = 0; i < 12; i++)
+        m[i] = i;
+    return sum1(m, 12);
+}
+EOF
+
 # arrays
 try_ 12 << EOF
 int nth_of(int *a, int i) {
@@ -2264,19 +2359,19 @@ expr 1 "sizeof(char)";
 expr 2 "sizeof(short)";
 expr 4 "sizeof(int)";
 # sizeof pointers
-expr 4 "sizeof(void*)";
-expr 4 "sizeof(_Bool*)";
-expr 4 "sizeof(char*)";
-expr 4 "sizeof(short*)";
-expr 4 "sizeof(int*)";
+expr $PTR_SZ "sizeof(void*)";
+expr $PTR_SZ "sizeof(_Bool*)";
+expr $PTR_SZ "sizeof(char*)";
+expr $PTR_SZ "sizeof(short*)";
+expr $PTR_SZ "sizeof(int*)";
 # sizeof multi-level pointer
-expr 4 "sizeof(void**)";
-expr 4 "sizeof(_Bool**)";
-expr 4 "sizeof(char**)";
-expr 4 "sizeof(short**)";
-expr 4 "sizeof(int**)";
+expr $PTR_SZ "sizeof(void**)";
+expr $PTR_SZ "sizeof(_Bool**)";
+expr $PTR_SZ "sizeof(char**)";
+expr $PTR_SZ "sizeof(short**)";
+expr $PTR_SZ "sizeof(int**)";
 # sizeof struct
-try_ 4 << EOF
+try_ $PTR_SZ << EOF
 typedef struct {
     int a;
     int b;
@@ -2294,7 +2389,7 @@ int main() { return sizeof(struct_t); }
 EOF
 
 # sizeof enum
-try_ 4 << EOF
+try_ $PTR_SZ << EOF
 typedef enum {
     A,
     B
@@ -2869,6 +2964,142 @@ EOF
 
 # Category: Function-like Macros
 begin_category "Function-like Macros" "Testing function-like macros and variadic macros"
+
+# stringification: '#' spells the argument as it was written
+try_output 0 "hello world" << EOF
+#define STR(x) #x
+int main()
+{
+    printf("%s\n", STR(hello world));
+    return 0;
+}
+EOF
+
+# '#' does not expand its operand, but an extra level of macro does
+try_output 0 "VER 3" << EOF
+#define STR(x) #x
+#define XSTR(x) STR(x)
+#define VER 3
+int main()
+{
+    printf("%s %s\n", STR(VER), XSTR(VER));
+    return 0;
+}
+EOF
+
+# a quote or backslash in the argument survives stringification
+try_output 0 '["q\\b"]' << EOF
+#define STR(x) #x
+int main()
+{
+    printf("[%s]\n", STR("q\\\\b"));
+    return 0;
+}
+EOF
+
+# an empty argument stringifies to an empty string
+try_output 0 "[]" << EOF
+#define STR(x) #x
+int main()
+{
+    printf("[%s]\n", STR());
+    return 0;
+}
+EOF
+
+# token pasting builds an identifier
+try_ 11 << EOF
+#define CAT(a, b) a##b
+int foobar()
+{
+    return 11;
+}
+int main()
+{
+    return CAT(foo, bar)();
+}
+EOF
+
+# pasting chains left to right, and works on numbers
+try_ 123 << EOF
+#define JOIN3(a, b, c) a##b##c
+int main()
+{
+    return JOIN3(1, 2, 3);
+}
+EOF
+
+# pasting in an object-like macro, and pasting an operator
+try_ 42 << EOF
+#define PLUSEQ +##=
+#define OBJ pre##fix
+int prefix = 41;
+int main()
+{
+    int x = 1;
+    x PLUSEQ prefix;
+    return x;
+}
+EOF
+
+# an empty operand leaves the other side of '##' standing alone
+try_ 3 << EOF
+#define CAT(a, b) a##b
+int main()
+{
+    return CAT(1, ) + CAT(, 2);
+}
+EOF
+
+# an omitted argument substitutes nothing rather than its own name
+try_ 3 << EOF
+#define TAIL(x, y) x y
+int main()
+{
+    return TAIL(3, );
+}
+EOF
+
+# a comma inside parentheses belongs to the argument, not the argument list
+try_ 5 << EOF
+#define ID(x) x
+int add(int p, int q)
+{
+    return p + q;
+}
+int main()
+{
+    return ID(add(2, 3));
+}
+EOF
+
+# '#' outside a macro definition is not a directive and must be rejected
+try_compile_error << EOF
+int main()
+{
+    int a = 1 # 2;
+    return a;
+}
+EOF
+
+# '##' with nothing on its left is rejected
+try_compile_error << EOF
+#define P(a) ##a
+int main()
+{
+    return P(1);
+}
+EOF
+
+# a paste that does not form a single token is rejected
+try_compile_error << EOF
+#define Q(a, b) a##b
+int main()
+{
+    int Q(x, +) = 1;
+    return 0;
+}
+EOF
 
 # function-like macro
 try_ 1 << EOF
@@ -4182,10 +4413,10 @@ int calculate_sum(int count, ...)
     int *p;
 
     p = &count;
-    p++;
+    p += $VS;
 
     for (i = 0; i < count; i++)
-        sum += p[i];
+        sum += p[i * $VS];
 
     return sum;
 }
@@ -4207,11 +4438,11 @@ void multi_arg_test(int first, ...)
 
     /* Point to variadic arguments */
     p = &first;
-    p++;
+    p += $VS;
 
     /* Get integer values */
     val1 = p[0];
-    val2 = p[1];
+    val2 = p[1 * $VS];
 
     printf("Multi: %d %d %d", first, val1, val2);
 }
@@ -4230,10 +4461,10 @@ void print_args(int count, ...)
     int *p = &count;
     int i;
 
-    p++;
+    p += $VS;
     printf("Args:");
     for (i = 0; i < count; i++)
-        printf(" %d=%d", i + 1, p[i]);
+        printf(" %d=%d", i + 1, p[i * $VS]);
 }
 
 int main()
@@ -4250,9 +4481,12 @@ void mixed_args(int first, ...)
     int *p = &first;
 
     printf("Values: %d", first);
-    printf(" %d", *(++p));
-    printf(" %d", *(++p));
-    printf(" %d", *(++p));
+    p += $VS;
+    printf(" %d", *p);
+    p += $VS;
+    printf(" %d", *p);
+    p += $VS;
+    printf(" %d", *p);
 }
 
 int main()
@@ -4269,13 +4503,13 @@ void find_min_max(int count, ...)
     int *p = &count;
     int i, min, max;
 
-    p++;
+    p += $VS;
     min = p[0];
     max = p[0];
 
     for (i = 1; i < count; i++) {
-        if (p[i] < min) min = p[i];
-        if (p[i] > max) max = p[i];
+        if (p[i * $VS] < min) min = p[i * $VS];
+        if (p[i * $VS] > max) max = p[i * $VS];
     }
 
     printf("Min: %d, Max: %d", min, max);
@@ -4307,7 +4541,7 @@ try_output 0 "Single extra: 123" << EOF
 void single_extra(int base, ...)
 {
     int *p = &base;
-    p++;
+    p += $VS;
     printf("Single extra: %d", *p);
 }
 
@@ -4340,12 +4574,12 @@ int arithmetic_va(int count, ...)
     int result = 0;
     int i;
 
-    p++;
+    p += $VS;
     for (i = 0; i < count; i++) {
         if (i % 2 == 0)
-            result += p[i];
+            result += p[i * $VS];
         else
-            result -= p[i];
+            result -= p[i * $VS];
     }
     return result;
 }
@@ -4364,8 +4598,8 @@ int sum_three(int a, ...)
 {
     int *p = &a;
     int v1 = p[0];
-    int v2 = p[1];
-    int v3 = p[2];
+    int v2 = p[1 * $VS];
+    int v3 = p[2 * $VS];
     return v1 + v2 + v3;
 }
 
@@ -5328,8 +5562,9 @@ int main() {
 }
 EOF
 
-# Sizeof union with mixed types
-try_ 4 << EOF
+# Sizeof union with mixed types. The largest member is the pointer, so the
+# union is one pointer wide: 4 on the 32-bit targets, 8 on LP64.
+try_ $PTR_SZ << EOF
 typedef union {
     char c;
     int i;
@@ -5337,7 +5572,7 @@ typedef union {
 } mixed_union_t;
 
 int main() {
-    return sizeof(mixed_union_t);  /* Returns 4 (size of largest member) */
+    return sizeof(mixed_union_t);  /* size of the largest member */
 }
 EOF
 

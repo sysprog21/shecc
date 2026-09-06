@@ -140,10 +140,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 24;
         return;
     case OP_trunc:
-        if (ph2_ir->src1 == 2)
-            elf_offset += 8;
-        else
-            elf_offset += 4;
+        /* SXTB, SXTH and MOV are each one instruction. */
+        elf_offset += 4;
         return;
     case OP_sign_ext:
         elf_offset += 4;
@@ -190,7 +188,7 @@ void cfg_flatten(void)
         /* reserve stack */
         ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
         flatten_ir->src0 = func->stack_size;
-        strncpy(flatten_ir->func_name, func->return_def.var_name, MAX_VAR_LEN);
+        flatten_ir->func_name = intern_string(func->return_def.var_name);
 
         /* The actual offset of the top of the local stack is the sum of:
          * - 36 bytes (pushing registers r4-r11 and lr onto the stack)
@@ -321,6 +319,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__add_i(__AL, rd, interm, ph2_ir->src0));
         return;
     case OP_assign:
+        /* update_elf_offset() reserves no space for a self-assignment, so
+         * emitting one here would push every later address out by four bytes
+         * and leave the data segment's p_offset and p_vaddr incongruent.
+         */
+        if (rd == rn)
+            return;
         emit(__mov_r(__AL, rd, rn));
         return;
     case OP_load:
@@ -572,11 +576,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mov_i(__EQ, rd, 1));
         return;
     case OP_trunc:
+        /* Narrowing keeps the sign: there are no unsigned types. */
         if (rm == 1) {
-            emit(__and_i(__AL, rd, rn, 0xFF));
+            emit(__sxtb(__AL, rd, rn, 0));
         } else if (rm == 2) {
-            emit(__sll_amt(__AL, 0, logic_ls, rd, rn, 16));
-            emit(__sll_amt(__AL, 0, logic_rs, rd, rd, 16));
+            emit(__sxth(__AL, rd, rn, 0));
         } else if (rm == 4) {
             emit(__mov_r(__AL, rd, rn));
         } else {

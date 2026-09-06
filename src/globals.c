@@ -93,6 +93,8 @@ int elf_data_start;
 int elf_rodata_start;
 int elf_bss_start;
 int elf_bss_size;
+/* Offset of the entry point within the code section (0 = start of code). */
+int elf_entry_offset = 0;
 dynamic_sections_t dynamic_sections;
 
 /* Command line compilation flags */
@@ -207,8 +209,12 @@ void *arena_alloc(arena_t *arena, int size)
  */
 void *arena_calloc(arena_t *arena, int n, int size)
 {
-    if (n * size == 0) {
-        printf("arena_calloc: cannot allocate 0 bytes\n");
+    /* Reject a count and size whose product does not fit, rather than
+     * allocating the wrapped-around amount and letting the caller write past
+     * it.
+     */
+    if (n <= 0 || size <= 0 || n > 0x7fffffff / size) {
+        printf("arena_calloc: invalid allocation size\n");
         abort();
     }
 
@@ -240,7 +246,7 @@ void *arena_calloc(arena_t *arena, int n, int size)
 void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
 {
     /* act like malloc */
-    if (oldptr == NULL) {
+    if (!oldptr) {
         if (oldsz != 0) {
             printf("arena_realloc: oldptr == NULL requires oldsz == 0\n");
             abort();
@@ -288,20 +294,6 @@ char *arena_strdup(arena_t *arena, char *str)
     memcpy(dup, str, n);
     dup[n] = '\0';
     return dup;
-}
-
-/* Duplicate a block of memory into the arena.
- * Allocates size bytes within the arena and copies data from the input pointer.
- *
- * @arena: a Pointer to the arena. Must not be NULL.
- * @data: data Pointer to the source memory. Must not be NULL.
- * @size: size Number of bytes to copy. Must be non-negative.
- *
- * Return: The pointer to the duplicated memory stored in the arena.
- */
-void *arena_memdup(arena_t *arena, void *data, int size)
-{
-    return memcpy(arena_alloc(arena, size), data, size);
 }
 
 /* Typed allocators for consistent memory management */
@@ -570,7 +562,11 @@ void hashmap_free(hashmap_t *map)
  */
 type_t *find_type(char *type_name, int flag)
 {
+    char head = type_name[0];
+
     for (int i = 0; i < types_idx; i++) {
+        if (TYPES[i].type_name[0] != head)
+            continue;
         if (TYPES[i].base_type == TYPE_struct ||
             TYPES[i].base_type == TYPE_union) {
             if (flag == 1)
@@ -595,6 +591,10 @@ type_t *find_type(char *type_name, int flag)
 
 ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 {
+    if (ph2_ir_idx >= MAX_IR_INSTR) {
+        printf("Error: too many phase-2 IR instructions\n");
+        abort();
+    }
     PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
     return ph2_ir;
 }
@@ -608,20 +608,23 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->is_branch_detached = 0;
     ph2_ir->src0 = 0;
     ph2_ir->src1 = 0;
+    /* Only a select names a third source, but the allocation is not zeroed and
+     * every field is set here by hand.
+     */
+    ph2_ir->src2 = 0;
     ph2_ir->dest = 0;
-    ph2_ir->func_name[0] = '\0';
+    ph2_ir->func_name = NULL;
     ph2_ir->next_bb = NULL;
     ph2_ir->then_bb = NULL;
     ph2_ir->else_bb = NULL;
     ph2_ir->ofs_based_on_stack_top = false;
+    /* Default to the full slot. Slots are PTR_SIZE wide, so a wide access is
+     * always valid; only an address-taken narrow scalar may be written behind
+     * the allocator's back, and reg-alloc narrows those explicitly.
+     */
+    ph2_ir->size_bytes = PTR_SIZE;
+    ph2_ir->is_pointer = false;
     return add_existed_ph2_ir(ph2_ir);
-}
-
-void set_var_liveout(var_t *var, int end)
-{
-    if (var->liveness >= end)
-        return;
-    var->liveness = end;
 }
 
 block_t *add_block(block_t *parent, func_t *func)
@@ -842,20 +845,62 @@ int parse_numeric_constant(char *buffer)
     return value;
 }
 
+/* Give @type its field table, on the first field it is asked for.
+ *
+ * The table is MAX_FIELDS var_t by value, and it has to stay put: a struct
+ * body hands out a var_t * per declarator and reads it again after the next
+ * declarator has been added, so a table that grew by reallocating would leave
+ * those pointers behind. Allocating it once at full size keeps them valid.
+ *
+ * What it need not do is allocate for a type that never has a field. Most of
+ * what add_type() creates -- every enum, every typedef of a scalar, every
+ * builtin -- has none, and was paying for the whole table and for the loop
+ * that walked it.
+ */
+void type_ensure_fields(type_t *type)
+{
+    if (type->fields)
+        return;
+
+    type->fields = arena_calloc(GENERAL_ARENA, MAX_FIELDS, sizeof(var_t));
+    /* The field variables come out of a zeroed allocation, so give their
+     * interned name pointers the empty string a reader can dereference.
+     */
+    for (int i = 0; i < MAX_FIELDS; i++)
+        type->fields[i].var_name = "";
+}
+
 type_t *add_type(void)
 {
     if (types_idx >= MAX_TYPES) {
         printf("Error: Maximum number of types (%d) exceeded\n", MAX_TYPES);
         abort();
     }
-    return &TYPES[types_idx++];
+    type_t *t = &TYPES[types_idx++];
+    t->fields = NULL;
+    return t;
+}
+
+/* Record a struct, union or enum tag's name.
+ *
+ * type_name is a fixed array, and an identifier may be up to MAX_ID_LEN long,
+ * so a longer tag would run past it into the fields that follow. Refuse it
+ * rather than corrupting the type.
+ */
+void fatal(char *msg);
+
+void set_type_name(type_t *type, char *name)
+{
+    if (strlen(name) >= MAX_TYPE_LEN)
+        fatal("Type name too long");
+    strcpy(type->type_name, intern_string(name));
 }
 
 type_t *add_named_type(char *name)
 {
     type_t *type = add_type();
     /* Use interned string for type name */
-    strcpy(type->type_name, intern_string(name));
+    set_type_name(type, name);
     return type;
 }
 
@@ -886,29 +931,48 @@ var_t *find_member(char token[], type_t *type)
     if (type->size == 0)
         type = type->base_struct;
 
+    char head = token[0];
+
     for (int i = 0; i < type->num_fields; i++) {
+        if (type->fields[i].var_name[0] != head)
+            continue;
         if (!strcmp(type->fields[i].var_name, token))
             return &type->fields[i];
     }
     return NULL;
 }
 
+/* Name lookup is the parser's inner loop: every identifier walks the enclosing
+ * scopes, then the parameter list, then the globals, and all but the one match
+ * is a strcmp against a name that differs immediately. A call into the C
+ * library's vectorized strcmp costs far more than the comparison it performs on
+ * such names, so each scan settles the common case -- a different first letter
+ * -- before making the call. Names are never empty, so reading the first byte
+ * of either side is always in bounds.
+ */
 var_t *find_local_var(char *token, block_t *block)
 {
     func_t *func = block->func;
+    char head = token[0];
 
     for (; block; block = block->parent) {
         var_list_t *var_list = &block->locals;
         for (int i = 0; i < var_list->size; i++) {
-            if (!strcmp(var_list->elements[i]->var_name, token))
-                return var_list->elements[i];
+            var_t *var = var_list->elements[i];
+            if (var->var_name[0] != head)
+                continue;
+            if (!strcmp(var->var_name, token))
+                return var;
         }
     }
 
     if (func) {
         for (int i = 0; i < func->num_params; i++) {
-            if (!strcmp(func->param_defs[i].var_name, token))
-                return &func->param_defs[i];
+            var_t *param = &func->param_defs[i];
+            if (param->var_name[0] != head)
+                continue;
+            if (!strcmp(param->var_name, token))
+                return param;
         }
     }
     return NULL;
@@ -917,10 +981,14 @@ var_t *find_local_var(char *token, block_t *block)
 var_t *find_global_var(char *token)
 {
     var_list_t *var_list = &GLOBAL_BLOCK->locals;
+    char head = token[0];
 
     for (int i = 0; i < var_list->size; i++) {
-        if (!strcmp(var_list->elements[i]->var_name, token))
-            return var_list->elements[i];
+        var_t *var = var_list->elements[i];
+        if (var->var_name[0] != head)
+            continue;
+        if (!strcmp(var->var_name, token))
+            return var;
     }
     return NULL;
 }
@@ -937,7 +1005,10 @@ int size_var(var_t *var)
 {
     int size;
     if (var->ptr_level > 0 || var->is_func) {
-        size = 4;
+        /* Pointers and function pointers occupy a target pointer, which is
+         * 8 bytes on LP64 targets and 4 on the 32-bit ones.
+         */
+        size = PTR_SIZE;
     } else {
         type_t *type = var->type;
         if (type->size == 0)
@@ -972,8 +1043,10 @@ func_t *add_func(char *func_name, bool synthesize)
 
     func = arena_alloc_func();
     hashmap_put(FUNC_MAP, func_name, func);
+    for (int i = 0; i < MAX_PARAMS; i++)
+        func->param_defs[i].var_name = "";
     /* Use interned string for function name */
-    strcpy(func->return_def.var_name, intern_string(func_name));
+    func->return_def.var_name = intern_string(func_name);
     /* Prepare space for function arguments.
      *
      * For Arm architecture, the first four arguments (arg1 ~ arg4) are
@@ -997,10 +1070,13 @@ func_t *add_func(char *func_name, bool synthesize)
      * If the target architecture is RISC-V, arg1 ~ arg8 are passed to
      * registers and arg9+ are passed to the stack.
      *
-     * We allocate (MAX_PARAMS - MAX_ARGS_IN_REG) * 4 bytes for all functions
-     * so that each of them can use the space to pass extra arguments.
+     * We reserve one slot per stack-passed argument at the bottom of every
+     * frame so that each function can use the space to pass extra arguments.
+     * The slot is pointer-sized, matching what abi_lower_call_args() stores:
+     * sizing it at 4 on an LP64 target leaves the reservation short, and the
+     * outgoing arguments then overwrite the first locals allocated above it.
      */
-    func->stack_size = (MAX_PARAMS - MAX_ARGS_IN_REG) * 4;
+    func->stack_size = (MAX_PARAMS - MAX_ARGS_IN_REG) * PTR_SIZE;
 
     if (synthesize)
         return func;
@@ -1038,15 +1114,116 @@ basic_block_t *bb_create(block_t *parent)
     /* Initialize non-zero fields */
     bb->scope = parent;
     bb->belong_to = parent->func;
+    /* -1 marks "no machine code emitted for this block yet". Backends assign
+     * a real offset as they emit; 0 is a legitimate offset, so it cannot
+     * double as the sentinel.
+     */
+    bb->elf_offset = -1;
 
-    /* Initialize prev array with NEXT type */
-    for (int i = 0; i < MAX_BB_PRED; i++)
-        bb->prev[i].type = NEXT;
-
-    if (dump_ir)
+    if (dump_ir) {
+        bb->bb_label_name = arena_alloc(GENERAL_ARENA, MAX_VAR_LEN);
         snprintf(bb->bb_label_name, MAX_VAR_LEN, ".label.%d", bb_label_idx++);
+    }
 
     return bb;
+}
+
+/* Bumped once per compute_live_in() call; a variable belongs to the set being
+ * built when its stamp equals the current value.
+ */
+int liveness_gen;
+
+/* Bumped once per recompute_live_out() call, stamping the union of successor
+ * live_in sets as it is assembled.
+ */
+int live_merge_gen;
+
+/* log2 of @v when it is a power of two, otherwise -1. */
+int exact_log2(int v)
+{
+    int k = 0;
+
+    if (v <= 0 || (v & (v - 1)))
+        return -1;
+    while (v > 1) {
+        v = v >> 1;
+        k++;
+    }
+    return k;
+}
+
+/* Grow a doubling array held in @arena from @cap elements of @elem_sz to the
+ * next capacity, starting at @first while it is still unallocated. A non-zero
+ * @limit caps the growth, with @what naming the array in the diagnostic.
+ * Returns the (possibly moved) array and writes the new capacity back to @cap.
+ */
+void *arena_grow(arena_t *arena,
+                 char *ptr,
+                 int *cap,
+                 int elem_sz,
+                 int first,
+                 int limit,
+                 char *what)
+{
+    int new_cap = *cap ? *cap << 1 : first;
+    if (limit && new_cap > limit)
+        fatal(what);
+    void *grown = arena_realloc(arena, ptr, *cap * elem_sz, new_cap * elem_sz);
+    *cap = new_cap;
+    return grown;
+}
+
+/* Record another SSA version of @v, growing the version array as needed. */
+void var_add_subscript(var_t *v, var_t *sub)
+{
+    if (v->subscripts_idx >= v->subscripts_cap)
+        v->subscripts =
+            arena_grow(BLOCK_ARENA, (char *) v->subscripts, &v->subscripts_cap,
+                       sizeof(var_t *), 4, 0, NULL);
+    v->subscripts[v->subscripts_idx++] = sub;
+}
+
+/* The first SSA version of @v, or NULL when it has none. Callers relied on the
+ * old array being zero-filled to get NULL here.
+ */
+var_t *var_subscript0(var_t *v)
+{
+    if (!v->subscripts_idx)
+        return NULL;
+    return v->subscripts[0];
+}
+
+/* Detach @v from any version array it inherited from a by-value copy. */
+void var_reset_subscripts(var_t *v)
+{
+    /* memcpy'd from a base, so the copy would otherwise alias the base's
+     * renaming state as well as its version list.
+     */
+    v->rename = NULL;
+    v->subscripts = NULL;
+    v->subscripts_idx = 0;
+    v->subscripts_cap = 0;
+}
+
+/* Append to a basic block's dominance frontier, growing the array as needed.
+ * The array starts unallocated, so a block that never contributes to a frontier
+ * costs nothing beyond the pointer.
+ */
+void bb_add_df(basic_block_t *bb, basic_block_t *df)
+{
+    if (bb->df_idx >= bb->df_cap)
+        bb->DF = arena_grow(BB_ARENA, (char *) bb->DF, &bb->df_cap,
+                            sizeof(basic_block_t *), 8, 0, NULL);
+    bb->DF[bb->df_idx++] = df;
+}
+
+/* The reverse-dominance-frontier counterpart of bb_add_df(). */
+void bb_add_rdf(basic_block_t *bb, basic_block_t *rdf)
+{
+    if (bb->rdf_idx >= bb->rdf_cap)
+        bb->RDF = arena_grow(BB_ARENA, (char *) bb->RDF, &bb->rdf_cap,
+                             sizeof(basic_block_t *), 8, 0, NULL);
+    bb->RDF[bb->rdf_idx++] = rdf;
 }
 
 /* The pred-succ pair must have only one connection */
@@ -1059,17 +1236,22 @@ void bb_connect(basic_block_t *pred,
     if (!succ)
         abort();
 
+    /* bb_disconnect() leaves holes, so reuse the first free slot before
+     * extending. prev_idx is one past the highest slot ever filled.
+     */
     int i = 0;
-    while (succ->prev[i].bb)
+    while (i < succ->prev_idx && succ->prev[i].bb)
         i++;
 
-    if (i > MAX_BB_PRED - 1) {
-        printf("Error: too many predecessors\n");
-        abort();
-    }
+    if (i >= succ->prev_cap)
+        succ->prev = arena_grow(BB_ARENA, (char *) succ->prev, &succ->prev_cap,
+                                sizeof(bb_connection_t), 4, MAX_BB_PRED,
+                                "Too many predecessors");
 
     succ->prev[i].bb = pred;
     succ->prev[i].type = type;
+    if (i >= succ->prev_idx)
+        succ->prev_idx = i + 1;
 
     switch (type) {
     case NEXT:
@@ -1089,7 +1271,7 @@ void bb_connect(basic_block_t *pred,
 /* The pred-succ pair must have only one connection */
 void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
 {
-    for (int i = 0; i < MAX_BB_PRED; i++) {
+    for (int i = 0; i < succ->prev_idx; i++) {
         if (succ->prev[i].bb == pred) {
             switch (succ->prev[i].type) {
             case NEXT:
@@ -1109,6 +1291,21 @@ void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
             break;
         }
     }
+}
+
+/* Count the predecessors still wired to 'bb'. bb_disconnect() leaves holes in
+ * prev[], so prev_idx is only a high-water mark and the entries must be counted
+ * rather than trusted.
+ */
+int bb_pred_count(basic_block_t *bb)
+{
+    int n = 0;
+
+    for (int i = 0; i < bb->prev_idx; i++) {
+        if (bb->prev[i].bb)
+            n++;
+    }
+    return n;
 }
 
 /* The symbol is an argument of function or the variable in declaration */
@@ -1157,16 +1354,17 @@ void add_insn(block_t *block,
     n->rd = rd;
     n->rs1 = rs1;
     n->rs2 = rs2;
+    /* Only a select names a third source. The allocation is not zeroed and
+     * every field is set here by hand, so this one has to be too.
+     */
+    n->rs3 = NULL;
     n->sz = sz;
     n->useful = false;
     n->belong_to = bb;
     n->phi_ops = NULL;
     n->idx = 0;
 
-    if (str)
-        strcpy(n->str, intern_string(str));
-    else
-        n->str[0] = '\0';
+    n->str = str ? intern_string(str) : NULL;
 
     /* Mark variables as address-taken to prevent incorrect constant
      * optimization
@@ -1229,8 +1427,15 @@ bool strbuf_extend(strbuf_t *src, int len)
 
 bool strbuf_putc(strbuf_t *src, char value)
 {
-    if (!strbuf_extend(src, 1))
-        return false;
+    /* Appending one byte is how the whole of the generated machine code and
+     * every ELF header reaches memory, several hundred thousand times per
+     * compile, and all but a handful of those have room already. Testing for
+     * the room here keeps the call to the growth path off that route.
+     */
+    if (src->size + 1 >= src->capacity) {
+        if (!strbuf_extend(src, 1))
+            return false;
+    }
 
     src->elements[src->size] = value;
     src->size++;
@@ -1242,8 +1447,10 @@ bool strbuf_puts(strbuf_t *src, const char *value)
 {
     int len = strlen(value);
 
-    if (!strbuf_extend(src, len))
-        return false;
+    if (src->size + len >= src->capacity) {
+        if (!strbuf_extend(src, len))
+            return false;
+    }
 
     strncpy(src->elements + src->size, value, len);
     src->size += len;
@@ -1316,6 +1523,10 @@ void global_init(void)
     case ELF_MACHINE_RV32:
         dynamic_sections.use_relaplt = true;
         break;
+    case ELF_MACHINE_X86_64:
+        /* x86-64 uses RELA throughout. */
+        dynamic_sections.use_relaplt = true;
+        break;
     }
     dynamic_sections.elf_interp = strbuf_create(MAX_INTERP);
     dynamic_sections.elf_dynamic = strbuf_create(MAX_DYNAMIC);
@@ -1335,6 +1546,15 @@ void lexer_cleanup(void);
 /* Free empty trailing blocks from an arena safely.
  * This only frees blocks that come after the last used block,
  * ensuring no pointers are invalidated.
+ *
+ * NOTE: measured over a self-compile, this reclaims nothing. arena_alloc()
+ * prepends each new block at the head, so the list runs newest-to-oldest and
+ * every block behind the head is full by construction: last_used is always the
+ * tail and there is never anything after it to free. The only case that ever
+ * fires is an arena whose very first allocation was larger than its initial
+ * block, leaving that block at offset 0 behind a newer one. Reclaiming a
+ * bump allocator's memory needs a phase boundary that can drop a whole arena
+ * -- see release_token_arena() -- not a scan for empty blocks.
  *
  * @arena: The arena to compact.
  * Return: Bytes freed.
@@ -1373,6 +1593,44 @@ int arena_free_trailing_blocks(arena_t *arena)
     }
 
     return freed;
+}
+
+/* Release the whole token arena and the source buffers behind it.
+ *
+ * Every token, macro, hide set and conditional-inclusion record lives in
+ * TOKEN_ARENA, and nothing survives parsing: identifiers and string literals
+ * reach the parser through intern_string(), which copies into GENERAL_ARENA,
+ * and every parser entry point copies a token's text into a local buffer
+ * before storing it. So once parse() returns, all 17 MiB of it is garbage that
+ * would otherwise stay resident through the memory peak in reg_alloc().
+ *
+ * The source buffers in SRC_FILE_MAP exist only to quote a line in a parse
+ * error, so they go at the same time.
+ */
+void release_token_arena(void)
+{
+    if (TOKEN_ARENA) {
+        arena_free(TOKEN_ARENA);
+        TOKEN_ARENA = NULL;
+    }
+
+    /* Every error_at() site is in the preprocessor or the parser, and both are
+     * done by the time this runs, so no line will be quoted again. LIBC_SRC is
+     * in the map as well, but the global owns it and global_release() frees it
+     * there; freeing it here too would free it twice.
+     */
+    if (SRC_FILE_MAP) {
+        for (int i = 0; i < SRC_FILE_MAP->cap; i++) {
+            if (!SRC_FILE_MAP->table[i].occupied)
+                continue;
+
+            strbuf_t *src = SRC_FILE_MAP->table[i].val;
+            if (src && src != LIBC_SRC)
+                strbuf_free(src);
+        }
+        hashmap_free(SRC_FILE_MAP);
+        SRC_FILE_MAP = NULL;
+    }
 }
 
 /* Compact all arenas to reduce memory usage after compilation phases.
@@ -1439,7 +1697,8 @@ void global_release(void)
     arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
     arena_free(HASHMAP_ARENA);
-    arena_free(TOKEN_ARENA);
+    if (TOKEN_ARENA)
+        arena_free(TOKEN_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
     hashmap_free(TOKEN_CACHE);
     hashmap_free(SRC_FILE_MAP);
@@ -1473,6 +1732,11 @@ void global_release(void)
 void fatal(char *msg)
 {
     printf("[Error]: %s\n", msg);
+    /* abort() does not flush, so a diagnostic written to a pipe -- a build
+     * log, or any invocation whose output is captured -- is discarded and the
+     * compiler appears to die silently.
+     */
+    fflush(stdout);
     abort();
 }
 
@@ -1509,10 +1773,13 @@ void error_at(char *msg, source_location_t *loc)
 
     start_idx = offset + 1;
 
-    /* Copies whole line to diagnostic buffer */
+    /* Copies whole line to diagnostic buffer. The source line, the caret column
+     * and the underline length all come from the input, so every write here has
+     * to stop at the end of the buffer.
+     */
     for (offset = start_idx;
          offset < src->capacity && src->elements[offset] != '\n' &&
-         src->elements[offset] != '\0';
+         src->elements[offset] != '\0' && i < MAX_LINE_LEN - 1;
          offset++) {
         diagnostic[i++] = src->elements[offset];
     }
@@ -1521,15 +1788,21 @@ void error_at(char *msg, source_location_t *loc)
     printf("%s\n", diagnostic);
     printf("%6c |  ", ' ');
 
+    /* Keep room for the note appended after the underline. */
+    char *note = " Error occurs here";
+    int limit = MAX_LINE_LEN - strlen(note) - 1;
+
     i = 0;
-    for (offset = start_idx; offset < pos; offset++)
+    for (offset = start_idx; offset < pos && i < limit; offset++)
         diagnostic[i++] = ' ';
-    diagnostic[i++] = '^';
-    for (; len > 1; len--)
+    if (i < limit)
+        diagnostic[i++] = '^';
+    for (; len > 1 && i < limit; len--)
         diagnostic[i++] = '~';
 
-    strcpy(diagnostic + i, " Error occurs here");
+    strcpy(diagnostic + i, note);
     printf("%s\n", diagnostic);
+    fflush(stdout); /* see fatal(): abort() discards buffered output */
     abort();
 }
 
@@ -1772,11 +2045,8 @@ void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
 void dump_bb_insn_by_dom(func_t *func, basic_block_t *bb, bool *at_func_start)
 {
     dump_bb_insn(func, bb, at_func_start);
-    for (int i = 0; i < MAX_BB_DOM_SUCC; i++) {
-        if (!bb || !bb->dom_next[i])
-            break;
+    for (int i = 0; bb && i < bb->dom_next_idx; i++)
         dump_bb_insn_by_dom(func, bb->dom_next[i], at_func_start);
-    }
 }
 
 void dump_insn(void)
@@ -1810,9 +2080,7 @@ void dump_insn(void)
         dump_bb_insn_by_dom(func, func->bbs, &at_func_start);
 
         /* Handle implicit return */
-        for (int i = 0; i < MAX_BB_PRED; i++) {
-            if (!func->exit)
-                break;
+        for (int i = 0; func->exit && i < func->exit->prev_idx; i++) {
             basic_block_t *bb = func->exit->prev[i].bb;
             if (!bb)
                 continue;
