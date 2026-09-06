@@ -845,6 +845,31 @@ int parse_numeric_constant(char *buffer)
     return value;
 }
 
+/* Give @type its field table, on the first field it is asked for.
+ *
+ * The table is MAX_FIELDS var_t by value, and it has to stay put: a struct
+ * body hands out a var_t * per declarator and reads it again after the next
+ * declarator has been added, so a table that grew by reallocating would leave
+ * those pointers behind. Allocating it once at full size keeps them valid.
+ *
+ * What it need not do is allocate for a type that never has a field. Most of
+ * what add_type() creates -- every enum, every typedef of a scalar, every
+ * builtin -- has none, and was paying for the whole table and for the loop
+ * that walked it.
+ */
+void type_ensure_fields(type_t *type)
+{
+    if (type->fields)
+        return;
+
+    type->fields = arena_calloc(GENERAL_ARENA, MAX_FIELDS, sizeof(var_t));
+    /* The field variables come out of a zeroed allocation, so give their
+     * interned name pointers the empty string a reader can dereference.
+     */
+    for (int i = 0; i < MAX_FIELDS; i++)
+        type->fields[i].var_name = "";
+}
+
 type_t *add_type(void)
 {
     if (types_idx >= MAX_TYPES) {
@@ -852,12 +877,7 @@ type_t *add_type(void)
         abort();
     }
     type_t *t = &TYPES[types_idx++];
-    t->fields = arena_calloc(GENERAL_ARENA, MAX_FIELDS, sizeof(var_t));
-    /* The field variables come out of a zeroed allocation, so give their
-     * interned name pointers the empty string a reader can dereference.
-     */
-    for (int i = 0; i < MAX_FIELDS; i++)
-        t->fields[i].var_name = "";
+    t->fields = NULL;
     return t;
 }
 
@@ -1592,6 +1612,24 @@ void release_token_arena(void)
     if (TOKEN_ARENA) {
         arena_free(TOKEN_ARENA);
         TOKEN_ARENA = NULL;
+    }
+
+    /* Every error_at() site is in the preprocessor or the parser, and both are
+     * done by the time this runs, so no line will be quoted again. LIBC_SRC is
+     * in the map as well, but the global owns it and global_release() frees it
+     * there; freeing it here too would free it twice.
+     */
+    if (SRC_FILE_MAP) {
+        for (int i = 0; i < SRC_FILE_MAP->cap; i++) {
+            if (!SRC_FILE_MAP->table[i].occupied)
+                continue;
+
+            strbuf_t *src = SRC_FILE_MAP->table[i].val;
+            if (src && src != LIBC_SRC)
+                strbuf_free(src);
+        }
+        hashmap_free(SRC_FILE_MAP);
+        SRC_FILE_MAP = NULL;
     }
 }
 

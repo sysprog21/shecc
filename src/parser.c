@@ -197,6 +197,7 @@ var_t *type_add_field(type_t *type, int *idx)
 
     if (i >= MAX_FIELDS)
         error_at("Too many fields in struct or union", cur_token_loc());
+    type_ensure_fields(type);
     *idx = i + 1;
     return &type->fields[i];
 }
