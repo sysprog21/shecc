@@ -867,7 +867,10 @@ void elf_generate_section_headers(void)
 #endif
 }
 
-void elf_align(strbuf_t *elf_array)
+/* Pad @elf_array with zero bytes until its size is a multiple of @boundary,
+ * which must be a power of two.
+ */
+void elf_align_to(strbuf_t *elf_array, int boundary)
 {
     /* Check for null pointers to prevent crashes */
     if (!elf_array) {
@@ -875,8 +878,17 @@ void elf_align(strbuf_t *elf_array)
         return;
     }
 
-    while (elf_array->size & 3)
+    while (elf_array->size & (boundary - 1))
         elf_write_byte(elf_array, 0);
+}
+
+/* Pad to a four-byte boundary, which is what the sections holding words want.
+ * A section whose contents are read as pointers wants elf_align_to(PTR_SIZE)
+ * instead: on a 64-bit target four bytes is not enough.
+ */
+void elf_align(strbuf_t *elf_array)
+{
+    elf_align_to(elf_array, 4);
 }
 
 /* Lay out .interp, .dynsym, .dynstr, .rela.plt (.rel.plt), .got and .dynamic.
@@ -904,8 +916,7 @@ void elf_generate_dynamic_sections(void)
     /* .got follows .interp and the loader writes pointers into it, so pad
      * to a pointer boundary rather than the usual four bytes.
      */
-    while (dynamic_sections.elf_interp->size % PTR_SIZE)
-        elf_write_byte(dynamic_sections.elf_interp, 0);
+    elf_align_to(dynamic_sections.elf_interp, PTR_SIZE);
 
     /* Add first symbol table entry (STN_UNDEF) to .dynsym section. */
     elf_write_dynsym(dynamic_sections.elf_dynsym, 0, 0, 0);
@@ -967,8 +978,12 @@ void elf_generate_dynamic_sections(void)
 
         func_plt_ofs += PLT_ENT_SIZE;
     }
-    /* Ensure proper alignment for .dynstr section. */
-    elf_align(dynamic_sections.elf_dynstr);
+    /* .dynsym begins where .dynstr ends, and its entries are read as aligned
+     * words: 24 bytes each under ELF64, which wants 8. Four-byte alignment
+     * would leave a string table ending 4 bytes off an 8-byte boundary, and
+     * DT_SYMTAB misaligned with it.
+     */
+    elf_align_to(dynamic_sections.elf_dynstr, PTR_SIZE);
 
     /* .got section
      *
