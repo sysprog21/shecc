@@ -178,7 +178,13 @@ update-snapshot: $(OUT)/$(STAGE0) tests/update-snapshots.sh
 	tests/update-snapshots.sh $(ARCH) $(DYNLINK)
 	$(VECHO) "  OK\n"
 
-$(OUT)/%.o: %.c
+# Both prerequisites are order-only, and both exist because "make -j" would
+# otherwise let a compile start beside the thing it reads. Selecting a target
+# replaces src/codegen.c with "ln -sf", which unlinks before it relinks, so a
+# compile racing "config" can find nothing there. And src/main.c includes
+# out/libc.inc, which is generated: listing it only on the stage0 link left
+# the two free to run in either order on a tree that has never been built.
+$(OUT)/%.o: %.c | config $(OUT)/libc.inc
 	$(VECHO) "  CC\t$@\n"
 	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
 
@@ -213,12 +219,18 @@ $(OUT)/$(STAGE1): $(OUT)/$(STAGE0)
 	$(Q)$(OUT)/$(STAGE0) $(STAGE0_FLAGS) -o $@ $(SRCDIR)/main.c > $(OUT)/shecc-stage1.log
 	$(Q)chmod a+x $@
 
+# The mode belongs here rather than on "bootstrap", because "check" builds
+# stage2 through this rule without going through that target. Statically the
+# question does not arise: shecc's own libc opens the output 0775. Linked
+# dynamically the open is glibc's, which gives 0666 before the umask, so a
+# "make check" on a tree that had never been bootstrapped produced a stage2
+# nothing could execute and every stage-2 test failed to compile.
 $(OUT)/$(STAGE2): $(OUT)/$(STAGE1)
 	$(VECHO) "  SHECC\t$@\n"
 	$(Q)$(TARGET_EXEC) $(OUT)/$(STAGE1) $(STAGE1_FLAGS) -o $@ $(SRCDIR)/main.c
+	$(Q)chmod 775 $@
 
 bootstrap: $(OUT)/$(STAGE2)
-	$(Q)chmod 775 $(OUT)/$(STAGE2)
 	$(Q)if ! diff -q $(OUT)/$(STAGE1) $(OUT)/$(STAGE2); then \
 	echo "Unable to bootstrap. Aborting"; false; \
 	fi
