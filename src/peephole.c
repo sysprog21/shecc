@@ -740,6 +740,18 @@ void peephole(void)
                     continue;
                 }
 
+                /* Every rewrite below moves this instruction's result to
+                 * the destination of the one after it, dropping the write to
+                 * the register it named. That is fine for a temporary, whose
+                 * value nothing wants again, and wrong for a pinned register:
+                 * a variable lives there for the whole function and nothing
+                 * else ever reloads it, so "li rbx, 0; add rax, rsi, rbx" must
+                 * not become "mov rax, rsi" and leave rbx unwritten.
+                 */
+                if (ir->dest >= 0 && ir->dest < REG_CNT &&
+                    ((func->pinned_regs >> ir->dest) & 1))
+                    continue;
+
                 /* Try triple pattern optimization first (3-instruction
                  * sequences)
                  */

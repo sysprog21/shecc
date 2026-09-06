@@ -423,6 +423,28 @@ var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
     return from;
 }
 
+/* Convert @val to @type at @ptr_level levels of indirection.
+ *
+ * resize_var() takes its target as a var_t, and every caller builds that the
+ * same way: a zeroed local carrying only those two fields. Building it here
+ * keeps the zeroing in one place -- shecc miscompiles "var_t t = {0};", so it
+ * has to be a memset, and nine copies of that were nine chances to leave one
+ * out.
+ */
+var_t *resize_to(block_t *block,
+                 basic_block_t **bb,
+                 var_t *val,
+                 type_t *type,
+                 int ptr_level)
+{
+    var_t target;
+
+    memset(&target, 0, sizeof(var_t));
+    target.type = type;
+    target.ptr_level = ptr_level;
+    return resize_var(block, bb, val, &target);
+}
+
 void read_parameter_list_decl(func_t *func, bool anon);
 
 /* Forward declaration for ternary handling used by initializers */
@@ -554,11 +576,8 @@ void parse_struct_field_init(block_t *parent,
             if (field_val_raw && field_idx < struct_type->num_fields) {
                 var_t *field = &struct_type->fields[field_idx];
 
-                var_t target = {0};
-                target.type = field->type;
-                target.ptr_level = field->ptr_level;
-                var_t *field_val =
-                    resize_var(parent, bb, field_val_raw, &target);
+                var_t *field_val = resize_to(parent, bb, field_val_raw,
+                                             field->type, field->ptr_level);
 
                 var_t *field_addr =
                     compute_field_address(parent, bb, target_addr, field);
@@ -888,10 +907,7 @@ void parse_array_init(var_t *var,
                 stored_vals[count] = val;
 
             if (val && emit_code && !is_implicit && count < var->array_size) {
-                var_t target = {0};
-                target.type = var->type;
-                target.ptr_level = 0;
-                var_t *v = resize_var(parent, bb, val, &target);
+                var_t *v = resize_to(parent, bb, val, var->type, 0);
 
                 var_t *elem_addr = compute_element_address(
                     parent, bb, base_addr, count, elem_size);
@@ -940,10 +956,7 @@ void parse_array_init(var_t *var,
             val->init_val = 0;
             add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
 
-            var_t target = {0};
-            target.type = var->type;
-            target.ptr_level = 0;
-            var_t *v = resize_var(parent, bb, val, &target);
+            var_t *v = resize_to(parent, bb, val, var->type, 0);
 
             var_t *elem_addr = compute_element_address(parent, bb, base_addr,
                                                        count, elem_size);
@@ -969,10 +982,7 @@ void parse_array_init(var_t *var,
             for (int i = 0; i < count && i < 256; i++) {
                 if (!stored_vals[i])
                     continue;
-                var_t target = {0};
-                target.type = var->type;
-                target.ptr_level = 0;
-                var_t *v = resize_var(parent, bb, stored_vals[i], &target);
+                var_t *v = resize_to(parent, bb, stored_vals[i], var->type, 0);
 
                 var_t *elem_addr = compute_element_address(
                     parent, bb, base_addr, i, elem_size);
@@ -1000,10 +1010,7 @@ void parse_array_compound_literal(var_t *var,
             if (count == 0)
                 var->init_val = value->init_val;
 
-            var_t target = {0};
-            target.type = var->type;
-            target.ptr_level = 0;
-            var_t *store_val = resize_var(parent, bb, value, &target);
+            var_t *store_val = resize_to(parent, bb, value, var->type, 0);
             var_t *elem_addr =
                 compute_element_address(parent, bb, var, count, elem_size);
             add_insn(parent, *bb, OP_write, NULL, elem_addr, store_val,
@@ -1585,6 +1592,18 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
     }
 }
 
+/* Set by the dereference handlers around the read_lvalue() call that parses
+ * the pointer being dereferenced.
+ *
+ * read_lvalue() otherwise swallows a following "+ expr" as pointer arithmetic,
+ * scaling the addend by the element size. That is right for "p + 1" but wrong
+ * for "*p + 1": unary '*' binds tighter than '+', so the sum belongs to the
+ * enclosing expression and shecc was reading p[1] instead of adding one to
+ * p[0]. read_lvalue() consumes and clears the flag on entry, so lvalues parsed
+ * further in (a subscript, a call argument) keep the normal behaviour.
+ */
+bool no_ptr_arith = false;
+
 void handle_single_dereference(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1;
@@ -1625,6 +1644,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
 
         lex_peek(T_identifier, token);
         var_t *var = find_var(token, parent);
+        no_ptr_arith = true;
         read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
 
         rs1 = opstack_pop();
@@ -1752,6 +1772,7 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
 
         lex_peek(T_identifier, token);
         var_t *var = find_var(token, parent);
+        no_ptr_arith = true;
         read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
 
         /* Apply dereferences one by one */
@@ -2882,6 +2903,9 @@ void read_lvalue(lvalue_t *lvalue,
     bool is_address_got = false;
     bool is_member = false;
 
+    bool allow_ptr_arith = !no_ptr_arith;
+    no_ptr_arith = false;
+
     /* already peeked and have the variable */
     lex_expect(T_identifier);
 
@@ -3063,8 +3087,8 @@ void read_lvalue(lvalue_t *lvalue,
      * been dereferenced. After array indexing like arr[0], we have a value, not
      * a pointer.
      */
-    if (lex_peek(T_plus, NULL) && (var->ptr_level || var->array_size) &&
-        !lvalue->is_reference) {
+    if (allow_ptr_arith && lex_peek(T_plus, NULL) &&
+        (var->ptr_level || var->array_size) && !lvalue->is_reference) {
         while (lex_peek(T_plus, NULL) && (var->ptr_level || var->array_size)) {
             lex_expect(T_plus);
             if (lvalue->is_reference) {
@@ -4403,11 +4427,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                 var_t *field = &struct_type->fields[field_idx];
 
                                 /* Create target variable for field */
-                                var_t target = {0};
-                                target.type = field->type;
-                                target.ptr_level = field->ptr_level;
                                 var_t *field_val =
-                                    resize_var(parent, &bb, val, &target);
+                                    resize_to(parent, &bb, val, field->type,
+                                              field->ptr_level);
 
                                 /* Compute field address: &struct + field_offset
                                  */
@@ -4500,11 +4522,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                         &struct_type->fields[field_idx];
 
                                     /* Create target variable for field */
-                                    var_t target = {0};
-                                    target.type = field->type;
-                                    target.ptr_level = field->ptr_level;
                                     var_t *field_val =
-                                        resize_var(parent, &bb, val, &target);
+                                        resize_to(parent, &bb, val, field->type,
+                                                  field->ptr_level);
 
                                     /* Compute field address: &struct +
                                      * field_offset */
@@ -4650,11 +4670,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                             var_t *field = &struct_type->fields[field_idx];
 
                             /* Create target variable for field */
-                            var_t target = {0};
-                            target.type = field->type;
-                            target.ptr_level = field->ptr_level;
                             var_t *field_val =
-                                resize_var(parent, &bb, val, &target);
+                                resize_to(parent, &bb, val, field->type,
+                                          field->ptr_level);
 
                             /* Compute field address: &struct + field_offset */
                             var_t *struct_addr = require_var(parent);
@@ -4763,11 +4781,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                 var_t *field = &struct_type->fields[field_idx];
 
                                 /* Create target variable for field */
-                                var_t target = {0};
-                                target.type = field->type;
-                                target.ptr_level = field->ptr_level;
                                 var_t *field_val =
-                                    resize_var(parent, &bb, val, &target);
+                                    resize_to(parent, &bb, val, field->type,
+                                              field->ptr_level);
 
                                 /* Compute field address: &struct + field_offset
                                  */

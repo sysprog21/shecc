@@ -128,6 +128,11 @@ int main(int argc, char *argv[])
 
     ssa_build();
 
+    /* Copy small helpers into their callers before anything else looks at
+     * them, so the optimizer sees one body rather than a call boundary.
+     */
+    inline_calls();
+
     /* dump first phase IR */
     if (dump_ir)
         dump_insn();
@@ -139,6 +144,26 @@ int main(int argc, char *argv[])
 
     /* SSA-based optimization */
     optimize();
+
+    /* Flatten unpredictable ifs into branchless selects.
+     *
+     * After the optimizer rather than inside ssa_build(): a select reads a
+     * third operand, and the passes in optimize() walk instructions two
+     * sources at a time. One of them would rewrite a copy feeding that third
+     * operand and leave the select reading a value nothing defines.
+     */
+    if_convert();
+
+    /* Send short-circuit arms straight to their destination. */
+    thread_const_branches();
+
+    /* Both passes above rewired the CFG the dominator tree was built from, and
+     * everything below asks that tree which edges close a loop.
+     */
+    rebuild_dom();
+
+    /* Walk arrays with a pointer rather than recomputing addresses. */
+    strength_reduce();
 
     /* Compact arenas after SSA optimization to free temporary SSA structures */
     compact_all_arenas();

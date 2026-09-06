@@ -894,6 +894,25 @@ items 27 "int a; a = 15; int b; b = 2; if(a - 15) b = 10; else if (b) return a +
 items 8 "if (1) return 010; else return 11;"
 items 10 "int a; a = 012 - 10; int b; b = 0100 - 64; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
 
+# The values on both sides of the select, its condition, and unrelated values
+# are all used after the join.  This keeps the register file full when the
+# allocator has to choose the select result's register.
+try_ 30 << EOF
+int pick(int a, int b, int c, int d, int e, int f, int g) {
+    int selected;
+    int hold = g;
+    if (a)
+        selected = b;
+    else
+        selected = c;
+    return a + b + c + d + e + f + hold + selected;
+}
+
+int main() {
+    return pick(1, 2, 3, 4, 5, 6, 7);
+}
+EOF
+
 # Category: Compound Statements
 begin_category "Compound Statements" "Testing block scoping and compound statements"
 

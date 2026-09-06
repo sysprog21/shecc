@@ -46,10 +46,12 @@
 #define MAX_GOTPLT 1024
 #define MAX_CONSTANTS 1024
 #define MAX_NESTING 128
-/* How often a variable must be named before holding it in a register for a
- * whole function is worth the push and pop that saving one costs.
+/* How many instructions an if may speculate when flattened into a select, and
+ * how many blocks one of its arms may span. Beyond a handful, running the arm
+ * that would have been skipped costs more than the misprediction it avoids.
  */
-#define MIN_PINNED_USES 4
+#define MAX_SPECULATED_INSNS 8
+#define MAX_IF_ARM_BLOCKS 4
 /* Recursion limits for nesting in the input. The parser descends recursively
  * for each of these, so a deeply nested program would otherwise exhaust the
  * machine stack before any diagnostic could be produced.
@@ -131,6 +133,56 @@
 #define ELF_IS_64 1
 #else
 #define ELF_IS_64 0
+#endif
+
+/* Ceilings for strength_reduce(): how long a chain of instructions may compute
+ * one address, and how many rounds the step analysis takes to settle.
+ */
+#define MAX_IV_CHAIN 12
+#define MAX_IV_ROUNDS 4
+
+/* A pointer the loop advances costs a register for the whole loop and an
+ * addition at the bottom of it, so it only pays where it replaces more work
+ * than that -- and only a couple of them fit before the loop's own variables
+ * start going to the frame instead.
+ */
+#define MIN_IV_CHAIN 3
+#define MAX_IV_PER_LOOP 2
+
+/* How many blocks one natural loop's walk keeps in hand at once. Past this
+ * the walk stops widening, which can only understate a depth.
+ */
+#define MAX_LOOP_WALK 512
+
+/* Limits on copying a function into its callers: how big a body is worth
+ * copying, how many distinct variables one such body may name, and how many
+ * times the pass sweeps the program so that a function which becomes copyable
+ * only after its own callee was copied into it still gets copied.
+ */
+#define MAX_INLINE_INSNS 16
+#define MAX_INLINE_VARS 32
+#define MAX_INLINE_ROUNDS 3
+
+/* What a naming inside one loop is worth against one in straight-line code,
+ * and how many nesting levels still multiply it.
+ */
+#define LOOP_USE_WEIGHT 8
+#define MAX_WEIGHTED_LOOP_DEPTH 3
+
+#if ELF_MACHINE == ELF_MACHINE_X86_64
+/* Whether the target can select between two values without branching. Only
+ * where it can is flattening an if into a select worthwhile.
+ */
+#define HAVE_COND_MOVE 1
+/* How many registers at the top of the allocator's file a call preserves.
+ * Only such a register can hold a value across a call, so only these may be
+ * given to a variable for the whole of a function that calls anything. The
+ * x86-64 file ends with RBX, R14, R12 and R13, which the prologue pushes; the
+ * other targets are left alone until their files are checked the same way.
+ */
+#define CALLEE_SAVED_REGS 4
+#else
+#define CALLEE_SAVED_REGS 0
 #endif
 
 /* Common data structures */
@@ -308,6 +360,8 @@ typedef enum {
 
     OP_phi,
     OP_unwound_phi, /* work like address_of + store */
+    /* rd = rs2 ? rs1 : rs3 -- select without a branch. */
+    OP_cmov,
 
     /* calling convention */
     OP_define,   /* function entry point */
@@ -432,6 +486,34 @@ struct var {
     bool is_global;
     bool is_const_qualified; /* true if variable has const qualifier */
     bool address_taken;      /* true if variable address was taken (&var) */
+    /* Working state for strength_reduce(): how many instructions in the
+     * function write the variable, whether it is written inside the loop being
+     * examined, and how much its value moves per iteration when it does.
+     * All three are recomputed per loop; nothing outside that pass reads them.
+     */
+    int def_cnt;
+    int loop_stamp;
+    int iv_gen;
+    int iv_step;
+    /* pin_registers()'s tally for the variable: what its namings are worth
+     * weighted by loop depth, the reverse-post-order number of the last block
+     * that named it, whether it was
+     * ever named in two, and whether a loop named it. Stamped per function so
+     * that no array has to hold the candidates -- the file has a handful of
+     * registers and a function names hundreds of variables, and the one worth
+     * a register is not reliably among the first few met.
+     */
+    int pin_gen;
+    int pin_weight;
+    int pin_blk;
+    bool pin_cross;
+    bool pin_hot;
+    /* Defined inside an arm that if_convert() flattened into a select. The
+     * register its variable is pinned to still holds the value flowing into
+     * the select, which the arms read and the select overwrites, so a value
+     * computed on the way there must go somewhere else.
+     */
+    bool in_select_arm;
     int array_size;
     int array_dim2; /* second dimension size for 2D arrays */
     int offset;     /* offset from stack or frame, index 0 is reserved */
@@ -531,6 +613,8 @@ struct ph2_ir {
     opcode_t op;
     int src0;
     int src1;
+    /* The register OP_cmov keeps when its condition does not hold. */
+    int src2;
     int dest;
     /* Type information for LP64 support */
     int size_bytes; /* Size in bytes for load/store/read/write operations */
@@ -596,6 +680,11 @@ struct insn {
     var_t *rd;
     var_t *rs1;
     var_t *rs2;
+    /* The value OP_cmov keeps when its condition does not hold. A select needs
+     * three inputs and the two source fields are taken by the chosen value and
+     * the condition; every other opcode leaves this NULL.
+     */
+    var_t *rs3;
     int sz;
     bool useful; /* Used in DCE process. Set true if instruction is useful. */
     basic_block_t *belong_to;
@@ -713,6 +802,22 @@ struct basic_block {
     int ph2_base;
     int rpo;
     int rpo_r;
+    /* How many loops enclose the block.
+     * pin_registers() weights a variable's uses by it: a name inside a loop
+     * stands for as many reads as the loop has iterations, and ranking by the
+     * plain count gave a register to a variable named four times in
+     * straight-line code over one named once in the innermost loop.
+     */
+    int loop_depth;
+    /* What one naming of a variable in this block is worth to pin_registers(),
+     * derived from loop_depth once rather than on every operand of every
+     * instruction the tally walks.
+     */
+    int loop_weight;
+    /* Stamp marking the block as already counted for the loop being walked,
+     * so that one loop raises its depth once however many ways in there are.
+     */
+    int loop_mark;
     int df_idx;
     int rdf_idx;
     int df_cap;
@@ -753,6 +858,13 @@ struct func {
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
+    /* inline_calls()'s verdict on this body and the return that ends it,
+     * stamped with the round that reached them: a body is examined once per
+     * round rather than once per call site that names it.
+     */
+    int inline_gen;
+    bool inline_ok;
+    struct insn *inline_ret;
     int stack_size;
 
     /* SSA info */

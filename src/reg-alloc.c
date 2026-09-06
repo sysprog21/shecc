@@ -183,6 +183,10 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->is_branch_detached = 0; /* arch-lowering will set for branches */
     n->src0 = 0;
     n->src1 = 0;
+    /* Only a select names a third source, but the allocation is not zeroed and
+     * every field is set here by hand.
+     */
+    n->src2 = 0;
     n->dest = 0;
     n->func_name = NULL;
     n->next_bb = NULL;
@@ -262,10 +266,34 @@ int calculate_spill_cost(var_t *var, basic_block_t *bb, int current_idx)
  */
 var_t *pinned_base[REG_CNT];
 
+/* Registers the instruction being lowered has already placed an operand in.
+ *
+ * Preparing one operand can spill another's register to make room, leaving the
+ * number recorded for it naming a register that no longer holds the value. An
+ * instruction reading more operands than the two "avoid" arguments can express
+ * -- a select reads three -- locks each as it is placed, and the spill
+ * searches leave those alone.
+ */
+int reg_locked;
+
+/* Whether @reg holds an operand of the instruction being lowered. */
+bool reg_is_locked(int reg)
+{
+    if (reg < 0 || reg >= REG_CNT)
+        return false;
+    return (reg_locked >> reg) & 1;
+}
+
 /* The register @var's base is pinned to, or -1. */
 int pinned_reg_of(var_t *var)
 {
     if (!var || !var->base)
+        return -1;
+    /* A value an if-converted arm computes shares its variable's base with the
+     * select's result, but the pinned register still holds what the arms read,
+     * so it takes an ordinary register instead.
+     */
+    if (var->in_select_arm)
         return -1;
     for (int i = 0; i < REG_CNT; i++) {
         if (pinned_base[i] && pinned_base[i] == var->base)
@@ -286,7 +314,7 @@ int find_best_spill(basic_block_t *bb,
         if (i == avoid_reg1 || i == avoid_reg2)
             continue;
 
-        if (!REGS[i].var || pinned_base[i])
+        if (!REGS[i].var || pinned_base[i] || reg_is_locked(i))
             continue;
 
         int cost = calculate_spill_cost(REGS[i].var, bb, current_idx);
@@ -637,6 +665,17 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
     vreg_clear_phys(var);
 }
 
+/* Whether register @i can be handed to a value that wants one.
+ *
+ * Empty is not enough: a pinned register looks empty whenever the version it
+ * currently holds has been consumed, but nothing ever reloads it and the next
+ * read of its variable expects to find the value still there.
+ */
+bool reg_is_free(int i)
+{
+    return !REGS[i].var && !pinned_base[i];
+}
+
 /* Return the index of register for given variable. Otherwise, return -1. */
 int find_in_regs(var_t *var)
 {
@@ -669,22 +708,19 @@ bool var_is_pinnable(var_t *var)
  * iteration. At most half the file is given away so expression evaluation
  * still has registers to work with.
  */
+int pin_scan_gen;
+
 void pin_registers(func_t *func)
 {
-    var_t *cand[REG_CNT];
-    int uses[REG_CNT];
-    int n = 0, limit = REG_CNT / 2;
+    int limit = REG_CNT / 2;
     bool calls = false;
 
     for (int i = 0; i < REG_CNT; i++)
         pinned_base[i] = NULL;
     func->pinned_regs = 0;
 
-    /* A function that calls anything may still hold a variable across the
-     * call, but only in a register the call preserves. Registers are handed
-     * out from the top of the file downwards, and those are the preserved
-     * ones, so capping the count is all that is needed.
-     */
+    mark_loop_depth(func);
+
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
         for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
             if (insn->opcode == OP_call || insn->opcode == OP_indirect ||
@@ -696,81 +732,132 @@ void pin_registers(func_t *func)
         }
     }
 
-    /* Holding a value across a call costs the prologue a push and the
-     * epilogue a pop, so it only pays for a variable named often enough to
-     * earn them back.
+    /* Across a call only the registers the callee preserves will still hold
+     * their value. Those sit at the top of the file, which is the end the
+     * loop below hands out from, so capping the count is all that is needed.
      */
-    /* Not across a call. The registers a call preserves sit at the top of the
-     * file and holding a value in one across a call still breaks the
-     * three-stage bootstrap for reasons not yet identified -- the ABI
-     * guarantee holds, so the fault is in how the allocator tracks the
-     * register, and it is not worth shipping until that is understood.
-     */
-    if (calls)
-        return;
+    if (calls) {
+        if (!CALLEE_SAVED_REGS)
+            return;
+        if (limit > CALLEE_SAVED_REGS)
+            limit = CALLEE_SAVED_REGS;
+    }
 
+    /* Tally what every variable's namings are worth. The count lives on the
+     * variable rather than in an array here: the file has a handful of
+     * registers and a function names hundreds of variables, and the one worth
+     * a register is not reliably among the first few met -- a pointer
+     * strength_reduce() introduced is named last of all.
+     */
+    pin_scan_gen++;
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
         for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-            var_t *ops[3];
+            var_t *ops[4];
+
             ops[0] = insn->rd;
             ops[1] = insn->rs1;
             ops[2] = insn->rs2;
+            ops[3] = insn->rs3;
 
-            for (int k = 0; k < 3; k++) {
+            for (int k = 0; k < 4; k++) {
                 var_t *var = ops[k];
-                int at = -1;
 
                 if (!var_is_pinnable(var))
                     continue;
-                /* A parameter arrives in an argument register and is stored to
-                 * its slot on entry; nothing would put it in a pinned register
-                 * before its first read.
+                /* A parameter passed on the stack lives at an offset into the
+                 * caller's frame that the callee cannot pin; one passed in a
+                 * register is moved into its pinned register on entry, so it
+                 * is a candidate like any other -- and a good one, since a
+                 * pointer a loop walks is usually a parameter.
                  */
-                bool is_param = false;
+                bool on_stack = false;
+                bool in_reg = false;
+
                 for (int q = 0; q < func->num_params; q++) {
-                    if (var->base == &func->param_defs[q])
-                        is_param = true;
+                    if (var->base != &func->param_defs[q])
+                        continue;
+                    if (q < MAX_ARGS_IN_REG)
+                        in_reg = true;
+                    else
+                        on_stack = true;
                 }
-                if (is_param)
+                if (on_stack)
                     continue;
-                for (int i = 0; i < n; i++) {
-                    if (cand[i] == var->base)
-                        at = i;
+
+                var_t *base = var->base;
+
+                if (base->pin_gen != pin_scan_gen) {
+                    base->pin_gen = pin_scan_gen;
+                    base->pin_weight = 0;
+                    /* A parameter is written in the entry block before the
+                     * body names it, so its range already spans blocks.
+                     */
+                    base->pin_cross = in_reg;
+                    base->pin_hot = false;
+                    base->pin_blk = -1;
                 }
-                if (at >= 0) {
-                    uses[at]++;
-                    continue;
-                }
-                if (n < REG_CNT) {
-                    cand[n] = var->base;
-                    uses[n] = 1;
-                    n++;
-                }
+                base->pin_weight += bb->loop_weight;
+                if (base->pin_blk >= 0 && base->pin_blk != bb->rpo)
+                    base->pin_cross = true;
+                base->pin_blk = bb->rpo;
+                if (bb->loop_depth)
+                    base->pin_hot = true;
             }
         }
     }
 
     /* Take the most-named bases, highest register first: the low registers are
-     * where arguments and return values land.
+     * where arguments and return values land. The winner is found by walking
+     * the tally again rather than sorting it, which costs one pass per
+     * register handed out -- a handful, against a function's instruction
+     * count.
      */
     for (int taken = 0; taken < limit; taken++) {
-        int best = -1;
+        var_t *best = NULL;
 
-        for (int i = 0; i < n; i++) {
-            if (!cand[i])
-                continue;
-            /* Registers are handed out from the top of the file, which is
-             * where the preserved ones are, so a pinned function saves and
-             * restores one in its prologue. A variable named only once or
-             * twice does not earn that back -- least of all in a small leaf
-             * called from a loop, which pays it on every call.
-             */
-            if (uses[i] < MIN_PINNED_USES)
-                continue;
-            if (best < 0 || uses[i] > uses[best])
-                best = i;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+                var_t *ops[4];
+
+                ops[0] = insn->rd;
+                ops[1] = insn->rs1;
+                ops[2] = insn->rs2;
+                ops[3] = insn->rs3;
+
+                for (int k = 0; k < 4; k++) {
+                    if (!ops[k] || !ops[k]->base)
+                        continue;
+
+                    var_t *base = ops[k]->base;
+
+                    if (base->pin_gen != pin_scan_gen)
+                        continue;
+                    /* Registers are handed out from the top of the file,
+                     * which is where the preserved ones are, so a pinned
+                     * function saves and restores one in its prologue. A
+                     * variable named once in straight-line code does not earn
+                     * that back -- least of all in a small leaf called from a
+                     * loop, which pays it on every call -- so a candidate has
+                     * to be read inside a loop and to outlive the block that
+                     * names it.
+                     */
+                    if (!base->pin_cross || !base->pin_hot)
+                        continue;
+
+                    bool already = false;
+
+                    for (int r = 0; r < REG_CNT; r++) {
+                        if (pinned_base[r] == base)
+                            already = true;
+                    }
+                    if (already)
+                        continue;
+                    if (!best || base->pin_weight > best->pin_weight)
+                        best = base;
+                }
+            }
         }
-        if (best < 0)
+        if (!best)
             return;
 
         /* Incoming arguments arrive in the low registers and are placed there
@@ -784,8 +871,7 @@ void pin_registers(func_t *func)
         if (reg < args_in_reg)
             return;
 
-        pinned_base[reg] = cand[best];
-        cand[best] = NULL;
+        pinned_base[reg] = best;
         func->pinned_regs = func->pinned_regs | (1 << reg);
     }
 }
@@ -850,7 +936,7 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
     }
 
     for (i = 0; i < REG_CNT; i++) {
-        if (!REGS[i].var) {
+        if (reg_is_free(i)) {
             load_var(bb, var, i);
             vreg_map_to_phys(var, i);
             return i;
@@ -865,7 +951,8 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
             /* A pinned register is not available: nothing reloads it, so
              * handing it to another variable loses the pinned value.
              */
-            if (i != operand_0 && REGS[i].var && !pinned_base[i]) {
+            if (i != operand_0 && REGS[i].var && !pinned_base[i] &&
+                !reg_is_locked(i)) {
                 spilled = i;
                 break;
             }
@@ -900,7 +987,7 @@ bool is_pushing_args;
 bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, var_t *var)
 {
     for (insn_t *insn = from; insn; insn = insn->next) {
-        if (insn->rs1 == var || insn->rs2 == var)
+        if (insn->rs1 == var || insn->rs2 == var || insn->rs3 == var)
             return true;
     }
     return false;
@@ -945,6 +1032,14 @@ int coalesce_candidate(basic_block_t *bb, insn_t *insn, int reg)
     }
 
     if (is_pushing_args)
+        return -1;
+
+    /* A pinned register is not a scratch one however dead the version it
+     * currently holds looks: the variable living there is read again further
+     * on and nothing ever reloads it. Handing it to a temporary destroyed the
+     * value a select was about to choose between.
+     */
+    if (pinned_base[reg])
         return -1;
 
     var_t *v = REGS[reg].var;
@@ -999,7 +1094,7 @@ int prepare_dest(basic_block_t *bb,
     }
 
     for (i = 0; i < REG_CNT; i++) {
-        if (!REGS[i].var) {
+        if (reg_is_free(i)) {
             REGS[i].var = var;
             REGS[i].polluted = 1;
             vreg_map_to_phys(var, i);
@@ -1014,12 +1109,20 @@ int prepare_dest(basic_block_t *bb,
     if (spilled < 0) {
         for (i = 0; i < REG_CNT; i++) {
             if (i != operand_0 && i != operand_1 && REGS[i].var &&
-                !pinned_base[i]) {
+                !pinned_base[i] && !reg_is_locked(i)) {
                 spilled = i;
                 break;
             }
         }
     }
+
+    /* Callers normally have at least one register which is not an operand,
+     * but an instruction with more register inputs than the allocator's two
+     * avoid arguments can leave every register protected.  Let that caller
+     * make an instruction-specific choice instead of indexing REGS[-1].
+     */
+    if (spilled < 0)
+        return -1;
 
     if (REGS[spilled].var)
         vreg_clear_phys(REGS[spilled].var);
@@ -1080,20 +1183,6 @@ void spill_live_out(basic_block_t *bb)
         }
         spill_var(bb, REGS[i].var, i);
     }
-}
-
-/* Count the predecessors still wired to 'bb'. bb_disconnect() leaves holes in
- * prev[], so prev_idx is only a high-water mark and the entries must be counted
- * rather than trusted.
- */
-int bb_pred_count(basic_block_t *bb)
-{
-    int n = 0;
-    for (int i = 0; i < bb->prev_idx; i++) {
-        if (bb->prev[i].bb)
-            n++;
-    }
-    return n;
 }
 
 /* End a block the way spill_live_out() does -- every live-out variable written
@@ -1227,7 +1316,19 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
     insn = insn->prev;
     stack_args = num_of_args - MAX_ARGS_IN_REG;
     while (stack_args) {
-        load_var(bb, insn->rs1, MAX_ARGS_IN_REG - 1);
+        /* A pinned variable has no slot to load from: its value only ever
+         * lives in its register, so reading the frame here handed the callee
+         * whatever the slot happened to hold.
+         */
+        int held = pinned_reg_of(insn->rs1);
+
+        if (held >= 0) {
+            ph2_ir_t *mv = bb_add_ph2_ir(bb, OP_assign);
+            mv->src0 = held;
+            mv->dest = MAX_ARGS_IN_REG - 1;
+        } else {
+            load_var(bb, insn->rs1, MAX_ARGS_IN_REG - 1);
+        }
         ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
         ir->src0 = MAX_ARGS_IN_REG - 1;
         /* One pointer-sized slot per stack-passed argument. */
@@ -1470,6 +1571,13 @@ void phi_live_index_build(func_t *func)
             c = phi_cand_index(insn->rs2);
             if (c >= 0)
                 phi_cand_last[c] = n;
+            /* A select reads a third operand. Leaving it out of the walk ends
+             * the value's range before the instruction that reads it, and two
+             * variables live at once then look free to share a slot.
+             */
+            c = phi_cand_index(insn->rs3);
+            if (c >= 0)
+                phi_cand_last[c] = n;
             c = phi_cand_index(insn->rd);
             if (c >= 0 && phi_cand_def[c] < 0)
                 phi_cand_def[c] = n;
@@ -1595,7 +1703,7 @@ bool var_range_in_bb(basic_block_t *bb, var_t *var, int *lo, int *hi)
     int def = -1, last_read = -1, n = 0;
 
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-        if (insn->rs1 == var || insn->rs2 == var)
+        if (insn->rs1 == var || insn->rs2 == var || insn->rs3 == var)
             last_read = n;
         if (insn->rd == var && def < 0)
             def = n;
@@ -2040,6 +2148,27 @@ void reg_alloc(void)
             REGS[i].polluted = 1;
         }
 
+        /* Move a pinned parameter out of the argument register it arrived in
+         * before anything else claims that register. Pinned registers are
+         * handed out from the top of the file and pin_registers() refuses any
+         * that an argument occupies, so this never overwrites another one.
+         */
+        for (int i = 0; i < args_in_reg; i++) {
+            var_t *param = var_subscript0(&func->param_defs[i]);
+            int home = pinned_reg_of(param);
+
+            if (home < 0)
+                continue;
+
+            ph2_ir_t *mv = bb_add_ph2_ir(func->bbs, OP_assign);
+            mv->src0 = i;
+            mv->dest = home;
+            REGS[home].var = param;
+            REGS[home].polluted = 0;
+            REGS[i].var = NULL;
+            REGS[i].polluted = 0;
+        }
+
         /* variadic function implementation */
         if (func->va_args) {
             /* When encountering a variadic function, allocate space for all
@@ -2324,6 +2453,73 @@ void reg_alloc(void)
                     ir->ofs_based_on_stack_top =
                         insn->rs1->ofs_based_on_stack_top;
                     break;
+                case OP_cmov: {
+                    /* A select reads three registers, one more than the
+                     * allocator's avoid arguments can protect, so each is
+                     * locked as it is placed. With all three safe the
+                     * destination may land anywhere.
+                     */
+                    int cond, taken, other;
+
+                    track_var_use(insn->rs1, insn->idx);
+                    track_var_use(insn->rs2, insn->idx);
+                    track_var_use(insn->rs3, insn->idx);
+
+                    reg_locked = 0;
+                    taken = prepare_operand(bb, insn->rs1, -1);
+                    reg_locked = reg_locked | (1 << taken);
+                    other = prepare_operand(bb, insn->rs3, taken);
+                    reg_locked = reg_locked | (1 << other);
+                    cond = prepare_operand(bb, insn->rs2, taken);
+                    reg_locked = reg_locked | (1 << cond);
+                    dest = prepare_dest(bb, insn, insn->rd, taken, other);
+
+                    if (dest < 0) {
+                        /* A select needs a fourth register only while all
+                         * three inputs remain live.  Save one unpinned input
+                         * first, then use its physical register as the
+                         * result.  The CMOV emitter deliberately supports the
+                         * destination aliasing either arm; it tests the
+                         * condition before overwriting anything, so the
+                         * condition is safe too if it is the only choice.
+                         *
+                         * spill_var() leaves the machine register unchanged,
+                         * which is exactly what the select still needs.  It
+                         * only removes the allocator's association, making
+                         * the value available for the result and forcing a
+                         * later use of the saved input to reload its slot.
+                         */
+                        int reuse = -1;
+                        int sources[] = {taken, other, cond};
+
+                        for (int i = 0; i < 3; i++) {
+                            int reg = sources[i];
+                            if (!pinned_base[reg]) {
+                                reuse = reg;
+                                break;
+                            }
+                        }
+
+                        /* pin_registers() reserves at most half the file, so
+                         * one of a select's inputs is always reclaimable.
+                         */
+                        if (reuse < 0)
+                            abort();
+                        spill_var(bb, REGS[reuse].var, reuse);
+                        dest = prepare_dest(bb, insn, insn->rd, taken, other);
+                        if (dest != reuse)
+                            abort();
+                    }
+                    reg_locked = 0;
+                    ir = bb_add_ph2_ir(bb, OP_cmov);
+                    ir->src0 = cond;
+                    ir->src1 = taken;
+                    ir->src2 = other;
+                    ir->dest = dest;
+                    ir->size_bytes = var_slot_size(insn->rd);
+                    ir->is_pointer = is_pointer_like(insn->rd);
+                    break;
+                }
                 case OP_assign:
                     if (insn->rd->consumed == -1)
                         break;
@@ -2633,6 +2829,10 @@ void dump_ph2_ir(void)
             continue;
         case OP_assign:
             printf("\t%%x%c = %%x%c", rd, rs1);
+            break;
+        case OP_cmov:
+            printf("\t%%x%c = %%x%c if %%x%c else %%x%c", rd, rs2, rs1,
+                   ph2_ir->src2 + 48);
             break;
         case OP_load_constant:
             printf("\tli %%x%c, $%d", rd, ph2_ir->src0);

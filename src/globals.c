@@ -608,6 +608,10 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->is_branch_detached = 0;
     ph2_ir->src0 = 0;
     ph2_ir->src1 = 0;
+    /* Only a select names a third source, but the allocation is not zeroed and
+     * every field is set here by hand.
+     */
+    ph2_ir->src2 = 0;
     ph2_ir->dest = 0;
     ph2_ir->func_name = NULL;
     ph2_ir->next_bb = NULL;
@@ -1269,6 +1273,21 @@ void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
     }
 }
 
+/* Count the predecessors still wired to 'bb'. bb_disconnect() leaves holes in
+ * prev[], so prev_idx is only a high-water mark and the entries must be counted
+ * rather than trusted.
+ */
+int bb_pred_count(basic_block_t *bb)
+{
+    int n = 0;
+
+    for (int i = 0; i < bb->prev_idx; i++) {
+        if (bb->prev[i].bb)
+            n++;
+    }
+    return n;
+}
+
 /* The symbol is an argument of function or the variable in declaration */
 void add_symbol(basic_block_t *bb, var_t *var)
 {
@@ -1315,6 +1334,10 @@ void add_insn(block_t *block,
     n->rd = rd;
     n->rs1 = rs1;
     n->rs2 = rs2;
+    /* Only a select names a third source. The allocation is not zeroed and
+     * every field is set here by hand, so this one has to be too.
+     */
+    n->rs3 = NULL;
     n->sz = sz;
     n->useful = false;
     n->belong_to = bb;

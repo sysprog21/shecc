@@ -260,6 +260,17 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 10;
         return;
 
+    case OP_cmov:
+        /* TEST cond,cond (3) + CMOVcc rd, x (4), plus MOV rd, other (3) when
+         * the destination does not already name one of the two arms. Like
+         * every other case here this is the worst case, and it has to be:
+         * branch targets come from elf_code->size as the code is emitted, but
+         * elf_preprocess() still places .rodata at elf_code_start + elf_offset,
+         * so an estimate below the real size would put data on top of code.
+         */
+        elf_offset += 10;
+        return;
+
     case OP_add:
     case OP_sub:
     case OP_bit_and:
@@ -656,13 +667,19 @@ int map_ir_reg(int ir_reg)
     case 7:
         return 3; /* rbx */
     case 8:
-        /* R14 rather than R12 or R13: the low three bits of those two are the
-         * SIB and disp32 escapes in ModR/M, so naming them needs a special
-         * case at every addressing site. R14 has no such collision, and like
-         * RBX it is callee-saved, so the allocator gains a register that
-         * survives a call.
-         */
         return 14; /* r14 */
+    /* R12 and R13 come last because their low three bits are the SIB and
+     * disp32 escapes in ModR/M: naming them costs an extra byte wherever they
+     * address memory, which emit_mem_base() and emit_mem_sib() already spell
+     * out, and emit_lea_disp() declines. Handing them out after the others
+     * keeps that cost on the least-used registers, and both are callee-saved,
+     * so a function that calls anything has four registers it can keep a
+     * value in rather than two.
+     */
+    case 9:
+        return 12; /* r12 */
+    case 10:
+        return 13; /* r13 */
     default:
         return ir_reg;
     }
@@ -752,8 +769,8 @@ void emit_bb_rel32(basic_block_t *bb)
  * instruction, where the two-operand forms need MOV then ADD/SHL.
  *
  * Returns false when the encoding cannot express the operands, so callers fall
- * back. reg_map never hands out RSP/RBP/R12/R13, whose low three bits collide
- * with the SIB escape encodings, but the guards keep that assumption local.
+ * back: RSP cannot be an index at all and R12 shares its low three bits, while
+ * RBP and R13 need a displacement this zero-displacement form does not carry.
  */
 bool emit_lea_sum(int rd, int base, int index)
 {
@@ -1072,8 +1089,11 @@ bool sib_take(int *base, int *index, int *scale, int *disp)
     return true;
 }
 
-/* Whether base and index can appear together in one SIB operand. RSP and R12
- * share the encoding that means "no index", so neither can be the index.
+/* Whether base and index can appear together in one SIB operand.
+ *
+ * RSP cannot be an index at all. R12 shares its low three bits and so is
+ * turned away with it: REX.X does tell the two apart, but declining the fold
+ * costs only the fold, and R12 is the second-to-last register handed out.
  */
 bool sib_regs_ok(int base, int index)
 {
@@ -1139,6 +1159,7 @@ int cmp_imm_val;
 bool op_writes_dest(opcode_t op)
 {
     switch (op) {
+    case OP_cmov:
     case OP_load:
     case OP_load_constant:
     case OP_global_load:
@@ -1216,15 +1237,27 @@ bool op_src1_is_reg(opcode_t op)
     case OP_gt:
     case OP_geq:
     case OP_write:
+    case OP_cmov:
         return true;
     default:
         return false;
     }
 }
 
+/* Whether src2 names a register. Only a select does: it is the value kept
+ * when the condition does not hold, and a scan that missed it would take that
+ * value for dead and drop whatever computed it.
+ */
+bool op_src2_is_reg(opcode_t op)
+{
+    return op == OP_cmov;
+}
+
 /* Whether @ir reads @reg as an operand. */
 bool ir_reads_reg(ph2_ir_t *ir, int reg)
 {
+    if (op_src2_is_reg(ir->op) && ir->src2 == reg)
+        return true;
     if (op_src0_is_reg(ir->op) && ir->src0 == reg)
         return true;
     return op_src1_is_reg(ir->op) && ir->src1 == reg;
@@ -1261,6 +1294,11 @@ int func_saved_regs(func_t *func)
                 top = ir->src0;
             if (op_src1_is_reg(ir->op) && ir->src1 > top)
                 top = ir->src1;
+            /* A function whose only use of a preserved register is a
+             * select's third operand still has to preserve it.
+             */
+            if (op_src2_is_reg(ir->op) && ir->src2 > top)
+                top = ir->src2;
         }
     }
     if (top > REG_CNT - 1)
@@ -1688,19 +1726,34 @@ bool try_fold_sib(ph2_ir_t *shift, int rd, int rs1, int scale)
     int disp = 0;
     int gaddr_at = -1;
 
-    if (gaddr_def_ofs(bb, emit_ir_index, base_ir, &disp)) {
-        base = 15; /* R15 */
-        sib_emit_index(rd, rs1, base, scale, disp, sum_at, gaddr_at);
-        return true;
-    }
-    disp = 0;
+    /* The base is commonly materialised between the shift and the addition, so
+     * look there first: that definition is the one the addition reads, and a
+     * search that started before the shift walked straight past it to whatever
+     * wrote the register last time round -- one global array's contents read
+     * at another's address.
+     */
+    bool base_written = false;
 
     for (int j = emit_ir_index + 1; j < sum_at; j++) {
         ph2_ir_t *ir = PH2_IR_FLATTEN[j];
 
-        if (ir->op == OP_global_address_of && ir->dest == base_ir) {
-            gaddr_at = j;
-            disp = ir->src0;
+        if (op_writes_dest(ir->op) && ir->dest == base_ir) {
+            /* Whatever wrote it, the definition reaching the addition is no
+             * longer the one before the shift. Recording that separately from
+             * whether the write was a global address matters: a later read
+             * below clears gaddr_at, and without this the fallback would go
+             * looking before the shift and find a stale definition.
+             */
+            base_written = true;
+            if (ir->op == OP_global_address_of) {
+                gaddr_at = j;
+                disp = ir->src0;
+            } else {
+                /* Something else put the address there, so it is not the
+                 * global area plus a literal any more.
+                 */
+                gaddr_at = -1;
+            }
             continue;
         }
         /* Anything else reading the base means the address it holds is
@@ -1709,6 +1762,18 @@ bool try_fold_sib(ph2_ir_t *shift, int rd, int rs1, int scale)
         if (ir_reads_reg(ir, base_ir))
             gaddr_at = -1;
     }
+
+    /* Nothing in between named it, so the definition that reaches the addition
+     * is the one before the shift.
+     */
+    if (gaddr_at < 0 && !base_written &&
+        gaddr_def_ofs(bb, emit_ir_index, base_ir, &disp)) {
+        base = 15; /* R15 */
+        sib_emit_index(rd, rs1, base, scale, disp, sum_at, gaddr_at);
+        return true;
+    }
+    if (gaddr_at < 0)
+        disp = 0;
     if (gaddr_at >= 0 && reg_dead_after(sum_at + 1, base_ir)) {
         base = 15; /* R15 */
     } else {
@@ -1821,6 +1886,12 @@ bool const_load_dead(int idx, int reg, int val)
             if (branch_cc_for(ir->op))
                 folded_count = true;
         }
+        /* A select's third operand is a plain register read that never turns
+         * into an immediate, and it is checked before the write below because
+         * the same instruction reads it and writes the destination.
+         */
+        if (op_src2_is_reg(ir->op) && ir->src2 == reg)
+            return false;
         if (op_src0_is_reg(ir->op) && ir->src0 == reg)
             return false;
         if (!(folds_ok && folded_count) && op_src1_is_reg(ir->op) &&
@@ -2224,12 +2295,18 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                  */
                 /* Only when the consumer is the very next instruction: a
                  * later one could be skipped by another fold, and the copy
-                 * would already be gone.
+                 * would already be gone. And only when src0 is its one read of
+                 * the register: the override redirects that read alone, so a
+                 * second read of the same register -- src1, or a select's
+                 * src2 -- would be left looking at whatever the load this
+                 * skips was going to overwrite.
                  */
                 if (!reg_mirror_sext[i] && src0_override < 0 && emit_next_ir &&
                     op_src0_is_reg(emit_next_ir->op) &&
                     emit_next_ir->src0 == ph2_ir->dest &&
                     emit_next_ir->src1 != ph2_ir->dest &&
+                    !(op_src2_is_reg(emit_next_ir->op) &&
+                      emit_next_ir->src2 == ph2_ir->dest) &&
                     reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
                     src0_override = held;
                     src0_override_at = emit_ir_index + 1;
@@ -2527,14 +2604,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * the quotient in RAX and remainder in RDX. Both are allocatable
          * registers here (reg_map[6] and reg_map[2]) and the allocator does not
          * know they are clobbered, so save and restore them around the
-         * sequence. R10/R11/R14 are outside reg_map.
+         * sequence. R10 and R11 are outside reg_map and can stage values;
+         * RDX goes on the stack rather than into a third scratch, because
+         * every register that once served as one has since joined the file
+         * and staging RDX there destroyed a dividend pinned to it.
          */
         emit_byte(REX_W | REX_B); /* MOV r10, rax  (save) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 0, 2));
-        emit_byte(REX_W | REX_B); /* MOV r14, rdx  (save) */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 2, 6));
+        emit_push_reg(2); /* PUSH rdx  (save) */
         emit_byte(REX_W | REX_B | (rs2 >= 8 ? REX_R : 0)); /* MOV r11, rs2 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
@@ -2557,9 +2635,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(REX_W | REX_R); /* MOV rax, r10  (restore) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 0));
-        emit_byte(REX_W | REX_R); /* MOV rdx, r14  (restore) */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 6, 2));
+        emit_pop_reg(2); /* POP rdx  (restore) */
         emit_byte(REX_W | REX_R | (rd >= 8 ? REX_B : 0)); /* MOV rd, r11 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
@@ -3284,6 +3360,44 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_byte(rex29);
         emit_byte(0x8D);
         emit_rsp_mem(rd, ph2_ir->src0);
+        return;
+    }
+
+    case OP_cmov: {
+        /* The value for the failing arm goes to the destination, and the other
+         * moves over it only when the condition holds. No branch means nothing
+         * to mispredict, which is the point: the arms were flattened precisely
+         * because the test was unpredictable.
+         */
+        int cond = rs1, taken = map_ir_reg(ph2_ir->src1);
+        int other = map_ir_reg(ph2_ir->src2);
+        int move_in = taken, cc = 0x45; /* CMOVNE */
+
+        /* The test comes first because the move below may land in the
+         * condition's own register: the condition dies at this instruction, so
+         * the allocator is free to hand its register to the destination.
+         * Reading the flags before overwriting it costs nothing -- MOV leaves
+         * them alone -- and testing after would have tested the wrong value.
+         */
+        emit_rex(1, cond, cond); /* TEST cond, cond */
+        emit_byte(0x85);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(cond), reg_low3(cond)));
+
+        /* When the destination already holds the value the test selects,
+         * copying the other over it would destroy it; keep what is there and
+         * bring the other in when the test fails instead.
+         */
+        if (rd == taken) {
+            move_in = other;
+            cc = 0x44; /* CMOVE */
+        } else {
+            emit_mov_reg(rd, other); /* nothing to do when they coincide */
+        }
+
+        emit_rex(1, rd, move_in); /* CMOVcc rd, move_in */
+        emit_byte(0x0F);
+        emit_byte(cc);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(move_in)));
         return;
     }
 
@@ -4187,14 +4301,14 @@ void code_generate(void)
 
     /* Map shecc's calling convention onto the Linux x86-64 syscall ABI.
      *
-     * Incoming (reg_map order, MAX_ARGS_IN_REG = 7):
-     *     RDI=sysno RSI=a1 RDX=a2 RCX=a3 R8=a4 R9=a5 RAX=a6
+     * Incoming (reg_map order, MAX_ARGS_IN_REG = 6, seventh on the frame):
+     *     RDI=sysno RSI=a1 RDX=a2 RCX=a3 R8=a4 R9=a5, a6 at [rsp + 8]
      * Required by the kernel:
      *     RAX=sysno RDI=a1 RSI=a2 RDX=a3 R10=a4 R8=a5 R9=a6
      *
-     * The syscall number is parked in R11 first so that RAX is still free to be
-     * read as a6, and each register is read before it is overwritten. Six
-     * arguments are needed in full for mmap(2).
+     * The syscall number is parked in R11 first so that RAX is free to take
+     * it back at the end, and each register is read before it is overwritten.
+     * Six arguments are needed in full for mmap(2).
      */
     /* MOV r11, rdi (save sysno) */
     emit_byte(REX_W | REX_B);
@@ -4220,10 +4334,19 @@ void code_generate(void)
     emit_byte(REX_W | REX_R | REX_B);
     emit_byte(0x89);
     emit_byte(modrm(MOD_DIRECT, 1, 0));
-    /* MOV r9, rax (a6) */
-    emit_byte(REX_W | REX_B);
-    emit_byte(0x89);
-    emit_byte(modrm(MOD_DIRECT, 0, 1));
+    /* MOV r9, [rsp + 8] (a6)
+     *
+     * The seventh argument does not travel in a register: the file holds six,
+     * and everything past them goes to the caller's frame, where the call
+     * left it just above the return address. Reading RAX here instead worked
+     * only while RAX happened to hold zero, which is the offset every mmap(2)
+     * shecc makes asks for -- until a caller left something else there.
+     */
+    emit_byte(REX_W | REX_R);
+    emit_byte(0x8B);
+    emit_byte(modrm(MOD_DISP8, 1, 4));
+    emit_byte(0x24); /* SIB: base RSP, no index */
+    emit_byte(8);
     /* MOV rax, r11 (sysno) */
     emit_byte(REX_W | REX_R);
     emit_byte(0x89);
