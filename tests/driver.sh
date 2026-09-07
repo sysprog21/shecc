@@ -2854,8 +2854,11 @@ skip:
 }
 EOF
 
-# Forward reference
-try_compile_error << EOF
+# Forward reference. Statements between a goto and its label are unreachable
+# but perfectly legal, and gcc accepts this silently at -Wall -Wextra
+# -pedantic. shecc used to abort on the unreachable "return 1;" -- this case
+# asserted that abort as a compile error; it now asserts the correct result.
+try_ 0 << EOF
 int main()
 {
     goto end;

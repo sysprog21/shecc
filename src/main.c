@@ -72,21 +72,18 @@ int main(int argc, char *argv[])
                 out = argv[i + 1];
                 i++;
             } else
-                /* unsupported options */
-                abort();
+                usage_error("-o requires an output file name");
         } else if (argv[i][0] == '-') {
-            fatal("Unidentified option");
+            usage_error("Unidentified option");
         } else
             in = argv[i];
     }
 
     if (!in) {
-        printf("Missing source file!\n");
         printf(
-            "Usage: shecc [-o output] [+m] [--dump-ir] [--no-libc] [--dynlink] "
-            "[-E]"
-            "<input.c>\n");
-        exit(-1);
+            "Usage: shecc [-o output] [+m] [--dump-ir] [--no-libc] "
+            "[--dynlink] [-E] <input.c>\n");
+        usage_error("Missing source file");
     }
 
     /* initialize global objects */

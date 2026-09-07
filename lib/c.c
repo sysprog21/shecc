@@ -585,6 +585,8 @@ void abort(void)
 
 FILE *fopen(char *filename, char *mode)
 {
+    int fd;
+
     if (!strcmp(mode, "wb")) {
         /* O_WRONLY | O_CREAT | O_TRUNC. Without O_TRUNC, writing a shorter
          * file over a longer one leaves the old tail in place -- which turns
@@ -592,24 +594,31 @@ FILE *fopen(char *filename, char *mode)
          * the previous one.
          */
 #if defined(__arm__)
-        return __syscall(__syscall_open, filename, 577, 0x1fd);
+        fd = __syscall(__syscall_open, filename, 577, 0x1fd);
 #elif defined(__riscv)
         /* FIXME: mode not work currently in RISC-V */
-        return __syscall(__syscall_openat, -100, filename, 577, 0x1fd);
+        fd = __syscall(__syscall_openat, -100, filename, 577, 0x1fd);
 #elif defined(__x86_64__)
-        return __syscall(__syscall_open, filename, 577, 0x1fd);
+        fd = __syscall(__syscall_open, filename, 577, 0x1fd);
 #endif
-    }
-    if (!strcmp(mode, "rb")) {
+    } else if (!strcmp(mode, "rb")) {
 #if defined(__arm__)
-        return __syscall(__syscall_open, filename, 0, 0);
+        fd = __syscall(__syscall_open, filename, 0, 0);
 #elif defined(__riscv)
-        return __syscall(__syscall_openat, -100, filename, 0, 0);
+        fd = __syscall(__syscall_openat, -100, filename, 0, 0);
 #elif defined(__x86_64__)
-        return __syscall(__syscall_open, filename, 0, 0);
+        fd = __syscall(__syscall_open, filename, 0, 0);
 #endif
-    }
-    return NULL;
+    } else
+        return NULL;
+
+    /* open(2) reports failure as a negative errno rather than as NULL, so a
+     * caller's "if (!fp)" would sail straight past it. Fold it into NULL here
+     * and every call site gets the standard test for free.
+     */
+    if (fd < 0)
+        return NULL;
+    return fd;
 }
 
 int fclose(FILE *stream)

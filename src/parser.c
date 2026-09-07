@@ -1145,7 +1145,8 @@ int read_const_expr_operand(void)
     if (lex_peek(T_char, buffer)) {
         char unescaped[MAX_TOKEN_LEN];
         lex_expect(T_char);
-        unescape_string(buffer, unescaped, MAX_TOKEN_LEN);
+        if (unescape_string(buffer, unescaped, MAX_TOKEN_LEN) < 0)
+            error_at("Invalid escape sequence", cur_token_loc());
         return unescaped[0];
     }
     if (lex_peek(T_identifier, buffer)) {
@@ -1586,7 +1587,8 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
     lvalue_t lvalue;
     var_t *vd, *rs1;
 
-    lex_peek(T_identifier, token);
+    if (!lex_peek(T_identifier, token))
+        error_at("Expected an identifier", next_token_loc());
     var_t *var = find_var(token, parent);
     read_lvalue(&lvalue, var, parent, bb, false, OP_generic, true);
 
@@ -1637,7 +1639,8 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
         char token[MAX_VAR_LEN];
         lvalue_t lvalue;
 
-        lex_peek(T_identifier, token);
+        if (!lex_peek(T_identifier, token))
+            error_at("Expected an identifier", next_token_loc());
         var_t *var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, true, OP_generic, false);
 
@@ -1764,7 +1767,8 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
         char token[MAX_VAR_LEN];
         lvalue_t lvalue;
 
-        lex_peek(T_identifier, token);
+        if (!lex_peek(T_identifier, token))
+            error_at("Expected an identifier", next_token_loc());
         var_t *var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, true, OP_generic, false);
 
@@ -2905,6 +2909,12 @@ void read_lvalue(lvalue_t *lvalue,
     bool is_address_got = false;
     bool is_member = false;
 
+    /* Callers pass a find_var() result, which is NULL for a name that was
+     * never declared.
+     */
+    if (!var)
+        error_at("Undeclared identifier", next_token_loc());
+
     /* already peeked and have the variable */
     lex_expect(T_identifier);
 
@@ -3049,6 +3059,8 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* change type currently pointed to */
             var = find_member(token, lvalue->type);
+            if (!var)
+                error_at("Unknown struct or union member", next_token_loc());
             lvalue->type = var->type;
             lvalue->ptr_level = var->ptr_level;
             lvalue->is_func = var->is_func;
@@ -3469,8 +3481,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
 
     if (!lex_accept(T_colon)) {
         /* ternary operator in standard C needs three operands */
-        /* Note: Dangling basic block cleanup handled by arena allocator */
-        abort();
+        error_at("Expected ':' in conditional expression", next_token_loc());
     }
 
     var_t *true_val = opstack_pop();
@@ -3781,11 +3792,18 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
         if (!op2)
             error_at("Division by zero in constant expression",
                      cur_token_loc());
+        /* INT_MIN / -1 has no representable result; on x86 it raises SIGFPE
+         * rather than producing one.
+         */
+        if (op1 == INT_MIN && op2 == -1)
+            error_at("Overflow in constant expression", cur_token_loc());
         res = op1 / op2;
         break;
     case OP_mod:
         if (!op2)
             error_at("Modulo by zero in constant expression", cur_token_loc());
+        if (op1 == INT_MIN && op2 == -1)
+            error_at("Overflow in constant expression", cur_token_loc());
         /* Use bitwise AND for modulo optimization when divisor is power of 2 */
         if (tmp == INT_MIN) {
             res = op1 % op2;
@@ -4101,7 +4119,8 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     lex_expect(T_numeric);
                 } else if (lex_peek_n(T_char, literal, MAX_TOKEN_LEN)) {
                     char unescaped[MAX_TOKEN_LEN];
-                    unescape_string(literal, unescaped, MAX_TOKEN_LEN);
+                    if (unescape_string(literal, unescaped, MAX_TOKEN_LEN) < 0)
+                        error_at("Invalid escape sequence", next_token_loc());
                     case_val = unescaped[0];
                     lex_expect(T_char);
                 } else if (lex_peek(T_identifier, token)) {

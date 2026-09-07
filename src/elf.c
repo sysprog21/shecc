@@ -1297,7 +1297,7 @@ void elf_generate(const char *outfile)
 
     FILE *fp = fopen(outfile, "wb");
     if (!fp) {
-        fatal("Unable to open output file for writing");
+        usage_error("Unable to open output file for writing");
         return;
     }
 

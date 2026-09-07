@@ -756,8 +756,13 @@ int unescape_string(const char *input, char *output, int output_size)
             /* Hexadecimal escape sequence: \xhh */
             i++; /* Skips 'x' */
 
-            if (!isxdigit(input[i]))
+            if (!isxdigit(input[i])) {
+                /* Terminate before bailing: callers read output[0], and an
+                 * unterminated buffer left them reading stack garbage.
+                 */
+                output[j] = '\0';
                 return -1;
+            }
 
             int value = 0;
             int count = 0;
@@ -888,6 +893,7 @@ type_t *add_type(void)
  * rather than corrupting the type.
  */
 void fatal(char *msg);
+void usage_error(char *msg);
 
 void set_type_name(type_t *type, char *name)
 {
@@ -930,6 +936,8 @@ var_t *find_member(char token[], type_t *type)
      */
     if (type->size == 0)
         type = type->base_struct;
+    if (!type)
+        return NULL;
 
     char head = token[0];
 
@@ -1231,10 +1239,12 @@ void bb_connect(basic_block_t *pred,
                 basic_block_t *succ,
                 bb_connection_type_t type)
 {
-    if (!pred)
-        abort();
-    if (!succ)
-        abort();
+    /* Statements after a return or goto are unreachable, and the parser walks
+     * them with no current block. An edge out of nowhere is meaningless rather
+     * than wrong, so drop it.
+     */
+    if (!pred || !succ)
+        return;
 
     /* bb_disconnect() leaves holes, so reuse the first free slot before
      * extending. prev_idx is one past the highest slot ever filled.
@@ -1738,6 +1748,17 @@ void fatal(char *msg)
      */
     fflush(stdout);
     abort();
+}
+
+/* Reports a mistake in how the compiler was invoked. A bad command line is not
+ * a broken invariant, so this exits rather than abort()ing: no core dump, and
+ * no "Aborted" line, for an ordinary typo.
+ */
+void usage_error(char *msg)
+{
+    printf("[Error]: %s\n", msg);
+    fflush(stdout);
+    exit(1);
 }
 
 /* Reports error and prints occurred position context,
