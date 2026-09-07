@@ -63,8 +63,7 @@ OBJS := $(SRCS:%.c=$(OUT)/%.o)
 deps := $(OBJS:%.o=%.o.d)
 TESTS := $(wildcard tests/*.c)
 TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
-SNAPSHOTS = $(foreach SNAPSHOT_ARCH,$(SNAPSHOT_ARCHS), $(patsubst tests/%.c, tests/snapshots/%-$(SNAPSHOT_ARCH)-static.json, $(TESTS)))
-SNAPSHOTS += $(patsubst tests/%.c, tests/snapshots/%-arm-dynamic.json, $(TESTS))
+SNAPSHOTS = $(foreach SNAPSHOT_ARCH,$(SNAPSHOT_ARCHS), $(foreach SNAPSHOT_MODE,static dynamic, $(patsubst tests/%.c, tests/snapshots/%-$(SNAPSHOT_ARCH)-$(SNAPSHOT_MODE).json, $(TESTS))))
 
 all: config bootstrap
 
