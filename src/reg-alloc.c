@@ -1999,6 +1999,669 @@ void coalesce_phi_slots(func_t *func)
     }
 }
 
+/* Place one global initializer, which has no basic block of its own. */
+void reg_alloc_global(insn_t *global_insn)
+{
+    ph2_ir_t *ir;
+    int dest, src0;
+
+    /* Global initializers carry no liveness information, so no operand register
+     * may be reused as a destination here.
+     */
+
+    switch (global_insn->opcode) {
+    case OP_allocat:
+        if (global_insn->rd->array_size) {
+            /* Original scheme: pointer slot + backing region. Cache the base
+             * offset of the backing region into init_val so later global
+             * initializers can address elements without loading the pointer.
+             */
+            global_insn->rd->offset = GLOBAL_FUNC->stack_size;
+            global_insn->rd->space_is_allocated = true;
+            GLOBAL_FUNC->stack_size += PTR_SIZE;
+            src0 = GLOBAL_FUNC->stack_size; /* base of backing region */
+
+            /* Stash base offset for this array variable */
+            global_insn->rd->init_val = src0;
+
+            if (global_insn->rd->ptr_level)
+                GLOBAL_FUNC->stack_size +=
+                    align_size(PTR_SIZE * global_insn->rd->array_size);
+            else {
+                GLOBAL_FUNC->stack_size += align_size(
+                    global_insn->rd->array_size * global_insn->rd->type->size);
+            }
+
+            dest =
+                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+            ir->src0 = src0;
+            ir->dest = dest;
+            ir->is_pointer = true;
+            ir->size_bytes = PTR_SIZE;
+            spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
+        } else {
+            global_insn->rd->offset = GLOBAL_FUNC->stack_size;
+            global_insn->rd->space_is_allocated = true;
+            if (global_insn->rd->ptr_level)
+                GLOBAL_FUNC->stack_size += PTR_SIZE;
+            else if (global_insn->rd->type != TY_int &&
+                     global_insn->rd->type != TY_short &&
+                     global_insn->rd->type != TY_char &&
+                     global_insn->rd->type != TY_bool) {
+                GLOBAL_FUNC->stack_size +=
+                    align_size(global_insn->rd->type->size);
+            } else
+                /* 'char' is aligned to one byte for the convenience */
+                GLOBAL_FUNC->stack_size += PTR_SIZE;
+        }
+        break;
+    case OP_load_constant:
+    case OP_load_data_address:
+    case OP_load_rodata_address:
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
+        ir->src0 = global_insn->rd->init_val;
+        ir->dest = dest;
+        break;
+    case OP_assign:
+        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_assign);
+        ir->src0 = src0;
+        ir->dest = dest;
+        spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
+        /* release the unused constant number in register manually */
+        REGS[src0].polluted = 0;
+        vreg_clear_phys(REGS[src0].var);
+        REGS[src0].var = NULL;
+        break;
+    case OP_add: {
+        /* Special-case address computation for globals: if rs1 is a global base
+         * and rs2 is a constant, propagate absolute offset to rd so OP_write
+         * can fold into OP_global_store.
+         */
+        if (global_insn->rs1 && global_insn->rs1->is_global &&
+            global_insn->rs2) {
+            int base_off = global_insn->rs1->offset;
+
+            /* For global arrays, use backing-region base cached in init_val */
+            if (global_insn->rs1->array_size > 0)
+                base_off = global_insn->rs1->init_val;
+            global_insn->rd->offset = base_off + global_insn->rs2->init_val;
+            global_insn->rd->space_is_allocated = true;
+            global_insn->rd->is_global = true;
+            break;
+        }
+        /* Fallback: generate an add */
+        int src1;
+        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
+        dest =
+            prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, src1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_add);
+        ir->src0 = src0;
+        ir->src1 = src1;
+        ir->dest = dest;
+        break;
+    }
+    case OP_write: {
+        /* Fold (addr, val) where addr carries GP-relative offset */
+        if (global_insn->rs1 && (global_insn->rs1->is_global)) {
+            int vreg = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_store);
+            ir->src0 = vreg;
+
+            /* For array variables used as base, store to the backing region's
+             * base offset (cached in init_val).
+             */
+            int base_off = global_insn->rs1->offset;
+            if (global_insn->rs1->array_size > 0)
+                base_off = global_insn->rs1->init_val;
+            ir->src1 = base_off;
+            break;
+        }
+        /* Fallback generic write */
+        int src1;
+        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_write);
+        ir->src0 = src0;
+        ir->src1 = src1;
+        ir->dest = global_insn->sz;
+        break;
+    }
+    case OP_trunc:
+    case OP_sign_ext:
+    case OP_cast:
+        /* A narrowing initializer such as "char g[] = {65, 66}" reaches the
+         * global block as a conversion, so it has to be lowered here exactly as
+         * it is inside a function.
+         */
+        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
+        ir->src0 = src0;
+        ir->src1 = global_insn->sz;
+        ir->dest = dest;
+        break;
+    default:
+        printf("Unsupported global operation: %d\n", global_insn->opcode);
+        fflush(stdout); /* see fatal() */
+        abort();
+    }
+}
+
+/* Assign registers across one basic block, and emit the phase-2 IR that carries
+ * the assignment.
+ */
+void reg_alloc_bb(func_t *func, basic_block_t *bb)
+{
+    bool handle_abi = false, args_on_stack = false;
+
+    is_pushing_args = false;
+    int args = 0;
+
+    bb->visited++;
+
+    /* The entry block starts with the incoming arguments already in their
+     * registers; every other block takes what its predecessor handed over, or
+     * nothing.
+     */
+    if (bb != func->bbs)
+        load_entry_regs(bb);
+
+    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+        func_t *callee_func;
+        ph2_ir_t *ir;
+        int dest, src0, src1;
+        int sz, clear_reg;
+
+        refresh(bb, insn);
+
+        switch (insn->opcode) {
+        case OP_unwound_phi:
+            track_var_use(insn->rs1, insn->idx);
+
+            /* A pinned destination lives in the same register on every path, so
+             * the copy this phi stands for is a register move rather than a
+             * write into a slot nothing reads back.
+             */
+            int to = pinned_reg_of(insn->rd);
+            if (to >= 0) {
+                src0 = prepare_operand(bb, insn->rs1, -1);
+                if (src0 != to) {
+                    ir = bb_add_ph2_ir(bb, OP_assign);
+                    ir->src0 = src0;
+                    ir->dest = to;
+                    ir->is_pointer = is_pointer_like(insn->rd);
+                    ir->size_bytes = var_slot_size(insn->rd);
+                }
+                REGS[to].var = insn->rd;
+                REGS[to].polluted = 1;
+                break;
+            }
+
+            if (!insn->rd->space_is_allocated)
+                alloc_var_slot(bb->belong_to, insn->rd);
+
+            /* Sharing a slot with the phi turns the copy into a write of the
+             * operand into the place it already lives. Only a register the
+             * block has changed still needs storing -- and reading the slot
+             * back first, as the general path would, is a load whose value goes
+             * straight home again.
+             */
+            if (insn->rs1->space_is_allocated &&
+                insn->rs1->offset == insn->rd->offset &&
+                insn->rs1->ofs_based_on_stack_top ==
+                    insn->rd->ofs_based_on_stack_top) {
+                int held = find_in_regs(insn->rs1);
+
+                if (held < 0 || !REGS[held].polluted)
+                    break; /* the slot already holds the value */
+                store_var(bb, insn->rs1, held);
+                break;
+            }
+
+            src0 = prepare_operand(bb, insn->rs1, -1);
+            ir = bb_add_ph2_ir(bb, OP_store);
+            ir->src0 = src0;
+            ir->src1 = insn->rd->offset;
+            ir->ofs_based_on_stack_top = insn->rd->ofs_based_on_stack_top;
+            ir->is_pointer = is_pointer_like(insn->rd);
+            ir->size_bytes = var_slot_size(insn->rd);
+            break;
+        case OP_allocat:
+            if ((insn->rd->type == TY_void || insn->rd->type == TY_int ||
+                 insn->rd->type == TY_short || insn->rd->type == TY_char ||
+                 insn->rd->type == TY_bool) &&
+                insn->rd->array_size == 0)
+                break;
+
+            insn->rd->offset = func->stack_size;
+            insn->rd->space_is_allocated = true;
+            func->stack_size += PTR_SIZE;
+            src0 = func->stack_size;
+
+            if (insn->rd->ptr_level)
+                sz = PTR_SIZE;
+            else {
+                sz = insn->rd->type->size;
+            }
+
+            if (insn->rd->array_size)
+                func->stack_size += align_size(insn->rd->array_size * sz);
+            else
+                func->stack_size += align_size(sz);
+
+            if (!insn->rd->is_global &&
+                aggregate_has_function_pointer(insn->rd->type)) {
+                insn->rd->has_backing_storage = true;
+            }
+
+            dest = prepare_dest(bb, insn, insn->rd, -1, -1);
+            ir = bb_add_ph2_ir(bb, OP_address_of);
+            ir->src0 = src0;
+            ir->dest = dest;
+            ir->ofs_based_on_stack_top = insn->rd->ofs_based_on_stack_top;
+
+            /* For arrays, store the base address just like global arrays do */
+            if (insn->rd->array_size)
+                spill_var(bb, insn->rd, dest);
+            break;
+        case OP_load_constant:
+        case OP_load_data_address:
+        case OP_load_rodata_address:
+            dest = prepare_dest(bb, insn, insn->rd, -1, -1);
+            ir = bb_add_ph2_ir(bb, insn->opcode);
+            ir->src0 = insn->rd->init_val;
+            ir->dest = dest;
+
+            /* store global variable immediately after assignment */
+            if (insn->rd->is_global) {
+                ir = bb_add_ph2_ir(bb, OP_global_store);
+                ir->src0 = dest;
+                ir->src1 = insn->rd->offset;
+                REGS[dest].polluted = 0;
+            }
+
+            break;
+        case OP_address_of:
+        case OP_global_address_of:
+            /* Mark variable as address-taken, disable constant optimization */
+            insn->rs1->address_taken = true;
+            insn->rs1->is_const = false;
+
+            /* OP_allocat puts a local aggregate's spill slot before its backing
+             * storage. &aggregate must name the backing storage, not the spill
+             * slot.
+             *
+             * FIXME: This does not support aggregate parameter for now.
+             */
+            bool is_pointer = insn->rs1->ptr_level ||
+                              (insn->rs1->type && insn->rs1->type->ptr_level);
+            if (!insn->rs1->is_global && !is_pointer &&
+                aggregate_has_function_pointer(insn->rs1->type)) {
+                if (!insn->rs1->has_backing_storage) {
+                    insn->rs1->offset = func->stack_size;
+                    insn->rs1->space_is_allocated = true;
+                    insn->rs1->ofs_based_on_stack_top = false;
+                    func->stack_size += PTR_SIZE;
+                    if (insn->rs1->ptr_level)
+                        sz = PTR_SIZE;
+                    else
+                        sz = insn->rs1->type->size;
+                    if (insn->rs1->array_size)
+                        func->stack_size +=
+                            align_size(insn->rs1->array_size * sz);
+                    else
+                        func->stack_size += align_size(sz);
+                    insn->rs1->has_backing_storage = true;
+                }
+
+                dest = prepare_dest(bb, insn, insn->rd, -1, -1);
+                ir = bb_add_ph2_ir(bb, OP_address_of);
+                ir->src0 = insn->rs1->offset + PTR_SIZE;
+                ir->dest = dest;
+                ir->ofs_based_on_stack_top = insn->rs1->ofs_based_on_stack_top;
+                break;
+            }
+
+            /* make sure variable is on stack */
+            if (!insn->rs1->space_is_allocated) {
+                alloc_var_slot(bb->belong_to, insn->rs1);
+
+                for (int i = 0; i < REG_CNT; i++)
+                    if (REGS[i].var == insn->rs1 && !pinned_base[i]) {
+                        ir = bb_add_ph2_ir(bb, OP_store);
+                        ir->src0 = i;
+                        ir->src1 = insn->rs1->offset;
+                        ir->ofs_based_on_stack_top =
+                            insn->rs1->ofs_based_on_stack_top;
+                        /* Clear stale register tracking */
+                        REGS[i].var = NULL;
+                    }
+            }
+
+            dest = prepare_dest(bb, insn, insn->rd, -1, -1);
+            if (insn->rs1->is_global || insn->opcode == OP_global_address_of)
+                ir = bb_add_ph2_ir(bb, OP_global_address_of);
+            else
+                ir = bb_add_ph2_ir(bb, OP_address_of);
+            ir->src0 = insn->rs1->offset;
+            ir->dest = dest;
+            ir->ofs_based_on_stack_top = insn->rs1->ofs_based_on_stack_top;
+            break;
+        case OP_cmov: {
+            /* A select reads three registers, one more than the allocator's
+             * avoid arguments can protect, so each is locked as it is placed.
+             * With all three safe the destination may land anywhere.
+             */
+            int cond, taken, other;
+
+            track_var_use(insn->rs1, insn->idx);
+            track_var_use(insn->rs2, insn->idx);
+            track_var_use(insn->rs3, insn->idx);
+
+            reg_locked = 0;
+            taken = prepare_operand(bb, insn->rs1, -1);
+            reg_locked = reg_locked | (1 << taken);
+            other = prepare_operand(bb, insn->rs3, taken);
+            reg_locked = reg_locked | (1 << other);
+            cond = prepare_operand(bb, insn->rs2, taken);
+            reg_locked = reg_locked | (1 << cond);
+            dest = prepare_dest(bb, insn, insn->rd, taken, other);
+
+            if (dest < 0) {
+                /* A select needs a fourth register only while all three inputs
+                 * remain live. Save one unpinned input first, then use its
+                 * physical register as the result. The CMOV emitter
+                 * deliberately supports the destination aliasing either arm; it
+                 * tests the condition before overwriting anything, so the
+                 * condition is safe too if it is the only choice.
+                 *
+                 * spill_var() leaves the machine register unchanged, which is
+                 * exactly what the select still needs. It only removes the
+                 * allocator's association, making the value available for the
+                 * result and forcing a later use of the saved input to reload
+                 * its slot.
+                 */
+                int reuse = -1;
+                const int sources[] = {taken, other, cond};
+
+                for (int i = 0; i < 3; i++) {
+                    int reg = sources[i];
+                    if (!pinned_base[reg]) {
+                        reuse = reg;
+                        break;
+                    }
+                }
+
+                /* pin_registers() reserves at most half the file, so one of a
+                 * select's inputs is always reclaimable.
+                 */
+                if (reuse < 0)
+                    abort();
+                spill_var(bb, REGS[reuse].var, reuse);
+                dest = prepare_dest(bb, insn, insn->rd, taken, other);
+                if (dest != reuse)
+                    abort();
+            }
+            reg_locked = 0;
+            ir = bb_add_ph2_ir(bb, OP_cmov);
+            ir->src0 = cond;
+            ir->src1 = taken;
+            ir->src2 = other;
+            ir->dest = dest;
+            ir->size_bytes = var_slot_size(insn->rd);
+            ir->is_pointer = is_pointer_like(insn->rd);
+            break;
+        }
+        case OP_assign:
+            if (insn->rd->consumed == -1)
+                break;
+
+            track_var_use(insn->rs1, insn->idx);
+            src0 = find_in_regs(insn->rs1);
+
+            /* If operand is loaded from stack, clear the original slot after
+             * moving.
+             */
+            if (src0 > -1)
+                clear_reg = 0;
+            else {
+                clear_reg = 1;
+                src0 = prepare_operand(bb, insn->rs1, -1);
+            }
+            dest = prepare_dest(bb, insn, insn->rd, src0, -1);
+            ir = bb_add_ph2_ir(bb, OP_assign);
+            ir->src0 = src0;
+            ir->dest = dest;
+
+            /* store global variable immediately after assignment */
+            if (insn->rd->is_global) {
+                ir = bb_add_ph2_ir(bb, OP_global_store);
+                ir->src0 = dest;
+                ir->src1 = insn->rd->offset;
+                REGS[dest].polluted = 0;
+            }
+
+            if (clear_reg) {
+                vreg_clear_phys(REGS[src0].var);
+                REGS[src0].var = NULL;
+            }
+
+            break;
+        case OP_read:
+            src0 = prepare_operand(bb, insn->rs1, -1);
+            dest = prepare_dest(bb, insn, insn->rd, src0, -1);
+            ir = bb_add_ph2_ir(bb, OP_read);
+            ir->src0 = src0;
+            ir->src1 = insn->sz;
+            ir->dest = dest;
+            break;
+        case OP_write:
+            if (insn->rs2->is_func) {
+                src0 = prepare_operand(bb, insn->rs1, -1);
+                ir = bb_add_ph2_ir(bb, OP_address_of_func);
+                ir->src0 = src0;
+                ir->func_name = intern_string(insn->rs2->var_name);
+                if (dynlink) {
+                    func_t *target_fn = find_func(ir->func_name);
+                    if (target_fn)
+                        target_fn->is_used = true;
+                }
+            } else {
+                /* FIXME: Register content becomes stale after store operation.
+                 * Current workaround causes redundant spilling - need better
+                 * register invalidation strategy.
+                 */
+                spill_alive(bb, insn);
+                src0 = prepare_operand(bb, insn->rs1, -1);
+                src1 = prepare_operand(bb, insn->rs2, src0);
+                ir = bb_add_ph2_ir(bb, OP_write);
+                ir->src0 = src0;
+                ir->src1 = src1;
+                ir->dest = insn->sz;
+            }
+            break;
+        case OP_branch:
+            src0 = prepare_operand(bb, insn->rs1, -1);
+
+            /* REGS[src0].var had been set to NULL, but the actual content is
+             * still holded in the register.
+             *
+             * Write every live-out value back but keep it in its register: the
+             * arm reached by the jump starts with an empty file and loads from
+             * the slots just written, while the arm that falls through can
+             * inherit the registers through bb_export_regs().
+             */
+            spill_live_out_keep(bb);
+
+            ir = bb_add_ph2_ir(bb, OP_branch);
+            ir->src0 = src0;
+            ir->then_bb = bb->then_;
+            ir->else_bb = bb->else_;
+            break;
+        case OP_push:
+            extend_liveness(bb, insn, insn->rs1, insn->sz);
+
+            if (!is_pushing_args) {
+                spill_alive(bb, insn);
+                is_pushing_args = true;
+            }
+            if (!handle_abi) {
+                args_on_stack = abi_lower_call_args(bb, insn);
+                handle_abi = true;
+            }
+
+            if (args_on_stack && args >= MAX_ARGS_IN_REG)
+                break;
+
+            src0 = prepare_operand(bb, insn->rs1, -1);
+            ir = bb_add_ph2_ir(bb, OP_assign);
+            ir->src0 = src0;
+            ir->dest = args++;
+            REGS[ir->dest].var = insn->rs1;
+            REGS[ir->dest].polluted = 0;
+            break;
+        case OP_call:
+            callee_func = find_func(insn->str);
+            if (!callee_func->num_params)
+                spill_alive(bb, insn);
+
+            if (dynlink)
+                callee_func->is_used = true;
+
+            ir = bb_add_ph2_ir(bb, OP_call);
+            /* add_insn() interned this when the call was created. */
+            ir->func_name = insn->str;
+
+            is_pushing_args = false;
+            args = 0;
+            handle_abi = false;
+
+            clobber_caller_saved();
+
+            break;
+        case OP_indirect:
+            if (!args)
+                spill_alive(bb, insn);
+
+            src0 = prepare_operand(bb, insn->rs1, -1);
+            ir = bb_add_ph2_ir(bb, OP_load_func);
+            ir->src0 = src0;
+
+            bb_add_ph2_ir(bb, OP_indirect);
+
+            is_pushing_args = false;
+            args = 0;
+            handle_abi = false;
+
+            clobber_caller_saved();
+            break;
+        case OP_func_ret:
+            dest = prepare_dest(bb, insn, insn->rd, -1, -1);
+            ir = bb_add_ph2_ir(bb, OP_assign);
+            ir->src0 = 0;
+            ir->dest = dest;
+            break;
+        case OP_return:
+            if (insn->rs1)
+                src0 = prepare_operand(bb, insn->rs1, -1);
+            else
+                src0 = -1;
+
+            ir = bb_add_ph2_ir(bb, OP_return);
+            ir->src0 = src0;
+            break;
+        case OP_add:
+        case OP_sub:
+        case OP_mul:
+        case OP_div:
+        case OP_mod:
+        case OP_lshift:
+        case OP_rshift:
+        case OP_eq:
+        case OP_neq:
+        case OP_gt:
+        case OP_geq:
+        case OP_lt:
+        case OP_leq:
+        case OP_bit_and:
+        case OP_bit_or:
+        case OP_bit_xor:
+            track_var_use(insn->rs1, insn->idx);
+            track_var_use(insn->rs2, insn->idx);
+            src0 = prepare_operand(bb, insn->rs1, -1);
+            src1 = prepare_operand(bb, insn->rs2, src0);
+            dest = prepare_dest(bb, insn, insn->rd, src0, src1);
+            ir = bb_add_ph2_ir(bb, insn->opcode);
+            ir->src0 = src0;
+            ir->src1 = src1;
+            ir->dest = dest;
+
+            /* Record whether the result is an address. On LP64 an int-typed
+             * result has to wrap at 32 bits, while a pointer must keep all
+             * 64. The backend cannot tell the two apart without this.
+             */
+            ir->is_pointer = is_pointer_like(insn->rd) ||
+                             is_pointer_like(insn->rs1) ||
+                             is_pointer_like(insn->rs2);
+            break;
+        case OP_negate:
+        case OP_bit_not:
+        case OP_log_not:
+            src0 = prepare_operand(bb, insn->rs1, -1);
+            dest = prepare_dest(bb, insn, insn->rd, src0, -1);
+            ir = bb_add_ph2_ir(bb, insn->opcode);
+            ir->src0 = src0;
+            ir->dest = dest;
+            break;
+        case OP_trunc:
+        case OP_sign_ext:
+        case OP_cast:
+            src0 = prepare_operand(bb, insn->rs1, -1);
+            dest = prepare_dest(bb, insn, insn->rd, src0, -1);
+            ir = bb_add_ph2_ir(bb, insn->opcode);
+            ir->src1 = insn->sz;
+            ir->src0 = src0;
+            ir->dest = dest;
+            break;
+        default:
+            printf("Unknown opcode\n");
+            fflush(stdout); /* see fatal() */
+            abort();
+        }
+    }
+
+    if (bb->next) {
+        spill_live_out_keep(bb);
+        bb_export_regs(bb);
+    } else if (bb->then_ || bb->else_) {
+        /* A conditional branch has already written its live-out values back at
+         * OP_branch; only the handover is left.
+         */
+        bb_export_regs(bb);
+    }
+
+    if (bb == func->exit)
+        return;
+
+    /* append jump instruction for the normal block only */
+    if (!bb->next)
+        return;
+
+    if (bb->next == func->exit)
+        return;
+
+    /* jump to the beginning of loop or over the else block */
+    if (bb->next->visited == func->visited || bb->next->rpo != bb->rpo + 1) {
+        ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_jump);
+        ir->next_bb = bb->next;
+    }
+}
+
 void reg_alloc(void)
 {
     /* TODO: Add proper .bss and .data section support for uninitialized /
@@ -2006,161 +2669,7 @@ void reg_alloc(void)
      */
     for (insn_t *global_insn = GLOBAL_FUNC->bbs->insn_list.head; global_insn;
          global_insn = global_insn->next) {
-        ph2_ir_t *ir;
-        int dest, src0;
-
-        /* Global initializers carry no liveness information, so no operand
-         * register may be reused as a destination here.
-         */
-
-        switch (global_insn->opcode) {
-        case OP_allocat:
-            if (global_insn->rd->array_size) {
-                /* Original scheme: pointer slot + backing region. Cache the
-                 * base offset of the backing region into init_val so later
-                 * global initializers can address elements without loading the
-                 * pointer.
-                 */
-                global_insn->rd->offset = GLOBAL_FUNC->stack_size;
-                global_insn->rd->space_is_allocated = true;
-                GLOBAL_FUNC->stack_size += PTR_SIZE;
-                src0 = GLOBAL_FUNC->stack_size; /* base of backing region */
-
-                /* Stash base offset for this array variable */
-                global_insn->rd->init_val = src0;
-
-                if (global_insn->rd->ptr_level)
-                    GLOBAL_FUNC->stack_size +=
-                        align_size(PTR_SIZE * global_insn->rd->array_size);
-                else {
-                    GLOBAL_FUNC->stack_size +=
-                        align_size(global_insn->rd->array_size *
-                                   global_insn->rd->type->size);
-                }
-
-                dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1,
-                                    -1);
-                ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
-                ir->src0 = src0;
-                ir->dest = dest;
-                ir->is_pointer = true;
-                ir->size_bytes = PTR_SIZE;
-                spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
-            } else {
-                global_insn->rd->offset = GLOBAL_FUNC->stack_size;
-                global_insn->rd->space_is_allocated = true;
-                if (global_insn->rd->ptr_level)
-                    GLOBAL_FUNC->stack_size += PTR_SIZE;
-                else if (global_insn->rd->type != TY_int &&
-                         global_insn->rd->type != TY_short &&
-                         global_insn->rd->type != TY_char &&
-                         global_insn->rd->type != TY_bool) {
-                    GLOBAL_FUNC->stack_size +=
-                        align_size(global_insn->rd->type->size);
-                } else
-                    /* 'char' is aligned to one byte for the convenience */
-                    GLOBAL_FUNC->stack_size += PTR_SIZE;
-            }
-            break;
-        case OP_load_constant:
-        case OP_load_data_address:
-        case OP_load_rodata_address:
-            dest =
-                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
-            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
-            ir->src0 = global_insn->rd->init_val;
-            ir->dest = dest;
-            break;
-        case OP_assign:
-            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
-            dest =
-                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
-            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_assign);
-            ir->src0 = src0;
-            ir->dest = dest;
-            spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
-            /* release the unused constant number in register manually */
-            REGS[src0].polluted = 0;
-            vreg_clear_phys(REGS[src0].var);
-            REGS[src0].var = NULL;
-            break;
-        case OP_add: {
-            /* Special-case address computation for globals: if rs1 is a global
-             * base and rs2 is a constant, propagate absolute offset to rd so
-             * OP_write can fold into OP_global_store.
-             */
-            if (global_insn->rs1 && global_insn->rs1->is_global &&
-                global_insn->rs2) {
-                int base_off = global_insn->rs1->offset;
-
-                /* For global arrays, use backing-region base cached in init_val
-                 */
-                if (global_insn->rs1->array_size > 0)
-                    base_off = global_insn->rs1->init_val;
-                global_insn->rd->offset = base_off + global_insn->rs2->init_val;
-                global_insn->rd->space_is_allocated = true;
-                global_insn->rd->is_global = true;
-                break;
-            }
-            /* Fallback: generate an add */
-            int src1;
-            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
-            src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
-            dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0,
-                                src1);
-            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_add);
-            ir->src0 = src0;
-            ir->src1 = src1;
-            ir->dest = dest;
-            break;
-        }
-        case OP_write: {
-            /* Fold (addr, val) where addr carries GP-relative offset */
-            if (global_insn->rs1 && (global_insn->rs1->is_global)) {
-                int vreg =
-                    prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
-                ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_store);
-                ir->src0 = vreg;
-
-                /* For array variables used as base, store to the backing
-                 * region's base offset (cached in init_val).
-                 */
-                int base_off = global_insn->rs1->offset;
-                if (global_insn->rs1->array_size > 0)
-                    base_off = global_insn->rs1->init_val;
-                ir->src1 = base_off;
-                break;
-            }
-            /* Fallback generic write */
-            int src1;
-            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
-            src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
-            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_write);
-            ir->src0 = src0;
-            ir->src1 = src1;
-            ir->dest = global_insn->sz;
-            break;
-        }
-        case OP_trunc:
-        case OP_sign_ext:
-        case OP_cast:
-            /* A narrowing initializer such as "char g[] = {65, 66}" reaches the
-             * global block as a conversion, so it has to be lowered here
-             * exactly as it is inside a function.
-             */
-            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
-            dest =
-                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
-            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
-            ir->src0 = src0;
-            ir->src1 = global_insn->sz;
-            ir->dest = dest;
-            break;
-        default:
-            printf("Unsupported global operation: %d\n", global_insn->opcode);
-            fflush(stdout); /* see fatal() */
-            abort();
-        }
+        reg_alloc_global(global_insn);
     }
 
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
@@ -2284,528 +2793,7 @@ void reg_alloc(void)
         }
 
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            bool handle_abi = false, args_on_stack = false;
-
-            is_pushing_args = false;
-            int args = 0;
-
-            bb->visited++;
-
-            /* The entry block starts with the incoming arguments already in
-             * their registers; every other block takes what its predecessor
-             * handed over, or nothing.
-             */
-            if (bb != func->bbs)
-                load_entry_regs(bb);
-
-            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-                func_t *callee_func;
-                ph2_ir_t *ir;
-                int dest, src0, src1;
-                int sz, clear_reg;
-
-                refresh(bb, insn);
-
-                switch (insn->opcode) {
-                case OP_unwound_phi:
-                    track_var_use(insn->rs1, insn->idx);
-
-                    /* A pinned destination lives in the same register on every
-                     * path, so the copy this phi stands for is a register move
-                     * rather than a write into a slot nothing reads back.
-                     */
-                    int to = pinned_reg_of(insn->rd);
-                    if (to >= 0) {
-                        src0 = prepare_operand(bb, insn->rs1, -1);
-                        if (src0 != to) {
-                            ir = bb_add_ph2_ir(bb, OP_assign);
-                            ir->src0 = src0;
-                            ir->dest = to;
-                            ir->is_pointer = is_pointer_like(insn->rd);
-                            ir->size_bytes = var_slot_size(insn->rd);
-                        }
-                        REGS[to].var = insn->rd;
-                        REGS[to].polluted = 1;
-                        break;
-                    }
-
-                    if (!insn->rd->space_is_allocated)
-                        alloc_var_slot(bb->belong_to, insn->rd);
-
-                    /* Sharing a slot with the phi turns the copy into a write
-                     * of the operand into the place it already lives. Only a
-                     * register the block has changed still needs storing -- and
-                     * reading the slot back first, as the general path would,
-                     * is a load whose value goes straight home again.
-                     */
-                    if (insn->rs1->space_is_allocated &&
-                        insn->rs1->offset == insn->rd->offset &&
-                        insn->rs1->ofs_based_on_stack_top ==
-                            insn->rd->ofs_based_on_stack_top) {
-                        int held = find_in_regs(insn->rs1);
-
-                        if (held < 0 || !REGS[held].polluted)
-                            break; /* the slot already holds the value */
-                        store_var(bb, insn->rs1, held);
-                        break;
-                    }
-
-                    src0 = prepare_operand(bb, insn->rs1, -1);
-                    ir = bb_add_ph2_ir(bb, OP_store);
-                    ir->src0 = src0;
-                    ir->src1 = insn->rd->offset;
-                    ir->ofs_based_on_stack_top =
-                        insn->rd->ofs_based_on_stack_top;
-                    ir->is_pointer = is_pointer_like(insn->rd);
-                    ir->size_bytes = var_slot_size(insn->rd);
-                    break;
-                case OP_allocat:
-                    if ((insn->rd->type == TY_void ||
-                         insn->rd->type == TY_int ||
-                         insn->rd->type == TY_short ||
-                         insn->rd->type == TY_char ||
-                         insn->rd->type == TY_bool) &&
-                        insn->rd->array_size == 0)
-                        break;
-
-                    insn->rd->offset = func->stack_size;
-                    insn->rd->space_is_allocated = true;
-                    func->stack_size += PTR_SIZE;
-                    src0 = func->stack_size;
-
-                    if (insn->rd->ptr_level)
-                        sz = PTR_SIZE;
-                    else {
-                        sz = insn->rd->type->size;
-                    }
-
-                    if (insn->rd->array_size)
-                        func->stack_size +=
-                            align_size(insn->rd->array_size * sz);
-                    else
-                        func->stack_size += align_size(sz);
-
-                    if (!insn->rd->is_global &&
-                        aggregate_has_function_pointer(insn->rd->type)) {
-                        insn->rd->has_backing_storage = true;
-                    }
-
-                    dest = prepare_dest(bb, insn, insn->rd, -1, -1);
-                    ir = bb_add_ph2_ir(bb, OP_address_of);
-                    ir->src0 = src0;
-                    ir->dest = dest;
-                    ir->ofs_based_on_stack_top =
-                        insn->rd->ofs_based_on_stack_top;
-
-                    /* For arrays, store the base address just like global
-                     * arrays do
-                     */
-                    if (insn->rd->array_size)
-                        spill_var(bb, insn->rd, dest);
-                    break;
-                case OP_load_constant:
-                case OP_load_data_address:
-                case OP_load_rodata_address:
-                    dest = prepare_dest(bb, insn, insn->rd, -1, -1);
-                    ir = bb_add_ph2_ir(bb, insn->opcode);
-                    ir->src0 = insn->rd->init_val;
-                    ir->dest = dest;
-
-                    /* store global variable immediately after assignment */
-                    if (insn->rd->is_global) {
-                        ir = bb_add_ph2_ir(bb, OP_global_store);
-                        ir->src0 = dest;
-                        ir->src1 = insn->rd->offset;
-                        REGS[dest].polluted = 0;
-                    }
-
-                    break;
-                case OP_address_of:
-                case OP_global_address_of:
-                    /* Mark variable as address-taken, disable constant
-                     * optimization
-                     */
-                    insn->rs1->address_taken = true;
-                    insn->rs1->is_const = false;
-
-                    /* OP_allocat puts a local aggregate's spill slot before its
-                     * backing storage. &aggregate must name the backing
-                     * storage, not the spill slot.
-                     *
-                     * FIXME: This does not support aggregate parameter for now.
-                     */
-                    bool is_pointer =
-                        insn->rs1->ptr_level ||
-                        (insn->rs1->type && insn->rs1->type->ptr_level);
-                    if (!insn->rs1->is_global && !is_pointer &&
-                        aggregate_has_function_pointer(insn->rs1->type)) {
-                        if (!insn->rs1->has_backing_storage) {
-                            insn->rs1->offset = func->stack_size;
-                            insn->rs1->space_is_allocated = true;
-                            insn->rs1->ofs_based_on_stack_top = false;
-                            func->stack_size += PTR_SIZE;
-                            if (insn->rs1->ptr_level)
-                                sz = PTR_SIZE;
-                            else
-                                sz = insn->rs1->type->size;
-                            if (insn->rs1->array_size)
-                                func->stack_size +=
-                                    align_size(insn->rs1->array_size * sz);
-                            else
-                                func->stack_size += align_size(sz);
-                            insn->rs1->has_backing_storage = true;
-                        }
-
-                        dest = prepare_dest(bb, insn, insn->rd, -1, -1);
-                        ir = bb_add_ph2_ir(bb, OP_address_of);
-                        ir->src0 = insn->rs1->offset + PTR_SIZE;
-                        ir->dest = dest;
-                        ir->ofs_based_on_stack_top =
-                            insn->rs1->ofs_based_on_stack_top;
-                        break;
-                    }
-
-                    /* make sure variable is on stack */
-                    if (!insn->rs1->space_is_allocated) {
-                        alloc_var_slot(bb->belong_to, insn->rs1);
-
-                        for (int i = 0; i < REG_CNT; i++)
-                            if (REGS[i].var == insn->rs1 && !pinned_base[i]) {
-                                ir = bb_add_ph2_ir(bb, OP_store);
-                                ir->src0 = i;
-                                ir->src1 = insn->rs1->offset;
-                                ir->ofs_based_on_stack_top =
-                                    insn->rs1->ofs_based_on_stack_top;
-                                /* Clear stale register tracking */
-                                REGS[i].var = NULL;
-                            }
-                    }
-
-                    dest = prepare_dest(bb, insn, insn->rd, -1, -1);
-                    if (insn->rs1->is_global ||
-                        insn->opcode == OP_global_address_of)
-                        ir = bb_add_ph2_ir(bb, OP_global_address_of);
-                    else
-                        ir = bb_add_ph2_ir(bb, OP_address_of);
-                    ir->src0 = insn->rs1->offset;
-                    ir->dest = dest;
-                    ir->ofs_based_on_stack_top =
-                        insn->rs1->ofs_based_on_stack_top;
-                    break;
-                case OP_cmov: {
-                    /* A select reads three registers, one more than the
-                     * allocator's avoid arguments can protect, so each is
-                     * locked as it is placed. With all three safe the
-                     * destination may land anywhere.
-                     */
-                    int cond, taken, other;
-
-                    track_var_use(insn->rs1, insn->idx);
-                    track_var_use(insn->rs2, insn->idx);
-                    track_var_use(insn->rs3, insn->idx);
-
-                    reg_locked = 0;
-                    taken = prepare_operand(bb, insn->rs1, -1);
-                    reg_locked = reg_locked | (1 << taken);
-                    other = prepare_operand(bb, insn->rs3, taken);
-                    reg_locked = reg_locked | (1 << other);
-                    cond = prepare_operand(bb, insn->rs2, taken);
-                    reg_locked = reg_locked | (1 << cond);
-                    dest = prepare_dest(bb, insn, insn->rd, taken, other);
-
-                    if (dest < 0) {
-                        /* A select needs a fourth register only while all three
-                         * inputs remain live. Save one unpinned input first,
-                         * then use its physical register as the result. The
-                         * CMOV emitter deliberately supports the destination
-                         * aliasing either arm; it tests the condition before
-                         * overwriting anything, so the condition is safe too if
-                         * it is the only choice.
-                         *
-                         * spill_var() leaves the machine register unchanged,
-                         * which is exactly what the select still needs. It only
-                         * removes the allocator's association, making the value
-                         * available for the result and forcing a later use of
-                         * the saved input to reload its slot.
-                         */
-                        int reuse = -1;
-                        const int sources[] = {taken, other, cond};
-
-                        for (int i = 0; i < 3; i++) {
-                            int reg = sources[i];
-                            if (!pinned_base[reg]) {
-                                reuse = reg;
-                                break;
-                            }
-                        }
-
-                        /* pin_registers() reserves at most half the file, so
-                         * one of a select's inputs is always reclaimable.
-                         */
-                        if (reuse < 0)
-                            abort();
-                        spill_var(bb, REGS[reuse].var, reuse);
-                        dest = prepare_dest(bb, insn, insn->rd, taken, other);
-                        if (dest != reuse)
-                            abort();
-                    }
-                    reg_locked = 0;
-                    ir = bb_add_ph2_ir(bb, OP_cmov);
-                    ir->src0 = cond;
-                    ir->src1 = taken;
-                    ir->src2 = other;
-                    ir->dest = dest;
-                    ir->size_bytes = var_slot_size(insn->rd);
-                    ir->is_pointer = is_pointer_like(insn->rd);
-                    break;
-                }
-                case OP_assign:
-                    if (insn->rd->consumed == -1)
-                        break;
-
-                    track_var_use(insn->rs1, insn->idx);
-                    src0 = find_in_regs(insn->rs1);
-
-                    /* If operand is loaded from stack, clear the original slot
-                     * after moving.
-                     */
-                    if (src0 > -1)
-                        clear_reg = 0;
-                    else {
-                        clear_reg = 1;
-                        src0 = prepare_operand(bb, insn->rs1, -1);
-                    }
-                    dest = prepare_dest(bb, insn, insn->rd, src0, -1);
-                    ir = bb_add_ph2_ir(bb, OP_assign);
-                    ir->src0 = src0;
-                    ir->dest = dest;
-
-                    /* store global variable immediately after assignment */
-                    if (insn->rd->is_global) {
-                        ir = bb_add_ph2_ir(bb, OP_global_store);
-                        ir->src0 = dest;
-                        ir->src1 = insn->rd->offset;
-                        REGS[dest].polluted = 0;
-                    }
-
-                    if (clear_reg) {
-                        vreg_clear_phys(REGS[src0].var);
-                        REGS[src0].var = NULL;
-                    }
-
-                    break;
-                case OP_read:
-                    src0 = prepare_operand(bb, insn->rs1, -1);
-                    dest = prepare_dest(bb, insn, insn->rd, src0, -1);
-                    ir = bb_add_ph2_ir(bb, OP_read);
-                    ir->src0 = src0;
-                    ir->src1 = insn->sz;
-                    ir->dest = dest;
-                    break;
-                case OP_write:
-                    if (insn->rs2->is_func) {
-                        src0 = prepare_operand(bb, insn->rs1, -1);
-                        ir = bb_add_ph2_ir(bb, OP_address_of_func);
-                        ir->src0 = src0;
-                        ir->func_name = intern_string(insn->rs2->var_name);
-                        if (dynlink) {
-                            func_t *target_fn = find_func(ir->func_name);
-                            if (target_fn)
-                                target_fn->is_used = true;
-                        }
-                    } else {
-                        /* FIXME: Register content becomes stale after store
-                         * operation. Current workaround causes redundant
-                         * spilling - need better register invalidation
-                         * strategy.
-                         */
-                        spill_alive(bb, insn);
-                        src0 = prepare_operand(bb, insn->rs1, -1);
-                        src1 = prepare_operand(bb, insn->rs2, src0);
-                        ir = bb_add_ph2_ir(bb, OP_write);
-                        ir->src0 = src0;
-                        ir->src1 = src1;
-                        ir->dest = insn->sz;
-                    }
-                    break;
-                case OP_branch:
-                    src0 = prepare_operand(bb, insn->rs1, -1);
-
-                    /* REGS[src0].var had been set to NULL, but the actual
-                     * content is still holded in the register.
-                     *
-                     * Write every live-out value back but keep it in its
-                     * register: the arm reached by the jump starts with an
-                     * empty file and loads from the slots just written, while
-                     * the arm that falls through can inherit the registers
-                     * through bb_export_regs().
-                     */
-                    spill_live_out_keep(bb);
-
-                    ir = bb_add_ph2_ir(bb, OP_branch);
-                    ir->src0 = src0;
-                    ir->then_bb = bb->then_;
-                    ir->else_bb = bb->else_;
-                    break;
-                case OP_push:
-                    extend_liveness(bb, insn, insn->rs1, insn->sz);
-
-                    if (!is_pushing_args) {
-                        spill_alive(bb, insn);
-                        is_pushing_args = true;
-                    }
-                    if (!handle_abi) {
-                        args_on_stack = abi_lower_call_args(bb, insn);
-                        handle_abi = true;
-                    }
-
-                    if (args_on_stack && args >= MAX_ARGS_IN_REG)
-                        break;
-
-                    src0 = prepare_operand(bb, insn->rs1, -1);
-                    ir = bb_add_ph2_ir(bb, OP_assign);
-                    ir->src0 = src0;
-                    ir->dest = args++;
-                    REGS[ir->dest].var = insn->rs1;
-                    REGS[ir->dest].polluted = 0;
-                    break;
-                case OP_call:
-                    callee_func = find_func(insn->str);
-                    if (!callee_func->num_params)
-                        spill_alive(bb, insn);
-
-                    if (dynlink)
-                        callee_func->is_used = true;
-
-                    ir = bb_add_ph2_ir(bb, OP_call);
-                    /* add_insn() interned this when the call was created. */
-                    ir->func_name = insn->str;
-
-                    is_pushing_args = false;
-                    args = 0;
-                    handle_abi = false;
-
-                    clobber_caller_saved();
-
-                    break;
-                case OP_indirect:
-                    if (!args)
-                        spill_alive(bb, insn);
-
-                    src0 = prepare_operand(bb, insn->rs1, -1);
-                    ir = bb_add_ph2_ir(bb, OP_load_func);
-                    ir->src0 = src0;
-
-                    bb_add_ph2_ir(bb, OP_indirect);
-
-                    is_pushing_args = false;
-                    args = 0;
-                    handle_abi = false;
-
-                    clobber_caller_saved();
-                    break;
-                case OP_func_ret:
-                    dest = prepare_dest(bb, insn, insn->rd, -1, -1);
-                    ir = bb_add_ph2_ir(bb, OP_assign);
-                    ir->src0 = 0;
-                    ir->dest = dest;
-                    break;
-                case OP_return:
-                    if (insn->rs1)
-                        src0 = prepare_operand(bb, insn->rs1, -1);
-                    else
-                        src0 = -1;
-
-                    ir = bb_add_ph2_ir(bb, OP_return);
-                    ir->src0 = src0;
-                    break;
-                case OP_add:
-                case OP_sub:
-                case OP_mul:
-                case OP_div:
-                case OP_mod:
-                case OP_lshift:
-                case OP_rshift:
-                case OP_eq:
-                case OP_neq:
-                case OP_gt:
-                case OP_geq:
-                case OP_lt:
-                case OP_leq:
-                case OP_bit_and:
-                case OP_bit_or:
-                case OP_bit_xor:
-                    track_var_use(insn->rs1, insn->idx);
-                    track_var_use(insn->rs2, insn->idx);
-                    src0 = prepare_operand(bb, insn->rs1, -1);
-                    src1 = prepare_operand(bb, insn->rs2, src0);
-                    dest = prepare_dest(bb, insn, insn->rd, src0, src1);
-                    ir = bb_add_ph2_ir(bb, insn->opcode);
-                    ir->src0 = src0;
-                    ir->src1 = src1;
-                    ir->dest = dest;
-
-                    /* Record whether the result is an address. On LP64 an
-                     * int-typed result has to wrap at 32 bits, while a pointer
-                     * must keep all 64. The backend cannot tell the two apart
-                     * without this.
-                     */
-                    ir->is_pointer = is_pointer_like(insn->rd) ||
-                                     is_pointer_like(insn->rs1) ||
-                                     is_pointer_like(insn->rs2);
-                    break;
-                case OP_negate:
-                case OP_bit_not:
-                case OP_log_not:
-                    src0 = prepare_operand(bb, insn->rs1, -1);
-                    dest = prepare_dest(bb, insn, insn->rd, src0, -1);
-                    ir = bb_add_ph2_ir(bb, insn->opcode);
-                    ir->src0 = src0;
-                    ir->dest = dest;
-                    break;
-                case OP_trunc:
-                case OP_sign_ext:
-                case OP_cast:
-                    src0 = prepare_operand(bb, insn->rs1, -1);
-                    dest = prepare_dest(bb, insn, insn->rd, src0, -1);
-                    ir = bb_add_ph2_ir(bb, insn->opcode);
-                    ir->src1 = insn->sz;
-                    ir->src0 = src0;
-                    ir->dest = dest;
-                    break;
-                default:
-                    printf("Unknown opcode\n");
-                    fflush(stdout); /* see fatal() */
-                    abort();
-                }
-            }
-
-            if (bb->next) {
-                spill_live_out_keep(bb);
-                bb_export_regs(bb);
-            } else if (bb->then_ || bb->else_) {
-                /* A conditional branch has already written its live-out values
-                 * back at OP_branch; only the handover is left.
-                 */
-                bb_export_regs(bb);
-            }
-
-            if (bb == func->exit)
-                continue;
-
-            /* append jump instruction for the normal block only */
-            if (!bb->next)
-                continue;
-
-            if (bb->next == func->exit)
-                continue;
-
-            /* jump to the beginning of loop or over the else block */
-            if (bb->next->visited == func->visited ||
-                bb->next->rpo != bb->rpo + 1) {
-                ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_jump);
-                ir->next_bb = bb->next;
-            }
+            reg_alloc_bb(func, bb);
         }
 
         /* handle implicit return */

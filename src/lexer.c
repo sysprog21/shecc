@@ -240,12 +240,20 @@ token_t *new_token(token_kind_t kind, const source_location_t *loc, int len)
     return token;
 }
 
-token_t *lex_token(strbuf_t *buf, source_location_t *loc)
+/* Skipping a comment or a run of whitespace resumes the scan, and lex_layout()
+ * below does that by starting a fresh token here.
+ */
+token_t *lex_token(strbuf_t *buf, source_location_t *loc);
+
+/* Preprocessor directives, comments, and the whitespace between tokens.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
 {
     token_t *token;
-    char token_buffer[MAX_TOKEN_LEN], ch = peek_char(buf, 0);
-
-    loc->pos = buf->size;
+    char token_buffer[MAX_TOKEN_LEN];
 
     if (ch == '#') {
         /* Inside a macro replacement list '#' stringifies the parameter that
@@ -392,6 +400,19 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         return token;
     }
 
+    return NULL;
+}
+
+/* Integer literals, in every base the language accepts.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+    char token_buffer[MAX_TOKEN_LEN];
+
     if (isdigit(ch)) {
         int sz = 0;
         token_buffer[sz++] = ch;
@@ -479,76 +500,18 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         return token;
     }
 
-    if (ch == '(') {
-        ch = read_char(buf);
-        token = new_token(T_open_bracket, loc, 1);
-        loc->column++;
-        return token;
-    }
+    return NULL;
+}
 
-    if (ch == ')') {
-        ch = read_char(buf);
-        token = new_token(T_close_bracket, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '{') {
-        ch = read_char(buf);
-        token = new_token(T_open_curly, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '}') {
-        ch = read_char(buf);
-        token = new_token(T_close_curly, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '[') {
-        ch = read_char(buf);
-        token = new_token(T_open_square, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ']') {
-        ch = read_char(buf);
-        token = new_token(T_close_square, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ',') {
-        ch = read_char(buf);
-        token = new_token(T_comma, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '^') {
-        ch = read_char(buf);
-
-        if (ch == '=') {
-            ch = read_char(buf);
-            token = new_token(T_xoreq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_bit_xor, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '~') {
-        ch = read_char(buf);
-        token = new_token(T_bit_not, loc, 1);
-        loc->column++;
-        return token;
-    }
+/* String and character literals.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+    char token_buffer[MAX_TOKEN_LEN];
 
     if (ch == '"') {
         int sz = 0;
@@ -613,6 +576,122 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         token = new_token(T_char, loc, sz + 2);
         token->literal = intern_string(token_buffer);
         loc->column += sz + 2;
+        return token;
+    }
+
+    return NULL;
+}
+
+/* Punctuation that is never the start of a longer token.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_punct(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+
+    if (ch == '(') {
+        ch = read_char(buf);
+        token = new_token(T_open_bracket, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ')') {
+        ch = read_char(buf);
+        token = new_token(T_close_bracket, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '{') {
+        ch = read_char(buf);
+        token = new_token(T_open_curly, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '}') {
+        ch = read_char(buf);
+        token = new_token(T_close_curly, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '[') {
+        ch = read_char(buf);
+        token = new_token(T_open_square, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ']') {
+        ch = read_char(buf);
+        token = new_token(T_close_square, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ',') {
+        ch = read_char(buf);
+        token = new_token(T_comma, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '~') {
+        ch = read_char(buf);
+        token = new_token(T_bit_not, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ';') {
+        read_char(buf);
+        token = new_token(T_semicolon, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '?') {
+        read_char(buf);
+        token = new_token(T_question, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ':') {
+        read_char(buf);
+        token = new_token(T_colon, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    return NULL;
+}
+
+/* Operators, each of which may or may not continue into a longer one.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_operator(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+
+    if (ch == '^') {
+        ch = read_char(buf);
+
+        if (ch == '=') {
+            ch = read_char(buf);
+            token = new_token(T_xoreq, loc, 2);
+            loc->column += 2;
+            return token;
+        }
+
+        token = new_token(T_bit_xor, loc, 1);
+        loc->column++;
         return token;
     }
 
@@ -831,27 +910,6 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         return token;
     }
 
-    if (ch == ';') {
-        read_char(buf);
-        token = new_token(T_semicolon, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '?') {
-        read_char(buf);
-        token = new_token(T_question, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ':') {
-        read_char(buf);
-        token = new_token(T_colon, loc, 1);
-        loc->column++;
-        return token;
-    }
-
     if (ch == '=') {
         ch = read_char(buf);
 
@@ -866,6 +924,19 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         loc->column++;
         return token;
     }
+
+    return NULL;
+}
+
+/* Identifiers, and the keywords spelled like them.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+    char token_buffer[MAX_TOKEN_LEN];
 
     if (isalnum(ch) || ch == '_') {
         int sz = 0;
@@ -974,6 +1045,40 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         loc->column += sz;
         return token;
     }
+
+    return NULL;
+}
+
+/* Reads one token, dispatching on the character it starts with. Each reader
+ * above claims the characters it knows and returns NULL for the rest; the order
+ * of the calls matters only between lex_number() and lex_word(), which would
+ * otherwise both claim a leading digit.
+ */
+token_t *lex_token(strbuf_t *buf, source_location_t *loc)
+{
+    token_t *token;
+    char ch = peek_char(buf, 0);
+
+    loc->pos = buf->size;
+
+    token = lex_layout(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_number(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_literal(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_punct(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_operator(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_word(buf, loc, ch);
+    if (token)
+        return token;
 
     error_at("Unexpected token", loc);
     return NULL;

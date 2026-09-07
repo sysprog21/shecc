@@ -4058,383 +4058,446 @@ basic_block_t *read_code_block(func_t *func,
                                block_t *parent,
                                basic_block_t *bb);
 
-basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
+/* A switch, its cases, and the block they break out of. */
+basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
 {
     char token[MAX_ID_LEN];
-    func_t *func;
-    type_t *type;
-    var_t *vd, *rs1, *rs2, *var;
-    opcode_t prefix_op = OP_generic;
-    bool is_const = false;
+    var_t *vd;
+    var_t *rs1;
+    var_t *rs2;
 
-    if (!bb)
-        printf("Warning: unreachable code detected\n");
+    bool is_default = false;
 
-    /* statement can be:
-     *   function call, variable declaration, assignment operation,
-     *   keyword, block
-     */
+    basic_block_t *n = bb_create(parent);
+    bb_connect(bb, n, NEXT);
+    bb = n;
 
-    if (lex_peek(T_open_curly, NULL))
-        return read_code_block(parent->func, parent, bb);
+    lex_expect(T_open_bracket);
+    read_expr(parent, &bb);
+    lex_expect(T_close_bracket);
 
-    if (lex_accept(T_return)) {
-        return handle_return_statement(parent, bb);
-    }
+    /* create exit jump for breaks */
+    basic_block_t *switch_end = bb_create(parent);
+    break_bb_push(switch_end);
+    basic_block_t *true_body_ = bb_create(parent);
 
-    if (lex_accept(T_if)) {
-        return handle_if_statement(parent, bb);
-    }
+    lex_expect(T_open_curly);
+    while (lex_peek(T_default, NULL) || lex_peek(T_case, NULL)) {
+        if (lex_accept(T_default))
+            is_default = true;
+        else {
+            int case_val;
 
-    if (lex_accept(T_while)) {
-        return handle_while_statement(parent, bb);
-    }
+            lex_accept(T_case);
+            char literal[MAX_TOKEN_LEN];
 
-    if (lex_accept(T_switch)) {
-        bool is_default = false;
-
-        basic_block_t *n = bb_create(parent);
-        bb_connect(bb, n, NEXT);
-        bb = n;
-
-        lex_expect(T_open_bracket);
-        read_expr(parent, &bb);
-        lex_expect(T_close_bracket);
-
-        /* create exit jump for breaks */
-        basic_block_t *switch_end = bb_create(parent);
-        break_bb_push(switch_end);
-        basic_block_t *true_body_ = bb_create(parent);
-
-        lex_expect(T_open_curly);
-        while (lex_peek(T_default, NULL) || lex_peek(T_case, NULL)) {
-            if (lex_accept(T_default))
-                is_default = true;
-            else {
-                int case_val;
-
-                lex_accept(T_case);
-                char literal[MAX_TOKEN_LEN];
-
-                if (lex_peek_n(T_numeric, literal, MAX_TOKEN_LEN)) {
-                    case_val = parse_numeric_constant(literal);
-                    lex_expect(T_numeric);
-                } else if (lex_peek_n(T_char, literal, MAX_TOKEN_LEN)) {
-                    char unescaped[MAX_TOKEN_LEN];
-                    if (unescape_string(literal, unescaped, MAX_TOKEN_LEN) < 0)
-                        error_at("Invalid escape sequence", next_token_loc());
-                    case_val = unescaped[0];
-                    lex_expect(T_char);
-                } else if (lex_peek(T_identifier, token)) {
-                    const constant_t *cd = find_constant(token);
-                    if (!cd)
-                        error_at("Unknown constant in case label",
-                                 cur_token_loc());
-                    case_val = cd->value;
-                    lex_expect(T_identifier);
-                } else {
-                    fatal("Not a valid case value");
-                }
-
-                vd = require_var(parent);
-                vd->var_name = gen_name();
-                vd->init_val = case_val;
-                opstack_push(vd);
-                add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
-
-                vd = require_var(parent);
-                vd->var_name = gen_name();
-                rs1 = opstack_pop();
-                rs2 = operand_stack[operand_stack_idx - 1];
-                add_insn(parent, bb, OP_eq, vd, rs1, rs2, 0, NULL);
-
-                add_insn(parent, bb, OP_branch, NULL, vd, NULL, 0, NULL);
-            }
-            lex_expect(T_colon);
-
-            if (is_default)
-                /* there's no condition if it is a default label */
-                bb_connect(bb, true_body_, NEXT);
-            else
-                bb_connect(bb, true_body_, THEN);
-
-            int control = 0;
-
-            while (!lex_peek(T_case, NULL) && !lex_peek(T_close_curly, NULL) &&
-                   !lex_peek(T_default, NULL)) {
-                true_body_ = read_body_statement(parent, true_body_);
-                control = 1;
+            if (lex_peek_n(T_numeric, literal, MAX_TOKEN_LEN)) {
+                case_val = parse_numeric_constant(literal);
+                lex_expect(T_numeric);
+            } else if (lex_peek_n(T_char, literal, MAX_TOKEN_LEN)) {
+                char unescaped[MAX_TOKEN_LEN];
+                if (unescape_string(literal, unescaped, MAX_TOKEN_LEN) < 0)
+                    error_at("Invalid escape sequence", next_token_loc());
+                case_val = unescaped[0];
+                lex_expect(T_char);
+            } else if (lex_peek(T_identifier, token)) {
+                const constant_t *cd = find_constant(token);
+                if (!cd)
+                    error_at("Unknown constant in case label", cur_token_loc());
+                case_val = cd->value;
+                lex_expect(T_identifier);
+            } else {
+                fatal("Not a valid case value");
             }
 
-            if (control && true_body_) {
-                /* Create a new body block for next case, and connect the last
-                 * body block which lacks 'break' to it to make that one ignore
-                 * the upcoming cases.
-                 */
-                n = bb_create(parent);
-                bb_connect(true_body_, n, NEXT);
-                true_body_ = n;
-            }
+            vd = require_var(parent);
+            vd->var_name = gen_name();
+            vd->init_val = case_val;
+            opstack_push(vd);
+            add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
-            if (!lex_peek(T_close_curly, NULL)) {
-                if (is_default)
-                    error_at("Label default should be the last one",
-                             next_token_loc());
+            vd = require_var(parent);
+            vd->var_name = gen_name();
+            rs1 = opstack_pop();
+            rs2 = operand_stack[operand_stack_idx - 1];
+            add_insn(parent, bb, OP_eq, vd, rs1, rs2, 0, NULL);
 
-                /* create a new conditional block for next case */
-                n = bb_create(parent);
-                bb_connect(bb, n, ELSE);
-                bb = n;
+            add_insn(parent, bb, OP_branch, NULL, vd, NULL, 0, NULL);
+        }
+        lex_expect(T_colon);
 
-                /* create a new body block for next case if the last body block
-                 * exits 'switch'.
-                 */
-                if (!true_body_)
-                    true_body_ = bb_create(parent);
-            } else if (!is_default) {
-                /* handle missing default label */
-                bb_connect(bb, switch_end, ELSE);
-            }
+        if (is_default)
+            /* there's no condition if it is a default label */
+            bb_connect(bb, true_body_, NEXT);
+        else
+            bb_connect(bb, true_body_, THEN);
+
+        int control = 0;
+
+        while (!lex_peek(T_case, NULL) && !lex_peek(T_close_curly, NULL) &&
+               !lex_peek(T_default, NULL)) {
+            true_body_ = read_body_statement(parent, true_body_);
+            control = 1;
         }
 
-        /* remove the expression in switch() */
-        opstack_pop();
-        lex_expect(T_close_curly);
+        if (control && true_body_) {
+            /* Create a new body block for next case, and connect the last body
+             * block which lacks 'break' to it to make that one ignore the
+             * upcoming cases.
+             */
+            n = bb_create(parent);
+            bb_connect(true_body_, n, NEXT);
+            true_body_ = n;
+        }
 
-        if (true_body_)
-            /* if the last label has no explicit break, connect it to the end */
-            bb_connect(true_body_, switch_end, NEXT);
-
-        break_exit_idx--;
-
-        int dangling = 1;
-        for (int i = 0; i < switch_end->prev_idx; i++)
-            if (switch_end->prev[i].bb)
-                dangling = 0;
-
-        if (dangling)
-            return NULL;
-
-        return switch_end;
-    }
-
-    if (lex_accept(T_break)) {
-        if (!break_exit_idx)
-            error_at("'break' outside of a loop or switch", cur_token_loc());
-        bb_connect(bb, break_bb[break_exit_idx - 1], NEXT);
-        lex_expect(T_semicolon);
-        return NULL;
-    }
-
-    if (lex_accept(T_continue)) {
-        if (!continue_pos_idx)
-            error_at("'continue' outside of a loop", cur_token_loc());
-        bb_connect(bb, continue_bb[continue_pos_idx - 1], NEXT);
-        lex_expect(T_semicolon);
-        return NULL;
-    }
-
-    if (lex_accept(T_for)) {
-        lex_expect(T_open_bracket);
-
-        /* synthesize for loop block */
-        block_t *blk = add_block(parent, parent->func);
-
-        /* setup - execute once */
-        basic_block_t *setup = bb_create(blk);
-        bb_connect(bb, setup, NEXT);
-
-        if (!lex_accept(T_semicolon)) {
-            if (!lex_peek(T_identifier, token))
-                error_at("Unexpected token when parsing for loop",
+        if (!lex_peek(T_close_curly, NULL)) {
+            if (is_default)
+                error_at("Label default should be the last one",
                          next_token_loc());
 
-            int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-            if (find_type_flag == 1 && lex_accept(T_union)) {
-                find_type_flag = 2;
-            }
-            type = find_type(token, find_type_flag);
-            if (type) {
-                var = require_typed_var(blk, type);
-                read_full_var_decl(var, false, false);
-                add_insn(blk, setup, OP_allocat, var, NULL, NULL, 0, NULL);
-                add_symbol(setup, var);
-                if (lex_accept(T_assign)) {
-                    read_expr(blk, &setup);
-                    read_ternary_operation(blk, &setup);
+            /* create a new conditional block for next case */
+            n = bb_create(parent);
+            bb_connect(bb, n, ELSE);
+            bb = n;
 
-                    rs1 = resize_var(parent, &bb, opstack_pop(), var);
-                    add_insn(blk, setup, OP_assign, var, rs1, NULL, 0, NULL);
-                }
-                while (lex_accept(T_comma)) {
-                    var_t *nv;
-
-                    /* add sequence point at T_comma */
-                    perform_side_effect(blk, setup);
-
-                    /* multiple (partial) declarations */
-                    nv = require_typed_var(blk, type);
-                    read_partial_var_decl(nv, var); /* partial */
-                    add_insn(blk, setup, OP_allocat, nv, NULL, NULL, 0, NULL);
-                    add_symbol(setup, nv);
-                    if (lex_accept(T_assign)) {
-                        read_expr(blk, &setup);
-
-                        rs1 = resize_var(parent, &bb, opstack_pop(), nv);
-                        add_insn(blk, setup, OP_assign, nv, rs1, NULL, 0, NULL);
-                    }
-                }
-            } else {
-                read_body_assignment(token, blk, OP_generic, &setup);
-            }
-
-            lex_expect(T_semicolon);
+            /* create a new body block for next case if the last body block
+             * exits 'switch'.
+             */
+            if (!true_body_)
+                true_body_ = bb_create(parent);
+        } else if (!is_default) {
+            /* handle missing default label */
+            bb_connect(bb, switch_end, ELSE);
         }
-
-        basic_block_t *cond_ = bb_create(blk);
-        basic_block_t *for_end = bb_create(parent);
-        basic_block_t *cond_start = cond_;
-        break_bb_push(for_end);
-        bb_connect(setup, cond_, NEXT);
-
-        /* condition - check before the loop */
-        if (!lex_accept(T_semicolon)) {
-            read_expr(blk, &cond_);
-            lex_expect(T_semicolon);
-        } else {
-            /* always true */
-            vd = require_var(blk);
-            vd->init_val = 1;
-            vd->var_name = gen_name();
-            opstack_push(vd);
-            add_insn(blk, cond_, OP_load_constant, vd, NULL, NULL, 0, NULL);
-        }
-        bb_connect(cond_, for_end, ELSE);
-
-        vd = opstack_pop();
-        add_insn(blk, cond_, OP_branch, NULL, vd, NULL, 0, NULL);
-
-        basic_block_t *inc_ = bb_create(blk);
-        continue_bb_push(inc_);
-
-        /* increment after each loop */
-        if (!lex_accept(T_close_bracket)) {
-            if (lex_accept(T_increment))
-                prefix_op = OP_add;
-            else if (lex_accept(T_decrement))
-                prefix_op = OP_sub;
-            lex_peek(T_identifier, token);
-            read_body_assignment(token, blk, prefix_op, &inc_);
-            lex_expect(T_close_bracket);
-        }
-
-        /* loop body */
-        basic_block_t *body_ = bb_create(blk);
-        bb_connect(cond_, body_, THEN);
-        body_ = read_body_statement(blk, body_);
-
-        /* Normal fallthrough from the loop body goes through the increment
-         * block. A continue statement may already have connected another
-         * predecessor to inc_.
-         */
-        if (body_)
-            bb_connect(body_, inc_, NEXT);
-
-        /* An empty increment block still needs its back-edge when it is
-         * reachable through normal fallthrough or continue.
-         *
-         * Do not connect a completely unreachable increment block, such as:
-         *
-         *     for (;;) {
-         *         break;
-         *     }
-         */
-        bool has_pred = false;
-        for (int i = 0; i < inc_->prev_idx; i++) {
-            if (inc_->prev[i].bb) {
-                has_pred = true;
-                break;
-            }
-        }
-        if (has_pred)
-            bb_connect(inc_, cond_start, NEXT);
-
-        /* jump to increment */
-        continue_pos_idx--;
-        break_exit_idx--;
-        return for_end;
     }
 
-    if (lex_accept(T_do)) {
-        basic_block_t *n = bb_create(parent);
-        bb_connect(bb, n, NEXT);
-        bb = n;
+    /* remove the expression in switch() */
+    opstack_pop();
+    lex_expect(T_close_curly);
 
-        basic_block_t *cond_ = bb_create(parent);
-        basic_block_t *do_while_end = bb_create(parent);
+    if (true_body_)
+        /* if the last label has no explicit break, connect it to the end */
+        bb_connect(true_body_, switch_end, NEXT);
 
-        continue_bb_push(cond_);
-        break_bb_push(do_while_end);
+    break_exit_idx--;
 
-        basic_block_t *do_body = read_body_statement(parent, bb);
-        if (do_body)
-            bb_connect(do_body, cond_, NEXT);
+    int dangling = 1;
+    for (int i = 0; i < switch_end->prev_idx; i++)
+        if (switch_end->prev[i].bb)
+            dangling = 0;
 
-        lex_expect(T_while);
-        lex_expect(T_open_bracket);
-        read_expr(parent, &cond_);
-        lex_expect(T_close_bracket);
+    if (dangling)
+        return NULL;
 
-        vd = opstack_pop();
-        add_insn(parent, cond_, OP_branch, NULL, vd, NULL, 0, NULL);
+    return switch_end;
+}
 
-        lex_expect(T_semicolon);
+/* A for loop: setup, condition, body and increment. */
+basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
+{
+    char token[MAX_ID_LEN];
+    type_t *type;
+    var_t *vd;
+    var_t *rs1;
+    var_t *var;
+    opcode_t prefix_op = OP_generic;
 
-        for (int i = 0; i < cond_->prev_idx; i++) {
-            if (cond_->prev[i].bb) {
-                bb_connect(cond_, bb, THEN);
-                bb_connect(cond_, do_while_end, ELSE);
-                break;
-            }
-            /* if breaking out of loop, skip condition block */
-        }
+    lex_expect(T_open_bracket);
 
-        continue_pos_idx--;
-        break_exit_idx--;
-        return do_while_end;
-    }
+    /* synthesize for loop block */
+    block_t *blk = add_block(parent, parent->func);
 
-    if (lex_accept(T_goto))
-        return handle_goto_statement(parent, bb);
+    /* setup - execute once */
+    basic_block_t *setup = bb_create(blk);
+    bb_connect(bb, setup, NEXT);
 
-    /* empty statement */
-    if (lex_accept(T_semicolon))
-        return bb;
+    if (!lex_accept(T_semicolon)) {
+        if (!lex_peek(T_identifier, token))
+            error_at("Unexpected token when parsing for loop",
+                     next_token_loc());
 
-    /* struct/union variable declaration */
-    if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
         int find_type_flag = lex_accept(T_struct) ? 2 : 1;
         if (find_type_flag == 1 && lex_accept(T_union)) {
             find_type_flag = 2;
         }
-        lex_ident(T_identifier, token);
         type = find_type(token, find_type_flag);
         if (type) {
-            var = require_typed_var(parent, type);
-            var->is_const_qualified = is_const;
-            read_partial_var_decl(var, NULL);
-            add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
-            add_symbol(bb, var);
+            var = require_typed_var(blk, type);
+            read_full_var_decl(var, false, false);
+            add_insn(blk, setup, OP_allocat, var, NULL, NULL, 0, NULL);
+            add_symbol(setup, var);
+            if (lex_accept(T_assign)) {
+                read_expr(blk, &setup);
+                read_ternary_operation(blk, &setup);
+
+                rs1 = resize_var(parent, &bb, opstack_pop(), var);
+                add_insn(blk, setup, OP_assign, var, rs1, NULL, 0, NULL);
+            }
+            while (lex_accept(T_comma)) {
+                var_t *nv;
+
+                /* add sequence point at T_comma */
+                perform_side_effect(blk, setup);
+
+                /* multiple (partial) declarations */
+                nv = require_typed_var(blk, type);
+                read_partial_var_decl(nv, var); /* partial */
+                add_insn(blk, setup, OP_allocat, nv, NULL, NULL, 0, NULL);
+                add_symbol(setup, nv);
+                if (lex_accept(T_assign)) {
+                    read_expr(blk, &setup);
+
+                    rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                    add_insn(blk, setup, OP_assign, nv, rs1, NULL, 0, NULL);
+                }
+            }
+        } else {
+            read_body_assignment(token, blk, OP_generic, &setup);
+        }
+
+        lex_expect(T_semicolon);
+    }
+
+    basic_block_t *cond_ = bb_create(blk);
+    basic_block_t *for_end = bb_create(parent);
+    basic_block_t *cond_start = cond_;
+    break_bb_push(for_end);
+    bb_connect(setup, cond_, NEXT);
+
+    /* condition - check before the loop */
+    if (!lex_accept(T_semicolon)) {
+        read_expr(blk, &cond_);
+        lex_expect(T_semicolon);
+    } else {
+        /* always true */
+        vd = require_var(blk);
+        vd->init_val = 1;
+        vd->var_name = gen_name();
+        opstack_push(vd);
+        add_insn(blk, cond_, OP_load_constant, vd, NULL, NULL, 0, NULL);
+    }
+    bb_connect(cond_, for_end, ELSE);
+
+    vd = opstack_pop();
+    add_insn(blk, cond_, OP_branch, NULL, vd, NULL, 0, NULL);
+
+    basic_block_t *inc_ = bb_create(blk);
+    continue_bb_push(inc_);
+
+    /* increment after each loop */
+    if (!lex_accept(T_close_bracket)) {
+        if (lex_accept(T_increment))
+            prefix_op = OP_add;
+        else if (lex_accept(T_decrement))
+            prefix_op = OP_sub;
+        lex_peek(T_identifier, token);
+        read_body_assignment(token, blk, prefix_op, &inc_);
+        lex_expect(T_close_bracket);
+    }
+
+    /* loop body */
+    basic_block_t *body_ = bb_create(blk);
+    bb_connect(cond_, body_, THEN);
+    body_ = read_body_statement(blk, body_);
+
+    /* Normal fallthrough from the loop body goes through the increment block. A
+     * continue statement may already have connected another predecessor to
+     * inc_.
+     */
+    if (body_)
+        bb_connect(body_, inc_, NEXT);
+
+    /* An empty increment block still needs its back-edge when it is reachable
+     * through normal fallthrough or continue.
+     *
+     * Do not connect a completely unreachable increment block, such as:
+     *
+     *     for (;;) {
+     *         break;
+     *     }
+     */
+    bool has_pred = false;
+    for (int i = 0; i < inc_->prev_idx; i++) {
+        if (inc_->prev[i].bb) {
+            has_pred = true;
+            break;
+        }
+    }
+    if (has_pred)
+        bb_connect(inc_, cond_start, NEXT);
+
+    /* jump to increment */
+    continue_pos_idx--;
+    break_exit_idx--;
+    return for_end;
+}
+
+/* A do-while loop, whose condition is tested after the body. */
+basic_block_t *handle_do_statement(block_t *parent, basic_block_t *bb)
+{
+    var_t *vd;
+
+    basic_block_t *n = bb_create(parent);
+    bb_connect(bb, n, NEXT);
+    bb = n;
+
+    basic_block_t *cond_ = bb_create(parent);
+    basic_block_t *do_while_end = bb_create(parent);
+
+    continue_bb_push(cond_);
+    break_bb_push(do_while_end);
+
+    basic_block_t *do_body = read_body_statement(parent, bb);
+    if (do_body)
+        bb_connect(do_body, cond_, NEXT);
+
+    lex_expect(T_while);
+    lex_expect(T_open_bracket);
+    read_expr(parent, &cond_);
+    lex_expect(T_close_bracket);
+
+    vd = opstack_pop();
+    add_insn(parent, cond_, OP_branch, NULL, vd, NULL, 0, NULL);
+
+    lex_expect(T_semicolon);
+
+    for (int i = 0; i < cond_->prev_idx; i++) {
+        if (cond_->prev[i].bb) {
+            bb_connect(cond_, bb, THEN);
+            bb_connect(cond_, do_while_end, ELSE);
+            break;
+        }
+        /* if breaking out of loop, skip condition block */
+    }
+
+    continue_pos_idx--;
+    break_exit_idx--;
+    return do_while_end;
+}
+
+/* A local struct or union declaration. */
+basic_block_t *handle_record_statement(block_t *parent, basic_block_t *bb)
+{
+    char token[MAX_ID_LEN];
+    type_t *type;
+    var_t *rs1;
+    var_t *var;
+    bool is_const = false;
+
+    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+    if (find_type_flag == 1 && lex_accept(T_union)) {
+        find_type_flag = 2;
+    }
+    lex_ident(T_identifier, token);
+    type = find_type(token, find_type_flag);
+    if (type) {
+        var = require_typed_var(parent, type);
+        var->is_const_qualified = is_const;
+        read_partial_var_decl(var, NULL);
+        add_insn(parent, bb, OP_allocat, var, NULL, NULL, 0, NULL);
+        add_symbol(bb, var);
+        if (lex_accept(T_assign)) {
+            if (lex_peek(T_open_curly, NULL) &&
+                (var->array_size > 0 || var->ptr_level > 0)) {
+                parse_array_init(var, parent, &bb, 1); /* Always emit code */
+            } else if (lex_peek(T_open_curly, NULL) &&
+                       (var->type->base_type == TYPE_struct ||
+                        var->type->base_type == TYPE_typedef)) {
+                /* C90-compliant struct compound literal support */
+                type_t *struct_type = var->type;
+
+                /* Handle typedef by getting actual struct type */
+                if (struct_type->base_type == TYPE_typedef &&
+                    struct_type->base_struct)
+                    struct_type = struct_type->base_struct;
+
+                lex_expect(T_open_curly);
+                int field_idx = 0;
+
+                if (!lex_peek(T_close_curly, NULL)) {
+                    for (;;) {
+                        /* Parse field value expression */
+                        read_expr(parent, &bb);
+                        read_ternary_operation(parent, &bb);
+                        var_t *val = opstack_pop();
+
+                        /* Initialize field if within bounds */
+                        if (field_idx < struct_type->num_fields) {
+                            var_t *field = &struct_type->fields[field_idx];
+
+                            /* Create target variable for field */
+                            var_t *field_val =
+                                resize_to(parent, &bb, val, field->type,
+                                          field->ptr_level);
+
+                            /* Compute field address: &struct + field_offset */
+                            var_t *struct_addr = require_var(parent);
+                            struct_addr->var_name = gen_name();
+                            add_insn(parent, bb, OP_address_of, struct_addr,
+                                     var, NULL, 0, NULL);
+
+                            var_t *field_addr = struct_addr;
+                            if (field->offset > 0) {
+                                var_t *offset = require_var(parent);
+                                offset->var_name = gen_name();
+                                offset->init_val = field->offset;
+                                add_insn(parent, bb, OP_load_constant, offset,
+                                         NULL, NULL, 0, NULL);
+
+                                var_t *addr = require_var(parent);
+                                addr->var_name = gen_name();
+                                add_insn(parent, bb, OP_add, addr, struct_addr,
+                                         offset, 0, NULL);
+                                field_addr = addr;
+                            }
+
+                            /* Write field value */
+                            int field_size = size_var(field);
+                            add_insn(parent, bb, OP_write, NULL, field_addr,
+                                     field_val, field_size, NULL);
+                        }
+
+                        field_idx++;
+                        if (!lex_accept(T_comma))
+                            break;
+                        if (lex_peek(T_close_curly, NULL))
+                            break;
+                    }
+                }
+                lex_expect(T_close_curly);
+            } else {
+                read_expr(parent, &bb);
+                read_ternary_operation(parent, &bb);
+
+                var_t *rhs = opstack_pop();
+                rhs = scalarize_array_literal_if_needed(
+                    parent, &bb, rhs, var->type,
+                    !var->ptr_level && var->array_size == 0);
+
+                rs1 = resize_var(parent, &bb, rhs, var);
+                add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+            }
+        }
+        while (lex_accept(T_comma)) {
+            var_t *nv;
+
+            /* add sequence point at T_comma */
+            perform_side_effect(parent, bb);
+
+            /* multiple (partial) declarations */
+            nv = require_typed_var(parent, type);
+            read_inner_var_decl(nv, false, false);
+            add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
+            add_symbol(bb, nv);
             if (lex_accept(T_assign)) {
                 if (lex_peek(T_open_curly, NULL) &&
-                    (var->array_size > 0 || var->ptr_level > 0)) {
-                    parse_array_init(var, parent, &bb,
-                                     1); /* Always emit code */
+                    (nv->array_size > 0 || nv->ptr_level > 0)) {
+                    parse_array_init(nv, parent, &bb, true);
                 } else if (lex_peek(T_open_curly, NULL) &&
-                           (var->type->base_type == TYPE_struct ||
-                            var->type->base_type == TYPE_typedef)) {
+                           (nv->type->base_type == TYPE_struct ||
+                            nv->type->base_type == TYPE_typedef)) {
                     /* C90-compliant struct compound literal support */
-                    type_t *struct_type = var->type;
+                    type_t *struct_type = nv->type;
 
                     /* Handle typedef by getting actual struct type */
                     if (struct_type->base_type == TYPE_typedef &&
@@ -4465,7 +4528,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                                 var_t *struct_addr = require_var(parent);
                                 struct_addr->var_name = gen_name();
                                 add_insn(parent, bb, OP_address_of, struct_addr,
-                                         var, NULL, 0, NULL);
+                                         nv, NULL, 0, NULL);
 
                                 var_t *field_addr = struct_addr;
                                 if (field->offset > 0) {
@@ -4499,120 +4562,35 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 } else {
                     read_expr(parent, &bb);
                     read_ternary_operation(parent, &bb);
-
                     var_t *rhs = opstack_pop();
                     rhs = scalarize_array_literal_if_needed(
-                        parent, &bb, rhs, var->type,
-                        !var->ptr_level && var->array_size == 0);
+                        parent, &bb, rhs, nv->type,
+                        !nv->ptr_level && nv->array_size == 0);
 
-                    rs1 = resize_var(parent, &bb, rhs, var);
-                    add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+                    rs1 = resize_var(parent, &bb, rhs, nv);
+                    add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
                 }
             }
-            while (lex_accept(T_comma)) {
-                var_t *nv;
-
-                /* add sequence point at T_comma */
-                perform_side_effect(parent, bb);
-
-                /* multiple (partial) declarations */
-                nv = require_typed_var(parent, type);
-                read_inner_var_decl(nv, false, false);
-                add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
-                add_symbol(bb, nv);
-                if (lex_accept(T_assign)) {
-                    if (lex_peek(T_open_curly, NULL) &&
-                        (nv->array_size > 0 || nv->ptr_level > 0)) {
-                        parse_array_init(nv, parent, &bb, true);
-                    } else if (lex_peek(T_open_curly, NULL) &&
-                               (nv->type->base_type == TYPE_struct ||
-                                nv->type->base_type == TYPE_typedef)) {
-                        /* C90-compliant struct compound literal support */
-                        type_t *struct_type = nv->type;
-
-                        /* Handle typedef by getting actual struct type */
-                        if (struct_type->base_type == TYPE_typedef &&
-                            struct_type->base_struct)
-                            struct_type = struct_type->base_struct;
-
-                        lex_expect(T_open_curly);
-                        int field_idx = 0;
-
-                        if (!lex_peek(T_close_curly, NULL)) {
-                            for (;;) {
-                                /* Parse field value expression */
-                                read_expr(parent, &bb);
-                                read_ternary_operation(parent, &bb);
-                                var_t *val = opstack_pop();
-
-                                /* Initialize field if within bounds */
-                                if (field_idx < struct_type->num_fields) {
-                                    var_t *field =
-                                        &struct_type->fields[field_idx];
-
-                                    /* Create target variable for field */
-                                    var_t *field_val =
-                                        resize_to(parent, &bb, val, field->type,
-                                                  field->ptr_level);
-
-                                    /* Compute field address: &struct +
-                                     * field_offset
-                                     */
-                                    var_t *struct_addr = require_var(parent);
-                                    struct_addr->var_name = gen_name();
-                                    add_insn(parent, bb, OP_address_of,
-                                             struct_addr, nv, NULL, 0, NULL);
-
-                                    var_t *field_addr = struct_addr;
-                                    if (field->offset > 0) {
-                                        var_t *offset = require_var(parent);
-                                        offset->var_name = gen_name();
-                                        offset->init_val = field->offset;
-                                        add_insn(parent, bb, OP_load_constant,
-                                                 offset, NULL, NULL, 0, NULL);
-
-                                        var_t *addr = require_var(parent);
-                                        addr->var_name = gen_name();
-                                        add_insn(parent, bb, OP_add, addr,
-                                                 struct_addr, offset, 0, NULL);
-                                        field_addr = addr;
-                                    }
-
-                                    /* Write field value */
-                                    int field_size = size_var(field);
-                                    add_insn(parent, bb, OP_write, NULL,
-                                             field_addr, field_val, field_size,
-                                             NULL);
-                                }
-
-                                field_idx++;
-                                if (!lex_accept(T_comma))
-                                    break;
-                                if (lex_peek(T_close_curly, NULL))
-                                    break;
-                            }
-                        }
-                        lex_expect(T_close_curly);
-                    } else {
-                        read_expr(parent, &bb);
-                        read_ternary_operation(parent, &bb);
-                        var_t *rhs = opstack_pop();
-                        rhs = scalarize_array_literal_if_needed(
-                            parent, &bb, rhs, nv->type,
-                            !nv->ptr_level && nv->array_size == 0);
-
-                        rs1 = resize_var(parent, &bb, rhs, nv);
-                        add_insn(parent, bb, OP_assign, nv, rs1, NULL, 0, NULL);
-                    }
-                }
-            }
-            lex_expect(T_semicolon);
-            return bb;
         }
-        error_at("Unknown struct/union type", next_token_loc());
+        lex_expect(T_semicolon);
+        return bb;
     }
+    error_at("Unknown struct/union type", next_token_loc());
+}
 
-    /* Handle const qualifier for local variable declarations */
+/* Everything a statement can still be: a declaration, an assignment, a call, or
+ * an expression evaluated for its effect.
+ */
+basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
+{
+    char token[MAX_ID_LEN];
+    func_t *func;
+    type_t *type;
+    var_t *rs1;
+    var_t *var;
+    opcode_t prefix_op = OP_generic;
+    bool is_const = false;
+
     if (lex_accept(T_const)) {
         is_const = true;
         /* After const, we expect a type */
@@ -4954,6 +4932,71 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 
     error_at("Unrecognized statement token", next_token_loc());
     return NULL;
+}
+
+basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
+{
+    if (!bb)
+        printf("Warning: unreachable code detected\n");
+
+    /* statement can be:
+     *   function call, variable declaration, assignment operation,
+     *   keyword, block
+     */
+
+    if (lex_peek(T_open_curly, NULL))
+        return read_code_block(parent->func, parent, bb);
+
+    if (lex_accept(T_return)) {
+        return handle_return_statement(parent, bb);
+    }
+
+    if (lex_accept(T_if)) {
+        return handle_if_statement(parent, bb);
+    }
+
+    if (lex_accept(T_while)) {
+        return handle_while_statement(parent, bb);
+    }
+
+    if (lex_accept(T_switch))
+        return handle_switch_statement(parent, bb);
+
+    if (lex_accept(T_break)) {
+        if (!break_exit_idx)
+            error_at("'break' outside of a loop or switch", cur_token_loc());
+        bb_connect(bb, break_bb[break_exit_idx - 1], NEXT);
+        lex_expect(T_semicolon);
+        return NULL;
+    }
+
+    if (lex_accept(T_continue)) {
+        if (!continue_pos_idx)
+            error_at("'continue' outside of a loop", cur_token_loc());
+        bb_connect(bb, continue_bb[continue_pos_idx - 1], NEXT);
+        lex_expect(T_semicolon);
+        return NULL;
+    }
+
+    if (lex_accept(T_for))
+        return handle_for_statement(parent, bb);
+
+    if (lex_accept(T_do))
+        return handle_do_statement(parent, bb);
+
+    if (lex_accept(T_goto))
+        return handle_goto_statement(parent, bb);
+
+    /* empty statement */
+    if (lex_accept(T_semicolon))
+        return bb;
+
+    /* struct/union variable declaration */
+    if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL))
+        return handle_record_statement(parent, bb);
+
+    /* Handle const qualifier for local variable declarations */
+    return handle_declaration(parent, bb);
 }
 
 /* Nesting counter for read_code_block(), which recurses through
