@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# Print "<tag> <download URL> <sha256>" for one asset of the latest release of
-# a GitHub repository. Both toolchain downloads in the workflows resolve what
-# they fetch this way, so that neither pins a version that goes stale nor
-# trusts an archive it has not checksummed.
+# Print "<tag> <download URL> <sha256>" for one asset of the latest release of a
+# GitHub repository. Both toolchain downloads in the workflows resolve what they
+# fetch this way, so that neither pins a version that goes stale nor trusts an
+# archive it has not checksummed.
 
 set -euo pipefail
 
@@ -36,4 +36,4 @@ jq -er --arg name "$ASSET" '
           error("\($name) has no sha256 digest in \($release.tag_name)")
       else
           "\($release.tag_name) \($asset.browser_download_url) \($sha256)"
-      end' <<<"$release"
+      end' <<< "$release"

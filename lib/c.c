@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 /* minimal libc implementation */
@@ -12,8 +12,8 @@
 /* Staging buffer for the printf family that writes straight to a descriptor.
  *
  * The longest single call in the tree is ssa.c's "insn_%p [label=%s]": a
- * DUMP_INSN_LEN staging buffer plus 26 bytes around it, so 537. Every byte
- * here is stack in every program shecc emits, so it stays close to that.
+ * DUMP_INSN_LEN staging buffer plus 26 bytes around it, so 537. Every byte here
+ * is stack in every program shecc emits, so it stays close to that.
  */
 #define FMT_BUF_LEN 576
 
@@ -123,15 +123,16 @@ char *strncat(char *dest, char *src, int len)
 char *strchr(char *str, int ch)
 {
     int i = 0;
+
     /* Compare both sides as bytes.
      *
      * A byte above 0x7F is the whole difficulty: comparing str[i] against the
      * int the caller passed fails wherever char is signed, since one side is
      * negative and the other is not. Converting the search value to a char is
-     * not enough either -- the arm backend widens a char loaded from memory
-     * and a char held in a variable differently, so the two disagree even
-     * though each promotes to -61 on its own. Masking both to 0..255 leaves
-     * nothing to disagree about, on any target.
+     * not enough either -- the arm backend widens a char loaded from memory and
+     * a char held in a variable differently, so the two disagree even though
+     * each promotes to -61 on its own. Masking both to 0..255 leaves nothing to
+     * disagree about, on any target.
      *
      * The terminator counts as part of the string, and a masked zero still
      * finds it.
@@ -218,8 +219,8 @@ void *memset(void *s, int c, int n)
 
 /* set 10 digits (32bit) without div
  *
- * This function converts a given integer value to its string representation
- * in base-10 without using division operations. The method involves calculating
+ * This function converts a given integer value to its string representation in
+ * base-10 without using division operations. The method involves calculating
  * the approximate quotient and remainder using bitwise operations, which are
  * then used to derive each digit of the result.
  *
@@ -227,11 +228,10 @@ void *memset(void *s, int c, int n)
  * detailed in the reference link:
  * http://web.archive.org/web/20180517023231/http://www.hackersdelight.org/divcMore.pdf.
  * This approach avoids expensive division instructions by using a series of
- * bitwise shifts and additions to calculate the quotient and remainder.
- */
-/* Pointer width of the target, held in a variable rather than tested with
- * the preprocessor: shecc must be able to compile this file for either
- * target, and a constant condition would leave statically dead code behind.
+ * bitwise shifts and additions to calculate the quotient and remainder. Pointer
+ * width of the target, held in a variable rather than tested with the
+ * preprocessor: shecc must be able to compile this file for either target, and
+ * a constant condition would leave statically dead code behind.
  */
 int __ptr_width = __SIZEOF_POINTER__;
 
@@ -243,9 +243,9 @@ void __str_base10(char *pb, int val)
 
     /* On a 32-bit target, negating INT_MIN overflows and the digit loop below
      * cannot make progress, so the value is spelled out directly. On LP64 the
-     * negation happens in a 64-bit register and the normal path is exact.
-     * This is an ordinary constant expression rather than a preprocessor
-     * conditional so that shecc can compile this file for either target.
+     * negation happens in a 64-bit register and the normal path is exact. This
+     * is an ordinary constant expression rather than a preprocessor conditional
+     * so that shecc can compile this file for either target.
      */
     if (__ptr_width == 4 && val == -2147483648) {
         strncpy(pb + INT_BUF_LEN - 11, "-2147483648", 11);
@@ -322,10 +322,10 @@ void __str_base16(char *pb, int val)
  * - On success, the return value should be the length of the entire converted
  *   string even if n is insufficient to store it.
  *
- * Thus, a structure fmtbuf_t is defined for formatted output conversion for
- * the functions in the printf() family.
+ * Thus, a structure fmtbuf_t is defined for formatted output conversion for the
+ * functions in the printf() family.
  * @buf: the current position of the buffer.
- * @n  : the remaining space of the buffer.
+ * @n : the remaining space of the buffer.
  * @len: the number of characters that would have been written (excluding the
  * null terminator) had n been sufficiently large.
  *
@@ -344,8 +344,8 @@ void __fmtbuf_write_char(fmtbuf_t *fmtbuf, int val)
 {
     fmtbuf->len += 1;
 
-    /* Write the given character when n is greater than 1.
-     * This means preserving one position for the null character.
+    /* Write the given character when n is greater than 1. This means preserving
+     * one position for the null character.
      */
     if (fmtbuf->n <= 1)
         return;
@@ -360,8 +360,8 @@ void __fmtbuf_write_str(fmtbuf_t *fmtbuf, char *str, int l)
 {
     fmtbuf->len += l;
 
-    /* Write the given string when n is greater than 1.
-     * This means preserving one position for the null character.
+    /* Write the given string when n is greater than 1. This means preserving
+     * one position for the null character.
      */
     if (fmtbuf->n <= 1)
         return;
@@ -457,8 +457,9 @@ void __format(fmtbuf_t *fmtbuf,
 void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
 {
     int si = 0, pi = 0;
-    /* A pointer-width view of the same argument area, for %s. Reading a
-     * pointer argument through an int would truncate it on LP64.
+
+    /* A pointer-width view of the same argument area, for %s. Reading a pointer
+     * argument through an int would truncate it on LP64.
      */
     char **var_args_p = (char **) var_args;
 
@@ -512,11 +513,11 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
             case 'p': {
                 /* Append param as a pointer.
                  *
-                 * A pointer occupies VA_INT_STEP int-sized slots, so on an
-                 * LP64 target the second one carries the high word. Printing
-                 * only @v would drop it, and the graph writer in ssa.c names
-                 * its nodes after these values, so two objects sharing a low
-                 * word would collapse into one node.
+                 * A pointer occupies VA_INT_STEP int-sized slots, so on an LP64
+                 * target the second one carries the high word. Printing only @v
+                 * would drop it, and the graph writer in ssa.c names its nodes
+                 * after these values, so two objects sharing a low word would
+                 * collapse into one node.
                  *
                  * A pointer has one spelling here, "0x" and its significant
                  * digits, so any width or zero-pad in the format is ignored.
@@ -532,6 +533,7 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
                 __fmtbuf_write_char(fmtbuf, 'x');
                 if (hi) {
                     __format(fmtbuf, hi, 0, 0, 16, 0);
+
                     /* The low word keeps its leading zeros, or the two halves
                      * would run together into a different number.
                      */
@@ -649,9 +651,9 @@ FILE *fopen(char *filename, char *mode)
 
     if (!strcmp(mode, "w") || !strcmp(mode, "wb")) {
         /* Flags below are O_WRONLY | O_CREAT | O_TRUNC. Without O_TRUNC,
-         * writing a shorter file over a longer one leaves the old tail in
-         * place -- which turns a rebuilt executable into the new image
-         * followed by a fragment of the previous one.
+         * writing a shorter file over a longer one leaves the old tail in place
+         * -- which turns a rebuilt executable into the new image followed by a
+         * fragment of the previous one.
          *
          * "wb" writes an executable and opens 0775; "w" writes text, which has
          * no business being executable, and opens 0666 before the umask.

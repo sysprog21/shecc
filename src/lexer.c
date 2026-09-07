@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 #include <ctype.h>
 #include <stdbool.h>
@@ -138,8 +138,8 @@ void lexer_cleanup()
     }
 
     /* Token storage arrays are allocated from GENERAL_ARENA and will be
-     * automatically freed when the arena is freed in global_release().
-     * No need to explicitly free them here.
+     * automatically freed when the arena is freed in global_release(). No need
+     * to explicitly free them here.
      */
     directive_tokens_storage = NULL;
     keyword_tokens_storage = NULL;
@@ -870,12 +870,11 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
     if (isalnum(ch) || ch == '_') {
         int sz = 0;
         do {
-            /* Bounded by the smallest buffer an identifier is ever copied
-             * into, not by the token buffer's own size: lex_ident() and
-             * lex_peek() strcpy into caller arrays of MAX_ID_LEN, so a longer
-             * name would run off the end of one. Diagnosing it here is what
-             * keeps a long identifier in the input from corrupting the
-             * compiler's stack.
+            /* Bounded by the smallest buffer an identifier is ever copied into,
+             * not by the token buffer's own size: lex_ident() and lex_peek()
+             * strcpy into caller arrays of MAX_ID_LEN, so a longer name would
+             * run off the end of one. Diagnosing it here is what keeps a long
+             * identifier in the input from corrupting the compiler's stack.
              */
             if (sz >= MAX_ID_LEN - 1) {
                 loc->len = sz;
@@ -962,10 +961,10 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
             break;
         }
 
-        /* Fall back to the hashmap for anything the switch does not name.
-         * No keyword is shorter than two characters or longer than eight, so a
-         * name outside that range cannot be one and needs no lookup -- which
-         * is most of the identifiers in a real program.
+        /* Fall back to the hashmap for anything the switch does not name. No
+         * keyword is shorter than two characters or longer than eight, so a
+         * name outside that range cannot be one and needs no lookup -- which is
+         * most of the identifiers in a real program.
          */
         if (kind == T_identifier && sz >= 2 && sz <= 8)
             kind = lookup_keyword(token_buffer);
@@ -988,10 +987,10 @@ token_stream_t *gen_file_token_stream(char *filename)
     token_t head;
     token_t *cur = &head;
     token_stream_t *tks;
-    /* initialie source location with the following configuration:
-     * pos is at 0,
-     * len is 1 for reporting convenience,
-     * and the column and line number are set to 1.
+
+    /* initialie source location with the following configuration: pos is at 0,
+     * len is 1 for reporting convenience, and the column and line number are
+     * set to 1.
      */
     source_location_t loc = {0, 1, 1, 1, filename};
     strbuf_t *buf;
@@ -1051,10 +1050,10 @@ token_stream_t *gen_libc_token_stream()
         hashmap_put(SRC_FILE_MAP, filename, LIBC_SRC);
 
     /* This buffer was built by appending, so its capacity is whatever the
-     * doubling left and runs past the text into memory that was never
-     * written -- while the scan below, like the one over a file, stops at
-     * capacity. Terminate it the way read_file() leaves a file: the text, a
-     * NUL, and capacity naming one past the text. Without this the lexer reads
+     * doubling left and runs past the text into memory that was never written
+     * -- while the scan below, like the one over a file, stops at capacity.
+     * Terminate it the way read_file() leaves a file: the text, a NUL, and
+     * capacity naming one past the text. Without this the lexer reads
      * uninitialised bytes, and what it finds there depends on the allocator,
      * which is enough to make the compiler emit different code from one build
      * to the next.
@@ -1069,9 +1068,8 @@ token_stream_t *gen_libc_token_stream()
     while (buf->size < buf->capacity) {
         tk = lex_token(buf, &loc);
 
-        /* Early break to discard eof token, so later
-         * we can concat libc token stream with actual
-         * input file's token stream.
+        /* Early break to discard eof token, so later we can concat libc token
+         * stream with actual input file's token stream.
          */
         if (tk->kind == T_eof)
             break;
@@ -1204,8 +1202,7 @@ void lex_ident(token_kind_t token, char *value)
     error_at("Unexpected token", &tk->location);
 }
 
-/* Strictly match next token with given token type.
- */
+/* Strictly match next token with given token type. */
 void lex_expect(token_kind_t token)
 {
     if (cur_token->next && cur_token->next->kind == token) {

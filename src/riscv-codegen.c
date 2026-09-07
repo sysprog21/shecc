@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 /* Translate IR to target machine code */
@@ -14,8 +14,8 @@
 
 /* Explanation: registers preservation/restoration
  *
- * The following table illustrates which registers are caller-saved
- * or callee-saved:
+ * The following table illustrates which registers are caller-saved or
+ * callee-saved:
  * +-----------+--------+
  * | Register  | Saver  |
  * | ABI Name  |        |
@@ -192,21 +192,21 @@ void cfg_flatten(void)
     func_t *func;
 
     if (dynlink) {
-        /* When using dynamic linking, 20 instructions are generated at
-         * the program entry point to perform the following operations:
+        /* When using dynamic linking, 20 instructions are generated at the
+         * program entry point to perform the following operations:
          * - prepare arguments and call __libc_start_main()
          * - preserve a0 ('argc'), a1 ('argv') and sp.
          * - allocate a global stack and jump to global init function.
          */
         elf_offset = 80;
     } else {
-        /* Under static linking, "__syscall" must be generated to allow
-         * the program to invoke system calls.
+        /* Under static linking, "__syscall" must be generated to allow the
+         * program to invoke system calls.
          *
          * "__syscall" consists of 9 instructions, preceded by 6 initial
-         * instructions. Consequently, the elf offset for "__syscall" is
-         * is 24 bytes, and the offset for the subsequent function
-         * (GLOBAL_FUNC) is 60 bytes.
+         * instructions. Consequently, the elf offset for "__syscall" is is 24
+         * bytes, and the offset for the subsequent function (GLOBAL_FUNC) is 60
+         * bytes.
          */
         func = find_func("__syscall");
         func->bbs->elf_offset = 24;
@@ -236,11 +236,11 @@ void cfg_flatten(void)
         flatten_ir->src0 = func->stack_size;
         flatten_ir->func_name = intern_string(func->return_def.var_name);
 
-        /* Except for local variables, it must allocate additional space
-         * to preserve the content of ra at each function entry point.
+        /* Except for local variables, it must allocate additional space to
+         * preserve the content of ra at each function entry point.
          *
-         * 'stack_size' doesn't include the additional space, so an extra
-         * number '4' is added to 'stack_size'.
+         * 'stack_size' doesn't include the additional space, so an extra number
+         * '4' is added to 'stack_size'.
          */
         int stack_top_ofs = ALIGN_UP(func->stack_size + 4, RV32_ALIGNMENT);
 
@@ -264,9 +264,9 @@ void cfg_flatten(void)
                         insn->src1 = insn->src1 + stack_top_ofs;
                         break;
                     default:
-                        /* Ignore opcodes with the ofs_based_on_stack_top
-                         * flag set since only the three opcodes above needs
-                         * to access a variable's address.
+                        /* Ignore opcodes with the ofs_based_on_stack_top flag
+                         * set since only the three opcodes above needs to
+                         * access a variable's address.
                          */
                         break;
                     }
@@ -297,8 +297,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     int rs2 = ph2_ir->src1 + 10;
     int ofs;
 
-    /* Prepare the variables to reuse the same code for
-     * the instruction sequence of
+    /* Prepare the variables to reuse the same code for the instruction sequence
+     * of
      * 1. division and modulo.
      * 2. load and store operations.
      * 3. address-of operations.
@@ -579,9 +579,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
         return;
     case OP_sign_ext: {
-        /* Decode size information:
-         * Lower 16 bits: target size
-         * Upper 16 bits: source size
+        /* Decode size information: Lower 16 bits: target size Upper 16 bits:
+         * source size
          */
         int target_size = ph2_ir->src1 & 0xFFFF;
         int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
@@ -590,9 +589,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         int shift_amount = (target_size - source_size) * 8;
 
         if (source_size == 2) {
-            /* Sign extend from short to word (16-bit shift)
-             * For 16-bit sign extension, use only shift operations
-             * since 0xFFFF is too large for RISC-V immediate field
+            /* Sign extend from short to word (16-bit shift) For 16-bit sign
+             * extension, use only shift operations since 0xFFFF is too large
+             * for RISC-V immediate field
              */
             emit(__slli(rd, rs1, shift_amount));
             emit(__srai(rd, rd, shift_amount));
@@ -620,6 +619,7 @@ void code_generate(void)
 
     if (dynlink) {
         plt_generate();
+
         /* - Initial stack layout when the program starts:
          *
          *      +----------------+ (high address)
@@ -644,9 +644,9 @@ void code_generate(void)
          *                         void (*rtld_fini) (void),
          *                         void (*stack_end));
          *
-         * Currently, to execute a dynamically linked program with the
-         * minimal effort required, we perform the following call:
-         * -> __libc_start_main(main_wrapper, argc, argv, NULL,
+         * Currently, to execute a dynamically linked program with the minimal
+         * effort required, we perform the following call: ->
+         * __libc_start_main(main_wrapper, argc, argv, NULL,
          *                      NULL, NULL, stack_end)
          */
         emit(__lui(__a0, rv_hi(elf_code_start + 36)));
@@ -665,11 +665,11 @@ void code_generate(void)
 
         /* The main wrapper is located here under the dynamic linking mode
          *
-         * Use s0 and s1 registers to temporarily store 'argc' and 'argv',
-         * while preserving ra on the stack.
+         * Use s0 and s1 registers to temporarily store 'argc' and 'argv', while
+         * preserving ra on the stack.
          *
-         * After the main function completes its execution, it must use
-         * the original content of ra to transfer control back to
+         * After the main function completes its execution, it must use the
+         * original content of ra to transfer control back to
          * __libc_start_main().
          */
         emit(__addi(__sp, __sp, -12));
@@ -680,14 +680,15 @@ void code_generate(void)
         emit(__addi(__s1, __a1, 0)); /* argv */
         ofs = ALIGN_UP(GLOBAL_FUNC->stack_size, RV32_ALIGNMENT) + 4;
     } else {
-        /* When using static linking, the starting address
-         * of the main wrapper is here.
+        /* When using static linking, the starting address of the main wrapper
+         * is here.
          *
          * Save original sp in s0 first.
          */
         ofs = ALIGN_UP(GLOBAL_FUNC->stack_size, RV32_ALIGNMENT);
         emit(__addi(__s0, __sp, 0));
     }
+
     /* Next, the main wrapper performs:
      *   1. allocate global stack
      *   2. jump to global init function
@@ -773,7 +774,7 @@ void plt_generate()
     /* Accroding the RISC-V ABI specification, the first PLT entry should
      * contains the following instructions:
      *
-     * 1: auipc  t2, %pcrel_hi(.got)
+     * 1: auipc t2, %pcrel_hi(.got)
      *    sub    t1, t1, t3
      *    lw     t3, %pcrel_lo(1b)(t2)
      *    addi   t1, t1 -(PLT0_SIZE + 12)    # PLT0_SIZE is 32 bytes.
@@ -842,12 +843,12 @@ void plt_generate()
     elf_write_int(dynamic_sections.elf_plt, __lw(__t0, __t0, 4));
     elf_write_int(dynamic_sections.elf_plt, __jalr(__zero, __t3, 0));
     for (int i = 0; i * PLT_ENT_SIZE < end; i++) {
-        /* elf_generate() ensures that the .got section is placed
-         * a higher memory address than the plt section. As a result,
-         * 'ofs' must always be positive.
+        /* elf_generate() ensures that the .got section is placed a higher
+         * memory address than the plt section. As a result, 'ofs' must always
+         * be positive.
          *
-         * addr_of_plt: the starting address of PLT[N]. (N >= 1)
-         * addr_of_got: the starting address of GOT[N + 1].
+         * addr_of_plt: the starting address of PLT[N]. (N >= 1) addr_of_got:
+         * the starting address of GOT[N + 1].
          */
         addr_of_plt =
             dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE + PLT_ENT_SIZE * i;
@@ -856,14 +857,14 @@ void plt_generate()
 
         /* In RISC-V ABI, a PLT stub takes up 4 instructions to load GOT[N + 2]:
          *
-         * 1: auipc  t3, %pcrel_hi(function@.got)
+         * 1: auipc t3, %pcrel_hi(function@.got)
          *    lw     t3, %pcrel_lo(1b)(t3)
          *    jalr   t1, t3
          *    nop
          *
-         * Each PLT stub uses auipc and lw instructions to perform a
-         * PC-relative addressing to obtain GOT[N + 1], and then perform
-         * an unconditional jump.
+         * Each PLT stub uses auipc and lw instructions to perform a PC-relative
+         * addressing to obtain GOT[N + 1], and then perform an unconditional
+         * jump.
          *
          * +-------------------------------------+----------------------------+
          * | Instruction                         | Contents of registers      |

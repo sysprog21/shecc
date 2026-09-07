@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 #include <stdbool.h>
@@ -71,9 +71,9 @@ char *dot_output_name(char *input)
     if (slash)
         base = slash + 1;
 
-    /* A dot only introduces a suffix when something in the same path
-     * component precedes it. That rules out a directory's dot ("dir.d/file")
-     * and a dotfile's leading one, which would reduce ".bashrc" to ".dot".
+    /* A dot only introduces a suffix when something in the same path component
+     * precedes it. That rules out a directory's dot ("dir.d/file") and a
+     * dotfile's leading one, which would reduce ".bashrc" to ".dot".
      */
     if (suffix && suffix <= base)
         suffix = NULL;
@@ -85,6 +85,7 @@ char *dot_output_name(char *input)
 
     if (suffix)
         base_len = suffix - input;
+
     /* strlen, not sizeof: shecc types a string literal as a pointer, so
      * sizeof(".dot") is 1 once the compiler is compiling itself.
      */
@@ -148,8 +149,8 @@ int main(int argc, char *argv[])
         out = dot_output_name(in);
 
     /* The graph is written by truncating its output, so naming the input
-     * destroys the source. That happens both when -o names it outright and
-     * when an input already ending in .dot derives its own name.
+     * destroys the source. That happens both when -o names it outright and when
+     * an input already ending in .dot derives its own name.
      */
     if (dump_dot && !strcmp(out, in))
         usage_error("--dot would overwrite the input; name another output");
@@ -207,8 +208,8 @@ int main(int argc, char *argv[])
 
     unwind_phi();
 
-    /* Copy small helpers into their callers before anything else looks at
-     * them, so the optimizer sees one body rather than a call boundary.
+    /* Copy small helpers into their callers before anything else looks at them,
+     * so the optimizer sees one body rather than a call boundary.
      */
     inline_calls();
 
@@ -227,9 +228,9 @@ int main(int argc, char *argv[])
     /* Flatten unpredictable ifs into branchless selects.
      *
      * After the optimizer rather than inside ssa_build(): a select reads a
-     * third operand, and the passes in optimize() walk instructions two
-     * sources at a time. One of them would rewrite a copy feeding that third
-     * operand and leave the select reading a value nothing defines.
+     * third operand, and the passes in optimize() walk instructions two sources
+     * at a time. One of them would rewrite a copy feeding that third operand
+     * and leave the select reading a value nothing defines.
      */
     if_convert();
 
@@ -275,8 +276,7 @@ int main(int argc, char *argv[])
     if (dump_ir)
         dump_ph2_ir();
 
-    /*
-     * ELF preprocess:
+    /* ELF preprocess:
      * 1. generate all sections except for .text section.
      * 2. calculate the starting addresses of certain sections.
      */

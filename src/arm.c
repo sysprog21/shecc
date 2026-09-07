@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 /* ARMv7-A instruction encoding */
@@ -22,8 +22,8 @@
  *             |    +------- always
  *             +------------ branch
  *
- * Machine-level "b" instructions have restricted ranges from the address of
- * the current instruction.
+ * Machine-level "b" instructions have restricted ranges from the address of the
+ * current instruction.
  */
 
 #include "defs.h"
@@ -44,8 +44,7 @@ typedef enum {
     arm_stmdb = 16
 } arm_op_t;
 
-/* Condition code
- * Reference:
+/* Condition code Reference:
  * https://community.arm.com/developer/ip-products/processors/b/processors-ip-blog/posts/condition-codes-1-condition-flags-and-codes
  */
 typedef enum {
@@ -230,8 +229,7 @@ int __sll_amt(arm_cond_t cond,
 
 int __sra(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
 {
-    /* Arithmetic right shift with register
-     * Bit 4 = 1 (register-specified shift)
+    /* Arithmetic right shift with register Bit 4 = 1 (register-specified shift)
      * Bits 5-6 = arith_rs (2) for arithmetic right shift
      */
     return arm_encode(cond, 0 + (arm_mov << 1) + (0 << 5), 0, rd,
@@ -260,11 +258,10 @@ int __zero(int rd)
     return __mov_i(__AL, rd, 0);
 }
 
-/* ARM halfword transfer (immediate offset) using special encoding
- * For halfword: bits[11:8] = imm4H, bits[7:4] = encoding, bits[3:0] = imm4L
- * imm4H: upper 4 bits of offset
- * imm4L: lower 4 bits of offset
- * encoding: 0b1011 for unsigned halfword, 0b1111 for signed halfword
+/* ARM halfword transfer (immediate offset) using special encoding For halfword:
+ * bits[11:8] = imm4H, bits[7:4] = encoding, bits[3:0] = imm4L imm4H: upper 4
+ * bits of offset imm4L: lower 4 bits of offset encoding: 0b1011 for unsigned
+ * halfword, 0b1111 for signed halfword
  */
 int arm_halfword_transfer(arm_cond_t cond,
                           int l,

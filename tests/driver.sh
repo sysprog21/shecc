@@ -11,16 +11,18 @@ readonly SHOW_PROGRESS="${SHOW_PROGRESS:-1}"
 readonly COLOR_OUTPUT="${COLOR_OUTPUT:-1}"
 # Substring match against the category name; empty runs everything.
 readonly TEST_FILTER="${TEST_FILTER:-}"
+
 # 1 stops at the first failure. The default reports every failure and still
 # exits non-zero at the end, so one bad case no longer hides the other 600.
 readonly FAIL_FAST="${FAIL_FAST:-0}"
 
-# Everything the run creates goes here, so it can be removed in one step --
-# the suite used to leave ~2400 files in /tmp per invocation. Kept on failure,
+# Everything the run creates goes here, so it can be removed in one step -- the
+# suite used to leave ~2400 files in /tmp per invocation. Kept on failure,
 # because report_test_failure names the files it wants you to look at.
 readonly TEST_TMPDIR="$(mktemp -d)"
 export TMPDIR="$TEST_TMPDIR"
-function cleanup() {
+function cleanup()
+{
     if [ "$FAILED_TESTS" -eq 0 ]; then
         rm -rf "$TEST_TMPDIR"
     else
@@ -32,7 +34,8 @@ trap cleanup EXIT
 # Set by begin_category; tests outside the selected categories return early.
 CATEGORY_SELECTED=1
 
-function test_selected() {
+function test_selected()
+{
     [ "$CATEGORY_SELECTED" = "1" ]
 }
 
@@ -43,7 +46,7 @@ readonly TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Pointer width of the configured target. The sizeof tests below assert on it,
 # and it differs between the 32-bit targets and x86-64.
 PTR_SZ=$(sed -n 's/^#define PTR_SIZE \([0-9]*\).*/\1/p' \
-    "$TESTS_DIR/../config" 2>/dev/null | head -1)
+    "$TESTS_DIR/../config" 2> /dev/null | head -1)
 [ -n "${PTR_SZ}" ] || PTR_SZ=4
 
 # Variadic arguments occupy one pointer-sized slot each, so an int-based walk
@@ -86,16 +89,20 @@ fi
 case "$1" in
     "0")
         readonly SHECC="$PWD/out/shecc"
-        readonly STAGE="Stage 0 (Host Compiler)" ;;
+        readonly STAGE="Stage 0 (Host Compiler)"
+        ;;
     "1")
         readonly SHECC="${TARGET_EXEC:-} $PWD/out/shecc-stage1.elf"
-        readonly STAGE="Stage 1 (Cross-compiled)" ;;
+        readonly STAGE="Stage 1 (Cross-compiled)"
+        ;;
     "2")
         readonly SHECC="${TARGET_EXEC:-} $PWD/out/shecc-stage2.elf"
-        readonly STAGE="Stage 2 (Self-hosted)" ;;
+        readonly STAGE="Stage 2 (Self-hosted)"
+        ;;
     *)
         echo "$1 is not a valid stage"
-        exit 1 ;;
+        exit 1
+        ;;
 esac
 
 if [ $# -ge 2 ] && [ "$2" = "1" ]; then
@@ -109,15 +116,16 @@ fi
 # Utility Functions
 
 # Color output functions
-function print_color() {
+function print_color()
+{
     if [ "$COLOR_OUTPUT" = "1" ]; then
         case "$1" in
-            green)  echo -ne "\033[32m$2\033[0m" ;;
-            red)    echo -ne "\033[31m$2\033[0m" ;;
+            green) echo -ne "\033[32m$2\033[0m" ;;
+            red) echo -ne "\033[31m$2\033[0m" ;;
             yellow) echo -ne "\033[33m$2\033[0m" ;;
-            blue)   echo -ne "\033[34m$2\033[0m" ;;
-            bold)   echo -ne "\033[1m$2\033[0m" ;;
-            *)      echo -n "$2" ;;
+            blue) echo -ne "\033[34m$2\033[0m" ;;
+            bold) echo -ne "\033[1m$2\033[0m" ;;
+            *) echo -n "$2" ;;
         esac
     else
         echo -n "$2"
@@ -125,7 +133,8 @@ function print_color() {
 }
 
 # Begin a new test category
-function begin_category() {
+function begin_category()
+{
     local category="$1"
     local description="${2:-}"
 
@@ -146,8 +155,8 @@ function begin_category() {
         CATEGORY_SELECTED=1
     else
         case "$category" in
-        *"$TEST_FILTER"*) CATEGORY_SELECTED=1 ;;
-        *) CATEGORY_SELECTED=0 ;;
+            *"$TEST_FILTER"*) CATEGORY_SELECTED=1 ;;
+            *) CATEGORY_SELECTED=0 ;;
         esac
     fi
     CATEGORY_TESTS["$category"]=0
@@ -167,7 +176,8 @@ function begin_category() {
 }
 
 # Show progress indicator
-function show_progress() {
+function show_progress()
+{
     if [ "$SHOW_PROGRESS" = "1" ]; then
         ((PROGRESS_COUNT++))
         if [ $((PROGRESS_COUNT % 10)) -eq 0 ]; then
@@ -180,7 +190,8 @@ function show_progress() {
 }
 
 # Core test failure reporting function (consolidated)
-function report_test_failure() {
+function report_test_failure()
+{
     local test_type="$1"
     local tmp_in="$2"
     local tmp_exe="$3"
@@ -223,7 +234,8 @@ function report_test_failure() {
 }
 
 # Main test execution function
-function try() {
+function try()
+{
     local expected="$1"
     local expected_output=""
     local input=""
@@ -234,6 +246,7 @@ function try() {
     elif [ $# -eq 3 ]; then
         expected_output="$2"
         input="$3"
+
         # An expectation was supplied, so compare against it -- including when
         # it is empty, which asserts that the program prints nothing.
         check_output=1
@@ -245,9 +258,10 @@ function try() {
     local tmp_exe="$(mktemp)"
     local tmp_err="$(mktemp)"
     echo "$input" > "$tmp_in"
+
     # Keep the compiler's diagnostic rather than discarding it: without it a
     # failure reports only an exit-code mismatch and never says why.
-    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>"$tmp_err"
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2> "$tmp_err"
     chmod +x $tmp_exe
 
     local output=''
@@ -273,13 +287,15 @@ function try() {
     fi
 }
 
-function try_() {
+function try_()
+{
     local expected="$1"
     local input="$(cat)"
     try "$expected" "$input"
 }
 
-function try_output() {
+function try_output()
+{
     local expected="$1"
     local expected_output="$2"
     local input="$(cat)"
@@ -288,32 +304,32 @@ function try_output() {
 
 # Compile and run a checked-in program through the same path as inline cases.
 # This keeps the small end-to-end programs in both stage-0 and stage-2 runs.
-function try_file() {
+function try_file()
+{
     try "$1" "$2" "$(< "$3")"
 }
 
-# try_compile_error - test shecc with invalid C program
-# Usage:
-# - try_compile_error invalid_input_code
-# compile "invalid_input_code" with shecc so that shecc generates a
-# compilation error message.
+# try_compile_error - test shecc with invalid C program Usage:
+# - try_compile_error invalid_input_code compile "invalid_input_code" with shecc
+# so that shecc generates a compilation error message.
 #
-# This function uses shecc to compile invalid code and obtains the exit
-# code returned by shecc. The exit code must be a non-zero value to
-# indicate that shecc has the ability to parse the invalid code and
-# output an error message.
-function try_compile_error() {
+# This function uses shecc to compile invalid code and obtains the exit code
+# returned by shecc. The exit code must be a non-zero value to indicate that
+# shecc has the ability to parse the invalid code and output an error message.
+function try_compile_error()
+{
     local input=$(cat)
     test_selected || return 0
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
-    # Suppress compiler error output and "Aborted" messages completely
-    # Run in a subshell with job control disabled
+
+    # Suppress compiler error output and "Aborted" messages completely Run in a
+    # subshell with job control disabled
     (
-        set +m 2>/dev/null  # Disable job control messages
+        set +m 2> /dev/null # Disable job control messages
         $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>&1
-    ) >/dev/null 2>&1
+    ) > /dev/null 2>&1
     local exit_code=$?
 
     ((TOTAL_TESTS++))
@@ -331,20 +347,23 @@ function try_compile_error() {
     fi
 }
 
-function items() {
+function items()
+{
     local expected="$1"
     local input="$2"
     try "$expected" "int main(int argc, int argv) { $input }"
 }
 
-function expr() {
+function expr()
+{
     local expected="$1"
     local input="$2"
     items "$expected" "exit($input);"
 }
 
 # Batch test runners for common patterns
-function run_expr_tests() {
+function run_expr_tests()
+{
     local -n tests_ref=$1
     for test in "${tests_ref[@]}"; do
         IFS=' ' read -r expected code <<< "$test"
@@ -352,7 +371,8 @@ function run_expr_tests() {
     done
 }
 
-function run_try_tests() {
+function run_try_tests()
+{
     local -n tests_ref=$1
     for test in "${tests_ref[@]}"; do
         local expected=$(echo "$test" | head -n1)
@@ -361,7 +381,8 @@ function run_try_tests() {
     done
 }
 
-function run_items_tests() {
+function run_items_tests()
+{
     local -n tests_ref=$1
     for test in "${tests_ref[@]}"; do
         IFS=' ' read -r expected code <<< "$test"
@@ -369,12 +390,12 @@ function run_items_tests() {
     done
 }
 
-# try_large - test shecc with large return values (> 255)
-# Usage:
-# - try_large expected_value input_code
-# compile "input_code" with shecc and verify the return value by printing it
-# instead of using exit code (which is limited to 0-255).
-function try_large() {
+# try_large - test shecc with large return values (> 255) Usage:
+# - try_large expected_value input_code compile "input_code" with shecc and
+# verify the return value by printing it instead of using exit code (which is
+# limited to 0-255).
+function try_large()
+{
     local expected="$1"
     local input="$(cat)"
 
@@ -394,7 +415,7 @@ int main() {
 EOF
 
     # Suppress compiler warnings by redirecting stderr
-    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>/dev/null
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2> /dev/null
     chmod +x $tmp_exe
 
     local output=$(${TARGET_EXEC:-} "$tmp_exe")
@@ -590,7 +611,7 @@ declare -a bitwise_tests=(
 )
 
 run_expr_tests bitwise_tests
-try_output 0 "128 59926 -6 -4 -500283"  << EOF
+try_output 0 "128 59926 -6 -4 -500283" << EOF
 int main() {
   printf("%d %d %d %d %d", 32768 >> 8, 245458999 >> 12, -11 >> 1, -16 >> 2, -1000565 >> 1);
   return 0;
@@ -630,8 +651,8 @@ run_items_tests variable_tests
 # Category: Compound Literals
 begin_category "Compound Literals" "Testing C99 compound literal features"
 
-# Compound literal support - C90/C99 compliant implementation
-# Basic struct compound literals (verified working)
+# Compound literal support - C90/C99 compliant implementation Basic struct
+# compound literals (verified working)
 try_ 42 << EOF
 typedef struct { int x; int y; } point_t;
 int main() {
@@ -764,7 +785,8 @@ EOF
 
 # Enhanced compound literal tests - C99 features with non-standard extensions
 # These tests validate both standard C99 compound literals and the non-standard
-# behavior required by the test suite (array compound literals in scalar contexts)
+# behavior required by the test suite (array compound literals in scalar
+# contexts)
 
 # Test: Array compound literal assigned to scalar int (non-standard)
 try_ 100 << EOF
@@ -968,7 +990,7 @@ items 8 "if (1) return 010; else return 11;"
 items 10 "int a; a = 012 - 10; int b; b = 0100 - 64; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
 
 # The values on both sides of the select, its condition, and unrelated values
-# are all used after the join.  This keeps the register file full when the
+# are all used after the join. This keeps the register file full when the
 # allocator has to choose the select result's register.
 try_ 30 << EOF
 int pick(int a, int b, int c, int d, int e, int f, int g) {
@@ -1023,8 +1045,7 @@ items 0 "int i = 0; for (;; i++) { break; } return i;"
 # Category: Comments
 begin_category "Comments" "Testing C-style and C++-style comment parsing"
 
-# C-style comments / C++-style comments
-# Start
+# C-style comments / C++-style comments Start
 try_ 0 << EOF
 /* This is a test C-style comments */
 int main() { return 0; }
@@ -1172,8 +1193,8 @@ try_compile_error << EOF
 int main(void, int i) {}
 EOF
 
-# Unreachable declaration should not cause prog segmentation fault
-# (prog should leave normally with exit code 0)
+# Unreachable declaration should not cause prog segmentation fault (prog should
+# leave normally with exit code 0)
 try_ 0 << EOF
 int main()
 {
@@ -1503,8 +1524,8 @@ int main() {
 }
 EOF
 
-# Pointer difference calculations
-# Test basic pointer subtraction returning element count
+# Pointer difference calculations Test basic pointer subtraction returning
+# element count
 try_ 5 << EOF
 int main() {
     char arr[10];
@@ -1784,8 +1805,8 @@ int main() {
 }
 EOF
 
-# A local function pointer shadows a global function.  Copying it must load
-# the local variable's stored target, rather than materializing the global
+# A local function pointer shadows a global function. Copying it must load the
+# local variable's stored target, rather than materializing the global
 # function's address.
 try_ 9 << EOF
 int target(int x) { return x + 3; }
@@ -1821,9 +1842,8 @@ int main() {
 }
 EOF
 
-
-# Addressing a pointer to a function-pointer aggregate must return the
-# pointer variable's address, not backing storage for its pointee.
+# Addressing a pointer to a function-pointer aggregate must return the pointer
+# variable's address, not backing storage for its pointee.
 try_ 5 << EOF
 typedef struct {
     int (*fn)(int);
@@ -1957,8 +1977,7 @@ int main() {
 }
 EOF
 
-# 2D Array Tests
-# with proper row-major indexing for multi-dimensional arrays
+# 2D Array Tests with proper row-major indexing for multi-dimensional arrays
 try_ 78 << EOF
 int main() {
     int matrix[3][4];
@@ -2151,8 +2170,8 @@ int main() {
 }
 EOF
 
-# Mixed subscript and arrow / dot operators,
-# excerpted and modified from issue #165
+# Mixed subscript and arrow / dot operators, excerpted and modified from issue
+# #165
 try_output 0 "DDDDDDMMMEEE1" << EOF
 #include <stdlib.h>
 #include <string.h>
@@ -2426,23 +2445,23 @@ items 24 "short s; s = 6; s *= 4; return s;"
 begin_category "Sizeof Operator" "Testing sizeof operator on various types"
 
 # sizeof
-expr 0 "sizeof(void)";
-expr 1 "sizeof(_Bool)";
-expr 1 "sizeof(char)";
-expr 2 "sizeof(short)";
-expr 4 "sizeof(int)";
+expr 0 "sizeof(void)"
+expr 1 "sizeof(_Bool)"
+expr 1 "sizeof(char)"
+expr 2 "sizeof(short)"
+expr 4 "sizeof(int)"
 # sizeof pointers
-expr $PTR_SZ "sizeof(void*)";
-expr $PTR_SZ "sizeof(_Bool*)";
-expr $PTR_SZ "sizeof(char*)";
-expr $PTR_SZ "sizeof(short*)";
-expr $PTR_SZ "sizeof(int*)";
+expr $PTR_SZ "sizeof(void*)"
+expr $PTR_SZ "sizeof(_Bool*)"
+expr $PTR_SZ "sizeof(char*)"
+expr $PTR_SZ "sizeof(short*)"
+expr $PTR_SZ "sizeof(int*)"
 # sizeof multi-level pointer
-expr $PTR_SZ "sizeof(void**)";
-expr $PTR_SZ "sizeof(_Bool**)";
-expr $PTR_SZ "sizeof(char**)";
-expr $PTR_SZ "sizeof(short**)";
-expr $PTR_SZ "sizeof(int**)";
+expr $PTR_SZ "sizeof(void**)"
+expr $PTR_SZ "sizeof(_Bool**)"
+expr $PTR_SZ "sizeof(char**)"
+expr $PTR_SZ "sizeof(short**)"
+expr $PTR_SZ "sizeof(int**)"
 # sizeof struct
 try_ $PTR_SZ << EOF
 typedef struct {
@@ -2541,8 +2560,8 @@ EOF
 begin_category "Memory Management" "Testing malloc, free, and dynamic memory allocation"
 
 if [ "$LINK_MODE" = "static" ]; then
-# malloc and free
-try_ 1 << EOF
+    # malloc and free
+    try_ 1 << EOF
 int main()
 {
     /* change test bench if different scheme apply */
@@ -2927,10 +2946,10 @@ skip:
 }
 EOF
 
-# Forward reference. Statements between a goto and its label are unreachable
-# but perfectly legal, and gcc accepts this silently at -Wall -Wextra
-# -pedantic. shecc used to abort on the unreachable "return 1;" -- this case
-# asserted that abort as a compile error; it now asserts the correct result.
+# Forward reference. Statements between a goto and its label are unreachable but
+# perfectly legal, and gcc accepts this silently at -Wall -Wextra -pedantic.
+# shecc used to abort on the unreachable "return 1;" -- this case asserted that
+# abort as a compile error; it now asserts the correct result.
 try_ 0 << EOF
 int main()
 {
@@ -3976,16 +3995,16 @@ EOF
 
 if [ "$LINK_MODE" = "static" ]; then
 
-# printf family, including truncation and zero size input
-try_output 11 "Hello World" << EOF
+    # printf family, including truncation and zero size input
+    try_output 11 "Hello World" << EOF
 int main() {
     int written = printf("Hello World");
     return written;
 }
 EOF
 
-# tests printf returns EBADF (errno 9) when stdout is closed
-try_output 1 "" << EOF
+    # tests printf returns EBADF (errno 9) when stdout is closed
+    try_output 1 "" << EOF
 int main()
 {
     __syscall(__syscall_close, 1);
@@ -3994,7 +4013,7 @@ int main()
 }
 EOF
 
-try_output 11 "Hello World" << EOF
+    try_output 11 "Hello World" << EOF
 int main() {
     char buffer[50];
     int written = sprintf(buffer, "Hello World");
@@ -4003,7 +4022,7 @@ int main() {
 }
 EOF
 
-try_output 16 "Hello World 1123" << EOF
+    try_output 16 "Hello World 1123" << EOF
 int main() {
     char buffer[50];
     int written = sprintf(buffer, "Hello %s %d", "World", 1123);
@@ -4012,12 +4031,11 @@ int main() {
 }
 EOF
 
-# The following cases validate the behavior and return value of
-# snprintf().
-#
-# This case is a normal case and outputs the complete string
-# because the given buffer size is large enough.
-try_output 16 "Hello World 1123" << EOF
+    # The following cases validate the behavior and return value of snprintf().
+    #
+    # This case is a normal case and outputs the complete string because the
+    # given buffer size is large enough.
+    try_output 16 "Hello World 1123" << EOF
 int main() {
     char buffer[50];
     int written = snprintf(buffer, 50, "Hello %s %d", "World", 1123);
@@ -4026,11 +4044,11 @@ int main() {
 }
 EOF
 
-# If n is zero, nothing is written.
-#
-# Thus, the output should be the string containing 19 characters
-# for this test case.
-try_output 11 "0000000000000000000" << EOF
+    # If n is zero, nothing is written.
+    #
+    # Thus, the output should be the string containing 19 characters for this
+    # test case.
+    try_output 11 "0000000000000000000" << EOF
 int main() {
     char buffer[20];
     for (int i = 0; i < 19; i++)
@@ -4042,10 +4060,10 @@ int main() {
 }
 EOF
 
-# In this case, snprintf() only writes at most 10 bytes (including '\0'),
-# but the return value is 11, which corresponds to the length of
-# "Number: -37".
-try_output 11 "Number: -" << EOF
+    # In this case, snprintf() only writes at most 10 bytes (including '\0'),
+    # but the return value is 11, which corresponds to the length of "Number:
+    # -37".
+    try_output 11 "Number: -" << EOF
 int main() {
     char buffer[10];
     for (int i = 0; i < 9; i++)
@@ -4057,7 +4075,7 @@ int main() {
 }
 EOF
 
-try_output 14 " 4e 75 6d 62 65 72 3a 20 2d 0 30 30 30 30 30 30 30 30 30 0" << EOF
+    try_output 14 " 4e 75 6d 62 65 72 3a 20 2d 0 30 30 30 30 30 30 30 30 30 0" << EOF
 int main()
 {
     char buffer[20];
@@ -4073,8 +4091,8 @@ int main()
 }
 EOF
 
-# A complex test case for snprintf().
-ans="written = 24
+    # A complex test case for snprintf().
+    ans="written = 24
 buffer  = buf - 00000
 written = 13
 buffer  = aaaa - 0
@@ -4083,7 +4101,7 @@ buffer  = aaaa - 000000777777
 written = 14
 buffer  = aaaa - 000000777777
  61 61 61 61 20 2d 20 30 30 30 30 30 30 37 37 37 37 37 37 0 30 30 30 30 30 30 30 30 30 0"
-try_output 0 "$ans" << EOF
+    try_output 0 "$ans" << EOF
 int main()
 {
     char buffer[30];
@@ -4107,16 +4125,15 @@ int main()
 }
 EOF
 
-# test the return value when calling fputc().
-#
-# Since the FILE data type is defined as an int in
-# the built-in C library, and most of the functions
-# such as fputc(), fgetc(), fclose() and fgets() directly
-# treat the "stream" parameter (of type FILE *) as a file
-# descriptor for performing input/output operations, the
-# following test cases define "stdout" as 1, which is the
-# file descriptor for the standard output.
-try_output 0 "awritten = a" << EOF
+    # test the return value when calling fputc().
+    #
+    # Since the FILE data type is defined as an int in the built-in C library,
+    # and most of the functions such as fputc(), fgetc(), fclose() and fgets()
+    # directly treat the "stream" parameter (of type FILE *) as a file
+    # descriptor for performing input/output operations, the following test
+    # cases define "stdout" as 1, which is the file descriptor for the standard
+    # output.
+    try_output 0 "awritten = a" << EOF
 #define stdout 1
 int main()
 {
@@ -4126,7 +4143,7 @@ int main()
 }
 EOF
 
-try_output 1 "" << EOF
+    try_output 1 "" << EOF
 #define stdout 1
 int main()
 {
@@ -4139,8 +4156,7 @@ else
     echo "Skip test cases because of using dynamic linking mode"
 fi # "LINK_MODE" = "static"
 
-# tests integer type conversion
-# excerpted and modified from issue #166
+# tests integer type conversion excerpted and modified from issue #166
 try_output 0 "a = -127, b = -78, c = -93, d = -44" << EOF
 int main()
 {
@@ -4224,8 +4240,7 @@ int main()
 }
 EOF
 
-# Binary literal tests (0b/0B prefix)
-# Test basic binary literals
+# Binary literal tests (0b/0B prefix) Test basic binary literals
 expr 0 "0b0"
 expr 1 "0b1"
 expr 2 "0b10"
@@ -4257,15 +4272,15 @@ items 54 "int a = 0b1111; int b = 0b0011; return (a + b) * 3;"
 items 160 "int mask = 0b11110000; int value = 0b10101010; return value & mask;"
 
 # Test combination of different number bases
-expr 45 "0b1111 + 0xF + 017"  # 15 + 15 + 15 = 45
-expr 90 "0b110000 + 0x10 + 032"  # 48 + 16 + 26 = 90
+expr 45 "0b1111 + 0xF + 017"    # 15 + 15 + 15 = 45
+expr 90 "0b110000 + 0x10 + 032" # 48 + 16 + 26 = 90
 
 # Test binary literals in comparisons
 expr 1 "0b1010 == 10"
 expr 1 "0b11111111 == 255"
 expr 0 "0b1000 != 8"
 expr 1 "0b10000 > 0xF"
-expr 1 "0B1111 < 020"  # 15 < 16 (octal)
+expr 1 "0B1111 < 020" # 15 < 16 (octal)
 
 # Test binary literals with large values
 try_large 1023 << EOF
@@ -4305,8 +4320,8 @@ int main()
 }
 EOF
 
-# New escape sequence tests (\a, \b, \v, \f)
-# Test character literals with new escape sequences
+# New escape sequence tests (\a, \b, \v, \f) Test character literals with new
+# escape sequences
 try_ 7 << EOF
 int main() {
     char bell = '\a';  /* ASCII 7 - bell/alert */
@@ -4442,8 +4457,8 @@ int main() {
 }
 EOF
 
-# Test escape sequences in printf
-# Note: The bell character (\a) is non-printable but present in output
+# Test escape sequences in printf Note: The bell character (\a) is non-printable
+# but present in output
 try_output 0 "$(printf 'Bell: \a Tab:\t Newline:\n')" << EOF
 int main() {
     printf("Bell: %c Tab:%c Newline:%c", '\a', '\t', '\n');
@@ -4476,9 +4491,9 @@ int main() {
 }
 EOF
 
-# va_list and variadic function tests
-# Note: These tests demonstrate both direct pointer arithmetic and
-# va_list typedef forwarding between functions, now fully supported.
+# va_list and variadic function tests Note: These tests demonstrate both direct
+# pointer arithmetic and va_list typedef forwarding between functions, now fully
+# supported.
 
 # Test 1: Sum calculation using variadic arguments
 try_output 0 "Sum: 15" << EOF
@@ -4686,8 +4701,8 @@ int main()
 }
 EOF
 
-# va_list typedef forwarding tests
-# These tests demonstrate va_list typedef forwarding between functions
+# va_list typedef forwarding tests These tests demonstrate va_list typedef
+# forwarding between functions
 
 # Test 11: Basic va_list typedef forwarding
 try_output 0 "Test: 42" << EOF
@@ -4788,8 +4803,8 @@ int main(void)
 }
 EOF
 
-# Complex pointer arithmetic tests
-# Testing enhanced parser capability to handle expressions like *(ptr + offset)
+# Complex pointer arithmetic tests Testing enhanced parser capability to handle
+# expressions like *(ptr + offset)
 
 # Test 1: Basic pointer arithmetic on RHS
 try_output 0 "Values: 10 20 30" << EOF
@@ -5355,8 +5370,8 @@ int main()
 }
 EOF
 
-# Additional struct initialization tests from refine-parser
-# Test: Local struct initialization (working with field-by-field assignment)
+# Additional struct initialization tests from refine-parser Test: Local struct
+# initialization (working with field-by-field assignment)
 try_ 42 << EOF
 typedef struct {
     int x;
@@ -5420,8 +5435,7 @@ int main() {
 }
 EOF
 
-# Union support tests
-# Basic union declaration and field access
+# Union support tests Basic union declaration and field access
 try_ 42 << EOF
 typedef union {
     int i;
@@ -5638,8 +5652,8 @@ int main() {
 }
 EOF
 
-# Sizeof union with mixed types. The largest member is the pointer, so the
-# union is one pointer wide: 4 on the 32-bit targets, 8 on LP64.
+# Sizeof union with mixed types. The largest member is the pointer, so the union
+# is one pointer wide: 4 on the 32-bit targets, 8 on LP64.
 try_ $PTR_SZ << EOF
 typedef union {
     char c;
@@ -5907,8 +5921,8 @@ int main() {
 }
 EOF
 
-# Local array initializers - verify compilation and correct values
-# Test 1: Implicit size array with single element
+# Local array initializers - verify compilation and correct values Test 1:
+# Implicit size array with single element
 try_ 1 << 'EOF'
 int main() {
     int a[] = {1};
@@ -6139,8 +6153,8 @@ int main() {
 }
 EOF
 
-# Pointer dereference assignment tests
-# Test Case 1: Simple pointer dereference assignment
+# Pointer dereference assignment tests Test Case 1: Simple pointer dereference
+# assignment
 try_ 0 << EOF
 void f(int *ap) {
     *ap = 0;  // Should work now
@@ -6355,7 +6369,7 @@ EOF
 
 echo ""
 if [ "$SHOW_PROGRESS" = "1" ]; then
-    echo ""  # New line after progress indicators
+    echo "" # New line after progress indicators
 fi
 
 TEST_END_TIME=$(date +%s)
@@ -6372,14 +6386,14 @@ echo "Overall Statistics:"
 echo "  Total Tests:    $TOTAL_TESTS"
 print_color green "  Passed:         $PASSED_TESTS"
 if [ "$PASSED_TESTS" -gt 0 ] && [ "$TOTAL_TESTS" -gt 0 ]; then
-    echo " ($(( PASSED_TESTS * 100 / TOTAL_TESTS ))%)"
+    echo " ($((PASSED_TESTS * 100 / TOTAL_TESTS))%)"
 else
     echo ""
 fi
 
 if [ "$FAILED_TESTS" -gt 0 ]; then
     print_color red "  Failed:         $FAILED_TESTS"
-    echo " ($(( FAILED_TESTS * 100 / TOTAL_TESTS ))%)"
+    echo " ($((FAILED_TESTS * 100 / TOTAL_TESTS))%)"
 else
     echo "  Failed:         0"
 fi

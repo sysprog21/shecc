@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 /* Translate IR to target machine code */
@@ -90,8 +90,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         if (func->bbs)
             elf_offset += 4;
         else if (dynlink) {
-            /* When calling external functions in dynamic linking mode,
-             * the following instructions are required:
+            /* When calling external functions in dynamic linking mode, the
+             * following instructions are required:
              * - movw + movt: set r8 to 'elf_data_start'
              * - ldr: load a word from the address 'elf_data_start' into r12.
              *        (restore the global stack pointer.)
@@ -196,9 +196,8 @@ void cfg_flatten(void)
          *   (to ensure 8-byte alignment after pushing the 9 registers)
          * - ALIGN_UP(func->stack_size, 8)
          *
-         * Note that func->stack_size does not include the 36 + 4 bytes,
-         * so an additional 40 bytes should be added to
-         * ALIGN_UP(func->stack_size, 8).
+         * Note that func->stack_size does not include the 36 + 4 bytes, so an
+         * additional 40 bytes should be added to ALIGN_UP(func->stack_size, 8).
          */
         int stack_top_ofs = ALIGN_UP(func->stack_size, MIN_ALIGNMENT) + 40;
 
@@ -225,9 +224,9 @@ void cfg_flatten(void)
                         insn->src1 = insn->src1 + stack_top_ofs;
                         break;
                     default:
-                        /* Ignore opcodes with the ofs_based_on_stack_top
-                         * flag set since only the three opcodes above needs
-                         * to access a variable's address.
+                        /* Ignore opcodes with the ofs_based_on_stack_top flag
+                         * set since only the three opcodes above needs to
+                         * access a variable's address.
                          */
                         break;
                     }
@@ -393,17 +392,17 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             abort();
         }
 
-        /* When calling external functions in dynamic linking mode,
-         * the following instructions are required:
+        /* When calling external functions in dynamic linking mode, the
+         * following instructions are required:
          * - movw + movt: set r8 to 'elf_data_start'
          * - ldr: load a word from the address 'elf_data_start' to r12.
          *        (restore the global stack pointer.)
          *
          * Since shecc uses r12 to store a global stack pointer and external
-         * functions can freely modify r12, causing internal functions to
-         * access global variables incorrectly, additional instructions are
-         * needed to restore r12 from the global object after the external
-         * function returns.
+         * functions can freely modify r12, causing internal functions to access
+         * global variables incorrectly, additional instructions are needed to
+         * restore r12 from the global object after the external function
+         * returns.
          *
          * Otherwise, only a 'bl' instruction is generated to call internal
          * functions because shecc guarantees they do not modify r12.
@@ -487,8 +486,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             return;
         }
         interm = __r8;
-        /* div/mod emulation */
-        /* Preserve the values of the dividend and divisor */
+        /* div/mod emulation: preserve the dividend and the divisor */
         emit(__stmdb(__AL, 1, __sp, (1 << rn) | (1 << rm)));
         /* Obtain absolute values of the dividend and divisor */
         emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
@@ -524,6 +522,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__srl_amt(__AL, 1, logic_rs, __r9, __r9, 1));
         emit(__srl_amt(__CC, 0, logic_rs, rm, rm, 1));
         emit(__b(__CC, -20));
+
         /* After completing the emulation, the quotient and remainder will be
          * stored in __r8 and __r9, respectively.
          *
@@ -630,32 +629,35 @@ void code_generate(void)
         emit(__mov_i(__AL, __r3, 0));
         emit(__bl(__AL, (dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE) -
                             (elf_code_start + elf_code->size)));
+
         /* Call '_exit' (syscall) to terminate the program if __libc_start_main
-         * returns. */
+         * returns.
+         */
         emit(__mov_i(__AL, __r0, 127));
         emit(__mov_i(__AL, __r7, 1));
         emit(__svc());
 
-        /* If the compiled program is dynamic linking, the starting
-         * point of 'main_wrapper' is located here.
+        /* If the compiled program is dynamic linking, the starting point of
+         * 'main_wrapper' is located here.
          *
-         * Push the contents of r4-r11 and lr onto stack.
-         * Preserve 'argc' and 'argv' for the 'main' function.
+         * Push the contents of r4-r11 and lr onto stack. Preserve 'argc' and
+         * 'argv' for the 'main' function.
          */
         emit(__stmdb(__AL, 1, __sp, 0x4FF0));
         emit(__mov_r(__AL, __r9, __r0));
         emit(__mov_r(__AL, __r10, __r1));
     }
-    /* For both static and dynamic linking, we need to set up the stack
-     * and call the main function.
+
+    /* For both static and dynamic linking, we need to set up the stack and call
+     * the main function.
      *
-     * To ensure that the stack remains 8-byte aligned after adjustment,
-     * 'ofs' is to align(GLOBAL_FUNC->stack_size, 8) to allocate space
-     * for the global stack.
+     * To ensure that the stack remains 8-byte aligned after adjustment, 'ofs'
+     * is to align(GLOBAL_FUNC->stack_size, 8) to allocate space for the global
+     * stack.
      *
-     * In dynamic linking mode, since the preceding __stmdb instruction
-     * pushes 9 registers onto stack, 'ofs' must be increased by 4 to
-     * prevent the stack from becoming misaligned.
+     * In dynamic linking mode, since the preceding __stmdb instruction pushes 9
+     * registers onto stack, 'ofs' must be increased by 4 to prevent the stack
+     * from becoming misaligned.
      */
     ofs = ALIGN_UP(GLOBAL_FUNC->stack_size, MIN_ALIGNMENT);
     if (dynlink)
@@ -664,21 +666,22 @@ void code_generate(void)
     emit(__movt(__AL, __r8, ofs));
     emit(__sub_r(__AL, __sp, __sp, __r8));
     emit(__mov_r(__AL, __r12, __sp));
-    /* The first object in the .data section is used to store the global
-     * stack pointer. Therefore, store r12 at the address 'elf_data_start'
-     * after the global stack has been prepared.
+
+    /* The first object in the .data section is used to store the global stack
+     * pointer. Therefore, store r12 at the address 'elf_data_start' after the
+     * global stack has been prepared.
      */
     emit(__movw(__AL, __r8, elf_data_start));
     emit(__movt(__AL, __r8, elf_data_start));
     emit(__sw(__AL, __r12, __r8, 0));
 
     if (!dynlink) {
-        /* Jump directly to the main preparation and then execute the
-         * main function.
+        /* Jump directly to the main preparation and then execute the main
+         * function.
          *
          * In static linking mode, when the main function completes its
-         * execution, it will invoke the '_exit' syscall to terminate
-         * the program.
+         * execution, it will invoke the '_exit' syscall to terminate the
+         * program.
          *
          * That is, the execution flow is:
          *
@@ -707,12 +710,12 @@ void code_generate(void)
         /* __syscall - only for static linking
          *
          * If the number of arguments is greater than 4, the additional
-         * arguments need to be retrieved from the stack. However, this
-         * process must modify the contents of registers r4-r7.
+         * arguments need to be retrieved from the stack. However, this process
+         * must modify the contents of registers r4-r7.
          *
          * Therefore, __syscall needs to preserve the contents of these
-         * registers before invoking a syscall, and restore them after
-         * the syscall has completed.
+         * registers before invoking a syscall, and restore them after the
+         * syscall has completed.
          */
         emit(__stmdb(__AL, 1, __sp, 0x00F0));
         emit(__lw(__AL, __r4, __sp, 16));
@@ -741,12 +744,12 @@ void code_generate(void)
         if (dynlink) {
             emit(__mov_r(__AL, __r0, __r9));
             emit(__mov_r(__AL, __r1, __r10));
+
             /* Call the main function.
              *
-             * After the main function returns, the following
-             * instructions restore the registers r4-r11 and
-             * return control to __libc_start_main via the
-             * preserved lr.
+             * After the main function returns, the following instructions
+             * restore the registers r4-r11 and return control to
+             * __libc_start_main via the preserved lr.
              */
             emit(__bl(__AL, MAIN_BB->elf_offset - elf_code->size));
             emit(__movw(__AL, __r8, ofs));
@@ -760,12 +763,13 @@ void code_generate(void)
             emit(__lw(__AL, __r0, __r8, 0));
             emit(__add_i(__AL, __r1, __r8, 4));
 
-            /* Call main function, and call '_exit' syscall to
-             * terminate the program. */
+            /* Call main function, and call '_exit' syscall to terminate the
+             * program.
+             */
             emit(__bl(__AL, MAIN_BB->elf_offset - elf_code->size));
 
-            /* exit with main's return value - r0 already has the
-             * return value */
+            /* exit with main's return value - r0 already has the return value
+             */
             emit(__mov_i(__AL, __r7, 1));
             emit(__svc());
         }
@@ -781,29 +785,28 @@ void plt_generate(void)
 {
     /* - PLT code generation explanation -
      *
-     * As described in ARM's Platform Standard, PLT code should make register
-     * ip address the corresponding GOT entry on SVr4-like (Linux-like)
-     * platforms.
+     * As described in ARM's Platform Standard, PLT code should make register ip
+     * address the corresponding GOT entry on SVr4-like (Linux-like) platforms.
      *
-     * Therefore, PLT[1] ~ PLT[N] use r12 (ip) to load the address of the
-     * GOT entry and jump to the function entry via the GOT value.
+     * Therefore, PLT[1] ~ PLT[N] use r12 (ip) to load the address of the GOT
+     * entry and jump to the function entry via the GOT value.
      *
      * PLT[0] is used to call the resolver, which requires:
      * - [sp] contains the return address from the original function call.
      * - ip contains the address of the GOT entry.
      * - lr points to the address of GOT[2].
      *
-     * The second requirement is alreadly handled by PLT[1] - PLT[N], so
-     * PLT[0] must take care of the other two. The first one can be achieved
-     * by a 'push' instruction; for the third, we use r10 to store the address
-     * of GOT[2] and then move the value to lr.
+     * The second requirement is alreadly handled by PLT[1] - PLT[N], so PLT[0]
+     * must take care of the other two. The first one can be achieved by a
+     * 'push' instruction; for the third, we use r10 to store the address of
+     * GOT[2] and then move the value to lr.
      *
      * - Reason for using r10 in PLT[0] -
      *
      * The register allocation assumes 8 available registers, so the ARM code
      * generator primarily uses r0-r7 for code generation. These registers
-     * cannot be modified arbitrarily; otherwise, the program may fail if any
-     * of them are changed by PLT[0].
+     * cannot be modified arbitrarily; otherwise, the program may fail if any of
+     * them are changed by PLT[0].
      *
      * However, r8-r11 can be freely used as temporary registers during code
      * generation, so PLT[0] arbitrarily chooses r10 to perform the required

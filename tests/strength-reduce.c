@@ -1,7 +1,8 @@
-/* The address of a[i * 4] changes by a fixed amount on each trip through
- * these loops.  Their explicit goto back edges give the strength-reduction
- * pass a latch with an existing SSA jump: it must advance the address before
- * that jump, not append the advance after it.
+/*
+ * The address of a[i * 4] changes by a fixed amount on each trip through these
+ * loops. Their explicit goto back edges give the strength-reduction pass a
+ * latch with an existing SSA jump: it must advance the address before that
+ * jump, not append the advance after it.
  */
 int main()
 {
