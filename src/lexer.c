@@ -1160,6 +1160,20 @@ void lex_copy_literal(token_t *tk, char *value, int n)
     strcpy(value, tk->literal);
 }
 
+/* Peek the next token and, when it matches, copy its literal into a caller
+ * buffer of n bytes. lex_peek() copies unbounded, which is safe only for
+ * identifiers: numeric, char and string literals are scanned up to
+ * MAX_TOKEN_LEN and overflow a MAX_ID_LEN destination.
+ */
+bool lex_peek_n(token_kind_t token, char *value, int n)
+{
+    if (!cur_token->next || cur_token->next->kind != token)
+        return false;
+    if (value)
+        lex_copy_literal(cur_token->next, value, n);
+    return true;
+}
+
 /* Strictly match next token with given token type and copy token's literal to
  * value, which is n bytes wide.
  */

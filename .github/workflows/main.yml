@@ -18,10 +18,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Bootstrap each target and run the test suite against the stage 0 and stage
-  # 2 compilers. The snapshot and sanitizer checks used to be steps of this
-  # job; they are jobs of their own below, so that they run beside it rather
-  # than after it.
+  # Bootstrap each target and run the consolidated behavioral suite against
+  # the stage 0 and stage 2 compilers.
   host-x86:
     name: ${{ matrix.architecture }}/${{ matrix.link_mode }} (${{ matrix.compiler }})
     runs-on: ubuntu-24.04
@@ -61,38 +59,8 @@ jobs:
           name: logs-${{ matrix.compiler }}-${{ matrix.architecture }}-${{ matrix.link_mode }}
           path: |
             out/*.log
-            out/tests/*.log
           if-no-files-found: ignore
           retention-days: 7
-
-  # The IR a target emits does not depend on which host compiler built shecc,
-  # so this dimension of the matrix above buys nothing here.
-  snapshots:
-    name: IR snapshots ${{ matrix.architecture }}/${{ matrix.link_mode }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        # SNAPSHOT_ARCHS in the Makefile: x64 carries no reference IR yet.
-        architecture: [arm, riscv]
-        link_mode: [static, dynamic]
-    env:
-      ARCH: ${{ matrix.architecture }}
-      DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-      - name: Set up the build environment
-        uses: ./.github/actions/setup-build-env
-        with:
-          architecture: ${{ matrix.architecture }}
-          link-mode: ${{ matrix.link_mode }}
-          github-token: ${{ github.token }}
-      # Only the stage 0 compiler is involved, so this needs no emulator run
-      # and finishes well before the bootstrapping jobs do.
-      - name: IR regression tests
-        run: make check-snapshot ARCH="$ARCH" DYNLINK="$DYNLINK"
 
   # A tree that has already been built cannot be turned into a sanitized one:
   # the object files are up to date, so the link that follows reuses them and

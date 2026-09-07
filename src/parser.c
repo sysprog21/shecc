@@ -17,7 +17,7 @@
 int global_var_idx = 0;
 
 /* Side effect instructions cache */
-insn_t side_effect[10];
+insn_t side_effect[MAX_SIDE_EFFECT];
 int se_idx = 0;
 
 /* Control flow utilities */
@@ -501,8 +501,8 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         bool is_neg = false;
         if (lex_accept(T_minus))
             is_neg = true;
-        char numtok[MAX_ID_LEN];
-        lex_ident(T_numeric, numtok);
+        char numtok[MAX_TOKEN_LEN];
+        lex_ident_n(T_numeric, numtok, MAX_TOKEN_LEN);
         int num_val = parse_numeric_constant(numtok);
         if (is_neg)
             num_val = -num_val;
@@ -829,7 +829,7 @@ void parse_array_init(var_t *var,
 {
     int count = 0;
     var_t *base_addr = NULL;
-    var_t *stored_vals[256];
+    var_t *stored_vals[MAX_IMPLICIT_ARRAY];
     bool is_implicit = (var->array_size == 0);
 
     /* Elements of a pointer array are pointer-sized. Using the base type's
@@ -902,8 +902,15 @@ void parse_array_init(var_t *var,
                 val = opstack_pop();
             }
 
-            if (is_implicit && emit_code && count < 256)
+            if (is_implicit && emit_code) {
+                /* Truncating would declare array_size == count while storing
+                 * fewer elements, so refuse.
+                 */
+                if (count >= MAX_IMPLICIT_ARRAY)
+                    error_at("Too many elements in array initializer",
+                             next_token_loc());
                 stored_vals[count] = val;
+            }
 
             if (val && emit_code && !is_implicit && count < var->array_size) {
                 var_t *v = resize_to(parent, bb, val, var->type, 0);
@@ -978,7 +985,7 @@ void parse_array_init(var_t *var,
         if (emit_code && count > 0) {
             base_addr = var;
 
-            for (int i = 0; i < count && i < 256; i++) {
+            for (int i = 0; i < count; i++) {
                 if (!stored_vals[i])
                     continue;
                 var_t *v = resize_to(parent, bb, stored_vals[i], var->type, 0);
@@ -1138,7 +1145,8 @@ int read_const_expr_operand(void)
     if (lex_peek(T_char, buffer)) {
         char unescaped[MAX_TOKEN_LEN];
         lex_expect(T_char);
-        unescape_string(buffer, unescaped, MAX_TOKEN_LEN);
+        if (unescape_string(buffer, unescaped, MAX_TOKEN_LEN) < 0)
+            error_at("Invalid escape sequence", cur_token_loc());
         return unescaped[0];
     }
     if (lex_peek(T_identifier, buffer)) {
@@ -1406,12 +1414,12 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
 
 void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
 {
-    char token[MAX_ID_LEN];
+    char token[MAX_TOKEN_LEN];
     int value = 0;
     int i = 0;
     char c;
 
-    lex_ident(T_numeric, token);
+    lex_ident_n(T_numeric, token, MAX_TOKEN_LEN);
 
     if (token[0] == '-') {
         is_neg = !is_neg;
@@ -1579,7 +1587,8 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
     lvalue_t lvalue;
     var_t *vd, *rs1;
 
-    lex_peek(T_identifier, token);
+    if (!lex_peek(T_identifier, token))
+        error_at("Expected an identifier", next_token_loc());
     var_t *var = find_var(token, parent);
     read_lvalue(&lvalue, var, parent, bb, false, OP_generic, true);
 
@@ -1630,7 +1639,8 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
         char token[MAX_VAR_LEN];
         lvalue_t lvalue;
 
-        lex_peek(T_identifier, token);
+        if (!lex_peek(T_identifier, token))
+            error_at("Expected an identifier", next_token_loc());
         var_t *var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, true, OP_generic, false);
 
@@ -1757,7 +1767,8 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
         char token[MAX_VAR_LEN];
         lvalue_t lvalue;
 
-        lex_peek(T_identifier, token);
+        if (!lex_peek(T_identifier, token))
+            error_at("Expected an identifier", next_token_loc());
         var_t *var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, true, OP_generic, false);
 
@@ -1946,11 +1957,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 bool is_array = false;
                 if (lex_accept(T_open_square)) {
                     is_array = true;
-                    /* Skip array size if present */
-                    if (lex_peek(T_numeric, NULL)) {
-                        char size_buffer[10];
-                        lex_ident(T_numeric, size_buffer);
-                    }
+                    /* Skip the array size: it is discarded, and a numeric
+                     * literal can be longer than any small buffer.
+                     */
+                    if (lex_peek(T_numeric, NULL))
+                        lex_expect(T_numeric);
                     lex_expect(T_close_square);
                 }
 
@@ -2898,6 +2909,12 @@ void read_lvalue(lvalue_t *lvalue,
     bool is_address_got = false;
     bool is_member = false;
 
+    /* Callers pass a find_var() result, which is NULL for a name that was
+     * never declared.
+     */
+    if (!var)
+        error_at("Undeclared identifier", next_token_loc());
+
     /* already peeked and have the variable */
     lex_expect(T_identifier);
 
@@ -3042,6 +3059,8 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* change type currently pointed to */
             var = find_member(token, lvalue->type);
+            if (!var)
+                error_at("Unknown struct or union member", next_token_loc());
             lvalue->type = var->type;
             lvalue->ptr_level = var->ptr_level;
             lvalue->is_func = var->is_func;
@@ -3190,6 +3209,13 @@ void read_lvalue(lvalue_t *lvalue,
                 add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
             }
         } else if (lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) {
+            /* This arm appends three entries, so check for room once before
+             * writing any of them.
+             */
+            if (se_idx + 3 > MAX_SIDE_EFFECT)
+                error_at("Too many postfix operators in one statement",
+                         next_token_loc());
+
             side_effect[se_idx].opcode = OP_load_constant;
             vd = require_var(parent);
             vd->var_name = gen_name();
@@ -3455,8 +3481,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
 
     if (!lex_accept(T_colon)) {
         /* ternary operator in standard C needs three operands */
-        /* Note: Dangling basic block cleanup handled by arena allocator */
-        abort();
+        error_at("Expected ':' in conditional expression", next_token_loc());
     }
 
     var_t *true_val = opstack_pop();
@@ -3767,11 +3792,18 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
         if (!op2)
             error_at("Division by zero in constant expression",
                      cur_token_loc());
+        /* INT_MIN / -1 has no representable result; on x86 it raises SIGFPE
+         * rather than producing one.
+         */
+        if (op1 == INT_MIN && op2 == -1)
+            error_at("Overflow in constant expression", cur_token_loc());
         res = op1 / op2;
         break;
     case OP_mod:
         if (!op2)
             error_at("Modulo by zero in constant expression", cur_token_loc());
+        if (op1 == INT_MIN && op2 == -1)
+            error_at("Overflow in constant expression", cur_token_loc());
         /* Use bitwise AND for modulo optimization when divisor is power of 2 */
         if (tmp == INT_MIN) {
             res = op1 % op2;
@@ -4080,12 +4112,15 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 int case_val;
 
                 lex_accept(T_case);
-                if (lex_peek(T_numeric, token)) {
-                    case_val = parse_numeric_constant(token);
+                char literal[MAX_TOKEN_LEN];
+
+                if (lex_peek_n(T_numeric, literal, MAX_TOKEN_LEN)) {
+                    case_val = parse_numeric_constant(literal);
                     lex_expect(T_numeric);
-                } else if (lex_peek(T_char, token)) {
+                } else if (lex_peek_n(T_char, literal, MAX_TOKEN_LEN)) {
                     char unescaped[MAX_TOKEN_LEN];
-                    unescape_string(token, unescaped, MAX_TOKEN_LEN);
+                    if (unescape_string(literal, unescaped, MAX_TOKEN_LEN) < 0)
+                        error_at("Invalid escape sequence", next_token_loc());
                     case_val = unescaped[0];
                     lex_expect(T_char);
                 } else if (lex_peek(T_identifier, token)) {
@@ -5363,8 +5398,8 @@ void read_global_statement(void)
             do {
                 lex_ident(T_identifier, token);
                 if (lex_accept(T_assign)) {
-                    char value[MAX_ID_LEN];
-                    lex_ident(T_numeric, value);
+                    char value[MAX_TOKEN_LEN];
+                    lex_ident_n(T_numeric, value, MAX_TOKEN_LEN);
                     val = parse_numeric_constant(value);
                 }
                 add_constant(token, val++);

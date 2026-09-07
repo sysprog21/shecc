@@ -102,6 +102,7 @@ bool dynlink = false;
 bool libc = true;
 bool expand_only = false;
 bool dump_ir = false;
+bool dump_dot = false;
 bool hard_mul_div = false;
 
 /* Create a new arena block with given capacity.
@@ -756,8 +757,13 @@ int unescape_string(const char *input, char *output, int output_size)
             /* Hexadecimal escape sequence: \xhh */
             i++; /* Skips 'x' */
 
-            if (!isxdigit(input[i]))
+            if (!isxdigit(input[i])) {
+                /* Terminate before bailing: callers read output[0], and an
+                 * unterminated buffer left them reading stack garbage.
+                 */
+                output[j] = '\0';
                 return -1;
+            }
 
             int value = 0;
             int count = 0;
@@ -888,6 +894,7 @@ type_t *add_type(void)
  * rather than corrupting the type.
  */
 void fatal(char *msg);
+void usage_error(char *msg);
 
 void set_type_name(type_t *type, char *name)
 {
@@ -926,10 +933,13 @@ constant_t *find_constant(char alias[])
 var_t *find_member(char token[], type_t *type)
 {
     /* If it is a forwardly declared alias of a structure, switch to the base
-     * structure type.
+     * structure type. A scalar -- or "void", whose size is also 0 -- has no
+     * base to switch to, and following the NULL was a SIGSEGV.
      */
     if (type->size == 0)
         type = type->base_struct;
+    if (!type)
+        return NULL;
 
     char head = token[0];
 
@@ -1120,9 +1130,13 @@ basic_block_t *bb_create(block_t *parent)
      */
     bb->elf_offset = -1;
 
-    if (dump_ir) {
-        bb->bb_label_name = arena_alloc(GENERAL_ARENA, MAX_VAR_LEN);
-        snprintf(bb->bb_label_name, MAX_VAR_LEN, ".label.%d", bb_label_idx++);
+    if (dump_ir || dump_dot) {
+        /* MAX_VAR_LEN spent 128 bytes on a string that is always ".label."
+         * plus an int. A self-compile calls bb_create() 52k times, so that
+         * was 6.4 MiB of arena where 1.2 MiB does.
+         */
+        bb->bb_label_name = arena_alloc(GENERAL_ARENA, MAX_LABEL_LEN);
+        snprintf(bb->bb_label_name, MAX_LABEL_LEN, ".label.%d", bb_label_idx++);
     }
 
     return bb;
@@ -1231,10 +1245,12 @@ void bb_connect(basic_block_t *pred,
                 basic_block_t *succ,
                 bb_connection_type_t type)
 {
-    if (!pred)
-        abort();
-    if (!succ)
-        abort();
+    /* Statements after a return or goto are unreachable, and the parser walks
+     * them with no current block. An edge out of nowhere is meaningless rather
+     * than wrong, so drop it.
+     */
+    if (!pred || !succ)
+        return;
 
     /* bb_disconnect() leaves holes, so reuse the first free slot before
      * extending. prev_idx is one past the highest slot ever filled.
@@ -1738,6 +1754,17 @@ void fatal(char *msg)
      */
     fflush(stdout);
     abort();
+}
+
+/* Reports a mistake in how the compiler was invoked. A bad command line is not
+ * a broken invariant, so this exits rather than abort()ing: no core dump, and
+ * no "Aborted" line, for an ordinary typo.
+ */
+void usage_error(char *msg)
+{
+    printf("[Error]: %s\n", msg);
+    fflush(stdout);
+    exit(1);
 }
 
 /* Reports error and prints occurred position context,

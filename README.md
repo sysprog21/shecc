@@ -82,11 +82,6 @@ It is still possible to build `shecc` on macOS or Microsoft Windows. However,
 the second stage bootstrapping would fail due to `qemu-arm` absence, and the
 `x64` target expects an x86-64 GNU/Linux host to execute its own output.
 
-To execute the snapshot test, install the packages below:
-```shell
-$ sudo apt-get install graphviz jq
-```
-
 ### Additional packages
 
 The dynamic linking mode needs an ELF interpreter and the matching glibc for the
@@ -161,12 +156,13 @@ $ make check-sanitizer
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```shell
-$ shecc [-o output] [+m] [--no-libc] [--dump-ir] [--dynlink] [-E] <infile.c>
+$ shecc [-o output] [+m] [--dot] [--no-libc] [--dump-ir] [--dynlink] [-E] <infile.c>
 ```
 
 Compiler options:
 - `-o` : Specify output file name (default: `out.elf`)
 - `+m` : Use hardware multiplication/division instructions (default: disabled)
+- `--dot` : Write the SSA control-flow graph in Graphviz DOT format and stop
 - `--no-libc` : Exclude embedded C library (default: embedded)
 - `--dump-ir` : Dump intermediate representation (IR)
 - `--dynlink` : Use dynamic linking (default: disabled)
@@ -191,37 +187,14 @@ $ chmod +x fib
 $ qemu-arm -L /usr/arm-linux-gnueabihf fib
 ```
 
-### IR Regression Tests
-
-To ensure the consistency of frontend (lexer, parser) behavior when working on it, the snapshot test is introduced.
-The snapshot test dumps IRs from the executable and compares the structural identity with the provided snapshots.
-
-Verify the emitted IRs by specifying `check-snapshots` target when invoking `make`:
-```shell
-$ make check-snapshots
-```
-
-If the compiler frontend is updated, the emitted IRs might be changed.
-Thus, you can update snapshots by specifying `update-snapshots` target when invoking `make`:
-```shell
-$ make update-snapshots
-```
-
-Notice that the above 2 targets will update all backend snapshots at once, to update/check current backend's snapshot,
-use `update-snapshot` / `check-snapshot` instead.
-
-Reference IRs exist for the Arm and RISC-V backends only. The x86-64 backend
-carries none yet, so the snapshot targets skip it. `check-snapshots` and
-`update-snapshots` reconfigure the tree as they walk the backends and leave it
-configured for Arm, so re-run `make config ARCH=...` afterwards if you were
-building another target.
-
 ### Unit Tests
 
-`shecc` comes with a comprehensive test suite (400+ test cases). To run the tests:
+`shecc` has one behavioral test flow. `make check` runs the executable and
+compiler-error tests with both the host-built and self-hosted compilers, then
+runs the selected target's ABI tests. To run it:
 ```shell
 # Add 'DYNLINK=1' if using the dynamic linking mode.
-$ make check          # Run all tests (stage 0 and stage 2, plus the ABI suite)
+$ make check          # Consolidated suite: stage 0, stage 2, and ABI tests
 $ make check-stage0   # Test stage 0 compiler only
 $ make check-stage2   # Test stage 2 compiler only
 $ make check-abi-stage0 # Check the target calling convention (stage 0)
@@ -262,6 +235,21 @@ To clean up the generated compiler files, execute the command `make clean`.
 For resetting architecture configurations, use the command `make distclean`.
 
 ## Intermediate Representation
+
+To visualize the SSA control-flow graph, use the standalone `--dot` target.
+It writes Graphviz DOT with one cluster per function and IR instruction nodes
+grouped by basic block; no executable is generated. The graph is printed before
+phi values are unwound into edge copies, so the phi nodes are still in it, and
+functions the input cannot reach -- most of the embedded C library -- are
+pruned first. The default output replaces the input suffix with `.dot`.
+
+```shell
+$ out/shecc --dot -o fib.dot tests/fib.c
+$ dot -Tsvg fib.dot -o fib.svg
+```
+
+Graphviz is needed to render the result, but not to produce it, and nothing in
+`make check` depends on it.
 
 Once the option `--dump-ir` is passed to `shecc`, the intermediate representation (IR)
 will be generated. Take the file `tests/fib.c` for example. It consists of a recursive

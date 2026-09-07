@@ -64,7 +64,7 @@ ifeq ($(USE_QEMU),1)
 endif
 
 # Check the prerequisites
-PREREQ_LIST := dot jq
+PREREQ_LIST :=
 TARGET_EXEC ?=
 ifeq ($(USE_QEMU),1)
     # Add qemu to the list if the host and target architectures differ

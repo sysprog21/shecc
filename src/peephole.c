@@ -44,7 +44,21 @@ bool is_fusible_insn(ph2_ir_t *ph2_ir)
  * transformation rules to consecutive IR instructions.
  * Returns true if any optimization was applied, false otherwise.
  */
-bool insn_fusion(ph2_ir_t *ph2_ir)
+/* Drop the instructions after @ir through @last, keeping ph2_ir_list.tail on a
+ * node still in the list.
+ *
+ * Every removal in this file goes through here. A bare "ir->next = last->next"
+ * leaves tail pointing at a removed node, which is why x64-codegen.c used to
+ * walk a block rather than read its tail.
+ */
+void ph2_ir_drop_after(basic_block_t *bb, ph2_ir_t *ir, ph2_ir_t *last)
+{
+    ir->next = last->next;
+    if (!ir->next)
+        bb->ph2_ir_list.tail = ir;
+}
+
+bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
 {
     ph2_ir_t *next = ph2_ir->next;
     if (!next)
@@ -60,7 +74,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
              * Example: {add t1, a, b; mv result, t1} → {add result, a, b}
              */
             ph2_ir->dest = next->dest;
-            ph2_ir->next = next->next;
+            ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
     }
@@ -79,7 +93,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
             ph2_ir->op = OP_assign;
             ph2_ir->src0 = non_zero_src;
             ph2_ir->dest = next->dest;
-            ph2_ir->next = next->next;
+            ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
 
@@ -91,7 +105,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
                 ph2_ir->op = OP_assign;
                 ph2_ir->src0 = next->src0;
                 ph2_ir->dest = next->dest;
-                ph2_ir->next = next->next;
+                ph2_ir_drop_after(bb, ph2_ir, next);
                 return true;
             }
 
@@ -102,7 +116,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
                 ph2_ir->op = OP_negate;
                 ph2_ir->src0 = next->src1;
                 ph2_ir->dest = next->dest;
-                ph2_ir->next = next->next;
+                ph2_ir_drop_after(bb, ph2_ir, next);
                 return true;
             }
         }
@@ -116,7 +130,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
             ph2_ir->op = OP_load_constant;
             ph2_ir->src0 = 0;
             ph2_ir->dest = next->dest;
-            ph2_ir->next = next->next;
+            ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
     }
@@ -133,7 +147,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
             ph2_ir->op = OP_assign;
             ph2_ir->src0 = ph2_ir->dest == next->src0 ? next->src1 : next->src0;
             ph2_ir->dest = next->dest;
-            ph2_ir->next = next->next;
+            ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
     }
@@ -148,7 +162,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
         ph2_ir->dest = next->dest;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -162,7 +176,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
         ph2_ir->dest = next->dest;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -175,7 +189,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
         ph2_ir->dest = next->dest;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -206,7 +220,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
         ph2_ir->dest = next->dest;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -222,7 +236,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src1;
         ph2_ir->dest = next->dest;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -232,7 +246,7 @@ bool insn_fusion(ph2_ir_t *ph2_ir)
 /* Redundant move elimination Eliminates unnecessary move operations that are
  * overwritten or redundant
  */
-bool redundant_move_elim(ph2_ir_t *ph2_ir)
+bool redundant_move_elim(basic_block_t *bb, ph2_ir_t *ph2_ir)
 {
     ph2_ir_t *next = ph2_ir->next;
     if (!next)
@@ -246,7 +260,7 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         ph2_ir->dest == next->dest) {
         /* Replace first move with second, skip second */
         ph2_ir->src0 = next->src0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -260,7 +274,7 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
         ph2_ir->src1 = 0; /* Clear unused field */
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -272,7 +286,7 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         /* Replace constant load with move */
         ph2_ir->op = OP_assign;
         ph2_ir->src0 = next->src0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -287,7 +301,7 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         ph2_ir->op = next->op;
         ph2_ir->src0 = next->src0;
         ph2_ir->src1 = next->src1;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -299,7 +313,7 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         ph2_ir->dest == next->dest) {
         /* Keep only the second constant */
         ph2_ir->src0 = next->src0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -313,7 +327,7 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         ph2_ir->op = next->op;
         ph2_ir->src0 = next->src0;
         ph2_ir->src1 = next->src1;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -326,7 +340,7 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
         ph2_ir->op = OP_load_constant;
         ph2_ir->src0 = next->src0;
         ph2_ir->src1 = 0; /* Clear unused field */
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -337,7 +351,7 @@ bool redundant_move_elim(ph2_ir_t *ph2_ir)
  * loads and dead stores that access the same memory location. Conservative
  * implementation to maintain bootstrap stability.
  */
-bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
+bool eliminate_load_store_pairs(basic_block_t *bb, ph2_ir_t *ph2_ir)
 {
     ph2_ir_t *next = ph2_ir->next;
     if (!next)
@@ -365,7 +379,7 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
             ph2_ir->src0 = next->src0;
             ph2_ir->size_bytes = next->size_bytes;
             ph2_ir->is_pointer = next->is_pointer;
-            ph2_ir->next = next->next;
+            ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
     }
@@ -422,7 +436,7 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
             ph2_ir->src0 >= 0 && ph2_ir->size_bytes == next->size_bytes &&
             ph2_ir->is_pointer == next->is_pointer &&
             ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
-            ph2_ir->next = next->next;
+            ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
     }
@@ -433,7 +447,7 @@ bool eliminate_load_store_pairs(ph2_ir_t *ph2_ir)
         if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1) {
             /* Remove first store - it's dead */
             ph2_ir->dest = next->dest;
-            ph2_ir->next = next->next;
+            ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
     }
@@ -539,11 +553,11 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
     return false;
 }
 
-/* Simplify bitwise patterns the SSA optimizer's SCCP cannot see, because they
+/* Simplify bitwise patterns the SSA optimizer cannot see, because they
  * only become visible once registers are assigned. Returns true when it
  * rewrote something.
  */
-bool bitwise_optimization(ph2_ir_t *ph2_ir)
+bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
 {
     if (!ph2_ir || !ph2_ir->next)
         return false;
@@ -556,7 +570,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         /* Replace with simple assignment */
         ph2_ir->op = OP_assign;
         ph2_ir->dest = next->dest;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -568,7 +582,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         /* Replace AND with assignment */
         next->op = OP_assign;
         next->src1 = 0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -578,7 +592,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         /* Replace OR with assignment */
         next->op = OP_assign;
         next->src1 = 0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -588,7 +602,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         /* Replace XOR with assignment */
         next->op = OP_assign;
         next->src1 = 0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -600,7 +614,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         next->op = OP_load_constant;
         next->src0 = 0;
         next->src1 = 0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -612,7 +626,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         next->op = OP_load_constant;
         next->src0 = -1;
         next->src1 = 0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -625,7 +639,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
         /* Replace shift with assignment */
         next->op = OP_assign;
         next->src1 = 0;
-        ph2_ir->next = next->next;
+        ph2_ir_drop_after(bb, ph2_ir, next);
         return true;
     }
 
@@ -636,7 +650,7 @@ bool bitwise_optimization(ph2_ir_t *ph2_ir)
  * are more complex but offer significant optimization opportunities Returns
  * true if optimization was applied
  */
-bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
+bool triple_pattern_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
 {
     if (!ph2_ir || !ph2_ir->next || !ph2_ir->next->next)
         return false;
@@ -671,8 +685,8 @@ bool triple_pattern_optimization(ph2_ir_t *ph2_ir)
         /* All three stores go to the same location Only the last one matters,
          * eliminate first two
          */
-        ph2_ir->src0 = third->src0; /* Use last value */
-        ph2_ir->next = third->next; /* Skip middle stores */
+        ph2_ir->src0 = third->src0;           /* Use last value */
+        ph2_ir_drop_after(bb, ph2_ir, third); /* Skip middle stores */
         return true;
     }
 
@@ -739,7 +753,7 @@ void peephole(void)
                  * self-assignments
                  */
                 if (next->op == OP_assign && next->dest == next->src0) {
-                    ir->next = next->next;
+                    ph2_ir_drop_after(bb, ir, next);
                     continue;
                 }
 
@@ -758,11 +772,11 @@ void peephole(void)
                 /* Try triple pattern optimization first (3-instruction
                  * sequences)
                  */
-                if (triple_pattern_optimization(ir))
+                if (triple_pattern_optimization(bb, ir))
                     continue;
 
                 /* Try instruction fusion (2-instruction sequences) */
-                if (insn_fusion(ir))
+                if (insn_fusion(bb, ir))
                     continue;
 
                 /* Apply strength reduction for power-of-2 operations */
@@ -770,15 +784,15 @@ void peephole(void)
                     continue;
 
                 /* Apply bitwise operation optimizations */
-                if (bitwise_optimization(ir))
+                if (bitwise_optimization(bb, ir))
                     continue;
 
                 /* Apply redundant move elimination */
-                if (redundant_move_elim(ir))
+                if (redundant_move_elim(bb, ir))
                     continue;
 
                 /* Apply load/store elimination */
-                if (eliminate_load_store_pairs(ir))
+                if (eliminate_load_store_pairs(bb, ir))
                     continue;
             }
         }

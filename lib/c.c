@@ -9,6 +9,14 @@
 #include "c.h"
 #define INT_BUF_LEN 16
 
+/* Staging buffer for the printf family that writes straight to a descriptor.
+ *
+ * The longest single call in the tree is ssa.c's "insn_%p [label=%s]": a
+ * DUMP_INSN_LEN staging buffer plus 26 bytes around it, so 537. Every byte
+ * here is stack in every program shecc emits, so it stays close to that.
+ */
+#define FMT_BUF_LEN 576
+
 #define __is_alpha(c) ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
 #define __is_digit(c) ((c >= '0' && c <= '9'))
 #define __is_hex(c) \
@@ -501,6 +509,37 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
                 /* append param as hex */
                 __format(fmtbuf, v, w, zp, 16, pp);
                 break;
+            case 'p': {
+                /* Append param as a pointer.
+                 *
+                 * A pointer occupies VA_INT_STEP int-sized slots, so on an
+                 * LP64 target the second one carries the high word. Printing
+                 * only @v would drop it, and the graph writer in ssa.c names
+                 * its nodes after these values, so two objects sharing a low
+                 * word would collapse into one node.
+                 *
+                 * A pointer has one spelling here, "0x" and its significant
+                 * digits, so any width or zero-pad in the format is ignored.
+                 * Honoring them on one branch and not the other would render
+                 * the same conversion two ways depending on the value.
+                 */
+                int hi = 0;
+
+                if (VA_INT_STEP > 1)
+                    hi = var_args[pi * VA_INT_STEP + 1];
+
+                __fmtbuf_write_char(fmtbuf, '0');
+                __fmtbuf_write_char(fmtbuf, 'x');
+                if (hi) {
+                    __format(fmtbuf, hi, 0, 0, 16, 0);
+                    /* The low word keeps its leading zeros, or the two halves
+                     * would run together into a different number.
+                     */
+                    __format(fmtbuf, v, 8, 1, 16, 0);
+                } else
+                    __format(fmtbuf, v, 0, 0, 16, 0);
+                break;
+            }
             case '%':
                 /* append literal '%' character */
                 __fmtbuf_write_char(fmtbuf, '%');
@@ -517,16 +556,44 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
         fmtbuf->buf[0] = 0;
 }
 
-int printf(char *str, ...)
+int __write_fmt(int fd, char *str, int *var_args)
 {
-    char buffer[200];
+    char buffer[FMT_BUF_LEN];
     fmtbuf_t fmtbuf;
 
     fmtbuf.buf = buffer;
-    fmtbuf.n = INT_MAX;
+    fmtbuf.n = FMT_BUF_LEN;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 1);
-    return __syscall(__syscall_write, 1, buffer, fmtbuf.len);
+    __format_to_buf(&fmtbuf, str, var_args);
+
+    /* len counts what the conversion would have produced, not what fit. */
+    int len = fmtbuf.len;
+    if (len < FMT_BUF_LEN)
+        return __syscall(__syscall_write, fd, buffer, len);
+
+    /* Longer than the staging buffer. Format it again into one that holds it,
+     * rather than writing a silently truncated line. Re-reading var_args is
+     * safe: __format_to_buf() only reads it.
+     */
+    char *wide = malloc(len + 1);
+
+    if (!wide)
+        return __syscall(__syscall_write, fd, buffer, FMT_BUF_LEN - 1);
+
+    fmtbuf.buf = wide;
+    fmtbuf.n = len + 1;
+    fmtbuf.len = 0;
+    __format_to_buf(&fmtbuf, str, var_args);
+
+    int written = __syscall(__syscall_write, fd, wide, fmtbuf.len);
+
+    free(wide);
+    return written;
+}
+
+int printf(char *str, ...)
+{
+    return __write_fmt(1, str, &str + 1);
 }
 
 int sprintf(char *buffer, char *str, ...)
@@ -555,14 +622,7 @@ int __free_all(void);
 
 int fprintf(FILE *stream, char *str, ...)
 {
-    char buffer[200];
-    fmtbuf_t fmtbuf;
-
-    fmtbuf.buf = buffer;
-    fmtbuf.n = INT_MAX;
-    fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 1);
-    return __syscall(__syscall_write, stream, buffer, fmtbuf.len);
+    return __write_fmt(stream, str, &str + 1);
 }
 
 int fflush(FILE *stream)
@@ -585,31 +645,43 @@ void abort(void)
 
 FILE *fopen(char *filename, char *mode)
 {
-    if (!strcmp(mode, "wb")) {
-        /* O_WRONLY | O_CREAT | O_TRUNC. Without O_TRUNC, writing a shorter
-         * file over a longer one leaves the old tail in place -- which turns
-         * a rebuilt executable into the new image followed by a fragment of
-         * the previous one.
+    int fd;
+
+    if (!strcmp(mode, "w") || !strcmp(mode, "wb")) {
+        /* Flags below are O_WRONLY | O_CREAT | O_TRUNC. Without O_TRUNC,
+         * writing a shorter file over a longer one leaves the old tail in
+         * place -- which turns a rebuilt executable into the new image
+         * followed by a fragment of the previous one.
+         *
+         * "wb" writes an executable and opens 0775; "w" writes text, which has
+         * no business being executable, and opens 0666 before the umask.
          */
-#if defined(__arm__)
-        return __syscall(__syscall_open, filename, 577, 0x1fd);
-#elif defined(__riscv)
+        int perm = 0x1b6;
+
+        if (!strcmp(mode, "wb"))
+            perm = 0x1fd;
+#if defined(__riscv)
         /* FIXME: mode not work currently in RISC-V */
-        return __syscall(__syscall_openat, -100, filename, 577, 0x1fd);
-#elif defined(__x86_64__)
-        return __syscall(__syscall_open, filename, 577, 0x1fd);
+        fd = __syscall(__syscall_openat, -100, filename, 577, perm);
+#else
+        fd = __syscall(__syscall_open, filename, 577, perm);
 #endif
-    }
-    if (!strcmp(mode, "rb")) {
-#if defined(__arm__)
-        return __syscall(__syscall_open, filename, 0, 0);
-#elif defined(__riscv)
-        return __syscall(__syscall_openat, -100, filename, 0, 0);
-#elif defined(__x86_64__)
-        return __syscall(__syscall_open, filename, 0, 0);
+    } else if (!strcmp(mode, "r") || !strcmp(mode, "rb")) {
+#if defined(__riscv)
+        fd = __syscall(__syscall_openat, -100, filename, 0, 0);
+#else
+        fd = __syscall(__syscall_open, filename, 0, 0);
 #endif
-    }
-    return NULL;
+    } else
+        return NULL;
+
+    /* open(2) reports failure as a negative errno rather than as NULL, so a
+     * caller's "if (!fp)" would sail straight past it. Fold it into NULL here
+     * and every call site gets the standard test for free.
+     */
+    if (fd < 0)
+        return NULL;
+    return fd;
 }
 
 int fclose(FILE *stream)

@@ -10,7 +10,9 @@
 #include "defs.h"
 #include "globals.c"
 
-/* SCCP (Sparse Conditional Constant Propagation) optimization */
+/* Constant cast optimization. Despite the file name this is not SCCP:
+ * there is no lattice and no CFG-edge worklist anywhere in the tree.
+ */
 #include "opt-sccp.c"
 
 /* Configuration constants - replace magic numbers */
@@ -823,6 +825,23 @@ void solve_phi_insertion(void)
 }
 
 var_t *require_var(block_t *blk);
+
+/* A new variable holding @val, for use as an instruction operand.
+ *
+ * It has to be new. rename_var() gives every use reached by one definition the
+ * same var_t, and mark_const() stamps init_val onto that shared object, so
+ * rewriting an existing constant's value changes what every other use sees.
+ * The caller emits the OP_load_constant that defines it.
+ */
+var_t *new_const_var(block_t *scope, int val)
+{
+    var_t *var = require_var(scope);
+
+    var->var_name = gen_name();
+    var->is_const = true;
+    var->init_val = val;
+    return var;
+}
 bool is_dominate(basic_block_t *pred, basic_block_t *succ);
 
 /* The renaming state of @v, created on first use. */
@@ -2305,7 +2324,7 @@ bool sr_collect_chain(func_t *func, var_t *var, insn_t **chain, int *len)
 void sr_emit_advance(basic_block_t *latch, var_t *var, int step)
 {
     block_t *scope = latch->scope;
-    var_t *amount = require_var(scope);
+    var_t *amount = new_const_var(scope, step);
     var_t *sum = require_var(scope);
     insn_t *after = latch->insn_list.tail;
     insn_t *load;
@@ -2319,9 +2338,6 @@ void sr_emit_advance(basic_block_t *latch, var_t *var, int step)
                   after->opcode == OP_return || after->opcode == OP_func_ret))
         after = after->prev;
 
-    amount->var_name = gen_name();
-    amount->is_const = true;
-    amount->init_val = step;
     sum->var_name = gen_name();
     sum->type = var->type;
     sum->ptr_level = var->ptr_level;
@@ -2718,8 +2734,6 @@ void check_var_cross_init()
     }
 }
 
-#ifdef __SHECC__
-#else
 void bb_dump_connection(FILE *fd,
                         basic_block_t *curr,
                         basic_block_t *next,
@@ -2851,7 +2865,7 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
             }
             fprintf(fd, ")>]\n");
         } else {
-            char str[256];
+            char str[DUMP_INSN_LEN];
             switch (insn->opcode) {
             case OP_allocat:
                 sprintf(str, "<%s<SUB>%d</SUB> := ALLOC>", insn->rd->var_name,
@@ -3021,6 +3035,9 @@ void dump_cfg(char name[])
 {
     FILE *fd = fopen(name, "w");
 
+    if (!fd)
+        usage_error("Unable to open DOT output");
+
     fprintf(fd, "strict digraph CFG {\n");
     fprintf(fd, "node [shape=box]\n");
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
@@ -3037,37 +3054,6 @@ void dump_cfg(char name[])
     fprintf(fd, "}\n");
     fclose(fd);
 }
-
-void dom_dump(FILE *fd, basic_block_t *bb)
-{
-    fprintf(fd, "\"%p\"\n", bb);
-    for (int i = 0; i < bb->dom_next_idx; i++) {
-        dom_dump(fd, bb->dom_next[i]);
-        fprintf(fd, "\"%p\":s->\"%p\":n\n", bb, bb->dom_next[i]);
-    }
-}
-
-void dump_dom(char name[])
-{
-    FILE *fd = fopen(name, "w");
-
-    fprintf(fd, "strict digraph DOM {\n");
-    fprintf(fd, "node [shape=box]\n");
-    fprintf(fd, "splines=polyline\n");
-    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        /* Skip function declarations without bodies */
-        if (!func->bbs)
-            continue;
-
-        fprintf(fd, "subgraph cluster_%p {\n", func);
-        fprintf(fd, "label=\"%p\"\n", func);
-        dom_dump(fd, func->bbs);
-        fprintf(fd, "}\n");
-    }
-    fprintf(fd, "}\n");
-    fclose(fd);
-}
-#endif
 
 int func_marked_count;
 
@@ -3207,6 +3193,7 @@ void prune_unused_funcs(void)
         func->is_used = false;
 }
 
+/* Builds SSA form and stops there; unwind_phi() is the caller's to call. */
 void ssa_build(void)
 {
     build_rpo();
@@ -3220,16 +3207,6 @@ void ssa_build(void)
 
     solve_phi_insertion();
     solve_phi_params();
-
-#ifdef __SHECC__
-#else
-    if (dump_ir) {
-        dump_cfg("CFG.dot");
-        dump_dom("DOM.dot");
-    }
-#endif
-
-    unwind_phi();
 }
 
 /* Check if operation can be subject to CSE */
@@ -3565,23 +3542,29 @@ bool is_block_unreachable(basic_block_t *bb)
     return false;
 }
 
-/* Check if a variable escapes (is used outside the function) */
 bool var_escapes(var_t *var)
 {
-    if (!var)
-        return true; /* conservative: assume it escapes */
-
-    /* Global variables always escape */
-    if (var->is_global)
-        return true;
-
-    /* Function definitions escape */
-    if (var->is_func)
-        return true;
-
-    /* Conservative approach - assume all variables escape to avoid issues */
-    /* This ensures we don't eliminate stores that might be needed */
+    /* Reports every variable as escaping, which makes dce_init_mark() treat
+     * every OP_write as useful and so disables SSA-level dead-store
+     * elimination. The is_global/is_func branches that used to precede this
+     * were unreachable for the same reason and are gone rather than left
+     * reading as though they decided something.
+     */
     return true;
+}
+
+/* Append one initial useful instruction, reserving space only when it exists.
+ */
+void dce_init_push(insn_t *work_list[],
+                   int work_list_idx,
+                   int *mark_num,
+                   insn_t *insn)
+{
+    if (work_list_idx + *mark_num >= DCE_WORKLIST_SIZE)
+        fatal("DCE worklist size exceeded");
+
+    work_list[work_list_idx + *mark_num] = insn;
+    *mark_num = *mark_num + 1;
 }
 
 /* initial mark useful instruction */
@@ -3595,8 +3578,7 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
     case OP_return:
         insn->useful = true;
         insn->belong_to->useful = true;
-        work_list[work_list_idx + mark_num] = insn;
-        mark_num++;
+        dce_init_push(work_list, work_list_idx, &mark_num, insn);
         break;
     case OP_write:
     case OP_store:
@@ -3604,42 +3586,36 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
         if (!insn->rd || var_escapes(insn->rd)) {
             insn->useful = true;
             insn->belong_to->useful = true;
-            work_list[work_list_idx + mark_num] = insn;
-            mark_num++;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn);
         }
         break;
     case OP_global_store:
         /* Global stores always escape */
         insn->useful = true;
         insn->belong_to->useful = true;
-        work_list[work_list_idx + mark_num] = insn;
-        mark_num++;
+        dce_init_push(work_list, work_list_idx, &mark_num, insn);
         break;
     case OP_address_of:
     case OP_unwound_phi:
     case OP_allocat:
         insn->useful = true;
         insn->belong_to->useful = true;
-        work_list[work_list_idx + mark_num] = insn;
-        mark_num++;
+        dce_init_push(work_list, work_list_idx, &mark_num, insn);
         break;
     case OP_indirect:
     case OP_call:
         insn->useful = true;
         insn->belong_to->useful = true;
-        work_list[work_list_idx + mark_num] = insn;
-        mark_num++;
+        dce_init_push(work_list, work_list_idx, &mark_num, insn);
         /* mark precall and postreturn sequences at calls */
         if (insn->next && insn->next->opcode == OP_func_ret) {
             insn->next->useful = true;
-            work_list[work_list_idx + mark_num] = insn->next;
-            mark_num++;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn->next);
         }
         while (insn->prev && insn->prev->opcode == OP_push) {
             insn = insn->prev;
             insn->useful = true;
-            work_list[work_list_idx + mark_num] = insn;
-            mark_num++;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn);
         }
         break;
     default:
@@ -3649,8 +3625,7 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
         if (insn->rd->is_global && !insn->useful) {
             insn->useful = true;
             insn->belong_to->useful = true;
-            work_list[work_list_idx + mark_num] = insn;
-            mark_num++;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn);
         }
         break;
     }
@@ -3665,10 +3640,7 @@ void dce_insn(basic_block_t *bb)
 
     /* initially analyze current bb */
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-        int mark_num = dce_init_mark(insn, work_list, work_list_idx);
-        work_list_idx += mark_num;
-        if (work_list_idx > DCE_WORKLIST_SIZE - 1)
-            fatal("DCE worklist size exceeded");
+        work_list_idx += dce_init_mark(insn, work_list, work_list_idx);
     }
 
     /* Process worklist - marking dependencies as useful */
@@ -4122,27 +4094,47 @@ void optimize(void)
                     }
                 }
 
-                /* Strength reduction for power-of-2 operations */
+                /* Strength reduction for power-of-2 operations.
+                 *
+                 * The replacement operand has to be a variable of its own.
+                 * mark_const() hands every use of a folded local the same
+                 * var_t, and that var_t is what its defining OP_load_constant
+                 * materialises, so rewriting init_val in place changes the
+                 * value every other use sees: "int k = 8; return a*k + b*k;"
+                 * returned 2 << 3 + 3 * 3.
+                 */
                 if (insn->rs2 && insn->rs2->is_const && insn->rd) {
                     int val = insn->rs2->init_val;
                     int shift = exact_log2(val);
+                    opcode_t reduced = OP_generic;
+                    int operand = 0;
 
                     if (shift >= 0) {
                         /* x * power_of_2 = x << shift */
                         if (insn->opcode == OP_mul) {
-                            insn->opcode = OP_lshift;
-                            insn->rs2->init_val = shift;
+                            reduced = OP_lshift;
+                            operand = shift;
                         }
                         /* x / power_of_2 = x >> shift (unsigned) */
                         else if (insn->opcode == OP_div) {
-                            insn->opcode = OP_rshift;
-                            insn->rs2->init_val = shift;
+                            reduced = OP_rshift;
+                            operand = shift;
                         }
                         /* x % power_of_2 = x & (power_of_2 - 1) */
                         else if (insn->opcode == OP_mod) {
-                            insn->opcode = OP_bit_and;
-                            insn->rs2->init_val = val - 1;
+                            reduced = OP_bit_and;
+                            operand = val - 1;
                         }
+                    }
+
+                    if (reduced != OP_generic) {
+                        var_t *amount = new_const_var(bb->scope, operand);
+
+                        bb_insert_after(
+                            bb, insn->prev,
+                            new_insn(OP_load_constant, amount, NULL, NULL));
+                        insn->opcode = reduced;
+                        insn->rs2 = amount;
                     }
                 }
 

@@ -36,16 +36,27 @@
 #define MAX_ID_LEN 64
 #define MAX_LINE_LEN 256
 #define MAX_VAR_LEN 128
+/* ".label." plus an int, for basic_block_t's dump name. */
+#define MAX_LABEL_LEN 24
+/* Staging buffer for one instruction's Graphviz label in bb_dump(). The widest
+ * case is a binary operator: three MAX_VAR_LEN names, three subscripts, an
+ * operator and 41 bytes of markup.
+ */
+#define DUMP_INSN_LEN 512
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
 #define MAX_LOCALS 3200
 #define MAX_FIELDS 64
 #define MAX_TYPES 256
 #define MAX_LABELS 256
-#define MAX_IR_INSTR 120000
+/* Pending postfix ++/-- effects in one statement; each one appends 3. */
+#define MAX_SIDE_EFFECT 64
+/* Elements captured from an implicitly sized array initializer. */
+#define MAX_IMPLICIT_ARRAY 256
+/* A self-compile emits ~101k ph2_ir; one pointer per slot in PH2_IR_FLATTEN. */
+#define MAX_IR_INSTR 262144
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
-#define MAX_BB_RDOM_SUCC 256
 #define MAX_CODE 262144
 #define MAX_DATA 262144
 #define MAX_SYMTAB 65536
@@ -570,7 +581,6 @@ struct var {
     bool is_ternary_ret;
     bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
-    int vreg_id;   /* Virtual register ID */
     int phys_reg;  /* Physical register assignment (-1 if unassigned) */
     int first_use; /* First instruction index where variable is used */
     int last_use;  /* Last instruction index where variable is used */
@@ -1061,15 +1071,5 @@ typedef struct {
     int r_info;   /* Elf32_Word */
     int r_addend; /* Elf32_Sword */
 } elf32_rela_t;
-
-/* For .dynamic section */
-typedef struct {
-    int d_tag; /* Elf32_Sword */
-    int d_un;  /* union {
-                *     Elf32_Word d_val;
-                *     Elf32_Addr d_ptr;
-                * } d_un;
-                */
-} elf32_dyn_t;
 
 #define ELF32_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))

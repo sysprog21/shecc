@@ -1065,16 +1065,17 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 strncpy(inclusion_path, path, MAX_LINE_LEN - 1);
                 inclusion_path[MAX_LINE_LEN - 1] = '\0';
             } else {
-                int sz = 0;
-                char token_buffer[MAX_TOKEN_LEN], *literal;
                 tk = pp_lex_expect_token(tk, T_lt, true);
 
+                /* The path is ignored (see the FIXME below), so just consume
+                 * it. Stopping at a newline too keeps an unterminated
+                 * "#include <foo" from eating the rest of the file.
+                 */
                 while (!pp_lex_peek_token(tk, T_gt, false)) {
+                    if (pp_lex_peek_token(tk, T_newline, false) ||
+                        pp_lex_peek_token(tk, T_eof, false))
+                        error_at("Unterminated #include <...>", &tk->location);
                     tk = pp_lex_next_token(tk, false);
-                    literal = token_to_string(tk, token_buffer);
-
-                    strcpy(inclusion_path + sz, literal);
-                    sz += strlen(literal);
                 }
 
                 tk = pp_lex_next_token(tk, false);

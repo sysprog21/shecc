@@ -9,11 +9,41 @@ readonly VERBOSE_MODE="${VERBOSE:-0}"
 readonly SHOW_SUMMARY="${SHOW_SUMMARY:-1}"
 readonly SHOW_PROGRESS="${SHOW_PROGRESS:-1}"
 readonly COLOR_OUTPUT="${COLOR_OUTPUT:-1}"
+# Substring match against the category name; empty runs everything.
+readonly TEST_FILTER="${TEST_FILTER:-}"
+# 1 stops at the first failure. The default reports every failure and still
+# exits non-zero at the end, so one bad case no longer hides the other 600.
+readonly FAIL_FAST="${FAIL_FAST:-0}"
+
+# Everything the run creates goes here, so it can be removed in one step --
+# the suite used to leave ~2400 files in /tmp per invocation. Kept on failure,
+# because report_test_failure names the files it wants you to look at.
+readonly TEST_TMPDIR="$(mktemp -d)"
+export TMPDIR="$TEST_TMPDIR"
+function cleanup() {
+    if [ "$FAILED_TESTS" -eq 0 ]; then
+        rm -rf "$TEST_TMPDIR"
+    else
+        echo "Test files kept in $TEST_TMPDIR"
+    fi
+}
+trap cleanup EXIT
+
+# Set by begin_category; tests outside the selected categories return early.
+CATEGORY_SELECTED=1
+
+function test_selected() {
+    [ "$CATEGORY_SELECTED" = "1" ]
+}
+
+# Directory holding this script and the checked-in test programs beside it, so
+# try_file works regardless of the directory make was invoked from.
+readonly TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Pointer width of the configured target. The sizeof tests below assert on it,
 # and it differs between the 32-bit targets and x86-64.
 PTR_SZ=$(sed -n 's/^#define PTR_SIZE \([0-9]*\).*/\1/p' \
-    "$(dirname "$0")/../config" 2>/dev/null | head -1)
+    "$TESTS_DIR/../config" 2>/dev/null | head -1)
 [ -n "${PTR_SZ}" ] || PTR_SZ=4
 
 # Variadic arguments occupy one pointer-sized slot each, so an int-based walk
@@ -48,6 +78,8 @@ if [ "$#" -lt 1 ]; then
     echo "  SHOW_SUMMARY=1    Show category summaries (default)"
     echo "  SHOW_PROGRESS=1   Show progress dots (default)"
     echo "  COLOR_OUTPUT=1    Enable colored output (default)"
+    echo "  TEST_FILTER=<str> Run only categories whose name contains <str>"
+    echo "  FAIL_FAST=1       Stop at the first failure (default: report all)"
     exit 1
 fi
 
@@ -110,6 +142,14 @@ function begin_category() {
     fi
 
     CURRENT_CATEGORY="$category"
+    if [ -z "$TEST_FILTER" ]; then
+        CATEGORY_SELECTED=1
+    else
+        case "$category" in
+        *"$TEST_FILTER"*) CATEGORY_SELECTED=1 ;;
+        *) CATEGORY_SELECTED=0 ;;
+        esac
+    fi
     CATEGORY_TESTS["$category"]=0
     CATEGORY_PASSED["$category"]=0
     CATEGORY_FAILED["$category"]=0
@@ -148,6 +188,7 @@ function report_test_failure() {
     local actual="$5"
     local output="$6"
     local expected_output="${7:-}"
+    local stderr_file="${8:-}"
 
     ((FAILED_TESTS++))
     ((CATEGORY_FAILED["$CURRENT_CATEGORY"]++))
@@ -169,7 +210,16 @@ function report_test_failure() {
     echo ""
     echo "Compiler command: $SHECC $SHECC_CFLAGS -o $tmp_exe $tmp_in"
     echo "Test files: input=$tmp_in, executable=$tmp_exe"
-    exit 1
+    if [ -n "$stderr_file" ] && [ -s "$stderr_file" ]; then
+        echo ""
+        print_color yellow "Compiler stderr:"
+        echo
+        cat "$stderr_file"
+    fi
+    echo ""
+    if [ "$FAIL_FAST" = "1" ]; then
+        exit 1
+    fi
 }
 
 # Main test execution function
@@ -177,19 +227,27 @@ function try() {
     local expected="$1"
     local expected_output=""
     local input=""
+    local check_output=0
 
     if [ $# -eq 2 ]; then
         input="$2"
     elif [ $# -eq 3 ]; then
         expected_output="$2"
         input="$3"
+        # An expectation was supplied, so compare against it -- including when
+        # it is empty, which asserts that the program prints nothing.
+        check_output=1
     fi
+
+    test_selected || return 0
 
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
+    local tmp_err="$(mktemp)"
     echo "$input" > "$tmp_in"
-    # Suppress compiler warnings by redirecting stderr
-    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>/dev/null
+    # Keep the compiler's diagnostic rather than discarding it: without it a
+    # failure reports only an exit-code mismatch and never says why.
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>"$tmp_err"
     chmod +x $tmp_exe
 
     local output=''
@@ -200,9 +258,9 @@ function try() {
     ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
 
     if [ "$actual" != "$expected" ]; then
-        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output"
-    elif [ -n "$expected_output" ] && [ "$output" != "$expected_output" ]; then
-        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output"
+        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output" "$tmp_err"
+    elif [ "$check_output" = 1 ] && [ "$output" != "$expected_output" ]; then
+        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output" "$tmp_err"
     else
         ((PASSED_TESTS++))
         ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
@@ -228,6 +286,12 @@ function try_output() {
     try "$expected" "$expected_output" "$input"
 }
 
+# Compile and run a checked-in program through the same path as inline cases.
+# This keeps the small end-to-end programs in both stage-0 and stage-2 runs.
+function try_file() {
+    try "$1" "$2" "$(< "$3")"
+}
+
 # try_compile_error - test shecc with invalid C program
 # Usage:
 # - try_compile_error invalid_input_code
@@ -240,6 +304,7 @@ function try_output() {
 # output an error message.
 function try_compile_error() {
     local input=$(cat)
+    test_selected || return 0
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
@@ -313,6 +378,7 @@ function try_large() {
     local expected="$1"
     local input="$(cat)"
 
+    test_selected || return 0
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
 
@@ -383,6 +449,13 @@ echo ""
 if [ "$SHOW_PROGRESS" = "1" ]; then
     echo "Running tests..."
 fi
+
+# Category: Checked-in end-to-end programs
+begin_category "Standalone Programs" "Testing checked-in end-to-end programs"
+
+try_file 0 'F(10) = 55' "$TESTS_DIR/fib.c"
+try_file 0 $'1\nHello World' "$TESTS_DIR/hello.c"
+try_file 0 '' "$TESTS_DIR/strength-reduce.c"
 
 # Category: Basic Literals and Constants
 begin_category "Literals and Constants" "Testing integer, character, and string literals"
@@ -2854,8 +2927,11 @@ skip:
 }
 EOF
 
-# Forward reference
-try_compile_error << EOF
+# Forward reference. Statements between a goto and its label are unreachable
+# but perfectly legal, and gcc accepts this silently at -Wall -Wextra
+# -pedantic. shecc used to abort on the unreachable "return 1;" -- this case
+# asserted that abort as a compile error; it now asserts the correct result.
+try_ 0 << EOF
 int main()
 {
     goto end;
