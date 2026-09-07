@@ -9,6 +9,32 @@ readonly VERBOSE_MODE="${VERBOSE:-0}"
 readonly SHOW_SUMMARY="${SHOW_SUMMARY:-1}"
 readonly SHOW_PROGRESS="${SHOW_PROGRESS:-1}"
 readonly COLOR_OUTPUT="${COLOR_OUTPUT:-1}"
+# Substring match against the category name; empty runs everything.
+readonly TEST_FILTER="${TEST_FILTER:-}"
+# 1 stops at the first failure. The default reports every failure and still
+# exits non-zero at the end, so one bad case no longer hides the other 600.
+readonly FAIL_FAST="${FAIL_FAST:-0}"
+
+# Everything the run creates goes here, so it can be removed in one step --
+# the suite used to leave ~2400 files in /tmp per invocation. Kept on failure,
+# because report_test_failure names the files it wants you to look at.
+readonly TEST_TMPDIR="$(mktemp -d)"
+export TMPDIR="$TEST_TMPDIR"
+function cleanup() {
+    if [ "$FAILED_TESTS" -eq 0 ]; then
+        rm -rf "$TEST_TMPDIR"
+    else
+        echo "Test files kept in $TEST_TMPDIR"
+    fi
+}
+trap cleanup EXIT
+
+# Set by begin_category; tests outside the selected categories return early.
+CATEGORY_SELECTED=1
+
+function test_selected() {
+    [ "$CATEGORY_SELECTED" = "1" ]
+}
 
 # Directory holding this script and the checked-in test programs beside it, so
 # try_file works regardless of the directory make was invoked from.
@@ -52,6 +78,8 @@ if [ "$#" -lt 1 ]; then
     echo "  SHOW_SUMMARY=1    Show category summaries (default)"
     echo "  SHOW_PROGRESS=1   Show progress dots (default)"
     echo "  COLOR_OUTPUT=1    Enable colored output (default)"
+    echo "  TEST_FILTER=<str> Run only categories whose name contains <str>"
+    echo "  FAIL_FAST=1       Stop at the first failure (default: report all)"
     exit 1
 fi
 
@@ -114,6 +142,14 @@ function begin_category() {
     fi
 
     CURRENT_CATEGORY="$category"
+    if [ -z "$TEST_FILTER" ]; then
+        CATEGORY_SELECTED=1
+    else
+        case "$category" in
+        *"$TEST_FILTER"*) CATEGORY_SELECTED=1 ;;
+        *) CATEGORY_SELECTED=0 ;;
+        esac
+    fi
     CATEGORY_TESTS["$category"]=0
     CATEGORY_PASSED["$category"]=0
     CATEGORY_FAILED["$category"]=0
@@ -152,6 +188,7 @@ function report_test_failure() {
     local actual="$5"
     local output="$6"
     local expected_output="${7:-}"
+    local stderr_file="${8:-}"
 
     ((FAILED_TESTS++))
     ((CATEGORY_FAILED["$CURRENT_CATEGORY"]++))
@@ -173,7 +210,16 @@ function report_test_failure() {
     echo ""
     echo "Compiler command: $SHECC $SHECC_CFLAGS -o $tmp_exe $tmp_in"
     echo "Test files: input=$tmp_in, executable=$tmp_exe"
-    exit 1
+    if [ -n "$stderr_file" ] && [ -s "$stderr_file" ]; then
+        echo ""
+        print_color yellow "Compiler stderr:"
+        echo
+        cat "$stderr_file"
+    fi
+    echo ""
+    if [ "$FAIL_FAST" = "1" ]; then
+        exit 1
+    fi
 }
 
 # Main test execution function
@@ -193,11 +239,15 @@ function try() {
         check_output=1
     fi
 
+    test_selected || return 0
+
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
+    local tmp_err="$(mktemp)"
     echo "$input" > "$tmp_in"
-    # Suppress compiler warnings by redirecting stderr
-    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>/dev/null
+    # Keep the compiler's diagnostic rather than discarding it: without it a
+    # failure reports only an exit-code mismatch and never says why.
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>"$tmp_err"
     chmod +x $tmp_exe
 
     local output=''
@@ -208,9 +258,9 @@ function try() {
     ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
 
     if [ "$actual" != "$expected" ]; then
-        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output"
+        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output" "$tmp_err"
     elif [ "$check_output" = 1 ] && [ "$output" != "$expected_output" ]; then
-        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output"
+        report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output" "$tmp_err"
     else
         ((PASSED_TESTS++))
         ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
@@ -254,6 +304,7 @@ function try_file() {
 # output an error message.
 function try_compile_error() {
     local input=$(cat)
+    test_selected || return 0
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
     echo "$input" > "$tmp_in"
@@ -327,6 +378,7 @@ function try_large() {
     local expected="$1"
     local input="$(cat)"
 
+    test_selected || return 0
     local tmp_in="$(mktemp --suffix .c)"
     local tmp_exe="$(mktemp)"
 
