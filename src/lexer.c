@@ -28,7 +28,7 @@ hashmap_t *KEYWORD_MAP = NULL;
 token_kind_t *directive_tokens_storage = NULL;
 token_kind_t *keyword_tokens_storage = NULL;
 
-void lex_init_directives()
+void lex_init_directives(void)
 {
     if (DIRECTIVE_MAP)
         return;
@@ -57,7 +57,7 @@ void lex_init_directives()
     }
 }
 
-void lex_init_keywords()
+void lex_init_keywords(void)
 {
     if (KEYWORD_MAP)
         return;
@@ -125,7 +125,7 @@ token_kind_t lookup_keyword(char *token)
 
 
 /* Cleanup function for lexer hashmaps */
-void lexer_cleanup()
+void lexer_cleanup(void)
 {
     if (DIRECTIVE_MAP) {
         hashmap_free(DIRECTIVE_MAP);
@@ -189,7 +189,7 @@ int file_read_all(FILE *f, char *dst, int len)
 }
 #endif
 
-strbuf_t *read_file(char *filename)
+strbuf_t *read_file(const char *filename)
 {
     FILE *f = fopen(filename, "rb");
     strbuf_t *src;
@@ -225,7 +225,7 @@ strbuf_t *get_file_buf(char *filename)
     return buf;
 }
 
-token_t *new_token(token_kind_t kind, source_location_t *loc, int len)
+token_t *new_token(token_kind_t kind, const source_location_t *loc, int len)
 {
     /* Every field is written here, so the allocation does not need zeroing
      * first -- and tokens are the single largest source of allocations in the
@@ -1032,10 +1032,10 @@ token_stream_t *gen_file_token_stream(char *filename)
     return tks;
 }
 
-token_stream_t *gen_libc_token_stream()
+token_stream_t *gen_libc_token_stream(void)
 {
     token_t head;
-    token_t *cur = &head, *tk;
+    token_t *cur = &head, *tk = NULL;
     token_stream_t *tks;
     char *filename = dynlink ? "lib/c.h" : "lib/c.c";
     strbuf_t *buf = LIBC_SRC;
@@ -1078,7 +1078,7 @@ token_stream_t *gen_libc_token_stream()
         cur = cur->next;
     }
 
-    if (!head.next)
+    if (!tk || !head.next)
         fatal("Unable to include libc");
 
     if (tk->kind != T_eof)
@@ -1093,7 +1093,7 @@ token_stream_t *gen_libc_token_stream()
 }
 
 /* Fetches current token's location. */
-source_location_t *cur_token_loc()
+source_location_t *cur_token_loc(void)
 {
     return &cur_token->location;
 }
@@ -1101,7 +1101,7 @@ source_location_t *cur_token_loc()
 /* Finds next token's location; if the current token is eof, returns the eof
  * token's location instead.
  */
-source_location_t *next_token_loc()
+source_location_t *next_token_loc(void)
 {
     if (cur_token->kind == T_eof)
         return &cur_token->location;

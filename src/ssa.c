@@ -43,7 +43,7 @@ void var_list_ensure_capacity(var_list_t *list, int min_capacity)
 }
 
 /* Whether @var appears in @list. */
-bool var_list_holds(var_list_t *list, var_t *var)
+bool var_list_holds(const var_list_t *list, var_t *var)
 {
     for (int i = 0; i < list->size; i++) {
         if (list->elements[i] == var)
@@ -171,7 +171,6 @@ void bb_build_rpo(func_t *func, basic_block_t *bb)
         }
         bb->rpo_next = curr;
         prev->rpo_next = bb;
-        prev = curr;
         return;
     }
 
@@ -447,7 +446,7 @@ void build_r_idom(void)
             for (basic_block_t *bb = func->exit->rpo_r_next; bb;
                  bb = bb->rpo_r_next) {
                 /* pick one predecessor */
-                basic_block_t *pred;
+                basic_block_t *pred = NULL;
                 if (bb->next && bb->next->r_idom) {
                     pred = bb->next;
                 } else if (bb->else_ && bb->else_->r_idom) {
@@ -455,6 +454,16 @@ void build_r_idom(void)
                 } else if (bb->then_ && bb->then_->r_idom) {
                     pred = bb->then_;
                 }
+
+                /* The mirror of the rule in build_idom(): reverse postorder
+                 * from the exit puts a successor of every block that reaches it
+                 * ahead of that block, so one is normally settled by now. A
+                 * block where none is cannot be given an immediate
+                 * postdominator yet; leaving it for a later round is what keeps
+                 * the walk off an uninitialised pointer.
+                 */
+                if (!pred)
+                    continue;
 
                 if (bb->next && bb->next != pred && bb->next->r_idom)
                     pred = reverse_intersect(bb->next, pred);
@@ -597,7 +606,7 @@ void use_chain_build(void)
     }
 }
 
-bool var_check_killed(var_t *var, basic_block_t *bb)
+bool var_check_killed(const var_t *var, const basic_block_t *bb)
 {
     for (int i = 0; i < bb->live_kill.size; i++) {
         if (bb->live_kill.elements[i] == var)
@@ -695,9 +704,9 @@ void solve_globals(void)
     }
 }
 
-bool var_check_in_scope(var_t *var, block_t *block)
+bool var_check_in_scope(const var_t *var, block_t *block)
 {
-    func_t *func = block->func;
+    const func_t *func = block->func;
 
     while (block) {
         /* Only the first 'size' entries hold a variable; the rest of the
@@ -843,7 +852,7 @@ var_t *new_const_var(block_t *scope, int val)
     var->init_val = val;
     return var;
 }
-bool is_dominate(basic_block_t *pred, basic_block_t *succ);
+bool is_dominate(const basic_block_t *pred, basic_block_t *succ);
 
 /* The renaming state of @v, created on first use. */
 rename_t *var_rename(var_t *v)
@@ -1213,7 +1222,7 @@ insn_t *new_insn(opcode_t op, var_t *rd, var_t *rs1, var_t *rs2)
 /* Whether @insn computes a value with no side effect and no way to fault, so
  * running it on a path that would not have reached it changes nothing.
  */
-bool insn_is_speculatable(insn_t *insn)
+bool insn_is_speculatable(const insn_t *insn)
 {
     switch (insn->opcode) {
     case OP_add:
@@ -1411,7 +1420,7 @@ bool if_convert_bb(func_t *func, basic_block_t *bb)
     for (int step = 0; step < 2; step++) {
         bool take_t = e_needs_t ? step == 0 : step == 1;
         basic_block_t **chain = take_t ? t_chain : e_chain;
-        insn_t *skip = take_t ? t_phi : e_phi;
+        const insn_t *skip = take_t ? t_phi : e_phi;
         int len = take_t ? t_len : e_len;
 
         for (int i = 0; i < len; i++) {
@@ -1483,7 +1492,7 @@ int sr_gen;
  * materialises one wherever the value is wanted.
  */
 bool var_read_by(func_t *func,
-                 var_t *var,
+                 const var_t *var,
                  insn_t **skip,
                  int nskip,
                  bool loop_only)
@@ -1624,7 +1633,7 @@ void thread_const_branches(void)
         if (!func->bbs)
             continue;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            insn_t *br = bb->insn_list.head;
+            const insn_t *br = bb->insn_list.head;
 
             if (!br || br->next || br->opcode != OP_branch || !br->rs1)
                 continue;
@@ -2018,7 +2027,7 @@ var_t *sr_base(var_t *var)
  */
 bool sr_varies(var_t *var)
 {
-    var_t *base;
+    const var_t *base;
 
     if (!var || var->is_const)
         return false;
@@ -2031,7 +2040,7 @@ bool sr_varies(var_t *var)
  */
 bool sr_step_of(var_t *var, int *step)
 {
-    var_t *base;
+    const var_t *base;
 
     if (!var)
         return false;
@@ -2069,7 +2078,7 @@ void sr_set_step(var_t *var, int step)
  * and a literal does not, because the allocator materialises one wherever it is
  * wanted and moving it would only lengthen a live range.
  */
-bool sr_movable(insn_t *insn)
+bool sr_movable(const insn_t *insn)
 {
     switch (insn->opcode) {
     case OP_add:
@@ -2092,7 +2101,7 @@ bool sr_movable(insn_t *insn)
 }
 
 /* The instruction inside the loop that defines @var, or NULL. */
-insn_t *sr_def_of(func_t *func, var_t *var)
+insn_t *sr_def_of(func_t *func, const var_t *var)
 {
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
         if (bb->loop_mark != sr_gen)
@@ -2134,7 +2143,7 @@ var_t *sr_basic_iv(func_t *func, basic_block_t *latch, int *step)
             if (!sum->rs1 || !sum->rs2)
                 continue;
 
-            var_t *addend = NULL;
+            const var_t *addend = NULL;
             var_t *carried = NULL;
             int sign = 1;
 
@@ -2241,7 +2250,7 @@ void sr_derive_steps(func_t *func)
                 if (!insn->rd)
                     continue;
 
-                var_t *base = sr_base(insn->rd);
+                const var_t *base = sr_base(insn->rd);
 
                 if (!base || base->iv_gen == sr_gen)
                     continue;
@@ -2310,7 +2319,7 @@ bool sr_collect_chain(func_t *func, var_t *var, insn_t **chain, int *len)
     if (!sr_movable(def))
         return false;
 
-    var_t *base = sr_base(def->rd);
+    const var_t *base = sr_base(def->rd);
 
     if (!base || base->def_cnt != 1)
         return false;
@@ -2523,7 +2532,7 @@ int sr_latch_count(basic_block_t *header)
     int n = 0;
 
     for (int i = 0; i < header->prev_idx; i++) {
-        basic_block_t *p = header->prev[i].bb;
+        const basic_block_t *p = header->prev[i].bb;
 
         if (p && p->loop_mark == sr_gen)
             n++;
@@ -2682,7 +2691,7 @@ void unwind_phi(void)
  * dom_prev is the inverse of the dom_next the search followed, so the two agree
  * on every pair.
  */
-bool is_dominate(basic_block_t *pred, basic_block_t *succ)
+bool is_dominate(const basic_block_t *pred, basic_block_t *succ)
 {
     for (basic_block_t *bb = succ; bb; bb = bb->dom_prev) {
         if (bb->dom_prev == pred)
@@ -2703,7 +2712,7 @@ void bb_check_var_cross_init(func_t *func, basic_block_t *bb)
         if (insn->opcode != OP_allocat)
             continue;
 
-        var_t *var = insn->rd;
+        const var_t *var = insn->rd;
         ref_block_t *ref;
         for (ref = var->ref_block_list.head; ref; ref = ref->next) {
             if (ref->bb == bb)
@@ -2730,7 +2739,7 @@ void bb_check_var_cross_init(func_t *func, basic_block_t *bb)
  *     x = 5;
  * }
  */
-void check_var_cross_init()
+void check_var_cross_init(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
@@ -2752,7 +2761,7 @@ void bb_dump_connection(FILE *fd,
                         basic_block_t *next,
                         bb_connection_type_t type)
 {
-    char *str;
+    const char *str;
 
     switch (type) {
     case NEXT:
@@ -2768,8 +2777,8 @@ void bb_dump_connection(FILE *fd,
         fatal("Unknown basic block connection type");
     }
 
-    char *pred;
-    void *pred_id;
+    const char *pred;
+    const void *pred_id;
     if (curr->insn_list.tail) {
         pred = "insn";
         pred_id = curr->insn_list.tail;
@@ -2778,8 +2787,8 @@ void bb_dump_connection(FILE *fd,
         pred_id = curr;
     }
 
-    char *succ;
-    void *succ_id;
+    const char *succ;
+    const void *succ_id;
     if (next->insn_list.tail) {
         succ = "insn";
         succ_id = next->insn_list.head;
@@ -2792,7 +2801,7 @@ void bb_dump_connection(FILE *fd,
 }
 
 /* escape character for the tag in dot file */
-char *get_insn_op(insn_t *insn)
+char *get_insn_op(const insn_t *insn)
 {
     switch (insn->opcode) {
     case OP_add:
@@ -2855,18 +2864,19 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
     if (next_ && (then_ || else_))
         printf("Warning: normal BB with condition\n");
 
-    fprintf(fd, "subgraph cluster_%p {\n", bb);
-    fprintf(fd, "label=\"BasicBlock %p (%s)\"\n", bb, bb->bb_label_name);
+    fprintf(fd, "subgraph cluster_%p {\n", (void *) bb);
+    fprintf(fd, "label=\"BasicBlock %p (%s)\"\n", (void *) bb,
+            bb->bb_label_name);
 
     insn_t *insn = bb->insn_list.head;
     if (!insn)
-        fprintf(fd, "pseudo_%p [label=\"pseudo\"]\n", bb);
+        fprintf(fd, "pseudo_%p [label=\"pseudo\"]\n", (void *) bb);
     if (!insn && (then_ || else_))
         printf("Warning: pseudo node should only have NEXT\n");
 
     for (; insn; insn = insn->next) {
         if (insn->opcode == OP_phi) {
-            fprintf(fd, "insn_%p [label=", insn);
+            fprintf(fd, "insn_%p [label=", (void *) insn);
             fprintf(fd, "<%s<SUB>%d</SUB> := PHI(%s<SUB>%d</SUB>",
                     insn->rd->var_name, insn->rd->subscript,
                     insn->phi_ops->var->var_name,
@@ -3018,11 +3028,12 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
             default:
                 fatal("Unknown opcode in instruction dump");
             }
-            fprintf(fd, "insn_%p [label=%s]\n", insn, str);
+            fprintf(fd, "insn_%p [label=%s]\n", (void *) insn, str);
         }
 
         if (insn->next)
-            fprintf(fd, "insn_%p->insn_%p [weight=100]\n", insn, insn->next);
+            fprintf(fd, "insn_%p->insn_%p [weight=100]\n", (void *) insn,
+                    (void *) insn->next);
     }
     fprintf(fd, "}\n");
 
@@ -3044,7 +3055,7 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
             bb_dump_connection(fd, bb->prev[i].bb, bb, bb->prev[i].type);
 }
 
-void dump_cfg(char name[])
+void dump_cfg(const char name[])
 {
     FILE *fd = fopen(name, "w");
 
@@ -3059,8 +3070,9 @@ void dump_cfg(char name[])
             continue;
 
         func->visited++;
-        fprintf(fd, "subgraph cluster_%p {\n", func);
-        fprintf(fd, "label=\"%p (%s)\"\n", func, func->return_def.var_name);
+        fprintf(fd, "subgraph cluster_%p {\n", (void *) func);
+        fprintf(fd, "label=\"%p (%s)\"\n", (void *) func,
+                func->return_def.var_name);
         bb_dump(fd, func, func->bbs);
         fprintf(fd, "}\n");
     }
@@ -3223,7 +3235,7 @@ void ssa_build(void)
 }
 
 /* Check if operation can be subject to CSE */
-bool is_cse_candidate(insn_t *insn)
+bool is_cse_candidate(const insn_t *insn)
 {
     switch (insn->opcode) {
     case OP_add:
@@ -3253,7 +3265,7 @@ bool is_cse_candidate(insn_t *insn)
 /* Common Subexpression Elimination (CSE) Enhanced to support general binary
  * operations
  */
-bool cse(insn_t *insn, basic_block_t *bb)
+bool cse(insn_t *insn, const basic_block_t *bb)
 {
     /* Handle array access pattern: add + read */
     if (insn->opcode == OP_read) {
@@ -3533,7 +3545,7 @@ bool const_folding(insn_t *insn)
 }
 
 /* Check if a basic block is unreachable */
-bool is_block_unreachable(basic_block_t *bb)
+bool is_block_unreachable(const basic_block_t *bb)
 {
     if (!bb)
         return true;
@@ -3559,6 +3571,8 @@ bool is_block_unreachable(basic_block_t *bb)
 
 bool var_escapes(var_t *var)
 {
+    UNUSED(var);
+
     /* Reports every variable as escaping, which makes dce_init_mark() treat
      * every OP_write as useful and so disables SSA-level dead-store
      * elimination. The is_global/is_func branches that used to precede this
@@ -3649,7 +3663,7 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
 }
 
 /* Dead Code Elimination (DCE) */
-void dce_insn(basic_block_t *bb)
+void dce_insn(const basic_block_t *bb)
 {
     insn_t *work_list[DCE_WORKLIST_SIZE];
     int work_list_idx = 0;
@@ -3731,8 +3745,6 @@ void dce_insn(basic_block_t *bb)
 
 void dce_sweep(void)
 {
-    int total_eliminated = 0; /* Track effectiveness */
-
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         /* Skip function declarations without bodies */
         if (!func->bbs)
@@ -3741,13 +3753,8 @@ void dce_sweep(void)
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             /* Skip unreachable blocks entirely */
             if (is_block_unreachable(bb)) {
-                /* Count instructions being eliminated */
-                for (insn_t *insn = bb->insn_list.head; insn;
-                     insn = insn->next) {
-                    if (!insn->useful)
-                        total_eliminated++;
+                for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next)
                     insn->useful = false;
-                }
                 /* Mark entire block as dead */
                 bb->useful = false;
                 continue;
@@ -3757,8 +3764,6 @@ void dce_sweep(void)
             while (insn) {
                 insn_t *next = insn->next;
                 if (!insn->useful) {
-                    total_eliminated++;
-
                     /* If a branch instruction is useless, redirect to the
                      * reverse immediate dominator of this basic block and
                      * remove the branch instruction. Later, register allocation
@@ -3793,7 +3798,7 @@ void dce_sweep(void)
     }
 }
 
-void build_reversed_rpo();
+void build_reversed_rpo(void);
 
 void optimize(void)
 {
@@ -4201,7 +4206,6 @@ void bb_build_reversed_rpo(func_t *func, basic_block_t *bb)
         }
         bb->rpo_r_next = curr;
         prev->rpo_r_next = bb;
-        prev = curr;
         return;
     }
 
@@ -4234,7 +4238,7 @@ void build_reversed_rpo(void)
     }
 }
 
-void update_consumed(insn_t *insn, var_t *var);
+void update_consumed(const insn_t *insn, var_t *var);
 
 /* Combined function to reset and solve locals in one pass */
 void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
@@ -4289,7 +4293,7 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
     }
 }
 
-void update_consumed(insn_t *insn, var_t *var)
+void update_consumed(const insn_t *insn, var_t *var)
 {
     if (insn->idx > var->consumed)
         var->consumed = insn->idx;
@@ -4432,7 +4436,7 @@ void liveness_analysis(void)
         if (!func->bbs)
             continue;
 
-        basic_block_t *bb = func->exit;
+        basic_block_t *bb;
         bool changed;
         do {
             changed = false;

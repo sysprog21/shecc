@@ -396,6 +396,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                   (elf_code_start + elf_code->size);
         } else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            fflush(stdout); /* see fatal() */
             abort();
         }
         emit(__jal(__ra, ofs));
@@ -416,6 +417,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             ofs = dynamic_sections.elf_plt_start + func->plt_offset;
         else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            fflush(stdout); /* see fatal() */
             abort();
         }
         emit(__lui(__t0, rv_hi(ofs)));
@@ -756,7 +758,7 @@ void code_generate(void)
     }
 }
 
-void plt_generate()
+void plt_generate(void)
 {
     int addr_of_plt = dynamic_sections.elf_plt_start;
     int addr_of_got = dynamic_sections.elf_got_start;

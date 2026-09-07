@@ -72,7 +72,7 @@ void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
 {
     if (!elf_array || !blk || sz <= 0)
         return;
-    char *ptr = blk;
+    const char *ptr = blk;
     for (int i = 0; i < sz; i++)
         strbuf_putc(elf_array, ptr[i]);
 }
@@ -368,7 +368,7 @@ void elf_generate_header(void)
 
 void elf_generate_program_headers(void)
 {
-    strbuf_t *elf_relplt = elf_relplt_buf();
+    const strbuf_t *elf_relplt = elf_relplt_buf();
     if (!elf_program_header || !elf_code || !elf_data || !elf_rodata ||
         (dynlink &&
          (!dynamic_sections.elf_interp || !elf_relplt ||
@@ -574,7 +574,7 @@ void elf_generate_section_headers(void)
      * compiles this file.
      */
 
-    strbuf_t *elf_relplt = elf_relplt_buf();
+    const strbuf_t *elf_relplt = elf_relplt_buf();
     /* Check for null pointers to prevent crashes */
     if (!elf_section_header || !elf_code || !elf_data || !elf_rodata ||
         !elf_symtab || !elf_strtab || !elf_shstrtab ||
@@ -1099,7 +1099,7 @@ void elf_reset_dynamic_sections(void)
 
 void elf_generate_sections(void)
 {
-    strbuf_t *elf_relplt = elf_relplt_buf();
+    const strbuf_t *elf_relplt = elf_relplt_buf();
     if (!elf_shstrtab ||
         (dynlink &&
          (!dynamic_sections.elf_interp || !elf_relplt ||
@@ -1271,13 +1271,13 @@ void elf_postprocess(void)
  * '__syscall' to call, since it is synthesized only for static linking.
  */
 #ifdef HOST_BUFFERED_STDIO
-void elf_write_all(FILE *fp, char *buf, int len)
+void elf_write_all(FILE *fp, const char *buf, int len)
 {
     if (len > 0)
         fwrite(buf, 1, len, fp);
 }
 #else
-void elf_write_all(FILE *fp, char *buf, int len)
+void elf_write_all(FILE *fp, const char *buf, int len)
 {
     int off = 0;
 

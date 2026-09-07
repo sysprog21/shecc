@@ -41,9 +41,6 @@ bool optimize_constant_casts(func_t *func)
 
     /* Simple peephole optimization: const + trunc pattern */
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-        if (!bb)
-            continue;
-
         for (insn_t *insn = bb->insn_list.head; insn && insn->next;
              insn = insn->next) {
             insn_t *next_insn = insn->next;

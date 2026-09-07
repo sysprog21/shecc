@@ -101,6 +101,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             elf_offset += 16;
         } else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            fflush(stdout); /* see fatal() */
             abort();
         }
         return;
@@ -389,6 +390,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             is_external_call = true;
         } else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            fflush(stdout); /* see fatal() */
             abort();
         }
 
@@ -430,6 +432,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             ofs = dynamic_sections.elf_plt_start + func->plt_offset;
         else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            fflush(stdout); /* see fatal() */
             abort();
         }
         emit(__movw(__AL, __r8, ofs));

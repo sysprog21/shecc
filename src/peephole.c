@@ -13,7 +13,7 @@
  * instructions are those whose results can be directly written to the final
  * destination register, eliminating intermediate moves.
  */
-bool is_fusible_insn(ph2_ir_t *ph2_ir)
+bool is_fusible_insn(const ph2_ir_t *ph2_ir)
 {
     switch (ph2_ir->op) {
     case OP_add: /* Arithmetic operations */

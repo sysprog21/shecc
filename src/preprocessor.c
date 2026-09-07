@@ -21,7 +21,7 @@ token_t *pp_lex_skip_space(token_t *tk)
 }
 
 /* Whether @tk is whitespace, a tab or a newline. */
-bool pp_is_layout(token_t *tk)
+bool pp_is_layout(const token_t *tk)
 {
     return tk->kind == T_whitespace || tk->kind == T_newline ||
            tk->kind == T_tab;
@@ -30,7 +30,7 @@ bool pp_is_layout(token_t *tk)
 /* The first token after @tk that is not layout, or NULL at the end. */
 token_t *pp_next_significant(token_t *tk)
 {
-    token_t *before = pp_lex_skip_space(tk);
+    const token_t *before = pp_lex_skip_space(tk);
 
     return before->next;
 }
@@ -65,7 +65,7 @@ token_t *pp_lex_expect_token(token_t *tk, token_kind_t kind, bool skip_space)
 }
 
 /* Copies and isolate the given copied token */
-token_t *copy_token(token_t *tk)
+token_t *copy_token(const token_t *tk)
 {
     /* The copy overwrites every byte, so zeroing the allocation first would be
      * wasted work -- and this runs once per token of every macro expansion.
@@ -90,7 +90,7 @@ typedef struct macro {
 
 bool is_macro_defined(char *name)
 {
-    macro_t *macro = hashmap_get(MACROS, name);
+    const macro_t *macro = hashmap_get(MACROS, name);
 
     return macro && !macro->is_disabled;
 }
@@ -153,7 +153,7 @@ hide_set_t *hide_set_union(hide_set_t *hs1, hide_set_t *hs2)
     return head.next;
 }
 
-bool hide_set_contains(hide_set_t *hs, char *name)
+bool hide_set_contains(hide_set_t *hs, const char *name)
 {
     for (; hs; hs = hs->next)
         if (!strcmp(hs->name, name))
@@ -607,8 +607,8 @@ token_t *pp_stringify(token_t *arg, source_location_t *loc)
 token_t *pp_paste_tokens(token_t *lhs, token_t *rhs, source_location_t *loc)
 {
     char lbuf[MAX_TOKEN_LEN], rbuf[MAX_TOKEN_LEN], joined[MAX_TOKEN_LEN];
-    char *l = token_to_string(lhs, lbuf);
-    char *r = token_to_string(rhs, rbuf);
+    const char *l = token_to_string(lhs, lbuf);
+    const char *r = token_to_string(rhs, rbuf);
 
     if (!l || !r)
         error_at("Operand of '##' cannot be pasted", loc);
@@ -745,7 +745,7 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
         /* A parameter the next '##' will join is substituted here, unexpanded
          * -- letting the expansion loop reach it would expand it first.
          */
-        token_t *after = pp_next_significant(tk);
+        const token_t *after = pp_next_significant(tk);
 
         if (args && tk->kind == T_identifier && after &&
             after->kind == T_hashhash && hashmap_contains(args, tk->literal)) {
@@ -811,7 +811,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             expansion_ctx.macro_args = ctx->macro_args;
             expansion_ctx.trim_eof = true;
 
-            token_t *macro_arg_replcaement = NULL;
+            token_t *macro_arg_replacement = NULL;
 
             /* Check if this identifier is a macro parameter (argument) If we're
              * currently expanding a macro body, parameters should be replaced
@@ -829,12 +829,10 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 ctx->macro_args &&
                 hashmap_contains(ctx->macro_args, tk->literal);
 
-            if (is_macro_param)
-                macro_arg_replcaement =
-                    hashmap_get(ctx->macro_args, tk->literal);
-
             if (is_macro_param) {
-                if (macro_arg_replcaement) {
+                macro_arg_replacement =
+                    hashmap_get(ctx->macro_args, tk->literal);
+                if (macro_arg_replacement) {
                     /* Recursively expand the argument to handle nested macros
                      */
                     expansion_ctx.hide_set = ctx->hide_set;
@@ -842,10 +840,10 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                         NULL; /* Don't take account of macro arguments, this
                                  might run into infinite loop
                                  */
-                    macro_arg_replcaement = pp_preprocess_internal(
-                        macro_arg_replcaement, &expansion_ctx);
-                    if (macro_arg_replcaement) {
-                        cur->next = macro_arg_replcaement;
+                    macro_arg_replacement = pp_preprocess_internal(
+                        macro_arg_replacement, &expansion_ctx);
+                    if (macro_arg_replacement) {
+                        cur->next = macro_arg_replacement;
                         cur = expansion_ctx.end_of_token;
                     }
                 }
@@ -1614,7 +1612,6 @@ char *token_to_string(token_t *tk, char *dest)
         break;
     default:
         error_at("Unknown token kind", &tk->location);
-        printf("UNKNOWN_TOKEN");
         break;
     }
 

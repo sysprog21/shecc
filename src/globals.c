@@ -117,6 +117,7 @@ arena_block_t *arena_block_create(int capacity)
 
     if (!block) {
         printf("Failed to allocate memory for arena block structure\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -125,6 +126,7 @@ arena_block_t *arena_block_create(int capacity)
     if (!block->memory) {
         printf("Failed to allocate memory for arena block buffer\n");
         free(block);
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -153,6 +155,7 @@ arena_t *arena_init(int initial_capacity)
     arena_t *arena = malloc(sizeof(arena_t));
     if (!arena) {
         printf("Failed to allocate memory for arena structure\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
     arena->head = arena_block_create(initial_capacity);
@@ -174,6 +177,7 @@ void *arena_alloc(arena_t *arena, int size)
 {
     if (size <= 0) {
         printf("arena_alloc: size must be positive\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -218,6 +222,7 @@ void *arena_calloc(arena_t *arena, int n, int size)
      */
     if (n <= 0 || size <= 0 || n > 0x7fffffff / size) {
         printf("arena_calloc: invalid allocation size\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -252,12 +257,14 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
     if (!oldptr) {
         if (oldsz != 0) {
             printf("arena_realloc: oldptr == NULL requires oldsz == 0\n");
+            fflush(stdout); /* see fatal() */
             abort();
         }
         return arena_alloc(arena, newsz);
     }
     if (oldsz == 0) {
         printf("arena_realloc: oldptr != NULL requires oldsz > 0\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -269,7 +276,7 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
     /* From here on, oldptr != NULL and newsz > oldsz and oldsz != 0 */
     int delta = newsz - oldsz;
     arena_block_t *blk = arena->head;
-    char *block_end = blk->memory + blk->offset;
+    const char *block_end = blk->memory + blk->offset;
 
     /* grow in place if oldptr is the last allocation in the current block */
     if (oldptr + oldsz == block_end && blk->offset + delta <= blk->capacity) {
@@ -290,7 +297,7 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
  *
  * Return: Pointer to the duplicated string stored in the arena.
  */
-char *arena_strdup(arena_t *arena, char *str)
+char *arena_strdup(arena_t *arena, const char *str)
 {
     const int n = strlen(str);
     char *dup = arena_alloc(arena, n + 1);
@@ -436,6 +443,7 @@ void hashmap_rehash(hashmap_t *map)
                 index = (index + 1) & (map->cap - 1);
                 if (index == start) {
                     printf("Error: New table is full during rehash\n");
+                    fflush(stdout); /* see fatal() */
                     abort();
                 }
             }
@@ -477,6 +485,7 @@ void hashmap_put(hashmap_t *map, char *key, void *val)
         index = (index + 1) & (map->cap - 1);
         if (index == start) {
             printf("Error: Hashmap is full\n");
+            fflush(stdout); /* see fatal() */
             abort();
         }
     }
@@ -560,7 +569,7 @@ void hashmap_free(hashmap_t *map)
  *
  * Return: The pointer to the type, or NULL if not found.
  */
-type_t *find_type(char *type_name, int flag)
+type_t *find_type(const char *type_name, int flag)
 {
     char head = type_name[0];
 
@@ -593,6 +602,7 @@ ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 {
     if (ph2_ir_idx >= MAX_IR_INSTR) {
         printf("Error: too many phase-2 IR instructions\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
     PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
@@ -815,7 +825,7 @@ int unescape_string(const char *input, char *output, int output_size)
     return j;
 }
 
-int parse_numeric_constant(char *buffer)
+int parse_numeric_constant(const char *buffer)
 {
     int i = 0;
     int value = 0;
@@ -882,6 +892,7 @@ type_t *add_type(void)
 {
     if (types_idx >= MAX_TYPES) {
         printf("Error: Maximum number of types (%d) exceeded\n", MAX_TYPES);
+        fflush(stdout); /* see fatal() */
         abort();
     }
     type_t *t = &TYPES[types_idx++];
@@ -895,8 +906,8 @@ type_t *add_type(void)
  * so a longer tag would run past it into the fields that follow. Refuse it
  * rather than corrupting the type.
  */
-void fatal(char *msg);
-void usage_error(char *msg);
+__noreturn void fatal(const char *msg);
+__noreturn void usage_error(const char *msg);
 
 void set_type_name(type_t *type, char *name)
 {
@@ -932,7 +943,7 @@ constant_t *find_constant(char alias[])
     return hashmap_get(CONSTANTS_MAP, alias);
 }
 
-var_t *find_member(char token[], type_t *type)
+var_t *find_member(const char token[], type_t *type)
 {
     /* If it is a forwardly declared alias of a structure, switch to the base
      * structure type. A scalar -- or "void", whose size is also 0 -- has no
@@ -962,7 +973,7 @@ var_t *find_member(char token[], type_t *type)
  * -- before making the call. Names are never empty, so reading the first byte
  * of either side is always in bounds.
  */
-var_t *find_local_var(char *token, block_t *block)
+var_t *find_local_var(const char *token, block_t *block)
 {
     func_t *func = block->func;
     char head = token[0];
@@ -990,7 +1001,7 @@ var_t *find_local_var(char *token, block_t *block)
     return NULL;
 }
 
-var_t *find_global_var(char *token)
+var_t *find_global_var(const char *token)
 {
     var_list_t *var_list = &GLOBAL_BLOCK->locals;
     char head = token[0];
@@ -1316,7 +1327,7 @@ void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
  * prev[], so prev_idx is only a high-water mark and the entries must be counted
  * rather than trusted.
  */
-int bb_pred_count(basic_block_t *bb)
+int bb_pred_count(const basic_block_t *bb)
 {
     int n = 0;
 
@@ -1747,8 +1758,12 @@ void global_release(void)
     strbuf_free(dynamic_sections.elf_got);
 }
 
-/* Reports an error without specifying a position */
-void fatal(char *msg)
+/* Reports a broken invariant, which has no position in the source to point at
+ * because nothing in the source is necessarily wrong. This one abort()s: a core
+ * dump is what makes an internal failure debuggable. A mistake in the input
+ * belongs in error_at(), and a mistake on the command line in usage_error().
+ */
+__noreturn void fatal(const char *msg)
 {
     printf("[Error]: %s\n", msg);
 
@@ -1764,31 +1779,46 @@ void fatal(char *msg)
  * a broken invariant, so this exits rather than abort()ing: no core dump, and
  * no "Aborted" line, for an ordinary typo.
  */
-void usage_error(char *msg)
+__noreturn void usage_error(const char *msg)
 {
     printf("[Error]: %s\n", msg);
     fflush(stdout);
     exit(1);
 }
 
-/* Reports error and prints occurred position context, if the given location is
- * NULL or source file is missing, then fallbacks to fatal(char *).
+/* Reports a mistake in the input, quoting the line it sits on. A program the
+ * compiler refuses is not a broken invariant, so this exits the way
+ * usage_error() does rather than abort()ing: an ordinary syntax error should
+ * not raise SIGABRT, wake the system crash handler, or leave a core behind.
+ *
+ * Falls back to the same message without context when the location is NULL or
+ * the source file is no longer on hand.
  */
-void error_at(char *msg, source_location_t *loc)
+__noreturn void error_at(char *msg, source_location_t *loc)
 {
     int offset, start_idx, i = 0, len, pos;
     char diagnostic[MAX_LINE_LEN];
 
-    if (!loc)
-        fatal(msg);
+    if (!loc) {
+        printf("[Error]: %s\n", msg);
+        fflush(stdout);
+        exit(1);
+    }
 
     len = loc->len;
     pos = loc->pos;
 
     strbuf_t *src = hashmap_get(SRC_FILE_MAP, loc->filename);
 
-    if (!src)
-        fatal(msg);
+    /* The source text is no longer on hand, which changes what can be shown and
+     * not what went wrong: still a mistake in the input, so still an exit
+     * rather than the core dump fatal() would take.
+     */
+    if (!src) {
+        printf("[Error]: %s\n", msg);
+        fflush(stdout);
+        exit(1);
+    }
 
     if (len < 1)
         len = 1;
@@ -1819,7 +1849,7 @@ void error_at(char *msg, source_location_t *loc)
     printf("%6c |  ", ' ');
 
     /* Keep room for the note appended after the underline. */
-    char *note = " Error occurs here";
+    const char *note = " Error occurs here";
     int limit = MAX_LINE_LEN - strlen(note) - 1;
 
     i = 0;
@@ -1832,8 +1862,8 @@ void error_at(char *msg, source_location_t *loc)
 
     strcpy(diagnostic + i, note);
     printf("%s\n", diagnostic);
-    fflush(stdout); /* see fatal(): abort() discards buffered output */
-    abort();
+    fflush(stdout); /* exit() flushes, but say so once rather than rely on it */
+    exit(1);
 }
 
 void print_indent(int indent)
@@ -1842,11 +1872,13 @@ void print_indent(int indent)
         printf("\t");
 }
 
-void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
+void dump_bb_insn(const func_t *func,
+                  const basic_block_t *bb,
+                  bool *at_func_start)
 {
     if (!bb)
         return;
-    var_t *rd, *rs1, *rs2;
+    const var_t *rd, *rs1, *rs2;
 
     if (bb != func->bbs && bb->insn_list.head) {
         if (!at_func_start[0])
@@ -2111,7 +2143,7 @@ void dump_insn(void)
 
         /* Handle implicit return */
         for (int i = 0; func->exit && i < func->exit->prev_idx; i++) {
-            basic_block_t *bb = func->exit->prev[i].bb;
+            const basic_block_t *bb = func->exit->prev[i].bb;
             if (!bb)
                 continue;
 

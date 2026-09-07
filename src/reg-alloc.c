@@ -149,7 +149,7 @@ void track_var_use(var_t *var, int insn_idx)
     var->last_use = insn_idx;
 }
 
-void refresh(basic_block_t *bb, insn_t *insn)
+void refresh(basic_block_t *bb, const insn_t *insn)
 {
     for (int i = 0; i < REG_CNT; i++) {
         if (!REGS[i].var)
@@ -276,7 +276,7 @@ bool reg_is_locked(int reg)
 }
 
 /* The register @var's base is pinned to, or -1. */
-int pinned_reg_of(var_t *var)
+int pinned_reg_of(const var_t *var)
 {
     if (!var || !var->base)
         return -1;
@@ -359,7 +359,7 @@ void slot_var_track(var_t *var)
  * arithmetic. A store through a pointer is invisible to these scans, so
  * anything else in the frame is left alone.
  */
-bool slot_is_private(var_t *var)
+bool slot_is_private(const var_t *var)
 {
     if (var->address_taken || var->array_size || var->has_backing_storage)
         return false;
@@ -491,7 +491,7 @@ void ph2_list_remove(basic_block_t *bb, ph2_ir_t *prev, ph2_ir_t *ir)
 }
 
 /* Whether @ir leaves @reg holding something other than what it held before. */
-bool ph2_writes_reg(ph2_ir_t *ir, int reg)
+bool ph2_writes_reg(const ph2_ir_t *ir, int reg)
 {
     switch (ir->op) {
     case OP_store:
@@ -522,6 +522,7 @@ bool ph2_writes_reg(ph2_ir_t *ir, int reg)
  */
 void collapse_slot_roundtrip(func_t *func)
 {
+    UNUSED(func);
     for (int i = 0; i < slot_var_count; i++) {
         if (!slot_private[i] || slot_stores[i] != 1 || slot_loads[i] != 1)
             continue;
@@ -693,7 +694,7 @@ bool reg_is_free(int i)
 }
 
 /* Return the index of register for given variable. Otherwise, return -1. */
-int find_in_regs(var_t *var)
+int find_in_regs(const var_t *var)
 {
     for (int i = 0; i < REG_CNT; i++) {
         if (REGS[i].var == var)
@@ -1002,8 +1003,9 @@ bool is_pushing_args;
  * in its live-out set. Asking the block directly is what makes the two arms of
  * an if-else able to reuse the same register.
  */
-bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, var_t *var)
+bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, const var_t *var)
 {
+    UNUSED(bb);
     for (insn_t *insn = from; insn; insn = insn->next) {
         if (insn->rs1 == var || insn->rs2 == var || insn->rs3 == var)
             return true;
@@ -1168,7 +1170,7 @@ int prepare_dest(basic_block_t *bb,
     return spilled;
 }
 
-void spill_alive(basic_block_t *bb, insn_t *insn)
+void spill_alive(basic_block_t *bb, const insn_t *insn)
 {
     /* Spill all locals on pointer writes (conservative aliasing handling) */
     if (insn && insn->opcode == OP_write) {
@@ -1325,7 +1327,10 @@ void load_entry_regs(basic_block_t *bb)
 }
 
 /* The operand of 'OP_push' should not been killed until function called. */
-void extend_liveness(basic_block_t *bb, insn_t *insn, var_t *var, int offset)
+void extend_liveness(basic_block_t *bb,
+                     const insn_t *insn,
+                     var_t *var,
+                     int offset)
 {
     if (check_live_out(bb, var))
         return;
@@ -1439,7 +1444,7 @@ bool phi_live_ready;
 /* The candidate number of @var under the current function's stamp, or -1 when
  * @var is not one.
  */
-int phi_cand_index(var_t *var)
+int phi_cand_index(const var_t *var)
 {
     if (!var)
         return -1;
@@ -1526,7 +1531,7 @@ int phi_live_note(basic_block_t *bb, var_t *var, int flags)
 }
 
 /* Note that @var is live on exit from @bb, when @bb already records it. */
-void phi_live_mark_out(basic_block_t *bb, var_t *var)
+void phi_live_mark_out(const basic_block_t *bb, var_t *var)
 {
     int idx = phi_cand_index(var);
     if (idx < 0)
@@ -1709,7 +1714,7 @@ bool live_iter_next(live_iter_t *it)
  * outer walk run in the block order of func->bbs, which is increasing rpo, so a
  * cursor only ever moves forward.
  */
-bool live_rec_seek(int *cursor, basic_block_t *bb)
+bool live_rec_seek(int *cursor, const basic_block_t *bb)
 {
     int rec = *cursor;
 
@@ -2153,6 +2158,7 @@ void reg_alloc(void)
             break;
         default:
             printf("Unsupported global operation: %d\n", global_insn->opcode);
+            fflush(stdout); /* see fatal() */
             abort();
         }
     }
@@ -2523,7 +2529,7 @@ void reg_alloc(void)
                          * the saved input to reload its slot.
                          */
                         int reuse = -1;
-                        int sources[] = {taken, other, cond};
+                        const int sources[] = {taken, other, cond};
 
                         for (int i = 0; i < 3; i++) {
                             int reg = sources[i];
@@ -2769,6 +2775,7 @@ void reg_alloc(void)
                     break;
                 default:
                     printf("Unknown opcode\n");
+                    fflush(stdout); /* see fatal() */
                     abort();
                 }
             }

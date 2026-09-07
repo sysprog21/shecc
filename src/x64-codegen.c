@@ -2371,6 +2371,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                  */
                 printf("Error: Undefined function called: %s\n",
                        ph2_ir->func_name);
+                fflush(stdout); /* see fatal() */
                 abort();
             } else {
                 emit_byte(0xE8); /* CALL rel32 */

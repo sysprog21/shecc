@@ -1,20 +1,15 @@
+# -fwrapv is required, not probed: hashmap_hash_index() carries the FNV-1a
+# accumulator in a signed int, because shecc has no 'unsigned' to compile
+# itself with, and the multiply there overflows by design.
 CFLAGS := -O -g \
-	-std=c99 -pedantic
+	-std=c99 -pedantic -fwrapv
 
+# Every -Wno- that used to sit here has been earned away rather than renewed:
+# the tree is clean under gcc and clang with nothing switched off, so a warning
+# that appears from now on is about the code and not about the flag list.
 CFLAGS_TO_CHECK := \
-	-fwrapv \
 	-Wall -Wextra \
-	-Wno-unused-but-set-variable \
-	-Wno-unused-parameter \
-	-Wno-unused-function \
-	-Wshadow \
-	-Wno-variadic-macros \
-	-Wno-uninitialized \
-	-Wno-strict-prototypes \
-	-Wno-declaration-after-statement \
-	-Wno-format \
-	-Wno-format-pedantic \
-	-Wno-overflow
+	-Wshadow
 
 SUPPORTED_CFLAGS :=
 # Check if a specific compiler flag is supported, attempting a dummy compilation

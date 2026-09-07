@@ -91,6 +91,11 @@
 #define MAX_EXPR_DEPTH 256
 #define MAX_BLOCK_DEPTH 256
 #define MAX_OPERAND_STACK_SIZE 32
+
+/* Depth of the operator stack that read_expr() and the constant-expression
+ * evaluator shunt through, and of the value stack the latter keeps beside it.
+ */
+#define MAX_OPERATOR_STACK_SIZE 10
 #define MAX_ANALYSIS_STACK_SIZE 1600
 
 /* Default capacities for common data structures, with the arena sizes taken
@@ -134,11 +139,24 @@
  * allocations and memcpy sizes below would be half what they need.
  */
 #define HOST_PTR_SIZE PTR_SIZE
+
+/* shecc parses no attributes, and does not need the hint: it reports what it
+ * cannot compile rather than warning about it.
+ */
+#define __noreturn
 #else
 /* suppress GCC/Clang warnings */
 #define UNUSED(x) (void) (x)
 /* configure host data model when using 'memcpy'. */
 #define HOST_PTR_SIZE __SIZEOF_POINTER__
+
+/* Marks the diagnostic paths that never come back. Without it the host compiler
+ * cannot see that a variable set on every surviving path is initialized, and
+ * reports each of those as a maybe-uninitialized use -- which is why the
+ * warning used to be switched off for the whole tree, taking the real cases
+ * with it.
+ */
+#define __noreturn __attribute__((noreturn))
 #endif
 
 #ifndef MIN_ALIGNMENT

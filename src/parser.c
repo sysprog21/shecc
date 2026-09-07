@@ -37,8 +37,8 @@ var_t *operand_stack[MAX_OPERAND_STACK_SIZE];
 int operand_stack_idx = 0;
 
 /* Forward declarations */
-source_location_t *cur_token_loc();
-source_location_t *next_token_loc();
+source_location_t *cur_token_loc(void);
+source_location_t *next_token_loc(void);
 
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
 void perform_side_effect(block_t *parent, basic_block_t *bb);
@@ -49,7 +49,7 @@ void parse_array_init(var_t *var,
                       basic_block_t **bb,
                       bool emit_code);
 
-label_t *find_label(char *name)
+label_t *find_label(const char *name)
 {
     for (int i = 0; i < label_idx; i++) {
         if (!strcmp(name, labels[i].label_name))
@@ -58,7 +58,7 @@ label_t *find_label(char *name)
     return NULL;
 }
 
-void add_label(char *name, basic_block_t *bb)
+void add_label(const char *name, basic_block_t *bb)
 {
     if (label_idx > MAX_LABELS - 1)
         error_at("Too many labels in function", cur_token_loc());
@@ -478,7 +478,7 @@ var_t *compute_element_address(block_t *parent,
 var_t *compute_field_address(block_t *parent,
                              basic_block_t **bb,
                              var_t *struct_addr,
-                             var_t *field)
+                             const var_t *field)
 {
     if (field->offset == 0)
         return struct_addr;
@@ -1035,7 +1035,7 @@ void parse_array_compound_literal(var_t *var,
  * keep array metadata without pointer indirection and are marked via
  * is_compound_literal when synthesized.
  */
-bool is_array_literal_placeholder(var_t *var)
+bool is_array_literal_placeholder(const var_t *var)
 {
     return var && var->array_size > 0 && !var->ptr_level &&
            var->is_compound_literal;
@@ -1322,6 +1322,7 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
     if (!type) {
         printf("Could not find type %s%s\n",
                find_type_flag == 2 ? "struct/union " : "", type_name);
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -1333,6 +1334,7 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
 /* starting next_token, need to check the type */
 void read_partial_var_decl(var_t *vd, var_t *template)
 {
+    UNUSED(template);
     read_inner_var_decl(vd, false, false);
 }
 
@@ -2062,7 +2064,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 if (!lex_peek(T_close_curly, NULL)) {
                     read_expr(parent, bb);
                     read_ternary_operation(parent, bb);
-                    var_t *ptr_val = opstack_pop();
+                    const var_t *ptr_val = opstack_pop();
 
                     /* For pointer compound literals, store the address */
                     compound_var->init_val = ptr_val->init_val;
@@ -2099,7 +2101,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 if (!lex_peek(T_close_curly, NULL)) {
                     read_expr(parent, bb);
                     read_ternary_operation(parent, bb);
-                    var_t *first_field = opstack_pop();
+                    const var_t *first_field = opstack_pop();
                     compound_var->init_val = first_field->init_val;
 
                     /* Consume additional fields if present */
@@ -2135,10 +2137,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                     read_expr(parent, bb);
                     read_ternary_operation(parent, bb);
 
-                    /* Check if there are more elements (comma-separated) or if
-                     * it's an explicit array
-                     */
-                    if (lex_peek(T_comma, NULL) || is_array_literal) {
+                    /* Check if there are more elements (comma-separated) */
+                    if (lex_peek(T_comma, NULL)) {
                         /* Array compound literal: (int[]){1, 2, 3} */
                         var_t *first_element = opstack_pop();
 
@@ -2245,7 +2245,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         lex_peek(T_identifier, token);
 
         /* is a constant or variable? */
-        constant_t *con = find_constant(token);
+        const constant_t *con = find_constant(token);
         var_t *var = find_var(token, parent);
         func_t *func = find_func(token);
 
@@ -2574,7 +2574,7 @@ bool is_pointer_operation(opcode_t op, var_t *rs1, var_t *rs2)
 void read_expr_body(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1, *rs2;
-    opcode_t oper_stack[10];
+    opcode_t oper_stack[MAX_OPERATOR_STACK_SIZE];
     int oper_stack_idx = 0;
 
     /* These variables used for parsing logical-and/or operation.
@@ -2602,7 +2602,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
         has_prev_log_op = true;
         prev_log_op = op;
     } else {
-        if (oper_stack_idx >= 10)
+        if (oper_stack_idx >= MAX_OPERATOR_STACK_SIZE)
             fatal("Expression too complex: operator stack exhausted");
         oper_stack[oper_stack_idx++] = op;
     }
@@ -2732,7 +2732,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
         }
         read_expr_operand(parent, bb);
         if (!is_logical(op)) {
-            if (oper_stack_idx >= 10)
+            if (oper_stack_idx >= MAX_OPERATOR_STACK_SIZE)
                 fatal("Expression too complex: operator stack exhausted");
             oper_stack[oper_stack_idx++] = op;
         }
@@ -3165,7 +3165,10 @@ void read_lvalue(lvalue_t *lvalue,
             add_insn(parent, *bb, OP_add, vd, rs1, rs2, 0, NULL);
         }
     } else {
-        var_t *t;
+        /* Set and read only under 'is_reference'; the initializer says so to a
+         * compiler that cannot correlate the two tests.
+         */
+        var_t *t = NULL;
 
         /* If operand is a reference, read the value and push to stack for the
          * incoming addition/subtraction. Otherwise, use the top element of
@@ -3910,9 +3913,9 @@ bool read_global_assignment(char *token)
             return true;
         }
 
-        opcode_t op_stack[10];
+        opcode_t op_stack[MAX_OPERATOR_STACK_SIZE];
         opcode_t op, next_op;
-        int val_stack[10];
+        int val_stack[MAX_OPERATOR_STACK_SIZE];
         int op_stack_index = 0, val_stack_index = 0;
         int operand1, operand2;
         operand1 = read_primary_constant();
@@ -3948,12 +3951,6 @@ bool read_global_assignment(char *token)
             add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
             return true;
         }
-        if (op == OP_ternary) {
-            lex_expect(T_question);
-            int cond = eval_expression_imm(op, operand1, operand2);
-            eval_ternary_imm(cond, token);
-            return true;
-        }
 
         /* using stack if operands more than two */
         op_stack[op_stack_index++] = op;
@@ -3985,7 +3982,8 @@ bool read_global_assignment(char *token)
                 } while (op_stack_index > 0 && same_op == 0);
             }
             /* push next operand on stack */
-            if (val_stack_index >= 10 || op_stack_index >= 10)
+            if (val_stack_index >= MAX_OPERATOR_STACK_SIZE ||
+                op_stack_index >= MAX_OPERATOR_STACK_SIZE)
                 fatal("Constant expression too complex");
             val_stack[val_stack_index++] = read_primary_constant();
             /* push operator on stack */
@@ -4128,7 +4126,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                     case_val = unescaped[0];
                     lex_expect(T_char);
                 } else if (lex_peek(T_identifier, token)) {
-                    constant_t *cd = find_constant(token);
+                    const constant_t *cd = find_constant(token);
                     if (!cd)
                         error_at("Unknown constant in case label",
                                  cur_token_loc());
@@ -4942,7 +4940,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         lex_accept(T_identifier);
         token_t *id_tk = cur_token;
         if (lex_accept(T_colon)) {
-            label_t *l = find_label(token);
+            const label_t *l = find_label(token);
             if (l)
                 error_at("label redefinition", &id_tk->location);
 
@@ -5013,7 +5011,7 @@ void read_func_body(func_t *func)
     }
 
     for (int i = 0; i < label_idx; i++) {
-        label_t *label = &labels[i];
+        const label_t *label = &labels[i];
         if (label->used)
             continue;
 
@@ -5045,7 +5043,7 @@ void print_func_decl(func_t *func, const char *prefix, bool newline)
     printf("%s(", func->return_def.var_name);
 
     for (int i = 0; i < func->num_params; i++) {
-        var_t *var = &func->param_defs[i];
+        const var_t *var = &func->param_defs[i];
 
         if (var->is_const_qualified)
             printf("const ");
@@ -5134,30 +5132,33 @@ void read_global_decl(block_t *block, bool is_const)
                        func->return_def.var_name);
                 print_func_decl(&func_tmp, "before: ", true);
                 print_func_decl(func, "after: ", true);
+                fflush(stdout); /* see fatal() */
                 abort();
             }
 
             if (func->num_params != func_tmp.num_params) {
                 printf(
-                    "Error: confilcting number of arguments for the function "
+                    "Error: conflicting number of arguments for the function "
                     "%s.\n",
                     func->return_def.var_name);
                 print_func_decl(&func_tmp, "before: ", true);
                 print_func_decl(func, "after: ", true);
+                fflush(stdout); /* see fatal() */
                 abort();
             }
 
             for (int i = 0; i < func->num_params; i++) {
-                var_t *func_var = &func->param_defs[i];
-                var_t *func_tmp_var = &func_tmp.param_defs[i];
+                const var_t *func_var = &func->param_defs[i];
+                const var_t *func_tmp_var = &func_tmp.param_defs[i];
                 if ((func_var->type != func_tmp_var->type) ||
                     (func_var->ptr_level != func_tmp_var->ptr_level) ||
                     (func_var->is_const_qualified !=
                      func_tmp_var->is_const_qualified)) {
-                    printf("Error: confilcting types for the function %s.\n",
+                    printf("Error: conflicting types for the function %s.\n",
                            func->return_def.var_name);
                     print_func_decl(&func_tmp, "before: ", true);
                     print_func_decl(func, "after: ", true);
+                    fflush(stdout); /* see fatal() */
                     abort();
                 }
             }
@@ -5167,6 +5168,7 @@ void read_global_decl(block_t *block, bool is_const)
                        func->return_def.var_name);
                 print_func_decl(&func_tmp, "before: ", true);
                 print_func_decl(func, "after: ", true);
+                fflush(stdout); /* see fatal() */
                 abort();
             }
         }
@@ -5537,7 +5539,7 @@ void read_global_statement(void)
             lex_expect(T_semicolon);
         } else {
             char base_type[MAX_ID_LEN];
-            type_t *base;
+            const type_t *base;
             type_t *type = add_type();
             lex_ident(T_identifier, base_type);
             base = find_type(base_type, true);

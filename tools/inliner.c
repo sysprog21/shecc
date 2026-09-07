@@ -182,11 +182,11 @@ int main(int argc, char *argv[])
     write_str("    strbuf_puts(LIBC_SRC, src);\n");
     write_str("}\n");
 
-    write_str("void libc_impl() {\n");
+    write_str("void libc_impl(void) {\n");
     load_from(argv[1]);
     write_str("}\n");
 
-    write_str("void libc_decl() {\n");
+    write_str("void libc_decl(void) {\n");
     load_from(argv[2]);
     write_str("}\n");
 

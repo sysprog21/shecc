@@ -64,9 +64,9 @@ char *last_char(char *text, char needle)
 /* Derive lacc-style DOT output when the caller did not specify -o. */
 char *dot_output_name(char *input)
 {
-    char *suffix = last_char(input, '.');
+    const char *suffix = last_char(input, '.');
     char *slash = last_char(input, '/');
-    char *base = input;
+    const char *base = input;
 
     if (slash)
         base = slash + 1;
@@ -103,7 +103,7 @@ int main(int argc, char *argv[])
 {
     char *out = NULL;
     char *in = NULL;
-    token_stream_t *libc_token_stream, *token_stream;
+    token_stream_t *libc_token_stream = NULL, *token_stream;
     token_t *tk;
 
     for (int i = 1; i < argc; i++) {
@@ -169,7 +169,7 @@ int main(int argc, char *argv[])
     token_stream = gen_file_token_stream(in);
 
     /* concat libc's and input file's token stream */
-    if (libc) {
+    if (libc_token_stream) {
         libc_token_stream->tail->next = token_stream->head;
         token_stream = libc_token_stream;
     }
