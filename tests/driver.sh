@@ -2693,6 +2693,29 @@ int main()
 }
 EOF
 
+# An empty replacement list expands to nothing, in both macro shapes. Producing
+# no tokens used to hand the caller a pointer into the dead frame that expanded
+# them, which spliced the token list into a cycle the parser never left.
+try_output 42 "" << EOF
+#define EMPTY
+#define NOTHING(x)
+EMPTY int main(void)
+{
+    NOTHING(1)
+    EMPTY return 42;
+}
+EOF
+
+try_output 0 "ab" << EOF
+#define BLANK
+#define JOIN(a, b) printf(a); BLANK printf(b);
+int main(void)
+{
+    JOIN("a", "b")
+    return 0;
+}
+EOF
+
 # format
 try_output 0 "2147483647" << EOF
 int main() {

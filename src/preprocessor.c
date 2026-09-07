@@ -363,9 +363,11 @@ token_t *pp_read_constant_expr_operand(token_t *tk, int *val)
                 ctx.macro_args = NULL;
                 ctx.trim_eof = false;
                 expanded_tk = pp_preprocess_internal(macro->replacement, &ctx);
-                tmp = tk->next;
-                tk->next = expanded_tk;
-                ctx.end_of_token->next = tmp;
+                if (expanded_tk) {
+                    tmp = tk->next;
+                    tk->next = expanded_tk;
+                    ctx.end_of_token->next = tmp;
+                }
                 return pp_read_constant_expr_operand(tk, val);
             }
 
@@ -785,6 +787,14 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
     token_t *cur = &head;
     cond_incl_t *ci = NULL;
 
+    /* A macro whose replacement list is empty -- "#define NDEBUG", or a
+     * function-like macro that expands to nothing -- produces no tokens at all,
+     * and both of the values returned below have to say so. Without the
+     * initializer the result is whatever the stack held, and end_of_token below
+     * would name this frame, which the caller splices onto after it has died.
+     */
+    head.next = NULL;
+
     while (tk) {
         macro_t *macro = NULL;
 
@@ -834,8 +844,10 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                                  */
                     macro_arg_replcaement = pp_preprocess_internal(
                         macro_arg_replcaement, &expansion_ctx);
-                    cur->next = macro_arg_replcaement;
-                    cur = expansion_ctx.end_of_token;
+                    if (macro_arg_replcaement) {
+                        cur->next = macro_arg_replcaement;
+                        cur = expansion_ctx.end_of_token;
+                    }
                 }
                 tk = pp_lex_next_token(tk, false);
                 continue;
@@ -914,8 +926,10 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                             arg_tk = pp_preprocess_internal(arg_tk,
                                                             &arg_expansion_ctx);
                             tk = pp_lex_next_token(tk, false);
-                            arg_cur->next = arg_tk;
-                            arg_cur = arg_expansion_ctx.end_of_token;
+                            if (arg_tk) {
+                                arg_cur->next = arg_tk;
+                                arg_cur = arg_expansion_ctx.end_of_token;
+                            }
                             continue;
                         }
                     }
@@ -1005,10 +1019,13 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 /* Expand macro body with collected arguments Replace parameter
                  * references with supplied argument tokens
                  */
-                cur->next = pp_preprocess_internal(
+                token_t *expanded = pp_preprocess_internal(
                     pp_subst_hash(macro->replacement, expansion_ctx.macro_args),
                     &expansion_ctx);
-                cur = expansion_ctx.end_of_token;
+                if (expanded) {
+                    cur->next = expanded;
+                    cur = expansion_ctx.end_of_token;
+                }
 
                 hashmap_free(expansion_ctx.macro_args);
             } else {
@@ -1018,9 +1035,12 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                  */
                 expansion_ctx.hide_set =
                     hide_set_union(ctx->hide_set, new_hide_set(tk->literal));
-                cur->next = pp_preprocess_internal(
+                token_t *expanded = pp_preprocess_internal(
                     pp_subst_hash(macro->replacement, NULL), &expansion_ctx);
-                cur = expansion_ctx.end_of_token;
+                if (expanded) {
+                    cur->next = expanded;
+                    cur = expansion_ctx.end_of_token;
+                }
             }
 
             tk = pp_lex_next_token(tk, false);
@@ -1102,8 +1122,12 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 continue;
 
             file_tks = gen_file_token_stream(intern_string(inclusion_path));
-            cur->next = pp_preprocess_internal(file_tks->head, &inclusion_ctx);
-            cur = inclusion_ctx.end_of_token;
+            token_t *included =
+                pp_preprocess_internal(file_tks->head, &inclusion_ctx);
+            if (included) {
+                cur->next = included;
+                cur = inclusion_ctx.end_of_token;
+            }
             continue;
         }
         case T_cppd_define: {
@@ -1307,7 +1331,11 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
     if (ci)
         error_at("Unterminated conditional directive", &ci->tk->location);
 
-    ctx->end_of_token = cur;
+    /* NULL rather than '&head' when nothing was produced: the caller must skip
+     * the splice entirely, and a stale read should fault rather than corrupt
+     * the token list it is building.
+     */
+    ctx->end_of_token = cur == &head ? NULL : cur;
     return head.next;
 }
 
