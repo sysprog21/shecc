@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 #include <stdio.h>
 #include <string.h>
@@ -10,8 +10,8 @@
 #include "defs.h"
 #include "globals.c"
 
-/* Constant cast optimization. Despite the file name this is not SCCP:
- * there is no lattice and no CFG-edge worklist anywhere in the tree.
+/* Constant cast optimization. Despite the file name this is not SCCP: there is
+ * no lattice and no CFG-edge worklist anywhere in the tree.
  */
 #include "opt-sccp.c"
 
@@ -43,7 +43,7 @@ void var_list_ensure_capacity(var_list_t *list, int min_capacity)
 }
 
 /* Whether @var appears in @list. */
-bool var_list_holds(var_list_t *list, var_t *var)
+bool var_list_holds(const var_list_t *list, var_t *var)
 {
     for (int i = 0; i < list->size; i++) {
         if (list->elements[i] == var)
@@ -77,12 +77,12 @@ void var_list_assign_array(var_list_t *list, var_t **data, int count)
     list->size = count;
 }
 
-/* cfront does not accept structure as an argument, pass pointer */
-/* The only thing a step of either traversal changes in the argument block is
- * the block it names, so a step sets that field and puts it back on the way
- * out. Copying the whole structure per edge instead -- which is what these did
- * -- costs a copy on every block of every traversal, and the traversals are
- * how nearly every analysis in the middle end walks a function.
+/* cfront does not accept structure as an argument, pass pointer The only thing
+ * a step of either traversal changes in the argument block is the block it
+ * names, so a step sets that field and puts it back on the way out. Copying the
+ * whole structure per edge instead -- which is what these did -- costs a copy
+ * on every block of every traversal, and the traversals are how nearly every
+ * analysis in the middle end walks a function.
  */
 void bb_forward_traversal(bb_traversal_args_t *args)
 {
@@ -171,7 +171,6 @@ void bb_build_rpo(func_t *func, basic_block_t *bb)
         }
         bb->rpo_next = curr;
         prev->rpo_next = bb;
-        prev = curr;
         return;
     }
 
@@ -251,11 +250,12 @@ void build_idom(void)
                     pred = bb->prev[i].bb;
                     break;
                 }
-                /* Reverse postorder puts a predecessor of every reachable
-                 * block ahead of it, so one is normally settled by now. A
-                 * block where none is cannot be given an immediate dominator
-                 * yet; leaving it for a later round is what keeps the walk off
-                 * an uninitialised pointer.
+
+                /* Reverse postorder puts a predecessor of every reachable block
+                 * ahead of it, so one is normally settled by now. A block where
+                 * none is cannot be given an immediate dominator yet; leaving
+                 * it for a later round is what keeps the walk off an
+                 * uninitialised pointer.
                  */
                 if (!pred)
                     continue;
@@ -333,8 +333,8 @@ void build_dom(void)
  * the target no longer does. strength_reduce() and mark_loop_depth() both ask
  * is_dominate() which edges close a loop, and against a stale tree a forward
  * edge reads as a back edge -- mark_natural_loop() then walks predecessors out
- * of the region it was meant to stay inside, since it has no stop at the
- * header and relies on the header dominating the latch.
+ * of the region it was meant to stay inside, since it has no stop at the header
+ * and relies on the header dominating the latch.
  *
  * The order has to be rebuilt along with the tree. Both passes keep the
  * rpo_next chain consistent -- a block they drop comes out of it -- but
@@ -387,12 +387,12 @@ void bb_build_df(func_t *func, basic_block_t *bb)
 
     for (int i = 0; i < bb->prev_idx; i++) {
         if (bb->prev[i].bb) {
-            /* Walk up from the predecessor to this block's immediate
-             * dominator. The walk normally stops there, since a block's
-             * immediate dominator dominates all of its predecessors -- but an
-             * edge the dominator tree does not account for runs off the top
-             * instead, so stop at the root as well. Ending early only widens
-             * the frontier, which costs a phi that turns out to be trivial.
+            /* Walk up from the predecessor to this block's immediate dominator.
+             * The walk normally stops there, since a block's immediate
+             * dominator dominates all of its predecessors -- but an edge the
+             * dominator tree does not account for runs off the top instead, so
+             * stop at the root as well. Ending early only widens the frontier,
+             * which costs a phi that turns out to be trivial.
              */
             for (basic_block_t *curr = bb->prev[i].bb; curr && curr != bb->idom;
                  curr = curr->idom)
@@ -446,7 +446,7 @@ void build_r_idom(void)
             for (basic_block_t *bb = func->exit->rpo_r_next; bb;
                  bb = bb->rpo_r_next) {
                 /* pick one predecessor */
-                basic_block_t *pred;
+                basic_block_t *pred = NULL;
                 if (bb->next && bb->next->r_idom) {
                     pred = bb->next;
                 } else if (bb->else_ && bb->else_->r_idom) {
@@ -454,6 +454,16 @@ void build_r_idom(void)
                 } else if (bb->then_ && bb->then_->r_idom) {
                     pred = bb->then_;
                 }
+
+                /* The mirror of the rule in build_idom(): reverse postorder
+                 * from the exit puts a successor of every block that reaches it
+                 * ahead of that block, so one is normally settled by now. A
+                 * block where none is cannot be given an immediate
+                 * postdominator yet; leaving it for a later round is what keeps
+                 * the walk off an uninitialised pointer.
+                 */
+                if (!pred)
+                    continue;
 
                 if (bb->next && bb->next != pred && bb->next->r_idom)
                     pred = reverse_intersect(bb->next, pred);
@@ -596,7 +606,7 @@ void use_chain_build(void)
     }
 }
 
-bool var_check_killed(var_t *var, basic_block_t *bb)
+bool var_check_killed(const var_t *var, const basic_block_t *bb)
 {
     for (int i = 0; i < bb->live_kill.size; i++) {
         if (bb->live_kill.elements[i] == var)
@@ -694,9 +704,9 @@ void solve_globals(void)
     }
 }
 
-bool var_check_in_scope(var_t *var, block_t *block)
+bool var_check_in_scope(const var_t *var, block_t *block)
 {
-    func_t *func = block->func;
+    const func_t *func = block->func;
 
     while (block) {
         /* Only the first 'size' entries hold a variable; the rest of the
@@ -830,8 +840,8 @@ var_t *require_var(block_t *blk);
  *
  * It has to be new. rename_var() gives every use reached by one definition the
  * same var_t, and mark_const() stamps init_val onto that shared object, so
- * rewriting an existing constant's value changes what every other use sees.
- * The caller emits the OP_load_constant that defines it.
+ * rewriting an existing constant's value changes what every other use sees. The
+ * caller emits the OP_load_constant that defines it.
  */
 var_t *new_const_var(block_t *scope, int val)
 {
@@ -842,7 +852,7 @@ var_t *new_const_var(block_t *scope, int val)
     var->init_val = val;
     return var;
 }
-bool is_dominate(basic_block_t *pred, basic_block_t *succ);
+bool is_dominate(const basic_block_t *pred, basic_block_t *succ);
 
 /* The renaming state of @v, created on first use. */
 rename_t *var_rename(var_t *v)
@@ -914,6 +924,7 @@ void pop_name(var_t *var)
 {
     if (var->is_global)
         return;
+
     /* Pop unconditionally, creating the state if the variable has none: the
      * inline rename_t this replaced was always present, so a pop with nothing
      * pushed drove stack_idx to -1, and the next push then landed one slot
@@ -1068,9 +1079,9 @@ void bb_unwind_phi(func_t *func, basic_block_t *bb)
 
 int loop_scan_gen;
 
-/* Raise the depth of every block in the natural loop that the edge from
- * @latch back to @header closes: the header, and everything that can reach the
- * latch without leaving the loop.
+/* Raise the depth of every block in the natural loop that the edge from @latch
+ * back to @header closes: the header, and everything that can reach the latch
+ * without leaving the loop.
  */
 bool mark_natural_loop(basic_block_t *header, basic_block_t *latch)
 {
@@ -1095,11 +1106,12 @@ bool mark_natural_loop(basic_block_t *header, basic_block_t *latch)
 
             if (!p || p->loop_mark == loop_scan_gen)
                 continue;
+
             /* Out of room to widen. Marking this block and then not walking
              * through it would leave the rest of the loop unmarked while
              * looking marked, and a reader of loop_mark would take blocks
-             * inside the loop for blocks outside it. Report the whole answer
-             * as unusable instead.
+             * inside the loop for blocks outside it. Report the whole answer as
+             * unusable instead.
              */
             if (sp >= MAX_LOOP_WALK)
                 return false;
@@ -1138,6 +1150,7 @@ void mark_loop_depth(func_t *func)
                 continue;
             if (succ[k] != p && !is_dominate(succ[k], p))
                 continue;
+
             /* A walk that ran out of room stopped partway, leaving the depths
              * it had already raised standing over a region it never finished
              * measuring. Those feed the weights pin_registers() compares, so a
@@ -1209,7 +1222,7 @@ insn_t *new_insn(opcode_t op, var_t *rd, var_t *rs1, var_t *rs2)
 /* Whether @insn computes a value with no side effect and no way to fault, so
  * running it on a path that would not have reached it changes nothing.
  */
-bool insn_is_speculatable(insn_t *insn)
+bool insn_is_speculatable(const insn_t *insn)
 {
     switch (insn->opcode) {
     case OP_add:
@@ -1245,9 +1258,9 @@ bool insn_is_speculatable(insn_t *insn)
  *
  * An arm is not one block: the copy carrying its value to the join is appended
  * to whichever block immediately precedes the join, which is separate from the
- * one holding the arm's computation. The walk follows single-entry,
- * single-exit blocks and stops at the first block something else can also
- * reach, which is the join.
+ * one holding the arm's computation. The walk follows single-entry, single-exit
+ * blocks and stops at the first block something else can also reach, which is
+ * the join.
  */
 basic_block_t *if_arm_chain(basic_block_t *arm,
                             basic_block_t **chain,
@@ -1272,6 +1285,7 @@ basic_block_t *if_arm_chain(basic_block_t *arm,
                 continue;
             if (!insn_is_speculatable(insn))
                 return NULL;
+
             /* Writing a global or an address-taken variable is a store, and a
              * store is a side effect however plain the arithmetic producing it
              * looks.
@@ -1360,6 +1374,7 @@ bool if_convert_bb(func_t *func, basic_block_t *bb)
 
     if (!join || join != e_join)
         return false;
+
     /* Flattening removes both arms, so the join must be reached from them and
      * nothing else.
      */
@@ -1405,7 +1420,7 @@ bool if_convert_bb(func_t *func, basic_block_t *bb)
     for (int step = 0; step < 2; step++) {
         bool take_t = e_needs_t ? step == 0 : step == 1;
         basic_block_t **chain = take_t ? t_chain : e_chain;
-        insn_t *skip = take_t ? t_phi : e_phi;
+        const insn_t *skip = take_t ? t_phi : e_phi;
         int len = take_t ? t_len : e_len;
 
         for (int i = 0; i < len; i++) {
@@ -1413,6 +1428,7 @@ bool if_convert_bb(func_t *func, basic_block_t *bb)
                 next = insn->next;
                 if (insn == skip)
                     continue;
+
                 /* Whatever the arm computes is a version of the variable the
                  * select writes as often as not, and that variable's pinned
                  * register still has to carry the value the arms read.
@@ -1472,11 +1488,11 @@ int sr_gen;
  * @skip.
  *
  * With @loop_only set, only the blocks the stamped loop covers are searched: a
- * reader outside it does not keep a literal alive inside, because the
- * allocator materialises one wherever the value is wanted.
+ * reader outside it does not keep a literal alive inside, because the allocator
+ * materialises one wherever the value is wanted.
  */
 bool var_read_by(func_t *func,
-                 var_t *var,
+                 const var_t *var,
                  insn_t **skip,
                  int nskip,
                  bool loop_only)
@@ -1530,8 +1546,9 @@ bool thread_const_branch(func_t *func, basic_block_t *join)
 
     if (!join->then_ || !join->else_)
         return false;
-    /* Only a block that does nothing else: anything before the branch would
-     * be skipped, and a phi copy left in it belongs to a successor.
+
+    /* Only a block that does nothing else: anything before the branch would be
+     * skipped, and a phi copy left in it belongs to a successor.
      */
     if (!br || br->next || br->opcode != OP_branch || !br->rs1)
         return false;
@@ -1549,8 +1566,9 @@ bool thread_const_branch(func_t *func, basic_block_t *join)
 
             if (!pred || pred == join)
                 continue;
-            /* A predecessor that also goes somewhere else keeps a branch of
-             * its own, and rewiring one of its edges would need that branch
+
+            /* A predecessor that also goes somewhere else keeps a branch of its
+             * own, and rewiring one of its edges would need that branch
              * rewritten.
              */
             if (pred->then_ || pred->else_ || pred->next != join)
@@ -1615,7 +1633,7 @@ void thread_const_branches(void)
         if (!func->bbs)
             continue;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            insn_t *br = bb->insn_list.head;
+            const insn_t *br = bb->insn_list.head;
 
             if (!br || br->next || br->opcode != OP_branch || !br->rs1)
                 continue;
@@ -1630,8 +1648,8 @@ void thread_const_branches(void)
  * into the argument registers, everything live crosses a call boundary and so
  * goes to the frame, and the callee builds and tears down a frame of its own.
  * The benchmark suite's "calls" case spends three instructions on that for
- * every one it spends computing. Copying the body in removes all of it and
- * lets the optimizer see the caller and the callee together.
+ * every one it spends computing. Copying the body in removes all of it and lets
+ * the optimizer see the caller and the callee together.
  *
  * Only a body with no control flow of its own is copied, which keeps the
  * transformation to splicing one instruction list into another.
@@ -1640,9 +1658,9 @@ var_t *inline_from[MAX_INLINE_VARS];
 var_t *inline_to[MAX_INLINE_VARS];
 int inline_map_n;
 
-/* The caller's stand-in for the callee's @var: the argument for a parameter,
- * a fresh variable for anything the body computes, and the variable itself
- * for anything shared.
+/* The caller's stand-in for the callee's @var: the argument for a parameter, a
+ * fresh variable for anything the body computes, and the variable itself for
+ * anything shared.
  */
 var_t *inline_lookup(var_t *var, block_t *scope)
 {
@@ -1653,8 +1671,9 @@ var_t *inline_lookup(var_t *var, block_t *scope)
     for (int i = 0; i < inline_map_n; i++) {
         if (inline_from[i] == var)
             return inline_to[i];
-        /* Parameters are mapped by the variable they are versions of, so that
-         * a body naming a later version still finds the argument.
+
+        /* Parameters are mapped by the variable they are versions of, so that a
+         * body naming a later version still finds the argument.
          */
         if (inline_from[i] && inline_from[i] == var->base)
             return inline_to[i];
@@ -1678,10 +1697,10 @@ var_t *inline_lookup(var_t *var, block_t *scope)
 
 /* Whether @func is small and straight-line enough to copy into its callers.
  *
- * A function is a chain of blocks even when its source has no control flow:
- * the entry block holds the declarations and falls into the body. Any block
- * that branches, or that something else can reach, ends the chain and makes
- * the function too complicated to splice into an instruction list.
+ * A function is a chain of blocks even when its source has no control flow: the
+ * entry block holds the declarations and falls into the body. Any block that
+ * branches, or that something else can reach, ends the chain and makes the
+ * function too complicated to splice into an instruction list.
  */
 int inline_round;
 
@@ -1695,8 +1714,8 @@ int inline_round;
  * anything is touched is what keeps that from needing to be undone.
  *
  * The count mirrors inline_lookup()'s matching exactly: a global is shared
- * rather than copied, a parameter is found through the variable it is a
- * version of, and every other version gets an entry of its own.
+ * rather than copied, a parameter is found through the variable it is a version
+ * of, and every other version gets an entry of its own.
  */
 bool inline_map_fits(func_t *func)
 {
@@ -1763,6 +1782,7 @@ bool func_is_inlinable(func_t *func)
             return false;
         if (bb != func->bbs && bb_pred_count(bb) != 1)
             return false;
+
         /* The single-predecessor test above is skipped for the entry block, so
          * a "next" chain that came back round to it would walk for ever. A
          * chain longer than the instruction budget cannot be inlinable in any
@@ -1778,15 +1798,16 @@ bool func_is_inlinable(func_t *func)
             last = insn;
             if (insn->opcode == OP_return)
                 continue;
+
             /* A call of its own would have to be copied as a call, which is
              * what the copying is meant to remove; the pass runs again once
-             * that callee has been copied in, and by then this body
-             * qualifies.
+             * that callee has been copied in, and by then this body qualifies.
              */
             if (!insn_is_speculatable(insn))
                 return false;
             if (insn->rd && (insn->rd->is_global || insn->rd->address_taken))
                 return false;
+
             /* Writing a parameter would mean the copy assigns to the caller's
              * own variable, since a parameter maps onto the argument.
              */
@@ -1824,12 +1845,13 @@ insn_t *inline_clone(basic_block_t *bb,
     return copy;
 }
 
-/* Replace the push/call/retval sequence ending at @call with the callee's
- * body. Returns the instruction to carry on scanning from, which is NULL when
- * the copy lands at the end of the block; *@done says whether the call was
- * replaced at all. The two have to be reported separately -- a NULL return
- * read as "left alone" stopped the round from being counted as progress and
- * left the rest of the block unscanned.
+/* Replace the push/call/retval sequence ending at @call with the callee's body.
+ *
+ * Returns the instruction to carry on scanning from, which is NULL when the
+ * copy lands at the end of the block; *@done says whether the call was replaced
+ * at all. The two have to be reported separately -- a NULL return read as "left
+ * alone" stopped the round from being counted as progress and left the rest of
+ * the block unscanned.
  *
  * @done is an int and not a bool on purpose. A _Bool is one byte, and writing
  * one byte through a pointer into the caller's slot -- which is pointer-sized
@@ -1860,11 +1882,11 @@ insn_t *inline_call_at(basic_block_t *bb, insn_t *call, int *done)
     if (argc != callee->num_params || argc > MAX_PARAMS)
         return NULL;
 
-    /* A call nested in another call's argument list -- "f(g(x), y)" -- has
-     * the outer call's pushes already standing before it. The register
-     * allocator hands those the argument registers as it meets them, so
-     * anything spliced in between would overwrite arguments the outer call is
-     * still waiting to make.
+    /* A call nested in another call's argument list -- "f(g(x), y)" -- has the
+     * outer call's pushes already standing before it. The register allocator
+     * hands those the argument registers as it meets them, so anything spliced
+     * in between would overwrite arguments the outer call is still waiting to
+     * make.
      */
     for (insn_t *p = first->prev; p; p = p->prev) {
         if (p->opcode == OP_call || p->opcode == OP_indirect)
@@ -1961,9 +1983,10 @@ void inline_calls(void)
                     if (done) {
                         next = resume;
                         changed = true;
-                        /* The body just grew, so the verdict cached for it
-                         * this round no longer describes it -- and losing a
-                         * call may be exactly what makes it copyable.
+
+                        /* The body just grew, so the verdict cached for it this
+                         * round no longer describes it -- and losing a call may
+                         * be exactly what makes it copyable.
                          */
                         func->inline_gen = 0;
                     }
@@ -1983,12 +2006,11 @@ void inline_calls(void)
  * at the bottom leaves the body with the access alone -- matmul's innermost
  * loop spent six of its sixteen instructions on the two subscripts.
  *
- * Unlike hoisting a loop-invariant value, this pays even when the result has
- * to live on the frame: the loop trades a four-instruction recomputation for
- * one addition, where hoisting trades a recomputation for a reload.
- */
-/* The variable the loop counts with, where the chain walk stops: its value
- * before the loop is what the first address is computed from.
+ * Unlike hoisting a loop-invariant value, this pays even when the result has to
+ * live on the frame: the loop trades a four-instruction recomputation for one
+ * addition, where hoisting trades a recomputation for a reload. The variable
+ * the loop counts with, where the chain walk stops: its value before the loop
+ * is what the first address is computed from.
  */
 var_t *sr_iv;
 
@@ -2000,12 +2022,12 @@ var_t *sr_base(var_t *var)
 }
 
 /* Whether @var is written inside the loop being examined. A constant never is,
- * wherever its materialisation sits: the allocator emits one wherever the
- * value is wanted.
+ * wherever its materialisation sits: the allocator emits one wherever the value
+ * is wanted.
  */
 bool sr_varies(var_t *var)
 {
-    var_t *base;
+    const var_t *base;
 
     if (!var || var->is_const)
         return false;
@@ -2013,12 +2035,12 @@ bool sr_varies(var_t *var)
     return base && base->loop_stamp == sr_gen;
 }
 
-/* How much @var moves per iteration, into *step. Reports false when that is
- * not known -- which for a variable the loop writes means "not yet derived".
+/* How much @var moves per iteration, into *step. Reports false when that is not
+ * known -- which for a variable the loop writes means "not yet derived".
  */
 bool sr_step_of(var_t *var, int *step)
 {
-    var_t *base;
+    const var_t *base;
 
     if (!var)
         return false;
@@ -2050,13 +2072,13 @@ void sr_set_step(var_t *var, int step)
     base->iv_step = step;
 }
 
-/* Whether @insn is one the pass is willing to lift out of a loop: it computes
- * a value from its operands, touches no memory and faults on nothing. Taking
- * an array's address qualifies -- that address is the same on every
- * iteration -- and a literal does not, because the allocator materialises one
- * wherever it is wanted and moving it would only lengthen a live range.
+/* Whether @insn is one the pass is willing to lift out of a loop: it computes a
+ * value from its operands, touches no memory and faults on nothing. Taking an
+ * array's address qualifies -- that address is the same on every iteration --
+ * and a literal does not, because the allocator materialises one wherever it is
+ * wanted and moving it would only lengthen a live range.
  */
-bool sr_movable(insn_t *insn)
+bool sr_movable(const insn_t *insn)
 {
     switch (insn->opcode) {
     case OP_add:
@@ -2079,7 +2101,7 @@ bool sr_movable(insn_t *insn)
 }
 
 /* The instruction inside the loop that defines @var, or NULL. */
-insn_t *sr_def_of(func_t *func, var_t *var)
+insn_t *sr_def_of(func_t *func, const var_t *var)
 {
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
         if (bb->loop_mark != sr_gen)
@@ -2121,7 +2143,7 @@ var_t *sr_basic_iv(func_t *func, basic_block_t *latch, int *step)
             if (!sum->rs1 || !sum->rs2)
                 continue;
 
-            var_t *addend = NULL;
+            const var_t *addend = NULL;
             var_t *carried = NULL;
             int sign = 1;
 
@@ -2137,12 +2159,13 @@ var_t *sr_basic_iv(func_t *func, basic_block_t *latch, int *step)
             }
             if (!addend || !addend->init_val)
                 continue;
+
             /* The literal has to be added to the variable itself, not to
              * something computed from it: a temporary made from a variable
-             * carries that variable as its base, so "g = g * 2 + 1" matches
-             * the shape as readily as "i = i + 1" and would be taken for a
-             * counter stepping by one. The value flowing in is the one the
-             * loop either carries round in a phi or never writes.
+             * carries that variable as its base, so "g = g * 2 + 1" matches the
+             * shape as readily as "i = i + 1" and would be taken for a counter
+             * stepping by one. The value flowing in is the one the loop either
+             * carries round in a phi or never writes.
              */
             insn_t *src = sr_def_of(func, carried);
 
@@ -2162,9 +2185,9 @@ var_t *sr_basic_iv(func_t *func, basic_block_t *latch, int *step)
     if (!found)
         return NULL;
 
-    /* One variable the loop writes twice is not a counter: "i++" in one arm
-     * and "i--" in another moves it by neither step, and an address derived
-     * from it would advance by a fixed amount that matches neither.
+    /* One variable the loop writes twice is not a counter: "i++" in one arm and
+     * "i--" in another moves it by neither step, and an address derived from it
+     * would advance by a fixed amount that matches neither.
      */
     int writes = 0;
     basic_block_t *wblk = NULL;
@@ -2175,19 +2198,19 @@ var_t *sr_basic_iv(func_t *func, basic_block_t *latch, int *step)
         for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
             /* Only a copy back into the variable counts. The arithmetic that
              * produces the new value writes a temporary, and a temporary made
-             * from a variable carries that variable as its base.
-             */
-            /* Only a write of the variable itself counts. The arithmetic
-             * that produces the new value writes a temporary, and a temporary
-             * made from a variable carries that variable as its base -- but a
-             * select names the variable, and one writing the counter means the
-             * counter does not advance on every trip round.
+             * from a variable carries that variable as its base. Only a write
+             * of the variable itself counts. The arithmetic that produces the
+             * new value writes a temporary, and a temporary made from a
+             * variable carries that variable as its base -- but a select names
+             * the variable, and one writing the counter means the counter does
+             * not advance on every trip round.
              */
             if (insn->opcode != OP_assign && insn->opcode != OP_unwound_phi &&
                 insn->opcode != OP_cmov)
                 continue;
             if (!insn->rd || sr_base(insn->rd) != found)
                 continue;
+
             /* A phi copying the variable to itself carries it around the loop
              * rather than giving it a new value.
              */
@@ -2201,9 +2224,9 @@ var_t *sr_basic_iv(func_t *func, basic_block_t *latch, int *step)
         return NULL;
 
     /* The write has to happen on every trip round, because the pointer derived
-     * from the counter is advanced on every trip round. A "continue" that
-     * jumps over the sole increment leaves the two disagreeing, and the loop
-     * reads one element too far from then on.
+     * from the counter is advanced on every trip round. A "continue" that jumps
+     * over the sole increment leaves the two disagreeing, and the loop reads
+     * one element too far from then on.
      */
     if (wblk != latch && !is_dominate(wblk, latch))
         return NULL;
@@ -2227,7 +2250,7 @@ void sr_derive_steps(func_t *func)
                 if (!insn->rd)
                     continue;
 
-                var_t *base = sr_base(insn->rd);
+                const var_t *base = sr_base(insn->rd);
 
                 if (!base || base->iv_gen == sr_gen)
                     continue;
@@ -2296,7 +2319,7 @@ bool sr_collect_chain(func_t *func, var_t *var, insn_t **chain, int *len)
     if (!sr_movable(def))
         return false;
 
-    var_t *base = sr_base(def->rd);
+    const var_t *base = sr_base(def->rd);
 
     if (!base || base->def_cnt != 1)
         return false;
@@ -2331,9 +2354,10 @@ void sr_emit_advance(basic_block_t *latch, var_t *var, int step)
     insn_t *add;
     insn_t *assign;
 
-    /* A loop latch ends in the jump back to its header.  Appending the
-     * advance after that jump leaves it unreachable, so place the whole
-     * sequence before the terminator instead. */
+    /* A loop latch ends in the jump back to its header. Appending the advance
+     * after that jump leaves it unreachable, so place the whole sequence before
+     * the terminator instead.
+     */
     if (after && (after->opcode == OP_branch || after->opcode == OP_jump ||
                   after->opcode == OP_return || after->opcode == OP_func_ret))
         after = after->prev;
@@ -2398,10 +2422,10 @@ bool sr_reduce_access(func_t *func,
      * The walk collected every definition before its operands, so reversing it
      * is nearly right -- but only while the chain is a straight line. A value
      * two of them share is collected under the first, and reversing then puts
-     * it after the second, which would read a variable nothing had defined
-     * yet. Choosing repeatedly instead is correct either way: take an entry
-     * once every chain value it reads has been taken. Nothing is moved until
-     * the whole order is settled, so a chain that cannot be ordered at all is
+     * it after the second, which would read a variable nothing had defined yet.
+     * Choosing repeatedly instead is correct either way: take an entry once
+     * every chain value it reads has been taken. Nothing is moved until the
+     * whole order is settled, so a chain that cannot be ordered at all is
      * declined rather than half-moved.
      */
     int order[MAX_IV_CHAIN + 1];
@@ -2508,7 +2532,7 @@ int sr_latch_count(basic_block_t *header)
     int n = 0;
 
     for (int i = 0; i < header->prev_idx; i++) {
-        basic_block_t *p = header->prev[i].bb;
+        const basic_block_t *p = header->prev[i].bb;
 
         if (p && p->loop_mark == sr_gen)
             n++;
@@ -2521,8 +2545,8 @@ void sr_loop(func_t *func, basic_block_t *header, basic_block_t *latch)
     int step = 0, made = 0;
 
     /* One way back, and one way in that runs everything before the loop: the
-     * first address is computed there and advanced there. The test on the
-     * latch costs nothing and comes before the walk that marks the loop.
+     * first address is computed there and advanced there. The test on the latch
+     * costs nothing and comes before the walk that marks the loop.
      */
     if (latch->then_ || latch->else_ || latch->next != header)
         return;
@@ -2567,6 +2591,7 @@ void sr_loop(func_t *func, basic_block_t *header, basic_block_t *latch)
             next = insn->next;
             if (insn->opcode != OP_read && insn->opcode != OP_write)
                 continue;
+
             /* A reduction takes instructions out of this block, so the walk
              * starts again rather than following a pointer into the block they
              * moved to.
@@ -2663,10 +2688,10 @@ void unwind_phi(void)
  * The walk goes up from @succ rather than down through everything @pred
  * dominates: the answer lies on the one path to the root, where the downward
  * search visited @pred's whole subtree and did not stop when it found it.
- * dom_prev is the inverse of the dom_next the search followed, so the two
- * agree on every pair.
+ * dom_prev is the inverse of the dom_next the search followed, so the two agree
+ * on every pair.
  */
-bool is_dominate(basic_block_t *pred, basic_block_t *succ)
+bool is_dominate(const basic_block_t *pred, basic_block_t *succ)
 {
     for (basic_block_t *bb = succ; bb; bb = bb->dom_prev) {
         if (bb->dom_prev == pred)
@@ -2675,9 +2700,8 @@ bool is_dominate(basic_block_t *pred, basic_block_t *succ)
     return false;
 }
 
-/*
- * For any variable, the basic block that defines it must dominate all the
- * basic blocks where it is used; otherwise, it is an invalid cross-block
+/* For any variable, the basic block that defines it must dominate all the basic
+ * blocks where it is used; otherwise, it is an invalid cross-block
  * initialization.
  */
 void bb_check_var_cross_init(func_t *func, basic_block_t *bb)
@@ -2688,7 +2712,7 @@ void bb_check_var_cross_init(func_t *func, basic_block_t *bb)
         if (insn->opcode != OP_allocat)
             continue;
 
-        var_t *var = insn->rd;
+        const var_t *var = insn->rd;
         ref_block_t *ref;
         for (ref = var->ref_block_list.head; ref; ref = ref->next) {
             if (ref->bb == bb)
@@ -2702,14 +2726,12 @@ void bb_check_var_cross_init(func_t *func, basic_block_t *bb)
 }
 
 /**
- * A variable's initialization lives in a basic block that does not dominate
- * all of its uses, so control flow can reach a use without first passing
- * through its initialization (i.e., a possibly-uninitialized use).
+ * A variable's initialization lives in a basic block that does not dominate all
+ * of its uses, so control flow can reach a use without first passing through
+ * its initialization (i.e., a possibly-uninitialized use).
  *
- * For Example:
- * // Jumps directly to 'label', skipping the declaration below
- * goto label;
- * if (1) {
+ * For Example: // Jumps directly to 'label', skipping the declaration below
+ * goto label; if (1) {
  *     // This line is never executed when 'goto' is taken
  *     int x;
  * label:
@@ -2717,7 +2739,7 @@ void bb_check_var_cross_init(func_t *func, basic_block_t *bb)
  *     x = 5;
  * }
  */
-void check_var_cross_init()
+void check_var_cross_init(void)
 {
     bb_traversal_args_t *args = arena_alloc_traversal_args();
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
@@ -2739,7 +2761,7 @@ void bb_dump_connection(FILE *fd,
                         basic_block_t *next,
                         bb_connection_type_t type)
 {
-    char *str;
+    const char *str;
 
     switch (type) {
     case NEXT:
@@ -2755,8 +2777,8 @@ void bb_dump_connection(FILE *fd,
         fatal("Unknown basic block connection type");
     }
 
-    char *pred;
-    void *pred_id;
+    const char *pred;
+    const void *pred_id;
     if (curr->insn_list.tail) {
         pred = "insn";
         pred_id = curr->insn_list.tail;
@@ -2765,8 +2787,8 @@ void bb_dump_connection(FILE *fd,
         pred_id = curr;
     }
 
-    char *succ;
-    void *succ_id;
+    const char *succ;
+    const void *succ_id;
     if (next->insn_list.tail) {
         succ = "insn";
         succ_id = next->insn_list.head;
@@ -2779,7 +2801,7 @@ void bb_dump_connection(FILE *fd,
 }
 
 /* escape character for the tag in dot file */
-char *get_insn_op(insn_t *insn)
+char *get_insn_op(const insn_t *insn)
 {
     switch (insn->opcode) {
     case OP_add:
@@ -2842,18 +2864,19 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
     if (next_ && (then_ || else_))
         printf("Warning: normal BB with condition\n");
 
-    fprintf(fd, "subgraph cluster_%p {\n", bb);
-    fprintf(fd, "label=\"BasicBlock %p (%s)\"\n", bb, bb->bb_label_name);
+    fprintf(fd, "subgraph cluster_%p {\n", (void *) bb);
+    fprintf(fd, "label=\"BasicBlock %p (%s)\"\n", (void *) bb,
+            bb->bb_label_name);
 
     insn_t *insn = bb->insn_list.head;
     if (!insn)
-        fprintf(fd, "pseudo_%p [label=\"pseudo\"]\n", bb);
+        fprintf(fd, "pseudo_%p [label=\"pseudo\"]\n", (void *) bb);
     if (!insn && (then_ || else_))
         printf("Warning: pseudo node should only have NEXT\n");
 
     for (; insn; insn = insn->next) {
         if (insn->opcode == OP_phi) {
-            fprintf(fd, "insn_%p [label=", insn);
+            fprintf(fd, "insn_%p [label=", (void *) insn);
             fprintf(fd, "<%s<SUB>%d</SUB> := PHI(%s<SUB>%d</SUB>",
                     insn->rd->var_name, insn->rd->subscript,
                     insn->phi_ops->var->var_name,
@@ -3005,11 +3028,12 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
             default:
                 fatal("Unknown opcode in instruction dump");
             }
-            fprintf(fd, "insn_%p [label=%s]\n", insn, str);
+            fprintf(fd, "insn_%p [label=%s]\n", (void *) insn, str);
         }
 
         if (insn->next)
-            fprintf(fd, "insn_%p->insn_%p [weight=100]\n", insn, insn->next);
+            fprintf(fd, "insn_%p->insn_%p [weight=100]\n", (void *) insn,
+                    (void *) insn->next);
     }
     fprintf(fd, "}\n");
 
@@ -3031,7 +3055,7 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
             bb_dump_connection(fd, bb->prev[i].bb, bb, bb->prev[i].type);
 }
 
-void dump_cfg(char name[])
+void dump_cfg(const char name[])
 {
     FILE *fd = fopen(name, "w");
 
@@ -3046,8 +3070,9 @@ void dump_cfg(char name[])
             continue;
 
         func->visited++;
-        fprintf(fd, "subgraph cluster_%p {\n", func);
-        fprintf(fd, "label=\"%p (%s)\"\n", func, func->return_def.var_name);
+        fprintf(fd, "subgraph cluster_%p {\n", (void *) func);
+        fprintf(fd, "label=\"%p (%s)\"\n", (void *) func,
+                func->return_def.var_name);
         bb_dump(fd, func, func->bbs);
         fprintf(fd, "}\n");
     }
@@ -3210,7 +3235,7 @@ void ssa_build(void)
 }
 
 /* Check if operation can be subject to CSE */
-bool is_cse_candidate(insn_t *insn)
+bool is_cse_candidate(const insn_t *insn)
 {
     switch (insn->opcode) {
     case OP_add:
@@ -3237,9 +3262,10 @@ bool is_cse_candidate(insn_t *insn)
     }
 }
 
-/* Common Subexpression Elimination (CSE) */
-/* Enhanced to support general binary operations */
-bool cse(insn_t *insn, basic_block_t *bb)
+/* Common Subexpression Elimination (CSE) Enhanced to support general binary
+ * operations
+ */
+bool cse(insn_t *insn, const basic_block_t *bb)
 {
     /* Handle array access pattern: add + read */
     if (insn->opcode == OP_read) {
@@ -3369,8 +3395,9 @@ bool mark_const(insn_t *insn)
      */
     if (insn->rd->is_global)
         return false;
-    /* Copying from such a variable is no better: the value read is whatever
-     * the pointer last wrote, not the constant the source was assigned.
+
+    /* Copying from such a variable is no better: the value read is whatever the
+     * pointer last wrote, not the constant the source was assigned.
      */
     if (insn->rs1->address_taken)
         return false;
@@ -3518,7 +3545,7 @@ bool const_folding(insn_t *insn)
 }
 
 /* Check if a basic block is unreachable */
-bool is_block_unreachable(basic_block_t *bb)
+bool is_block_unreachable(const basic_block_t *bb)
 {
     if (!bb)
         return true;
@@ -3544,6 +3571,8 @@ bool is_block_unreachable(basic_block_t *bb)
 
 bool var_escapes(var_t *var)
 {
+    UNUSED(var);
+
     /* Reports every variable as escaping, which makes dce_init_mark() treat
      * every OP_write as useful and so disables SSA-level dead-store
      * elimination. The is_global/is_func branches that used to precede this
@@ -3571,6 +3600,7 @@ void dce_init_push(insn_t *work_list[],
 int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
 {
     int mark_num = 0;
+
     /* mark instruction "useful" if it sets a return value, affects the value in
      * a storage location, or it is a function call.
      */
@@ -3633,7 +3663,7 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
 }
 
 /* Dead Code Elimination (DCE) */
-void dce_insn(basic_block_t *bb)
+void dce_insn(const basic_block_t *bb)
 {
     insn_t *work_list[DCE_WORKLIST_SIZE];
     int work_list_idx = 0;
@@ -3715,8 +3745,6 @@ void dce_insn(basic_block_t *bb)
 
 void dce_sweep(void)
 {
-    int total_eliminated = 0; /* Track effectiveness */
-
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         /* Skip function declarations without bodies */
         if (!func->bbs)
@@ -3725,13 +3753,8 @@ void dce_sweep(void)
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             /* Skip unreachable blocks entirely */
             if (is_block_unreachable(bb)) {
-                /* Count instructions being eliminated */
-                for (insn_t *insn = bb->insn_list.head; insn;
-                     insn = insn->next) {
-                    if (!insn->useful)
-                        total_eliminated++;
+                for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next)
                     insn->useful = false;
-                }
                 /* Mark entire block as dead */
                 bb->useful = false;
                 continue;
@@ -3741,7 +3764,6 @@ void dce_sweep(void)
             while (insn) {
                 insn_t *next = insn->next;
                 if (!insn->useful) {
-                    total_eliminated++;
                     /* If a branch instruction is useless, redirect to the
                      * reverse immediate dominator of this basic block and
                      * remove the branch instruction. Later, register allocation
@@ -3776,7 +3798,7 @@ void dce_sweep(void)
     }
 }
 
-void build_reversed_rpo();
+void build_reversed_rpo(void);
 
 void optimize(void)
 {
@@ -3871,8 +3893,9 @@ void optimize(void)
                     }
                 }
 
-                /* Enhanced algebraic simplifications */
-                /* Self-operation optimizations */
+                /* Enhanced algebraic simplifications Self-operation
+                 * optimizations
+                 */
                 if (insn->rs1 && insn->rs2 && insn->rs1 == insn->rs2) {
                     /* x - x = 0 */
                     if (insn->opcode == OP_sub && insn->rd) {
@@ -4002,8 +4025,9 @@ void optimize(void)
                     }
                 }
 
-                /* Multi-instruction analysis and optimization */
-                /* Store-to-load forwarding */
+                /* Multi-instruction analysis and optimization Store-to-load
+                 * forwarding
+                 */
                 if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
                     insn_t *search = insn->prev;
                     int search_limit = 10; /* Look back up to 10 instructions */
@@ -4182,7 +4206,6 @@ void bb_build_reversed_rpo(func_t *func, basic_block_t *bb)
         }
         bb->rpo_r_next = curr;
         prev->rpo_r_next = bb;
-        prev = curr;
         return;
     }
 
@@ -4215,7 +4238,7 @@ void build_reversed_rpo(void)
     }
 }
 
-void update_consumed(insn_t *insn, var_t *var);
+void update_consumed(const insn_t *insn, var_t *var);
 
 /* Combined function to reset and solve locals in one pass */
 void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
@@ -4226,10 +4249,10 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
     bb->live_kill.size = 0;
 
     /* Both sets are asked about once per operand and once per destination, and
-     * answering from the lists themselves means a scan of one of them for
-     * every one of a block's instructions -- quadratic in the size of the
-     * block, which is what made this the most expensive part of the analysis
-     * on shecc's own longer functions. Stamping a variable as it enters a set
+     * answering from the lists themselves means a scan of one of them for every
+     * one of a block's instructions -- quadratic in the size of the block,
+     * which is what made this the most expensive part of the analysis on
+     * shecc's own longer functions. Stamping a variable as it enters a set
      * turns each of those questions into one comparison. live_kill was just
      * emptied, so nothing carries a stale stamp; live_gen is not, so what it
      * already holds is stamped first.
@@ -4244,8 +4267,8 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
         insn->idx = i++;
 
-        /* The three source operands are treated alike; the third is the value
-         * a select keeps when its condition does not hold.
+        /* The three source operands are treated alike; the third is the value a
+         * select keeps when its condition does not hold.
          */
         var_t *srcs[3];
         srcs[0] = insn->rs1;
@@ -4270,7 +4293,7 @@ void bb_reset_and_solve_locals(func_t *func, basic_block_t *bb)
     }
 }
 
-void update_consumed(insn_t *insn, var_t *var)
+void update_consumed(const insn_t *insn, var_t *var)
 {
     if (insn->idx > var->consumed)
         var->consumed = insn->idx;
@@ -4352,8 +4375,9 @@ bool recompute_live_out(basic_block_t *bb)
         return true;
     }
 
-    /* Size is same, need to check if contents are identical */
-    /* Optimize by checking if first few elements match (common case) */
+    /* Size is same, need to check if contents are identical Optimize by
+     * checking if first few elements match (common case)
+     */
     if (live_out_idx > 0) {
         /* Quick check first element */
         bool first_found = false;
@@ -4412,7 +4436,7 @@ void liveness_analysis(void)
         if (!func->bbs)
             continue;
 
-        basic_block_t *bb = func->exit;
+        basic_block_t *bb;
         bool changed;
         do {
             changed = false;

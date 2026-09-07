@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 #pragma once
@@ -54,7 +54,8 @@ arena_t *BLOCK_ARENA;
 arena_t *BB_ARENA;
 
 /* TOKEN_ARENA is responsible for token_t (including literal) /
- * source_location_t allocation */
+ * source_location_t allocation
+ */
 arena_t *TOKEN_ARENA;
 
 /* GENERAL_ARENA is responsible for functions, symbols, constants, aliases,
@@ -116,6 +117,7 @@ arena_block_t *arena_block_create(int capacity)
 
     if (!block) {
         printf("Failed to allocate memory for arena block structure\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -124,6 +126,7 @@ arena_block_t *arena_block_create(int capacity)
     if (!block->memory) {
         printf("Failed to allocate memory for arena block buffer\n");
         free(block);
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -152,6 +155,7 @@ arena_t *arena_init(int initial_capacity)
     arena_t *arena = malloc(sizeof(arena_t));
     if (!arena) {
         printf("Failed to allocate memory for arena structure\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
     arena->head = arena_block_create(initial_capacity);
@@ -161,8 +165,8 @@ arena_t *arena_init(int initial_capacity)
     return arena;
 }
 
-/* Allocate memory from the given arena with given size.
- * The arena may create a new arena block if no space is available.
+/* Allocate memory from the given arena with given size. The arena may create a
+ * new arena block if no space is available.
  * @arena: The arena to allocate memory from. Must not be NULL.
  * @size: The size of memory to allocate. Must be positive.
  *
@@ -173,6 +177,7 @@ void *arena_alloc(arena_t *arena, int size)
 {
     if (size <= 0) {
         printf("arena_alloc: size must be positive\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -182,7 +187,8 @@ void *arena_alloc(arena_t *arena, int size)
 
     if (!arena->head || arena->head->offset + size > arena->head->capacity) {
         /* Need a new block: choose capacity = max(DEFAULT_ARENA_SIZE,
-         * arena->block_size, size) */
+         * arena->block_size, size)
+         */
         const int base =
             (arena->block_size > DEFAULT_ARENA_SIZE ? arena->block_size
                                                     : DEFAULT_ARENA_SIZE);
@@ -200,8 +206,8 @@ void *arena_alloc(arena_t *arena, int size)
 
 /* arena_alloc() plus explicit zero‑initialization.
  * @arena: The arena to allocate memory from. Must not be NULL.
- * @n:     Number of elements.
- * @size:  Size of each element in bytes.
+ * @n: Number of elements.
+ * @size: Size of each element in bytes.
  *
  * Internally calls arena_alloc(n * size) and then fills the entire region with
  * zero bytes.
@@ -216,6 +222,7 @@ void *arena_calloc(arena_t *arena, int n, int size)
      */
     if (n <= 0 || size <= 0 || n > 0x7fffffff / size) {
         printf("arena_calloc: invalid allocation size\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -250,12 +257,14 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
     if (!oldptr) {
         if (oldsz != 0) {
             printf("arena_realloc: oldptr == NULL requires oldsz == 0\n");
+            fflush(stdout); /* see fatal() */
             abort();
         }
         return arena_alloc(arena, newsz);
     }
     if (oldsz == 0) {
         printf("arena_realloc: oldptr != NULL requires oldsz > 0\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
 
@@ -267,7 +276,7 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
     /* From here on, oldptr != NULL and newsz > oldsz and oldsz != 0 */
     int delta = newsz - oldsz;
     arena_block_t *blk = arena->head;
-    char *block_end = blk->memory + blk->offset;
+    const char *block_end = blk->memory + blk->offset;
 
     /* grow in place if oldptr is the last allocation in the current block */
     if (oldptr + oldsz == block_end && blk->offset + delta <= blk->capacity) {
@@ -288,7 +297,7 @@ void *arena_realloc(arena_t *arena, char *oldptr, int oldsz, int newsz)
  *
  * Return: Pointer to the duplicated string stored in the arena.
  */
-char *arena_strdup(arena_t *arena, char *str)
+char *arena_strdup(arena_t *arena, const char *str)
 {
     const int n = strlen(str);
     char *dup = arena_alloc(arena, n + 1);
@@ -337,10 +346,9 @@ void arena_free(arena_t *arena)
     free(arena);
 }
 
-/* Hash a string with FNV-1a hash function
- * and converts into usable hashmap index. The range of returned
- * hashmap index is ranged from "(0 ~ 2,147,483,647) mod size" due to
- * lack of unsigned integer implementation.
+/* Hash a string with FNV-1a hash function and converts into usable hashmap
+ * index. The range of returned hashmap index is ranged from "(0 ~
+ * 2,147,483,647) mod size" due to lack of unsigned integer implementation.
  * @size: The size of map. Must not be negative or 0.
  * @key: The key string. May be NULL.
  *
@@ -374,10 +382,9 @@ int round_up_pow2(int v)
     return v;
 }
 
-/* Create a hashmap on heap. Notice that provided size will always be rounded
- * up to nearest power of 2.
- * @size: The initial bucket size of hashmap. Must not be 0 or
- * negative.
+/* Create a hashmap on heap. Notice that provided size will always be rounded up
+ * to nearest power of 2.
+ * @size: The initial bucket size of hashmap. Must not be 0 or negative.
  *
  * Return: The pointer of created hashmap.
  */
@@ -436,6 +443,7 @@ void hashmap_rehash(hashmap_t *map)
                 index = (index + 1) & (map->cap - 1);
                 if (index == start) {
                     printf("Error: New table is full during rehash\n");
+                    fflush(stdout); /* see fatal() */
                     abort();
                 }
             }
@@ -449,9 +457,8 @@ void hashmap_rehash(hashmap_t *map)
     free(old_table);
 }
 
-/* Put a key-value pair into given hashmap.
- * If key already contains a value, then replace it with new value, the old
- * value will be freed.
+/* Put a key-value pair into given hashmap. If key already contains a value,
+ * then replace it with new value, the old value will be freed.
  * @map: The hashmap to be put into. Must not be NULL.
  * @key: The key string. May be NULL.
  * @val: The value pointer. May be NULL. This value's lifetime is held by
@@ -478,6 +485,7 @@ void hashmap_put(hashmap_t *map, char *key, void *val)
         index = (index + 1) & (map->cap - 1);
         if (index == start) {
             printf("Error: Hashmap is full\n");
+            fflush(stdout); /* see fatal() */
             abort();
         }
     }
@@ -561,7 +569,7 @@ void hashmap_free(hashmap_t *map)
  *
  * Return: The pointer to the type, or NULL if not found.
  */
-type_t *find_type(char *type_name, int flag)
+type_t *find_type(const char *type_name, int flag)
 {
     char head = type_name[0];
 
@@ -594,6 +602,7 @@ ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 {
     if (ph2_ir_idx >= MAX_IR_INSTR) {
         printf("Error: too many phase-2 IR instructions\n");
+        fflush(stdout); /* see fatal() */
         abort();
     }
     PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
@@ -609,6 +618,7 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->is_branch_detached = 0;
     ph2_ir->src0 = 0;
     ph2_ir->src1 = 0;
+
     /* Only a select names a third source, but the allocation is not zeroed and
      * every field is set here by hand.
      */
@@ -619,6 +629,7 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->then_bb = NULL;
     ph2_ir->else_bb = NULL;
     ph2_ir->ofs_based_on_stack_top = false;
+
     /* Default to the full slot. Slots are PTR_SIZE wide, so a wide access is
      * always valid; only an address-taken narrow scalar may be written behind
      * the allocator's back, and reg-alloc narrows those explicitly.
@@ -814,7 +825,7 @@ int unescape_string(const char *input, char *output, int output_size)
     return j;
 }
 
-int parse_numeric_constant(char *buffer)
+int parse_numeric_constant(const char *buffer)
 {
     int i = 0;
     int value = 0;
@@ -853,15 +864,15 @@ int parse_numeric_constant(char *buffer)
 
 /* Give @type its field table, on the first field it is asked for.
  *
- * The table is MAX_FIELDS var_t by value, and it has to stay put: a struct
- * body hands out a var_t * per declarator and reads it again after the next
+ * The table is MAX_FIELDS var_t by value, and it has to stay put: a struct body
+ * hands out a var_t * per declarator and reads it again after the next
  * declarator has been added, so a table that grew by reallocating would leave
  * those pointers behind. Allocating it once at full size keeps them valid.
  *
  * What it need not do is allocate for a type that never has a field. Most of
  * what add_type() creates -- every enum, every typedef of a scalar, every
- * builtin -- has none, and was paying for the whole table and for the loop
- * that walked it.
+ * builtin -- has none, and was paying for the whole table and for the loop that
+ * walked it.
  */
 void type_ensure_fields(type_t *type)
 {
@@ -869,6 +880,7 @@ void type_ensure_fields(type_t *type)
         return;
 
     type->fields = arena_calloc(GENERAL_ARENA, MAX_FIELDS, sizeof(var_t));
+
     /* The field variables come out of a zeroed allocation, so give their
      * interned name pointers the empty string a reader can dereference.
      */
@@ -880,6 +892,7 @@ type_t *add_type(void)
 {
     if (types_idx >= MAX_TYPES) {
         printf("Error: Maximum number of types (%d) exceeded\n", MAX_TYPES);
+        fflush(stdout); /* see fatal() */
         abort();
     }
     type_t *t = &TYPES[types_idx++];
@@ -893,8 +906,8 @@ type_t *add_type(void)
  * so a longer tag would run past it into the fields that follow. Refuse it
  * rather than corrupting the type.
  */
-void fatal(char *msg);
-void usage_error(char *msg);
+__noreturn void fatal(const char *msg);
+__noreturn void usage_error(const char *msg);
 
 void set_type_name(type_t *type, char *name)
 {
@@ -930,7 +943,7 @@ constant_t *find_constant(char alias[])
     return hashmap_get(CONSTANTS_MAP, alias);
 }
 
-var_t *find_member(char token[], type_t *type)
+var_t *find_member(const char token[], type_t *type)
 {
     /* If it is a forwardly declared alias of a structure, switch to the base
      * structure type. A scalar -- or "void", whose size is also 0 -- has no
@@ -960,7 +973,7 @@ var_t *find_member(char token[], type_t *type)
  * -- before making the call. Names are never empty, so reading the first byte
  * of either side is always in bounds.
  */
-var_t *find_local_var(char *token, block_t *block)
+var_t *find_local_var(const char *token, block_t *block)
 {
     func_t *func = block->func;
     char head = token[0];
@@ -988,7 +1001,7 @@ var_t *find_local_var(char *token, block_t *block)
     return NULL;
 }
 
-var_t *find_global_var(char *token)
+var_t *find_global_var(const char *token)
 {
     var_list_t *var_list = &GLOBAL_BLOCK->locals;
     char head = token[0];
@@ -1015,8 +1028,8 @@ int size_var(var_t *var)
 {
     int size;
     if (var->ptr_level > 0 || var->is_func) {
-        /* Pointers and function pointers occupy a target pointer, which is
-         * 8 bytes on LP64 targets and 4 on the 32-bit ones.
+        /* Pointers and function pointers occupy a target pointer, which is 8
+         * bytes on LP64 targets and 4 on the 32-bit ones.
          */
         size = PTR_SIZE;
     } else {
@@ -1057,11 +1070,11 @@ func_t *add_func(char *func_name, bool synthesize)
         func->param_defs[i].var_name = "";
     /* Use interned string for function name */
     func->return_def.var_name = intern_string(func_name);
+
     /* Prepare space for function arguments.
      *
-     * For Arm architecture, the first four arguments (arg1 ~ arg4) are
-     * passed to r0 ~ r3, and any additional arguments (arg5+) are passed
-     * to the stack.
+     * For Arm architecture, the first four arguments (arg1 ~ arg4) are passed
+     * to r0 ~ r3, and any additional arguments (arg5+) are passed to the stack.
      *
      * +-------------+
      * | local vars  |
@@ -1077,8 +1090,8 @@ func_t *add_func(char *func_name, bool synthesize)
      * |    arg 5    |
      * +-------------+ <-- sp
      *
-     * If the target architecture is RISC-V, arg1 ~ arg8 are passed to
-     * registers and arg9+ are passed to the stack.
+     * If the target architecture is RISC-V, arg1 ~ arg8 are passed to registers
+     * and arg9+ are passed to the stack.
      *
      * We reserve one slot per stack-passed argument at the bottom of every
      * frame so that each function can use the space to pass extra arguments.
@@ -1124,16 +1137,17 @@ basic_block_t *bb_create(block_t *parent)
     /* Initialize non-zero fields */
     bb->scope = parent;
     bb->belong_to = parent->func;
-    /* -1 marks "no machine code emitted for this block yet". Backends assign
-     * a real offset as they emit; 0 is a legitimate offset, so it cannot
-     * double as the sentinel.
+
+    /* -1 marks "no machine code emitted for this block yet". Backends assign a
+     * real offset as they emit; 0 is a legitimate offset, so it cannot double
+     * as the sentinel.
      */
     bb->elf_offset = -1;
 
     if (dump_ir || dump_dot) {
-        /* MAX_VAR_LEN spent 128 bytes on a string that is always ".label."
-         * plus an int. A self-compile calls bb_create() 52k times, so that
-         * was 6.4 MiB of arena where 1.2 MiB does.
+        /* MAX_VAR_LEN spent 128 bytes on a string that is always ".label." plus
+         * an int. A self-compile calls bb_create() 52k times, so that was 6.4
+         * MiB of arena where 1.2 MiB does.
          */
         bb->bb_label_name = arena_alloc(GENERAL_ARENA, MAX_LABEL_LEN);
         snprintf(bb->bb_label_name, MAX_LABEL_LEN, ".label.%d", bb_label_idx++);
@@ -1313,7 +1327,7 @@ void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
  * prev[], so prev_idx is only a high-water mark and the entries must be counted
  * rather than trusted.
  */
-int bb_pred_count(basic_block_t *bb)
+int bb_pred_count(const basic_block_t *bb)
 {
     int n = 0;
 
@@ -1370,6 +1384,7 @@ void add_insn(block_t *block,
     n->rd = rd;
     n->rs1 = rs1;
     n->rs2 = rs2;
+
     /* Only a select names a third source. The allocation is not zeroed and
      * every field is set here by hand, so this one has to be too.
      */
@@ -1483,8 +1498,8 @@ void strbuf_free(strbuf_t *src)
     free(src);
 }
 
-/* This routine is required because the global variable initializations are
- * not supported now.
+/* This routine is required because the global variable initializations are not
+ * supported now.
  */
 void global_init(void)
 {
@@ -1559,18 +1574,17 @@ void global_init(void)
 /* Forward declaration for lexer cleanup */
 void lexer_cleanup(void);
 
-/* Free empty trailing blocks from an arena safely.
- * This only frees blocks that come after the last used block,
- * ensuring no pointers are invalidated.
+/* Free empty trailing blocks from an arena safely. This only frees blocks that
+ * come after the last used block, ensuring no pointers are invalidated.
  *
  * NOTE: measured over a self-compile, this reclaims nothing. arena_alloc()
  * prepends each new block at the head, so the list runs newest-to-oldest and
  * every block behind the head is full by construction: last_used is always the
  * tail and there is never anything after it to free. The only case that ever
  * fires is an arena whose very first allocation was larger than its initial
- * block, leaving that block at offset 0 behind a newer one. Reclaiming a
- * bump allocator's memory needs a phase boundary that can drop a whole arena
- * -- see release_token_arena() -- not a scan for empty blocks.
+ * block, leaving that block at offset 0 behind a newer one. Reclaiming a bump
+ * allocator's memory needs a phase boundary that can drop a whole arena -- see
+ * release_token_arena() -- not a scan for empty blocks.
  *
  * @arena: The arena to compact.
  * Return: Bytes freed.
@@ -1616,9 +1630,9 @@ int arena_free_trailing_blocks(arena_t *arena)
  * Every token, macro, hide set and conditional-inclusion record lives in
  * TOKEN_ARENA, and nothing survives parsing: identifiers and string literals
  * reach the parser through intern_string(), which copies into GENERAL_ARENA,
- * and every parser entry point copies a token's text into a local buffer
- * before storing it. So once parse() returns, all 17 MiB of it is garbage that
- * would otherwise stay resident through the memory peak in reg_alloc().
+ * and every parser entry point copies a token's text into a local buffer before
+ * storing it. So once parse() returns, all 17 MiB of it is garbage that would
+ * otherwise stay resident through the memory peak in reg_alloc().
  *
  * The source buffers in SRC_FILE_MAP exist only to quote a line in a parse
  * error, so they go at the same time.
@@ -1649,8 +1663,8 @@ void release_token_arena(void)
     }
 }
 
-/* Compact all arenas to reduce memory usage after compilation phases.
- * This safely frees only trailing empty blocks without invalidating pointers.
+/* Compact all arenas to reduce memory usage after compilation phases. This
+ * safely frees only trailing empty blocks without invalidating pointers.
  *
  * Return: Total bytes freed across all arenas.
  */
@@ -1668,8 +1682,8 @@ int compact_all_arenas(void)
     return total_saved;
 }
 
-/* Compact specific arenas based on compilation phase.
- * Different phases have different memory usage patterns.
+/* Compact specific arenas based on compilation phase. Different phases have
+ * different memory usage patterns.
  *
  * @phase_mask: Bitmask using COMPACT_ARENA_* defines
  *              to indicate which arenas to compact.
@@ -1744,12 +1758,17 @@ void global_release(void)
     strbuf_free(dynamic_sections.elf_got);
 }
 
-/* Reports an error without specifying a position */
-void fatal(char *msg)
+/* Reports a broken invariant, which has no position in the source to point at
+ * because nothing in the source is necessarily wrong. This one abort()s: a core
+ * dump is what makes an internal failure debuggable. A mistake in the input
+ * belongs in error_at(), and a mistake on the command line in usage_error().
+ */
+__noreturn void fatal(const char *msg)
 {
     printf("[Error]: %s\n", msg);
-    /* abort() does not flush, so a diagnostic written to a pipe -- a build
-     * log, or any invocation whose output is captured -- is discarded and the
+
+    /* abort() does not flush, so a diagnostic written to a pipe -- a build log,
+     * or any invocation whose output is captured -- is discarded and the
      * compiler appears to die silently.
      */
     fflush(stdout);
@@ -1760,32 +1779,46 @@ void fatal(char *msg)
  * a broken invariant, so this exits rather than abort()ing: no core dump, and
  * no "Aborted" line, for an ordinary typo.
  */
-void usage_error(char *msg)
+__noreturn void usage_error(const char *msg)
 {
     printf("[Error]: %s\n", msg);
     fflush(stdout);
     exit(1);
 }
 
-/* Reports error and prints occurred position context,
- * if the given location is NULL or source file is missing,
- * then fallbacks to fatal(char *).
+/* Reports a mistake in the input, quoting the line it sits on. A program the
+ * compiler refuses is not a broken invariant, so this exits the way
+ * usage_error() does rather than abort()ing: an ordinary syntax error should
+ * not raise SIGABRT, wake the system crash handler, or leave a core behind.
+ *
+ * Falls back to the same message without context when the location is NULL or
+ * the source file is no longer on hand.
  */
-void error_at(char *msg, source_location_t *loc)
+__noreturn void error_at(char *msg, source_location_t *loc)
 {
     int offset, start_idx, i = 0, len, pos;
     char diagnostic[MAX_LINE_LEN];
 
-    if (!loc)
-        fatal(msg);
+    if (!loc) {
+        printf("[Error]: %s\n", msg);
+        fflush(stdout);
+        exit(1);
+    }
 
     len = loc->len;
     pos = loc->pos;
 
     strbuf_t *src = hashmap_get(SRC_FILE_MAP, loc->filename);
 
-    if (!src)
-        fatal(msg);
+    /* The source text is no longer on hand, which changes what can be shown and
+     * not what went wrong: still a mistake in the input, so still an exit
+     * rather than the core dump fatal() would take.
+     */
+    if (!src) {
+        printf("[Error]: %s\n", msg);
+        fflush(stdout);
+        exit(1);
+    }
 
     if (len < 1)
         len = 1;
@@ -1816,7 +1849,7 @@ void error_at(char *msg, source_location_t *loc)
     printf("%6c |  ", ' ');
 
     /* Keep room for the note appended after the underline. */
-    char *note = " Error occurs here";
+    const char *note = " Error occurs here";
     int limit = MAX_LINE_LEN - strlen(note) - 1;
 
     i = 0;
@@ -1829,8 +1862,8 @@ void error_at(char *msg, source_location_t *loc)
 
     strcpy(diagnostic + i, note);
     printf("%s\n", diagnostic);
-    fflush(stdout); /* see fatal(): abort() discards buffered output */
-    abort();
+    fflush(stdout); /* exit() flushes, but say so once rather than rely on it */
+    exit(1);
 }
 
 void print_indent(int indent)
@@ -1839,11 +1872,13 @@ void print_indent(int indent)
         printf("\t");
 }
 
-void dump_bb_insn(func_t *func, basic_block_t *bb, bool *at_func_start)
+void dump_bb_insn(const func_t *func,
+                  const basic_block_t *bb,
+                  bool *at_func_start)
 {
     if (!bb)
         return;
-    var_t *rd, *rs1, *rs2;
+    const var_t *rd, *rs1, *rs2;
 
     if (bb != func->bbs && bb->insn_list.head) {
         if (!at_func_start[0])
@@ -2108,7 +2143,7 @@ void dump_insn(void)
 
         /* Handle implicit return */
         for (int i = 0; func->exit && i < func->exit->prev_idx; i++) {
-            basic_block_t *bb = func->exit->prev[i].bb;
+            const basic_block_t *bb = func->exit->prev[i].bb;
             if (!bb)
                 continue;
 

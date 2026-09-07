@@ -1,8 +1,8 @@
 /*
  * Convert all line endings to LF (Unix style)
  *
- * This tool ensures consistent line endings before processing with inliner.
- * It converts CR-only (old Mac) and CRLF (Windows) to LF (Unix).
+ * This tool ensures consistent line endings before processing with inliner. It
+ * converts CR-only (old Mac) and CRLF (Windows) to LF (Unix).
  */
 
 #include <stdbool.h>

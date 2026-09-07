@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 /* Constant cast optimization pass.
@@ -14,8 +14,8 @@
 
 /* Narrow a constant to 'size' bytes, keeping its sign. Every integer type in
  * this language is signed -- there is no 'unsigned' keyword -- and widening
- * sign-extends, so masking alone would make "char c = -1" compare as 255.
- * A size the caller does not narrow is returned unchanged.
+ * sign-extends, so masking alone would make "char c = -1" compare as 255. A
+ * size the caller does not narrow is returned unchanged.
  */
 int sign_extend_const(int value, int size)
 {
@@ -41,15 +41,12 @@ bool optimize_constant_casts(func_t *func)
 
     /* Simple peephole optimization: const + trunc pattern */
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-        if (!bb)
-            continue;
-
         for (insn_t *insn = bb->insn_list.head; insn && insn->next;
              insn = insn->next) {
             insn_t *next_insn = insn->next;
 
-            /* Look for pattern: const %.tX, VALUE followed by
-             * %.tY = trunc %.tX, SIZE
+            /* Look for pattern: const %.tX, VALUE followed by %.tY = trunc
+             * %.tX, SIZE
              */
             if (insn->opcode == OP_load_constant &&
                 next_insn->opcode == OP_trunc && insn->rd && next_insn->rs1 &&

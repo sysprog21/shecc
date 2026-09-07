@@ -61,10 +61,15 @@ int reg_low3(int reg)
     return reg & 0x07;
 }
 
-/* Helper to emit bytes to the code buffer */
-void emit_byte(char byte)
+/* Helper to emit bytes to the code buffer Takes an int because shecc has no
+ * 'unsigned': every opcode above 0x7F would otherwise be a value the call site
+ * cannot write and the conversion silently changes. The narrowing to the byte
+ * actually emitted happens here, once and on purpose, rather than 134 times
+ * implicitly.
+ */
+void emit_byte(int byte)
 {
-    strbuf_putc(elf_code, byte);
+    strbuf_putc(elf_code, (char) (byte & 0xff));
 }
 
 /* Emit a REX prefix. 'w' selects a 64-bit operand size; the two register

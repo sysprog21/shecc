@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 #pragma once
@@ -55,6 +55,7 @@
 #define __syscall_lseek 8
 #define __syscall_mmap 9
 #define __syscall_munmap 11
+
 /* x86-64 provides no mmap2. Every call site passes offset 0, so mmap2's
  * page-granular offset is indistinguishable from mmap's byte offset here.
  */
@@ -75,8 +76,8 @@
 typedef int *va_list;
 
 /* Every variadic argument occupies one pointer-sized stack slot, so an
- * int-based va_list must advance this many elements per argument: one on
- * the 32-bit targets, two on LP64.
+ * int-based va_list must advance this many elements per argument: one on the
+ * 32-bit targets, two on LP64.
  */
 #define VA_INT_STEP (__SIZEOF_POINTER__ / 4)
 
@@ -100,9 +101,10 @@ int fclose(FILE *stream);
 int fgetc(FILE *stream);
 char *fgets(char *str, int n, FILE *stream);
 int fputc(int c, FILE *stream);
+
 /* Only under dynamic linking, where the host libc supplies them and buffers
- * behind them. A statically linked program has neither, and moves whole
- * blocks through '__syscall' instead.
+ * behind them. A statically linked program has neither, and moves whole blocks
+ * through '__syscall' instead.
  */
 int fread(char *ptr, int size, int nmemb, FILE *stream);
 int fwrite(char *ptr, int size, int nmemb, FILE *stream);

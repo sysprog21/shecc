@@ -1,20 +1,15 @@
+# -fwrapv is required, not probed: hashmap_hash_index() carries the FNV-1a
+# accumulator in a signed int, because shecc has no 'unsigned' to compile
+# itself with, and the multiply there overflows by design.
 CFLAGS := -O -g \
-	-std=c99 -pedantic
+	-std=c99 -pedantic -fwrapv
 
+# Every -Wno- that used to sit here has been earned away rather than renewed:
+# the tree is clean under gcc and clang with nothing switched off, so a warning
+# that appears from now on is about the code and not about the flag list.
 CFLAGS_TO_CHECK := \
-	-fwrapv \
 	-Wall -Wextra \
-	-Wno-unused-but-set-variable \
-	-Wno-unused-parameter \
-	-Wno-unused-function \
-	-Wshadow \
-	-Wno-variadic-macros \
-	-Wno-uninitialized \
-	-Wno-strict-prototypes \
-	-Wno-declaration-after-statement \
-	-Wno-format \
-	-Wno-format-pedantic \
-	-Wno-overflow
+	-Wshadow
 
 SUPPORTED_CFLAGS :=
 # Check if a specific compiler flag is supported, attempting a dummy compilation
@@ -25,8 +20,13 @@ check_flag = $(shell $(CC) $(1) -S -o /dev/null -xc /dev/null 2>/dev/null; \
               if test $$? -eq 0; then echo "$(1)"; fi)
 
 # Iterate through the list of all potential flags, effectively filtering out all
-# unsupported flags.
+# unsupported flags. Half a second of $(CC) probing that the style and hook
+# targets have no use for, so skip it when nothing is being compiled.
+STYLE_GOALS := check-style check-newline check-comments check-format check-shell \
+	indent install-hooks uninstall-hooks check-hooks
+ifneq ($(filter-out $(STYLE_GOALS),$(or $(MAKECMDGOALS),all)),)
 $(foreach flag, $(CFLAGS_TO_CHECK), $(eval CFLAGS += $(call check_flag, $(flag))))
+endif
 
 BUILD_SESSION := .session.mk
 
@@ -53,6 +53,9 @@ BUILTIN_LIBC_HEADER := c.h
 STAGE0_FLAGS ?= --dump-ir
 STAGE1_FLAGS ?=
 DYNLINK ?= 0
+
+COMMENTFLOW ?= commentflow
+SHFMT ?= shfmt
 ifeq ($(DYNLINK),1)
     STAGE0_FLAGS += --dynlink
     STAGE1_FLAGS += --dynlink
@@ -60,12 +63,27 @@ endif
 
 SRCS := $(wildcard $(patsubst %,%/main.c, $(SRCDIR)))
 OBJS := $(SRCS:%.c=$(OUT)/%.o)
-deps := $(OBJS:%.o=%.o.d)
+
+# The sanitizer build keeps its objects apart from the normal one. Sharing them
+# lets whichever ran last decide what the other links: a plain "make" after it
+# fails outright on the missing runtime, and -- quietly, which is worse --
+# "make sanitizer" after a plain build relinks an uninstrumented object, so
+# check-sanitizer then passes having checked nothing.
+SAN_OUT := $(OUT)/sanitize
+SAN_OBJS := $(SRCS:%.c=$(SAN_OUT)/%.o)
+deps := $(OBJS:%.o=%.o.d) $(SAN_OBJS:%.o=%.o.d)
 
 all: config bootstrap
 
-sanitizer: CFLAGS += -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -O0
-sanitizer: LDFLAGS += -fsanitize=address -fsanitize=undefined
+# Both goals carry the flags, because a target-specific variable reaches only
+# that target and its prerequisites: "make check-sanitizer" on its own would
+# otherwise build $(SAN_OBJS) with the ordinary CFLAGS and run the suite against
+# a binary that instruments nothing.
+SAN_CFLAGS := -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -O0
+SAN_LDFLAGS := -fsanitize=address -fsanitize=undefined
+
+sanitizer check-sanitizer: CFLAGS += $(SAN_CFLAGS)
+sanitizer check-sanitizer: LDFLAGS += $(SAN_LDFLAGS)
 sanitizer: config $(OUT)/$(STAGE0)-sanitizer
 	$(VECHO) "  Built stage 0 compiler with sanitizers\n"
 
@@ -119,7 +137,49 @@ config:
 	$(VECHO) "Target machine code switch to %s\n" $(ARCH)
 	$(Q)$(CONFIG_CHECK_CMD)
 
+.PHONY: $(STYLE_GOALS)
+
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2
+
+# One checker per target: they share nothing, so "make -j check-style" runs them
+# concurrently and finishes in the time the slowest one takes.
+check-style: check-newline check-comments check-format check-shell
+
+check-newline:
+	$(Q).ci/check-newline.sh
+
+check-comments:
+	$(Q)COMMENTFLOW=$(COMMENTFLOW) .ci/check-commentflow.sh
+
+check-format:
+	$(Q).ci/check-format.sh
+
+check-shell:
+	$(Q)SHFMT=$(SHFMT) .ci/check-shell.sh
+
+check-hooks:
+	$(Q)scripts/test-git-hooks.sh
+
+# Naming both goals would otherwise run each --write pass beside the checker
+# reading the same files, so the rewrite goes first and the checkers then report
+# on a tree that has stopped moving. Neither goal alone is affected.
+ifneq ($(filter indent,$(MAKECMDGOALS)),)
+check-newline check-comments check-format check-shell: | indent
+endif
+
+# The checkers own both halves: which files they cover and which tool rewrites
+# them. Naming either one here again would only be a second place to update.
+indent:
+	$(Q).ci/check-newline.sh --write
+	$(Q)SHFMT=$(SHFMT) .ci/check-shell.sh --write
+	$(Q)COMMENTFLOW=$(COMMENTFLOW) .ci/check-commentflow.sh --write
+	$(Q).ci/check-format.sh --write
+
+install-hooks:
+	$(Q)scripts/install-git-hooks.sh
+
+uninstall-hooks:
+	$(Q)scripts/install-git-hooks.sh --uninstall
 
 check-stage0: $(OUT)/$(STAGE0) tests/driver.sh
 	$(VECHO) "  TEST STAGE 0\n"
@@ -151,7 +211,8 @@ $(OUT)/%.o: %.c | config $(OUT)/libc.inc
 	$(VECHO) "  CC\t$@\n"
 	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
 
-SHELL_HACK := $(shell mkdir -p $(OUT) $(OUT)/$(SRCDIR) $(OUT)/tests)
+SHELL_HACK := $(shell mkdir -p $(OUT) $(OUT)/$(SRCDIR) $(OUT)/tests \
+                      $(SAN_OUT)/$(SRCDIR))
 
 $(OUT)/norm-lf: tools/norm-lf.c
 	$(VECHO) "  CC+LD\t$@\n"
@@ -172,9 +233,13 @@ $(OUT)/$(STAGE0): $(OUT)/libc.inc $(OBJS)
 	$(VECHO) "  LD\t$@\n"
 	$(Q)$(CC) $(OBJS) $(LDFLAGS) -o $@
 
-$(OUT)/$(STAGE0)-sanitizer: $(OUT)/libc.inc $(OBJS)
+$(SAN_OUT)/%.o: %.c | config $(OUT)/libc.inc
+	$(VECHO) "  CC\t$@\n"
+	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
+
+$(OUT)/$(STAGE0)-sanitizer: $(OUT)/libc.inc $(SAN_OBJS)
 	$(VECHO) "  LD\t$@ (with sanitizers)\n"
-	$(Q)$(CC) $(OBJS) $(LDFLAGS) -o $@
+	$(Q)$(CC) $(SAN_OBJS) $(LDFLAGS) -o $@
 
 $(OUT)/$(STAGE1): $(OUT)/$(STAGE0)
 	$(Q)$(STAGE1_CHECK_CMD)
@@ -201,7 +266,8 @@ bootstrap: $(OUT)/$(STAGE2)
 .PHONY: clean
 clean:
 	-$(RM) $(OUT)/$(STAGE0) $(OUT)/$(STAGE1) $(OUT)/$(STAGE2)
-	-$(RM) $(OBJS) $(deps)
+	-$(RM) $(OUT)/$(STAGE0)-sanitizer
+	-$(RM) $(OBJS) $(SAN_OBJS) $(deps)
 	-$(RM) $(TESTBINS) $(OUT)/tests/*.log $(OUT)/tests/*.lst
 	-$(RM) $(OUT)/shecc*.log
 	-$(RM) $(OUT)/libc.inc

@@ -56,16 +56,20 @@ fi
 case "$1" in
     "0")
         readonly SHECC="$PWD/out/shecc"
-        readonly STAGE="Stage 0 (Host Compiler)" ;;
+        readonly STAGE="Stage 0 (Host Compiler)"
+        ;;
     "1")
         readonly SHECC="${TARGET_EXEC:-} $PWD/out/shecc-stage1.elf"
-        readonly STAGE="Stage 1 (Cross-compiled)" ;;
+        readonly STAGE="Stage 1 (Cross-compiled)"
+        ;;
     "2")
         readonly SHECC="${TARGET_EXEC:-} $PWD/out/shecc-stage2.elf"
-        readonly STAGE="Stage 2 (Self-hosted)" ;;
+        readonly STAGE="Stage 2 (Self-hosted)"
+        ;;
     *)
         echo "Error: Invalid stage '$1'. Use 0, 1, or 2."
-        exit 1 ;;
+        exit 1
+        ;;
 esac
 
 DYNLINK="${2:-0}"
@@ -80,9 +84,10 @@ echo -e "Compiler:    $SHECC"
 echo ""
 
 # Helper Functions
-update_category_stats() {
+update_category_stats()
+{
     local category="$1"
-    local result="$2"  # "pass" or "fail"
+    local result="$2" # "pass" or "fail"
 
     if [[ -z "${CATEGORY_TESTS[$category]:-}" ]]; then
         CATEGORY_TESTS[$category]=0
@@ -99,7 +104,8 @@ update_category_stats() {
     fi
 }
 
-show_progress() {
+show_progress()
+{
     if [[ "$SHOW_PROGRESS" == "1" ]]; then
         echo -n "."
         PROGRESS_COUNT=$((PROGRESS_COUNT + 1))
@@ -110,7 +116,8 @@ show_progress() {
 }
 
 # Test execution function
-run_abi_test() {
+run_abi_test()
+{
     local test_name="$1"
     local category="$2"
     local source_code="$3"
@@ -164,11 +171,10 @@ run_abi_test() {
     run_output=$(eval "$run_cmd" 2>&1)
     exit_code=$?
 
-    # Check result
-    # If the exit code is not zero or the output is not expected,
-    # set 'run_status' to "FAILED".
+    # If the exit code is not zero or the output is not expected, set
+    # 'run_status' to "FAILED".
     run_status="SUCCESS"
-    if [[ $exit_code -ne 0 || ( -n "$expected_output" && "$run_output" != *"$expected_output"* ) ]]; then
+    if [[ $exit_code -ne 0 || (-n "$expected_output" && "$run_output" != *"$expected_output"*) ]]; then
         run_status="FAILED"
     fi
 
@@ -200,7 +206,8 @@ run_abi_test() {
 
 # Parameter Passing Tests
 
-test_one_arg() {
+test_one_arg()
+{
     run_abi_test "One argument (a0)" "Parameter Passing" '
 #include <stdio.h>
 int add_42(int x) { return x + 42; }
@@ -216,7 +223,8 @@ int main() {
 ' "PASS"
 }
 
-test_two_args() {
+test_two_args()
+{
     run_abi_test "Two arguments (a0, a1)" "Parameter Passing" '
 #include <stdio.h>
 int add(int a, int b) { return a + b; }
@@ -232,7 +240,8 @@ int main() {
 ' "PASS"
 }
 
-test_four_args() {
+test_four_args()
+{
     run_abi_test "Four arguments (a0-a3)" "Parameter Passing" '
 #include <stdio.h>
 int sum4(int a, int b, int c, int d) { return a + b + c + d; }
@@ -248,7 +257,8 @@ int main() {
 ' "PASS"
 }
 
-test_five_args() {
+test_five_args()
+{
     run_abi_test "Five arguments (a0-a4)" "Parameter Passing" '
 #include <stdio.h>
 int sum5(int a, int b, int c, int d, int e) { return a + b + c + d + e; }
@@ -264,7 +274,8 @@ int main() {
 ' "PASS"
 }
 
-test_eight_args() {
+test_eight_args()
+{
     run_abi_test "Eight arguments" "Parameter Passing" '
 #include <stdio.h>
 int sum8(int a, int b, int c, int d, int e, int f, int g, int h) {
@@ -284,7 +295,8 @@ int main() {
 
 # Stack Alignment Tests
 
-test_stack_alignment_basic() {
+test_stack_alignment_basic()
+{
     run_abi_test "Basic stack alignment" "Stack Alignment" '
 #include <stdio.h>
 int is_aligned(void *ptr) {
@@ -306,7 +318,8 @@ int main() {
 ' "PASS"
 }
 
-test_stack_alignment_extended() {
+test_stack_alignment_extended()
+{
     run_abi_test "Stack alignment with extended args" "Stack Alignment" '
 #include <stdio.h>
 int is_aligned(void *ptr) {
@@ -331,7 +344,8 @@ int main() {
 
 # Return Value Tests
 
-test_return_char() {
+test_return_char()
+{
     run_abi_test "Return char value" "Return Values" '
 #include <stdio.h>
 char get_char(void) { return '\''A'\''; }
@@ -346,7 +360,8 @@ int main() {
 ' "PASS"
 }
 
-test_return_int() {
+test_return_int()
+{
     run_abi_test "Return int value" "Return Values" '
 #include <stdio.h>
 int get_value(void) { return 12345; }
@@ -361,7 +376,8 @@ int main() {
 ' "PASS"
 }
 
-test_return_pointer() {
+test_return_pointer()
+{
     run_abi_test "Return pointer value" "Return Values" '
 #include <stdio.h>
 int *return_ptr(int *p) { return p; }
@@ -380,7 +396,8 @@ int main() {
 
 # External Function Call Tests (Dynamic Linking Only)
 
-test_printf_one_arg() {
+test_printf_one_arg()
+{
     run_abi_test "printf with 1 argument" "External Calls" '
 #include <stdio.h>
 int main() {
@@ -390,7 +407,8 @@ int main() {
 ' "PASS" 1
 }
 
-test_printf_multi_args() {
+test_printf_multi_args()
+{
     run_abi_test "printf with 5 arguments" "External Calls" '
 #include <stdio.h>
 int main() {
@@ -400,7 +418,8 @@ int main() {
 ' "Values: 1 2 3 4" 1
 }
 
-test_strlen() {
+test_strlen()
+{
     run_abi_test "strlen external call" "External Calls" '
 #include <stdio.h>
 #include <string.h>
@@ -416,7 +435,8 @@ int main() {
 ' "PASS" 1
 }
 
-test_strcpy() {
+test_strcpy()
+{
     run_abi_test "strcpy external call" "External Calls" '
 #include <stdio.h>
 #include <string.h>
@@ -434,7 +454,8 @@ int main() {
 ' "PASS" 1
 }
 
-test_memcpy() {
+test_memcpy()
+{
     run_abi_test "memcpy external call" "External Calls" '
 #include <stdio.h>
 #include <string.h>
@@ -454,7 +475,8 @@ int main() {
 
 # Register Preservation Tests
 
-test_local_vars_preserved() {
+test_local_vars_preserved()
+{
     run_abi_test "Local variables preserved across calls" "Register Preservation" '
 #include <stdio.h>
 int dummy(int a, int b, int c, int d, int e, int f, int g, int h) {
@@ -475,7 +497,8 @@ int main() {
 ' "PASS"
 }
 
-test_recursive_preservation() {
+test_recursive_preservation()
+{
     run_abi_test "Register preservation in recursion" "Register Preservation" '
 #include <stdio.h>
 int factorial(int n) {
@@ -497,7 +520,8 @@ int main() {
 
 # Structure Passing Tests
 
-test_small_struct() {
+test_small_struct()
+{
     run_abi_test "Small struct passing (≤4 bytes)" "Structure Passing" '
 #include <stdio.h>
 typedef struct { char a; char b; short c; } SmallStruct;

@@ -51,10 +51,22 @@ However, participation requires adherence to fundamental ground rules:
   This variant should be considered the standard for all documentation efforts.
   For instance, opt for "initialize" over "initialise" and "color" rather than "colour".
 
-Software requirement: [clang-format](https://clang.llvm.org/docs/ClangFormat.html) version 18 or later.
+Building and testing need none of the style tools. `make check-style` needs all
+four, and `make indent` all but ShellCheck, which only ever reports:
+[clang-format](https://clang.llvm.org/docs/ClangFormat.html) version 20,
+[commentflow](https://github.com/sysprog21/commentflow),
+[shfmt](https://github.com/mvdan/sh), and
+[ShellCheck](https://www.shellcheck.net/).
+The newline check also calls `file(1)` to tell text from binary, which is
+already present on most systems and reports itself as missing when it is not.
 
-This repository consistently contains an up-to-date `.clang-format` file with rules that match the explained ones.
-For maintaining a uniform coding style, execute the command `clang-format -i *.{c,h}`.
+The rules live in `.clang-format` for C and in `.editorconfig` for shell, both
+kept up to date with the conventions explained here.
+Run `make indent` to apply them, and `make check-style` to verify them without
+modifying the tree. Note that `indent` also rewraps the text of your comments
+through commentflow, so review its output rather than committing it blind.
+Run `make install-hooks` to apply the same checks to staged changes; an
+existing local hook is preserved.
 
 ## Coding Style for Modern C
 

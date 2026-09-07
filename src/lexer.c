@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 #include <ctype.h>
 #include <stdbool.h>
@@ -28,7 +28,7 @@ hashmap_t *KEYWORD_MAP = NULL;
 token_kind_t *directive_tokens_storage = NULL;
 token_kind_t *keyword_tokens_storage = NULL;
 
-void lex_init_directives()
+void lex_init_directives(void)
 {
     if (DIRECTIVE_MAP)
         return;
@@ -57,7 +57,7 @@ void lex_init_directives()
     }
 }
 
-void lex_init_keywords()
+void lex_init_keywords(void)
 {
     if (KEYWORD_MAP)
         return;
@@ -125,7 +125,7 @@ token_kind_t lookup_keyword(char *token)
 
 
 /* Cleanup function for lexer hashmaps */
-void lexer_cleanup()
+void lexer_cleanup(void)
 {
     if (DIRECTIVE_MAP) {
         hashmap_free(DIRECTIVE_MAP);
@@ -138,8 +138,8 @@ void lexer_cleanup()
     }
 
     /* Token storage arrays are allocated from GENERAL_ARENA and will be
-     * automatically freed when the arena is freed in global_release().
-     * No need to explicitly free them here.
+     * automatically freed when the arena is freed in global_release(). No need
+     * to explicitly free them here.
      */
     directive_tokens_storage = NULL;
     keyword_tokens_storage = NULL;
@@ -189,7 +189,7 @@ int file_read_all(FILE *f, char *dst, int len)
 }
 #endif
 
-strbuf_t *read_file(char *filename)
+strbuf_t *read_file(const char *filename)
 {
     FILE *f = fopen(filename, "rb");
     strbuf_t *src;
@@ -225,7 +225,7 @@ strbuf_t *get_file_buf(char *filename)
     return buf;
 }
 
-token_t *new_token(token_kind_t kind, source_location_t *loc, int len)
+token_t *new_token(token_kind_t kind, const source_location_t *loc, int len)
 {
     /* Every field is written here, so the allocation does not need zeroing
      * first -- and tokens are the single largest source of allocations in the
@@ -240,12 +240,20 @@ token_t *new_token(token_kind_t kind, source_location_t *loc, int len)
     return token;
 }
 
-token_t *lex_token(strbuf_t *buf, source_location_t *loc)
+/* Skipping a comment or a run of whitespace resumes the scan, and lex_layout()
+ * below does that by starting a fresh token here.
+ */
+token_t *lex_token(strbuf_t *buf, source_location_t *loc);
+
+/* Preprocessor directives, comments, and the whitespace between tokens.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
 {
     token_t *token;
-    char token_buffer[MAX_TOKEN_LEN], ch = peek_char(buf, 0);
-
-    loc->pos = buf->size;
+    char token_buffer[MAX_TOKEN_LEN];
 
     if (ch == '#') {
         /* Inside a macro replacement list '#' stringifies the parameter that
@@ -392,6 +400,19 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         return token;
     }
 
+    return NULL;
+}
+
+/* Integer literals, in every base the language accepts.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+    char token_buffer[MAX_TOKEN_LEN];
+
     if (isdigit(ch)) {
         int sz = 0;
         token_buffer[sz++] = ch;
@@ -479,76 +500,18 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         return token;
     }
 
-    if (ch == '(') {
-        ch = read_char(buf);
-        token = new_token(T_open_bracket, loc, 1);
-        loc->column++;
-        return token;
-    }
+    return NULL;
+}
 
-    if (ch == ')') {
-        ch = read_char(buf);
-        token = new_token(T_close_bracket, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '{') {
-        ch = read_char(buf);
-        token = new_token(T_open_curly, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '}') {
-        ch = read_char(buf);
-        token = new_token(T_close_curly, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '[') {
-        ch = read_char(buf);
-        token = new_token(T_open_square, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ']') {
-        ch = read_char(buf);
-        token = new_token(T_close_square, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ',') {
-        ch = read_char(buf);
-        token = new_token(T_comma, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '^') {
-        ch = read_char(buf);
-
-        if (ch == '=') {
-            ch = read_char(buf);
-            token = new_token(T_xoreq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_bit_xor, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '~') {
-        ch = read_char(buf);
-        token = new_token(T_bit_not, loc, 1);
-        loc->column++;
-        return token;
-    }
+/* String and character literals.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+    char token_buffer[MAX_TOKEN_LEN];
 
     if (ch == '"') {
         int sz = 0;
@@ -613,6 +576,122 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         token = new_token(T_char, loc, sz + 2);
         token->literal = intern_string(token_buffer);
         loc->column += sz + 2;
+        return token;
+    }
+
+    return NULL;
+}
+
+/* Punctuation that is never the start of a longer token.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_punct(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+
+    if (ch == '(') {
+        ch = read_char(buf);
+        token = new_token(T_open_bracket, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ')') {
+        ch = read_char(buf);
+        token = new_token(T_close_bracket, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '{') {
+        ch = read_char(buf);
+        token = new_token(T_open_curly, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '}') {
+        ch = read_char(buf);
+        token = new_token(T_close_curly, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '[') {
+        ch = read_char(buf);
+        token = new_token(T_open_square, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ']') {
+        ch = read_char(buf);
+        token = new_token(T_close_square, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ',') {
+        ch = read_char(buf);
+        token = new_token(T_comma, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '~') {
+        ch = read_char(buf);
+        token = new_token(T_bit_not, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ';') {
+        read_char(buf);
+        token = new_token(T_semicolon, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == '?') {
+        read_char(buf);
+        token = new_token(T_question, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    if (ch == ':') {
+        read_char(buf);
+        token = new_token(T_colon, loc, 1);
+        loc->column++;
+        return token;
+    }
+
+    return NULL;
+}
+
+/* Operators, each of which may or may not continue into a longer one.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_operator(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+
+    if (ch == '^') {
+        ch = read_char(buf);
+
+        if (ch == '=') {
+            ch = read_char(buf);
+            token = new_token(T_xoreq, loc, 2);
+            loc->column += 2;
+            return token;
+        }
+
+        token = new_token(T_bit_xor, loc, 1);
+        loc->column++;
         return token;
     }
 
@@ -831,27 +910,6 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         return token;
     }
 
-    if (ch == ';') {
-        read_char(buf);
-        token = new_token(T_semicolon, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '?') {
-        read_char(buf);
-        token = new_token(T_question, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ':') {
-        read_char(buf);
-        token = new_token(T_colon, loc, 1);
-        loc->column++;
-        return token;
-    }
-
     if (ch == '=') {
         ch = read_char(buf);
 
@@ -867,15 +925,27 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         return token;
     }
 
+    return NULL;
+}
+
+/* Identifiers, and the keywords spelled like them.
+ *
+ * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
+ * the character to the next reader in line.
+ */
+token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
+{
+    token_t *token;
+    char token_buffer[MAX_TOKEN_LEN];
+
     if (isalnum(ch) || ch == '_') {
         int sz = 0;
         do {
-            /* Bounded by the smallest buffer an identifier is ever copied
-             * into, not by the token buffer's own size: lex_ident() and
-             * lex_peek() strcpy into caller arrays of MAX_ID_LEN, so a longer
-             * name would run off the end of one. Diagnosing it here is what
-             * keeps a long identifier in the input from corrupting the
-             * compiler's stack.
+            /* Bounded by the smallest buffer an identifier is ever copied into,
+             * not by the token buffer's own size: lex_ident() and lex_peek()
+             * strcpy into caller arrays of MAX_ID_LEN, so a longer name would
+             * run off the end of one. Diagnosing it here is what keeps a long
+             * identifier in the input from corrupting the compiler's stack.
              */
             if (sz >= MAX_ID_LEN - 1) {
                 loc->len = sz;
@@ -962,10 +1032,10 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
             break;
         }
 
-        /* Fall back to the hashmap for anything the switch does not name.
-         * No keyword is shorter than two characters or longer than eight, so a
-         * name outside that range cannot be one and needs no lookup -- which
-         * is most of the identifiers in a real program.
+        /* Fall back to the hashmap for anything the switch does not name. No
+         * keyword is shorter than two characters or longer than eight, so a
+         * name outside that range cannot be one and needs no lookup -- which is
+         * most of the identifiers in a real program.
          */
         if (kind == T_identifier && sz >= 2 && sz <= 8)
             kind = lookup_keyword(token_buffer);
@@ -975,6 +1045,40 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         loc->column += sz;
         return token;
     }
+
+    return NULL;
+}
+
+/* Reads one token, dispatching on the character it starts with. Each reader
+ * above claims the characters it knows and returns NULL for the rest; the order
+ * of the calls matters only between lex_number() and lex_word(), which would
+ * otherwise both claim a leading digit.
+ */
+token_t *lex_token(strbuf_t *buf, source_location_t *loc)
+{
+    token_t *token;
+    char ch = peek_char(buf, 0);
+
+    loc->pos = buf->size;
+
+    token = lex_layout(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_number(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_literal(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_punct(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_operator(buf, loc, ch);
+    if (token)
+        return token;
+    token = lex_word(buf, loc, ch);
+    if (token)
+        return token;
 
     error_at("Unexpected token", loc);
     return NULL;
@@ -988,10 +1092,10 @@ token_stream_t *gen_file_token_stream(char *filename)
     token_t head;
     token_t *cur = &head;
     token_stream_t *tks;
-    /* initialie source location with the following configuration:
-     * pos is at 0,
-     * len is 1 for reporting convenience,
-     * and the column and line number are set to 1.
+
+    /* initialie source location with the following configuration: pos is at 0,
+     * len is 1 for reporting convenience, and the column and line number are
+     * set to 1.
      */
     source_location_t loc = {0, 1, 1, 1, filename};
     strbuf_t *buf;
@@ -1033,10 +1137,10 @@ token_stream_t *gen_file_token_stream(char *filename)
     return tks;
 }
 
-token_stream_t *gen_libc_token_stream()
+token_stream_t *gen_libc_token_stream(void)
 {
     token_t head;
-    token_t *cur = &head, *tk;
+    token_t *cur = &head, *tk = NULL;
     token_stream_t *tks;
     char *filename = dynlink ? "lib/c.h" : "lib/c.c";
     strbuf_t *buf = LIBC_SRC;
@@ -1051,10 +1155,10 @@ token_stream_t *gen_libc_token_stream()
         hashmap_put(SRC_FILE_MAP, filename, LIBC_SRC);
 
     /* This buffer was built by appending, so its capacity is whatever the
-     * doubling left and runs past the text into memory that was never
-     * written -- while the scan below, like the one over a file, stops at
-     * capacity. Terminate it the way read_file() leaves a file: the text, a
-     * NUL, and capacity naming one past the text. Without this the lexer reads
+     * doubling left and runs past the text into memory that was never written
+     * -- while the scan below, like the one over a file, stops at capacity.
+     * Terminate it the way read_file() leaves a file: the text, a NUL, and
+     * capacity naming one past the text. Without this the lexer reads
      * uninitialised bytes, and what it finds there depends on the allocator,
      * which is enough to make the compiler emit different code from one build
      * to the next.
@@ -1069,9 +1173,8 @@ token_stream_t *gen_libc_token_stream()
     while (buf->size < buf->capacity) {
         tk = lex_token(buf, &loc);
 
-        /* Early break to discard eof token, so later
-         * we can concat libc token stream with actual
-         * input file's token stream.
+        /* Early break to discard eof token, so later we can concat libc token
+         * stream with actual input file's token stream.
          */
         if (tk->kind == T_eof)
             break;
@@ -1080,7 +1183,7 @@ token_stream_t *gen_libc_token_stream()
         cur = cur->next;
     }
 
-    if (!head.next)
+    if (!tk || !head.next)
         fatal("Unable to include libc");
 
     if (tk->kind != T_eof)
@@ -1095,7 +1198,7 @@ token_stream_t *gen_libc_token_stream()
 }
 
 /* Fetches current token's location. */
-source_location_t *cur_token_loc()
+source_location_t *cur_token_loc(void)
 {
     return &cur_token->location;
 }
@@ -1103,7 +1206,7 @@ source_location_t *cur_token_loc()
 /* Finds next token's location; if the current token is eof, returns the eof
  * token's location instead.
  */
-source_location_t *next_token_loc()
+source_location_t *next_token_loc(void)
 {
     if (cur_token->kind == T_eof)
         return &cur_token->location;
@@ -1204,8 +1307,7 @@ void lex_ident(token_kind_t token, char *value)
     error_at("Unexpected token", &tk->location);
 }
 
-/* Strictly match next token with given token type.
- */
+/* Strictly match next token with given token type. */
 void lex_expect(token_kind_t token)
 {
     if (cur_token->next && cur_token->next->kind == token) {

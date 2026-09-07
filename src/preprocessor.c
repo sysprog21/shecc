@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 #include "../config"
 #include "defs.h"
@@ -21,7 +21,7 @@ token_t *pp_lex_skip_space(token_t *tk)
 }
 
 /* Whether @tk is whitespace, a tab or a newline. */
-bool pp_is_layout(token_t *tk)
+bool pp_is_layout(const token_t *tk)
 {
     return tk->kind == T_whitespace || tk->kind == T_newline ||
            tk->kind == T_tab;
@@ -30,7 +30,7 @@ bool pp_is_layout(token_t *tk)
 /* The first token after @tk that is not layout, or NULL at the end. */
 token_t *pp_next_significant(token_t *tk)
 {
-    token_t *before = pp_lex_skip_space(tk);
+    const token_t *before = pp_lex_skip_space(tk);
 
     return before->next;
 }
@@ -65,11 +65,10 @@ token_t *pp_lex_expect_token(token_t *tk, token_kind_t kind, bool skip_space)
 }
 
 /* Copies and isolate the given copied token */
-token_t *copy_token(token_t *tk)
+token_t *copy_token(const token_t *tk)
 {
-    /* The copy overwrites every byte, so zeroing the allocation first would
-     * be wasted work -- and this runs once per token of every macro
-     * expansion.
+    /* The copy overwrites every byte, so zeroing the allocation first would be
+     * wasted work -- and this runs once per token of every macro expansion.
      */
     token_t *new_tk = arena_alloc(TOKEN_ARENA, sizeof(token_t));
     memcpy(new_tk, tk, sizeof(token_t));
@@ -91,7 +90,7 @@ typedef struct macro {
 
 bool is_macro_defined(char *name)
 {
-    macro_t *macro = hashmap_get(MACROS, name);
+    const macro_t *macro = hashmap_get(MACROS, name);
 
     return macro && !macro->is_disabled;
 }
@@ -154,7 +153,7 @@ hide_set_t *hide_set_union(hide_set_t *hs1, hide_set_t *hs2)
     return head.next;
 }
 
-bool hide_set_contains(hide_set_t *hs, char *name)
+bool hide_set_contains(hide_set_t *hs, const char *name)
 {
     for (; hs; hs = hs->next)
         if (!strcmp(hs->name, name))
@@ -165,8 +164,8 @@ bool hide_set_contains(hide_set_t *hs, char *name)
 typedef enum { CK_if_then, CK_elif_then, CK_else_then } cond_kind_t;
 
 /* cond_incl_t is used as a stack-like context to track conditional macro
- * directives' expansion, and gives information to the expansion context
- * to process the token stream with correct behavior.
+ * directives' expansion, and gives information to the expansion context to
+ * process the token stream with correct behavior.
  */
 typedef struct cond_incl {
     struct cond_incl *prev;
@@ -186,13 +185,12 @@ cond_incl_t *push_cond(cond_incl_t *ci, token_t *tk, bool included)
 }
 
 /* preprocess_ctx_t is used to track various inforamtion when expanding token
- * stream, the context state may vary due to the current expanding object,
- * but in general case, it will tries to inherit parent context state if
- * possible.
+ * stream, the context state may vary due to the current expanding object, but
+ * in general case, it will tries to inherit parent context state if possible.
  *
- * Due to the standard that token stream are always ends with EOF token,
- * the default behavior is not to trim EOF token, but if the result requires
- * EOF token to be present, set trim_eof to true would suffice.
+ * Due to the standard that token stream are always ends with EOF token, the
+ * default behavior is not to trim EOF token, but if the result requires EOF
+ * token to be present, set trim_eof to true would suffice.
  */
 typedef struct preprocess_ctx {
     hide_set_t *hide_set;
@@ -365,9 +363,11 @@ token_t *pp_read_constant_expr_operand(token_t *tk, int *val)
                 ctx.macro_args = NULL;
                 ctx.trim_eof = false;
                 expanded_tk = pp_preprocess_internal(macro->replacement, &ctx);
-                tmp = tk->next;
-                tk->next = expanded_tk;
-                ctx.end_of_token->next = tmp;
+                if (expanded_tk) {
+                    tmp = tk->next;
+                    tk->next = expanded_tk;
+                    ctx.end_of_token->next = tmp;
+                }
                 return pp_read_constant_expr_operand(tk, val);
             }
 
@@ -551,8 +551,8 @@ token_t *pp_skip_cond_incl(token_t *tk)
 
 /* Spell an argument's tokens as a string literal, for '#'.
  *
- * T_string literals are stored with their escapes intact and unescaped later
- * by the parser, so a quote or a backslash coming from the argument has to be
+ * T_string literals are stored with their escapes intact and unescaped later by
+ * the parser, so a quote or a backslash coming from the argument has to be
  * escaped again here. Tokens are separated by a single space, with none at
  * either end.
  */
@@ -607,8 +607,8 @@ token_t *pp_stringify(token_t *arg, source_location_t *loc)
 token_t *pp_paste_tokens(token_t *lhs, token_t *rhs, source_location_t *loc)
 {
     char lbuf[MAX_TOKEN_LEN], rbuf[MAX_TOKEN_LEN], joined[MAX_TOKEN_LEN];
-    char *l = token_to_string(lhs, lbuf);
-    char *r = token_to_string(rhs, rbuf);
+    const char *l = token_to_string(lhs, lbuf);
+    const char *r = token_to_string(rhs, rbuf);
 
     if (!l || !r)
         error_at("Operand of '##' cannot be pasted", loc);
@@ -647,18 +647,19 @@ token_t *pp_paste_tokens(token_t *lhs, token_t *rhs, source_location_t *loc)
  *
  * Both operate on an argument as it was written rather than on its expansion,
  * so they cannot wait for the expansion loop: by the time that loop reaches a
- * parameter it has already expanded it. @args is NULL for an object-like
- * macro, which has no parameters to stringify but may still paste.
+ * parameter it has already expanded it. @args is NULL for an object-like macro,
+ * which has no parameters to stringify but may still paste.
  *
  * An argument with no tokens in it is not "no argument": '#' spells it as the
- * empty string, and pasting against it leaves the other operand standing on
- * its own. Membership in @args, rather than a non-empty value, is what makes a
- * name a parameter.
+ * empty string, and pasting against it leaves the other operand standing on its
+ * own. Membership in @args, rather than a non-empty value, is what makes a name
+ * a parameter.
  */
 token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
 {
     token_t head;
     token_t *tail = &head, *tail_prev = NULL;
+
     /* Whether anything at all precedes a '##' here, and whether that something
      * was an argument that turned out to be empty.
      */
@@ -719,9 +720,9 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
                     tail = tail_prev->next;
                 }
 
-                /* Only the first token of a multi-token argument is joined;
-                 * the rest follow it. An argument is a list of its own, so it
-                 * ends where the argument does. A literal operand is not: its
+                /* Only the first token of a multi-token argument is joined; the
+                 * rest follow it. An argument is a list of its own, so it ends
+                 * where the argument does. A literal operand is not: its
                  * successor is the next token of the replacement list, which
                  * the loop below still has to walk, so copying from here would
                  * emit the remainder of the macro body twice.
@@ -744,7 +745,7 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
         /* A parameter the next '##' will join is substituted here, unexpanded
          * -- letting the expansion loop reach it would expand it first.
          */
-        token_t *after = pp_next_significant(tk);
+        const token_t *after = pp_next_significant(tk);
 
         if (args && tk->kind == T_identifier && after &&
             after->kind == T_hashhash && hashmap_contains(args, tk->literal)) {
@@ -786,6 +787,14 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
     token_t *cur = &head;
     cond_incl_t *ci = NULL;
 
+    /* A macro whose replacement list is empty -- "#define NDEBUG", or a
+     * function-like macro that expands to nothing -- produces no tokens at all,
+     * and both of the values returned below have to say so. Without the
+     * initializer the result is whatever the stack held, and end_of_token below
+     * would name this frame, which the caller splices onto after it has died.
+     */
+    head.next = NULL;
+
     while (tk) {
         macro_t *macro = NULL;
 
@@ -795,22 +804,23 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             preprocess_ctx_t expansion_ctx;
 
             /* Initialize expansion context: inherit parent context and enable
-             * EOF trimming for macro body expansion */
+             * EOF trimming for macro body expansion
+             */
             expansion_ctx.expanded_from =
                 ctx->expanded_from ? ctx->expanded_from : tk;
             expansion_ctx.macro_args = ctx->macro_args;
             expansion_ctx.trim_eof = true;
 
-            token_t *macro_arg_replcaement = NULL;
+            token_t *macro_arg_replacement = NULL;
 
-            /* Check if this identifier is a macro parameter (argument)
-             * If we're currently expanding a macro body, parameters should be
-             * replaced with their supplied arguments.
+            /* Check if this identifier is a macro parameter (argument) If we're
+             * currently expanding a macro body, parameters should be replaced
+             * with their supplied arguments.
              *
              * Membership decides this, not a non-empty value: an argument with
-             * no tokens in it still names a parameter, and substituting
-             * nothing for it is what "M(a,)" means. Testing the value would
-             * leave the parameter's own name standing in the output.
+             * no tokens in it still names a parameter, and substituting nothing
+             * for it is what "M(a,)" means. Testing the value would leave the
+             * parameter's own name standing in the output.
              *
              * '#' and '##' were already resolved by pp_subst_hash(), which had
              * to run before this expansion could reach their operands.
@@ -819,22 +829,23 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 ctx->macro_args &&
                 hashmap_contains(ctx->macro_args, tk->literal);
 
-            if (is_macro_param)
-                macro_arg_replcaement =
-                    hashmap_get(ctx->macro_args, tk->literal);
-
             if (is_macro_param) {
-                if (macro_arg_replcaement) {
+                macro_arg_replacement =
+                    hashmap_get(ctx->macro_args, tk->literal);
+                if (macro_arg_replacement) {
                     /* Recursively expand the argument to handle nested macros
                      */
                     expansion_ctx.hide_set = ctx->hide_set;
                     expansion_ctx.macro_args =
                         NULL; /* Don't take account of macro arguments, this
-                                 might run into infinite loop */
-                    macro_arg_replcaement = pp_preprocess_internal(
-                        macro_arg_replcaement, &expansion_ctx);
-                    cur->next = macro_arg_replcaement;
-                    cur = expansion_ctx.end_of_token;
+                                 might run into infinite loop
+                                 */
+                    macro_arg_replacement = pp_preprocess_internal(
+                        macro_arg_replacement, &expansion_ctx);
+                    if (macro_arg_replacement) {
+                        cur->next = macro_arg_replacement;
+                        cur = expansion_ctx.end_of_token;
+                    }
                 }
                 tk = pp_lex_next_token(tk, false);
                 continue;
@@ -851,8 +862,9 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             if (!macro || macro->is_disabled)
                 break;
 
-            /* Handle built-in function-like macros (__FILE__, __LINE__)
-             * These have special handlers that generate tokens directly */
+            /* Handle built-in function-like macros (__FILE__, __LINE__) These
+             * have special handlers that generate tokens directly
+             */
             if (macro->handler) {
                 cur->next = macro->handler(expansion_ctx.expanded_from);
                 cur = cur->next;
@@ -874,7 +886,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 arg_head.next = NULL;
 
                 /* Add macro name to hide set to prevent re-expansion of itself
-                 * during its own body expansion */
+                 * during its own body expansion
+                 */
                 expansion_ctx.hide_set =
                     hide_set_union(ctx->hide_set, new_hide_set(tk->literal));
                 /* Create parameter mapping table for this macro invocation */
@@ -885,7 +898,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 /* Parse macro arguments until closing parenthesis
                  *
                  * Handles nested parentheses and comma-separated argument list
-                 * by tracking the nested depth */
+                 * by tracking the nested depth
+                 */
                 while (true) {
                     if (pp_lex_peek_token(tk, T_open_bracket, false))
                         bracket_depth++;
@@ -910,8 +924,10 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                             arg_tk = pp_preprocess_internal(arg_tk,
                                                             &arg_expansion_ctx);
                             tk = pp_lex_next_token(tk, false);
-                            arg_cur->next = arg_tk;
-                            arg_cur = arg_expansion_ctx.end_of_token;
+                            if (arg_tk) {
+                                arg_cur->next = arg_tk;
+                                arg_cur = arg_expansion_ctx.end_of_token;
+                            }
                             continue;
                         }
                     }
@@ -953,7 +969,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                             if (hashmap_contains(expansion_ctx.macro_args,
                                                  param_tk->literal)) {
                                 /* Append to existing variadic args with comma
-                                 * separator to preserve argument boundaries */
+                                 * separator to preserve argument boundaries
+                                 */
                                 token_t *prev =
                                     hashmap_get(expansion_ctx.macro_args,
                                                 param_tk->literal);
@@ -997,23 +1014,31 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                     error_at("Too few arguments supplied to macro invocation",
                              &macro_tk->location);
 
-                /* Expand macro body with collected arguments
-                 * Replace parameter references with supplied argument tokens */
-                cur->next = pp_preprocess_internal(
+                /* Expand macro body with collected arguments Replace parameter
+                 * references with supplied argument tokens
+                 */
+                token_t *expanded = pp_preprocess_internal(
                     pp_subst_hash(macro->replacement, expansion_ctx.macro_args),
                     &expansion_ctx);
-                cur = expansion_ctx.end_of_token;
+                if (expanded) {
+                    cur->next = expanded;
+                    cur = expansion_ctx.end_of_token;
+                }
 
                 hashmap_free(expansion_ctx.macro_args);
             } else {
-                /* Handle object-like macro expansion (no parameters)
-                 * Simply expand the replacement with current hide set plus
-                 * this macro name added to prevent re-expansion */
+                /* Handle object-like macro expansion (no parameters) Simply
+                 * expand the replacement with current hide set plus this macro
+                 * name added to prevent re-expansion
+                 */
                 expansion_ctx.hide_set =
                     hide_set_union(ctx->hide_set, new_hide_set(tk->literal));
-                cur->next = pp_preprocess_internal(
+                token_t *expanded = pp_preprocess_internal(
                     pp_subst_hash(macro->replacement, NULL), &expansion_ctx);
-                cur = expansion_ctx.end_of_token;
+                if (expanded) {
+                    cur->next = expanded;
+                    cur = expansion_ctx.end_of_token;
+                }
             }
 
             tk = pp_lex_next_token(tk, false);
@@ -1021,9 +1046,9 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
         }
         case T_hash:
         case T_hashhash:
-            /* Every '#' a macro body owns is resolved by pp_subst_hash()
-             * before that body is rescanned, so one arriving here is loose in
-             * ordinary code.
+            /* Every '#' a macro body owns is resolved by pp_subst_hash() before
+             * that body is rescanned, so one arriving here is loose in ordinary
+             * code.
              */
             error_at("'#' is only meaningful inside a macro definition",
                      &tk->location);
@@ -1068,8 +1093,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 tk = pp_lex_expect_token(tk, T_lt, true);
 
                 /* The path is ignored (see the FIXME below), so just consume
-                 * it. Stopping at a newline too keeps an unterminated
-                 * "#include <foo" from eating the rest of the file.
+                 * it. Stopping at a newline too keeps an unterminated "#include
+                 * <foo" from eating the rest of the file.
                  */
                 while (!pp_lex_peek_token(tk, T_gt, false)) {
                     if (pp_lex_peek_token(tk, T_newline, false) ||
@@ -1079,8 +1104,9 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 }
 
                 tk = pp_lex_next_token(tk, false);
-                /* FIXME: We ignore #include <...> at this moment, since
-                 * all libc functions are included done by inlining.
+
+                /* FIXME: We ignore #include <...> at this moment, since all
+                 * libc functions are included done by inlining.
                  */
                 tk = pp_lex_expect_token(tk, T_newline, true);
                 tk = pp_lex_next_token(tk, false);
@@ -1094,8 +1120,12 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 continue;
 
             file_tks = gen_file_token_stream(intern_string(inclusion_path));
-            cur->next = pp_preprocess_internal(file_tks->head, &inclusion_ctx);
-            cur = inclusion_ctx.end_of_token;
+            token_t *included =
+                pp_preprocess_internal(file_tks->head, &inclusion_ctx);
+            if (included) {
+                cur->next = included;
+                cur = inclusion_ctx.end_of_token;
+            }
             continue;
         }
         case T_cppd_define: {
@@ -1299,20 +1329,24 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
     if (ci)
         error_at("Unterminated conditional directive", &ci->tk->location);
 
-    ctx->end_of_token = cur;
+    /* NULL rather than '&head' when nothing was produced: the caller must skip
+     * the splice entirely, and a stale read should fault rather than corrupt
+     * the token list it is building.
+     */
+    ctx->end_of_token = cur == &head ? NULL : cur;
     return head.next;
 }
 
-/* Drop the whitespace, tab and newline tokens from a fully preprocessed
- * stream, on the way into the parser.
+/* Drop the whitespace, tab and newline tokens from a fully preprocessed stream,
+ * on the way into the parser.
  *
- * They carry no meaning to the parser, which never names those kinds, and
- * every token is created before this runs, so once they are gone the parser
- * never meets one again. That is what let the skip-over-layout walk in front
- * of each token access -- more than a million iterations over a self-compile
- * -- be removed outright. Preprocessed output (-E) still needs them to
- * separate one token from the next, so the stripping belongs here and not in
- * preprocess() itself.
+ * They carry no meaning to the parser, which never names those kinds, and every
+ * token is created before this runs, so once they are gone the parser never
+ * meets one again. That is what let the skip-over-layout walk in front of each
+ * token access -- more than a million iterations over a self-compile -- be
+ * removed outright. Preprocessed output (-E) still needs them to separate one
+ * token from the next, so the stripping belongs here and not in preprocess()
+ * itself.
  */
 token_t *pp_strip_layout(token_t *tk)
 {
@@ -1373,9 +1407,9 @@ token_t *preprocess(token_t *tk)
     macro->replacement->literal = "1";
     hashmap_put(MACROS, "__SHECC__", macro);
 
-    /* Tells the source being compiled that the embedded libc is not part of
-     * the output, so the functions lib/c.c would have supplied -- '__syscall'
-     * above all -- are unavailable and libc resolves through the PLT instead.
+    /* Tells the source being compiled that the embedded libc is not part of the
+     * output, so the functions lib/c.c would have supplied -- '__syscall' above
+     * all -- are unavailable and libc resolves through the PLT instead.
      */
     if (dynlink) {
         macro = calloc(1, sizeof(macro_t));
@@ -1578,7 +1612,6 @@ char *token_to_string(token_t *tk, char *dest)
         break;
     default:
         error_at("Unknown token kind", &tk->location);
-        printf("UNKNOWN_TOKEN");
         break;
     }
 

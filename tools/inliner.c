@@ -1,18 +1,18 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 /* inliner - inline libc source into C file.
  *
- * The inliner is used at build-time, and developers can use the
- * "inline C" feature to implement target-specific parts such as
- * C runtime and essential libraries.
+ * The inliner is used at build-time, and developers can use the "inline C"
+ * feature to implement target-specific parts such as C runtime and essential
+ * libraries.
  *
- * Note: Input files are preprocessed by norm-lf tool to ensure
- * consistent LF (Unix) line endings before processing.
+ * Note: Input files are preprocessed by norm-lf tool to ensure consistent LF
+ * (Unix) line endings before processing.
  */
 
 #include <stdbool.h>
@@ -182,11 +182,11 @@ int main(int argc, char *argv[])
     write_str("    strbuf_puts(LIBC_SRC, src);\n");
     write_str("}\n");
 
-    write_str("void libc_impl() {\n");
+    write_str("void libc_impl(void) {\n");
     load_from(argv[1]);
     write_str("}\n");
 
-    write_str("void libc_decl() {\n");
+    write_str("void libc_decl(void) {\n");
     load_from(argv[2]);
     write_str("}\n");
 

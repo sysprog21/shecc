@@ -1,8 +1,8 @@
 /*
  * shecc - Self-Hosting and Educational C Compiler.
  *
- * shecc is freely redistributable under the BSD 2 clause license. See the
- * file "LICENSE" for information on usage and redistribution of this file.
+ * shecc is freely redistributable under the BSD 2 clause license. See the file
+ * "LICENSE" for information on usage and redistribution of this file.
  */
 
 /* ELF file manipulation */
@@ -21,8 +21,8 @@ void elf_write_str(strbuf_t *elf_array, const char *vals)
 {
     /* Note that strbuf_puts() does not push the null character.
      *
-     * If necessary, use elf_write_byte() to append the null character
-     * after calling elf_write_str().
+     * If necessary, use elf_write_byte() to append the null character after
+     * calling elf_write_str().
      */
     if (!elf_array || !vals)
         return;
@@ -72,15 +72,15 @@ void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
 {
     if (!elf_array || !blk || sz <= 0)
         return;
-    char *ptr = blk;
+    const char *ptr = blk;
     for (int i = 0; i < sz; i++)
         strbuf_putc(elf_array, ptr[i]);
 }
 
-/* The dynamic-linking tables differ only in width between the two ELF
- * classes, so the generator below writes them through these helpers rather
- * than memcpy-ing a struct: shecc has no 64-bit integer type, so an ELF64
- * entry cannot be expressed as a C struct here at all.
+/* The dynamic-linking tables differ only in width between the two ELF classes,
+ * so the generator below writes them through these helpers rather than
+ * memcpy-ing a struct: shecc has no 64-bit integer type, so an ELF64 entry
+ * cannot be expressed as a C struct here at all.
  */
 
 int elf_sym_size(void)
@@ -140,6 +140,7 @@ void elf_write_jmprel(strbuf_t *buf, int offset, int sym_idx)
 {
 #if ELF_IS_64 == 1
     elf_write_quad(buf, offset);
+
     /* r_info is (symbol << 32) | type, so the two halves are written in
      * little-endian order as type followed by symbol index.
      */
@@ -165,8 +166,8 @@ void elf_write_got_slot(strbuf_t *buf, int val)
 }
 
 /* Place the dynamic sections. Every start is derived from the end of .rodata,
- * so a backend whose final code size is only known after emission can call
- * this again once it is.
+ * so a backend whose final code size is only known after emission can call this
+ * again once it is.
  */
 void elf_layout_dynamic(void)
 {
@@ -184,8 +185,8 @@ void elf_layout_dynamic(void)
     dynamic_sections.elf_plt_start = ro_end + relplt_bytes;
 
     /* .interp opens the second load segment, so start it a page clear of the
-     * first: the two must not share a page, and the offset must stay
-     * congruent to the address modulo the page size.
+     * first: the two must not share a page, and the offset must stay congruent
+     * to the address modulo the page size.
      */
     dynamic_sections.elf_interp_start =
         dynamic_sections.elf_plt_start + dynamic_sections.plt_size + PAGESIZE;
@@ -285,8 +286,9 @@ void elf_generate_header(void)
                 elf_rodata->size + elf_symtab->size + elf_strtab->size +
                 elf_shstrtab->size;
     }
-    /* The following table explains the meaning of each field in the
-     * ELF32 file header.
+
+    /* The following table explains the meaning of each field in the ELF32 file
+     * header.
      *
      * Notice that the following values are hexadecimal.
      *
@@ -366,7 +368,7 @@ void elf_generate_header(void)
 
 void elf_generate_program_headers(void)
 {
-    strbuf_t *elf_relplt = elf_relplt_buf();
+    const strbuf_t *elf_relplt = elf_relplt_buf();
     if (!elf_program_header || !elf_code || !elf_data || !elf_rodata ||
         (dynlink &&
          (!dynamic_sections.elf_interp || !elf_relplt ||
@@ -379,8 +381,7 @@ void elf_generate_program_headers(void)
 
 #if ELF_IS_64 == 1
     /* Two ELF64 PT_LOAD segments, 56 bytes each. Field order differs from
-     * ELF32: p_flags sits immediately after p_type rather than before
-     * p_align.
+     * ELF32: p_flags sits immediately after p_type rather than before p_align.
      */
     int ro_size = elf_header_len + elf_code->size + elf_rodata->size;
     if (dynlink)
@@ -399,9 +400,9 @@ void elf_generate_program_headers(void)
     /* read-write segment. Statically linked it holds .data (plus .bss, which
      * occupies no file space) and starts at the next page boundary so that
      * p_vaddr === p_offset (mod p_align), which the kernel enforces.
-     * Dynamically linked it begins at .interp and covers everything the
-     * loader needs, which elf_preprocess() has already placed a page clear of
-     * the read-only segment.
+     * Dynamically linked it begins at .interp and covers everything the loader
+     * needs, which elf_preprocess() has already placed a page clear of the
+     * read-only segment.
      */
     int data_file_ofs = ALIGN_UP(ro_size, PAGESIZE);
     int rw_vaddr = elf_data_start;
@@ -566,14 +567,14 @@ void elf_generate_program_headers(void)
 void elf_generate_section_headers(void)
 {
 #if ELF_IS_64 == 0
-    /* x86-64 output carries no section headers; the program headers alone
-     * are sufficient to load and run the image. The body below is therefore
-     * compiled out entirely for that target -- leaving it after an early
-     * return would make it unreachable code, which shecc's own parser
-     * rejects when it compiles this file.
+    /* x86-64 output carries no section headers; the program headers alone are
+     * sufficient to load and run the image. The body below is therefore
+     * compiled out entirely for that target -- leaving it after an early return
+     * would make it unreachable code, which shecc's own parser rejects when it
+     * compiles this file.
      */
 
-    strbuf_t *elf_relplt = elf_relplt_buf();
+    const strbuf_t *elf_relplt = elf_relplt_buf();
     /* Check for null pointers to prevent crashes */
     if (!elf_section_header || !elf_code || !elf_data || !elf_rodata ||
         !elf_symtab || !elf_strtab || !elf_shstrtab ||
@@ -590,9 +591,8 @@ void elf_generate_section_headers(void)
     elf32_shdr_t shdr;
     int ofs = elf_header_len, sh_name = 0;
 
-    /*
-     * The following table uses the text section header as an example
-     * to explain the ELF32 section header.
+    /* The following table uses the text section header as an example to explain
+     * the ELF32 section header.
      *
      *    |  Section       |                                                 |
      *  & |  Header bytes  | Explanation                                     |
@@ -882,8 +882,8 @@ void elf_align_to(strbuf_t *elf_array, int boundary)
         elf_write_byte(elf_array, 0);
 }
 
-/* Pad to a four-byte boundary, which is what the sections holding words want.
- * A section whose contents are read as pointers wants elf_align_to(PTR_SIZE)
+/* Pad to a four-byte boundary, which is what the sections holding words want. A
+ * section whose contents are read as pointers wants elf_align_to(PTR_SIZE)
  * instead: on a 64-bit target four bytes is not enough.
  */
 void elf_align(strbuf_t *elf_array)
@@ -901,9 +901,8 @@ void elf_generate_dynamic_sections(void)
 {
     strbuf_t *elf_relplt = elf_relplt_buf();
 
-    /* In dynamic linking mode, elf_generate_sections() also generates
-     * .interp, .dynsym, .dynstr, .rel.plt (.rela.plt), .got and dynamic
-     * sections.
+    /* In dynamic linking mode, elf_generate_sections() also generates .interp,
+     * .dynsym, .dynstr, .rel.plt (.rela.plt), .got and dynamic sections.
      *
      * .plt section is generated at the code generation phase.
      */
@@ -913,8 +912,9 @@ void elf_generate_dynamic_sections(void)
     /* .interp section */
     elf_write_str(dynamic_sections.elf_interp, DYN_LINKER);
     elf_write_byte(dynamic_sections.elf_interp, 0);
-    /* .got follows .interp and the loader writes pointers into it, so pad
-     * to a pointer boundary rather than the usual four bytes.
+
+    /* .got follows .interp and the loader writes pointers into it, so pad to a
+     * pointer boundary rather than the usual four bytes.
      */
     elf_align_to(dynamic_sections.elf_interp, PTR_SIZE);
 
@@ -936,8 +936,8 @@ void elf_generate_dynamic_sections(void)
      * - Append the external function name to .dynstr section.
      * - Set plt_offset for the external function.
      *
-     * Since __libc_start_main is not added to the function list,
-     * it must be handled additionally first.
+     * Since __libc_start_main is not added to the function list, it must be
+     * handled additionally first.
      */
     rel_offset = dynamic_sections.elf_got_start + PTR_SIZE * RESERVED_GOT_NUM;
     elf_write_jmprel(elf_relplt, rel_offset, dymsym_idx);
@@ -951,17 +951,18 @@ void elf_generate_dynamic_sections(void)
     elf_write_byte(dynamic_sections.elf_dynstr, 0);
     st_name += strlen("__libc_start_main") + 1;
 
-    /* Because PLT[1] is reserved for __libc_start_main, its plt_offset
-     * must be PLT_FIXUP_SIZE. Therefore, no offset assignment is
-     * required for this function.
+    /* Because PLT[1] is reserved for __libc_start_main, its plt_offset must be
+     * PLT_FIXUP_SIZE. Therefore, no offset assignment is required for this
+     * function.
      */
 
     func_plt_ofs = PLT_FIXUP_SIZE + PLT_ENT_SIZE;
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         if (!func->is_used || func->bbs)
             continue;
-        /* If the function is used and has no basic block,
-         * consider it to be an external function.
+
+        /* If the function is used and has no basic block, consider it to be an
+         * external function.
          */
         rel_offset += PTR_SIZE;
         elf_write_jmprel(elf_relplt, rel_offset, dymsym_idx);
@@ -978,6 +979,7 @@ void elf_generate_dynamic_sections(void)
 
         func_plt_ofs += PLT_ENT_SIZE;
     }
+
     /* .dynsym begins where .dynstr ends, and its entries are read as aligned
      * words: 24 bytes each under ELF64, which wants 8. Four-byte alignment
      * would leave a string table ending 4 bytes off an 8-byte boundary, and
@@ -1002,9 +1004,8 @@ void elf_generate_dynamic_sections(void)
     switch (ELF_MACHINE) {
     case ELF_MACHINE_ARM32:
     case ELF_MACHINE_X86_64:
-        /* GOT[0] holds the address of .dynamic. The GOT is still being
-         * built, so its final size comes from got_size rather than the
-         * buffer.
+        /* GOT[0] holds the address of .dynamic. The GOT is still being built,
+         * so its final size comes from got_size rather than the buffer.
          */
         elf_write_got_slot(dynamic_sections.elf_got,
                            dynamic_sections.elf_got_start +
@@ -1024,9 +1025,10 @@ void elf_generate_dynamic_sections(void)
          i += PTR_SIZE) {
         int slot = dynamic_sections.elf_plt_start;
         if (ELF_MACHINE == ELF_MACHINE_X86_64)
+
             /* x86-64 reaches the resolver through the push in its own PLT
-             * entry, which supplies the relocation index, rather than
-             * jumping straight to PLT[0].
+             * entry, which supplies the relocation index, rather than jumping
+             * straight to PLT[0].
              */
             slot = dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE +
                    got_idx * PLT_ENT_SIZE + 6;
@@ -1073,8 +1075,8 @@ void elf_generate_dynamic_sections(void)
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, 0x1);
 #if DYN_BIND_NOW == 1
     /* Resolve every PLT entry at load time. This target's PLT[0] does not
-     * arrange the GOT[1]/GOT[2] hand-off the lazy resolver needs, so the
-     * loader writes the final addresses straight into the GOT instead.
+     * arrange the GOT[1]/GOT[2] hand-off the lazy resolver needs, so the loader
+     * writes the final addresses straight into the GOT instead.
      */
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x18, 0x0); /* DT_BIND_NOW */
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x1e, 0x8); /* DF_BIND_NOW */
@@ -1097,7 +1099,7 @@ void elf_reset_dynamic_sections(void)
 
 void elf_generate_sections(void)
 {
-    strbuf_t *elf_relplt = elf_relplt_buf();
+    const strbuf_t *elf_relplt = elf_relplt_buf();
     if (!elf_shstrtab ||
         (dynlink &&
          (!dynamic_sections.elf_interp || !elf_relplt ||
@@ -1111,9 +1113,7 @@ void elf_generate_sections(void)
     if (dynlink)
         elf_generate_dynamic_sections();
 
-    /* shstr section; len = 53
-     * If using dynamic linking, len = 105.
-     */
+    /* shstr section; len = 53 If using dynamic linking, len = 105. */
     elf_write_byte(elf_shstrtab, 0);
     elf_write_str(elf_shstrtab, ".text");
     elf_write_byte(elf_shstrtab, 0);
@@ -1203,8 +1203,8 @@ void elf_preprocess(void)
          *   - Common:
          *     - The remaining entries correspond to all external functions.
          *
-         * Next, consider the case of __libc_start_main before initializing
-         * the sizes:
+         * Next, consider the case of __libc_start_main before initializing the
+         * sizes:
          * - .rel.plt (.rela.plt) has the one entry for __libc_start_main.
          * - .plt includes one fixup entry plus one entry for __libc_start_main.
          * - .got has RESERVED_GOT_NUM + 1 entries.
@@ -1240,9 +1240,9 @@ void elf_preprocess(void)
         elf_data_start =
             elf_dynamic_start() + dynamic_sections.elf_dynamic->size;
     } else {
-        /* To prevent two load segments from sharing a common page, add
-         * PAGESIZE to elf_data_start, since the first section of the second
-         * load segment is .data in static linking mode.
+        /* To prevent two load segments from sharing a common page, add PAGESIZE
+         * to elf_data_start, since the first section of the second load segment
+         * is .data in static linking mode.
          */
         elf_data_start = elf_rodata_start + elf_rodata->size + PAGESIZE;
     }
@@ -1262,8 +1262,8 @@ void elf_postprocess(void)
  *
  * The image was written a byte at a time through fputc(), which costs a call
  * into the C library for every one of the several hundred thousand bytes of a
- * self-compile -- and, once shecc is compiled by itself, a write(2) for each
- * of them, because its own libc has no buffer behind fputc().
+ * self-compile -- and, once shecc is compiled by itself, a write(2) for each of
+ * them, because its own libc has no buffer behind fputc().
  *
  * That reasoning holds only where lib/c.c is the libc in the output. A host
  * compiler's runtime already buffers fwrite(), and so does the one a
@@ -1271,13 +1271,13 @@ void elf_postprocess(void)
  * '__syscall' to call, since it is synthesized only for static linking.
  */
 #ifdef HOST_BUFFERED_STDIO
-void elf_write_all(FILE *fp, char *buf, int len)
+void elf_write_all(FILE *fp, const char *buf, int len)
 {
     if (len > 0)
         fwrite(buf, 1, len, fp);
 }
 #else
-void elf_write_all(FILE *fp, char *buf, int len)
+void elf_write_all(FILE *fp, const char *buf, int len)
 {
     int off = 0;
 
@@ -1354,8 +1354,8 @@ void elf_generate(const char *outfile)
 
     /* Other sections and section headers.
      *
-     * ELF64 output emits no section headers, so the symbol and string
-     * tables have nothing to reference and are left out of the image.
+     * ELF64 output emits no section headers, so the symbol and string tables
+     * have nothing to reference and are left out of the image.
      */
 #if ELF_IS_64 == 0
     elf_write_all(fp, elf_symtab->elements, elf_symtab->size);

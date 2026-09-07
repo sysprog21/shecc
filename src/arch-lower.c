@@ -10,11 +10,11 @@
 #include "../config"
 #include "defs.h"
 
-/* Mark detached conditional branches so codegen can decide between
- * short/long forms without re-deriving CFG shape.
+/* Mark detached conditional branches so codegen can decide between short/long
+ * forms without re-deriving CFG shape.
  *
- * Only the ARM backend reads 'is_branch_detached'; RISC-V and x86-64 ignore
- * it, so the pass runs for ARM alone.
+ * Only the ARM backend reads 'is_branch_detached'; RISC-V and x86-64 ignore it,
+ * so the pass runs for ARM alone.
  */
 void arch_lower(void)
 {

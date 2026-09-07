@@ -1607,6 +1607,1299 @@ bool emit_mul_by_const(int rd, int rs1, int c)
     return false;
 }
 
+/* An OP_jump whose target is a single instruction emits that instruction in
+ * place, so the family emitters below reach back into the dispatcher.
+ */
+void emit_ph2_ir(ph2_ir_t *ph2_ir);
+
+/* Integer arithmetic. */
+void emit_arith(ph2_ir_t *ph2_ir,
+                int rd,
+                int rs1,
+                int rs2,
+                bool src1_const_known,
+                int src1_const)
+{
+    switch (ph2_ir->op) {
+    case OP_add: {
+        /* A tracked literal becomes an immediate, which also makes the
+         * instruction that materialised it dead.
+         */
+        if (src1_const_known) {
+            /* If the only consumer is the load right after, that load can carry
+             * the displacement and this address never needs a register. The
+             * memory operand picks a byte or a doubleword displacement for
+             * itself, so the constant does not have to be a small one.
+             */
+            if (!addr_fold && emit_next_ir &&
+                (emit_next_ir->op == OP_read || emit_next_ir->op == OP_write) &&
+                emit_next_ir->src0 == ph2_ir->dest &&
+                emit_next_ir->src1 != ph2_ir->dest && reg_low3(rs1) != 4 &&
+                reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
+                addr_fold = true;
+                addr_fold_base = rs1;
+                addr_fold_disp = src1_const;
+                return;
+            }
+            if (rd != rs1 && emit_lea_disp(rd, rs1, src1_const))
+                return;
+            emit_mov_reg(rd, rs1);
+            emit_alu_imm(rd, 0, src1_const); /* ADD rd, imm */
+            return;
+        }
+        if (try_fold_sib_add(ph2_ir, rs1, rs2))
+            return;
+
+        /* x64 only has 2-operand ADD, so for rd = rs1 + rs2: MOV rd, rs1 ADD
+         * rd, rs2
+         *
+         * Special case: if rd == rs2, then MOV rd, rs1 would overwrite rs2 In
+         * this case, use: ADD rs2, rs1 (which is commutative for addition)
+         */
+        if (rd == rs2 && rd != rs1) {
+            /* ADD rd, rs1 (since addition is commutative) */
+            emit_rex(1, rs1, rd);
+            emit_byte(0x01);
+            int reg_rs1 = reg_low3(rs1);
+            int reg_rd = reg_low3(rd);
+            emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
+        } else if (rd != rs1 && rd != rs2 && emit_lea_sum(rd, rs1, rs2)) {
+            /* Three distinct registers: one LEA replaces MOV plus ADD. */
+        } else {
+            /* Normal case: MOV rd, rs1; ADD rd, rs2 */
+            emit_mov_reg(rd, rs1);
+            /* ADD rd, rs2 */
+            emit_rex(1, rs2, rd);
+            emit_byte(0x01);
+            int reg_rs2 = reg_low3(rs2);
+            int reg_rd2 = reg_low3(rd);
+            emit_byte(modrm(MOD_DIRECT, reg_rs2, reg_rd2));
+        }
+        return;
+    }
+
+    case OP_sub: {
+        /* A tracked literal becomes an immediate, which also makes the
+         * instruction that materialised it dead.
+         */
+        if (src1_const_known) {
+            if (rd != rs1 && emit_lea_disp(rd, rs1, -src1_const))
+                return;
+            emit_mov_reg(rd, rs1);
+            emit_alu_imm(rd, 5, src1_const); /* SUB rd, imm */
+            return;
+        }
+
+        /* rd = rs1 - rs2.
+         *
+         * The staging below is only needed when rd and rs2 are the same
+         * register, where "MOV rd, rs1" would destroy the subtrahend before it
+         * is read. Every other case subtracts in place.
+         */
+        if (rd != rs2) {
+            emit_mov_reg(rd, rs1);
+            emit_rex(1, rs2, rd); /* SUB rd, rs2 */
+            emit_byte(0x29);
+            emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), reg_low3(rd)));
+            return;
+        }
+
+        /* rd == rs2: stage through R11, which reg_map never hands out, so any
+         * aliasing is harmless. MOV r11, rs1
+         */
+        emit_rex(1, rs1, 11);
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
+        /* SUB r11, rs2 */
+        emit_rex(1, rs2, 11);
+        emit_byte(0x29);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
+        /* MOV rd, r11 */
+        emit_rex(1, 11, rd);
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
+        return;
+    }
+    case OP_mul: {
+        /* rd = rs1 * rs2, then truncated to int width.
+         *
+         * shecc's int is 32 bits, and code such as the FNV-1a hash in
+         * hashmap_hash_index() depends on multiplication wrapping at 32 bits.
+         * This backend keeps values in 64-bit registers, so the product must be
+         * narrowed explicitly with MOVSXD; without it the value keeps growing
+         * and later comparisons against INT_MAX take the wrong branch. Pointers
+         * are never multiplied, and pointer scaling (index * element size) is
+         * far inside 32 bits, so narrowing here is safe.
+         */
+        if (src1_const_known && emit_mul_by_const(rd, rs1, src1_const)) {
+            /* nothing further: the product is already in rd */
+        } else if (src1_const_known) {
+            /* The three-operand IMUL takes the multiplier as an immediate and
+             * writes a different register, so neither the literal nor the MOV
+             * that would stage it needs an instruction.
+             */
+            emit_rex(1, rd, rs1);
+            if (src1_const >= -128 && src1_const <= 127) {
+                emit_byte(0x6B); /* IMUL rd, rs1, imm8 */
+                emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
+                emit_byte(src1_const);
+            } else {
+                emit_byte(0x69); /* IMUL rd, rs1, imm32 */
+                emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
+                emit_dword(src1_const);
+            }
+        } else if (rd == rs2 && rd != rs1) {
+            /* IMUL is commutative, so multiply by rs1 in place. */
+            emit_rex(1, rd, rs1);
+            emit_byte(0x0F);
+            emit_byte(0xAF);
+            emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
+        } else {
+            emit_mov_reg(rd, rs1);
+            emit_rex(1, rd, rs2);
+            emit_byte(0x0F);
+            emit_byte(0xAF);
+            emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs2)));
+        }
+        if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+            wrap_to_int(rd, ph2_ir->is_pointer);
+        return;
+    }
+    case OP_div:
+    case OP_mod: {
+        /* Signed division. IDIV forces the dividend into RDX:RAX and returns
+         * the quotient in RAX and remainder in RDX. Both are allocatable
+         * registers here (reg_map[6] and reg_map[2]) and the allocator does not
+         * know they are clobbered, so save and restore them around the
+         * sequence. R10 and R11 are outside reg_map and can stage values; RDX
+         * goes on the stack rather than into a third scratch, because every
+         * register that once served as one has since joined the file and
+         * staging RDX there destroyed a dividend pinned to it.
+         */
+        emit_byte(REX_W | REX_B); /* MOV r10, rax  (save) */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 0, 2));
+        emit_push_reg(2);     /* PUSH rdx  (save) */
+        emit_rex(1, rs2, 11); /* MOV r11, rs2 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
+        emit_rex(1, rs1, -1); /* MOV rax, rs1 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 0));
+        emit_byte(REX_W); /* CQO */
+        emit_byte(0x99);
+        emit_byte(REX_W | REX_B); /* IDIV r11 */
+        emit_byte(0xF7);
+        emit_byte(modrm(MOD_DIRECT, 7, 3));
+
+        /* Capture the result into R11 before restoring RAX/RDX, so rd may
+         * itself be RAX or RDX.
+         */
+        emit_byte(REX_W | REX_B); /* MOV r11, rax | rdx */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, ph2_ir->op == OP_div ? 0 : 2, 3));
+        emit_byte(REX_W | REX_R); /* MOV rax, r10  (restore) */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 2, 0));
+        emit_pop_reg(2);     /* POP rdx  (restore) */
+        emit_rex(1, 11, rd); /* MOV rd, r11 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
+        return;
+    }
+    default:
+        break;
+    }
+}
+
+/* Bitwise operations and shifts. */
+void emit_bitwise(ph2_ir_t *ph2_ir,
+                  int rd,
+                  int rs1,
+                  int rs2,
+                  bool src1_const_known,
+                  int src1_const)
+{
+    switch (ph2_ir->op) {
+    case OP_bit_and:
+    case OP_bit_or:
+    case OP_bit_xor: {
+        /* The three bitwise operations differ only in the immediate group's
+         * opcode extension and the r/m opcode byte, which alu_ext_for() and
+         * alu_mem_opcode() already supply; all three are commutative.
+         */
+        int ext = alu_ext_for(ph2_ir->op);
+
+        /* A tracked literal becomes an immediate, which also makes the
+         * instruction that materialised it dead.
+         */
+        if (src1_const_known) {
+            emit_mov_reg(rd, rs1);
+            emit_alu_imm(rd, ext, src1_const);
+            return;
+        }
+
+        /* Two-operand form: "rd = rs1 OP rs2" is MOV rd, rs1 followed by OP rd,
+         * rs2. When rd already names rs2, commutativity lets the MOV go and rs1
+         * becomes the source instead.
+         */
+        int src = rs2;
+        if (rd == rs2 && rd != rs1)
+            src = rs1;
+        else
+            emit_mov_reg(rd, rs1);
+        emit_rex(1, src, rd);
+        emit_byte(alu_mem_opcode(ext));
+        emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(rd)));
+        return;
+    }
+
+    case OP_bit_not:
+        /* rd = NOT rs1. Copy first: rd and rs1 differ whenever the operand is
+         * not already in the destination register.
+         */
+        emit_mov_reg(rd, rs1);
+        emit_rex(1, -1, rd);
+        emit_byte(0xF7);
+        emit_byte(modrm(MOD_DIRECT, 2, reg_low3(rd)));
+        return;
+
+    case OP_negate:
+        /* rd = NEG rs1. Copy first: rd and rs1 differ whenever the operand is
+         * not already in the destination register.
+         */
+        emit_mov_reg(rd, rs1);
+        emit_rex(1, -1, rd);
+        emit_byte(0xF7);
+        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
+        return;
+
+    case OP_lshift: {
+        /* A count the block already loaded as a literal needs neither CL nor
+         * the save/restore around it: SHL r64, imm8 is one instruction.
+         */
+        if (src1_const_known && src1_const >= 0 && src1_const < 32) {
+            int want_src = ph2_ir->src0;
+            int dest_ir = ph2_ir->dest;
+
+            /* The same shift of the same register may already sit in another
+             * register; copying it is one instruction instead of three.
+             */
+            for (int i = 0; i < REG_CNT; i++) {
+                if (!shift_valid[i] || shift_src[i] != want_src ||
+                    shift_imm[i] != src1_const || i == dest_ir)
+                    continue;
+                int held = map_ir_reg(i);
+                emit_mov_reg(rd, held);
+                if (dest_ir >= 0 && dest_ir < REG_CNT) {
+                    shift_valid[dest_ir] = true;
+                    shift_src[dest_ir] = want_src;
+                    shift_imm[dest_ir] = src1_const;
+                }
+                return;
+            }
+
+            /* "index << k; add base; read/write" is one x86 addressing mode.
+             * Folding it away removes both the shift and the addition, which is
+             * every array subscript in the program.
+             */
+            if (try_fold_sib(ph2_ir, rd, rs1, src1_const))
+                return;
+
+            /* Narrowing back to int matters when the result is a value, but a
+             * scaled index feeding pointer arithmetic is only ever added to an
+             * address. Overflowing it is already undefined, and gcc likewise
+             * scales the sign-extended index in 64 bits without re-wrapping.
+             */
+            bool addr_only =
+                reg_feeds_address_only(emit_ir_index + 1, ph2_ir->dest);
+            emit_mov_reg(rd, rs1);
+            emit_shift_imm(rd, SHIFT_EXT_SHL, src1_const);
+            if (!addr_only &&
+                !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+                wrap_to_int(rd, ph2_ir->is_pointer);
+
+            /* Recording needs the shift source to still be intact: if the
+             * result landed in it, the pairing no longer describes anything.
+             */
+            if (dest_ir >= 0 && dest_ir < REG_CNT && dest_ir != want_src &&
+                want_src >= 0 && want_src < REG_CNT) {
+                shift_valid[dest_ir] = true;
+                shift_src[dest_ir] = want_src;
+                shift_imm[dest_ir] = src1_const;
+            }
+            return;
+        }
+
+        /* rd = rs1 shl rs2.
+         *
+         * x86 takes the shift count in CL, but RCX is reg_map[3] and may hold a
+         * live value the allocator still needs -- it has no notion of this
+         * instruction clobbering a register. Save RCX in R10, stage the value
+         * in R11, then restore. R10/R11 are never handed out by reg_map, so
+         * this is safe for every aliasing of rd, rs1 and rs2.
+         */
+        emit_byte(REX_W | REX_B); /* MOV r10, rcx */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 1, 2));
+        emit_rex(1, rs1, 11); /* MOV r11, rs1 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
+        emit_rex(1, rs2, -1); /* MOV rcx, rs2 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
+        emit_byte(REX_W | REX_B); /* SHL r11, cl */
+        emit_byte(0xD3);
+        emit_byte(modrm(MOD_DIRECT, 4, 3));
+        emit_byte(REX_W | REX_R); /* MOV rcx, r10 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 2, 1));
+        emit_rex(1, 11, rd); /* MOV rd, r11 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
+
+        /* The shift happened in a 64-bit register, so bits that an int would
+         * have dropped survive. Narrow exactly as OP_mul does: without this, "1
+         * << 31" (which strength reduction also produces for "x * 2") stayed
+         * positive and every later comparison took the wrong branch.
+         */
+        wrap_to_int(rd, ph2_ir->is_pointer);
+        return;
+    }
+    case OP_rshift: {
+        /* A count the block already loaded as a literal needs neither CL nor
+         * the save/restore around it: SAR r64, imm8 is one instruction.
+         */
+        if (src1_const_known && src1_const >= 0 && src1_const < 32) {
+            emit_mov_reg(rd, rs1);
+            emit_shift_imm(rd, SHIFT_EXT_SAR, src1_const);
+            if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+                wrap_to_int(rd, ph2_ir->is_pointer);
+            return;
+        }
+
+        /* rd = rs1 sar rs2.
+         *
+         * x86 takes the shift count in CL, but RCX is reg_map[3] and may hold a
+         * live value the allocator still needs -- it has no notion of this
+         * instruction clobbering a register. Save RCX in R10, stage the value
+         * in R11, then restore. R10/R11 are never handed out by reg_map, so
+         * this is safe for every aliasing of rd, rs1 and rs2.
+         */
+        emit_byte(REX_W | REX_B); /* MOV r10, rcx */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 1, 2));
+        emit_rex(1, rs1, 11); /* MOV r11, rs1 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
+        emit_rex(1, rs2, -1); /* MOV rcx, rs2 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
+        emit_byte(REX_W | REX_B); /* SAR r11, cl */
+        emit_byte(0xD3);
+        emit_byte(modrm(MOD_DIRECT, 7, 3));
+        emit_byte(REX_W | REX_R); /* MOV rcx, r10 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 2, 1));
+        emit_rex(1, 11, rd); /* MOV rd, r11 */
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
+        return;
+    }
+    default:
+        break;
+    }
+}
+
+/* Comparisons, and the jumps and branches they feed. */
+void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
+{
+    switch (ph2_ir->op) {
+    case OP_eq:
+    case OP_neq:
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+        /* CMP rs1, rs2, then turn the flags into 0 or 1 in rd. The six
+         * comparisons differ only in the condition, and SETcc is the matching
+         * Jcc opcode plus 0x10, so branch_cc_for() supplies both forms.
+         */
+        emit_cmp(rs1, rs2);
+        emit_setcc_bool(rd, branch_cc_for(ph2_ir->op) + 0x10);
+        return;
+
+    case OP_jump: {
+        if (bb_falls_through(ph2_ir->next_bb))
+            return;
+
+        /* Everything below either jumps away or emits a rotated copy of the
+         * target block, whose own control flow this walk does not model. Treat
+         * the next block as unreachable from here either way.
+         */
+        emit_fell_through = false;
+
+        /* Rotate the loop. Jumping back to a small block that tests the
+         * condition and branches costs two taken branches per iteration, where
+         * a bottom-tested loop costs one. Emitting that test here instead makes
+         * the unconditional jump disappear, and this copy is reached only along
+         * the back edge, so what the registers hold coming out of the body
+         * still applies.
+         */
+        if (!in_dup_block && ph2_ir->next_bb) {
+            ph2_ir_t *tail = NULL;
+            int cnt = 0;
+            for (ph2_ir_t *t = ph2_ir->next_bb->ph2_ir_list.head; t;
+                 t = t->next) {
+                tail = t;
+                cnt++;
+            }
+            if (tail && tail->op == OP_branch && cnt <= 6) {
+                ph2_ir_t *saved_next = emit_next_ir;
+                int saved_index = emit_ir_index;
+
+                /* The copy runs the same instructions in the same order, so the
+                 * forward scans stay valid -- but only against the block's own
+                 * position in the flattened stream, not the jump's.
+                 */
+                int dup_base = ph2_ir->next_bb->ph2_base;
+
+                in_dup_block = true;
+                folds_off = dup_base < 0;
+                int n = 0;
+                for (ph2_ir_t *t = ph2_ir->next_bb->ph2_ir_list.head; t;
+                     t = t->next) {
+                    emit_ir_index = dup_base < 0 ? -1 : dup_base + n;
+                    emit_next_ir = t->next;
+                    emit_ph2_ir(t);
+                    n++;
+                }
+                in_dup_block = false;
+                folds_off = false;
+                emit_ir_index = saved_index;
+                emit_next_ir = saved_next;
+                return;
+            }
+        }
+
+        /* A jump to the instruction that follows it is already the way control
+         * flows. reg_alloc() appends the jump from the CFG alone, and the
+         * flattened order often puts the target next anyway.
+         */
+        if (bb_falls_through(ph2_ir->next_bb))
+            return;
+
+        /* JMP rel32, through the same target resolution the conditional edges
+         * use, so a jump landing on nothing but another jump goes straight to
+         * where that one ends up.
+         */
+        emit_byte(0xE9);
+        emit_bb_rel32(ph2_ir->next_bb);
+        return;
+    }
+
+    case OP_branch: {
+        if (fused_cc_pending) {
+            fused_cc_pending = false;
+            emit_byte(0x0F);
+            emit_byte(fused_cc); /* Jcc rel32 -> then_bb */
+            emit_bb_rel32(ph2_ir->then_bb);
+
+            if (!bb_falls_through(ph2_ir->else_bb)) {
+                emit_byte(0xE9); /* JMP rel32 -> else_bb */
+                emit_bb_rel32(ph2_ir->else_bb);
+                emit_fell_through = false;
+            }
+            return;
+        }
+
+        /* TEST rs1, rs1 */
+        emit_rex(1, rs1, rs1);
+        emit_byte(0x85);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rs1)));
+
+        /* Emit both edges explicitly: JNZ then_bb, then JMP else_bb.
+         *
+         * Falling through to else_bb would be shorter, but it is only valid
+         * when else_bb is literally the next block emitted. This backend
+         * interleaves NOP sleds and re-emits blocks that the linear walk
+         * missed, so that property does not hold reliably -- and when it
+         * silently fails, a false condition runs the true branch. Short circuit
+         * operators are where this shows up first: in "a && b" the false edge
+         * would fall into b's evaluation and adopt its result.
+         */
+        emit_byte(0x0F);
+        emit_byte(0x85); /* JNZ rel32 -> then_bb */
+        emit_bb_rel32(ph2_ir->then_bb);
+
+        if (!bb_falls_through(ph2_ir->else_bb)) {
+            emit_byte(0xE9); /* JMP rel32 -> else_bb */
+            emit_bb_rel32(ph2_ir->else_bb);
+            emit_fell_through = false;
+        }
+        return;
+    }
+    default:
+        break;
+    }
+}
+
+/* Calls, and the returns that unwind them. */
+void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
+{
+    switch (ph2_ir->op) {
+    case OP_call:
+        /* CALL rel32 - find the target function and calculate relative offset
+         */
+        {
+            func_t *target_func = find_func(ph2_ir->func_name);
+
+            if (dynlink && target_func && !target_func->bbs) {
+                /* An external symbol: call its PLT entry, which the loader
+                 * redirects to the real function on first use.
+                 */
+                emit_byte(0xE8); /* CALL rel32 */
+                add_pltcall_ref(target_func->plt_offset);
+            } else if (!target_func || !target_func->bbs) {
+                /* Without dynamic linking there is nothing to call, and a CALL
+                 * with displacement 0 does not trap: it pushes a return address
+                 * and falls into the next instruction, leaving RSP eight bytes
+                 * low for the remainder of the function so that every [rsp
+                 * + ofs] local and the epilogue read the wrong slots. Refuse to
+                 * emit the image instead of shipping one that misbehaves
+                 * silently.
+                 */
+                printf("Error: Undefined function called: %s\n",
+                       ph2_ir->func_name);
+                fflush(stdout); /* see fatal() */
+                abort();
+            } else {
+                emit_byte(0xE8); /* CALL rel32 */
+
+                /* Check if this is a forward reference (function not compiled
+                 * yet)
+                 */
+                if (target_func->bbs->elf_offset == -1) {
+                    /* Forward reference - BB not emitted yet, add to patch list
+                     */
+                    add_forward_ref(target_func->bbs);
+                    emit_dword(0); /* Placeholder - will be patched later */
+                } else {
+                    /* BB already emitted - calculate actual offset */
+                    int displacement =
+                        target_func->bbs->elf_offset - (elf_code->size + 4);
+                    emit_dword(displacement);
+                }
+            }
+
+            /* System V returns integers in RAX, but the shared IR expects a
+             * call's result in register 0 (reg_map[0] == RDI): reg-alloc turns
+             * OP_func_ret into OP_assign reading register 0. Bridge the two
+             * conventions here, once, for every call.
+             *
+             * MOV RDI, RAX
+             */
+            emit_byte(REX_W);
+            emit_byte(0x89);
+            emit_byte(modrm(MOD_DIRECT, 0, 7)); /* reg=RAX -> rm=RDI */
+        }
+        return;
+
+    case OP_return:
+        emit_fell_through = false;
+        /* If there's a return value in src0, move it to RAX */
+        if (ph2_ir->src0 >= 0) {
+            /* rs1 already names the physical register, including the case where
+             * a folded load redirected this instruction to read the register
+             * that still holds the value. Re-deriving it from src0 here would
+             * ignore that redirection and return a stale register.
+             */
+            int ret_reg = rs1;
+            /* Debug output MOV rax, ret_reg - only if not already in RAX */
+            if (ret_reg != 0) { /* 0 is RAX, no move needed */
+                /* MOV RAX, ret_reg.
+                 *
+                 * 0x89 is MOV r/m64, r64: the ModRM reg field holds the source
+                 * (ret_reg) and rm holds the destination (RAX). The reg field
+                 * is extended by REX.R, not REX.B -- setting REX.B here instead
+                 * extended RAX, so a return value the allocator left in r8/r9
+                 * emitted "MOV r8, rax", the exact opposite of what is
+                 * intended.
+                 */
+                emit_rex(1, ret_reg, -1); /* REX.R for source reg >= 8 */
+                emit_byte(0x89);
+                int ret_reg_low = reg_low3(ret_reg);
+                int rax_reg3 = 0;
+                emit_byte(modrm(MOD_DIRECT, ret_reg_low, rax_reg3));
+            }
+        }
+        /* Function epilogue: ADD rsp, aligned_size; POP r13; POP r12; POP rbx;
+         * POP rbp; RET (R15 is reserved for global base pointer)
+         */
+        {
+            int stack_size_ret = ph2_ir->src1;
+            if (cur_define_stack >= 0 && stack_size_ret != cur_define_stack)
+                fprintf(stderr,
+                        "[x64] FRAME MISMATCH: prologue reserved %d, epilogue "
+                        "releases %d\n",
+                        cur_define_stack, stack_size_ret);
+            {
+                int aligned_ret =
+                    x64_frame_bytes(stack_size_ret, cur_saved_regs);
+                emit_byte(REX_W);
+                if (aligned_ret <= 127) {
+                    emit_byte(0x83); /* ADD r/m64, imm8 */
+                    int rsp_reg = 4;
+                    emit_byte(modrm(MOD_DIRECT, 0, rsp_reg));
+                    emit_byte(aligned_ret);
+                } else {
+                    emit_byte(0x81); /* ADD r/m64, imm32 */
+                    int rsp_reg = 4;
+                    emit_byte(modrm(MOD_DIRECT, 0, rsp_reg));
+                    emit_dword(aligned_ret);
+                }
+            }
+        }
+        /* R15 is reserved for global base pointer - don't save/restore */
+        for (int cs = cur_saved_regs - 1; cs >= 0; cs--)
+            emit_pop_reg(map_ir_reg(X64_FIRST_CALLEE_SAVED + cs));
+        emit_byte(0x5D); /* POP rbp */
+        emit_byte(0xC3); /* RET */
+        return;
+
+    case OP_func_ret:
+        /* This should not be used in x64 backend - the register allocator
+         * generates OP_assign to move the return value from RAX
+         */
+        printf("Warning: OP_func_ret should not reach x64 backend\n");
+        return;
+
+    default:
+        break;
+    }
+}
+
+/* Stack slots, addresses, conditional moves, loads and stores. */
+void emit_memory(ph2_ir_t *ph2_ir, int rd, int rs1)
+{
+    switch (ph2_ir->op) {
+    case OP_allocat: {
+        /* SUB rsp, size.
+         *
+         * src0 is a byte count, not a register index, so it must be read raw:
+         * 'rs1' has already been rewritten through reg_map[] above and would
+         * turn any size in 0..7 into an unrelated register number.
+         */
+        int alloc_bytes = ph2_ir->src0;
+        emit_byte(REX_W);
+        if (alloc_bytes >= -128 && alloc_bytes <= 127) {
+            emit_byte(0x83);
+            int rsp_reg3 = 4;
+            emit_byte(modrm(MOD_DIRECT, 5, rsp_reg3));
+            emit_byte(alloc_bytes);
+        } else {
+            emit_byte(0x81);
+            int rsp_reg3 = 4;
+            emit_byte(modrm(MOD_DIRECT, 5, rsp_reg3));
+            emit_dword(alloc_bytes);
+        }
+        return;
+    }
+
+    case OP_address_of: {
+        /* LEA rd, [rsp + src0] */
+        emit_rex(1, rd, -1);
+        emit_byte(0x8D);
+        emit_rsp_mem(rd, ph2_ir->src0);
+        return;
+    }
+
+    case OP_cmov: {
+        /* The value for the failing arm goes to the destination, and the other
+         * moves over it only when the condition holds. No branch means nothing
+         * to mispredict, which is the point: the arms were flattened precisely
+         * because the test was unpredictable.
+         */
+        int cond = rs1, taken = map_ir_reg(ph2_ir->src1);
+        int other = map_ir_reg(ph2_ir->src2);
+        int move_in = taken, cc = 0x45; /* CMOVNE */
+
+        /* The test comes first because the move below may land in the
+         * condition's own register: the condition dies at this instruction, so
+         * the allocator is free to hand its register to the destination.
+         * Reading the flags before overwriting it costs nothing -- MOV leaves
+         * them alone -- and testing after would have tested the wrong value.
+         */
+        emit_rex(1, cond, cond); /* TEST cond, cond */
+        emit_byte(0x85);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(cond), reg_low3(cond)));
+
+        /* When the destination already holds the value the test selects,
+         * copying the other over it would destroy it; keep what is there and
+         * bring the other in when the test fails instead.
+         */
+        if (rd == taken) {
+            move_in = other;
+            cc = 0x44; /* CMOVE */
+        } else {
+            emit_mov_reg(rd, other); /* nothing to do when they coincide */
+        }
+
+        emit_rex(1, rd, move_in); /* CMOVcc rd, move_in */
+        emit_byte(0x0F);
+        emit_byte(cc);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(move_in)));
+        return;
+    }
+
+    case OP_load:
+        /* Load a local from its frame slot at the width of its type.
+         *
+         * A slot is pointer-sized, but an int occupies only its low 4 bytes.
+         * Reading all 8 picks up whatever preceded it whenever the variable was
+         * last written through a pointer -- a callee doing "val[0] = x" stores
+         * 4 bytes -- which makes a zero read back as non-zero. That is how "#if
+         * defined(__arm__)" ended up true when self-hosting.
+         */
+        {
+            int stack_offset = ph2_ir->src0; /* frame offset from RSP */
+            int eff_size = ph2_ir->size_bytes;
+            if (eff_size == 1) {
+                /* MOVSX rd, BYTE PTR [rsp+ofs]. char is signed here, and a
+                 * _Bool only ever holds 0 or 1, which sign-extends to itself.
+                 */
+                emit_rex(1, rd, -1);
+                emit_byte(0x0F);
+                emit_byte(0xBE);
+            } else if (eff_size == 2) {
+                emit_rex(1, rd, -1);
+                emit_byte(0x0F);
+                emit_byte(0xBF);
+            } else if (eff_size == 4) {
+                /* MOVSXD rd, DWORD PTR [rsp+ofs]: int is signed */
+                emit_rex(1, rd, -1);
+                emit_byte(0x63);
+            } else {
+                emit_rex(1, rd, -1);
+                emit_byte(0x8B);
+            }
+            emit_rsp_mem(rd, stack_offset);
+        }
+        return;
+
+    case OP_store:
+        /* MOV [rbp-offset], src_reg - Use type info for proper sizing */
+        {
+            int src_reg = rs1;
+            int stack_offset = ph2_ir->src1; /* frame offset from RSP */
+
+            /* Use type information to determine store size For x64, pointers
+             * MUST be stored as 64-bit to preserve address
+             */
+            int eff_size = ph2_ir->size_bytes;
+            if (ph2_ir->is_pointer && eff_size != PTR_SIZE)
+                eff_size = PTR_SIZE;
+
+            if (eff_size <= 4) {
+                /* 32-bit store. An int occupies only the low four bytes of its
+                 * slot and OP_load reads it back at that width, so writing
+                 * eight would put bits there that nothing ever reads -- and it
+                 * is what stopped the slot from being usable as a memory
+                 * operand.
+                 */
+                if (src_reg >= 8)
+                    emit_byte(REX_R);
+            } else {
+                /* Pointers and anything slot-width keep the 64-bit form. */
+                emit_rex(1, src_reg, -1);
+            }
+            emit_byte(0x89);
+            emit_rsp_mem(src_reg, stack_offset);
+        }
+        return;
+
+    default:
+        break;
+    }
+}
+
+/* Indirect access through a pointer. */
+void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
+{
+    switch (ph2_ir->op) {
+    case OP_read:
+        /* Load *rs1 into rd. The element width lives in src1 (1, 2 or 4);
+         * pointer-typed reads must move a full pointer instead.
+         */
+        {
+            /* get_size() already yields PTR_SIZE for pointer-typed reads, so
+             * the IR width is authoritative. is_pointer describes the address
+             * operand, not the element, and must not be consulted.
+             */
+            int rsize = ph2_ir->src1;
+            int mem_disp = 0;
+            bool have_disp = false;
+            int sib_base, sib_index, sib_scale, sib_disp;
+            bool sib = sib_take(&sib_base, &sib_index, &sib_scale, &sib_disp);
+            if (addr_fold) {
+                rs1 = addr_fold_base;
+                mem_disp = addr_fold_disp;
+                have_disp = true;
+                addr_fold = false;
+            }
+            if (sib)
+                emit_rex_sib(1, rd, sib_base, sib_index);
+            else
+                emit_rex(1, rd, rs1);
+            if (rsize == 1) {
+                /* MOVSX r64, BYTE PTR [rs1]: char is signed here, as it is for
+                 * every other narrow type, and RISC-V already uses lb rather
+                 * than lbu. Zero-extending made a negative char read back
+                 * through a pointer as a large positive value.
+                 */
+                emit_byte(0x0F);
+                emit_byte(0xBE);
+            } else if (rsize == 2) {
+                /* MOVSX r64, WORD PTR [rs1]: short is signed, so the upper bits
+                 * must be a sign extension. ARM uses LDRSH and RISC-V uses lh
+                 * here; zero-extending made a negative short read back as a
+                 * large positive value.
+                 */
+                emit_byte(0x0F);
+                emit_byte(0xBF);
+            } else if (rsize == 4) {
+                /* MOVSXD r64, DWORD PTR [rs1]: int is signed, so the upper half
+                 * must be a sign extension, not zero.
+                 */
+                emit_byte(0x63);
+            } else {
+                /* MOV r64, [rs1] */
+                emit_byte(0x8B);
+            }
+            if (sib)
+                emit_mem_sib(rd, sib_base, sib_index, sib_scale, sib_disp);
+            else
+                emit_mem_base(rd, rs1, mem_disp, have_disp);
+        }
+        return;
+
+    case OP_write:
+        /* Store value (src1) into [address (src0)] - IR uses src0 as address */
+        {
+            int addr_reg = rs1;
+            int val_reg = rs2;
+            int wr_disp = 0;
+            bool wr_have_disp = false;
+            int wsib_base, wsib_index, wsib_scale, wsib_disp;
+            bool wsib =
+                sib_take(&wsib_base, &wsib_index, &wsib_scale, &wsib_disp);
+            if (addr_fold) {
+                addr_reg = addr_fold_base;
+                wr_disp = addr_fold_disp;
+                wr_have_disp = true;
+                addr_fold = false;
+            }
+            /* Debug: trace write width mismatches for pointers */
+            if (ph2_ir->is_pointer && ph2_ir->size_bytes != PTR_SIZE) {
+                if (x64_debug)
+                    fprintf(
+                        stderr,
+                        "[EMIT] OP_write ptr width mismatch: size=%d ptr=%d "
+                        "addr=%d val=%d\n",
+                        ph2_ir->size_bytes, ph2_ir->is_pointer, ph2_ir->src0,
+                        ph2_ir->src1);
+            }
+
+            /* The store width the IR asks for lives in dest (1, 2 or 4);
+             * pointer-typed writes must store a full pointer. As with OP_read,
+             * the IR width already accounts for pointers.
+             */
+            int wsize = ph2_ir->dest;
+            if (wsize == 1) {
+                /* MOV r/m8, r8. A REX prefix is mandatory once the source is
+                 * RSP/RBP/RSI/RDI, otherwise the encoding names AH/CH/DH/BH.
+                 */
+                if (wsib)
+                    emit_rex_sib(0, val_reg, wsib_base, wsib_index);
+                else if (val_reg >= 4 || addr_reg >= 8)
+                    emit_rex(0, val_reg, addr_reg);
+                emit_byte(0x88);
+            } else if (wsize == 2) {
+                emit_byte(0x66); /* operand-size override */
+                if (wsib)
+                    emit_rex_sib(0, val_reg, wsib_base, wsib_index);
+                else if (val_reg >= 8 || addr_reg >= 8)
+                    emit_rex(0, val_reg, addr_reg);
+                emit_byte(0x89);
+            } else if (wsize == 4) {
+                if (wsib) {
+                    if (val_reg >= 8 || wsib_base >= 8 || wsib_index >= 8)
+                        emit_rex_sib(0, val_reg, wsib_base, wsib_index);
+                } else if (val_reg >= 8 || addr_reg >= 8)
+                    emit_rex(0, val_reg, addr_reg);
+                emit_byte(0x89); /* MOV r/m32, r32 */
+            } else if (wsib) {
+                emit_rex_sib(1, val_reg, wsib_base, wsib_index);
+                emit_byte(0x89); /* MOV r/m64, r64 */
+            } else {
+                /* Built with statements rather than a conditional expression:
+                 * folding the register tests into the argument of emit_byte
+                 * came out with a corrupted high nibble when shecc compiled
+                 * itself, so the store lost its REX.B and wrote the wrong
+                 * register.
+                 */
+                emit_rex(1, val_reg, addr_reg);
+                emit_byte(0x89); /* MOV r/m64, r64 */
+            }
+            if (wsib)
+                emit_mem_sib(val_reg, wsib_base, wsib_index, wsib_scale,
+                             wsib_disp);
+            else
+                emit_mem_base(val_reg, addr_reg, wr_disp, wr_have_disp);
+        }
+        return;
+
+    case OP_indirect:
+        /* CALL r11 (staged by the preceding OP_load_func) */
+        emit_byte(REX_W | REX_B);
+        emit_byte(0xFF);
+        emit_byte(modrm(MOD_DIRECT, 2, 3));
+        /* System V returns in RAX; the shared IR expects register 0. */
+        emit_byte(REX_W);
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, 0, 7));
+        return;
+
+    default:
+        break;
+    }
+}
+
+/* Globals, functions, and the data sections they live in. */
+void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
+{
+    switch (ph2_ir->op) {
+    case OP_load_func:
+    case OP_global_load_func:
+        /* Stage the callee address in R11 for the OP_indirect that follows. R11
+         * is outside reg_map, so nothing the allocator owns is disturbed.
+         */
+        emit_rex(1, rs1, 11);
+        emit_byte(0x89);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
+        return;
+
+    case OP_address_of_func:
+        /* Store the address of func_name into [rs1]. The address is not known
+         * until every function has been emitted, so record it for patching.
+         */
+        {
+            func_t *target = find_func(ph2_ir->func_name);
+            emit_byte(REX_W | REX_B);
+            emit_byte(0xB8 + 3); /* MOVABS r11, imm64 */
+            if (target && target->bbs) {
+                if (funcaddr_ref_count >= FUNCADDR_REF_MAX)
+                    fatal("x64: too many function-address relocations");
+                funcaddr_refs[funcaddr_ref_count].patch_location =
+                    elf_code->size;
+                funcaddr_refs[funcaddr_ref_count].target_bb = target->bbs;
+                funcaddr_ref_count++;
+            }
+            emit_dword(0);
+            emit_dword(0);
+
+            /* MOV [rs1], r11. Built with statements rather than a conditional
+             * expression: folding the register test into emit_byte's argument
+             * produced a corrupted high nibble once shecc compiled itself, so
+             * the store named the wrong base register.
+             */
+            emit_rex(1, 11, rs1); /* reg field is r11 */
+            emit_byte(0x89);
+            emit_mem_base(3, rs1, 0, false);
+        }
+        return;
+
+    case OP_global_address_of: {
+        /* Calculate address using R15 + offset (LEA rd, [r15 + offset]).
+         *
+         * src0 is a byte offset into the data area, not a register index, so it
+         * is read raw rather than through 'rs1', which emit_ph2_ir() has
+         * already rewritten through reg_map[].
+         */
+        int data_ofs = ph2_ir->src0;
+        if (data_ofs == 0) {
+            /* Just copy R15 to dest register.
+             *
+             * 0x89 puts the source in the ModRM reg field and the destination
+             * in r/m, so REX.R comes from R15 and REX.B from rd. Naming them
+             * the other way round emitted "MOV r15, rd", clobbering the global
+             * base pointer.
+             */
+            emit_rex(1, 15, rd); /* reg field is r15, r/m is rd */
+            emit_byte(0x89);     /* MOV */
+            int rd_low = reg_low3(rd);
+            emit_byte(modrm(MOD_DIRECT, 7, rd_low)); /* MOV rd, r15 */
+        } else {
+            /* LEA rd, [r15 + offset] */
+            emit_rex(1, rd, 11); /* r/m is r11 */
+            emit_byte(0x8D);     /* LEA */
+            int rd_low = reg_low3(rd);
+
+            if (data_ofs < 128) {
+                emit_byte(modrm(MOD_DISP8, rd_low, 7)); /* [R15 + disp8] */
+                emit_byte(data_ofs);
+            } else {
+                emit_byte(modrm(MOD_DISP32, rd_low, 7)); /* [R15 + disp32] */
+                emit_dword(data_ofs);
+            }
+        }
+    }
+        return;
+
+    case OP_global_load: {
+        /* Use R15-relative addressing for globals (like ARM uses R12) MOV
+         * dest_reg, [R15 + offset]
+         */
+        int dest_reg = map_ir_reg(ph2_ir->dest);
+
+        /* Pointers must always be loaded as 64-bit */
+        int eff_size = ph2_ir->size_bytes;
+        if (ph2_ir->is_pointer && eff_size != PTR_SIZE)
+            eff_size = PTR_SIZE;
+
+        /* Narrow globals must be loaded at their own width and extended,
+         * exactly as OP_load does for locals: a store through a pointer writes
+         * only the declared width, so an unconditional 8-byte load would pick
+         * up whatever sits in the rest of the slot.
+         */
+        emit_rex(1, dest_reg, 11); /* r/m is r11 */
+        if (eff_size == 1 && !ph2_ir->is_pointer) {
+            /* MOVSX, not MOVZX: 'char' is signed here, exactly as OP_load
+             * treats a one-byte local. Zero-extending made a global char
+             * holding -1 compare as 255.
+             */
+            emit_byte(0x0F); /* MOVSX dest, BYTE [r15 + ofs] */
+            emit_byte(0xBE);
+        } else if (eff_size == 2 && !ph2_ir->is_pointer) {
+            emit_byte(0x0F); /* MOVSX dest, WORD [r15 + ofs] */
+            emit_byte(0xBF);
+        } else if (eff_size == 4 && !ph2_ir->is_pointer) {
+            emit_byte(0x63); /* MOVSXD dest, DWORD [r15 + ofs] */
+        } else {
+            emit_byte(0x8B); /* MOV dest, QWORD [r15 + ofs] */
+        }
+        emit_r15_mem(reg_low3(dest_reg), ph2_ir->src0);
+    }
+        return;
+
+    case OP_global_store: {
+        /* Use R15-relative addressing for globals (like ARM uses R12) MOV [R15
+         * + offset], src_reg
+         */
+        int src_reg = rs1; /* honours a redirected source, as OP_store does */
+
+        /* Pointers must always be stored as 64-bit */
+        int eff_size = ph2_ir->size_bytes;
+        if (ph2_ir->is_pointer && eff_size != PTR_SIZE)
+            eff_size = PTR_SIZE;
+
+        /* Store at the slot's declared width, mirroring OP_global_load. A wider
+         * store would spill into the neighbouring global; a narrower one would
+         * leave stale bytes for the matching load to pick up.
+         */
+        if (eff_size == 1 && !ph2_ir->is_pointer) {
+            /* MOV BYTE [r15 + ofs], src8. REX is mandatory so that source
+             * registers 4..7 name SPL/BPL/SIL/DIL rather than AH..BH.
+             */
+            emit_rex(0, src_reg, 15);
+            emit_byte(0x88);
+            emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
+        } else if (eff_size == 2 && !ph2_ir->is_pointer) {
+            /* MOV WORD [r15 + ofs], src16 */
+            emit_byte(0x66); /* operand-size override, before REX */
+            emit_rex(0, src_reg, 15);
+            emit_byte(0x89);
+            emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
+        } else if (eff_size == 4 && !ph2_ir->is_pointer) {
+            /* MOV DWORD [r15 + ofs], src32 */
+            emit_rex(0, src_reg, 15);
+            emit_byte(0x89);
+            emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
+        } else {
+            /* MOV QWORD [r15 + ofs], src64 */
+            emit_rex(1, src_reg, 15);
+            emit_byte(0x89);
+            emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
+        }
+    }
+        return;
+
+    case OP_load_data_address: {
+        /* Calculate address using R15 + offset (LEA rd, [r15 + offset]).
+         *
+         * src0 is a byte offset into the data area, not a register index, so it
+         * is read raw rather than through 'rs1', which emit_ph2_ir() has
+         * already rewritten through reg_map[].
+         */
+        int data_ofs = ph2_ir->src0;
+        if (data_ofs == 0) {
+            /* Just copy R15 to dest register.
+             *
+             * 0x89 puts the source in the ModRM reg field and the destination
+             * in r/m, so REX.R comes from R15 and REX.B from rd. Naming them
+             * the other way round emitted "MOV r15, rd", clobbering the global
+             * base pointer.
+             */
+            emit_rex(1, 15, rd); /* reg field is r15, r/m is rd */
+            emit_byte(0x89);     /* MOV */
+            int rd_low = reg_low3(rd);
+            emit_byte(modrm(MOD_DIRECT, 7, rd_low)); /* MOV rd, r15 */
+        } else {
+            /* LEA rd, [r15 + offset] */
+            emit_rex(1, rd, 11); /* r/m is r11 */
+            emit_byte(0x8D);     /* LEA */
+            int rd_low = reg_low3(rd);
+
+            if (data_ofs < 128) {
+                emit_byte(modrm(MOD_DISP8, rd_low, 7)); /* [R15 + disp8] */
+                emit_byte(data_ofs);
+            } else {
+                emit_byte(modrm(MOD_DISP32, rd_low, 7)); /* [R15 + disp32] */
+                emit_dword(data_ofs);
+            }
+        }
+    }
+        return;
+
+    case OP_load_rodata_address: {
+        /* MOVABS rd, imm64 with a placeholder address, recorded for patching
+         * once .rodata's final location is known.
+         */
+        emit_rex(1, -1, rd);
+        emit_byte(0xB8 + reg_low3(rd));
+        {
+            if (rodata_ref_count >= RODATA_REF_MAX)
+                fatal("x64: too many .rodata relocations");
+            rodata_refs[rodata_ref_count].patch_location = elf_code->size;
+
+            /* src0 is a .rodata byte offset, not a register index; read it raw
+             * so that offsets 0..7 are not rewritten by reg_map[].
+             */
+            rodata_refs[rodata_ref_count].rodata_offset = ph2_ir->src0;
+            rodata_ref_count++;
+        }
+        emit_dword(0);
+        emit_dword(0);
+        return;
+    }
+    default:
+        break;
+    }
+}
+
+/* Logical operators and width conversions. */
+void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
+{
+    switch (ph2_ir->op) {
+    case OP_log_not: {
+        /* TEST rs1, rs1; SETE r11b; MOVZX rd, r11b.
+         *
+         * The source is rs1, which is not always the same register as rd -- for
+         * a global it never is.
+         */
+        emit_rex(1, rs1, rs1);
+        emit_byte(0x85);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rs1)));
+
+        emit_setcc_bool(rd, 0x94); /* SETE */
+    }
+        return;
+
+    case OP_log_and: {
+        /* Logical AND: result = (rs1 != 0) && (rs2 != 0) For now, just set
+         * result to 1 - proper implementation needs control flow
+         */
+        emit_rex(1, -1, rd);
+        emit_byte(0xC7); /* MOV rd, imm32 */
+        int rd_low_and = reg_low3(rd);
+        emit_byte(modrm(MOD_DIRECT, 0, rd_low_and));
+        emit_dword(1); /* Always return 1 for now */
+        return;
+    }
+
+    case OP_log_or: {
+        /* Logical OR: result = (rs1 != 0) || (rs2 != 0) */
+        /* For now, just set result to 1 - proper implementation needs control
+         * flow
+         */
+        emit_rex(1, -1, rd);
+        emit_byte(0xC7); /* MOV rd, imm32 */
+        int rd_low_or = reg_low3(rd);
+        emit_byte(modrm(MOD_DIRECT, 0, rd_low_or));
+        emit_dword(1); /* Always return 1 for now */
+        return;
+    }
+
+    case OP_trunc: {
+        /* Narrow rs1 to the target width held in src1, matching the 32-bit
+         * backends: the language has no unsigned types, so every narrowing
+         * keeps the sign -- 127 + 1 wraps to -128, 32767
+         * + 1 to -32768 -- and a 4-byte truncation sign-extends the low word.
+         */
+        int tsize = ph2_ir->src1;
+        emit_rex(1, rd, rs1);
+        if (tsize == 1) {
+            emit_byte(0x0F);
+            emit_byte(0xBE); /* MOVSX r64, r/m8 */
+        } else if (tsize == 2) {
+            emit_byte(0x0F);
+            emit_byte(0xBF); /* MOVSX r64, r/m16 */
+        } else if (tsize == 4) {
+            emit_byte(0x63); /* MOVSXD r64, r/m32 */
+        } else {
+            emit_byte(0x89); /* plain MOV */
+            emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
+            return;
+        }
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
+    }
+        return;
+
+    case OP_sign_ext: {
+        /* src1 packs (source type size << 16) | target size, as built by the
+         * parser's promote() helper.
+         *
+         * rs1/rd are already physical registers here; they must not be run
+         * through reg_map a second time.
+         */
+        int src_size = (ph2_ir->src1 >> 16) & 0xFFFF;
+        int dst_size = ph2_ir->src1 & 0xFFFF;
+        int width = src_size;
+
+        /* Widening to a pointer. The register already holds a complete 64-bit
+         * address, so sign-extending it from 32 bits would discard the upper
+         * half and destroy every stack address. Copy it instead, which is also
+         * what a source that is already full width wants.
+         */
+        if (dst_size == PTR_SIZE && PTR_SIZE == 8)
+            width = 8;
+        else if (width != 1 && width != 2 && width != 4)
+            width = 8;
+        emit_narrow_move(rd, rs1, width, true);
+    }
+        return;
+
+    case OP_cast: {
+        /* Usually just a register move */
+        emit_mov_reg(rd, rs1);
+    }
+        return;
+
+    default:
+        break;
+    }
+}
+
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
 {
     for (int i = 0; i < MAX_SKIP_IR; i++) {
@@ -1853,1211 +3146,67 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     }
 
-    case OP_add: {
-        /* A tracked literal becomes an immediate, which also makes the
-         * instruction that materialised it dead.
-         */
-        if (src1_const_known) {
-            /* If the only consumer is the load right after, that load can carry
-             * the displacement and this address never needs a register. The
-             * memory operand picks a byte or a doubleword displacement for
-             * itself, so the constant does not have to be a small one.
-             */
-            if (!addr_fold && emit_next_ir &&
-                (emit_next_ir->op == OP_read || emit_next_ir->op == OP_write) &&
-                emit_next_ir->src0 == ph2_ir->dest &&
-                emit_next_ir->src1 != ph2_ir->dest && reg_low3(rs1) != 4 &&
-                reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
-                addr_fold = true;
-                addr_fold_base = rs1;
-                addr_fold_disp = src1_const;
-                return;
-            }
-            if (rd != rs1 && emit_lea_disp(rd, rs1, src1_const))
-                return;
-            emit_mov_reg(rd, rs1);
-            emit_alu_imm(rd, 0, src1_const); /* ADD rd, imm */
-            return;
-        }
-        if (try_fold_sib_add(ph2_ir, rs1, rs2))
-            return;
-
-        /* x64 only has 2-operand ADD, so for rd = rs1 + rs2: MOV rd, rs1 ADD
-         * rd, rs2
-         *
-         * Special case: if rd == rs2, then MOV rd, rs1 would overwrite rs2 In
-         * this case, use: ADD rs2, rs1 (which is commutative for addition)
-         */
-        if (rd == rs2 && rd != rs1) {
-            /* ADD rd, rs1 (since addition is commutative) */
-            emit_rex(1, rs1, rd);
-            emit_byte(0x01);
-            int reg_rs1 = reg_low3(rs1);
-            int reg_rd = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs1, reg_rd));
-        } else if (rd != rs1 && rd != rs2 && emit_lea_sum(rd, rs1, rs2)) {
-            /* Three distinct registers: one LEA replaces MOV plus ADD. */
-        } else {
-            /* Normal case: MOV rd, rs1; ADD rd, rs2 */
-            emit_mov_reg(rd, rs1);
-            /* ADD rd, rs2 */
-            emit_rex(1, rs2, rd);
-            emit_byte(0x01);
-            int reg_rs2 = reg_low3(rs2);
-            int reg_rd2 = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, reg_rs2, reg_rd2));
-        }
-        return;
-    }
-
-    case OP_sub: {
-        /* A tracked literal becomes an immediate, which also makes the
-         * instruction that materialised it dead.
-         */
-        if (src1_const_known) {
-            if (rd != rs1 && emit_lea_disp(rd, rs1, -src1_const))
-                return;
-            emit_mov_reg(rd, rs1);
-            emit_alu_imm(rd, 5, src1_const); /* SUB rd, imm */
-            return;
-        }
-
-        /* rd = rs1 - rs2.
-         *
-         * The staging below is only needed when rd and rs2 are the same
-         * register, where "MOV rd, rs1" would destroy the subtrahend before it
-         * is read. Every other case subtracts in place.
-         */
-        if (rd != rs2) {
-            emit_mov_reg(rd, rs1);
-            emit_rex(1, rs2, rd); /* SUB rd, rs2 */
-            emit_byte(0x29);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), reg_low3(rd)));
-            return;
-        }
-
-        /* rd == rs2: stage through R11, which reg_map never hands out, so any
-         * aliasing is harmless. MOV r11, rs1
-         */
-        emit_rex(1, rs1, 11);
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
-        /* SUB r11, rs2 */
-        emit_rex(1, rs2, 11);
-        emit_byte(0x29);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
-        /* MOV rd, r11 */
-        emit_rex(1, 11, rd);
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
-        return;
-    }
-    case OP_mul: {
-        /* rd = rs1 * rs2, then truncated to int width.
-         *
-         * shecc's int is 32 bits, and code such as the FNV-1a hash in
-         * hashmap_hash_index() depends on multiplication wrapping at 32 bits.
-         * This backend keeps values in 64-bit registers, so the product must be
-         * narrowed explicitly with MOVSXD; without it the value keeps growing
-         * and later comparisons against INT_MAX take the wrong branch. Pointers
-         * are never multiplied, and pointer scaling (index * element size) is
-         * far inside 32 bits, so narrowing here is safe.
-         */
-        if (src1_const_known && emit_mul_by_const(rd, rs1, src1_const)) {
-            /* nothing further: the product is already in rd */
-        } else if (src1_const_known) {
-            /* The three-operand IMUL takes the multiplier as an immediate and
-             * writes a different register, so neither the literal nor the MOV
-             * that would stage it needs an instruction.
-             */
-            emit_rex(1, rd, rs1);
-            if (src1_const >= -128 && src1_const <= 127) {
-                emit_byte(0x6B); /* IMUL rd, rs1, imm8 */
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
-                emit_byte(src1_const);
-            } else {
-                emit_byte(0x69); /* IMUL rd, rs1, imm32 */
-                emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
-                emit_dword(src1_const);
-            }
-        } else if (rd == rs2 && rd != rs1) {
-            /* IMUL is commutative, so multiply by rs1 in place. */
-            emit_rex(1, rd, rs1);
-            emit_byte(0x0F);
-            emit_byte(0xAF);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
-        } else {
-            emit_mov_reg(rd, rs1);
-            emit_rex(1, rd, rs2);
-            emit_byte(0x0F);
-            emit_byte(0xAF);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs2)));
-        }
-        if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
-            wrap_to_int(rd, ph2_ir->is_pointer);
-        return;
-    }
+    case OP_add:
+    case OP_sub:
+    case OP_mul:
     case OP_div:
-    case OP_mod: {
-        /* Signed division. IDIV forces the dividend into RDX:RAX and returns
-         * the quotient in RAX and remainder in RDX. Both are allocatable
-         * registers here (reg_map[6] and reg_map[2]) and the allocator does not
-         * know they are clobbered, so save and restore them around the
-         * sequence. R10 and R11 are outside reg_map and can stage values; RDX
-         * goes on the stack rather than into a third scratch, because every
-         * register that once served as one has since joined the file and
-         * staging RDX there destroyed a dividend pinned to it.
-         */
-        emit_byte(REX_W | REX_B); /* MOV r10, rax  (save) */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 0, 2));
-        emit_push_reg(2);     /* PUSH rdx  (save) */
-        emit_rex(1, rs2, 11); /* MOV r11, rs2 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
-        emit_rex(1, rs1, -1); /* MOV rax, rs1 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 0));
-        emit_byte(REX_W); /* CQO */
-        emit_byte(0x99);
-        emit_byte(REX_W | REX_B); /* IDIV r11 */
-        emit_byte(0xF7);
-        emit_byte(modrm(MOD_DIRECT, 7, 3));
-
-        /* Capture the result into R11 before restoring RAX/RDX, so rd may
-         * itself be RAX or RDX.
-         */
-        emit_byte(REX_W | REX_B); /* MOV r11, rax | rdx */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, ph2_ir->op == OP_div ? 0 : 2, 3));
-        emit_byte(REX_W | REX_R); /* MOV rax, r10  (restore) */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 2, 0));
-        emit_pop_reg(2);     /* POP rdx  (restore) */
-        emit_rex(1, 11, rd); /* MOV rd, r11 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
-        return;
-    }
+    case OP_mod:
+        emit_arith(ph2_ir, rd, rs1, rs2, src1_const_known, src1_const);
+        break;
     case OP_bit_and:
     case OP_bit_or:
-    case OP_bit_xor: {
-        /* The three bitwise operations differ only in the immediate group's
-         * opcode extension and the r/m opcode byte, which alu_ext_for() and
-         * alu_mem_opcode() already supply; all three are commutative.
-         */
-        int ext = alu_ext_for(ph2_ir->op);
-
-        /* A tracked literal becomes an immediate, which also makes the
-         * instruction that materialised it dead.
-         */
-        if (src1_const_known) {
-            emit_mov_reg(rd, rs1);
-            emit_alu_imm(rd, ext, src1_const);
-            return;
-        }
-
-        /* Two-operand form: "rd = rs1 OP rs2" is MOV rd, rs1 followed by OP rd,
-         * rs2. When rd already names rs2, commutativity lets the MOV go and rs1
-         * becomes the source instead.
-         */
-        int src = rs2;
-        if (rd == rs2 && rd != rs1)
-            src = rs1;
-        else
-            emit_mov_reg(rd, rs1);
-        emit_rex(1, src, rd);
-        emit_byte(alu_mem_opcode(ext));
-        emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(rd)));
-        return;
-    }
-
+    case OP_bit_xor:
     case OP_bit_not:
-        /* rd = NOT rs1. Copy first: rd and rs1 differ whenever the operand is
-         * not already in the destination register.
-         */
-        emit_mov_reg(rd, rs1);
-        emit_rex(1, -1, rd);
-        emit_byte(0xF7);
-        emit_byte(modrm(MOD_DIRECT, 2, reg_low3(rd)));
-        return;
-
     case OP_negate:
-        /* rd = NEG rs1. Copy first: rd and rs1 differ whenever the operand is
-         * not already in the destination register.
-         */
-        emit_mov_reg(rd, rs1);
-        emit_rex(1, -1, rd);
-        emit_byte(0xF7);
-        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
-        return;
-
-    case OP_lshift: {
-        /* A count the block already loaded as a literal needs neither CL nor
-         * the save/restore around it: SHL r64, imm8 is one instruction.
-         */
-        if (src1_const_known && src1_const >= 0 && src1_const < 32) {
-            int want_src = ph2_ir->src0;
-            int dest_ir = ph2_ir->dest;
-
-            /* The same shift of the same register may already sit in another
-             * register; copying it is one instruction instead of three.
-             */
-            for (int i = 0; i < REG_CNT; i++) {
-                if (!shift_valid[i] || shift_src[i] != want_src ||
-                    shift_imm[i] != src1_const || i == dest_ir)
-                    continue;
-                int held = map_ir_reg(i);
-                emit_mov_reg(rd, held);
-                if (dest_ir >= 0 && dest_ir < REG_CNT) {
-                    shift_valid[dest_ir] = true;
-                    shift_src[dest_ir] = want_src;
-                    shift_imm[dest_ir] = src1_const;
-                }
-                return;
-            }
-
-            /* "index << k; add base; read/write" is one x86 addressing mode.
-             * Folding it away removes both the shift and the addition, which is
-             * every array subscript in the program.
-             */
-            if (try_fold_sib(ph2_ir, rd, rs1, src1_const))
-                return;
-
-            /* Narrowing back to int matters when the result is a value, but a
-             * scaled index feeding pointer arithmetic is only ever added to an
-             * address. Overflowing it is already undefined, and gcc likewise
-             * scales the sign-extended index in 64 bits without re-wrapping.
-             */
-            bool addr_only =
-                reg_feeds_address_only(emit_ir_index + 1, ph2_ir->dest);
-            emit_mov_reg(rd, rs1);
-            emit_shift_imm(rd, SHIFT_EXT_SHL, src1_const);
-            if (!addr_only &&
-                !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
-                wrap_to_int(rd, ph2_ir->is_pointer);
-
-            /* Recording needs the shift source to still be intact: if the
-             * result landed in it, the pairing no longer describes anything.
-             */
-            if (dest_ir >= 0 && dest_ir < REG_CNT && dest_ir != want_src &&
-                want_src >= 0 && want_src < REG_CNT) {
-                shift_valid[dest_ir] = true;
-                shift_src[dest_ir] = want_src;
-                shift_imm[dest_ir] = src1_const;
-            }
-            return;
-        }
-
-        /* rd = rs1 shl rs2.
-         *
-         * x86 takes the shift count in CL, but RCX is reg_map[3] and may hold a
-         * live value the allocator still needs -- it has no notion of this
-         * instruction clobbering a register. Save RCX in R10, stage the value
-         * in R11, then restore. R10/R11 are never handed out by reg_map, so
-         * this is safe for every aliasing of rd, rs1 and rs2.
-         */
-        emit_byte(REX_W | REX_B); /* MOV r10, rcx */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 1, 2));
-        emit_rex(1, rs1, 11); /* MOV r11, rs1 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
-        emit_rex(1, rs2, -1); /* MOV rcx, rs2 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
-        emit_byte(REX_W | REX_B); /* SHL r11, cl */
-        emit_byte(0xD3);
-        emit_byte(modrm(MOD_DIRECT, 4, 3));
-        emit_byte(REX_W | REX_R); /* MOV rcx, r10 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 2, 1));
-        emit_rex(1, 11, rd); /* MOV rd, r11 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
-
-        /* The shift happened in a 64-bit register, so bits that an int would
-         * have dropped survive. Narrow exactly as OP_mul does: without this, "1
-         * << 31" (which strength reduction also produces for "x * 2") stayed
-         * positive and every later comparison took the wrong branch.
-         */
-        wrap_to_int(rd, ph2_ir->is_pointer);
-        return;
-    }
-    case OP_rshift: {
-        /* A count the block already loaded as a literal needs neither CL nor
-         * the save/restore around it: SAR r64, imm8 is one instruction.
-         */
-        if (src1_const_known && src1_const >= 0 && src1_const < 32) {
-            emit_mov_reg(rd, rs1);
-            emit_shift_imm(rd, SHIFT_EXT_SAR, src1_const);
-            if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
-                wrap_to_int(rd, ph2_ir->is_pointer);
-            return;
-        }
-
-        /* rd = rs1 sar rs2.
-         *
-         * x86 takes the shift count in CL, but RCX is reg_map[3] and may hold a
-         * live value the allocator still needs -- it has no notion of this
-         * instruction clobbering a register. Save RCX in R10, stage the value
-         * in R11, then restore. R10/R11 are never handed out by reg_map, so
-         * this is safe for every aliasing of rd, rs1 and rs2.
-         */
-        emit_byte(REX_W | REX_B); /* MOV r10, rcx */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 1, 2));
-        emit_rex(1, rs1, 11); /* MOV r11, rs1 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
-        emit_rex(1, rs2, -1); /* MOV rcx, rs2 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
-        emit_byte(REX_W | REX_B); /* SAR r11, cl */
-        emit_byte(0xD3);
-        emit_byte(modrm(MOD_DIRECT, 7, 3));
-        emit_byte(REX_W | REX_R); /* MOV rcx, r10 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 2, 1));
-        emit_rex(1, 11, rd); /* MOV rd, r11 */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
-        return;
-    }
+    case OP_lshift:
+    case OP_rshift:
+        emit_bitwise(ph2_ir, rd, rs1, rs2, src1_const_known, src1_const);
+        break;
     case OP_eq:
     case OP_neq:
     case OP_lt:
     case OP_leq:
     case OP_gt:
     case OP_geq:
-        /* CMP rs1, rs2, then turn the flags into 0 or 1 in rd. The six
-         * comparisons differ only in the condition, and SETcc is the matching
-         * Jcc opcode plus 0x10, so branch_cc_for() supplies both forms.
-         */
-        emit_cmp(rs1, rs2);
-        emit_setcc_bool(rd, branch_cc_for(ph2_ir->op) + 0x10);
-        return;
-
-    case OP_jump: {
-        if (bb_falls_through(ph2_ir->next_bb))
-            return;
-
-        /* Everything below either jumps away or emits a rotated copy of the
-         * target block, whose own control flow this walk does not model. Treat
-         * the next block as unreachable from here either way.
-         */
-        emit_fell_through = false;
-
-        /* Rotate the loop. Jumping back to a small block that tests the
-         * condition and branches costs two taken branches per iteration, where
-         * a bottom-tested loop costs one. Emitting that test here instead makes
-         * the unconditional jump disappear, and this copy is reached only along
-         * the back edge, so what the registers hold coming out of the body
-         * still applies.
-         */
-        if (!in_dup_block && ph2_ir->next_bb) {
-            ph2_ir_t *tail = NULL;
-            int cnt = 0;
-            for (ph2_ir_t *t = ph2_ir->next_bb->ph2_ir_list.head; t;
-                 t = t->next) {
-                tail = t;
-                cnt++;
-            }
-            if (tail && tail->op == OP_branch && cnt <= 6) {
-                ph2_ir_t *saved_next = emit_next_ir;
-                int saved_index = emit_ir_index;
-
-                /* The copy runs the same instructions in the same order, so the
-                 * forward scans stay valid -- but only against the block's own
-                 * position in the flattened stream, not the jump's.
-                 */
-                int dup_base = ph2_ir->next_bb->ph2_base;
-
-                in_dup_block = true;
-                folds_off = dup_base < 0;
-                int n = 0;
-                for (ph2_ir_t *t = ph2_ir->next_bb->ph2_ir_list.head; t;
-                     t = t->next) {
-                    emit_ir_index = dup_base < 0 ? -1 : dup_base + n;
-                    emit_next_ir = t->next;
-                    emit_ph2_ir(t);
-                    n++;
-                }
-                in_dup_block = false;
-                folds_off = false;
-                emit_ir_index = saved_index;
-                emit_next_ir = saved_next;
-                return;
-            }
-        }
-
-        /* A jump to the instruction that follows it is already the way control
-         * flows. reg_alloc() appends the jump from the CFG alone, and the
-         * flattened order often puts the target next anyway.
-         */
-        if (bb_falls_through(ph2_ir->next_bb))
-            return;
-
-        /* JMP rel32, through the same target resolution the conditional edges
-         * use, so a jump landing on nothing but another jump goes straight to
-         * where that one ends up.
-         */
-        emit_byte(0xE9);
-        emit_bb_rel32(ph2_ir->next_bb);
-        return;
-    }
-
-    case OP_branch: {
-        if (fused_cc_pending) {
-            fused_cc_pending = false;
-            emit_byte(0x0F);
-            emit_byte(fused_cc); /* Jcc rel32 -> then_bb */
-            emit_bb_rel32(ph2_ir->then_bb);
-
-            if (!bb_falls_through(ph2_ir->else_bb)) {
-                emit_byte(0xE9); /* JMP rel32 -> else_bb */
-                emit_bb_rel32(ph2_ir->else_bb);
-                emit_fell_through = false;
-            }
-            return;
-        }
-
-        /* TEST rs1, rs1 */
-        emit_rex(1, rs1, rs1);
-        emit_byte(0x85);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rs1)));
-
-        /* Emit both edges explicitly: JNZ then_bb, then JMP else_bb.
-         *
-         * Falling through to else_bb would be shorter, but it is only valid
-         * when else_bb is literally the next block emitted. This backend
-         * interleaves NOP sleds and re-emits blocks that the linear walk
-         * missed, so that property does not hold reliably -- and when it
-         * silently fails, a false condition runs the true branch. Short circuit
-         * operators are where this shows up first: in "a && b" the false edge
-         * would fall into b's evaluation and adopt its result.
-         */
-        emit_byte(0x0F);
-        emit_byte(0x85); /* JNZ rel32 -> then_bb */
-        emit_bb_rel32(ph2_ir->then_bb);
-
-        if (!bb_falls_through(ph2_ir->else_bb)) {
-            emit_byte(0xE9); /* JMP rel32 -> else_bb */
-            emit_bb_rel32(ph2_ir->else_bb);
-            emit_fell_through = false;
-        }
-        return;
-    }
+    case OP_jump:
+    case OP_branch:
+        emit_compare_jump(ph2_ir, rd, rs1, rs2);
+        break;
     case OP_call:
-        /* CALL rel32 - find the target function and calculate relative offset
-         */
-        {
-            func_t *target_func = find_func(ph2_ir->func_name);
-
-            if (dynlink && target_func && !target_func->bbs) {
-                /* An external symbol: call its PLT entry, which the loader
-                 * redirects to the real function on first use.
-                 */
-                emit_byte(0xE8); /* CALL rel32 */
-                add_pltcall_ref(target_func->plt_offset);
-            } else if (!target_func || !target_func->bbs) {
-                /* Without dynamic linking there is nothing to call, and a CALL
-                 * with displacement 0 does not trap: it pushes a return address
-                 * and falls into the next instruction, leaving RSP eight bytes
-                 * low for the remainder of the function so that every [rsp
-                 * + ofs] local and the epilogue read the wrong slots. Refuse to
-                 * emit the image instead of shipping one that misbehaves
-                 * silently.
-                 */
-                printf("Error: Undefined function called: %s\n",
-                       ph2_ir->func_name);
-                abort();
-            } else {
-                emit_byte(0xE8); /* CALL rel32 */
-
-                /* Check if this is a forward reference (function not compiled
-                 * yet)
-                 */
-                if (target_func->bbs->elf_offset == -1) {
-                    /* Forward reference - BB not emitted yet, add to patch list
-                     */
-                    add_forward_ref(target_func->bbs);
-                    emit_dword(0); /* Placeholder - will be patched later */
-                } else {
-                    /* BB already emitted - calculate actual offset */
-                    int displacement =
-                        target_func->bbs->elf_offset - (elf_code->size + 4);
-                    emit_dword(displacement);
-                }
-            }
-
-            /* System V returns integers in RAX, but the shared IR expects a
-             * call's result in register 0 (reg_map[0] == RDI): reg-alloc turns
-             * OP_func_ret into OP_assign reading register 0. Bridge the two
-             * conventions here, once, for every call.
-             *
-             * MOV RDI, RAX
-             */
-            emit_byte(REX_W);
-            emit_byte(0x89);
-            emit_byte(modrm(MOD_DIRECT, 0, 7)); /* reg=RAX -> rm=RDI */
-        }
-        return;
-
     case OP_return:
-        emit_fell_through = false;
-        /* If there's a return value in src0, move it to RAX */
-        if (ph2_ir->src0 >= 0) {
-            /* rs1 already names the physical register, including the case where
-             * a folded load redirected this instruction to read the register
-             * that still holds the value. Re-deriving it from src0 here would
-             * ignore that redirection and return a stale register.
-             */
-            int ret_reg = rs1;
-            /* Debug output MOV rax, ret_reg - only if not already in RAX */
-            if (ret_reg != 0) { /* 0 is RAX, no move needed */
-                /* MOV RAX, ret_reg.
-                 *
-                 * 0x89 is MOV r/m64, r64: the ModRM reg field holds the source
-                 * (ret_reg) and rm holds the destination (RAX). The reg field
-                 * is extended by REX.R, not REX.B -- setting REX.B here instead
-                 * extended RAX, so a return value the allocator left in r8/r9
-                 * emitted "MOV r8, rax", the exact opposite of what is
-                 * intended.
-                 */
-                emit_rex(1, ret_reg, -1); /* REX.R for source reg >= 8 */
-                emit_byte(0x89);
-                int ret_reg_low = reg_low3(ret_reg);
-                int rax_reg3 = 0;
-                emit_byte(modrm(MOD_DIRECT, ret_reg_low, rax_reg3));
-            }
-        }
-        /* Function epilogue: ADD rsp, aligned_size; POP r13; POP r12; POP rbx;
-         * POP rbp; RET (R15 is reserved for global base pointer)
-         */
-        {
-            int stack_size_ret = ph2_ir->src1;
-            if (cur_define_stack >= 0 && stack_size_ret != cur_define_stack)
-                fprintf(stderr,
-                        "[x64] FRAME MISMATCH: prologue reserved %d, epilogue "
-                        "releases %d\n",
-                        cur_define_stack, stack_size_ret);
-            {
-                int aligned_ret =
-                    x64_frame_bytes(stack_size_ret, cur_saved_regs);
-                emit_byte(REX_W);
-                if (aligned_ret <= 127) {
-                    emit_byte(0x83); /* ADD r/m64, imm8 */
-                    int rsp_reg = 4;
-                    emit_byte(modrm(MOD_DIRECT, 0, rsp_reg));
-                    emit_byte(aligned_ret);
-                } else {
-                    emit_byte(0x81); /* ADD r/m64, imm32 */
-                    int rsp_reg = 4;
-                    emit_byte(modrm(MOD_DIRECT, 0, rsp_reg));
-                    emit_dword(aligned_ret);
-                }
-            }
-        }
-        /* R15 is reserved for global base pointer - don't save/restore */
-        for (int cs = cur_saved_regs - 1; cs >= 0; cs--)
-            emit_pop_reg(map_ir_reg(X64_FIRST_CALLEE_SAVED + cs));
-        emit_byte(0x5D); /* POP rbp */
-        emit_byte(0xC3); /* RET */
-        return;
-
     case OP_func_ret:
-        /* This should not be used in x64 backend - the register allocator
-         * generates OP_assign to move the return value from RAX
-         */
-        printf("Warning: OP_func_ret should not reach x64 backend\n");
-        return;
-
-    case OP_allocat: {
-        /* SUB rsp, size.
-         *
-         * src0 is a byte count, not a register index, so it must be read raw:
-         * 'rs1' has already been rewritten through reg_map[] above and would
-         * turn any size in 0..7 into an unrelated register number.
-         */
-        int alloc_bytes = ph2_ir->src0;
-        emit_byte(REX_W);
-        if (alloc_bytes >= -128 && alloc_bytes <= 127) {
-            emit_byte(0x83);
-            int rsp_reg3 = 4;
-            emit_byte(modrm(MOD_DIRECT, 5, rsp_reg3));
-            emit_byte(alloc_bytes);
-        } else {
-            emit_byte(0x81);
-            int rsp_reg3 = 4;
-            emit_byte(modrm(MOD_DIRECT, 5, rsp_reg3));
-            emit_dword(alloc_bytes);
-        }
-        return;
-    }
-
-    case OP_address_of: {
-        /* LEA rd, [rsp + src0] */
-        emit_rex(1, rd, -1);
-        emit_byte(0x8D);
-        emit_rsp_mem(rd, ph2_ir->src0);
-        return;
-    }
-
-    case OP_cmov: {
-        /* The value for the failing arm goes to the destination, and the other
-         * moves over it only when the condition holds. No branch means nothing
-         * to mispredict, which is the point: the arms were flattened precisely
-         * because the test was unpredictable.
-         */
-        int cond = rs1, taken = map_ir_reg(ph2_ir->src1);
-        int other = map_ir_reg(ph2_ir->src2);
-        int move_in = taken, cc = 0x45; /* CMOVNE */
-
-        /* The test comes first because the move below may land in the
-         * condition's own register: the condition dies at this instruction, so
-         * the allocator is free to hand its register to the destination.
-         * Reading the flags before overwriting it costs nothing -- MOV leaves
-         * them alone -- and testing after would have tested the wrong value.
-         */
-        emit_rex(1, cond, cond); /* TEST cond, cond */
-        emit_byte(0x85);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(cond), reg_low3(cond)));
-
-        /* When the destination already holds the value the test selects,
-         * copying the other over it would destroy it; keep what is there and
-         * bring the other in when the test fails instead.
-         */
-        if (rd == taken) {
-            move_in = other;
-            cc = 0x44; /* CMOVE */
-        } else {
-            emit_mov_reg(rd, other); /* nothing to do when they coincide */
-        }
-
-        emit_rex(1, rd, move_in); /* CMOVcc rd, move_in */
-        emit_byte(0x0F);
-        emit_byte(cc);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(move_in)));
-        return;
-    }
-
+        emit_call_return(ph2_ir, rs1);
+        break;
+    case OP_allocat:
+    case OP_address_of:
+    case OP_cmov:
     case OP_load:
-        /* Load a local from its frame slot at the width of its type.
-         *
-         * A slot is pointer-sized, but an int occupies only its low 4 bytes.
-         * Reading all 8 picks up whatever preceded it whenever the variable was
-         * last written through a pointer -- a callee doing "val[0] = x" stores
-         * 4 bytes -- which makes a zero read back as non-zero. That is how "#if
-         * defined(__arm__)" ended up true when self-hosting.
-         */
-        {
-            int stack_offset = ph2_ir->src0; /* frame offset from RSP */
-            int eff_size = ph2_ir->size_bytes;
-            if (eff_size == 1) {
-                /* MOVSX rd, BYTE PTR [rsp+ofs]. char is signed here, and a
-                 * _Bool only ever holds 0 or 1, which sign-extends to itself.
-                 */
-                emit_rex(1, rd, -1);
-                emit_byte(0x0F);
-                emit_byte(0xBE);
-            } else if (eff_size == 2) {
-                emit_rex(1, rd, -1);
-                emit_byte(0x0F);
-                emit_byte(0xBF);
-            } else if (eff_size == 4) {
-                /* MOVSXD rd, DWORD PTR [rsp+ofs]: int is signed */
-                emit_rex(1, rd, -1);
-                emit_byte(0x63);
-            } else {
-                emit_rex(1, rd, -1);
-                emit_byte(0x8B);
-            }
-            emit_rsp_mem(rd, stack_offset);
-        }
-        return;
-
     case OP_store:
-        /* MOV [rbp-offset], src_reg - Use type info for proper sizing */
-        {
-            int src_reg = rs1;
-            int stack_offset = ph2_ir->src1; /* frame offset from RSP */
-
-            /* Use type information to determine store size For x64, pointers
-             * MUST be stored as 64-bit to preserve address
-             */
-            int eff_size = ph2_ir->size_bytes;
-            if (ph2_ir->is_pointer && eff_size != PTR_SIZE)
-                eff_size = PTR_SIZE;
-
-            if (eff_size <= 4) {
-                /* 32-bit store. An int occupies only the low four bytes of its
-                 * slot and OP_load reads it back at that width, so writing
-                 * eight would put bits there that nothing ever reads -- and it
-                 * is what stopped the slot from being usable as a memory
-                 * operand.
-                 */
-                if (src_reg >= 8)
-                    emit_byte(REX_R);
-            } else {
-                /* Pointers and anything slot-width keep the 64-bit form. */
-                emit_rex(1, src_reg, -1);
-            }
-            emit_byte(0x89);
-            emit_rsp_mem(src_reg, stack_offset);
-        }
-        return;
-
+        emit_memory(ph2_ir, rd, rs1);
+        break;
     case OP_read:
-        /* Load *rs1 into rd. The element width lives in src1 (1, 2 or 4);
-         * pointer-typed reads must move a full pointer instead.
-         */
-        {
-            /* get_size() already yields PTR_SIZE for pointer-typed reads, so
-             * the IR width is authoritative. is_pointer describes the address
-             * operand, not the element, and must not be consulted.
-             */
-            int rsize = ph2_ir->src1;
-            int mem_disp = 0;
-            bool have_disp = false;
-            int sib_base, sib_index, sib_scale, sib_disp;
-            bool sib = sib_take(&sib_base, &sib_index, &sib_scale, &sib_disp);
-            if (addr_fold) {
-                rs1 = addr_fold_base;
-                mem_disp = addr_fold_disp;
-                have_disp = true;
-                addr_fold = false;
-            }
-            if (sib)
-                emit_rex_sib(1, rd, sib_base, sib_index);
-            else
-                emit_rex(1, rd, rs1);
-            if (rsize == 1) {
-                /* MOVSX r64, BYTE PTR [rs1]: char is signed here, as it is for
-                 * every other narrow type, and RISC-V already uses lb rather
-                 * than lbu. Zero-extending made a negative char read back
-                 * through a pointer as a large positive value.
-                 */
-                emit_byte(0x0F);
-                emit_byte(0xBE);
-            } else if (rsize == 2) {
-                /* MOVSX r64, WORD PTR [rs1]: short is signed, so the upper bits
-                 * must be a sign extension. ARM uses LDRSH and RISC-V uses lh
-                 * here; zero-extending made a negative short read back as a
-                 * large positive value.
-                 */
-                emit_byte(0x0F);
-                emit_byte(0xBF);
-            } else if (rsize == 4) {
-                /* MOVSXD r64, DWORD PTR [rs1]: int is signed, so the upper half
-                 * must be a sign extension, not zero.
-                 */
-                emit_byte(0x63);
-            } else {
-                /* MOV r64, [rs1] */
-                emit_byte(0x8B);
-            }
-            if (sib)
-                emit_mem_sib(rd, sib_base, sib_index, sib_scale, sib_disp);
-            else
-                emit_mem_base(rd, rs1, mem_disp, have_disp);
-        }
-        return;
-
     case OP_write:
-        /* Store value (src1) into [address (src0)] - IR uses src0 as address */
-        {
-            int addr_reg = rs1;
-            int val_reg = rs2;
-            int wr_disp = 0;
-            bool wr_have_disp = false;
-            int wsib_base, wsib_index, wsib_scale, wsib_disp;
-            bool wsib =
-                sib_take(&wsib_base, &wsib_index, &wsib_scale, &wsib_disp);
-            if (addr_fold) {
-                addr_reg = addr_fold_base;
-                wr_disp = addr_fold_disp;
-                wr_have_disp = true;
-                addr_fold = false;
-            }
-            /* Debug: trace write width mismatches for pointers */
-            if (ph2_ir->is_pointer && ph2_ir->size_bytes != PTR_SIZE) {
-                if (x64_debug)
-                    fprintf(
-                        stderr,
-                        "[EMIT] OP_write ptr width mismatch: size=%d ptr=%d "
-                        "addr=%d val=%d\n",
-                        ph2_ir->size_bytes, ph2_ir->is_pointer, ph2_ir->src0,
-                        ph2_ir->src1);
-            }
-
-            /* The store width the IR asks for lives in dest (1, 2 or 4);
-             * pointer-typed writes must store a full pointer. As with OP_read,
-             * the IR width already accounts for pointers.
-             */
-            int wsize = ph2_ir->dest;
-            if (wsize == 1) {
-                /* MOV r/m8, r8. A REX prefix is mandatory once the source is
-                 * RSP/RBP/RSI/RDI, otherwise the encoding names AH/CH/DH/BH.
-                 */
-                if (wsib)
-                    emit_rex_sib(0, val_reg, wsib_base, wsib_index);
-                else if (val_reg >= 4 || addr_reg >= 8)
-                    emit_rex(0, val_reg, addr_reg);
-                emit_byte(0x88);
-            } else if (wsize == 2) {
-                emit_byte(0x66); /* operand-size override */
-                if (wsib)
-                    emit_rex_sib(0, val_reg, wsib_base, wsib_index);
-                else if (val_reg >= 8 || addr_reg >= 8)
-                    emit_rex(0, val_reg, addr_reg);
-                emit_byte(0x89);
-            } else if (wsize == 4) {
-                if (wsib) {
-                    if (val_reg >= 8 || wsib_base >= 8 || wsib_index >= 8)
-                        emit_rex_sib(0, val_reg, wsib_base, wsib_index);
-                } else if (val_reg >= 8 || addr_reg >= 8)
-                    emit_rex(0, val_reg, addr_reg);
-                emit_byte(0x89); /* MOV r/m32, r32 */
-            } else if (wsib) {
-                emit_rex_sib(1, val_reg, wsib_base, wsib_index);
-                emit_byte(0x89); /* MOV r/m64, r64 */
-            } else {
-                /* Built with statements rather than a conditional expression:
-                 * folding the register tests into the argument of emit_byte
-                 * came out with a corrupted high nibble when shecc compiled
-                 * itself, so the store lost its REX.B and wrote the wrong
-                 * register.
-                 */
-                emit_rex(1, val_reg, addr_reg);
-                emit_byte(0x89); /* MOV r/m64, r64 */
-            }
-            if (wsib)
-                emit_mem_sib(val_reg, wsib_base, wsib_index, wsib_scale,
-                             wsib_disp);
-            else
-                emit_mem_base(val_reg, addr_reg, wr_disp, wr_have_disp);
-        }
-        return;
-
     case OP_indirect:
-        /* CALL r11 (staged by the preceding OP_load_func) */
-        emit_byte(REX_W | REX_B);
-        emit_byte(0xFF);
-        emit_byte(modrm(MOD_DIRECT, 2, 3));
-        /* System V returns in RAX; the shared IR expects register 0. */
-        emit_byte(REX_W);
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, 0, 7));
-        return;
-
+        emit_read_write(ph2_ir, rd, rs1, rs2);
+        break;
     case OP_load_func:
     case OP_global_load_func:
-        /* Stage the callee address in R11 for the OP_indirect that follows. R11
-         * is outside reg_map, so nothing the allocator owns is disturbed.
-         */
-        emit_rex(1, rs1, 11);
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
-        return;
-
     case OP_address_of_func:
-        /* Store the address of func_name into [rs1]. The address is not known
-         * until every function has been emitted, so record it for patching.
-         */
-        {
-            func_t *target = find_func(ph2_ir->func_name);
-            emit_byte(REX_W | REX_B);
-            emit_byte(0xB8 + 3); /* MOVABS r11, imm64 */
-            if (target && target->bbs) {
-                if (funcaddr_ref_count >= FUNCADDR_REF_MAX)
-                    fatal("x64: too many function-address relocations");
-                funcaddr_refs[funcaddr_ref_count].patch_location =
-                    elf_code->size;
-                funcaddr_refs[funcaddr_ref_count].target_bb = target->bbs;
-                funcaddr_ref_count++;
-            }
-            emit_dword(0);
-            emit_dword(0);
-
-            /* MOV [rs1], r11. Built with statements rather than a conditional
-             * expression: folding the register test into emit_byte's argument
-             * produced a corrupted high nibble once shecc compiled itself, so
-             * the store named the wrong base register.
-             */
-            emit_rex(1, 11, rs1); /* reg field is r11 */
-            emit_byte(0x89);
-            emit_mem_base(3, rs1, 0, false);
-        }
-        return;
-
-    case OP_global_address_of: {
-        /* Calculate address using R15 + offset (LEA rd, [r15 + offset]).
-         *
-         * src0 is a byte offset into the data area, not a register index, so it
-         * is read raw rather than through 'rs1', which emit_ph2_ir() has
-         * already rewritten through reg_map[].
-         */
-        int data_ofs = ph2_ir->src0;
-        if (data_ofs == 0) {
-            /* Just copy R15 to dest register.
-             *
-             * 0x89 puts the source in the ModRM reg field and the destination
-             * in r/m, so REX.R comes from R15 and REX.B from rd. Naming them
-             * the other way round emitted "MOV r15, rd", clobbering the global
-             * base pointer.
-             */
-            emit_rex(1, 15, rd); /* reg field is r15, r/m is rd */
-            emit_byte(0x89);     /* MOV */
-            int rd_low = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, 7, rd_low)); /* MOV rd, r15 */
-        } else {
-            /* LEA rd, [r15 + offset] */
-            emit_rex(1, rd, 11); /* r/m is r11 */
-            emit_byte(0x8D);     /* LEA */
-            int rd_low = reg_low3(rd);
-
-            if (data_ofs < 128) {
-                emit_byte(modrm(MOD_DISP8, rd_low, 7)); /* [R15 + disp8] */
-                emit_byte(data_ofs);
-            } else {
-                emit_byte(modrm(MOD_DISP32, rd_low, 7)); /* [R15 + disp32] */
-                emit_dword(data_ofs);
-            }
-        }
-    }
-        return;
-
-    case OP_global_load: {
-        /* Use R15-relative addressing for globals (like ARM uses R12) MOV
-         * dest_reg, [R15 + offset]
-         */
-        int dest_reg = map_ir_reg(ph2_ir->dest);
-
-        /* Pointers must always be loaded as 64-bit */
-        int eff_size = ph2_ir->size_bytes;
-        if (ph2_ir->is_pointer && eff_size != PTR_SIZE)
-            eff_size = PTR_SIZE;
-
-        /* Narrow globals must be loaded at their own width and extended,
-         * exactly as OP_load does for locals: a store through a pointer writes
-         * only the declared width, so an unconditional 8-byte load would pick
-         * up whatever sits in the rest of the slot.
-         */
-        emit_rex(1, dest_reg, 11); /* r/m is r11 */
-        if (eff_size == 1 && !ph2_ir->is_pointer) {
-            /* MOVSX, not MOVZX: 'char' is signed here, exactly as OP_load
-             * treats a one-byte local. Zero-extending made a global char
-             * holding -1 compare as 255.
-             */
-            emit_byte(0x0F); /* MOVSX dest, BYTE [r15 + ofs] */
-            emit_byte(0xBE);
-        } else if (eff_size == 2 && !ph2_ir->is_pointer) {
-            emit_byte(0x0F); /* MOVSX dest, WORD [r15 + ofs] */
-            emit_byte(0xBF);
-        } else if (eff_size == 4 && !ph2_ir->is_pointer) {
-            emit_byte(0x63); /* MOVSXD dest, DWORD [r15 + ofs] */
-        } else {
-            emit_byte(0x8B); /* MOV dest, QWORD [r15 + ofs] */
-        }
-        emit_r15_mem(reg_low3(dest_reg), ph2_ir->src0);
-    }
-        return;
-
-    case OP_global_store: {
-        /* Use R15-relative addressing for globals (like ARM uses R12) MOV [R15
-         * + offset], src_reg
-         */
-        int src_reg = rs1; /* honours a redirected source, as OP_store does */
-
-        /* Pointers must always be stored as 64-bit */
-        int eff_size = ph2_ir->size_bytes;
-        if (ph2_ir->is_pointer && eff_size != PTR_SIZE)
-            eff_size = PTR_SIZE;
-
-        /* Store at the slot's declared width, mirroring OP_global_load. A wider
-         * store would spill into the neighbouring global; a narrower one would
-         * leave stale bytes for the matching load to pick up.
-         */
-        if (eff_size == 1 && !ph2_ir->is_pointer) {
-            /* MOV BYTE [r15 + ofs], src8. REX is mandatory so that source
-             * registers 4..7 name SPL/BPL/SIL/DIL rather than AH..BH.
-             */
-            emit_rex(0, src_reg, 15);
-            emit_byte(0x88);
-            emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
-        } else if (eff_size == 2 && !ph2_ir->is_pointer) {
-            /* MOV WORD [r15 + ofs], src16 */
-            emit_byte(0x66); /* operand-size override, before REX */
-            emit_rex(0, src_reg, 15);
-            emit_byte(0x89);
-            emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
-        } else if (eff_size == 4 && !ph2_ir->is_pointer) {
-            /* MOV DWORD [r15 + ofs], src32 */
-            emit_rex(0, src_reg, 15);
-            emit_byte(0x89);
-            emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
-        } else {
-            /* MOV QWORD [r15 + ofs], src64 */
-            emit_rex(1, src_reg, 15);
-            emit_byte(0x89);
-            emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
-        }
-    }
-        return;
-
-    case OP_load_data_address: {
-        /* Calculate address using R15 + offset (LEA rd, [r15 + offset]).
-         *
-         * src0 is a byte offset into the data area, not a register index, so it
-         * is read raw rather than through 'rs1', which emit_ph2_ir() has
-         * already rewritten through reg_map[].
-         */
-        int data_ofs = ph2_ir->src0;
-        if (data_ofs == 0) {
-            /* Just copy R15 to dest register.
-             *
-             * 0x89 puts the source in the ModRM reg field and the destination
-             * in r/m, so REX.R comes from R15 and REX.B from rd. Naming them
-             * the other way round emitted "MOV r15, rd", clobbering the global
-             * base pointer.
-             */
-            emit_rex(1, 15, rd); /* reg field is r15, r/m is rd */
-            emit_byte(0x89);     /* MOV */
-            int rd_low = reg_low3(rd);
-            emit_byte(modrm(MOD_DIRECT, 7, rd_low)); /* MOV rd, r15 */
-        } else {
-            /* LEA rd, [r15 + offset] */
-            emit_rex(1, rd, 11); /* r/m is r11 */
-            emit_byte(0x8D);     /* LEA */
-            int rd_low = reg_low3(rd);
-
-            if (data_ofs < 128) {
-                emit_byte(modrm(MOD_DISP8, rd_low, 7)); /* [R15 + disp8] */
-                emit_byte(data_ofs);
-            } else {
-                emit_byte(modrm(MOD_DISP32, rd_low, 7)); /* [R15 + disp32] */
-                emit_dword(data_ofs);
-            }
-        }
-    }
-        return;
-
-    case OP_load_rodata_address: {
-        /* MOVABS rd, imm64 with a placeholder address, recorded for patching
-         * once .rodata's final location is known.
-         */
-        emit_rex(1, -1, rd);
-        emit_byte(0xB8 + reg_low3(rd));
-        {
-            if (rodata_ref_count >= RODATA_REF_MAX)
-                fatal("x64: too many .rodata relocations");
-            rodata_refs[rodata_ref_count].patch_location = elf_code->size;
-
-            /* src0 is a .rodata byte offset, not a register index; read it raw
-             * so that offsets 0..7 are not rewritten by reg_map[].
-             */
-            rodata_refs[rodata_ref_count].rodata_offset = ph2_ir->src0;
-            rodata_ref_count++;
-        }
-        emit_dword(0);
-        emit_dword(0);
-        return;
-    }
-    case OP_log_not: {
-        /* TEST rs1, rs1; SETE r11b; MOVZX rd, r11b.
-         *
-         * The source is rs1, which is not always the same register as rd -- for
-         * a global it never is.
-         */
-        emit_rex(1, rs1, rs1);
-        emit_byte(0x85);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rs1)));
-
-        emit_setcc_bool(rd, 0x94); /* SETE */
-    }
-        return;
-
-    case OP_log_and: {
-        /* Logical AND: result = (rs1 != 0) && (rs2 != 0) For now, just set
-         * result to 1 - proper implementation needs control flow
-         */
-        emit_rex(1, -1, rd);
-        emit_byte(0xC7); /* MOV rd, imm32 */
-        int rd_low_and = reg_low3(rd);
-        emit_byte(modrm(MOD_DIRECT, 0, rd_low_and));
-        emit_dword(1); /* Always return 1 for now */
-        return;
-    }
-
-    case OP_log_or: {
-        /* Logical OR: result = (rs1 != 0) || (rs2 != 0) */
-        /* For now, just set result to 1 - proper implementation needs control
-         * flow
-         */
-        emit_rex(1, -1, rd);
-        emit_byte(0xC7); /* MOV rd, imm32 */
-        int rd_low_or = reg_low3(rd);
-        emit_byte(modrm(MOD_DIRECT, 0, rd_low_or));
-        emit_dword(1); /* Always return 1 for now */
-        return;
-    }
-
-    case OP_trunc: {
-        /* Narrow rs1 to the target width held in src1, matching the 32-bit
-         * backends: the language has no unsigned types, so every narrowing
-         * keeps the sign -- 127 + 1 wraps to -128, 32767
-         * + 1 to -32768 -- and a 4-byte truncation sign-extends the low word.
-         */
-        int tsize = ph2_ir->src1;
-        emit_rex(1, rd, rs1);
-        if (tsize == 1) {
-            emit_byte(0x0F);
-            emit_byte(0xBE); /* MOVSX r64, r/m8 */
-        } else if (tsize == 2) {
-            emit_byte(0x0F);
-            emit_byte(0xBF); /* MOVSX r64, r/m16 */
-        } else if (tsize == 4) {
-            emit_byte(0x63); /* MOVSXD r64, r/m32 */
-        } else {
-            emit_byte(0x89); /* plain MOV */
-            emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rd)));
-            return;
-        }
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs1)));
-    }
-        return;
-
-    case OP_sign_ext: {
-        /* src1 packs (source type size << 16) | target size, as built by the
-         * parser's promote() helper.
-         *
-         * rs1/rd are already physical registers here; they must not be run
-         * through reg_map a second time.
-         */
-        int src_size = (ph2_ir->src1 >> 16) & 0xFFFF;
-        int dst_size = ph2_ir->src1 & 0xFFFF;
-        int width = src_size;
-
-        /* Widening to a pointer. The register already holds a complete 64-bit
-         * address, so sign-extending it from 32 bits would discard the upper
-         * half and destroy every stack address. Copy it instead, which is also
-         * what a source that is already full width wants.
-         */
-        if (dst_size == PTR_SIZE && PTR_SIZE == 8)
-            width = 8;
-        else if (width != 1 && width != 2 && width != 4)
-            width = 8;
-        emit_narrow_move(rd, rs1, width, true);
-    }
-        return;
-
-    case OP_cast: {
-        /* Usually just a register move */
-        emit_mov_reg(rd, rs1);
-    }
-        return;
-
+    case OP_global_address_of:
+    case OP_global_load:
+    case OP_global_store:
+    case OP_load_data_address:
+    case OP_load_rodata_address:
+        emit_global(ph2_ir, rd, rs1);
+        break;
+    case OP_log_not:
+    case OP_log_and:
+    case OP_log_or:
+    case OP_trunc:
+    case OP_sign_ext:
+    case OP_cast:
+        emit_logic_cast(ph2_ir, rd, rs1);
+        break;
     case OP_define:
         /* Update the function's actual offset to current code position */
         {

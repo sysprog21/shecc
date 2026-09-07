@@ -200,12 +200,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+      - name: Set up style tools
+        uses: ./.github/actions/setup-build-env
+        with:
+          architecture: x64
+          link-mode: static
+          github-token: ${{ github.token }}
+          style-tools: 'true'
       - name: Coding convention
-        shell: bash
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get update -q -y
-          sudo apt-get install -q -y --no-install-recommends clang-format-18
-          .ci/check-newline.sh
-          .ci/check-format.sh
+        run: make check-style
+      - name: Git hooks
+        run: make check-hooks

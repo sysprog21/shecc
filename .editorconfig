@@ -1,0 +1,24 @@
+# Top-level EditorConfig file
+root = true
+
+# Enforced repository-wide by .ci/check-newline.sh
+[*]
+end_of_line = lf
+insert_final_newline = true
+
+# Matching .clang-format's "UseTab: Never" and "IndentWidth: 4"
+[*.{c,h}]
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+
+# Shell adds the shfmt-specific keys, which no editor reads but which keep
+# "shfmt -d" and "shfmt -w" agreeing without duplicating flags in the Makefile.
+[*.sh]
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+function_next_line = true
+switch_case_indent = true
+space_redirects = true
+binary_next_line = true

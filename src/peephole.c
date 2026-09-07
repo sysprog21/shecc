@@ -13,7 +13,7 @@
  * instructions are those whose results can be directly written to the final
  * destination register, eliminating intermediate moves.
  */
-bool is_fusible_insn(ph2_ir_t *ph2_ir)
+bool is_fusible_insn(const ph2_ir_t *ph2_ir)
 {
     switch (ph2_ir->op) {
     case OP_add: /* Arithmetic operations */
@@ -42,10 +42,9 @@ bool is_fusible_insn(ph2_ir_t *ph2_ir)
 
 /* Main peephole optimization function that applies pattern matching and
  * transformation rules to consecutive IR instructions.
- * Returns true if any optimization was applied, false otherwise.
- */
-/* Drop the instructions after @ir through @last, keeping ph2_ir_list.tail on a
- * node still in the list.
+ * Returns true if any optimization was applied, false otherwise. Drop the
+ * instructions after @ir through @last, keeping ph2_ir_list.tail on a node
+ * still in the list.
  *
  * Every removal in this file goes through here. A bare "ir->next = last->next"
  * leaves tail pointing at a removed node, which is why x64-codegen.c used to
@@ -369,8 +368,8 @@ bool eliminate_load_store_pairs(basic_block_t *bb, ph2_ir_t *ph2_ir)
          * links the caller is holding valid.
          *
          * Only at equal width. A wide store followed by a narrow one to the
-         * same slot leaves the bytes the second does not cover holding what
-         * the first put there, so dropping the first loses them.
+         * same slot leaves the bytes the second does not cover holding what the
+         * first put there, so dropping the first loses them.
          */
         if (ph2_ir->src1 == next->src1 && ph2_ir->src1 >= 0 &&
             ph2_ir->size_bytes == next->size_bytes &&
@@ -553,9 +552,10 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
     return false;
 }
 
-/* Simplify bitwise patterns the SSA optimizer cannot see, because they
- * only become visible once registers are assigned. Returns true when it
- * rewrote something.
+/* Simplify bitwise patterns the SSA optimizer cannot see, because they only
+ * become visible once registers are assigned.
+ *
+ * Returns true when it rewrote something.
  */
 bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
 {
@@ -724,8 +724,8 @@ bool triple_pattern_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
  *
  * This runs on ph2_ir_t, after register allocation, and so sees only what
  * assigning registers makes visible. Constant folding, common subexpression
- * elimination and dead code elimination have already run over insn_t in the
- * SSA optimizer and are not repeated here.
+ * elimination and dead code elimination have already run over insn_t in the SSA
+ * optimizer and are not repeated here.
  *
  * What is left to do at this level:
  * - self-assignment elimination, for assignments allocation itself created
@@ -757,13 +757,13 @@ void peephole(void)
                     continue;
                 }
 
-                /* Every rewrite below moves this instruction's result to
-                 * the destination of the one after it, dropping the write to
-                 * the register it named. That is fine for a temporary, whose
-                 * value nothing wants again, and wrong for a pinned register:
-                 * a variable lives there for the whole function and nothing
-                 * else ever reloads it, so "li rbx, 0; add rax, rsi, rbx" must
-                 * not become "mov rax, rsi" and leave rbx unwritten.
+                /* Every rewrite below moves this instruction's result to the
+                 * destination of the one after it, dropping the write to the
+                 * register it named. That is fine for a temporary, whose value
+                 * nothing wants again, and wrong for a pinned register: a
+                 * variable lives there for the whole function and nothing else
+                 * ever reloads it, so "li rbx, 0; add rax, rsi, rbx" must not
+                 * become "mov rax, rsi" and leave rbx unwritten.
                  */
                 if (ir->dest >= 0 && ir->dest < REG_CNT &&
                     ((func->pinned_regs >> ir->dest) & 1))
