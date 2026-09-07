@@ -49,6 +49,55 @@
 /* inlined libc */
 #include "../out/libc.inc"
 
+char *last_char(char *text, char needle)
+{
+    char *last = NULL;
+
+    for (int i = 0; text[i]; i++) {
+        if (text[i] == needle)
+            last = text + i;
+    }
+
+    return last;
+}
+
+/* Derive lacc-style DOT output when the caller did not specify -o. */
+char *dot_output_name(char *input)
+{
+    char *suffix = last_char(input, '.');
+    char *slash = last_char(input, '/');
+    char *base = input;
+
+    if (slash)
+        base = slash + 1;
+
+    /* A dot only introduces a suffix when something in the same path
+     * component precedes it. That rules out a directory's dot ("dir.d/file")
+     * and a dotfile's leading one, which would reduce ".bashrc" to ".dot".
+     */
+    if (suffix && suffix <= base)
+        suffix = NULL;
+
+    /* Not a ternary: "suffix - input" is ptrdiff_t and strlen() is size_t, and
+     * mixing them in one ?: makes the whole expression unsigned.
+     */
+    int base_len = strlen(input);
+
+    if (suffix)
+        base_len = suffix - input;
+    /* strlen, not sizeof: shecc types a string literal as a pointer, so
+     * sizeof(".dot") is 1 once the compiler is compiling itself.
+     */
+    char *output = malloc(base_len + strlen(".dot") + 1);
+
+    if (!output)
+        fatal("Unable to allocate DOT output name");
+
+    memcpy(output, input, base_len);
+    strcpy(output + base_len, ".dot");
+    return output;
+}
+
 int main(int argc, char *argv[])
 {
     char *out = NULL;
@@ -59,6 +108,8 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
             dump_ir = true;
+        else if (!strcmp(argv[i], "--dot"))
+            dump_dot = true;
         else if (!strcmp(argv[i], "+m"))
             hard_mul_div = true;
         else if (!strcmp(argv[i], "--no-libc"))
@@ -81,10 +132,27 @@ int main(int argc, char *argv[])
 
     if (!in) {
         printf(
-            "Usage: shecc [-o output] [+m] [--dump-ir] [--no-libc] "
+            "Usage: shecc [-o output] [+m] [--dot] [--dump-ir] [--no-libc] "
             "[--dynlink] [-E] <input.c>\n");
         usage_error("Missing source file");
     }
+
+    /* --dot stops the pipeline at a different phase than these do. */
+    if (dump_dot && expand_only)
+        usage_error("--dot cannot be combined with -E");
+
+    if (dump_dot && dump_ir)
+        usage_error("--dot cannot be combined with --dump-ir");
+
+    if (dump_dot && !out)
+        out = dot_output_name(in);
+
+    /* The graph is written by truncating its output, so naming the input
+     * destroys the source. That happens both when -o names it outright and
+     * when an input already ending in .dot derives its own name.
+     */
+    if (dump_dot && !strcmp(out, in))
+        usage_error("--dot would overwrite the input; name another output");
 
     /* initialize global objects */
     global_init();
@@ -124,6 +192,20 @@ int main(int argc, char *argv[])
     compact_all_arenas();
 
     ssa_build();
+
+    /* Like lacc's -dot target, visualize the SSA CFG directly rather than
+     * lowering it into an executable. Prune first: every compile prepends the
+     * whole of lib/c.c, and the functions nothing reaches are noise in the
+     * picture -- two thirds of the graph on tests/fib.c.
+     */
+    if (dump_dot) {
+        prune_unused_funcs();
+        dump_cfg(out);
+        global_release();
+        exit(0);
+    }
+
+    unwind_phi();
 
     /* Copy small helpers into their callers before anything else looks at
      * them, so the optimizer sees one body rather than a call boundary.

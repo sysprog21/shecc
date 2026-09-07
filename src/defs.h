@@ -36,6 +36,13 @@
 #define MAX_ID_LEN 64
 #define MAX_LINE_LEN 256
 #define MAX_VAR_LEN 128
+/* ".label." plus an int, for basic_block_t's dump name. */
+#define MAX_LABEL_LEN 24
+/* Staging buffer for one instruction's Graphviz label in bb_dump(). The widest
+ * case is a binary operator: three MAX_VAR_LEN names, three subscripts, an
+ * operator and 41 bytes of markup.
+ */
+#define DUMP_INSN_LEN 512
 #define MAX_TYPE_LEN 32
 #define MAX_PARAMS 8
 #define MAX_LOCALS 3200

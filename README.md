@@ -161,12 +161,13 @@ $ make check-sanitizer
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```shell
-$ shecc [-o output] [+m] [--no-libc] [--dump-ir] [--dynlink] [-E] <infile.c>
+$ shecc [-o output] [+m] [--dot] [--no-libc] [--dump-ir] [--dynlink] [-E] <infile.c>
 ```
 
 Compiler options:
 - `-o` : Specify output file name (default: `out.elf`)
 - `+m` : Use hardware multiplication/division instructions (default: disabled)
+- `--dot` : Write the SSA control-flow graph in Graphviz DOT format and stop
 - `--no-libc` : Exclude embedded C library (default: embedded)
 - `--dump-ir` : Dump intermediate representation (IR)
 - `--dynlink` : Use dynamic linking (default: disabled)
@@ -262,6 +263,21 @@ To clean up the generated compiler files, execute the command `make clean`.
 For resetting architecture configurations, use the command `make distclean`.
 
 ## Intermediate Representation
+
+To visualize the SSA control-flow graph, use the standalone `--dot` target.
+It writes Graphviz DOT with one cluster per function and IR instruction nodes
+grouped by basic block; no executable is generated. The graph is printed before
+phi values are unwound into edge copies, so the phi nodes are still in it, and
+functions the input cannot reach -- most of the embedded C library -- are
+pruned first. The default output replaces the input suffix with `.dot`.
+
+```shell
+$ out/shecc --dot -o fib.dot tests/fib.c
+$ dot -Tsvg fib.dot -o fib.svg
+```
+
+Graphviz is needed to render the result, but not to produce it, and nothing in
+`make check` depends on it.
 
 Once the option `--dump-ir` is passed to `shecc`, the intermediate representation (IR)
 will be generated. Take the file `tests/fib.c` for example. It consists of a recursive

@@ -2732,8 +2732,6 @@ void check_var_cross_init()
     }
 }
 
-#ifdef __SHECC__
-#else
 void bb_dump_connection(FILE *fd,
                         basic_block_t *curr,
                         basic_block_t *next,
@@ -2865,7 +2863,7 @@ void bb_dump(FILE *fd, func_t *func, basic_block_t *bb)
             }
             fprintf(fd, ")>]\n");
         } else {
-            char str[256];
+            char str[DUMP_INSN_LEN];
             switch (insn->opcode) {
             case OP_allocat:
                 sprintf(str, "<%s<SUB>%d</SUB> := ALLOC>", insn->rd->var_name,
@@ -3035,6 +3033,9 @@ void dump_cfg(char name[])
 {
     FILE *fd = fopen(name, "w");
 
+    if (!fd)
+        usage_error("Unable to open DOT output");
+
     fprintf(fd, "strict digraph CFG {\n");
     fprintf(fd, "node [shape=box]\n");
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
@@ -3051,37 +3052,6 @@ void dump_cfg(char name[])
     fprintf(fd, "}\n");
     fclose(fd);
 }
-
-void dom_dump(FILE *fd, basic_block_t *bb)
-{
-    fprintf(fd, "\"%p\"\n", bb);
-    for (int i = 0; i < bb->dom_next_idx; i++) {
-        dom_dump(fd, bb->dom_next[i]);
-        fprintf(fd, "\"%p\":s->\"%p\":n\n", bb, bb->dom_next[i]);
-    }
-}
-
-void dump_dom(char name[])
-{
-    FILE *fd = fopen(name, "w");
-
-    fprintf(fd, "strict digraph DOM {\n");
-    fprintf(fd, "node [shape=box]\n");
-    fprintf(fd, "splines=polyline\n");
-    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        /* Skip function declarations without bodies */
-        if (!func->bbs)
-            continue;
-
-        fprintf(fd, "subgraph cluster_%p {\n", func);
-        fprintf(fd, "label=\"%p\"\n", func);
-        dom_dump(fd, func->bbs);
-        fprintf(fd, "}\n");
-    }
-    fprintf(fd, "}\n");
-    fclose(fd);
-}
-#endif
 
 int func_marked_count;
 
@@ -3221,6 +3191,7 @@ void prune_unused_funcs(void)
         func->is_used = false;
 }
 
+/* Builds SSA form and stops there; unwind_phi() is the caller's to call. */
 void ssa_build(void)
 {
     build_rpo();
@@ -3234,16 +3205,6 @@ void ssa_build(void)
 
     solve_phi_insertion();
     solve_phi_params();
-
-#ifdef __SHECC__
-#else
-    if (dump_ir) {
-        dump_cfg("CFG.dot");
-        dump_dom("DOM.dot");
-    }
-#endif
-
-    unwind_phi();
 }
 
 /* Check if operation can be subject to CSE */
@@ -3598,6 +3559,20 @@ bool var_escapes(var_t *var)
     return true;
 }
 
+/* Append one initial useful instruction, reserving space only when it exists.
+ */
+void dce_init_push(insn_t *work_list[],
+                   int work_list_idx,
+                   int *mark_num,
+                   insn_t *insn)
+{
+    if (work_list_idx + *mark_num >= DCE_WORKLIST_SIZE)
+        fatal("DCE worklist size exceeded");
+
+    work_list[work_list_idx + *mark_num] = insn;
+    *mark_num = *mark_num + 1;
+}
+
 /* initial mark useful instruction */
 int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
 {
@@ -3609,8 +3584,7 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
     case OP_return:
         insn->useful = true;
         insn->belong_to->useful = true;
-        work_list[work_list_idx + mark_num] = insn;
-        mark_num++;
+        dce_init_push(work_list, work_list_idx, &mark_num, insn);
         break;
     case OP_write:
     case OP_store:
@@ -3618,42 +3592,36 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
         if (!insn->rd || var_escapes(insn->rd)) {
             insn->useful = true;
             insn->belong_to->useful = true;
-            work_list[work_list_idx + mark_num] = insn;
-            mark_num++;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn);
         }
         break;
     case OP_global_store:
         /* Global stores always escape */
         insn->useful = true;
         insn->belong_to->useful = true;
-        work_list[work_list_idx + mark_num] = insn;
-        mark_num++;
+        dce_init_push(work_list, work_list_idx, &mark_num, insn);
         break;
     case OP_address_of:
     case OP_unwound_phi:
     case OP_allocat:
         insn->useful = true;
         insn->belong_to->useful = true;
-        work_list[work_list_idx + mark_num] = insn;
-        mark_num++;
+        dce_init_push(work_list, work_list_idx, &mark_num, insn);
         break;
     case OP_indirect:
     case OP_call:
         insn->useful = true;
         insn->belong_to->useful = true;
-        work_list[work_list_idx + mark_num] = insn;
-        mark_num++;
+        dce_init_push(work_list, work_list_idx, &mark_num, insn);
         /* mark precall and postreturn sequences at calls */
         if (insn->next && insn->next->opcode == OP_func_ret) {
             insn->next->useful = true;
-            work_list[work_list_idx + mark_num] = insn->next;
-            mark_num++;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn->next);
         }
         while (insn->prev && insn->prev->opcode == OP_push) {
             insn = insn->prev;
             insn->useful = true;
-            work_list[work_list_idx + mark_num] = insn;
-            mark_num++;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn);
         }
         break;
     default:
@@ -3663,8 +3631,7 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
         if (insn->rd->is_global && !insn->useful) {
             insn->useful = true;
             insn->belong_to->useful = true;
-            work_list[work_list_idx + mark_num] = insn;
-            mark_num++;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn);
         }
         break;
     }
@@ -3679,12 +3646,6 @@ void dce_insn(basic_block_t *bb)
 
     /* initially analyze current bb */
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-        /* dce_init_mark() appends up to MAX_PARAMS + 2 entries for a call --
-         * the call, its return value, and one per preceding OP_push -- so the
-         * room has to be there before it writes, not checked afterwards.
-         */
-        if (work_list_idx + MAX_PARAMS + 2 > DCE_WORKLIST_SIZE)
-            fatal("DCE worklist size exceeded");
         work_list_idx += dce_init_mark(insn, work_list, work_list_idx);
     }
 

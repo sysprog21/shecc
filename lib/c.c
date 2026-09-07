@@ -10,8 +10,10 @@
 #define INT_BUF_LEN 16
 
 /* Staging buffer for the printf family that writes straight to a descriptor.
- * Every byte here is stack in every program shecc emits, so it stays close to
- * the longest single conversion the compiler itself performs.
+ *
+ * The longest single call in the tree is ssa.c's "insn_%p [label=%s]": a
+ * DUMP_INSN_LEN staging buffer plus 26 bytes around it, so 537. Every byte
+ * here is stack in every program shecc emits, so it stays close to that.
  */
 #define FMT_BUF_LEN 576
 
@@ -645,26 +647,29 @@ FILE *fopen(char *filename, char *mode)
 {
     int fd;
 
-    if (!strcmp(mode, "wb")) {
-        /* O_WRONLY | O_CREAT | O_TRUNC. Without O_TRUNC, writing a shorter
-         * file over a longer one leaves the old tail in place -- which turns
-         * a rebuilt executable into the new image followed by a fragment of
-         * the previous one.
+    if (!strcmp(mode, "w") || !strcmp(mode, "wb")) {
+        /* Flags below are O_WRONLY | O_CREAT | O_TRUNC. Without O_TRUNC,
+         * writing a shorter file over a longer one leaves the old tail in
+         * place -- which turns a rebuilt executable into the new image
+         * followed by a fragment of the previous one.
+         *
+         * "wb" writes an executable and opens 0775; "w" writes text, which has
+         * no business being executable, and opens 0666 before the umask.
          */
-#if defined(__arm__)
-        fd = __syscall(__syscall_open, filename, 577, 0x1fd);
-#elif defined(__riscv)
+        int perm = 0x1b6;
+
+        if (!strcmp(mode, "wb"))
+            perm = 0x1fd;
+#if defined(__riscv)
         /* FIXME: mode not work currently in RISC-V */
-        fd = __syscall(__syscall_openat, -100, filename, 577, 0x1fd);
-#elif defined(__x86_64__)
-        fd = __syscall(__syscall_open, filename, 577, 0x1fd);
+        fd = __syscall(__syscall_openat, -100, filename, 577, perm);
+#else
+        fd = __syscall(__syscall_open, filename, 577, perm);
 #endif
-    } else if (!strcmp(mode, "rb")) {
-#if defined(__arm__)
-        fd = __syscall(__syscall_open, filename, 0, 0);
-#elif defined(__riscv)
+    } else if (!strcmp(mode, "r") || !strcmp(mode, "rb")) {
+#if defined(__riscv)
         fd = __syscall(__syscall_openat, -100, filename, 0, 0);
-#elif defined(__x86_64__)
+#else
         fd = __syscall(__syscall_open, filename, 0, 0);
 #endif
     } else
