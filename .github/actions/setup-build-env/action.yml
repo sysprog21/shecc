@@ -67,6 +67,24 @@ runs:
         echo "$sha256  $file" | sha256sum -c -
         sudo apt-get install -q -y --no-install-recommends "$file"
 
+    # An Arm64 runner is asked for so that the Arm output runs through the
+    # kernel rather than an emulator, and the step above is what lets
+    # mk/arm.mk see that. Read the decision back while it is fresh: a runner
+    # the probe stops matching would otherwise turn those jobs into slower
+    # copies of the x86 ones without saying so. An empty TARGET_EXEC is the
+    # Makefile saying nothing stands in front of the binary.
+    - name: Confirm the Arm output runs natively
+      if: runner.arch == 'ARM64' && inputs.architecture == 'arm'
+      shell: bash
+      run: |
+        set -euo pipefail
+        runner=$(make -np ARCH=arm 2>/dev/null | \
+            sed -n 's/^TARGET_EXEC = *//p' | head -1)
+        if [ -n "$runner" ]; then
+            echo "Expected native execution, but the build selected: $runner"
+            exit 1
+        fi
+
     # The RISC-V toolchain is not packaged, so it comes from the project's own
     # releases. Only the sysroot is wanted: mk/common.mk locates ld-linux
     # through it, and refuses to configure a dynamic build without one.
