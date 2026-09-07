@@ -42,6 +42,10 @@
 #define MAX_FIELDS 64
 #define MAX_TYPES 256
 #define MAX_LABELS 256
+/* Pending postfix ++/-- effects in one statement; each one appends 3. */
+#define MAX_SIDE_EFFECT 64
+/* Elements captured from an implicitly sized array initializer. */
+#define MAX_IMPLICIT_ARRAY 256
 #define MAX_IR_INSTR 120000
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64

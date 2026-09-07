@@ -3679,10 +3679,13 @@ void dce_insn(basic_block_t *bb)
 
     /* initially analyze current bb */
     for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-        int mark_num = dce_init_mark(insn, work_list, work_list_idx);
-        work_list_idx += mark_num;
-        if (work_list_idx > DCE_WORKLIST_SIZE - 1)
+        /* dce_init_mark() appends up to MAX_PARAMS + 2 entries for a call --
+         * the call, its return value, and one per preceding OP_push -- so the
+         * room has to be there before it writes, not checked afterwards.
+         */
+        if (work_list_idx + MAX_PARAMS + 2 > DCE_WORKLIST_SIZE)
             fatal("DCE worklist size exceeded");
+        work_list_idx += dce_init_mark(insn, work_list, work_list_idx);
     }
 
     /* Process worklist - marking dependencies as useful */

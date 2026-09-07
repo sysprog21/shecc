@@ -17,7 +17,7 @@
 int global_var_idx = 0;
 
 /* Side effect instructions cache */
-insn_t side_effect[10];
+insn_t side_effect[MAX_SIDE_EFFECT];
 int se_idx = 0;
 
 /* Control flow utilities */
@@ -501,8 +501,8 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         bool is_neg = false;
         if (lex_accept(T_minus))
             is_neg = true;
-        char numtok[MAX_ID_LEN];
-        lex_ident(T_numeric, numtok);
+        char numtok[MAX_TOKEN_LEN];
+        lex_ident_n(T_numeric, numtok, MAX_TOKEN_LEN);
         int num_val = parse_numeric_constant(numtok);
         if (is_neg)
             num_val = -num_val;
@@ -829,7 +829,7 @@ void parse_array_init(var_t *var,
 {
     int count = 0;
     var_t *base_addr = NULL;
-    var_t *stored_vals[256];
+    var_t *stored_vals[MAX_IMPLICIT_ARRAY];
     bool is_implicit = (var->array_size == 0);
 
     /* Elements of a pointer array are pointer-sized. Using the base type's
@@ -902,8 +902,15 @@ void parse_array_init(var_t *var,
                 val = opstack_pop();
             }
 
-            if (is_implicit && emit_code && count < 256)
+            if (is_implicit && emit_code) {
+                /* Truncating would declare array_size == count while storing
+                 * fewer elements, so refuse.
+                 */
+                if (count >= MAX_IMPLICIT_ARRAY)
+                    error_at("Too many elements in array initializer",
+                             next_token_loc());
                 stored_vals[count] = val;
+            }
 
             if (val && emit_code && !is_implicit && count < var->array_size) {
                 var_t *v = resize_to(parent, bb, val, var->type, 0);
@@ -978,7 +985,7 @@ void parse_array_init(var_t *var,
         if (emit_code && count > 0) {
             base_addr = var;
 
-            for (int i = 0; i < count && i < 256; i++) {
+            for (int i = 0; i < count; i++) {
                 if (!stored_vals[i])
                     continue;
                 var_t *v = resize_to(parent, bb, stored_vals[i], var->type, 0);
@@ -1406,12 +1413,12 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
 
 void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
 {
-    char token[MAX_ID_LEN];
+    char token[MAX_TOKEN_LEN];
     int value = 0;
     int i = 0;
     char c;
 
-    lex_ident(T_numeric, token);
+    lex_ident_n(T_numeric, token, MAX_TOKEN_LEN);
 
     if (token[0] == '-') {
         is_neg = !is_neg;
@@ -1946,11 +1953,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 bool is_array = false;
                 if (lex_accept(T_open_square)) {
                     is_array = true;
-                    /* Skip array size if present */
-                    if (lex_peek(T_numeric, NULL)) {
-                        char size_buffer[10];
-                        lex_ident(T_numeric, size_buffer);
-                    }
+                    /* Skip the array size: it is discarded, and a numeric
+                     * literal can be longer than any small buffer.
+                     */
+                    if (lex_peek(T_numeric, NULL))
+                        lex_expect(T_numeric);
                     lex_expect(T_close_square);
                 }
 
@@ -3190,6 +3197,13 @@ void read_lvalue(lvalue_t *lvalue,
                 add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
             }
         } else if (lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) {
+            /* This arm appends three entries, so check for room once before
+             * writing any of them.
+             */
+            if (se_idx + 3 > MAX_SIDE_EFFECT)
+                error_at("Too many postfix operators in one statement",
+                         next_token_loc());
+
             side_effect[se_idx].opcode = OP_load_constant;
             vd = require_var(parent);
             vd->var_name = gen_name();
@@ -4080,12 +4094,14 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
                 int case_val;
 
                 lex_accept(T_case);
-                if (lex_peek(T_numeric, token)) {
-                    case_val = parse_numeric_constant(token);
+                char literal[MAX_TOKEN_LEN];
+
+                if (lex_peek_n(T_numeric, literal, MAX_TOKEN_LEN)) {
+                    case_val = parse_numeric_constant(literal);
                     lex_expect(T_numeric);
-                } else if (lex_peek(T_char, token)) {
+                } else if (lex_peek_n(T_char, literal, MAX_TOKEN_LEN)) {
                     char unescaped[MAX_TOKEN_LEN];
-                    unescape_string(token, unescaped, MAX_TOKEN_LEN);
+                    unescape_string(literal, unescaped, MAX_TOKEN_LEN);
                     case_val = unescaped[0];
                     lex_expect(T_char);
                 } else if (lex_peek(T_identifier, token)) {
@@ -5363,8 +5379,8 @@ void read_global_statement(void)
             do {
                 lex_ident(T_identifier, token);
                 if (lex_accept(T_assign)) {
-                    char value[MAX_ID_LEN];
-                    lex_ident(T_numeric, value);
+                    char value[MAX_TOKEN_LEN];
+                    lex_ident_n(T_numeric, value, MAX_TOKEN_LEN);
                     val = parse_numeric_constant(value);
                 }
                 add_constant(token, val++);
