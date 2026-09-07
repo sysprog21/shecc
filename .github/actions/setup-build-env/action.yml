@@ -1,0 +1,161 @@
+name: Set up the build environment
+description: >
+  Install what a shecc build needs for one target and linking mode, and put the
+  cross toolchain that dynamic linking resolves ld-linux through on PATH.
+
+inputs:
+  architecture:
+    description: Target architecture, one of the ARCHS the Makefile accepts.
+    required: true
+  link-mode:
+    description: Linking mode of the generated ELF, "static" or "dynamic".
+    required: true
+  github-token:
+    description: >
+      Token used to read the release metadata of the toolchains fetched from
+      GitHub. Only the anonymous rate limit applies without one.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # graphviz and jq are what the Makefile checks for before configuring, and
+    # the snapshot tests run the IR through both.
+    - name: Install packages
+      shell: bash
+      env:
+        ARCHITECTURE: ${{ inputs.architecture }}
+        LINK_MODE: ${{ inputs.link-mode }}
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        set -euo pipefail
+        packages=(build-essential graphviz jq)
+        if [ "$ARCHITECTURE" = arm ] && [ "$(uname -m)" = aarch64 ]; then
+            # An Arm64 host runs the Arm output natively, through the armhf
+            # loader and libc rather than an emulator.
+            sudo dpkg --add-architecture armhf
+            packages+=(libc6:armhf)
+        fi
+        # x64 output also runs natively; every other pairing needs the
+        # emulator. On an Arm64 host it is the fallback for when the
+        # native-execution probe below does not recognise the runner.
+        if [ "$ARCHITECTURE" != x64 ]; then
+            packages+=(qemu-user)
+        fi
+        if [ "$LINK_MODE" = dynamic ] && [ "$ARCHITECTURE" = arm ] && \
+           [ "$(uname -m)" != aarch64 ]; then
+            packages+=(gcc-arm-linux-gnueabihf)
+        fi
+        sudo apt-get update -q -y
+        sudo apt-get install -q -y --no-install-recommends "${packages[@]}"
+
+    # mk/arm.mk asks fastfetch what machine this is, and skips the emulator
+    # when the answer is one that runs the Arm output natively.
+    - name: Install fastfetch
+      if: runner.arch == 'ARM64'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        asset=$("$GITHUB_WORKSPACE"/.github/scripts/release-asset.sh fastfetch-cli/fastfetch \
+                    fastfetch-linux-aarch64.deb)
+        read -r _ url sha256 <<<"$asset"
+        file="$RUNNER_TEMP/fastfetch-linux-aarch64.deb"
+        curl --fail --silent --show-error --location -o "$file" "$url"
+        echo "$sha256  $file" | sha256sum -c -
+        sudo apt-get install -q -y --no-install-recommends "$file"
+
+    # An Arm64 runner is asked for so that the Arm output runs through the
+    # kernel rather than an emulator, and the step above is what lets
+    # mk/arm.mk see that. Read the decision back while it is fresh: a runner
+    # the probe stops matching would otherwise turn those jobs into slower
+    # copies of the x86 ones without saying so. An empty TARGET_EXEC is the
+    # Makefile saying nothing stands in front of the binary.
+    - name: Confirm the Arm output runs natively
+      if: runner.arch == 'ARM64' && inputs.architecture == 'arm'
+      shell: bash
+      run: |
+        set -euo pipefail
+        runner=$(make -np ARCH=arm 2>/dev/null | \
+            sed -n 's/^TARGET_EXEC = *//p' | head -1)
+        if [ -n "$runner" ]; then
+            echo "Expected native execution, but the build selected: $runner"
+            exit 1
+        fi
+
+    # The RISC-V toolchain is not packaged, so it comes from the project's own
+    # releases. Only the sysroot is wanted: mk/common.mk locates ld-linux
+    # through it, and refuses to configure a dynamic build without one.
+    - name: Resolve the RISC-V toolchain release
+      id: riscv-release
+      if: inputs.architecture == 'riscv' && inputs.link-mode == 'dynamic'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        asset=$("$GITHUB_WORKSPACE"/.github/scripts/release-asset.sh riscv-collab/riscv-gnu-toolchain \
+                    riscv32-glibc-ubuntu-24.04-gcc.tar.xz)
+        read -r tag url sha256 <<<"$asset"
+        {
+            echo "tag=$tag"
+            echo "url=$url"
+            echo "sha256=$sha256"
+        } >> "$GITHUB_OUTPUT"
+
+    # The toolchain is configured for the /opt/riscv prefix, and mk/common.mk
+    # finds ld-linux by asking its gcc for the sysroot, so it is restored to
+    # the prefix it was built for rather than somewhere under $HOME. The runner
+    # has to own the directory: /opt is root's, and both the cache restore and
+    # the extraction below write into it without sudo.
+    - name: Prepare the RISC-V toolchain directory
+      if: inputs.architecture == 'riscv' && inputs.link-mode == 'dynamic'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo mkdir -p /opt/riscv
+        sudo chown "$(id -u):$(id -g)" /opt/riscv
+
+    # Keyed on the release the step above resolved, so a new upstream release
+    # is picked up and everything until then is a restore rather than a
+    # several-hundred-megabyte download.
+    - name: Restore the RISC-V toolchain
+      id: riscv-cache
+      if: inputs.architecture == 'riscv' && inputs.link-mode == 'dynamic'
+      uses: actions/cache@v6
+      with:
+        path: /opt/riscv
+        key: riscv32-glibc-ubuntu-24.04-${{ steps.riscv-release.outputs.tag }}
+
+    - name: Download the RISC-V toolchain
+      if: >-
+        inputs.architecture == 'riscv' && inputs.link-mode == 'dynamic' &&
+        steps.riscv-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        URL: ${{ steps.riscv-release.outputs.url }}
+        SHA256: ${{ steps.riscv-release.outputs.sha256 }}
+      run: |
+        set -euo pipefail
+        file="$RUNNER_TEMP/riscv32-glibc-ubuntu-24.04-gcc.tar.xz"
+        curl --fail --silent --show-error --location -o "$file" "$URL"
+        echo "$SHA256  $file" | sha256sum -c -
+        # The archive carries its own "riscv" top-level directory, which is
+        # the directory prepared above.
+        tar -Jxf "$file" --strip-components=1 -C /opt/riscv
+
+    - name: Select the RISC-V toolchain
+      if: inputs.architecture == 'riscv' && inputs.link-mode == 'dynamic'
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "/opt/riscv/bin" >> "$GITHUB_PATH"
+        # Fail here, naming what is wrong, rather than inside a Makefile that
+        # only reports that no toolchain was found. The sysroot is what
+        # mk/common.mk goes on to look for ld-linux in.
+        /opt/riscv/bin/riscv32-unknown-linux-gnu-gcc --version | head -1
+        sysroot=$(/opt/riscv/bin/riscv32-unknown-linux-gnu-gcc --print-sysroot)
+        echo "sysroot: $sysroot"
+        test -d "$sysroot"

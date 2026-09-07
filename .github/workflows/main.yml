@@ -1,173 +1,243 @@
 name: Github Actions
 
-on: [push, pull_request]
+on:
+  # A branch pushed to this repository is built once, through the pull request
+  # that proposes it. Building the push as well ran everything below twice for
+  # every open pull request.
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only the newest revision of a branch or pull request is worth a runner.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # Bootstrap each target and run the test suite against the stage 0 and stage
+  # 2 compilers. The snapshot and sanitizer checks used to be steps of this
+  # job; they are jobs of their own below, so that they run beside it rather
+  # than after it.
   host-x86:
+    name: ${{ matrix.architecture }}/${{ matrix.link_mode }} (${{ matrix.compiler }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
+      # One target failing says nothing about the others, and finding out
+      # which of them share the failure is the point of the matrix.
+      fail-fast: false
       matrix:
         compiler: [gcc, clang]
-        architecture: [arm, riscv]
+        architecture: [arm, riscv, x64]
         link_mode: [static, dynamic]
+    env:
+      CC: ${{ matrix.compiler }}
+      ARCH: ${{ matrix.architecture }}
+      DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Download dependencies
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          sudo apt-get update -q -y
-          sudo apt-get install -q -y graphviz jq
-          sudo apt-get install -q -y qemu-user
-          sudo apt-get install -q -y build-essential
-          if [ "${{ matrix.link_mode }}" = "dynamic" ]; then
-            if [ "${{ matrix.architecture }}" = "arm" ]; then
-              sudo apt-get install -q -y gcc-arm-linux-gnueabihf
-            else
-              # Use the GitHub Releases API to obtain the JSON data of the latest
-              # RISC-V toolchain archive
-              LATEST_RLS_JSON=$(curl --fail --silent --show-error -L -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/riscv-collab/riscv-gnu-toolchain/releases/latest | jq '.assets | .[] | select(.name == "riscv32-glibc-ubuntu-24.04-gcc.tar.xz")')
-
-              # Retrieve SHA256 and URL
-              EXPECTED_SHA256=$(echo $LATEST_RLS_JSON | jq -r .digest | sed 's/sha256://g')
-              URL=$(echo $LATEST_RLS_JSON | jq -r .browser_download_url)
-              set -eo pipefail
-
-              # Download the toolchain archive
-              FILE=/tmp/riscv32-glibc-ubuntu-24.04-gcc.tar.xz
-              sudo wget -qO $FILE $URL
-
-              # Verify SHA256
-              echo "$EXPECTED_SHA256 $FILE" | sha256sum -c -
-
-              # Extract the archive and add "/opt/riscv/bin" to the system path
-              sudo tar Jxf $FILE -C /opt
-              echo "/opt/riscv/bin" >> "$GITHUB_PATH"
-            fi
-          fi
-      - name: Determine static or dynamic linking mode
-        id: determine-mode
-        run: |
-          if [ "${{ matrix.link_mode }}" = "dynamic" ]; then
-            echo "Use dynamic linking mode"
-            echo "DYNLINK=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "Use static linking mode"
-            echo "DYNLINK=0" >> "$GITHUB_OUTPUT"
-          fi
+        uses: actions/checkout@v7
+      - name: Set up the build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          architecture: ${{ matrix.architecture }}
+          link-mode: ${{ matrix.link_mode }}
+          github-token: ${{ github.token }}
+      # ARCH and DYNLINK are named on the command line rather than left to the
+      # environment: the build session the tree records assigns ARCH outright,
+      # and a makefile assignment wins over the environment.
       - name: Build artifacts
-        env:
-          CC: ${{ matrix.compiler }}
-        run: |
-          make ARCH=${{ matrix.architecture }} DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }}
+        run: make ARCH="$ARCH" DYNLINK="$DYNLINK"
+      - name: Unit tests
+        run: make check ARCH="$ARCH" DYNLINK="$DYNLINK"
+      - name: Upload the test logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ matrix.compiler }}-${{ matrix.architecture }}-${{ matrix.link_mode }}
+          path: |
+            out/*.log
+            out/tests/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The IR a target emits does not depend on which host compiler built shecc,
+  # so this dimension of the matrix above buys nothing here.
+  snapshots:
+    name: IR snapshots ${{ matrix.architecture }}/${{ matrix.link_mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # SNAPSHOT_ARCHS in the Makefile: x64 carries no reference IR yet.
+        architecture: [arm, riscv]
+        link_mode: [static, dynamic]
+    env:
+      ARCH: ${{ matrix.architecture }}
+      DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up the build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          architecture: ${{ matrix.architecture }}
+          link-mode: ${{ matrix.link_mode }}
+          github-token: ${{ github.token }}
+      # Only the stage 0 compiler is involved, so this needs no emulator run
+      # and finishes well before the bootstrapping jobs do.
       - name: IR regression tests
-        run: |
-          make check-snapshot DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
-      - name: Sanitizer-enabled stage 0 tests
-        env:
-          CC: ${{ matrix.compiler }}
-        run: |
-          make check-sanitizer DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
-      - name: Unit tests
-        run: |
-          make check DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
+        run: make check-snapshot ARCH="$ARCH" DYNLINK="$DYNLINK"
 
-  host-arm:
-    runs-on: ubuntu-24.04-arm
+  # A tree that has already been built cannot be turned into a sanitized one:
+  # the object files are up to date, so the link that follows reuses them and
+  # produces a stage 0 compiler with no sanitizer in it. That is what the
+  # sanitizer step of host-x86 used to do. Building "sanitizer" first, in a
+  # job that builds nothing else, is what puts the instrumentation in.
+  sanitizer:
+    name: Sanitizers ${{ matrix.architecture }}/${{ matrix.link_mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
+        # gcc only, and not for want of coverage: clang's sanitizer runtime
+        # makes this compiler around 500 times slower here. The same input
+        # takes 0.16s through the gcc-sanitized stage 0 and 90s through the
+        # clang-sanitized one, which puts a single cell of this matrix at
+        # roughly fifteen hours. Restoring the dimension means finding out
+        # why first.
+        architecture: [arm, riscv, x64]
         link_mode: [static, dynamic]
+    env:
+      ARCH: ${{ matrix.architecture }}
+      DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download dependencies
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          sudo dpkg --add-architecture armhf
-          sudo apt-get update -q -y
-          sudo apt-get install -q -y graphviz jq
-          sudo apt-get install -q -y build-essential libc6:armhf
-
-          # Use the GitHub Releases API to obtain the JSON data of the latest
-          # fastfetch package
-          LATEST_RLS_JSON=$(curl --fail --silent --show-error -L -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest | jq '.assets | .[] | select(.name == "fastfetch-linux-aarch64.deb")')
-
-          # Retrieve SHA256 and URL
-          EXPECTED_SHA256=$(echo $LATEST_RLS_JSON | jq -r .digest | sed 's/sha256://g')
-          URL=$(echo $LATEST_RLS_JSON | jq -r .browser_download_url)
-          set -eo pipefail
-
-          # Download the fastfetch package
-          FILE=/tmp/fastfetch-linux-aarch64.deb
-          sudo wget -qO $FILE $URL
-
-          # Verify SHA256
-          echo "$EXPECTED_SHA256 $FILE" | sha256sum -c -
-
-          # Install fastfetch
-          sudo dpkg -i /tmp/fastfetch-linux-aarch64.deb
-
-      - name: Determine static or dynamic linking mode
-        id: determine-mode
-        run: |
-          if [ "${{ matrix.link_mode }}" = "dynamic" ]; then
-            echo "Use dynamic linking mode"
-            echo "DYNLINK=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "Use static linking mode"
-            echo "DYNLINK=0" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build artifacts
-        run: |
-          make ARCH=arm DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }}
-
+        uses: actions/checkout@v7
+      - name: Set up the build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          architecture: ${{ matrix.architecture }}
+          link-mode: ${{ matrix.link_mode }}
+          github-token: ${{ github.token }}
+      - name: Build the stage 0 compiler with sanitizers
+        run: make sanitizer ARCH="$ARCH" DYNLINK="$DYNLINK"
       - name: Sanitizer-enabled stage 0 tests
-        run: |
-          make check-sanitizer DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
+        run: make check-sanitizer ARCH="$ARCH" DYNLINK="$DYNLINK"
 
-      - name: Unit tests
-        run: |
-          make check DYNLINK=${{ steps.determine-mode.outputs.DYNLINK }} || exit 1
-
+  # Preprocess shecc with itself, then compile the result: the stage 1 source
+  # is the largest input the preprocessor gets, and the only one that exercises
+  # every directive the compiler's own sources use.
   preprocessor-host:
+    name: Preprocessor ${{ matrix.architecture }} (${{ matrix.compiler }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         compiler: [gcc, clang]
-        architecture: [arm, riscv]
+        architecture: [arm, riscv, x64]
+    env:
+      CC: ${{ matrix.compiler }}
+      ARCH: ${{ matrix.architecture }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Download dependencies
-        run: |
-          sudo apt-get update -q -y
-          sudo apt-get install -q -y graphviz jq
-          sudo apt-get install -q -y qemu-user
-          sudo apt-get install -q -y build-essential
-      - name: Configurate config
-        run: |
-          make distclean config ARCH=${{ matrix.architecture }}
+        uses: actions/checkout@v7
+      - name: Set up the build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          architecture: ${{ matrix.architecture }}
+          link-mode: static
       - name: Preprocess stage 1 source code
-        env:
-          CC: ${{ matrix.compiler }}
         run: |
+          make config ARCH="$ARCH"
           make out/shecc
           ./out/shecc -E src/main.c > ./out/out.c
       - name: Build stage 1 artifact
-        run: |
-          ./out/shecc --no-libc -o out/shecc-stage1.elf ./out/out.c
+        run: ./out/shecc --no-libc -o out/shecc-stage1.elf ./out/out.c
+
+  # An Arm64 runner executes the Arm output natively, so this covers the paths
+  # that the emulator would otherwise stand in for.
+  host-arm:
+    name: arm/${{ matrix.link_mode }} on Arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        link_mode: [static, dynamic]
+    env:
+      DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up the build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          architecture: arm
+          link-mode: ${{ matrix.link_mode }}
+          github-token: ${{ github.token }}
+      - name: Build artifacts
+        run: make ARCH=arm DYNLINK="$DYNLINK"
+      - name: Unit tests
+        run: make check ARCH=arm DYNLINK="$DYNLINK"
+      - name: Upload the test logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-arm64-host-${{ matrix.link_mode }}
+          path: |
+            out/*.log
+            out/tests/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Kept apart from the Arm64 build above: "make sanitizer" has to be the
+  # build that produces the object files, and that job has already made them
+  # without instrumentation.
+  host-arm-sanitizer:
+    name: Sanitizers arm/${{ matrix.link_mode }} on Arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        link_mode: [static, dynamic]
+    env:
+      DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Set up the build environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          architecture: arm
+          link-mode: ${{ matrix.link_mode }}
+          github-token: ${{ github.token }}
+      - name: Build the stage 0 compiler with sanitizers
+        run: make sanitizer ARCH=arm DYNLINK="$DYNLINK"
+      - name: Sanitizer-enabled stage 0 tests
+        run: make check-sanitizer ARCH=arm DYNLINK="$DYNLINK"
 
   coding-style:
+    name: Coding style
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-    - uses: actions/checkout@v4
-    - name: Coding convention
-      run: |
-            sudo apt-get install -q -y clang-format-18
-            .ci/check-newline.sh
-            .ci/check-format.sh
-      shell: bash
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Coding convention
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y --no-install-recommends clang-format-18
+          .ci/check-newline.sh
+          .ci/check-format.sh
