@@ -823,6 +823,23 @@ void solve_phi_insertion(void)
 }
 
 var_t *require_var(block_t *blk);
+
+/* A new variable holding @val, for use as an instruction operand.
+ *
+ * It has to be new. rename_var() gives every use reached by one definition the
+ * same var_t, and mark_const() stamps init_val onto that shared object, so
+ * rewriting an existing constant's value changes what every other use sees.
+ * The caller emits the OP_load_constant that defines it.
+ */
+var_t *new_const_var(block_t *scope, int val)
+{
+    var_t *var = require_var(scope);
+
+    var->var_name = gen_name();
+    var->is_const = true;
+    var->init_val = val;
+    return var;
+}
 bool is_dominate(basic_block_t *pred, basic_block_t *succ);
 
 /* The renaming state of @v, created on first use. */
@@ -2305,7 +2322,7 @@ bool sr_collect_chain(func_t *func, var_t *var, insn_t **chain, int *len)
 void sr_emit_advance(basic_block_t *latch, var_t *var, int step)
 {
     block_t *scope = latch->scope;
-    var_t *amount = require_var(scope);
+    var_t *amount = new_const_var(scope, step);
     var_t *sum = require_var(scope);
     insn_t *after = latch->insn_list.tail;
     insn_t *load;
@@ -2319,9 +2336,6 @@ void sr_emit_advance(basic_block_t *latch, var_t *var, int step)
                   after->opcode == OP_return || after->opcode == OP_func_ret))
         after = after->prev;
 
-    amount->var_name = gen_name();
-    amount->is_const = true;
-    amount->init_val = step;
     sum->var_name = gen_name();
     sum->type = var->type;
     sum->ptr_level = var->ptr_level;
@@ -4122,27 +4136,47 @@ void optimize(void)
                     }
                 }
 
-                /* Strength reduction for power-of-2 operations */
+                /* Strength reduction for power-of-2 operations.
+                 *
+                 * The replacement operand has to be a variable of its own.
+                 * mark_const() hands every use of a folded local the same
+                 * var_t, and that var_t is what its defining OP_load_constant
+                 * materialises, so rewriting init_val in place changes the
+                 * value every other use sees: "int k = 8; return a*k + b*k;"
+                 * returned 2 << 3 + 3 * 3.
+                 */
                 if (insn->rs2 && insn->rs2->is_const && insn->rd) {
                     int val = insn->rs2->init_val;
                     int shift = exact_log2(val);
+                    opcode_t reduced = OP_generic;
+                    int operand = 0;
 
                     if (shift >= 0) {
                         /* x * power_of_2 = x << shift */
                         if (insn->opcode == OP_mul) {
-                            insn->opcode = OP_lshift;
-                            insn->rs2->init_val = shift;
+                            reduced = OP_lshift;
+                            operand = shift;
                         }
                         /* x / power_of_2 = x >> shift (unsigned) */
                         else if (insn->opcode == OP_div) {
-                            insn->opcode = OP_rshift;
-                            insn->rs2->init_val = shift;
+                            reduced = OP_rshift;
+                            operand = shift;
                         }
                         /* x % power_of_2 = x & (power_of_2 - 1) */
                         else if (insn->opcode == OP_mod) {
-                            insn->opcode = OP_bit_and;
-                            insn->rs2->init_val = val - 1;
+                            reduced = OP_bit_and;
+                            operand = val - 1;
                         }
+                    }
+
+                    if (reduced != OP_generic) {
+                        var_t *amount = new_const_var(bb->scope, operand);
+
+                        bb_insert_after(
+                            bb, insn->prev,
+                            new_insn(OP_load_constant, amount, NULL, NULL));
+                        insn->opcode = reduced;
+                        insn->rs2 = amount;
                     }
                 }
 
