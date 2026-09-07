@@ -66,6 +66,15 @@ TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
 SNAPSHOTS = $(foreach SNAPSHOT_ARCH,$(SNAPSHOT_ARCHS), $(patsubst tests/%.c, tests/snapshots/%-$(SNAPSHOT_ARCH)-static.json, $(TESTS)))
 SNAPSHOTS += $(patsubst tests/%.c, tests/snapshots/%-arm-dynamic.json, $(TESTS))
 
+# Benchmark variables
+BENCH_RUNS ?= 5
+BENCH_OUTPUT_JSON ?= out/benchmark-$(CC)-$(ARCH)-static.json
+BENCH_ARGS = --hostcc $(CC) --arch $(ARCH) --runs $(BENCH_RUNS) --output-json $(BENCH_OUTPUT_JSON)
+ifeq ($(DYNLINK),1)
+    BENCH_OUTPUT_JSON = out/benchmark-$(CC)-$(ARCH)-dynamic.json
+    BENCH_ARGS += --dynlink
+endif
+
 all: config bootstrap
 
 sanitizer: CFLAGS += -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -O0
@@ -164,6 +173,13 @@ check-abi-stage0: $(OUT)/$(STAGE0)
 
 check-abi-stage2: $(OUT)/$(STAGE2)
 	tests/$(ARCH)-abi.sh 2 $(DYNLINK);
+
+all-bench:
+	$(Q)$(foreach ARCH, $(ARCHS), $(MAKE) bench CC=$(CC) ARCH=$(ARCH) DYNLINK=0 BENCH_RUNS=$(BENCH_RUNS) --silent;)
+	$(Q)$(MAKE) bench CC=$(CC) ARCH=$(ARCH) DYNLINK=1 BENCH_RUNS=$(BENCH_RUNS) --silent
+
+bench: tests/bench.py
+	$(Q)$< $(BENCH_ARGS)
 
 update-snapshots: tests/update-snapshots.sh
 	# static linking
