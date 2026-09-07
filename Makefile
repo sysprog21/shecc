@@ -25,8 +25,13 @@ check_flag = $(shell $(CC) $(1) -S -o /dev/null -xc /dev/null 2>/dev/null; \
               if test $$? -eq 0; then echo "$(1)"; fi)
 
 # Iterate through the list of all potential flags, effectively filtering out all
-# unsupported flags.
+# unsupported flags. Half a second of $(CC) probing that the style and hook
+# targets have no use for, so skip it when nothing is being compiled.
+STYLE_GOALS := check-style check-newline check-comments check-format check-shell \
+	indent install-hooks uninstall-hooks check-hooks
+ifneq ($(filter-out $(STYLE_GOALS),$(or $(MAKECMDGOALS),all)),)
 $(foreach flag, $(CFLAGS_TO_CHECK), $(eval CFLAGS += $(call check_flag, $(flag))))
+endif
 
 BUILD_SESSION := .session.mk
 
@@ -53,6 +58,9 @@ BUILTIN_LIBC_HEADER := c.h
 STAGE0_FLAGS ?= --dump-ir
 STAGE1_FLAGS ?=
 DYNLINK ?= 0
+
+COMMENTFLOW ?= commentflow
+SHFMT ?= shfmt
 ifeq ($(DYNLINK),1)
     STAGE0_FLAGS += --dynlink
     STAGE1_FLAGS += --dynlink
@@ -119,7 +127,49 @@ config:
 	$(VECHO) "Target machine code switch to %s\n" $(ARCH)
 	$(Q)$(CONFIG_CHECK_CMD)
 
+.PHONY: $(STYLE_GOALS)
+
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2
+
+# One checker per target: they share nothing, so "make -j check-style" runs them
+# concurrently and finishes in the time the slowest one takes.
+check-style: check-newline check-comments check-format check-shell
+
+check-newline:
+	$(Q).ci/check-newline.sh
+
+check-comments:
+	$(Q)COMMENTFLOW=$(COMMENTFLOW) .ci/check-commentflow.sh
+
+check-format:
+	$(Q).ci/check-format.sh
+
+check-shell:
+	$(Q)SHFMT=$(SHFMT) .ci/check-shell.sh
+
+check-hooks:
+	$(Q)scripts/test-git-hooks.sh
+
+# Naming both goals would otherwise run each --write pass beside the checker
+# reading the same files, so the rewrite goes first and the checkers then report
+# on a tree that has stopped moving. Neither goal alone is affected.
+ifneq ($(filter indent,$(MAKECMDGOALS)),)
+check-newline check-comments check-format check-shell: | indent
+endif
+
+# The checkers own both halves: which files they cover and which tool rewrites
+# them. Naming either one here again would only be a second place to update.
+indent:
+	$(Q).ci/check-newline.sh --write
+	$(Q)SHFMT=$(SHFMT) .ci/check-shell.sh --write
+	$(Q)COMMENTFLOW=$(COMMENTFLOW) .ci/check-commentflow.sh --write
+	$(Q).ci/check-format.sh --write
+
+install-hooks:
+	$(Q)scripts/install-git-hooks.sh
+
+uninstall-hooks:
+	$(Q)scripts/install-git-hooks.sh --uninstall
 
 check-stage0: $(OUT)/$(STAGE0) tests/driver.sh
 	$(VECHO) "  TEST STAGE 0\n"

@@ -16,6 +16,14 @@ inputs:
       GitHub. Only the anonymous rate limit applies without one.
     required: false
     default: ''
+  style-tools:
+    description: >
+      Install the formatters and linters that "make check-style" runs:
+      clang-format at the major version the project requires, and shfmt,
+      ShellCheck and commentflow at their latest release, each checked against
+      the digest that release publishes.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -25,12 +33,16 @@ runs:
       env:
         ARCHITECTURE: ${{ inputs.architecture }}
         LINK_MODE: ${{ inputs.link-mode }}
+        STYLE_TOOLS: ${{ inputs.style-tools }}
         DEBIAN_FRONTEND: noninteractive
       run: |
         set -euo pipefail
         # jq is used by the release-asset helper below. Graphviz is not needed
         # by the build or test suite.
         packages=(build-essential jq)
+        if [ "$STYLE_TOOLS" = true ]; then
+            packages+=(ca-certificates curl file gnupg)
+        fi
         if [ "$ARCHITECTURE" = arm ] && [ "$(uname -m)" = aarch64 ]; then
             # An Arm64 host runs the Arm output natively, through the armhf
             # loader and libc rather than an emulator.
@@ -49,6 +61,87 @@ runs:
         fi
         sudo apt-get update -q -y
         sudo apt-get install -q -y --no-install-recommends "${packages[@]}"
+
+    - name: Install clang-format 20
+      if: inputs.style-tools == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        key="$RUNNER_TEMP/llvm-snapshot.gpg.key"
+        curl --fail --silent --show-error --location \
+            -o "$key" https://apt.llvm.org/llvm-snapshot.gpg.key
+        expected=6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+        # Import into a throwaway keyring and export only the pinned key.
+        # Checking the first fingerprint and then installing the whole bundle
+        # would let a second key riding along in the same file sign packages.
+        ring="$RUNNER_TEMP/llvm-keyring"
+        rm -rf "$ring"
+        mkdir -m 0700 "$ring"
+        gpg --homedir "$ring" --batch --import "$key"
+        sudo install -d -m 0755 /etc/apt/keyrings
+        gpg --homedir "$ring" --export "$expected" |
+            sudo tee /etc/apt/keyrings/llvm.gpg > /dev/null
+        test -s /etc/apt/keyrings/llvm.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" |
+            sudo tee /etc/apt/sources.list.d/llvm-20.list > /dev/null
+        sudo apt-get update -q -y
+        sudo apt-get install -q -y --no-install-recommends clang-format-20
+        clang-format-20 --version
+
+    # shfmt and ShellCheck come from their own releases rather than from apt:
+    # a formatter that the distribution moves out from under the tree rewraps
+    # scripts a contributor's shfmt just formatted, and turns "make check-style"
+    # into a disagreement between two machines rather than a statement about the
+    # code.
+    - name: Install shfmt
+      if: inputs.style-tools == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        asset=$("$GITHUB_WORKSPACE"/.github/scripts/release-asset.sh mvdan/sh \
+            'shfmt_{tag}_linux_amd64')
+        read -r _ url sha256 <<< "$asset"
+        binary="$RUNNER_TEMP/shfmt"
+        curl --fail --silent --show-error --location -o "$binary" "$url"
+        echo "$sha256  $binary" | sha256sum -c -
+        sudo install -m 0755 "$binary" /usr/local/bin/shfmt
+        shfmt --version
+
+    - name: Install ShellCheck
+      if: inputs.style-tools == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        asset=$("$GITHUB_WORKSPACE"/.github/scripts/release-asset.sh \
+            koalaman/shellcheck 'shellcheck-{tag}.linux.x86_64.tar.xz')
+        read -r _ url sha256 <<< "$asset"
+        archive="$RUNNER_TEMP/shellcheck.tar.xz"
+        curl --fail --silent --show-error --location -o "$archive" "$url"
+        echo "$sha256  $archive" | sha256sum -c -
+        # The archive nests the binary under a directory named for the release.
+        sudo tar -Jxf "$archive" -C /usr/local/bin --strip-components=1 \
+            --wildcards '*/shellcheck'
+        shellcheck --version
+
+    - name: Install commentflow
+      if: inputs.style-tools == 'true'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        asset=$("$GITHUB_WORKSPACE"/.github/scripts/release-asset.sh \
+            sysprog21/commentflow \
+            commentflow-x86_64-unknown-linux-gnu.tar.gz)
+        read -r _ url sha256 <<< "$asset"
+        archive="$RUNNER_TEMP/commentflow.tar.gz"
+        curl --fail --silent --show-error --location -o "$archive" "$url"
+        echo "$sha256  $archive" | sha256sum -c -
+        sudo tar -xzf "$archive" -C /usr/local/bin commentflow
 
     # mk/arm.mk asks fastfetch what machine this is, and skips the emulator
     # when the answer is one that runs the Arm output natively.
