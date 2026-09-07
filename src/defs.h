@@ -53,10 +53,10 @@
 #define MAX_SIDE_EFFECT 64
 /* Elements captured from an implicitly sized array initializer. */
 #define MAX_IMPLICIT_ARRAY 256
-#define MAX_IR_INSTR 120000
+/* A self-compile emits ~101k ph2_ir; one pointer per slot in PH2_IR_FLATTEN. */
+#define MAX_IR_INSTR 262144
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
-#define MAX_BB_RDOM_SUCC 256
 #define MAX_CODE 262144
 #define MAX_DATA 262144
 #define MAX_SYMTAB 65536
@@ -581,7 +581,6 @@ struct var {
     bool is_ternary_ret;
     bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
-    int vreg_id;   /* Virtual register ID */
     int phys_reg;  /* Physical register assignment (-1 if unassigned) */
     int first_use; /* First instruction index where variable is used */
     int last_use;  /* Last instruction index where variable is used */
@@ -1072,15 +1071,5 @@ typedef struct {
     int r_info;   /* Elf32_Word */
     int r_addend; /* Elf32_Sword */
 } elf32_rela_t;
-
-/* For .dynamic section */
-typedef struct {
-    int d_tag; /* Elf32_Sword */
-    int d_un;  /* union {
-                *     Elf32_Word d_val;
-                *     Elf32_Addr d_ptr;
-                * } d_un;
-                */
-} elf32_dyn_t;
 
 #define ELF32_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))

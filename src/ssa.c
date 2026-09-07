@@ -10,7 +10,9 @@
 #include "defs.h"
 #include "globals.c"
 
-/* SCCP (Sparse Conditional Constant Propagation) optimization */
+/* Constant cast optimization. Despite the file name this is not SCCP:
+ * there is no lattice and no CFG-edge worklist anywhere in the tree.
+ */
 #include "opt-sccp.c"
 
 /* Configuration constants - replace magic numbers */
@@ -3540,22 +3542,14 @@ bool is_block_unreachable(basic_block_t *bb)
     return false;
 }
 
-/* Check if a variable escapes (is used outside the function) */
 bool var_escapes(var_t *var)
 {
-    if (!var)
-        return true; /* conservative: assume it escapes */
-
-    /* Global variables always escape */
-    if (var->is_global)
-        return true;
-
-    /* Function definitions escape */
-    if (var->is_func)
-        return true;
-
-    /* Conservative approach - assume all variables escape to avoid issues */
-    /* This ensures we don't eliminate stores that might be needed */
+    /* Reports every variable as escaping, which makes dce_init_mark() treat
+     * every OP_write as useful and so disables SSA-level dead-store
+     * elimination. The is_global/is_func branches that used to precede this
+     * were unreachable for the same reason and are gone rather than left
+     * reading as though they decided something.
+     */
     return true;
 }
 
