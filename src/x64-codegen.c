@@ -3813,16 +3813,8 @@ void code_generate(void)
                     continue;
                 if (t->ph2_base != mark_idx)
                     t->is_branch_target = true;
-                /* Walk to the block's last instruction rather than reading
-                 * ph2_ir_list.tail: peephole() drops an instruction by
-                 * relinking its predecessor's next pointer, and does not
-                 * maintain the tail, so a block whose last instruction it
-                 * removed has a tail pointing at that removed node.
-                 */
-                for (ph2_ir_t *tail = t->ph2_ir_list.head; tail;
-                     tail = tail->next) {
-                    if (tail->next || tail->op != OP_branch)
-                        continue;
+                ph2_ir_t *tail = t->ph2_ir_list.tail;
+                if (tail && tail->op == OP_branch) {
                     basic_block_t *d = bb_code_target(tail->then_bb);
                     if (d)
                         d->is_branch_target = true;
