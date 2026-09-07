@@ -68,12 +68,27 @@ endif
 
 SRCS := $(wildcard $(patsubst %,%/main.c, $(SRCDIR)))
 OBJS := $(SRCS:%.c=$(OUT)/%.o)
-deps := $(OBJS:%.o=%.o.d)
+
+# The sanitizer build keeps its objects apart from the normal one. Sharing them
+# lets whichever ran last decide what the other links: a plain "make" after it
+# fails outright on the missing runtime, and -- quietly, which is worse --
+# "make sanitizer" after a plain build relinks an uninstrumented object, so
+# check-sanitizer then passes having checked nothing.
+SAN_OUT := $(OUT)/sanitize
+SAN_OBJS := $(SRCS:%.c=$(SAN_OUT)/%.o)
+deps := $(OBJS:%.o=%.o.d) $(SAN_OBJS:%.o=%.o.d)
 
 all: config bootstrap
 
-sanitizer: CFLAGS += -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -O0
-sanitizer: LDFLAGS += -fsanitize=address -fsanitize=undefined
+# Both goals carry the flags, because a target-specific variable reaches only
+# that target and its prerequisites: "make check-sanitizer" on its own would
+# otherwise build $(SAN_OBJS) with the ordinary CFLAGS and run the suite against
+# a binary that instruments nothing.
+SAN_CFLAGS := -fsanitize=address -fsanitize=undefined -fno-omit-frame-pointer -O0
+SAN_LDFLAGS := -fsanitize=address -fsanitize=undefined
+
+sanitizer check-sanitizer: CFLAGS += $(SAN_CFLAGS)
+sanitizer check-sanitizer: LDFLAGS += $(SAN_LDFLAGS)
 sanitizer: config $(OUT)/$(STAGE0)-sanitizer
 	$(VECHO) "  Built stage 0 compiler with sanitizers\n"
 
@@ -201,7 +216,8 @@ $(OUT)/%.o: %.c | config $(OUT)/libc.inc
 	$(VECHO) "  CC\t$@\n"
 	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
 
-SHELL_HACK := $(shell mkdir -p $(OUT) $(OUT)/$(SRCDIR) $(OUT)/tests)
+SHELL_HACK := $(shell mkdir -p $(OUT) $(OUT)/$(SRCDIR) $(OUT)/tests \
+                      $(SAN_OUT)/$(SRCDIR))
 
 $(OUT)/norm-lf: tools/norm-lf.c
 	$(VECHO) "  CC+LD\t$@\n"
@@ -222,9 +238,13 @@ $(OUT)/$(STAGE0): $(OUT)/libc.inc $(OBJS)
 	$(VECHO) "  LD\t$@\n"
 	$(Q)$(CC) $(OBJS) $(LDFLAGS) -o $@
 
-$(OUT)/$(STAGE0)-sanitizer: $(OUT)/libc.inc $(OBJS)
+$(SAN_OUT)/%.o: %.c | config $(OUT)/libc.inc
+	$(VECHO) "  CC\t$@\n"
+	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
+
+$(OUT)/$(STAGE0)-sanitizer: $(OUT)/libc.inc $(SAN_OBJS)
 	$(VECHO) "  LD\t$@ (with sanitizers)\n"
-	$(Q)$(CC) $(OBJS) $(LDFLAGS) -o $@
+	$(Q)$(CC) $(SAN_OBJS) $(LDFLAGS) -o $@
 
 $(OUT)/$(STAGE1): $(OUT)/$(STAGE0)
 	$(Q)$(STAGE1_CHECK_CMD)
@@ -251,7 +271,8 @@ bootstrap: $(OUT)/$(STAGE2)
 .PHONY: clean
 clean:
 	-$(RM) $(OUT)/$(STAGE0) $(OUT)/$(STAGE1) $(OUT)/$(STAGE2)
-	-$(RM) $(OBJS) $(deps)
+	-$(RM) $(OUT)/$(STAGE0)-sanitizer
+	-$(RM) $(OBJS) $(SAN_OBJS) $(deps)
 	-$(RM) $(TESTBINS) $(OUT)/tests/*.log $(OUT)/tests/*.lst
 	-$(RM) $(OUT)/shecc*.log
 	-$(RM) $(OUT)/libc.inc
