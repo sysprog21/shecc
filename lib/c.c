@@ -9,6 +9,12 @@
 #include "c.h"
 #define INT_BUF_LEN 16
 
+/* Staging buffer for the printf family that writes straight to a descriptor.
+ * Every byte here is stack in every program shecc emits, so it stays close to
+ * the longest single conversion the compiler itself performs.
+ */
+#define FMT_BUF_LEN 576
+
 #define __is_alpha(c) ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
 #define __is_digit(c) ((c >= '0' && c <= '9'))
 #define __is_hex(c) \
@@ -501,6 +507,37 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
                 /* append param as hex */
                 __format(fmtbuf, v, w, zp, 16, pp);
                 break;
+            case 'p': {
+                /* Append param as a pointer.
+                 *
+                 * A pointer occupies VA_INT_STEP int-sized slots, so on an
+                 * LP64 target the second one carries the high word. Printing
+                 * only @v would drop it, and the graph writer in ssa.c names
+                 * its nodes after these values, so two objects sharing a low
+                 * word would collapse into one node.
+                 *
+                 * A pointer has one spelling here, "0x" and its significant
+                 * digits, so any width or zero-pad in the format is ignored.
+                 * Honoring them on one branch and not the other would render
+                 * the same conversion two ways depending on the value.
+                 */
+                int hi = 0;
+
+                if (VA_INT_STEP > 1)
+                    hi = var_args[pi * VA_INT_STEP + 1];
+
+                __fmtbuf_write_char(fmtbuf, '0');
+                __fmtbuf_write_char(fmtbuf, 'x');
+                if (hi) {
+                    __format(fmtbuf, hi, 0, 0, 16, 0);
+                    /* The low word keeps its leading zeros, or the two halves
+                     * would run together into a different number.
+                     */
+                    __format(fmtbuf, v, 8, 1, 16, 0);
+                } else
+                    __format(fmtbuf, v, 0, 0, 16, 0);
+                break;
+            }
             case '%':
                 /* append literal '%' character */
                 __fmtbuf_write_char(fmtbuf, '%');
@@ -517,16 +554,44 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
         fmtbuf->buf[0] = 0;
 }
 
-int printf(char *str, ...)
+int __write_fmt(int fd, char *str, int *var_args)
 {
-    char buffer[200];
+    char buffer[FMT_BUF_LEN];
     fmtbuf_t fmtbuf;
 
     fmtbuf.buf = buffer;
-    fmtbuf.n = INT_MAX;
+    fmtbuf.n = FMT_BUF_LEN;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 1);
-    return __syscall(__syscall_write, 1, buffer, fmtbuf.len);
+    __format_to_buf(&fmtbuf, str, var_args);
+
+    /* len counts what the conversion would have produced, not what fit. */
+    int len = fmtbuf.len;
+    if (len < FMT_BUF_LEN)
+        return __syscall(__syscall_write, fd, buffer, len);
+
+    /* Longer than the staging buffer. Format it again into one that holds it,
+     * rather than writing a silently truncated line. Re-reading var_args is
+     * safe: __format_to_buf() only reads it.
+     */
+    char *wide = malloc(len + 1);
+
+    if (!wide)
+        return __syscall(__syscall_write, fd, buffer, FMT_BUF_LEN - 1);
+
+    fmtbuf.buf = wide;
+    fmtbuf.n = len + 1;
+    fmtbuf.len = 0;
+    __format_to_buf(&fmtbuf, str, var_args);
+
+    int written = __syscall(__syscall_write, fd, wide, fmtbuf.len);
+
+    free(wide);
+    return written;
+}
+
+int printf(char *str, ...)
+{
+    return __write_fmt(1, str, &str + 1);
 }
 
 int sprintf(char *buffer, char *str, ...)
@@ -555,14 +620,7 @@ int __free_all(void);
 
 int fprintf(FILE *stream, char *str, ...)
 {
-    char buffer[200];
-    fmtbuf_t fmtbuf;
-
-    fmtbuf.buf = buffer;
-    fmtbuf.n = INT_MAX;
-    fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 1);
-    return __syscall(__syscall_write, stream, buffer, fmtbuf.len);
+    return __write_fmt(stream, str, &str + 1);
 }
 
 int fflush(FILE *stream)
