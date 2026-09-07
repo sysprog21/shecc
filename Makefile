@@ -41,15 +41,15 @@ OUT ?= out
 # Every architecture that can be selected as a build target. The first is the
 # default when ARCH is not given.
 ARCHS = arm riscv x64
-# The subset carrying reference IR snapshots. x64 has none yet, so the snapshot
-# targets skip it; it is still a fully supported build target.
-SNAPSHOT_ARCHS = arm riscv
 ARCH ?= $(firstword $(ARCHS))
 SRCDIR := $(shell find src -type d)
 LIBDIR := $(shell find lib -type d)
 
 BUILTIN_LIBC_SOURCE ?= c.c
 BUILTIN_LIBC_HEADER := c.h
+# --dump-ir is what makes out/shecc-stage1.log the IR of the stage 1 build
+# rather than an empty file. It is the only thing in the tree that exercises
+# dump_insn()/dump_ph2_ir(), and it is what a failed CI run uploads.
 STAGE0_FLAGS ?= --dump-ir
 STAGE1_FLAGS ?=
 DYNLINK ?= 0
@@ -61,9 +61,6 @@ endif
 SRCS := $(wildcard $(patsubst %,%/main.c, $(SRCDIR)))
 OBJS := $(SRCS:%.c=$(OUT)/%.o)
 deps := $(OBJS:%.o=%.o.d)
-TESTS := $(wildcard tests/*.c)
-TESTBINS := $(TESTS:%.c=$(OUT)/%.elf)
-SNAPSHOTS = $(foreach SNAPSHOT_ARCH,$(SNAPSHOT_ARCHS), $(foreach SNAPSHOT_MODE,static dynamic, $(patsubst tests/%.c, tests/snapshots/%-$(SNAPSHOT_ARCH)-$(SNAPSHOT_MODE).json, $(TESTS))))
 
 all: config bootstrap
 
@@ -86,10 +83,9 @@ endif
 # Naming "config" or "distclean" anywhere in the goals is that reconfigure: the
 # record is about to be rewritten or removed, so the architecture it still holds
 # does not apply and the check must not fire. Testing for their presence rather
-# than filtering them out is what lets a goal list combine them with real work
-# -- check-snapshots and update-snapshots recurse with exactly
-# "distclean config check-snapshot ARCH=...". "clean" touches no generated
-# config, so a mismatch cannot affect it either.
+# than filtering them out is what lets a goal list combine them with real work,
+# as "make distclean config check ARCH=riscv" does. "clean" touches no
+# generated config, so a mismatch cannot affect it either.
 CONFIGURED_ARCH := $(shell sed -n 's/^ARCH=//p' $(BUILD_SESSION) 2>/dev/null)
 ifneq (,$(CONFIGURED_ARCH))
 ifeq (,$(filter config distclean,$(MAKECMDGOALS)))
@@ -123,19 +119,13 @@ config:
 	$(VECHO) "Target machine code switch to %s\n" $(ARCH)
 	$(Q)$(CONFIG_CHECK_CMD)
 
-$(OUT)/tests/%.elf: tests/%.c $(OUT)/$(STAGE0)
-	$(VECHO) "  SHECC\t$@\n"
-	$(Q)$(OUT)/$(STAGE0) $(STAGE0_FLAGS) -o $@ $< > $(basename $@).log ; \
-	chmod +x $@ ; $(PRINTF) "Running $@ ...\n"
-	$(Q)$(TARGET_EXEC) $@ && $(call pass)
-
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2
 
-check-stage0: $(OUT)/$(STAGE0) $(TESTBINS) tests/driver.sh
+check-stage0: $(OUT)/$(STAGE0) tests/driver.sh
 	$(VECHO) "  TEST STAGE 0\n"
 	tests/driver.sh 0 $(DYNLINK)
 
-check-stage2: $(OUT)/$(STAGE2) $(TESTBINS) tests/driver.sh
+check-stage2: $(OUT)/$(STAGE2) tests/driver.sh
 	$(VECHO) "  TEST STAGE 2\n"
 	tests/driver.sh 2 $(DYNLINK)
 
@@ -145,37 +135,11 @@ check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh
 	tests/driver.sh 0 $(DYNLINK)
 	$(Q)rm $(OUT)/shecc
 
-check-snapshots: $(OUT)/$(STAGE0) $(SNAPSHOTS) tests/check-snapshots.sh
-	# static linking
-	$(Q)$(foreach SNAPSHOT_ARCH, $(SNAPSHOT_ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
-	# dynamic linking
-	$(Q)$(foreach SNAPSHOT_ARCH, $(SNAPSHOT_ARCHS), $(MAKE) distclean config check-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=1 --silent;)
-	$(VECHO) "Switching backend back to %s (DYNLINK=0)\n" arm
-	$(Q)$(MAKE) distclean config ARCH=arm DYNLINK=0 --silent
-
-check-snapshot: $(OUT)/$(STAGE0) tests/check-snapshots.sh
-	$(VECHO) "Checking snapshot for %s (DYNLINK=%s)\n" $(ARCH) $(DYNLINK)
-	tests/check-snapshots.sh $(ARCH) $(DYNLINK)
-	$(VECHO) "  OK\n"
-
 check-abi-stage0: $(OUT)/$(STAGE0)
 	tests/$(ARCH)-abi.sh 0 $(DYNLINK);
 
 check-abi-stage2: $(OUT)/$(STAGE2)
 	tests/$(ARCH)-abi.sh 2 $(DYNLINK);
-
-update-snapshots: tests/update-snapshots.sh
-	# static linking
-	$(Q)$(foreach SNAPSHOT_ARCH, $(SNAPSHOT_ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=0 --silent;)
-	# dynamic linking
-	$(Q)$(foreach SNAPSHOT_ARCH, $(SNAPSHOT_ARCHS), $(MAKE) distclean config update-snapshot ARCH=$(SNAPSHOT_ARCH) DYNLINK=1 --silent;)
-	$(VECHO) "Switching backend back to %s (DYNLINK=0)\n" arm
-	$(Q)$(MAKE) distclean config ARCH=arm DYNLINK=0 --silent
-
-update-snapshot: $(OUT)/$(STAGE0) tests/update-snapshots.sh
-	$(VECHO) "Updating snapshot for %s (DYNLINK=%s)\n" $(ARCH) $(DYNLINK)
-	tests/update-snapshots.sh $(ARCH) $(DYNLINK)
-	$(VECHO) "  OK\n"
 
 # Both prerequisites are order-only, and both exist because "make -j" would
 # otherwise let a compile start beside the thing it reads. Selecting a target

@@ -20,8 +20,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # graphviz and jq are what the Makefile checks for before configuring, and
-    # the snapshot tests run the IR through both.
     - name: Install packages
       shell: bash
       env:
@@ -30,7 +28,9 @@ runs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         set -euo pipefail
-        packages=(build-essential graphviz jq)
+        # jq is used by the release-asset helper below. Graphviz is not needed
+        # by the build or test suite.
+        packages=(build-essential jq)
         if [ "$ARCHITECTURE" = arm ] && [ "$(uname -m)" = aarch64 ]; then
             # An Arm64 host runs the Arm output natively, through the armhf
             # loader and libc rather than an emulator.

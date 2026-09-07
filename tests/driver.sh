@@ -10,10 +10,14 @@ readonly SHOW_SUMMARY="${SHOW_SUMMARY:-1}"
 readonly SHOW_PROGRESS="${SHOW_PROGRESS:-1}"
 readonly COLOR_OUTPUT="${COLOR_OUTPUT:-1}"
 
+# Directory holding this script and the checked-in test programs beside it, so
+# try_file works regardless of the directory make was invoked from.
+readonly TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Pointer width of the configured target. The sizeof tests below assert on it,
 # and it differs between the 32-bit targets and x86-64.
 PTR_SZ=$(sed -n 's/^#define PTR_SIZE \([0-9]*\).*/\1/p' \
-    "$(dirname "$0")/../config" 2>/dev/null | head -1)
+    "$TESTS_DIR/../config" 2>/dev/null | head -1)
 [ -n "${PTR_SZ}" ] || PTR_SZ=4
 
 # Variadic arguments occupy one pointer-sized slot each, so an int-based walk
@@ -177,12 +181,16 @@ function try() {
     local expected="$1"
     local expected_output=""
     local input=""
+    local check_output=0
 
     if [ $# -eq 2 ]; then
         input="$2"
     elif [ $# -eq 3 ]; then
         expected_output="$2"
         input="$3"
+        # An expectation was supplied, so compare against it -- including when
+        # it is empty, which asserts that the program prints nothing.
+        check_output=1
     fi
 
     local tmp_in="$(mktemp --suffix .c)"
@@ -201,7 +209,7 @@ function try() {
 
     if [ "$actual" != "$expected" ]; then
         report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output"
-    elif [ -n "$expected_output" ] && [ "$output" != "$expected_output" ]; then
+    elif [ "$check_output" = 1 ] && [ "$output" != "$expected_output" ]; then
         report_test_failure "TEST" "$tmp_in" "$tmp_exe" "$expected" "$actual" "$output" "$expected_output"
     else
         ((PASSED_TESTS++))
@@ -226,6 +234,12 @@ function try_output() {
     local expected_output="$2"
     local input="$(cat)"
     try "$expected" "$expected_output" "$input"
+}
+
+# Compile and run a checked-in program through the same path as inline cases.
+# This keeps the small end-to-end programs in both stage-0 and stage-2 runs.
+function try_file() {
+    try "$1" "$2" "$(< "$3")"
 }
 
 # try_compile_error - test shecc with invalid C program
@@ -383,6 +397,13 @@ echo ""
 if [ "$SHOW_PROGRESS" = "1" ]; then
     echo "Running tests..."
 fi
+
+# Category: Checked-in end-to-end programs
+begin_category "Standalone Programs" "Testing checked-in end-to-end programs"
+
+try_file 0 'F(10) = 55' "$TESTS_DIR/fib.c"
+try_file 0 $'1\nHello World' "$TESTS_DIR/hello.c"
+try_file 0 '' "$TESTS_DIR/strength-reduce.c"
 
 # Category: Basic Literals and Constants
 begin_category "Literals and Constants" "Testing integer, character, and string literals"
