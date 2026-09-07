@@ -4,29 +4,30 @@
 
 ## Introduction
 
-`shecc` is built from scratch, targeting both 32-bit Arm and RISC-V architectures,
+`shecc` is built from scratch, targeting 32-bit Arm, 32-bit RISC-V, and x86-64,
 as a self-compiling compiler for a subset of the C language.
 Despite its simplistic nature, it is capable of performing basic optimization strategies as a standalone optimizing compiler.
 
 ### Features
 
-* Generate executable Linux ELF binaries for ARMv7-A and RV32IM.
+* Generate executable Linux ELF binaries for ARMv7-A, RV32IM, and x86-64.
 * Provide a minimal C standard library for basic I/O on GNU/Linux.
 * The cross-compiler is written in ANSI C, making it compatible with most platforms.
 * Include a self-contained C front-end with an integrated machine code generator; no external assembler or linker needed.
 * Utilize a two-pass compilation process: the first pass checks syntax and breaks down complex statements into basic operations,
-  while the second pass translates these operations into Arm/RISC-V machine code.
+  while the second pass translates these operations into target machine code.
 * Develop a register allocation system that is compatible with RISC-style architectures.
 * Implement an architecture-independent, [static single assignment](https://en.wikipedia.org/wiki/Static_single-assignment_form) (SSA)-based middle-end for enhanced optimizations.
 * Support dynamic linking to allow generated executables to run with glibc.
+* Emit both ELF32 (Arm, RISC-V) and ELF64 (x86-64) images; the ELF class follows the target pointer width.
 
 ## Compatibility
 
 `shecc` is capable of compiling C source files written in the following
 syntax:
-* data types: `char`, `int`, `struct`, `enum`, `typedef`, and pointer types
-* condition statements: `if`, `else`, `while`, `for`, `do-while`, `switch`, `case`, `default`, `break`, `continue`, `return`, and
-                        general expressions
+* data types: `char`, `short`, `int`, `_Bool`, `void`, `struct`, `union`, `enum`, `typedef`, and pointer types
+* condition statements: `if`, `else`, `while`, `for`, `do-while`, `switch`, `case`, `default`, `break`, `continue`, `return`, `goto`
+                        with labels, and general expressions
 * operators: all arithmetic, logical, bitwise, and assignment operators including compound assignments
   (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
 * arrays: global/local arrays with initializers, multi-dimensional arrays
@@ -36,11 +37,13 @@ syntax:
 * pointers: full pointer arithmetic, multi-level pointer dereference (`***ptr`)
 * global/local variable initializations for all supported data types
     - e.g. `int i = [expr];`, `int arr[] = {1, 2, 3};`
-* preprocessor directives: `#define`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`, `#undef`, `#error`, and `#include`
-* function-like macros with parameters and `__VA_ARGS__` support
+* preprocessor directives: `#define`, `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`, `#undef`, `#error`, and `#include`
+* function-like macros with parameters, `__VA_ARGS__`, stringification (`#`), and token pasting (`##`)
 
-The backend targets armv7hf with Linux ABI, verified on Raspberry Pi 3,
-and also supports RISC-V 32-bit architecture, verified with QEMU.
+The Arm backend targets armv7hf with the Linux ABI, verified on Raspberry Pi 3.
+The RISC-V backend targets RV32IM, verified with QEMU.
+The x86-64 backend follows the System V AMD64 ABI and runs natively on an
+x86-64 GNU/Linux host, so no emulator is involved.
 
 ## Bootstrapping
 
@@ -48,11 +51,12 @@ The steps to validate `shecc` bootstrapping:
 1. `stage0`: `shecc` source code is initially compiled using an ordinary compiler
    which generates a native executable. The generated compiler can be used as a
    cross-compiler.
-2. `stage1`: The built binary reads its own source code as input and generates an
-   ARMv7-A/RV32IM  binary.
-3. `stage2`: The generated ARMv7-A/RV32IM binary is invoked (via QEMU or running on
-   Arm and RISC-V devices) with its own source code as input and generates another
-   ARMv7-A/RV32IM binary.
+2. `stage1`: The built binary reads its own source code as input and generates a
+   binary for the selected target.
+3. `stage2`: The generated target binary is invoked with its own source code as
+   input and generates another target binary. It runs natively for x86-64 and on
+   the Arm boards the build system recognizes; every other case, including the
+   RISC-V target, goes through QEMU.
 4. `bootstrap`: Build the `stage1` and `stage2` compilers, and verify that they are
    byte-wise identical. If so, `shecc` can compile its own source code and produce
    new versions of that same program.
@@ -61,8 +65,9 @@ The steps to validate `shecc` bootstrapping:
 
 Code generator in `shecc` does not rely on external utilities. You only need
 ordinary C compilers such as `gcc` and `clang`. However, `shecc` would bootstrap
-itself, and Arm/RISC-V ISA emulation is required. Install QEMU for Arm/RISC-V user
-emulation on GNU/Linux:
+itself, so the target binaries have to run somewhere. Building for `x64` on an
+x86-64 GNU/Linux host needs nothing extra. Building for Arm or RISC-V on such a
+host requires ISA emulation; install QEMU for Arm/RISC-V user emulation:
 
 ```shell
 $ sudo apt-get install qemu-user
@@ -74,7 +79,8 @@ execution without QEMU. The host machine may install the prebuilt
 system to determine whether native execution can be enabled.
 
 It is still possible to build `shecc` on macOS or Microsoft Windows. However,
-the second stage bootstrapping would fail due to `qemu-arm` absence.
+the second stage bootstrapping would fail due to `qemu-arm` absence, and the
+`x64` target expects an x86-64 GNU/Linux host to execute its own output.
 
 To execute the snapshot test, install the packages below:
 ```shell
@@ -83,8 +89,10 @@ $ sudo apt-get install graphviz jq
 
 ### Additional packages
 
-Because `shecc` supports the dynamic linking mode for both the Arm and RISC-V architectures,
-it needs to install cross-compile GNU toolchains to obtain the ELF interpreter and other dependencies.
+The dynamic linking mode needs an ELF interpreter and the matching glibc for the
+target. The `x64` target resolves both from the host system, so it needs nothing
+beyond an x86-64 GNU/Linux installation. The Arm and RISC-V targets need a
+cross-compile GNU toolchain to obtain them.
 
 For the Arm architecture, you can install the ARM GNU toolchain using `apt-get`:
 
@@ -101,14 +109,22 @@ run a dynamically linked `shecc` targeting the RISC-V architecture. For instance
 
 ## Build and Verify
 
-Configure which backend you want, `shecc` supports ARMv7-A and RV32IM backend:
+Configure which backend you want. `shecc` supports the ARMv7-A, RV32IM, and
+x86-64 backends, with Arm as the default:
 ```shell
 $ make config ARCH=arm
-# Target machine code switch to Arm
+# Target machine code switch to arm
 
 $ make config ARCH=riscv
-# Target machine code switch to RISC-V
+# Target machine code switch to riscv
+
+$ make config ARCH=x64
+# Target machine code switch to x64
 ```
+
+The selected target is recorded in the tree, so a later `make` with a different
+`ARCH` stops and asks for an explicit `make config ARCH=...` rather than pairing
+one target's settings with another target's generated configuration.
 
 Run `make` and you should see this:
 ```shell
@@ -124,7 +140,7 @@ $ make
 Run `make DYNLINK=1` to use the dynamic linking mode and generate the dynamically linked compiler:
 ```shell
 # If using the dynamic linking mode, you should add 'DYNLINK=1' for each 'make' command.
-# Append 'ARCH=arm' or 'ARCH=riscv' to specify the target architecture (default: arm).
+# The target architecture comes from the last 'make config' (default: arm).
 $ make DYNLINK=1
   CC+LD	out/inliner
   GEN	out/libc.inc
@@ -145,7 +161,7 @@ $ make check-sanitizer
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```shell
-$ shecc [-o output] [+m] [--no-libc] [--dump-ir] [--dynlink] <infile.c>
+$ shecc [-o output] [+m] [--no-libc] [--dump-ir] [--dynlink] [-E] <infile.c>
 ```
 
 Compiler options:
@@ -154,6 +170,7 @@ Compiler options:
 - `--no-libc` : Exclude embedded C library (default: embedded)
 - `--dump-ir` : Dump intermediate representation (IR)
 - `--dynlink` : Use dynamic linking (default: disabled)
+- `-E` : Preprocess only; write the expanded token stream and stop
 
 Example 1: static linking mode
 ```shell
@@ -161,6 +178,9 @@ $ out/shecc -o fib tests/fib.c
 $ chmod +x fib
 $ qemu-arm fib
 ```
+
+An `x64` build produces a native binary, so `./fib` runs it directly with no
+emulator in front.
 
 Example 2: dynamic linking mode
 
@@ -187,17 +207,25 @@ Thus, you can update snapshots by specifying `update-snapshots` target when invo
 $ make update-snapshots
 ```
 
-Notice that the above 2 targets will update all backend snapshots at once, to update/check current backend's snapshot, 
+Notice that the above 2 targets will update all backend snapshots at once, to update/check current backend's snapshot,
 use `update-snapshot` / `check-snapshot` instead.
+
+Reference IRs exist for the Arm and RISC-V backends only. The x86-64 backend
+carries none yet, so the snapshot targets skip it. `check-snapshots` and
+`update-snapshots` reconfigure the tree as they walk the backends and leave it
+configured for Arm, so re-run `make config ARCH=...` afterwards if you were
+building another target.
 
 ### Unit Tests
 
-`shecc` comes with a comprehensive test suite (200+ test cases). To run the tests:
+`shecc` comes with a comprehensive test suite (400+ test cases). To run the tests:
 ```shell
 # Add 'DYNLINK=1' if using the dynamic linking mode.
-$ make check          # Run all tests (stage 0 and stage 2)
+$ make check          # Run all tests (stage 0 and stage 2, plus the ABI suite)
 $ make check-stage0   # Test stage 0 compiler only
 $ make check-stage2   # Test stage 2 compiler only
+$ make check-abi-stage0 # Check the target calling convention (stage 0)
+$ make check-abi-stage2 # Same, for the stage 2 compiler
 $ make check-sanitizer # Test with AddressSanitizer and UBSan
 ```
 
@@ -208,9 +236,10 @@ The test suite covers:
 * Structs, enums, and typedefs
 * Variadic functions
 * Preprocessor directives and macros
+* Calling convention conformance for the selected target
 * Self-hosting validation
 
-Reference output:
+Reference output (Arm target; pointer sizes read 8 on x86-64):
 ```
   TEST STAGE 0
 ...
@@ -296,10 +325,10 @@ see [COMPLIANCE.md](COMPLIANCE.md).
 
 ## Known Issues
 
-2. Full `<stdarg.h>` support is not available. Variadic functions work via direct pointer arithmetic.
+1. Full `<stdarg.h>` support is not available. Variadic functions work via direct pointer arithmetic.
    See the `printf` implementation in `lib/c.c` for the supported approach.
-3. The C front-end operates directly on token streams without building a full AST.
-4. Complex pointer arithmetic expressions like `*(p + offset)` have limited support.
+2. The C front-end operates directly on token streams without building a full AST.
+3. Complex pointer arithmetic expressions like `*(p + offset)` have limited support.
 
 ## License
 
