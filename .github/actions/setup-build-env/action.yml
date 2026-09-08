@@ -59,6 +59,10 @@ runs:
            [ "$(uname -m)" != aarch64 ]; then
             packages+=(gcc-arm-linux-gnueabihf)
         fi
+        if [ "$LINK_MODE" = dynamic ] && [ "$ARCHITECTURE" = arm64 ] && \
+           [ "$(uname -m)" != aarch64 ]; then
+            packages+=(gcc-aarch64-linux-gnu)
+        fi
         sudo apt-get update -q -y
         sudo apt-get install -q -y --no-install-recommends "${packages[@]}"
 

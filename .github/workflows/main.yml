@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
-        architecture: [arm, riscv, x64]
+        architecture: [arm, arm64, riscv, x64]
         link_mode: [static, dynamic]
     env:
       CC: ${{ matrix.compiler }}
@@ -80,7 +80,7 @@ jobs:
         # clang-sanitized one, which puts a single cell of this matrix at
         # roughly fifteen hours. Restoring the dimension means finding out
         # why first.
-        architecture: [arm, riscv, x64]
+        architecture: [arm, arm64, riscv, x64]
         link_mode: [static, dynamic]
     env:
       ARCH: ${{ matrix.architecture }}
@@ -110,7 +110,7 @@ jobs:
       fail-fast: false
       matrix:
         compiler: [gcc, clang]
-        architecture: [arm, riscv, x64]
+        architecture: [arm, arm64, riscv, x64]
     env:
       CC: ${{ matrix.compiler }}
       ARCH: ${{ matrix.architecture }}
