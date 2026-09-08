@@ -5612,7 +5612,11 @@ void parse_internal(void)
 {
     /* set starting point of global stack manually */
     GLOBAL_FUNC = add_func("", true);
-    GLOBAL_FUNC->stack_size = 4;
+
+    /* The first global slot retains the synthetic global-frame pointer. It must
+     * occupy a full target pointer, not the historic 32-bit word.
+     */
+    GLOBAL_FUNC->stack_size = PTR_SIZE;
     GLOBAL_FUNC->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
     GLOBAL_FUNC->bbs->belong_to = GLOBAL_FUNC; /* Prevent nullptr deref in RA */
     GLOBAL_FUNC->bbs->elf_offset = -1;         /* not yet emitted */
@@ -5676,9 +5680,11 @@ void parse_internal(void)
 
     /* Add a global object to the .data section.
      *
-     * This object is used to save the global stack pointer.
+     * This object saves the global stack pointer, so it is written back as a
+     * pointer and must reserve a full one: on an LP64 target the historic
+     * 32-bit word left four bytes belonging to the next global.
      */
-    elf_write_int(elf_data, 0);
+    elf_write_ptr(elf_data, 0);
 
     /* lexer initialization */
     do {

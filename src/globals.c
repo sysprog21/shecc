@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "defs.h"
 
@@ -636,6 +637,8 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
      */
     ph2_ir->size_bytes = PTR_SIZE;
     ph2_ir->is_pointer = false;
+    ph2_ir->src0_is_pointer = false;
+    ph2_ir->src1_is_pointer = false;
     return add_existed_ph2_ir(ph2_ir);
 }
 
@@ -1552,10 +1555,9 @@ void global_init(void)
         dynamic_sections.use_relaplt = false;
         break;
     case ELF_MACHINE_RV32:
-        dynamic_sections.use_relaplt = true;
-        break;
     case ELF_MACHINE_X86_64:
-        /* x86-64 uses RELA throughout. */
+    case ELF_MACHINE_AARCH64:
+        /* Every target but Arm32 uses RELA throughout. */
         dynamic_sections.use_relaplt = true;
         break;
     }

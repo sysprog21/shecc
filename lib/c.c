@@ -241,13 +241,11 @@ void __str_base10(char *pb, int val)
     int q, r, t;
     int i = INT_BUF_LEN - 1;
 
-    /* On a 32-bit target, negating INT_MIN overflows and the digit loop below
-     * cannot make progress, so the value is spelled out directly. On LP64 the
-     * negation happens in a 64-bit register and the normal path is exact. This
-     * is an ordinary constant expression rather than a preprocessor conditional
-     * so that shecc can compile this file for either target.
+    /* val is an int on every target: negating INT_MIN overflows even when
+     * pointers and registers are 64-bit. Spell it directly so the digit loop
+     * never walks its stack buffer backwards indefinitely.
      */
-    if (__ptr_width == 4 && val == -2147483648) {
+    if (val == -2147483648) {
         strncpy(pb + INT_BUF_LEN - 11, "-2147483648", 11);
         return;
     }
@@ -662,14 +660,14 @@ FILE *fopen(char *filename, char *mode)
 
         if (!strcmp(mode, "wb"))
             perm = 0x1fd;
-#if defined(__riscv)
+#if defined(__riscv) || defined(__aarch64__)
         /* FIXME: mode not work currently in RISC-V */
         fd = __syscall(__syscall_openat, -100, filename, 577, perm);
 #else
         fd = __syscall(__syscall_open, filename, 577, perm);
 #endif
     } else if (!strcmp(mode, "r") || !strcmp(mode, "rb")) {
-#if defined(__riscv)
+#if defined(__riscv) || defined(__aarch64__)
         fd = __syscall(__syscall_openat, -100, filename, 0, 0);
 #else
         fd = __syscall(__syscall_open, filename, 0, 0);
@@ -690,6 +688,16 @@ int fclose(FILE *stream)
 {
     __syscall(__syscall_close, stream);
     return 0;
+}
+
+int chmod(char *filename, int mode)
+{
+#if defined(__riscv) || defined(__aarch64__)
+    /* sys_fchmodat takes (dirfd, filename, mode); AT_FDCWD is -100. */
+    return __syscall(__syscall_fchmodat, -100, filename, mode);
+#else
+    return __syscall(__syscall_chmod, filename, mode);
+#endif
 }
 
 /* Read a byte from file descriptor. So the return value is either in the range
@@ -738,32 +746,28 @@ int fputc(int c, FILE *stream)
 int fseek(FILE *stream, int offset, int whence)
 {
     int result;
-#if defined(__arm__)
-    result = __syscall(__syscall_lseek, stream, offset, whence);
-#elif defined(__riscv)
-    /* No need to offset */
+
+    /* RV32 has only _llseek, which splits the offset and returns the result
+     * through a pointer. Every other target takes (fd, offset, whence)
+     * directly. lib/c.h rejects an architecture that is neither.
+     */
+#if defined(__riscv)
     result = __syscall(__syscall_lseek, stream, 0, offset, NULL, whence);
-#elif defined(__x86_64__)
-    /* x86-64 lseek(2) takes (fd, offset, whence) directly. */
-    result = __syscall(__syscall_lseek, stream, offset, whence);
 #else
-#error "Unsupported fseek support for current platform"
+    result = __syscall(__syscall_lseek, stream, offset, whence);
 #endif
     return result == -1;
 }
 
 int ftell(FILE *stream)
 {
-#if defined(__arm__)
-    return __syscall(__syscall_lseek, stream, 0, SEEK_CUR);
-#elif defined(__riscv)
+    /* See fseek(): only RV32 needs the split-offset _llseek form. */
+#if defined(__riscv)
     int result;
     __syscall(__syscall_lseek, stream, 0, 0, &result, SEEK_CUR);
     return result;
-#elif defined(__x86_64__)
-    return __syscall(__syscall_lseek, stream, 0, SEEK_CUR);
 #else
-#error "Unsupported ftell support for current platform"
+    return __syscall(__syscall_lseek, stream, 0, SEEK_CUR);
 #endif
 }
 
