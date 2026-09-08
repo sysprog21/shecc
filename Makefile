@@ -40,7 +40,7 @@ USE_QEMU ?= 1
 OUT ?= out
 # Every architecture that can be selected as a build target. The first is the
 # default when ARCH is not given.
-ARCHS = arm riscv x64
+ARCHS = arm arm64 riscv x64
 ARCH ?= $(firstword $(ARCHS))
 SRCDIR := $(shell find src -type d)
 LIBDIR := $(shell find lib -type d)

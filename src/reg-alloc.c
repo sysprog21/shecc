@@ -22,6 +22,36 @@ bool is_pointer_like(var_t *v)
     return v && (v->ptr_level > 0 || (v->type && v->type->ptr_level > 0));
 }
 
+/* An operand holds an address if it is pointer-like or is an array, which
+ * decays to one wherever it is used as a value. A subscript reaches OP_add with
+ * the array itself as the base, so leaving arrays out here would let an LP64
+ * backend read a[i] as ordinary arithmetic and skip widening the index.
+ */
+bool is_address_like(var_t *v)
+{
+    return is_pointer_like(v) || (v && v->array_size > 0);
+}
+
+/* Record which operands of a three-address instruction are addresses.
+ *
+ * An LP64 backend needs the operands apart, not just the instruction: pointer
+ * arithmetic keeps the address 64 bits wide while sign-extending the int index
+ * beside it.
+ *
+ * The two source flags and is_pointer deliberately ask different questions.
+ * Only the AArch64 backend reads the source flags, and it wants every address,
+ * arrays included. is_pointer is older and the x86-64 backend decides store
+ * widths and int narrowing by it, so it keeps counting pointer-like operands
+ * alone rather than acquiring arrays and changing a settled target.
+ */
+void set_ptr_flags(ph2_ir_t *ir, insn_t *insn)
+{
+    ir->src0_is_pointer = is_address_like(insn->rs1);
+    ir->src1_is_pointer = is_address_like(insn->rs2);
+    ir->is_pointer = is_pointer_like(insn->rd) || is_pointer_like(insn->rs1) ||
+                     is_pointer_like(insn->rs2);
+}
+
 /* Width of the value a local's frame slot actually holds.
  *
  * Slots are pointer-sized, but a scalar occupies only its low bytes. Reading
@@ -186,6 +216,8 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->ofs_based_on_stack_top = false;
     n->size_bytes = PTR_SIZE; /* default to the full slot; see add_ph2_ir */
     n->is_pointer = false;
+    n->src0_is_pointer = false;
+    n->src1_is_pointer = false;
 
     if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;
@@ -2103,6 +2135,7 @@ void reg_alloc_global(insn_t *global_insn)
         ir->src0 = src0;
         ir->src1 = src1;
         ir->dest = dest;
+        set_ptr_flags(ir, global_insn);
         break;
     }
     case OP_write: {
@@ -2500,6 +2533,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
 
             ir = bb_add_ph2_ir(bb, OP_branch);
             ir->src0 = src0;
+
+            /* An LP64 backend tests an address over its full width and an int
+             * over its low word only.
+             */
+            ir->src0_is_pointer = is_address_like(insn->rs1);
             ir->then_bb = bb->then_;
             ir->else_bb = bb->else_;
             break;
@@ -2601,13 +2639,12 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src1 = src1;
             ir->dest = dest;
 
-            /* Record whether the result is an address. On LP64 an int-typed
-             * result has to wrap at 32 bits, while a pointer must keep all
-             * 64. The backend cannot tell the two apart without this.
+            /* Record whether the result is an address, and which operand it
+             * came from. On LP64 an int-typed result has to wrap at 32 bits,
+             * while a pointer must keep all 64, and pointer arithmetic has to
+             * widen the int index beside the address.
              */
-            ir->is_pointer = is_pointer_like(insn->rd) ||
-                             is_pointer_like(insn->rs1) ||
-                             is_pointer_like(insn->rs2);
+            set_ptr_flags(ir, insn);
             break;
         case OP_negate:
         case OP_bit_not:
@@ -2617,6 +2654,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src0 = src0;
             ir->dest = dest;
+
+            /* As for OP_branch: the width of the test follows the operand, not
+             * the result.
+             */
+            ir->src0_is_pointer = is_address_like(insn->rs1);
             break;
         case OP_trunc:
         case OP_sign_ext:

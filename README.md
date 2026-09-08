@@ -4,13 +4,13 @@
 
 ## Introduction
 
-`shecc` is built from scratch, targeting 32-bit Arm, 32-bit RISC-V, and x86-64,
-as a self-compiling compiler for a subset of the C language.
+`shecc` is built from scratch, targeting 32-bit Arm, AArch64, 32-bit RISC-V,
+and x86-64, as a self-compiling compiler for a subset of the C language.
 Despite its simplistic nature, it is capable of performing basic optimization strategies as a standalone optimizing compiler.
 
 ### Features
 
-* Generate executable Linux ELF binaries for ARMv7-A, RV32IM, and x86-64.
+* Generate executable Linux ELF binaries for ARMv7-A, AArch64, RV32IM, and x86-64.
 * Provide a minimal C standard library for basic I/O on GNU/Linux.
 * The cross-compiler is written in ANSI C, making it compatible with most platforms.
 * Include a self-contained C front-end with an integrated machine code generator; no external assembler or linker needed.
@@ -19,7 +19,7 @@ Despite its simplistic nature, it is capable of performing basic optimization st
 * Develop a register allocation system that is compatible with RISC-style architectures.
 * Implement an architecture-independent, [static single assignment](https://en.wikipedia.org/wiki/Static_single-assignment_form) (SSA)-based middle-end for enhanced optimizations.
 * Support dynamic linking to allow generated executables to run with glibc.
-* Emit both ELF32 (Arm, RISC-V) and ELF64 (x86-64) images; the ELF class follows the target pointer width.
+* Emit both ELF32 (Arm, RISC-V) and ELF64 (AArch64, x86-64) images; the ELF class follows the target pointer width.
 
 ## Compatibility
 
@@ -41,6 +41,10 @@ syntax:
 * function-like macros with parameters, `__VA_ARGS__`, stringification (`#`), and token pasting (`##`)
 
 The Arm backend targets armv7hf with the Linux ABI, verified on Raspberry Pi 3.
+The AArch64 backend follows AAPCS64 and supports static and eager-bound dynamic
+linking, verified with QEMU AArch64 on eMag. Its images separate the load
+segments by 64 KiB so they load under any of the 4 KiB, 16 KiB and 64 KiB
+translation granules AArch64 Linux may be configured with.
 The RISC-V backend targets RV32IM, verified with QEMU.
 The x86-64 backend follows the System V AMD64 ABI and runs natively on an
 x86-64 GNU/Linux host, so no emulator is involved.
@@ -86,7 +90,7 @@ the second stage bootstrapping would fail due to `qemu-arm` absence, and the
 
 The dynamic linking mode needs an ELF interpreter and the matching glibc for the
 target. The `x64` target resolves both from the host system, so it needs nothing
-beyond an x86-64 GNU/Linux installation. The Arm and RISC-V targets need a
+beyond an x86-64 GNU/Linux installation. The Arm, AArch64, and RISC-V targets need a
 cross-compile GNU toolchain to obtain them.
 
 For the Arm architecture, you can install the ARM GNU toolchain using `apt-get`:
@@ -98,20 +102,29 @@ Another approach is to manually download and install the toolchain from [ARM Dev
 Select "x86_64 Linux hosted cross toolchains" - "AArch32 GNU/Linux target with hard float (arm-none-linux-gnueabihf)"
 to download the toolchain.
 
+For AArch64 dynamic binaries, install the matching toolchain and user emulator:
+
+```shell
+$ sudo apt-get install gcc-aarch64-linux-gnu qemu-user
+```
+
 Since `apt-get` does not provide the necessary RISC-V GNU toolchain, it must be downloaded manually if you want to
 run a dynamically linked `shecc` targeting the RISC-V architecture. For instance, you can download and extract the
 `riscv32-glibc-ubuntu-22.04-gcc.tar.xz` package from the [riscv-gnu-gcc](https://github.com/riscv-collab/riscv-gnu-toolchain) repository.
 
 ## Build and Verify
 
-Configure which backend you want. `shecc` supports the ARMv7-A, RV32IM, and
-x86-64 backends, with Arm as the default:
+Configure which backend you want. `shecc` supports the ARMv7-A, AArch64,
+RV32IM, and x86-64 backends, with Arm as the default:
 ```shell
 $ make config ARCH=arm
 # Target machine code switch to arm
 
 $ make config ARCH=riscv
 # Target machine code switch to riscv
+
+$ make config ARCH=arm64
+# Target machine code switch to arm64
 
 $ make config ARCH=x64
 # Target machine code switch to x64
@@ -145,7 +158,10 @@ $ make DYNLINK=1
   SHECC	out/shecc-stage2.elf
 
 $ file out/shecc-stage2.elf
+# ARCH=arm:
 out/shecc-stage2.elf: ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-armhf.so.3, not stripped
+# ARCH=arm64:
+out/shecc-stage2.elf: ELF 64-bit LSB executable, ARM aarch64, dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, no section header
 ```
 
 For development builds with memory safety checks:
@@ -171,20 +187,26 @@ Compiler options:
 Example 1: static linking mode
 ```shell
 $ out/shecc -o fib tests/fib.c
-$ chmod +x fib
 $ qemu-arm fib
 ```
+
+The compiler marks its own output executable, so neither example needs a
+`chmod +x` in front of the run. Earlier revisions did: the mode used to be
+whatever the libc that opened the file chose, which was 0666 for a
+glibc-linked build.
 
 An `x64` build produces a native binary, so `./fib` runs it directly with no
 emulator in front.
 
 Example 2: dynamic linking mode
 
-Notice that `/usr/arm-linux-gnueabihf` is the ELF interpreter prefix. Since the path may be different if you manually install the ARM/RISC-V GNU toolchain instead of using `apt-get`, you should set the prefix to the actual path.
+For AArch64, `/usr/aarch64-linux-gnu` is a typical ELF interpreter prefix.
+The path may differ if you manually install a GNU toolchain, so set it to the
+actual sysroot.
 ```shell
 $ out/shecc --dynlink -o fib tests/fib.c
-$ chmod +x fib
-$ qemu-arm -L /usr/arm-linux-gnueabihf fib
+$ qemu-arm -L /usr/arm-linux-gnueabihf fib      # ARCH=arm
+$ qemu-aarch64 -L /usr/aarch64-linux-gnu fib    # ARCH=arm64
 ```
 
 ### Unit Tests

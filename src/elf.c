@@ -155,8 +155,10 @@ void elf_write_jmprel(strbuf_t *buf, int offset, int sym_idx)
 #endif
 }
 
-/* One GOT slot. */
-void elf_write_got_slot(strbuf_t *buf, int val)
+/* One pointer-sized value: eight bytes on an ELF64 target, four on ELF32. Used
+ * for GOT slots and for any data-section object holding an address.
+ */
+void elf_write_ptr(strbuf_t *buf, int val)
 {
 #if ELF_IS_64 == 1
     elf_write_quad(buf, val);
@@ -171,6 +173,16 @@ void elf_write_got_slot(strbuf_t *buf, int val)
  */
 void elf_layout_dynamic(void)
 {
+    /* Everything below is placed from the end of .rodata, and .got holds
+     * pointers, so that end has to be pointer-aligned. Padding here rather than
+     * in the caller keeps the two runs of this function in agreement -- the pad
+     * is already present the second time, so it is idempotent -- which a
+     * backend that bakes the PLT address into its calls, as AArch64's BL does,
+     * depends on.
+     */
+    while ((elf_rodata_start + elf_rodata->size) % PTR_SIZE)
+        elf_write_byte(elf_rodata, 0);
+
     int relplt_bytes = dynamic_sections.use_relaplt
                            ? dynamic_sections.relaplt_size
                            : dynamic_sections.relplt_size;
@@ -1004,20 +1016,21 @@ void elf_generate_dynamic_sections(void)
     switch (ELF_MACHINE) {
     case ELF_MACHINE_ARM32:
     case ELF_MACHINE_X86_64:
+    case ELF_MACHINE_AARCH64:
         /* GOT[0] holds the address of .dynamic. The GOT is still being built,
          * so its final size comes from got_size rather than the buffer.
          */
-        elf_write_got_slot(dynamic_sections.elf_got,
-                           dynamic_sections.elf_got_start +
-                               dynamic_sections.got_size +
-                               dynamic_sections.elf_dynstr->size +
-                               dynamic_sections.elf_dynsym->size);
-        elf_write_got_slot(dynamic_sections.elf_got, 0);
-        elf_write_got_slot(dynamic_sections.elf_got, 0);
+        elf_write_ptr(dynamic_sections.elf_got,
+                      dynamic_sections.elf_got_start +
+                          dynamic_sections.got_size +
+                          dynamic_sections.elf_dynstr->size +
+                          dynamic_sections.elf_dynsym->size);
+        elf_write_ptr(dynamic_sections.elf_got, 0);
+        elf_write_ptr(dynamic_sections.elf_got, 0);
         break;
     case ELF_MACHINE_RV32:
-        elf_write_got_slot(dynamic_sections.elf_got, 0);
-        elf_write_got_slot(dynamic_sections.elf_got, 0);
+        elf_write_ptr(dynamic_sections.elf_got, 0);
+        elf_write_ptr(dynamic_sections.elf_got, 0);
         break;
     }
     int got_idx = 0;
@@ -1032,7 +1045,7 @@ void elf_generate_dynamic_sections(void)
              */
             slot = dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE +
                    got_idx * PLT_ENT_SIZE + 6;
-        elf_write_got_slot(dynamic_sections.elf_got, slot);
+        elf_write_ptr(dynamic_sections.elf_got, slot);
         got_idx++;
     }
 
@@ -1187,6 +1200,13 @@ void elf_preprocess(void)
     elf_code_start = ELF_START + elf_header_len;
     elf_rodata_start = elf_code_start + elf_offset;
     if (dynlink) {
+        /* Dynamic startup clears the synthetic global frame with memset.
+         * Reserve its PLT slot even when user code does not otherwise call it.
+         */
+        func_t *memset_func = find_func("memset");
+        if (memset_func)
+            memset_func->is_used = true;
+
         /* Precalculate the sizes of .rel.plt (.rela.plt), .plt and .got
          * sections.
          *
@@ -1242,9 +1262,19 @@ void elf_preprocess(void)
     } else {
         /* To prevent two load segments from sharing a common page, add PAGESIZE
          * to elf_data_start, since the first section of the second load segment
-         * is .data in static linking mode.
+         * is .data in static linking mode. ELF requires p_offset and p_vaddr to
+         * agree modulo p_align. ELF64 output pads the file to the next page
+         * before .data, so derive its virtual address from that same aligned
+         * file offset rather than merely adding a page to the preceding virtual
+         * end.
          */
+#if ELF_IS_64 == 1
+        elf_data_start =
+            ELF_START +
+            ALIGN_UP(elf_header_len + elf_offset + elf_rodata->size, PAGESIZE);
+#else
         elf_data_start = elf_rodata_start + elf_rodata->size + PAGESIZE;
+#endif
     }
     elf_bss_start = elf_data_start + elf_data->size;
     elf_align(elf_symtab);
@@ -1340,11 +1370,21 @@ void elf_generate(const char *outfile)
     if (!dynlink) {
         int ro_written = elf_header_len + elf_code->size + elf_rodata->size;
         int data_ofs = ALIGN_UP(ro_written, PAGESIZE);
-        char pad[PAGESIZE];
 
-        for (int i = 0; i < PAGESIZE; i++)
+        /* Written in chunks rather than from one PAGESIZE-sized buffer: a
+         * target with a 64 KiB granule would otherwise put 64 KiB on the stack,
+         * and zero all of it to emit the few bytes actually needed.
+         */
+        char pad[256];
+        int left = data_ofs - ro_written;
+
+        for (int i = 0; i < 256; i++)
             pad[i] = 0;
-        elf_write_all(fp, pad, data_ofs - ro_written);
+        while (left > 0) {
+            int n = left < 256 ? left : 256;
+            elf_write_all(fp, pad, n);
+            left -= n;
+        }
     }
 #endif
     /* Readable and writable sections */
@@ -1364,4 +1404,13 @@ void elf_generate(const char *outfile)
     elf_write_all(fp, elf_section_header->elements, elf_section_header->size);
 #endif
     fclose(fp);
+
+    /* A generated ELF is meant to be runnable directly, but the mode it gets
+     * depends on which libc opened it, not on how the output is linked: the
+     * embedded lib/c.c passes 0775 to openat(2) while glibc's fopen("wb")
+     * yields 0666. Every compiler that reaches here -- host-built, static
+     * self-hosted, or dynamic -- therefore sets the bits explicitly.
+     */
+    if (chmod((char *) outfile, 0x1ed) < 0) /* 0755 */
+        usage_error("Unable to mark output executable");
 }

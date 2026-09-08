@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "defs.h"
 
@@ -636,6 +637,8 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
      */
     ph2_ir->size_bytes = PTR_SIZE;
     ph2_ir->is_pointer = false;
+    ph2_ir->src0_is_pointer = false;
+    ph2_ir->src1_is_pointer = false;
     return add_existed_ph2_ir(ph2_ir);
 }
 
@@ -1552,10 +1555,9 @@ void global_init(void)
         dynamic_sections.use_relaplt = false;
         break;
     case ELF_MACHINE_RV32:
-        dynamic_sections.use_relaplt = true;
-        break;
     case ELF_MACHINE_X86_64:
-        /* x86-64 uses RELA throughout. */
+    case ELF_MACHINE_AARCH64:
+        /* Every target but Arm32 uses RELA throughout. */
         dynamic_sections.use_relaplt = true;
         break;
     }
@@ -1770,8 +1772,15 @@ __noreturn void fatal(const char *msg)
     /* abort() does not flush, so a diagnostic written to a pipe -- a build log,
      * or any invocation whose output is captured -- is discarded and the
      * compiler appears to die silently.
+     *
+     * The stream is NULL rather than stdout because a dynamically linked build
+     * resolves fflush through the PLT to the host libc, for which lib/c.h's
+     * 'stdout' -- the plain file descriptor 1 -- is not a FILE *. NULL means
+     * "every stream" there and is ignored by the unbuffered embedded libc, so
+     * it is right for both. That build needs the flush most, being the only one
+     * whose stdio actually buffers.
      */
-    fflush(stdout);
+    fflush(NULL);
     abort();
 }
 
@@ -1782,7 +1791,7 @@ __noreturn void fatal(const char *msg)
 __noreturn void usage_error(const char *msg)
 {
     printf("[Error]: %s\n", msg);
-    fflush(stdout);
+    fflush(NULL);
     exit(1);
 }
 
@@ -1801,7 +1810,7 @@ __noreturn void error_at(char *msg, source_location_t *loc)
 
     if (!loc) {
         printf("[Error]: %s\n", msg);
-        fflush(stdout);
+        fflush(NULL);
         exit(1);
     }
 
@@ -1816,7 +1825,7 @@ __noreturn void error_at(char *msg, source_location_t *loc)
      */
     if (!src) {
         printf("[Error]: %s\n", msg);
-        fflush(stdout);
+        fflush(NULL);
         exit(1);
     }
 
@@ -1862,7 +1871,7 @@ __noreturn void error_at(char *msg, source_location_t *loc)
 
     strcpy(diagnostic + i, note);
     printf("%s\n", diagnostic);
-    fflush(stdout); /* exit() flushes, but say so once rather than rely on it */
+    fflush(NULL); /* exit() flushes, but say so once rather than rely on it */
     exit(1);
 }
 

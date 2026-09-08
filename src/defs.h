@@ -45,7 +45,17 @@
  */
 #define DUMP_INSN_LEN 512
 #define MAX_TYPE_LEN 32
+
+/* Declaration limit, and with MAX_ARGS_IN_REG it also sizes the outgoing
+ * stack-argument area every frame reserves (see add_func() in globals.c). A
+ * target passing many arguments in registers must raise it or that area is
+ * empty and a call with more arguments overwrites the caller's first locals.
+ * Raising it for everyone would widen func_t.param_defs and the variadic spill
+ * on targets that gain nothing, so each mk file states its own.
+ */
+#ifndef MAX_PARAMS
 #define MAX_PARAMS 8
+#endif
 #define MAX_LOCALS 3200
 #define MAX_FIELDS 64
 #define MAX_TYPES 256
@@ -177,6 +187,7 @@
 #define ELF_MACHINE_ARM32 0x28
 #define ELF_MACHINE_RV32 0xf3
 #define ELF_MACHINE_X86_64 0x3e
+#define ELF_MACHINE_AARCH64 0xb7
 
 /* ELF class of the active target: a 64-bit pointer means ELF64, and every
  * 32-bit target means ELF32. Used to select the header/segment writers in
@@ -690,6 +701,11 @@ struct ph2_ir {
      */
     bool ofs_based_on_stack_top;
     bool is_pointer; /* True if this operation involves a pointer type */
+    /* Operand provenance is required by LP64 backends: pointer arithmetic keeps
+     * the address operand wide but sign-extends an int index.
+     */
+    bool src0_is_pointer;
+    bool src1_is_pointer;
 };
 
 typedef struct ph2_ir ph2_ir_t;
