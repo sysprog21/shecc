@@ -648,6 +648,102 @@ declare -a variable_tests=(
 
 run_items_tests variable_tests
 
+# Narrow signed values must stay negative through promotion and through a store
+# and reload. An LP64 backend holds them in a 64-bit register, so a load that
+# zero-extends or a promotion that forgets to extend turns a small negative
+# number into a large positive one. The array-element form belongs here too, but
+# it fails on the Arm backend, whose char elements load zero-extended, so it
+# stays in tests/arm64-abi.sh until that is fixed.
+try_ 42 << EOF
+int main() {
+    char c = -5;
+    short s = -1000;
+    int ci = c;
+    int si = s;
+    if (ci != -5)
+        return 1;
+    if (si != -1000)
+        return 2;
+    if (c >= 0)
+        return 3;
+    if (s >= 0)
+        return 4;
+    return 42;
+}
+EOF
+
+# A pointer is wider than an int on an LP64 target, so testing one for truth has
+# to consider the whole value, not just its low word. No fixture can force the
+# case that separates the two, since pinning a pointer whose low word is zero
+# needs a 64-bit literal and shecc has no integer constant that wide. What is
+# testable is that every path which tests an address agrees: the backend emits a
+# different width for a branch, for a logical negation and for a comparison, so
+# each is reached here with a null and a non-null pointer.
+try_ 42 << EOF
+struct holder {
+    int *ptr;
+};
+
+int *pick(int *p, int take)
+{
+    if (take)
+        return p;
+    return 0;
+}
+
+int main() {
+    int v = 42;
+    int *p = &v;
+    int *n = 0;
+    struct holder h;
+    int seen = 0;
+
+    if (!p)
+        return 1;
+    if (n)
+        return 2;
+    if (p == 0)
+        return 3;
+    if (n != 0)
+        return 4;
+
+    while (n)
+        return 5;
+
+    seen = p ? 1 : 0;
+    if (!seen)
+        return 6;
+    seen = n ? 1 : 0;
+    if (seen)
+        return 7;
+
+    if (p && !n)
+        seen = 2;
+    if (seen != 2)
+        return 8;
+    if (n || !p)
+        return 9;
+
+    /* A pointer that reaches the test through a return value or a struct
+     * field has been through a store and a reload on the way.
+     */
+    if (!pick(p, 1))
+        return 10;
+    if (pick(p, 0))
+        return 11;
+
+    h.ptr = n;
+    if (h.ptr)
+        return 12;
+    h.ptr = p;
+    if (!h.ptr)
+        return 13;
+
+    int *q = h.ptr;
+    return *q;
+}
+EOF
+
 # Category: Compound Literals
 begin_category "Compound Literals" "Testing C99 compound literal features"
 
