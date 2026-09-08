@@ -130,17 +130,21 @@ jobs:
       - name: Build stage 1 artifact
         run: ./out/shecc --no-libc -o out/shecc-stage1.elf ./out/out.c
 
-  # An Arm64 runner executes the Arm output natively, so this covers the paths
-  # that the emulator would otherwise stand in for.
+  # An Arm64 runner executes both the Arm and the AArch64 output natively, so
+  # this covers the paths that the emulator would otherwise stand in for. For
+  # AArch64 that is the only place the real loader is exercised: QEMU-user maps
+  # the image itself, and on an x86-64 host it always presents 4 KiB pages.
   host-arm:
-    name: arm/${{ matrix.link_mode }} on Arm64
+    name: ${{ matrix.architecture }}/${{ matrix.link_mode }} on Arm64
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
+        architecture: [arm, arm64]
         link_mode: [static, dynamic]
     env:
+      ARCH: ${{ matrix.architecture }}
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
     steps:
       - name: Checkout code
@@ -148,18 +152,18 @@ jobs:
       - name: Set up the build environment
         uses: ./.github/actions/setup-build-env
         with:
-          architecture: arm
+          architecture: ${{ matrix.architecture }}
           link-mode: ${{ matrix.link_mode }}
           github-token: ${{ github.token }}
       - name: Build artifacts
-        run: make ARCH=arm DYNLINK="$DYNLINK"
+        run: make ARCH="$ARCH" DYNLINK="$DYNLINK"
       - name: Unit tests
-        run: make check ARCH=arm DYNLINK="$DYNLINK"
+        run: make check ARCH="$ARCH" DYNLINK="$DYNLINK"
       - name: Upload the test logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: logs-arm64-host-${{ matrix.link_mode }}
+          name: logs-arm64-host-${{ matrix.architecture }}-${{ matrix.link_mode }}
           path: |
             out/*.log
             out/tests/*.log

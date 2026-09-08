@@ -59,6 +59,9 @@ runs:
            [ "$(uname -m)" != aarch64 ]; then
             packages+=(gcc-arm-linux-gnueabihf)
         fi
+        # An Arm64 host runs the AArch64 output natively, so mk/arm64.mk
+        # turns USE_QEMU off and the build resolves the interpreter and libc
+        # from the running system instead of from a cross sysroot.
         if [ "$LINK_MODE" = dynamic ] && [ "$ARCHITECTURE" = arm64 ] && \
            [ "$(uname -m)" != aarch64 ]; then
             packages+=(gcc-aarch64-linux-gnu)
@@ -164,18 +167,21 @@ runs:
         echo "$sha256  $file" | sha256sum -c -
         sudo apt-get install -q -y --no-install-recommends "$file"
 
-    # An Arm64 runner is asked for so that the Arm output runs through the
-    # kernel rather than an emulator, and the step above is what lets
-    # mk/arm.mk see that. Read the decision back while it is fresh: a runner
-    # the probe stops matching would otherwise turn those jobs into slower
-    # copies of the x86 ones without saying so. An empty TARGET_EXEC is the
-    # Makefile saying nothing stands in front of the binary.
-    - name: Confirm the Arm output runs natively
-      if: runner.arch == 'ARM64' && inputs.architecture == 'arm'
+    # An Arm64 runner is asked for so that the Arm and AArch64 output runs
+    # through the kernel rather than an emulator: mk/arm.mk decides that from
+    # the step above, mk/arm64.mk from the host architecture alone. Read the
+    # decision back while it is fresh: a runner the probe stops matching would
+    # otherwise turn those jobs into slower copies of the x86 ones without
+    # saying so. An empty TARGET_EXEC is the Makefile saying nothing stands in
+    # front of the binary.
+    - name: Confirm the output runs natively
+      if: runner.arch == 'ARM64' && (inputs.architecture == 'arm' || inputs.architecture == 'arm64')
       shell: bash
+      env:
+        ARCHITECTURE: ${{ inputs.architecture }}
       run: |
         set -euo pipefail
-        runner=$(make -np ARCH=arm 2>/dev/null | \
+        runner=$(make -np ARCH="$ARCHITECTURE" 2>/dev/null | \
             sed -n 's/^TARGET_EXEC = *//p' | head -1)
         if [ -n "$runner" ]; then
             echo "Expected native execution, but the build selected: $runner"

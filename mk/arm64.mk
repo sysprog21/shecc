@@ -28,4 +28,15 @@ ARCH_DEFS = \
     \#define DYN_BIND_NOW 1\n$\
     "
 
+# An Arm64 Linux host runs this target's output itself, so nothing has to stand
+# in for it. The Arm target needs fastfetch to tell a board that can run its
+# 32-bit output from one that cannot; here the host answers on its own. The
+# check is for the kernel as well as the architecture, since what comes out is
+# an AArch64 Linux ELF and no other system will execute it. With the emulator
+# out of the way the dynamic build resolves its interpreter and libc from the
+# running system rather than from a sysroot.
+ifeq ($(shell uname -s -m),Linux aarch64)
+    USE_QEMU = 0
+endif
+
 TOOLCHAIN_CANDIDATES := aarch64-linux-gnu- aarch64-none-linux-gnu-
