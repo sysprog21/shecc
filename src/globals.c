@@ -1770,8 +1770,15 @@ __noreturn void fatal(const char *msg)
     /* abort() does not flush, so a diagnostic written to a pipe -- a build log,
      * or any invocation whose output is captured -- is discarded and the
      * compiler appears to die silently.
+     *
+     * The stream is NULL rather than stdout because a dynamically linked build
+     * resolves fflush through the PLT to the host libc, for which lib/c.h's
+     * 'stdout' -- the plain file descriptor 1 -- is not a FILE *. NULL means
+     * "every stream" there and is ignored by the unbuffered embedded libc, so
+     * it is right for both. That build needs the flush most, being the only one
+     * whose stdio actually buffers.
      */
-    fflush(stdout);
+    fflush(NULL);
     abort();
 }
 
@@ -1782,7 +1789,7 @@ __noreturn void fatal(const char *msg)
 __noreturn void usage_error(const char *msg)
 {
     printf("[Error]: %s\n", msg);
-    fflush(stdout);
+    fflush(NULL);
     exit(1);
 }
 
@@ -1801,7 +1808,7 @@ __noreturn void error_at(char *msg, source_location_t *loc)
 
     if (!loc) {
         printf("[Error]: %s\n", msg);
-        fflush(stdout);
+        fflush(NULL);
         exit(1);
     }
 
@@ -1816,7 +1823,7 @@ __noreturn void error_at(char *msg, source_location_t *loc)
      */
     if (!src) {
         printf("[Error]: %s\n", msg);
-        fflush(stdout);
+        fflush(NULL);
         exit(1);
     }
 
@@ -1862,7 +1869,7 @@ __noreturn void error_at(char *msg, source_location_t *loc)
 
     strcpy(diagnostic + i, note);
     printf("%s\n", diagnostic);
-    fflush(stdout); /* exit() flushes, but say so once rather than rely on it */
+    fflush(NULL); /* exit() flushes, but say so once rather than rely on it */
     exit(1);
 }
 
