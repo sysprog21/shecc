@@ -53,12 +53,13 @@ BUILTIN_LIBC_HEADER := c.h
 STAGE0_FLAGS ?= --dump-ir
 STAGE1_FLAGS ?=
 DYNLINK ?= 0
+BINDING ?= lazy
 
 COMMENTFLOW ?= commentflow
 SHFMT ?= shfmt
 ifeq ($(DYNLINK),1)
-    STAGE0_FLAGS += --dynlink
-    STAGE1_FLAGS += --dynlink
+    STAGE0_FLAGS += --dynlink -z $(BINDING)
+    STAGE1_FLAGS += --dynlink -z $(BINDING)
 endif
 
 SRCS := $(wildcard $(patsubst %,%/main.c, $(SRCDIR)))
