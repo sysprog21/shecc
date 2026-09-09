@@ -512,6 +512,42 @@ begin_category "Literals and Constants" "Testing integer, character, and string 
 
 # just a number
 expr 0 0
+
+# C99 _Bool conversions store the truth value, not a truncated source byte.
+try_ 4 << EOF
+_Bool echo_bool(_Bool value) { return value; }
+int main(void) {
+    _Bool positive = 2;
+    _Bool negative = -7;
+    _Bool zero = 0;
+    positive = 42;
+    return (positive == 1) + (negative == 1) + (zero == 0) +
+           (echo_bool(-3) == 1);
+}
+EOF
+
+try_ 2 << EOF
+_Bool global_true = 2;
+int main(void) {
+    static _Bool local_true = -3;
+    return (global_true == 1) + (local_true == 1);
+}
+EOF
+
+try_ 31 << EOF
+int bool_pointer_object;
+_Bool pointer_to_bool(int *value) { return value; }
+_Bool bool_identity(_Bool value) { return value; }
+int main(void) {
+    _Bool direct = &bool_pointer_object;
+    int *null_value = 0;
+    _Bool passed = pointer_to_bool(&bool_pointer_object);
+    _Bool null_result = pointer_to_bool(null_value);
+    return direct + 2 * passed + 4 * (!null_result) +
+           8 * (bool_identity(&bool_pointer_object) == 1) +
+           16 * (bool_identity(null_value) == 0);
+}
+EOF
 expr 42 42
 
 # octal constant (satisfying re(0[0-7]+))
@@ -520,6 +556,768 @@ expr 65 0101
 
 # Category: Arithmetic Operations
 begin_category "Arithmetic Operations" "Testing +, -, *, /, % operators"
+
+# Unsigned int operations must use modular arithmetic, logical right shift,
+# unsigned division, and unsigned relational comparisons after the value's high
+# bit is set at run time.
+try_ 4 << EOF
+int main(void)
+{
+    unsigned int bits = 2147483647;
+    bits = bits + bits + 1;
+    return (bits >> 31) + (bits / 2 == 2147483647) +
+           (bits / 3 == 1431655765) + (bits > 0);
+}
+EOF
+
+try_ 1 << EOF
+int main(void) {
+    unsigned int bits = 2147483647;
+    bits = bits + bits + 1;
+    return bits >> 31;
+}
+EOF
+
+try_ 1 << EOF
+int main(void) {
+    unsigned int bits = 2147483647;
+    bits = bits + bits + 1;
+    return bits / 2 == 2147483647;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    int negative = -1;
+    unsigned int divisor = 2U;
+    return (negative / divisor == 2147483647U) +
+           (negative % divisor == 1U);
+}
+EOF
+try_ 1 << EOF
+int main(void) {
+    unsigned int all_bits = 4294967295U;
+    return all_bits >> 31;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned int value = 1UL;
+    return (value + 1L == 2U) + (sizeof(long) == 4);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    return (0xffffffff >> 31) + (-2147483648 < 0);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned int one = 1U;
+    return ((~one) >> 31) + ((1 ? one - 2 : -1) >> 31);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char byte = 1;
+    unsigned short half = 1;
+    return (-byte == -1) + (-half == -1);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char byte = 255U;
+    unsigned short half = 65535U;
+    byte++;
+    half++;
+    return (byte == 0U) + (half == 0U);
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 3 << EOF
+long long identity(long long value) { return value; }
+unsigned long long uidentity(unsigned long long value) { return value; }
+int main(void) {
+    long long signed_value = 1000;
+    unsigned long long unsigned_value = 2000U;
+    return (sizeof(signed_value) == 8) +
+           (identity(signed_value) == 1000) +
+           (uidentity(unsigned_value) == 2000U);
+}
+EOF
+    try_ 4 << EOF
+long int identity_long_int(long int value) { return value; }
+signed long long int identity_signed_wide(signed long long int value) {
+    return value;
+}
+unsigned long long int identity_unsigned_wide(unsigned long long int value) {
+    return value;
+}
+int main(void) {
+    long int narrow = -7L;
+    signed long long int negative = -0x100000000LL;
+    unsigned long long int positive = 0x100000000ULL;
+    return (identity_long_int(narrow) == -7L) +
+           (identity_signed_wide(negative) == -0x100000000LL) +
+           (identity_unsigned_wide(positive) == 0x100000000ULL) +
+           (sizeof(unsigned long long int) == 8);
+}
+EOF
+    try_ 2 << EOF
+typedef long long signed_wide;
+typedef unsigned long long unsigned_wide;
+int main(void) {
+    signed_wide signed_value = -1LL;
+    unsigned_wide unsigned_value = 1ULL << 32;
+    return (signed_value < 0LL) + ((unsigned_value >> 32) == 1ULL);
+}
+EOF
+    try_ 2 << EOF
+typedef long unsigned long reordered_unsigned_wide;
+typedef const long long signed_wide_const;
+int main(void) {
+    reordered_unsigned_wide value = 1ULL << 32;
+    signed_wide_const negative = -1LL;
+    return ((value >> 32) == 1ULL) + (negative < 0LL);
+}
+EOF
+fi
+try_compile_error << EOF
+unsigned unsigned int invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
+signed unsigned int invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
+signed signed int invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
+long long long invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
+typedef unsigned unsigned int invalid;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+typedef signed unsigned int invalid;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { return (signed unsigned int) 1; }
+EOF
+try_compile_error << EOF
+int main(void) { return (unsigned unsigned int) 1; }
+EOF
+try_compile_error << EOF
+enum invalid_enum { invalid_value };
+unsigned enum invalid_enum invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
+enum invalid_enum { invalid_value };
+int main(void) { return (long enum invalid_enum) invalid_value; }
+EOF
+try_compile_error << EOF
+enum invalid_enum { invalid_value };
+int main(void) { return sizeof(signed enum invalid_enum); }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(signed unsigned int); }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(unsigned unsigned int); }
+EOF
+try_compile_error << EOF
+int signed char invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
+typedef int unsigned char invalid;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { return (int signed char) 1; }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(int unsigned char); }
+EOF
+try_compile_error << EOF
+typedef long long long invalid;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+long incompatible_object;
+int incompatible_object;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+unsigned long incompatible_function(unsigned long value);
+unsigned int incompatible_function(unsigned int value);
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+static int object_then_function;
+static int object_then_function(void) { return 1; }
+int main(void) { return object_then_function(); }
+EOF
+try_compile_error << EOF
+static int function_then_object(void) { return 1; }
+static int function_then_object;
+int main(void) { return function_then_object(); }
+EOF
+try_ 3 << EOF
+int main(void) {
+    long signed_long = -1L;
+    unsigned int unsigned_int = 1U;
+    unsigned long unsigned_long = 1UL;
+    int signed_int = -2;
+    return (sizeof(1L) == sizeof(long)) +
+           ((signed_long + unsigned_int) == 0UL) +
+           ((unsigned_long + signed_int) == 0xffffffffUL);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned long value = 0xffffffffUL;
+    return (sizeof(long unsigned) == 4) +
+           ((long unsigned) value == 0xffffffffUL);
+}
+EOF
+try_ 8 << EOF
+typedef short unsigned int base_first_ushort;
+short unsigned int preserve_half(short unsigned int value)
+{
+    return value;
+}
+int main(void) {
+    short unsigned int half = 65535U;
+    char unsigned byte = 255U;
+    int signed whole = -1;
+    int unsigned short reordered_half = 65535U;
+    base_first_ushort typedef_half = 65535U;
+    return (sizeof(half) == 2) + (sizeof(byte) == 1) +
+           (half == 65535U && byte == 255U && whole < 0) +
+           (preserve_half(half) == 65535U) +
+           (reordered_half == 65535U) +
+           ((short unsigned int)-1 == 65535U) +
+           (sizeof(short unsigned int) == 2) +
+           (sizeof(typedef_half) == 2 && typedef_half == 65535U);
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 1 << EOF
+int main(void) { return (unsigned long long) 1 == 1ULL; }
+EOF
+fi
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 4 << EOF
+int main(void) {
+    long long decimal = 4294967296;
+    long long hexadecimal = 0x100000000;
+    unsigned long long all_bits = 0xffffffffffffffff;
+    return ((decimal >> 32) == 1LL) +
+           ((hexadecimal >> 32) == 1LL) +
+           ((all_bits >> 63) == 1ULL) +
+           (all_bits > 0ULL);
+}
+EOF
+    try_ 4 << EOF
+int main(void) {
+    return (sizeof(2147483647) == 4) +
+           (sizeof(2147483648) == 8) +
+           (sizeof(0xffffffff) == 4) +
+           (sizeof(0x100000000) == 8);
+}
+EOF
+fi
+if [ "$PTR_SZ" -lt 8 ]; then
+    try_compile_error << EOF
+int main(void) { return 4294967296U; }
+EOF
+else
+    try_ 1 << EOF
+int main(void) { return 4294967296U >> 32; }
+EOF
+fi
+if [ "$PTR_SZ" -lt 8 ]; then
+    try_compile_error << EOF
+int main(void) { return 1LL; }
+EOF
+    try_compile_error << EOF
+long long unsupported_value;
+int main(void) { return 0; }
+EOF
+    try_compile_error << EOF
+long long unsupported_return(void) { return 0; }
+int main(void) { return 0; }
+EOF
+    try_compile_error << EOF
+long long (*unsupported_callback)(void);
+int main(void) { return 0; }
+EOF
+    try_ 2 << EOF
+int main(void) {
+    return (sizeof(long long) == 8) +
+           (sizeof(unsigned long long) == 8);
+}
+EOF
+    try_ 1 << EOF
+typedef long long *wide_pointer;
+long long *identity_wide_pointer(long long *value) { return value; }
+int main(void) {
+    int storage = 0;
+    wide_pointer alias = (wide_pointer)&storage;
+    return identity_wide_pointer(alias) == alias;
+}
+EOF
+else
+    try_ 3 << EOF
+int main(void) {
+    return (sizeof(1LL) == 8) + ((1LL << 32) != 0) +
+           (((1ULL << 32) >> 32) == 1U);
+}
+EOF
+    try_ 3 << EOF
+int main(void) {
+    unsigned long long value = 0x100000000ULL;
+    unsigned long long pattern = 0x123456789abcdef0ULL;
+    return ((value >> 32) == 1ULL) +
+           ((pattern >> 32) == 0x12345678ULL) +
+           ((value + 7ULL) == 0x100000007ULL);
+}
+EOF
+    try_ 3 << EOF
+int main(void) {
+    unsigned long long value = 4294967296ULL;
+    unsigned long long pattern = 1311768467463790320ULL;
+    return ((value >> 32) == 1ULL) +
+           ((pattern >> 32) == 305419896ULL) +
+           ((value + 7ULL) == 4294967303ULL);
+}
+EOF
+    try_ 3 << EOF
+int main(void) {
+    unsigned long long octal = 040000000000ULL;
+    unsigned long long binary = 0b100000000000000000000000000000000ULL;
+    return ((octal >> 32) == 1ULL) +
+           ((binary >> 32) == 1ULL) +
+           ((octal + binary) == 0x200000000ULL);
+}
+EOF
+    try_ 4 << EOF
+int main(void) {
+    unsigned long long all = 18446744073709551615ULL;
+    long long min = -9223372036854775808LL;
+    return (all == 0xffffffffffffffffULL) +
+           ((all >> 63) == 1ULL) +
+           (min < 0LL) +
+           ((min >> 63) == -1LL);
+}
+EOF
+    try_ 2 << EOF
+unsigned long long global_value = 0x123456789abcdef0ULL;
+int main(void) {
+    return ((global_value >> 32) == 0x12345678ULL) +
+           (((global_value + 1ULL) >> 32) == 0x12345678ULL);
+}
+EOF
+    try_ 2 << EOF
+long long global_min = -9223372036854775808LL;
+int main(void) {
+    return (global_min < 0LL) + ((global_min >> 63) == -1LL);
+}
+EOF
+    try_ 2 << EOF
+unsigned long long global_sum = 0x100000000ULL + 7ULL;
+int main(void) {
+    return ((global_sum >> 32) == 1ULL) +
+           ((global_sum - 7ULL) == 0x100000000ULL);
+}
+EOF
+    try_ 2 << EOF
+unsigned long long global_parenthesized = (0x100000000ULL + 7ULL);
+int main(void) {
+    return ((global_parenthesized >> 32) == 1ULL) +
+           ((unsigned int)global_parenthesized == 7U);
+}
+EOF
+
+    try_ 2 << EOF
+unsigned long long global_nested_parenthesized = ((0x100000000ULL + 7ULL));
+int main(void) {
+    return ((global_nested_parenthesized >> 32) == 1ULL) +
+           ((unsigned int)global_nested_parenthesized == 7U);
+}
+EOF
+
+    try_ 2 << EOF
+unsigned long long global_grouped_outer = (0x100000000ULL + 7ULL) * 2ULL;
+int main(void) {
+    return ((global_grouped_outer >> 32) == 2ULL) +
+           ((unsigned int)global_grouped_outer == 14U);
+}
+EOF
+
+    try_ 2 << EOF
+unsigned long long global_wide_late = (3 + 0x100000000ULL) * 2ULL;
+int main(void) {
+    return ((global_wide_late >> 32) == 2ULL) +
+           ((unsigned int)global_wide_late == 6U);
+}
+EOF
+
+    try_ 2 << EOF
+unsigned long long global_nested_grouped =
+    (0x100000000ULL + (3ULL * 4ULL)) - 5ULL;
+int main(void) {
+    return ((global_nested_grouped >> 32) == 1ULL) +
+           ((unsigned int)global_nested_grouped == 7U);
+}
+EOF
+
+    try_ 2 << EOF
+long long global_negated_grouped = -(0x100000000LL + 7LL);
+int main(void) {
+    return ((global_negated_grouped >> 32) == -2LL) +
+           ((unsigned int) global_negated_grouped == 0xfffffff9U);
+}
+EOF
+
+    try_ 4 << EOF
+unsigned long long global_wide_complement = ~0ULL;
+long long global_wide_double_negation = -(~0LL);
+unsigned long long global_wide_unary_plus = +0x100000000ULL;
+unsigned long long global_wide_logical_not = !0ULL;
+int main(void) {
+    return (global_wide_complement == 0xffffffffffffffffULL) +
+           (global_wide_double_negation == 1LL) +
+           (global_wide_unary_plus == 0x100000000ULL) +
+           (global_wide_logical_not == 1ULL);
+}
+EOF
+
+    try_ 2 << EOF
+int main(void) {
+    unsigned int all = 0xffffffffU;
+    return (all == 0xffffffffU) + (all > 1U);
+}
+EOF
+
+    try_ 2 << EOF
+long long global_negative_wide = -0x100000000LL;
+int main(void) {
+    return ((global_negative_wide >> 32) == -1LL) +
+           ((unsigned int)global_negative_wide == 0U);
+}
+EOF
+
+    try_ 2 << EOF
+unsigned long long global_unsigned_negative_wide = -0x100000000LL;
+int main(void) {
+    return ((global_unsigned_negative_wide >> 32) == 0xffffffffULL) +
+           ((unsigned int)global_unsigned_negative_wide == 0U);
+}
+EOF
+    try_ 3 << EOF
+unsigned long long global_unsuffixed = 0x100000000;
+unsigned long long global_all_bits = 0xffffffffffffffff;
+long long global_decimal = 2147483648;
+int main(void) {
+    return ((global_unsuffixed >> 32) == 1ULL) +
+           ((global_all_bits >> 63) == 1ULL) +
+           (global_decimal == 2147483648LL);
+}
+EOF
+    try_ 2 << EOF
+unsigned int global_octal_max = 037777777777;
+unsigned long long global_octal_wide = 040000000000;
+int main(void) {
+    return (global_octal_max >> 31) +
+           ((global_octal_wide >> 32) == 1ULL);
+}
+EOF
+    try_ 3 << EOF
+unsigned long long global_quotient =
+    0x123456789abcdef0ULL / 0x100000000ULL;
+unsigned long long global_remainder =
+    0x123456789abcdef0ULL % 0x100000000ULL;
+int main(void) {
+    return (global_quotient == 0x12345678ULL) +
+           (global_remainder == 0x9abcdef0ULL) +
+           ((global_quotient << 32) == 0x1234567800000000ULL);
+}
+EOF
+    try_ 2 << EOF
+unsigned long long global_precedence =
+    0x100000000ULL + 3ULL * 4ULL - 5ULL;
+int main(void) {
+    return ((global_precedence >> 32) == 1ULL) +
+           ((unsigned int)global_precedence == 7U);
+}
+EOF
+    try_ 2 << EOF
+unsigned long long identity_wide(unsigned long long value) { return value; }
+int main(void) {
+    unsigned long long value = identity_wide(0x123456789abcdef0ULL);
+    return ((value >> 32) == 0x12345678ULL) +
+           ((value - 0x1234567800000000ULL) == 0x9abcdef0ULL);
+}
+EOF
+    try_ 3 << EOF
+int main(void) {
+    unsigned long long high = 0x100000000ULL;
+    unsigned long long mask = 0xffffffffffffffffULL;
+    return (((1ULL | high) >> 32) == 1ULL) +
+           (((high & mask) >> 32) == 1ULL) +
+           ((high ^ high) == 0ULL);
+}
+EOF
+    try_ 3 << EOF
+int main(void) {
+    unsigned long long value = 0x123456789abcdef0ULL;
+    return ((value / 0x100000000ULL) == 0x12345678ULL) +
+           ((value % 0x100000000ULL) == 0x9abcdef0ULL) +
+           ((0x100000000ULL / 3ULL) == 1431655765ULL);
+}
+EOF
+    try_compile_error << EOF
+int main(void) { return 18446744073709551616ULL != 0ULL; }
+EOF
+    try_compile_error << EOF
+int main(void) { return 9223372036854775808LL != 0LL; }
+EOF
+    try_compile_error << EOF
+int main(void) { return 9223372036854775808 != 0LL; }
+EOF
+    try_ 2 << EOF
+int main(void) {
+    unsigned long long first = 0x100000000lLu;
+    unsigned long long second = 0x100000000Ull;
+    return ((first >> 32) == 1ULL) + ((second >> 32) == 1ULL);
+}
+EOF
+    try_compile_error << EOF
+int main(void) { return 1UU; }
+EOF
+    try_compile_error << EOF
+int main(void) { return 1LLL; }
+EOF
+    try_compile_error << EOF
+int main(void) { return 1LUL; }
+EOF
+    try_ 2 << EOF
+int main(void) {
+    int value = -6;
+    return (value / 4 == -1) + (value % 4 == -2);
+}
+EOF
+    try_ 2 << EOF
+int main(void) {
+    return (sizeof(long long) == 8) + (sizeof(unsigned long long) == 8);
+}
+EOF
+    try_ 5 << EOF
+int main(void) {
+    unsigned int high = 0xffffffffU;
+    unsigned long long widened_unsigned = (unsigned long long) high;
+    long long widened_signed = (long long) -1;
+    unsigned long long shifted = (unsigned long long) 1U << 32;
+    return ((widened_unsigned >> 32) == 0ULL) +
+           ((widened_unsigned >> 31) == 1ULL) +
+           (widened_signed == -1LL) +
+           ((shifted >> 32) == 1ULL) +
+           ((unsigned int) shifted == 0U);
+}
+EOF
+    try_ 2 << EOF
+long long bump(long long value) { return value + 1LL; }
+unsigned long long twice(unsigned long long value) { return value * 2ULL; }
+int main(void) {
+    long long signed_value = 1LL << 32;
+    unsigned long long unsigned_value = 1ULL << 32;
+    return ((bump(signed_value) >> 32) == 1LL) +
+           ((twice(unsigned_value) >> 33) == 1ULL);
+}
+EOF
+    try_ 4 << EOF
+int main(void) {
+    long long signed_value = 1LL << 33;
+    unsigned long long unsigned_value = 1ULL << 33;
+    return (((signed_value / 2LL) >> 32) == 1LL) +
+           ((signed_value % 3LL) == 2LL) +
+           (((unsigned_value / 2ULL) >> 32) == 1ULL) +
+           ((unsigned_value % 3ULL) == 2ULL);
+}
+EOF
+    try_ 2 << EOF
+long long eighth(long long a, long long b, long long c, long long d,
+                 long long e, long long f, long long g, long long h) {
+    return h;
+}
+unsigned long long ueighth(unsigned long long a, unsigned long long b,
+                            unsigned long long c, unsigned long long d,
+                            unsigned long long e, unsigned long long f,
+                            unsigned long long g, unsigned long long h) {
+    return h;
+}
+int main(void) {
+    long long signed_value = 1LL << 32;
+    unsigned long long unsigned_value = 1ULL << 32;
+    return ((eighth(1LL, 2LL, 3LL, 4LL, 5LL, 6LL, 7LL, signed_value) >> 32) == 1LL) +
+           ((ueighth(1ULL, 2ULL, 3ULL, 4ULL, 5ULL, 6ULL, 7ULL, unsigned_value) >> 32) == 1ULL);
+}
+EOF
+    try_ 1 << EOF
+int main(void) {
+    unsigned long long value = 0xffffffffU;
+    value = value * 16 + 0;
+    return (value >> 32) == 15ULL;
+}
+EOF
+    try_ 1 << EOF
+unsigned long long scale(unsigned long long value, int factor) {
+    unsigned long long product = value * factor;
+    return product;
+}
+int main(void) {
+    unsigned long long value = 0xffffffffU;
+    return (scale(value, 16) >> 32) == 15ULL;
+}
+EOF
+    try_ 4 << EOF
+int main(void) {
+    unsigned int high = 0xffffffffU;
+    long long one = 1LL;
+    return ((high + one) == 4294967296LL) +
+           ((high * one) == 4294967295LL) +
+           ((-1 + 1ULL) == 0ULL) +
+           ((-1 > 1ULL) == 1);
+}
+EOF
+fi
+try_ 1 << EOF
+unsigned int identity(unsigned int value) { return value; }
+int main(void) { return identity(4294967295U) >> 31; }
+EOF
+try_ 2 << EOF
+unsigned char byte_identity(unsigned char value) { return value; }
+unsigned short half_identity(unsigned short value) { return value; }
+int main(void) {
+    return (byte_identity(255) == 255) + (half_identity(65535) == 65535);
+}
+EOF
+try_ 1 << EOF
+unsigned int eighth(unsigned int a, unsigned int b, unsigned int c,
+                    unsigned int d, unsigned int e, unsigned int f,
+                    unsigned int g, unsigned int h) { return h; }
+int main(void) {
+    return eighth(1U, 2U, 3U, 4U, 5U, 6U, 7U, 4294967295U) >> 31;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    return (((unsigned int)-1) >> 31) +
+           (((unsigned short)-1) >> 15);
+}
+EOF
+try_ 0 << EOF
+int main(void) {
+    unsigned char byte = 255;
+    unsigned short half = 65535;
+    byte++;
+    half++;
+    return byte + half;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char byte = 255;
+    unsigned short half = 65535;
+    byte /= 2;
+    half /= 2;
+    return (byte == 127) + (half == 32767);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char bytes[1] = {255};
+    unsigned short halves[1] = {65535};
+    bytes[0] /= 2;
+    halves[0] /= 2;
+    return (bytes[0] == 127) + (halves[0] == 32767);
+}
+EOF
+try_ 2 << EOF
+typedef unsigned char *uchar_pointer;
+typedef unsigned short *ushort_pointer;
+int main(void) {
+    unsigned char bytes[1] = {255};
+    unsigned short halves[1] = {65535};
+    uchar_pointer byte_ptr = bytes;
+    ushort_pointer half_ptr = halves;
+    return (byte_ptr[0] / 2 == 127) + (half_ptr[0] / 2 == 32767);
+}
+EOF
+try_ 2 << EOF
+struct unsigned_members { unsigned char byte; unsigned short half; };
+int main(void) {
+    struct unsigned_members value = {255, 65535};
+    return (value.byte / 2 == 127) + (value.half / 2 == 32767);
+}
+EOF
+try_ 7 << EOF
+struct typedef_pair { int left; int right; };
+typedef struct typedef_pair *pair_pointer;
+int main(void) {
+    struct typedef_pair value = {3, 4};
+    pair_pointer pointer = &value;
+    return pointer[0].left + pointer[0].right;
+}
+EOF
+try_ 9 << EOF
+union typedef_value { int left; int right; };
+typedef union typedef_value *value_pointer;
+int main(void) {
+    union typedef_value value;
+    value.right = 9;
+    value_pointer pointer = &value;
+    return pointer[0].right;
+}
+EOF
+try_ 7 << EOF
+typedef struct { int left; int right; } *anonymous_pair_pointer;
+int main(void) {
+    int values[4] = {1, 2, 3, 4};
+    anonymous_pair_pointer pointer = (anonymous_pair_pointer)values;
+    return pointer[1].left + pointer[1].right;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char bytes[1] = {255};
+    unsigned short halves[1] = {65535};
+    return (bytes[0] / 2 == 127) + (halves[0] / 2 == 32767);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned int one = 1U;
+    int minus_two = -2;
+    int minus_one = -1;
+    return ((one + minus_two) >> 31) + (minus_one > one);
+}
+EOF
+try_ 4 << EOF
+typedef unsigned short ushort;
+int main(void) {
+    ushort small = 65535;
+    return (small > 0) + (sizeof(unsigned char) == 1) +
+           (sizeof(unsigned short) == 2) + (sizeof(unsigned long) == 4);
+}
+EOF
 
 declare -a arithmetic_tests=(
     "42 24+18"
@@ -630,6 +1428,19 @@ declare -a logical_tests=(
 )
 
 run_expr_tests logical_tests
+
+# Logical negation of a pointer yields int, irrespective of the pointed-to type.
+# A record pointer used to carry its record size into a following comparison,
+# producing an invalid truncation on 32-bit targets.
+try_ 2 << EOF
+struct pair { int first; int second; };
+int main(void) {
+    struct pair value;
+    struct pair *present = &value;
+    struct pair *absent = 0;
+    return (!present == 0) + (!absent == 1);
+}
+EOF
 
 # Category: Bitwise Operations
 begin_category "Bitwise Operations" "Testing bitwise shift, AND, OR, XOR operators"
@@ -792,10 +1603,12 @@ int main(void) {
 }
 EOF
 
-try_compile_error << EOF
+if [ "$PTR_SZ" -lt 8 ]; then
+    try_compile_error << EOF
 long long value;
 int main(void) { return 0; }
 EOF
+fi
 
 # Compound literal support - C90/C99 compliant implementation Basic struct
 # compound literals (verified working)
@@ -2598,6 +3411,27 @@ EOF
 # Category: Arrays
 begin_category "Arrays" "Testing array declarations, indexing, and operations"
 
+# Array element reads preserve the declared signed width. This covers both
+# local-address and indexed OP_read lowering on every target.
+try_ 42 << EOF
+int main(void) {
+    char bytes[4];
+    short halves[4];
+    int i;
+    for (i = 0; i < 4; i++) {
+        bytes[i] = -1 - i;
+        halves[i] = -1000 - i;
+    }
+    for (i = 0; i < 4; i++) {
+        if (bytes[i] != -1 - i)
+            return 1;
+        if (halves[i] != -1000 - i)
+            return 2;
+    }
+    return 42;
+}
+EOF
+
 try_compile_error << EOF
 int main(void)
 {
@@ -2999,6 +3833,20 @@ int main(void)
 }
 EOF
 
+# Unsigned scalar declarations preserve their storage widths. unsigned char and
+# unsigned short promote to int in arithmetic, while unsigned int remains
+# unsigned through the expression pipeline.
+try_ 26 << EOF
+unsigned int global_value = 1000;
+int main(void)
+{
+    unsigned char byte = 20;
+    unsigned short half = 30;
+    unsigned int word = global_value;
+    return byte + half + word;
+}
+EOF
+
 # Static declarations have static storage duration. The local counter must be
 # initialized once in the synthetic global frame, while its name stays scoped to
 # next_value().
@@ -3016,6 +3864,151 @@ int main(void)
 }
 EOF
 
+try_ 5 << EOF
+int static_address_constants(void)
+{
+    static int values[3] = {1, 2, 3};
+    static int *decayed = values;
+    static int *addressed = &values[0];
+    return decayed[1] + addressed[2];
+}
+int main(void) { return static_address_constants(); }
+EOF
+
+try_ 1 << EOF
+int writable_static_string(void)
+{
+    static char buffer[8] = "hi";
+    buffer[0] = 'H';
+    return buffer[0] == 'H' && buffer[1] == 'i' && buffer[2] == 0;
+}
+int main(void) { return writable_static_string(); }
+EOF
+
+try_ 1 << EOF
+static char inferred_file_scope_string[] = "map";
+
+int inferred_static_string(void)
+{
+    static char buffer[] = "cat";
+    buffer[0] = 'C';
+    return buffer[0] == 'C' && buffer[1] == 'a' && buffer[2] == 't' &&
+           sizeof(buffer) == 4;
+}
+int inferred_for_string(void)
+{
+    int n = 0;
+    for (char word[] = "go"; word[n]; n++)
+        ;
+    return n == 2;
+}
+int inferred_for_array(void)
+{
+    int total = 0;
+    for (int values[] = {2, 3}; values[0] && sizeof(values) == 8;
+         values[0] = 0)
+        total = values[0] + values[1];
+    return total == 5;
+}
+int inferred_file_scope_string_test(void)
+{
+    inferred_file_scope_string[0] = 'M';
+    return inferred_file_scope_string[0] == 'M' &&
+           inferred_file_scope_string[1] == 'a' &&
+           sizeof(inferred_file_scope_string) == 4;
+}
+int main(void)
+{
+    return inferred_static_string() && inferred_for_string() &&
+           inferred_for_array() && inferred_file_scope_string_test();
+}
+EOF
+
+try_ 10 << EOF
+static int triangular(int value)
+{
+    return value ? value + triangular(value - 1) : 0;
+}
+int main(void) { return triangular(4); }
+EOF
+
+try_ 3 << EOF
+int next_zeroed(void)
+{
+    static int count;
+    return count++;
+}
+int main(void)
+{
+    return next_zeroed() + next_zeroed() + next_zeroed();
+}
+EOF
+
+try_ 1 << EOF
+int zeroed_entry(void)
+{
+    static int entries[2];
+    entries[1]++;
+    return entries[0] == 0;
+}
+int main(void) { return zeroed_entry(); }
+EOF
+
+# Global-storage declarators are temporarily placed on the expression stack for
+# constant initialization. Aggregate and zero initializers must discard their
+# own entries too, or a declaration-heavy block exhausts that stack.
+try_ 33 << EOF
+int many_static_aggregates(void)
+{
+    static int slot00[1] = {0};
+    static int slot01[1] = {1};
+    static int slot02[1] = {2};
+    static int slot03[1] = {3};
+    static int slot04[1] = {4};
+    static int slot05[1] = {5};
+    static int slot06[1] = {6};
+    static int slot07[1] = {7};
+    static int slot08[1] = {8};
+    static int slot09[1] = {9};
+    static int slot10[1] = {10};
+    static int slot11[1] = {11};
+    static int slot12[1] = {12};
+    static int slot13[1] = {13};
+    static int slot14[1] = {14};
+    static int slot15[1] = {15};
+    static int slot16[1] = {16};
+    static int slot17[1] = {17};
+    static int slot18[1] = {18};
+    static int slot19[1] = {19};
+    static int slot20[1] = {20};
+    static int slot21[1] = {21};
+    static int slot22[1] = {22};
+    static int slot23[1] = {23};
+    static int slot24[1] = {24};
+    static int slot25[1] = {25};
+    static int slot26[1] = {26};
+    static int slot27[1] = {27};
+    static int slot28[1] = {28};
+    static int slot29[1] = {29};
+    static int slot30[1] = {30};
+    static int slot31[1] = {31};
+    static int slot32[1] = {32};
+    return slot00[0] + slot32[0] + slot01[0];
+}
+int main(void) { return many_static_aggregates(); }
+EOF
+
+try_ 1 << EOF
+struct zeroed_pair { int first; int second; };
+int zeroed_record(void)
+{
+    static struct zeroed_pair pair;
+    pair.second = 1;
+    return pair.first == 0;
+}
+int main(void) { return zeroed_record(); }
+EOF
+
 # A block-scope static initializer is lowered as global data and therefore must
 # be a C99 constant expression, not a run-time call.
 try_compile_error << EOF
@@ -3024,6 +4017,36 @@ int main(void)
 {
     static int value = runtime_value();
     return value;
+}
+EOF
+
+try_ 13 << EOF
+struct static_compound_pair { int left; int right; };
+int static_compound_literals(void)
+{
+    static int scalar = (int){3};
+    static int *values = (int[]){4, 5};
+    static struct static_compound_pair pair =
+        (struct static_compound_pair){2, 3};
+    return scalar + values[1] + pair.left + pair.right;
+}
+int main(void) { return static_compound_literals(); }
+EOF
+
+try_compile_error << EOF
+int counter;
+int main(void)
+{
+    static counter = 5;
+    return counter;
+}
+EOF
+
+try_compile_error << EOF
+int main(void)
+{
+    static ++missing;
+    return 0;
 }
 EOF
 
@@ -3210,6 +4233,69 @@ int main(void)
 }
 EOF
 
+# Nested block scope must give a same-spelled static a second persistent object,
+# without losing the enclosing static object between calls.
+try_ 24 << EOF
+int nested_static_values(void)
+{
+    static int value = 1;
+    int outer = value++;
+    {
+        static int value = 10;
+        return outer + value++;
+    }
+}
+int main(void)
+{
+    return nested_static_values() + nested_static_values();
+}
+EOF
+
+# A C99 for-init declaration has block scope, so its static object persists
+# across calls but remains visible only to the loop's clauses and body.
+try_ 6 << EOF
+int run_once(void)
+{
+    int total = 0;
+    for (static int count = 1; count < 4; count++)
+        total += count;
+    return total;
+}
+int main(void)
+{
+    return run_once() + run_once();
+}
+EOF
+
+# The same global-storage lowering applies to each declarator in a for-init
+# declaration.
+try_ 4 << EOF
+int run_once(void)
+{
+    int total = 0;
+    for (static int count = 1, step = 2; count < 5; count += step)
+        total += count;
+    return total;
+}
+int main(void)
+{
+    return run_once() + run_once();
+}
+EOF
+
+# Built-in specifiers in a for-init declaration take the same declaration path
+# as their block-scope counterparts; this also checks unsigned wraparound in the
+# loop condition/increment sequence.
+try_ 3 << EOF
+int main(void)
+{
+    int count = 0;
+    for (unsigned int value = 0xfffffffeU; value != 1U; value++)
+        count++;
+    return count;
+}
+EOF
+
 # A redeclaration without a storage class inherits an earlier static function's
 # internal linkage. Reversing that order is a constraint violation.
 try_ 42 << EOF
@@ -3217,11 +4303,153 @@ static int helper(void);
 int helper(void) { return 42; }
 int main(void) { return helper(); }
 EOF
+try_compile_error << EOF
+static int missing_static_function(void);
+int main(void) { return missing_static_function(); }
+EOF
+try_compile_error << EOF
+int runtime_value(void) { return 7; }
+int main(void) {
+    static int invalid_static_value = runtime_value;
+    return invalid_static_value;
+}
+EOF
+try_ 42 << EOF
+static int increment(int value);
+int increment(int value) { return value + 1; }
+int main(void) {
+    int (*internal_call)(int) = increment;
+    return internal_call(41);
+}
+EOF
+
+# A static function designator retains internal linkage when materialized into a
+# local function pointer and invoked indirectly.
+try_ 42 << EOF
+static int increment(int value) { return value + 1; }
+int main(void) {
+    int (*internal_call)(int) = increment;
+    return internal_call(41);
+}
+EOF
+
+# A file-scope function designator is an address constant too. This exercises
+# global setup before main and both internal and external linkage targets.
+try_ 49 << EOF
+static int increment(int value) { return value + 1; }
+int double_value(int value) { return value * 2; }
+static int (*internal_call)(int) = increment;
+int (*external_call)(int) = double_value;
+int (*address_call)(int) = &increment;
+static int internal_value = 3;
+int external_value = 4;
+static int *internal_value_ptr = &internal_value;
+int *external_value_ptr = &external_value;
+int main(void) {
+    return internal_call(20) + external_call(10) + address_call(0) +
+           *internal_value_ptr + *external_value_ptr;
+}
+EOF
+
+try_ 13 << EOF
+static int internal_values[] = {1, 2, 3};
+int external_values[] = {4, 5};
+static int *internal_first = internal_values;
+int *internal_last = internal_values + 2;
+int *external_first = &external_values;
+int main(void) {
+    return internal_first[2] + *internal_last + external_first[0] +
+           external_first[1] - 2;
+}
+EOF
+
+try_ 7 << EOF
+struct global_pair { char tag; int value; };
+static struct global_pair internal_pair = {1, 7};
+int *internal_value = &internal_pair.value;
+int main(void) { return *internal_value; }
+EOF
+
+try_ 9 << EOF
+struct nested_inner { char pad; int value; };
+struct nested_outer { int prefix; struct nested_inner inner; };
+static struct nested_outer global_nested = {2, {1, 9}};
+int *nested_value = &global_nested.inner.value;
+int main(void) { return *nested_value; }
+EOF
+
+try_ 8 << EOF
+struct global_array_record { int prefix; int values[3]; };
+static struct global_array_record global_array = {1, {2, 8, 3}};
+int *array_member_value = &global_array.values[1];
+int main(void) { return *array_member_value; }
+EOF
+
+try_ 11 << EOF
+struct global_array_element { int value; };
+static struct global_array_element global_elements[] = {{3}, {11}};
+int *array_element_value = &global_elements[1].value;
+int main(void) { return *array_element_value; }
+EOF
+
+# Explicitly addressed global elements and member arrays may carry a byte-scaled
+# integer constant-expression offset, not just a decayed array name or a bare
+# literal.
+try_ 25 << EOF
+int global_values[] = {3, 5, 8};
+struct global_offset_record { int values[3]; };
+static struct global_offset_record global_offset = {{1, 2, 8}};
+enum global_offsets {
+    global_offset_count = 1 + 1,
+    global_offset_shift = global_offset_count << 1
+} global_marker = global_offset_shift;
+static enum global_offsets global_half = global_offset_count;
+int *global_last = &global_values[0] + global_offset_count;
+int *global_first = &global_values[2] - (1 + 1);
+int *member_last = &global_offset.values[0] + (global_offset_shift / 2);
+int main(void) {
+    return *global_last + *global_first + *member_last + global_marker +
+           global_half;
+}
+EOF
+
+# Repeated compatible file-scope declarations name the same static object. A
+# later initialized definition supplies that object's initial value.
+try_ 42 << EOF
+static int file_value;
+int file_value;
+int file_value = 42;
+int main(void) { return file_value; }
+EOF
+
+try_compile_error << EOF
+static int initialized_once = 1;
+static int initialized_once = 2;
+int main(void) { return initialized_once; }
+EOF
 
 try_compile_error << EOF
 int helper(void);
 static int helper(void) { return 42; }
 int main(void) { return helper(); }
+EOF
+
+try_compile_error << EOF
+static int defined_twice(void) { return 1; }
+static int defined_twice(void) { return 2; }
+int main(void) { return defined_twice(); }
+EOF
+
+try_compile_error << EOF
+static static int duplicated_file_storage;
+int main(void) { return duplicated_file_storage; }
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    static const static int duplicated_block_storage = 1;
+    return duplicated_block_storage;
+}
 EOF
 
 # Category: Const Qualifiers
@@ -3722,6 +4950,35 @@ items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; return
 items 8 "short s; s = 5; s += 3; return s;"
 items 15 "short s; s = 20; s -= 5; return s;"
 items 24 "short s; s = 6; s *= 4; return s;"
+try_ 2 << EOF
+int main(void) {
+    int negative = -1;
+    unsigned int divisor = 2U;
+    negative /= divisor;
+    int quotient = negative;
+    negative %= divisor;
+    return (quotient == 2147483647U) + (negative == 1U);
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 1 << EOF
+int main(void) {
+    unsigned long long value = 0ULL;
+    value += -1;
+    return value == 0xffffffffffffffffULL;
+}
+EOF
+    try_ 2 << EOF
+int main(void) {
+    unsigned long long quotient = 0x100000000ULL;
+    unsigned long long remainder = 0x100000001ULL;
+    int divisor = 2;
+    quotient /= divisor;
+    remainder %= 3;
+    return (quotient == 0x80000000ULL) + (remainder == 2ULL);
+}
+EOF
+fi
 
 # Category: Sizeof Operator
 begin_category "Sizeof Operator" "Testing sizeof operator on various types"
@@ -3788,6 +5045,14 @@ EOF
 
 # sizeof with expressions
 items 4 "int x = 42; return sizeof(x);"
+items 12 "int values[3]; return sizeof(values);"
+try_ 8 << EOF
+int main(void)
+{
+    static char buffer[8] = "hi";
+    return sizeof(buffer);
+}
+EOF
 items 4 "int arr[5]; return sizeof(arr[0]);"
 items 4 "int x = 10; int *ptr = &x; return sizeof(*ptr);"
 items 1 "char c = 'A'; return sizeof(c);"
@@ -3851,6 +5116,115 @@ begin_category "Enumerations" "Testing enum declarations and usage"
 try_ 6 << EOF
 typedef enum { enum1 = 5, enum2 } enum_t;
 int main() { enum_t v = enum2; return v; }
+EOF
+
+# Block-scope enum definitions supply integer constants to expressions and
+# accept C99's trailing comma after their final enumerator.
+try_ 4 << EOF
+int main(void)
+{
+    enum local_values { local_base = 1 + 1, local_count = local_base << 1, };
+    return local_count;
+}
+EOF
+
+# A block-scope enum definition may introduce scalar declarators after its
+# enumerator list, including a comma-separated declarator list.
+try_ 12 << EOF
+int main(void)
+{
+    enum local_values { local_base = 1 + 1, local_count = local_base << 1 }
+        local_marker = local_count, local_next = local_marker + 1;
+    return local_marker + local_next + local_base + 1;
+}
+EOF
+
+try_ 14 << EOF
+int main(void)
+{
+    enum local_values { local_base = 2, local_count = local_base << 1 };
+    enum local_values local_marker = local_count;
+    enum local_values local_next = local_marker + local_base + 4;
+    return local_marker + local_next;
+}
+EOF
+
+# A nested enum definition shadows both a file-scope tag and an enumerator; its
+# tag and constants disappear when the nested block closes.
+try_ 13 << EOF
+enum enum_scope { scoped_value = 3 };
+int main(void)
+{
+    int before = scoped_value;
+    {
+        enum enum_scope { scoped_value = 5, scoped_count = scoped_value + 1 };
+        enum enum_scope values[scoped_count];
+        int nested = scoped_value + scoped_count;
+        int converted = (enum enum_scope) scoped_count;
+        if (nested != 11 || converted != 6 || sizeof(enum enum_scope) != 4)
+            return 1;
+    }
+    return before + scoped_value + 7;
+}
+EOF
+
+# Leading qualifiers must not bypass enum declarators: const enum objects are
+# read-only and static enum objects retain their initialized value between calls
+# just like other block-scope static scalar objects.
+try_ 10 << EOF
+enum persistent_enum { persistent_fixed = 3 };
+int next_persistent_enum(void)
+{
+    enum local_persistent_enum { persistent_start = 3 };
+    static enum local_persistent_enum value = persistent_start;
+    return value++;
+}
+int main(void)
+{
+    const enum persistent_enum fixed = persistent_fixed;
+    return next_persistent_enum() + next_persistent_enum() + fixed;
+}
+EOF
+
+try_ 12 << EOF
+enum static_enum_entries { static_enum_first = 3, static_enum_second = 4 };
+int static_enum_array_sum(void)
+{
+    static enum static_enum_entries entries[3] = {
+        static_enum_first, static_enum_second, static_enum_first + 2
+    };
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void) { return static_enum_array_sum(); }
+EOF
+
+try_ 10 << EOF
+enum global_array_values { global_array_first = 1, global_array_second = 2 };
+static int global_values[2] = {global_array_first, global_array_second};
+int static_enum_array_sum(void)
+{
+    enum static_array_values { static_array_first = 2, static_array_second = 5 };
+    static int values[3] = {
+        [static_array_first - 2] = static_array_first,
+        [static_array_second - 3] = static_array_second
+    };
+    return values[0] + values[1] + values[2];
+}
+int main(void) { return static_enum_array_sum() + global_values[0] + global_values[1]; }
+EOF
+
+# Enum tags are valid parameter and return type specifiers, including a
+# qualified parameter declaration in an ordinary file-scope function API.
+try_ 12 << EOF
+enum api_state { api_ready = 5 };
+enum api_state echo_api_state(const enum api_state value)
+{
+    return value;
+}
+int main(void)
+{
+    return echo_api_state(api_ready) + sizeof(enum api_state) + 3;
+}
 EOF
 
 # Category: Memory Management

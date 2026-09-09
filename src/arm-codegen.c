@@ -46,10 +46,12 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_load:
     case OP_global_load:
-        /* ARMv7 straight uses 12 bits to encode the offset of load instruction
-         * (no rotation).
+        /* LDR/LDRB use a 12-bit offset, but LDRSB uses eight bits. A larger
+         * signed-byte offset is materialized with MOVW/MOVT/ADD before the
+         * load, exactly as an offset beyond the general load range is.
          */
-        if (ph2_ir->src0 > 4095)
+        if (ph2_ir->src0 > 4095 || (ph2_ir->size_bytes == 1 &&
+                                    !ph2_ir->is_unsigned && ph2_ir->src0 > 255))
             elf_offset += 16;
         else if (ph2_ir->src0 >= 0)
             elf_offset += 4;
@@ -115,7 +117,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             return;
         }
         /* div/mod emulation's offset */
-        elf_offset += 116;
+        elf_offset += 124;
         return;
     case OP_load_data_address:
     case OP_load_rodata_address:
@@ -141,11 +143,19 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 24;
         return;
     case OP_trunc:
-        /* SXTB, SXTH and MOV are each one instruction. */
-        elf_offset += 4;
+        /* Unsigned byte/half truncation uses a logical shift pair; signed
+         * narrowing uses the single-instruction SXTB/SXTH forms.
+         */
+        if (ph2_ir->is_unsigned && (ph2_ir->src1 == 1 || ph2_ir->src1 == 2))
+            elf_offset += 8;
+        else
+            elf_offset += 4;
         return;
     case OP_sign_ext:
-        elf_offset += 4;
+        if (ph2_ir->src0_is_unsigned)
+            elf_offset += 8;
+        else
+            elf_offset += 4;
         return;
     case OP_cast:
         elf_offset += 4;
@@ -331,12 +341,31 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_load:
     case OP_global_load:
         interm = ph2_ir->op == OP_load ? __sp : __r12;
-        if (ph2_ir->src0 > 4095) {
+
+        /* LDRSB's immediate field is only eight bits, unlike LDRB's 12-bit
+         * field. Materialize a larger signed-byte offset before loading.
+         */
+        if (ph2_ir->src0 > 4095 ||
+            (ph2_ir->size_bytes == 1 && !ph2_ir->is_unsigned &&
+             ph2_ir->src0 > 255)) {
             emit(__movw(__AL, __r8, ph2_ir->src0));
             emit(__movt(__AL, __r8, ph2_ir->src0));
             emit(__add_r(__AL, __r8, interm, __r8));
-            emit(__lw(__AL, rd, __r8, 0));
-        } else
+            if (ph2_ir->size_bytes == 1)
+                emit(ph2_ir->is_unsigned ? __lb(__AL, rd, __r8, 0)
+                                         : __lsb(__AL, rd, __r8, 0));
+            else if (ph2_ir->size_bytes == 2)
+                emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, __r8, 0)
+                                         : __lh(__AL, rd, __r8, 0));
+            else
+                emit(__lw(__AL, rd, __r8, 0));
+        } else if (ph2_ir->size_bytes == 1)
+            emit(ph2_ir->is_unsigned ? __lb(__AL, rd, interm, ph2_ir->src0)
+                                     : __lsb(__AL, rd, interm, ph2_ir->src0));
+        else if (ph2_ir->size_bytes == 2)
+            emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, interm, ph2_ir->src0)
+                                     : __lh(__AL, rd, interm, ph2_ir->src0));
+        else
             emit(__lw(__AL, rd, interm, ph2_ir->src0));
         return;
     case OP_store:
@@ -369,9 +398,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_read:
         if (ph2_ir->src1 == 1)
-            emit(__lb(__AL, rd, rn, 0));
+            emit(ph2_ir->is_unsigned ? __lb(__AL, rd, rn, 0)
+                                     : __lsb(__AL, rd, rn, 0));
         else if (ph2_ir->src1 == 2)
-            emit(__lh(__AL, rd, rn, 0));
+            emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, rn, 0)
+                                     : __lh(__AL, rd, rn, 0));
         else if (ph2_ir->src1 == 4)
             emit(__lw(__AL, rd, rn, 0));
         else
@@ -498,9 +529,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_mod:
         if (hard_mul_div) {
             if (ph2_ir->op == OP_div)
-                emit(__div(__AL, rd, rm, rn));
+                emit(ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned
+                         ? __udiv(__AL, rd, rm, rn)
+                         : __div(__AL, rd, rm, rn));
             else {
-                emit(__div(__AL, __r8, rm, rn));
+                emit(ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned
+                         ? __udiv(__AL, __r8, rm, rn)
+                         : __div(__AL, __r8, rm, rn));
                 emit(__mul(__AL, __r8, rm, __r8));
                 emit(__sub_r(__AL, rd, rn, __r8));
             }
@@ -509,13 +544,25 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         interm = __r8;
         /* div/mod emulation: preserve the dividend and the divisor */
         emit(__stmdb(__AL, 1, __sp, (1 << rn) | (1 << rm)));
-        /* Obtain absolute values of the dividend and divisor */
-        emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
-        emit(__add_r(__AL, rn, rn, __r8));
-        emit(__eor_r(__AL, rn, rn, __r8));
-        emit(__srl_amt(__AL, 0, arith_rs, __r9, rm, 31));
-        emit(__add_r(__AL, rm, rm, __r9));
-        emit(__eor_r(__AL, rm, rm, __r9));
+
+        /* Unsigned operands already are magnitudes. Keep the signed path's
+         * instruction count so the fixed branch displacements remain valid.
+         */
+        if (ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned) {
+            emit(__zero(__r8));
+            emit(__mov_r(__AL, __r8, __r8));
+            emit(__mov_r(__AL, __r8, __r8));
+            emit(__zero(__r9));
+            emit(__mov_r(__AL, __r9, __r9));
+            emit(__mov_r(__AL, __r9, __r9));
+        } else {
+            emit(__srl_amt(__AL, 0, arith_rs, __r8, rn, 31));
+            emit(__add_r(__AL, rn, rn, __r8));
+            emit(__eor_r(__AL, rn, rn, __r8));
+            emit(__srl_amt(__AL, 0, arith_rs, __r9, rm, 31));
+            emit(__add_r(__AL, rm, rm, __r9));
+            emit(__eor_r(__AL, rm, rm, __r9));
+        }
         if (ph2_ir->op == OP_div)
             emit(__eor_r(__AL, __r10, __r8, __r9));
         else {
@@ -534,9 +581,17 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__cmp_i(__AL, rn, 0));
         emit(__b(__EQ, 44));
         emit(__cmp_r(__AL, rm, rn));
-        emit(__sll_amt(__CC, 0, logic_ls, rm, rm, 1));
-        emit(__sll_amt(__CC, 0, logic_ls, __r9, __r9, 1));
-        emit(__b(__CC, -12));
+
+        /* Scale until the divisor reaches the dividend or the *next* shift
+         * would overflow. A divisor such as 0xc0000000 is still valid for a
+         * 0xffffffff dividend; testing carry after shifting would lose it. Test
+         * bit 31 before the shift instead.
+         */
+        emit(__cmp_i(__CC, rm, 0x80000000));
+        emit(__b(__CS, 16));
+        emit(__sll_amt(__AL, 0, logic_ls, rm, rm, 1));
+        emit(__sll_amt(__AL, 0, logic_ls, __r9, __r9, 1));
+        emit(__b(__AL, -20));
         emit(__cmp_r(__AL, rn, rm));
         emit(__sub_r(__CS, rn, rn, rm));
         emit(__add_r(__CS, __r8, __r8, __r9));
@@ -563,7 +618,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sll(__AL, rd, rn, rm));
         return;
     case OP_rshift:
-        emit(__sra(__AL, rd, rn, rm));
+        emit(ph2_ir->src0_is_unsigned ? __srl(__AL, rd, rn, rm)
+                                      : __sra(__AL, rd, rn, rm));
         return;
     case OP_eq:
     case OP_neq:
@@ -573,7 +629,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_leq:
         emit(__cmp_r(__AL, rn, rm));
         emit(__zero(rd));
-        emit(__mov_i(arm_get_cond(ph2_ir->op), rd, 1));
+        emit(__mov_i(arm_get_cond(ph2_ir->op, ph2_ir->src0_is_unsigned ||
+                                                  ph2_ir->src1_is_unsigned),
+                     rd, 1));
         return;
     case OP_negate:
         emit(__rsb_i(__AL, rd, 0, rn));
@@ -596,8 +654,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mov_i(__EQ, rd, 1));
         return;
     case OP_trunc:
-        /* Narrowing keeps the sign: there are no unsigned types. */
-        if (rm == 1) {
+        if (ph2_ir->is_unsigned && (rm == 1 || rm == 2)) {
+            int shift = rm == 1 ? 24 : 16;
+
+            emit(__sll_amt(__AL, 0, logic_ls, rd, rn, shift));
+            emit(__srl_amt(__AL, 0, logic_rs, rd, rd, shift));
+        } else if (rm == 1) {
             emit(__sxtb(__AL, rd, rn, 0));
         } else if (rm == 2) {
             emit(__sxth(__AL, rd, rn, 0));
@@ -610,6 +672,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_sign_ext: {
         /* Decode source size from upper 16 bits */
         int source_size = (rm >> 16) & 0xFFFF;
+        if (ph2_ir->src0_is_unsigned) {
+            int shift = source_size == 2 ? 16 : 24;
+            emit(__sll_amt(__AL, 0, logic_ls, rd, rn, shift));
+            emit(__srl_amt(__AL, 0, logic_rs, rd, rd, shift));
+            return;
+        }
         if (source_size == 2) {
             emit(__sxth(__AL, rd, rn, 0));
         } else {

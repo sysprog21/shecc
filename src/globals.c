@@ -37,9 +37,16 @@ int types_idx = 0;
 
 type_t *TY_void;
 type_t *TY_char;
+type_t *TY_uchar;
 type_t *TY_bool;
 type_t *TY_int;
+type_t *TY_uint;
+type_t *TY_long;
+type_t *TY_ulong;
 type_t *TY_short;
+type_t *TY_ushort;
+type_t *TY_long_long;
+type_t *TY_ulong_long;
 
 /* Arenas */
 
@@ -591,7 +598,8 @@ type_t *find_type(const char *type_name, int flag)
                 /* If it is a forwardly declared alias of a structure, return
                  * the base structure type.
                  */
-                if (TYPES[i].base_type == TYPE_typedef && TYPES[i].size == 0)
+                if (TYPES[i].base_type == TYPE_typedef && TYPES[i].size == 0 &&
+                    TYPES[i].ptr_level == 0)
                     return TYPES[i].base_struct;
                 return &TYPES[i];
             }
@@ -652,6 +660,8 @@ block_t *add_block(block_t *parent, func_t *func)
     blk->locals.capacity = 16;
     blk->locals.elements =
         arena_alloc(BLOCK_ARENA, blk->locals.capacity * sizeof(var_t *));
+    blk->type_tags = NULL;
+    blk->constants = NULL;
     blk->parent = parent;
     blk->func = func;
     blk->next = NULL;
@@ -834,10 +844,16 @@ int parse_numeric_constant(const char *buffer)
     int i = 0;
     int value = 0;
     while (buffer[i]) {
+        /* The lexer keeps C99 integer suffixes in the token. Their type is
+         * selected by the parser; they are not digits of the value.
+         */
+        if ((buffer[i] | 32) == 'u' || (buffer[i] | 32) == 'l')
+            break;
         if (i == 1 && (buffer[i] | 32) == 'x') { /* hexadecimal */
             value = 0;
             i = 2;
-            while (buffer[i]) {
+            while (buffer[i] && (buffer[i] | 32) != 'u' &&
+                   (buffer[i] | 32) != 'l') {
                 char c = buffer[i++];
                 value <<= 4;
                 if (isdigit(c))
@@ -851,7 +867,8 @@ int parse_numeric_constant(const char *buffer)
         if (i == 1 && (buffer[i] | 32) == 'b') { /* binary */
             value = 0;
             i = 2;
-            while (buffer[i]) {
+            while (buffer[i] && (buffer[i] | 32) != 'u' &&
+                   (buffer[i] | 32) != 'l') {
                 char c = buffer[i++];
                 value <<= 1;
                 value += (c == '1');
@@ -939,12 +956,70 @@ void add_constant(char alias[], int value)
     /* Use interned string for constant name */
     strcpy(constant->alias, intern_string(alias));
     constant->value = value;
+    constant->next = NULL;
     hashmap_put(CONSTANTS_MAP, alias, constant);
 }
 
 constant_t *find_constant(char alias[])
 {
     return hashmap_get(CONSTANTS_MAP, alias);
+}
+
+/* Enum names declared in a block shadow enclosing names, but must disappear
+ * with that block. Keep their bindings on the parser's existing block tree.
+ */
+void add_scoped_constant(block_t *block, char alias[], int value)
+{
+    constant_t *constant = arena_alloc_constant();
+
+    if (!constant)
+        fatal("Failed to allocate scoped enum constant");
+    strcpy(constant->alias, intern_string(alias));
+    constant->value = value;
+    constant->next = block->constants;
+    block->constants = constant;
+}
+
+constant_t *find_scoped_constant(char alias[], block_t *block)
+{
+    for (; block; block = block->parent) {
+        for (constant_t *constant = block->constants; constant;
+             constant = constant->next) {
+            if (!strcmp(constant->alias, alias))
+                return constant;
+        }
+    }
+    return find_constant(alias);
+}
+
+void add_type_tag(block_t *block, char name[], type_t *type)
+{
+    type_tag_t *tag = arena_alloc(BLOCK_ARENA, sizeof(type_tag_t));
+
+    if (strlen(name) >= MAX_TYPE_LEN)
+        fatal("Type name too long");
+    strcpy(tag->name, intern_string(name));
+    tag->type = type;
+    tag->next = block->type_tags;
+    block->type_tags = tag;
+}
+
+type_t *find_type_tag(char name[], block_t *block)
+{
+    for (; block; block = block->parent) {
+        for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
+            if (!strcmp(tag->name, name))
+                return tag->type;
+    }
+    return find_type(name, 1);
+}
+
+type_t *find_local_type_tag(char name[], block_t *block)
+{
+    for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
+        if (!strcmp(tag->name, name))
+            return tag->type;
+    return NULL;
 }
 
 var_t *find_member(const char token[], type_t *type)

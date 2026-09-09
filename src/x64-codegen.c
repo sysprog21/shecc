@@ -261,7 +261,7 @@ bool fused_cc_pending;
  * by the unfused path.
  */
 
-int branch_cc_for(opcode_t op)
+int branch_cc_for(opcode_t op, bool is_unsigned)
 {
     switch (op) {
     case OP_eq:
@@ -269,13 +269,13 @@ int branch_cc_for(opcode_t op)
     case OP_neq:
         return 0x85; /* JNE */
     case OP_lt:
-        return 0x8C; /* JL */
+        return is_unsigned ? 0x82 : 0x8C; /* JB / JL */
     case OP_leq:
-        return 0x8E; /* JLE */
+        return is_unsigned ? 0x86 : 0x8E; /* JBE / JLE */
     case OP_gt:
-        return 0x8F; /* JG */
+        return is_unsigned ? 0x87 : 0x8F; /* JA / JG */
     case OP_geq:
-        return 0x8D; /* JGE */
+        return is_unsigned ? 0x83 : 0x8D; /* JAE / JGE */
     default:
         return 0;
     }
@@ -547,7 +547,6 @@ int src0_override_at;
  * named directly as the compare's second operand. -1 when unused.
  */
 int cmp_mem_slot;
-int cmp_mem_width;
 
 /* A comparison whose second operand is a tracked literal, so it becomes an
  * immediate and the instruction that materialised it falls away.
@@ -1289,7 +1288,8 @@ bool const_load_dead(int idx, int reg, int val)
             /* The three-operand IMUL carries its multiplier as an immediate. */
             if (ir->op == OP_mul)
                 folded_count = true;
-            if (branch_cc_for(ir->op))
+            if (branch_cc_for(ir->op,
+                              ir->src0_is_unsigned || ir->src1_is_unsigned))
                 folded_count = true;
         }
 
@@ -1379,25 +1379,31 @@ basic_block_t *bb_sole_code_pred(basic_block_t *bb)
 }
 
 /* CMP rs1 against rs2, or against the slot a folded load named instead. */
-void emit_cmp(int rs1, int rs2)
+void emit_cmp(int size_bytes, int rs1, int rs2)
 {
     if (cmp_imm_known) {
         cmp_imm_known = false;
         cmp_mem_slot = -1;
-        emit_alu_imm(rs1, 7, cmp_imm_val); /* CMP rs1, imm */
+        emit_rex(size_bytes > 4, -1, rs1);
+        if (cmp_imm_val >= -128 && cmp_imm_val <= 127) {
+            emit_byte(0x83); /* CMP r32/r64, imm8 */
+            emit_byte(modrm(MOD_DIRECT, 7, reg_low3(rs1)));
+            emit_byte(cmp_imm_val);
+        } else {
+            emit_byte(0x81); /* CMP r32/r64, imm32 */
+            emit_byte(modrm(MOD_DIRECT, 7, reg_low3(rs1)));
+            emit_dword(cmp_imm_val);
+        }
         return;
     }
     if (cmp_mem_slot >= 0) {
-        if (cmp_mem_width == 8)
-            emit_rex(1, rs1, -1);
-        else if (rs1 >= 8)
-            emit_byte(REX_R);
+        emit_rex(size_bytes > 4, rs1, -1);
         emit_byte(0x3B); /* CMP rs1, [rsp + slot] */
         emit_rsp_mem(rs1, cmp_mem_slot);
         cmp_mem_slot = -1;
         return;
     }
-    emit_rex(1, rs2, rs1);
+    emit_rex(size_bytes > 4, rs2, rs1);
     emit_byte(0x39); /* CMP rs1, rs2 */
     emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), reg_low3(rs1)));
 }
@@ -1761,48 +1767,64 @@ void emit_arith(ph2_ir_t *ph2_ir,
             emit_byte(0xAF);
             emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs2)));
         }
-        if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+        if (ph2_ir->size_bytes <= 4 &&
+            !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
             wrap_to_int(rd, ph2_ir->is_pointer);
         return;
     }
     case OP_div:
     case OP_mod: {
-        /* Signed division. IDIV forces the dividend into RDX:RAX and returns
-         * the quotient in RAX and remainder in RDX. Both are allocatable
-         * registers here (reg_map[6] and reg_map[2]) and the allocator does not
-         * know they are clobbered, so save and restore them around the
-         * sequence. R10 and R11 are outside reg_map and can stage values; RDX
-         * goes on the stack rather than into a third scratch, because every
-         * register that once served as one has since joined the file and
-         * staging RDX there destroyed a dividend pinned to it.
+        /* DIV/IDIV force the dividend into RDX:RAX and return the quotient in
+         * RAX and remainder in RDX. Both are allocatable registers here
+         * (reg_map[6] and reg_map[2]) and the allocator does not know they are
+         * clobbered, so save and restore them around the sequence. R10 and R11
+         * are outside reg_map and can stage values; RDX goes on the stack
+         * rather than into a third scratch, because every register that once
+         * served as one has since joined the file and staging RDX there
+         * destroyed a dividend pinned to it.
          */
-        emit_byte(REX_W | REX_B); /* MOV r10, rax  (save) */
+        bool wide = ph2_ir->size_bytes > 4;
+        bool is_unsigned = ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
+
+        /* A 32-bit unsigned operation must use EDX:EAX, not its 64-bit
+         * counterpart. For example, C requires -1 / 2U to be 2147483647,
+         * whereas a 64-bit DIV sees 2^64 - 1.
+         */
+        emit_rex(wide, 0, 10); /* MOV r10{d}, rax{d}  (save) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 0, 2));
-        emit_push_reg(2);     /* PUSH rdx  (save) */
-        emit_rex(1, rs2, 11); /* MOV r11, rs2 */
+        emit_push_reg(2);        /* PUSH rdx  (save) */
+        emit_rex(wide, rs2, 11); /* MOV r11{d}, rs2{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
-        emit_rex(1, rs1, -1); /* MOV rax, rs1 */
+        emit_rex(wide, rs1, -1); /* MOV rax{d}, rs1{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 0));
-        emit_byte(REX_W); /* CQO */
-        emit_byte(0x99);
-        emit_byte(REX_W | REX_B); /* IDIV r11 */
+        if (is_unsigned) {
+            /* Unsigned DIV consumes a zero-extended RDX:RAX dividend. */
+            emit_byte(0x31); /* XOR edx, edx */
+            emit_byte(modrm(MOD_DIRECT, 2, 2));
+        } else {
+            if (wide)
+                emit_byte(REX_W); /* CQO */
+            emit_byte(0x99);
+        }
+        emit_rex(wide, -1, 11); /* DIV/IDIV r11{d} */
         emit_byte(0xF7);
-        emit_byte(modrm(MOD_DIRECT, 7, 3));
+        emit_byte(modrm(MOD_DIRECT, is_unsigned ? 6 : 7, 3));
 
         /* Capture the result into R11 before restoring RAX/RDX, so rd may
          * itself be RAX or RDX.
          */
-        emit_byte(REX_W | REX_B); /* MOV r11, rax | rdx */
+        emit_rex(wide, ph2_ir->op == OP_div ? 0 : 2, 11);
+        /* MOV r11{d}, rax{d} | rdx{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, ph2_ir->op == OP_div ? 0 : 2, 3));
-        emit_byte(REX_W | REX_R); /* MOV rax, r10  (restore) */
+        emit_rex(wide, 10, 0); /* MOV rax{d}, r10{d}  (restore) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 0));
-        emit_pop_reg(2);     /* POP rdx  (restore) */
-        emit_rex(1, 11, rd); /* MOV rd, r11 */
+        emit_pop_reg(2);        /* POP rdx  (restore) */
+        emit_rex(wide, 11, rd); /* MOV rd{d}, r11{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
         return;
@@ -1878,7 +1900,7 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
         /* A count the block already loaded as a literal needs neither CL nor
          * the save/restore around it: SHL r64, imm8 is one instruction.
          */
-        if (src1_const_known && src1_const >= 0 && src1_const < 32) {
+        if (src1_const_known && src1_const >= 0 && src1_const < 64) {
             int want_src = ph2_ir->src0;
             int dest_ir = ph2_ir->dest;
 
@@ -1915,7 +1937,7 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
                 reg_feeds_address_only(emit_ir_index + 1, ph2_ir->dest);
             emit_mov_reg(rd, rs1);
             emit_shift_imm(rd, SHIFT_EXT_SHL, src1_const);
-            if (!addr_only &&
+            if (ph2_ir->size_bytes <= 4 && !addr_only &&
                 !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
                 wrap_to_int(rd, ph2_ir->is_pointer);
 
@@ -1963,17 +1985,24 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
          * << 31" (which strength reduction also produces for "x * 2") stayed
          * positive and every later comparison took the wrong branch.
          */
-        wrap_to_int(rd, ph2_ir->is_pointer);
+        if (ph2_ir->size_bytes <= 4)
+            wrap_to_int(rd, ph2_ir->is_pointer);
         return;
     }
     case OP_rshift: {
         /* A count the block already loaded as a literal needs neither CL nor
          * the save/restore around it: SAR r64, imm8 is one instruction.
          */
-        if (src1_const_known && src1_const >= 0 && src1_const < 32) {
-            emit_mov_reg(rd, rs1);
-            emit_shift_imm(rd, SHIFT_EXT_SAR, src1_const);
-            if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+        if (src1_const_known && src1_const >= 0 && src1_const < 64) {
+            if (ph2_ir->is_unsigned)
+                emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
+            else
+                emit_mov_reg(rd, rs1);
+            emit_shift_imm(rd,
+                           ph2_ir->is_unsigned ? SHIFT_EXT_SHR : SHIFT_EXT_SAR,
+                           src1_const);
+            if (ph2_ir->size_bytes <= 4 &&
+                !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
                 wrap_to_int(rd, ph2_ir->is_pointer);
             return;
         }
@@ -1995,9 +2024,9 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
         emit_rex(1, rs2, -1); /* MOV rcx, rs2 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
-        emit_byte(REX_W | REX_B); /* SAR r11, cl */
+        emit_byte(REX_W | REX_B); /* SAR/SHR r11, cl */
         emit_byte(0xD3);
-        emit_byte(modrm(MOD_DIRECT, 7, 3));
+        emit_byte(modrm(MOD_DIRECT, ph2_ir->is_unsigned ? 5 : 7, 3));
         emit_byte(REX_W | REX_R); /* MOV rcx, r10 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 1));
@@ -2025,8 +2054,11 @@ void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
          * comparisons differ only in the condition, and SETcc is the matching
          * Jcc opcode plus 0x10, so branch_cc_for() supplies both forms.
          */
-        emit_cmp(rs1, rs2);
-        emit_setcc_bool(rd, branch_cc_for(ph2_ir->op) + 0x10);
+        emit_cmp(ph2_ir->size_bytes, rs1, rs2);
+        emit_setcc_bool(
+            rd, branch_cc_for(ph2_ir->op, ph2_ir->src0_is_unsigned ||
+                                              ph2_ir->src1_is_unsigned) +
+                    0x10);
         return;
 
     case OP_jump: {
@@ -2154,7 +2186,12 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
         {
             func_t *target_func = find_func(ph2_ir->func_name);
 
-            if (dynlink && target_func && !target_func->bbs) {
+            if (target_func && target_func->is_static && !target_func->bbs) {
+                printf("Error: Undefined static function called: %s\n",
+                       ph2_ir->func_name);
+                fflush(stdout); /* see fatal() */
+                abort();
+            } else if (dynlink && target_func && !target_func->bbs) {
                 /* An external symbol: call its PLT entry, which the loader
                  * redirects to the real function on first use.
                  */
@@ -2215,6 +2252,10 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
              * ignore that redirection and return a stale register.
              */
             int ret_reg = rs1;
+            if (ph2_ir->src0_is_unsigned && ph2_ir->size_bytes < PTR_SIZE) {
+                emit_zero_extend(0, ret_reg, ph2_ir->size_bytes);
+                ret_reg = 0;
+            }
             /* Debug output MOV rax, ret_reg - only if not already in RAX */
             if (ret_reg != 0) { /* 0 is RAX, no move needed */
                 /* MOV RAX, ret_reg.
@@ -2370,15 +2411,15 @@ void emit_memory(ph2_ir_t *ph2_ir, int rd, int rs1)
                  */
                 emit_rex(1, rd, -1);
                 emit_byte(0x0F);
-                emit_byte(0xBE);
+                emit_byte(ph2_ir->is_unsigned ? 0xB6 : 0xBE);
             } else if (eff_size == 2) {
                 emit_rex(1, rd, -1);
                 emit_byte(0x0F);
-                emit_byte(0xBF);
+                emit_byte(ph2_ir->is_unsigned ? 0xB7 : 0xBF);
             } else if (eff_size == 4) {
-                /* MOVSXD rd, DWORD PTR [rsp+ofs]: int is signed */
-                emit_rex(1, rd, -1);
-                emit_byte(0x63);
+                /* A 32-bit MOV zero extends; signed int uses MOVSXD. */
+                emit_rex(ph2_ir->is_unsigned ? 0 : 1, rd, -1);
+                emit_byte(ph2_ir->is_unsigned ? 0x8B : 0x63);
             } else {
                 emit_rex(1, rd, -1);
                 emit_byte(0x8B);
@@ -2447,10 +2488,11 @@ void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
                 have_disp = true;
                 addr_fold = false;
             }
+            bool unsigned_word = ph2_ir->is_unsigned && rsize == 4;
             if (sib)
-                emit_rex_sib(1, rd, sib_base, sib_index);
+                emit_rex_sib(unsigned_word ? 0 : 1, rd, sib_base, sib_index);
             else
-                emit_rex(1, rd, rs1);
+                emit_rex(unsigned_word ? 0 : 1, rd, rs1);
             if (rsize == 1) {
                 /* MOVSX r64, BYTE PTR [rs1]: char is signed here, as it is for
                  * every other narrow type, and RISC-V already uses lb rather
@@ -2458,7 +2500,7 @@ void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
                  * through a pointer as a large positive value.
                  */
                 emit_byte(0x0F);
-                emit_byte(0xBE);
+                emit_byte(ph2_ir->is_unsigned ? 0xB6 : 0xBE);
             } else if (rsize == 2) {
                 /* MOVSX r64, WORD PTR [rs1]: short is signed, so the upper bits
                  * must be a sign extension. ARM uses LDRSH and RISC-V uses lh
@@ -2466,12 +2508,12 @@ void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
                  * large positive value.
                  */
                 emit_byte(0x0F);
-                emit_byte(0xBF);
+                emit_byte(ph2_ir->is_unsigned ? 0xB7 : 0xBF);
             } else if (rsize == 4) {
                 /* MOVSXD r64, DWORD PTR [rs1]: int is signed, so the upper half
                  * must be a sign extension, not zero.
                  */
-                emit_byte(0x63);
+                emit_byte(ph2_ir->is_unsigned ? 0x8B : 0x63);
             } else {
                 /* MOV r64, [rs1] */
                 emit_byte(0x8B);
@@ -2672,19 +2714,24 @@ void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
          * only the declared width, so an unconditional 8-byte load would pick
          * up whatever sits in the rest of the slot.
          */
-        emit_rex(1, dest_reg, 11); /* r/m is r11 */
+        emit_rex(
+            ph2_ir->is_unsigned && eff_size == 4 && !ph2_ir->is_pointer ? 0 : 1,
+            dest_reg, 11); /* r/m is r11 */
         if (eff_size == 1 && !ph2_ir->is_pointer) {
             /* MOVSX, not MOVZX: 'char' is signed here, exactly as OP_load
              * treats a one-byte local. Zero-extending made a global char
              * holding -1 compare as 255.
              */
             emit_byte(0x0F); /* MOVSX dest, BYTE [r15 + ofs] */
-            emit_byte(0xBE);
+            emit_byte(ph2_ir->is_unsigned ? 0xB6 : 0xBE);
         } else if (eff_size == 2 && !ph2_ir->is_pointer) {
             emit_byte(0x0F); /* MOVSX dest, WORD [r15 + ofs] */
-            emit_byte(0xBF);
+            emit_byte(ph2_ir->is_unsigned ? 0xB7 : 0xBF);
         } else if (eff_size == 4 && !ph2_ir->is_pointer) {
-            emit_byte(0x63); /* MOVSXD dest, DWORD [r15 + ofs] */
+            if (ph2_ir->is_unsigned) {
+                emit_byte(0x8B); /* MOV dest32, DWORD [r15 + ofs] */
+            } else
+                emit_byte(0x63); /* MOVSXD dest, DWORD [r15 + ofs] */
         } else {
             emit_byte(0x8B); /* MOV dest, QWORD [r15 + ofs] */
         }
@@ -2847,6 +2894,10 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
          * + 1 to -32768 -- and a 4-byte truncation sign-extends the low word.
          */
         int tsize = ph2_ir->src1;
+        if (ph2_ir->is_unsigned) {
+            emit_zero_extend(rd, rs1, tsize);
+            return;
+        }
         emit_rex(1, rd, rs1);
         if (tsize == 1) {
             emit_byte(0x0F);
@@ -2881,17 +2932,25 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
          * half and destroy every stack address. Copy it instead, which is also
          * what a source that is already full width wants.
          */
-        if (dst_size == PTR_SIZE && PTR_SIZE == 8)
+        if (ph2_ir->is_pointer && dst_size == PTR_SIZE && PTR_SIZE == 8)
             width = 8;
         else if (width != 1 && width != 2 && width != 4)
             width = 8;
-        emit_narrow_move(rd, rs1, width, true);
+        if (ph2_ir->src0_is_unsigned)
+            emit_zero_extend(rd, rs1, width);
+        else
+            emit_narrow_move(rd, rs1, width, true);
     }
         return;
 
     case OP_cast: {
-        /* Usually just a register move */
-        emit_mov_reg(rd, rs1);
+        /* Equal-width signed-to-unsigned casts still need to discard the source
+         * register's sign extension on LP64.
+         */
+        if (ph2_ir->is_unsigned && ph2_ir->size_bytes < PTR_SIZE)
+            emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
+        else
+            emit_mov_reg(rd, rs1);
     }
         return;
 
@@ -2946,7 +3005,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     }
     if (ph2_ir->op != OP_branch)
         fused_cc_pending = false;
-    if (!branch_cc_for(ph2_ir->op)) {
+    if (!branch_cc_for(ph2_ir->op,
+                       ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned)) {
         cmp_mem_slot = -1;
         cmp_imm_known = false;
     } else if (src1_const_known) {
@@ -2959,13 +3019,19 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
      * this value afterwards, so folding it costs no later reload.
      */
     if (ph2_ir->op == OP_load && emit_ir_index >= 0 && emit_next_ir &&
-        branch_cc_for(emit_next_ir->op) && emit_next_ir->src1 == ph2_ir->dest &&
+        branch_cc_for(emit_next_ir->op, emit_next_ir->src0_is_unsigned ||
+                                            emit_next_ir->src1_is_unsigned) &&
+        emit_next_ir->src1 == ph2_ir->dest &&
         emit_next_ir->src0 != ph2_ir->dest &&
         reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
         int w = load_width(ph2_ir);
-        if (w == 4 || w == 8) {
+
+        /* A folded memory operand must have the same width as the comparison.
+         * In particular, comparing an int load after it has been promoted to
+         * long must not turn into an eight-byte read from its four-byte slot.
+         */
+        if ((w == 4 || w == 8) && w == emit_next_ir->size_bytes) {
             cmp_mem_slot = ph2_ir->src0;
-            cmp_mem_width = w;
             return;
         }
     }
@@ -3086,10 +3152,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
      * result that were live elsewhere would have been stored between the two
      * instructions -- and then this test would not fire.
      */
-    int fuse_cc = branch_cc_for(ph2_ir->op);
+    int fuse_cc = branch_cc_for(
+        ph2_ir->op, ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned);
     if (fuse_cc && emit_next_ir && emit_next_ir->op == OP_branch &&
         emit_next_ir->src0 == ph2_ir->dest) {
-        emit_cmp(rs1, rs2);
+        emit_cmp(ph2_ir->size_bytes, rs1, rs2);
         fused_cc = fuse_cc;
         fused_cc_pending = true;
         return;
@@ -3121,6 +3188,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     switch (ph2_ir->op) {
     case OP_load_constant: {
+        if (ph2_ir->size_bytes == 8) {
+            emit_rex(1, -1, rd);
+            emit_byte(0xB8 + reg_low3(rd)); /* MOVABS r64, imm64 */
+            emit_dword(ph2_ir->src0);
+            emit_dword(ph2_ir->src1);
+            return;
+        }
+
         /* MOV r64, imm32 (sign-extended). The immediate is in src0, not a
          * register index.
          */
@@ -3134,6 +3209,18 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             if (const_load_dead(emit_ir_index + 1, ph2_ir->dest, ph2_ir->src0))
                 return;
         }
+
+        /* A 32-bit register write zero-extends to 64 bits, which is exactly the
+         * representation an unsigned scalar needs before a logical shift or
+         * unsigned comparison.
+         */
+        if (ph2_ir->is_unsigned && ph2_ir->size_bytes <= 4) {
+            emit_rex(0, -1, rd);
+            emit_byte(0xC7);
+            emit_byte(modrm(MOD_DIRECT, 0, reg_low3(rd)));
+            emit_dword(ph2_ir->src0);
+            return;
+        }
         emit_rex(1, -1, rd);
         emit_byte(0xC7);
         emit_byte(modrm(MOD_DIRECT, 0, reg_low3(rd)));
@@ -3142,7 +3229,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     }
 
     case OP_assign: {
-        emit_mov_reg(rd, rs1);
+        if (ph2_ir->is_unsigned && ph2_ir->size_bytes < PTR_SIZE)
+            emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
+        else
+            emit_mov_reg(rd, rs1);
         return;
     }
 

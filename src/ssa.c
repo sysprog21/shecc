@@ -850,6 +850,7 @@ var_t *new_const_var(block_t *scope, int val)
     var->var_name = gen_name();
     var->is_const = true;
     var->init_val = val;
+    var->init_val_hi = 0;
     return var;
 }
 bool is_dominate(const basic_block_t *pred, basic_block_t *succ);
@@ -3402,6 +3403,8 @@ bool mark_const(insn_t *insn)
     if (insn->rs1->address_taken)
         return false;
     if (!insn->rs1->is_const) {
+        if (insn->rs1->init_val_hi)
+            return false;
         if (!insn->prev)
             return false;
         if (insn->prev->opcode != OP_load_constant)
@@ -3413,8 +3416,14 @@ bool mark_const(insn_t *insn)
     insn->opcode = OP_load_constant;
     insn->rd->is_const = true;
     insn->rd->init_val = insn->rs1->init_val;
+    insn->rd->init_val_hi = insn->rs1->init_val_hi;
     insn->rs1 = NULL;
     return true;
+}
+
+bool ssa_is_unsigned_scalar(const var_t *var)
+{
+    return var && !var->ptr_level && var->type && var->type->is_unsigned;
 }
 
 bool eval_const_arithmetic(insn_t *insn)
@@ -3423,9 +3432,24 @@ bool eval_const_arithmetic(insn_t *insn)
         return false;
     if (!insn->rs1->is_const)
         return false;
+    if (insn->rs1->init_val_hi)
+        return false;
     if (!insn->rs2)
         return false;
     if (!insn->rs2->is_const)
+        return false;
+    if (insn->rs2->init_val_hi)
+        return false;
+
+    /* Constant folding predates unsigned arithmetic and evaluates every
+     * operation as signed int. Leave unsigned and wider-than-int expressions to
+     * target lowering until this pass gains width-aware evaluation.
+     */
+    if (ssa_is_unsigned_scalar(insn->rs1) ||
+        ssa_is_unsigned_scalar(insn->rs2) || ssa_is_unsigned_scalar(insn->rd) ||
+        (insn->rs1->type && insn->rs1->type->size > TY_int->size) ||
+        (insn->rs2->type && insn->rs2->type->size > TY_int->size) ||
+        (insn->rd && insn->rd->type && insn->rd->type->size > TY_int->size))
         return false;
 
     int res;
@@ -3507,6 +3531,11 @@ bool eval_const_unary(insn_t *insn)
     if (!insn->rs1)
         return false;
     if (!insn->rs1->is_const)
+        return false;
+    if (insn->rs1->init_val_hi)
+        return false;
+    if ((insn->rs1->type && insn->rs1->type->size > TY_int->size) ||
+        (insn->rd && insn->rd->type && insn->rd->type->size > TY_int->size))
         return false;
 
     int res;
@@ -3961,7 +3990,8 @@ void optimize(void)
                 }
 
                 /* Identity and constant optimizations */
-                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                if (insn->rs2 && insn->rs2->is_const &&
+                    !insn->rs2->init_val_hi && insn->rd) {
                     int val = insn->rs2->init_val;
 
                     /* x + 0 = x, x - 0 = x, x | 0 = x, x ^ 0 = x */
@@ -4140,12 +4170,14 @@ void optimize(void)
                             operand = shift;
                         }
                         /* x / power_of_2 = x >> shift (unsigned) */
-                        else if (insn->opcode == OP_div) {
+                        else if (insn->opcode == OP_div &&
+                                 ssa_is_unsigned_scalar(insn->rs1)) {
                             reduced = OP_rshift;
                             operand = shift;
                         }
                         /* x % power_of_2 = x & (power_of_2 - 1) */
-                        else if (insn->opcode == OP_mod) {
+                        else if (insn->opcode == OP_mod &&
+                                 ssa_is_unsigned_scalar(insn->rs1)) {
                             reduced = OP_bit_and;
                             operand = val - 1;
                         }

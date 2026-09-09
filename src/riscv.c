@@ -31,6 +31,8 @@ typedef enum {
     rv_lb = 3 /* 0b11 */,
     rv_lh = 4099 /* 0b11 + (1 << 12) */,
     rv_lw = 8195 /* 0b11 + (2 << 12) */,
+    rv_lbu = 16387 /* 0b11 + (4 << 12) */,
+    rv_lhu = 20483 /* 0b11 + (5 << 12) */,
     rv_sb = 35 /* 0b0100011 */,
     rv_sh = 4131 /* 0b0100011 + (1 << 12) */,
     rv_sw = 8227 /* 0b0100011 + (2 << 12) */,
@@ -49,7 +51,9 @@ typedef enum {
     /* m */
     rv_mul = 33554483 /* 0b0110011 + (1 << 25) */,
     rv_div = 33570867 /* 0b0110011 + (1 << 25) + (4 << 12) */,
-    rv_mod = 33579059 /* 0b0110011 + (1 << 25) + (6 << 12) */
+    rv_divu = 33574963 /* 0b0110011 + (1 << 25) + (5 << 12) */,
+    rv_mod = 33579059 /* 0b0110011 + (1 << 25) + (6 << 12) */,
+    rv_modu = 33583155 /* 0b0110011 + (1 << 25) + (7 << 12) */
 } rv_op;
 
 /* registers */
@@ -271,6 +275,16 @@ int __lh(rv_reg rd, rv_reg rs1, int imm)
     return rv_encode_I(rv_lh, rd, rs1, imm);
 }
 
+int __lbu(rv_reg rd, rv_reg rs1, int imm)
+{
+    return rv_encode_I(rv_lbu, rd, rs1, imm);
+}
+
+int __lhu(rv_reg rd, rv_reg rs1, int imm)
+{
+    return rv_encode_I(rv_lhu, rd, rs1, imm);
+}
+
 int __lw(rv_reg rd, rv_reg rs1, int imm)
 {
     return rv_encode_I(rv_lw, rd, rs1, imm);
@@ -342,7 +356,17 @@ int __div(rv_reg rd, rv_reg rs1, rv_reg rs2)
     return rv_encode_R(rv_div, rd, rs1, rs2);
 }
 
+int __divu(rv_reg rd, rv_reg rs1, rv_reg rs2)
+{
+    return rv_encode_R(rv_divu, rd, rs1, rs2);
+}
+
 int __mod(rv_reg rd, rv_reg rs1, rv_reg rs2)
 {
     return rv_encode_R(rv_mod, rd, rs1, rs2);
+}
+
+int __modu(rv_reg rd, rv_reg rs1, rv_reg rs2)
+{
+    return rv_encode_R(rv_modu, rd, rs1, rs2);
 }

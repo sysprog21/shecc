@@ -351,6 +351,7 @@ typedef enum {
     T_const, /* const qualifier */
     T_static,
     T_signed,
+    T_unsigned,
     T_long,
     /* C pre-processor directives */
     T_cppd_include,
@@ -417,6 +418,8 @@ typedef enum {
     TYPE_int,
     TYPE_char,
     TYPE_short,
+    TYPE_long,
+    TYPE_long_long,
     TYPE_struct,
     TYPE_union,
     TYPE_typedef
@@ -544,6 +547,8 @@ typedef struct var_list {
 
 struct var {
     type_t *type;
+    /* Lexical owner, used while parsing declarator constant expressions. */
+    void *scope;
 
     /* Interned, not copied. A MAX_VAR_LEN array was 128 of this struct's 312
      * bytes on every one of the ~86k variables a self-compile creates, and
@@ -556,7 +561,8 @@ struct var {
     int ptr_level;
     bool is_func;
     bool is_global;
-    bool is_static;          /* declaration used the static storage class */
+    bool is_static;       /* declaration used the static storage class */
+    bool has_initializer; /* a file-scope definition supplied an initializer */
     bool is_const_qualified; /* true if variable has const qualifier */
     bool is_const_pointer;   /* true for the outermost `* const` qualifier */
     bool address_taken;      /* true if variable address was taken (&var) */
@@ -591,9 +597,11 @@ struct var {
      */
     bool in_select_arm;
     int array_size;
-    int array_dim2; /* second dimension size for 2D arrays */
-    int offset;     /* offset from stack or frame, index 0 is reserved */
-    int init_val;   /* for global initialization */
+    bool has_unsized_array; /* `T name[]`: bound is supplied by initializer */
+    int array_dim2;         /* second dimension size for 2D arrays */
+    int offset;      /* offset from stack or frame, index 0 is reserved */
+    int init_val;    /* for global initialization */
+    int init_val_hi; /* upper word of an 8-byte integer constant */
     /* Generation stamps used by compute_live_in() to test set membership in
      * constant time instead of rescanning live_kill and live_in per element.
      */
@@ -673,6 +681,12 @@ typedef struct func func_t;
 /* block definition */
 struct block {
     var_list_t locals;
+
+    /* C tags and enumeration constants have lexical, not translation-unit,
+     * scope. Variables remain in locals; these lists serve parser lookups.
+     */
+    void *type_tags;
+    void *constants;
     struct block *parent;
     func_t *func;
     struct block *next;
@@ -728,11 +742,19 @@ struct ph2_ir {
      */
     bool ofs_based_on_stack_top;
     bool is_pointer; /* True if this operation involves a pointer type */
+    /* Scalar signedness accompanies register values independently of their
+     * storage width. Comparisons inspect their sources; arithmetic and loads
+     * inspect the result.
+     */
+    bool is_unsigned;
+
     /* Operand provenance is required by LP64 backends: pointer arithmetic keeps
      * the address operand wide but sign-extends an int index.
      */
     bool src0_is_pointer;
     bool src1_is_pointer;
+    bool src0_is_unsigned;
+    bool src1_is_unsigned;
 };
 
 typedef struct ph2_ir ph2_ir_t;
@@ -754,12 +776,23 @@ struct type {
     int ptr_level; /* pointer level for typedef pointer types */
     bool is_union; /* preserves union semantics for anonymous typedef unions */
     bool is_const_qualified; /* qualifier carried by a scalar typedef */
+    /* Integer representation is distinct from signedness: unsigned char and
+     * unsigned int keep the ordinary scalar widths but require zero extension
+     * and unsigned arithmetic lowering.
+     */
+    bool is_unsigned;
 };
 
 /* lvalue details */
 typedef struct {
     int size;
     int ptr_level;
+
+    /* Pointer depth of the value designated by this lvalue. A subscript
+     * computes an address (one level deeper than its selected value), so this
+     * must not be inferred from the address provenance alone.
+     */
+    int value_ptr_level;
     bool is_func;
     bool is_reference;
     bool is_const_qualified;
@@ -769,10 +802,17 @@ typedef struct {
 } lvalue_t;
 
 /* constants for enums */
-typedef struct {
+typedef struct constant {
     char alias[MAX_VAR_LEN];
     int value;
+    struct constant *next;
 } constant_t;
+
+typedef struct type_tag {
+    char name[MAX_TYPE_LEN];
+    type_t *type;
+    struct type_tag *next;
+} type_tag_t;
 
 struct phi_operand {
     var_t *var;

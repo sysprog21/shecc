@@ -44,12 +44,23 @@ bool is_address_like(var_t *v)
  * widths and int narrowing by it, so it keeps counting pointer-like operands
  * alone rather than acquiring arrays and changing a settled target.
  */
+bool is_unsigned_scalar(const var_t *var)
+{
+    return var && !var->ptr_level && !var->is_func && var->type &&
+           var->type->is_unsigned;
+}
+
 void set_ptr_flags(ph2_ir_t *ir, insn_t *insn)
 {
     ir->src0_is_pointer = is_address_like(insn->rs1);
     ir->src1_is_pointer = is_address_like(insn->rs2);
     ir->is_pointer = is_pointer_like(insn->rd) || is_pointer_like(insn->rs1) ||
                      is_pointer_like(insn->rs2);
+    ir->is_unsigned = is_unsigned_scalar(insn->rd) ||
+                      is_unsigned_scalar(insn->rs1) ||
+                      is_unsigned_scalar(insn->rs2);
+    ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+    ir->src1_is_unsigned = is_unsigned_scalar(insn->rs2);
 }
 
 /* Width of the value a local's frame slot actually holds.
@@ -216,8 +227,11 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->ofs_based_on_stack_top = false;
     n->size_bytes = PTR_SIZE; /* default to the full slot; see add_ph2_ir */
     n->is_pointer = false;
+    n->is_unsigned = false;
     n->src0_is_pointer = false;
     n->src1_is_pointer = false;
+    n->src0_is_unsigned = false;
+    n->src1_is_unsigned = false;
 
     if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;
@@ -701,6 +715,7 @@ void store_var(basic_block_t *bb, var_t *var, int idx)
     ir->src1 = var->offset;
     ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
     ir->is_pointer = is_pointer_like(var);
+    ir->is_unsigned = is_unsigned_scalar(var);
     ir->size_bytes = var_slot_size(var);
     REGS[idx].polluted = 0;
 }
@@ -935,6 +950,7 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
     if (var->is_const) {
         ir = bb_add_ph2_ir(bb, OP_load_constant);
         ir->src0 = var->init_val;
+        ir->src1 = var->init_val_hi;
     } else if (var->is_global && var->array_size) {
         /* A global array's address is fixed for the life of the program, and
          * the initialiser recorded where its storage sits. Computing it beats
@@ -953,7 +969,17 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
 
     ir->dest = idx;
     ir->is_pointer = is_pointer_like(var);
-    ir->size_bytes = var_slot_size(var);
+    ir->is_unsigned = is_unsigned_scalar(var);
+
+    /* Incoming stack arguments use ABI-sized slots but carry a scalar in the
+     * low declared-width bytes. Reloading all eight bytes can retain a caller's
+     * sign extension; use the declaration width to preserve unsigned argument
+     * semantics.
+     */
+    ir->size_bytes = var->ofs_based_on_stack_top && !var->ptr_level &&
+                             !var->is_func && var->type
+                         ? var->type->size
+                         : var_slot_size(var);
     REGS[idx].var = var;
     REGS[idx].polluted = 0;
     vreg_map_to_phys(var, idx);
@@ -2094,7 +2120,11 @@ void reg_alloc_global(insn_t *global_insn)
         dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
         ir->src0 = global_insn->rd->init_val;
+        ir->src1 = global_insn->rd->init_val_hi;
         ir->dest = dest;
+        ir->is_unsigned = is_unsigned_scalar(global_insn->rd);
+        ir->size_bytes =
+            global_insn->rd->ptr_level ? PTR_SIZE : global_insn->rd->type->size;
         break;
     case OP_assign:
         src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
@@ -2107,6 +2137,24 @@ void reg_alloc_global(insn_t *global_insn)
         REGS[src0].polluted = 0;
         vreg_clear_phys(REGS[src0].var);
         REGS[src0].var = NULL;
+        break;
+    case OP_address_of:
+    case OP_global_address_of:
+        /* A global function-pointer initializer first forms the address of its
+         * global storage slot. Its address is GP-relative, unlike an address
+         * formed in a function body.
+         */
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+
+        /* Global arrays have a pointer slot followed by their backing region;
+         * an address constant for the array denotes that backing region.
+         */
+        ir->src0 = global_insn->rs1->array_size ? global_insn->rs1->init_val
+                                                : global_insn->rs1->offset;
+        ir->dest = dest;
+        ir->is_pointer = true;
+        ir->size_bytes = PTR_SIZE;
         break;
     case OP_add: {
         /* Special-case address computation for globals: if rs1 is a global base
@@ -2125,13 +2173,50 @@ void reg_alloc_global(insn_t *global_insn)
             global_insn->rd->is_global = true;
             break;
         }
-        /* Fallback: generate an add */
+        /* Fall through to the ordinary scalar binary lowering below. */
+        goto lower_global_binary;
+    }
+    case OP_bit_not:
+    case OP_log_not: {
+        /* Unary wide global constant expressions use the normal phase-2
+         * instruction too. Keeping these separate from binary lowering avoids
+         * preparing a nonexistent right operand.
+         */
+        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
+        ir->src0 = src0;
+        ir->dest = dest;
+        set_ptr_flags(ir, global_insn);
+        break;
+    }
+    case OP_sub:
+    case OP_mul:
+    case OP_div:
+    case OP_mod:
+    case OP_lshift:
+    case OP_rshift:
+    case OP_bit_and:
+    case OP_bit_or:
+    case OP_bit_xor:
+    case OP_eq:
+    case OP_neq:
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+    lower_global_binary: {
+        /* Global scalar initializers may have been parsed as a binary constant
+         * expression. Use the same phase-2 operation as a function body so wide
+         * division, comparison, and bitwise expressions do not stop at global
+         * setup merely because they are not pointer-address arithmetic.
+         */
         int src1;
         src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
         src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
         dest =
             prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, src1);
-        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_add);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
         ir->src0 = src0;
         ir->src1 = src1;
         ir->dest = dest;
@@ -2139,6 +2224,18 @@ void reg_alloc_global(insn_t *global_insn)
         break;
     }
     case OP_write: {
+        if (global_insn->rs2 && global_insn->rs2->is_func) {
+            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_address_of_func);
+            ir->src0 = src0;
+            ir->func_name = intern_string(global_insn->rs2->var_name);
+            if (dynlink) {
+                func_t *target_fn = find_func(ir->func_name);
+                if (target_fn)
+                    target_fn->is_used = true;
+            }
+            break;
+        }
         /* Fold (addr, val) where addr carries GP-relative offset */
         if (global_insn->rs1 && (global_insn->rs1->is_global)) {
             int vreg = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
@@ -2159,6 +2256,7 @@ void reg_alloc_global(insn_t *global_insn)
              */
             ir->size_bytes = global_insn->sz;
             ir->is_pointer = global_insn->rs2->ptr_level > 0;
+            ir->is_unsigned = is_unsigned_scalar(global_insn->rs2);
             break;
         }
         /* Fallback generic write */
@@ -2169,6 +2267,7 @@ void reg_alloc_global(insn_t *global_insn)
         ir->src0 = src0;
         ir->src1 = src1;
         ir->dest = global_insn->sz;
+        set_ptr_flags(ir, global_insn);
         break;
     }
     case OP_trunc:
@@ -2315,7 +2414,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, -1, -1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src0 = insn->rd->init_val;
+            ir->src1 = insn->rd->init_val_hi;
             ir->dest = dest;
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
 
             /* store global variable immediately after assignment */
             if (insn->rd->is_global) {
@@ -2515,12 +2618,18 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = src0;
             ir->dest = dest;
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
 
             /* store global variable immediately after assignment */
             if (insn->rd->is_global) {
                 ir = bb_add_ph2_ir(bb, OP_global_store);
                 ir->src0 = dest;
                 ir->src1 = insn->rd->offset;
+                ir->is_unsigned = is_unsigned_scalar(insn->rd);
+                ir->size_bytes = var_slot_size(insn->rd);
                 REGS[dest].polluted = 0;
             }
 
@@ -2528,6 +2637,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 vreg_clear_phys(REGS[src0].var);
                 REGS[src0].var = NULL;
             }
+
+            /* An assignment creates storage-backed state. It must not retain a
+             * literal's compile-time cache for later reads.
+             */
+            insn->rd->is_const = false;
 
             break;
         case OP_read:
@@ -2537,6 +2651,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0 = src0;
             ir->src1 = insn->sz;
             ir->dest = dest;
+            set_ptr_flags(ir, insn);
             break;
         case OP_write:
             if (insn->rs2->is_func) {
@@ -2561,6 +2676,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 ir->src0 = src0;
                 ir->src1 = src1;
                 ir->dest = insn->sz;
+                set_ptr_flags(ir, insn);
             }
             break;
         case OP_branch:
@@ -2583,6 +2699,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
              * over its low word only.
              */
             ir->src0_is_pointer = is_address_like(insn->rs1);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             ir->then_bb = bb->then_;
             ir->else_bb = bb->else_;
             break;
@@ -2605,6 +2722,8 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = src0;
             ir->dest = args++;
+            ir->is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             REGS[ir->dest].var = insn->rs1;
             REGS[ir->dest].polluted = 0;
             break;
@@ -2634,6 +2753,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             src0 = prepare_operand(bb, insn->rs1, -1);
             ir = bb_add_ph2_ir(bb, OP_load_func);
             ir->src0 = src0;
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
 
             bb_add_ph2_ir(bb, OP_indirect);
 
@@ -2648,6 +2768,9 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = 0;
             ir->dest = dest;
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
             break;
         case OP_return:
             if (insn->rs1)
@@ -2657,6 +2780,10 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
 
             ir = bb_add_ph2_ir(bb, OP_return);
             ir->src0 = src0;
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            if (insn->rs1)
+                ir->size_bytes =
+                    insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
             break;
         case OP_add:
         case OP_sub:
@@ -2690,6 +2817,24 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
              * widen the int index beside the address.
              */
             set_ptr_flags(ir, insn);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+
+            /* SSA temporaries normally retain their result type, but width is a
+             * property of the operation as well: a wide operand must not be
+             * narrowed merely because an intermediate lost its annotation. This
+             * includes comparisons: their result is int, while CMP must inspect
+             * the common operand width rather than stale high halves of 32-bit
+             * register values.
+             */
+            int left_size =
+                insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
+            int right_size =
+                insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
+            if (left_size > ir->size_bytes)
+                ir->size_bytes = left_size;
+            if (right_size > ir->size_bytes)
+                ir->size_bytes = right_size;
             break;
         case OP_negate:
         case OP_bit_not:
@@ -2704,6 +2849,10 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
              * the result.
              */
             ir->src0_is_pointer = is_address_like(insn->rs1);
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
             break;
         case OP_trunc:
         case OP_sign_ext:
@@ -2714,6 +2863,10 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src1 = insn->sz;
             ir->src0 = src0;
             ir->dest = dest;
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
             break;
         default:
             printf("Unknown opcode\n");
