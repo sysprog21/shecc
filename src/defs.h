@@ -349,6 +349,9 @@ typedef enum {
     T_continue,
     T_goto,
     T_const, /* const qualifier */
+    T_static,
+    T_signed,
+    T_long,
     /* C pre-processor directives */
     T_cppd_include,
     T_cppd_define,
@@ -553,7 +556,9 @@ struct var {
     int ptr_level;
     bool is_func;
     bool is_global;
+    bool is_static;          /* declaration used the static storage class */
     bool is_const_qualified; /* true if variable has const qualifier */
+    bool is_const_pointer;   /* true for the outermost `* const` qualifier */
     bool address_taken;      /* true if variable address was taken (&var) */
     /* Working state for strength_reduce(): how many instructions in the
      * function write the variable, whether it is written inside the loop being
@@ -639,6 +644,28 @@ struct var {
      * array or struct literal temporaries).
      */
     bool is_compound_literal;
+
+    /* String literals have immutable storage duration in C. Preserve that
+     * provenance separately from the pointer type so the compatibility warning
+     * can remain opt-in while legacy source still compiles.
+     */
+    bool is_string_literal;
+
+    /* A function-pointer declarator owns a prototype separately from its value
+     * type. Keeping this syntax-only object lets an indirect call use the same
+     * argument lowering as a direct call (notably record-by-value arguments)
+     * without putting function ABI details into type_t. Kept void-typed so the
+     * self-hosted parser does not need an incomplete `struct func` declaration
+     * while reading var_t itself. parser.c owns the cast back to func_t.
+     */
+    void *func_signature;
+
+    /* C ABI lowering passes record parameters as pointers to caller-owned
+     * copies. The source-level declaration remains a record so field access and
+     * record assignment keep their C semantics; OP_address_of materializes the
+     * hidden incoming pointer instead of an address of a scalar slot.
+     */
+    bool is_aggregate_param;
 };
 
 typedef struct func func_t;
@@ -725,6 +752,8 @@ struct type {
     var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
+    bool is_union; /* preserves union semantics for anonymous typedef unions */
+    bool is_const_qualified; /* qualifier carried by a scalar typedef */
 };
 
 /* lvalue details */
@@ -733,7 +762,10 @@ typedef struct {
     int ptr_level;
     bool is_func;
     bool is_reference;
+    bool is_const_qualified;
     type_t *type;
+    /* The declaration selected by the lvalue, including a struct member. */
+    var_t *decl;
 } lvalue_t;
 
 /* constants for enums */
@@ -946,6 +978,7 @@ struct func {
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
+    bool is_static; /* internal-linkage declaration */
 
     /* inline_calls()'s verdict on this body and the return that ends it,
      * stamped with the round that reached them: a body is examined once per

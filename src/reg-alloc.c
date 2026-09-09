@@ -2152,6 +2152,13 @@ void reg_alloc_global(insn_t *global_insn)
             if (global_insn->rs1->array_size > 0)
                 base_off = global_insn->rs1->init_val;
             ir->src1 = base_off;
+
+            /* OP_global_store selects its instruction width from this field.
+             * Leaving it at zero falls through to an eight-byte store, which
+             * makes a global int field initializer overwrite its successor.
+             */
+            ir->size_bytes = global_insn->sz;
+            ir->is_pointer = global_insn->rs2->ptr_level > 0;
             break;
         }
         /* Fallback generic write */
@@ -2324,6 +2331,44 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             /* Mark variable as address-taken, disable constant optimization */
             insn->rs1->address_taken = true;
             insn->rs1->is_const = false;
+
+            /* Source-level record parameters arrive as hidden pointers to the
+             * caller's by-value copy. Their declaration must stay a record for
+             * parsing and type checks, but taking its address produces the ABI
+             * pointer rather than allocating a scalar spill slot.
+             */
+            if (insn->rs1->is_aggregate_param) {
+                int param_idx = -1;
+                for (int i = 0; i < func->num_params; i++)
+                    if (insn->rs1->base == &func->param_defs[i] ||
+                        insn->rs1 == &func->param_defs[i]) {
+                        param_idx = i;
+                        break;
+                    }
+                if (param_idx < 0)
+                    fatal("Aggregate parameter is not owned by its function");
+
+                dest = prepare_dest(bb, insn, insn->rd, -1, -1);
+                if (insn->rs1->space_is_allocated) {
+                    ir = bb_add_ph2_ir(bb, OP_load);
+                    ir->src0 = insn->rs1->offset;
+                    ir->dest = dest;
+                    ir->ofs_based_on_stack_top =
+                        insn->rs1->ofs_based_on_stack_top;
+                } else if (param_idx < MAX_ARGS_IN_REG) {
+                    ir = bb_add_ph2_ir(bb, OP_assign);
+                    ir->src0 = param_idx;
+                    ir->dest = dest;
+                } else {
+                    ir = bb_add_ph2_ir(bb, OP_load);
+                    ir->src0 = (param_idx - MAX_ARGS_IN_REG) * PTR_SIZE;
+                    ir->dest = dest;
+                    ir->ofs_based_on_stack_top = true;
+                }
+                ir->is_pointer = true;
+                ir->size_bytes = PTR_SIZE;
+                break;
+            }
 
             /* OP_allocat puts a local aggregate's spill slot before its backing
              * storage. &aggregate must name the backing storage, not the spill

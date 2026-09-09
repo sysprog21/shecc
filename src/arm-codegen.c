@@ -259,6 +259,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     const int rn = ph2_ir->src0;
     int rm = ph2_ir->src1; /* Not const because OP_trunc modifies it */
     int ofs;
+    int store_offset;
     bool is_external_call = false;
 
     /* Prepare this variable to reuse code for:
@@ -341,13 +342,30 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_store:
     case OP_global_store:
         interm = ph2_ir->op == OP_store ? __sp : __r12;
-        if (ph2_ir->src1 > 4095) {
-            emit(__movw(__AL, __r8, ph2_ir->src1));
-            emit(__movt(__AL, __r8, ph2_ir->src1));
+        store_offset = ph2_ir->src1;
+
+        /* STRH has an 8-bit split immediate while STR/STRB accept 12 bits.
+         * Materialize larger halfword offsets before selecting the width.
+         */
+        if (store_offset > (ph2_ir->size_bytes == 2 ? 255 : 4095)) {
+            emit(__movw(__AL, __r8, store_offset));
+            emit(__movt(__AL, __r8, store_offset));
             emit(__add_r(__AL, __r8, interm, __r8));
-            emit(__sw(__AL, rn, __r8, 0));
-        } else
-            emit(__sw(__AL, rn, interm, ph2_ir->src1));
+            interm = __r8;
+            store_offset = 0;
+        }
+
+        /* Global aggregate initialization can address a byte or halfword field
+         * directly. Treating every OP_global_store as a word store clobbers
+         * neighbouring designated members on ARM. Ordinary stack slots remain
+         * word-sized unless their IR says otherwise.
+         */
+        if (ph2_ir->size_bytes == 1)
+            emit(__sb(__AL, rn, interm, store_offset));
+        else if (ph2_ir->size_bytes == 2)
+            emit(__sh(__AL, rn, interm, store_offset));
+        else
+            emit(__sw(__AL, rn, interm, store_offset));
         return;
     case OP_read:
         if (ph2_ir->src1 == 1)

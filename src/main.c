@@ -109,6 +109,8 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
             dump_ir = true;
+        else if (!strcmp(argv[i], "--warn-string-literals"))
+            warn_string_literals = true;
         else if (!strcmp(argv[i], "--dot"))
             dump_dot = true;
         else if (!strcmp(argv[i], "+m"))
@@ -133,7 +135,8 @@ int main(int argc, char *argv[])
 
     if (!in) {
         printf(
-            "Usage: shecc [-o output] [+m] [--dot] [--dump-ir] [--no-libc] "
+            "Usage: shecc [-o output] [+m] [--dot] [--dump-ir] "
+            "[--warn-string-literals] [--no-libc] "
             "[--dynlink] [-E] <input.c>\n");
         usage_error("Missing source file");
     }

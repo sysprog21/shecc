@@ -12,7 +12,7 @@
 
 /* Hash table constants */
 #define NUM_DIRECTIVES 11
-#define NUM_KEYWORDS 18
+#define NUM_KEYWORDS 21
 
 /* Token mapping structure for elegant initialization */
 typedef struct {
@@ -88,6 +88,9 @@ void lex_init_keywords(void)
         {"goto", T_goto},
         {"union", T_union},
         {"const", T_const},
+        {"static", T_static},
+        {"signed", T_signed},
+        {"long", T_long},
     };
 
     /* hashmap insertion */
@@ -1002,7 +1005,7 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
                 kind = T_const;
             break;
 
-        case 6: /* 6-letter keywords: return, struct, switch, sizeof */
+        case 6: /* 6-letter keywords: return, struct, switch, sizeof, static */
             if (token_buffer[0] == 'r' && !memcmp(token_buffer, "return", 6))
                 kind = T_return;
             else if (token_buffer[0] == 's') {
@@ -1012,6 +1015,8 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
                     kind = T_switch;
                 else if (!memcmp(token_buffer, "sizeof", 6))
                     kind = T_sizeof;
+                else if (!memcmp(token_buffer, "static", 6))
+                    kind = T_static;
             }
             break;
 

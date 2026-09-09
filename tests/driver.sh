@@ -347,6 +347,35 @@ function try_compile_error()
     fi
 }
 
+# Verify a successful compilation emits a specific diagnostic. This is used for
+# C constructs that are permitted but deserve a warning, such as casting away
+# const qualification.
+function try_compile_warning()
+{
+    local expected="$1"
+    local extra_flags="${2:-}"
+    local input=$(cat)
+    test_selected || return 0
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    local tmp_log="$(mktemp)"
+    echo "$input" > "$tmp_in"
+
+    $SHECC $SHECC_CFLAGS $extra_flags -o "$tmp_exe" "$tmp_in" > "$tmp_log" 2>&1
+    local exit_code=$?
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$exit_code" -ne 0 ] || ! grep -Fq -- "$expected" "$tmp_log"; then
+        report_test_failure "COMPILE WARNING TEST" "$tmp_in" "$tmp_exe" \
+            "$expected" "$exit_code" "$(< "$tmp_log")"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
 function items()
 {
     local expected="$1"
@@ -747,6 +776,27 @@ EOF
 # Category: Compound Literals
 begin_category "Compound Literals" "Testing C99 compound literal features"
 
+# C99 permits long to use int's representation where both meet the required
+# minimum range. Exercise spelling, typedefs, pointer scaling, and ABI slots.
+try_ 13 << EOF
+typedef long count_t;
+typedef long signed signed_count_t;
+long add(long left, long int right, signed long extra) {
+    return left + right + extra;
+}
+int main(void) {
+    count_t values[3] = {3, 4, 5};
+    signed_count_t extra = (long signed)values[2];
+    return add(values[0], values[1], extra) +
+           (sizeof(long const) == sizeof(int));
+}
+EOF
+
+try_compile_error << EOF
+long long value;
+int main(void) { return 0; }
+EOF
+
 # Compound literal support - C90/C99 compliant implementation Basic struct
 # compound literals (verified working)
 try_ 42 << EOF
@@ -754,6 +804,25 @@ typedef struct { int x; int y; } point_t;
 int main() {
     point_t p = {42, 100};
     return p.x;
+}
+EOF
+
+# Typedef record declarations use the shared aggregate initializer path for both
+# their first and continuation declarators.
+try_ 6 << EOF
+typedef struct { int x; int y; int z; } point_t;
+int main() {
+    point_t first = {1}, second = {2, 3};
+    return first.x + first.y + first.z + second.x + second.y + second.z;
+}
+EOF
+
+# A union initializer selects exactly one member, including through a typedef.
+try_compile_error << EOF
+typedef union { int a; char b; } value_t;
+int main() {
+    value_t value = {1, 2};
+    return value.a;
 }
 EOF
 
@@ -783,6 +852,276 @@ EOF
 
 # Multi-field struct compound literals
 try_ 30 << EOF
+struct point { int x; int y; };
+int main(void) {
+    struct point p = (struct point){10, 20};
+    return p.x + p.y;
+}
+EOF
+
+# C99 aggregate initialization zero-fills all omitted record members.
+try_ 0 << EOF
+struct point { int x; int y; int z; };
+int main(void) {
+    struct point p = (struct point){7};
+    return p.y != 0 || p.z != 0;
+}
+EOF
+
+# Explicitly bounded array compound literals support index designators and
+# zero-fill the slots those designators skip.
+try_ 7 << EOF
+int main(void) {
+    int *values = (int[4]){[3] = 5, [1] = 2};
+    return values[0] + values[1] + values[2] + values[3];
+}
+EOF
+
+# Array compound literals use the same aggregate-element path as ordinary array
+# initializers, including nested braces, omitted members, and element
+# designators.
+try_ 8 << EOF
+struct pair { int first; int second; };
+int main(void) {
+    struct pair *values = (struct pair[]){ {1, 2}, {3, 4} };
+    return values[0].first + values[1].second + values[1].first;
+}
+EOF
+
+try_ 10 << EOF
+struct pair { int first; int second; };
+int main(void) {
+    struct pair *values = (struct pair[3]){
+        [2] = {.second = 9}, [0] = {.first = 1}
+    };
+    return values[0].first + values[0].second + values[1].first +
+           values[1].second + values[2].first + values[2].second;
+}
+EOF
+
+# An omitted bound is inferred through the largest designator. Reordered
+# designators must preserve earlier stores while all untouched records remain
+# zero-initialized.
+try_ 10 << EOF
+struct pair { int first; int second; };
+int main(void) {
+    struct pair *values = (struct pair[]){
+        [3] = {.second = 3}, [1] = {.first = 1}, [4] = {.second = 6}
+    };
+    return values[0].first + values[0].second + values[1].first +
+           values[2].second + values[3].second + values[4].second;
+}
+EOF
+
+# Nested record braces initialize the nested object before continuing at the
+# following outer member.
+try_ 12 << EOF
+struct pair { int x; int y; };
+struct outer { struct pair pair; int tail; };
+int main(void) {
+    struct outer value = {{2, 3}, 7};
+    return value.pair.x + value.pair.y + value.tail;
+}
+EOF
+
+# Nested array braces initialize the member array before the next outer field.
+try_ 12 << EOF
+struct outer { int values[2]; int tail; };
+int main(void) {
+    struct outer value = {{2, 3}, 7};
+    return value.values[0] + value.values[1] + value.tail;
+}
+EOF
+
+try_ 9 << EOF
+struct outer { int values[2]; int tail; };
+int main(void) {
+    struct outer value = {{2}, 7};
+    return value.values[0] + value.values[1] + value.tail;
+}
+EOF
+
+try_ 12 << EOF
+struct outer { int values[2]; int tail; };
+int main(void) {
+    struct outer value = (struct outer){{2, 3}, 7};
+    return value.values[0] + value.values[1] + value.tail;
+}
+EOF
+
+try_ 12 << EOF
+struct outer { int values[2]; int tail; };
+struct outer value = {{2, 3}, 7};
+int main(void) {
+    return value.values[0] + value.values[1] + value.tail;
+}
+EOF
+
+try_ 15 << EOF
+struct pair { int x; int y; };
+struct outer { struct pair values[2]; int tail; };
+int main(void) {
+    struct outer value = {{{1, 2}, {3, 4}}, 5};
+    return value.values[0].x + value.values[0].y + value.values[1].x +
+           value.values[1].y + value.tail;
+}
+EOF
+
+# Two-dimensional member arrays preserve row braces and then continue with the
+# next outer member.
+try_ 15 << EOF
+struct outer { int values[2][2]; int tail; };
+int main(void) {
+    struct outer value = {{{1, 2}, {3, 4}}, 5};
+    return value.values[0][0] + value.values[0][1] + value.values[1][0] +
+           value.values[1][1] + value.tail;
+}
+EOF
+
+try_ 15 << EOF
+struct outer { int values[2][2]; int tail; };
+struct outer value = {{{1, 2}, {3, 4}}, 5};
+int main(void) {
+    return value.values[0][0] + value.values[0][1] + value.values[1][0] +
+           value.values[1][1] + value.tail;
+}
+EOF
+
+try_ 15 << EOF
+struct outer { int values[2][2]; int tail; };
+int main(void) {
+    struct outer value = (struct outer){{{1, 2}, {3, 4}}, 5};
+    return value.values[0][0] + value.values[0][1] + value.values[1][0] +
+           value.values[1][1] + value.tail;
+}
+EOF
+
+try_ 12 << EOF
+struct pair { int x; int y; };
+struct outer { struct pair pair; int tail; };
+int main(void) {
+    struct outer value = (struct outer){{2, 3}, 7};
+    return value.pair.x + value.pair.y + value.tail;
+}
+EOF
+
+try_ 12 << EOF
+struct pair { int x; int y; };
+struct outer { struct pair pair; int tail; };
+struct outer value = {{2, 3}, 7};
+int main(void) {
+    return value.pair.x + value.pair.y + value.tail;
+}
+EOF
+
+# C99 member designators may reorder fields and leave other members zeroed.
+try_ 7 << EOF
+struct values { int first; int second; int third; };
+int main(void) {
+    struct values value = {.third = 5, .second = 2};
+    return value.first + value.second + value.third;
+}
+EOF
+
+try_ 7 << EOF
+struct values { int first; int second; int third; };
+int main(void) {
+    struct values value = (struct values){.third = 5, .second = 2};
+    return value.first + value.second + value.third;
+}
+EOF
+
+# Compound literals use the record initializer path for unions as well.
+try_ 42 << EOF
+union number { int integer; char character; };
+int main(void) {
+    union number value = (union number){42};
+    return value.integer;
+}
+EOF
+
+# Record assignment copies every byte, not just the scalar slot used by the
+# register allocator. Five ints exercise a copy larger than one pointer.
+try_ 150 << EOF
+struct values { int a; int b; int c; int d; int e; };
+int main(void) {
+    struct values first = {10, 20, 30, 40, 50};
+    struct values second;
+    second = first;
+    return second.a + second.b + second.c + second.d + second.e;
+}
+EOF
+
+# A non-word-sized record exercises the byte tail of aggregate copying.
+try_ 66 << EOF
+struct mixed { int value; char tag; };
+int main(void) {
+    struct mixed first = {65, 1};
+    struct mixed second;
+    second = first;
+    return second.value + second.tag;
+}
+EOF
+
+# Record arguments are passed by value: the callee receives every byte, but a
+# write to its parameter cannot modify the caller's object.
+try_ 250 << EOF
+struct values { int a; int b; int c; int d; int e; };
+int consume(struct values value) {
+    value.a = 100;
+    return value.a + value.b + value.c + value.d + value.e;
+}
+int main(void) {
+    struct values source = {10, 20, 30, 40, 50};
+    return consume(source) + source.a;
+}
+EOF
+
+# The aggregate ABI slot must work after all register argument slots are full.
+try_ 25 << EOF
+struct pair { int first; int second; };
+int consume(int a, int b, int c, int d, int e, int f, struct pair value) {
+    return a + b + c + d + e + f + value.first + value.second;
+}
+int main(void) {
+    struct pair value = {7, 8};
+    return consume(1, 2, 3, 4, 0, 0, value);
+}
+EOF
+
+try_compile_error << EOF
+struct point { int x; int y; };
+int main(void) {
+    struct point p = (struct point){1, 2, 3};
+    return p.x;
+}
+EOF
+
+try_compile_error << EOF
+union number { int integer; char character; };
+int main(void) {
+    union number value = {1, 2};
+    return value.integer;
+}
+EOF
+
+try_ 5 << EOF
+union number { int integer; char character; };
+int main(void) {
+    union number value = {.character = 5};
+    return value.character;
+}
+EOF
+
+try_compile_error << EOF
+union number { int integer; char character; };
+int main(void) {
+    union number first = {1}, second = {2, 3};
+    return first.integer + second.integer;
+}
+EOF
+
+try_ 30 << EOF
 typedef struct { int a; int b; int c; } data_t;
 int main() {
     data_t d = {10, 20, 30};
@@ -796,6 +1135,46 @@ int main() {
     int arr[3] = {10, 20, 30};
     return arr[1];
 }
+EOF
+
+# A declared-bound compound literal is an array object that decays to its first
+# element when assigned to a pointer.
+try_ 12 << EOF
+int main(void) {
+    int *values = (int[3]){3, 4, 5};
+    return values[0] + values[1] + values[2];
+}
+EOF
+
+# A declared bound remains part of the type: omitted members are zero-filled.
+try_ 0 << EOF
+int main(void) {
+    int *values = (int[4]){3, 4};
+    return values[2] != 0 || values[3] != 0;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    int *values = (int[2]){3, 4, 5};
+    return values[0];
+}
+EOF
+
+try_compile_error << EOF
+int change(signed const int value) {
+    value = 2;
+    return value;
+}
+int main(void) { return change(1); }
+EOF
+
+try_compile_error << EOF
+typedef const int const_int;
+int change(const_int value) {
+    value = 2;
+    return value;
+}
+int main(void) { return change(1); }
 EOF
 
 # Extended compound literal tests (C99-style brace initialization)
@@ -840,6 +1219,14 @@ int main() {
 }
 EOF
 
+try_ 7 << EOF
+struct point { int x; int y; };
+int main(void) {
+    struct point pts[2] = { {1, 2}, {3, 4} };
+    return pts[1].x + pts[1].y;
+}
+EOF
+
 # Test: Mixed array and struct compound literals
 try_ 40 << EOF
 struct point { int x; int y; };
@@ -855,6 +1242,83 @@ int main() {
 EOF
 
 # Global arrays of structs with compound literals
+try_ 9 << EOF
+struct global_compound_pair { int first; int second; };
+struct global_compound_pair global_compound_value =
+    (struct global_compound_pair){.second = 6, .first = 3};
+int main(void) {
+    return global_compound_value.first + global_compound_value.second;
+}
+EOF
+
+try_compile_error << EOF
+struct global_compound_left { int value; };
+struct global_compound_right { int value; };
+struct global_compound_left global_compound_mismatch =
+    (struct global_compound_right){1};
+int main(void) { return 0; }
+EOF
+
+try_ 12 << EOF
+int global_compound_scalar = (int){12};
+int main(void) { return global_compound_scalar; }
+EOF
+
+try_compile_error << EOF
+char global_compound_wrong_type = (int){1};
+int main(void) { return 0; }
+EOF
+
+try_ 9 << EOF
+int *global_compound_array = (int[]){2, 3, 4};
+int main(void) {
+    return global_compound_array[0] + global_compound_array[1] +
+           global_compound_array[2];
+}
+EOF
+
+try_ 5 << EOF
+int *global_compound_bounded = (int[4]){5};
+int main(void) {
+    return global_compound_bounded[0] + global_compound_bounded[1] +
+           global_compound_bounded[2] + global_compound_bounded[3];
+}
+EOF
+
+try_ 10 << EOF
+struct global_compound_record { int first; int second; };
+struct global_compound_record *global_compound_records =
+    (struct global_compound_record[]){ {1, 2}, {3, 4} };
+int main(void) {
+    return global_compound_records[0].first +
+           global_compound_records[1].first +
+           global_compound_records[1].second +
+           global_compound_records[0].second;
+}
+EOF
+
+try_compile_error << EOF
+struct global_compound_array_left { int value; };
+struct global_compound_array_right { int value; };
+struct global_compound_array_left *global_compound_array_mismatch =
+    (struct global_compound_array_right[]){ {1} };
+int main(void) { return 0; }
+EOF
+
+try_ 60 << EOF
+struct nested_compound_point { int x; int y; };
+struct nested_compound_value {
+    struct nested_compound_point point;
+    int z;
+};
+int main(void) {
+    struct nested_compound_value value = (struct nested_compound_value){
+        .point = (struct nested_compound_point){10, 20}, .z = 30
+    };
+    return value.point.x + value.point.y + value.z;
+}
+EOF
+
 try_ 7 << EOF
 struct point { int x; int y; };
 struct point gpts1[] = { {3, 4} };
@@ -1176,10 +1640,65 @@ EOF
 # Category: Functions
 begin_category "Functions" "Testing function definitions, calls, and recursion"
 
+# `signed` is the existing signed scalar domain; both its explicit and
+# omitted-`int` forms are valid declaration specifiers.
+try_ 5 << EOF
+signed sum(signed int left, signed right)
+{
+    signed char delta = -1;
+    signed short extra = 1;
+    return left + right + delta + extra;
+}
+int main(void)
+{
+    return sum(2, 3);
+}
+EOF
+
+try_compile_error << EOF
+int main(void)
+{
+    signed const int first = 1, second = 2;
+    second = 3;
+    return first + second;
+}
+EOF
+
+try_ 5 << EOF
+int main(void)
+{
+    signed char value = -1;
+    return (signed int)value + (signed)6 + sizeof(signed short) - 2;
+}
+EOF
+
+try_ 7 << EOF
+typedef signed int signed_count_t;
+typedef signed char signed_delta_t;
+int main(void)
+{
+    signed_count_t count = 8;
+    signed_delta_t delta = -1;
+    return count + delta;
+}
+EOF
+
 # functions
 try_ 0 << EOF
 int main(void) {
     return 0;
+}
+EOF
+
+# Named struct/union specifiers are valid parameter declaration specifiers.
+try_ 10 << EOF
+struct value { int first; };
+int first(struct value input) {
+    return input.first;
+}
+int main(void) {
+    struct value input = {10};
+    return first(input);
 }
 EOF
 
@@ -1661,6 +2180,22 @@ int main() {
 }
 EOF
 
+# C99 6.5.6: pointer subtraction yields an element count, not a byte count.
+try_ 5 << EOF
+int main(void) {
+    int values[10];
+    return &values[7] - &values[2];
+}
+EOF
+
+try_ 5 << EOF
+struct point { int x; int y; };
+int main(void) {
+    struct point values[10];
+    return &values[8] - &values[3];
+}
+EOF
+
 # Pointer arithmetic tests
 
 # Basic integer pointer difference
@@ -1702,13 +2237,73 @@ int main() {
 }
 EOF
 
-# Test with void* cast (treated as char*)
-try_ 8 << EOF
+# C99 does not define arithmetic on void pointers.
+try_compile_error << EOF
 int main() {
     char array[20];
     void *vp1 = array;
-    void *vp2 = array + 8;
-    return (char*)vp2 - (char*)vp1;
+    return vp1 + 8;
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    char array[20];
+    void *vp1 = array;
+    return vp1 - 1;
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    char array[20];
+    void *vp1 = array;
+    vp1++;
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    char array[20];
+    void *vp1 = array;
+    ++vp1;
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    char array[20];
+    void *vp1 = array;
+    vp1 += 1;
+    return 0;
+}
+EOF
+
+# A pointer-to-void-pointer advances over pointer objects, so it remains valid.
+try_ 1 << EOF
+int main() {
+    void *values[2];
+    void **p = values;
+    p += 1;
+    return (char *)p - (char *)values == sizeof(void *);
+}
+EOF
+
+# An array of pointers decays to a pointer-to-pointer. Its stride is a pointer
+# object, not the size of the pointee base type.
+try_ 1 << EOF
+int main() {
+    int *values[2];
+    return (char *)(values + 1) - (char *)values == sizeof(void *);
+}
+EOF
+
+try_ 1 << EOF
+int main() {
+    int *values[3];
+    return (values + 2) - (values + 1);
 }
 EOF
 
@@ -1938,6 +2533,33 @@ int main() {
 }
 EOF
 
+# An indirect call must retain the prototype parsed for its function-pointer
+# declaration so a record parameter is copied and passed by value, just as it is
+# for a direct call.
+try_ 42 << EOF
+struct pair { int left; int right; };
+int total(struct pair p) { p.left = 30; return p.left + p.right; }
+int main() {
+    struct pair p = {3, 12};
+    int (*fn)(struct pair) = total;
+    return fn(p) == 42 && p.left == 3 ? 42 : 1;
+}
+EOF
+
+# The same prototype metadata belongs to a function-pointer member, rather than
+# only to a standalone local declaration.
+try_ 42 << EOF
+struct pair { int left; int right; };
+struct holder { int (*fn)(struct pair); };
+int total(struct pair p) { p.right = 12; return p.left + p.right; }
+int main() {
+    struct pair p = {30, 3};
+    struct holder h;
+    h.fn = total;
+    return h.fn(p) == 42 && p.right == 3 ? 42 : 1;
+}
+EOF
+
 # Addressing a pointer to a function-pointer aggregate must return the pointer
 # variable's address, not backing storage for its pointee.
 try_ 5 << EOF
@@ -1975,6 +2597,34 @@ EOF
 
 # Category: Arrays
 begin_category "Arrays" "Testing array declarations, indexing, and operations"
+
+try_compile_error << EOF
+int main(void)
+{
+    int values[2] = {1, 2, 3};
+    return values[0];
+}
+EOF
+
+# C99 array designators may initialize sparse slots in either order; omitted
+# elements retain the aggregate's implicit zero initialization.
+try_ 7 << EOF
+int main(void)
+{
+    int values[4] = {[3] = 5, [1] = 2};
+    return values[0] + values[1] + values[2] + values[3];
+}
+EOF
+
+# Array element initializers dispatch through the same record path for unions.
+try_ 30 << EOF
+union value { int integer; char character; };
+int main(void)
+{
+    union value values[2] = {{10}, {20}};
+    return values[0].integer + values[1].integer;
+}
+EOF
 
 # a parameter whose first dimension is omitted is still a 2-D array: "int
 # a[][4]" must index exactly like "int a[3][4]", not like "int **"
@@ -2322,8 +2972,544 @@ int main()
 }
 EOF
 
+# A declaration's base type applies to every global declarator, while each
+# declarator keeps its own pointer and array modifiers and initializer.
+try_ 39 << EOF
+typedef int myint;
+struct pair { int x; int y; } first, second, *selected;
+union choice { int number; char letter; } chosen, *chosen_ptr;
+int plain = 3, *pointer, array[2];
+char *left = "A", *right = "B";
+myint alpha = 4, beta = 5;
+
+int main(void)
+{
+    pointer = &plain;
+    first.x = 6;
+    first.y = 7;
+    second.x = 8;
+    second.y = 9;
+    selected = &second;
+    chosen.number = 10;
+    chosen_ptr = &chosen;
+    array[0] = first.x;
+    array[1] = selected->y;
+    return *pointer + array[0] + array[1] + chosen_ptr->number + alpha + beta +
+           (left != 0) + (right != 0);
+}
+EOF
+
+# Static declarations have static storage duration. The local counter must be
+# initialized once in the synthetic global frame, while its name stays scoped to
+# next_value().
+try_ 19 << EOF
+const static int file_value = 4;
+static int next_value(void)
+{
+    static int counter = 7;
+    const static int bias = 0;
+    return counter++ + bias;
+}
+int main(void)
+{
+    return file_value + next_value() + next_value();
+}
+EOF
+
+# A block-scope static initializer is lowered as global data and therefore must
+# be a C99 constant expression, not a run-time call.
+try_compile_error << EOF
+int runtime_value(void) { return 7; }
+int main(void)
+{
+    static int value = runtime_value();
+    return value;
+}
+EOF
+
+# A block-scope static array has global storage duration but retains block
+# scope. Its constant initializer must be emitted with global data.
+try_ 15 << EOF
+int values(void)
+{
+    static int entries[3] = {4, 5, 6};
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 10 << EOF
+int values(void)
+{
+    static int left[2] = {1, 2}, right[2] = {3, 4};
+    return left[0] + left[1] + right[0] + right[1];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 17 << EOF
+struct static_pair { int first; int second; };
+static struct static_pair global_pair = {8, 9};
+int main(void)
+{
+    return global_pair.first + global_pair.second;
+}
+EOF
+
+# File-scope member designators may reorder fields; omitted fields are zero.
+try_ 7 << EOF
+struct designated_values { int first; int second; int third; };
+struct designated_values values = {.third = 5, .second = 2};
+int main(void)
+{
+    return values.first + values.second + values.third;
+}
+EOF
+
+# Keep byte-wide designated stores from clobbering an adjacent member.
+try_ 7 << EOF
+struct byte_designated_values { char first; char second; int third; };
+struct byte_designated_values byte_values = {.third = 5, .second = 2};
+int main(void)
+{
+    return byte_values.first + byte_values.second + byte_values.third;
+}
+EOF
+
+# Bounded array designators use the same global initializer lowering.
+try_ 9 << EOF
+int designated_entries[4] = {[3] = 7, [1] = 2};
+int main(void)
+{
+    return designated_entries[0] + designated_entries[1] +
+           designated_entries[2] + designated_entries[3];
+}
+EOF
+
+# An omitted bound is one past the highest designated element.
+try_ 9 << EOF
+int inferred_entries[] = {[3] = 7, [1] = 2};
+int main(void)
+{
+    return inferred_entries[0] + inferred_entries[1] +
+           inferred_entries[2] + inferred_entries[3];
+}
+EOF
+
+# The same lowering serves block-scope static records.
+try_ 12 << EOF
+struct static_designated_values { int first; int second; int third; };
+int values(void)
+{
+    static struct static_designated_values value = {.third = 8, .second = 4};
+    return value.first + value.second + value.third;
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 8 << EOF
+int values(void)
+{
+    static int entries[3] = {[2] = 5, [0] = 3};
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 8 << EOF
+int values(void)
+{
+    int entries[] = {[2] = 5, [0] = 3};
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 8 << EOF
+int values(void)
+{
+    static int entries[] = {[2] = 5, [0] = 3};
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 9 << EOF
+struct local_pair { int first; int second; };
+int values(void)
+{
+    static struct local_pair pair = {4, 5};
+    return pair.first + pair.second;
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 10 << EOF
+struct local_pair { int first; int second; };
+int values(void)
+{
+    static struct local_pair left = {1, 2}, right = {3, 4};
+    return left.first + left.second + right.first + right.second;
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 15 << EOF
+struct static_grid { int values[2][2]; int tail; };
+int values(void)
+{
+    static struct static_grid grid = {{{1, 2}, {3, 4}}, 5};
+    return grid.values[0][0] + grid.values[0][1] + grid.values[1][0] +
+           grid.values[1][1] + grid.tail;
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+# Block scope gives same-spelled statics distinct objects in distinct functions.
+try_ 62 << EOF
+int first(void)
+{
+    static int value = 10;
+    return value++;
+}
+int second(void)
+{
+    static int value = 20;
+    return value++;
+}
+int main(void)
+{
+    return first() + second() + first() + second();
+}
+EOF
+
+# A redeclaration without a storage class inherits an earlier static function's
+# internal linkage. Reversing that order is a constraint violation.
+try_ 42 << EOF
+static int helper(void);
+int helper(void) { return 42; }
+int main(void) { return helper(); }
+EOF
+
+try_compile_error << EOF
+int helper(void);
+static int helper(void) { return 42; }
+int main(void) { return helper(); }
+EOF
+
 # Category: Const Qualifiers
 begin_category "Const Qualifiers" "Testing const qualifier support for variables and parameters"
+
+# Explicit casts may remove const in C, but must be diagnosed. Adding const
+# remains legal and should not spuriously warn.
+try_compile_warning "Warning: discarding const qualifier in cast" << EOF
+int main(void) {
+    const int value = 42;
+    int *mutable = (int *)&value;
+    return *mutable;
+}
+EOF
+
+try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+int main(void) {
+    char *text = "hello";
+    return text[0];
+}
+EOF
+
+try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+char *message = "global";
+int main(void) {
+    return message[0];
+}
+EOF
+
+try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+int first(char *text) { return text[0]; }
+int main(void) {
+    return first("argument");
+}
+EOF
+
+try_ 42 << EOF
+int main(void) {
+    int value = 42;
+    const int *read_only = (const int *)&value;
+    return *read_only;
+}
+EOF
+
+# Qualified union objects use the normal aggregate initializer path.
+try_ 42 << EOF
+union number { int integer; char character; };
+int main(void) {
+    const union number value = {42};
+    return value.integer;
+}
+EOF
+
+# C99 constraint violations: qualifiers make the designated object read-only.
+try_compile_error << EOF
+int main(void) {
+    const int x = 1;
+    x = 2;
+    return x;
+}
+EOF
+
+try_compile_error << EOF
+struct pair { int x; int y; };
+int main(void) {
+    const struct pair value = {1, 2};
+    value.x = 3;
+    return value.x;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    const int values[2] = {1, 2};
+    values[1] = 3;
+    return values[1];
+}
+EOF
+
+# Qualifiers apply to every declarator in one declaration, not just the first.
+try_compile_error << EOF
+int main(void) {
+    const int first = 1, second = 2;
+    second = 3;
+    return first + second;
+}
+EOF
+
+# A scalar typedef preserves const qualification on each use.
+try_compile_error << EOF
+typedef const int const_int;
+int main(void) {
+    const_int value = 1;
+    value = 2;
+    return value;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    const int x = 1;
+    x++;
+    return x;
+}
+EOF
+
+# C99 permits a qualifier after the base type. It still qualifies the object,
+# whereas a qualifier after `*` qualifies the pointer itself.
+try_compile_error << EOF
+int main(void) {
+    int const value = 1;
+    value = 2;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    int const *pointer = &value;
+    *pointer = 2;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int first = 1, second = 2;
+    int * const pointer = &first;
+    pointer = &second;
+    return *pointer;
+}
+EOF
+
+try_compile_error << EOF
+struct trailing_const_pair { int value; };
+int main(void) {
+    struct trailing_const_pair const pair = {1};
+    pair.value = 2;
+    return pair.value;
+}
+EOF
+
+try_compile_error << EOF
+void change(int const *pointer) {
+    *pointer = 2;
+}
+int main(void) {
+    int value = 1;
+    change(&value);
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int const trailing_global = 1;
+int main(void) {
+    trailing_global = 2;
+    return trailing_global;
+}
+EOF
+
+try_compile_error << EOF
+typedef int *int_pointer;
+int main(void) {
+    int first = 1, second = 2;
+    int_pointer const pointer = &first;
+    pointer = &second;
+    return *pointer;
+}
+EOF
+
+try_compile_error << EOF
+typedef int *int_pointer;
+int main(void) {
+    int first = 1, second = 2;
+    const int_pointer pointer = &first;
+    pointer = &second;
+    return *pointer;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    const int *p = &value;
+    *p = 2;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    const int value = 1;
+    int *p = &value;
+    return *p;
+}
+EOF
+
+# Adding const through two pointer levels is unsafe: a const pointer could be
+# written back through the original int **.
+try_compile_error << EOF
+int main(void) {
+    int value = 7;
+    int *p = &value;
+    const int **cpp = &p;
+    return **cpp;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 7;
+    int *p = &value;
+    int **pp = &p;
+    const int **cpp;
+    cpp = pp;
+    return **cpp;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int *p = 0;
+    const int value = 1;
+    p = &value;
+    return *p;
+}
+EOF
+
+# Parameter conversion must reject the same qualifier loss as an assignment.
+try_compile_error << EOF
+void overwrite(int *p) { *p = 2; }
+int main(void) {
+    const int value = 1;
+    overwrite(&value);
+    return value;
+}
+EOF
+
+# A retained function-pointer prototype must enforce it as well.
+try_compile_error << EOF
+void overwrite(int *p) { *p = 2; }
+int main(void) {
+    const int value = 1;
+    void (*fn)(int *) = overwrite;
+    fn(&value);
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    const int *p = &value;
+    *p += 2;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int first = 1, second = 2;
+    int * const p = &first;
+    p = &second;
+    return *p;
+}
+EOF
+
+try_compile_error << EOF
+void set_value(const int *p) {
+    *p = 2;
+}
+int main(void) {
+    int value = 1;
+    set_value(&value);
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    const int *p = &value;
+    const int **pp = &p;
+    **pp = 2;
+    return value;
+}
+EOF
 
 # Test 1: Basic const local variable
 try_ 42 << EOF
@@ -2369,11 +3555,11 @@ int main() {
 }
 EOF
 
-# Test 6: Non-const pointer to const data
+# Test 6: Pointer to const data
 try_ 35 << EOF
 int main() {
     const int value = 35;
-    int *ptr = &value;
+    const int *ptr = &value;
     return *ptr;
 }
 EOF
@@ -2541,7 +3727,22 @@ items 24 "short s; s = 6; s *= 4; return s;"
 begin_category "Sizeof Operator" "Testing sizeof operator on various types"
 
 # sizeof
-expr 0 "sizeof(void)"
+try_compile_error << EOF
+int main(void)
+{
+    return sizeof(void);
+}
+EOF
+try_compile_error << EOF
+int value(void)
+{
+    return 1;
+}
+int main(void)
+{
+    return sizeof(value);
+}
+EOF
 expr 1 "sizeof(_Bool)"
 expr 1 "sizeof(char)"
 expr 2 "sizeof(short)"
