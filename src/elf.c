@@ -1086,14 +1086,17 @@ void elf_generate_dynamic_sections(void)
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x3,
                   dynamic_sections.elf_got_start);
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, 0x1);
-#if DYN_BIND_NOW == 1
+
     /* Resolve every PLT entry at load time. This target's PLT[0] does not
      * arrange the GOT[1]/GOT[2] hand-off the lazy resolver needs, so the loader
      * writes the final addresses straight into the GOT instead.
      */
-    elf_write_dyn(dynamic_sections.elf_dynamic, 0x18, 0x0); /* DT_BIND_NOW */
-    elf_write_dyn(dynamic_sections.elf_dynamic, 0x1e, 0x8); /* DF_BIND_NOW */
-#endif
+    if (imm_binding) {
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x18,
+                      0x0); /* DT_BIND_NOW */
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x1e,
+                      0x8); /* DF_BIND_NOW */
+    }
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x0, 0x0);
 }
 
