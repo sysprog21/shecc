@@ -84,12 +84,13 @@ TRANSLATION_DEFS = "\#define SHECC_TRANSLATION_DATE \"$(TRANSLATION_DATE)\"\n\#d
 STAGE0_FLAGS ?= --dump-ir
 STAGE1_FLAGS ?=
 DYNLINK ?= 0
+BINDING ?= lazy
 
 COMMENTFLOW ?= commentflow
 SHFMT ?= shfmt
 ifeq ($(DYNLINK),1)
-    STAGE0_FLAGS += --dynlink
-    STAGE1_FLAGS += --dynlink
+    STAGE0_FLAGS += --dynlink -z $(BINDING)
+    STAGE1_FLAGS += --dynlink -z $(BINDING)
 endif
 
 SRCS := $(wildcard $(patsubst %,%/main.c, $(SRCDIR)))
