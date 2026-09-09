@@ -25,7 +25,6 @@ ARCH_DEFS = \
     \#define PLT_ENT_SIZE 16\n$\
     \#define RESERVED_GOT_NUM 3\n$\
     \#define R_ARCH_JUMP_SLOT 1026 /* R_AARCH64_JUMP_SLOT */\n$\
-    \#define DYN_BIND_NOW 1\n$\
     "
 
 # An Arm64 Linux host runs this target's output itself, so nothing has to stand
