@@ -986,6 +986,19 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
         return i;
     }
 
+    /* The reload below reads the variable's slot, so there has to be one
+     * holding its value. A parameter arrives in a register and is given a
+     * slot only when something spills it: reloading before that read whatever
+     * the frame happened to hold, and "int x = a - b; int *p = &b;" computed
+     * a - garbage. Writing the register back first is what makes the slot
+     * stand for the variable.
+     */
+    if (i > -1 && var->address_taken && !var->space_is_allocated) {
+        store_var(bb, var, i);
+        vreg_map_to_phys(var, i);
+        return i;
+    }
+
     for (i = 0; i < REG_CNT; i++) {
         if (reg_is_free(i)) {
             load_var(bb, var, i);
