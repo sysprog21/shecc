@@ -177,13 +177,6 @@
 #define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
 #endif
 
-/* Targets whose PLT has no lazy-resolution path ask the loader to bind every
- * PLT entry at load time.
- */
-#ifndef DYN_BIND_NOW
-#define DYN_BIND_NOW 0
-#endif
-
 #define ELF_MACHINE_ARM32 0x28
 #define ELF_MACHINE_RV32 0xf3
 #define ELF_MACHINE_X86_64 0x3e

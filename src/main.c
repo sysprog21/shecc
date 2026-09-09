@@ -117,7 +117,17 @@ int main(int argc, char *argv[])
             libc = false;
         else if (!strcmp(argv[i], "--dynlink"))
             dynlink = true;
-        else if (!strcmp(argv[i], "-E"))
+        else if (!strcmp(argv[i], "-z")) {
+            if (i + 1 >= argc)
+                usage_error("-z requires \"lazy\" or \"now\"");
+
+            if (!strcmp(argv[i + 1], "lazy"))
+                imm_binding = false;
+            else if (!strcmp(argv[i + 1], "now"))
+                imm_binding = true;
+            else
+                usage_error("-z requires \"lazy\" or \"now\"");
+        } else if (!strcmp(argv[i], "-E"))
             expand_only = true;
         else if (!strcmp(argv[i], "-o")) {
             if (i + 1 < argc) {
@@ -131,10 +141,21 @@ int main(int argc, char *argv[])
             in = argv[i];
     }
 
+    if (dynlink) {
+        switch (ELF_MACHINE) {
+        /* The following 64-bit targets have no lazy-resolution path, so
+         * immediate binding must be used.
+         */
+        case ELF_MACHINE_X86_64:
+        case ELF_MACHINE_AARCH64:
+            imm_binding = true;
+        }
+    }
+
     if (!in) {
         printf(
             "Usage: shecc [-o output] [+m] [--dot] [--dump-ir] [--no-libc] "
-            "[--dynlink] [-E] <input.c>\n");
+            "[--dynlink] [-z <lazy | now>] [-E] <input.c>\n");
         usage_error("Missing source file");
     }
 
