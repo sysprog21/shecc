@@ -1130,7 +1130,7 @@ token_stream_t *gen_file_token_stream(char *filename)
         error_at("Internal error, expected eof at the end of file",
                  &cur->location);
 
-    tks = malloc(sizeof(token_stream_t));
+    tks = arena_calloc(TOKEN_ARENA, 1, sizeof(token_stream_t));
     tks->head = head.next;
     tks->tail = cur;
     hashmap_put(TOKEN_CACHE, filename, tks);
@@ -1190,7 +1190,7 @@ token_stream_t *gen_libc_token_stream(void)
         error_at("Internal error, expected eof at the end of file",
                  &cur->location);
 
-    tks = malloc(sizeof(token_stream_t));
+    tks = arena_calloc(TOKEN_ARENA, 1, sizeof(token_stream_t));
     tks->head = head.next;
     tks->tail = cur;
     hashmap_put(TOKEN_CACHE, filename, tks);
