@@ -1046,6 +1046,11 @@ void pin_registers(func_t *func)
     }
 }
 
+/* Defined beside OP_push handling below; allocation must not reclaim ABI
+ * argument registers once argument staging has begun.
+ */
+extern bool is_pushing_args;
+
 void load_var(basic_block_t *bb, var_t *var, int idx)
 {
     ph2_ir_t *ir;
@@ -1120,6 +1125,36 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
             else {
                 high = r;
                 break;
+            }
+        }
+
+        /* Loading a spilled pair needs the same two-register recovery as
+         * producing one. Without this, several live wide locals could be stored
+         * safely in stack slots yet a later reload aborted before the ordinary
+         * spill chooser got a chance to free a complete pair.
+         */
+        if (high < 0 && !is_pushing_args) {
+            for (int r = 0; r < REG_CNT; r++) {
+                var_t *owner = REGS[r].var;
+
+                if (!owner || r == operand_0 || pinned_base[r] ||
+                    !var_needs_register_pair(owner))
+                    continue;
+                spill_var(bb, owner, r);
+                low = -1;
+                high = -1;
+                for (int q = 0; q < REG_CNT; q++) {
+                    if (!reg_is_free(q))
+                        continue;
+                    if (low < 0)
+                        low = q;
+                    else {
+                        high = q;
+                        break;
+                    }
+                }
+                if (high >= 0)
+                    break;
             }
         }
         if (high < 0)
@@ -1296,6 +1331,37 @@ int prepare_dest(basic_block_t *bb,
             else {
                 high = r;
                 break;
+            }
+        }
+
+        /* Unlike a word destination, a pair cannot use the ordinary single
+         * register spill chooser. Before argument staging begins, spill whole
+         * non-source pairs and retry; their slot preserves both words. Once
+         * OP_push has installed ABI arguments, those registers are live until
+         * the call and must never be reclaimed here.
+         */
+        if (high < 0 && !is_pushing_args) {
+            for (int r = 0; r < REG_CNT; r++) {
+                var_t *owner = REGS[r].var;
+
+                if (!owner || r == operand_0 || r == operand_1 ||
+                    pinned_base[r] || !var_needs_register_pair(owner))
+                    continue;
+                spill_var(bb, owner, r);
+                low = -1;
+                high = -1;
+                for (int q = 0; q < REG_CNT; q++) {
+                    if (!reg_is_free(q))
+                        continue;
+                    if (low < 0)
+                        low = q;
+                    else {
+                        high = q;
+                        break;
+                    }
+                }
+                if (high >= 0)
+                    break;
             }
         }
         if (high < 0)
@@ -2632,6 +2698,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0 = insn->rd->init_val;
             ir->src1 = insn->rd->init_val_hi;
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
             ir->is_unsigned = is_unsigned_scalar(insn->rd);
             ir->size_bytes =
                 insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
@@ -2840,6 +2907,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->dest_hi = vreg_get_phys_hi(insn->rd);
             ir->is_unsigned = is_unsigned_scalar(insn->rd);
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->src0_is_pointer = is_address_like(insn->rs1);
             ir->size_bytes =
                 insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
 
@@ -3045,8 +3113,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, src0, src1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src0 = src0;
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->src1 = src1;
+            ir->src1_hi = vreg_get_phys_hi(insn->rs2);
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
 
             /* Record whether the result is an address, and which operand it
              * came from. On LP64 an int-typed result has to wrap at 32 bits,
@@ -3080,7 +3151,9 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, src0, -1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src0 = src0;
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
 
             /* As for OP_branch: the width of the test follows the operand, not
              * the result.
@@ -3099,7 +3172,9 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src1 = insn->sz;
             ir->src0 = src0;
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
             ir->is_unsigned = is_unsigned_scalar(insn->rd);
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             ir->size_bytes =

@@ -98,17 +98,40 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_jump:
     case OP_load_func:
     case OP_indirect:
-    case OP_add:
-    case OP_sub:
-    case OP_mul:
     case OP_lshift:
     case OP_rshift:
+        elf_offset += ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 ? 48 : 4;
+        return;
+    case OP_mul:
+        elf_offset +=
+            ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0
+                ? 20
+                : 4;
+        return;
+    case OP_negate:
+        elf_offset += 4;
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
+            elf_offset += 4;
+        return;
+    case OP_add:
+    case OP_sub:
+        elf_offset += 4;
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0)
+            elf_offset += 4;
+        return;
     case OP_bit_and:
     case OP_bit_or:
     case OP_bit_xor:
-    case OP_negate:
+        elf_offset += 4;
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0)
+            elf_offset += 4;
+        return;
     case OP_bit_not:
         elf_offset += 4;
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
+            elf_offset += 4;
         return;
     case OP_call:
         func = find_func(ph2_ir->func_name);
@@ -147,14 +170,20 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 8;
         return;
     case OP_address_of_func:
-    case OP_eq:
-    case OP_neq:
-    case OP_gt:
-    case OP_lt:
-    case OP_geq:
-    case OP_leq:
     case OP_log_not:
         elf_offset += 12;
+        return;
+    case OP_gt:
+    case OP_lt:
+        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 24 : 12;
+        return;
+    case OP_geq:
+    case OP_leq:
+        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 28 : 12;
+        return;
+    case OP_eq:
+    case OP_neq:
+        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 16 : 12;
         return;
     case OP_branch:
         if (ph2_ir->is_branch_detached)
@@ -177,13 +206,24 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             elf_offset += 4;
         return;
     case OP_sign_ext:
-        if (ph2_ir->src0_is_unsigned)
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi < 0) {
+            int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
+            elf_offset +=
+                (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer) &&
+                        (source_size == 1 || source_size == 2)
+                    ? 12
+                    : 8;
+        } else if (ph2_ir->src0_is_unsigned)
             elf_offset += 8;
         else
             elf_offset += 4;
         return;
     case OP_cast:
-        elf_offset += 4;
+        elf_offset +=
+            ph2_ir->dest_hi >= 0 &&
+                    (ph2_ir->src0_hi < 0 || ph2_ir->dest_hi != ph2_ir->src0_hi)
+                ? 8
+                : 4;
         return;
     default:
         fatal("Unknown opcode");
@@ -583,13 +623,33 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__bx(__AL, __lr));
         return;
     case OP_add:
-        emit(__add_r(__AL, rd, rn, rm));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0) {
+            emit(__adds_r(__AL, rd, rn, rm));
+            emit(__adc_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
+                         ph2_ir->src1_hi));
+        } else
+            emit(__add_r(__AL, rd, rn, rm));
         return;
     case OP_sub:
-        emit(__sub_r(__AL, rd, rn, rm));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0) {
+            emit(__subs_r(__AL, rd, rn, rm));
+            emit(__sbc_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
+                         ph2_ir->src1_hi));
+        } else
+            emit(__sub_r(__AL, rd, rn, rm));
         return;
     case OP_mul:
-        emit(__mul(__AL, rd, rn, rm));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0) {
+            emit(__umull(__AL, rd, ph2_ir->dest_hi, rn, rm));
+            emit(__mul(__AL, __r8, rn, ph2_ir->src1_hi));
+            emit(__mul(__AL, __r9, ph2_ir->src0_hi, rm));
+            emit(__add_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r8));
+            emit(__add_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r9));
+        } else
+            emit(__mul(__AL, rd, rn, rm));
         return;
     case OP_div:
     case OP_mod:
@@ -681,9 +741,50 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__rsb_i(__NE, rd, 0, rd));
         return;
     case OP_lshift:
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+            emit(__cmp_i(__AL, rm, 32));
+            emit(__b(__CS, 32));
+            emit(__mov_r(__AL, __r8, rn));
+            emit(__sll(__AL, rd, rn, rm));
+            emit(__sll(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi, rm));
+            emit(__rsb_i(__AL, __r9, 32, rm));
+            emit(__srl(__AL, __r8, __r8, __r9));
+            emit(__or_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r8));
+            emit(__b(__AL, 16));
+            emit(__add_i(__AL, __r9, rm, -32));
+            emit(__sll(__AL, ph2_ir->dest_hi, rn, __r9));
+            emit(__zero(rd));
+            return;
+        }
         emit(__sll(__AL, rd, rn, rm));
         return;
     case OP_rshift:
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+            int shift_kind = ph2_ir->src0_is_unsigned ? logic_rs : arith_rs;
+
+            emit(__cmp_i(__AL, rm, 32));
+            emit(__b(__CS, 32));
+            emit(__mov_r(__AL, __r8, ph2_ir->src0_hi));
+            emit(shift_kind == logic_rs ? __srl(__AL, rd, rn, rm)
+                                        : __sra(__AL, rd, rn, rm));
+            emit(__rsb_i(__AL, __r9, 32, rm));
+            emit(__sll(__AL, __r8, __r8, __r9));
+            emit(__or_r(__AL, rd, rd, __r8));
+            emit(shift_kind == logic_rs
+                     ? __srl(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi, rm)
+                     : __sra(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi, rm));
+            emit(__b(__AL, 16));
+            emit(__add_i(__AL, __r9, rm, -32));
+            emit(shift_kind == logic_rs
+                     ? __srl(__AL, rd, ph2_ir->src0_hi, __r9)
+                     : __sra(__AL, rd, ph2_ir->src0_hi, __r9));
+            if (shift_kind == logic_rs)
+                emit(__zero(ph2_ir->dest_hi));
+            else
+                emit(__srl_amt(__AL, 0, arith_rs, ph2_ir->dest_hi,
+                               ph2_ir->src0_hi, 31));
+            return;
+        }
         emit(ph2_ir->src0_is_unsigned ? __srl(__AL, rd, rn, rm)
                                       : __sra(__AL, rd, rn, rm));
         return;
@@ -693,26 +794,80 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_lt:
     case OP_geq:
     case OP_leq:
+        if (ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0) {
+            bool unsigned_cmp =
+                ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
+            arm_cond_t true_cond = arm_get_cond(ph2_ir->op, unsigned_cmp);
+            arm_cond_t false_cond;
+
+            switch (ph2_ir->op) {
+            case OP_lt:
+                false_cond = unsigned_cmp ? __CS : __GE;
+                emit(__zero(rd));
+                break;
+            case OP_gt:
+                false_cond = unsigned_cmp ? __LS : __LE;
+                emit(__zero(rd));
+                break;
+            case OP_geq:
+                false_cond = unsigned_cmp ? __CC : __LT;
+                emit(__mov_i(__AL, rd, 1));
+                break;
+            default: /* OP_leq */
+                false_cond = unsigned_cmp ? __HI : __GT;
+                emit(__mov_i(__AL, rd, 1));
+                break;
+            }
+            emit(__cmp_r(__AL, ph2_ir->src0_hi, ph2_ir->src1_hi));
+            emit(__mov_i(true_cond, rd, 1));
+            emit(__mov_i(false_cond, rd, 0));
+            emit(__cmp_r(__EQ, rn, rm));
+            if (ph2_ir->op == OP_geq || ph2_ir->op == OP_leq)
+                emit(__mov_i(__EQ, rd, 0));
+            emit(__mov_i(true_cond, rd, 1));
+            return;
+        }
         emit(__cmp_r(__AL, rn, rm));
+        if ((ph2_ir->op == OP_eq || ph2_ir->op == OP_neq) &&
+            ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0)
+            emit(__cmp_r(__EQ, ph2_ir->src0_hi, ph2_ir->src1_hi));
         emit(__zero(rd));
         emit(__mov_i(arm_get_cond(ph2_ir->op, ph2_ir->src0_is_unsigned ||
                                                   ph2_ir->src1_is_unsigned),
                      rd, 1));
         return;
     case OP_negate:
-        emit(__rsb_i(__AL, rd, 0, rn));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+            emit(__rsbs_i(__AL, rd, 0, rn));
+            emit(__rsc_i(__AL, ph2_ir->dest_hi, 0, ph2_ir->src0_hi));
+        } else
+            emit(__rsb_i(__AL, rd, 0, rn));
         return;
     case OP_bit_not:
         emit(__mvn_r(__AL, rd, rn));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
+            emit(__mvn_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
         return;
     case OP_bit_and:
         emit(__and_r(__AL, rd, rn, rm));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0)
+            emit(__and_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
+                         ph2_ir->src1_hi));
         return;
     case OP_bit_or:
         emit(__or_r(__AL, rd, rn, rm));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0)
+            emit(__or_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
+                        ph2_ir->src1_hi));
         return;
     case OP_bit_xor:
         emit(__eor_r(__AL, rd, rn, rm));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0)
+            emit(__eor_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
+                         ph2_ir->src1_hi));
         return;
     case OP_log_not:
         emit(__cmp_i(__AL, rn, 0));
@@ -738,6 +893,27 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_sign_ext: {
         /* Decode source size from upper 16 bits */
         int source_size = (rm >> 16) & 0xFFFF;
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi < 0) {
+            if (source_size == 1) {
+                if (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer) {
+                    emit(__sll_amt(__AL, 0, logic_ls, rd, rn, 24));
+                    emit(__srl_amt(__AL, 0, logic_rs, rd, rd, 24));
+                } else
+                    emit(__sxtb(__AL, rd, rn, 0));
+            } else if (source_size == 2) {
+                if (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer) {
+                    emit(__sll_amt(__AL, 0, logic_ls, rd, rn, 16));
+                    emit(__srl_amt(__AL, 0, logic_rs, rd, rd, 16));
+                } else
+                    emit(__sxth(__AL, rd, rn, 0));
+            } else
+                emit(__mov_r(__AL, rd, rn));
+            if (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer)
+                emit(__zero(ph2_ir->dest_hi));
+            else
+                emit(__srl_amt(__AL, 0, arith_rs, ph2_ir->dest_hi, rd, 31));
+            return;
+        }
         if (ph2_ir->src0_is_unsigned) {
             int shift = source_size == 2 ? 16 : 24;
             emit(__sll_amt(__AL, 0, logic_ls, rd, rn, shift));
@@ -753,8 +929,20 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     }
         return;
     case OP_cast:
-        /* Generic cast operation - for now, just move the value */
+        /* A 32-bit source widened to a direct wide scalar needs an explicit
+         * high word. Copy an existing pair unchanged, otherwise sign- or
+         * zero-extend the source according to its original type.
+         */
         emit(__mov_r(__AL, rd, rn));
+        if (ph2_ir->dest_hi >= 0) {
+            if (ph2_ir->src0_hi >= 0) {
+                if (ph2_ir->dest_hi != ph2_ir->src0_hi)
+                    emit(__mov_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
+            } else if (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer)
+                emit(__zero(ph2_ir->dest_hi));
+            else
+                emit(__srl_amt(__AL, 0, arith_rs, ph2_ir->dest_hi, rn, 31));
+        }
         return;
     default:
         fatal("Unknown opcode");

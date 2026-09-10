@@ -646,8 +646,14 @@ var_t *resize_to(block_t *block,
 bool incompatible_const_pointer_conversion(const var_t *from, const var_t *to)
 {
     unsigned int from_mask, to_mask;
+    int from_depth, to_depth;
 
-    if (!from || !to || !from->ptr_level || !to->ptr_level)
+    if (!from || !to)
+        return false;
+
+    from_depth = from->ptr_level + from->type->ptr_level;
+    to_depth = to->ptr_level + to->type->ptr_level;
+    if (!from_depth || !to_depth)
         return false;
 
     if (from->is_const_qualified && !to->is_const_qualified)
@@ -658,16 +664,18 @@ bool incompatible_const_pointer_conversion(const var_t *from, const var_t *to)
      * inner level: `int * const *` must accept `&p` when p is an `int * const`,
      * and converting it back to `int **` must be rejected.
      */
-    from_mask = from->pointer_const_mask;
-    to_mask = to->pointer_const_mask;
-    if (from->ptr_level > 0 && from->ptr_level <= 32)
-        from_mask &= ~(1U << (from->ptr_level - 1));
-    if (to->ptr_level > 0 && to->ptr_level <= 32)
-        to_mask &= ~(1U << (to->ptr_level - 1));
+    from_mask = from->type->pointer_const_mask |
+                (from->pointer_const_mask << from->type->ptr_level);
+    to_mask = to->type->pointer_const_mask |
+              (to->pointer_const_mask << to->type->ptr_level);
+    if (from_depth <= 32)
+        from_mask &= ~(1U << (from_depth - 1));
+    if (to_depth <= 32)
+        to_mask &= ~(1U << (to_depth - 1));
     if (from_mask & ~to_mask)
         return true;
 
-    return from->ptr_level > 1 && to->ptr_level > 1 &&
+    return from_depth > 1 && to_depth > 1 &&
            from->is_const_qualified != to->is_const_qualified;
 }
 
@@ -2534,6 +2542,9 @@ void read_full_var_decl(var_t *vd,
 
     vd->type = type;
     vd->is_const_qualified = type->is_const_qualified;
+    if (type->ptr_level && type->ptr_level <= 32)
+        vd->is_const_pointer =
+            type->pointer_const_mask & (1U << (type->ptr_level - 1));
 
     /* A qualifier may follow the base type as well as precede it: both "const
      * int" and "int const" qualify the object. Consume it before parsing
@@ -9066,6 +9077,7 @@ void read_global_statement(void)
             type->size = base->size;
             type->num_fields = 0;
             type->ptr_level = base->ptr_level;
+            type->pointer_const_mask = base->pointer_const_mask;
             type->is_const_qualified =
                 typedef_const || base->is_const_qualified;
             type->is_unsigned = base->is_unsigned;
@@ -9075,6 +9087,17 @@ void read_global_statement(void)
             while (lex_accept(T_asterisk)) {
                 type->ptr_level++;
                 type->size = PTR_SIZE;
+                while (true) {
+                    if (lex_accept(T_const)) {
+                        if (type->ptr_level <= 32)
+                            type->pointer_const_mask |=
+                                1U << (type->ptr_level - 1);
+                    } else if (lex_accept(T_volatile) ||
+                               lex_accept(T_restrict)) {
+                        ;
+                    } else
+                        break;
+                }
             }
 
             lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);

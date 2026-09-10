@@ -5171,6 +5171,57 @@ int main(void) {
     return value;
 }
 EOF
+
+# A qualifier after a typedef declarator's star belongs to the pointer object.
+# It must parse, retain its type-level depth, and reject conversion through a
+# pointer-to-pointer that would permit replacing the fixed pointer.
+try_ 1 << EOF
+typedef int *const fixed_ptr;
+int main(void) {
+    int value = 1;
+    fixed_ptr fixed = &value;
+    return *fixed;
+}
+EOF
+try_compile_error << EOF
+typedef int *const fixed_ptr;
+typedef fixed_ptr *const fixed_handle;
+int main(void) {
+    int value = 1;
+    fixed_ptr fixed = &value;
+    fixed_handle handle = &fixed;
+    int ***mutable = &handle;
+    return ***mutable;
+}
+EOF
+try_compile_error << EOF
+typedef int *const fixed_ptr;
+int main(void) {
+    int first = 1, second = 2;
+    fixed_ptr fixed = &first;
+    fixed = &second;
+    return *fixed;
+}
+EOF
+try_ 1 << EOF
+typedef int *const fixed_ptr;
+typedef fixed_ptr *const fixed_handle;
+int main(void) {
+    int value = 1;
+    fixed_ptr fixed = &value;
+    fixed_handle handle = &fixed;
+    return **handle;
+}
+EOF
+try_compile_error << EOF
+typedef int *const fixed_ptr;
+int main(void) {
+    int value = 1;
+    fixed_ptr fixed = &value;
+    int **mutable = &fixed;
+    return **mutable;
+}
+EOF
 try_compile_error << EOF
 int main(void) {
     const int x = 1;

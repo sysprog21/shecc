@@ -807,6 +807,11 @@ struct type {
     var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
+    /* Qualifiers written after stars inside a typedef declarator. These bits
+     * are relative to the typedef's own pointer depth; var_t keeps any stars
+     * subsequently written at a use site.
+     */
+    unsigned int pointer_const_mask;
     bool is_union; /* preserves union semantics for anonymous typedef unions */
     bool
         has_flexible_array_member; /* cannot be embedded by value in a record */

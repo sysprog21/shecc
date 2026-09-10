@@ -35,6 +35,9 @@ typedef enum {
     arm_sub = 2,
     arm_rsb = 3,
     arm_add = 4,
+    arm_adc = 5,
+    arm_sbc = 6,
+    arm_rsc = 7,
     arm_ldm = 9,
     arm_teq = 9,
     arm_cmp = 10,
@@ -124,6 +127,15 @@ int arm_extract_bits(int imm, int i_start, int i_end, int d_start, int d_end)
 int arm_encode(arm_cond_t cond, int opcode, int rn, int rd, int op2)
 {
     return (cond << 28) + (opcode << 20) + (rn << 16) + (rd << 12) + op2;
+}
+
+/* ARM A8.8.247: unsigned 32x32 -> 64 multiply. RdLo/RdHi receive the complete
+ * product, which is the primitive paired wide multiplication needs.
+ */
+int __umull(arm_cond_t cond, arm_reg rdlo, arm_reg rdhi, arm_reg rm, arm_reg rs)
+{
+    return (cond << 28) + 0x00800090 + (rdhi << 16) + (rdlo << 12) + (rs << 8) +
+           rm;
 }
 
 int __svc(void)
@@ -255,9 +267,39 @@ int __add_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
     return __mov(cond, 0, arm_add, 0, rs, rd, ro);
 }
 
+int __adds_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_add, 1, rs, rd, ro);
+}
+
+int __adc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_adc, 0, rs, rd, ro);
+}
+
 int __sub_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
 {
     return __mov(cond, 0, arm_sub, 0, rs, rd, ro);
+}
+
+int __subs_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_sub, 1, rs, rd, ro);
+}
+
+int __sbc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_sbc, 0, rs, rd, ro);
+}
+
+int __rsbs_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
+{
+    return __mov(cond, 1, arm_rsb, 1, rn, rd, imm);
+}
+
+int __rsc_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
+{
+    return __mov(cond, 1, arm_rsc, 0, rn, rd, imm);
 }
 
 int __zero(int rd)
