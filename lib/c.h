@@ -131,7 +131,7 @@ int fseek(FILE *stream, int offset, int whence);
 int ftell(FILE *stream);
 
 /* string-related functions */
-int strlen(char *str);
+int strlen(const char *str);
 int strcmp(char *s1, char *s2);
 int strncmp(char *s1, char *s2, int len);
 char *strcpy(char *dest, char *src);

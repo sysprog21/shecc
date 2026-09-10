@@ -783,6 +783,31 @@ EOF
 
 # Multi-field struct compound literals
 try_ 30 << EOF
+struct point { int x; int y; };
+int main(void) {
+    struct point p = (struct point){10, 20};
+    return p.x + p.y;
+}
+EOF
+
+# C99 aggregate initialization zero-fills all omitted record members.
+try_ 0 << EOF
+struct point { int x; int y; int z; };
+int main(void) {
+    struct point p = (struct point){7};
+    return p.y != 0 || p.z != 0;
+}
+EOF
+
+try_compile_error << EOF
+struct point { int x; int y; };
+int main(void) {
+    struct point p = (struct point){1, 2, 3};
+    return p.x;
+}
+EOF
+
+try_ 30 << EOF
 typedef struct { int a; int b; int c; } data_t;
 int main() {
     data_t d = {10, 20, 30};
@@ -795,6 +820,30 @@ try_ 20 << EOF
 int main() {
     int arr[3] = {10, 20, 30};
     return arr[1];
+}
+EOF
+
+# A declared-bound compound literal is an array object that decays to its first
+# element when assigned to a pointer.
+try_ 12 << EOF
+int main(void) {
+    int *values = (int[3]){3, 4, 5};
+    return values[0] + values[1] + values[2];
+}
+EOF
+
+# A declared bound remains part of the type: omitted members are zero-filled.
+try_ 0 << EOF
+int main(void) {
+    int *values = (int[4]){3, 4};
+    return values[2] != 0 || values[3] != 0;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int *values = (int[2]){3, 4, 5};
+    return values[0];
 }
 EOF
 
@@ -1992,6 +2041,14 @@ EOF
 # Category: Arrays
 begin_category "Arrays" "Testing array declarations, indexing, and operations"
 
+try_compile_error << EOF
+int main(void)
+{
+    int values[2] = {1, 2, 3};
+    return values[0];
+}
+EOF
+
 # a parameter whose first dimension is omitted is still a 2-D array: "int
 # a[][4]" must index exactly like "int a[3][4]", not like "int **"
 try_ 66 << EOF
@@ -2365,8 +2422,180 @@ int main(void)
 }
 EOF
 
+# Static declarations have static storage duration. The local counter must be
+# initialized once in the synthetic global frame, while its name stays scoped to
+# next_value().
+try_ 19 << EOF
+const static int file_value = 4;
+static int next_value(void)
+{
+    static int counter = 7;
+    const static int bias = 0;
+    return counter++ + bias;
+}
+int main(void)
+{
+    return file_value + next_value() + next_value();
+}
+EOF
+
+# A block-scope static array has global storage duration but retains block
+# scope. Its constant initializer must be emitted with global data.
+try_ 15 << EOF
+int values(void)
+{
+    static int entries[3] = {4, 5, 6};
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 10 << EOF
+int values(void)
+{
+    static int left[2] = {1, 2}, right[2] = {3, 4};
+    return left[0] + left[1] + right[0] + right[1];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 17 << EOF
+struct static_pair { int first; int second; };
+static struct static_pair global_pair = {8, 9};
+int main(void)
+{
+    return global_pair.first + global_pair.second;
+}
+EOF
+
+try_ 9 << EOF
+struct local_pair { int first; int second; };
+int values(void)
+{
+    static struct local_pair pair = {4, 5};
+    return pair.first + pair.second;
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 10 << EOF
+struct local_pair { int first; int second; };
+int values(void)
+{
+    static struct local_pair left = {1, 2}, right = {3, 4};
+    return left.first + left.second + right.first + right.second;
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
 # Category: Const Qualifiers
 begin_category "Const Qualifiers" "Testing const qualifier support for variables and parameters"
+
+# C99 constraint violations: qualifiers make the designated object read-only.
+try_compile_error << EOF
+int main(void) {
+    const int x = 1;
+    x = 2;
+    return x;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    const int x = 1;
+    x++;
+    return x;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    const int *p = &value;
+    *p = 2;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    const int value = 1;
+    int *p = &value;
+    return *p;
+}
+EOF
+
+# Adding const through two pointer levels is unsafe: a const pointer could be
+# written back through the original int **.
+try_compile_error << EOF
+int main(void) {
+    int value = 7;
+    int *p = &value;
+    const int **cpp = &p;
+    return **cpp;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 7;
+    int *p = &value;
+    int **pp = &p;
+    const int **cpp;
+    cpp = pp;
+    return **cpp;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int *p = 0;
+    const int value = 1;
+    p = &value;
+    return *p;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    const int *p = &value;
+    *p += 2;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int first = 1, second = 2;
+    int * const p = &first;
+    p = &second;
+    return *p;
+}
+EOF
+
+try_compile_error << EOF
+void set_value(const int *p) {
+    *p = 2;
+}
+int main(void) {
+    int value = 1;
+    set_value(&value);
+    return value;
+}
+EOF
 
 # Test 1: Basic const local variable
 try_ 42 << EOF
@@ -2412,11 +2641,11 @@ int main() {
 }
 EOF
 
-# Test 6: Non-const pointer to const data
+# Test 6: Pointer to const data
 try_ 35 << EOF
 int main() {
     const int value = 35;
-    int *ptr = &value;
+    const int *ptr = &value;
     return *ptr;
 }
 EOF

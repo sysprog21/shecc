@@ -47,7 +47,7 @@ int isblank(int c)
     return c == ' ' || c == '\t';
 }
 
-int strlen(char *str)
+int strlen(const char *str)
 {
     /* process the string by checking 4 characters (a 32-bit word) at a time */
     int i = 0;

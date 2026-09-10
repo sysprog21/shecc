@@ -349,6 +349,7 @@ typedef enum {
     T_continue,
     T_goto,
     T_const, /* const qualifier */
+    T_static,
     /* C pre-processor directives */
     T_cppd_include,
     T_cppd_define,
@@ -553,7 +554,9 @@ struct var {
     int ptr_level;
     bool is_func;
     bool is_global;
+    bool is_static;          /* declaration used the static storage class */
     bool is_const_qualified; /* true if variable has const qualifier */
+    bool is_const_pointer;   /* true for the outermost `* const` qualifier */
     bool address_taken;      /* true if variable address was taken (&var) */
     /* Working state for strength_reduce(): how many instructions in the
      * function write the variable, whether it is written inside the loop being
@@ -733,6 +736,7 @@ typedef struct {
     int ptr_level;
     bool is_func;
     bool is_reference;
+    bool is_const_qualified;
     type_t *type;
 } lvalue_t;
 
@@ -946,6 +950,7 @@ struct func {
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
+    bool is_static; /* internal-linkage declaration */
 
     /* inline_calls()'s verdict on this body and the return that ends it,
      * stamped with the round that reached them: a body is examined once per
