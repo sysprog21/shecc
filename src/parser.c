@@ -137,6 +137,7 @@ var_t *require_var(block_t *blk)
     var->var_name = "";
     var->consumed = -1;
     var->phys_reg = -1;
+    var->phys_reg_hi = -1;
     var->first_use = -1;
     var->last_use = -1;
     var->use_count = 0;
@@ -4570,6 +4571,14 @@ void handle_pointer_arithmetic(block_t *parent,
     var_t *int_var = NULL;
     int element_size = 0;
 
+    /* Functions are not objects, so no form of C99 pointer arithmetic may use a
+     * function pointer. Keep this before the add/sub split below: only the
+     * subtraction path performs the more specific compatible-pointee check.
+     */
+    if ((rs1 && rs1->is_func) || (rs2 && rs2->is_func))
+        error_at("Pointer arithmetic requires object pointers",
+                 cur_token_loc());
+
     if (is_direct_void_pointer(rs1) || is_direct_void_pointer(rs2))
         error_at("Pointer arithmetic on void* is invalid", cur_token_loc());
 
@@ -4584,31 +4593,36 @@ void handle_pointer_arithmetic(block_t *parent,
 
         /* If they have names, they might be variable references - look them up
          */
-        if (rs1->var_name[0] && !rs1->init_val) {
+        if (rs1->var_name[0]) {
             var_t *found = find_var(rs1->var_name, parent);
             if (found)
                 orig_rs1 = found;
         }
-        if (rs2->var_name[0] && !rs2->init_val) {
+        if (rs2->var_name[0]) {
             var_t *found = find_var(rs2->var_name, parent);
             if (found)
                 orig_rs2 = found;
         }
 
         /* Check if both have ptr_level or typedef pointer type */
-        bool rs1_is_ptr = is_pointer_like_value(orig_rs1);
-        bool rs2_is_ptr = is_pointer_like_value(orig_rs2);
+        bool rs1_is_ptr = is_pointer_like_value(orig_rs1) || orig_rs1->is_func;
+        bool rs2_is_ptr = is_pointer_like_value(orig_rs2) || orig_rs2->is_func;
 
         /* If variable lookup failed, check the passed variables directly */
         if (!rs1_is_ptr)
-            rs1_is_ptr = is_pointer_like_value(rs1);
+            rs1_is_ptr = is_pointer_like_value(rs1) || rs1->is_func;
         if (!rs2_is_ptr)
-            rs2_is_ptr = is_pointer_like_value(rs2);
+            rs2_is_ptr = is_pointer_like_value(rs2) || rs2->is_func;
 
         if (rs1_is_ptr && rs2_is_ptr) {
             /* Both are pointers - this is pointer difference Determine element
-             * size
+             * size C99 6.5.6 confines pointer subtraction to pointers to
+             * complete object types. A function pointer is pointer-like for
+             * calls and comparisons, but it has no object elements to count.
              */
+            if (orig_rs1->is_func || orig_rs2->is_func)
+                error_at("Pointer subtraction requires object pointers",
+                         cur_token_loc());
             type_t *left_pointee =
                 pointee_type_from_pointer_typedef(orig_rs1->type);
             type_t *right_pointee =
@@ -4702,7 +4716,8 @@ bool is_pointer_operation(opcode_t op, var_t *rs1, var_t *rs2)
     if (op != OP_add && op != OP_sub)
         return false;
 
-    return is_pointer_like_value(rs1) || is_pointer_like_value(rs2);
+    return is_pointer_like_value(rs1) || is_pointer_like_value(rs2) ||
+           (rs1 && rs1->is_func) || (rs2 && rs2->is_func);
 }
 
 /* The first unsigned slice has the existing int/short/char widths. Narrow
@@ -5006,8 +5021,10 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
 
         bool rs1_is_placeholder = is_array_literal_placeholder(rs1);
         bool rs2_is_placeholder = is_array_literal_placeholder(rs2);
-        bool rs1_is_ptr_like = is_pointer_like_value(rs1);
-        bool rs2_is_ptr_like = is_pointer_like_value(rs2);
+        bool rs1_is_ptr_like =
+            is_pointer_like_value(rs1) || (rs1 && rs1->is_func);
+        bool rs2_is_ptr_like =
+            is_pointer_like_value(rs2) || (rs2 && rs2->is_func);
         bool pointer_context = (rs1_is_ptr_like && !rs1_is_placeholder) ||
                                (rs2_is_ptr_like && !rs2_is_placeholder);
 
@@ -6033,6 +6050,11 @@ bool read_body_assignment(char *token,
                     t = operand_stack[operand_stack_idx - 1];
 
                 read_expr(parent, bb);
+
+                /* read_expr stops before `?`; compound assignment has the same
+                 * conditional-expression RHS grammar as ordinary assignment.
+                 */
+                read_ternary_operation(parent, bb);
 
                 var_t *rhs_val = opstack_pop();
                 rhs_val = scalarize_array_literal_if_needed(

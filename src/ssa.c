@@ -888,6 +888,12 @@ void new_name(block_t *block, var_t **var)
     var_t *vd = require_var(block);
     memcpy(vd, *var, sizeof(var_t));
     var_reset_subscripts(vd); /* the copy shares nothing with its base */
+    /* A fresh SSA definition has no physical-register residence. In particular,
+     * it must not inherit either half of a future wide pair from the version it
+     * was copied from.
+     */
+    vd->phys_reg = -1;
+    vd->phys_reg_hi = -1;
     vd->base = *var;
     vd->subscript = i;
     var_add_subscript(v, vd);
@@ -1015,6 +1021,8 @@ void solve_phi_params(void)
             var_t *base = &func->param_defs[i];
             memcpy(var, base, sizeof(var_t));
             var_reset_subscripts(var); /* the copy shares nothing with base */
+            var->phys_reg = -1;
+            var->phys_reg_hi = -1;
             var->base = base;
             var->subscript = 0;
 

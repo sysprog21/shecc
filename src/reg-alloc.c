@@ -85,9 +85,15 @@ int var_slot_size(var_t *v)
      * carries the type of the expression that made it, which for pointer
      * arithmetic is still int, and a four-byte slot truncates the address.
      */
-    if (!v->address_taken)
-        return PTR_SIZE;
     if (!v->type)
+        return PTR_SIZE;
+
+    /* A direct wide scalar needs both words even when its address never
+     * escapes: spilling an SSA temporary is still a memory round trip.
+     */
+    if (v->type->base_type != TYPE_struct && v->type->size == 8)
+        return 8;
+    if (!v->address_taken)
         return PTR_SIZE;
 
     /* Classify by the stored width rather than by type identity: an enum is a
@@ -102,10 +108,34 @@ int var_slot_size(var_t *v)
     return PTR_SIZE;
 }
 
+/* High halves stay out of REGS[]: its users assume a register entry names one
+ * ordinary scalar owner. This parallel reservation table prevents a pair's high
+ * machine register from being handed to a different value.
+ */
+var_t *pair_high_owner[REG_CNT];
+
 void vreg_map_to_phys(var_t *var, int phys_reg)
 {
     if (var)
         var->phys_reg = phys_reg;
+}
+
+/* A wide scalar on a 32-bit target owns two independent machine registers.
+ * Keeping the high mapping on the SSA value, rather than duplicating @var in
+ * REGS[], lets the existing register file continue to mean one complete
+ * single-word owner per entry while paired allocation is introduced.
+ */
+void vreg_map_pair_to_phys(var_t *var, int low_reg, int high_reg)
+{
+    if (!var)
+        return;
+    if (high_reg < 0 || high_reg >= REG_CNT)
+        fatal("Invalid high register for wide value");
+    if (pair_high_owner[high_reg] && pair_high_owner[high_reg] != var)
+        fatal("Wide value high register is already reserved");
+    var->phys_reg = low_reg;
+    var->phys_reg_hi = high_reg;
+    pair_high_owner[high_reg] = var;
 }
 
 int vreg_get_phys(var_t *var)
@@ -115,10 +145,60 @@ int vreg_get_phys(var_t *var)
     return -1;
 }
 
-void vreg_clear_phys(var_t *var)
+int vreg_get_phys_hi(var_t *var)
 {
     if (var)
+        return var->phys_reg_hi;
+    return -1;
+}
+
+bool var_needs_register_pair(const var_t *var)
+{
+    return PTR_SIZE < 8 && var && !var->ptr_level && !var->is_func &&
+           !var->array_size && var->type &&
+           var->type->base_type != TYPE_struct && var->type->size == 8;
+}
+
+/* ABI argument locations are measured in machine words, not source parameters.
+ * Keeping that calculation in one place matters once a direct 64-bit scalar
+ * occupies two words on a 32-bit target: its first word must be even-aligned,
+ * and every following argument starts after both words.
+ */
+int abi_arg_words(const var_t *var)
+{
+    return var_needs_register_pair(var) ? 2 : 1;
+}
+
+int abi_arg_start(int cursor, const var_t *var)
+{
+    if (abi_arg_words(var) == 2)
+        cursor = ALIGN_UP(cursor, 2);
+    return cursor;
+}
+
+int abi_arg_next(int cursor, const var_t *var)
+{
+    return abi_arg_start(cursor, var) + abi_arg_words(var);
+}
+
+int abi_param_start(const func_t *func, int param_idx)
+{
+    int cursor = 0;
+
+    for (int i = 0; i < param_idx; i++)
+        cursor = abi_arg_next(cursor, &func->param_defs[i]);
+    return abi_arg_start(cursor, &func->param_defs[param_idx]);
+}
+
+void vreg_clear_phys(var_t *var)
+{
+    if (var) {
+        if (var->phys_reg_hi >= 0 && var->phys_reg_hi < REG_CNT &&
+            pair_high_owner[var->phys_reg_hi] == var)
+            pair_high_owner[var->phys_reg_hi] = NULL;
         var->phys_reg = -1;
+        var->phys_reg_hi = -1;
+    }
 }
 
 /* Aligns size to nearest multiple of 4, this meets ARMv7's alignment
@@ -220,6 +300,9 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
      */
     n->src2 = 0;
     n->dest = 0;
+    n->src0_hi = -1;
+    n->src1_hi = -1;
+    n->dest_hi = -1;
     n->func_name = NULL;
     n->next_bb = NULL;
     n->then_bb = NULL;
@@ -697,11 +780,20 @@ void dead_store_elim(func_t *func)
  */
 void alloc_var_slot(func_t *func, var_t *var)
 {
+    int slot_size = var_slot_size(var);
+
     if (var->address_taken)
         func->stack_size = ALIGN_UP(func->stack_size, 16);
+
+    /* A future 32-bit wide scalar occupies a low/high word pair. It must not
+     * start at an arbitrary four-byte offset: both AAPCS32 and the RV32 ABI
+     * require the pair's stack home to be eight-byte aligned.
+     */
+    if (slot_size > PTR_SIZE)
+        func->stack_size = ALIGN_UP(func->stack_size, slot_size);
     var->offset = func->stack_size;
     var->space_is_allocated = true;
-    func->stack_size += PTR_SIZE;
+    func->stack_size += slot_size;
     slot_var_track(var);
 }
 
@@ -713,6 +805,7 @@ void store_var(basic_block_t *bb, var_t *var, int idx)
     ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_store)
                                   : bb_add_ph2_ir(bb, OP_store);
     ir->src0 = idx;
+    ir->src0_hi = vreg_get_phys_hi(var);
     ir->src1 = var->offset;
     ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
     ir->is_pointer = is_pointer_like(var);
@@ -738,7 +831,7 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
  */
 bool reg_is_free(int i)
 {
-    return !REGS[i].var && !pinned_base[i];
+    return !REGS[i].var && !pinned_base[i] && !pair_high_owner[i];
 }
 
 /* Return the index of register for given variable. Otherwise, return -1. */
@@ -845,7 +938,9 @@ void pin_registers(func_t *func)
                 for (int q = 0; q < func->num_params; q++) {
                     if (var->base != &func->param_defs[q])
                         continue;
-                    if (q < MAX_ARGS_IN_REG)
+                    int word = abi_param_start(func, q);
+                    if (word + abi_arg_words(&func->param_defs[q]) <=
+                        MAX_ARGS_IN_REG)
                         in_reg = true;
                     else
                         on_stack = true;
@@ -934,10 +1029,16 @@ void pin_registers(func_t *func)
          * them; the variable would then read a parameter's value instead.
          */
         int reg = REG_CNT - 1 - taken;
-        int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
-                                                             : MAX_ARGS_IN_REG;
+        int arg_words_in_reg = 0;
+        for (int i = 0; i < func->num_params; i++) {
+            int word = abi_param_start(func, i);
 
-        if (reg < args_in_reg)
+            if (word + abi_arg_words(&func->param_defs[i]) > MAX_ARGS_IN_REG)
+                break;
+            arg_words_in_reg = abi_arg_next(word, &func->param_defs[i]);
+        }
+
+        if (reg < arg_words_in_reg)
             return;
 
         pinned_base[reg] = best;
@@ -971,6 +1072,7 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
     }
 
     ir->dest = idx;
+    ir->dest_hi = vreg_get_phys_hi(var);
     ir->is_pointer = is_pointer_like(var);
     ir->is_unsigned = is_unsigned_scalar(var);
 
@@ -1007,6 +1109,25 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
     int phys_reg = vreg_get_phys(var);
     if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var)
         return phys_reg;
+
+    if (var_needs_register_pair(var)) {
+        int low = -1, high = -1;
+        for (int r = 0; r < REG_CNT; r++) {
+            if (!reg_is_free(r))
+                continue;
+            if (low < 0)
+                low = r;
+            else {
+                high = r;
+                break;
+            }
+        }
+        if (high < 0)
+            fatal("Wide operand needs two free registers");
+        vreg_map_pair_to_phys(var, low, high);
+        load_var(bb, var, low);
+        return low;
+    }
 
     /* Force reload for address-taken variables (may be modified via pointer) */
     int i = find_in_regs(var);
@@ -1083,7 +1204,10 @@ bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, const var_t *var)
 void clobber_caller_saved(void)
 {
     for (int i = 0; i < REG_CNT; i++) {
-        REGS[i].var = pinned_base[i] ? REGS[i].var : NULL;
+        if (!pinned_base[i] && REGS[i].var) {
+            vreg_clear_phys(REGS[i].var);
+            REGS[i].var = NULL;
+        }
         if (!REGS[i].var)
             REGS[i].polluted = 0;
     }
@@ -1154,6 +1278,34 @@ int prepare_dest(basic_block_t *bb,
                  int operand_0,
                  int operand_1)
 {
+    if (var_needs_register_pair(var)) {
+        int mapped_low = vreg_get_phys(var);
+        int mapped_high = vreg_get_phys_hi(var);
+        if (mapped_low >= 0 && mapped_low < REG_CNT && mapped_high >= 0 &&
+            mapped_high < REG_CNT && REGS[mapped_low].var == var &&
+            pair_high_owner[mapped_high] == var) {
+            REGS[mapped_low].polluted = 1;
+            return mapped_low;
+        }
+        int low = -1, high = -1;
+        for (int r = 0; r < REG_CNT; r++) {
+            if (!reg_is_free(r))
+                continue;
+            if (low < 0)
+                low = r;
+            else {
+                high = r;
+                break;
+            }
+        }
+        if (high < 0)
+            fatal("Wide destination needs two free registers");
+        REGS[low].var = var;
+        REGS[low].polluted = 1;
+        vreg_map_pair_to_phys(var, low, high);
+        return low;
+    }
+
     int pinned = pinned_reg_of(var);
     if (pinned >= 0) {
         REGS[pinned].var = var;
@@ -1399,22 +1551,83 @@ void extend_liveness(basic_block_t *bb,
         var->consumed = insn->idx + offset;
 }
 
+/* Materialize a wide argument exactly where the ABI consumes it. Moving a pair
+ * after arbitrary allocation is not generally safe: the source and destination
+ * pairs can overlap in a cycle. A spill/reload costs a little more in that
+ * uncommon path, but gives both 32-bit backends an unambiguous pair in the
+ * required ABI registers.
+ */
+void prepare_pair_argument(basic_block_t *bb, var_t *var, int low)
+{
+    int high = low + 1;
+    int old_low = vreg_get_phys(var);
+    int old_high = vreg_get_phys_hi(var);
+
+    if (old_low == low && old_high == high && REGS[low].var == var &&
+        pair_high_owner[high] == var)
+        return;
+
+    if (old_low >= 0 && old_low < REG_CNT && REGS[old_low].var == var)
+        spill_var(bb, var, old_low);
+    else
+        vreg_clear_phys(var);
+
+    if (REGS[low].var)
+        spill_var(bb, REGS[low].var, low);
+    if (pair_high_owner[high]) {
+        var_t *owner = pair_high_owner[high];
+        int owner_low = vreg_get_phys(owner);
+
+        if (owner_low >= 0 && owner_low < REG_CNT &&
+            REGS[owner_low].var == owner)
+            spill_var(bb, owner, owner_low);
+        else
+            vreg_clear_phys(owner);
+    }
+
+    vreg_map_pair_to_phys(var, low, high);
+    load_var(bb, var, low);
+}
+
 /* Return whether extra arguments are pushed onto stack. */
 bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
 {
+    insn_t *pushes[MAX_PARAMS];
+    int starts[MAX_PARAMS];
     int num_of_args = 0;
-    int stack_args = 0;
+    int cursor = 0;
+
     while (insn && insn->opcode == OP_push) {
-        num_of_args += 1;
+        if (num_of_args >= MAX_PARAMS)
+            fatal("Too many call arguments");
+        starts[num_of_args] = abi_arg_start(cursor, insn->rs1);
+        pushes[num_of_args++] = insn;
+        cursor = abi_arg_next(cursor, insn->rs1);
         insn = insn->next;
     }
 
-    if (num_of_args <= MAX_ARGS_IN_REG)
+    if (cursor <= MAX_ARGS_IN_REG)
         return false;
 
-    insn = insn->prev;
-    stack_args = num_of_args - MAX_ARGS_IN_REG;
-    while (stack_args) {
+    for (int i = num_of_args - 1; i >= 0; i--) {
+        insn = pushes[i];
+
+        if (starts[i] < MAX_ARGS_IN_REG)
+            continue;
+
+        if (abi_arg_words(insn->rs1) == 2) {
+            int scratch = MAX_ARGS_IN_REG - 2;
+
+            prepare_pair_argument(bb, insn->rs1, scratch);
+            ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
+            ir->src0 = scratch;
+            ir->src0_hi = scratch + 1;
+            ir->src1 = (starts[i] - MAX_ARGS_IN_REG) * PTR_SIZE;
+            ir->size_bytes = 8;
+            spill_var(bb, insn->rs1, scratch);
+            continue;
+        }
+
         /* A pinned variable has no slot to load from: its value only ever lives
          * in its register, so reading the frame here handed the callee whatever
          * the slot happened to hold.
@@ -1430,10 +1643,7 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
         }
         ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
         ir->src0 = MAX_ARGS_IN_REG - 1;
-        /* One pointer-sized slot per stack-passed argument. */
-        ir->src1 = (stack_args - 1) * PTR_SIZE;
-        stack_args -= 1;
-        insn = insn->prev;
+        ir->src1 = (starts[i] - MAX_ARGS_IN_REG) * PTR_SIZE;
     }
     REGS[MAX_ARGS_IN_REG - 1].var = NULL;
     return true;
@@ -2125,6 +2335,7 @@ void reg_alloc_global(insn_t *global_insn)
         ir->src0 = global_insn->rd->init_val;
         ir->src1 = global_insn->rd->init_val_hi;
         ir->dest = dest;
+        ir->dest_hi = vreg_get_phys_hi(global_insn->rd);
         ir->is_unsigned = is_unsigned_scalar(global_insn->rd);
         ir->size_bytes =
             global_insn->rd->ptr_level ? PTR_SIZE : global_insn->rd->type->size;
@@ -2134,7 +2345,9 @@ void reg_alloc_global(insn_t *global_insn)
         dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_assign);
         ir->src0 = src0;
+        ir->src0_hi = vreg_get_phys_hi(global_insn->rs1);
         ir->dest = dest;
+        ir->dest_hi = vreg_get_phys_hi(global_insn->rd);
         spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
         /* release the unused constant number in register manually */
         REGS[src0].polluted = 0;
@@ -2461,13 +2674,15 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                     ir->dest = dest;
                     ir->ofs_based_on_stack_top =
                         insn->rs1->ofs_based_on_stack_top;
-                } else if (param_idx < MAX_ARGS_IN_REG) {
+                } else if (abi_param_start(func, param_idx) < MAX_ARGS_IN_REG) {
                     ir = bb_add_ph2_ir(bb, OP_assign);
-                    ir->src0 = param_idx;
+                    ir->src0 = abi_param_start(func, param_idx);
                     ir->dest = dest;
                 } else {
                     ir = bb_add_ph2_ir(bb, OP_load);
-                    ir->src0 = (param_idx - MAX_ARGS_IN_REG) * PTR_SIZE;
+                    ir->src0 =
+                        (abi_param_start(func, param_idx) - MAX_ARGS_IN_REG) *
+                        PTR_SIZE;
                     ir->dest = dest;
                     ir->ofs_based_on_stack_top = true;
                 }
@@ -2620,7 +2835,9 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, src0, -1);
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = src0;
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
             ir->is_unsigned = is_unsigned_scalar(insn->rd);
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             ir->size_bytes =
@@ -2630,6 +2847,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             if (insn->rd->is_global) {
                 ir = bb_add_ph2_ir(bb, OP_global_store);
                 ir->src0 = dest;
+                ir->src0_hi = vreg_get_phys_hi(insn->rd);
                 ir->src1 = insn->rd->offset;
                 ir->is_unsigned = is_unsigned_scalar(insn->rd);
                 ir->size_bytes = var_slot_size(insn->rd);
@@ -2718,17 +2936,29 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 handle_abi = true;
             }
 
-            if (args_on_stack && args >= MAX_ARGS_IN_REG)
+            args = abi_arg_start(args, insn->rs1);
+            if (args_on_stack && args >= MAX_ARGS_IN_REG) {
+                args = abi_arg_next(args, insn->rs1);
                 break;
+            }
+
+            if (abi_arg_words(insn->rs1) == 2) {
+                if (args + 2 > MAX_ARGS_IN_REG)
+                    fatal("Wide argument crosses ABI register boundary");
+                prepare_pair_argument(bb, insn->rs1, args);
+                args = abi_arg_next(args, insn->rs1);
+                break;
+            }
 
             src0 = prepare_operand(bb, insn->rs1, -1);
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = src0;
-            ir->dest = args++;
+            ir->dest = args;
             ir->is_unsigned = is_unsigned_scalar(insn->rs1);
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             REGS[ir->dest].var = insn->rs1;
             REGS[ir->dest].polluted = 0;
+            args = abi_arg_next(args, insn->rs1);
             break;
         case OP_call:
             callee_func = find_func(insn->str);
@@ -2770,7 +3000,10 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, -1, -1);
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = 0;
+            if (var_needs_register_pair(insn->rd))
+                ir->src0_hi = 1;
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
             ir->is_unsigned = is_unsigned_scalar(insn->rd);
             ir->size_bytes =
                 insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
@@ -2783,6 +3016,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
 
             ir = bb_add_ph2_ir(bb, OP_return);
             ir->src0 = src0;
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             if (insn->rs1)
                 ir->size_bytes =
@@ -2925,19 +3159,29 @@ void reg_alloc(void)
         if (!strcmp(func->return_def.var_name, "main"))
             MAIN_BB = func->bbs;
 
-        for (int i = 0; i < REG_CNT; i++)
+        for (int i = 0; i < REG_CNT; i++) {
             REGS[i].var = NULL;
+            pair_high_owner[i] = NULL;
+        }
 
         slot_var_count = 0;
         coalesce_phi_slots(func);
         pin_registers(func);
 
-        /* set arguments available */
-        int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
-                                                             : MAX_ARGS_IN_REG;
-        for (int i = 0; i < args_in_reg; i++) {
-            REGS[i].var = var_subscript0(&func->param_defs[i]);
-            REGS[i].polluted = 1;
+        /* Set arguments available. The register file is indexed by ABI word,
+         * whereas param_defs is indexed by source parameter.
+         */
+        int args_in_reg = 0;
+        for (int i = 0; i < func->num_params; i++) {
+            int word = abi_param_start(func, i);
+
+            if (word + abi_arg_words(&func->param_defs[i]) > MAX_ARGS_IN_REG)
+                break;
+            REGS[word].var = var_subscript0(&func->param_defs[i]);
+            REGS[word].polluted = 1;
+            if (abi_arg_words(&func->param_defs[i]) == 2)
+                vreg_map_pair_to_phys(REGS[word].var, word, word + 1);
+            args_in_reg++;
         }
 
         /* Move a pinned parameter out of the argument register it arrived in
@@ -2948,17 +3192,18 @@ void reg_alloc(void)
         for (int i = 0; i < args_in_reg; i++) {
             var_t *param = var_subscript0(&func->param_defs[i]);
             int home = pinned_reg_of(param);
+            int word = abi_param_start(func, i);
 
             if (home < 0)
                 continue;
 
             ph2_ir_t *mv = bb_add_ph2_ir(func->bbs, OP_assign);
-            mv->src0 = i;
+            mv->src0 = word;
             mv->dest = home;
             REGS[home].var = param;
             REGS[home].polluted = 0;
-            REGS[i].var = NULL;
-            REGS[i].polluted = 0;
+            REGS[word].var = NULL;
+            REGS[word].polluted = 0;
         }
 
         /* variadic function implementation */
@@ -3027,9 +3272,13 @@ void reg_alloc(void)
              * cfg_flatten(), the operand's offset will be recalculated by
              * adding the function's stack size.
              */
-            for (int i = MAX_ARGS_IN_REG; i < func->num_params; i++) {
+            for (int i = 0; i < func->num_params; i++) {
                 var_t *param = var_subscript0(&func->param_defs[i]);
-                param->offset = (i - MAX_ARGS_IN_REG) * PTR_SIZE;
+                int word = abi_param_start(func, i);
+
+                if (word < MAX_ARGS_IN_REG)
+                    continue;
+                param->offset = (word - MAX_ARGS_IN_REG) * PTR_SIZE;
                 param->space_is_allocated = true;
                 param->ofs_based_on_stack_top = true;
             }

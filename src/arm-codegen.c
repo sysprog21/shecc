@@ -26,6 +26,14 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             elf_offset += 8;
         else
             elf_offset += 4;
+        if (ph2_ir->dest_hi >= 0) {
+            if (ph2_ir->src1 < 0)
+                elf_offset += 12;
+            else if (ph2_ir->src1 > 255)
+                elf_offset += 8;
+            else
+                elf_offset += 4;
+        }
         return;
     case OP_address_of:
     case OP_global_address_of:
@@ -43,6 +51,9 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_assign:
         if (ph2_ir->dest != ph2_ir->src0)
             elf_offset += 4;
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->dest_hi != ph2_ir->src0_hi)
+            elf_offset += 4;
         return;
     case OP_load:
     case OP_global_load:
@@ -52,9 +63,15 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
          */
         if (ph2_ir->src0 > 4095 || (ph2_ir->size_bytes == 1 &&
                                     !ph2_ir->is_unsigned && ph2_ir->src0 > 255))
-            elf_offset += 16;
+            if (ph2_ir->dest_hi >= 0)
+                elf_offset += 20;
+            else
+                elf_offset += 16;
         else if (ph2_ir->src0 >= 0)
-            elf_offset += 4;
+            if (ph2_ir->dest_hi >= 0)
+                elf_offset += 8;
+            else
+                elf_offset += 4;
         else
             abort();
         return;
@@ -64,9 +81,15 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
          * (no rotation).
          */
         if (ph2_ir->src1 > 4095)
-            elf_offset += 16;
+            if (ph2_ir->src0_hi >= 0)
+                elf_offset += 20;
+            else
+                elf_offset += 16;
         else if (ph2_ir->src1 >= 0)
-            elf_offset += 4;
+            if (ph2_ir->src0_hi >= 0)
+                elf_offset += 8;
+            else
+                elf_offset += 4;
         else
             abort();
         return;
@@ -141,6 +164,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_return:
         elf_offset += 24;
+        if (ph2_ir->src0_hi >= 0)
+            elf_offset += 4;
         return;
     case OP_trunc:
         /* Unsigned byte/half truncation uses a logical shift pair; signed
@@ -318,6 +343,17 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__movt(__AL, rd, ph2_ir->src0));
         } else
             emit(__mov_i(__AL, rd, ph2_ir->src0));
+        if (ph2_ir->dest_hi >= 0) {
+            if (ph2_ir->src1 < 0) {
+                emit(__movw(__AL, __r8, -ph2_ir->src1));
+                emit(__movt(__AL, __r8, -ph2_ir->src1));
+                emit(__rsb_i(__AL, ph2_ir->dest_hi, 0, __r8));
+            } else if (ph2_ir->src1 > 255) {
+                emit(__movw(__AL, ph2_ir->dest_hi, ph2_ir->src1));
+                emit(__movt(__AL, ph2_ir->dest_hi, ph2_ir->src1));
+            } else
+                emit(__mov_i(__AL, ph2_ir->dest_hi, ph2_ir->src1));
+        }
         return;
     case OP_address_of:
     case OP_global_address_of:
@@ -334,13 +370,28 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * emitting one here would push every later address out by four bytes
          * and leave the data segment's p_offset and p_vaddr incongruent.
          */
-        if (rd == rn)
-            return;
-        emit(__mov_r(__AL, rd, rn));
+        if (rd != rn)
+            emit(__mov_r(__AL, rd, rn));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->dest_hi != ph2_ir->src0_hi)
+            emit(__mov_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
         return;
     case OP_load:
     case OP_global_load:
         interm = ph2_ir->op == OP_load ? __sp : __r12;
+        if (ph2_ir->dest_hi >= 0) {
+            if (ph2_ir->src0 > 4095) {
+                emit(__movw(__AL, __r8, ph2_ir->src0));
+                emit(__movt(__AL, __r8, ph2_ir->src0));
+                emit(__add_r(__AL, __r8, interm, __r8));
+                emit(__lw(__AL, rd, __r8, 0));
+                emit(__lw(__AL, ph2_ir->dest_hi, __r8, 4));
+            } else {
+                emit(__lw(__AL, rd, interm, ph2_ir->src0));
+                emit(__lw(__AL, ph2_ir->dest_hi, interm, ph2_ir->src0 + 4));
+            }
+            return;
+        }
 
         /* LDRSB's immediate field is only eight bits, unlike LDRB's 12-bit
          * field. Materialize a larger signed-byte offset before loading.
@@ -372,6 +423,19 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_global_store:
         interm = ph2_ir->op == OP_store ? __sp : __r12;
         store_offset = ph2_ir->src1;
+        if (ph2_ir->src0_hi >= 0) {
+            if (store_offset > 4095) {
+                emit(__movw(__AL, __r8, store_offset));
+                emit(__movt(__AL, __r8, store_offset));
+                emit(__add_r(__AL, __r8, interm, __r8));
+                emit(__sw(__AL, rn, __r8, 0));
+                emit(__sw(__AL, ph2_ir->src0_hi, __r8, 4));
+            } else {
+                emit(__sw(__AL, rn, interm, store_offset));
+                emit(__sw(__AL, ph2_ir->src0_hi, interm, store_offset + 4));
+            }
+            return;
+        }
 
         /* STRH has an 8-bit split immediate while STR/STRB accept 12 bits.
          * Materialize larger halfword offsets before selecting the width.
@@ -499,6 +563,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__mov_r(__AL, __r0, __r0));
         else
             emit(__mov_r(__AL, __r0, rn));
+        if (ph2_ir->src0_hi >= 0)
+            emit(__mov_r(__AL, __r1, ph2_ir->src0_hi));
 
         /* When calling a function, the following operations are performed:
          * 1. push r4-r11 and lr onto the stack.

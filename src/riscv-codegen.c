@@ -88,6 +88,12 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             elf_offset += 8;
         else
             elf_offset += 4;
+        if (ph2_ir->dest_hi >= 0) {
+            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047)
+                elf_offset += 8;
+            else
+                elf_offset += 4;
+        }
         return;
     case OP_address_of:
     case OP_global_address_of:
@@ -98,18 +104,31 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_assign:
         elf_offset += 4;
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->dest_hi != ph2_ir->src0_hi)
+            elf_offset += 4;
         return;
     case OP_load:
     case OP_global_load:
         if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
-            elf_offset += 16;
+            if (ph2_ir->dest_hi >= 0)
+                elf_offset += 20;
+            else
+                elf_offset += 16;
+        else if (ph2_ir->dest_hi >= 0)
+            elf_offset += 8;
         else
             elf_offset += 4;
         return;
     case OP_store:
     case OP_global_store:
         if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047)
-            elf_offset += 16;
+            if (ph2_ir->src0_hi >= 0)
+                elf_offset += 20;
+            else
+                elf_offset += 16;
+        else if (ph2_ir->src0_hi >= 0)
+            elf_offset += 8;
         else
             elf_offset += 4;
         return;
@@ -162,6 +181,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_return:
         elf_offset += 24;
+        if (ph2_ir->src0_hi >= 0)
+            elf_offset += 4;
         return;
     case OP_trunc:
         /* A byte and a short each need a shift pair to keep the sign. */
@@ -320,6 +341,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
         } else
             emit(__addi(rd, __zero, ph2_ir->src0));
+        if (ph2_ir->dest_hi >= 0) {
+            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
+                emit(__lui(ph2_ir->dest_hi, rv_hi(ph2_ir->src1)));
+                emit(__addi(ph2_ir->dest_hi, ph2_ir->dest_hi,
+                            rv_lo(ph2_ir->src1)));
+            } else
+                emit(__addi(ph2_ir->dest_hi, __zero, ph2_ir->src1));
+        }
         return;
     case OP_address_of:
     case OP_global_address_of:
@@ -333,10 +362,26 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_assign:
         emit(__addi(rd, rs1, 0));
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->dest_hi != ph2_ir->src0_hi)
+            emit(__addi(ph2_ir->dest_hi, ph2_ir->src0_hi, 0));
         return;
     case OP_load:
     case OP_global_load:
         interm = ph2_ir->op == OP_load ? __sp : __gp;
+        if (ph2_ir->dest_hi >= 0) {
+            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+                emit(__add(__t0, interm, __t0));
+                emit(__lw(rd, __t0, 0));
+                emit(__lw(ph2_ir->dest_hi, __t0, 4));
+            } else {
+                emit(__lw(rd, interm, ph2_ir->src0));
+                emit(__lw(ph2_ir->dest_hi, interm, ph2_ir->src0 + 4));
+            }
+            return;
+        }
         if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
             emit(__lui(__t0, rv_hi(ph2_ir->src0)));
             emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
@@ -361,6 +406,19 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_store:
     case OP_global_store:
         interm = ph2_ir->op == OP_store ? __sp : __gp;
+        if (ph2_ir->src0_hi >= 0) {
+            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
+                emit(__lui(__t0, rv_hi(ph2_ir->src1)));
+                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
+                emit(__add(__t0, interm, __t0));
+                emit(__sw(rs1, __t0, 0));
+                emit(__sw(ph2_ir->src0_hi, __t0, 4));
+            } else {
+                emit(__sw(rs1, interm, ph2_ir->src1));
+                emit(__sw(ph2_ir->src0_hi, interm, ph2_ir->src1 + 4));
+            }
+            return;
+        }
         if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
             emit(__lui(__t0, rv_hi(ph2_ir->src1)));
             emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
@@ -457,6 +515,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__addi(__zero, __zero, 0));
         else
             emit(__addi(__a0, rs1, 0));
+        if (ph2_ir->src0_hi >= 0)
+            emit(__addi(__a1, ph2_ir->src0_hi, 0));
         ofs = ALIGN_UP(ph2_ir->src1 + 4, RV32_ALIGNMENT);
         emit(__lui(__t0, rv_hi(ofs)));
         emit(__addi(__t0, __t0, rv_lo(ofs)));

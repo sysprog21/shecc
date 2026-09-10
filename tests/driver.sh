@@ -2686,6 +2686,22 @@ int main() {
 }
 EOF
 
+# File-scope scalar compound literals have static storage duration. They use the
+# target object's initializer directly, but retain the C99 one-element
+# constraint (with an optional trailing comma).
+try_ 42 << EOF
+int value = (int){42};
+int main() { return value; }
+EOF
+try_ 7 << EOF
+int value = (int){7,};
+int main() { return value; }
+EOF
+try_compile_error << EOF
+int invalid = (int){1, 2};
+int main() { return 0; }
+EOF
+
 # Test: Empty array compound literal (edge case)
 try_ 0 << EOF
 int main() {
@@ -3377,6 +3393,31 @@ int main(void) {
     struct first left[2];
     struct second right[2];
     return &left[1] - &right[1];
+}
+EOF
+
+# C99 6.5.6 permits subtraction only for pointers to complete object types.
+try_compile_error << EOF
+int main(void) {
+    void *left = 0;
+    void *right = 0;
+    return left - right;
+}
+EOF
+try_compile_error << EOF
+int first(void) { return 1; }
+int second(void) { return 2; }
+int main(void) {
+    int (*left)(void) = first;
+    int (*right)(void) = second;
+    return left - right;
+}
+EOF
+try_compile_error << EOF
+int callback(void) { return 1; }
+int main(void) {
+    int (*pointer)(void) = callback;
+    return pointer + 1;
 }
 EOF
 
@@ -5533,6 +5574,20 @@ items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; return
 items 8 "short s; s = 5; s += 3; return s;"
 items 15 "short s; s = 20; s -= 5; return s;"
 items 24 "short s; s = 6; s *= 4; return s;"
+try_ 7 << EOF
+int main(void) {
+    int value = 1;
+    value += 1 ? 6 : 9;
+    return value;
+}
+EOF
+try_ 6 << EOF
+int main(void) {
+    int value = 7;
+    value ^= 0 ? 1 : 1;
+    return value;
+}
+EOF
 try_ 2 << EOF
 int main(void) {
     int negative = -1;

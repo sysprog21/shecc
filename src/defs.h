@@ -658,7 +658,11 @@ struct var {
     bool is_ternary_ret;
     bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
-    int phys_reg;  /* Physical register assignment (-1 if unassigned) */
+    int phys_reg;  /* low physical register (-1 if unassigned) */
+    /* The high word of a 32-bit-target wide scalar. It remains -1 for the
+     * ordinary single-register representation and on LP64 targets.
+     */
+    int phys_reg_hi;
     int first_use; /* First instruction index where variable is used */
     int last_use;  /* Last instruction index where variable is used */
     int use_count; /* Number of times variable is used */
@@ -749,6 +753,13 @@ struct ph2_ir {
     /* The register OP_cmov keeps when its condition does not hold. */
     int src2;
     int dest;
+
+    /* A 32-bit target represents a wide integer as low/high register pairs. -1
+     * means this instruction uses the existing single-register form.
+     */
+    int src0_hi;
+    int src1_hi;
+    int dest_hi;
     /* Type information for LP64 support */
     int size_bytes; /* Size in bytes for load/store/read/write operations */
 
