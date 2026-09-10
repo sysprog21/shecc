@@ -308,6 +308,7 @@ test_long_args_and_return()
 long combine(long a, long b, long c, long d, long e, long f, long g) {
     return a + b + c + d + e + f + g;
 }
+
 int main() {
     long result = combine(1, 2, 3, 4, 5, 6, 21);
     if (result == 42) {
@@ -315,6 +316,55 @@ int main() {
         return 0;
     }
     printf("FAIL: got %d\n", result);
+    return 1;
+}
+' "PASS"
+}
+
+# System V AMD64 assigns each integer-class long long argument one register
+# slot. Exercise all six argument registers, two overflow-area slots, and a
+# return value with nonzero upper words so a 32-bit-only path cannot pass.
+test_unsigned_long_long_args_and_return()
+{
+    run_abi_test "Unsigned long long arguments and return" "Parameter Passing" '
+#include <stdio.h>
+unsigned long long combine8(unsigned long long a, unsigned long long b,
+                            unsigned long long c, unsigned long long d,
+                            unsigned long long e, unsigned long long f,
+                            unsigned long long g, unsigned long long h) {
+    return a + b + c + d + e + f + g + h;
+}
+int main() {
+    unsigned long long result = combine8(0x100000001ULL, 0x100000002ULL,
+        0x100000003ULL, 0x100000004ULL, 0x100000005ULL, 0x100000006ULL,
+        0x100000007ULL, 0x100000008ULL);
+    if (result == 0x800000024ULL) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+test_signed_long_long_args_and_return()
+{
+    run_abi_test "Signed long long arguments and return" "Parameter Passing" '
+#include <stdio.h>
+long long combine8(long long a, long long b, long long c, long long d,
+                   long long e, long long f, long long g, long long h) {
+    return a + b + c + d + e + f + g + h;
+}
+int main() {
+    long long result = combine8(-0x100000001LL, -0x100000002LL,
+        -0x100000003LL, -0x100000004LL, -0x100000005LL, -0x100000006LL,
+        -0x100000007LL, -0x100000008LL);
+    if (result == -0x800000024LL) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
     return 1;
 }
 ' "PASS"
@@ -581,6 +631,8 @@ test_four_args
 test_five_args
 test_eight_args
 test_long_args_and_return
+test_unsigned_long_long_args_and_return
+test_signed_long_long_args_and_return
 
 echo ""
 echo -e "${CYAN}Running Stack Alignment Tests...${NC}"

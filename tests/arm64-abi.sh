@@ -73,6 +73,23 @@ int sum10(int a,int b,int c,int d,int e,int f,int g,int h,int i,int j) {
 }
 int main(void) { return sum10(1,2,3,4,5,6,7,8,9,10); }'
 
+# AAPCS64 gives each 64-bit integer one x-register slot. This crosses all eight
+# register slots and two eight-byte stack slots, and retains nonzero high words
+# so a W-register path cannot accidentally pass.
+run_case 'wide register and stack arguments' 42 '
+unsigned long long sum10(unsigned long long a, unsigned long long b,
+ unsigned long long c, unsigned long long d, unsigned long long e,
+ unsigned long long f, unsigned long long g, unsigned long long h,
+ unsigned long long i, unsigned long long j) {
+ return a+b+c+d+e+f+g+h+i+j;
+}
+int main(void) {
+ unsigned long long total = sum10(0x100000001ULL, 0x100000002ULL,
+  0x100000003ULL, 0x100000004ULL, 0x100000005ULL, 0x100000006ULL,
+  0x100000007ULL, 0x100000008ULL, 0x100000009ULL, 0x10000000aULL);
+ return total == 0xa00000037ULL ? 42 : 1;
+}'
+
 # The callee reads stack arguments at a fixed offset above its own frame, so
 # that offset has to be rounded exactly as the prologue rounds the frame. A
 # frame whose size is 8 modulo 16 is what catches a disagreement: an

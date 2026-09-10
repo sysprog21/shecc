@@ -547,7 +547,6 @@ int src0_override_at;
  * named directly as the compare's second operand. -1 when unused.
  */
 int cmp_mem_slot;
-int cmp_mem_width;
 
 /* A comparison whose second operand is a tracked literal, so it becomes an
  * immediate and the instruction that materialised it falls away.
@@ -1380,25 +1379,31 @@ basic_block_t *bb_sole_code_pred(basic_block_t *bb)
 }
 
 /* CMP rs1 against rs2, or against the slot a folded load named instead. */
-void emit_cmp(int rs1, int rs2)
+void emit_cmp(int size_bytes, int rs1, int rs2)
 {
     if (cmp_imm_known) {
         cmp_imm_known = false;
         cmp_mem_slot = -1;
-        emit_alu_imm(rs1, 7, cmp_imm_val); /* CMP rs1, imm */
+        emit_rex(size_bytes > 4, -1, rs1);
+        if (cmp_imm_val >= -128 && cmp_imm_val <= 127) {
+            emit_byte(0x83); /* CMP r32/r64, imm8 */
+            emit_byte(modrm(MOD_DIRECT, 7, reg_low3(rs1)));
+            emit_byte(cmp_imm_val);
+        } else {
+            emit_byte(0x81); /* CMP r32/r64, imm32 */
+            emit_byte(modrm(MOD_DIRECT, 7, reg_low3(rs1)));
+            emit_dword(cmp_imm_val);
+        }
         return;
     }
     if (cmp_mem_slot >= 0) {
-        if (cmp_mem_width == 8)
-            emit_rex(1, rs1, -1);
-        else if (rs1 >= 8)
-            emit_byte(REX_R);
+        emit_rex(size_bytes > 4, rs1, -1);
         emit_byte(0x3B); /* CMP rs1, [rsp + slot] */
         emit_rsp_mem(rs1, cmp_mem_slot);
         cmp_mem_slot = -1;
         return;
     }
-    emit_rex(1, rs2, rs1);
+    emit_rex(size_bytes > 4, rs2, rs1);
     emit_byte(0x39); /* CMP rs1, rs2 */
     emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), reg_low3(rs1)));
 }
@@ -2042,7 +2047,7 @@ void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
          * comparisons differ only in the condition, and SETcc is the matching
          * Jcc opcode plus 0x10, so branch_cc_for() supplies both forms.
          */
-        emit_cmp(rs1, rs2);
+        emit_cmp(ph2_ir->size_bytes, rs1, rs2);
         emit_setcc_bool(
             rd, branch_cc_for(ph2_ir->op, ph2_ir->src0_is_unsigned ||
                                               ph2_ir->src1_is_unsigned) +
@@ -3008,9 +3013,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_next_ir->src0 != ph2_ir->dest &&
         reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
         int w = load_width(ph2_ir);
-        if (w == 4 || w == 8) {
+
+        /* A folded memory operand must have the same width as the comparison.
+         * In particular, comparing an int load after it has been promoted to
+         * long must not turn into an eight-byte read from its four-byte slot.
+         */
+        if ((w == 4 || w == 8) && w == emit_next_ir->size_bytes) {
             cmp_mem_slot = ph2_ir->src0;
-            cmp_mem_width = w;
             return;
         }
     }
@@ -3135,7 +3144,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         ph2_ir->op, ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned);
     if (fuse_cc && emit_next_ir && emit_next_ir->op == OP_branch &&
         emit_next_ir->src0 == ph2_ir->dest) {
-        emit_cmp(rs1, rs2);
+        emit_cmp(ph2_ir->size_bytes, rs1, rs2);
         fused_cc = fuse_cc;
         fused_cc_pending = true;
         return;

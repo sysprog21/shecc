@@ -558,7 +558,8 @@ struct var {
     int ptr_level;
     bool is_func;
     bool is_global;
-    bool is_static;          /* declaration used the static storage class */
+    bool is_static;       /* declaration used the static storage class */
+    bool has_initializer; /* a file-scope definition supplied an initializer */
     bool is_const_qualified; /* true if variable has const qualifier */
     bool is_const_pointer;   /* true for the outermost `* const` qualifier */
     bool address_taken;      /* true if variable address was taken (&var) */

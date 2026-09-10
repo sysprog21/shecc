@@ -850,6 +850,7 @@ var_t *new_const_var(block_t *scope, int val)
     var->var_name = gen_name();
     var->is_const = true;
     var->init_val = val;
+    var->init_val_hi = 0;
     return var;
 }
 bool is_dominate(const basic_block_t *pred, basic_block_t *succ);
@@ -3384,7 +3385,7 @@ bool mark_const(insn_t *insn)
         return false;
 
     if (insn->opcode == OP_load_constant) {
-        insn->rd->is_const = insn->rd->init_val_hi == 0;
+        insn->rd->is_const = true;
         return false;
     }
     if (insn->opcode != OP_assign)
@@ -3431,9 +3432,13 @@ bool eval_const_arithmetic(insn_t *insn)
         return false;
     if (!insn->rs1->is_const)
         return false;
+    if (insn->rs1->init_val_hi)
+        return false;
     if (!insn->rs2)
         return false;
     if (!insn->rs2->is_const)
+        return false;
+    if (insn->rs2->init_val_hi)
         return false;
 
     /* Constant folding predates unsigned arithmetic and evaluates every
@@ -3526,6 +3531,8 @@ bool eval_const_unary(insn_t *insn)
     if (!insn->rs1)
         return false;
     if (!insn->rs1->is_const)
+        return false;
+    if (insn->rs1->init_val_hi)
         return false;
     if ((insn->rs1->type && insn->rs1->type->size > TY_int->size) ||
         (insn->rd && insn->rd->type && insn->rd->type->size > TY_int->size))
@@ -3983,7 +3990,8 @@ void optimize(void)
                 }
 
                 /* Identity and constant optimizations */
-                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                if (insn->rs2 && insn->rs2->is_const &&
+                    !insn->rs2->init_val_hi && insn->rd) {
                     int val = insn->rs2->init_val;
 
                     /* x + 0 = x, x - 0 = x, x | 0 = x, x ^ 0 = x */

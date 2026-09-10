@@ -52,6 +52,7 @@ void parse_global_record_init(var_t *var, block_t *block);
 void parse_global_compound_record_init(var_t *var, block_t *block);
 void parse_global_compound_scalar_init(var_t *var, block_t *block);
 void parse_global_compound_array_init(var_t *var, block_t *block);
+bool read_global_assignment_var(var_t *var);
 
 bool global_compound_literal_starts_here(void)
 {
@@ -436,6 +437,16 @@ var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
         /* Sign extend */
         return promote_unchecked(block, bb, from, to->type, to->ptr_level);
     }
+
+    /* A same-rank unsigned assignment still has a required representation
+     * conversion on a wider register machine. Keeping an arithmetic result in a
+     * 64-bit register can leave carry bits above an unsigned int's object
+     * width; a later equality comparison would then see 2^32 + 1 instead of the
+     * stored value 1.
+     */
+    if (!is_from_ptr && !is_to_ptr && to->type && to->type->is_unsigned &&
+        to_size < PTR_SIZE)
+        return truncate_unchecked(block, bb, from, to->type, to->ptr_level);
 
     return from;
 }
@@ -1819,14 +1830,20 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
      */
     while (lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
            lex_peek(T_const, NULL) || lex_peek(T_long, NULL)) {
-        if (lex_accept(T_signed))
+        if (lex_accept(T_signed)) {
+            if (is_signed)
+                error_at("duplicate signed type specifier", cur_token_loc());
             is_signed = true;
-        else if (lex_accept(T_unsigned))
+        } else if (lex_accept(T_unsigned)) {
+            if (is_unsigned)
+                error_at("duplicate unsigned type specifier", cur_token_loc());
             is_unsigned = true;
-        else if (lex_accept(T_const))
+        } else if (lex_accept(T_const))
             is_const = true;
         else {
             lex_expect(T_long);
+            if (is_long_long)
+                error_at("too many long type specifiers", cur_token_loc());
             if (is_long)
                 is_long_long = true;
             else
@@ -2007,6 +2024,26 @@ bool numeric_has_unsigned_suffix(const char *token)
     return false;
 }
 
+/* C99 permits U, L, LL, UL, ULL, LU, and LLU (case-insensitively). Keep this
+ * separate from type selection: malformed suffixes must not become a valid wide
+ * literal merely because their letters happen to be counted.
+ */
+bool numeric_suffix_is_valid(const char *suffix)
+{
+    int pos = 0;
+
+    if ((suffix[pos] | 32) == 'u')
+        pos++;
+    if ((suffix[pos] | 32) == 'l') {
+        pos++;
+        if ((suffix[pos] | 32) == 'l')
+            pos++;
+    }
+    if ((suffix[pos] | 32) == 'u')
+        pos++;
+    return suffix[pos] == '\0';
+}
+
 bool numeric_has_long_long_suffix(const char *token)
 {
     int long_suffix_count = 0;
@@ -2015,6 +2052,74 @@ bool numeric_has_long_long_suffix(const char *token)
         if ((token[i] | 32) == 'l')
             long_suffix_count++;
     return long_suffix_count == 2;
+}
+
+int numeric_long_suffix_count(const char *token)
+{
+    int count = 0;
+
+    for (int i = 0; token[i]; i++)
+        if ((token[i] | 32) == 'l')
+            count++;
+    return count;
+}
+
+/* The file-scope constant evaluator is still word-sized. Decide from the token
+ * spelling whether it must use the two-word literal path before that evaluator
+ * consumes and narrows it.
+ */
+bool numeric_literal_needs_wide_path(const char *token)
+{
+    const char *digits = token;
+    int count = 0;
+    bool is_unsigned = numeric_has_unsigned_suffix(token);
+
+    if (numeric_has_long_long_suffix(token))
+        return true;
+    if (digits[0] == '0' && (digits[1] | 32) == 'x') {
+        digits += 2;
+        while (isxdigit(digits[count]))
+            count++;
+        return count > 8;
+    }
+    if (digits[0] == '0' && (digits[1] | 32) == 'b') {
+        digits += 2;
+        while (digits[count] == '0' || digits[count] == '1')
+            count++;
+        return count > 32;
+    }
+    if (digits[0] == '0') {
+        while (digits[count] >= '0' && digits[count] <= '7')
+            count++;
+        return count > 12 ||
+               (count == 12 && strncmp(digits, "037777777777", count) > 0);
+    }
+    while (isdigit(digits[count]))
+        count++;
+    if (count > 10)
+        return true;
+    if (count < 10)
+        return false;
+    return strncmp(digits, is_unsigned ? "4294967295" : "2147483647", count) >
+           0;
+}
+
+/* Some bootstrap stages still materialize the exact decimal 2^31 token as an
+ * int bit pattern before the global initializer path sees it. This path was
+ * selected from the original token spelling, so restore the required wide
+ * candidate type before phase-2 chooses its constant-load width.
+ */
+void force_wide_global_literal_type(var_t *value, const char *token)
+{
+    if (value->type->size >= 8)
+        return;
+    if (PTR_SIZE < 8)
+        error_at("long long literal needs 64-bit target lowering",
+                 cur_token_loc());
+    value->type = numeric_has_unsigned_suffix(token) ||
+                          (unsigned int) value->init_val_hi > 0x7fffffffU
+                      ? TY_ulong_long
+                      : TY_long_long;
 }
 
 /* Accumulate a 64-bit token in four 16-bit limbs. Each intermediate stays small
@@ -2051,15 +2156,17 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
     unsigned int value = 0;
     unsigned int value_hi = 0;
     int i = 0;
-    int hex_digits, high_digits;
-    unsigned int *part;
     char c;
     int base = 10;
     bool is_decimal = true;
+    bool has_unsigned_suffix;
+    int long_suffix_count;
     bool is_long_long;
 
     lex_ident_n(T_numeric, token, MAX_TOKEN_LEN);
-    is_long_long = numeric_has_long_long_suffix(token);
+    has_unsigned_suffix = numeric_has_unsigned_suffix(token);
+    long_suffix_count = numeric_long_suffix_count(token);
+    is_long_long = long_suffix_count >= 2;
 
     if (token[0] == '-') {
         is_neg = !is_neg;
@@ -2070,13 +2177,6 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
             i = 2;
             base = 16;
             is_decimal = false;
-            hex_digits = 0;
-            while (isxdigit(token[2 + hex_digits]))
-                hex_digits++;
-            if (is_long_long && hex_digits > 16)
-                error_at("Integer literal exceeds supported range",
-                         cur_token_loc());
-            high_digits = is_long_long && hex_digits > 8 ? hex_digits - 8 : 0;
             do {
                 c = token[i++];
                 if (isdigit(c))
@@ -2089,13 +2189,9 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
                         error_at("Invalid numeric constant", cur_token_loc());
                 }
 
-                part = (i - 3 < high_digits) ? &value_hi : &value;
-                if (*part > 0xffffffffU / base ||
-                    (*part == 0xffffffffU / base &&
-                     (unsigned int) c > 0xffffffffU % base))
-                    error_at("Integer literal exceeds 32-bit range",
+                if (!numeric_mul_add_wide(&value_hi, &value, base, c))
+                    error_at("Integer literal exceeds supported range",
                              cur_token_loc());
-                *part = (*part * base) + c;
             } while (isxdigit(token[i]));
         } else if ((token[1] | 32) == 'b') { /* binary */
             i = 2;
@@ -2106,17 +2202,9 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
                 if (c != '0' && c != '1')
                     error_at("Invalid binary constant", cur_token_loc());
                 c -= '0';
-                if (is_long_long &&
-                    !numeric_mul_add_wide(&value_hi, &value, base, c))
+                if (!numeric_mul_add_wide(&value_hi, &value, base, c))
                     error_at("Integer literal exceeds supported range",
                              cur_token_loc());
-                if (!is_long_long && (value > 0xffffffffU / base ||
-                                      (value == 0xffffffffU / base &&
-                                       (unsigned int) c > 0xffffffffU % base)))
-                    error_at("Integer literal exceeds 32-bit range",
-                             cur_token_loc());
-                if (!is_long_long)
-                    value = (value * base) + c;
             } while (token[i] == '0' || token[i] == '1');
         } else { /* octal */
             base = 8;
@@ -2126,63 +2214,62 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
                 if (c > '7')
                     error_at("Invalid numeric constant", cur_token_loc());
                 c -= '0';
-                if (is_long_long &&
-                    !numeric_mul_add_wide(&value_hi, &value, base, c))
+                if (!numeric_mul_add_wide(&value_hi, &value, base, c))
                     error_at("Integer literal exceeds supported range",
                              cur_token_loc());
-                if (!is_long_long && (value > 0xffffffffU / base ||
-                                      (value == 0xffffffffU / base &&
-                                       (unsigned int) c > 0xffffffffU % base)))
-                    error_at("Integer literal exceeds 32-bit range",
-                             cur_token_loc());
-                if (!is_long_long)
-                    value = (value * base) + c;
             } while (isdigit(token[i]));
         }
     } else {
         do {
             c = token[i++] - '0';
-            if (is_long_long &&
-                !numeric_mul_add_wide(&value_hi, &value, base, c))
+            if (!numeric_mul_add_wide(&value_hi, &value, base, c))
                 error_at("Integer literal exceeds supported range",
                          cur_token_loc());
-            if (!is_long_long && (value > 0xffffffffU / base ||
-                                  (value == 0xffffffffU / base &&
-                                   (unsigned int) c > 0xffffffffU % base)))
-                error_at("Integer literal exceeds 32-bit range",
-                         cur_token_loc());
-            if (!is_long_long)
-                value = (value * base) + c;
         } while (isdigit(token[i]));
     }
 
+    if (!numeric_suffix_is_valid(token + i))
+        error_at("Invalid integer literal suffix", cur_token_loc());
+
+    /* Decimal constants have only signed candidates unless they carry U: C99
+     * may not silently select unsigned long long for 2^63 or above. The one
+     * exception is the magnitude in the standard spelling of LLONG_MIN, where
+     * the separately parsed unary minus consumes exactly 2^63.
+     */
+    if (is_decimal && !has_unsigned_suffix &&
+        (value_hi > 0x80000000U ||
+         (value_hi == 0x80000000U && (value != 0 || !is_neg))))
+        error_at("Decimal integer literal exceeds signed long long range",
+                 cur_token_loc());
+
     var_t *vd = require_var(parent);
     vd->var_name = gen_name();
-    if (is_long_long) {
+    if (is_long_long || value_hi ||
+        (is_decimal && !has_unsigned_suffix && !is_neg &&
+         numeric_literal_needs_wide_path(token)) ||
+        (is_decimal && !has_unsigned_suffix &&
+         (value > 0x80000000U || (value == 0x80000000U && !is_neg)))) {
         if (PTR_SIZE < 8)
             error_at("long long literal needs 64-bit target lowering",
                      cur_token_loc());
-        vd->type =
-            numeric_has_unsigned_suffix(token) ? TY_ulong_long : TY_long_long;
-    } else if (numeric_has_unsigned_suffix(token) ||
-               (!is_decimal && value > 0x7fffffffU))
+        if (has_unsigned_suffix || (!is_decimal && value_hi > 0x7fffffffU))
+            vd->type = TY_ulong_long;
+        else
+            vd->type = TY_long_long;
+    } else if (has_unsigned_suffix || (!is_decimal && value > 0x7fffffffU))
         vd->type = TY_uint;
 
     /* Keep the exact 2^31 magnitude as an int bit pattern: C spells INT_MIN as
      * unary minus plus that token, and the unary operator is parsed after the
      * literal. Larger decimal values really need long long here.
      */
-    else if (value > 0x80000000U)
-        error_at("Integer literal requires unsupported 64-bit type",
-                 cur_token_loc());
     if (is_neg) {
         value = 0 - value;
         value_hi = ~value_hi + (value == 0);
     }
     vd->init_val = value;
     vd->init_val_hi = value_hi;
-    /* The integer constant folders currently carry one word only. */
-    vd->is_const = value_hi == 0;
+    vd->is_const = true;
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 }
@@ -4905,6 +4992,127 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
 }
 
 bool read_global_assignment_var(var_t *var);
+
+/* Keep the legacy word-sized evaluator for ordinary constants and casts, but
+ * select the two-word path whenever a literal-only initializer contains a wide
+ * token. Looking past leading narrow operands matters for expressions such as
+ * `(3 + 0x100000000LL)`: the old evaluator would consume the later token before
+ * it had a chance to preserve its high word.
+ */
+bool wide_global_literal_appears_before_initializer_end(token_t *token)
+{
+    int bracket_depth = 0;
+
+    for (; token; token = token->next) {
+        if (token->kind == T_open_bracket)
+            bracket_depth++;
+        else if (token->kind == T_close_bracket) {
+            if (bracket_depth == 0)
+                return false;
+            bracket_depth--;
+        } else if (bracket_depth == 0 &&
+                   (token->kind == T_semicolon || token->kind == T_comma))
+            return false;
+        else if (token->kind == T_numeric &&
+                 numeric_literal_needs_wide_path(token->literal))
+            return true;
+    }
+    return false;
+}
+
+var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb);
+
+/* A grouped primary is lowered into the same global setup block as its parent.
+ * The caller owns the closing parenthesis, so get_operator() naturally stops an
+ * inner precedence stack without consuming its delimiter.
+ */
+var_t *read_wide_global_literal_primary(block_t *parent, basic_block_t *bb)
+{
+    char literal[MAX_TOKEN_LEN];
+    bool is_neg = lex_accept(T_minus);
+    var_t *value;
+
+    if (lex_accept(T_open_bracket)) {
+        value = read_wide_global_literal_expression(parent, bb);
+        lex_expect(T_close_bracket);
+        if (is_neg) {
+            var_t *zero = require_var(parent);
+            var_t *result = require_var(parent);
+
+            zero->var_name = gen_name();
+            zero->type = value->type;
+            zero->init_val = 0;
+            add_insn(parent, bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
+            result->var_name = gen_name();
+            result->type = value->type;
+            add_insn(parent, bb, OP_sub, result, zero, value, 0, NULL);
+            return result;
+        }
+        return value;
+    }
+    if (!lex_peek(T_numeric, literal))
+        error_at("Wide global initializer needs a literal operand",
+                 next_token_loc());
+    read_numeric_param(parent, bb, is_neg);
+    value = opstack_pop();
+    force_wide_global_literal_type(value, literal);
+    return value;
+}
+
+/* Parse arithmetic literal-only global expressions, including grouped
+ * subexpressions, without sending a high word through the legacy int-only
+ * constant evaluator.
+ */
+var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb)
+{
+    opcode_t op_stack[MAX_OPERATOR_STACK_SIZE];
+    var_t *val_stack[MAX_OPERATOR_STACK_SIZE];
+    int op_stack_index = 0, val_stack_index = 0;
+    opcode_t op;
+
+    val_stack[val_stack_index++] = read_wide_global_literal_primary(parent, bb);
+    op = get_operator();
+    while (op != OP_generic) {
+        if (op == OP_ternary || is_logical(op))
+            error_at("Wide global initializer needs arithmetic literals",
+                     cur_token_loc());
+        while (op_stack_index > 0 &&
+               get_operator_prio(op_stack[op_stack_index - 1]) >=
+                   get_operator_prio(op)) {
+            var_t *right = val_stack[--val_stack_index];
+            var_t *left = val_stack[--val_stack_index];
+            var_t *result = require_var(parent);
+
+            result->var_name = gen_name();
+            result->type = integer_binary_result_type(
+                op_stack[--op_stack_index], left, right);
+            add_insn(parent, bb, op_stack[op_stack_index], result, left, right,
+                     0, NULL);
+            val_stack[val_stack_index++] = result;
+        }
+        if (op_stack_index >= MAX_OPERATOR_STACK_SIZE ||
+            val_stack_index >= MAX_OPERATOR_STACK_SIZE)
+            fatal("Wide global initializer is too complex");
+        op_stack[op_stack_index++] = op;
+        val_stack[val_stack_index++] =
+            read_wide_global_literal_primary(parent, bb);
+        op = get_operator();
+    }
+    while (op_stack_index > 0) {
+        var_t *right = val_stack[--val_stack_index];
+        var_t *left = val_stack[--val_stack_index];
+        var_t *result = require_var(parent);
+
+        result->var_name = gen_name();
+        result->type =
+            integer_binary_result_type(op_stack[--op_stack_index], left, right);
+        add_insn(parent, bb, op_stack[op_stack_index], result, left, right, 0,
+                 NULL);
+        val_stack[val_stack_index++] = result;
+    }
+    return val_stack[0];
+}
+
 void eval_ternary_imm(int cond, var_t *var)
 {
     if (cond == 0) {
@@ -4930,6 +5138,17 @@ bool read_global_assignment_var(var_t *var)
 
     /* global initialization must be constant */
     {
+        /* The legacy global evaluator stores operands in int. Parse a wide
+         * literal-only expression separately so its upper payload survives;
+         * lower each reduction into the global setup block instead of trying to
+         * narrow the expression through that evaluator.
+         */
+        if (wide_global_literal_appears_before_initializer_end(
+                cur_token->next)) {
+            rs1 = read_wide_global_literal_expression(parent, bb);
+            add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+            return true;
+        }
         if (lex_peek(T_string, NULL)) {
             /* String literal global initialization: String literals are now
              * stored in .rodata section. TODO: Implement compile-time address
@@ -5238,6 +5457,8 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     var_t *rs1;
     var_t *var;
     opcode_t prefix_op = OP_generic;
+    bool is_const = false;
+    bool is_static = false;
 
     lex_expect(T_open_bracket);
 
@@ -5249,7 +5470,23 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     bb_connect(bb, setup, NEXT);
 
     if (!lex_accept(T_semicolon)) {
-        if (!lex_peek(T_identifier, token))
+        while (lex_peek(T_static, NULL) || lex_peek(T_const, NULL)) {
+            if (lex_accept(T_static)) {
+                if (is_static)
+                    error_at("duplicate static storage class specifier",
+                             cur_token_loc());
+                is_static = true;
+            } else {
+                lex_expect(T_const);
+                is_const = true;
+            }
+        }
+
+        bool has_builtin_type = lex_peek(T_signed, NULL) ||
+                                lex_peek(T_unsigned, NULL) ||
+                                lex_peek(T_long, NULL);
+        if (!has_builtin_type && !lex_peek(T_identifier, token) &&
+            !lex_peek(T_struct, NULL) && !lex_peek(T_union, NULL))
             error_at("Unexpected token when parsing for loop",
                      next_token_loc());
 
@@ -5257,18 +5494,34 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
         if (find_type_flag == 1 && lex_accept(T_union)) {
             find_type_flag = 2;
         }
-        type = find_type(token, find_type_flag);
+        type = has_builtin_type ? TY_int : find_type(token, find_type_flag);
         if (type) {
             var = require_typed_var(blk, type);
+            var->is_static = is_static;
+            var->is_global = is_static;
+            var->is_const_qualified = is_const;
             read_full_var_decl(var, false, false);
-            add_insn(blk, setup, OP_allocat, var, NULL, NULL, 0, NULL);
+            add_insn(is_static ? GLOBAL_BLOCK : blk,
+                     is_static ? GLOBAL_FUNC->bbs : setup, OP_allocat, var,
+                     NULL, NULL, 0, NULL);
             add_symbol(setup, var);
             if (lex_accept(T_assign)) {
-                read_expr(blk, &setup);
-                read_ternary_operation(blk, &setup);
+                if (is_static) {
+                    if (lex_peek(T_open_curly, NULL) &&
+                        (var->array_size > 0 || var->ptr_level > 0))
+                        parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs,
+                                         true);
+                    else if (lex_peek(T_open_curly, NULL))
+                        parse_global_record_init(var, GLOBAL_BLOCK);
+                    else
+                        read_global_assignment_var(var);
+                } else {
+                    read_expr(blk, &setup);
+                    read_ternary_operation(blk, &setup);
 
-                rs1 = resize_var(parent, &bb, opstack_pop(), var);
-                add_insn(blk, setup, OP_assign, var, rs1, NULL, 0, NULL);
+                    rs1 = resize_var(parent, &bb, opstack_pop(), var);
+                    add_insn(blk, setup, OP_assign, var, rs1, NULL, 0, NULL);
+                }
             }
             while (lex_accept(T_comma)) {
                 var_t *nv;
@@ -5278,14 +5531,30 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
 
                 /* multiple (partial) declarations */
                 nv = require_typed_var(blk, type);
+                nv->is_static = is_static;
+                nv->is_global = is_static;
+                nv->is_const_qualified = is_const;
                 read_partial_var_decl(nv, var); /* partial */
-                add_insn(blk, setup, OP_allocat, nv, NULL, NULL, 0, NULL);
+                add_insn(is_static ? GLOBAL_BLOCK : blk,
+                         is_static ? GLOBAL_FUNC->bbs : setup, OP_allocat, nv,
+                         NULL, NULL, 0, NULL);
                 add_symbol(setup, nv);
                 if (lex_accept(T_assign)) {
-                    read_expr(blk, &setup);
+                    if (is_static) {
+                        if (lex_peek(T_open_curly, NULL) &&
+                            (nv->array_size > 0 || nv->ptr_level > 0))
+                            parse_array_init(nv, GLOBAL_BLOCK,
+                                             &GLOBAL_FUNC->bbs, true);
+                        else if (lex_peek(T_open_curly, NULL))
+                            parse_global_record_init(nv, GLOBAL_BLOCK);
+                        else
+                            read_global_assignment_var(nv);
+                    } else {
+                        read_expr(blk, &setup);
 
-                    rs1 = resize_var(parent, &bb, opstack_pop(), nv);
-                    add_insn(blk, setup, OP_assign, nv, rs1, NULL, 0, NULL);
+                        rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                        add_insn(blk, setup, OP_assign, nv, rs1, NULL, 0, NULL);
+                    }
                 }
             }
         } else {
@@ -5529,9 +5798,12 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     bool is_static = false;
 
     while (lex_peek(T_static, NULL) || lex_peek(T_const, NULL)) {
-        if (lex_accept(T_static))
+        if (lex_accept(T_static)) {
+            if (is_static)
+                error_at("duplicate static storage class specifier",
+                         cur_token_loc());
             is_static = true;
-        else {
+        } else {
             lex_expect(T_const);
             is_const = true;
         }
@@ -6010,6 +6282,8 @@ void read_global_init_var(var_t *var, block_t *block)
     if (!lex_accept(T_assign))
         return;
 
+    var->has_initializer = true;
+
     if (lex_peek(T_open_curly, NULL) &&
         (var->array_size > 0 || var->ptr_level > 0))
         parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
@@ -6028,6 +6302,53 @@ void read_global_init_var(var_t *var, block_t *block)
         read_global_assignment_var(var);
 }
 
+/* A compatible repeated file-scope declaration names the same object. The
+ * parser creates a provisional var_t while reading its declarator, so discard
+ * that entry before emitting allocation or initializer IR and keep the first
+ * declaration's storage.
+ */
+var_t *resolve_global_declarator(block_t *block,
+                                 var_t *var,
+                                 bool is_static,
+                                 bool *is_redeclaration)
+{
+    var_t *previous = NULL;
+
+    *is_redeclaration = false;
+
+    for (int i = 0; i + 1 < block->locals.size; i++) {
+        var_t *candidate = block->locals.elements[i];
+        if (!strcmp(candidate->var_name, var->var_name)) {
+            previous = candidate;
+            break;
+        }
+    }
+    if (!previous)
+        return var;
+
+    *is_redeclaration = true;
+
+    if (previous->type != var->type || previous->ptr_level != var->ptr_level ||
+        previous->array_size != var->array_size ||
+        previous->array_dim2 != var->array_dim2 ||
+        previous->is_const_qualified != var->is_const_qualified)
+        error_at("conflicting types for global declaration", next_token_loc());
+    if (!previous->is_static && is_static)
+        error_at("static declaration follows non-static declaration",
+                 next_token_loc());
+    if (lex_peek(T_assign, NULL) && previous->has_initializer)
+        error_at("redefinition of global variable", next_token_loc());
+
+    /* Scalar declarators were placed on the operand stack by
+     * read_inner_var_decl(). Its later initializer lowering pops that entry, so
+     * point it at the shared object rather than the discarded declaration.
+     */
+    if (operand_stack_idx && operand_stack[operand_stack_idx - 1] == var)
+        operand_stack[operand_stack_idx - 1] = previous;
+    block->locals.size--;
+    return previous;
+}
+
 /* Read one declarator after the first in a global declaration. Each shares the
  * declaration's base type: "int a = 1, b, c = 3;".
  */
@@ -6036,12 +6357,15 @@ void read_global_declarator(block_t *block,
                             bool is_const,
                             bool is_static)
 {
+    bool is_redeclaration;
     var_t *nv = require_typed_var(block, decl_type);
     nv->is_global = true;
     nv->is_static = is_static;
     nv->is_const_qualified = is_const;
     read_inner_var_decl(nv, false, false);
-    add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, nv, NULL, NULL, 0, NULL);
+    nv = resolve_global_declarator(block, nv, is_static, &is_redeclaration);
+    if (!is_redeclaration)
+        add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, nv, NULL, NULL, 0, NULL);
     read_global_init_var(nv, block);
 }
 
@@ -6185,15 +6509,20 @@ void read_global_record_declarator(block_t *block,
                                    bool is_const,
                                    bool is_static)
 {
+    bool is_redeclaration;
     var_t *var = require_typed_var(block, decl_type);
     var->is_global = true;
     var->is_static = is_static;
     var->is_const_qualified = is_const;
     read_inner_var_decl(var, false, false);
-    add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
+    var = resolve_global_declarator(block, var, is_static, &is_redeclaration);
+    if (!is_redeclaration)
+        add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
 
     if (!lex_accept(T_assign))
         return;
+
+    var->has_initializer = true;
 
     if (lex_peek(T_open_curly, NULL) &&
         (var->array_size > 0 || var->ptr_level > 0)) {
@@ -6212,6 +6541,7 @@ void read_global_record_declarator(block_t *block,
 
 void read_global_decl(block_t *block, bool is_const, bool is_static)
 {
+    bool is_redeclaration;
     var_t *var = require_var(block);
     var->is_global = true;
     var->is_static = is_static;
@@ -6307,8 +6637,13 @@ void read_global_decl(block_t *block, bool is_const, bool is_static)
         if (lex_accept(T_semicolon)) /* forward definition */
             return;
         error_at("Syntax error in global declaration", next_token_loc());
-    } else
-        add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
+    } else {
+        var =
+            resolve_global_declarator(block, var, is_static, &is_redeclaration);
+        if (!is_redeclaration)
+            add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0,
+                     NULL);
+    }
 
     /* is a variable */
     if (lex_peek(T_assign, NULL)) {
@@ -6392,6 +6727,9 @@ void read_global_statement(void)
             is_const = true;
         else {
             lex_expect(T_static);
+            if (is_static)
+                error_at("duplicate static storage class specifier",
+                         cur_token_loc());
             is_static = true;
         }
     }
@@ -6651,24 +6989,56 @@ void read_global_statement(void)
             char base_type[MAX_ID_LEN];
             const type_t *base;
             type_t *type = add_type();
-            bool typedef_const = lex_accept(T_const);
-            bool is_signed = lex_accept(T_signed);
-            bool is_unsigned = lex_accept(T_unsigned);
-            bool is_long = lex_accept(T_long);
+            bool typedef_const = false;
+            bool is_signed = false;
+            bool is_unsigned = false;
+            bool is_long = false;
+            bool is_long_long = false;
+
+            /* Typedef declarations use the same freely ordered scalar specifier
+             * set as object declarations. Keeping this in a loop admits C99
+             * spellings such as `long unsigned long` rather than treating the
+             * second specifier as the typedef name.
+             */
+            while (lex_peek(T_const, NULL) || lex_peek(T_signed, NULL) ||
+                   lex_peek(T_unsigned, NULL) || lex_peek(T_long, NULL)) {
+                if (lex_accept(T_const))
+                    typedef_const = true;
+                else if (lex_accept(T_signed)) {
+                    if (is_signed)
+                        error_at("duplicate signed type specifier",
+                                 cur_token_loc());
+                    is_signed = true;
+                } else if (lex_accept(T_unsigned)) {
+                    if (is_unsigned)
+                        error_at("duplicate unsigned type specifier",
+                                 cur_token_loc());
+                    is_unsigned = true;
+                } else {
+                    lex_expect(T_long);
+                    if (is_long_long)
+                        error_at("too many long type specifiers",
+                                 cur_token_loc());
+                    if (is_long)
+                        is_long_long = true;
+                    else
+                        is_long = true;
+                }
+            }
             if (is_signed && is_unsigned)
                 error_at("both signed and unsigned specified", cur_token_loc());
-            if (is_long) {
-                is_signed |= lex_accept(T_signed);
-                typedef_const |= lex_accept(T_const);
-            }
 
             if (is_long) {
-                if (lex_accept(T_long))
-                    error_at("long long is not supported yet", cur_token_loc());
+                if (is_long_long && PTR_SIZE < 8)
+                    error_at("long long needs 64-bit target lowering",
+                             cur_token_loc());
                 if (lex_peek(T_identifier, base_type) &&
                     !strcmp(base_type, "int"))
                     lex_expect(T_identifier);
-                base = is_unsigned ? TY_uint : TY_int;
+                if (is_long_long)
+                    base = is_unsigned ? TY_ulong_long : TY_long_long;
+                else
+                    base = is_unsigned ? TY_uint : TY_int;
             } else if (is_unsigned) {
                 if (lex_peek(T_identifier, base_type) &&
                     (!strcmp(base_type, "int") || !strcmp(base_type, "char") ||

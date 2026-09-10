@@ -54,6 +54,56 @@ void a64_mov_imm(int d, int v)
         emit(0xd2800000 | ((v & 0xffff) << 5) | d);
     emit(0xf2800000 | (((v >> 16) & 0xffff) << 5) | d | (1 << 21));
 }
+
+/* A 32-bit unsigned constant has zeroes above bit 31 when it later widens to an
+ * X-register scalar. The signed helper intentionally uses MOVN for a negative
+ * int, so keep this spelling separate.
+ */
+void a64_mov_imm_unsigned(int d, int v)
+{
+    unsigned int value = v;
+
+    emit(0xd2800000 | ((value & 0xffff) << 5) | d);
+    emit(0xf2800000 | (((value >> 16) & 0xffff) << 5) | d | (1 << 21));
+}
+
+/* Phase-2 constants retain their upper word in src1. Materialise all four
+ * halfwords for an eight-byte scalar rather than silently discarding it in the
+ * ordinary int helper above.
+ */
+void a64_mov_imm_wide(int d, int lo, int hi)
+{
+    unsigned int low = lo, high = hi;
+
+    emit(0xd2800000 | ((low & 0xffff) << 5) | d);
+    emit(0xf2800000 | (((low >> 16) & 0xffff) << 5) | d | (1 << 21));
+    emit(0xf2800000 | ((high & 0xffff) << 5) | d | (2 << 21));
+    emit(0xf2800000 | (((high >> 16) & 0xffff) << 5) | d | (3 << 21));
+}
+
+int a64_div_opcode(ph2_ir_t *p)
+{
+    if (p->size_bytes == 8) {
+        if (p->src0_is_unsigned || p->src1_is_unsigned)
+            return 0x9ac00800; /* UDIV Xd, Xn, Xm */
+        return 0x9ac00c00;     /* SDIV Xd, Xn, Xm */
+    }
+    if (p->src0_is_unsigned || p->src1_is_unsigned)
+        return 0x1ac00800; /* UDIV Wd, Wn, Wm */
+    return 0x1ac00c00;     /* SDIV Wd, Wn, Wm */
+}
+
+int a64_rshift_opcode(ph2_ir_t *p)
+{
+    if (p->size_bytes == 8) {
+        if (p->src0_is_unsigned)
+            return 0x9ac02400; /* LSRV Xd, Xn, Xm */
+        return 0x9ac02800;     /* ASRV Xd, Xn, Xm */
+    }
+    if (p->src0_is_unsigned)
+        return 0x1ac02400; /* LSRV Wd, Wn, Wm */
+    return 0x1ac02800;     /* ASRV Wd, Wn, Wm */
+}
 void a64_add(int d, int n, int m)
 {
     int op = (d == A64_SP || n == A64_SP) ? 0x8b206000 : 0x8b000000;
@@ -217,7 +267,7 @@ int a64_ptr_index(ph2_ir_t *p)
  */
 bool a64_cmp_wide(ph2_ir_t *p)
 {
-    return p->src0_is_pointer || p->src1_is_pointer;
+    return p->size_bytes == 8 || p->src0_is_pointer || p->src1_is_pointer;
 }
 
 int a64_cond(opcode_t op, bool is_unsigned)
@@ -254,7 +304,7 @@ void update_elf_offset(ph2_ir_t *ir)
     case OP_load_constant:
     case OP_load_data_address:
     case OP_load_rodata_address:
-        n = 2;
+        n = ir->op == OP_load_constant && ir->size_bytes == 8 ? 4 : 2;
         break;
     case OP_address_of:
     case OP_global_address_of:
@@ -406,7 +456,12 @@ void emit_ph2_ir(ph2_ir_t *p)
         return;
     }
     case OP_load_constant:
-        a64_mov_imm(d, p->src0);
+        if (p->size_bytes == 8)
+            a64_mov_imm_wide(d, p->src0, p->src1);
+        else if (p->is_unsigned)
+            a64_mov_imm_unsigned(d, p->src0);
+        else
+            a64_mov_imm(d, p->src0);
         return;
     case OP_assign:
         if (d != n)
@@ -466,43 +521,44 @@ void emit_ph2_ir(ph2_ir_t *p)
             a64_sub(d, n, m);
         return;
     case OP_mul:
-        emit(0x1b007c00 | (m << 16) | (n << 5) | d);
+        emit((p->size_bytes == 8 ? 0x9b007c00 : 0x1b007c00) | (m << 16) |
+             (n << 5) | d);
         return;
     case OP_div:
-        emit((p->src0_is_unsigned || p->src1_is_unsigned ? 0x1ac00800
-                                                         : 0x1ac00c00) |
-             (m << 16) | (n << 5) | d);
+        emit(a64_div_opcode(p) | (m << 16) | (n << 5) | d);
         return;
     case OP_mod:
         /* d = n % m. Do not put the quotient in d: register coalescing may make
          * d alias n, losing the minuend before MSUB reads it.
          */
-        emit((p->src0_is_unsigned || p->src1_is_unsigned ? 0x1ac00800
-                                                         : 0x1ac00c00) |
-             (m << 16) | (n << 5) | A64_IP0);
-        emit(0x1b008000 | (m << 16) | (n << 10) | (A64_IP0 << 5) | d);
+        emit(a64_div_opcode(p) | (m << 16) | (n << 5) | A64_IP0);
+        emit((p->size_bytes == 8 ? 0x9b008000 : 0x1b008000) | (m << 16) |
+             (n << 10) | (A64_IP0 << 5) | d);
         return;
     case OP_lshift:
-        emit(0x1ac02000 | (m << 16) | (n << 5) | d);
-        return;
-    case OP_rshift:
-        emit((p->src0_is_unsigned ? 0x1ac02400 : 0x1ac02800) | (m << 16) |
+        emit((p->size_bytes == 8 ? 0x9ac02000 : 0x1ac02000) | (m << 16) |
              (n << 5) | d);
         return;
+    case OP_rshift:
+        emit(a64_rshift_opcode(p) | (m << 16) | (n << 5) | d);
+        return;
     case OP_bit_and:
-        emit(0x0a000000 | (m << 16) | (n << 5) | d);
+        emit((p->size_bytes == 8 ? 0x8a000000 : 0x0a000000) | (m << 16) |
+             (n << 5) | d);
         return;
     case OP_bit_or:
-        emit(0x2a000000 | (m << 16) | (n << 5) | d);
+        emit((p->size_bytes == 8 ? 0xaa000000 : 0x2a000000) | (m << 16) |
+             (n << 5) | d);
         return;
     case OP_bit_xor:
-        emit(0x4a000000 | (m << 16) | (n << 5) | d);
+        emit((p->size_bytes == 8 ? 0xca000000 : 0x4a000000) | (m << 16) |
+             (n << 5) | d);
         return;
     case OP_negate:
-        emit(0x4b0003e0 | (n << 16) | d);
+        emit((p->size_bytes == 8 ? 0xcb0003e0 : 0x4b0003e0) | (n << 16) | d);
         return;
     case OP_bit_not:
-        emit(0x2a2003e0 | (n << 16) | d);
+        emit((p->size_bytes == 8 ? 0xaa2003e0 : 0x2a2003e0) | (n << 16) | d);
         return;
     case OP_eq:
     case OP_neq:
@@ -542,7 +598,7 @@ void emit_ph2_ir(ph2_ir_t *p)
         /* Widening to a pointer: the register already holds a full address, so
          * extending it from 32 bits would discard the upper half.
          */
-        if (dst_size == PTR_SIZE)
+        if (dst_size == PTR_SIZE && p->is_pointer)
             a64_mov(d, n);
         else
             a64_extend(d, n, src_size, p->src0_is_unsigned);

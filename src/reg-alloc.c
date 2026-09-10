@@ -2122,6 +2122,9 @@ void reg_alloc_global(insn_t *global_insn)
         ir->src0 = global_insn->rd->init_val;
         ir->src1 = global_insn->rd->init_val_hi;
         ir->dest = dest;
+        ir->is_unsigned = is_unsigned_scalar(global_insn->rd);
+        ir->size_bytes =
+            global_insn->rd->ptr_level ? PTR_SIZE : global_insn->rd->type->size;
         break;
     case OP_assign:
         src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
@@ -2152,13 +2155,36 @@ void reg_alloc_global(insn_t *global_insn)
             global_insn->rd->is_global = true;
             break;
         }
-        /* Fallback: generate an add */
+        /* Fall through to the ordinary scalar binary lowering below. */
+        goto lower_global_binary;
+    }
+    case OP_sub:
+    case OP_mul:
+    case OP_div:
+    case OP_mod:
+    case OP_lshift:
+    case OP_rshift:
+    case OP_bit_and:
+    case OP_bit_or:
+    case OP_bit_xor:
+    case OP_eq:
+    case OP_neq:
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+    lower_global_binary: {
+        /* Global scalar initializers may have been parsed as a binary constant
+         * expression. Use the same phase-2 operation as a function body so wide
+         * division, comparison, and bitwise expressions do not stop at global
+         * setup merely because they are not pointer-address arithmetic.
+         */
         int src1;
         src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
         src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
         dest =
             prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, src1);
-        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_add);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
         ir->src0 = src0;
         ir->src1 = src1;
         ir->dest = dest;
@@ -2752,22 +2778,19 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
 
             /* SSA temporaries normally retain their result type, but width is a
              * property of the operation as well: a wide operand must not be
-             * narrowed merely because an intermediate lost its annotation.
-             * Comparisons still produce int; their x64 emitter compares full
-             * registers independently of this result width.
+             * narrowed merely because an intermediate lost its annotation. This
+             * includes comparisons: their result is int, while CMP must inspect
+             * the common operand width rather than stale high halves of 32-bit
+             * register values.
              */
-            if (insn->opcode != OP_eq && insn->opcode != OP_neq &&
-                insn->opcode != OP_gt && insn->opcode != OP_geq &&
-                insn->opcode != OP_lt && insn->opcode != OP_leq) {
-                int left_size =
-                    insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
-                int right_size =
-                    insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
-                if (left_size > ir->size_bytes)
-                    ir->size_bytes = left_size;
-                if (right_size > ir->size_bytes)
-                    ir->size_bytes = right_size;
-            }
+            int left_size =
+                insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
+            int right_size =
+                insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
+            if (left_size > ir->size_bytes)
+                ir->size_bytes = left_size;
+            if (right_size > ir->size_bytes)
+                ir->size_bytes = right_size;
             break;
         case OP_negate:
         case OP_bit_not:

@@ -79,7 +79,8 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
     }
 
     /* Arithmetic identity with zero constant */
-    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0) {
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
+        ph2_ir->src1 == 0) {
         if (next->op == OP_add &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
             /* Pattern: {li 0; add x, 0} → {mov x} (additive identity: x+0 = x)
@@ -135,7 +136,8 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
     }
 
     /* Multiplicative identity with one constant */
-    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1) {
+    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1 &&
+        ph2_ir->src1 == 0) {
         if (next->op == OP_mul &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1)) {
             /* Pattern: {li 1; mul x, 1} → {mov x} (multiplicative identity: x *
@@ -153,7 +155,8 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
 
     /* Bitwise identity operations */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
-        next->op == OP_bit_and && ph2_ir->dest == next->src1) {
+        ph2_ir->src1 == 0 && next->op == OP_bit_and &&
+        ph2_ir->dest == next->src1) {
         /* Pattern: {li -1; and x, -1} → {mov x} (x & 0xFFFFFFFF = x) Example:
          * {li t1, -1; and result, var, t1} → {mov result, var} Eliminates
          * bitwise AND with all-ones mask
@@ -166,7 +169,7 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
     }
 
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        (next->op == OP_lshift || next->op == OP_rshift) &&
+        ph2_ir->src1 == 0 && (next->op == OP_lshift || next->op == OP_rshift) &&
         ph2_ir->dest == next->src1) {
         /* Pattern: {li 0; shl/shr x, 0} → {mov x} (x << 0 = x >> 0 = x)
          * Example: {li t1, 0; shl result, var, t1} → {mov result, var}
@@ -180,7 +183,8 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
     }
 
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        next->op == OP_bit_or && ph2_ir->dest == next->src1) {
+        ph2_ir->src1 == 0 && next->op == OP_bit_or &&
+        ph2_ir->dest == next->src1) {
         /* Pattern: {li 0; or x, 0} → {mov x} (x | 0 = x) Example: {li t1, 0; or
          * result, var, t1} → {mov result, var} Eliminates bitwise OR with zero
          * (identity element)
@@ -196,7 +200,7 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
      * significantly faster than multiplication
      */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 > 0 &&
-        next->op == OP_mul && ph2_ir->dest == next->src1) {
+        ph2_ir->src1 == 0 && next->op == OP_mul && ph2_ir->dest == next->src1) {
         int shift_amount = exact_log2(ph2_ir->src0);
         if (shift_amount >= 0) {
             /* Pattern: {li 2^n; mul x, 2^n} → {li n; shl x, n} Example: {li t1,
@@ -211,7 +215,8 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
 
     /* XOR identity operation */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        next->op == OP_bit_xor && ph2_ir->dest == next->src1) {
+        ph2_ir->src1 == 0 && next->op == OP_bit_xor &&
+        ph2_ir->dest == next->src1) {
         /* Pattern: {li 0; xor x, 0} → {mov x} (x ^ 0 = x) Example: {li t1, 0;
          * xor result, var, t1} → {mov result, var} Completes bitwise identity
          * optimization coverage
@@ -227,7 +232,7 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
      * case where constant 1 is in src0 position of multiplication
      */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1 &&
-        next->op == OP_mul && ph2_ir->dest == next->src0) {
+        ph2_ir->src1 == 0 && next->op == OP_mul && ph2_ir->dest == next->src0) {
         /* Pattern: {li 1; mul 1, x} → {mov x} (1 * x = x) Example: {li t1, 1;
          * mul result, t1, var} → {mov result, var} Covers multiplication
          * commutativity edge case
@@ -578,7 +583,8 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
      * 32-bit)
      */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
-        next->op == OP_bit_and && next->src1 == ph2_ir->dest) {
+        ph2_ir->src1 == 0 && next->op == OP_bit_and &&
+        next->src1 == ph2_ir->dest) {
         /* Replace AND with assignment */
         next->op = OP_assign;
         next->src1 = 0;
@@ -588,7 +594,8 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
 
     /* Pattern 3: OR with zero → identity x | 0 = x */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        next->op == OP_bit_or && next->src1 == ph2_ir->dest) {
+        ph2_ir->src1 == 0 && next->op == OP_bit_or &&
+        next->src1 == ph2_ir->dest) {
         /* Replace OR with assignment */
         next->op = OP_assign;
         next->src1 = 0;
@@ -598,7 +605,8 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
 
     /* Pattern 4: XOR with zero → identity x ^ 0 = x */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        next->op == OP_bit_xor && next->src1 == ph2_ir->dest) {
+        ph2_ir->src1 == 0 && next->op == OP_bit_xor &&
+        next->src1 == ph2_ir->dest) {
         /* Replace XOR with assignment */
         next->op = OP_assign;
         next->src1 = 0;
@@ -608,7 +616,7 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
 
     /* Pattern 5: AND with zero → zero x & 0 = 0 */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        next->op == OP_bit_and &&
+        ph2_ir->src1 == 0 && next->op == OP_bit_and &&
         (next->src0 == ph2_ir->dest || next->src1 == ph2_ir->dest)) {
         /* Replace with constant load of 0 */
         next->op = OP_load_constant;
@@ -620,7 +628,7 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
 
     /* Pattern 6: OR with all-ones → all-ones x | 0xFFFFFFFF = 0xFFFFFFFF */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
-        next->op == OP_bit_or &&
+        ph2_ir->src1 == 0 && next->op == OP_bit_or &&
         (next->src0 == ph2_ir->dest || next->src1 == ph2_ir->dest)) {
         /* Replace with constant load of -1 */
         next->op = OP_load_constant;
@@ -634,7 +642,7 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
      * x << 0 = x, x >> 0 = x
      */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        (next->op == OP_lshift || next->op == OP_rshift) &&
+        ph2_ir->src1 == 0 && (next->op == OP_lshift || next->op == OP_rshift) &&
         next->src1 == ph2_ir->dest) {
         /* Replace shift with assignment */
         next->op = OP_assign;
