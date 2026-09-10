@@ -37,6 +37,7 @@ int types_idx = 0;
 
 type_t *TY_void;
 type_t *TY_char;
+type_t *TY_schar;
 type_t *TY_uchar;
 type_t *TY_bool;
 type_t *TY_int;
@@ -1121,6 +1122,8 @@ var_t *find_var(char *token, block_t *parent)
 int size_var(var_t *var)
 {
     int size;
+    if (var->is_flexible_array_member)
+        return 0;
     if (var->ptr_level > 0 || var->is_func) {
         /* Pointers and function pointers occupy a target pointer, which is 8
          * bytes on LP64 targets and 4 on the 32-bit ones.

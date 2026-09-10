@@ -718,6 +718,43 @@ token_t *pp_stringify(token_t *arg, source_location_t *loc)
     return out;
 }
 
+/* C99's #error directive displays the rest of its directive line as a
+ * diagnostic message. These are raw preprocessing tokens, not a macro
+ * replacement list, so spell them directly and retain their source order.
+ */
+__noreturn void pp_error_directive(token_t *directive)
+{
+    char message[MAX_LINE_LEN], scratch[MAX_TOKEN_LEN];
+    int len = 0;
+    bool needs_space = false;
+    source_location_t *loc = &directive->location;
+    token_t *tk = directive;
+
+    while (tk->next && tk->next->kind != T_newline && tk->next->kind != T_eof) {
+        tk = pp_lex_next_token(tk, false);
+        if (pp_is_layout(tk)) {
+            needs_space = len > 0;
+            continue;
+        }
+
+        char *spelling = token_to_string(tk, scratch);
+        if (!spelling)
+            continue;
+        if (needs_space && len < MAX_LINE_LEN - 1)
+            message[len++] = ' ';
+        needs_space = true;
+        loc = &tk->location;
+        for (int i = 0; spelling[i] && len < MAX_LINE_LEN - 1; i++)
+            message[len++] = spelling[i];
+    }
+
+    if (!len)
+        strcpy(message, "#error");
+    else
+        message[len] = '\0';
+    error_at(message, loc);
+}
+
 /* Join two tokens into one, as '##' requires.
  *
  * Pasting is textual, so the result has to be scanned again: "a" and "1" give
@@ -1189,6 +1226,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
         case T_cppd_include: {
             char inclusion_path[MAX_LINE_LEN];
             token_stream_t *file_tks = NULL;
+            token_t *include_tk = tk;
             preprocess_ctx_t inclusion_ctx;
             inclusion_ctx.hide_set = ctx->hide_set;
             inclusion_ctx.expanded_from = NULL;
@@ -1199,29 +1237,36 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 tk = pp_lex_next_token(tk, true);
                 strcpy(inclusion_path, tk->literal);
 
-                /* normalize path */
-                char path[MAX_LINE_LEN];
-                const char *file = tk->location.filename;
-                int c = strlen(file) - 1;
+                /* A header name may be supplied by an object-like macro. The
+                 * replacement is rescanned here rather than treating the macro
+                 * name as an angle include, and aliases may name another alias
+                 * before finally producing the required string token.
+                 */
+            } else if (pp_lex_peek_token(tk, T_identifier, true)) {
+                macro_t *aliases[MAX_TOKEN_LEN];
+                int alias_count = 0;
 
-                while (c > 0 && file[c] != '/')
-                    c--;
-
-                if (c) {
-                    if (c >= MAX_LINE_LEN - 1)
-                        c = MAX_LINE_LEN - 2;
-
-                    memcpy(path, file, c);
-                    path[c] = '\0';
-                } else {
-                    path[0] = '.';
-                    path[1] = '\0';
-                    c = 1;
+                tk = pp_lex_next_token(tk, true);
+                macro = hashmap_get(MACROS, tk->literal);
+                while (macro && !macro->is_disabled && !macro->param_num &&
+                       macro->replacement && !macro->replacement->next &&
+                       macro->replacement->kind == T_identifier) {
+                    for (int i = 0; i < alias_count; i++)
+                        if (aliases[i] == macro)
+                            error_at("cyclic macro expansion in #include",
+                                     &tk->location);
+                    if (alias_count == MAX_TOKEN_LEN)
+                        error_at("#include macro alias chain is too deep",
+                                 &tk->location);
+                    aliases[alias_count++] = macro;
+                    macro = hashmap_get(MACROS, macro->replacement->literal);
                 }
-
-                snprintf(path + c, MAX_LINE_LEN - c, "/%s", inclusion_path);
-                strncpy(inclusion_path, path, MAX_LINE_LEN - 1);
-                inclusion_path[MAX_LINE_LEN - 1] = '\0';
+                if (!macro || macro->is_disabled || macro->param_num ||
+                    !macro->replacement || macro->replacement->next ||
+                    macro->replacement->kind != T_string)
+                    error_at("#include macro must expand to a header name",
+                             &tk->location);
+                strcpy(inclusion_path, macro->replacement->literal);
             } else {
                 tk = pp_lex_expect_token(tk, T_lt, true);
 
@@ -1245,6 +1290,30 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 tk = pp_lex_next_token(tk, false);
                 continue;
             }
+
+            /* normalize path */
+            char path[MAX_LINE_LEN];
+            const char *file = include_tk->location.filename;
+            int c = strlen(file) - 1;
+
+            while (c > 0 && file[c] != '/')
+                c--;
+
+            if (c) {
+                if (c >= MAX_LINE_LEN - 1)
+                    c = MAX_LINE_LEN - 2;
+
+                memcpy(path, file, c);
+                path[c] = '\0';
+            } else {
+                path[0] = '.';
+                path[1] = '\0';
+                c = 1;
+            }
+
+            snprintf(path + c, MAX_LINE_LEN - c, "/%s", inclusion_path);
+            strncpy(inclusion_path, path, MAX_LINE_LEN - 1);
+            inclusion_path[MAX_LINE_LEN - 1] = '\0';
 
             tk = pp_lex_expect_token(tk, T_newline, true);
             tk = pp_lex_next_token(tk, false);
@@ -1432,17 +1501,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             continue;
         }
         case T_cppd_error: {
-            if (pp_lex_peek_token(tk, T_string, true)) {
-                tk = pp_lex_next_token(tk, true);
-
-                error_at(tk->literal, &tk->location);
-            } else {
-                error_at(
-                    "Internal error, #error does not support non-string error "
-                    "message",
-                    &tk->location);
-            }
-            break;
+            pp_error_directive(tk);
         }
         case T_backslash: {
             /* This branch is designed to be failed since backslash should be
@@ -1500,6 +1559,25 @@ token_t *pp_strip_layout(token_t *tk)
         if (tk->kind == T_whitespace || tk->kind == T_newline ||
             tk->kind == T_tab)
             continue;
+
+        /* C99 translation phase 6 concatenates adjacent string literal tokens
+         * after macro expansion. Do it at the parser boundary: whitespace is
+         * already irrelevant there, and this covers both source-adjacent and
+         * macro-produced strings without changing -E's token spelling.
+         */
+        if (cur != &head && cur->kind == T_string && tk->kind == T_string) {
+            char combined[MAX_TOKEN_LEN];
+            int left_len = strlen(cur->literal);
+            int right_len = strlen(tk->literal);
+
+            if (left_len + right_len >= MAX_TOKEN_LEN)
+                error_at("Concatenated string literal too long", &tk->location);
+            memcpy(combined, cur->literal, left_len);
+            memcpy(combined + left_len, tk->literal, right_len + 1);
+            cur->literal = intern_string(combined);
+            cur->location.len += tk->location.len;
+            continue;
+        }
         cur->next = tk;
         cur = tk;
     }

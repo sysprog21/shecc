@@ -351,6 +351,31 @@ function try_compile_error()
     fi
 }
 
+function try_compile_error_message()
+{
+    local expected="$1"
+    local input=$(cat)
+    test_selected || return 0
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    local tmp_log="$(mktemp)"
+    echo "$input" > "$tmp_in"
+
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" > "$tmp_log" 2>&1
+    local exit_code=$?
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$exit_code" -eq 0 ] || ! rg -Fq "$expected" "$tmp_log"; then
+        report_test_failure "COMPILE ERROR MESSAGE TEST" "$tmp_in" "$tmp_exe" \
+            "$expected" "$exit_code" "$(< "$tmp_log")"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
 # Verify a successful compilation emits a specific diagnostic. This is used for
 # C constructs that are permitted but deserve a warning, such as casting away
 # const qualification.
@@ -836,6 +861,18 @@ int main(void) {
            (sizeof(0x100000000) == 8);
 }
 EOF
+    try_ 6 << EOF
+int main(void) {
+    /* C99 chooses candidates from the suffix-specific list: the current
+     * ABI has 32-bit long, so overflow moves to the 64-bit long-long tier. */
+    return (sizeof(2147483647L) == 4) +
+           (sizeof(2147483648L) == 8) +
+           (sizeof(0x80000000L) == 4) +
+           (sizeof(0x80000000LL) == 8) +
+           (sizeof(4294967295U) == 4) +
+           (sizeof(4294967296U) == 8);
+}
+EOF
 fi
 if [ "$PTR_SZ" -lt 8 ]; then
     try_compile_error << EOF
@@ -1227,6 +1264,73 @@ int main(void) {
            (((unsigned short)-1) >> 15);
 }
 EOF
+try_ 5 << EOF
+/* C99 integer promotions preserve the magnitude of narrow unsigned values:
+ * unary operators promote to int, and the promoted operands then participate
+ * in ordinary binary arithmetic.  Sign-extending either source would make
+ * these comparisons false. */
+int main(void) {
+    unsigned char byte = 255;
+    unsigned short half = 65535;
+    return (+byte == 255) + (~byte == -256) + (-byte == -255) +
+           (+half == 65535) + (~half == -65536);
+}
+EOF
+try_ 3 << EOF
+typedef signed char signed_byte;
+signed_byte echo_signed_byte(signed_byte value);
+signed char echo_signed_byte(signed char value) { return value; }
+signed_byte compatible_signed_byte_object;
+signed char compatible_signed_byte_object;
+int main(void) {
+    signed_byte value = -1;
+    return (sizeof(signed char) == 1) + (echo_signed_byte(value) == -1) +
+           (compatible_signed_byte_object == 0);
+}
+EOF
+try_compile_error << EOF
+char incompatible_character_object;
+signed char incompatible_character_object;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+char incompatible_character_function(char value);
+signed char incompatible_character_function(signed char value);
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) {
+    char plain = 0;
+    signed char signed_value = 0;
+    char *plain_pointer = &plain;
+    signed char *signed_pointer = &signed_value;
+    plain_pointer = signed_pointer;
+    return *plain_pointer;
+}
+EOF
+try_compile_error << EOF
+void take_plain(char *value) { }
+int main(void) {
+    signed char value = 0;
+    take_plain(&value);
+    return 0;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    char plain = 0;
+    signed char signed_value = 0;
+    return &plain == &signed_value;
+}
+EOF
+try_ 0 << EOF
+int main(void) {
+    signed char value = 0;
+    void *bridge = &value;
+    signed char *round_trip = bridge;
+    return *round_trip;
+}
+EOF
 try_ 0 << EOF
 int main(void) {
     unsigned char byte = 255;
@@ -1329,6 +1433,92 @@ int main(void) {
     value.right = 9;
     value_pointer pointer = &value;
     return pointer[0].right;
+}
+EOF
+try_ 42 << EOF
+struct packet { int value; char data[]; };
+int main(void) {
+    char storage[sizeof(struct packet) + sizeof(long unsigned int) - 1];
+    struct packet *packet = (struct packet *)storage;
+    packet->value = 39;
+    packet->data[0] = 3;
+    return (sizeof(struct packet) == 4 ? packet->value : 0) + packet->data[0];
+}
+EOF
+try_ 42 << EOF
+struct matrix { int tag; int cells[][2]; };
+int main(void) {
+    char storage[sizeof(struct matrix) + 16];
+    struct matrix *matrix = (struct matrix *)storage;
+    matrix->cells[1][1] = 42;
+    return matrix->cells[1][1];
+}
+EOF
+try_compile_error << EOF
+struct invalid { char data[]; int value; };
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct invalid { int value, data[]; int after; };
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct invalid { char data[]; };
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+union invalid { char data[]; int value; };
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct packet { int value; char data[]; };
+struct invalid { int header; struct packet packet; };
+int main(void) { return 0; }
+EOF
+try_ 1 << EOF
+struct packet { int value; char data[]; };
+union holder { struct packet packet; int value; };
+int main(void) { return sizeof(union holder) == sizeof(int); }
+EOF
+try_compile_error << EOF
+struct packet { int value; char data[]; };
+union holder { struct packet packet; int value; };
+struct invalid { union holder holder; };
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct packet { int value; char data[]; };
+typedef struct packet packet_t;
+struct invalid { packet_t packet; };
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct packet { int value; char data[]; };
+struct packet packets[2];
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct packet { int value; char data[]; };
+typedef struct packet packet_t;
+packet_t packets[2];
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct packet { int value; char data[]; };
+union holder { struct packet packet; int value; };
+union holder holders[2];
+int main(void) { return 0; }
+EOF
+try_ 4 << EOF
+struct packet { int value; char data[]; };
+struct packet *packets[2];
+typedef struct packet *packet_ptr;
+packet_ptr typedef_packets[2];
+int main(void) {
+    return (sizeof(packets) == 2 * sizeof(struct packet *)) +
+           (sizeof packets == 2 * sizeof(struct packet *)) +
+           (sizeof(typedef_packets) == 2 * sizeof(packet_ptr)) +
+           (sizeof typedef_packets == 2 * sizeof(packet_ptr));
 }
 EOF
 try_ 7 << EOF
@@ -1758,6 +1948,21 @@ fi
 
 # Compound literal support - C90/C99 compliant implementation Basic struct
 # compound literals (verified working)
+try_compile_error << EOF
+int main(void) { return (int){1, 2}; }
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    return (int *){&value, &value} != 0;
+}
+EOF
+
+try_ 1 << EOF
+int main(void) { return (int){1,}; }
+EOF
+
 try_ 42 << EOF
 typedef struct { int x; int y; } point_t;
 int main() {
@@ -3156,6 +3361,35 @@ int main(void) {
 }
 EOF
 
+# C99 6.5.6 requires the two pointer operands to point at compatible types.
+try_compile_error << EOF
+int main(void) {
+    int words[2];
+    char bytes[2];
+    return &words[1] - &bytes[1];
+}
+EOF
+
+try_compile_error << EOF
+struct first { int value; };
+struct second { int value; };
+int main(void) {
+    struct first left[2];
+    struct second right[2];
+    return &left[1] - &right[1];
+}
+EOF
+
+try_ 1 << EOF
+typedef int *int_pointer;
+int main(void) {
+    int values[2];
+    int_pointer typed = &values[1];
+    int *spelled = &values[0];
+    return typed - spelled;
+}
+EOF
+
 # Pointer arithmetic tests
 
 # Basic integer pointer difference
@@ -3963,6 +4197,154 @@ int external_function(void) { return 7; }
 int main(void) { return external_value + external_function(); }
 EOF
 
+# A block-scope extern declaration has no automatic storage and hides an
+# enclosing local name while referring to the translation unit's object or
+# function declaration, including one defined later in the file.
+try_ 18 << EOF
+int main(void) {
+    int later_value = 99;
+    {
+        extern int later_value;
+        extern int later_extra, later_value;
+        extern int later_function(void);
+        later_value += later_extra + later_function();
+        return later_value;
+    }
+}
+int later_function(void) { return 8; }
+int later_value = 10;
+int later_extra = 0;
+EOF
+
+try_ 8 << EOF
+int hidden_function(void) { return 8; }
+int main(void) {
+    int hidden_function = 0;
+    {
+        extern int hidden_function(void);
+        return hidden_function();
+    }
+}
+EOF
+
+# C99 permits a string literal to initialize a character-array member without an
+# extra brace level, for automatic and file-scope record objects.
+try_ 15 << EOF
+struct named_text { char text[6]; int tag; } global_text = {"hi", 7};
+int main(void) {
+    struct named_text local_text = {"ok", 9};
+    return global_text.text[0] + global_text.text[1] + global_text.text[2] +
+           global_text.tag + local_text.text[0] + local_text.text[1] +
+           local_text.text[2] + local_text.tag - 428;
+}
+EOF
+
+# A declaration in a C99 for initializer has block scope too. Its extern object
+# and function forms must bind later file-scope definitions and hide an
+# enclosing automatic object for the whole loop.
+try_ 4 << EOF
+int main(void) {
+    int for_value = 99;
+    for (extern int for_value; for_value == 0; for_value++)
+        return for_value + 4;
+    return 0;
+}
+int for_value = 0;
+EOF
+
+try_ 12 << EOF
+int main(void) {
+    for (extern int for_function(void); 1; )
+        return for_function();
+}
+int for_function(void) { return 12; }
+EOF
+
+# Nested record-member designators select the resolved leaf, rather than only
+# the outer record member, in local and static-storage initializers.
+try_ 24 << EOF
+struct nested_leaf { int first; int second; };
+struct nested_outer { int prefix; struct nested_leaf inner; int suffix; };
+struct nested_outer global_nested = {.inner.second = 7, .suffix = 5};
+int main(void) {
+    struct nested_outer local_nested = {.inner.first = 3, .inner.second = 4,
+                                        .suffix = 5};
+    return global_nested.inner.first + global_nested.inner.second +
+           global_nested.suffix + local_nested.inner.first +
+           local_nested.inner.second + local_nested.suffix;
+}
+EOF
+
+# An array-member designator writes one selected element, including when the
+# array is itself reached through a nested record member.
+try_ 32 << EOF
+struct array_inner { int items[4]; };
+struct array_outer { int prefix; struct array_inner inner; int suffix; };
+struct array_outer global_array = {.inner.items[2] = 7, .suffix = 5};
+int main(void) {
+    struct array_outer local_array = {.inner.items[1] = 9,
+                                      .inner.items[3] = 11};
+    return global_array.inner.items[0] + global_array.inner.items[2] +
+           global_array.suffix + local_array.inner.items[1] +
+           local_array.inner.items[3];
+}
+EOF
+
+# A two-dimensional member designator carries the stored row stride, while a
+# one-subscript designator names a row that can receive a braced initializer.
+try_ 22 << EOF
+struct matrix_inner { int cells[2][3]; };
+struct matrix_outer { struct matrix_inner inner; int tag; };
+struct matrix_outer global_matrix = {.inner.cells[1][2] = 7, .tag = 3};
+int main(void) {
+    struct matrix_outer local_matrix = {.inner.cells[0] = {4, 5, 6},
+                                        .inner.cells[1][1] = 2};
+    return global_matrix.inner.cells[1][2] + global_matrix.tag +
+           local_matrix.inner.cells[0][0] + local_matrix.inner.cells[0][2] +
+           local_matrix.inner.cells[1][1];
+}
+EOF
+
+# Following positional initializers continue from a one-dimensional designated
+# array element before advancing to the next record member.
+try_ 30 << EOF
+struct continued_array { int items[4]; int tail; } global_continue =
+    {.items[1] = 4, 5, 6};
+int main(void) {
+    struct continued_array local_continue = {.items[2] = 7, 8};
+    return global_continue.items[0] + global_continue.items[1] +
+           global_continue.items[2] + global_continue.items[3] +
+           global_continue.tail + local_continue.items[2] +
+           local_continue.items[3] + local_continue.tail;
+}
+EOF
+
+# Positional values after a two-dimensional member leaf advance in row-major
+# order through the remaining elements.
+try_ 30 << EOF
+struct continued_matrix { int cells[2][3]; } global_matrix_continue =
+    {.cells[0][1] = 4, 5, 6, 7, 8};
+int main(void) {
+    return global_matrix_continue.cells[0][0] +
+           global_matrix_continue.cells[0][1] +
+           global_matrix_continue.cells[0][2] +
+           global_matrix_continue.cells[1][0] +
+           global_matrix_continue.cells[1][1] +
+           global_matrix_continue.cells[1][2];
+}
+EOF
+
+# Translation phase 6 also concatenates literals made adjacent by macro
+# expansion, before the expression parser sees them.
+try_ 3 << EOF
+#define STRING_LEFT "ab"
+#define STRING_RIGHT "cd"
+int main(void) {
+    char *text = STRING_LEFT STRING_RIGHT;
+    return (text[0] == 'a') + (text[2] == 'c') + (text[4] == 0);
+}
+EOF
+
 # A declaration's base type applies to every global declarator, while each
 # declarator keeps its own pointer and array modifiers and initializer.
 try_ 39 << EOF
@@ -4648,6 +5030,50 @@ int main(void) {
     int value = 42;
     const int *read_only = (const int *)&value;
     return *read_only;
+}
+EOF
+
+# A pointer object's qualifier belongs one level inward after address-of.
+# Preserve it so a valid pointer-to-const-pointer declaration is accepted, while
+# the reverse conversion cannot discard that intermediate qualifier.
+try_ 2 << EOF
+int main(void) {
+    int first = 1, second = 2;
+    int * const fixed = &first;
+    int * const *indirect = &fixed;
+    indirect = &fixed;
+    return **indirect + (*fixed == first);
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    int * const fixed = &value;
+    int **mutable_indirect = &fixed;
+    return **mutable_indirect;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int first = 1, second = 2;
+    int * const fixed = &first;
+    int * const *indirect = &fixed;
+    *indirect = &second;
+    return *fixed;
+}
+EOF
+
+# A cast to the same multi-level qualified type preserves the inner pointer
+# qualifier instead of treating it as a discarded base-object qualifier.
+try_ 1 << EOF
+int main(void) {
+    int value = 1;
+    int * const fixed = &value;
+    int * const *indirect = &fixed;
+    int * const *copy = (int * const *)indirect;
+    return **copy;
 }
 EOF
 
@@ -5441,7 +5867,18 @@ begin_category "Preprocessor Directives" "Testing #define, #ifdef, #ifndef, #if,
 # beside it before compiling the checked-in main file.
 cp "$TESTS_DIR/include-base.h" "$TEST_TMPDIR/include-base.h"
 cp "$TESTS_DIR/include-values.h" "$TEST_TMPDIR/include-values.h"
-try_file 19 "$TESTS_DIR/include-main.c"
+cp "$TESTS_DIR/include-macro.h" "$TEST_TMPDIR/include-macro.h"
+try_file 24 "$TESTS_DIR/include-main.c"
+try_compile_error << EOF
+#define FIRST_HEADER SECOND_HEADER
+#define SECOND_HEADER FIRST_HEADER
+#include FIRST_HEADER
+int main(void) { return 0; }
+EOF
+try_compile_error_message "unsupported platform configuration" << EOF
+#error unsupported platform configuration
+int main(void) { return 0; }
+EOF
 
 # #ifdef...#else...#endif
 try_ 0 << EOF
