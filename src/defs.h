@@ -35,6 +35,7 @@
 #define MAX_TOKEN_LEN 256
 #define MAX_ID_LEN 64
 #define MAX_LINE_LEN 256
+#define MAX_INCLUDE_DIRS 16
 #define MAX_VAR_LEN 128
 /* ".label." plus an int, for basic_block_t's dump name. */
 #define MAX_LABEL_LEN 24
@@ -57,7 +58,12 @@
 #define MAX_PARAMS 8
 #endif
 #define MAX_LOCALS 3200
-#define MAX_FIELDS 64
+
+/* var_t itself is parsed as a record by every bootstrap stage. Leave room for
+ * compiler metadata as well as user records with many declarators. Field tables
+ * are allocated lazily, so this does not inflate scalar type storage.
+ */
+#define MAX_FIELDS 96
 #define MAX_TYPES 256
 #define MAX_LABELS 256
 /* Pending postfix ++/-- effects in one statement; each one appends 3. */
@@ -370,6 +376,7 @@ typedef enum {
     T_cppd_ifdef,
     T_cppd_ifndef,
     T_cppd_pragma,
+    T_cppd_line,
 
     /* C pre-processor specific, these kinds will be removed after
      * pre-processing is done.
@@ -392,6 +399,11 @@ typedef struct {
     int len; /* length of token */
     int line;
     int column;
+
+    /* Immutable physical path used for quoted-include lookup. #line changes
+     * filename only, which remains the logical diagnostic/__FILE__ name.
+     */
+    char *physical_filename;
     char *filename;
 } source_location_t;
 
@@ -620,8 +632,18 @@ struct var {
      * contributes no bytes to the record's fixed layout.
      */
     bool is_flexible_array_member;
-    int array_dim2;  /* second dimension size for 2D arrays */
-    int offset;      /* offset from stack or frame, index 0 is reserved */
+    int array_dim2; /* second dimension size for multidimensional arrays */
+    int array_dim3; /* third dimension size for multidimensional arrays */
+    int array_dim4; /* fourth dimension size for multidimensional arrays */
+    int offset;     /* offset from stack or frame, index 0 is reserved */
+    /* Record bit-field metadata. `offset` is the containing storage unit's byte
+     * offset. `is_bitfield` distinguishes an ordinary member from the valid
+     * unnamed zero-width field used as an allocation-unit barrier.
+     */
+    bool is_bitfield;
+    int bit_width;
+    int bit_offset;
+    int bit_storage_size;
     int init_val;    /* for global initialization */
     int init_val_hi; /* upper word of an 8-byte integer constant */
     /* Generation stamps used by compute_live_in() to test set membership in
@@ -684,6 +706,13 @@ struct var {
      * can remain opt-in while legacy source still compiles.
      */
     bool is_string_literal;
+
+    /* `&__func__` is a pointer to the compiler's static character array. Its
+     * address has the same machine representation as the decayed char pointer,
+     * but one unary dereference must restore that pointer without loading the
+     * first bytes of the string as an address.
+     */
+    bool is_func_name_array_address;
 
     /* A function-pointer declarator owns a prototype separately from its value
      * type. Keeping this syntax-only object lets an indirect call use the same
@@ -798,6 +827,12 @@ struct type {
     base_type_t base_type;
     struct type *base_struct;
     int size;
+
+    /* Natural ABI alignment of an object of this type. Record definitions
+     * retain their maximum member alignment so nested records lay out correctly
+     * too.
+     */
+    int alignment;
 
     /* Member table, allocated when the type is created rather than inlined. A
      * MAX_FIELDS array of var_t by value made type_t 12 KiB, and TYPES is a

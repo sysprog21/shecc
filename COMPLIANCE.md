@@ -48,72 +48,66 @@ This document tracks compliance gaps and non-standard behaviors.
 
 | Feature | Status | Impact |
 |---------|--------|--------|
-| `static` | Not implemented | No internal linkage or persistent local variables |
-| `extern` | Not implemented | No external linkage declarations |
-| `register` | Not implemented | No register hint optimization |
+| `static` | Partial | File-scope internal linkage and persistent block-scope objects work, including C99 `for` initializers; cross-translation-unit linkage remains incomplete. |
+| `extern` | Partial | File- and block-scope object declarations plus function prototypes bind to global declarations; remaining C99 forms need coverage. |
+| `register` | Partial | Block-scope declarations and parameters lower as automatic objects and reject address-taking; no allocation hint is implemented. |
 | `auto` | Not implemented | Default storage class (implicit) |
-| `const` | Parsed but ignored | No read-only enforcement |
-| `volatile` | Not implemented | No volatile semantics |
-| `restrict` | Not implemented | No pointer aliasing optimization |
-| `inline` | Not implemented | No function inlining |
+| `const` | Supported | Enforced for direct and indirect lvalues; pointer-level conversions are checked. |
+| `volatile` | Partial | Preserved through declarations and prevents key optimizations; exhaustive optimizer audit remains. |
+| `restrict` | Partial | Parsed and retained as an aliasing qualifier; does not yet drive optimization. |
+| `inline` | Partial | File-scope declarations/definitions are accepted; C99 linkage constraints remain incomplete. |
 
 ### Type System
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `long` | Missing | Only 4-byte integers |
-| `long long` | Missing | No 64-bit integers |
-| `unsigned` | Missing | All integers are signed |
-| `signed` | Missing | Implicit for integers |
+| `long` | Partial | Distinct rank with the current 32-bit representation. |
+| `long long` | Partial | Eight-byte values work on x64/AArch64; 32-bit target admission remains gated. |
+| `unsigned` | Supported | Unsigned char/short/int/long families, arithmetic, conversions, and ABI paths are implemented. |
+| `signed` | Supported | Signed scalar spellings, including signed char, are distinct and parsed. |
 | `float` | Missing | No floating-point support |
 | `double` | Missing | No floating-point support |
 | `long double` | Missing | No floating-point support |
-| Bit-fields | Missing | Cannot pack struct members |
+| Bit-fields | Supported | `_Bool`, `int`, and `unsigned int` fields pack least-significant-bit first in their conventional allocation units; narrow unsigned fields receive C99 integer promotion. |
 
 ### Literals & Constants
 
 | Feature | Status | Current Behavior |
 |---------|--------|-----------------|
-| Integer suffixes (`u`, `l`, `ll`) | Not parsed | All literals are `int` |
+| Integer suffixes (`u`, `l`, `ll`) | Partial | Common suffix spellings and x64 wide literals are parsed; full candidate-type selection remains incomplete. |
 | Wide characters (`L'c'`) | Not supported | Single-byte only |
 | Wide strings (`L"..."`) | Not supported | Single-byte only |
-| Multi-character constants | Not supported | Single character only |
-| Universal characters (`\u`, `\U`) | Not supported | ASCII only |
-| Hex escapes (`\x...`) | Limited | Max 2 hex digits |
+| Multi-character constants | Supported | Implementation-defined left-to-right packing of up to four bytes. |
+| Universal characters (`\u`, `\U`) | Partial | Narrow literals and identifiers are validated and decoded to UTF-8; wide literals remain unsupported. |
+| Hex escapes (`\x...`) | Supported | The full following hexadecimal run is consumed before narrowing. |
 
 ### Preprocessor Gaps
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| `#include` | Partial | Local file inclusion is supported, but lack of capability to include system files |
-| Token pasting (`##`) | Missing | Cannot concatenate tokens |
-| Stringizing (`#`) | Missing | Cannot convert to string |
-| `__DATE__` | Missing | No compile date |
-| `__TIME__` | Missing | No compile time |
-| `__STDC__` | Missing | No standard compliance indicator |
+| `#include` | Partial | Quoted includes and explicit `-I` angle-header search work; hosted C99 headers remain incomplete. |
+| Token pasting (`##`) | Supported | Object- and function-like pastes are rescanned and diagnosed when invalid. |
+| Stringizing (`#`) | Supported | Function-like macro arguments are stringized with C99 whitespace and escaping behavior. |
+| `__DATE__` | Supported | Expands to the C99 date-character array shape. |
+| `__TIME__` | Supported | Expands to the C99 time-character array shape. |
+| `__STDC__` | Supported | Expands to integer constant `1`; `__STDC_HOSTED__` is also provided. |
 
 ### Advanced Features
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| Designated initializers | Missing | No `.field = value` syntax |
+| Designated initializers | Partial | Record and bounded-array designators work for local, static, and file-scope objects; higher-rank continuation cases remain incomplete. |
 | Compound literals | Partial | Limited support |
 | Flexible array members | Missing | No `[]` at struct end |
 | Variable-length arrays | Missing | No runtime-sized arrays |
 | `_Complex` | Missing | No complex numbers |
 | `_Imaginary` | Missing | No imaginary numbers |
-| `_Static_assert` | Missing | No compile-time assertions |
-| `_Alignof` | Missing | No alignment queries |
-| `_Alignas` | Missing | No alignment specification |
-| `_Generic` | Missing | No generic selection |
 
 ## Non-Standard Behaviors
 
 ### GNU Extensions
 - Binary literals: `0b101010`
 - Escape sequence: `\e` for ESC character
-- `void*` arithmetic (treated as `char*`)
-- `sizeof(void)` returns 0 (should be error)
 - Computed goto
 
 ### Implementation-Specific

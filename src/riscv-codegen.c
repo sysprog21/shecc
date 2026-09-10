@@ -563,10 +563,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sw(__t0, rs1, 0));
         return;
     case OP_load_func:
-        emit(__addi(__t0, rs1, 0));
+        emit(__addi(__s2, rs1, 0));
         return;
     case OP_indirect:
-        emit(__jalr(__ra, __t0, 0));
+        emit(__jalr(__ra, __s2, 0));
         return;
     case OP_return:
         if (ph2_ir->src0 == -1)

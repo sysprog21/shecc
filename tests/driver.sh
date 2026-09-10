@@ -302,6 +302,40 @@ function try_output()
     try "$expected" "$expected_output" "$input"
 }
 
+# Compile an inline program with one focused compiler-option set. Keep this
+# beside try_ so feature regressions can exercise command-line behaviour without
+# mutating the suite-wide linker configuration.
+function try_flags()
+{
+    local expected="$1"
+    local extra_flags="$2"
+    local input=$(cat)
+    test_selected || return 0
+
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    local tmp_err="$(mktemp)"
+    echo "$input" > "$tmp_in"
+    $SHECC $SHECC_CFLAGS $extra_flags -o "$tmp_exe" "$tmp_in" 2> "$tmp_err"
+    local actual=$?
+    if [ "$actual" -eq 0 ]; then
+        chmod +x "$tmp_exe"
+        ${TARGET_EXEC:-} "$tmp_exe"
+        actual=$?
+    fi
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$actual" -ne "$expected" ]; then
+        report_test_failure "OPTION TEST" "$tmp_in" "$tmp_exe" "$expected" \
+            "$actual" "$(< "$tmp_err")" "" "$tmp_err"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
 # Compile and run a checked-in program through the same path as inline cases.
 # This keeps the small end-to-end programs in both stage-0 and stage-2 runs.
 function try_file()
@@ -577,11 +611,123 @@ int main(void) {
            16 * (bool_identity(null_value) == 0);
 }
 EOF
+
+# C99 integer promotions convert _Bool to int before arithmetic. This also
+# exercises the common unsigned type when that promoted result meets unsigned
+# int, rather than treating a one-byte _Bool as an arithmetic byte.
+try_ 31 << EOF
+int main(void) {
+    _Bool one = 1;
+    _Bool zero = 0;
+    unsigned int unsigned_one = 1U;
+    return ((one + one) == 2) +
+           2 * ((one - zero) == 1) +
+           4 * ((one << 3) == 8) +
+           8 * ((one + unsigned_one) == 2U) +
+           16 * ((zero - one) < 0);
+}
+EOF
+
+# Volatile accesses must remain observable through qualified pointers and must
+# not be replaced with a cached direct-object value across a call boundary.
+try_ 31 << EOF
+volatile int global_slot;
+void write_volatile(volatile int *slot, int value) { *slot = value; }
+int bump_volatile(volatile int *slot) {
+    int before = *slot;
+    *slot = before + 1;
+    return *slot;
+}
+int main(void) {
+    volatile int local_slot = 3;
+    write_volatile(&local_slot, 9);
+    write_volatile(&global_slot, 20);
+    return (bump_volatile(&local_slot) == 10) +
+           2 * (local_slot == 10) +
+           4 * (bump_volatile(&global_slot) == 21) +
+           8 * (global_slot == 21) +
+           16 * (((volatile int *) &local_slot) == &local_slot);
+}
+EOF
+
+# restrict is a C99 pointer qualifier. These are non-aliasing calls by contract;
+# the test covers parser/type-name acceptance and ordinary accesses without
+# requiring an alias-sensitive optimization.
+try_ 31 << EOF
+int accumulate(int *restrict destination, const int *restrict source) {
+    *destination += *source;
+    return *destination;
+}
+int main(void) {
+    int left = 4;
+    int right = 5;
+    int *restrict local = &left;
+    const int *restrict input = &right;
+    int *cast_local = (int *restrict) local;
+    return (accumulate(local, input) == 9) +
+           2 * (left == 9) +
+           4 * (accumulate(cast_local, input) == 14) +
+           8 * (*input == 5) +
+           16 * (cast_local == &left);
+}
+EOF
 expr 42 42
 
 # octal constant (satisfying re(0[0-7]+))
 expr 10 012
 expr 65 0101
+
+# Category: C99 universal character names
+begin_category "Universal Character Names" "Testing UCN literals and identifiers"
+
+# C99 universal character names in narrow literals are encoded in shecc's UTF-8
+# execution character set. Exercise two-, three-, and four-byte sequences.
+try_ 4 << EOF
+int main(void) {
+    char *s = "\\u00a9\\u20ac\\U0001f600";
+    return ((unsigned char)s[0] == 0xc2) + ((unsigned char)s[1] == 0xa9) +
+           ((unsigned char)s[2] == 0xe2) + ((unsigned char)s[5] == 0xf0);
+}
+EOF
+
+# Multi-character constants retain the implementation-defined left-to-right
+# UTF-8 byte packing used by ordinary escaped constants.
+try_ 1 << EOF
+int main(void) { return '\\u00a9' == 0xc2a9; }
+EOF
+
+# Identifier UCNs are decoded to a stable UTF-8 spelling before keyword,
+# typedef, object, and macro lookup. Cover a continuation UCN and a four-byte
+# scalar in a macro name as well as a UCN at the start of a typedef name.
+try_ 42 << EOF
+#define \U0001f600 40
+typedef int \u03b1;
+\u03b1 value\u00e9 = \U0001f600;
+int main(void) { return value\u00e9 + 2; }
+EOF
+
+# C99's three exceptions to the basic-source UCN restriction remain UCN
+# nondigits, despite their direct spellings not being ordinary identifiers.
+try_ 42 << EOF
+int \u0024 = 42;
+int main(void) { return \u0024; }
+EOF
+
+try_compile_error << EOF
+int main(void) { return "\\u0041"[0]; }
+EOF
+try_compile_error << EOF
+int main(void) { return "\\uD800"[0]; }
+EOF
+try_compile_error << EOF
+int main(void) { return "\\U00110000"[0]; }
+EOF
+try_compile_error << EOF
+int \u0041 = 0;
+EOF
+try_compile_error << EOF
+int \u12 = 0;
+EOF
 
 # Category: Arithmetic Operations
 begin_category "Arithmetic Operations" "Testing +, -, *, /, % operators"
@@ -1796,6 +1942,23 @@ int named_for_func(void) { return __func__[0] == 'n'; }
 int main(void) { return named_for_func(); }
 EOF
 
+# __func__ behaves as a static character array before ordinary expression decay:
+# taking its address, restoring the array, and dereferencing again yields its
+# first byte.
+try_ 1 << EOF
+int addressed_func_name(void) { return *(*(&__func__)) == 'a'; }
+int main(void) { return addressed_func_name(); }
+EOF
+
+# Postfix subscripting applies to parenthesized pointer and string expressions.
+try_ 7 << EOF
+int main(void) {
+    int values[2] = { 4, 7 };
+    int *pointer = values;
+    return ("cat")[1] + (pointer)[1] - 'a';
+}
+EOF
+
 try_ 1 << EOF
 int function_name_width(void) { return sizeof __func__ == 20; }
 int main(void) {
@@ -1930,6 +2093,40 @@ int main() {
 
     int *q = h.ptr;
     return *q;
+}
+EOF
+
+# Block-scope tagged records use the same layout path as file-scope records,
+# including immediate declarators, bit-fields, unions, and recursive pointers.
+try_ 21 << EOF
+int main(void) {
+    struct flags { unsigned int low : 3; unsigned int high : 3; }
+        bits = {2, 4};
+    union payload { int number; char bytes[4]; } data = {7};
+    struct node { struct node *next; int value; }
+        first = {0, 3}, second = {&first, 5};
+    return bits.low + bits.high + data.number + first.value +
+           second.value + (second.next == &first ? 0 : 1);
+}
+EOF
+try_ 40 << EOF
+int struct_value(void) {
+    static struct pair { int left; int right; } saved = {3, 4};
+    saved.left++;
+    return saved.left + saved.right;
+}
+int union_value(void) {
+    static union payload { int number; char bytes[4]; } saved = {5};
+    saved.number++;
+    return saved.number;
+}
+int array_value(void) {
+    static struct point { int x; int y; } points[2] = {{1, 2}, {3, 4}};
+    return points[0].x + points[0].y + points[1].x + points[1].y;
+}
+int main(void) {
+    return struct_value() + struct_value() + union_value() + union_value() +
+           array_value();
 }
 EOF
 
@@ -2386,13 +2583,13 @@ int main() {
 }
 EOF
 
-# Test: Multi-element array of structs
-try_ 1 << EOF
+# Multi-element record arrays must retain every element and member; this is a
+# full aggregate-initialization check rather than an observation of element 0.
+try_ 10 << EOF
 struct point { int x; int y; };
 int main() {
-    /* Multi-element arrays: first element after index 0 may not initialize correctly */
     struct point pts[2] = { {1, 2}, {3, 4} };
-    return pts[0].x;  /* Expected: 1, Actual: 1 (may be coincidental) */
+    return pts[0].x + pts[0].y + pts[1].x + pts[1].y;
 }
 EOF
 
@@ -3390,6 +3587,32 @@ int main(void) {
 }
 EOF
 
+try_ 4 << EOF
+typedef int *int_ptr;
+int main(void) {
+    int values[10];
+    int_ptr start = &values[2];
+    int_ptr end = &values[6];
+    return end - start;
+}
+EOF
+
+try_ 2 << EOF
+int main(void) {
+    int *values[4];
+    return &values[3] - &values[1];
+}
+EOF
+
+try_ 9 << EOF
+int main(void) {
+    int first = 4, second = 9;
+    int *values[2] = {&first, &second};
+    values[0] = &second;
+    return *values[0];
+}
+EOF
+
 # C99 6.5.6 requires the two pointer operands to point at compatible types.
 try_compile_error << EOF
 int main(void) {
@@ -3729,6 +3952,117 @@ int main() {
 }
 EOF
 
+# Parenthesized declarators may place an array suffix on the callback pointer.
+# Exercise automatic, static-local, and file-scope storage separately: each
+# requires pointer-sized element allocation and indexed indirect-call lowering.
+try_ 23 << EOF
+int plus1(int x) { return x + 1; }
+int plus2(int x) { return x + 2; }
+int main(void) {
+    int (*callbacks[2])(int) = {plus1, &plus2};
+    return callbacks[0](10) + callbacks[1](10);
+}
+EOF
+try_ 23 << EOF
+int plus1(int x) { return x + 1; }
+int plus2(int x) { return x + 2; }
+int (*callbacks[2][2])(int) = {{plus1, &plus2}, {plus2, plus1}};
+int main(void) { return callbacks[1][0](10) + callbacks[1][1](10); }
+EOF
+try_ 48 << EOF
+int plus1(int x) { return x + 1; }
+int plus2(int x) { return x + 2; }
+int (*callbacks[2][2][2])(int) = {
+    {{plus1, &plus2}, {plus2, plus1}},
+    {{plus2, plus1}, {plus1, plus2}}
+};
+int invoke(int value) {
+    static int (*local[2][2][2])(int) = {
+        {{plus1, plus2}, {plus2, plus1}},
+        {{plus2, plus1}, {plus1, plus2}}
+    };
+    return local[1][0][0](value) + local[1][1][1](value);
+}
+int main(void) {
+    return callbacks[1][0][0](10) + callbacks[1][1][1](10) + invoke(10);
+}
+EOF
+try_ 23 << EOF
+int plus1(int x) { return x + 1; }
+int plus2(int x) { return x + 2; }
+int invoke(int value) {
+    static int (*callbacks[2])(int) = {plus1, &plus2};
+    return callbacks[0](value) + callbacks[1](value);
+}
+int main(void) { return invoke(10); }
+EOF
+try_ 23 << EOF
+int plus1(int x) { return x + 1; }
+int plus2(int x) { return x + 2; }
+int (*callbacks[2])(int) = {plus1, &plus2};
+int main(void) { return callbacks[0](10) + callbacks[1](10); }
+EOF
+try_ 23 << EOF
+int plus1(int x) { return x + 1; }
+int plus2(int x) { return x + 2; }
+struct callbacks { int (*items[2])(int); };
+int main(void) {
+    struct callbacks value;
+    value.items[0] = plus1;
+    value.items[1] = plus2;
+    return value.items[0](10) + value.items[1](10);
+}
+EOF
+
+# Parenthesized function designators remain callable. In particular, a
+# function-pointer dereference is a designator, not a read of the callback's
+# integer return type.
+try_ 42 << EOF
+int add(int left, int right) { return left + right; }
+int main(void) {
+    int (*callback)(int, int) = add;
+    return (add)(19, 23) + (callback)(8, 13) + (*callback)(5, 16) == 84
+               ? 42
+               : 1;
+}
+EOF
+
+# RV32 stages an indirect target before all four ABI argument registers are
+# populated. This scalar shape keeps that staging path covered without admitting
+# the still-gated 64-bit value ABI on 32-bit targets.
+try_ 10 << EOF
+int sum4(int first, int second, int third, int fourth)
+{
+    return first + second + third + fourth;
+}
+int main(void)
+{
+    int (*callback)(int, int, int, int) = sum4;
+    return callback(1, 2, 3, 4);
+}
+EOF
+
+# The LP64 ABIs return an eight-byte callback result in the normal integer
+# return register pair/value. Keep this separate from the still-gated 32-bit
+# long-long ABI work.
+if [ "$PTR_SZ" -eq 8 ]; then
+    try_ 42 << EOF
+unsigned long long add_wide(unsigned long long left,
+                            unsigned long long right)
+{
+    return left + right;
+}
+int main(void)
+{
+    unsigned long long (*callback)(unsigned long long, unsigned long long) =
+        add_wide;
+    return callback(0x100000000ULL, 0x100000000ULL) == 0x200000000ULL
+               ? 42
+               : 1;
+}
+EOF
+fi
+
 # Assignment between function-pointer variables copies the stored function
 # address; it must not treat the RHS variable name as a function symbol.
 try_ 5 << EOF
@@ -3845,6 +4179,84 @@ EOF
 
 # Category: Arrays
 begin_category "Arrays" "Testing array declarations, indexing, and operations"
+
+# Nested braced rows use the same flattened backing storage as indexing. Check
+# local and static storage, including omitted elements at the end of each row.
+try_ 10 << EOF
+int main(void) {
+    int values[2][3] = {{1}, {4, 5}};
+    return values[0][0] + values[0][2] + values[1][0] + values[1][1] +
+           values[1][2];
+}
+EOF
+try_ 10 << EOF
+static int values[2][3] = {{1}, {4, 5}};
+int main(void) {
+    return values[0][0] + values[0][2] + values[1][0] + values[1][1] +
+           values[1][2];
+}
+EOF
+try_ 13 << EOF
+int main(void) {
+    int values[2][2][2] = {1, 2, 3, 4, 5, 6, 7, 8};
+    return values[1][0][1] + values[1][1][0];
+}
+EOF
+try_ 13 << EOF
+static int values[2][2][2] = {{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}};
+int main(void) { return values[1][0][1] + values[1][1][0]; }
+EOF
+try_ 1 << EOF
+static int values[2][2][2] = {{{1}}};
+int main(void) {
+    return values[0][0][0] + values[0][0][1] + values[0][1][0] +
+           values[1][0][0];
+}
+EOF
+try_ 73 << EOF
+int global_values[2][2][2] = {[1][0][1] = 2, 3, 4};
+int local_values(void) {
+    int values[2][2][2] = {[1][0] = {5, 6}, 7, 8};
+    return values[1][0][0] + values[1][0][1] + values[1][1][0] +
+           values[1][1][1];
+}
+int static_values(void) {
+    static int values[2][2][2] = {[1][0] = {8, 9}, 10, 11};
+    return values[1][0][0] + values[1][0][1] + values[1][1][0] +
+           values[1][1][1];
+}
+int main(void) {
+    return global_values[1][0][1] + global_values[1][1][0] +
+           global_values[1][1][1] + local_values() + static_values();
+}
+EOF
+try_ 17 << EOF
+int global_values[][2] = {[3][1] = 7};
+int local_values(void) {
+    int values[][2] = {{1}, {2, 3}};
+    return values[0][0] + values[0][1] + values[1][0] + values[1][1];
+}
+int static_values(void) {
+    static int values[][2] = {[2][1] = 4};
+    return values[2][0] + values[2][1];
+}
+int main(void) {
+    return global_values[3][0] + global_values[3][1] + local_values() +
+           static_values();
+}
+EOF
+try_ 13 << EOF
+struct grid { int values[2][2][2]; };
+int main(void) {
+    struct grid value = {{{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}}};
+    return value.values[1][0][1] + value.values[1][1][0];
+}
+EOF
+try_ 13 << EOF
+struct grid { int values[2][2][2]; };
+static struct grid value = {{{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}}};
+int main(void) { return value.values[1][0][1] + value.values[1][1][0]; }
+EOF
 
 # Array element reads preserve the declared signed width. This covers both
 # local-address and indexed OP_read lowering on every target.
@@ -4385,6 +4797,135 @@ int main(void) {
            global_matrix_continue.cells[1][0] +
            global_matrix_continue.cells[1][1] +
            global_matrix_continue.cells[1][2];
+}
+EOF
+
+# Continuation follows a nested array-member leaf as well: after the final
+# element it advances to the outer record's next field.
+try_ 90 << EOF
+struct inner { int items[2][2]; };
+struct outer { struct inner inner; int tail; };
+struct outer global = {.inner.items[0][1] = 2, 3, 4, .tail = 5};
+int local(void) {
+    struct outer value = {.inner.items[0][1] = 6, 7, 8, .tail = 9};
+    return value.inner.items[0][1] + value.inner.items[1][0] +
+           value.inner.items[1][1] + value.tail;
+}
+int fixed(void) {
+    static struct outer value =
+        {.inner.items[0][1] = 10, 11, 12, .tail = 13};
+    return value.inner.items[0][1] + value.inner.items[1][0] +
+           value.inner.items[1][1] + value.tail;
+}
+int main(void) {
+    return global.inner.items[0][1] + global.inner.items[1][0] +
+           global.inner.items[1][1] + global.tail + local() + fixed();
+}
+EOF
+try_ 14 << EOF
+struct inner { int cells[2][2][2]; };
+struct outer { struct inner inner; int tail; };
+struct outer value = {.inner.cells[1][0][1] = 2, 3, 4, .tail = 5};
+int main(void) {
+    return value.inner.cells[1][0][1] + value.inner.cells[1][1][0] +
+           value.inner.cells[1][1][1] + value.tail;
+}
+EOF
+
+# Four-dimensional arrays retain every inner stride for declaration, nested
+# aggregate initialization, and ordinary row-major indexing.
+try_ 30 << EOF
+static int file_table[2][2][2][2] =
+    {{{{0, 1}, {2, 3}}, {{4, 5}, {6, 7}}},
+      {{{8, 9}, {10, 11}}, {{12, 13}, {14, 15}}}};
+int main(void) {
+    int local_table[2][2][2][2] =
+        {{{{15, 14}, {13, 12}}, {{11, 10}, {9, 8}}}};
+    return file_table[1][0][1][1] + local_table[0][1][1][0] +
+           local_table[1][0][0][0] + (sizeof(local_table) == 64 ? 10 : 0);
+}
+EOF
+try_ 33 << EOF
+static int file_table[2][2][2][2] = {[1][0][1][1] = 7, 8, 9};
+int main(void) {
+    int local_table[2][2][2][2] = {[0][1][0][1] = 4, 5};
+    return file_table[1][0][1][1] + file_table[1][1][0][0] +
+           file_table[1][1][0][1] + local_table[0][1][0][1] +
+           local_table[0][1][1][0];
+}
+EOF
+try_ 22 << EOF
+static int file_table[2][2][2][2] = {[1][1][0] = {4, 5}};
+int main(void) {
+    int local_table[2][2][2][2] = {[0][1][1] = {6, 7}};
+    return file_table[1][1][0][0] + file_table[1][1][0][1] +
+           local_table[0][1][1][0] + local_table[0][1][1][1];
+}
+EOF
+try_ 44 << EOF
+struct grid { int cells[2][2][2][2]; int tail; };
+static struct grid file_grid = {.cells[1][0][1][1] = 7, 8, 9, .tail = 5};
+int main(void) {
+    struct grid local_grid = {.cells[0][1][0][1] = 4, 5, .tail = 6};
+    return file_grid.cells[1][0][1][1] + file_grid.cells[1][1][0][0] +
+           file_grid.cells[1][1][0][1] + file_grid.tail +
+           local_grid.cells[0][1][0][1] + local_grid.cells[0][1][1][0] +
+           local_grid.tail;
+}
+EOF
+try_compile_error << EOF
+int too_many_dimensions[1][1][1][1][1];
+EOF
+
+# Forward record tags may be used through pointers before their complete
+# definition; both global static storage and block scope retain that rule.
+try_ 17 << EOF
+struct node;
+union payload;
+static struct node *head;
+static union payload *slot;
+struct node { struct node *next; int value; };
+union payload { int number; char bytes[4]; };
+int local_forward(void) {
+    struct local;
+    struct local *ptr = 0;
+    return !ptr;
+}
+int main(void) {
+    struct node value;
+    union payload data;
+    value.next = 0;
+    value.value = 7;
+    data.number = 9;
+    head = &value;
+    slot = &data;
+    return head->value + slot->number + local_forward();
+}
+EOF
+try_compile_error << EOF
+struct incomplete;
+struct incomplete value;
+EOF
+
+# Three-dimensional member paths retain both inner strides. A leaf designator
+# also resumes positional initialization in row-major order for every storage
+# duration supported by aggregate initialization.
+try_ 54 << EOF
+struct grid { int cells[2][2][2]; };
+struct grid global_grid = {.cells[1][0][1] = 2, 3, 4};
+int local_grid(void) {
+    struct grid value = {.cells[1][0][1] = 5, 6, 7};
+    return value.cells[1][0][1] + value.cells[1][1][0] +
+           value.cells[1][1][1];
+}
+int static_grid(void) {
+    static struct grid value = {.cells[1][0][1] = 8, 9, 10};
+    return value.cells[1][0][1] + value.cells[1][1][0] +
+           value.cells[1][1][1];
+}
+int main(void) {
+    return global_grid.cells[1][0][1] + global_grid.cells[1][1][0] +
+           global_grid.cells[1][1][1] + local_grid() + static_grid();
 }
 EOF
 
@@ -5777,13 +6318,45 @@ typedef struct {
 int main() { return sizeof(struct_t*); }
 EOF
 
-try_ 6 << EOF
+try_ 8 << EOF
 typedef struct {
     int x;
     short y;
 } struct_t;
 
 int main() { return sizeof(struct_t); }
+EOF
+
+# Record members use natural alignment, and a struct's trailing size is rounded
+# to its strongest member so arrays of the record keep every element aligned.
+try_ 4 << EOF
+struct layout {
+    char tag;
+    int value;
+    short tail;
+};
+int main(void) {
+    struct layout value;
+    struct layout values[2];
+    return (sizeof(value) == 12) +
+           ((char *)&value.value - (char *)&value == 4) +
+           ((char *)&value.tail - (char *)&value == 8) +
+           ((char *)&values[1] - (char *)&values[0] == 12);
+}
+EOF
+
+# A typedef-backed nested record carries its own alignment into its enclosing
+# record rather than being treated as its scalar storage size alone.
+try_ 4 << EOF
+typedef struct { char c; int value; } inner_t;
+struct outer { char tag; inner_t inner; short tail; };
+int main(void) {
+    struct outer value;
+    return (sizeof(value) == 16) +
+           ((char *)&value.inner - (char *)&value == 4) +
+           ((char *)&value.tail - (char *)&value == 12) +
+           (sizeof(value.inner) == 8);
+}
 EOF
 
 # sizeof enum
@@ -5798,6 +6371,44 @@ EOF
 # sizeof with expressions
 items 4 "int x = 42; return sizeof(x);"
 items 12 "int values[3]; return sizeof(values);"
+items 12 "int values[3]; return sizeof((values));"
+items 12 "int values[3]; return sizeof(((values)));"
+items 12 "int values[3]; return sizeof(*&values);"
+items 12 "int values[3]; return sizeof *&values;"
+items 24 "int values[2][3]; return sizeof(*&values);"
+items 12 "int values[2][3]; return sizeof(values[0]);"
+items 12 "int values[2][3]; return sizeof values[0];"
+items 12 "int values[2][3], index = 0; return sizeof(values[index++]) + index;"
+items 4 "int values[2][3]; return sizeof values[0][1];"
+items 16 "int values[2][2][2][2]; return sizeof(values[0][0]);"
+items 8 "int values[2][2][2][2]; return sizeof(values[0][0][0]);"
+items 4 "int values[2][2][2][2]; return sizeof(values[0][0][0][0]);"
+items 12 "struct holder { int values[3]; }; struct holder value; return sizeof value.values;"
+items 12 "struct holder { int values[2][3]; }; struct holder value; return sizeof(value.values[0]);"
+items 12 "struct holder { int values[2][3]; }; struct holder value; return sizeof value.values[0];"
+items 4 "struct holder { int values[2][3]; }; struct holder value; return sizeof(value.values[0][0]);"
+items 12 "struct holder { int values[2][3]; }; struct holder *value = 0; return sizeof(value->values[0]);"
+items 12 "struct holder { int values[3]; }; struct holder *value = 0; return sizeof(value->values);"
+items 12 "struct holder { int values[3]; }; struct holder *value = 0; return sizeof((*value).values);"
+items 12 "struct holder { int values[3]; }; struct holder *value = 0; return sizeof (*value).values;"
+try_ 15 << EOF
+typedef struct { int values[3]; } holder_t;
+typedef holder_t holder_alias;
+typedef holder_alias *holder_ptr;
+int main(void) {
+    holder_alias value = {{1, 2, 3}};
+    holder_ptr pointer = &value;
+    return pointer->values[2] + sizeof(pointer->values);
+}
+EOF
+try_ 20 << EOF
+struct nested { int values[2]; };
+struct holder { int values[3]; struct nested nested; };
+int main(void) {
+    struct holder value;
+    return sizeof(value.values) + sizeof(value.nested.values);
+}
+EOF
 try_ 8 << EOF
 int main(void)
 {
@@ -6037,7 +6648,57 @@ begin_category "Preprocessor Directives" "Testing #define, #ifdef, #ifndef, #if,
 cp "$TESTS_DIR/include-base.h" "$TEST_TMPDIR/include-base.h"
 cp "$TESTS_DIR/include-values.h" "$TEST_TMPDIR/include-values.h"
 cp "$TESTS_DIR/include-macro.h" "$TEST_TMPDIR/include-macro.h"
+cp -R "$TESTS_DIR/include-nested" "$TEST_TMPDIR/include-nested"
 try_file 24 "$TESTS_DIR/include-main.c"
+
+# line changes diagnostics and __FILE__, not the physical directory used to
+# resolve a following quoted include.
+try_ 7 << EOF
+#line 10 "generated/virtual.c"
+#include "include-base.h"
+int main(void) { return QUOTED_INCLUDE_BASE; }
+EOF
+
+# A header's #pragma once identity is its normalized relative path, not the
+# spelling used by an includer. The outer header reaches the same header again
+# through ./ and ../ components after its canonical spelling; a duplicate
+# inclusion would define its object twice.
+try_ 19 << EOF
+#include "include-nested/outer.h"
+int main(void) { return NESTED_ONCE_VALUE + nested_once_object; }
+EOF
+try_flags 24 "-I$TESTS_DIR" << EOF
+#include <include-angle.h>
+#include <include-angle-child.h>
+int main(void) { return ANGLE_INCLUDE_BASE + ANGLE_INCLUDE_CHILD; }
+EOF
+try_flags 24 "-I$TESTS_DIR" << EOF
+#define ANGLE_HEADER <include-angle.h>
+#include ANGLE_HEADER
+int main(void) { return ANGLE_INCLUDE_BASE + ANGLE_INCLUDE_CHILD; }
+EOF
+try_flags 1 "--no-libc" << EOF
+#include <stdbool.h>
+int main(void) {
+    bool value = true;
+    return value == true && __bool_true_false_are_defined == 1;
+}
+EOF
+try_flags 1 "--no-libc" << EOF
+#include <iso646.h>
+int main(void) {
+    int value = 6;
+    value and_eq 3;
+    value or_eq 4;
+    value xor_eq 1;
+    return value == 7 and not (value not_eq 7) and
+           ((5 bitand 3) == 1) and ((1 bitor 2) == 3) and
+           ((1 xor 3) == 2) and ((compl 0) < 0);
+}
+EOF
+try_compile_error_message "Angle header not found in -I search paths" << EOF
+#include <missing-shecc-header.h>
+EOF
 try_compile_error << EOF
 #define FIRST_HEADER SECOND_HEADER
 #define SECOND_HEADER FIRST_HEADER
@@ -6047,6 +6708,19 @@ EOF
 try_compile_error_message "unsupported platform configuration" << EOF
 #error unsupported platform configuration
 int main(void) { return 0; }
+EOF
+try_ 0 << EOF
+#pragma vendor_extension ignored payload
+int main(void) { return 0; }
+EOF
+try_ 0 << EOF
+_Pragma("vendor_extension ignored payload")
+#define DO_PRAGMA(value) _Pragma(#value)
+DO_PRAGMA(another_extension ignored)
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+_Pragma(123)
 EOF
 
 # #ifdef...#else...#endif
@@ -6651,6 +7325,46 @@ int main()
 }
 EOF
 
+#line changes the logical source location observed by the standard built-ins.
+try_ 1 << EOF
+#line 70
+int main(void) { return __LINE__ == 70; }
+EOF
+
+try_ 1 << EOF
+#line 41 "generated-input.c"
+int main(void) { return !strcmp(__FILE__, "generated-input.c"); }
+EOF
+
+#line operands are macro-expanded in an isolated directive token stream.
+try_ 2 << EOF
+#define LINE_VALUE 90
+#define LINE_FILE "macro-generated.c"
+#line LINE_VALUE LINE_FILE
+int main(void) { return (__LINE__ == 90) + !strcmp(__FILE__, "macro-generated.c"); }
+EOF
+
+try_ 1 << EOF
+#define ID(x) x
+#line ID(120)
+int main(void) { return __LINE__ == 120; }
+EOF
+
+try_compile_error << EOF
+#line 0
+int main(void) { return 0; }
+EOF
+
+# C99 fixes the spelling and extent of these translation-time string literals.
+# Their actual value is supplied once at configuration time so all bootstrap
+# stages use precisely the same expansion.
+try_ 1 << EOF
+int main(void)
+{
+    return sizeof(__DATE__) == 12 && sizeof(__TIME__) == 9;
+}
+EOF
+
 # Category: Function-like Macros
 begin_category "Function-like Macros" "Testing function-like macros and variadic macros"
 
@@ -6658,6 +7372,13 @@ begin_category "Function-like Macros" "Testing function-like macros and variadic
 try_ 6 << EOF
 #define SIX() 6
 int main(void) { return SIX(); }
+EOF
+
+# An object-like replacement is expanded without consuming its following call.
+try_ 9 << EOF
+#define TARGET target
+int target(void) { return 9; }
+int main(void) { return TARGET(); }
 EOF
 
 # stringification: '#' spells the argument as it was written
@@ -8048,6 +8769,12 @@ int main() {
 }
 EOF
 
+# C99 permits at most three octal digits in one escape; the trailing 2 is a
+# second character in this implementation-defined packed multicharacter value.
+try_ 1 << EOF
+int main(void) { return '\1012' == 0x4132; }
+EOF
+
 # Test hex escapes in strings
 try_output 0 "Hello World" << EOF
 int main() {
@@ -9110,6 +9837,16 @@ int main() {
 }
 EOF
 
+# Union extent is padded to the strictest member alignment, even when its
+# largest member is an odd-sized character array.
+try_ 8 << EOF
+typedef union {
+    char bytes[5];
+    int value;
+} padded_union_t;
+int main(void) { return sizeof(padded_union_t); }
+EOF
+
 # Union with different data types
 try_output 0 "Value as int: 1094795585, as char: 65" << EOF
 typedef union {
@@ -9972,6 +10709,174 @@ int main()
     func();
     return 0;
 }
+EOF
+
+begin_category "Bit-fields"
+try_ 37 << EOF
+struct flags {
+    unsigned int low : 3;
+    unsigned int high : 5;
+    int signed_value : 4;
+    unsigned int : 0;
+    unsigned int tail : 1;
+};
+int main(void) {
+    struct flags value = {0};
+    value.low = 7;
+    value.high = 31;
+    value.signed_value = -3;
+    value.tail = 1;
+    return value.low + value.high + value.signed_value + value.tail +
+           (sizeof(struct flags) == 8 ? 1 : 0);
+}
+EOF
+try_ 7 << EOF
+struct flags { unsigned int left : 3; unsigned int right : 3; };
+int main(void) {
+    struct flags value = {0};
+    value.left = 2;
+    value.right = 4;
+    value.left += 1;
+    return value.left + value.right;
+}
+EOF
+try_ 6 << EOF
+struct flags { unsigned int left : 3; unsigned int right : 3; };
+int main(void) {
+    struct flags value = {2, 4};
+    return value.left + value.right;
+}
+EOF
+try_ 117 << EOF
+struct flags {
+    unsigned int low : 3;
+    unsigned int : 2;
+    unsigned int high : 3;
+};
+static struct flags file_flags = {5, 6};
+int main(void) {
+    struct flags local = {1, 7};
+    return file_flags.low + file_flags.high * 8 +
+           local.low * 64 + local.high * 512;
+}
+EOF
+try_ 7 << EOF
+struct flags { unsigned int left : 3; unsigned int right : 3; };
+int main(void) {
+    struct flags value = {2, 4};
+    value.left++;
+    return value.left + value.right;
+}
+EOF
+try_ 9 << EOF
+struct flags { unsigned int left : 3; unsigned int right : 3; };
+int main(void) {
+    struct flags value = {2, 4};
+    int old = value.left++;
+    return old + value.left + value.right;
+}
+EOF
+try_ 2 << EOF
+struct flags { unsigned int value : 3; };
+int main(void) {
+    struct flags flags = {1};
+    return (flags.value - 8 < 0) + ((~flags.value) < 0);
+}
+EOF
+try_ 4 << EOF
+struct flags { unsigned int value : 3; };
+int main(void) { struct flags flags = {1}; return sizeof(+flags.value); }
+EOF
+try_ 5 << EOF
+union flags { unsigned int value : 3; unsigned int raw; };
+int main(void) { union flags value = {0}; value.value = 5; return value.value; }
+EOF
+try_ 18 << EOF
+union flags {
+    unsigned int : 2;
+    unsigned int value : 3;
+    unsigned int raw;
+};
+static union flags first = {5}, second = {6};
+int main(void) {
+    union flags local = {7};
+    return first.value + second.value + local.value;
+}
+EOF
+try_ 7 << EOF
+struct flags { unsigned int left : 3; unsigned int right : 3; };
+int main(void) {
+    struct flags values[2] = {{1, 2}, {3, 4}};
+    return values[1].left + values[1].right;
+}
+EOF
+try_ 3 << EOF
+struct flags { _Bool left : 1; _Bool right : 1; _Bool third : 1; };
+int main(void) {
+    struct flags value = {0};
+    value.left = 9;
+    value.right = 1;
+    return value.left + value.right + (sizeof(struct flags) == 1 ? 1 : 0);
+}
+EOF
+try_ 3 << EOF
+struct flags { _Bool file : 1; _Bool local : 1; };
+static struct flags file_flags = {2, 0};
+int main(void) {
+    struct flags local = {0};
+    local.local = 2;
+    return file_flags.file + file_flags.local + local.file + local.local +
+           (sizeof(struct flags) == 1 ? 1 : 0);
+}
+EOF
+try_ 6 << EOF
+struct flags { unsigned int left : 3; unsigned int right : 3; };
+static struct flags value = {2, 4};
+int main(void) { return value.left + value.right; }
+EOF
+try_ 5 << EOF
+struct flags { unsigned int left : 3; unsigned int right : 3; };
+static struct flags value = {.left = 7, .right = 3, .left = 2};
+int main(void) { return value.left + value.right; }
+EOF
+try_ 7 << EOF
+struct flags { unsigned int left : 3; unsigned int right : 3; };
+static struct flags values[2] = {{1, 2}, {.left = 3, .right = 4}};
+int main(void) { return values[1].left + values[1].right; }
+EOF
+try_ 72 << EOF
+struct message { char *text; unsigned int code : 4; };
+static struct message value = {"hello", 7};
+int main(void) { return value.text[0] + value.code - 39; }
+EOF
+try_ 42 << EOF
+int increment(int value) { return value + 1; }
+struct callback { int (*call)(int); };
+static struct callback value = {increment};
+int main(void) { return value.call(41); }
+EOF
+try_ 42 << EOF
+static int increment(int value) { return value + 1; }
+struct callback { int padding; int (*call)(int); };
+static struct callback value = {0, &increment};
+int main(void) { return value.call(41); }
+EOF
+try_compile_error << EOF
+struct invalid { int value : 33; };
+EOF
+try_compile_error << EOF
+struct invalid { int value : 0; };
+EOF
+try_compile_error << EOF
+struct invalid { _Bool value : 2; };
+EOF
+try_compile_error << EOF
+struct flags { unsigned int value : 1; };
+int main(void) { struct flags value; return (int)&value.value; }
+EOF
+try_compile_error << EOF
+struct flags { unsigned int value : 1; };
+int main(void) { struct flags value; return sizeof(value.value); }
 EOF
 
 # Test Results Summary

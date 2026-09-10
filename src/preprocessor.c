@@ -96,6 +96,110 @@ bool is_macro_defined(char *name)
     return macro && !macro->is_disabled;
 }
 
+/* The freestanding runtime supplies these declarations internally, so their
+ * standard headers intentionally remain optional when no implementation search
+ * path is configured. All other angle headers must resolve through -I.
+ */
+bool is_builtin_system_header(const char *name)
+{
+    return !strcmp(name, "assert.h") || !strcmp(name, "ctype.h") ||
+           !strcmp(name, "errno.h") || !strcmp(name, "limits.h") ||
+           !strcmp(name, "stdarg.h") || !strcmp(name, "stdbool.h") ||
+           !strcmp(name, "stddef.h") || !strcmp(name, "stdio.h") ||
+           !strcmp(name, "stdlib.h") || !strcmp(name, "string.h") ||
+           !strcmp(name, "sys/stat.h");
+}
+
+void define_builtin_object_macro(const char *name,
+                                 token_kind_t kind,
+                                 const char *replacement)
+{
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+
+    macro->name = intern_string((char *) name);
+    macro->replacement =
+        new_token(kind, &synth_built_in_loc, strlen(replacement));
+    macro->replacement->literal = intern_string((char *) replacement);
+    hashmap_put(MACROS, macro->name, macro);
+}
+
+/* stdbool.h is entirely macro-defined in C99. Supplying it here makes the
+ * freestanding compiler usable with --no-libc too, rather than relying on the
+ * private definitions prepended from lib/c.h.
+ */
+void install_stdbool_header(void)
+{
+    define_builtin_object_macro("bool", T_identifier, "_Bool");
+    define_builtin_object_macro("true", T_numeric, "1");
+    define_builtin_object_macro("false", T_numeric, "0");
+    define_builtin_object_macro("__bool_true_false_are_defined", T_numeric,
+                                "1");
+}
+
+/* iso646.h is likewise a pure C99 macro header. Keep the replacement token
+ * kinds explicit so the operators retain their ordinary parser precedence.
+ */
+void install_iso646_header(void)
+{
+    define_builtin_object_macro("and", T_log_and, "&&");
+    define_builtin_object_macro("and_eq", T_andeq, "&=");
+    define_builtin_object_macro("bitand", T_ampersand, "&");
+    define_builtin_object_macro("bitor", T_bit_or, "|");
+    define_builtin_object_macro("compl", T_bit_not, "~");
+    define_builtin_object_macro("not", T_log_not, "!");
+    define_builtin_object_macro("not_eq", T_noteq, "!=");
+    define_builtin_object_macro("or", T_log_or, "||");
+    define_builtin_object_macro("or_eq", T_oreq, "|=");
+    define_builtin_object_macro("xor", T_bit_xor, "^");
+    define_builtin_object_macro("xor_eq", T_xoreq, "^=");
+}
+
+/* An angle header is lexed as ordinary preprocessing tokens. Recover its raw
+ * spelling from the immutable source buffer so dotted and slash-separated names
+ * do not need special punctuation reconstruction here.
+ */
+bool resolve_angle_include(token_t *open,
+                           token_t *close,
+                           char *resolved,
+                           int resolved_size)
+{
+    strbuf_t *source = get_file_buf(open->location.physical_filename);
+    int start = open->location.pos + open->location.len;
+    int len = close->location.pos - start;
+    char name[MAX_LINE_LEN];
+
+    if (len <= 0 || len >= MAX_LINE_LEN)
+        error_at("Invalid #include <...> header name", &open->location);
+    memcpy(name, source->elements + start, len);
+    name[len] = '\0';
+    for (int i = 0; i < len; i++)
+        if (name[i] == ' ' || name[i] == '\t')
+            error_at("Whitespace is not permitted in #include <...>",
+                     &open->location);
+
+    for (int i = 0; i < include_dirs_idx; i++) {
+        FILE *file;
+        snprintf(resolved, resolved_size, "%s/%s", include_dirs[i], name);
+        file = fopen(resolved, "rb");
+        if (file) {
+            fclose(file);
+            return true;
+        }
+    }
+    if (!strcmp(name, "stdbool.h")) {
+        install_stdbool_header();
+        return false;
+    }
+    if (!strcmp(name, "iso646.h")) {
+        install_iso646_header();
+        return false;
+    }
+    if (is_builtin_system_header(name))
+        return false;
+    error_at("Angle header not found in -I search paths", &open->location);
+    return false;
+}
+
 /* file_macro_handler is responsible for expanding built-in macro "__FILE__"
  * inplace with a string token with file's relative path's name literally
  */
@@ -121,6 +225,39 @@ token_t *line_macro_handler(token_t *tk)
     new_tk->literal = intern_string(line);
     memcpy(&new_tk->location, &tk->location, sizeof(source_location_t));
     return new_tk;
+}
+
+/* C99 6.10.8 requires these strings to describe the translation time. The
+ * generated configuration supplies that time once for all bootstrap stages;
+ * consulting a clock while compiling would make stage 1 and stage 2 differ.
+ */
+token_t *translation_timestamp_macro_handler(token_t *tk)
+{
+    token_t *new_tk = copy_token(tk);
+
+    new_tk->kind = T_string;
+    new_tk->literal = !strcmp(tk->literal, "__DATE__") ? SHECC_TRANSLATION_DATE
+                                                       : SHECC_TRANSLATION_TIME;
+    memcpy(&new_tk->location, &tk->location, sizeof(source_location_t));
+    return new_tk;
+}
+
+/* Remap the remaining physical tokens from one source stream for #line.
+ * Included files are preprocessed recursively from separate token streams, so
+ * they retain their own logical locations.
+ */
+void pp_apply_line_directive(token_t *first,
+                             char *original_filename,
+                             char *logical_filename,
+                             int line_delta)
+{
+    for (token_t *it = first; it && it->kind != T_eof; it = it->next) {
+        if (strcmp(it->location.physical_filename, original_filename))
+            continue;
+        it->location.line += line_delta;
+        if (logical_filename)
+            it->location.filename = logical_filename;
+    }
 }
 
 /* hide_set_t is used to track which macros have been expanded in the previous
@@ -203,6 +340,59 @@ typedef struct preprocess_ctx {
 
 token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx);
 char *token_to_string(token_t *tk, char *dest);
+
+/* Macro expansion for #line must be confined to its operands: sending the live
+ * stream through pp_preprocess_internal() could consume following source
+ * directives. Copy through (but not including) the directive newline and append
+ * a private EOF sentinel for a normal standalone rescan.
+ */
+token_t *pp_expand_line_operands(token_t *directive)
+{
+    token_t head;
+    token_t *tail = &head;
+    token_t *raw = directive->next;
+    preprocess_ctx_t ctx;
+
+    head.next = NULL;
+    while (raw && raw->kind != T_newline && raw->kind != T_eof) {
+        tail->next = copy_token(raw);
+        tail = tail->next;
+        raw = raw->next;
+    }
+    if (!raw || raw->kind != T_newline)
+        error_at("Unterminated #line directive", &directive->location);
+
+    tail->next = new_token(T_eof, &raw->location, 0);
+    ctx.expanded_from = directive;
+    ctx.hide_set = NULL;
+    ctx.macro_args = NULL;
+    ctx.trim_eof = false;
+    return pp_preprocess_internal(head.next, &ctx);
+}
+
+void pp_read_line_operands(token_t *directive,
+                           int *requested_line,
+                           char **logical_filename)
+{
+    token_t head;
+    token_t *cursor;
+    token_t *expanded = pp_expand_line_operands(directive);
+
+    head.next = expanded;
+    cursor = &head;
+    if (!pp_lex_peek_token(cursor, T_numeric, true))
+        error_at("#line requires a decimal line number", &directive->location);
+    cursor = pp_lex_next_token(cursor, true);
+    *requested_line = parse_numeric_constant(cursor->literal);
+    if (*requested_line <= 0)
+        error_at("#line number must be positive", &cursor->location);
+    if (pp_lex_peek_token(cursor, T_string, true)) {
+        cursor = pp_lex_next_token(cursor, true);
+        *logical_filename = intern_string(cursor->literal);
+    }
+    if (!pp_lex_peek_token(cursor, T_eof, true))
+        error_at("Unexpected token in #line directive", &cursor->location);
+}
 
 int pp_get_operator_prio(opcode_t op)
 {
@@ -755,6 +945,18 @@ __noreturn void pp_error_directive(token_t *directive)
     error_at(message, loc);
 }
 
+/* C99's _Pragma operator is processed after macro replacement. The compiler has
+ * no standard pragma semantics, so its destringized directive is ignored just
+ * like an unknown #pragma; consume the operator syntax so no tokens reach the
+ * parser.
+ */
+token_t *pp_ignore_pragma_operator(token_t *tk)
+{
+    tk = pp_lex_expect_token(tk, T_open_bracket, true);
+    tk = pp_lex_expect_token(tk, T_string, true);
+    return pp_lex_expect_token(tk, T_close_bracket, true);
+}
+
 /* Join two tokens into one, as '##' requires.
  *
  * Pasting is textual, so the result has to be scanned again: "a" and "1" give
@@ -1009,6 +1211,12 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 continue;
             }
 
+            if (!strcmp(tk->literal, "_Pragma")) {
+                tk = pp_ignore_pragma_operator(tk);
+                tk = pp_lex_next_token(tk, false);
+                continue;
+            }
+
             /* Prevent infinite recursion by checking hide set */
             if (hide_set_contains(ctx->hide_set, tk->literal))
                 break;
@@ -1227,6 +1435,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             char inclusion_path[MAX_LINE_LEN];
             token_stream_t *file_tks = NULL;
             token_t *include_tk = tk;
+            bool angle_header = false;
+            bool angle_form = false;
             preprocess_ctx_t inclusion_ctx;
             inclusion_ctx.hide_set = ctx->hide_set;
             inclusion_ctx.expanded_from = NULL;
@@ -1262,18 +1472,34 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                     macro = hashmap_get(MACROS, macro->replacement->literal);
                 }
                 if (!macro || macro->is_disabled || macro->param_num ||
-                    !macro->replacement || macro->replacement->next ||
-                    macro->replacement->kind != T_string)
+                    !macro->replacement)
                     error_at("#include macro must expand to a header name",
                              &tk->location);
-                strcpy(inclusion_path, macro->replacement->literal);
+                if (macro->replacement->kind == T_string &&
+                    !macro->replacement->next) {
+                    strcpy(inclusion_path, macro->replacement->literal);
+                } else if (macro->replacement->kind == T_lt) {
+                    token_t *open = macro->replacement;
+                    token_t *close = open;
+
+                    angle_form = true;
+                    while (close && close->kind != T_gt)
+                        close = close->next;
+                    if (!close || close->next)
+                        error_at("#include macro must expand to a header name",
+                                 &tk->location);
+                    inclusion_path[0] = '\0';
+                    angle_header = resolve_angle_include(
+                        open, close, inclusion_path, sizeof(inclusion_path));
+                } else {
+                    error_at("#include macro must expand to a header name",
+                             &tk->location);
+                }
             } else {
                 tk = pp_lex_expect_token(tk, T_lt, true);
-
-                /* The path is ignored (see the FIXME below), so just consume
-                 * it. Stopping at a newline too keeps an unterminated "#include
-                 * <foo" from eating the rest of the file.
-                 */
+                token_t *open = tk;
+                angle_form = true;
+                inclusion_path[0] = '\0';
                 while (!pp_lex_peek_token(tk, T_gt, false)) {
                     if (pp_lex_peek_token(tk, T_newline, false) ||
                         pp_lex_peek_token(tk, T_eof, false))
@@ -1281,47 +1507,57 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                     tk = pp_lex_next_token(tk, false);
                 }
 
-                tk = pp_lex_next_token(tk, false);
+                token_t *close = pp_lex_next_token(tk, false);
+                angle_header = resolve_angle_include(
+                    open, close, inclusion_path, sizeof(inclusion_path));
+                tk = close;
+            }
 
-                /* FIXME: We ignore #include <...> at this moment, since all
-                 * libc functions are included done by inlining.
-                 */
+            if (angle_form && !angle_header) {
                 tk = pp_lex_expect_token(tk, T_newline, true);
                 tk = pp_lex_next_token(tk, false);
                 continue;
             }
 
-            /* normalize path */
-            char path[MAX_LINE_LEN];
-            const char *file = include_tk->location.filename;
-            int c = strlen(file) - 1;
+            if (!angle_header) {
+                /* Quoted headers are relative to the physical source path. */
+                char path[MAX_LINE_LEN];
+                const char *file = include_tk->location.physical_filename;
+                int c = strlen(file) - 1;
 
-            while (c > 0 && file[c] != '/')
-                c--;
+                while (c > 0 && file[c] != '/')
+                    c--;
 
-            if (c) {
-                if (c >= MAX_LINE_LEN - 1)
-                    c = MAX_LINE_LEN - 2;
+                if (c) {
+                    if (c >= MAX_LINE_LEN - 1)
+                        c = MAX_LINE_LEN - 2;
+                    memcpy(path, file, c);
+                    path[c] = '\0';
+                } else {
+                    path[0] = '.';
+                    path[1] = '\0';
+                    c = 1;
+                }
 
-                memcpy(path, file, c);
-                path[c] = '\0';
-            } else {
-                path[0] = '.';
-                path[1] = '\0';
-                c = 1;
+                snprintf(path + c, MAX_LINE_LEN - c, "/%s", inclusion_path);
+                strncpy(inclusion_path, path, MAX_LINE_LEN - 1);
+                inclusion_path[MAX_LINE_LEN - 1] = '\0';
             }
-
-            snprintf(path + c, MAX_LINE_LEN - c, "/%s", inclusion_path);
-            strncpy(inclusion_path, path, MAX_LINE_LEN - 1);
-            inclusion_path[MAX_LINE_LEN - 1] = '\0';
 
             tk = pp_lex_expect_token(tk, T_newline, true);
             tk = pp_lex_next_token(tk, false);
 
-            if (hashmap_contains(PRAGMA_ONCE, inclusion_path))
+            file_tks = gen_file_token_stream(intern_string(inclusion_path));
+
+            /* gen_file_token_stream() canonicalizes lexical components such as
+             * "./" and "../". PRAGMA_ONCE is keyed by that same physical
+             * filename, so test the canonical spelling rather than the raw
+             * include directive.
+             */
+            if (hashmap_contains(PRAGMA_ONCE,
+                                 file_tks->head->location.physical_filename))
                 continue;
 
-            file_tks = gen_file_token_stream(intern_string(inclusion_path));
             token_t *included =
                 pp_preprocess_internal(file_tks->head, &inclusion_ctx);
             if (included) {
@@ -1491,13 +1727,31 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 tk = pp_lex_next_token(tk, true);
 
                 if (!strcmp("once", tk->literal))
-                    hashmap_put(PRAGMA_ONCE, tk->location.filename, NULL);
+                    hashmap_put(PRAGMA_ONCE, tk->location.physical_filename,
+                                NULL);
             }
 
             while (!pp_lex_peek_token(tk, T_newline, true))
                 tk = pp_lex_next_token(tk, true);
 
             tk = pp_lex_expect_token(tk, T_newline, true);
+            continue;
+        }
+        case T_cppd_line: {
+            char *original_filename = tk->location.physical_filename;
+            char *logical_filename = NULL;
+            int requested_line;
+
+            pp_read_line_operands(tk, &requested_line, &logical_filename);
+            while (!pp_lex_peek_token(tk, T_newline, false))
+                tk = pp_lex_next_token(tk, false);
+            if (!pp_lex_peek_token(tk, T_newline, true))
+                error_at("Unexpected token in #line directive", &tk->location);
+            tk = pp_lex_expect_token(tk, T_newline, true);
+            tk = pp_lex_next_token(tk, false);
+            if (tk->kind != T_eof)
+                pp_apply_line_directive(tk, original_filename, logical_filename,
+                                        requested_line - tk->location.line);
             continue;
         }
         case T_cppd_error: {
@@ -1612,6 +1866,16 @@ token_t *preprocess(token_t *tk)
     macro->name = "__LINE__";
     macro->handler = line_macro_handler;
     hashmap_put(MACROS, "__LINE__", macro);
+
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    macro->name = "__DATE__";
+    macro->handler = translation_timestamp_macro_handler;
+    hashmap_put(MACROS, "__DATE__", macro);
+
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    macro->name = "__TIME__";
+    macro->handler = translation_timestamp_macro_handler;
+    hashmap_put(MACROS, "__TIME__", macro);
 
     /* C99-required implementation macros. shecc supplies its own small runtime
      * rather than a complete hosted library, so advertise freestanding mode
@@ -1847,6 +2111,7 @@ char *token_to_string(token_t *tk, char *dest)
     case T_cppd_ifdef:
     case T_cppd_ifndef:
     case T_cppd_pragma:
+    case T_cppd_line:
         error_at(
             "Internal error, preprocessor directives should be ommited "
             "after preprocessing",

@@ -47,6 +47,17 @@ LIBDIR := $(shell find lib -type d)
 
 BUILTIN_LIBC_SOURCE ?= c.c
 BUILTIN_LIBC_HEADER := c.h
+# The translation timestamp belongs to generated configuration rather than the
+# compiler's host clock. A single value is consequently embedded in stages 0,
+# 1, and 2, which keeps bootstrap byte-for-byte reproducible. Rebuilders can
+# supply SOURCE_DATE_EPOCH for a stable timestamp across separate invocations.
+SOURCE_DATE_EPOCH ?= $(shell date -u +%s)
+TRANSLATION_DATE := $(shell LC_ALL=C TZ=UTC date -u -d "@$(SOURCE_DATE_EPOCH)" '+%b %e %Y')
+TRANSLATION_TIME := $(shell LC_ALL=C TZ=UTC date -u -d "@$(SOURCE_DATE_EPOCH)" '+%H:%M:%S')
+ifeq ($(strip $(TRANSLATION_DATE)$(TRANSLATION_TIME)),)
+$(error SOURCE_DATE_EPOCH must be a Unix epoch accepted by date)
+endif
+TRANSLATION_DEFS = "\#define SHECC_TRANSLATION_DATE \"$(TRANSLATION_DATE)\"\n\#define SHECC_TRANSLATION_TIME \"$(TRANSLATION_TIME)\"\n"
 # --dump-ir is what makes out/shecc-stage1.log the IR of the stage 1 build
 # rather than an empty file. It is the only thing in the tree that exercises
 # dump_insn()/dump_ph2_ir(), and it is what a failed CI run uploads.
@@ -132,6 +143,7 @@ include mk/common.mk
 config:
 	$(Q)ln -sf $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
 	$(Q)$(PRINTF) $(ARCH_DEFS) > $@.tmp
+	$(Q)$(PRINTF) $(TRANSLATION_DEFS) >> $@.tmp
 	$(Q)if cmp -s $@.tmp $@; then $(RM) $@.tmp; else mv $@.tmp $@; fi
 	$(Q)$(PRINTF) "ARCH=$(ARCH)" > $(BUILD_SESSION)
 	$(VECHO) "Target machine code switch to %s\n" $(ARCH)

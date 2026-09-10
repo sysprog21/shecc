@@ -2393,7 +2393,7 @@ void reg_alloc_global(insn_t *global_insn)
             /* Stash base offset for this array variable */
             global_insn->rd->init_val = src0;
 
-            if (global_insn->rd->ptr_level)
+            if (global_insn->rd->ptr_level || global_insn->rd->is_func)
                 GLOBAL_FUNC->stack_size +=
                     align_size(PTR_SIZE * global_insn->rd->array_size);
             else {
@@ -2539,10 +2539,37 @@ void reg_alloc_global(insn_t *global_insn)
     }
     case OP_write: {
         if (global_insn->rs2 && global_insn->rs2->is_func) {
-            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            /* A direct aggregate field address is itself a global object, not a
+             * pointer value stored in that object. Loading it here turns an
+             * all-zero callback slot into the destination address.
+             */
+            if (global_insn->rs1 && global_insn->rs1->is_global) {
+                dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rs1,
+                                    -1, -1);
+                ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+                ir->src0 = global_insn->rs1->array_size
+                               ? global_insn->rs1->init_val
+                               : global_insn->rs1->offset;
+                ir->dest = dest;
+                ir->is_pointer = true;
+                ir->size_bytes = PTR_SIZE;
+                src0 = dest;
+            } else {
+                src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            }
             ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_address_of_func);
             ir->src0 = src0;
             ir->func_name = intern_string(global_insn->rs2->var_name);
+
+            /* The GP-relative address exists only to receive this one
+             * relocation. In particular, an address temporary for a later array
+             * element must not be spilled: its slot allocation can be the very
+             * element being initialized, which would overwrite the function
+             * address with the address itself.
+             */
+            REGS[src0].polluted = 0;
+            vreg_clear_phys(REGS[src0].var);
+            REGS[src0].var = NULL;
             if (dynlink) {
                 func_t *target_fn = find_func(ir->func_name);
                 if (target_fn)
@@ -2611,6 +2638,7 @@ void reg_alloc_global(insn_t *global_insn)
 void reg_alloc_bb(func_t *func, basic_block_t *bb)
 {
     bool handle_abi = false, args_on_stack = false;
+    bool riscv_indirect_target_staged = false;
 
     is_pushing_args = false;
     int args = 0;
@@ -2696,7 +2724,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             func->stack_size += PTR_SIZE;
             src0 = func->stack_size;
 
-            if (insn->rd->ptr_level)
+            if (insn->rd->ptr_level || insn->rd->is_func)
                 sz = PTR_SIZE;
             else {
                 sz = insn->rd->type->size;
@@ -3028,6 +3056,24 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             extend_liveness(bb, insn, insn->rs1, insn->sz);
 
             if (!is_pushing_args) {
+                /* RV32 has four ABI argument registers. A call with two aligned
+                 * 64-bit arguments fills all four, leaving no virtual register
+                 * in which OP_indirect may materialize its target. Stage it
+                 * before assigning that file. The RV32 backend keeps this value
+                 * in s2, an otherwise-unused callee-saved register.
+                 */
+                if (ELF_MACHINE == 0xf3) {
+                    insn_t *call = insn;
+
+                    while (call && call->opcode == OP_push)
+                        call = call->next;
+                    if (call && call->opcode == OP_indirect) {
+                        src0 = prepare_operand(bb, call->rs1, -1);
+                        ir = bb_add_ph2_ir(bb, OP_load_func);
+                        ir->src0 = src0;
+                        riscv_indirect_target_staged = true;
+                    }
+                }
                 spill_alive(bb, insn);
                 is_pushing_args = true;
             }
@@ -3083,16 +3129,19 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             if (!args)
                 spill_alive(bb, insn);
 
-            src0 = prepare_operand(bb, insn->rs1, -1);
-            ir = bb_add_ph2_ir(bb, OP_load_func);
-            ir->src0 = src0;
-            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            if (!riscv_indirect_target_staged) {
+                src0 = prepare_operand(bb, insn->rs1, -1);
+                ir = bb_add_ph2_ir(bb, OP_load_func);
+                ir->src0 = src0;
+                ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            }
 
             bb_add_ph2_ir(bb, OP_indirect);
 
             is_pushing_args = false;
             args = 0;
             handle_abi = false;
+            riscv_indirect_target_staged = false;
 
             clobber_caller_saved();
             break;

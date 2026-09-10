@@ -11,7 +11,7 @@
 #include "globals.c"
 
 /* Hash table constants */
-#define NUM_DIRECTIVES 11
+#define NUM_DIRECTIVES 12
 #define NUM_KEYWORDS 27
 
 /* Token mapping structure for elegant initialization */
@@ -46,7 +46,7 @@ void lex_init_directives(void)
         {"#error", T_cppd_error},     {"#if", T_cppd_if},
         {"#ifdef", T_cppd_ifdef},     {"#ifndef", T_cppd_ifndef},
         {"#include", T_cppd_include}, {"#pragma", T_cppd_pragma},
-        {"#undef", T_cppd_undef},
+        {"#undef", T_cppd_undef},     {"#line", T_cppd_line},
     };
 
     /* hashmap insertion */
@@ -307,7 +307,10 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
         return token;
     }
 
-    if (ch == '\\') {
+    /* Leave a UCN to lex_word(); an ordinary backslash remains available for
+     * the preprocessor's line-splice handling.
+     */
+    if (ch == '\\' && peek_char(buf, 1) != 'u' && peek_char(buf, 1) != 'U') {
         read_char(buf);
         token = new_token(T_backslash, loc, 1);
         loc->column++;
@@ -568,6 +571,14 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
         }
         token_buffer[sz] = '\0';
 
+        /* Validate every escape while the literal is still represented by one
+         * token. Some later string-initializer paths only need its decoded
+         * bytes and historically did not inspect unescape_string()'s status.
+         */
+        char unescaped[MAX_TOKEN_LEN];
+        if (unescape_string(token_buffer, unescaped, sizeof(unescaped)) < 0)
+            error_at("Invalid escape sequence", loc);
+
         read_char(buf);
         token = new_token(T_string, loc, sz + 2);
         token->literal = intern_string(token_buffer);
@@ -603,6 +614,10 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
             loc->len = 2;
             error_at("Unenclosed character literal", loc);
         }
+
+        char unescaped[MAX_TOKEN_LEN];
+        if (unescape_string(token_buffer, unescaped, sizeof(unescaped)) < 0)
+            error_at("Invalid escape sequence", loc);
 
         read_char(buf);
         token = new_token(T_char, loc, sz + 2);
@@ -960,6 +975,71 @@ token_t *lex_operator(strbuf_t *buf, source_location_t *loc, char ch)
     return NULL;
 }
 
+/* UCNs in identifiers are lexical spellings, rather than string escapes: the
+ * token keeps their UTF-8 spelling while its source location counts the raw
+ * six- or ten-byte `\\u`/`\\U` sequence. Keep this decoder here and
+ * deliberately leaf-sized. Calling the general literal unescaper from
+ * lex_word() made the self-hosted compiler's stage-1 build fail before it
+ * reached user input.
+ */
+static bool lex_ucn_starts(strbuf_t *buf)
+{
+    return peek_char(buf, 0) == '\\' &&
+           (peek_char(buf, 1) == 'u' || peek_char((strbuf_t *) buf, 1) == 'U');
+}
+
+static int lex_ucn_identifier(char *out, int out_size, strbuf_t *buf)
+{
+    int digits = peek_char(buf, 1) == 'u' ? 4 : 8;
+    unsigned int value = 0;
+    int out_len;
+
+    for (int i = 0; i < digits; i++) {
+        int digit = hex_digit_value(peek_char(buf, i + 2));
+
+        if (digit < 0)
+            return -1;
+        value = (value << 4) | digit;
+    }
+
+    /* C99 6.4.3 forbids surrogates, out-of-range scalars, and a UCN spelling of
+     * a basic-source character except $, @, and `. Those three are still
+     * grammar-level UCN nondigits, even though their direct spellings are not
+     * ordinary identifier characters.
+     */
+    if ((value < 0xa0 && value != '$' && value != '@' && value != '`') ||
+        value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff))
+        return -1;
+
+    if (value <= 0x7f)
+        out_len = 1;
+    else if (value <= 0x7ff)
+        out_len = 2;
+    else if (value <= 0xffff)
+        out_len = 3;
+    else
+        out_len = 4;
+    if (out_len >= out_size)
+        return -1;
+
+    if (out_len == 1) {
+        out[0] = value;
+    } else if (out_len == 2) {
+        out[0] = 0xc0 | (value >> 6);
+        out[1] = 0x80 | (value & 0x3f);
+    } else if (out_len == 3) {
+        out[0] = 0xe0 | (value >> 12);
+        out[1] = 0x80 | ((value >> 6) & 0x3f);
+        out[2] = 0x80 | (value & 0x3f);
+    } else {
+        out[0] = 0xf0 | (value >> 18);
+        out[1] = 0x80 | ((value >> 12) & 0x3f);
+        out[2] = 0x80 | ((value >> 6) & 0x3f);
+        out[3] = 0x80 | (value & 0x3f);
+    }
+    return out_len;
+}
+
 /* Identifiers, and the keywords spelled like them.
  *
  * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
@@ -970,8 +1050,9 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
     token_t *token;
     char token_buffer[MAX_TOKEN_LEN];
 
-    if (isalnum(ch) || ch == '_') {
+    if (isalnum(ch) || ch == '_' || lex_ucn_starts(buf)) {
         int sz = 0;
+        int source_len = 0;
         do {
             /* Bounded by the smallest buffer an identifier is ever copied into,
              * not by the token buffer's own size: lex_ident() and lex_peek()
@@ -983,9 +1064,27 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
                 loc->len = sz;
                 error_at("Identifier too long", loc);
             }
-            token_buffer[sz++] = ch;
-            ch = read_char(buf);
-        } while (isalnum(ch) || ch == '_');
+            if (lex_ucn_starts(buf)) {
+                int ucn_len =
+                    lex_ucn_identifier(token_buffer + sz, MAX_ID_LEN - sz, buf);
+                int raw_len = peek_char(buf, 1) == 'u' ? 6 : 10;
+
+                if (ucn_len < 0) {
+                    loc->len = raw_len;
+                    error_at("Invalid universal character name in identifier",
+                             loc);
+                }
+                sz += ucn_len;
+                source_len += raw_len;
+                for (int i = 0; i < raw_len; i++)
+                    read_char(buf);
+                ch = peek_char(buf, 0);
+            } else {
+                token_buffer[sz++] = ch;
+                source_len++;
+                ch = read_char(buf);
+            }
+        } while (isalnum(ch) || ch == '_' || lex_ucn_starts(buf));
         token_buffer[sz] = 0;
 
         /* Fast path for common keywords - avoid hashmap lookup */
@@ -1088,9 +1187,9 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
         if (kind == T_identifier && sz >= 2 && sz <= 8)
             kind = lookup_keyword(token_buffer);
 
-        token = new_token(kind, loc, sz);
+        token = new_token(kind, loc, source_len);
         token->literal = intern_string(token_buffer);
-        loc->column += sz;
+        loc->column += source_len;
         return token;
     }
 
@@ -1132,11 +1231,72 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
     return NULL;
 }
 
+/* Return one lexical spelling for a source path. This deliberately does not
+ * call realpath(3): headers need not exist until after the preprocessor has
+ * formed their name, and preserving a lexical path keeps diagnostics useful. It
+ * is nevertheless important that the token cache and #pragma once see "a/./b.h"
+ * and "a/x/../b.h" as the same header.
+ */
+static char *normalize_filename(const char *filename)
+{
+    char path[MAX_LINE_LEN];
+    int component_start[MAX_LINE_LEN];
+    bool component_is_normal[MAX_LINE_LEN];
+    int component_count = 0;
+    int in = 0;
+    int out = 0;
+    bool absolute = filename[0] == '/';
+
+    if (strlen(filename) >= MAX_LINE_LEN)
+        fatal("Source filename is too long");
+
+    if (absolute)
+        path[out++] = '/';
+
+    while (filename[in]) {
+        int start;
+        int len;
+
+        while (filename[in] == '/')
+            in++;
+        start = in;
+        while (filename[in] && filename[in] != '/')
+            in++;
+        len = in - start;
+
+        if (!len || (len == 1 && filename[start] == '.'))
+            continue;
+
+        if (len == 2 && filename[start] == '.' && filename[start + 1] == '.') {
+            if (component_count && component_is_normal[component_count - 1])
+                out = component_start[--component_count];
+            else if (!absolute) {
+                if (out)
+                    path[out++] = '/';
+                component_start[component_count++] = out;
+                component_is_normal[component_count - 1] = false;
+                path[out++] = '.';
+                path[out++] = '.';
+            }
+            continue;
+        }
+
+        if (out && path[out - 1] != '/')
+            path[out++] = '/';
+        component_start[component_count++] = out;
+        component_is_normal[component_count - 1] = true;
+        memcpy(path + out, filename + start, len);
+        out += len;
+    }
+
+    if (!out)
+        path[out++] = '.';
+    path[out] = '\0';
+    return intern_string(path);
+}
+
 token_stream_t *gen_file_token_stream(char *filename)
 {
-    /* FIXME: We should normalize filename first to make cache works as expected
-     */
-
     token_t head;
     token_t *cur = &head;
     token_stream_t *tks;
@@ -1145,7 +1305,8 @@ token_stream_t *gen_file_token_stream(char *filename)
      * len is 1 for reporting convenience, and the column and line number are
      * set to 1.
      */
-    source_location_t loc = {0, 1, 1, 1, filename};
+    filename = normalize_filename(filename);
+    source_location_t loc = {0, 1, 1, 1, filename, filename};
     strbuf_t *buf;
 
     tks = hashmap_get(TOKEN_CACHE, filename);
@@ -1192,7 +1353,7 @@ token_stream_t *gen_libc_token_stream(void)
     token_stream_t *tks;
     char *filename = dynlink ? "lib/c.h" : "lib/c.c";
     strbuf_t *buf = LIBC_SRC;
-    source_location_t loc = {0, 1, 1, 1, filename};
+    source_location_t loc = {0, 1, 1, 1, filename, filename};
 
     tks = hashmap_get(TOKEN_CACHE, filename);
 

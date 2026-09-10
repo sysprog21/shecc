@@ -115,6 +115,8 @@ bool dump_ir = false;
 bool dump_dot = false;
 bool hard_mul_div = false;
 bool warn_string_literals = false;
+char *include_dirs[MAX_INCLUDE_DIRS];
+int include_dirs_idx = 0;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -714,6 +716,38 @@ int hex_digit_value(char c)
     return -1;
 }
 
+/* Encode a valid Unicode scalar value into this implementation's UTF-8
+ * execution character set. Narrow literals retain bytes, so this also keeps a
+ * UCN usable in strings, character constants, and #if character constants.
+ */
+static int append_utf8(char *output, int out, int limit, unsigned int value)
+{
+    if (value <= 0x7f) {
+        if (out + 1 >= limit)
+            return -1;
+        output[out++] = value;
+    } else if (value <= 0x7ff) {
+        if (out + 2 >= limit)
+            return -1;
+        output[out++] = 0xc0 | (value >> 6);
+        output[out++] = 0x80 | (value & 0x3f);
+    } else if (value <= 0xffff) {
+        if (out + 3 >= limit)
+            return -1;
+        output[out++] = 0xe0 | (value >> 12);
+        output[out++] = 0x80 | ((value >> 6) & 0x3f);
+        output[out++] = 0x80 | (value & 0x3f);
+    } else {
+        if (out + 4 >= limit)
+            return -1;
+        output[out++] = 0xf0 | (value >> 18);
+        output[out++] = 0x80 | ((value >> 12) & 0x3f);
+        output[out++] = 0x80 | ((value >> 6) & 0x3f);
+        output[out++] = 0x80 | (value & 0x3f);
+    }
+    return out;
+}
+
 int unescape_string(const char *input, char *output, int output_size)
 {
     if (!input || !output || output_size == 0)
@@ -800,6 +834,37 @@ int unescape_string(const char *input, char *output, int output_size)
             }
 
             output[j++] = (char) value;
+            break;
+        }
+        case 'u':
+        case 'U': {
+            int digits = input[i] == 'u' ? 4 : 8;
+            unsigned int value = 0;
+
+            i++;
+            for (int digit = 0; digit < digits; digit++) {
+                if (!isxdigit(input[i])) {
+                    output[j] = '\0';
+                    return -1;
+                }
+                value = (value << 4) + hex_digit_value(input[i++]);
+            }
+
+            /* C99 6.4.3 excludes surrogate code points, values above the
+             * Unicode range, and basic-source characters other than $, @, and
+             * `. The latter must be spelt directly in source.
+             */
+            if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) ||
+                (value < 0xa0 && value != '$' && value != '@' &&
+                 value != '`')) {
+                output[j] = '\0';
+                return -1;
+            }
+            j = append_utf8(output, j, output_size, value);
+            if (j < 0) {
+                output[0] = '\0';
+                return -1;
+            }
             break;
         }
         case '0':
