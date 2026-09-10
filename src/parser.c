@@ -5137,6 +5137,38 @@ void read_global_declarator(block_t *block, type_t *decl_type, bool is_const)
     read_global_init(nv, block);
 }
 
+void consume_global_compound_literal(void);
+
+/* Struct and union objects accept brace initializers, unlike scalar globals.
+ * Keep their continuation declarators on the same path as the first one so that
+ * linkage, qualifiers, and declarator-specific modifiers cannot diverge.
+ */
+void read_global_record_declarator(block_t *block,
+                                   type_t *decl_type,
+                                   bool is_const)
+{
+    var_t *var = require_typed_var(block, decl_type);
+    var->is_global = true;
+    var->is_const_qualified = is_const;
+    read_inner_var_decl(var, false, false);
+    add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
+
+    if (!lex_accept(T_assign))
+        return;
+
+    if (lex_peek(T_open_curly, NULL) &&
+        (var->array_size > 0 || var->ptr_level > 0)) {
+        parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
+    } else if (lex_peek(T_open_curly, NULL)) {
+        /* Static record initialization is not emitted yet, but consuming the
+         * complete initializer preserves the declaration grammar.
+         */
+        consume_global_compound_literal();
+    } else {
+        read_global_assignment(var->var_name);
+    }
+}
+
 void read_global_decl(block_t *block, bool is_const)
 {
     var_t *var = require_var(block);
@@ -5316,52 +5348,9 @@ void read_global_statement(void)
             if (!decl_type)
                 error_at("Unknown struct type", &id_tk->location);
 
-            /* one or more declarators */
-            var_t *var = require_typed_var(block, decl_type);
-            var->is_global = true; /* Global struct variable */
-            var->is_const_qualified = is_const;
-            read_partial_var_decl(var, NULL);
-            add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0,
-                     NULL);
-            if (lex_accept(T_assign)) {
-                if (lex_peek(T_open_curly, NULL) &&
-                    (var->array_size > 0 || var->ptr_level > 0)) {
-                    parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
-                } else if (lex_peek(T_open_curly, NULL) &&
-                           var->array_size == 0 && var->ptr_level == 0 &&
-                           (decl_type->base_type == TYPE_struct ||
-                            decl_type->base_type == TYPE_typedef)) {
-                    /* Global struct compound literal support Currently we just
-                     * consume the syntax - actual initialization would require
-                     * runtime code which globals don't support
-                     */
-                    consume_global_compound_literal();
-                } else {
-                    read_global_assignment(var->var_name);
-                }
-            }
-            while (lex_accept(T_comma)) {
-                var_t *nv = require_typed_var(block, decl_type);
-                read_inner_var_decl(nv, false, false);
-                add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, nv, NULL, NULL, 0,
-                         NULL);
-                if (lex_accept(T_assign)) {
-                    if (lex_peek(T_open_curly, NULL) &&
-                        (nv->array_size > 0 || nv->ptr_level > 0)) {
-                        parse_array_init(nv, block, &GLOBAL_FUNC->bbs, true);
-                    } else if (lex_peek(T_open_curly, NULL) &&
-                               nv->array_size == 0 && nv->ptr_level == 0 &&
-                               (decl_type->base_type == TYPE_struct ||
-                                decl_type->base_type == TYPE_typedef)) {
-                        /* Global struct compound literal support for
-                         * continuation Currently we just consume the syntax
-                         */
-                        consume_global_compound_literal();
-                    } else {
-                        read_global_assignment(nv->var_name);
-                    }
-                }
-            }
+            read_global_record_declarator(block, decl_type, is_const);
+            while (lex_accept(T_comma))
+                read_global_record_declarator(block, decl_type, is_const);
             lex_expect(T_semicolon);
             return;
         }
@@ -5395,6 +5384,15 @@ void read_global_statement(void)
 
         type->size = size;
         type->num_fields = i;
+
+        /* A record definition may be followed by its declarators, as in "struct
+         * pair { int x, y; } first, *second;".
+         */
+        if (!lex_peek(T_semicolon, NULL)) {
+            read_global_record_declarator(block, type, is_const);
+            while (lex_accept(T_comma))
+                read_global_record_declarator(block, type, is_const);
+        }
         lex_expect(T_semicolon);
     } else if (lex_accept(T_union)) {
         int i = 0, max_size = 0;
@@ -5434,6 +5432,12 @@ void read_global_statement(void)
 
         type->size = max_size;
         type->num_fields = i;
+
+        if (!lex_peek(T_semicolon, NULL)) {
+            read_global_record_declarator(block, type, is_const);
+            while (lex_accept(T_comma))
+                read_global_record_declarator(block, type, is_const);
+        }
         lex_expect(T_semicolon);
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {

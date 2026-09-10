@@ -2322,6 +2322,33 @@ int main()
 }
 EOF
 
+# A declaration's base type applies to every global declarator, while each
+# declarator keeps its own pointer and array modifiers and initializer.
+try_ 39 << EOF
+typedef int myint;
+struct pair { int x; int y; } first, second, *selected;
+union choice { int number; char letter; } chosen, *chosen_ptr;
+int plain = 3, *pointer, array[2];
+char *left = "A", *right = "B";
+myint alpha = 4, beta = 5;
+
+int main(void)
+{
+    pointer = &plain;
+    first.x = 6;
+    first.y = 7;
+    second.x = 8;
+    second.y = 9;
+    selected = &second;
+    chosen.number = 10;
+    chosen_ptr = &chosen;
+    array[0] = first.x;
+    array[1] = selected->y;
+    return *pointer + array[0] + array[1] + chosen_ptr->number + alpha + beta +
+           (left != 0) + (right != 0);
+}
+EOF
+
 # Category: Const Qualifiers
 begin_category "Const Qualifiers" "Testing const qualifier support for variables and parameters"
 
