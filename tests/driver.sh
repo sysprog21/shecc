@@ -533,6 +533,21 @@ int main(void) {
     return (global_true == 1) + (local_true == 1);
 }
 EOF
+
+try_ 31 << EOF
+int bool_pointer_object;
+_Bool pointer_to_bool(int *value) { return value; }
+_Bool bool_identity(_Bool value) { return value; }
+int main(void) {
+    _Bool direct = &bool_pointer_object;
+    int *null_value = 0;
+    _Bool passed = pointer_to_bool(&bool_pointer_object);
+    _Bool null_result = pointer_to_bool(null_value);
+    return direct + 2 * passed + 4 * (!null_result) +
+           8 * (bool_identity(&bool_pointer_object) == 1) +
+           16 * (bool_identity(null_value) == 0);
+}
+EOF
 expr 42 42
 
 # octal constant (satisfying re(0[0-7]+))
@@ -608,6 +623,15 @@ int main(void) {
     return (-byte == -1) + (-half == -1);
 }
 EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char byte = 255U;
+    unsigned short half = 65535U;
+    byte++;
+    half++;
+    return (byte == 0U) + (half == 0U);
+}
+EOF
 if [ "$PTR_SZ" -ge 8 ]; then
     try_ 3 << EOF
 long long identity(long long value) { return value; }
@@ -662,6 +686,10 @@ unsigned unsigned int invalid;
 int main(void) { return invalid; }
 EOF
 try_compile_error << EOF
+signed unsigned int invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
 signed signed int invalid;
 int main(void) { return invalid; }
 EOF
@@ -674,9 +702,116 @@ typedef unsigned unsigned int invalid;
 int main(void) { return 0; }
 EOF
 try_compile_error << EOF
+typedef signed unsigned int invalid;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { return (signed unsigned int) 1; }
+EOF
+try_compile_error << EOF
+int main(void) { return (unsigned unsigned int) 1; }
+EOF
+try_compile_error << EOF
+enum invalid_enum { invalid_value };
+unsigned enum invalid_enum invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
+enum invalid_enum { invalid_value };
+int main(void) { return (long enum invalid_enum) invalid_value; }
+EOF
+try_compile_error << EOF
+enum invalid_enum { invalid_value };
+int main(void) { return sizeof(signed enum invalid_enum); }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(signed unsigned int); }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(unsigned unsigned int); }
+EOF
+try_compile_error << EOF
+int signed char invalid;
+int main(void) { return invalid; }
+EOF
+try_compile_error << EOF
+typedef int unsigned char invalid;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { return (int signed char) 1; }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(int unsigned char); }
+EOF
+try_compile_error << EOF
 typedef long long long invalid;
 int main(void) { return 0; }
 EOF
+try_compile_error << EOF
+long incompatible_object;
+int incompatible_object;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+unsigned long incompatible_function(unsigned long value);
+unsigned int incompatible_function(unsigned int value);
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+static int object_then_function;
+static int object_then_function(void) { return 1; }
+int main(void) { return object_then_function(); }
+EOF
+try_compile_error << EOF
+static int function_then_object(void) { return 1; }
+static int function_then_object;
+int main(void) { return function_then_object(); }
+EOF
+try_ 3 << EOF
+int main(void) {
+    long signed_long = -1L;
+    unsigned int unsigned_int = 1U;
+    unsigned long unsigned_long = 1UL;
+    int signed_int = -2;
+    return (sizeof(1L) == sizeof(long)) +
+           ((signed_long + unsigned_int) == 0UL) +
+           ((unsigned_long + signed_int) == 0xffffffffUL);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned long value = 0xffffffffUL;
+    return (sizeof(long unsigned) == 4) +
+           ((long unsigned) value == 0xffffffffUL);
+}
+EOF
+try_ 8 << EOF
+typedef short unsigned int base_first_ushort;
+short unsigned int preserve_half(short unsigned int value)
+{
+    return value;
+}
+int main(void) {
+    short unsigned int half = 65535U;
+    char unsigned byte = 255U;
+    int signed whole = -1;
+    int unsigned short reordered_half = 65535U;
+    base_first_ushort typedef_half = 65535U;
+    return (sizeof(half) == 2) + (sizeof(byte) == 1) +
+           (half == 65535U && byte == 255U && whole < 0) +
+           (preserve_half(half) == 65535U) +
+           (reordered_half == 65535U) +
+           ((short unsigned int)-1 == 65535U) +
+           (sizeof(short unsigned int) == 2) +
+           (sizeof(typedef_half) == 2 && typedef_half == 65535U);
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 1 << EOF
+int main(void) { return (unsigned long long) 1 == 1ULL; }
+EOF
+fi
 if [ "$PTR_SZ" -ge 8 ]; then
     try_ 4 << EOF
 int main(void) {
@@ -3619,6 +3754,66 @@ int main(void)
 }
 EOF
 
+try_ 5 << EOF
+int static_address_constants(void)
+{
+    static int values[3] = {1, 2, 3};
+    static int *decayed = values;
+    static int *addressed = &values[0];
+    return decayed[1] + addressed[2];
+}
+int main(void) { return static_address_constants(); }
+EOF
+
+try_ 1 << EOF
+int writable_static_string(void)
+{
+    static char buffer[8] = "hi";
+    buffer[0] = 'H';
+    return buffer[0] == 'H' && buffer[1] == 'i' && buffer[2] == 0;
+}
+int main(void) { return writable_static_string(); }
+EOF
+
+try_ 1 << EOF
+static char inferred_file_scope_string[] = "map";
+
+int inferred_static_string(void)
+{
+    static char buffer[] = "cat";
+    buffer[0] = 'C';
+    return buffer[0] == 'C' && buffer[1] == 'a' && buffer[2] == 't' &&
+           sizeof(buffer) == 4;
+}
+int inferred_for_string(void)
+{
+    int n = 0;
+    for (char word[] = "go"; word[n]; n++)
+        ;
+    return n == 2;
+}
+int inferred_for_array(void)
+{
+    int total = 0;
+    for (int values[] = {2, 3}; values[0] && sizeof(values) == 8;
+         values[0] = 0)
+        total = values[0] + values[1];
+    return total == 5;
+}
+int inferred_file_scope_string_test(void)
+{
+    inferred_file_scope_string[0] = 'M';
+    return inferred_file_scope_string[0] == 'M' &&
+           inferred_file_scope_string[1] == 'a' &&
+           sizeof(inferred_file_scope_string) == 4;
+}
+int main(void)
+{
+    return inferred_static_string() && inferred_for_string() &&
+           inferred_for_array() && inferred_file_scope_string_test();
+}
+EOF
+
 try_ 10 << EOF
 static int triangular(int value)
 {
@@ -3649,6 +3844,50 @@ int zeroed_entry(void)
 int main(void) { return zeroed_entry(); }
 EOF
 
+# Global-storage declarators are temporarily placed on the expression stack for
+# constant initialization. Aggregate and zero initializers must discard their
+# own entries too, or a declaration-heavy block exhausts that stack.
+try_ 33 << EOF
+int many_static_aggregates(void)
+{
+    static int slot00[1] = {0};
+    static int slot01[1] = {1};
+    static int slot02[1] = {2};
+    static int slot03[1] = {3};
+    static int slot04[1] = {4};
+    static int slot05[1] = {5};
+    static int slot06[1] = {6};
+    static int slot07[1] = {7};
+    static int slot08[1] = {8};
+    static int slot09[1] = {9};
+    static int slot10[1] = {10};
+    static int slot11[1] = {11};
+    static int slot12[1] = {12};
+    static int slot13[1] = {13};
+    static int slot14[1] = {14};
+    static int slot15[1] = {15};
+    static int slot16[1] = {16};
+    static int slot17[1] = {17};
+    static int slot18[1] = {18};
+    static int slot19[1] = {19};
+    static int slot20[1] = {20};
+    static int slot21[1] = {21};
+    static int slot22[1] = {22};
+    static int slot23[1] = {23};
+    static int slot24[1] = {24};
+    static int slot25[1] = {25};
+    static int slot26[1] = {26};
+    static int slot27[1] = {27};
+    static int slot28[1] = {28};
+    static int slot29[1] = {29};
+    static int slot30[1] = {30};
+    static int slot31[1] = {31};
+    static int slot32[1] = {32};
+    return slot00[0] + slot32[0] + slot01[0];
+}
+int main(void) { return many_static_aggregates(); }
+EOF
+
 try_ 1 << EOF
 struct zeroed_pair { int first; int second; };
 int zeroed_record(void)
@@ -3668,6 +3907,36 @@ int main(void)
 {
     static int value = runtime_value();
     return value;
+}
+EOF
+
+try_ 13 << EOF
+struct static_compound_pair { int left; int right; };
+int static_compound_literals(void)
+{
+    static int scalar = (int){3};
+    static int *values = (int[]){4, 5};
+    static struct static_compound_pair pair =
+        (struct static_compound_pair){2, 3};
+    return scalar + values[1] + pair.left + pair.right;
+}
+int main(void) { return static_compound_literals(); }
+EOF
+
+try_compile_error << EOF
+int counter;
+int main(void)
+{
+    static counter = 5;
+    return counter;
+}
+EOF
+
+try_compile_error << EOF
+int main(void)
+{
+    static ++missing;
+    return 0;
 }
 EOF
 
@@ -3854,6 +4123,24 @@ int main(void)
 }
 EOF
 
+# Nested block scope must give a same-spelled static a second persistent object,
+# without losing the enclosing static object between calls.
+try_ 24 << EOF
+int nested_static_values(void)
+{
+    static int value = 1;
+    int outer = value++;
+    {
+        static int value = 10;
+        return outer + value++;
+    }
+}
+int main(void)
+{
+    return nested_static_values() + nested_static_values();
+}
+EOF
+
 # A C99 for-init declaration has block scope, so its static object persists
 # across calls but remains visible only to the loop's clauses and body.
 try_ 6 << EOF
@@ -3905,6 +4192,17 @@ try_ 42 << EOF
 static int helper(void);
 int helper(void) { return 42; }
 int main(void) { return helper(); }
+EOF
+try_compile_error << EOF
+static int missing_static_function(void);
+int main(void) { return missing_static_function(); }
+EOF
+try_compile_error << EOF
+int runtime_value(void) { return 7; }
+int main(void) {
+    static int invalid_static_value = runtime_value;
+    return invalid_static_value;
+}
 EOF
 try_ 42 << EOF
 static int increment(int value);
@@ -4637,6 +4935,14 @@ EOF
 
 # sizeof with expressions
 items 4 "int x = 42; return sizeof(x);"
+items 12 "int values[3]; return sizeof(values);"
+try_ 8 << EOF
+int main(void)
+{
+    static char buffer[8] = "hi";
+    return sizeof(buffer);
+}
+EOF
 items 4 "int arr[5]; return sizeof(arr[0]);"
 items 4 "int x = 10; int *ptr = &x; return sizeof(*ptr);"
 items 1 "char c = 'A'; return sizeof(c);"
@@ -4768,6 +5074,18 @@ int main(void)
     const enum persistent_enum fixed = persistent_fixed;
     return next_persistent_enum() + next_persistent_enum() + fixed;
 }
+EOF
+
+try_ 12 << EOF
+enum static_enum_entries { static_enum_first = 3, static_enum_second = 4 };
+int static_enum_array_sum(void)
+{
+    static enum static_enum_entries entries[3] = {
+        static_enum_first, static_enum_second, static_enum_first + 2
+    };
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void) { return static_enum_array_sum(); }
 EOF
 
 try_ 10 << EOF

@@ -143,8 +143,13 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 24;
         return;
     case OP_trunc:
-        /* SXTB, SXTH and MOV are each one instruction. */
-        elf_offset += 4;
+        /* Unsigned byte/half truncation uses a logical shift pair; signed
+         * narrowing uses the single-instruction SXTB/SXTH forms.
+         */
+        if (ph2_ir->is_unsigned && (ph2_ir->src1 == 1 || ph2_ir->src1 == 2))
+            elf_offset += 8;
+        else
+            elf_offset += 4;
         return;
     case OP_sign_ext:
         if (ph2_ir->src0_is_unsigned)
@@ -649,8 +654,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mov_i(__EQ, rd, 1));
         return;
     case OP_trunc:
-        /* Narrowing keeps the sign: there are no unsigned types. */
-        if (rm == 1) {
+        if (ph2_ir->is_unsigned && (rm == 1 || rm == 2)) {
+            int shift = rm == 1 ? 24 : 16;
+
+            emit(__sll_amt(__AL, 0, logic_ls, rd, rn, shift));
+            emit(__srl_amt(__AL, 0, logic_rs, rd, rd, shift));
+        } else if (rm == 1) {
             emit(__sxtb(__AL, rd, rn, 0));
         } else if (rm == 2) {
             emit(__sxth(__AL, rd, rn, 0));

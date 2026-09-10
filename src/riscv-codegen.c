@@ -143,7 +143,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         if (hard_mul_div)
             elf_offset += 4;
         else
-            elf_offset += 108;
+            elf_offset += 116;
         return;
     case OP_load_data_address:
     case OP_load_rodata_address:
@@ -365,8 +365,17 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__lui(__t0, rv_hi(ph2_ir->src1)));
             emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
             emit(__add(__t0, interm, __t0));
-            emit(__sw(rs1, __t0, 0));
-        } else
+            if (ph2_ir->size_bytes == 1)
+                emit(__sb(rs1, __t0, 0));
+            else if (ph2_ir->size_bytes == 2)
+                emit(__sh(rs1, __t0, 0));
+            else
+                emit(__sw(rs1, __t0, 0));
+        } else if (ph2_ir->size_bytes == 1)
+            emit(__sb(rs1, interm, ph2_ir->src1));
+        else if (ph2_ir->size_bytes == 2)
+            emit(__sh(rs1, interm, ph2_ir->src1));
+        else
             emit(__sw(rs1, interm, ph2_ir->src1));
         return;
     case OP_read:
@@ -530,13 +539,21 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* Unsigned integer division */
         emit(__addi(__t0, __zero, 0));
         emit(__addi(__t1, __zero, 1));
-        emit(__beq(__t3, __zero, 52));
-        emit(__beq(__t2, __zero, 48));
-        emit(__beq(__t2, __t3, 20));
-        emit(__bltu(__t2, __t3, 16));
+        emit(__beq(__t3, __zero, 60));
+        emit(__beq(__t2, __zero, 56));
+        emit(__beq(__t2, __t3, 28));
+        emit(__bltu(__t2, __t3, 24));
+
+        /* Stop scaling before the divisor's high bit would wrap to zero.
+         * Without this guard a high-bit unsigned dividend can loop forever
+         * after the next left shift turns both the divisor and quotient bit
+         * marker into zero.
+         */
+        emit(__slt(__t4, __t3, __zero));
+        emit(__bne(__t4, __zero, 16));
         emit(__slli(__t3, __t3, 1));
         emit(__slli(__t1, __t1, 1));
-        emit(__jal(__zero, -16));
+        emit(__jal(__zero, -24));
         emit(__bltu(__t2, __t3, 12));
         emit(__sub(__t2, __t2, __t3));
         emit(__add(__t0, __t0, __t1));
@@ -606,8 +623,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__xori(rd, rd, 1));
         return;
     case OP_trunc:
-        /* Narrowing keeps the sign: there are no unsigned types. */
-        if (ph2_ir->src1 == 1) {
+        if (ph2_ir->is_unsigned && (ph2_ir->src1 == 1 || ph2_ir->src1 == 2)) {
+            int shift = ph2_ir->src1 == 1 ? 24 : 16;
+
+            emit(__slli(rd, rs1, shift));
+            emit(__srli(rd, rd, shift));
+        } else if (ph2_ir->src1 == 1) {
             emit(__slli(rd, rs1, 24));
             emit(__srai(rd, rd, 24));
         } else if (ph2_ir->src1 == 2) {

@@ -41,6 +41,8 @@ type_t *TY_uchar;
 type_t *TY_bool;
 type_t *TY_int;
 type_t *TY_uint;
+type_t *TY_long;
+type_t *TY_ulong;
 type_t *TY_short;
 type_t *TY_ushort;
 type_t *TY_long_long;

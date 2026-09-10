@@ -418,6 +418,7 @@ typedef enum {
     TYPE_int,
     TYPE_char,
     TYPE_short,
+    TYPE_long,
     TYPE_long_long,
     TYPE_struct,
     TYPE_union,
@@ -596,7 +597,8 @@ struct var {
      */
     bool in_select_arm;
     int array_size;
-    int array_dim2;  /* second dimension size for 2D arrays */
+    bool has_unsized_array; /* `T name[]`: bound is supplied by initializer */
+    int array_dim2;         /* second dimension size for 2D arrays */
     int offset;      /* offset from stack or frame, index 0 is reserved */
     int init_val;    /* for global initialization */
     int init_val_hi; /* upper word of an 8-byte integer constant */

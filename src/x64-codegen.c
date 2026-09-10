@@ -2186,7 +2186,12 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
         {
             func_t *target_func = find_func(ph2_ir->func_name);
 
-            if (dynlink && target_func && !target_func->bbs) {
+            if (target_func && target_func->is_static && !target_func->bbs) {
+                printf("Error: Undefined static function called: %s\n",
+                       ph2_ir->func_name);
+                fflush(stdout); /* see fatal() */
+                abort();
+            } else if (dynlink && target_func && !target_func->bbs) {
                 /* An external symbol: call its PLT entry, which the loader
                  * redirects to the real function on first use.
                  */
