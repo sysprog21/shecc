@@ -115,7 +115,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             return;
         }
         /* div/mod emulation's offset */
-        elf_offset += 116;
+        elf_offset += 124;
         return;
     case OP_load_data_address:
     case OP_load_rodata_address:
@@ -565,9 +565,17 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__cmp_i(__AL, rn, 0));
         emit(__b(__EQ, 44));
         emit(__cmp_r(__AL, rm, rn));
-        emit(__sll_amt(__CC, 0, logic_ls, rm, rm, 1));
-        emit(__sll_amt(__CC, 0, logic_ls, __r9, __r9, 1));
-        emit(__b(__CC, -12));
+
+        /* Scale until the divisor reaches the dividend or the *next* shift
+         * would overflow. A divisor such as 0xc0000000 is still valid for a
+         * 0xffffffff dividend; testing carry after shifting would lose it. Test
+         * bit 31 before the shift instead.
+         */
+        emit(__cmp_i(__CC, rm, 0x80000000));
+        emit(__b(__CS, 16));
+        emit(__sll_amt(__AL, 0, logic_ls, rm, rm, 1));
+        emit(__sll_amt(__AL, 0, logic_ls, __r9, __r9, 1));
+        emit(__b(__AL, -20));
         emit(__cmp_r(__AL, rn, rm));
         emit(__sub_r(__CS, rn, rn, rm));
         emit(__add_r(__CS, __r8, __r8, __r9));

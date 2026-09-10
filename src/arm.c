@@ -134,19 +134,25 @@ int __svc(void)
 int __mov(arm_cond_t cond, int io, int opcode, int s, int rn, int rd, int op2)
 {
     int shift = 0;
-    if (op2 > 255) {
+
+    /* ARM's immediate is a rotated 32-bit bit pattern. Treat it as unsigned
+     * while finding that rotation: an `int` carrying 0x80000000 must not look
+     * like a small negative value and be encoded as zero.
+     */
+    unsigned int encoded_op2 = op2;
+    if (encoded_op2 > 255) {
         shift = 16; /* full rotation */
-        while ((op2 & 3) == 0) {
+        while ((encoded_op2 & 3) == 0) {
             /* we can shift by two bits */
-            op2 >>= 2;
+            encoded_op2 >>= 2;
             shift -= 1;
         }
-        if (op2 > 255)
+        if (encoded_op2 > 255)
             /* value spans more than 8 bits */
             fatal("Unable to represent value");
     }
     return arm_encode(cond, s + (opcode << 1) + (io << 5), rn, rd,
-                      (shift << 8) + (op2 & 255));
+                      (shift << 8) + (encoded_op2 & 255));
 }
 
 int __and_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)

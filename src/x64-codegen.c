@@ -1762,7 +1762,8 @@ void emit_arith(ph2_ir_t *ph2_ir,
             emit_byte(0xAF);
             emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs2)));
         }
-        if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+        if (ph2_ir->size_bytes <= 4 &&
+            !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
             wrap_to_int(rd, ph2_ir->is_pointer);
         return;
     }
@@ -1887,7 +1888,7 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
         /* A count the block already loaded as a literal needs neither CL nor
          * the save/restore around it: SHL r64, imm8 is one instruction.
          */
-        if (src1_const_known && src1_const >= 0 && src1_const < 32) {
+        if (src1_const_known && src1_const >= 0 && src1_const < 64) {
             int want_src = ph2_ir->src0;
             int dest_ir = ph2_ir->dest;
 
@@ -1924,7 +1925,7 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
                 reg_feeds_address_only(emit_ir_index + 1, ph2_ir->dest);
             emit_mov_reg(rd, rs1);
             emit_shift_imm(rd, SHIFT_EXT_SHL, src1_const);
-            if (!addr_only &&
+            if (ph2_ir->size_bytes <= 4 && !addr_only &&
                 !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
                 wrap_to_int(rd, ph2_ir->is_pointer);
 
@@ -1972,22 +1973,24 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
          * << 31" (which strength reduction also produces for "x * 2") stayed
          * positive and every later comparison took the wrong branch.
          */
-        wrap_to_int(rd, ph2_ir->is_pointer);
+        if (ph2_ir->size_bytes <= 4)
+            wrap_to_int(rd, ph2_ir->is_pointer);
         return;
     }
     case OP_rshift: {
         /* A count the block already loaded as a literal needs neither CL nor
          * the save/restore around it: SAR r64, imm8 is one instruction.
          */
-        if (src1_const_known && src1_const >= 0 && src1_const < 32) {
+        if (src1_const_known && src1_const >= 0 && src1_const < 64) {
             if (ph2_ir->is_unsigned)
-                emit_zero_extend(rd, rs1, 4);
+                emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
             else
                 emit_mov_reg(rd, rs1);
             emit_shift_imm(rd,
                            ph2_ir->is_unsigned ? SHIFT_EXT_SHR : SHIFT_EXT_SAR,
                            src1_const);
-            if (!reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+            if (ph2_ir->size_bytes <= 4 &&
+                !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
                 wrap_to_int(rd, ph2_ir->is_pointer);
             return;
         }
@@ -2912,7 +2915,7 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
          * half and destroy every stack address. Copy it instead, which is also
          * what a source that is already full width wants.
          */
-        if (dst_size == PTR_SIZE && PTR_SIZE == 8)
+        if (ph2_ir->is_pointer && dst_size == PTR_SIZE && PTR_SIZE == 8)
             width = 8;
         else if (width != 1 && width != 2 && width != 4)
             width = 8;
@@ -3164,6 +3167,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     switch (ph2_ir->op) {
     case OP_load_constant: {
+        if (ph2_ir->size_bytes == 8) {
+            emit_rex(1, -1, rd);
+            emit_byte(0xB8 + reg_low3(rd)); /* MOVABS r64, imm64 */
+            emit_dword(ph2_ir->src0);
+            emit_dword(ph2_ir->src1);
+            return;
+        }
+
         /* MOV r64, imm32 (sign-extended). The immediate is in src0, not a
          * register index.
          */

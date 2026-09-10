@@ -43,6 +43,8 @@ type_t *TY_int;
 type_t *TY_uint;
 type_t *TY_short;
 type_t *TY_ushort;
+type_t *TY_long_long;
+type_t *TY_ulong_long;
 
 /* Arenas */
 
@@ -837,10 +839,16 @@ int parse_numeric_constant(const char *buffer)
     int i = 0;
     int value = 0;
     while (buffer[i]) {
+        /* The lexer keeps C99 integer suffixes in the token. Their type is
+         * selected by the parser; they are not digits of the value.
+         */
+        if ((buffer[i] | 32) == 'u' || (buffer[i] | 32) == 'l')
+            break;
         if (i == 1 && (buffer[i] | 32) == 'x') { /* hexadecimal */
             value = 0;
             i = 2;
-            while (buffer[i]) {
+            while (buffer[i] && (buffer[i] | 32) != 'u' &&
+                   (buffer[i] | 32) != 'l') {
                 char c = buffer[i++];
                 value <<= 4;
                 if (isdigit(c))
@@ -854,7 +862,8 @@ int parse_numeric_constant(const char *buffer)
         if (i == 1 && (buffer[i] | 32) == 'b') { /* binary */
             value = 0;
             i = 2;
-            while (buffer[i]) {
+            while (buffer[i] && (buffer[i] | 32) != 'u' &&
+                   (buffer[i] | 32) != 'l') {
                 char c = buffer[i++];
                 value <<= 1;
                 value += (c == '1');

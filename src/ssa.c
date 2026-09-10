@@ -3384,7 +3384,7 @@ bool mark_const(insn_t *insn)
         return false;
 
     if (insn->opcode == OP_load_constant) {
-        insn->rd->is_const = true;
+        insn->rd->is_const = insn->rd->init_val_hi == 0;
         return false;
     }
     if (insn->opcode != OP_assign)
@@ -3402,6 +3402,8 @@ bool mark_const(insn_t *insn)
     if (insn->rs1->address_taken)
         return false;
     if (!insn->rs1->is_const) {
+        if (insn->rs1->init_val_hi)
+            return false;
         if (!insn->prev)
             return false;
         if (insn->prev->opcode != OP_load_constant)
@@ -3413,6 +3415,7 @@ bool mark_const(insn_t *insn)
     insn->opcode = OP_load_constant;
     insn->rd->is_const = true;
     insn->rd->init_val = insn->rs1->init_val;
+    insn->rd->init_val_hi = insn->rs1->init_val_hi;
     insn->rs1 = NULL;
     return true;
 }
@@ -3434,11 +3437,14 @@ bool eval_const_arithmetic(insn_t *insn)
         return false;
 
     /* Constant folding predates unsigned arithmetic and evaluates every
-     * operation as signed int. Leave unsigned expressions to the target
-     * lowering until this pass gains width-aware unsigned evaluation.
+     * operation as signed int. Leave unsigned and wider-than-int expressions to
+     * target lowering until this pass gains width-aware evaluation.
      */
     if (ssa_is_unsigned_scalar(insn->rs1) ||
-        ssa_is_unsigned_scalar(insn->rs2) || ssa_is_unsigned_scalar(insn->rd))
+        ssa_is_unsigned_scalar(insn->rs2) || ssa_is_unsigned_scalar(insn->rd) ||
+        (insn->rs1->type && insn->rs1->type->size > TY_int->size) ||
+        (insn->rs2->type && insn->rs2->type->size > TY_int->size) ||
+        (insn->rd && insn->rd->type && insn->rd->type->size > TY_int->size))
         return false;
 
     int res;
@@ -3520,6 +3526,9 @@ bool eval_const_unary(insn_t *insn)
     if (!insn->rs1)
         return false;
     if (!insn->rs1->is_const)
+        return false;
+    if ((insn->rs1->type && insn->rs1->type->size > TY_int->size) ||
+        (insn->rd && insn->rd->type && insn->rd->type->size > TY_int->size))
         return false;
 
     int res;
@@ -4153,12 +4162,14 @@ void optimize(void)
                             operand = shift;
                         }
                         /* x / power_of_2 = x >> shift (unsigned) */
-                        else if (insn->opcode == OP_div) {
+                        else if (insn->opcode == OP_div &&
+                                 ssa_is_unsigned_scalar(insn->rs1)) {
                             reduced = OP_rshift;
                             operand = shift;
                         }
                         /* x % power_of_2 = x & (power_of_2 - 1) */
-                        else if (insn->opcode == OP_mod) {
+                        else if (insn->opcode == OP_mod &&
+                                 ssa_is_unsigned_scalar(insn->rs1)) {
                             reduced = OP_bit_and;
                             operand = val - 1;
                         }

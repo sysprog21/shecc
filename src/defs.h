@@ -418,6 +418,7 @@ typedef enum {
     TYPE_int,
     TYPE_char,
     TYPE_short,
+    TYPE_long_long,
     TYPE_struct,
     TYPE_union,
     TYPE_typedef
@@ -592,9 +593,10 @@ struct var {
      */
     bool in_select_arm;
     int array_size;
-    int array_dim2; /* second dimension size for 2D arrays */
-    int offset;     /* offset from stack or frame, index 0 is reserved */
-    int init_val;   /* for global initialization */
+    int array_dim2;  /* second dimension size for 2D arrays */
+    int offset;      /* offset from stack or frame, index 0 is reserved */
+    int init_val;    /* for global initialization */
+    int init_val_hi; /* upper word of an 8-byte integer constant */
     /* Generation stamps used by compute_live_in() to test set membership in
      * constant time instead of rescanning live_kill and live_in per element.
      */

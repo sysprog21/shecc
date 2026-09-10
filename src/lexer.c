@@ -497,19 +497,31 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
             }
         }
 
-        /* C99's unsigned integer suffix belongs to the numeric token rather
-         * than starting an adjacent identifier. Width suffixes are handled with
-         * the later long/long-long work.
+        /* C99 integer suffixes belong to the numeric token rather than starting
+         * an adjacent identifier. The existing `long` spelling has the same
+         * 32-bit representation as int. Keep a double-long suffix for the
+         * parser, which selects the distinct 64-bit type on targets that can
+         * lower it.
          */
-        if ((ch | 32) == 'u') {
+        bool has_unsigned_suffix = false;
+        int long_suffix_count = 0;
+        while ((ch | 32) == 'u' || (ch | 32) == 'l') {
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz;
                 error_at("Token too long", loc);
             }
+            if ((ch | 32) == 'u') {
+                if (has_unsigned_suffix)
+                    error_at("Invalid integer literal suffix", loc);
+                has_unsigned_suffix = true;
+            } else {
+                long_suffix_count++;
+                if (long_suffix_count > 2)
+                    error_at("Invalid integer literal suffix", loc);
+            }
             token_buffer[sz++] = ch;
             ch = read_char(buf);
         }
-
         token_buffer[sz] = '\0';
         token = new_token(T_numeric, loc, sz);
         token->literal = intern_string(token_buffer);

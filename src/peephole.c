@@ -515,7 +515,7 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
     /* Pattern 1: Division by power of 2 → right shift x / 2^n = x >> n (for
      * unsigned)
      */
-    if (next->op == OP_div && next->src1 == ph2_ir->dest) {
+    if (next->op == OP_div && next->is_unsigned && next->src1 == ph2_ir->dest) {
         /* Convert division to right shift */
         ph2_ir->src0 = shift; /* Load shift amount instead */
         next->op = OP_rshift;
@@ -523,7 +523,7 @@ bool strength_reduction(ph2_ir_t *ph2_ir)
     }
 
     /* Pattern 2: Modulo by power of 2 → bitwise AND x % 2^n = x & (2^n - 1) */
-    if (next->op == OP_mod && next->src1 == ph2_ir->dest) {
+    if (next->op == OP_mod && next->is_unsigned && next->src1 == ph2_ir->dest) {
         /* Convert modulo to bitwise AND */
         ph2_ir->src0 = value - 1; /* Load mask (2^n - 1) */
         next->op = OP_bit_and;

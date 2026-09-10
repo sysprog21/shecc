@@ -950,6 +950,7 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
     if (var->is_const) {
         ir = bb_add_ph2_ir(bb, OP_load_constant);
         ir->src0 = var->init_val;
+        ir->src1 = var->init_val_hi;
     } else if (var->is_global && var->array_size) {
         /* A global array's address is fixed for the life of the program, and
          * the initialiser recorded where its storage sits. Computing it beats
@@ -2119,6 +2120,7 @@ void reg_alloc_global(insn_t *global_insn)
         dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
         ir->src0 = global_insn->rd->init_val;
+        ir->src1 = global_insn->rd->init_val_hi;
         ir->dest = dest;
         break;
     case OP_assign:
@@ -2342,6 +2344,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, -1, -1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src0 = insn->rd->init_val;
+            ir->src1 = insn->rd->init_val_hi;
             ir->dest = dest;
             ir->is_unsigned = is_unsigned_scalar(insn->rd);
             ir->size_bytes =
@@ -2744,6 +2747,27 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
              * widen the int index beside the address.
              */
             set_ptr_flags(ir, insn);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+
+            /* SSA temporaries normally retain their result type, but width is a
+             * property of the operation as well: a wide operand must not be
+             * narrowed merely because an intermediate lost its annotation.
+             * Comparisons still produce int; their x64 emitter compares full
+             * registers independently of this result width.
+             */
+            if (insn->opcode != OP_eq && insn->opcode != OP_neq &&
+                insn->opcode != OP_gt && insn->opcode != OP_geq &&
+                insn->opcode != OP_lt && insn->opcode != OP_leq) {
+                int left_size =
+                    insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
+                int right_size =
+                    insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
+                if (left_size > ir->size_bytes)
+                    ir->size_bytes = left_size;
+                if (right_size > ir->size_bytes)
+                    ir->size_bytes = right_size;
+            }
             break;
         case OP_negate:
         case OP_bit_not:
@@ -2760,6 +2784,8 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0_is_pointer = is_address_like(insn->rs1);
             ir->is_unsigned = is_unsigned_scalar(insn->rd);
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
             break;
         case OP_trunc:
         case OP_sign_ext:

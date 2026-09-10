@@ -500,6 +500,7 @@ void diagnose_const_pointer_conversion(const var_t *from, const var_t *to)
 }
 
 void read_parameter_list_decl(func_t *func, bool anon);
+var_t *integer_promote_operand(block_t *parent, basic_block_t **bb, var_t *var);
 
 /* Forward declaration for ternary handling used by initializers */
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
@@ -1810,6 +1811,7 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
     bool is_unsigned = false;
     bool is_const = false;
     bool is_long = false;
+    bool is_long_long = false;
 
     /* C permits these declaration specifiers in either order. Consume the
      * scalar set as a group so `const unsigned int` and `unsigned const int`
@@ -1826,12 +1828,15 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
         else {
             lex_expect(T_long);
             if (is_long)
-                error_at("long long is not supported yet", cur_token_loc());
-            is_long = true;
+                is_long_long = true;
+            else
+                is_long = true;
         }
     }
     if (is_signed && is_unsigned)
         error_at("both signed and unsigned specified", cur_token_loc());
+    if (is_long_long && PTR_SIZE < 8)
+        error_at("long long needs 64-bit target lowering", cur_token_loc());
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union)) {
         find_type_flag = 2;
@@ -1846,7 +1851,7 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
         if (is_long) {
             if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
                 lex_expect(T_identifier);
-            type = TY_uint; /* long remains the current 32-bit ABI width */
+            type = is_long_long ? TY_ulong_long : TY_uint;
         } else if (lex_peek(T_identifier, type_name) &&
                    (!strcmp(type_name, "char") || !strcmp(type_name, "short") ||
                     !strcmp(type_name, "int"))) {
@@ -1866,7 +1871,7 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
          */
         if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
             lex_expect(T_identifier);
-        type = TY_int;
+        type = is_long_long ? TY_long_long : TY_int;
     } else if (is_signed && find_type_flag == 1 &&
                (!lex_peek(T_identifier, type_name) ||
                 (strcmp(type_name, "int") && strcmp(type_name, "char") &&
@@ -1996,18 +2001,65 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
 
 bool numeric_has_unsigned_suffix(const char *token)
 {
-    int len = strlen(token);
-    return len > 0 && ((token[len - 1] | 32) == 'u');
+    for (int i = 0; token[i]; i++)
+        if ((token[i] | 32) == 'u')
+            return true;
+    return false;
+}
+
+bool numeric_has_long_long_suffix(const char *token)
+{
+    int long_suffix_count = 0;
+
+    for (int i = 0; token[i]; i++)
+        if ((token[i] | 32) == 'l')
+            long_suffix_count++;
+    return long_suffix_count == 2;
+}
+
+/* Accumulate a 64-bit token in four 16-bit limbs. Each intermediate stays small
+ * enough for the self-hosted compiler's unsigned arithmetic.
+ */
+bool numeric_mul_add_wide(unsigned int *hi,
+                          unsigned int *lo,
+                          unsigned int base,
+                          unsigned int digit)
+{
+    unsigned int a = *lo & 0xffffU;
+    unsigned int b = *lo >> 16;
+    unsigned int c = *hi & 0xffffU;
+    unsigned int d = *hi >> 16;
+    unsigned int t;
+
+    t = a * base + digit;
+    a = t & 0xffffU;
+    t = b * base + (t >> 16);
+    b = t & 0xffffU;
+    t = c * base + (t >> 16);
+    c = t & 0xffffU;
+    t = d * base + (t >> 16);
+    if (t > 0xffffU)
+        return false;
+    *lo = (b << 16) | a;
+    *hi = (t << 16) | c;
+    return true;
 }
 
 void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
 {
     char token[MAX_TOKEN_LEN];
-    int value = 0;
+    unsigned int value = 0;
+    unsigned int value_hi = 0;
     int i = 0;
+    int hex_digits, high_digits;
+    unsigned int *part;
     char c;
+    int base = 10;
+    bool is_decimal = true;
+    bool is_long_long;
 
     lex_ident_n(T_numeric, token, MAX_TOKEN_LEN);
+    is_long_long = numeric_has_long_long_suffix(token);
 
     if (token[0] == '-') {
         is_neg = !is_neg;
@@ -2016,6 +2068,15 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
     if (token[0] == '0') {
         if ((token[1] | 32) == 'x') { /* hexdecimal */
             i = 2;
+            base = 16;
+            is_decimal = false;
+            hex_digits = 0;
+            while (isxdigit(token[2 + hex_digits]))
+                hex_digits++;
+            if (is_long_long && hex_digits > 16)
+                error_at("Integer literal exceeds supported range",
+                         cur_token_loc());
+            high_digits = is_long_long && hex_digits > 8 ? hex_digits - 8 : 0;
             do {
                 c = token[i++];
                 if (isdigit(c))
@@ -2028,42 +2089,100 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
                         error_at("Invalid numeric constant", cur_token_loc());
                 }
 
-                value = (value * 16) + c;
+                part = (i - 3 < high_digits) ? &value_hi : &value;
+                if (*part > 0xffffffffU / base ||
+                    (*part == 0xffffffffU / base &&
+                     (unsigned int) c > 0xffffffffU % base))
+                    error_at("Integer literal exceeds 32-bit range",
+                             cur_token_loc());
+                *part = (*part * base) + c;
             } while (isxdigit(token[i]));
         } else if ((token[1] | 32) == 'b') { /* binary */
             i = 2;
+            base = 2;
+            is_decimal = false;
             do {
                 c = token[i++];
                 if (c != '0' && c != '1')
                     error_at("Invalid binary constant", cur_token_loc());
                 c -= '0';
-                value = (value * 2) + c;
+                if (is_long_long &&
+                    !numeric_mul_add_wide(&value_hi, &value, base, c))
+                    error_at("Integer literal exceeds supported range",
+                             cur_token_loc());
+                if (!is_long_long && (value > 0xffffffffU / base ||
+                                      (value == 0xffffffffU / base &&
+                                       (unsigned int) c > 0xffffffffU % base)))
+                    error_at("Integer literal exceeds 32-bit range",
+                             cur_token_loc());
+                if (!is_long_long)
+                    value = (value * base) + c;
             } while (token[i] == '0' || token[i] == '1');
         } else { /* octal */
+            base = 8;
+            is_decimal = false;
             do {
                 c = token[i++];
                 if (c > '7')
                     error_at("Invalid numeric constant", cur_token_loc());
                 c -= '0';
-                value = (value * 8) + c;
+                if (is_long_long &&
+                    !numeric_mul_add_wide(&value_hi, &value, base, c))
+                    error_at("Integer literal exceeds supported range",
+                             cur_token_loc());
+                if (!is_long_long && (value > 0xffffffffU / base ||
+                                      (value == 0xffffffffU / base &&
+                                       (unsigned int) c > 0xffffffffU % base)))
+                    error_at("Integer literal exceeds 32-bit range",
+                             cur_token_loc());
+                if (!is_long_long)
+                    value = (value * base) + c;
             } while (isdigit(token[i]));
         }
     } else {
         do {
             c = token[i++] - '0';
-            value = (value * 10) + c;
+            if (is_long_long &&
+                !numeric_mul_add_wide(&value_hi, &value, base, c))
+                error_at("Integer literal exceeds supported range",
+                         cur_token_loc());
+            if (!is_long_long && (value > 0xffffffffU / base ||
+                                  (value == 0xffffffffU / base &&
+                                   (unsigned int) c > 0xffffffffU % base)))
+                error_at("Integer literal exceeds 32-bit range",
+                         cur_token_loc());
+            if (!is_long_long)
+                value = (value * base) + c;
         } while (isdigit(token[i]));
     }
 
-    if (is_neg)
-        value = -value;
-
     var_t *vd = require_var(parent);
     vd->var_name = gen_name();
-    if (numeric_has_unsigned_suffix(token))
+    if (is_long_long) {
+        if (PTR_SIZE < 8)
+            error_at("long long literal needs 64-bit target lowering",
+                     cur_token_loc());
+        vd->type =
+            numeric_has_unsigned_suffix(token) ? TY_ulong_long : TY_long_long;
+    } else if (numeric_has_unsigned_suffix(token) ||
+               (!is_decimal && value > 0x7fffffffU))
         vd->type = TY_uint;
+
+    /* Keep the exact 2^31 magnitude as an int bit pattern: C spells INT_MIN as
+     * unary minus plus that token, and the unary operator is parsed after the
+     * literal. Larger decimal values really need long long here.
+     */
+    else if (value > 0x80000000U)
+        error_at("Integer literal requires unsupported 64-bit type",
+                 cur_token_loc());
+    if (is_neg) {
+        value = 0 - value;
+        value_hi = ~value_hi + (value == 0);
+    }
     vd->init_val = value;
-    vd->is_const = true;
+    vd->init_val_hi = value_hi;
+    /* The integer constant folders currently carry one word only. */
+    vd->is_const = value_hi == 0;
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 }
@@ -2477,8 +2596,15 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
     if (has_long_type) {
         type = has_unsigned_type ? TY_uint : TY_int;
-        if (lex_accept(T_long))
-            error_at("long long is not supported yet", cur_token_loc());
+        if (lex_accept(T_long)) {
+            if (PTR_SIZE < 8)
+                error_at("long long needs 64-bit target lowering",
+                         cur_token_loc());
+            if (has_unsigned_type)
+                type = TY_ulong_long;
+            else
+                type = TY_long_long;
+        }
         lex_accept(T_signed);
         lex_accept(T_const);
         if (lex_peek(T_identifier, token) && !strcmp(token, "int"))
@@ -2588,11 +2714,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         read_expr_operand(parent, bb);
 
         rs1 = opstack_pop();
+        rs1 = integer_promote_operand(parent, bb, rs1);
 
         /* Constant folding for bitwise NOT */
         if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
             vd = require_var(parent);
             vd->var_name = gen_name();
+            vd->type = rs1->type;
             vd->is_const = true;
             vd->init_val = ~rs1->init_val;
             opstack_push(vd);
@@ -2600,6 +2728,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         } else {
             vd = require_var(parent);
             vd->var_name = gen_name();
+            vd->type = rs1->type;
             opstack_push(vd);
             add_insn(parent, *bb, OP_bit_not, vd, rs1, NULL, 0, NULL);
         }
@@ -2646,13 +2775,16 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             type_t *type;
             if (has_unsigned_type && !is_record) {
                 if (has_long_type) {
-                    if (lex_accept(T_long))
-                        error_at("long long is not supported yet",
-                                 cur_token_loc());
+                    type = TY_uint;
+                    if (lex_accept(T_long)) {
+                        if (PTR_SIZE < 8)
+                            error_at("long long needs 64-bit target lowering",
+                                     cur_token_loc());
+                        type = TY_ulong_long;
+                    }
                     if (lex_peek(T_identifier, lookahead_token) &&
                         !strcmp(lookahead_token, "int"))
                         lex_expect(T_identifier);
-                    type = TY_uint;
                 } else if (lex_peek(T_identifier, lookahead_token) &&
                            (!strcmp(lookahead_token, "int") ||
                             !strcmp(lookahead_token, "char") ||
@@ -2667,14 +2799,18 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 } else
                     type = TY_uint;
             } else if (has_long_type && !is_record) {
-                if (lex_accept(T_long))
-                    error_at("long long is not supported yet", cur_token_loc());
+                type = TY_int;
+                if (lex_accept(T_long)) {
+                    if (PTR_SIZE < 8)
+                        error_at("long long needs 64-bit target lowering",
+                                 cur_token_loc());
+                    type = TY_long_long;
+                }
                 lex_accept(T_signed);
                 lex_accept(T_const);
                 if (lex_peek(T_identifier, lookahead_token) &&
                     !strcmp(lookahead_token, "int"))
                     lex_expect(T_identifier);
-                type = TY_int;
             } else if (has_signed_type && !is_record) {
                 if (lex_peek(T_identifier, lookahead_token) &&
                     (!strcmp(lookahead_token, "int") ||
@@ -3057,11 +3193,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
         if (is_neg) {
             rs1 = opstack_pop();
+            rs1 = integer_promote_operand(parent, bb, rs1);
 
             /* Constant folding for negation */
             if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
                 vd = require_var(parent);
                 vd->var_name = gen_name();
+                vd->type = rs1->type;
                 vd->is_const = true;
                 vd->init_val = -rs1->init_val;
                 opstack_push(vd);
@@ -3353,6 +3491,20 @@ type_t *integer_binary_result_type(opcode_t op,
         op == OP_gt || op == OP_geq)
         return TY_int;
 
+    /* The current type lattice has a 32-bit int/long tier and a distinct 64-bit
+     * long-long tier. A 64-bit signed operand can represent every 32-bit
+     * unsigned value; an unsigned 64-bit operand wins at its rank.
+     */
+    if ((left && left->type && left->type->size > TY_int->size) ||
+        (right && right->type && right->type->size > TY_int->size)) {
+        if ((left && left->type && left->type->size > TY_int->size &&
+             left->type->is_unsigned) ||
+            (right && right->type && right->type->size > TY_int->size &&
+             right->type->is_unsigned))
+            return TY_ulong_long;
+        return TY_long_long;
+    }
+
     if (unsigned_int_operand(left) || unsigned_int_operand(right))
         return TY_uint;
     return TY_int;
@@ -3422,8 +3574,11 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
                         continue;
                     }
 
+                    rs1 = integer_promote_operand(parent, bb, rs1);
+                    rs2 = integer_promote_operand(parent, bb, rs2);
                     vd = require_var(parent);
                     vd->var_name = gen_name();
+                    vd->type = integer_binary_result_type(top_op, rs1, rs2);
                     opstack_push(vd);
                     add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
 
@@ -3569,7 +3724,9 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
         /* Constant folding for binary operations */
         if (rs1 && rs2 && rs1->is_const && !rs1->ptr_level && !rs1->is_global &&
             rs2->is_const && !rs2->ptr_level && !rs2->is_global &&
-            !unsigned_int_operand(rs1) && !unsigned_int_operand(rs2)) {
+            !unsigned_int_operand(rs1) && !unsigned_int_operand(rs2) &&
+            rs1->type->size <= TY_int->size &&
+            rs2->type->size <= TY_int->size) {
             /* Both operands are compile-time constants */
             int result = 0;
             bool folded = true;
@@ -4367,6 +4524,14 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
 
     vd = require_var(parent);
     vd->var_name = gen_name();
+    if (!true_ptr_like && !false_ptr_like && !true_val->ptr_level &&
+        !false_val->ptr_level) {
+        true_val = integer_promote_operand(parent, &then_, true_val);
+        false_val = integer_promote_operand(parent, &else_, false_val);
+        vd->type = integer_binary_result_type(OP_add, true_val, false_val);
+        true_val = resize_to(parent, &then_, true_val, vd->type, 0);
+        false_val = resize_to(parent, &else_, false_val, vd->type, 0);
+    }
     add_insn(parent, then_, OP_assign, vd, true_val, NULL, 0, NULL);
     add_insn(parent, else_, OP_assign, vd, false_val, NULL, 0, NULL);
 
@@ -6597,6 +6762,20 @@ void parse_internal(void)
     TY_ushort->base_type = TYPE_short;
     TY_ushort->size = 2;
     TY_ushort->is_unsigned = true;
+
+    /* Unlike `long`, which deliberately shares the current 32-bit int ABI, long
+     * long has a distinct type and an eight-byte object representation. Parser
+     * admission and target lowering are staged separately so 32-bit backends
+     * never silently truncate it.
+     */
+    TY_long_long = add_named_type("long long");
+    TY_long_long->base_type = TYPE_long_long;
+    TY_long_long->size = 8;
+
+    TY_ulong_long = add_named_type("unsigned long long");
+    TY_ulong_long->base_type = TYPE_long_long;
+    TY_ulong_long->size = 8;
+    TY_ulong_long->is_unsigned = true;
 
     /* builtin type _Bool was introduced in C99 specification, it is more
      * well-known as macro type bool, which is defined in <std_bool.h> (in

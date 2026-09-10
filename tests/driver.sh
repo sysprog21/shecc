@@ -555,9 +555,185 @@ int main(void) {
     return all_bits >> 31;
 }
 EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned int value = 1UL;
+    return (value + 1L == 2U) + (sizeof(long) == 4);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    return (0xffffffff >> 31) + (-2147483648 < 0);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned int one = 1U;
+    return ((~one) >> 31) + ((1 ? one - 2 : -1) >> 31);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char byte = 1;
+    unsigned short half = 1;
+    return (-byte == -1) + (-half == -1);
+}
+EOF
+try_ 3 << EOF
+long long identity(long long value) { return value; }
+unsigned long long uidentity(unsigned long long value) { return value; }
+int main(void) {
+    long long signed_value = 1000;
+    unsigned long long unsigned_value = 2000U;
+    return (sizeof(signed_value) == 8) +
+           (identity(signed_value) == 1000) +
+           (uidentity(unsigned_value) == 2000U);
+}
+EOF
+try_compile_error << EOF
+int main(void) { return 4294967296U; }
+EOF
+if [ "$PTR_SZ" -lt 8 ]; then
+    try_compile_error << EOF
+int main(void) { return 1LL; }
+EOF
+else
+    try_ 3 << EOF
+int main(void) {
+    return (sizeof(1LL) == 8) + ((1LL << 32) != 0) +
+           (((1ULL << 32) >> 32) == 1U);
+}
+EOF
+    try_ 3 << EOF
+int main(void) {
+    unsigned long long value = 0x100000000ULL;
+    unsigned long long pattern = 0x123456789abcdef0ULL;
+    return ((value >> 32) == 1ULL) +
+           ((pattern >> 32) == 0x12345678ULL) +
+           ((value + 7ULL) == 0x100000007ULL);
+}
+EOF
+    try_ 3 << EOF
+int main(void) {
+    unsigned long long value = 4294967296ULL;
+    unsigned long long pattern = 1311768467463790320ULL;
+    return ((value >> 32) == 1ULL) +
+           ((pattern >> 32) == 305419896ULL) +
+           ((value + 7ULL) == 4294967303ULL);
+}
+EOF
+    try_ 3 << EOF
+int main(void) {
+    unsigned long long octal = 040000000000ULL;
+    unsigned long long binary = 0b100000000000000000000000000000000ULL;
+    return ((octal >> 32) == 1ULL) +
+           ((binary >> 32) == 1ULL) +
+           ((octal + binary) == 0x200000000ULL);
+}
+EOF
+    try_ 4 << EOF
+int main(void) {
+    unsigned long long all = 18446744073709551615ULL;
+    long long min = -9223372036854775808LL;
+    return (all == 0xffffffffffffffffULL) +
+           ((all >> 63) == 1ULL) +
+           (min < 0LL) +
+           ((min >> 63) == -1LL);
+}
+EOF
+    try_compile_error << EOF
+int main(void) { return 18446744073709551616ULL != 0ULL; }
+EOF
+    try_ 2 << EOF
+int main(void) {
+    int value = -6;
+    return (value / 4 == -1) + (value % 4 == -2);
+}
+EOF
+    try_ 2 << EOF
+int main(void) {
+    return (sizeof(long long) == 8) + (sizeof(unsigned long long) == 8);
+}
+EOF
+    try_ 5 << EOF
+int main(void) {
+    unsigned int high = 0xffffffffU;
+    unsigned long long widened_unsigned = (unsigned long long) high;
+    long long widened_signed = (long long) -1;
+    unsigned long long shifted = (unsigned long long) 1U << 32;
+    return ((widened_unsigned >> 32) == 0ULL) +
+           ((widened_unsigned >> 31) == 1ULL) +
+           (widened_signed == -1LL) +
+           ((shifted >> 32) == 1ULL) +
+           ((unsigned int) shifted == 0U);
+}
+EOF
+    try_ 2 << EOF
+long long bump(long long value) { return value + 1LL; }
+unsigned long long twice(unsigned long long value) { return value * 2ULL; }
+int main(void) {
+    long long signed_value = 1LL << 32;
+    unsigned long long unsigned_value = 1ULL << 32;
+    return ((bump(signed_value) >> 32) == 1LL) +
+           ((twice(unsigned_value) >> 33) == 1ULL);
+}
+EOF
+    try_ 4 << EOF
+int main(void) {
+    long long signed_value = 1LL << 33;
+    unsigned long long unsigned_value = 1ULL << 33;
+    return (((signed_value / 2LL) >> 32) == 1LL) +
+           ((signed_value % 3LL) == 2LL) +
+           (((unsigned_value / 2ULL) >> 32) == 1ULL) +
+           ((unsigned_value % 3ULL) == 2ULL);
+}
+EOF
+    try_ 2 << EOF
+long long eighth(long long a, long long b, long long c, long long d,
+                 long long e, long long f, long long g, long long h) {
+    return h;
+}
+unsigned long long ueighth(unsigned long long a, unsigned long long b,
+                            unsigned long long c, unsigned long long d,
+                            unsigned long long e, unsigned long long f,
+                            unsigned long long g, unsigned long long h) {
+    return h;
+}
+int main(void) {
+    long long signed_value = 1LL << 32;
+    unsigned long long unsigned_value = 1ULL << 32;
+    return ((eighth(1LL, 2LL, 3LL, 4LL, 5LL, 6LL, 7LL, signed_value) >> 32) == 1LL) +
+           ((ueighth(1ULL, 2ULL, 3ULL, 4ULL, 5ULL, 6ULL, 7ULL, unsigned_value) >> 32) == 1ULL);
+}
+EOF
+    try_ 1 << EOF
+int main(void) {
+    unsigned long long value = 0xffffffffU;
+    value = value * 16 + 0;
+    return (value >> 32) == 15ULL;
+}
+EOF
+    try_ 1 << EOF
+unsigned long long scale(unsigned long long value, int factor) {
+    unsigned long long product = value * factor;
+    return product;
+}
+int main(void) {
+    unsigned long long value = 0xffffffffU;
+    return (scale(value, 16) >> 32) == 15ULL;
+}
+EOF
+fi
 try_ 1 << EOF
 unsigned int identity(unsigned int value) { return value; }
 int main(void) { return identity(4294967295U) >> 31; }
+EOF
+try_ 2 << EOF
+unsigned char byte_identity(unsigned char value) { return value; }
+unsigned short half_identity(unsigned short value) { return value; }
+int main(void) {
+    return (byte_identity(255) == 255) + (half_identity(65535) == 65535);
+}
 EOF
 try_ 1 << EOF
 unsigned int eighth(unsigned int a, unsigned int b, unsigned int c,
@@ -870,10 +1046,12 @@ int main(void) {
 }
 EOF
 
-try_compile_error << EOF
+if [ "$PTR_SZ" -lt 8 ]; then
+    try_compile_error << EOF
 long long value;
 int main(void) { return 0; }
 EOF
+fi
 
 # Compound literal support - C90/C99 compliant implementation Basic struct
 # compound literals (verified working)
