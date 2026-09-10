@@ -549,6 +549,14 @@ int main(void) {
     return bits / 2 == 2147483647;
 }
 EOF
+try_ 2 << EOF
+int main(void) {
+    int negative = -1;
+    unsigned int divisor = 2U;
+    return (negative / divisor == 2147483647U) +
+           (negative % divisor == 1U);
+}
+EOF
 try_ 1 << EOF
 int main(void) {
     unsigned int all_bits = 4294967295U;
@@ -579,7 +587,8 @@ int main(void) {
     return (-byte == -1) + (-half == -1);
 }
 EOF
-try_ 3 << EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 3 << EOF
 long long identity(long long value) { return value; }
 unsigned long long uidentity(unsigned long long value) { return value; }
 int main(void) {
@@ -590,7 +599,7 @@ int main(void) {
            (uidentity(unsigned_value) == 2000U);
 }
 EOF
-try_ 4 << EOF
+    try_ 4 << EOF
 long int identity_long_int(long int value) { return value; }
 signed long long int identity_signed_wide(signed long long int value) {
     return value;
@@ -608,7 +617,7 @@ int main(void) {
            (sizeof(unsigned long long int) == 8);
 }
 EOF
-try_ 2 << EOF
+    try_ 2 << EOF
 typedef long long signed_wide;
 typedef unsigned long long unsigned_wide;
 int main(void) {
@@ -617,7 +626,7 @@ int main(void) {
     return (signed_value < 0LL) + ((unsigned_value >> 32) == 1ULL);
 }
 EOF
-try_ 2 << EOF
+    try_ 2 << EOF
 typedef long unsigned long reordered_unsigned_wide;
 typedef const long long signed_wide_const;
 int main(void) {
@@ -626,6 +635,7 @@ int main(void) {
     return ((value >> 32) == 1ULL) + (negative < 0LL);
 }
 EOF
+fi
 try_compile_error << EOF
 unsigned unsigned int invalid;
 int main(void) { return invalid; }
@@ -646,7 +656,8 @@ try_compile_error << EOF
 typedef long long long invalid;
 int main(void) { return 0; }
 EOF
-try_ 4 << EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 4 << EOF
 int main(void) {
     long long decimal = 4294967296;
     long long hexadecimal = 0x100000000;
@@ -657,7 +668,7 @@ int main(void) {
            (all_bits > 0ULL);
 }
 EOF
-try_ 4 << EOF
+    try_ 4 << EOF
 int main(void) {
     return (sizeof(2147483647) == 4) +
            (sizeof(2147483648) == 8) +
@@ -665,6 +676,7 @@ int main(void) {
            (sizeof(0x100000000) == 8);
 }
 EOF
+fi
 if [ "$PTR_SZ" -lt 8 ]; then
     try_compile_error << EOF
 int main(void) { return 4294967296U; }
@@ -979,6 +991,16 @@ int main(void) {
     return (scale(value, 16) >> 32) == 15ULL;
 }
 EOF
+    try_ 4 << EOF
+int main(void) {
+    unsigned int high = 0xffffffffU;
+    long long one = 1LL;
+    return ((high + one) == 4294967296LL) +
+           ((high * one) == 4294967295LL) +
+           ((-1 + 1ULL) == 0ULL) +
+           ((-1 > 1ULL) == 1);
+}
+EOF
 fi
 try_ 1 << EOF
 unsigned int identity(unsigned int value) { return value; }
@@ -1140,6 +1162,19 @@ declare -a logical_tests=(
 )
 
 run_expr_tests logical_tests
+
+# Logical negation of a pointer yields int, irrespective of the pointed-to type.
+# A record pointer used to carry its record size into a following comparison,
+# producing an invalid truncation on 32-bit targets.
+try_ 2 << EOF
+struct pair { int first; int second; };
+int main(void) {
+    struct pair value;
+    struct pair *present = &value;
+    struct pair *absent = 0;
+    return (!present == 0) + (!absent == 1);
+}
+EOF
 
 # Category: Bitwise Operations
 begin_category "Bitwise Operations" "Testing bitwise shift, AND, OR, XOR operators"
@@ -3110,6 +3145,27 @@ EOF
 # Category: Arrays
 begin_category "Arrays" "Testing array declarations, indexing, and operations"
 
+# Array element reads preserve the declared signed width. This covers both
+# local-address and indexed OP_read lowering on every target.
+try_ 42 << EOF
+int main(void) {
+    char bytes[4];
+    short halves[4];
+    int i;
+    for (i = 0; i < 4; i++) {
+        bytes[i] = -1 - i;
+        halves[i] = -1000 - i;
+    }
+    for (i = 0; i < 4; i++) {
+        if (bytes[i] != -1 - i)
+            return 1;
+        if (halves[i] != -1000 - i)
+            return 2;
+    }
+    return 42;
+}
+EOF
+
 try_compile_error << EOF
 int main(void)
 {
@@ -3542,6 +3598,47 @@ int main(void)
 }
 EOF
 
+try_ 10 << EOF
+static int triangular(int value)
+{
+    return value ? value + triangular(value - 1) : 0;
+}
+int main(void) { return triangular(4); }
+EOF
+
+try_ 3 << EOF
+int next_zeroed(void)
+{
+    static int count;
+    return count++;
+}
+int main(void)
+{
+    return next_zeroed() + next_zeroed() + next_zeroed();
+}
+EOF
+
+try_ 1 << EOF
+int zeroed_entry(void)
+{
+    static int entries[2];
+    entries[1]++;
+    return entries[0] == 0;
+}
+int main(void) { return zeroed_entry(); }
+EOF
+
+try_ 1 << EOF
+struct zeroed_pair { int first; int second; };
+int zeroed_record(void)
+{
+    static struct zeroed_pair pair;
+    pair.second = 1;
+    return pair.first == 0;
+}
+int main(void) { return zeroed_record(); }
+EOF
+
 # A block-scope static initializer is lowered as global data and therefore must
 # be a C99 constant expression, not a run-time call.
 try_compile_error << EOF
@@ -3788,6 +3885,96 @@ static int helper(void);
 int helper(void) { return 42; }
 int main(void) { return helper(); }
 EOF
+try_ 42 << EOF
+static int increment(int value);
+int increment(int value) { return value + 1; }
+int main(void) {
+    int (*internal_call)(int) = increment;
+    return internal_call(41);
+}
+EOF
+
+# A static function designator retains internal linkage when materialized into a
+# local function pointer and invoked indirectly.
+try_ 42 << EOF
+static int increment(int value) { return value + 1; }
+int main(void) {
+    int (*internal_call)(int) = increment;
+    return internal_call(41);
+}
+EOF
+
+# A file-scope function designator is an address constant too. This exercises
+# global setup before main and both internal and external linkage targets.
+try_ 49 << EOF
+static int increment(int value) { return value + 1; }
+int double_value(int value) { return value * 2; }
+static int (*internal_call)(int) = increment;
+int (*external_call)(int) = double_value;
+int (*address_call)(int) = &increment;
+static int internal_value = 3;
+int external_value = 4;
+static int *internal_value_ptr = &internal_value;
+int *external_value_ptr = &external_value;
+int main(void) {
+    return internal_call(20) + external_call(10) + address_call(0) +
+           *internal_value_ptr + *external_value_ptr;
+}
+EOF
+
+try_ 13 << EOF
+static int internal_values[] = {1, 2, 3};
+int external_values[] = {4, 5};
+static int *internal_first = internal_values;
+int *internal_last = internal_values + 2;
+int *external_first = &external_values;
+int main(void) {
+    return internal_first[2] + *internal_last + external_first[0] +
+           external_first[1] - 2;
+}
+EOF
+
+try_ 7 << EOF
+struct global_pair { char tag; int value; };
+static struct global_pair internal_pair = {1, 7};
+int *internal_value = &internal_pair.value;
+int main(void) { return *internal_value; }
+EOF
+
+try_ 9 << EOF
+struct nested_inner { char pad; int value; };
+struct nested_outer { int prefix; struct nested_inner inner; };
+static struct nested_outer global_nested = {2, {1, 9}};
+int *nested_value = &global_nested.inner.value;
+int main(void) { return *nested_value; }
+EOF
+
+try_ 8 << EOF
+struct global_array_record { int prefix; int values[3]; };
+static struct global_array_record global_array = {1, {2, 8, 3}};
+int *array_member_value = &global_array.values[1];
+int main(void) { return *array_member_value; }
+EOF
+
+try_ 11 << EOF
+struct global_array_element { int value; };
+static struct global_array_element global_elements[] = {{3}, {11}};
+int *array_element_value = &global_elements[1].value;
+int main(void) { return *array_element_value; }
+EOF
+
+# Explicitly addressed global elements and member arrays may carry a byte-scaled
+# integer constant-expression offset, not just a decayed array name or a bare
+# literal.
+try_ 19 << EOF
+int global_values[] = {3, 5, 8};
+struct global_offset_record { int values[3]; };
+static struct global_offset_record global_offset = {{1, 2, 8}};
+int *global_last = &global_values[0] + (1 + 1);
+int *global_first = &global_values[2] - (1 + 1);
+int *member_last = &global_offset.values[0] + (1 << 1);
+int main(void) { return *global_last + *global_first + *member_last; }
+EOF
 
 # Repeated compatible file-scope declarations name the same static object. A
 # later initialized definition supplies that object's initial value.
@@ -3808,6 +3995,12 @@ try_compile_error << EOF
 int helper(void);
 static int helper(void) { return 42; }
 int main(void) { return helper(); }
+EOF
+
+try_compile_error << EOF
+static int defined_twice(void) { return 1; }
+static int defined_twice(void) { return 2; }
+int main(void) { return defined_twice(); }
 EOF
 
 try_compile_error << EOF
@@ -4320,6 +4513,35 @@ items 20 "int *p; int a[3]; a[0] = 10; a[1] = 20; a[2] = 30; p = a; p+=1; return
 items 8 "short s; s = 5; s += 3; return s;"
 items 15 "short s; s = 20; s -= 5; return s;"
 items 24 "short s; s = 6; s *= 4; return s;"
+try_ 2 << EOF
+int main(void) {
+    int negative = -1;
+    unsigned int divisor = 2U;
+    negative /= divisor;
+    int quotient = negative;
+    negative %= divisor;
+    return (quotient == 2147483647U) + (negative == 1U);
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 1 << EOF
+int main(void) {
+    unsigned long long value = 0ULL;
+    value += -1;
+    return value == 0xffffffffffffffffULL;
+}
+EOF
+    try_ 2 << EOF
+int main(void) {
+    unsigned long long quotient = 0x100000000ULL;
+    unsigned long long remainder = 0x100000001ULL;
+    int divisor = 2;
+    quotient /= divisor;
+    remainder %= 3;
+    return (quotient == 0x80000000ULL) + (remainder == 2ULL);
+}
+EOF
+fi
 
 # Category: Sizeof Operator
 begin_category "Sizeof Operator" "Testing sizeof operator on various types"

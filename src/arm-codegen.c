@@ -46,10 +46,12 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_load:
     case OP_global_load:
-        /* ARMv7 straight uses 12 bits to encode the offset of load instruction
-         * (no rotation).
+        /* LDR/LDRB use a 12-bit offset, but LDRSB uses eight bits. A larger
+         * signed-byte offset is materialized with MOVW/MOVT/ADD before the
+         * load, exactly as an offset beyond the general load range is.
          */
-        if (ph2_ir->src0 > 4095)
+        if (ph2_ir->src0 > 4095 || (ph2_ir->size_bytes == 1 &&
+                                    !ph2_ir->is_unsigned && ph2_ir->src0 > 255))
             elf_offset += 16;
         else if (ph2_ir->src0 >= 0)
             elf_offset += 4;
@@ -334,19 +336,27 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_load:
     case OP_global_load:
         interm = ph2_ir->op == OP_load ? __sp : __r12;
-        if (ph2_ir->src0 > 4095) {
+
+        /* LDRSB's immediate field is only eight bits, unlike LDRB's 12-bit
+         * field. Materialize a larger signed-byte offset before loading.
+         */
+        if (ph2_ir->src0 > 4095 ||
+            (ph2_ir->size_bytes == 1 && !ph2_ir->is_unsigned &&
+             ph2_ir->src0 > 255)) {
             emit(__movw(__AL, __r8, ph2_ir->src0));
             emit(__movt(__AL, __r8, ph2_ir->src0));
             emit(__add_r(__AL, __r8, interm, __r8));
             if (ph2_ir->size_bytes == 1)
-                emit(__lb(__AL, rd, __r8, 0));
+                emit(ph2_ir->is_unsigned ? __lb(__AL, rd, __r8, 0)
+                                         : __lsb(__AL, rd, __r8, 0));
             else if (ph2_ir->size_bytes == 2)
                 emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, __r8, 0)
                                          : __lh(__AL, rd, __r8, 0));
             else
                 emit(__lw(__AL, rd, __r8, 0));
         } else if (ph2_ir->size_bytes == 1)
-            emit(__lb(__AL, rd, interm, ph2_ir->src0));
+            emit(ph2_ir->is_unsigned ? __lb(__AL, rd, interm, ph2_ir->src0)
+                                     : __lsb(__AL, rd, interm, ph2_ir->src0));
         else if (ph2_ir->size_bytes == 2)
             emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, interm, ph2_ir->src0)
                                      : __lh(__AL, rd, interm, ph2_ir->src0));
@@ -383,7 +393,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_read:
         if (ph2_ir->src1 == 1)
-            emit(__lb(__AL, rd, rn, 0));
+            emit(ph2_ir->is_unsigned ? __lb(__AL, rd, rn, 0)
+                                     : __lsb(__AL, rd, rn, 0));
         else if (ph2_ir->src1 == 2)
             emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, rn, 0)
                                      : __lh(__AL, rd, rn, 0));

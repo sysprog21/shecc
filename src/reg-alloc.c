@@ -2138,6 +2138,24 @@ void reg_alloc_global(insn_t *global_insn)
         vreg_clear_phys(REGS[src0].var);
         REGS[src0].var = NULL;
         break;
+    case OP_address_of:
+    case OP_global_address_of:
+        /* A global function-pointer initializer first forms the address of its
+         * global storage slot. Its address is GP-relative, unlike an address
+         * formed in a function body.
+         */
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+
+        /* Global arrays have a pointer slot followed by their backing region;
+         * an address constant for the array denotes that backing region.
+         */
+        ir->src0 = global_insn->rs1->array_size ? global_insn->rs1->init_val
+                                                : global_insn->rs1->offset;
+        ir->dest = dest;
+        ir->is_pointer = true;
+        ir->size_bytes = PTR_SIZE;
+        break;
     case OP_add: {
         /* Special-case address computation for globals: if rs1 is a global base
          * and rs2 is a constant, propagate absolute offset to rd so OP_write
@@ -2192,6 +2210,18 @@ void reg_alloc_global(insn_t *global_insn)
         break;
     }
     case OP_write: {
+        if (global_insn->rs2 && global_insn->rs2->is_func) {
+            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_address_of_func);
+            ir->src0 = src0;
+            ir->func_name = intern_string(global_insn->rs2->var_name);
+            if (dynlink) {
+                func_t *target_fn = find_func(ir->func_name);
+                if (target_fn)
+                    target_fn->is_used = true;
+            }
+            break;
+        }
         /* Fold (addr, val) where addr carries GP-relative offset */
         if (global_insn->rs1 && (global_insn->rs1->is_global)) {
             int vreg = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);

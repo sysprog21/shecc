@@ -324,6 +324,26 @@ int __lb(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
     return arm_transfer(cond, 1, 1, rn, rd, ofs);
 }
 
+/* ARM signed byte load (LDRSB). Its immediate-offset encoding shares the
+ * halfword-transfer layout, but uses 1101 in bits [7:4] rather than LDRH's 1011
+ * or LDRSH's 1111.
+ */
+int __lsb(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
+{
+    int opcode = 16 + 8 + 4 + 1;
+
+    if (ofs < 0) {
+        opcode -= 8;
+        ofs = -ofs;
+    }
+    if (ofs > 255)
+        fatal("Signed byte offset too large");
+
+    int imm4h = ((ofs >> 4) & 0xF) << 8;
+    int imm4l = ofs & 0xF;
+    return arm_encode(cond, opcode, rn, rd, imm4h | 0xD0 | imm4l);
+}
+
 int __sw(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 {
     return arm_transfer(cond, 0, 4, rn, rd, ofs);

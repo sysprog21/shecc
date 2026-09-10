@@ -1774,50 +1774,57 @@ void emit_arith(ph2_ir_t *ph2_ir,
     }
     case OP_div:
     case OP_mod: {
-        /* Signed division. IDIV forces the dividend into RDX:RAX and returns
-         * the quotient in RAX and remainder in RDX. Both are allocatable
-         * registers here (reg_map[6] and reg_map[2]) and the allocator does not
-         * know they are clobbered, so save and restore them around the
-         * sequence. R10 and R11 are outside reg_map and can stage values; RDX
-         * goes on the stack rather than into a third scratch, because every
-         * register that once served as one has since joined the file and
-         * staging RDX there destroyed a dividend pinned to it.
+        /* DIV/IDIV force the dividend into RDX:RAX and return the quotient in
+         * RAX and remainder in RDX. Both are allocatable registers here
+         * (reg_map[6] and reg_map[2]) and the allocator does not know they are
+         * clobbered, so save and restore them around the sequence. R10 and R11
+         * are outside reg_map and can stage values; RDX goes on the stack
+         * rather than into a third scratch, because every register that once
+         * served as one has since joined the file and staging RDX there
+         * destroyed a dividend pinned to it.
          */
-        emit_byte(REX_W | REX_B); /* MOV r10, rax  (save) */
+        bool wide = ph2_ir->size_bytes > 4;
+        bool is_unsigned = ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
+
+        /* A 32-bit unsigned operation must use EDX:EAX, not its 64-bit
+         * counterpart. For example, C requires -1 / 2U to be 2147483647,
+         * whereas a 64-bit DIV sees 2^64 - 1.
+         */
+        emit_rex(wide, 0, 10); /* MOV r10{d}, rax{d}  (save) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 0, 2));
-        emit_push_reg(2);     /* PUSH rdx  (save) */
-        emit_rex(1, rs2, 11); /* MOV r11, rs2 */
+        emit_push_reg(2);        /* PUSH rdx  (save) */
+        emit_rex(wide, rs2, 11); /* MOV r11{d}, rs2{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 3));
-        emit_rex(1, rs1, -1); /* MOV rax, rs1 */
+        emit_rex(wide, rs1, -1); /* MOV rax{d}, rs1{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 0));
-        if (ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned) {
+        if (is_unsigned) {
             /* Unsigned DIV consumes a zero-extended RDX:RAX dividend. */
             emit_byte(0x31); /* XOR edx, edx */
             emit_byte(modrm(MOD_DIRECT, 2, 2));
         } else {
-            emit_byte(REX_W); /* CQO */
+            if (wide)
+                emit_byte(REX_W); /* CQO */
             emit_byte(0x99);
         }
-        emit_byte(REX_W | REX_B); /* IDIV r11 */
+        emit_rex(wide, -1, 11); /* DIV/IDIV r11{d} */
         emit_byte(0xF7);
-        emit_byte(modrm(
-            MOD_DIRECT,
-            (ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned) ? 6 : 7, 3));
+        emit_byte(modrm(MOD_DIRECT, is_unsigned ? 6 : 7, 3));
 
         /* Capture the result into R11 before restoring RAX/RDX, so rd may
          * itself be RAX or RDX.
          */
-        emit_byte(REX_W | REX_B); /* MOV r11, rax | rdx */
+        emit_rex(wide, ph2_ir->op == OP_div ? 0 : 2, 11);
+        /* MOV r11{d}, rax{d} | rdx{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, ph2_ir->op == OP_div ? 0 : 2, 3));
-        emit_byte(REX_W | REX_R); /* MOV rax, r10  (restore) */
+        emit_rex(wide, 10, 0); /* MOV rax{d}, r10{d}  (restore) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 0));
-        emit_pop_reg(2);     /* POP rdx  (restore) */
-        emit_rex(1, 11, rd); /* MOV rd, r11 */
+        emit_pop_reg(2);        /* POP rdx  (restore) */
+        emit_rex(wide, 11, rd); /* MOV rd{d}, r11{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
         return;

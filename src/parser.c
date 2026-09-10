@@ -2793,7 +2793,14 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         } else {
             vd = require_var(parent);
             vd->var_name = gen_name();
-            vd->type = rs1->type;
+
+            /* C99 6.5.3.3: logical negation always yields int. Preserving the
+             * operand's type made !pointer inherit the pointed-to record size,
+             * so a later comparison attempted an invalid truncation on 32-bit
+             * targets.
+             */
+            vd->type = TY_int;
+            vd->ptr_level = 0;
             opstack_push(vd);
             add_insn(parent, *bb, OP_log_not, vd, rs1, NULL, 0, NULL);
         }
@@ -3570,14 +3577,12 @@ void mark_var_mutated(var_t *var)
         var->is_const = false;
 }
 
-type_t *integer_binary_result_type(opcode_t op,
-                                   const var_t *left,
-                                   const var_t *right)
+/* The integer ranks currently represented by shecc are int/long (32 bits) and
+ * long long (64 bits). This is the common type after integer promotions;
+ * callers must convert both operands to it before emitting an operation.
+ */
+type_t *integer_common_type(const var_t *left, const var_t *right)
 {
-    if (op == OP_eq || op == OP_neq || op == OP_lt || op == OP_leq ||
-        op == OP_gt || op == OP_geq)
-        return TY_int;
-
     /* The current type lattice has a 32-bit int/long tier and a distinct 64-bit
      * long-long tier. A 64-bit signed operand can represent every 32-bit
      * unsigned value; an unsigned 64-bit operand wins at its rank.
@@ -3597,11 +3602,73 @@ type_t *integer_binary_result_type(opcode_t op,
     return TY_int;
 }
 
+type_t *integer_binary_result_type(opcode_t op,
+                                   const var_t *left,
+                                   const var_t *right)
+{
+    if (op == OP_eq || op == OP_neq || op == OP_lt || op == OP_leq ||
+        op == OP_gt || op == OP_geq)
+        return TY_int;
+
+    /* Shift counts are promoted, but do not participate in the usual arithmetic
+     * conversions; the result has the promoted left type.
+     */
+    if (op == OP_lshift || op == OP_rshift)
+        return left->type;
+    return integer_common_type(left, right);
+}
+
 var_t *integer_promote_operand(block_t *parent, basic_block_t **bb, var_t *var)
 {
     if (!var || var->ptr_level || !var->type || var->type->size >= TY_int->size)
         return var;
     return promote_unchecked(parent, bb, var, TY_int, 0);
+}
+
+/* Apply C99's usual arithmetic conversions after the individual integer
+ * promotions. In particular this must materialize a zero-extension for an
+ * unsigned int that meets a signed long long, and a sign-extension for a
+ * negative int that meets unsigned long long. Merely giving the result the
+ * common type leaves the machine operation to consume stale upper bits.
+ */
+void normalize_integer_binary_operands(block_t *parent,
+                                       basic_block_t **bb,
+                                       opcode_t op,
+                                       var_t **left,
+                                       var_t **right)
+{
+    type_t *common;
+
+    if (op == OP_lshift || op == OP_rshift)
+        return;
+
+    /* Equality and relational operators also reach this helper. Their pointer
+     * cases keep address semantics and are not usual arithmetic conversions.
+     */
+    if (is_pointer_like_value(left[0]) || is_pointer_like_value(right[0]))
+        return;
+
+    /* The ABI-visible 64-bit rank is distinct today. int and long are both
+     * 32-bit in the current type model, so normalizing their signed/unsigned
+     * combinations here would add conversions throughout the self-hosted
+     * compiler without yet representing a distinct long rank.
+     */
+    if (get_size(left[0]) <= TY_int->size && get_size(right[0]) <= TY_int->size)
+        return;
+
+    common = integer_common_type(*left, *right);
+
+    /* Do not manufacture no-op conversions. Besides bloating every unsigned
+     * expression, doing so makes stage1's self-hosting input prohibitively
+     * large. A conversion is observable here only across a width boundary, or
+     * when a signed value is reinterpreted at an unsigned common rank.
+     */
+    if (get_size(left[0]) != common->size ||
+        (!left[0]->type->is_unsigned && common->is_unsigned))
+        left[0] = resize_to(parent, bb, left[0], common, 0);
+    if (get_size(right[0]) != common->size ||
+        (!right[0]->type->is_unsigned && common->is_unsigned))
+        right[0] = resize_to(parent, bb, right[0], common, 0);
 }
 
 void read_expr_body(block_t *parent, basic_block_t **bb)
@@ -3663,6 +3730,8 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
 
                     rs1 = integer_promote_operand(parent, bb, rs1);
                     rs2 = integer_promote_operand(parent, bb, rs2);
+                    normalize_integer_binary_operands(parent, bb, top_op, &rs1,
+                                                      &rs2);
                     vd = require_var(parent);
                     vd->var_name = gen_name();
                     vd->type = integer_binary_result_type(top_op, rs1, rs2);
@@ -3807,6 +3876,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
         }
         rs1 = integer_promote_operand(parent, bb, rs1);
         rs2 = integer_promote_operand(parent, bb, rs2);
+        normalize_integer_binary_operands(parent, bb, top_op, &rs1, &rs2);
         type_t *result_type = integer_binary_result_type(top_op, rs1, rs2);
         /* Constant folding for binary operations */
         if (rs1 && rs2 && rs1->is_const && !rs1->ptr_level && !rs1->is_global &&
@@ -4796,6 +4866,7 @@ bool read_body_assignment(char *token,
                 rs1 = opstack_pop();
                 vd = require_var(parent);
                 vd->var_name = gen_name();
+                vd->type = integer_binary_result_type(OP_mul, rs1, rs2);
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_mul, vd, rs1, rs2, 0, NULL);
 
@@ -4803,6 +4874,7 @@ bool read_body_assignment(char *token,
                 rs1 = opstack_pop();
                 vd = require_var(parent);
                 vd->var_name = gen_name();
+                vd->type = integer_binary_result_type(op, rs1, rs2);
                 add_insn(parent, *bb, op, vd, rs1, rs2, 0, NULL);
 
                 if (lvalue.is_reference) {
@@ -5138,6 +5210,108 @@ bool read_global_assignment_var(var_t *var)
 
     /* global initialization must be constant */
     {
+        /* A function designator is a valid address constant. Keep it as the
+         * function symbol until lowering: OP_address_of_func has the deferred
+         * relocation needed because the target function's code offset is not
+         * known while global initializers are parsed.
+         */
+        bool explicit_address = lex_accept(T_ampersand);
+        char token[MAX_ID_LEN];
+        if (lex_peek(T_identifier, token)) {
+            func_t *func = find_func(token);
+            if (func) {
+                var_t *addr =
+                    require_ref_var(parent, var->type, var->ptr_level);
+                var_t *symbol = require_func_symbol_var(parent);
+
+                addr->var_name = gen_name();
+                symbol->is_func = true;
+                symbol->var_name = intern_string(token);
+                lex_expect(T_identifier);
+                add_insn(parent, bb, OP_address_of, addr, var, NULL, 0, NULL);
+                add_insn(parent, bb, OP_write, NULL, addr, symbol, PTR_SIZE,
+                         NULL);
+                return true;
+            }
+            var_t *object = find_var(token, parent);
+            if (object && object->is_global &&
+                (explicit_address || object->array_size)) {
+                var_t *object_addr =
+                    require_ref_var(parent, object->type, object->ptr_level);
+
+                object_addr->var_name = gen_name();
+                lex_expect(T_identifier);
+                add_insn(parent, bb, OP_address_of, object_addr, object, NULL,
+                         0, NULL);
+                if (!explicit_address && object->array_size &&
+                    lex_accept(T_plus)) {
+                    int index = read_primary_constant();
+                    var_t *byte_offset = require_var(parent);
+                    var_t *offset_addr = require_ref_var(parent, object->type,
+                                                         object->ptr_level);
+
+                    byte_offset->var_name = gen_name();
+                    byte_offset->init_val = index * object->type->size;
+                    add_insn(parent, bb, OP_load_constant, byte_offset, NULL,
+                             NULL, 0, NULL);
+                    offset_addr->var_name = gen_name();
+                    add_insn(parent, bb, OP_add, offset_addr, object_addr,
+                             byte_offset, 0, NULL);
+                    object_addr = offset_addr;
+                }
+                while (explicit_address) {
+                    if (lex_accept(T_dot)) {
+                        char field_name[MAX_ID_LEN];
+                        var_t *field;
+
+                        lex_ident(T_identifier, field_name);
+                        field = find_member(field_name, object->type);
+                        if (!field)
+                            error_at("Unknown struct or union member",
+                                     cur_token_loc());
+                        object_addr = compute_field_address(parent, &bb,
+                                                            object_addr, field);
+                        object = field;
+                    } else if (object->array_size &&
+                               lex_accept(T_open_square)) {
+                        int index = read_primary_constant();
+
+                        lex_expect(T_close_square);
+                        object_addr =
+                            compute_element_address(parent, &bb, object_addr,
+                                                    index, object->type->size);
+                    } else
+                        break;
+                }
+
+                /* An address constant may be offset after an explicitly
+                 * addressed member or element too. Array decay had this
+                 * handling above, but forms such as "&record.items[0] + 1"
+                 * stopped at the plus token. Keep the offset byte-scaled here
+                 * so global setup receives a literal byte offset.
+                 */
+                if (explicit_address &&
+                    (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL))) {
+                    /* read_const_expr accepts the leading binary sign as a
+                     * unary sign here and consumes the entire integer constant
+                     * expression, including grouping and enum constants.
+                     */
+                    int index = read_const_expr();
+                    int elem_size =
+                        object->ptr_level ? PTR_SIZE : object->type->size;
+
+                    object_addr = compute_element_address(
+                        parent, &bb, object_addr, index, elem_size);
+                }
+                add_insn(parent, bb, OP_assign, var, object_addr, NULL, 0,
+                         NULL);
+                return true;
+            }
+        }
+        if (explicit_address)
+            error_at("Expected a global object or function after '&'",
+                     cur_token_loc());
+
         /* The legacy global evaluator stores operands in int. Parse a wide
          * literal-only expression separately so its upper payload survives;
          * lower each reduction into the global setup block instead of trying to
@@ -6631,6 +6805,8 @@ void read_global_decl(block_t *block, bool is_const, bool is_static)
         }
 
         if (lex_peek(T_open_curly, NULL)) {
+            if (check_decl && func_tmp.bbs)
+                error_at("redefinition of function", next_token_loc());
             read_func_body(func);
             return;
         }

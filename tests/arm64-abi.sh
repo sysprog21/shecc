@@ -119,8 +119,8 @@ int d2(int x) { int a,b,c; a=x; b=a+1; c=b+1; return d3(c) + 1; }
 int d1(int x) { int a; int *p = &a; *p = x; return d2(*p) + 1; }
 int main(void) { return d1(37); }'
 
-# Narrow array elements must load sign-extended. Kept here rather than in
-# tests/driver.sh because the Arm backend zero-extends them (see TODO.md).
+# The shared driver covers narrow array loads on every target; retain this ABI
+# case to exercise the same sign-extension path through the AArch64 harness.
 run_case 'narrow array load and store' 42 '
 int main(void) {
  char b[4]; short h[4]; int i;
