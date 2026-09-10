@@ -155,6 +155,18 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_div:
     case OP_mod:
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0) {
+            /* The stack-backed restoring loop below has a fixed 64-round body.
+             * It keeps all pair state out of operand registers: an SSA result
+             * may coalesce with either dying input pair.
+             */
+            if (ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned)
+                elf_offset += 284;
+            else
+                elf_offset += ph2_ir->op == OP_div ? 424 : 416;
+            return;
+        }
         if (hard_mul_div) {
             if (ph2_ir->op == OP_div)
                 elf_offset += 4;
@@ -653,6 +665,137 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_div:
     case OP_mod:
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0) {
+            bool is_unsigned =
+                ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
+
+            /* Stack words: dividend (0,4), divisor (8,12), remainder (16,20),
+             * quotient (24,28), counter (32), and the incoming dividend bit
+             * (36). Signed pairs use (40,44) for sign masks. r8-r10 are codegen
+             * scratch registers.
+             */
+            emit(__add_i(__AL, __sp, __sp, is_unsigned ? -40 : -48));
+            emit(__sw(__AL, rn, __sp, 0));
+            emit(__sw(__AL, ph2_ir->src0_hi, __sp, 4));
+            emit(__sw(__AL, rm, __sp, 8));
+            emit(__sw(__AL, ph2_ir->src1_hi, __sp, 12));
+            if (!is_unsigned) {
+                /* x ^ sign + -sign produces its unsigned magnitude. */
+                emit(__lw(__AL, __r8, __sp, 4));
+                emit(__srl_amt(__AL, 0, arith_rs, __r10, __r8, 31));
+                emit(__sw(__AL, __r10, __sp, 40));
+                emit(__lw(__AL, __r8, __sp, 0));
+                emit(__eor_r(__AL, __r8, __r8, __r10));
+                emit(__rsbs_i(__AL, __r9, 0, __r10));
+                emit(__adds_r(__AL, __r8, __r8, __r9));
+                emit(__sw(__AL, __r8, __sp, 0));
+                emit(__lw(__AL, __r8, __sp, 4));
+                emit(__eor_r(__AL, __r8, __r8, __r10));
+                emit(__zero(__r9));
+                emit(__adc_r(__AL, __r8, __r8, __r9));
+                emit(__sw(__AL, __r8, __sp, 4));
+                emit(__lw(__AL, __r8, __sp, 12));
+                emit(__srl_amt(__AL, 0, arith_rs, __r10, __r8, 31));
+                emit(__sw(__AL, __r10, __sp, 44));
+                emit(__lw(__AL, __r8, __sp, 8));
+                emit(__eor_r(__AL, __r8, __r8, __r10));
+                emit(__rsbs_i(__AL, __r9, 0, __r10));
+                emit(__adds_r(__AL, __r8, __r8, __r9));
+                emit(__sw(__AL, __r8, __sp, 8));
+                emit(__lw(__AL, __r8, __sp, 12));
+                emit(__eor_r(__AL, __r8, __r8, __r10));
+                emit(__zero(__r9));
+                emit(__adc_r(__AL, __r8, __r8, __r9));
+                emit(__sw(__AL, __r8, __sp, 12));
+            }
+            emit(__zero(__r8));
+            emit(__sw(__AL, __r8, __sp, 16));
+            emit(__sw(__AL, __r8, __sp, 20));
+            emit(__sw(__AL, __r8, __sp, 24));
+            emit(__sw(__AL, __r8, __sp, 28));
+            emit(__mov_i(__AL, __r8, 64));
+            emit(__sw(__AL, __r8, __sp, 32));
+
+            /* Shift the remainder, dividend, and quotient left by one. */
+            emit(__lw(__AL, __r8, __sp, 4));
+            emit(__srl_amt(__AL, 0, logic_rs, __r10, __r8, 31));
+            emit(__sw(__AL, __r10, __sp, 36));
+            emit(__lw(__AL, __r8, __sp, 16));
+            emit(__srl_amt(__AL, 0, logic_rs, __r9, __r8, 31));
+            emit(__sll_amt(__AL, 0, logic_ls, __r8, __r8, 1));
+            emit(__sw(__AL, __r8, __sp, 16));
+            emit(__lw(__AL, __r8, __sp, 20));
+            emit(__sll_amt(__AL, 0, logic_ls, __r8, __r8, 1));
+            emit(__or_r(__AL, __r8, __r8, __r9));
+            emit(__sw(__AL, __r8, __sp, 20));
+            emit(__lw(__AL, __r10, __sp, 36));
+            emit(__lw(__AL, __r8, __sp, 16));
+            emit(__or_r(__AL, __r8, __r8, __r10));
+            emit(__sw(__AL, __r8, __sp, 16));
+            emit(__lw(__AL, __r8, __sp, 0));
+            emit(__srl_amt(__AL, 0, logic_rs, __r9, __r8, 31));
+            emit(__sll_amt(__AL, 0, logic_ls, __r8, __r8, 1));
+            emit(__sw(__AL, __r8, __sp, 0));
+            emit(__lw(__AL, __r8, __sp, 4));
+            emit(__sll_amt(__AL, 0, logic_ls, __r8, __r8, 1));
+            emit(__or_r(__AL, __r8, __r8, __r9));
+            emit(__sw(__AL, __r8, __sp, 4));
+            emit(__lw(__AL, __r8, __sp, 24));
+            emit(__srl_amt(__AL, 0, logic_rs, __r9, __r8, 31));
+            emit(__sll_amt(__AL, 0, logic_ls, __r8, __r8, 1));
+            emit(__sw(__AL, __r8, __sp, 24));
+            emit(__lw(__AL, __r8, __sp, 28));
+            emit(__sll_amt(__AL, 0, logic_ls, __r8, __r8, 1));
+            emit(__or_r(__AL, __r8, __r8, __r9));
+            emit(__sw(__AL, __r8, __sp, 28));
+
+            /* Subtract the divisor when the two-word remainder permits it. */
+            emit(__lw(__AL, __r8, __sp, 20));
+            emit(__lw(__AL, __r9, __sp, 12));
+            emit(__cmp_r(__AL, __r8, __r9));
+            emit(__b(__CC, 68));
+            emit(__b(__HI, 20));
+            emit(__lw(__AL, __r8, __sp, 16));
+            emit(__lw(__AL, __r9, __sp, 8));
+            emit(__cmp_r(__AL, __r8, __r9));
+            emit(__b(__CC, 48));
+            emit(__lw(__AL, __r8, __sp, 16));
+            emit(__lw(__AL, __r9, __sp, 8));
+            emit(__subs_r(__AL, __r8, __r8, __r9));
+            emit(__sw(__AL, __r8, __sp, 16));
+            emit(__lw(__AL, __r8, __sp, 20));
+            emit(__lw(__AL, __r9, __sp, 12));
+            emit(__sbc_r(__AL, __r8, __r8, __r9));
+            emit(__sw(__AL, __r8, __sp, 20));
+            emit(__lw(__AL, __r8, __sp, 24));
+            emit(__add_i(__AL, __r8, __r8, 1));
+            emit(__sw(__AL, __r8, __sp, 24));
+            emit(__lw(__AL, __r8, __sp, 32));
+            emit(__add_i(__AL, __r8, __r8, -1));
+            emit(__sw(__AL, __r8, __sp, 32));
+            emit(__cmp_i(__AL, __r8, 0));
+            emit(__b(__NE, -220));
+
+            emit(__lw(__AL, rd, __sp, ph2_ir->op == OP_mod ? 16 : 24));
+            emit(__lw(__AL, ph2_ir->dest_hi, __sp,
+                      ph2_ir->op == OP_mod ? 20 : 28));
+            if (!is_unsigned) {
+                emit(__lw(__AL, __r10, __sp, 40));
+                if (ph2_ir->op == OP_div) {
+                    emit(__lw(__AL, __r8, __sp, 44));
+                    emit(__eor_r(__AL, __r10, __r10, __r8));
+                }
+                emit(__eor_r(__AL, rd, rd, __r10));
+                emit(__eor_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r10));
+                emit(__rsbs_i(__AL, __r8, 0, __r10));
+                emit(__adds_r(__AL, rd, rd, __r8));
+                emit(__zero(__r8));
+                emit(__adc_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r8));
+            }
+            emit(__add_i(__AL, __sp, __sp, is_unsigned ? 40 : 48));
+            return;
+        }
         if (hard_mul_div) {
             if (ph2_ir->op == OP_div)
                 emit(ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned

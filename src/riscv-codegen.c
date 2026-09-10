@@ -186,7 +186,18 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_div:
     case OP_mod:
-        if (hard_mul_div)
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0)
+
+            /* Four copied input words, a quotient pair, a remainder pair, and a
+             * fixed 64-round restoring loop. The modulo form copies the final
+             * remainder out after the loop. Signed operands add magnitude
+             * conversion and a sign-restoration sequence.
+             */
+            elf_offset += ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned
+                              ? (ph2_ir->op == OP_mod ? 164 : 156)
+                              : 240;
+        else if (hard_mul_div)
             elf_offset += 4;
         else
             elf_offset += 116;
@@ -653,6 +664,109 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_div:
     case OP_mod:
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            ph2_ir->src1_hi >= 0) {
+            bool is_unsigned =
+                ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
+
+            /* 64-bit restoring division. t0:t1 is the remainder, t2:t3 is the
+             * shifting dividend, t4:t5 is the divisor, and rd:rd_hi accumulates
+             * the quotient. Two stack words hold the incoming dividend bit and
+             * the iteration counter while t6 carries the remainder/borrow; this
+             * avoids borrowing operand registers, because an SSA destination
+             * may legally coalesce with a dying operand pair. Signed inputs
+             * reserve two additional words for their sign masks and are
+             * converted to magnitudes before entering the same loop.
+             */
+            emit(__addi(__sp, __sp, is_unsigned ? -8 : -16));
+            emit(__addi(__t0, __zero, 0));
+            emit(__addi(__t1, __zero, 0));
+            if (is_unsigned) {
+                emit(__addi(__t2, rs1, 0));
+                emit(__addi(__t3, rs1_hi, 0));
+                emit(__addi(__t4, rs2, 0));
+                emit(__addi(__t5, rs2_hi, 0));
+            } else {
+                /* x ^ sign + -sign is abs(x), including INT64_MIN's
+                 * representable unsigned magnitude.
+                 */
+                emit(__srai(__t6, rs1_hi, 31));
+                emit(__sw(__t6, __sp, 8));
+                emit(__xor(__t2, rs1, __t6));
+                emit(__xor(__t3, rs1_hi, __t6));
+                emit(__sub(__t6, __zero, __t6));
+                emit(__add(__t2, __t2, __t6));
+                emit(__sltu(__t6, __t2, __t6));
+                emit(__add(__t3, __t3, __t6));
+                emit(__srai(__t6, rs2_hi, 31));
+                emit(__sw(__t6, __sp, 12));
+                emit(__xor(__t4, rs2, __t6));
+                emit(__xor(__t5, rs2_hi, __t6));
+                emit(__sub(__t6, __zero, __t6));
+                emit(__add(__t4, __t4, __t6));
+                emit(__sltu(__t6, __t4, __t6));
+                emit(__add(__t5, __t5, __t6));
+            }
+            emit(__addi(rd, __zero, 0));
+            emit(__addi(rd_hi, __zero, 0));
+            emit(__addi(__t6, __zero, 64));
+            emit(__sw(__t6, __sp, 4));
+
+            /* Bring down one dividend bit, shift the quotient, then subtract if
+             * the two-word remainder is at least the divisor.
+             */
+            emit(__srli(__t6, __t3, 31));
+            emit(__sw(__t6, __sp, 0));
+            emit(__srli(__t6, __t0, 31));
+            emit(__slli(__t0, __t0, 1));
+            emit(__slli(__t1, __t1, 1));
+            emit(__or(__t1, __t1, __t6));
+            emit(__lw(__t6, __sp, 0));
+            emit(__or(__t0, __t0, __t6));
+            emit(__srli(__t6, __t2, 31));
+            emit(__slli(__t2, __t2, 1));
+            emit(__slli(__t3, __t3, 1));
+            emit(__or(__t3, __t3, __t6));
+            emit(__srli(__t6, rd, 31));
+            emit(__slli(rd, rd, 1));
+            emit(__slli(rd_hi, rd_hi, 1));
+            emit(__or(rd_hi, rd_hi, __t6));
+            emit(__bltu(__t1, __t5, 32));
+            emit(__bltu(__t5, __t1, 8));
+            emit(__bltu(__t0, __t4, 24));
+            emit(__sltu(__t6, __t0, __t4));
+            emit(__sub(__t0, __t0, __t4));
+            emit(__sub(__t1, __t1, __t5));
+            emit(__sub(__t1, __t1, __t6));
+            emit(__addi(rd, rd, 1));
+            emit(__lw(__t6, __sp, 4));
+            emit(__addi(__t6, __t6, -1));
+            emit(__sw(__t6, __sp, 4));
+            emit(__bne(__t6, __zero, -108));
+
+            if (ph2_ir->op == OP_mod) {
+                emit(__addi(rd, __t0, 0));
+                emit(__addi(rd_hi, __t1, 0));
+            }
+            if (!is_unsigned) {
+                /* A quotient is negative for unlike operand signs; a remainder
+                 * follows the dividend's sign.
+                 */
+                emit(__lw(__t6, __sp, 8));
+                if (ph2_ir->op == OP_div) {
+                    emit(__lw(__t0, __sp, 12));
+                    emit(__xor(__t6, __t6, __t0));
+                }
+                emit(__xor(rd, rd, __t6));
+                emit(__xor(rd_hi, rd_hi, __t6));
+                emit(__sub(__t6, __zero, __t6));
+                emit(__add(rd, rd, __t6));
+                emit(__sltu(__t6, rd, __t6));
+                emit(__add(rd_hi, rd_hi, __t6));
+            }
+            emit(__addi(__sp, __sp, is_unsigned ? 8 : 16));
+            return;
+        }
         if (hard_mul_div) {
             if (ph2_ir->op == OP_div)
                 emit(ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned

@@ -213,6 +213,37 @@ var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
     return var;
 }
 
+/* A typedef keeps its stars (and their qualifiers) on type_t while ordinary
+ * declarators keep them on var_t. Expression results are ordinary vars, so
+ * dereferencing a typedef pointer must move the surviving qualifier bits into
+ * that representation instead of silently losing them.
+ */
+int effective_pointer_depth(const var_t *var)
+{
+    return var && var->type ? var->ptr_level + var->type->ptr_level : 0;
+}
+
+unsigned int effective_pointer_const_mask(const var_t *var)
+{
+    if (!var || !var->type)
+        return 0;
+    if (var->type->ptr_level >= 32)
+        return var->type->pointer_const_mask;
+    return var->type->pointer_const_mask |
+           (var->pointer_const_mask << var->type->ptr_level);
+}
+
+unsigned int dereferenced_pointer_const_mask(const var_t *var)
+{
+    int depth = effective_pointer_depth(var);
+    unsigned int mask = effective_pointer_const_mask(var);
+
+    /* The outermost pointer object was consumed by the dereference. */
+    if (depth > 0 && depth <= 32)
+        mask &= ~(1U << (depth - 1));
+    return mask;
+}
+
 /* A pointer typedef stores its pointer depth in type_t rather than var_t. After
  * indexing through it, use the underlying scalar type for the loaded value and
  * carry any remaining pointer depth in var_t. Otherwise a `typedef unsigned
@@ -3209,7 +3240,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             sz = deref_type->size;
         vd->var_name = gen_name();
         vd->is_const_qualified = rs1->is_const_qualified;
-        vd->pointer_const_mask = rs1->pointer_const_mask;
+        vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
         vd->is_const_pointer =
             vd->ptr_level > 0 && vd->ptr_level <= 32 &&
             (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
@@ -3256,7 +3287,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
         }
         vd->var_name = gen_name();
         vd->is_const_qualified = var->is_const_qualified;
-        vd->pointer_const_mask = var->pointer_const_mask;
+        vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
         vd->is_const_pointer =
             vd->ptr_level > 0 && vd->ptr_level <= 32 &&
             (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
@@ -3346,6 +3377,11 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
             else
                 sz = deref_type->size;
             vd->var_name = gen_name();
+            vd->is_const_qualified = rs1->is_const_qualified;
+            vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
+            vd->is_const_pointer =
+                vd->ptr_level > 0 && vd->ptr_level <= 32 &&
+                (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
             opstack_push(vd);
             add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
         }
@@ -3395,7 +3431,7 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
             }
             vd->var_name = gen_name();
             vd->is_const_qualified = rs1->is_const_qualified;
-            vd->pointer_const_mask = rs1->pointer_const_mask;
+            vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
             vd->is_const_pointer =
                 vd->ptr_level > 0 && vd->ptr_level <= 32 &&
                 (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
@@ -3793,8 +3829,9 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
             vd = require_var(parent);
             vd->var_name = gen_name();
+            vd->type = TY_int;
             vd->is_const = true;
-            vd->init_val = !rs1->init_val;
+            vd->init_val = !(rs1->init_val || rs1->init_val_hi);
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
         } else {
@@ -3827,6 +3864,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             vd->type = rs1->type;
             vd->is_const = true;
             vd->init_val = ~rs1->init_val;
+            vd->init_val_hi = ~rs1->init_val_hi;
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
         } else {
@@ -4442,6 +4480,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 vd->type = rs1->type;
                 vd->is_const = true;
                 vd->init_val = -rs1->init_val;
+                vd->init_val_hi = ~rs1->init_val_hi + (vd->init_val == 0);
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
                          NULL);
@@ -6347,6 +6386,159 @@ bool wide_global_literal_appears_before_initializer_end(token_t *token)
 
 var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb);
 
+/* Fold the operations that only need word arithmetic before emitting global
+ * setup code. That setup block is deliberately conservative about constants,
+ * and previously allowed a paired add/subtract to lose its high half.
+ */
+bool emit_wide_global_word_arithmetic(block_t *parent,
+                                      basic_block_t *bb,
+                                      var_t *result,
+                                      opcode_t op,
+                                      var_t *left,
+                                      var_t *right)
+{
+    unsigned int lo = (unsigned int) left->init_val;
+    unsigned int hi = (unsigned int) left->init_val_hi;
+    unsigned int rhs_lo = right ? (unsigned int) right->init_val : 0;
+    unsigned int rhs_hi = right ? (unsigned int) right->init_val_hi : 0;
+    unsigned int out_lo, out_hi;
+
+    if (op == OP_div || op == OP_mod) {
+        unsigned int rem_lo = 0, rem_hi = 0, quo_lo = 0, quo_hi = 0;
+        bool is_unsigned = left->type->is_unsigned || right->type->is_unsigned;
+        bool neg_left = !is_unsigned && (hi >> 31);
+        bool neg_right = !is_unsigned && (rhs_hi >> 31);
+
+        if (rhs_lo == 0 && rhs_hi == 0)
+            return false;
+        if (neg_left) {
+            lo = ~lo + 1;
+            hi = ~hi + (lo == 0);
+        }
+        if (neg_right) {
+            rhs_lo = ~rhs_lo + 1;
+            rhs_hi = ~rhs_hi + (rhs_lo == 0);
+        }
+        for (int i = 0; i < 64; i++) {
+            unsigned int incoming = hi >> 31;
+
+            hi = (hi << 1) | (lo >> 31);
+            lo <<= 1;
+            rem_hi = (rem_hi << 1) | (rem_lo >> 31);
+            rem_lo = (rem_lo << 1) | incoming;
+            quo_hi = (quo_hi << 1) | (quo_lo >> 31);
+            quo_lo <<= 1;
+            if (rem_hi > rhs_hi || (rem_hi == rhs_hi && rem_lo >= rhs_lo)) {
+                unsigned int borrow = rem_lo < rhs_lo;
+
+                rem_lo -= rhs_lo;
+                rem_hi = rem_hi - rhs_hi - borrow;
+                quo_lo |= 1;
+            }
+        }
+        if (op == OP_div) {
+            out_lo = quo_lo;
+            out_hi = quo_hi;
+            if (neg_left != neg_right) {
+                out_lo = ~out_lo + 1;
+                out_hi = ~out_hi + (out_lo == 0);
+            }
+        } else {
+            out_lo = rem_lo;
+            out_hi = rem_hi;
+            if (neg_left) {
+                out_lo = ~out_lo + 1;
+                out_hi = ~out_hi + (out_lo == 0);
+            }
+        }
+        result->init_val = out_lo;
+        result->init_val_hi = out_hi;
+        result->is_const = true;
+        add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+        return true;
+    }
+
+    switch (op) {
+    case OP_add:
+        out_lo = lo + rhs_lo;
+        out_hi = hi + rhs_hi + (out_lo < lo);
+        break;
+    case OP_sub:
+        out_lo = lo - rhs_lo;
+        out_hi = hi - rhs_hi - (lo < rhs_lo);
+        break;
+    case OP_mul: {
+        unsigned int p0 = (lo & 0xffffU) * (rhs_lo & 0xffffU);
+        unsigned int p1 = (lo & 0xffffU) * (rhs_lo >> 16);
+        unsigned int p2 = (lo >> 16) * (rhs_lo & 0xffffU);
+        unsigned int p3 = (lo >> 16) * (rhs_lo >> 16);
+        unsigned int carry = (p0 >> 16) + (p1 & 0xffffU) + (p2 & 0xffffU);
+
+        out_lo = (p0 & 0xffffU) | (carry << 16);
+        out_hi = p3 + (p1 >> 16) + (p2 >> 16) + (carry >> 16) + hi * rhs_lo +
+                 lo * rhs_hi;
+        break;
+    }
+    case OP_lshift:
+        if (rhs_lo >= 64) {
+            out_lo = 0;
+            out_hi = 0;
+        } else if (rhs_lo >= 32) {
+            out_lo = 0;
+            out_hi = lo << (rhs_lo - 32);
+        } else if (rhs_lo == 0) {
+            out_lo = lo;
+            out_hi = hi;
+        } else {
+            out_lo = lo << rhs_lo;
+            out_hi = (hi << rhs_lo) | (lo >> (32 - rhs_lo));
+        }
+        break;
+    case OP_rshift:
+        if (rhs_lo >= 64) {
+            out_hi = left->type->is_unsigned || !(hi >> 31) ? 0 : ~0U;
+            out_lo = out_hi;
+        } else if (rhs_lo >= 32) {
+            out_lo = left->type->is_unsigned
+                         ? hi >> (rhs_lo - 32)
+                         : (unsigned int) ((int) hi >> (rhs_lo - 32));
+            out_hi = left->type->is_unsigned || !(hi >> 31) ? 0 : ~0U;
+        } else if (rhs_lo == 0) {
+            out_lo = lo;
+            out_hi = hi;
+        } else {
+            out_lo = (lo >> rhs_lo) | (hi << (32 - rhs_lo));
+            out_hi = left->type->is_unsigned
+                         ? hi >> rhs_lo
+                         : (unsigned int) ((int) hi >> rhs_lo);
+        }
+        break;
+    case OP_bit_and:
+        out_lo = lo & rhs_lo;
+        out_hi = hi & rhs_hi;
+        break;
+    case OP_bit_or:
+        out_lo = lo | rhs_lo;
+        out_hi = hi | rhs_hi;
+        break;
+    case OP_bit_xor:
+        out_lo = lo ^ rhs_lo;
+        out_hi = hi ^ rhs_hi;
+        break;
+    case OP_bit_not:
+        out_lo = ~lo;
+        out_hi = ~hi;
+        break;
+    default:
+        return false;
+    }
+    result->init_val = out_lo;
+    result->init_val_hi = out_hi;
+    result->is_const = true;
+    add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+    return true;
+}
+
 /* A grouped primary is lowered into the same global setup block as its parent.
  * The caller owns the closing parenthesis, so get_operator() naturally stops an
  * inner precedence stack without consuming its delimiter.
@@ -6385,7 +6577,8 @@ var_t *read_wide_global_literal_primary(block_t *parent, basic_block_t *bb)
         result = require_var(parent);
         result->var_name = gen_name();
         result->type = value->type;
-        add_insn(parent, bb, OP_sub, result, zero, value, 0, NULL);
+        emit_wide_global_word_arithmetic(parent, bb, result, OP_sub, zero,
+                                         value);
         return result;
     }
     if (lex_accept(T_bit_not)) {
@@ -6395,7 +6588,8 @@ var_t *read_wide_global_literal_primary(block_t *parent, basic_block_t *bb)
         result = require_var(parent);
         result->var_name = gen_name();
         result->type = value->type;
-        add_insn(parent, bb, OP_bit_not, result, value, NULL, 0, NULL);
+        emit_wide_global_word_arithmetic(parent, bb, result, OP_bit_not, value,
+                                         NULL);
         return result;
     }
     if (lex_accept(T_log_not)) {
@@ -6448,8 +6642,10 @@ var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb)
             result->var_name = gen_name();
             result->type = integer_binary_result_type(
                 op_stack[--op_stack_index], left, right);
-            add_insn(parent, bb, op_stack[op_stack_index], result, left, right,
-                     0, NULL);
+            if (!emit_wide_global_word_arithmetic(
+                    parent, bb, result, op_stack[op_stack_index], left, right))
+                add_insn(parent, bb, op_stack[op_stack_index], result, left,
+                         right, 0, NULL);
             val_stack[val_stack_index++] = result;
         }
         if (op_stack_index >= MAX_OPERATOR_STACK_SIZE ||
@@ -6468,8 +6664,10 @@ var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb)
         result->var_name = gen_name();
         result->type =
             integer_binary_result_type(op_stack[--op_stack_index], left, right);
-        add_insn(parent, bb, op_stack[op_stack_index], result, left, right, 0,
-                 NULL);
+        if (!emit_wide_global_word_arithmetic(
+                parent, bb, result, op_stack[op_stack_index], left, right))
+            add_insn(parent, bb, op_stack[op_stack_index], result, left, right,
+                     0, NULL);
         val_stack[val_stack_index++] = result;
     }
     return val_stack[0];
@@ -7828,9 +8026,11 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             read_ternary_operation(parent, &bb);
             var_t *addr = opstack_pop();
 
+            int addr_depth = effective_pointer_depth(addr);
+            unsigned int addr_mask = effective_pointer_const_mask(addr);
             if (addr->is_const_qualified ||
-                (addr->ptr_level > 1 && addr->ptr_level <= 32 &&
-                 (addr->pointer_const_mask & (1U << (addr->ptr_level - 2)))))
+                (addr_depth > 1 && addr_depth <= 32 &&
+                 (addr_mask & (1U << (addr_depth - 2)))))
                 error_at("assignment of read-only location", next_token_loc());
 
             /* The width of the store is the pointee's, not the address's. */

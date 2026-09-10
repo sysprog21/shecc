@@ -738,7 +738,7 @@ void collapse_slot_roundtrip(func_t *func)
         /* Removing the store first would leave prev_load stale when the store
          * is the load's predecessor, so drop the later one first.
          */
-        if (load->dest == load->src0)
+        if (load->dest == load->src0 && load->dest_hi == load->src0_hi)
             ph2_list_remove(home, prev_load, load);
         ph2_list_remove(home, prev_store, store);
     }

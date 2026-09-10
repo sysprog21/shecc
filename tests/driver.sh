@@ -853,6 +853,12 @@ int main(void) {
            (all_bits > 0ULL);
 }
 EOF
+    try_ 1 << EOF
+int main(void) {
+    unsigned long long maximum = 0xffffffffffffffffULL;
+    return maximum + 1ULL == 0ULL;
+}
+EOF
     try_ 4 << EOF
 int main(void) {
     return (sizeof(2147483647) == 4) +
@@ -1138,6 +1144,13 @@ int main(void) {
     unsigned long long first = 0x100000000lLu;
     unsigned long long second = 0x100000000Ull;
     return ((first >> 32) == 1ULL) + ((second >> 32) == 1ULL);
+}
+EOF
+    try_ 2 << EOF
+int main(void) {
+    unsigned long long all_bits = ~0ULL;
+    return ((all_bits >> 63) == 1ULL) +
+           (!0x100000000ULL == 0);
 }
 EOF
     try_compile_error << EOF
@@ -4444,6 +4457,15 @@ int main(void)
 }
 EOF
 
+# Continuation declarators retain their individual pointer, array, and function
+# pointer forms while sharing the base type and processing each initializer.
+try_ 13 << EOF
+int add_one(int value) { return value + 1; }
+int value = 4, *value_ref = &value, values[2] = {3, 5},
+    (*apply)(int) = add_one;
+int main(void) { return *value_ref + values[1] + apply(values[0]); }
+EOF
+
 try_ 5 << EOF
 int static_address_constants(void)
 {
@@ -4453,6 +4475,21 @@ int static_address_constants(void)
     return decayed[1] + addressed[2];
 }
 int main(void) { return static_address_constants(); }
+EOF
+
+# A block-scope aggregate static must keep both its initializer and later member
+# writes across calls; this covers the global-frame lowering beyond the scalar
+# counter above.
+try_ 12 << EOF
+struct tally { int count; int values[2]; };
+int next_tally(void)
+{
+    static struct tally state = {1, {2, 3}};
+    state.count++;
+    state.values[0]++;
+    return state.count + state.values[0];
+}
+int main(void) { return next_tally() + next_tally(); }
 EOF
 
 try_ 1 << EOF
@@ -5303,6 +5340,32 @@ int main(void) {
     const int_pointer pointer = &first;
     pointer = &second;
     return *pointer;
+}
+EOF
+
+# A qualifier hidden in a typedef must survive another typedef and a
+# dereference: *slot designates the const pointer object, not its int pointee.
+try_compile_error << EOF
+typedef int *const fixed_ptr;
+typedef fixed_ptr *fixed_ptr_slot;
+int main(void) {
+    int value = 1;
+    fixed_ptr fixed = &value;
+    fixed_ptr_slot slot = &fixed;
+    *slot = &value;
+    return **slot;
+}
+EOF
+
+try_ 2 << EOF
+typedef int *const fixed_ptr;
+typedef fixed_ptr *fixed_ptr_slot;
+int main(void) {
+    int value = 1;
+    fixed_ptr fixed = &value;
+    fixed_ptr_slot slot = &fixed;
+    **slot = 2;
+    return value;
 }
 EOF
 
