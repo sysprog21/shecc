@@ -3022,6 +3022,14 @@ void read_lvalue(lvalue_t *lvalue,
             rs2 = opstack_pop();
             rs1 = opstack_pop();
             vd = require_var(parent);
+
+            /* A subscript expression computes the address of its selected
+             * element. Preserve that pointer provenance: unary '&' leaves an
+             * already-addressable subscript alone, and pointer subtraction must
+             * still know whether this is an int or struct element.
+             */
+            vd->type = lvalue->type;
+            vd->ptr_level = lvalue->ptr_level ? lvalue->ptr_level : 1;
             vd->var_name = gen_name();
             opstack_push(vd);
             add_insn(parent, *bb, OP_add, vd, rs1, rs2, 0, NULL);

@@ -1661,6 +1661,22 @@ int main() {
 }
 EOF
 
+# C99 6.5.6: pointer subtraction yields an element count, not a byte count.
+try_ 5 << EOF
+int main(void) {
+    int values[10];
+    return &values[7] - &values[2];
+}
+EOF
+
+try_ 5 << EOF
+struct point { int x; int y; };
+int main(void) {
+    struct point values[10];
+    return &values[8] - &values[3];
+}
+EOF
+
 # Pointer arithmetic tests
 
 # Basic integer pointer difference
