@@ -757,6 +757,25 @@ int main() {
 }
 EOF
 
+# Typedef record declarations use the shared aggregate initializer path for both
+# their first and continuation declarators.
+try_ 6 << EOF
+typedef struct { int x; int y; int z; } point_t;
+int main() {
+    point_t first = {1}, second = {2, 3};
+    return first.x + first.y + first.z + second.x + second.y + second.z;
+}
+EOF
+
+# A union initializer selects exactly one member, including through a typedef.
+try_compile_error << EOF
+typedef union { int a; char b; } value_t;
+int main() {
+    value_t value = {1, 2};
+    return value.a;
+}
+EOF
+
 try_ 42 << EOF
 typedef struct { short x; short y; } point_t;
 int main() {
@@ -799,11 +818,186 @@ int main(void) {
 }
 EOF
 
+# Explicitly bounded array compound literals support index designators and
+# zero-fill the slots those designators skip.
+try_ 7 << EOF
+int main(void) {
+    int *values = (int[4]){[3] = 5, [1] = 2};
+    return values[0] + values[1] + values[2] + values[3];
+}
+EOF
+
+# Nested record braces initialize the nested object before continuing at the
+# following outer member.
+try_ 12 << EOF
+struct pair { int x; int y; };
+struct outer { struct pair pair; int tail; };
+int main(void) {
+    struct outer value = {{2, 3}, 7};
+    return value.pair.x + value.pair.y + value.tail;
+}
+EOF
+
+# Nested array braces initialize the member array before the next outer field.
+try_ 12 << EOF
+struct outer { int values[2]; int tail; };
+int main(void) {
+    struct outer value = {{2, 3}, 7};
+    return value.values[0] + value.values[1] + value.tail;
+}
+EOF
+
+try_ 9 << EOF
+struct outer { int values[2]; int tail; };
+int main(void) {
+    struct outer value = {{2}, 7};
+    return value.values[0] + value.values[1] + value.tail;
+}
+EOF
+
+try_ 12 << EOF
+struct outer { int values[2]; int tail; };
+int main(void) {
+    struct outer value = (struct outer){{2, 3}, 7};
+    return value.values[0] + value.values[1] + value.tail;
+}
+EOF
+
+try_ 12 << EOF
+struct outer { int values[2]; int tail; };
+struct outer value = {{2, 3}, 7};
+int main(void) {
+    return value.values[0] + value.values[1] + value.tail;
+}
+EOF
+
+try_ 15 << EOF
+struct pair { int x; int y; };
+struct outer { struct pair values[2]; int tail; };
+int main(void) {
+    struct outer value = {{{1, 2}, {3, 4}}, 5};
+    return value.values[0].x + value.values[0].y + value.values[1].x +
+           value.values[1].y + value.tail;
+}
+EOF
+
+# Two-dimensional member arrays preserve row braces and then continue with the
+# next outer member.
+try_ 15 << EOF
+struct outer { int values[2][2]; int tail; };
+int main(void) {
+    struct outer value = {{{1, 2}, {3, 4}}, 5};
+    return value.values[0][0] + value.values[0][1] + value.values[1][0] +
+           value.values[1][1] + value.tail;
+}
+EOF
+
+try_ 15 << EOF
+struct outer { int values[2][2]; int tail; };
+struct outer value = {{{1, 2}, {3, 4}}, 5};
+int main(void) {
+    return value.values[0][0] + value.values[0][1] + value.values[1][0] +
+           value.values[1][1] + value.tail;
+}
+EOF
+
+try_ 15 << EOF
+struct outer { int values[2][2]; int tail; };
+int main(void) {
+    struct outer value = (struct outer){{{1, 2}, {3, 4}}, 5};
+    return value.values[0][0] + value.values[0][1] + value.values[1][0] +
+           value.values[1][1] + value.tail;
+}
+EOF
+
+try_ 12 << EOF
+struct pair { int x; int y; };
+struct outer { struct pair pair; int tail; };
+int main(void) {
+    struct outer value = (struct outer){{2, 3}, 7};
+    return value.pair.x + value.pair.y + value.tail;
+}
+EOF
+
+try_ 12 << EOF
+struct pair { int x; int y; };
+struct outer { struct pair pair; int tail; };
+struct outer value = {{2, 3}, 7};
+int main(void) {
+    return value.pair.x + value.pair.y + value.tail;
+}
+EOF
+
+# C99 member designators may reorder fields and leave other members zeroed.
+try_ 7 << EOF
+struct values { int first; int second; int third; };
+int main(void) {
+    struct values value = {.third = 5, .second = 2};
+    return value.first + value.second + value.third;
+}
+EOF
+
+try_ 7 << EOF
+struct values { int first; int second; int third; };
+int main(void) {
+    struct values value = (struct values){.third = 5, .second = 2};
+    return value.first + value.second + value.third;
+}
+EOF
+
+# Compound literals use the record initializer path for unions as well.
+try_ 42 << EOF
+union number { int integer; char character; };
+int main(void) {
+    union number value = (union number){42};
+    return value.integer;
+}
+EOF
+
+# Record assignment copies every byte, not just the scalar slot used by the
+# register allocator. Five ints exercise a copy larger than one pointer.
+try_ 150 << EOF
+struct values { int a; int b; int c; int d; int e; };
+int main(void) {
+    struct values first = {10, 20, 30, 40, 50};
+    struct values second;
+    second = first;
+    return second.a + second.b + second.c + second.d + second.e;
+}
+EOF
+
+# A non-word-sized record exercises the byte tail of aggregate copying.
+try_ 66 << EOF
+struct mixed { int value; char tag; };
+int main(void) {
+    struct mixed first = {65, 1};
+    struct mixed second;
+    second = first;
+    return second.value + second.tag;
+}
+EOF
+
 try_compile_error << EOF
 struct point { int x; int y; };
 int main(void) {
     struct point p = (struct point){1, 2, 3};
     return p.x;
+}
+EOF
+
+try_compile_error << EOF
+union number { int integer; char character; };
+int main(void) {
+    union number value = {1, 2};
+    return value.integer;
+}
+EOF
+
+try_compile_error << EOF
+union number { int integer; char character; };
+int main(void) {
+    union number first = {1}, second = {2, 3};
+    return first.integer + second.integer;
 }
 EOF
 
@@ -886,6 +1080,14 @@ int main() {
     /* Multi-element arrays: first element after index 0 may not initialize correctly */
     struct point pts[2] = { {1, 2}, {3, 4} };
     return pts[0].x;  /* Expected: 1, Actual: 1 (may be coincidental) */
+}
+EOF
+
+try_ 7 << EOF
+struct point { int x; int y; };
+int main(void) {
+    struct point pts[2] = { {1, 2}, {3, 4} };
+    return pts[1].x + pts[1].y;
 }
 EOF
 
@@ -1229,6 +1431,18 @@ begin_category "Functions" "Testing function definitions, calls, and recursion"
 try_ 0 << EOF
 int main(void) {
     return 0;
+}
+EOF
+
+# Named struct/union specifiers are valid parameter declaration specifiers.
+try_ 10 << EOF
+struct value { int first; };
+int first(struct value input) {
+    return input.first;
+}
+int main(void) {
+    struct value input = {10};
+    return first(input);
 }
 EOF
 
@@ -2049,6 +2263,26 @@ int main(void)
 }
 EOF
 
+# C99 array designators may initialize sparse slots in either order; omitted
+# elements retain the aggregate's implicit zero initialization.
+try_ 7 << EOF
+int main(void)
+{
+    int values[4] = {[3] = 5, [1] = 2};
+    return values[0] + values[1] + values[2] + values[3];
+}
+EOF
+
+# Array element initializers dispatch through the same record path for unions.
+try_ 30 << EOF
+union value { int integer; char character; };
+int main(void)
+{
+    union value values[2] = {{10}, {20}};
+    return values[0].integer + values[1].integer;
+}
+EOF
+
 # a parameter whose first dimension is omitted is still a 2-D array: "int
 # a[][4]" must index exactly like "int a[3][4]", not like "int **"
 try_ 66 << EOF
@@ -2500,8 +2734,49 @@ int main(void)
 }
 EOF
 
+try_ 15 << EOF
+struct static_grid { int values[2][2]; int tail; };
+int values(void)
+{
+    static struct static_grid grid = {{{1, 2}, {3, 4}}, 5};
+    return grid.values[0][0] + grid.values[0][1] + grid.values[1][0] +
+           grid.values[1][1] + grid.tail;
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+# Block scope gives same-spelled statics distinct objects in distinct functions.
+try_ 62 << EOF
+int first(void)
+{
+    static int value = 10;
+    return value++;
+}
+int second(void)
+{
+    static int value = 20;
+    return value++;
+}
+int main(void)
+{
+    return first() + second() + first() + second();
+}
+EOF
+
 # Category: Const Qualifiers
 begin_category "Const Qualifiers" "Testing const qualifier support for variables and parameters"
+
+# Qualified union objects use the normal aggregate initializer path.
+try_ 42 << EOF
+union number { int integer; char character; };
+int main(void) {
+    const union number value = {42};
+    return value.integer;
+}
+EOF
 
 # C99 constraint violations: qualifiers make the designated object read-only.
 try_compile_error << EOF
@@ -2509,6 +2784,32 @@ int main(void) {
     const int x = 1;
     x = 2;
     return x;
+}
+EOF
+
+try_compile_error << EOF
+struct pair { int x; int y; };
+int main(void) {
+    const struct pair value = {1, 2};
+    value.x = 3;
+    return value.x;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    const int values[2] = {1, 2};
+    values[1] = 3;
+    return values[1];
+}
+EOF
+
+# Qualifiers apply to every declarator in one declaration, not just the first.
+try_compile_error << EOF
+int main(void) {
+    const int first = 1, second = 2;
+    second = 3;
+    return first + second;
 }
 EOF
 

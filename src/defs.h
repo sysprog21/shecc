@@ -728,6 +728,7 @@ struct type {
     var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
+    bool is_union; /* preserves union semantics for anonymous typedef unions */
 };
 
 /* lvalue details */
