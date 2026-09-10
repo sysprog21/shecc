@@ -799,6 +799,7 @@ void parse_struct_field_init(block_t *parent,
                              bool emit_code)
 {
     int field_idx = 0;
+    int initializer_count = 0;
 
     /* Zero the complete struct before processing fields. Positional
      * initializers could defer this until the first omitted member, but a
@@ -851,7 +852,7 @@ void parse_struct_field_init(block_t *parent,
             if (field_idx >= struct_type->num_fields ||
                 ((struct_type->base_type == TYPE_union ||
                   struct_type->is_union) &&
-                 field_idx > 0))
+                 initializer_count > 0))
                 error_at("Too many elements in record initializer",
                          next_token_loc());
 
@@ -901,6 +902,7 @@ void parse_struct_field_init(block_t *parent,
             }
 
             field_idx++;
+            initializer_count++;
             if (!lex_accept(T_comma))
                 break;
             if (lex_peek(T_close_curly, NULL))
@@ -1317,6 +1319,7 @@ void parse_array_compound_literal(var_t *var,
      * literal into an inferred-size one.
      */
     int declared_size = var->array_size;
+    int inferred_size = 0;
     var->init_val = 0;
 
     /* A designated element can leave holes before or after it, so initialize
@@ -1341,9 +1344,6 @@ void parse_array_compound_literal(var_t *var,
     if (!lex_peek(T_close_curly, NULL)) {
         for (;;) {
             if (lex_accept(T_open_square)) {
-                if (!declared_size)
-                    error_at("Array designator needs an explicit array bound",
-                             cur_token_loc());
                 count = read_const_expr();
                 lex_expect(T_close_square);
                 lex_expect(T_assign);
@@ -1351,19 +1351,69 @@ void parse_array_compound_literal(var_t *var,
             if (declared_size && count >= declared_size)
                 error_at("Too many elements in array compound literal",
                          next_token_loc());
+            if (!declared_size && count >= MAX_IMPLICIT_ARRAY)
+                error_at("Too many elements in array compound literal",
+                         next_token_loc());
 
-            read_expr(parent, bb);
-            read_ternary_operation(parent, bb);
-            var_t *value = opstack_pop();
-            if (count == 0)
-                var->init_val = value->init_val;
+            /* An inferred-bound array gets its size only after the closing
+             * brace. Still zero every gap before storing a designator so the
+             * automatic object obeys C99's aggregate initialization rule.
+             * inferred_size is one past the highest initialized slot, so a
+             * later backward designator cannot make a forward gap overwrite an
+             * earlier explicit value.
+             */
+            if (!declared_size && count > inferred_size) {
+                var_t *zero = require_var(parent);
+                zero->var_name = gen_name();
+                zero->init_val = 0;
+                add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0,
+                         NULL);
+                for (int i = inferred_size; i < count; i++) {
+                    var_t *gap_addr =
+                        compute_element_address(parent, bb, var, i, elem_size);
+                    for (int offset = 0; offset < elem_size; offset++) {
+                        var_t *byte_addr = compute_element_address(
+                            parent, bb, gap_addr, offset, 1);
+                        add_insn(parent, *bb, OP_write, NULL, byte_addr, zero,
+                                 1, NULL);
+                    }
+                }
+            }
 
-            var_t *store_val = resize_to(parent, bb, value, var->type, 0);
             var_t *elem_addr =
                 compute_element_address(parent, bb, var, count, elem_size);
-            add_insn(parent, *bb, OP_write, NULL, elem_addr, store_val,
-                     elem_size, NULL);
+            if (lex_peek(T_open_curly, NULL) && is_record_type(var->type)) {
+                /* The array compound literal owns a real aggregate object, just
+                 * like an ordinary array initializer. A braced element must
+                 * therefore be lowered through the shared record path; treating
+                 * it as an expression rejected the opening brace and made
+                 * (struct S[]){ { ... }, { ... } } unusable.
+                 */
+                type_t *record_type = var->type;
+                if (record_type->base_type == TYPE_typedef &&
+                    record_type->base_struct)
+                    record_type = record_type->base_struct;
 
+                lex_expect(T_open_curly);
+                parse_struct_field_init(parent, bb, record_type, elem_addr,
+                                        true);
+                lex_expect(T_close_curly);
+            } else {
+                read_expr(parent, bb);
+                read_ternary_operation(parent, bb);
+                var_t *value = opstack_pop();
+                if (count == 0)
+                    var->init_val = value->init_val;
+
+                var_t *store_val = resize_to(parent, bb, value, var->type, 0);
+                add_insn(parent, *bb, OP_write, NULL, elem_addr, store_val,
+                         elem_size, NULL);
+            }
+
+            if (!declared_size) {
+                if (count + 1 > inferred_size)
+                    inferred_size = count + 1;
+            }
             count++;
             if (!lex_accept(T_comma))
                 break;
@@ -1374,7 +1424,7 @@ void parse_array_compound_literal(var_t *var,
 
     lex_expect(T_close_curly);
 
-    var->array_size = declared_size ? declared_size : count;
+    var->array_size = declared_size ? declared_size : inferred_size;
 }
 
 /* Identify compiler-emitted temporaries that hold array compound literals. They
@@ -1737,7 +1787,10 @@ void read_parameter_list_decl(func_t *func, bool anon)
         if (vn >= MAX_PARAMS)
             error_at("Too many parameters", cur_token_loc());
         read_full_var_decl(&func->param_defs[vn], anon, true);
-        func->param_defs[vn].is_const_qualified = is_const;
+        func->param_defs[vn].is_const_qualified |= is_const;
+        func->param_defs[vn].is_aggregate_param =
+            is_record_type(func->param_defs[vn].type) &&
+            !func->param_defs[vn].ptr_level;
         vn++;
         lex_accept(T_comma);
     }
@@ -1887,9 +1940,28 @@ void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
 
         if (func && param_num < func->num_params) {
             var_t *target = &func->param_defs[param_num];
-            if (!target->ptr_level && !target->array_size)
+            if (is_record_type(target->type) && !target->ptr_level) {
+                /* A record parameter is a by-value object. Keep that promise
+                 * without teaching every backend its native aggregate ABI: give
+                 * the callee an addressable caller-side copy in one
+                 * pointer-sized ABI slot.
+                 */
+                if (!is_record_object(param))
+                    error_at("Record argument required", cur_token_loc());
+
+                var_t *copy = require_typed_var(parent, target->type);
+                copy->var_name = gen_name();
+                add_insn(parent, *bb, OP_allocat, copy, NULL, NULL, 0, NULL);
+                emit_record_copy(parent, bb, copy, param);
+
+                param = require_ref_var(parent, target->type, 0);
+                param->var_name = gen_name();
+                add_insn(parent, *bb, OP_address_of, param, copy, NULL, 0,
+                         NULL);
+            } else if (!target->ptr_level && !target->array_size) {
                 param =
                     scalarize_array_literal(parent, bb, param, target->type);
+            }
         }
 
         /* Handle parameter type conversion for direct calls. Indirect calls
@@ -1909,7 +1981,10 @@ void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
              * arguments than a non-variadic function declares crashed the
              * compiler instead of compiling or diagnosing the call.
              */
-            param = resize_var(parent, bb, param, &func->param_defs[param_num]);
+            if (!is_record_type(func->param_defs[param_num].type) ||
+                func->param_defs[param_num].ptr_level)
+                param =
+                    resize_var(parent, bb, param, &func->param_defs[param_num]);
         }
 
         params[param_num++] = param;
@@ -2194,6 +2269,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     int ptr_cnt = 0;
     token_t *sizeof_tk = cur_token;
     type_t *type = NULL;
+    bool is_function = false;
     var_t *vd;
 
     lex_expect(T_open_bracket);
@@ -2232,10 +2308,15 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         var_t *expr_var = opstack_pop();
         type = expr_var->type;
         ptr_cnt = expr_var->ptr_level;
+        is_function = expr_var->is_func;
     }
 
     if (!type)
         error_at("Unable to determine type in sizeof", &sizeof_tk->location);
+    if (type == TY_void && ptr_cnt == 0)
+        error_at("sizeof(void) is invalid", &sizeof_tk->location);
+    if (is_function && ptr_cnt == 0)
+        error_at("sizeof(function) is invalid", &sizeof_tk->location);
 
     vd = require_var(parent);
     vd->init_val = ptr_cnt ? PTR_SIZE : type->size;
@@ -2774,6 +2855,13 @@ int get_pointer_element_size(var_t *ptr_var)
     if (!ptr_var || !ptr_var->type)
         return PTR_SIZE; /* Default to pointer size */
 
+    /* An array of pointers decays to a pointer-to-pointer. The declaration
+     * records its element's indirection level, so account for the decay before
+     * deriving the pointed-to object size.
+     */
+    if (ptr_var->array_size && ptr_var->ptr_level)
+        return PTR_SIZE;
+
     /* Direct pointer with type info.
      *
      * Only a single level of indirection points at the base type. For deeper
@@ -2805,6 +2893,24 @@ int get_pointer_element_size(var_t *ptr_var)
     return ptr_var->type->size ? ptr_var->type->size : PTR_SIZE;
 }
 
+/* A direct void pointer has no complete pointed-to object type. A pointer to
+ * void pointer (void **) is different: its elements are pointer objects and
+ * therefore have a known size.
+ */
+bool is_direct_void_pointer(const var_t *var)
+{
+    if (!var || !var->type || var->type->base_type != TYPE_void)
+        return false;
+    return var->ptr_level == 1 ||
+           (var->ptr_level == 0 && var->type->ptr_level == 1);
+}
+
+bool is_direct_void_pointer_type(const type_t *type, int ptr_level)
+{
+    return type && type->base_type == TYPE_void &&
+           (ptr_level == 1 || (ptr_level == 0 && type->ptr_level == 1));
+}
+
 /* Helper function to handle pointer arithmetic (add/sub with scaling) */
 void handle_pointer_arithmetic(block_t *parent,
                                basic_block_t **bb,
@@ -2815,6 +2921,9 @@ void handle_pointer_arithmetic(block_t *parent,
     var_t *ptr_var = NULL;
     var_t *int_var = NULL;
     int element_size = 0;
+
+    if (is_direct_void_pointer(rs1) || is_direct_void_pointer(rs2))
+        error_at("Pointer arithmetic on void* is invalid", cur_token_loc());
 
     /* Pointer arithmetic: differences (char*, int*, struct*, etc.),
      * addition/increment with scaling, and array indexing.
@@ -2854,52 +2963,7 @@ void handle_pointer_arithmetic(block_t *parent,
              */
             element_size = PTR_SIZE; /* Default */
 
-            /* Get element size from the first pointer */
-            if (orig_rs1->type) {
-                /* Check if this is a typedef pointer or regular pointer */
-                if (orig_rs1->type->ptr_level > 0) {
-                    /* Typedef pointer - element size from base type */
-                    switch (orig_rs1->type->base_type) {
-                    case TYPE_char:
-                        element_size = 1;
-                        break;
-                    case TYPE_short:
-                        element_size = 2;
-                        break;
-                    case TYPE_int:
-                        element_size = 4;
-                        break;
-                    default:
-                        /* For struct/union typedef pointers, use the actual
-                         * type size
-                         */
-                        if (orig_rs1->type->size > 0)
-                            element_size = orig_rs1->type->size;
-                        break;
-                    }
-                } else if (orig_rs1->ptr_level > 0) {
-                    /* Regular pointer (e.g., int *p) - type gives the base type
-                     */
-                    switch (orig_rs1->type->base_type) {
-                    case TYPE_char:
-                        element_size = 1;
-                        break;
-                    case TYPE_short:
-                        element_size = 2;
-                        break;
-                    case TYPE_int:
-                        element_size = 4;
-                        break;
-                    case TYPE_void:
-                        element_size = 1; /* void* arithmetic uses byte size */
-                        break;
-                    default:
-                        /* For struct pointers, use the struct size */
-                        element_size = orig_rs1->type->size;
-                        break;
-                    }
-                }
-            }
+            element_size = get_pointer_element_size(orig_rs1);
 
             /* Perform subtraction first */
             var_t *diff = require_var(parent);
@@ -3538,6 +3602,9 @@ void read_lvalue(lvalue_t *lvalue,
      */
     if (allow_ptr_arith && lex_peek(T_plus, NULL) &&
         (var->ptr_level || var->array_size) && !lvalue->is_reference) {
+        if (!var->array_size &&
+            is_direct_void_pointer_type(lvalue->type, lvalue->ptr_level))
+            error_at("Pointer arithmetic on void* is invalid", cur_token_loc());
         while (lex_peek(T_plus, NULL) && (var->ptr_level || var->array_size)) {
             lex_expect(T_plus);
             if (lvalue->is_reference) {
@@ -3555,7 +3622,7 @@ void read_lvalue(lvalue_t *lvalue,
              * pointer that pointee is itself a pointer, so the stride is
              * PTR_SIZE rather than the base type's width.
              */
-            if (var->ptr_level > 1)
+            if (var->ptr_level > 1 || (var->array_size && var->ptr_level))
                 lvalue->size = PTR_SIZE;
             else
                 lvalue->size = lvalue->type->size;
@@ -3580,18 +3647,13 @@ void read_lvalue(lvalue_t *lvalue,
             rs1 = opstack_pop();
             vd = require_var(parent);
 
-            /* A pointer plus an integer is still a pointer of the same type;
-             * without this the result looks like a plain int and a later
-             * dereference reads the base type's width instead of a pointer.
-             *
-             * Only genuine pointers are propagated. An array base has ptr_level
-             * 0, and copying that would label the sum with the element type,
-             * making get_size() report the element width for what is actually
-             * an address.
+            /* A pointer plus an integer is still a pointer. Array expressions
+             * first decay to a pointer, adding one level to the declaration's
+             * element indirection.
              */
-            if (var->ptr_level) {
+            if (var->ptr_level || var->array_size) {
                 vd->type = lvalue->type;
-                vd->ptr_level = var->ptr_level;
+                vd->ptr_level = var->ptr_level + !!var->array_size;
             }
             vd->var_name = gen_name();
             opstack_push(vd);
@@ -3615,12 +3677,18 @@ void read_lvalue(lvalue_t *lvalue,
             add_insn(parent, *bb, OP_read, t, rs1, NULL, lvalue->size, NULL);
         }
         if (prefix_op != OP_generic) {
+            if ((prefix_op == OP_add || prefix_op == OP_sub) &&
+                is_direct_void_pointer_type(lvalue->type, lvalue->ptr_level))
+                error_at("Pointer arithmetic on void* is invalid",
+                         cur_token_loc());
             vd = require_var(parent);
             vd->var_name = gen_name();
 
             /* For pointer arithmetic, increment by the size of pointed-to type
              */
-            if (lvalue->ptr_level)
+            if (lvalue->ptr_level > 1)
+                vd->init_val = PTR_SIZE;
+            else if (lvalue->ptr_level)
                 vd->init_val = lvalue->type->size;
             else
                 vd->init_val = 1;
@@ -3653,6 +3721,10 @@ void read_lvalue(lvalue_t *lvalue,
                 add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
             }
         } else if (lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) {
+            if (is_direct_void_pointer_type(lvalue->type, lvalue->ptr_level))
+                error_at("Pointer arithmetic on void* is invalid",
+                         cur_token_loc());
+
             /* This arm appends three entries, so check for room once before
              * writing any of them.
              */
@@ -3666,7 +3738,9 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* Calculate increment size based on pointer type */
             int increment_size = 1;
-            if (lvalue->ptr_level && !lvalue->is_reference) {
+            if (lvalue->ptr_level > 1 && !lvalue->is_reference) {
+                increment_size = PTR_SIZE;
+            } else if (lvalue->ptr_level && !lvalue->is_reference) {
                 increment_size = lvalue->type->size;
             } else if (!lvalue->is_reference && lvalue->type &&
                        lvalue->type->ptr_level > 0) {
@@ -4031,10 +4105,17 @@ bool read_body_assignment(char *token,
         if (op != OP_generic) {
             int increment_size = 1;
 
+            if ((op == OP_add || op == OP_sub) &&
+                is_direct_void_pointer_type(lvalue.type, lvalue.ptr_level))
+                error_at("Pointer arithmetic on void* is invalid",
+                         cur_token_loc());
+
             /* if we have a pointer, shift it by element size But not if we are
              * operating on a dereferenced value (array indexing)
              */
-            if (lvalue.ptr_level && !lvalue.is_reference)
+            if (lvalue.ptr_level > 1 && !lvalue.is_reference)
+                increment_size = PTR_SIZE;
+            else if (lvalue.ptr_level && !lvalue.is_reference)
                 increment_size = lvalue.type->size;
             /* Also check for typedef pointers which have is_ptr == 0 */
             else if (!lvalue.is_reference && lvalue.type &&
@@ -5334,6 +5415,9 @@ void read_func_body(func_t *func)
 
     for (int i = 0; i < func->num_params; i++) {
         /* arguments */
+        func->param_defs[i].is_aggregate_param =
+            is_record_type(func->param_defs[i].type) &&
+            !func->param_defs[i].ptr_level;
         add_symbol(func->bbs, &func->param_defs[i]);
         func->param_defs[i].base = &func->param_defs[i];
         var_add_killed_bb(&func->param_defs[i], func->bbs);

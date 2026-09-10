@@ -827,6 +827,42 @@ int main(void) {
 }
 EOF
 
+# Array compound literals use the same aggregate-element path as ordinary array
+# initializers, including nested braces, omitted members, and element
+# designators.
+try_ 8 << EOF
+struct pair { int first; int second; };
+int main(void) {
+    struct pair *values = (struct pair[]){ {1, 2}, {3, 4} };
+    return values[0].first + values[1].second + values[1].first;
+}
+EOF
+
+try_ 10 << EOF
+struct pair { int first; int second; };
+int main(void) {
+    struct pair *values = (struct pair[3]){
+        [2] = {.second = 9}, [0] = {.first = 1}
+    };
+    return values[0].first + values[0].second + values[1].first +
+           values[1].second + values[2].first + values[2].second;
+}
+EOF
+
+# An omitted bound is inferred through the largest designator. Reordered
+# designators must preserve earlier stores while all untouched records remain
+# zero-initialized.
+try_ 10 << EOF
+struct pair { int first; int second; };
+int main(void) {
+    struct pair *values = (struct pair[]){
+        [3] = {.second = 3}, [1] = {.first = 1}, [4] = {.second = 6}
+    };
+    return values[0].first + values[0].second + values[1].first +
+           values[2].second + values[3].second + values[4].second;
+}
+EOF
+
 # Nested record braces initialize the nested object before continuing at the
 # following outer member.
 try_ 12 << EOF
@@ -977,6 +1013,32 @@ int main(void) {
 }
 EOF
 
+# Record arguments are passed by value: the callee receives every byte, but a
+# write to its parameter cannot modify the caller's object.
+try_ 250 << EOF
+struct values { int a; int b; int c; int d; int e; };
+int consume(struct values value) {
+    value.a = 100;
+    return value.a + value.b + value.c + value.d + value.e;
+}
+int main(void) {
+    struct values source = {10, 20, 30, 40, 50};
+    return consume(source) + source.a;
+}
+EOF
+
+# The aggregate ABI slot must work after all register argument slots are full.
+try_ 25 << EOF
+struct pair { int first; int second; };
+int consume(int a, int b, int c, int d, int e, int f, struct pair value) {
+    return a + b + c + d + e + f + value.first + value.second;
+}
+int main(void) {
+    struct pair value = {7, 8};
+    return consume(1, 2, 3, 4, 0, 0, value);
+}
+EOF
+
 try_compile_error << EOF
 struct point { int x; int y; };
 int main(void) {
@@ -990,6 +1052,14 @@ union number { int integer; char character; };
 int main(void) {
     union number value = {1, 2};
     return value.integer;
+}
+EOF
+
+try_ 5 << EOF
+union number { int integer; char character; };
+int main(void) {
+    union number value = {.character = 5};
+    return value.character;
 }
 EOF
 
@@ -1038,6 +1108,23 @@ int main(void) {
     int *values = (int[2]){3, 4, 5};
     return values[0];
 }
+EOF
+
+try_compile_error << EOF
+int change(signed const int value) {
+    value = 2;
+    return value;
+}
+int main(void) { return change(1); }
+EOF
+
+try_compile_error << EOF
+typedef const int const_int;
+int change(const_int value) {
+    value = 2;
+    return value;
+}
+int main(void) { return change(1); }
 EOF
 
 # Extended compound literal tests (C99-style brace initialization)
@@ -2023,13 +2110,73 @@ int main() {
 }
 EOF
 
-# Test with void* cast (treated as char*)
-try_ 8 << EOF
+# C99 does not define arithmetic on void pointers.
+try_compile_error << EOF
 int main() {
     char array[20];
     void *vp1 = array;
-    void *vp2 = array + 8;
-    return (char*)vp2 - (char*)vp1;
+    return vp1 + 8;
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    char array[20];
+    void *vp1 = array;
+    return vp1 - 1;
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    char array[20];
+    void *vp1 = array;
+    vp1++;
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    char array[20];
+    void *vp1 = array;
+    ++vp1;
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+int main() {
+    char array[20];
+    void *vp1 = array;
+    vp1 += 1;
+    return 0;
+}
+EOF
+
+# A pointer-to-void-pointer advances over pointer objects, so it remains valid.
+try_ 1 << EOF
+int main() {
+    void *values[2];
+    void **p = values;
+    p += 1;
+    return (char *)p - (char *)values == 8;
+}
+EOF
+
+# An array of pointers decays to a pointer-to-pointer. Its stride is a pointer
+# object, not the size of the pointee base type.
+try_ 1 << EOF
+int main() {
+    int *values[2];
+    return (char *)(values + 1) - (char *)values == 8;
+}
+EOF
+
+try_ 1 << EOF
+int main() {
+    int *values[3];
+    return (values + 2) - (values + 1);
 }
 EOF
 
@@ -3059,6 +3206,16 @@ int main(void) {
 }
 EOF
 
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    const int *p = &value;
+    const int **pp = &p;
+    **pp = 2;
+    return value;
+}
+EOF
+
 # Test 1: Basic const local variable
 try_ 42 << EOF
 int main() {
@@ -3275,7 +3432,22 @@ items 24 "short s; s = 6; s *= 4; return s;"
 begin_category "Sizeof Operator" "Testing sizeof operator on various types"
 
 # sizeof
-expr 0 "sizeof(void)"
+try_compile_error << EOF
+int main(void)
+{
+    return sizeof(void);
+}
+EOF
+try_compile_error << EOF
+int value(void)
+{
+    return 1;
+}
+int main(void)
+{
+    return sizeof(value);
+}
+EOF
 expr 1 "sizeof(_Bool)"
 expr 1 "sizeof(char)"
 expr 2 "sizeof(short)"

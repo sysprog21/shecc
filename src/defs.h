@@ -643,6 +643,13 @@ struct var {
      * array or struct literal temporaries).
      */
     bool is_compound_literal;
+
+    /* C ABI lowering passes record parameters as pointers to caller-owned
+     * copies. The source-level declaration remains a record so field access and
+     * record assignment keep their C semantics; OP_address_of materializes the
+     * hidden incoming pointer instead of an address of a scalar slot.
+     */
+    bool is_aggregate_param;
 };
 
 typedef struct func func_t;
