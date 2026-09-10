@@ -350,6 +350,7 @@ typedef enum {
     T_goto,
     T_const, /* const qualifier */
     T_static,
+    T_signed,
     /* C pre-processor directives */
     T_cppd_include,
     T_cppd_define,
@@ -729,6 +730,7 @@ struct type {
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
     bool is_union; /* preserves union semantics for anonymous typedef unions */
+    bool is_const_qualified; /* qualifier carried by a scalar typedef */
 };
 
 /* lvalue details */

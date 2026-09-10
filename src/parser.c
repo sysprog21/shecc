@@ -1137,8 +1137,8 @@ void parse_array_init(var_t *var,
                       bool emit_code)
 {
     int count = 0;
+    int inferred_size = 0;
     var_t *base_addr = NULL;
-    var_t *stored_vals[MAX_IMPLICIT_ARRAY];
     bool is_implicit = (var->array_size == 0);
 
     /* Elements of a pointer array are pointer-sized. Using the base type's
@@ -1179,14 +1179,9 @@ void parse_array_init(var_t *var,
     if (!lex_peek(T_close_curly, NULL)) {
         for (;;) {
             var_t *val = NULL;
+            int prior_count = count;
 
             if (lex_accept(T_open_square)) {
-                if (parent == GLOBAL_BLOCK)
-                    error_at("Global array designators are not supported",
-                             cur_token_loc());
-                if (is_implicit)
-                    error_at("Array designator needs an explicit array bound",
-                             cur_token_loc());
                 count = read_const_expr();
                 lex_expect(T_close_square);
                 lex_expect(T_assign);
@@ -1246,18 +1241,36 @@ void parse_array_init(var_t *var,
                 val = opstack_pop();
             }
 
-            if (is_implicit && emit_code) {
-                /* Truncating would declare array_size == count while storing
-                 * fewer elements, so refuse.
-                 */
-                if (count >= MAX_IMPLICIT_ARRAY)
-                    error_at("Too many elements in array initializer",
-                             next_token_loc());
-                stored_vals[count] = val;
-            }
+            if (is_implicit && count >= MAX_IMPLICIT_ARRAY)
+                error_at("Too many elements in array initializer",
+                         next_token_loc());
 
-            if (val && emit_code && !is_implicit && count < var->array_size) {
+            if (val && emit_code && (is_implicit || count < var->array_size)) {
                 var_t *v = resize_to(parent, bb, val, var->type, 0);
+
+                /* A forward designator leaves a gap. Explicit arrays were
+                 * zeroed before parsing; inferred local arrays do not have a
+                 * known bound yet, so zero just the newly skipped elements.
+                 * Global storage begins zeroed.
+                 */
+                if (is_implicit && parent != GLOBAL_BLOCK &&
+                    count > prior_count) {
+                    var_t *zero = require_var(parent);
+                    zero->var_name = gen_name();
+                    zero->init_val = 0;
+                    add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0,
+                             NULL);
+                    for (int i = prior_count; i < count; i++) {
+                        var_t *gap_addr = compute_element_address(
+                            parent, bb, base_addr, i, elem_size);
+                        for (int offset = 0; offset < elem_size; offset++) {
+                            var_t *byte_addr = compute_element_address(
+                                parent, bb, gap_addr, offset, 1);
+                            add_insn(parent, *bb, OP_write, NULL, byte_addr,
+                                     zero, 1, NULL);
+                        }
+                    }
+                }
 
                 var_t *elem_addr = compute_element_address(
                     parent, bb, base_addr, count, elem_size);
@@ -1271,6 +1284,8 @@ void parse_array_init(var_t *var,
             }
 
             count++;
+            if (is_implicit && count > inferred_size)
+                inferred_size = count;
             if (!lex_accept(T_comma))
                 break;
             if (lex_peek(T_close_curly, NULL))
@@ -1283,23 +1298,7 @@ void parse_array_init(var_t *var,
     if (is_implicit) {
         if (var->ptr_level > 0)
             var->ptr_level = 0;
-        var->array_size = count;
-
-        if (emit_code && count > 0) {
-            base_addr = var;
-
-            for (int i = 0; i < count; i++) {
-                if (!stored_vals[i])
-                    continue;
-                var_t *v = resize_to(parent, bb, stored_vals[i], var->type, 0);
-
-                var_t *elem_addr = compute_element_address(
-                    parent, bb, base_addr, i, elem_size);
-
-                add_insn(parent, *bb, OP_write, NULL, elem_addr, v, elem_size,
-                         NULL);
-            }
-        }
+        var->array_size = inferred_size;
     }
 }
 
@@ -1659,12 +1658,27 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 void read_full_var_decl(var_t *vd, bool anon, bool is_param)
 {
     char type_name[MAX_ID_LEN];
+    bool is_signed = lex_accept(T_signed);
+    bool is_const = lex_accept(T_const);
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union)) {
         find_type_flag = 2;
     }
-    lex_ident(T_identifier, type_name);
-    type_t *type = find_type(type_name, find_type_flag);
+    type_t *type;
+
+    /* `signed` has the existing signed scalar semantics. C permits its `int`
+     * spelling to be omitted, while `signed char` and `signed short` retain
+     * their explicit base type.
+     */
+    if (is_signed && find_type_flag == 1 &&
+        (!lex_peek(T_identifier, type_name) ||
+         (strcmp(type_name, "int") && strcmp(type_name, "char") &&
+          strcmp(type_name, "short")))) {
+        type = TY_int;
+    } else {
+        lex_ident(T_identifier, type_name);
+        type = find_type(type_name, find_type_flag);
+    }
 
     if (!type) {
         printf("Could not find type %s%s\n",
@@ -1674,6 +1688,13 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
     }
 
     vd->type = type;
+    vd->is_const_qualified |= type->is_const_qualified;
+    if (is_const) {
+        if (type->ptr_level)
+            vd->is_const_pointer = true;
+        else
+            vd->is_const_qualified = true;
+    }
 
     read_inner_var_decl(vd, anon, is_param);
 }
@@ -1706,7 +1727,8 @@ void read_parameter_list_decl(func_t *func, bool anon)
     }
 
     while (lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL) ||
-           lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
+           lex_peek(T_signed, NULL) || lex_peek(T_struct, NULL) ||
+           lex_peek(T_union, NULL)) {
         /* Check for const qualifier */
         bool is_const = false;
         if (lex_accept(T_const))
@@ -2177,11 +2199,22 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     lex_expect(T_open_bracket);
 
     /* Check if this is sizeof(type) or sizeof(expression) */
+    bool has_signed_type = lex_accept(T_signed);
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union))
         find_type_flag = 2;
 
-    if (lex_peek(T_identifier, token)) {
+    if (has_signed_type) {
+        type = TY_int;
+        if (lex_peek(T_identifier, token) &&
+            (!strcmp(token, "int") || !strcmp(token, "char") ||
+             !strcmp(token, "short"))) {
+            lex_expect(T_identifier);
+            type = find_type(token, true);
+        }
+        while (lex_accept(T_asterisk))
+            ptr_cnt++;
+    } else if (lex_peek(T_identifier, token)) {
         /* Try to parse as a type first */
         type = find_type(token, find_type_flag);
         if (type) {
@@ -2291,23 +2324,38 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         int cast_array_size = 0;
 
         /* Look ahead to see if we have a typename followed by ) */
-        if (lex_peek(T_identifier, lookahead_token) ||
+        token_t *type_start = cur_token;
+        bool has_signed_type = lex_accept(T_signed);
+        if (has_signed_type || lex_peek(T_identifier, lookahead_token) ||
             lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
             /* Check if it's a basic type or typedef */
-            token_t *saved_token = cur_token;
+            token_t *saved_token = type_start;
             bool is_record = lex_accept(T_struct);
             if (!is_record)
                 is_record = lex_accept(T_union);
             if (is_record)
                 lex_ident(T_identifier, lookahead_token);
 
-            type_t *type = find_type(lookahead_token, is_record ? 2 : true);
+            type_t *type;
+            if (has_signed_type && !is_record) {
+                if (lex_peek(T_identifier, lookahead_token) &&
+                    (!strcmp(lookahead_token, "int") ||
+                     !strcmp(lookahead_token, "char") ||
+                     !strcmp(lookahead_token, "short"))) {
+                    lex_expect(T_identifier);
+                    type = find_type(lookahead_token, true);
+                } else {
+                    type = TY_int;
+                }
+            } else {
+                type = find_type(lookahead_token, is_record ? 2 : true);
+            }
 
             if (type) {
                 /* Save current position to backtrack if needed Try to parse as
                  * typename
                  */
-                if (!is_record)
+                if (!is_record && !has_signed_type)
                     lex_expect(T_identifier);
 
                 /* Check for pointer types: int*, char*, etc. */
@@ -4911,7 +4959,9 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     bool has_identifier = lex_peek(T_identifier, token);
     bool has_record_keyword =
         lex_peek(T_struct, NULL) || lex_peek(T_union, NULL);
-    if (!is_const && !has_identifier && !has_asterisk && !has_record_keyword)
+    bool has_signed_keyword = lex_peek(T_signed, NULL);
+    if (!is_const && !has_identifier && !has_asterisk && !has_record_keyword &&
+        !has_signed_keyword)
         error_at("Unexpected token", next_token_loc());
 
     /* is it a variable declaration? Special handling when statement starts with
@@ -4944,14 +4994,18 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     } else {
         /* Normal type checking without asterisk */
         token_t *type_token = cur_token;
-        int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-        if (find_type_flag == 1 && lex_accept(T_union))
-            find_type_flag = 2;
-        if (find_type_flag == 2)
-            lex_peek(T_identifier, token);
-        type = find_type(token, find_type_flag);
-        if (find_type_flag == 2)
-            cur_token = type_token;
+        if (lex_peek(T_signed, NULL)) {
+            type = TY_int;
+        } else {
+            int find_type_flag = lex_accept(T_struct) ? 2 : 1;
+            if (find_type_flag == 1 && lex_accept(T_union))
+                find_type_flag = 2;
+            if (find_type_flag == 2)
+                lex_peek(T_identifier, token);
+            type = find_type(token, find_type_flag);
+            if (find_type_flag == 2)
+                cur_token = type_token;
+        }
     }
 
     if (type) {
@@ -5038,7 +5092,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             nv = require_typed_var(parent, type);
             nv->is_static = is_static;
             nv->is_global = is_static;
-            nv->is_const_qualified = is_const;
+            nv->is_const_qualified = var->is_const_qualified;
             read_partial_var_decl(nv, var); /* partial */
             add_insn(is_static ? GLOBAL_BLOCK : parent,
                      is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, nv, NULL,
@@ -5538,7 +5592,8 @@ void read_global_decl(block_t *block, bool is_const, bool is_static)
      * first, mirroring what the struct-tagged global path already does.
      */
     while (lex_accept(T_comma))
-        read_global_declarator(block, var->type, is_const, is_static);
+        read_global_declarator(block, var->type, var->is_const_qualified,
+                               is_static);
 
     lex_expect(T_semicolon);
     return;
@@ -5864,14 +5919,26 @@ void read_global_statement(void)
             char base_type[MAX_ID_LEN];
             const type_t *base;
             type_t *type = add_type();
-            lex_ident(T_identifier, base_type);
-            base = find_type(base_type, true);
+            bool typedef_const = lex_accept(T_const);
+            bool is_signed = lex_accept(T_signed);
+
+            if (is_signed &&
+                (!lex_peek(T_identifier, base_type) ||
+                 (strcmp(base_type, "int") && strcmp(base_type, "char") &&
+                  strcmp(base_type, "short")))) {
+                base = TY_int;
+            } else {
+                lex_ident(T_identifier, base_type);
+                base = find_type(base_type, true);
+            }
             if (!base)
                 error_at("Unable to find base type", cur_token_loc());
             type->base_type = base->base_type;
             type->size = base->size;
             type->num_fields = 0;
             type->ptr_level = 0;
+            type->is_const_qualified =
+                typedef_const || base->is_const_qualified;
 
             /* Handle pointer types in typedef: typedef char *string; */
             while (lex_accept(T_asterisk)) {
@@ -5882,7 +5949,7 @@ void read_global_statement(void)
             lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
             lex_expect(T_semicolon);
         }
-    } else if (lex_peek(T_identifier, NULL)) {
+    } else if (lex_peek(T_identifier, NULL) || lex_peek(T_signed, NULL)) {
         read_global_decl(block, is_const, is_static);
     } else
         error_at("Syntax error in global statement", next_token_loc());

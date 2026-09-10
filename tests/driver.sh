@@ -1033,7 +1033,6 @@ int main(void) {
     return values[2] != 0 || values[3] != 0;
 }
 EOF
-
 try_compile_error << EOF
 int main(void) {
     int *values = (int[2]){3, 4, 5};
@@ -1426,6 +1425,49 @@ EOF
 
 # Category: Functions
 begin_category "Functions" "Testing function definitions, calls, and recursion"
+
+# `signed` is the existing signed scalar domain; both its explicit and
+# omitted-`int` forms are valid declaration specifiers.
+try_ 5 << EOF
+signed sum(signed int left, signed right)
+{
+    signed char delta = -1;
+    signed short extra = 1;
+    return left + right + delta + extra;
+}
+int main(void)
+{
+    return sum(2, 3);
+}
+EOF
+
+try_compile_error << EOF
+int main(void)
+{
+    signed const int first = 1, second = 2;
+    second = 3;
+    return first + second;
+}
+EOF
+
+try_ 5 << EOF
+int main(void)
+{
+    signed char value = -1;
+    return (signed int)value + (signed)6 + sizeof(signed short) - 2;
+}
+EOF
+
+try_ 7 << EOF
+typedef signed int signed_count_t;
+typedef signed char signed_delta_t;
+int main(void)
+{
+    signed_count_t count = 8;
+    signed_delta_t delta = -1;
+    return count + delta;
+}
+EOF
 
 # functions
 try_ 0 << EOF
@@ -2708,6 +2750,96 @@ int main(void)
 }
 EOF
 
+# File-scope member designators may reorder fields; omitted fields are zero.
+try_ 7 << EOF
+struct designated_values { int first; int second; int third; };
+struct designated_values values = {.third = 5, .second = 2};
+int main(void)
+{
+    return values.first + values.second + values.third;
+}
+EOF
+
+# Keep byte-wide designated stores from clobbering an adjacent member.
+try_ 7 << EOF
+struct byte_designated_values { char first; char second; int third; };
+struct byte_designated_values byte_values = {.third = 5, .second = 2};
+int main(void)
+{
+    return byte_values.first + byte_values.second + byte_values.third;
+}
+EOF
+
+# Bounded array designators use the same global initializer lowering.
+try_ 9 << EOF
+int designated_entries[4] = {[3] = 7, [1] = 2};
+int main(void)
+{
+    return designated_entries[0] + designated_entries[1] +
+           designated_entries[2] + designated_entries[3];
+}
+EOF
+
+# An omitted bound is one past the highest designated element.
+try_ 9 << EOF
+int inferred_entries[] = {[3] = 7, [1] = 2};
+int main(void)
+{
+    return inferred_entries[0] + inferred_entries[1] +
+           inferred_entries[2] + inferred_entries[3];
+}
+EOF
+
+# The same lowering serves block-scope static records.
+try_ 12 << EOF
+struct static_designated_values { int first; int second; int third; };
+int values(void)
+{
+    static struct static_designated_values value = {.third = 8, .second = 4};
+    return value.first + value.second + value.third;
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 8 << EOF
+int values(void)
+{
+    static int entries[3] = {[2] = 5, [0] = 3};
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 8 << EOF
+int values(void)
+{
+    int entries[] = {[2] = 5, [0] = 3};
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
+try_ 8 << EOF
+int values(void)
+{
+    static int entries[] = {[2] = 5, [0] = 3};
+    return entries[0] + entries[1] + entries[2];
+}
+int main(void)
+{
+    return values();
+}
+EOF
+
 try_ 9 << EOF
 struct local_pair { int first; int second; };
 int values(void)
@@ -2813,11 +2945,40 @@ int main(void) {
 }
 EOF
 
+# A scalar typedef preserves const qualification on each use.
+try_compile_error << EOF
+typedef const int const_int;
+int main(void) {
+    const_int value = 1;
+    value = 2;
+    return value;
+}
+EOF
 try_compile_error << EOF
 int main(void) {
     const int x = 1;
     x++;
     return x;
+}
+EOF
+
+try_compile_error << EOF
+typedef int *int_pointer;
+int main(void) {
+    int first = 1, second = 2;
+    int_pointer const pointer = &first;
+    pointer = &second;
+    return *pointer;
+}
+EOF
+
+try_compile_error << EOF
+typedef int *int_pointer;
+int main(void) {
+    int first = 1, second = 2;
+    const int_pointer pointer = &first;
+    pointer = &second;
+    return *pointer;
 }
 EOF
 

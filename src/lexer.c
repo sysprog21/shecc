@@ -12,7 +12,7 @@
 
 /* Hash table constants */
 #define NUM_DIRECTIVES 11
-#define NUM_KEYWORDS 18
+#define NUM_KEYWORDS 20
 
 /* Token mapping structure for elegant initialization */
 typedef struct {
@@ -89,6 +89,7 @@ void lex_init_keywords(void)
         {"union", T_union},
         {"const", T_const},
         {"static", T_static},
+        {"signed", T_signed},
     };
 
     /* hashmap insertion */

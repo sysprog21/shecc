@@ -2152,6 +2152,13 @@ void reg_alloc_global(insn_t *global_insn)
             if (global_insn->rs1->array_size > 0)
                 base_off = global_insn->rs1->init_val;
             ir->src1 = base_off;
+
+            /* OP_global_store selects its instruction width from this field.
+             * Leaving it at zero falls through to an eight-byte store, which
+             * makes a global int field initializer overwrite its successor.
+             */
+            ir->size_bytes = global_insn->sz;
+            ir->is_pointer = global_insn->rs2->ptr_level > 0;
             break;
         }
         /* Fallback generic write */
