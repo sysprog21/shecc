@@ -787,6 +787,12 @@ struct type {
 typedef struct {
     int size;
     int ptr_level;
+
+    /* Pointer depth of the value designated by this lvalue. A subscript
+     * computes an address (one level deeper than its selected value), so this
+     * must not be inferred from the address provenance alone.
+     */
+    int value_ptr_level;
     bool is_func;
     bool is_reference;
     bool is_const_qualified;

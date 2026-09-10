@@ -175,6 +175,8 @@ var_t *require_typed_ptr_var(block_t *blk, type_t *type, int ptr)
     return var;
 }
 
+type_t *pointee_type_from_pointer_typedef(type_t *type);
+
 var_t *require_ref_var(block_t *blk, type_t *type, int ptr)
 {
     if (!type)
@@ -190,18 +192,74 @@ var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
     if (!type)
         error_at("Cannot dereference variable from NULL type", cur_token_loc());
 
+    int effective_ptr = ptr + type->ptr_level;
+
     /* Allowing integer dereferencing */
-    if (!ptr && type->base_type != TYPE_struct &&
+    if (!effective_ptr && type->base_type != TYPE_struct &&
         type->base_type != TYPE_typedef)
         return require_var(blk);
 
-    if (!ptr)
+    if (!effective_ptr)
         error_at("Cannot dereference from non-pointer typed variable",
                  cur_token_loc());
 
-    var_t *var = require_typed_var(blk, type);
-    var->ptr_level = ptr - 1;
+    var_t *var =
+        require_typed_var(blk, pointee_type_from_pointer_typedef(type));
+    var->ptr_level = effective_ptr - 1;
     return var;
+}
+
+/* A pointer typedef stores its pointer depth in type_t rather than var_t. After
+ * indexing through it, use the underlying scalar type for the loaded value and
+ * carry any remaining pointer depth in var_t. Otherwise a `typedef unsigned
+ * char *P; P p; p[0]` read looks like a pointer-sized alias instead of an
+ * unsigned byte to the backend.
+ */
+type_t *pointee_type_from_pointer_typedef(type_t *type)
+{
+    if (!type || !type->ptr_level)
+        return type;
+
+    if (type->base_type == TYPE_typedef && type->base_struct)
+        return type->base_struct;
+
+    switch (type->base_type) {
+    case TYPE_void:
+        return TY_void;
+    case TYPE_char:
+        return type->is_unsigned ? TY_uchar : TY_char;
+    case TYPE_short:
+        return type->is_unsigned ? TY_ushort : TY_short;
+    case TYPE_int:
+        return type->is_unsigned ? TY_uint : TY_int;
+    case TYPE_long:
+        return type->is_unsigned ? TY_ulong : TY_long;
+    case TYPE_long_long:
+        return type->is_unsigned ? TY_ulong_long : TY_long_long;
+    default:
+        return type;
+    }
+}
+
+/* An inline record pointer typedef stores PTR_SIZE in type->size, while its
+ * fields still describe the pointee layout. Recover that layout for indexing;
+ * this differs on 32-bit targets whenever the record is wider than a pointer.
+ */
+int pointer_typedef_pointee_size(type_t *type, type_t *pointee)
+{
+    if (!type || !type->ptr_level || type->base_type != TYPE_typedef ||
+        !type->num_fields)
+        return pointee == TY_void ? 1 : pointee->size;
+
+    int size = 0;
+    for (int i = 0; i < type->num_fields; i++) {
+        int field_size = size_var(&type->fields[i]);
+        int end =
+            type->is_union ? field_size : type->fields[i].offset + field_size;
+        if (end > size)
+            size = end;
+    }
+    return size;
 }
 
 /* The next free field slot of @type.
@@ -1964,8 +2022,6 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
     if (leading_scalar_type == TY_int && lex_peek(T_identifier, type_name) &&
         !strcmp(type_name, "char"))
         error_at("int cannot be combined with char", cur_token_loc());
-    if (is_long_long && PTR_SIZE < 8)
-        error_at("long long needs 64-bit target lowering", cur_token_loc());
     bool is_enum_type = lex_accept(T_enum);
     if (is_enum_type && (is_signed || is_unsigned || is_long))
         error_at("enum type cannot be combined with integer specifiers",
@@ -2057,6 +2113,17 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
     }
 
     read_inner_var_decl(vd, anon, is_param);
+
+    /* A 32-bit target can carry a pointer to an eight-byte object without a
+     * paired-value register representation. Keep direct wide objects, arrays,
+     * parameters, returns, and function-pointer returns rejected until that
+     * lowering exists, but admit declarations such as `long long *p` and
+     * typedef aliases used exclusively behind a pointer.
+     */
+    if (PTR_SIZE < 8 && vd->type && vd->type->base_type == TYPE_long_long &&
+        (!(vd->ptr_level || vd->type->ptr_level) || vd->is_func))
+        error_at("long long value needs 64-bit target lowering",
+                 cur_token_loc());
 }
 
 /* starting next_token, need to check the type */
@@ -2645,7 +2712,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
          * defaults
          */
         type_t *deref_type = rs1->type ? rs1->type : TY_int;
-        int deref_ptr = rs1->ptr_level > 0 ? rs1->ptr_level - 1 : 0;
+        int deref_ptr = rs1->ptr_level + deref_type->ptr_level - 1;
 
         /* require_deref_var() takes the *source* pointer level and returns a
          * variable one level shallower. Passing the already-decremented value
@@ -2673,7 +2740,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
 
         rs1 = opstack_pop();
         vd = require_deref_var(parent, var->type, var->ptr_level);
-        if (lvalue.ptr_level > 1)
+        if (var->ptr_level + var->type->ptr_level > 1)
             sz = PTR_SIZE;
         else {
             /* For typedef pointers, get the size of the pointed-to type */
@@ -2934,9 +3001,11 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     } else if (has_long_type) {
         type = has_unsigned_type ? TY_ulong : TY_long;
         if (long_type_count > 1) {
-            if (PTR_SIZE < 8)
-                error_at("long long needs 64-bit target lowering",
-                         cur_token_loc());
+            /* sizeof only consumes type metadata. It does not materialize a
+             * long-long value, so 32-bit targets can correctly report the
+             * required eight-byte object size before their paired-register
+             * value ABI is implemented.
+             */
             if (has_unsigned_type)
                 type = TY_ulong_long;
             else
@@ -3188,9 +3257,6 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 if (has_long_type) {
                     type = TY_ulong;
                     if (long_type_count > 1) {
-                        if (PTR_SIZE < 8)
-                            error_at("long long needs 64-bit target lowering",
-                                     cur_token_loc());
                         type = TY_ulong_long;
                     }
                     if (lex_peek(T_identifier, lookahead_token) &&
@@ -3219,9 +3285,6 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             } else if (has_long_type && !is_record) {
                 type = TY_long;
                 if (long_type_count > 1) {
-                    if (PTR_SIZE < 8)
-                        error_at("long long needs 64-bit target lowering",
-                                 cur_token_loc());
                     type = TY_long_long;
                 }
                 lex_accept(T_signed);
@@ -3271,6 +3334,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                     while (lex_accept(T_const))
                         cast_const_pointer = true;
                 }
+
+                if (PTR_SIZE < 8 && type->base_type == TYPE_long_long &&
+                    !(ptr_level || type->ptr_level))
+                    error_at("long long value needs 64-bit target lowering",
+                             cur_token_loc());
 
                 /* Check for array brackets: [size] or [] */
                 bool is_array = false;
@@ -4383,6 +4451,7 @@ void read_lvalue(lvalue_t *lvalue,
     lvalue->decl = var;
     lvalue->size = get_size(var);
     lvalue->ptr_level = var->ptr_level;
+    lvalue->value_ptr_level = var->ptr_level + var->type->ptr_level;
     lvalue->is_func = var->is_func;
     lvalue->is_reference = false;
 
@@ -4404,6 +4473,8 @@ void read_lvalue(lvalue_t *lvalue,
     while (lex_peek(T_open_square, NULL) || lex_peek(T_arrow, NULL) ||
            lex_peek(T_dot, NULL)) {
         if (lex_accept(T_open_square)) {
+            int indexed_ptr_level;
+
             /* if subscripted member's is not yet resolved, dereference to
              * resolve base address. e.g., dereference of "->" in "data->raw[0]"
              * would be performed here.
@@ -4425,6 +4496,19 @@ void read_lvalue(lvalue_t *lvalue,
                 error_at("Cannot apply square operator to non-pointer",
                          cur_token_loc());
 
+            /* The selected value has one less indirection than the expression
+             * being indexed. An array first decays to a pointer to its element;
+             * after an earlier subscript, use that selected value as the next
+             * indexing source.
+             */
+            if (subscript_depth)
+                indexed_ptr_level = lvalue->value_ptr_level;
+            else
+                indexed_ptr_level =
+                    var->ptr_level + var->type->ptr_level + !!var->array_size;
+            lvalue->value_ptr_level =
+                indexed_ptr_level ? indexed_ptr_level - 1 : 0;
+
             /* if nested pointer, still pointer Also handle typedef pointers
              * which have ptr_level == 0
              */
@@ -4434,25 +4518,17 @@ void read_lvalue(lvalue_t *lvalue,
                  * pointer points to
                  */
                 if (lvalue->type->ptr_level > 0) {
-                    /* This is a typedef pointer, get base type size */
-                    switch (lvalue->type->base_type) {
-                    case TYPE_char:
-                        lvalue->size = TY_char->size;
-                        break;
-                    case TYPE_short:
-                        lvalue->size = TY_short->size;
-                        break;
-                    case TYPE_int:
-                        lvalue->size = TY_int->size;
-                        break;
-                    case TYPE_void:
-                        /* void pointers treated as byte pointers */
-                        lvalue->size = 1;
-                        break;
-                    default:
-                        lvalue->size = lvalue->type->size;
-                        break;
-                    }
+                    type_t *pointee =
+                        pointee_type_from_pointer_typedef(lvalue->type);
+
+                    /* void pointers retain the existing byte-stride extension;
+                     * every other typedef pointer advances by its actual
+                     * pointee, including a tagged record reached through a
+                     * typedef alias.
+                     */
+                    lvalue->size =
+                        pointer_typedef_pointee_size(lvalue->type, pointee);
+                    lvalue->type = pointee;
                 } else {
                     lvalue->size = lvalue->type->size;
                 }
@@ -4551,6 +4627,7 @@ void read_lvalue(lvalue_t *lvalue,
             lvalue->type = var->type;
             lvalue->decl = var;
             lvalue->ptr_level = var->ptr_level;
+            lvalue->value_ptr_level = var->ptr_level + var->type->ptr_level;
             lvalue->is_func = var->is_func;
             lvalue->size = get_size(var);
             lvalue->is_const_qualified |= var->is_const_qualified;
@@ -4666,6 +4743,8 @@ void read_lvalue(lvalue_t *lvalue,
             rs1 = operand_stack[operand_stack_idx - 1];
             t = require_var(parent);
             t->var_name = gen_name();
+            t->type = pointee_type_from_pointer_typedef(lvalue->type);
+            t->ptr_level = lvalue->value_ptr_level;
             opstack_push(t);
             add_insn(parent, *bb, OP_read, t, rs1, NULL, lvalue->size, NULL);
         }
@@ -5153,6 +5232,8 @@ bool read_body_assignment(char *token,
                     t = opstack_pop();
                     vd = require_var(parent);
                     vd->var_name = gen_name();
+                    vd->type = pointee_type_from_pointer_typedef(lvalue.type);
+                    vd->ptr_level = lvalue.value_ptr_level;
                     opstack_push(vd);
                     add_insn(parent, *bb, OP_read, vd, t, NULL, lvalue.size,
                              NULL);
@@ -5183,6 +5264,8 @@ bool read_body_assignment(char *token,
                     t = opstack_pop();
                     vd = require_var(parent);
                     vd->var_name = gen_name();
+                    vd->type = pointee_type_from_pointer_typedef(lvalue.type);
+                    vd->ptr_level = lvalue.value_ptr_level;
                     opstack_push(vd);
                     add_insn(parent, *bb, OP_read, vd, t, NULL, lvalue.size,
                              NULL);
@@ -5213,6 +5296,20 @@ bool read_body_assignment(char *token,
 
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
+
+                /* Compound assignment performs the same integer promotions and
+                 * usual arithmetic conversions as the corresponding binary
+                 * operator, then converts the result back to the lvalue type.
+                 * In particular, unsigned char and unsigned short must be
+                 * promoted before unsigned division, rather than being consumed
+                 * as sign-extended byte/halfword values by the backend.
+                 */
+                if (!is_pointer_operation(op, rs1, rs2)) {
+                    rs1 = integer_promote_operand(parent, bb, rs1);
+                    rs2 = integer_promote_operand(parent, bb, rs2);
+                    normalize_integer_binary_operands(parent, bb, op, &rs1,
+                                                      &rs2);
+                }
                 vd = require_var(parent);
                 vd->var_name = gen_name();
                 vd->type = integer_binary_result_type(op, rs1, rs2);
@@ -5460,31 +5557,68 @@ var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb);
 var_t *read_wide_global_literal_primary(block_t *parent, basic_block_t *bb)
 {
     char literal[MAX_TOKEN_LEN];
-    bool is_neg = lex_accept(T_minus);
     var_t *value;
 
+    /* Keep wide unary operators out of the legacy word-sized constant
+     * evaluator. Besides making `~0ULL` usable in a static initializer, the
+     * recursive form gives grouped operands and repeated unary operators the
+     * same semantics as ordinary expression parsing.
+     */
+    if (lex_accept(T_plus))
+        return read_wide_global_literal_primary(parent, bb);
+    if (lex_accept(T_minus)) {
+        var_t *zero = require_var(parent);
+        var_t *result;
+
+        /* Preserve the special lexical treatment of the magnitude of LLONG_MIN.
+         * read_numeric_param() needs to know that the immediately preceding
+         * unary minus will consume 2^63.
+         */
+        if (lex_peek(T_numeric, literal)) {
+            read_numeric_param(parent, bb, true);
+            value = opstack_pop();
+            force_wide_global_literal_type(value, literal);
+            return value;
+        }
+        value = read_wide_global_literal_primary(parent, bb);
+        zero->var_name = gen_name();
+        zero->type = value->type;
+        zero->init_val = 0;
+        add_insn(parent, bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
+        result = require_var(parent);
+        result->var_name = gen_name();
+        result->type = value->type;
+        add_insn(parent, bb, OP_sub, result, zero, value, 0, NULL);
+        return result;
+    }
+    if (lex_accept(T_bit_not)) {
+        var_t *result;
+
+        value = read_wide_global_literal_primary(parent, bb);
+        result = require_var(parent);
+        result->var_name = gen_name();
+        result->type = value->type;
+        add_insn(parent, bb, OP_bit_not, result, value, NULL, 0, NULL);
+        return result;
+    }
+    if (lex_accept(T_log_not)) {
+        var_t *result;
+
+        value = read_wide_global_literal_primary(parent, bb);
+        result = require_typed_var(parent, TY_int);
+        result->var_name = gen_name();
+        add_insn(parent, bb, OP_log_not, result, value, NULL, 0, NULL);
+        return result;
+    }
     if (lex_accept(T_open_bracket)) {
         value = read_wide_global_literal_expression(parent, bb);
         lex_expect(T_close_bracket);
-        if (is_neg) {
-            var_t *zero = require_var(parent);
-            var_t *result = require_var(parent);
-
-            zero->var_name = gen_name();
-            zero->type = value->type;
-            zero->init_val = 0;
-            add_insn(parent, bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-            result->var_name = gen_name();
-            result->type = value->type;
-            add_insn(parent, bb, OP_sub, result, zero, value, 0, NULL);
-            return result;
-        }
         return value;
     }
     if (!lex_peek(T_numeric, literal))
         error_at("Wide global initializer needs a literal operand",
                  next_token_loc());
-    read_numeric_param(parent, bb, is_neg);
+    read_numeric_param(parent, bb, false);
     value = opstack_pop();
     force_wide_global_literal_type(value, literal);
     return value;
@@ -7676,8 +7810,12 @@ void read_global_statement(void)
                 } while (!lex_accept(T_close_curly));
             }
 
+            while (lex_accept(T_asterisk)) {
+                type->ptr_level++;
+                type->size = PTR_SIZE;
+            }
             lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
-            type->size = size;
+            type->size = type->ptr_level ? PTR_SIZE : size;
             type->num_fields = i;
             type->base_type = TYPE_typedef;
 
@@ -7740,8 +7878,12 @@ void read_global_statement(void)
                 } while (!lex_accept(T_close_curly));
             }
 
+            while (lex_accept(T_asterisk)) {
+                type->ptr_level++;
+                type->size = PTR_SIZE;
+            }
             lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
-            type->size = max_size;
+            type->size = type->ptr_level ? PTR_SIZE : max_size;
             type->num_fields = i;
             type->base_type = TYPE_typedef;
             type->is_union = true;
@@ -7822,9 +7964,6 @@ void read_global_statement(void)
                 error_at("int cannot be combined with char", cur_token_loc());
 
             if (is_long) {
-                if (is_long_long && PTR_SIZE < 8)
-                    error_at("long long needs 64-bit target lowering",
-                             cur_token_loc());
                 if (lex_peek(T_identifier, base_type) &&
                     !strcmp(base_type, "int"))
                     lex_expect(T_identifier);
@@ -7879,7 +8018,7 @@ void read_global_statement(void)
             type->base_type = base->base_type;
             type->size = base->size;
             type->num_fields = 0;
-            type->ptr_level = 0;
+            type->ptr_level = base->ptr_level;
             type->is_const_qualified =
                 typedef_const || base->is_const_qualified;
             type->is_unsigned = base->is_unsigned;

@@ -598,7 +598,8 @@ type_t *find_type(const char *type_name, int flag)
                 /* If it is a forwardly declared alias of a structure, return
                  * the base structure type.
                  */
-                if (TYPES[i].base_type == TYPE_typedef && TYPES[i].size == 0)
+                if (TYPES[i].base_type == TYPE_typedef && TYPES[i].size == 0 &&
+                    TYPES[i].ptr_level == 0)
                     return TYPES[i].base_struct;
                 return &TYPES[i];
             }

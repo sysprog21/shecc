@@ -846,6 +846,33 @@ if [ "$PTR_SZ" -lt 8 ]; then
     try_compile_error << EOF
 int main(void) { return 1LL; }
 EOF
+    try_compile_error << EOF
+long long unsupported_value;
+int main(void) { return 0; }
+EOF
+    try_compile_error << EOF
+long long unsupported_return(void) { return 0; }
+int main(void) { return 0; }
+EOF
+    try_compile_error << EOF
+long long (*unsupported_callback)(void);
+int main(void) { return 0; }
+EOF
+    try_ 2 << EOF
+int main(void) {
+    return (sizeof(long long) == 8) +
+           (sizeof(unsigned long long) == 8);
+}
+EOF
+    try_ 1 << EOF
+typedef long long *wide_pointer;
+long long *identity_wide_pointer(long long *value) { return value; }
+int main(void) {
+    int storage = 0;
+    wide_pointer alias = (wide_pointer)&storage;
+    return identity_wide_pointer(alias) == alias;
+}
+EOF
 else
     try_ 3 << EOF
 int main(void) {
@@ -956,6 +983,19 @@ long long global_negated_grouped = -(0x100000000LL + 7LL);
 int main(void) {
     return ((global_negated_grouped >> 32) == -2LL) +
            ((unsigned int) global_negated_grouped == 0xfffffff9U);
+}
+EOF
+
+    try_ 4 << EOF
+unsigned long long global_wide_complement = ~0ULL;
+long long global_wide_double_negation = -(~0LL);
+unsigned long long global_wide_unary_plus = +0x100000000ULL;
+unsigned long long global_wide_logical_not = !0ULL;
+int main(void) {
+    return (global_wide_complement == 0xffffffffffffffffULL) +
+           (global_wide_double_negation == 1LL) +
+           (global_wide_unary_plus == 0x100000000ULL) +
+           (global_wide_logical_not == 1ULL);
 }
 EOF
 
@@ -1190,6 +1230,103 @@ int main(void) {
     byte++;
     half++;
     return byte + half;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char byte = 255;
+    unsigned short half = 65535;
+    byte /= 2;
+    half /= 2;
+    return (byte == 127) + (half == 32767);
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char bytes[1] = {255};
+    unsigned short halves[1] = {65535};
+    bytes[0] /= 2;
+    halves[0] /= 2;
+    return (bytes[0] == 127) + (halves[0] == 32767);
+}
+EOF
+try_ 2 << EOF
+typedef unsigned char *uchar_pointer;
+typedef unsigned short *ushort_pointer;
+int main(void) {
+    unsigned char bytes[1] = {255};
+    unsigned short halves[1] = {65535};
+    uchar_pointer byte_ptr = bytes;
+    ushort_pointer half_ptr = halves;
+    return (byte_ptr[0] / 2 == 127) + (half_ptr[0] / 2 == 32767);
+}
+EOF
+try_ 1 << EOF
+typedef unsigned char *uchar_pointer;
+typedef uchar_pointer *uchar_pointer_pointer;
+int main(void) {
+    unsigned char bytes[1] = {255};
+    uchar_pointer pointer = bytes;
+    uchar_pointer_pointer pointer_to_pointer = &pointer;
+    uchar_pointer loaded = *pointer_to_pointer;
+    return loaded[0] / 2 == 127;
+}
+EOF
+try_ 1 << EOF
+typedef unsigned char *uchar_pointer;
+typedef uchar_pointer *uchar_pointer_pointer;
+typedef uchar_pointer_pointer *uchar_pointer_pointer_pointer;
+int main(void) {
+    unsigned char bytes[1] = {255};
+    uchar_pointer pointer = bytes;
+    uchar_pointer_pointer pointer_to_pointer = &pointer;
+    uchar_pointer_pointer_pointer pointer_to_pointer_to_pointer =
+        &pointer_to_pointer;
+    uchar_pointer_pointer loaded_pointer_to_pointer =
+        *pointer_to_pointer_to_pointer;
+    uchar_pointer loaded_pointer = *loaded_pointer_to_pointer;
+    return loaded_pointer[0] / 2 == 127;
+}
+EOF
+try_ 2 << EOF
+struct unsigned_members { unsigned char byte; unsigned short half; };
+int main(void) {
+    struct unsigned_members value = {255, 65535};
+    return (value.byte / 2 == 127) + (value.half / 2 == 32767);
+}
+EOF
+try_ 7 << EOF
+struct typedef_pair { int left; int right; };
+typedef struct typedef_pair *pair_pointer;
+int main(void) {
+    struct typedef_pair value = {3, 4};
+    pair_pointer pointer = &value;
+    return pointer[0].left + pointer[0].right;
+}
+EOF
+try_ 9 << EOF
+union typedef_value { int left; int right; };
+typedef union typedef_value *value_pointer;
+int main(void) {
+    union typedef_value value;
+    value.right = 9;
+    value_pointer pointer = &value;
+    return pointer[0].right;
+}
+EOF
+try_ 7 << EOF
+typedef struct { int left; int right; } *anonymous_pair_pointer;
+int main(void) {
+    int values[4] = {1, 2, 3, 4};
+    anonymous_pair_pointer pointer = (anonymous_pair_pointer)values;
+    return pointer[1].left + pointer[1].right;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned char bytes[1] = {255};
+    unsigned short halves[1] = {65535};
+    return (bytes[0] / 2 == 127) + (halves[0] / 2 == 32767);
 }
 EOF
 try_ 2 << EOF

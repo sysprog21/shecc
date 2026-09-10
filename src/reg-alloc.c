@@ -2176,6 +2176,20 @@ void reg_alloc_global(insn_t *global_insn)
         /* Fall through to the ordinary scalar binary lowering below. */
         goto lower_global_binary;
     }
+    case OP_bit_not:
+    case OP_log_not: {
+        /* Unary wide global constant expressions use the normal phase-2
+         * instruction too. Keeping these separate from binary lowering avoids
+         * preparing a nonexistent right operand.
+         */
+        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
+        ir->src0 = src0;
+        ir->dest = dest;
+        set_ptr_flags(ir, global_insn);
+        break;
+    }
     case OP_sub:
     case OP_mul:
     case OP_div:
