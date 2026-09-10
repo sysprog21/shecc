@@ -779,7 +779,9 @@ int unescape_string(const char *input, char *output, int output_size)
             i++;
             break;
         case 'x': {
-            /* Hexadecimal escape sequence: \xhh */
+            /* C99 hexadecimal escapes consume the complete run of hex digits,
+             * unlike octal escapes which are limited to three.
+             */
             i++; /* Skips 'x' */
 
             if (!isxdigit(input[i])) {
@@ -791,12 +793,9 @@ int unescape_string(const char *input, char *output, int output_size)
             }
 
             int value = 0;
-            int count = 0;
-
-            while (isxdigit(input[i]) && count < 2) {
+            while (isxdigit(input[i])) {
                 value = (value << 4) + hex_digit_value(input[i]);
                 i++;
-                count++;
             }
 
             output[j++] = (char) value;
@@ -837,6 +836,22 @@ int unescape_string(const char *input, char *output, int output_size)
         return -1;
 
     return j;
+}
+
+/* C99 permits multi-character constants with an implementation-defined int
+ * value. shecc packs their first four bytes left to right.
+ */
+int parse_character_constant(const char *literal)
+{
+    char unescaped[MAX_TOKEN_LEN];
+    unsigned int value = 0;
+    int length = unescape_string(literal, unescaped, sizeof(unescaped));
+
+    if (length < 0)
+        return 0;
+    for (int i = 0; i < length && i < 4; i++)
+        value = (value << 8) | (unsigned char) unescaped[i];
+    return (int) value;
 }
 
 int parse_numeric_constant(const char *buffer)

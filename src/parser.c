@@ -786,9 +786,9 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         lex_ident(T_char, chtok);
         unescape_string(chtok, unescaped, MAX_TOKEN_LEN);
 
-        val = require_typed_var(parent, TY_char);
+        val = require_typed_var(parent, TY_int);
         val->var_name = gen_name();
-        val->init_val = unescaped[0];
+        val->init_val = parse_character_constant(chtok);
         add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
     } else if (lex_peek(T_string, NULL)) {
         lex_accept(T_string);
@@ -1775,7 +1775,7 @@ int read_const_expr_operand(block_t *scope)
         lex_expect(T_char);
         if (unescape_string(buffer, unescaped, MAX_TOKEN_LEN) < 0)
             error_at("Invalid escape sequence", cur_token_loc());
-        return unescaped[0];
+        return parse_character_constant(buffer);
     }
     if (lex_peek(T_identifier, buffer)) {
         lex_expect(T_identifier);
@@ -1863,8 +1863,14 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
          * require tracking const-ness of the pointer itself vs the pointed-to
          * data separately.
          */
-        while (lex_accept(T_const))
-            vd->is_const_pointer = true;
+        while (true) {
+            if (lex_accept(T_const))
+                vd->is_const_pointer = true;
+            else if (lex_accept(T_restrict))
+                ; /* restrict is an aliasing contract, not storage state. */
+            else
+                break;
+        }
     }
 
     /* is it function pointer declaration? */
@@ -1872,6 +1878,14 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
         func_t *func = arena_alloc_func();
         char temp_name[MAX_VAR_LEN];
         lex_expect(T_asterisk);
+        while (true) {
+            if (lex_accept(T_const))
+                vd->is_const_pointer = true;
+            else if (lex_accept(T_restrict))
+                ; /* restrict is an aliasing contract, not storage state. */
+            else
+                break;
+        }
         lex_ident(T_identifier, temp_name);
         vd->var_name = intern_string(temp_name);
         lex_expect(T_close_bracket);
@@ -2154,18 +2168,23 @@ void read_parameter_list_decl(func_t *func, bool anon)
     }
 
     while (lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL) ||
-           lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
-           lex_peek(T_long, NULL) || lex_peek(T_struct, NULL) ||
-           lex_peek(T_union, NULL) || lex_peek(T_enum, NULL)) {
+           lex_peek(T_register, NULL) || lex_peek(T_signed, NULL) ||
+           lex_peek(T_unsigned, NULL) || lex_peek(T_long, NULL) ||
+           lex_peek(T_struct, NULL) || lex_peek(T_union, NULL) ||
+           lex_peek(T_enum, NULL)) {
         /* Check for const qualifier */
         bool is_const = false;
+        bool is_register = false;
         if (lex_accept(T_const))
             is_const = true;
+        if (lex_accept(T_register))
+            is_register = true;
 
         if (vn >= MAX_PARAMS)
             error_at("Too many parameters", cur_token_loc());
         read_full_var_decl(&func->param_defs[vn], anon, true);
         func->param_defs[vn].is_const_qualified |= is_const;
+        func->param_defs[vn].is_register = is_register;
         func->param_defs[vn].is_aggregate_param =
             is_record_type(func->param_defs[vn].type) &&
             !func->param_defs[vn].ptr_level;
@@ -2527,9 +2546,9 @@ void read_char_param(block_t *parent, basic_block_t *bb)
     lex_ident(T_char, literal);
     unescape_string(literal, unescaped, MAX_TOKEN_LEN);
 
-    var_t *vd = require_typed_var(parent, TY_char);
+    var_t *vd = require_typed_var(parent, TY_int);
     vd->var_name = gen_name();
-    vd->init_val = unescaped[0];
+    vd->init_val = parse_character_constant(literal);
     vd->is_const = true;
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
@@ -2682,6 +2701,8 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
     if (!lex_peek(T_identifier, token))
         error_at("Expected an identifier", next_token_loc());
     var_t *var = find_var(token, parent);
+    if (var && var->is_register)
+        error_at("cannot take address of register object", next_token_loc());
     read_lvalue(&lvalue, var, parent, bb, false, OP_generic, true);
 
     if (!lvalue.is_reference) {
@@ -5399,7 +5420,7 @@ int read_primary_constant(block_t *scope)
     } else if (lex_peek(T_char, buffer)) {
         char unescaped[MAX_TOKEN_LEN];
         unescape_string(buffer, unescaped, MAX_TOKEN_LEN);
-        res = unescaped[0];
+        res = parse_character_constant(buffer);
         lex_expect(T_char);
     } else if (lex_peek(T_identifier, buffer)) {
         constant_t *con;
@@ -6042,7 +6063,7 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
                 char unescaped[MAX_TOKEN_LEN];
                 if (unescape_string(literal, unescaped, MAX_TOKEN_LEN) < 0)
                     error_at("Invalid escape sequence", next_token_loc());
-                case_val = unescaped[0];
+                case_val = parse_character_constant(literal);
                 lex_expect(T_char);
             } else if (lex_peek(T_identifier, token)) {
                 const constant_t *cd = find_scoped_constant(token, parent);
@@ -6147,6 +6168,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     opcode_t prefix_op = OP_generic;
     bool is_const = false;
     bool is_static = false;
+    bool is_register = false;
 
     lex_expect(T_open_bracket);
 
@@ -6158,17 +6180,26 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     bb_connect(bb, setup, NEXT);
 
     if (!lex_accept(T_semicolon)) {
-        while (lex_peek(T_static, NULL) || lex_peek(T_const, NULL)) {
+        while (lex_peek(T_static, NULL) || lex_peek(T_const, NULL) ||
+               lex_peek(T_register, NULL)) {
             if (lex_accept(T_static)) {
                 if (is_static)
                     error_at("duplicate static storage class specifier",
                              cur_token_loc());
                 is_static = true;
+            } else if (lex_accept(T_register)) {
+                if (is_register)
+                    error_at("duplicate register storage class specifier",
+                             cur_token_loc());
+                is_register = true;
             } else {
                 lex_expect(T_const);
                 is_const = true;
             }
         }
+        if (is_static && is_register)
+            error_at("static and register storage classes cannot be combined",
+                     cur_token_loc());
 
         bool has_builtin_type = lex_peek(T_signed, NULL) ||
                                 lex_peek(T_unsigned, NULL) ||
@@ -6186,6 +6217,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
         if (type) {
             var = require_typed_var(blk, type);
             var->is_static = is_static;
+            var->is_register = is_register;
             var->is_global = is_static;
             var->is_const_qualified = is_const;
             read_full_var_decl(var, false, false);
@@ -6228,6 +6260,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
                 /* multiple (partial) declarations */
                 nv = require_typed_var(blk, type);
                 nv->is_static = is_static;
+                nv->is_register = is_register;
                 nv->is_global = is_static;
                 nv->is_const_qualified = is_const;
                 read_partial_var_decl(nv, var); /* partial */
@@ -6612,18 +6645,28 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     opcode_t prefix_op = OP_generic;
     bool is_const = false;
     bool is_static = false;
+    bool is_register = false;
 
-    while (lex_peek(T_static, NULL) || lex_peek(T_const, NULL)) {
+    while (lex_peek(T_static, NULL) || lex_peek(T_const, NULL) ||
+           lex_peek(T_register, NULL)) {
         if (lex_accept(T_static)) {
             if (is_static)
                 error_at("duplicate static storage class specifier",
                          cur_token_loc());
             is_static = true;
+        } else if (lex_accept(T_register)) {
+            if (is_register)
+                error_at("duplicate register storage class specifier",
+                         cur_token_loc());
+            is_register = true;
         } else {
             lex_expect(T_const);
             is_const = true;
         }
     }
+    if (is_static && is_register)
+        error_at("static and register storage classes cannot be combined",
+                 cur_token_loc());
 
     if (lex_peek(T_enum, NULL))
         return handle_enum_statement(parent, bb, is_const, is_static);
@@ -6696,6 +6739,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     if (type) {
         var = require_typed_var(parent, type);
         var->is_static = is_static;
+        var->is_register = is_register;
         var->is_global = is_static;
         var->is_const_qualified = is_const;
         read_full_var_decl(var, false, false);
@@ -6791,6 +6835,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             /* multiple (partial) declarations */
             nv = require_typed_var(parent, type);
             nv->is_static = is_static;
+            nv->is_register = is_register;
             nv->is_global = is_static;
             nv->is_const_qualified = var->is_const_qualified;
             read_partial_var_decl(nv, var); /* partial */
@@ -7582,19 +7627,29 @@ void read_global_statement(void)
     block_t *block = GLOBAL_BLOCK; /* global block */
     bool is_const = false;
     bool is_static = false;
+    bool is_extern = false;
 
     /* These specifiers may appear in either order. */
-    while (lex_peek(T_const, NULL) || lex_peek(T_static, NULL)) {
+    while (lex_peek(T_const, NULL) || lex_peek(T_static, NULL) ||
+           lex_peek(T_extern, NULL)) {
         if (lex_accept(T_const))
             is_const = true;
-        else {
-            lex_expect(T_static);
+        else if (lex_accept(T_static)) {
             if (is_static)
                 error_at("duplicate static storage class specifier",
                          cur_token_loc());
             is_static = true;
+        } else {
+            lex_expect(T_extern);
+            if (is_extern)
+                error_at("duplicate extern storage class specifier",
+                         cur_token_loc());
+            is_extern = true;
         }
     }
+    if (is_static && is_extern)
+        error_at("static and extern storage classes cannot be combined",
+                 cur_token_loc());
 
     if (lex_accept(T_struct)) {
         int i = 0, size = 0;

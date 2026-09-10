@@ -306,7 +306,11 @@ function try_output()
 # This keeps the small end-to-end programs in both stage-0 and stage-2 runs.
 function try_file()
 {
-    try "$1" "$2" "$(< "$3")"
+    if [ "$#" -eq 2 ]; then
+        try "$1" "$(< "$2")"
+    else
+        try "$1" "$2" "$(< "$3")"
+    fi
 }
 
 # try_compile_error - test shecc with invalid C program Usage:
@@ -1288,6 +1292,19 @@ int main(void) {
     return loaded_pointer[0] / 2 == 127;
 }
 EOF
+try_ 1 << EOF
+int main(void) { return '\x123' == 0x23; }
+EOF
+try_ 3 << EOF
+#if __STDC__ != 1
+#error __STDC__ must be one
+#endif
+#if __STDC_VERSION__ != 199901L
+#error expected C99 version macro
+#endif
+int main(void) { return __STDC__ + !__STDC_HOSTED__ +
+                        (__STDC_VERSION__ == 199901L); }
+EOF
 try_ 2 << EOF
 struct unsigned_members { unsigned char byte; unsigned short half; };
 int main(void) {
@@ -1514,6 +1531,50 @@ declare -a variable_tests=(
 )
 
 run_items_tests variable_tests
+
+# A block-scope register declaration has ordinary automatic storage behavior.
+try_ 9 << EOF
+int main(void) {
+    register int value = 4;
+    value += 5;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    register int value = 4;
+    int *pointer = &value;
+    return *pointer;
+}
+EOF
+
+try_ 12 << EOF
+int identity(register int value) { return value; }
+int main(void) { return identity(12); }
+EOF
+
+try_ 13 << EOF
+int increment(int *restrict value) { *value += 1; return *value; }
+int main(void) {
+    int value = 12;
+    int *restrict pointer = &value;
+    return increment(pointer);
+}
+EOF
+
+try_ 13 << EOF
+int increment(int value) { return value + 1; }
+int main(void) {
+    int (*restrict callback)(int) = increment;
+    return callback(12);
+}
+EOF
+
+try_compile_error << EOF
+int invalid(register int value) { return *(&value); }
+int main(void) { return invalid(1); }
+EOF
 
 # Narrow signed values must stay negative through promotion and through a store
 # and reload. An LP64 backend holds them in a 64-bit register, so a load that
@@ -2439,6 +2500,7 @@ items 1 "int i = 0; for (;;) { i++; if (i < 4) { continue; } break; } return i =
 items 14 "int n = 0; for (int i = 0;;) { i++; if (i < 14) { continue; } n = i; break; } return n;"
 items 14 "int i = 0; for (; i < 20;) { i++; if (i < 14) { continue; } break; } return i;"
 items 14 "int n = 0; for (int i = 0; i < 20;) { i++; if (i < 14) { continue; } n = i; break; } return n;"
+items 6 "int sum = 0; for (register int i = 1; i < 4; i++) sum += i; return sum;"
 items 14 "int i = 0; for (; i < 14;) { i++; } return i;"
 items 0 "int i = 0; for (;; i++) { break; } return i;"
 
@@ -3831,6 +3893,16 @@ int main()
 {
     return a + b;
 }
+EOF
+
+# File-scope extern declarations share the later object's or function's
+# definition and preserve its ordinary external linkage.
+try_ 17 << EOF
+extern int external_value;
+extern int external_function(void);
+int external_value = 10;
+int external_function(void) { return 7; }
+int main(void) { return external_value + external_function(); }
 EOF
 
 # A declaration's base type applies to every global declarator, while each
@@ -5288,6 +5360,13 @@ EOF
 # Category: Preprocessor Directives
 begin_category "Preprocessor Directives" "Testing #define, #ifdef, #ifndef, #if, #elif, #else, #endif"
 
+# The compiler resolves quoted headers relative to the translation unit. The
+# harness writes that unit into TEST_TMPDIR, so stage the nested fixture headers
+# beside it before compiling the checked-in main file.
+cp "$TESTS_DIR/include-base.h" "$TEST_TMPDIR/include-base.h"
+cp "$TESTS_DIR/include-values.h" "$TEST_TMPDIR/include-values.h"
+try_file 19 "$TESTS_DIR/include-main.c"
+
 # #ifdef...#else...#endif
 try_ 0 << EOF
 #define A 0
@@ -5373,6 +5452,118 @@ int main()
 #endif
     return x;
 }
+EOF
+
+# A preprocessor expression is not limited to two operands. In particular,
+# chained logical operators must keep consuming the directive through newline.
+try_ 7 << EOF
+#define A
+#define C
+#if defined(A) || defined(B) || defined(C)
+#define RESULT 7
+#else
+#define RESULT 0
+#endif
+int main(void) { return RESULT; }
+EOF
+
+# C99 permits both defined(NAME) and defined NAME in a #if expression.
+try_ 9 << EOF
+#define ENABLED
+#if defined ENABLED && !defined DISABLED
+#define RESULT 9
+#else
+#define RESULT 0
+#endif
+int main(void) { return RESULT; }
+EOF
+
+# Conditional inclusion uses the full integer constant-expression grammar.
+try_ 11 << EOF
+#if ((1 << 2) == 4) && (5 % 3 == 2) && !defined UNKNOWN && (0 ? 0 : 1)
+#define RESULT 11
+#else
+#define RESULT 0
+#endif
+int main(void) { return RESULT; }
+EOF
+
+# Inactive operands must be parsed but not evaluated: both divisions are invalid
+# if reached, yet are protected by C99 short-circuit operators.
+try_ 16 << EOF
+#if 1 || (1 / 0)
+#define OR_RESULT 1
+#endif
+#if 0 && (1 / 0)
+#define AND_RESULT 0
+#else
+#define AND_RESULT 12
+#endif
+#if 1 ? 3 : (1 / 0)
+#define TERNARY_RESULT 3
+#endif
+int main(void) { return OR_RESULT + AND_RESULT + TERNARY_RESULT; }
+EOF
+
+# Character constants are integer constants in a C99 #if expression.
+try_ 14 << EOF
+#if 'A' == 65 && '\\n' == 10
+#define CHARACTER_RESULT 14
+#else
+#define CHARACTER_RESULT 0
+#endif
+int main(void) { return CHARACTER_RESULT; }
+EOF
+
+try_ 1 << EOF
+#if '\\x123' == 0x23
+#define HEX_ESCAPE_RESULT 1
+#else
+#define HEX_ESCAPE_RESULT 0
+#endif
+int main(void) { return HEX_ESCAPE_RESULT; }
+EOF
+
+try_ 2 << EOF
+#if 'AB' == 0x4142
+#define MULTI_CHARACTER_RESULT 1
+#else
+#define MULTI_CHARACTER_RESULT 0
+#endif
+int main(void) { return ('AB' == 0x4142) + MULTI_CHARACTER_RESULT; }
+EOF
+
+try_ 1 << EOF
+int main(void) { return 'A\\0' == 0x4100; }
+EOF
+
+# Parentheses do not turn an object-like macro into a function-like macro: they
+# remain available to call the replacement identifier.
+try_ 15 << EOF
+#define OBJECT_MACRO identity
+int identity(int value) { return value; }
+int main(void) { return OBJECT_MACRO(15); }
+EOF
+
+# Redefinition also replaces the old function-like signature.
+try_ 4 << EOF
+#define REUSED_MACRO(value) value
+#undef REUSED_MACRO
+#define REUSED_MACRO identity
+int identity(int value) { return value; }
+int main(void) { return REUSED_MACRO(4); }
+EOF
+
+# Function-like macros expand before a C99 #if expression is evaluated.
+try_ 17 << EOF
+#define TWO() 2
+#define ADD(left, right) ((left) + (right))
+#if ADD(TWO(), 3) == 5
+#define FUNCTION_MACRO_RESULT 17
+#else
+#define FUNCTION_MACRO_RESULT 0
+#endif
+int main(void) { return FUNCTION_MACRO_RESULT; }
 EOF
 
 # #define ... #undef
@@ -5780,6 +5971,12 @@ EOF
 
 # Category: Function-like Macros
 begin_category "Function-like Macros" "Testing function-like macros and variadic macros"
+
+# An empty argument list is a valid invocation of a zero-parameter macro.
+try_ 6 << EOF
+#define SIX() 6
+int main(void) { return SIX(); }
+EOF
 
 # stringification: '#' spells the argument as it was written
 try_output 0 "hello world" << EOF
@@ -7138,6 +7335,15 @@ EOF
 try_ 72 << EOF
 int main() {
     return '\x48';  /* Should return 72 (ASCII 'H') */
+}
+EOF
+
+# C99 hexadecimal escapes consume every following hex digit; assigning to a char
+# produces the low byte.
+try_ 1 << EOF
+int main() {
+    char *s = "\\x123";
+    return s[0] == 0x23;
 }
 EOF
 
