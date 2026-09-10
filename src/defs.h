@@ -349,10 +349,12 @@ typedef enum {
     T_continue,
     T_goto,
     T_const, /* const qualifier */
+    T_volatile,
     T_static,
     T_extern,
     T_register,
     T_restrict,
+    T_inline,
     T_signed,
     T_unsigned,
     T_long,
@@ -566,8 +568,10 @@ struct var {
     bool is_global;
     bool is_static;       /* declaration used the static storage class */
     bool is_register;     /* declaration used the register storage class */
+    bool is_inline;       /* declaration used the inline function specifier */
     bool has_initializer; /* a file-scope definition supplied an initializer */
     bool is_const_qualified; /* true if variable has const qualifier */
+    bool is_volatile;        /* declaration used the volatile qualifier */
     bool is_const_pointer;   /* true for the outermost `* const` qualifier */
     bool address_taken;      /* true if variable address was taken (&var) */
     /* Working state for strength_reduce(): how many instructions in the

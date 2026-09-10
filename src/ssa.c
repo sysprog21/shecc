@@ -3381,7 +3381,7 @@ bool mark_const(insn_t *insn)
      * materialise the initialiser instead of reading the slot, which is how
      * "int a = 0; f(&a); int b = a;" left b holding zero.
      */
-    if (insn->rd && insn->rd->address_taken)
+    if (insn->rd && (insn->rd->address_taken || insn->rd->is_volatile))
         return false;
 
     if (insn->opcode == OP_load_constant) {
@@ -3400,7 +3400,7 @@ bool mark_const(insn_t *insn)
     /* Copying from such a variable is no better: the value read is whatever the
      * pointer last wrote, not the constant the source was assigned.
      */
-    if (insn->rs1->address_taken)
+    if (insn->rs1->address_taken || insn->rs1->is_volatile)
         return false;
     if (!insn->rs1->is_const) {
         if (insn->rs1->init_val_hi)

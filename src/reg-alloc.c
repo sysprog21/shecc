@@ -407,7 +407,8 @@ void slot_var_track(var_t *var)
  */
 bool slot_is_private(const var_t *var)
 {
-    if (var->address_taken || var->array_size || var->has_backing_storage)
+    if (var->address_taken || var->array_size || var->has_backing_storage ||
+        var->is_volatile)
         return false;
     if (var->is_global || var->ofs_based_on_stack_top)
         return false;
@@ -756,6 +757,8 @@ int find_in_regs(const var_t *var)
 bool var_is_pinnable(var_t *var)
 {
     if (!var || var->is_const || !var->base)
+        return false;
+    if (var->is_volatile)
         return false;
 
     /* slot_is_private() rules out everything reachable other than by name:

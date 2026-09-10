@@ -1563,6 +1563,64 @@ int main(void) {
 }
 EOF
 
+try_ 14 << EOF
+inline int increment_inline(int value) { return value + 1; }
+static inline int twice_inline(int value) { return value * 2; }
+int inline trailing_inline(int value) { return value - 1; }
+int main(void) {
+    return twice_inline(increment_inline(6)) + trailing_inline(1);
+}
+EOF
+
+try_compile_error << EOF
+inline int invalid_inline_object;
+int main(void) { return 0; }
+EOF
+
+try_ 13 << EOF
+volatile int global_counter = 11, global_limit = 1;
+int increment_volatile(volatile int *counter) { *counter += 1; return *counter; }
+int main(void) {
+    volatile int local_counter = 12, local_limit = 1;
+    for (volatile int count = 0, limit = global_limit; count < limit; count++)
+        global_counter += count;
+    return increment_volatile(&local_counter) + local_limit - 1;
+}
+EOF
+
+try_ 1 << EOF
+int named_for_func(void) { return __func__[0] == 'n'; }
+int main(void) { return named_for_func(); }
+EOF
+
+try_ 1 << EOF
+int function_name_width(void) { return sizeof __func__ == 20; }
+int main(void) {
+    int value = 0;
+    int *pointer = &value;
+    return function_name_width() && sizeof value == 4 && sizeof *pointer == 4;
+}
+EOF
+
+try_ 13 << EOF
+int main(void) {
+    return sizeof "cat" + sizeof "a" "bc" + sizeof("tool");
+}
+EOF
+
+try_ 12 << EOF
+int main(void) { return sizeof((int[]){1, 2, 3}); }
+EOF
+
+try_ 6 << EOF
+int main(void) {
+    int value = 6;
+    int *restrict direct = (int *restrict)&value;
+    int *volatile indirect = (int *volatile)direct;
+    return *indirect;
+}
+EOF
+
 try_ 13 << EOF
 int increment(int value) { return value + 1; }
 int main(void) {
@@ -5157,6 +5215,24 @@ items 4 "int x = 10; int *ptr = &x; return sizeof(*ptr);"
 items 1 "char c = 'A'; return sizeof(c);"
 items 2 "short s = 100; return sizeof(s);"
 items 4 "int a = 1, b = 2; return sizeof(a + b);"
+items 7 "int value = 7; return +value;"
+items 255 "unsigned char value = 255; return +value;"
+try_compile_error << EOF
+int main(void) { int value = 0; int *pointer = &value; return +pointer; }
+EOF
+try_compile_error << EOF
+int main(void) { int value = 0; int *pointer = &value; return -pointer; }
+EOF
+try_compile_error << EOF
+int main(void) { int value = 0; int *pointer = &value; return ~pointer; }
+EOF
+try_compile_error << EOF
+int function_designator(void) { return 0; }
+int main(void) { return -function_designator; }
+EOF
+items $PTR_SZ "return sizeof(volatile int) + sizeof(int *restrict) - 4;"
+items 0 "int value = 0; int size = sizeof(++value); return value;"
+items 0 "int value = 0; int size = sizeof(value++); return value;"
 
 # sizeof with complex expressions
 try_ 4 << EOF

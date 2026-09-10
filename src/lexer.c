@@ -12,7 +12,7 @@
 
 /* Hash table constants */
 #define NUM_DIRECTIVES 11
-#define NUM_KEYWORDS 25
+#define NUM_KEYWORDS 27
 
 /* Token mapping structure for elegant initialization */
 typedef struct {
@@ -88,10 +88,12 @@ void lex_init_keywords(void)
         {"goto", T_goto},
         {"union", T_union},
         {"const", T_const},
+        {"volatile", T_volatile},
         {"static", T_static},
         {"extern", T_extern},
         {"register", T_register},
         {"restrict", T_restrict},
+        {"inline", T_inline},
         {"signed", T_signed},
         {"unsigned", T_unsigned},
         {"long", T_long},
@@ -1033,13 +1035,16 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
             break;
 
         case 6: /* 6-letter keywords: return, struct, switch, sizeof, static,
-                   extern
+                   extern, inline
                    */
             if (token_buffer[0] == 'r' && !memcmp(token_buffer, "return", 6))
                 kind = T_return;
             else if (token_buffer[0] == 'e' &&
                      !memcmp(token_buffer, "extern", 6))
                 kind = T_extern;
+            else if (token_buffer[0] == 'i' &&
+                     !memcmp(token_buffer, "inline", 6))
+                kind = T_inline;
             else if (token_buffer[0] == 's') {
                 if (!memcmp(token_buffer, "struct", 6))
                     kind = T_struct;
@@ -1059,13 +1064,15 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
                 kind = T_default;
             break;
 
-        case 8: /* 8-letter keywords: continue, register, restrict */
+        case 8: /* 8-letter keywords: continue, register, restrict, volatile */
             if (!memcmp(token_buffer, "continue", 8))
                 kind = T_continue;
             else if (!memcmp(token_buffer, "register", 8))
                 kind = T_register;
             else if (!memcmp(token_buffer, "restrict", 8))
                 kind = T_restrict;
+            else if (!memcmp(token_buffer, "volatile", 8))
+                kind = T_volatile;
             break;
 
         default:
