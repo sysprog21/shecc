@@ -63,7 +63,7 @@ int strlen(const char *str)
     }
 }
 
-int strcmp(char *s1, char *s2)
+int strcmp(const char *s1, const char *s2)
 {
     int i = 0;
     while (s1[i] && s2[i]) {
@@ -76,7 +76,7 @@ int strcmp(char *s1, char *s2)
     return s1[i] - s2[i];
 }
 
-int strncmp(char *s1, char *s2, int len)
+int strncmp(const char *s1, const char *s2, int len)
 {
     int i = 0;
     while (i < len) {
@@ -91,7 +91,7 @@ int strncmp(char *s1, char *s2, int len)
     return 0;
 }
 
-char *strcpy(char *dest, char *src)
+char *strcpy(char *dest, const char *src)
 {
     int i = 0;
     while (src[i]) {
@@ -102,13 +102,13 @@ char *strcpy(char *dest, char *src)
     return dest;
 }
 
-char *strcat(char *dest, char *src)
+char *strcat(char *dest, const char *src)
 {
     strcpy(&dest[strlen(dest)], src);
     return dest;
 }
 
-char *strncat(char *dest, char *src, int len)
+char *strncat(char *dest, const char *src, int len)
 {
     int i = strlen(dest), j = 0;
     while (j < len && src[j]) {
@@ -148,7 +148,7 @@ char *strchr(char *str, int ch)
     return NULL;
 }
 
-char *strncpy(char *dest, char *src, int len)
+char *strncpy(char *dest, const char *src, int len)
 {
     int i = 0;
     int beyond = 0;
@@ -165,7 +165,7 @@ char *strncpy(char *dest, char *src, int len)
     return dest;
 }
 
-char *memcpy(char *dest, char *src, int count)
+char *memcpy(char *dest, const char *src, int count)
 {
     int i = 0;
 
@@ -186,9 +186,9 @@ char *memcpy(char *dest, char *src, int count)
     return dest;
 }
 
-int memcmp(void *s1, void *s2, int n)
+int memcmp(const void *s1, const void *s2, int n)
 {
-    char *p1 = (char *) s1, *p2 = (char *) s2;
+    const char *p1 = s1, *p2 = s2;
 
     for (int i = 0; i < n; i++) {
         if (p1[i] < p2[i])
@@ -452,7 +452,7 @@ void __format(fmtbuf_t *fmtbuf,
     __fmtbuf_write_str(fmtbuf, pb + pbi, INT_BUF_LEN - pbi);
 }
 
-void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
+void __format_to_buf(fmtbuf_t *fmtbuf, const char *format, int *var_args)
 {
     int si = 0, pi = 0;
 
@@ -556,7 +556,7 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
         fmtbuf->buf[0] = 0;
 }
 
-int __write_fmt(int fd, char *str, int *var_args)
+int __write_fmt(int fd, const char *str, int *var_args)
 {
     char buffer[FMT_BUF_LEN];
     fmtbuf_t fmtbuf;
@@ -591,12 +591,12 @@ int __write_fmt(int fd, char *str, int *var_args)
     return written;
 }
 
-int printf(char *str, ...)
+int printf(const char *str, ...)
 {
     return __write_fmt(1, str, &str + 1);
 }
 
-int sprintf(char *buffer, char *str, ...)
+int sprintf(char *buffer, const char *str, ...)
 {
     fmtbuf_t fmtbuf;
 
@@ -607,7 +607,7 @@ int sprintf(char *buffer, char *str, ...)
     return fmtbuf.len;
 }
 
-int snprintf(char *buffer, int n, char *str, ...)
+int snprintf(char *buffer, int n, const char *str, ...)
 {
     fmtbuf_t fmtbuf;
 
@@ -620,7 +620,7 @@ int snprintf(char *buffer, int n, char *str, ...)
 
 int __free_all(void);
 
-int fprintf(FILE *stream, char *str, ...)
+int fprintf(FILE *stream, const char *str, ...)
 {
     return __write_fmt(stream, str, &str + 1);
 }
@@ -643,7 +643,7 @@ void abort(void)
     exit(-1);
 }
 
-FILE *fopen(char *filename, char *mode)
+FILE *fopen(const char *filename, const char *mode)
 {
     int fd;
 
@@ -690,7 +690,7 @@ int fclose(FILE *stream)
     return 0;
 }
 
-int chmod(char *filename, int mode)
+int chmod(const char *filename, int mode)
 {
 #if defined(__riscv) || defined(__aarch64__)
     /* sys_fchmodat takes (dirfd, filename, mode); AT_FDCWD is -100. */

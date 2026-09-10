@@ -106,6 +106,7 @@ bool expand_only = false;
 bool dump_ir = false;
 bool dump_dot = false;
 bool hard_mul_div = false;
+bool warn_string_literals = false;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.

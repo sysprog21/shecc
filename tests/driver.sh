@@ -347,6 +347,35 @@ function try_compile_error()
     fi
 }
 
+# Verify a successful compilation emits a specific diagnostic. This is used for
+# C constructs that are permitted but deserve a warning, such as casting away
+# const qualification.
+function try_compile_warning()
+{
+    local expected="$1"
+    local extra_flags="${2:-}"
+    local input=$(cat)
+    test_selected || return 0
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    local tmp_log="$(mktemp)"
+    echo "$input" > "$tmp_in"
+
+    $SHECC $SHECC_CFLAGS $extra_flags -o "$tmp_exe" "$tmp_in" > "$tmp_log" 2>&1
+    local exit_code=$?
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$exit_code" -ne 0 ] || ! rg -Fq "$expected" "$tmp_log"; then
+        report_test_failure "COMPILE WARNING TEST" "$tmp_in" "$tmp_exe" \
+            "$expected" "$exit_code" "$(< "$tmp_log")"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
 function items()
 {
     local expected="$1"
@@ -746,6 +775,27 @@ EOF
 
 # Category: Compound Literals
 begin_category "Compound Literals" "Testing C99 compound literal features"
+
+# C99 permits long to use int's representation where both meet the required
+# minimum range. Exercise spelling, typedefs, pointer scaling, and ABI slots.
+try_ 13 << EOF
+typedef long count_t;
+typedef long signed signed_count_t;
+long add(long left, long int right, signed long extra) {
+    return left + right + extra;
+}
+int main(void) {
+    count_t values[3] = {3, 4, 5};
+    signed_count_t extra = (long signed)values[2];
+    return add(values[0], values[1], extra) +
+           (sizeof(long const) == sizeof(int));
+}
+EOF
+
+try_compile_error << EOF
+long long value;
+int main(void) { return 0; }
+EOF
 
 # Compound literal support - C90/C99 compliant implementation Basic struct
 # compound literals (verified working)
@@ -1192,6 +1242,83 @@ int main() {
 EOF
 
 # Global arrays of structs with compound literals
+try_ 9 << EOF
+struct global_compound_pair { int first; int second; };
+struct global_compound_pair global_compound_value =
+    (struct global_compound_pair){.second = 6, .first = 3};
+int main(void) {
+    return global_compound_value.first + global_compound_value.second;
+}
+EOF
+
+try_compile_error << EOF
+struct global_compound_left { int value; };
+struct global_compound_right { int value; };
+struct global_compound_left global_compound_mismatch =
+    (struct global_compound_right){1};
+int main(void) { return 0; }
+EOF
+
+try_ 12 << EOF
+int global_compound_scalar = (int){12};
+int main(void) { return global_compound_scalar; }
+EOF
+
+try_compile_error << EOF
+char global_compound_wrong_type = (int){1};
+int main(void) { return 0; }
+EOF
+
+try_ 9 << EOF
+int *global_compound_array = (int[]){2, 3, 4};
+int main(void) {
+    return global_compound_array[0] + global_compound_array[1] +
+           global_compound_array[2];
+}
+EOF
+
+try_ 5 << EOF
+int *global_compound_bounded = (int[4]){5};
+int main(void) {
+    return global_compound_bounded[0] + global_compound_bounded[1] +
+           global_compound_bounded[2] + global_compound_bounded[3];
+}
+EOF
+
+try_ 10 << EOF
+struct global_compound_record { int first; int second; };
+struct global_compound_record *global_compound_records =
+    (struct global_compound_record[]){ {1, 2}, {3, 4} };
+int main(void) {
+    return global_compound_records[0].first +
+           global_compound_records[1].first +
+           global_compound_records[1].second +
+           global_compound_records[0].second;
+}
+EOF
+
+try_compile_error << EOF
+struct global_compound_array_left { int value; };
+struct global_compound_array_right { int value; };
+struct global_compound_array_left *global_compound_array_mismatch =
+    (struct global_compound_array_right[]){ {1} };
+int main(void) { return 0; }
+EOF
+
+try_ 60 << EOF
+struct nested_compound_point { int x; int y; };
+struct nested_compound_value {
+    struct nested_compound_point point;
+    int z;
+};
+int main(void) {
+    struct nested_compound_value value = (struct nested_compound_value){
+        .point = (struct nested_compound_point){10, 20}, .z = 30
+    };
+    return value.point.x + value.point.y + value.z;
+}
+EOF
+
 try_ 7 << EOF
 struct point { int x; int y; };
 struct point gpts1[] = { {3, 4} };
@@ -2160,7 +2287,7 @@ int main() {
     void *values[2];
     void **p = values;
     p += 1;
-    return (char *)p - (char *)values == 8;
+    return (char *)p - (char *)values == sizeof(void *);
 }
 EOF
 
@@ -2169,7 +2296,7 @@ EOF
 try_ 1 << EOF
 int main() {
     int *values[2];
-    return (char *)(values + 1) - (char *)values == 8;
+    return (char *)(values + 1) - (char *)values == sizeof(void *);
 }
 EOF
 
@@ -2403,6 +2530,33 @@ int main() {
     int right = get_right();
     h.add = add;
     return h.add(left, right) + one(5) + right;
+}
+EOF
+
+# An indirect call must retain the prototype parsed for its function-pointer
+# declaration so a record parameter is copied and passed by value, just as it is
+# for a direct call.
+try_ 42 << EOF
+struct pair { int left; int right; };
+int total(struct pair p) { p.left = 30; return p.left + p.right; }
+int main() {
+    struct pair p = {3, 12};
+    int (*fn)(struct pair) = total;
+    return fn(p) == 42 && p.left == 3 ? 42 : 1;
+}
+EOF
+
+# The same prototype metadata belongs to a function-pointer member, rather than
+# only to a standalone local declaration.
+try_ 42 << EOF
+struct pair { int left; int right; };
+struct holder { int (*fn)(struct pair); };
+int total(struct pair p) { p.right = 12; return p.left + p.right; }
+int main() {
+    struct pair p = {30, 3};
+    struct holder h;
+    h.fn = total;
+    return h.fn(p) == 42 && p.right == 3 ? 42 : 1;
 }
 EOF
 
@@ -2862,6 +3016,17 @@ int main(void)
 }
 EOF
 
+# A block-scope static initializer is lowered as global data and therefore must
+# be a C99 constant expression, not a run-time call.
+try_compile_error << EOF
+int runtime_value(void) { return 7; }
+int main(void)
+{
+    static int value = runtime_value();
+    return value;
+}
+EOF
+
 # A block-scope static array has global storage duration but retains block
 # scope. Its constant initializer must be emitted with global data.
 try_ 15 << EOF
@@ -3045,8 +3210,61 @@ int main(void)
 }
 EOF
 
+# A redeclaration without a storage class inherits an earlier static function's
+# internal linkage. Reversing that order is a constraint violation.
+try_ 42 << EOF
+static int helper(void);
+int helper(void) { return 42; }
+int main(void) { return helper(); }
+EOF
+
+try_compile_error << EOF
+int helper(void);
+static int helper(void) { return 42; }
+int main(void) { return helper(); }
+EOF
+
 # Category: Const Qualifiers
 begin_category "Const Qualifiers" "Testing const qualifier support for variables and parameters"
+
+# Explicit casts may remove const in C, but must be diagnosed. Adding const
+# remains legal and should not spuriously warn.
+try_compile_warning "Warning: discarding const qualifier in cast" << EOF
+int main(void) {
+    const int value = 42;
+    int *mutable = (int *)&value;
+    return *mutable;
+}
+EOF
+
+try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+int main(void) {
+    char *text = "hello";
+    return text[0];
+}
+EOF
+
+try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+char *message = "global";
+int main(void) {
+    return message[0];
+}
+EOF
+
+try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+int first(char *text) { return text[0]; }
+int main(void) {
+    return first("argument");
+}
+EOF
+
+try_ 42 << EOF
+int main(void) {
+    int value = 42;
+    const int *read_only = (const int *)&value;
+    return *read_only;
+}
+EOF
 
 # Qualified union objects use the normal aggregate initializer path.
 try_ 42 << EOF
@@ -3106,6 +3324,62 @@ int main(void) {
     const int x = 1;
     x++;
     return x;
+}
+EOF
+
+# C99 permits a qualifier after the base type. It still qualifies the object,
+# whereas a qualifier after `*` qualifies the pointer itself.
+try_compile_error << EOF
+int main(void) {
+    int const value = 1;
+    value = 2;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int value = 1;
+    int const *pointer = &value;
+    *pointer = 2;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int first = 1, second = 2;
+    int * const pointer = &first;
+    pointer = &second;
+    return *pointer;
+}
+EOF
+
+try_compile_error << EOF
+struct trailing_const_pair { int value; };
+int main(void) {
+    struct trailing_const_pair const pair = {1};
+    pair.value = 2;
+    return pair.value;
+}
+EOF
+
+try_compile_error << EOF
+void change(int const *pointer) {
+    *pointer = 2;
+}
+int main(void) {
+    int value = 1;
+    change(&value);
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+int const trailing_global = 1;
+int main(void) {
+    trailing_global = 2;
+    return trailing_global;
 }
 EOF
 
@@ -3174,6 +3448,27 @@ int main(void) {
     const int value = 1;
     p = &value;
     return *p;
+}
+EOF
+
+# Parameter conversion must reject the same qualifier loss as an assignment.
+try_compile_error << EOF
+void overwrite(int *p) { *p = 2; }
+int main(void) {
+    const int value = 1;
+    overwrite(&value);
+    return value;
+}
+EOF
+
+# A retained function-pointer prototype must enforce it as well.
+try_compile_error << EOF
+void overwrite(int *p) { *p = 2; }
+int main(void) {
+    const int value = 1;
+    void (*fn)(int *) = overwrite;
+    fn(&value);
+    return value;
 }
 EOF
 

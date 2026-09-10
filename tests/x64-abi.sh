@@ -286,6 +286,7 @@ test_eight_args()
 int sum8(int a, int b, int c, int d, int e, int f, int g, int h) {
     return a + b + c + d + e + f + g + h;
 }
+
 int main() {
     int result = sum8(1, 2, 3, 4, 5, 6, 7, 8);
     if (result == 36) {
@@ -293,6 +294,27 @@ int main() {
         return 0;
     }
     printf("FAIL: expected 36, got %d\n", result);
+    return 1;
+}
+' "PASS"
+}
+
+# shecc currently represents long as a 32-bit signed scalar. Exercise that
+# spelling through both register and stack argument slots and a return value.
+test_long_args_and_return()
+{
+    run_abi_test "Long arguments and return" "Parameter Passing" '
+#include <stdio.h>
+long combine(long a, long b, long c, long d, long e, long f, long g) {
+    return a + b + c + d + e + f + g;
+}
+int main() {
+    long result = combine(1, 2, 3, 4, 5, 6, 21);
+    if (result == 42) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: got %d\n", result);
     return 1;
 }
 ' "PASS"
@@ -558,6 +580,7 @@ test_two_args
 test_four_args
 test_five_args
 test_eight_args
+test_long_args_and_return
 
 echo ""
 echo -e "${CYAN}Running Stack Alignment Tests...${NC}"

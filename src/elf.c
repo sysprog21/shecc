@@ -1411,6 +1411,6 @@ void elf_generate(const char *outfile)
      * yields 0666. Every compiler that reaches here -- host-built, static
      * self-hosted, or dynamic -- therefore sets the bits explicitly.
      */
-    if (chmod((char *) outfile, 0x1ed) < 0) /* 0755 */
+    if (chmod(outfile, 0x1ed) < 0) /* 0755 */
         usage_error("Unable to mark output executable");
 }

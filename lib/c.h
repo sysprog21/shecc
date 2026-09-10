@@ -114,9 +114,9 @@ typedef int FILE;
 #define stdout 1
 #define stderr 2
 
-FILE *fopen(char *filename, char *mode);
+FILE *fopen(const char *filename, const char *mode);
 int fclose(FILE *stream);
-int chmod(char *filename, int mode);
+int chmod(const char *filename, int mode);
 int fgetc(FILE *stream);
 char *fgets(char *str, int n, FILE *stream);
 int fputc(int c, FILE *stream);
@@ -132,22 +132,22 @@ int ftell(FILE *stream);
 
 /* string-related functions */
 int strlen(const char *str);
-int strcmp(char *s1, char *s2);
-int strncmp(char *s1, char *s2, int len);
-char *strcpy(char *dest, char *src);
-char *strncpy(char *dest, char *src, int len);
-char *strcat(char *dest, char *src);
-char *strncat(char *dest, char *src, int len);
+int strcmp(const char *s1, const char *s2);
+int strncmp(const char *s1, const char *s2, int len);
+char *strcpy(char *dest, const char *src);
+char *strncpy(char *dest, const char *src, int len);
+char *strcat(char *dest, const char *src);
+char *strncat(char *dest, const char *src, int len);
 char *strchr(char *str, int ch);
-char *memcpy(char *dest, char *src, int count);
-int memcmp(void *s1, void *s2, int n);
+char *memcpy(char *dest, const char *src, int count);
+int memcmp(const void *s1, const void *s2, int n);
 void *memset(void *s, int c, int n);
 
 /* formatted output string */
-int printf(char *str, ...);
-int sprintf(char *buffer, char *str, ...);
-int snprintf(char *buffer, int n, char *str, ...);
-int fprintf(FILE *stream, char *str, ...);
+int printf(const char *str, ...);
+int sprintf(char *buffer, const char *str, ...);
+int snprintf(char *buffer, int n, const char *str, ...);
+int fprintf(FILE *stream, const char *str, ...);
 int fflush(FILE *stream);
 
 /* Terminating program */

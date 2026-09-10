@@ -49,6 +49,20 @@ void parse_array_init(var_t *var,
                       basic_block_t **bb,
                       bool emit_code);
 void parse_global_record_init(var_t *var, block_t *block);
+void parse_global_compound_record_init(var_t *var, block_t *block);
+void parse_global_compound_scalar_init(var_t *var, block_t *block);
+void parse_global_compound_array_init(var_t *var, block_t *block);
+
+bool global_compound_literal_starts_here(void)
+{
+    token_t *next;
+
+    if (!lex_peek(T_open_bracket, NULL))
+        return false;
+    next = cur_token->next->next;
+    return next && (next->kind == T_identifier || next->kind == T_struct ||
+                    next->kind == T_union);
+}
 
 label_t *find_label(const char *name)
 {
@@ -466,6 +480,25 @@ bool incompatible_const_pointer_conversion(const var_t *from, const var_t *to)
            from->is_const_qualified != to->is_const_qualified;
 }
 
+/* C still accepts assigning a string literal to char *, but treating the
+ * literal as read-only catches the common accidental-write case. Keep this
+ * diagnostic behind an explicit option: shecc's bundled, self-hosted sources
+ * contain older char * interfaces for string data.
+ */
+void diagnose_const_pointer_conversion(const var_t *from, const var_t *to)
+{
+    if (!incompatible_const_pointer_conversion(from, to))
+        return;
+
+    if (from->is_string_literal) {
+        if (warn_string_literals)
+            printf("Warning: string literal is read-only\n");
+        return;
+    }
+
+    error_at("discarding const qualifier", cur_token_loc());
+}
+
 void read_parameter_list_decl(func_t *func, bool anon);
 
 /* Forward declaration for ternary handling used by initializers */
@@ -559,6 +592,41 @@ void emit_record_copy(block_t *parent,
     }
 }
 
+/* Copy a record into an address which is already known, such as a nested record
+ * member. A compound literal is an object, not an integer value, so lowering it
+ * through one OP_write with the member's aggregate size leaves narrow backends
+ * with an impossible 8-byte store.
+ */
+void emit_record_copy_to_address(block_t *parent,
+                                 basic_block_t **bb,
+                                 var_t *dest_addr,
+                                 var_t *src)
+{
+    int size = size_var(src);
+    var_t *src_addr = require_ref_var(parent, src->type, 0);
+
+    src_addr->var_name = gen_name();
+    add_insn(parent, *bb, OP_address_of, src_addr, src, NULL, 0, NULL);
+
+    for (int offset = 0; offset < size;) {
+        int width = 1;
+        if (size - offset >= 4)
+            width = 4;
+        else if (size - offset >= 2)
+            width = 2;
+        var_t *src_part =
+            compute_element_address(parent, bb, src_addr, offset, 1);
+        var_t *dest_part =
+            compute_element_address(parent, bb, dest_addr, offset, 1);
+        var_t *value = require_var(parent);
+
+        value->var_name = gen_name();
+        add_insn(parent, *bb, OP_read, value, src_part, NULL, width, NULL);
+        add_insn(parent, *bb, OP_write, NULL, dest_part, value, width, NULL);
+        offset += width;
+    }
+}
+
 void emit_object_assignment(block_t *parent,
                             basic_block_t **bb,
                             var_t *dest,
@@ -566,6 +634,17 @@ void emit_object_assignment(block_t *parent,
 {
     if (is_record_object(dest) && is_record_object(src)) {
         emit_record_copy(parent, bb, dest, src);
+    } else if (dest->is_func && src->is_func &&
+               find_var(src->var_name, parent) != src) {
+        /* Function symbols are not scalar values: materialize their final
+         * address through OP_write, which the backend patches after laying out
+         * all functions. This is also needed for a declaration initializer such
+         * as `int (*fn)(int) = target;`.
+         */
+        var_t *dest_addr = require_ref_var(parent, dest->type, dest->ptr_level);
+        dest_addr->var_name = gen_name();
+        add_insn(parent, *bb, OP_address_of, dest_addr, dest, NULL, 0, NULL);
+        add_insn(parent, *bb, OP_write, NULL, dest_addr, src, PTR_SIZE, NULL);
     } else {
         src = resize_var(parent, bb, src, dest);
         add_insn(parent, *bb, OP_assign, dest, src, NULL, 0, NULL);
@@ -890,15 +969,20 @@ void parse_struct_field_init(block_t *parent,
             }
 
             if (field_val_raw && field_idx < struct_type->num_fields) {
-                var_t *field_val = resize_to(parent, bb, field_val_raw,
-                                             field->type, field->ptr_level);
-
                 var_t *field_addr =
                     compute_field_address(parent, bb, target_addr, field);
 
-                int field_size = size_var(field);
-                add_insn(parent, *bb, OP_write, NULL, field_addr, field_val,
-                         field_size, NULL);
+                if (is_record_type(field->type) &&
+                    is_record_object(field_val_raw)) {
+                    emit_record_copy_to_address(parent, bb, field_addr,
+                                                field_val_raw);
+                } else {
+                    var_t *field_val = resize_to(parent, bb, field_val_raw,
+                                                 field->type, field->ptr_level);
+                    int field_size = size_var(field);
+                    add_insn(parent, *bb, OP_write, NULL, field_addr, field_val,
+                             field_size, NULL);
+                }
             }
 
             field_idx++;
@@ -1635,13 +1719,20 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 
     /* is it function pointer declaration? */
     if (lex_accept(T_open_bracket)) {
-        func_t func;
+        func_t *func = arena_alloc_func();
         char temp_name[MAX_VAR_LEN];
         lex_expect(T_asterisk);
         lex_ident(T_identifier, temp_name);
         vd->var_name = intern_string(temp_name);
         lex_expect(T_close_bracket);
-        read_parameter_list_decl(&func, true);
+
+        /* The return declaration was parsed before the parenthesized
+         * declarator. Copy it into the syntax-only signature before the
+         * function-pointer marker is set on vd.
+         */
+        memcpy(&func->return_def, vd, sizeof(var_t));
+        read_parameter_list_decl(func, true);
+        vd->func_signature = func;
         vd->is_func = true;
     } else {
         if (!anon) {
@@ -1708,8 +1799,20 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
 void read_full_var_decl(var_t *vd, bool anon, bool is_param)
 {
     char type_name[MAX_ID_LEN];
+
+    /* Callers which have already consumed a leading qualifier leave it on the
+     * declaration. Keep it separate from qualification inherited from a
+     * typedef: `const int_pointer` qualifies the pointer object, while an
+     * unqualified `const_int_pointer` only qualifies the pointed-to object.
+     */
+    bool declaration_const = vd->is_const_qualified;
     bool is_signed = lex_accept(T_signed);
     bool is_const = lex_accept(T_const);
+    bool is_long = lex_accept(T_long);
+    if (is_long) {
+        is_signed |= lex_accept(T_signed);
+        is_const |= lex_accept(T_const);
+    }
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union)) {
         find_type_flag = 2;
@@ -1720,10 +1823,20 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
      * spelling to be omitted, while `signed char` and `signed short` retain
      * their explicit base type.
      */
-    if (is_signed && find_type_flag == 1 &&
-        (!lex_peek(T_identifier, type_name) ||
-         (strcmp(type_name, "int") && strcmp(type_name, "char") &&
-          strcmp(type_name, "short")))) {
+    if (is_long) {
+        /* C permits long and long int to share int's representation. shecc's
+         * current ABI is 32-bit for both, which meets C99's minimum range;
+         * reserve a second long for the later required long-long widening.
+         */
+        if (lex_accept(T_long))
+            error_at("long long is not supported yet", cur_token_loc());
+        if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
+            lex_expect(T_identifier);
+        type = TY_int;
+    } else if (is_signed && find_type_flag == 1 &&
+               (!lex_peek(T_identifier, type_name) ||
+                (strcmp(type_name, "int") && strcmp(type_name, "char") &&
+                 strcmp(type_name, "short")))) {
         type = TY_int;
     } else {
         lex_ident(T_identifier, type_name);
@@ -1738,8 +1851,16 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
     }
 
     vd->type = type;
-    vd->is_const_qualified |= type->is_const_qualified;
-    if (is_const) {
+    vd->is_const_qualified = type->is_const_qualified;
+
+    /* A qualifier may follow the base type as well as precede it: both "const
+     * int" and "int const" qualify the object. Consume it before parsing
+     * pointer declarators, where a following const instead qualifies the
+     * pointer itself ("int * const").
+     */
+    while (lex_accept(T_const))
+        is_const = true;
+    if (is_const || declaration_const) {
         if (type->ptr_level)
             vd->is_const_pointer = true;
         else
@@ -1777,8 +1898,8 @@ void read_parameter_list_decl(func_t *func, bool anon)
     }
 
     while (lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL) ||
-           lex_peek(T_signed, NULL) || lex_peek(T_struct, NULL) ||
-           lex_peek(T_union, NULL)) {
+           lex_peek(T_signed, NULL) || lex_peek(T_long, NULL) ||
+           lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
         /* Check for const qualifier */
         bool is_const = false;
         if (lex_accept(T_const))
@@ -1831,6 +1952,8 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     var_t *vd = require_typed_ptr_var(parent, TY_char, true);
     vd->var_name = gen_name();
     vd->init_val = index;
+    vd->is_const_qualified = true;
+    vd->is_string_literal = true;
     opstack_push(vd);
     /* String literals are now in .rodata section */
     add_insn(parent, bb, OP_load_rodata_address, vd, NULL, NULL, 0, NULL);
@@ -1940,6 +2063,7 @@ void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
 
         if (func && param_num < func->num_params) {
             var_t *target = &func->param_defs[param_num];
+            diagnose_const_pointer_conversion(param, target);
             if (is_record_type(target->type) && !target->ptr_level) {
                 /* A record parameter is a by-value object. Keep that promise
                  * without teaching every backend its native aggregate ABI: give
@@ -1964,8 +2088,8 @@ void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
             }
         }
 
-        /* Handle parameter type conversion for direct calls. Indirect calls
-         * currently don't provide function instance.
+        /* Handle parameter type conversion whenever the callee has a known
+         * prototype. Function-pointer declarations retain one too.
          */
         if (func && param_num >= func->num_params && func->va_args) {
             /* Default promotions apply to scalar varargs, but pointer-like
@@ -2009,10 +2133,34 @@ void read_func_call(func_t *func, block_t *parent, basic_block_t **bb)
              func->return_def.var_name);
 }
 
-void read_indirect_call(block_t *parent, basic_block_t **bb)
+/* Function-pointer prototypes are stored as opaque data in var_t so defs.h
+ * remains parseable before func_t is complete.
+ */
+func_t *get_func_signature(var_t *var)
 {
-    /* Note: Indirect calls use generic parameter handling */
-    read_func_parameters(NULL, parent, bb);
+    if (!var)
+        return NULL;
+    return var->func_signature;
+}
+
+void read_indirect_call(var_t *callee, block_t *parent, basic_block_t **bb)
+{
+    /* A function pointer carries its parsed prototype on the declaration. This
+     * makes indirect calls obey the same record-by-value lowering and scalar
+     * conversions as a direct call. Legacy/unprototyped pointers keep the old
+     * generic behaviour. The callee was evaluated before its argument list.
+     * Materialize a distinct SSA value now: lowering a by-value record argument
+     * emits a caller-side copy and can otherwise evict the untracked
+     * operand-stack value before OP_indirect consumes it.
+     */
+    var_t *target = opstack_pop();
+    var_t *saved_target = require_var(parent);
+    saved_target->var_name = gen_name();
+    add_insn(parent, *bb, OP_assign, saved_target, target, NULL, 0, NULL);
+    opstack_push(saved_target);
+
+    func_t *signature = get_func_signature(callee);
+    read_func_parameters(signature, parent, bb);
 
     add_insn(parent, *bb, OP_indirect, NULL, opstack_pop(), NULL, 0, NULL);
 }
@@ -2276,11 +2424,22 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
     /* Check if this is sizeof(type) or sizeof(expression) */
     bool has_signed_type = lex_accept(T_signed);
+    bool has_long_type = lex_accept(T_long);
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union))
         find_type_flag = 2;
 
-    if (has_signed_type) {
+    if (has_long_type) {
+        type = TY_int;
+        if (lex_accept(T_long))
+            error_at("long long is not supported yet", cur_token_loc());
+        lex_accept(T_signed);
+        lex_accept(T_const);
+        if (lex_peek(T_identifier, token) && !strcmp(token, "int"))
+            lex_expect(T_identifier);
+        while (lex_accept(T_asterisk))
+            ptr_cnt++;
+    } else if (has_signed_type) {
         type = TY_int;
         if (lex_peek(T_identifier, token) &&
             (!strcmp(token, "int") || !strcmp(token, "char") ||
@@ -2403,12 +2562,18 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         type_t *cast_or_literal_type = NULL;
         int cast_ptr_level = 0;
         int cast_array_size = 0;
+        bool cast_const_qualified = false;
+        bool cast_const_pointer = false;
 
         /* Look ahead to see if we have a typename followed by ) */
         token_t *type_start = cur_token;
+        bool has_const_type = lex_accept(T_const);
         bool has_signed_type = lex_accept(T_signed);
-        if (has_signed_type || lex_peek(T_identifier, lookahead_token) ||
-            lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
+        bool has_long_type = lex_accept(T_long);
+        bool has_type_identifier = lex_peek(T_identifier, lookahead_token);
+        if (has_const_type || has_signed_type || has_long_type ||
+            has_type_identifier || lex_peek(T_struct, NULL) ||
+            lex_peek(T_union, NULL)) {
             /* Check if it's a basic type or typedef */
             token_t *saved_token = type_start;
             bool is_record = lex_accept(T_struct);
@@ -2418,7 +2583,16 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 lex_ident(T_identifier, lookahead_token);
 
             type_t *type;
-            if (has_signed_type && !is_record) {
+            if (has_long_type && !is_record) {
+                if (lex_accept(T_long))
+                    error_at("long long is not supported yet", cur_token_loc());
+                lex_accept(T_signed);
+                lex_accept(T_const);
+                if (lex_peek(T_identifier, lookahead_token) &&
+                    !strcmp(lookahead_token, "int"))
+                    lex_expect(T_identifier);
+                type = TY_int;
+            } else if (has_signed_type && !is_record) {
                 if (lex_peek(T_identifier, lookahead_token) &&
                     (!strcmp(lookahead_token, "int") ||
                      !strcmp(lookahead_token, "char") ||
@@ -2436,13 +2610,19 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 /* Save current position to backtrack if needed Try to parse as
                  * typename
                  */
-                if (!is_record && !has_signed_type)
+                if (!is_record && !has_signed_type && !has_long_type)
                     lex_expect(T_identifier);
+
+                /* A qualifier may appear before or after the base type. */
+                while (lex_accept(T_const))
+                    has_const_type = true;
 
                 /* Check for pointer types: int*, char*, etc. */
                 int ptr_level = 0;
                 while (lex_accept(T_asterisk)) {
                     ptr_level++;
+                    while (lex_accept(T_const))
+                        cast_const_pointer = true;
                 }
 
                 /* Check for array brackets: [size] or [] */
@@ -2483,6 +2663,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                         is_cast = true;
                         cast_or_literal_type = type;
                         cast_ptr_level = ptr_level;
+                        cast_const_qualified =
+                            has_const_type || type->is_const_qualified;
                     }
                 } else {
                     /* Not a cast or compound literal - backtrack */
@@ -2502,6 +2684,15 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             var_t *cast_var = require_typed_ptr_var(
                 parent, cast_or_literal_type, cast_ptr_level);
             cast_var->var_name = gen_name();
+            cast_var->is_const_qualified = cast_const_qualified;
+            cast_var->is_const_pointer = cast_const_pointer;
+
+            /* An explicit C cast is permitted to remove qualifiers, but it is
+             * almost always a bug. Keep compiling it while making that loss
+             * visible, unlike implicit pointer assignments which are rejected.
+             */
+            if (incompatible_const_pointer_conversion(expr_var, cast_var))
+                printf("Warning: discarding const qualifier in cast\n");
 
             /* Generate cast IR. A cast down to a narrower type has to discard
              * the high bits: OP_cast is only a move, so "(char) 300" kept the
@@ -2742,9 +2933,15 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
             /* is it an indirect call with function pointer? */
             if (lex_peek(T_open_bracket, NULL)) {
-                read_indirect_call(parent, bb);
+                read_indirect_call(lvalue.decl, parent, bb);
 
-                vd = require_var(parent);
+                func_t *signature = get_func_signature(lvalue.decl);
+                if (signature)
+                    vd = require_typed_ptr_var(parent,
+                                               signature->return_def.type,
+                                               signature->return_def.ptr_level);
+                else
+                    vd = require_var(parent);
                 vd->var_name = gen_name();
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_func_ret, vd, NULL, NULL, 0, NULL);
@@ -3396,12 +3593,20 @@ void read_lvalue(lvalue_t *lvalue,
     lex_expect(T_identifier);
 
     lvalue->type = var->type;
+    lvalue->decl = var;
     lvalue->size = get_size(var);
     lvalue->ptr_level = var->ptr_level;
     lvalue->is_func = var->is_func;
     lvalue->is_reference = false;
+
+    /* A pointer hidden in a typedef keeps its depth on the type rather than the
+     * declarator. Its outer const still makes the pointer object read-only,
+     * just as for an explicitly spelled `T * const`.
+     */
     lvalue->is_const_qualified =
-        var->ptr_level ? var->is_const_pointer : var->is_const_qualified;
+        (var->ptr_level || (var->type && var->type->ptr_level))
+            ? var->is_const_pointer
+            : var->is_const_qualified;
 
     opstack_push(var);
 
@@ -3557,6 +3762,7 @@ void read_lvalue(lvalue_t *lvalue,
             if (!var)
                 error_at("Unknown struct or union member", next_token_loc());
             lvalue->type = var->type;
+            lvalue->decl = var;
             lvalue->ptr_level = var->ptr_level;
             lvalue->is_func = var->is_func;
             lvalue->size = get_size(var);
@@ -4093,7 +4299,7 @@ bool read_body_assignment(char *token,
                 add_insn(parent, *bb, OP_read, vd, rs1, NULL, PTR_SIZE, NULL);
             }
 
-            read_indirect_call(parent, bb);
+            read_indirect_call(lvalue.decl, parent, bb);
             return true;
         } else if (prefix_op == OP_generic) {
             lex_expect(T_assign);
@@ -4268,7 +4474,7 @@ bool read_body_assignment(char *token,
                 if (is_record_object(vd) && is_record_object(rs1)) {
                     emit_record_copy(parent, bb, vd, rs1);
                 } else if (incompatible_const_pointer_conversion(rs1, vd)) {
-                    error_at("discarding const qualifier", next_token_loc());
+                    diagnose_const_pointer_conversion(rs1, vd);
                 } else {
                     rs1 = resize_var(parent, bb, rs1, vd);
                     add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
@@ -4433,6 +4639,7 @@ bool read_global_assignment_var(var_t *var)
             read_literal_param(parent, bb);
             rs1 = opstack_pop();
             vd = var;
+            diagnose_const_pointer_conversion(rs1, vd);
             add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
             return true;
         }
@@ -5041,8 +5248,9 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     bool has_record_keyword =
         lex_peek(T_struct, NULL) || lex_peek(T_union, NULL);
     bool has_signed_keyword = lex_peek(T_signed, NULL);
+    bool has_long_keyword = lex_peek(T_long, NULL);
     if (!is_const && !has_identifier && !has_asterisk && !has_record_keyword &&
-        !has_signed_keyword)
+        !has_signed_keyword && !has_long_keyword)
         error_at("Unexpected token", next_token_loc());
 
     /* is it a variable declaration? Special handling when statement starts with
@@ -5075,7 +5283,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     } else {
         /* Normal type checking without asterisk */
         token_t *type_token = cur_token;
-        if (lex_peek(T_signed, NULL)) {
+        if (lex_peek(T_signed, NULL) || lex_peek(T_long, NULL)) {
             type = TY_int;
         } else {
             int find_type_flag = lex_accept(T_struct) ? 2 : 1;
@@ -5158,8 +5366,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
                     expr_result = first_elem;
                 }
 
-                if (incompatible_const_pointer_conversion(expr_result, var))
-                    error_at("discarding const qualifier", next_token_loc());
+                diagnose_const_pointer_conversion(expr_result, var);
                 emit_object_assignment(parent, &bb, var, expr_result);
             }
         }
@@ -5504,6 +5711,17 @@ void read_global_init_var(var_t *var, block_t *block)
     if (lex_peek(T_open_curly, NULL) &&
         (var->array_size > 0 || var->ptr_level > 0))
         parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
+    else if (global_compound_literal_starts_here() &&
+             !(var->ptr_level || var->type->ptr_level) &&
+             is_record_type(var->type))
+        parse_global_compound_record_init(var, block);
+    else if (global_compound_literal_starts_here() &&
+             (var->ptr_level || var->type->ptr_level))
+        parse_global_compound_array_init(var, block);
+    else if (global_compound_literal_starts_here())
+        parse_global_compound_scalar_init(var, block);
+    else if (lex_peek(T_open_curly, NULL) && is_record_type(var->type))
+        parse_global_record_init(var, block);
     else
         read_global_assignment_var(var);
 }
@@ -5542,6 +5760,120 @@ void parse_global_record_init(var_t *var, block_t *block)
     lex_expect(T_close_curly);
 }
 
+/* At file scope a compound literal has static storage duration. The target
+ * object is already global, so a record compound literal can use its normal
+ * constant aggregate lowering after consuming the spelled type name.
+ */
+void parse_global_compound_record_init(var_t *var, block_t *block)
+{
+    char type_name[MAX_ID_LEN];
+    int find_type_flag = 1;
+    type_t *compound_type, *target_type;
+
+    lex_expect(T_open_bracket);
+    if (lex_accept(T_struct) || lex_accept(T_union)) {
+        find_type_flag = 2;
+        lex_ident(T_identifier, type_name);
+    } else {
+        lex_ident(T_identifier, type_name);
+    }
+    lex_expect(T_close_bracket);
+
+    compound_type = find_type(type_name, find_type_flag);
+    target_type = var->type;
+    if (target_type->base_type == TYPE_typedef && target_type->base_struct)
+        target_type = target_type->base_struct;
+    if (compound_type && compound_type->base_type == TYPE_typedef &&
+        compound_type->base_struct)
+        compound_type = compound_type->base_struct;
+    if (!compound_type || !is_record_type(compound_type) ||
+        compound_type != target_type)
+        error_at("Incompatible record compound literal", cur_token_loc());
+
+    if (!lex_peek(T_open_curly, NULL))
+        error_at("Record compound literal needs an initializer",
+                 next_token_loc());
+    parse_global_record_init(var, block);
+}
+
+/* A scalar compound literal at file scope also has static storage duration. Its
+ * sole initializer is the target object's constant initializer, so no temporary
+ * storage is necessary after validating the spelled scalar type.
+ */
+void parse_global_compound_scalar_init(var_t *var, block_t *block)
+{
+    char type_name[MAX_ID_LEN];
+    type_t *compound_type;
+
+    UNUSED(block);
+
+    lex_expect(T_open_bracket);
+    lex_ident(T_identifier, type_name);
+    compound_type = find_type(type_name, true);
+    lex_expect(T_close_bracket);
+
+    if (!compound_type || is_record_type(compound_type) || var->ptr_level ||
+        compound_type != var->type)
+        error_at("Incompatible scalar compound literal", cur_token_loc());
+
+    lex_expect(T_open_curly);
+    if (lex_peek(T_close_curly, NULL))
+        error_at("Scalar compound literal needs an initializer",
+                 next_token_loc());
+    read_global_assignment_var(var);
+    if (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL))
+        error_at("Too many elements in scalar compound literal",
+                 next_token_loc());
+    lex_expect(T_close_curly);
+}
+
+/* An array compound literal at file scope is an unnamed static array. Keep that
+ * array in the global initializer block so its backing storage survives for the
+ * full program, then initialize the declared pointer with its base.
+ */
+void parse_global_compound_array_init(var_t *var, block_t *block)
+{
+    char type_name[MAX_ID_LEN];
+    type_t *element_type;
+    var_t *array;
+    int find_type_flag = 1;
+
+    lex_expect(T_open_bracket);
+    if (lex_accept(T_struct) || lex_accept(T_union)) {
+        find_type_flag = 2;
+        lex_ident(T_identifier, type_name);
+    } else {
+        lex_ident(T_identifier, type_name);
+    }
+    element_type = find_type(type_name, find_type_flag);
+    lex_expect(T_open_square);
+
+    array = require_typed_var(GLOBAL_BLOCK, element_type);
+    array->var_name = gen_name();
+    array->is_global = true;
+    if (lex_peek(T_numeric, NULL)) {
+        char bound[MAX_TOKEN_LEN];
+        lex_ident_n(T_numeric, bound, MAX_TOKEN_LEN);
+        array->array_size = parse_numeric_constant(bound);
+        if (array->array_size <= 0)
+            error_at("Array compound literal needs a positive bound",
+                     cur_token_loc());
+    }
+    lex_expect(T_close_square);
+    lex_expect(T_close_bracket);
+
+    if (!element_type || element_type != var->type)
+        error_at("Incompatible array compound literal", cur_token_loc());
+    if (!lex_peek(T_open_curly, NULL))
+        error_at("Array compound literal needs an initializer",
+                 next_token_loc());
+
+    add_insn(GLOBAL_BLOCK, GLOBAL_FUNC->bbs, OP_allocat, array, NULL, NULL, 0,
+             NULL);
+    parse_array_init(array, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
+    add_insn(block, GLOBAL_FUNC->bbs, OP_assign, var, array, NULL, 0, NULL);
+}
+
 /* Struct and union objects accept brace initializers, unlike scalar globals.
  * Keep their continuation declarators on the same path as the first one so that
  * linkage, qualifiers, and declarator-specific modifiers cannot diverge.
@@ -5564,6 +5896,11 @@ void read_global_record_declarator(block_t *block,
     if (lex_peek(T_open_curly, NULL) &&
         (var->array_size > 0 || var->ptr_level > 0)) {
         parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
+    } else if (global_compound_literal_starts_here() &&
+               (var->ptr_level || var->type->ptr_level)) {
+        parse_global_compound_array_init(var, block);
+    } else if (global_compound_literal_starts_here()) {
+        parse_global_compound_record_init(var, block);
     } else if (lex_peek(T_open_curly, NULL)) {
         parse_global_record_init(var, block);
     } else {
@@ -5594,7 +5931,16 @@ void read_global_decl(block_t *block, bool is_const, bool is_static)
             func = add_func(var->var_name, false);
 
         memcpy(&func->return_def, var, sizeof(var_t));
-        func->is_static = is_static;
+
+        /* A declaration without a storage-class specifier inherits a prior
+         * visible function's linkage. Thus `static int f(void); int f(void)`
+         * remains internal, whereas a first external declaration cannot later
+         * be made static in the same translation unit.
+         */
+        if (check_decl && !func_tmp.is_static && is_static)
+            error_at("static declaration follows non-static declaration",
+                     next_token_loc());
+        func->is_static = check_decl && func_tmp.is_static ? true : is_static;
         var_reset_subscripts(&func->return_def);
         block->locals.size--;
         read_parameter_list_decl(func, 0);
@@ -6005,11 +6351,23 @@ void read_global_statement(void)
             type_t *type = add_type();
             bool typedef_const = lex_accept(T_const);
             bool is_signed = lex_accept(T_signed);
+            bool is_long = lex_accept(T_long);
+            if (is_long) {
+                is_signed |= lex_accept(T_signed);
+                typedef_const |= lex_accept(T_const);
+            }
 
-            if (is_signed &&
-                (!lex_peek(T_identifier, base_type) ||
-                 (strcmp(base_type, "int") && strcmp(base_type, "char") &&
-                  strcmp(base_type, "short")))) {
+            if (is_long) {
+                if (lex_accept(T_long))
+                    error_at("long long is not supported yet", cur_token_loc());
+                if (lex_peek(T_identifier, base_type) &&
+                    !strcmp(base_type, "int"))
+                    lex_expect(T_identifier);
+                base = TY_int;
+            } else if (is_signed && (!lex_peek(T_identifier, base_type) ||
+                                     (strcmp(base_type, "int") &&
+                                      strcmp(base_type, "char") &&
+                                      strcmp(base_type, "short")))) {
                 base = TY_int;
             } else {
                 lex_ident(T_identifier, base_type);
@@ -6033,7 +6391,8 @@ void read_global_statement(void)
             lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
             lex_expect(T_semicolon);
         }
-    } else if (lex_peek(T_identifier, NULL) || lex_peek(T_signed, NULL)) {
+    } else if (lex_peek(T_identifier, NULL) || lex_peek(T_signed, NULL) ||
+               lex_peek(T_long, NULL)) {
         read_global_decl(block, is_const, is_static);
     } else
         error_at("Syntax error in global statement", next_token_loc());

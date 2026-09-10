@@ -351,6 +351,7 @@ typedef enum {
     T_const, /* const qualifier */
     T_static,
     T_signed,
+    T_long,
     /* C pre-processor directives */
     T_cppd_include,
     T_cppd_define,
@@ -644,6 +645,21 @@ struct var {
      */
     bool is_compound_literal;
 
+    /* String literals have immutable storage duration in C. Preserve that
+     * provenance separately from the pointer type so the compatibility warning
+     * can remain opt-in while legacy source still compiles.
+     */
+    bool is_string_literal;
+
+    /* A function-pointer declarator owns a prototype separately from its value
+     * type. Keeping this syntax-only object lets an indirect call use the same
+     * argument lowering as a direct call (notably record-by-value arguments)
+     * without putting function ABI details into type_t. Kept void-typed so the
+     * self-hosted parser does not need an incomplete `struct func` declaration
+     * while reading var_t itself. parser.c owns the cast back to func_t.
+     */
+    void *func_signature;
+
     /* C ABI lowering passes record parameters as pointers to caller-owned
      * copies. The source-level declaration remains a record so field access and
      * record assignment keep their C semantics; OP_address_of materializes the
@@ -748,6 +764,8 @@ typedef struct {
     bool is_reference;
     bool is_const_qualified;
     type_t *type;
+    /* The declaration selected by the lvalue, including a struct member. */
+    var_t *decl;
 } lvalue_t;
 
 /* constants for enums */
