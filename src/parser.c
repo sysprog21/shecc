@@ -139,6 +139,7 @@ var_t *require_var(block_t *blk)
     var->use_count = 0;
     var->base = var;
     var->type = TY_int;
+    var->scope = blk;
     var->space_is_allocated = false;
     var->has_backing_storage = false;
     var->ofs_based_on_stack_top = false;
@@ -405,6 +406,34 @@ var_t *truncate_unchecked(block_t *block,
     return rd;
 }
 
+var_t *normalize_bool(block_t *block, basic_block_t **bb, var_t *var)
+{
+    var_t *zero;
+    var_t *rd;
+
+    if (var->type == TY_bool && !var->ptr_level)
+        return var;
+    if (var->is_const && !var->ptr_level) {
+        rd = require_typed_var(block, TY_bool);
+        rd->var_name = gen_name();
+        rd->init_val = var->init_val != 0;
+        rd->is_const = true;
+        add_insn(block, *bb, OP_load_constant, rd, NULL, NULL, 0, NULL);
+        return rd;
+    }
+
+    zero = require_typed_var(block, TY_int);
+    zero->var_name = gen_name();
+    zero->init_val = 0;
+    zero->is_const = true;
+    add_insn(block, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
+
+    rd = require_typed_var(block, TY_bool);
+    rd->var_name = gen_name();
+    add_insn(block, *bb, OP_neq, rd, var, zero, 0, NULL);
+    return rd;
+}
+
 var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
 {
     bool is_from_ptr = from->ptr_level || from->array_size,
@@ -413,6 +442,9 @@ var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
 
     if (is_from_ptr && is_to_ptr)
         return from;
+
+    if (!is_to_ptr && to->type == TY_bool)
+        return normalize_bool(block, bb, from);
 
     int from_size = get_size(from), to_size = get_size(to);
 
@@ -1227,7 +1259,7 @@ basic_block_t *handle_goto_statement(block_t *parent, basic_block_t *bb)
     return else_;
 }
 
-int read_const_expr(void);
+int read_const_expr(block_t *scope);
 
 void parse_array_init(var_t *var,
                       block_t *parent,
@@ -1238,6 +1270,10 @@ void parse_array_init(var_t *var,
     int inferred_size = 0;
     var_t *base_addr = NULL;
     bool is_implicit = (var->array_size == 0);
+    block_t *initializer_scope = parent;
+
+    if (parent == GLOBAL_BLOCK && var->scope && var->scope != GLOBAL_BLOCK)
+        initializer_scope = var->scope;
 
     /* Elements of a pointer array are pointer-sized. Using the base type's
      * width strided "char *a[2] = {...}" by one byte, so every element but the
@@ -1280,7 +1316,7 @@ void parse_array_init(var_t *var,
             int prior_count = count;
 
             if (lex_accept(T_open_square)) {
-                count = read_const_expr();
+                count = read_const_expr(initializer_scope);
                 lex_expect(T_close_square);
                 lex_expect(T_assign);
             }
@@ -1327,16 +1363,41 @@ void parse_array_init(var_t *var,
                  * the value left every global array zero-filled, while the same
                  * initializer on a local worked.
                  */
-                if (parent == GLOBAL_BLOCK && !lex_peek(T_numeric, NULL) &&
-                    !lex_peek(T_minus, NULL) && !lex_peek(T_string, NULL) &&
-                    !lex_peek(T_char, NULL))
-                    error_at(
-                        "Global array initialization requires constant values",
-                        next_token_loc());
+                if (parent == GLOBAL_BLOCK &&
+                    initializer_scope != GLOBAL_BLOCK &&
+                    !lex_peek(T_string, NULL)) {
+                    /* Storage for a block-scope static lives globally, while
+                     * its initializer is an integer constant expression in the
+                     * surrounding block. Resolve local enumerators before
+                     * emitting the global setup-store value.
+                     */
+                    val = require_var(GLOBAL_BLOCK);
+                    val->var_name = gen_name();
+                    val->init_val = read_const_expr(var->scope);
+                    val->is_const = true;
+                    add_insn(GLOBAL_BLOCK, *bb, OP_load_constant, val, NULL,
+                             NULL, 0, NULL);
+                } else {
+                    if (parent == GLOBAL_BLOCK) {
+                        char token[MAX_ID_LEN];
+                        bool enum_constant =
+                            lex_peek(T_identifier, token) &&
+                            find_scoped_constant(token, parent);
 
-                read_expr(parent, bb);
-                read_ternary_operation(parent, bb);
-                val = opstack_pop();
+                        if (!lex_peek(T_numeric, NULL) &&
+                            !lex_peek(T_minus, NULL) &&
+                            !lex_peek(T_string, NULL) &&
+                            !lex_peek(T_char, NULL) && !enum_constant)
+                            error_at(
+                                "Global array initialization requires constant "
+                                "values",
+                                next_token_loc());
+                    }
+
+                    read_expr(parent, bb);
+                    read_ternary_operation(parent, bb);
+                    val = opstack_pop();
+                }
             }
 
             if (is_implicit && count >= MAX_IMPLICIT_ARRAY)
@@ -1440,7 +1501,7 @@ void parse_array_compound_literal(var_t *var,
     if (!lex_peek(T_close_curly, NULL)) {
         for (;;) {
             if (lex_accept(T_open_square)) {
-                count = read_const_expr();
+                count = read_const_expr(parent);
                 lex_expect(T_close_square);
                 lex_expect(T_assign);
             }
@@ -1608,23 +1669,23 @@ var_t *scalarize_array_literal_if_needed(block_t *parent,
 #define MAX_CONST_EXPR_OPS 16
 
 int eval_expression_imm(opcode_t op, int op1, int op2);
-int read_const_expr(void);
+int read_const_expr(block_t *scope);
 
-int read_const_expr_operand(void)
+int read_const_expr_operand(block_t *scope)
 {
     char buffer[MAX_TOKEN_LEN];
 
     if (lex_accept(T_minus))
-        return -read_const_expr_operand();
+        return -read_const_expr_operand(scope);
     if (lex_accept(T_plus))
-        return read_const_expr_operand();
+        return read_const_expr_operand(scope);
     if (lex_accept(T_bit_not))
-        return ~read_const_expr_operand();
+        return ~read_const_expr_operand(scope);
     if (lex_accept(T_log_not))
-        return !read_const_expr_operand();
+        return !read_const_expr_operand(scope);
 
     if (lex_accept(T_open_bracket)) {
-        int res = read_const_expr();
+        int res = read_const_expr(scope);
         lex_expect(T_close_bracket);
         return res;
     }
@@ -1641,7 +1702,7 @@ int read_const_expr_operand(void)
     }
     if (lex_peek(T_identifier, buffer)) {
         lex_expect(T_identifier);
-        constant_t *con = find_constant(buffer);
+        constant_t *con = find_scoped_constant(buffer, scope);
         if (con)
             return con->value;
         error_at("Identifier is not an integer constant", next_token_loc());
@@ -1650,13 +1711,13 @@ int read_const_expr_operand(void)
     return 0;
 }
 
-int read_const_expr(void)
+int read_const_expr(block_t *scope)
 {
     opcode_t op_stack[MAX_CONST_EXPR_OPS];
     int val_stack[MAX_CONST_EXPR_OPS];
     int op_n = 0, val_n = 0;
 
-    val_stack[val_n++] = read_const_expr_operand();
+    val_stack[val_n++] = read_const_expr_operand(scope);
 
     while (true) {
         opcode_t op = get_operator();
@@ -1675,9 +1736,9 @@ int read_const_expr(void)
                     op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
             }
             lex_expect(T_question);
-            int then_val = read_const_expr();
+            int then_val = read_const_expr(scope);
             lex_expect(T_colon);
-            int else_val = read_const_expr();
+            int else_val = read_const_expr(scope);
             return val_stack[0] ? then_val : else_val;
         }
 
@@ -1694,7 +1755,7 @@ int read_const_expr(void)
         if (op_n >= MAX_CONST_EXPR_OPS - 1)
             error_at("Constant expression nests too deeply", next_token_loc());
         op_stack[op_n++] = op;
-        val_stack[val_n++] = read_const_expr_operand();
+        val_stack[val_n++] = read_const_expr_operand(scope);
     }
 
     while (op_n > 0) {
@@ -1785,7 +1846,7 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
                 else
                     vd->ptr_level++;
             } else {
-                int next_dim = read_const_expr();
+                int next_dim = read_const_expr(vd->scope);
 
                 if (dim == 0) {
                     vd->array_size = next_dim;
@@ -1854,6 +1915,7 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
         error_at("both signed and unsigned specified", cur_token_loc());
     if (is_long_long && PTR_SIZE < 8)
         error_at("long long needs 64-bit target lowering", cur_token_loc());
+    bool is_enum_type = lex_accept(T_enum);
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union)) {
         find_type_flag = 2;
@@ -1864,7 +1926,10 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
      * spelling to be omitted, while `signed char` and `signed short` retain
      * their explicit base type.
      */
-    if (is_unsigned) {
+    if (is_enum_type) {
+        lex_ident(T_identifier, type_name);
+        type = find_type_tag(type_name, vd->scope);
+    } else if (is_unsigned) {
         if (is_long) {
             if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
                 lex_expect(T_identifier);
@@ -1956,7 +2021,7 @@ void read_parameter_list_decl(func_t *func, bool anon)
     while (lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL) ||
            lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
            lex_peek(T_long, NULL) || lex_peek(T_struct, NULL) ||
-           lex_peek(T_union, NULL)) {
+           lex_peek(T_union, NULL) || lex_peek(T_enum, NULL)) {
         /* Check for const qualifier */
         bool is_const = false;
         if (lex_accept(T_const))
@@ -2677,11 +2742,19 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     bool has_signed_type = lex_accept(T_signed);
     bool has_unsigned_type = lex_accept(T_unsigned);
     bool has_long_type = lex_accept(T_long);
+    bool has_enum_type = lex_accept(T_enum);
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union))
         find_type_flag = 2;
 
-    if (has_long_type) {
+    if (has_enum_type) {
+        lex_ident(T_identifier, token);
+        type = find_type_tag(token, parent);
+        if (!type)
+            error_at("Unknown enum type", cur_token_loc());
+        while (lex_accept(T_asterisk))
+            ptr_cnt++;
+    } else if (has_long_type) {
         type = has_unsigned_type ? TY_uint : TY_int;
         if (lex_accept(T_long)) {
             if (PTR_SIZE < 8)
@@ -2854,10 +2927,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         bool has_signed_type = lex_accept(T_signed);
         bool has_unsigned_type = lex_accept(T_unsigned);
         bool has_long_type = lex_accept(T_long);
+        bool has_enum_type = lex_accept(T_enum);
         bool has_type_identifier = lex_peek(T_identifier, lookahead_token);
         if (has_const_type || has_signed_type || has_unsigned_type ||
-            has_long_type || has_type_identifier || lex_peek(T_struct, NULL) ||
-            lex_peek(T_union, NULL)) {
+            has_long_type || has_enum_type || has_type_identifier ||
+            lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
             /* Check if it's a basic type or typedef */
             token_t *saved_token = type_start;
             bool is_record = lex_accept(T_struct);
@@ -2867,7 +2941,10 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 lex_ident(T_identifier, lookahead_token);
 
             type_t *type;
-            if (has_unsigned_type && !is_record) {
+            if (has_enum_type) {
+                lex_ident(T_identifier, lookahead_token);
+                type = find_type_tag(lookahead_token, parent);
+            } else if (has_unsigned_type && !is_record) {
                 if (has_long_type) {
                     type = TY_uint;
                     if (lex_accept(T_long)) {
@@ -2923,8 +3000,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 /* Save current position to backtrack if needed Try to parse as
                  * typename
                  */
-                if (!is_record && !has_signed_type && !has_unsigned_type &&
-                    !has_long_type)
+                if (!is_record && !has_enum_type && !has_signed_type &&
+                    !has_unsigned_type && !has_long_type)
                     lex_expect(T_identifier);
 
                 /* A qualifier may appear before or after the base type. */
@@ -3229,7 +3306,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         lex_peek(T_identifier, token);
 
         /* is a constant or variable? */
-        const constant_t *con = find_constant(token);
+        const constant_t *con = find_scoped_constant(token, parent);
         var_t *var = find_var(token, parent);
         func_t *func = find_func(token);
 
@@ -4945,7 +5022,7 @@ bool read_body_assignment(char *token,
     return false;
 }
 
-int read_primary_constant(void)
+int read_primary_constant(block_t *scope)
 {
     /* return signed constant */
     int isneg = 0, res;
@@ -4953,7 +5030,7 @@ int read_primary_constant(void)
     if (lex_accept(T_minus))
         isneg = 1;
     if (lex_accept(T_open_bracket)) {
-        res = read_primary_constant();
+        res = read_primary_constant(scope);
         lex_expect(T_close_bracket);
     } else if (lex_peek(T_numeric, buffer)) {
         res = parse_numeric_constant(buffer);
@@ -4963,6 +5040,14 @@ int read_primary_constant(void)
         unescape_string(buffer, unescaped, MAX_TOKEN_LEN);
         res = unescaped[0];
         lex_expect(T_char);
+    } else if (lex_peek(T_identifier, buffer)) {
+        constant_t *con;
+
+        lex_expect(T_identifier);
+        con = find_scoped_constant(buffer, scope);
+        if (!con)
+            error_at("Identifier is not an integer constant", next_token_loc());
+        res = con->value;
     } else
         error_at("Invalid value after assignment", next_token_loc());
     if (isneg)
@@ -5064,6 +5149,16 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
 }
 
 bool read_global_assignment_var(var_t *var);
+
+void emit_global_scalar_assignment(block_t *parent,
+                                   basic_block_t *bb,
+                                   var_t *dest,
+                                   var_t *src)
+{
+    if (!dest->ptr_level && dest->type == TY_bool)
+        src->init_val = src->init_val != 0;
+    add_insn(parent, bb, OP_assign, dest, src, NULL, 0, NULL);
+}
 
 /* Keep the legacy word-sized evaluator for ordinary constants and casts, but
  * select the two-word path whenever a literal-only initializer contains a wide
@@ -5205,6 +5300,13 @@ void eval_ternary_imm(int cond, var_t *var)
 bool read_global_assignment_var(var_t *var)
 {
     var_t *vd, *rs1;
+
+    /* A block-scope static is lowered in the global setup block, but its
+     * initializer is parsed in the declaration's lexical scope. In particular
+     * an enumerator declared by an enclosing block remains an integer constant
+     * expression here.
+     */
+    block_t *scope = var->scope ? var->scope : GLOBAL_BLOCK;
     block_t *parent = GLOBAL_BLOCK;
     basic_block_t *bb = GLOBAL_FUNC->bbs;
 
@@ -5245,7 +5347,7 @@ bool read_global_assignment_var(var_t *var)
                          0, NULL);
                 if (!explicit_address && object->array_size &&
                     lex_accept(T_plus)) {
-                    int index = read_primary_constant();
+                    int index = read_primary_constant(scope);
                     var_t *byte_offset = require_var(parent);
                     var_t *offset_addr = require_ref_var(parent, object->type,
                                                          object->ptr_level);
@@ -5274,7 +5376,7 @@ bool read_global_assignment_var(var_t *var)
                         object = field;
                     } else if (object->array_size &&
                                lex_accept(T_open_square)) {
-                        int index = read_primary_constant();
+                        int index = read_primary_constant(scope);
 
                         lex_expect(T_close_square);
                         object_addr =
@@ -5296,7 +5398,7 @@ bool read_global_assignment_var(var_t *var)
                      * unary sign here and consumes the entire integer constant
                      * expression, including grouping and enum constants.
                      */
-                    int index = read_const_expr();
+                    int index = read_const_expr(scope);
                     int elem_size =
                         object->ptr_level ? PTR_SIZE : object->type->size;
 
@@ -5333,7 +5435,7 @@ bool read_global_assignment_var(var_t *var)
             rs1 = opstack_pop();
             vd = var;
             diagnose_const_pointer_conversion(rs1, vd);
-            add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
+            emit_global_scalar_assignment(parent, bb, vd, rs1);
             return true;
         }
 
@@ -5342,7 +5444,7 @@ bool read_global_assignment_var(var_t *var)
         int val_stack[MAX_OPERATOR_STACK_SIZE];
         int op_stack_index = 0, val_stack_index = 0;
         int operand1, operand2;
-        operand1 = read_primary_constant();
+        operand1 = read_primary_constant(scope);
         op = get_operator();
         /* only one value after assignment */
         if (op == OP_generic) {
@@ -5353,7 +5455,7 @@ bool read_global_assignment_var(var_t *var)
 
             rs1 = vd;
             vd = opstack_pop();
-            add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
+            emit_global_scalar_assignment(parent, bb, vd, rs1);
             return true;
         }
         if (op == OP_ternary) {
@@ -5361,7 +5463,7 @@ bool read_global_assignment_var(var_t *var)
             eval_ternary_imm(operand1, var);
             return true;
         }
-        operand2 = read_primary_constant();
+        operand2 = read_primary_constant(scope);
         next_op = get_operator();
         if (next_op == OP_generic) {
             /* only two operands, apply and return */
@@ -5409,7 +5511,7 @@ bool read_global_assignment_var(var_t *var)
             if (val_stack_index >= MAX_OPERATOR_STACK_SIZE ||
                 op_stack_index >= MAX_OPERATOR_STACK_SIZE)
                 fatal("Constant expression too complex");
-            val_stack[val_stack_index++] = read_primary_constant();
+            val_stack[val_stack_index++] = read_primary_constant(scope);
             /* push operator on stack */
             op_stack[op_stack_index++] = op;
             op = get_operator();
@@ -5440,7 +5542,7 @@ bool read_global_assignment_var(var_t *var)
 
                     rs1 = vd;
                     vd = opstack_pop();
-                    add_insn(parent, bb, OP_assign, vd, rs1, NULL, 0, NULL);
+                    emit_global_scalar_assignment(parent, bb, vd, rs1);
                 }
                 return true;
             }
@@ -5460,8 +5562,7 @@ bool read_global_assignment_var(var_t *var)
 
             rs1 = vd;
             vd = opstack_pop();
-            add_insn(parent, GLOBAL_FUNC->bbs, OP_assign, vd, rs1, NULL, 0,
-                     NULL);
+            emit_global_scalar_assignment(parent, GLOBAL_FUNC->bbs, vd, rs1);
         }
         return true;
     }
@@ -5531,7 +5632,7 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
                 case_val = unescaped[0];
                 lex_expect(T_char);
             } else if (lex_peek(T_identifier, token)) {
-                const constant_t *cd = find_constant(token);
+                const constant_t *cd = find_scoped_constant(token, parent);
                 if (!cd)
                     error_at("Unknown constant in case label", cur_token_loc());
                 case_val = cd->value;
@@ -5958,6 +6059,102 @@ basic_block_t *handle_record_statement(block_t *parent, basic_block_t *bb)
     error_at("Unknown struct/union type", next_token_loc());
 }
 
+basic_block_t *handle_enum_declarators(block_t *parent,
+                                       basic_block_t *bb,
+                                       type_t *type,
+                                       bool is_const,
+                                       bool is_static)
+{
+    for (;;) {
+        var_t *var = require_typed_var(parent, type);
+
+        var->is_const_qualified = is_const;
+        var->is_static = is_static;
+        var->is_global = is_static;
+        read_partial_var_decl(var, NULL);
+        add_insn(is_static ? GLOBAL_BLOCK : parent,
+                 is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, var, NULL, NULL,
+                 0, NULL);
+        add_symbol(bb, var);
+
+        if (lex_accept(T_assign)) {
+            if (is_static) {
+                read_global_assignment_var(var);
+            } else if (lex_peek(T_open_curly, NULL) &&
+                       (var->array_size > 0 || var->ptr_level > 0)) {
+                parse_array_init(var, parent, &bb, true);
+            } else {
+                read_expr(parent, &bb);
+                read_ternary_operation(parent, &bb);
+
+                var_t *rhs = opstack_pop();
+                rhs = scalarize_array_literal_if_needed(
+                    parent, &bb, rhs, var->type,
+                    !var->ptr_level && var->array_size == 0);
+                emit_object_assignment(parent, &bb, var, rhs);
+            }
+        }
+
+        if (!lex_accept(T_comma))
+            break;
+        perform_side_effect(parent, bb);
+    }
+    lex_expect(T_semicolon);
+    return bb;
+}
+
+/* A block-scope enum definition contributes integer constants to the current
+ * expression parser just as a file-scope definition does. Like a record
+ * definition, it may introduce declarators after the closing brace.
+ */
+basic_block_t *handle_enum_statement(block_t *parent,
+                                     basic_block_t *bb,
+                                     bool is_const,
+                                     bool is_static)
+{
+    char token[MAX_ID_LEN];
+    int val = 0;
+    type_t *type = NULL;
+    bool has_tag = false;
+
+    lex_expect(T_enum);
+    if (lex_peek(T_identifier, token)) {
+        lex_expect(T_identifier);
+        type = find_local_type_tag(token, parent);
+        has_tag = true;
+    }
+    if (!lex_peek(T_open_curly, NULL)) {
+        if (!has_tag)
+            error_at("Unknown enum type", next_token_loc());
+        if (!type)
+            type = find_type_tag(token, parent);
+        if (!type)
+            error_at("Unknown enum type", next_token_loc());
+        return handle_enum_declarators(parent, bb, type, is_const, is_static);
+    }
+    if (!type)
+        type = add_type();
+    type->base_type = TYPE_int;
+    type->size = TY_int->size;
+    if (has_tag) {
+        set_type_name(type, token);
+        if (!find_local_type_tag(token, parent))
+            add_type_tag(parent, token, type);
+    }
+    lex_expect(T_open_curly);
+    do {
+        lex_ident(T_identifier, token);
+        if (lex_accept(T_assign))
+            val = read_const_expr(parent);
+        add_scoped_constant(parent, token, val++);
+    } while (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL));
+    lex_expect(T_close_curly);
+
+    if (lex_accept(T_semicolon))
+        return bb;
+    return handle_enum_declarators(parent, bb, type, is_const, is_static);
+}
+
 /* Everything a statement can still be: a declaration, an assignment, a call, or
  * an expression evaluated for its effect.
  */
@@ -5982,6 +6179,9 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             is_const = true;
         }
     }
+
+    if (lex_peek(T_enum, NULL))
+        return handle_enum_statement(parent, bb, is_const, is_static);
 
     /* statement with prefix */
     if (!is_const && lex_accept(T_increment))
@@ -6331,6 +6531,9 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL))
         return handle_record_statement(parent, bb);
 
+    if (lex_peek(T_enum, NULL))
+        return handle_enum_statement(parent, bb, false, false);
+
     /* Handle const qualifier for local variable declarations */
     return handle_declaration(parent, bb);
 }
@@ -6476,6 +6679,65 @@ void read_global_init_var(var_t *var, block_t *block)
         read_global_assignment_var(var);
 }
 
+/* A declarator's base type is already known when this runs. Keeping function
+ * completion independent of how that type was spelled lets enum, record, and
+ * ordinary scalar declarations share linkage and redeclaration checks.
+ */
+void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
+{
+    func_t *func = find_func(var->var_name);
+    func_t func_tmp;
+    bool check_decl = false;
+
+    if (func) {
+        memcpy(&func_tmp, func, sizeof(func_t));
+        check_decl = true;
+    } else {
+        func = add_func(var->var_name, false);
+    }
+
+    memcpy(&func->return_def, var, sizeof(var_t));
+    if (check_decl && !func_tmp.is_static && is_static)
+        error_at("static declaration follows non-static declaration",
+                 next_token_loc());
+    func->is_static = check_decl && func_tmp.is_static ? true : is_static;
+    var_reset_subscripts(&func->return_def);
+    block->locals.size--;
+    read_parameter_list_decl(func, 0);
+
+    if (check_decl) {
+        if (func->return_def.type != func_tmp.return_def.type ||
+            func->return_def.ptr_level != func_tmp.return_def.ptr_level ||
+            func->return_def.is_const_qualified !=
+                func_tmp.return_def.is_const_qualified)
+            error_at("conflicting types for function declaration",
+                     next_token_loc());
+        if (func->num_params != func_tmp.num_params ||
+            func->va_args != func_tmp.va_args)
+            error_at("conflicting types for function declaration",
+                     next_token_loc());
+        for (int i = 0; i < func->num_params; i++) {
+            const var_t *now = &func->param_defs[i];
+            const var_t *before = &func_tmp.param_defs[i];
+
+            if (now->type != before->type ||
+                now->ptr_level != before->ptr_level ||
+                now->is_const_qualified != before->is_const_qualified)
+                error_at("conflicting types for function declaration",
+                         next_token_loc());
+        }
+    }
+
+    if (lex_peek(T_open_curly, NULL)) {
+        if (check_decl && func_tmp.bbs)
+            error_at("redefinition of function", next_token_loc());
+        read_func_body(func);
+        return;
+    }
+    if (!lex_accept(T_semicolon))
+        error_at("Syntax error in global declaration", next_token_loc());
+}
+
 /* A compatible repeated file-scope declaration names the same object. The
  * parser creates a provisional var_t while reading its declarator, so discard
  * that entry before emitting allocation or initializer IR and keep the first
@@ -6526,7 +6788,7 @@ var_t *resolve_global_declarator(block_t *block,
 /* Read one declarator after the first in a global declaration. Each shares the
  * declaration's base type: "int a = 1, b, c = 3;".
  */
-void read_global_declarator(block_t *block,
+bool read_global_declarator(block_t *block,
                             type_t *decl_type,
                             bool is_const,
                             bool is_static)
@@ -6537,10 +6799,15 @@ void read_global_declarator(block_t *block,
     nv->is_static = is_static;
     nv->is_const_qualified = is_const;
     read_inner_var_decl(nv, false, false);
+    if (lex_peek(T_open_bracket, NULL)) {
+        read_global_function_declarator(block, nv, is_static);
+        return true;
+    }
     nv = resolve_global_declarator(block, nv, is_static, &is_redeclaration);
     if (!is_redeclaration)
         add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, nv, NULL, NULL, 0, NULL);
     read_global_init_var(nv, block);
+    return false;
 }
 
 void consume_global_compound_literal(void);
@@ -6725,94 +6992,8 @@ void read_global_decl(block_t *block, bool is_const, bool is_static)
     read_full_var_decl(var, false, false);
 
     if (lex_peek(T_open_bracket, NULL)) {
-        /* function */
-        func_t *func = find_func(var->var_name);
-        func_t func_tmp;
-        bool check_decl = false;
-
-        if (func) {
-            memcpy(&func_tmp, func, sizeof(func_t));
-            check_decl = true;
-        } else
-            func = add_func(var->var_name, false);
-
-        memcpy(&func->return_def, var, sizeof(var_t));
-
-        /* A declaration without a storage-class specifier inherits a prior
-         * visible function's linkage. Thus `static int f(void); int f(void)`
-         * remains internal, whereas a first external declaration cannot later
-         * be made static in the same translation unit.
-         */
-        if (check_decl && !func_tmp.is_static && is_static)
-            error_at("static declaration follows non-static declaration",
-                     next_token_loc());
-        func->is_static = check_decl && func_tmp.is_static ? true : is_static;
-        var_reset_subscripts(&func->return_def);
-        block->locals.size--;
-        read_parameter_list_decl(func, 0);
-
-        if (check_decl) {
-            /* Validate whether the previous declaration and the current one
-             * differ.
-             */
-            if ((func->return_def.type != func_tmp.return_def.type) ||
-                (func->return_def.ptr_level != func_tmp.return_def.ptr_level) ||
-                (func->return_def.is_const_qualified !=
-                 func_tmp.return_def.is_const_qualified)) {
-                printf("Error: conflicting types for the function %s.\n",
-                       func->return_def.var_name);
-                print_func_decl(&func_tmp, "before: ", true);
-                print_func_decl(func, "after: ", true);
-                fflush(stdout); /* see fatal() */
-                abort();
-            }
-
-            if (func->num_params != func_tmp.num_params) {
-                printf(
-                    "Error: conflicting number of arguments for the function "
-                    "%s.\n",
-                    func->return_def.var_name);
-                print_func_decl(&func_tmp, "before: ", true);
-                print_func_decl(func, "after: ", true);
-                fflush(stdout); /* see fatal() */
-                abort();
-            }
-
-            for (int i = 0; i < func->num_params; i++) {
-                const var_t *func_var = &func->param_defs[i];
-                const var_t *func_tmp_var = &func_tmp.param_defs[i];
-                if ((func_var->type != func_tmp_var->type) ||
-                    (func_var->ptr_level != func_tmp_var->ptr_level) ||
-                    (func_var->is_const_qualified !=
-                     func_tmp_var->is_const_qualified)) {
-                    printf("Error: conflicting types for the function %s.\n",
-                           func->return_def.var_name);
-                    print_func_decl(&func_tmp, "before: ", true);
-                    print_func_decl(func, "after: ", true);
-                    fflush(stdout); /* see fatal() */
-                    abort();
-                }
-            }
-
-            if (func->va_args != func_tmp.va_args) {
-                printf("Error: conflicting types for the function %s.\n",
-                       func->return_def.var_name);
-                print_func_decl(&func_tmp, "before: ", true);
-                print_func_decl(func, "after: ", true);
-                fflush(stdout); /* see fatal() */
-                abort();
-            }
-        }
-
-        if (lex_peek(T_open_curly, NULL)) {
-            if (check_decl && func_tmp.bbs)
-                error_at("redefinition of function", next_token_loc());
-            read_func_body(func);
-            return;
-        }
-        if (lex_accept(T_semicolon)) /* forward definition */
-            return;
-        error_at("Syntax error in global declaration", next_token_loc());
+        read_global_function_declarator(block, var, is_static);
+        return;
     } else {
         var =
             resolve_global_declarator(block, var, is_static, &is_redeclaration);
@@ -7015,6 +7196,56 @@ void read_global_statement(void)
                 read_global_record_declarator(block, type, is_const, is_static);
         }
         lex_expect(T_semicolon);
+    } else if (lex_accept(T_enum)) {
+        /* An enum definition is a declaration in its own right; it need not
+         * introduce a typedef. Its enumerators are integer constants and may
+         * use the same integer constant expressions accepted for array bounds
+         * and case labels.
+         */
+        int val = 0;
+        bool has_tag = false;
+        type_t *type;
+
+        if (lex_peek(T_identifier, token)) {
+            lex_expect(T_identifier);
+            has_tag = true;
+        }
+        if (!lex_peek(T_open_curly, NULL)) {
+            if (!has_tag)
+                error_at("Expected enum tag or definition", cur_token_loc());
+            type = find_type(token, true);
+            if (!type)
+                error_at("Unknown enum type", cur_token_loc());
+            if (read_global_declarator(block, type, is_const, is_static))
+                return;
+            while (lex_accept(T_comma))
+                read_global_declarator(block, type, is_const, is_static);
+            lex_expect(T_semicolon);
+            return;
+        }
+        type = has_tag ? find_type(token, true) : NULL;
+        if (!type)
+            type = add_type();
+
+        type->base_type = TYPE_int;
+        type->size = 4;
+        if (has_tag)
+            set_type_name(type, token);
+        lex_expect(T_open_curly);
+        do {
+            lex_ident(T_identifier, token);
+            if (lex_accept(T_assign))
+                val = read_const_expr(block);
+            add_constant(token, val++);
+        } while (lex_accept(T_comma));
+        lex_expect(T_close_curly);
+        if (!lex_peek(T_semicolon, NULL)) {
+            if (read_global_declarator(block, type, is_const, is_static))
+                return;
+            while (lex_accept(T_comma))
+                read_global_declarator(block, type, is_const, is_static);
+        }
+        lex_expect(T_semicolon);
     } else if (lex_accept(T_typedef)) {
         if (lex_accept(T_enum)) {
             int val = 0;
@@ -7025,11 +7256,8 @@ void read_global_statement(void)
             lex_expect(T_open_curly);
             do {
                 lex_ident(T_identifier, token);
-                if (lex_accept(T_assign)) {
-                    char value[MAX_TOKEN_LEN];
-                    lex_ident_n(T_numeric, value, MAX_TOKEN_LEN);
-                    val = parse_numeric_constant(value);
-                }
+                if (lex_accept(T_assign))
+                    val = read_const_expr(block);
                 add_constant(token, val++);
             } while (lex_accept(T_comma));
             lex_expect(T_close_curly);

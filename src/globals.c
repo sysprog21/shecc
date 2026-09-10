@@ -657,6 +657,8 @@ block_t *add_block(block_t *parent, func_t *func)
     blk->locals.capacity = 16;
     blk->locals.elements =
         arena_alloc(BLOCK_ARENA, blk->locals.capacity * sizeof(var_t *));
+    blk->type_tags = NULL;
+    blk->constants = NULL;
     blk->parent = parent;
     blk->func = func;
     blk->next = NULL;
@@ -951,12 +953,70 @@ void add_constant(char alias[], int value)
     /* Use interned string for constant name */
     strcpy(constant->alias, intern_string(alias));
     constant->value = value;
+    constant->next = NULL;
     hashmap_put(CONSTANTS_MAP, alias, constant);
 }
 
 constant_t *find_constant(char alias[])
 {
     return hashmap_get(CONSTANTS_MAP, alias);
+}
+
+/* Enum names declared in a block shadow enclosing names, but must disappear
+ * with that block. Keep their bindings on the parser's existing block tree.
+ */
+void add_scoped_constant(block_t *block, char alias[], int value)
+{
+    constant_t *constant = arena_alloc_constant();
+
+    if (!constant)
+        fatal("Failed to allocate scoped enum constant");
+    strcpy(constant->alias, intern_string(alias));
+    constant->value = value;
+    constant->next = block->constants;
+    block->constants = constant;
+}
+
+constant_t *find_scoped_constant(char alias[], block_t *block)
+{
+    for (; block; block = block->parent) {
+        for (constant_t *constant = block->constants; constant;
+             constant = constant->next) {
+            if (!strcmp(constant->alias, alias))
+                return constant;
+        }
+    }
+    return find_constant(alias);
+}
+
+void add_type_tag(block_t *block, char name[], type_t *type)
+{
+    type_tag_t *tag = arena_alloc(BLOCK_ARENA, sizeof(type_tag_t));
+
+    if (strlen(name) >= MAX_TYPE_LEN)
+        fatal("Type name too long");
+    strcpy(tag->name, intern_string(name));
+    tag->type = type;
+    tag->next = block->type_tags;
+    block->type_tags = tag;
+}
+
+type_t *find_type_tag(char name[], block_t *block)
+{
+    for (; block; block = block->parent) {
+        for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
+            if (!strcmp(tag->name, name))
+                return tag->type;
+    }
+    return find_type(name, 1);
+}
+
+type_t *find_local_type_tag(char name[], block_t *block)
+{
+    for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
+        if (!strcmp(tag->name, name))
+            return tag->type;
+    return NULL;
 }
 
 var_t *find_member(const char token[], type_t *type)

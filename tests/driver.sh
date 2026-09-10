@@ -512,6 +512,27 @@ begin_category "Literals and Constants" "Testing integer, character, and string 
 
 # just a number
 expr 0 0
+
+# C99 _Bool conversions store the truth value, not a truncated source byte.
+try_ 4 << EOF
+_Bool echo_bool(_Bool value) { return value; }
+int main(void) {
+    _Bool positive = 2;
+    _Bool negative = -7;
+    _Bool zero = 0;
+    positive = 42;
+    return (positive == 1) + (negative == 1) + (zero == 0) +
+           (echo_bool(-3) == 1);
+}
+EOF
+
+try_ 2 << EOF
+_Bool global_true = 2;
+int main(void) {
+    static _Bool local_true = -3;
+    return (global_true == 1) + (local_true == 1);
+}
+EOF
 expr 42 42
 
 # octal constant (satisfying re(0[0-7]+))
@@ -3966,14 +3987,22 @@ EOF
 # Explicitly addressed global elements and member arrays may carry a byte-scaled
 # integer constant-expression offset, not just a decayed array name or a bare
 # literal.
-try_ 19 << EOF
+try_ 25 << EOF
 int global_values[] = {3, 5, 8};
 struct global_offset_record { int values[3]; };
 static struct global_offset_record global_offset = {{1, 2, 8}};
-int *global_last = &global_values[0] + (1 + 1);
+enum global_offsets {
+    global_offset_count = 1 + 1,
+    global_offset_shift = global_offset_count << 1
+} global_marker = global_offset_shift;
+static enum global_offsets global_half = global_offset_count;
+int *global_last = &global_values[0] + global_offset_count;
 int *global_first = &global_values[2] - (1 + 1);
-int *member_last = &global_offset.values[0] + (1 << 1);
-int main(void) { return *global_last + *global_first + *member_last; }
+int *member_last = &global_offset.values[0] + (global_offset_shift / 2);
+int main(void) {
+    return *global_last + *global_first + *member_last + global_marker +
+           global_half;
+}
 EOF
 
 # Repeated compatible file-scope declarations name the same static object. A
@@ -4671,6 +4700,103 @@ begin_category "Enumerations" "Testing enum declarations and usage"
 try_ 6 << EOF
 typedef enum { enum1 = 5, enum2 } enum_t;
 int main() { enum_t v = enum2; return v; }
+EOF
+
+# Block-scope enum definitions supply integer constants to expressions and
+# accept C99's trailing comma after their final enumerator.
+try_ 4 << EOF
+int main(void)
+{
+    enum local_values { local_base = 1 + 1, local_count = local_base << 1, };
+    return local_count;
+}
+EOF
+
+# A block-scope enum definition may introduce scalar declarators after its
+# enumerator list, including a comma-separated declarator list.
+try_ 12 << EOF
+int main(void)
+{
+    enum local_values { local_base = 1 + 1, local_count = local_base << 1 }
+        local_marker = local_count, local_next = local_marker + 1;
+    return local_marker + local_next + local_base + 1;
+}
+EOF
+
+try_ 14 << EOF
+int main(void)
+{
+    enum local_values { local_base = 2, local_count = local_base << 1 };
+    enum local_values local_marker = local_count;
+    enum local_values local_next = local_marker + local_base + 4;
+    return local_marker + local_next;
+}
+EOF
+
+# A nested enum definition shadows both a file-scope tag and an enumerator; its
+# tag and constants disappear when the nested block closes.
+try_ 13 << EOF
+enum enum_scope { scoped_value = 3 };
+int main(void)
+{
+    int before = scoped_value;
+    {
+        enum enum_scope { scoped_value = 5, scoped_count = scoped_value + 1 };
+        enum enum_scope values[scoped_count];
+        int nested = scoped_value + scoped_count;
+        int converted = (enum enum_scope) scoped_count;
+        if (nested != 11 || converted != 6 || sizeof(enum enum_scope) != 4)
+            return 1;
+    }
+    return before + scoped_value + 7;
+}
+EOF
+
+# Leading qualifiers must not bypass enum declarators: const enum objects are
+# read-only and static enum objects retain their initialized value between calls
+# just like other block-scope static scalar objects.
+try_ 10 << EOF
+enum persistent_enum { persistent_fixed = 3 };
+int next_persistent_enum(void)
+{
+    enum local_persistent_enum { persistent_start = 3 };
+    static enum local_persistent_enum value = persistent_start;
+    return value++;
+}
+int main(void)
+{
+    const enum persistent_enum fixed = persistent_fixed;
+    return next_persistent_enum() + next_persistent_enum() + fixed;
+}
+EOF
+
+try_ 10 << EOF
+enum global_array_values { global_array_first = 1, global_array_second = 2 };
+static int global_values[2] = {global_array_first, global_array_second};
+int static_enum_array_sum(void)
+{
+    enum static_array_values { static_array_first = 2, static_array_second = 5 };
+    static int values[3] = {
+        [static_array_first - 2] = static_array_first,
+        [static_array_second - 3] = static_array_second
+    };
+    return values[0] + values[1] + values[2];
+}
+int main(void) { return static_enum_array_sum() + global_values[0] + global_values[1]; }
+EOF
+
+# Enum tags are valid parameter and return type specifiers, including a
+# qualified parameter declaration in an ordinary file-scope function API.
+try_ 12 << EOF
+enum api_state { api_ready = 5 };
+enum api_state echo_api_state(const enum api_state value)
+{
+    return value;
+}
+int main(void)
+{
+    return echo_api_state(api_ready) + sizeof(enum api_state) + 3;
+}
 EOF
 
 # Category: Memory Management

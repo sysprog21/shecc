@@ -546,6 +546,8 @@ typedef struct var_list {
 
 struct var {
     type_t *type;
+    /* Lexical owner, used while parsing declarator constant expressions. */
+    void *scope;
 
     /* Interned, not copied. A MAX_VAR_LEN array was 128 of this struct's 312
      * bytes on every one of the ~86k variables a self-compile creates, and
@@ -677,6 +679,12 @@ typedef struct func func_t;
 /* block definition */
 struct block {
     var_list_t locals;
+
+    /* C tags and enumeration constants have lexical, not translation-unit,
+     * scope. Variables remain in locals; these lists serve parser lookups.
+     */
+    void *type_tags;
+    void *constants;
     struct block *parent;
     func_t *func;
     struct block *next;
@@ -786,10 +794,17 @@ typedef struct {
 } lvalue_t;
 
 /* constants for enums */
-typedef struct {
+typedef struct constant {
     char alias[MAX_VAR_LEN];
     int value;
+    struct constant *next;
 } constant_t;
+
+typedef struct type_tag {
+    char name[MAX_TYPE_LEN];
+    type_t *type;
+    struct type_tag *next;
+} type_tag_t;
 
 struct phi_operand {
     var_t *var;

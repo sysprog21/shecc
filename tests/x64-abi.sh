@@ -321,6 +321,52 @@ int main() {
 ' "PASS"
 }
 
+# The first six integer arguments use registers and the final two use the
+# overflow area. Each narrow unsigned parameter must arrive zero-extended before
+# the callee promotes it for the sum.
+test_narrow_unsigned_args()
+{
+    run_abi_test "Narrow unsigned register and stack arguments" "Parameter Passing" '
+#include <stdio.h>
+int sum_narrow(unsigned char a, unsigned short b, unsigned char c,
+               unsigned short d, unsigned char e, unsigned short f,
+               unsigned char g, unsigned short h) {
+    return a + b + c + d + e + f + g + h;
+}
+int main(void) {
+    int result = sum_narrow(255U, 65535U, 255U, 65535U,
+                            255U, 65535U, 255U, 65535U);
+    if (result == 263160) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+test_mixed_narrow_args()
+{
+    run_abi_test "Mixed narrow register and stack arguments" "Parameter Passing" '
+#include <stdio.h>
+int sum_mixed(signed char a, unsigned char b, short c, unsigned short d,
+              signed char e, unsigned char f, short g, unsigned short h) {
+    return a + b + c + d + e + f + g + h;
+}
+int main(void) {
+    int result = sum_mixed(-128, 255U, -32768, 65535U,
+                           -1, 128U, -2, 32768U);
+    if (result == 65787) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
 # System V AMD64 assigns each integer-class long long argument one register
 # slot. Exercise all six argument registers, two overflow-area slots, and a
 # return value with nonzero upper words so a 32-bit-only path cannot pass.
@@ -435,6 +481,61 @@ test_return_char()
 char get_char(void) { return '\''A'\''; }
 int main() {
     if (get_char() == '\''A'\'') {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+# High-bit narrow unsigned returns must remain magnitudes when the caller
+# promotes them, rather than being interpreted as signed byte/halfword values.
+test_return_narrow_unsigned()
+{
+    run_abi_test "Return narrow unsigned values" "Return Values" '
+#include <stdio.h>
+unsigned char get_byte(void) { return 255U; }
+unsigned short get_half(void) { return 65535U; }
+int main(void) {
+    if (get_byte() == 255U && get_half() == 65535U) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+test_return_mixed_narrow()
+{
+    run_abi_test "Return mixed narrow signedness" "Return Values" '
+#include <stdio.h>
+signed char get_sbyte(void) { return -128; }
+unsigned char get_ubyte(void) { return 255U; }
+short get_shalf(void) { return -32768; }
+unsigned short get_uhalf(void) { return 65535U; }
+int main(void) {
+    if (get_sbyte() == -128 && get_ubyte() == 255U &&
+        get_shalf() == -32768 && get_uhalf() == 65535U) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+test_bool_argument_and_return()
+{
+    run_abi_test "Bool argument and return normalization" "Return Values" '
+#include <stdio.h>
+_Bool echo_bool(_Bool value) { return value; }
+int main(void) {
+    if (echo_bool(7) == 1 && echo_bool(0) == 0) {
         printf("PASS\n");
         return 0;
     }
@@ -631,6 +732,8 @@ test_four_args
 test_five_args
 test_eight_args
 test_long_args_and_return
+test_narrow_unsigned_args
+test_mixed_narrow_args
 test_unsigned_long_long_args_and_return
 test_signed_long_long_args_and_return
 
@@ -642,6 +745,9 @@ test_stack_alignment_extended
 echo ""
 echo -e "${CYAN}Running Return Value Tests...${NC}"
 test_return_char
+test_return_narrow_unsigned
+test_return_mixed_narrow
+test_bool_argument_and_return
 test_return_int
 test_return_pointer
 
