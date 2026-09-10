@@ -44,12 +44,23 @@ bool is_address_like(var_t *v)
  * widths and int narrowing by it, so it keeps counting pointer-like operands
  * alone rather than acquiring arrays and changing a settled target.
  */
+bool is_unsigned_scalar(const var_t *var)
+{
+    return var && !var->ptr_level && !var->is_func && var->type &&
+           var->type->is_unsigned;
+}
+
 void set_ptr_flags(ph2_ir_t *ir, insn_t *insn)
 {
     ir->src0_is_pointer = is_address_like(insn->rs1);
     ir->src1_is_pointer = is_address_like(insn->rs2);
     ir->is_pointer = is_pointer_like(insn->rd) || is_pointer_like(insn->rs1) ||
                      is_pointer_like(insn->rs2);
+    ir->is_unsigned = is_unsigned_scalar(insn->rd) ||
+                      is_unsigned_scalar(insn->rs1) ||
+                      is_unsigned_scalar(insn->rs2);
+    ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+    ir->src1_is_unsigned = is_unsigned_scalar(insn->rs2);
 }
 
 /* Width of the value a local's frame slot actually holds.
@@ -216,8 +227,11 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->ofs_based_on_stack_top = false;
     n->size_bytes = PTR_SIZE; /* default to the full slot; see add_ph2_ir */
     n->is_pointer = false;
+    n->is_unsigned = false;
     n->src0_is_pointer = false;
     n->src1_is_pointer = false;
+    n->src0_is_unsigned = false;
+    n->src1_is_unsigned = false;
 
     if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;
@@ -701,6 +715,7 @@ void store_var(basic_block_t *bb, var_t *var, int idx)
     ir->src1 = var->offset;
     ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
     ir->is_pointer = is_pointer_like(var);
+    ir->is_unsigned = is_unsigned_scalar(var);
     ir->size_bytes = var_slot_size(var);
     REGS[idx].polluted = 0;
 }
@@ -953,7 +968,17 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
 
     ir->dest = idx;
     ir->is_pointer = is_pointer_like(var);
-    ir->size_bytes = var_slot_size(var);
+    ir->is_unsigned = is_unsigned_scalar(var);
+
+    /* Incoming stack arguments use ABI-sized slots but carry a scalar in the
+     * low declared-width bytes. Reloading all eight bytes can retain a caller's
+     * sign extension; use the declaration width to preserve unsigned argument
+     * semantics.
+     */
+    ir->size_bytes = var->ofs_based_on_stack_top && !var->ptr_level &&
+                             !var->is_func && var->type
+                         ? var->type->size
+                         : var_slot_size(var);
     REGS[idx].var = var;
     REGS[idx].polluted = 0;
     vreg_map_to_phys(var, idx);
@@ -2159,6 +2184,7 @@ void reg_alloc_global(insn_t *global_insn)
              */
             ir->size_bytes = global_insn->sz;
             ir->is_pointer = global_insn->rs2->ptr_level > 0;
+            ir->is_unsigned = is_unsigned_scalar(global_insn->rs2);
             break;
         }
         /* Fallback generic write */
@@ -2169,6 +2195,7 @@ void reg_alloc_global(insn_t *global_insn)
         ir->src0 = src0;
         ir->src1 = src1;
         ir->dest = global_insn->sz;
+        set_ptr_flags(ir, global_insn);
         break;
     }
     case OP_trunc:
@@ -2316,6 +2343,9 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src0 = insn->rd->init_val;
             ir->dest = dest;
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
 
             /* store global variable immediately after assignment */
             if (insn->rd->is_global) {
@@ -2515,12 +2545,18 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = src0;
             ir->dest = dest;
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
 
             /* store global variable immediately after assignment */
             if (insn->rd->is_global) {
                 ir = bb_add_ph2_ir(bb, OP_global_store);
                 ir->src0 = dest;
                 ir->src1 = insn->rd->offset;
+                ir->is_unsigned = is_unsigned_scalar(insn->rd);
+                ir->size_bytes = var_slot_size(insn->rd);
                 REGS[dest].polluted = 0;
             }
 
@@ -2528,6 +2564,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 vreg_clear_phys(REGS[src0].var);
                 REGS[src0].var = NULL;
             }
+
+            /* An assignment creates storage-backed state. It must not retain a
+             * literal's compile-time cache for later reads.
+             */
+            insn->rd->is_const = false;
 
             break;
         case OP_read:
@@ -2537,6 +2578,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0 = src0;
             ir->src1 = insn->sz;
             ir->dest = dest;
+            set_ptr_flags(ir, insn);
             break;
         case OP_write:
             if (insn->rs2->is_func) {
@@ -2561,6 +2603,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 ir->src0 = src0;
                 ir->src1 = src1;
                 ir->dest = insn->sz;
+                set_ptr_flags(ir, insn);
             }
             break;
         case OP_branch:
@@ -2583,6 +2626,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
              * over its low word only.
              */
             ir->src0_is_pointer = is_address_like(insn->rs1);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             ir->then_bb = bb->then_;
             ir->else_bb = bb->else_;
             break;
@@ -2605,6 +2649,8 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = src0;
             ir->dest = args++;
+            ir->is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             REGS[ir->dest].var = insn->rs1;
             REGS[ir->dest].polluted = 0;
             break;
@@ -2634,6 +2680,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             src0 = prepare_operand(bb, insn->rs1, -1);
             ir = bb_add_ph2_ir(bb, OP_load_func);
             ir->src0 = src0;
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
 
             bb_add_ph2_ir(bb, OP_indirect);
 
@@ -2648,6 +2695,9 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = 0;
             ir->dest = dest;
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
             break;
         case OP_return:
             if (insn->rs1)
@@ -2657,6 +2707,10 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
 
             ir = bb_add_ph2_ir(bb, OP_return);
             ir->src0 = src0;
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            if (insn->rs1)
+                ir->size_bytes =
+                    insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
             break;
         case OP_add:
         case OP_sub:
@@ -2704,6 +2758,8 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
              * the result.
              */
             ir->src0_is_pointer = is_address_like(insn->rs1);
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             break;
         case OP_trunc:
         case OP_sign_ext:
@@ -2714,6 +2770,10 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src1 = insn->sz;
             ir->src0 = src0;
             ir->dest = dest;
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
             break;
         default:
             printf("Unknown opcode\n");

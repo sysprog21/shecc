@@ -44,6 +44,7 @@
 
 /* ModR/M opcode extensions selecting which shift 0xC1 encodes */
 #define SHIFT_EXT_SHL 4
+#define SHIFT_EXT_SHR 5
 #define SHIFT_EXT_SAR 7
 
 /* ModR/M byte construction: mod (2 bits) | reg (3 bits) | r/m (3 bits)
@@ -239,14 +240,39 @@ void emit_narrow_move(int dst, int src, int width, bool narrow)
     emit_byte(modrm(MOD_DIRECT, reg_low3(dst), reg_low3(src)));
 }
 
+/* Move the low scalar width while clearing all high bits. x86-64's 32-bit
+ * register form does this for free; byte and halfword values need MOVZX.
+ */
+void emit_zero_extend(int dst, int src, int width)
+{
+    if (width >= 8) {
+        if (dst != src) {
+            emit_rex(1, src, dst);
+            emit_byte(0x89);
+            emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(dst)));
+        }
+        return;
+    }
+    if (width == 4) {
+        emit_rex(0, src, dst);
+        emit_byte(0x89); /* MOV r32, r32 */
+        emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(dst)));
+        return;
+    }
+    emit_rex(1, dst, src);
+    emit_byte(0x0F);
+    emit_byte(width == 1 ? 0xB6 : 0xB7);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(dst), reg_low3(src)));
+}
+
 /* MOV dst, src, or nothing when the value is already in the destination. */
 void emit_mov_reg(int dst, int src)
 {
     emit_narrow_move(dst, src, 8, false);
 }
 
-/* Shift @reg by an immediate count. @ext picks the shift: SHIFT_EXT_SHL or
- * SHIFT_EXT_SAR.
+/* Shift @reg by an immediate count. @ext picks the shift: SHIFT_EXT_SHL,
+ * SHIFT_EXT_SHR, or SHIFT_EXT_SAR.
  */
 void emit_shift_imm(int reg, int ext, int imm)
 {

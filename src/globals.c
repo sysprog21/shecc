@@ -37,9 +37,12 @@ int types_idx = 0;
 
 type_t *TY_void;
 type_t *TY_char;
+type_t *TY_uchar;
 type_t *TY_bool;
 type_t *TY_int;
+type_t *TY_uint;
 type_t *TY_short;
+type_t *TY_ushort;
 
 /* Arenas */
 

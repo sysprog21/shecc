@@ -341,8 +341,21 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__lui(__t0, rv_hi(ph2_ir->src0)));
             emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
             emit(__add(__t0, interm, __t0));
-            emit(__lw(rd, __t0, 0));
-        } else
+            if (ph2_ir->size_bytes == 1)
+                emit(ph2_ir->is_unsigned ? __lbu(rd, __t0, 0)
+                                         : __lb(rd, __t0, 0));
+            else if (ph2_ir->size_bytes == 2)
+                emit(ph2_ir->is_unsigned ? __lhu(rd, __t0, 0)
+                                         : __lh(rd, __t0, 0));
+            else
+                emit(__lw(rd, __t0, 0));
+        } else if (ph2_ir->size_bytes == 1)
+            emit(ph2_ir->is_unsigned ? __lbu(rd, interm, ph2_ir->src0)
+                                     : __lb(rd, interm, ph2_ir->src0));
+        else if (ph2_ir->size_bytes == 2)
+            emit(ph2_ir->is_unsigned ? __lhu(rd, interm, ph2_ir->src0)
+                                     : __lh(rd, interm, ph2_ir->src0));
+        else
             emit(__lw(rd, interm, ph2_ir->src0));
         return;
     case OP_store:
@@ -358,9 +371,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_read:
         if (ph2_ir->src1 == 1)
-            emit(__lb(rd, rs1, 0));
+            emit(ph2_ir->is_unsigned ? __lbu(rd, rs1, 0) : __lb(rd, rs1, 0));
         else if (ph2_ir->src1 == 2)
-            emit(__lh(rd, rs1, 0));
+            emit(ph2_ir->is_unsigned ? __lhu(rd, rs1, 0) : __lh(rd, rs1, 0));
         else if (ph2_ir->src1 == 4)
             emit(__lw(rd, rs1, 0));
         else
@@ -471,9 +484,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_mod:
         if (hard_mul_div) {
             if (ph2_ir->op == OP_div)
-                emit(__div(rd, rs1, rs2));
+                emit(ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned
+                         ? __divu(rd, rs1, rs2)
+                         : __div(rd, rs1, rs2));
             else
-                emit(__mod(rd, rs1, rs2));
+                emit(ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned
+                         ? __modu(rd, rs1, rs2)
+                         : __mod(rd, rs1, rs2));
             return;
         }
         interm = __t0;
@@ -486,16 +503,30 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             interm = __t2;
             divisor_mask = __zero;
         }
-        /* Obtain absolute values of the dividend and divisor */
+
+        /* Obtain absolute values of the dividend and divisor. Unsigned values
+         * already are magnitudes; keep the same instruction count as the signed
+         * path because the fixed branch displacements below depend on it.
+         */
         emit(__addi(__t2, rs1, 0));
         emit(__addi(__t3, rs2, 0));
-        emit(__srai(__t0, __t2, 31));
-        emit(__add(__t2, __t2, __t0));
-        emit(__xor(__t2, __t2, __t0));
-        emit(__srai(__t1, __t3, 31));
-        emit(__add(__t3, __t3, __t1));
-        emit(__xor(__t3, __t3, __t1));
-        emit(__xor(__t5, __t0, divisor_mask));
+        if (ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned) {
+            emit(__addi(__t0, __zero, 0));
+            emit(__addi(__t2, __t2, 0));
+            emit(__addi(__t2, __t2, 0));
+            emit(__addi(__t1, __zero, 0));
+            emit(__addi(__t3, __t3, 0));
+            emit(__addi(__t3, __t3, 0));
+            emit(__addi(__t5, __zero, 0));
+        } else {
+            emit(__srai(__t0, __t2, 31));
+            emit(__add(__t2, __t2, __t0));
+            emit(__xor(__t2, __t2, __t0));
+            emit(__srai(__t1, __t3, 31));
+            emit(__add(__t3, __t3, __t1));
+            emit(__xor(__t3, __t3, __t1));
+            emit(__xor(__t5, __t0, divisor_mask));
+        }
         /* Unsigned integer division */
         emit(__addi(__t0, __zero, 0));
         emit(__addi(__t1, __zero, 1));
@@ -521,7 +552,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sll(rd, rs1, rs2));
         return;
     case OP_rshift:
-        emit(__sra(rd, rs1, rs2));
+        emit(ph2_ir->src0_is_unsigned ? __srl(rd, rs1, rs2)
+                                      : __sra(rd, rs1, rs2));
         return;
     case OP_eq:
         emit(__sub(rd, rs1, rs2));
@@ -533,17 +565,25 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sltu(rd, __zero, rd));
         return;
     case OP_gt:
-        emit(__slt(rd, rs2, rs1));
+        emit((ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned)
+                 ? __sltu(rd, rs2, rs1)
+                 : __slt(rd, rs2, rs1));
         return;
     case OP_geq:
-        emit(__slt(rd, rs1, rs2));
+        emit((ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned)
+                 ? __sltu(rd, rs1, rs2)
+                 : __slt(rd, rs1, rs2));
         emit(__xori(rd, rd, 1));
         return;
     case OP_lt:
-        emit(__slt(rd, rs1, rs2));
+        emit((ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned)
+                 ? __sltu(rd, rs1, rs2)
+                 : __slt(rd, rs1, rs2));
         return;
     case OP_leq:
-        emit(__slt(rd, rs2, rs1));
+        emit((ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned)
+                 ? __sltu(rd, rs2, rs1)
+                 : __slt(rd, rs2, rs1));
         emit(__xori(rd, rd, 1));
         return;
     case OP_negate:
@@ -596,12 +636,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
              * for RISC-V immediate field
              */
             emit(__slli(rd, rs1, shift_amount));
-            emit(__srai(rd, rd, shift_amount));
+            emit(ph2_ir->src0_is_unsigned ? __srli(rd, rd, shift_amount)
+                                          : __srai(rd, rd, shift_amount));
         } else {
             /* Fallback for other sizes */
             emit(__andi(rd, rs1, 0xFF));
             emit(__slli(rd, rd, shift_amount));
-            emit(__srai(rd, rd, shift_amount));
+            emit(ph2_ir->src0_is_unsigned ? __srli(rd, rd, shift_amount)
+                                          : __srai(rd, rd, shift_amount));
         }
         return;
     }

@@ -85,15 +85,18 @@ void a64_sub_sxtw(int d, int n, int m)
 /* Sign-extend the low @size bytes of Xn into Xd. Always one instruction, so
  * update_elf_offset()'s default estimate stays correct.
  */
-void a64_extend(int d, int n, int size)
+void a64_extend(int d, int n, int size, bool is_unsigned)
 {
     if (size == 1)
-        emit(0x93401c00 | (n << 5) | d);
+        emit((is_unsigned ? 0xd3401c00 : 0x93401c00) | (n << 5) | d);
     else if (size == 2)
-        emit(0x93403c00 | (n << 5) | d);
-    else if (size == 4)
-        a64_sxtw(d, n);
-    else
+        emit((is_unsigned ? 0xd3403c00 : 0x93403c00) | (n << 5) | d);
+    else if (size == 4) {
+        if (is_unsigned)
+            emit(0xd3407c00 | (n << 5) | d);
+        else
+            a64_sxtw(d, n);
+    } else
         a64_mov(d, n);
 }
 
@@ -217,7 +220,7 @@ bool a64_cmp_wide(ph2_ir_t *p)
     return p->src0_is_pointer || p->src1_is_pointer;
 }
 
-int a64_cond(opcode_t op)
+int a64_cond(opcode_t op, bool is_unsigned)
 {
     switch (op) {
     case OP_eq:
@@ -225,13 +228,13 @@ int a64_cond(opcode_t op)
     case OP_neq:
         return 1;
     case OP_geq:
-        return 10;
+        return is_unsigned ? 2 : 10; /* HS / GE */
     case OP_lt:
-        return 11;
+        return is_unsigned ? 3 : 11; /* LO / LT */
     case OP_gt:
-        return 12;
+        return is_unsigned ? 8 : 12; /* HI / GT */
     default:
-        return 13;
+        return is_unsigned ? 9 : 13; /* LS / LE */
     }
 }
 
@@ -466,20 +469,25 @@ void emit_ph2_ir(ph2_ir_t *p)
         emit(0x1b007c00 | (m << 16) | (n << 5) | d);
         return;
     case OP_div:
-        emit(0x1ac00c00 | (m << 16) | (n << 5) | d);
+        emit((p->src0_is_unsigned || p->src1_is_unsigned ? 0x1ac00800
+                                                         : 0x1ac00c00) |
+             (m << 16) | (n << 5) | d);
         return;
     case OP_mod:
         /* d = n % m. Do not put the quotient in d: register coalescing may make
          * d alias n, losing the minuend before MSUB reads it.
          */
-        emit(0x1ac00c00 | (m << 16) | (n << 5) | A64_IP0);
+        emit((p->src0_is_unsigned || p->src1_is_unsigned ? 0x1ac00800
+                                                         : 0x1ac00c00) |
+             (m << 16) | (n << 5) | A64_IP0);
         emit(0x1b008000 | (m << 16) | (n << 10) | (A64_IP0 << 5) | d);
         return;
     case OP_lshift:
         emit(0x1ac02000 | (m << 16) | (n << 5) | d);
         return;
     case OP_rshift:
-        emit(0x1ac02800 | (m << 16) | (n << 5) | d);
+        emit((p->src0_is_unsigned ? 0x1ac02400 : 0x1ac02800) | (m << 16) |
+             (n << 5) | d);
         return;
     case OP_bit_and:
         emit(0x0a000000 | (m << 16) | (n << 5) | d);
@@ -505,7 +513,9 @@ void emit_ph2_ir(ph2_ir_t *p)
         emit((a64_cmp_wide(p) ? 0xeb00001f : 0x6b00001f) | (m << 16) |
              (n << 5));
         emit((a64_cmp_wide(p) ? 0x9a9f07e0 : 0x1a9f07e0) |
-             ((a64_cond(p->op) ^ 1) << 12) | d);
+             ((a64_cond(p->op, p->src0_is_unsigned || p->src1_is_unsigned) ^ 1)
+              << 12) |
+             d);
         return;
 
     /* Width follows the operand, exactly as the comparisons above do. A pointer
@@ -524,7 +534,7 @@ void emit_ph2_ir(ph2_ir_t *p)
      * made every promotion a plain move.
      */
     case OP_trunc:
-        a64_extend(d, n, p->src1);
+        a64_extend(d, n, p->src1, p->is_unsigned);
         return;
     case OP_sign_ext: {
         int src_size = (p->src1 >> 16) & 0xffff, dst_size = p->src1 & 0xffff;
@@ -535,7 +545,7 @@ void emit_ph2_ir(ph2_ir_t *p)
         if (dst_size == PTR_SIZE)
             a64_mov(d, n);
         else
-            a64_extend(d, n, src_size);
+            a64_extend(d, n, src_size, p->src0_is_unsigned);
         return;
     }
     case OP_cast:

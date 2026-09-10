@@ -52,6 +52,7 @@ typedef enum {
     __NE = 1,  /* Not equal */
     __CS = 2,  /* Unsigned higher or same */
     __CC = 3,  /* Unsigned lower */
+    __HI = 8,  /* Unsigned higher */
     __LS = 9,  /* Unsigned lower or same */
     __GE = 10, /* Signed greater than or equal */
     __LT = 11, /* Signed less than */
@@ -87,7 +88,7 @@ typedef enum {
     rotat_rs = 3  /* Rotate right shift */
 } shift_type;
 
-arm_cond_t arm_get_cond(opcode_t op)
+arm_cond_t arm_get_cond(opcode_t op, bool is_unsigned)
 {
     switch (op) {
     case OP_eq:
@@ -95,13 +96,13 @@ arm_cond_t arm_get_cond(opcode_t op)
     case OP_neq:
         return __NE;
     case OP_lt:
-        return __LT;
+        return is_unsigned ? __CC : __LT;
     case OP_geq:
-        return __GE;
+        return is_unsigned ? __CS : __GE;
     case OP_gt:
-        return __GT;
+        return is_unsigned ? __HI : __GT;
     case OP_leq:
-        return __LE;
+        return is_unsigned ? __LS : __LE;
     default:
         fatal("Unsupported condition IR opcode");
     }
@@ -333,6 +334,12 @@ int __lh(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
     return arm_halfword_transfer(cond, 1, rn, rd, ofs, 1);
 }
 
+/* ARM unsigned halfword load (LDRH). */
+int __lhu(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
+{
+    return arm_halfword_transfer(cond, 1, rn, rd, ofs, 0);
+}
+
 /* ARM halfword store (STRH) */
 int __sh(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 {
@@ -390,6 +397,11 @@ int __mul(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
 int __div(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
 {
     return arm_encode(cond, 113, rd, 15, (r1 << 8) + 16 + r2);
+}
+
+int __udiv(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
+{
+    return arm_encode(cond, 115, rd, 15, (r1 << 8) + 16 + r2);
 }
 
 int __rsb_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)

@@ -3417,6 +3417,11 @@ bool mark_const(insn_t *insn)
     return true;
 }
 
+bool ssa_is_unsigned_scalar(const var_t *var)
+{
+    return var && !var->ptr_level && var->type && var->type->is_unsigned;
+}
+
 bool eval_const_arithmetic(insn_t *insn)
 {
     if (!insn->rs1)
@@ -3426,6 +3431,14 @@ bool eval_const_arithmetic(insn_t *insn)
     if (!insn->rs2)
         return false;
     if (!insn->rs2->is_const)
+        return false;
+
+    /* Constant folding predates unsigned arithmetic and evaluates every
+     * operation as signed int. Leave unsigned expressions to the target
+     * lowering until this pass gains width-aware unsigned evaluation.
+     */
+    if (ssa_is_unsigned_scalar(insn->rs1) ||
+        ssa_is_unsigned_scalar(insn->rs2) || ssa_is_unsigned_scalar(insn->rd))
         return false;
 
     int res;

@@ -521,6 +521,84 @@ expr 65 0101
 # Category: Arithmetic Operations
 begin_category "Arithmetic Operations" "Testing +, -, *, /, % operators"
 
+# Unsigned int operations must use modular arithmetic, logical right shift,
+# unsigned division, and unsigned relational comparisons after the value's high
+# bit is set at run time.
+try_ 4 << EOF
+int main(void)
+{
+    unsigned int bits = 2147483647;
+    bits = bits + bits + 1;
+    return (bits >> 31) + (bits / 2 == 2147483647) +
+           (bits / 3 == 1431655765) + (bits > 0);
+}
+EOF
+
+try_ 1 << EOF
+int main(void) {
+    unsigned int bits = 2147483647;
+    bits = bits + bits + 1;
+    return bits >> 31;
+}
+EOF
+
+try_ 1 << EOF
+int main(void) {
+    unsigned int bits = 2147483647;
+    bits = bits + bits + 1;
+    return bits / 2 == 2147483647;
+}
+EOF
+try_ 1 << EOF
+int main(void) {
+    unsigned int all_bits = 4294967295U;
+    return all_bits >> 31;
+}
+EOF
+try_ 1 << EOF
+unsigned int identity(unsigned int value) { return value; }
+int main(void) { return identity(4294967295U) >> 31; }
+EOF
+try_ 1 << EOF
+unsigned int eighth(unsigned int a, unsigned int b, unsigned int c,
+                    unsigned int d, unsigned int e, unsigned int f,
+                    unsigned int g, unsigned int h) { return h; }
+int main(void) {
+    return eighth(1U, 2U, 3U, 4U, 5U, 6U, 7U, 4294967295U) >> 31;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    return (((unsigned int)-1) >> 31) +
+           (((unsigned short)-1) >> 15);
+}
+EOF
+try_ 0 << EOF
+int main(void) {
+    unsigned char byte = 255;
+    unsigned short half = 65535;
+    byte++;
+    half++;
+    return byte + half;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    unsigned int one = 1U;
+    int minus_two = -2;
+    int minus_one = -1;
+    return ((one + minus_two) >> 31) + (minus_one > one);
+}
+EOF
+try_ 4 << EOF
+typedef unsigned short ushort;
+int main(void) {
+    ushort small = 65535;
+    return (small > 0) + (sizeof(unsigned char) == 1) +
+           (sizeof(unsigned short) == 2) + (sizeof(unsigned long) == 4);
+}
+EOF
+
 declare -a arithmetic_tests=(
     "42 24+18"
     "30 58-28"
@@ -2996,6 +3074,20 @@ int main(void)
     array[1] = selected->y;
     return *pointer + array[0] + array[1] + chosen_ptr->number + alpha + beta +
            (left != 0) + (right != 0);
+}
+EOF
+
+# Unsigned scalar declarations preserve their storage widths. unsigned char and
+# unsigned short promote to int in arithmetic, while unsigned int remains
+# unsigned through the expression pipeline.
+try_ 26 << EOF
+unsigned int global_value = 1000;
+int main(void)
+{
+    unsigned char byte = 20;
+    unsigned short half = 30;
+    unsigned int word = global_value;
+    return byte + half + word;
 }
 EOF
 

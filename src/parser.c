@@ -1806,13 +1806,32 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
      * unqualified `const_int_pointer` only qualifies the pointed-to object.
      */
     bool declaration_const = vd->is_const_qualified;
-    bool is_signed = lex_accept(T_signed);
-    bool is_const = lex_accept(T_const);
-    bool is_long = lex_accept(T_long);
-    if (is_long) {
-        is_signed |= lex_accept(T_signed);
-        is_const |= lex_accept(T_const);
+    bool is_signed = false;
+    bool is_unsigned = false;
+    bool is_const = false;
+    bool is_long = false;
+
+    /* C permits these declaration specifiers in either order. Consume the
+     * scalar set as a group so `const unsigned int` and `unsigned const int`
+     * follow the same path.
+     */
+    while (lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
+           lex_peek(T_const, NULL) || lex_peek(T_long, NULL)) {
+        if (lex_accept(T_signed))
+            is_signed = true;
+        else if (lex_accept(T_unsigned))
+            is_unsigned = true;
+        else if (lex_accept(T_const))
+            is_const = true;
+        else {
+            lex_expect(T_long);
+            if (is_long)
+                error_at("long long is not supported yet", cur_token_loc());
+            is_long = true;
+        }
     }
+    if (is_signed && is_unsigned)
+        error_at("both signed and unsigned specified", cur_token_loc());
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union)) {
         find_type_flag = 2;
@@ -1823,13 +1842,28 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
      * spelling to be omitted, while `signed char` and `signed short` retain
      * their explicit base type.
      */
-    if (is_long) {
+    if (is_unsigned) {
+        if (is_long) {
+            if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
+                lex_expect(T_identifier);
+            type = TY_uint; /* long remains the current 32-bit ABI width */
+        } else if (lex_peek(T_identifier, type_name) &&
+                   (!strcmp(type_name, "char") || !strcmp(type_name, "short") ||
+                    !strcmp(type_name, "int"))) {
+            lex_expect(T_identifier);
+            if (!strcmp(type_name, "char"))
+                type = TY_uchar;
+            else if (!strcmp(type_name, "short"))
+                type = TY_ushort;
+            else
+                type = TY_uint;
+        } else
+            type = TY_uint; /* `unsigned` is `unsigned int` */
+    } else if (is_long) {
         /* C permits long and long int to share int's representation. shecc's
          * current ABI is 32-bit for both, which meets C99's minimum range;
          * reserve a second long for the later required long-long widening.
          */
-        if (lex_accept(T_long))
-            error_at("long long is not supported yet", cur_token_loc());
         if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
             lex_expect(T_identifier);
         type = TY_int;
@@ -1898,8 +1932,9 @@ void read_parameter_list_decl(func_t *func, bool anon)
     }
 
     while (lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL) ||
-           lex_peek(T_signed, NULL) || lex_peek(T_long, NULL) ||
-           lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
+           lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
+           lex_peek(T_long, NULL) || lex_peek(T_struct, NULL) ||
+           lex_peek(T_union, NULL)) {
         /* Check for const qualifier */
         bool is_const = false;
         if (lex_accept(T_const))
@@ -1957,6 +1992,12 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     opstack_push(vd);
     /* String literals are now in .rodata section */
     add_insn(parent, bb, OP_load_rodata_address, vd, NULL, NULL, 0, NULL);
+}
+
+bool numeric_has_unsigned_suffix(const char *token)
+{
+    int len = strlen(token);
+    return len > 0 && ((token[len - 1] | 32) == 'u');
 }
 
 void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
@@ -2019,7 +2060,10 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
 
     var_t *vd = require_var(parent);
     vd->var_name = gen_name();
+    if (numeric_has_unsigned_suffix(token))
+        vd->type = TY_uint;
     vd->init_val = value;
+    vd->is_const = true;
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 }
@@ -2034,6 +2078,7 @@ void read_char_param(block_t *parent, basic_block_t *bb)
     var_t *vd = require_typed_var(parent, TY_char);
     vd->var_name = gen_name();
     vd->init_val = unescaped[0];
+    vd->is_const = true;
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 }
@@ -2424,19 +2469,33 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
     /* Check if this is sizeof(type) or sizeof(expression) */
     bool has_signed_type = lex_accept(T_signed);
+    bool has_unsigned_type = lex_accept(T_unsigned);
     bool has_long_type = lex_accept(T_long);
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
     if (find_type_flag == 1 && lex_accept(T_union))
         find_type_flag = 2;
 
     if (has_long_type) {
-        type = TY_int;
+        type = has_unsigned_type ? TY_uint : TY_int;
         if (lex_accept(T_long))
             error_at("long long is not supported yet", cur_token_loc());
         lex_accept(T_signed);
         lex_accept(T_const);
         if (lex_peek(T_identifier, token) && !strcmp(token, "int"))
             lex_expect(T_identifier);
+        while (lex_accept(T_asterisk))
+            ptr_cnt++;
+    } else if (has_unsigned_type) {
+        type = TY_uint;
+        if (lex_peek(T_identifier, token) &&
+            (!strcmp(token, "int") || !strcmp(token, "char") ||
+             !strcmp(token, "short"))) {
+            lex_expect(T_identifier);
+            if (!strcmp(token, "char"))
+                type = TY_uchar;
+            else if (!strcmp(token, "short"))
+                type = TY_ushort;
+        }
         while (lex_accept(T_asterisk))
             ptr_cnt++;
     } else if (has_signed_type) {
@@ -2521,6 +2580,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         } else {
             vd = require_var(parent);
             vd->var_name = gen_name();
+            vd->type = rs1->type;
             opstack_push(vd);
             add_insn(parent, *bb, OP_log_not, vd, rs1, NULL, 0, NULL);
         }
@@ -2569,10 +2629,11 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         token_t *type_start = cur_token;
         bool has_const_type = lex_accept(T_const);
         bool has_signed_type = lex_accept(T_signed);
+        bool has_unsigned_type = lex_accept(T_unsigned);
         bool has_long_type = lex_accept(T_long);
         bool has_type_identifier = lex_peek(T_identifier, lookahead_token);
-        if (has_const_type || has_signed_type || has_long_type ||
-            has_type_identifier || lex_peek(T_struct, NULL) ||
+        if (has_const_type || has_signed_type || has_unsigned_type ||
+            has_long_type || has_type_identifier || lex_peek(T_struct, NULL) ||
             lex_peek(T_union, NULL)) {
             /* Check if it's a basic type or typedef */
             token_t *saved_token = type_start;
@@ -2583,7 +2644,29 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 lex_ident(T_identifier, lookahead_token);
 
             type_t *type;
-            if (has_long_type && !is_record) {
+            if (has_unsigned_type && !is_record) {
+                if (has_long_type) {
+                    if (lex_accept(T_long))
+                        error_at("long long is not supported yet",
+                                 cur_token_loc());
+                    if (lex_peek(T_identifier, lookahead_token) &&
+                        !strcmp(lookahead_token, "int"))
+                        lex_expect(T_identifier);
+                    type = TY_uint;
+                } else if (lex_peek(T_identifier, lookahead_token) &&
+                           (!strcmp(lookahead_token, "int") ||
+                            !strcmp(lookahead_token, "char") ||
+                            !strcmp(lookahead_token, "short"))) {
+                    lex_expect(T_identifier);
+                    if (!strcmp(lookahead_token, "char"))
+                        type = TY_uchar;
+                    else if (!strcmp(lookahead_token, "short"))
+                        type = TY_ushort;
+                    else
+                        type = TY_uint;
+                } else
+                    type = TY_uint;
+            } else if (has_long_type && !is_record) {
                 if (lex_accept(T_long))
                     error_at("long long is not supported yet", cur_token_loc());
                 lex_accept(T_signed);
@@ -2610,7 +2693,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 /* Save current position to backtrack if needed Try to parse as
                  * typename
                  */
-                if (!is_record && !has_signed_type && !has_long_type)
+                if (!is_record && !has_signed_type && !has_unsigned_type &&
+                    !has_long_type)
                     lex_expect(T_identifier);
 
                 /* A qualifier may appear before or after the base type. */
@@ -2986,6 +3070,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             } else {
                 vd = require_var(parent);
                 vd->var_name = gen_name();
+                vd->type = rs1->type;
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_negate, vd, rs1, NULL, 0, NULL);
             }
@@ -3241,6 +3326,45 @@ bool is_pointer_operation(opcode_t op, var_t *rs1, var_t *rs2)
     return is_pointer_like_value(rs1) || is_pointer_like_value(rs2);
 }
 
+/* The first unsigned slice has the existing int/short/char widths. Narrow
+ * unsigned operands promote to int because int represents their full range; an
+ * unsigned int operand gives the arithmetic result unsigned int.
+ */
+bool unsigned_int_operand(const var_t *var)
+{
+    return var && !var->ptr_level && var->type && var->type->is_unsigned &&
+           var->type->size >= TY_int->size;
+}
+
+/* A source-level write invalidates the parser's constant-propagation cache.
+ * This is distinct from const qualification, which controls write legality.
+ */
+void mark_var_mutated(var_t *var)
+{
+    if (var)
+        var->is_const = false;
+}
+
+type_t *integer_binary_result_type(opcode_t op,
+                                   const var_t *left,
+                                   const var_t *right)
+{
+    if (op == OP_eq || op == OP_neq || op == OP_lt || op == OP_leq ||
+        op == OP_gt || op == OP_geq)
+        return TY_int;
+
+    if (unsigned_int_operand(left) || unsigned_int_operand(right))
+        return TY_uint;
+    return TY_int;
+}
+
+var_t *integer_promote_operand(block_t *parent, basic_block_t **bb, var_t *var)
+{
+    if (!var || var->ptr_level || !var->type || var->type->size >= TY_int->size)
+        return var;
+    return promote_unchecked(parent, bb, var, TY_int, 0);
+}
+
 void read_expr_body(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1, *rs2;
@@ -3439,9 +3563,13 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
                 rs2 = scalarize_array_literal(
                     parent, bb, rs2, rs1 && rs1->type ? rs1->type : NULL);
         }
+        rs1 = integer_promote_operand(parent, bb, rs1);
+        rs2 = integer_promote_operand(parent, bb, rs2);
+        type_t *result_type = integer_binary_result_type(top_op, rs1, rs2);
         /* Constant folding for binary operations */
-        if (rs1 && rs2 && rs1->init_val && !rs1->ptr_level && !rs1->is_global &&
-            rs2->init_val && !rs2->ptr_level && !rs2->is_global) {
+        if (rs1 && rs2 && rs1->is_const && !rs1->ptr_level && !rs1->is_global &&
+            rs2->is_const && !rs2->ptr_level && !rs2->is_global &&
+            !unsigned_int_operand(rs1) && !unsigned_int_operand(rs2)) {
             /* Both operands are compile-time constants */
             int result = 0;
             bool folded = true;
@@ -3510,6 +3638,8 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
                 /* Create constant result */
                 vd = require_var(parent);
                 vd->var_name = gen_name();
+                vd->type = result_type;
+                vd->is_const = true;
                 vd->init_val = result;
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
@@ -3518,6 +3648,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
                 /* Normal operation - folding failed or not supported */
                 vd = require_var(parent);
                 vd->var_name = gen_name();
+                vd->type = result_type;
                 opstack_push(vd);
                 add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
             }
@@ -3525,6 +3656,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
             /* Normal operation */
             vd = require_var(parent);
             vd->var_name = gen_name();
+            vd->type = result_type;
             opstack_push(vd);
             add_insn(parent, *bb, top_op, vd, rs1, rs2, 0, NULL);
         }
@@ -3924,6 +4056,7 @@ void read_lvalue(lvalue_t *lvalue,
             } else {
                 rs1 = vd;
                 vd = operand_stack[operand_stack_idx - 1];
+                mark_var_mutated(vd);
                 add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
             }
         } else if (lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) {
@@ -4379,6 +4512,7 @@ bool read_body_assignment(char *token,
                     add_insn(parent, *bb, OP_write, NULL, t, vd, size, NULL);
                 } else {
                     vd = resize_var(parent, bb, vd, t);
+                    mark_var_mutated(t);
                     add_insn(parent, *bb, OP_assign, t, vd, NULL, 0, NULL);
                 }
             } else {
@@ -4477,6 +4611,7 @@ bool read_body_assignment(char *token,
                     diagnose_const_pointer_conversion(rs1, vd);
                 } else {
                     rs1 = resize_var(parent, bb, rs1, vd);
+                    mark_var_mutated(vd);
                     add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
                 }
             }
@@ -5248,9 +5383,10 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     bool has_record_keyword =
         lex_peek(T_struct, NULL) || lex_peek(T_union, NULL);
     bool has_signed_keyword = lex_peek(T_signed, NULL);
+    bool has_unsigned_keyword = lex_peek(T_unsigned, NULL);
     bool has_long_keyword = lex_peek(T_long, NULL);
     if (!is_const && !has_identifier && !has_asterisk && !has_record_keyword &&
-        !has_signed_keyword && !has_long_keyword)
+        !has_signed_keyword && !has_unsigned_keyword && !has_long_keyword)
         error_at("Unexpected token", next_token_loc());
 
     /* is it a variable declaration? Special handling when statement starts with
@@ -5283,7 +5419,8 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     } else {
         /* Normal type checking without asterisk */
         token_t *type_token = cur_token;
-        if (lex_peek(T_signed, NULL) || lex_peek(T_long, NULL)) {
+        if (lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
+            lex_peek(T_long, NULL)) {
             type = TY_int;
         } else {
             int find_type_flag = lex_accept(T_struct) ? 2 : 1;
@@ -6351,7 +6488,10 @@ void read_global_statement(void)
             type_t *type = add_type();
             bool typedef_const = lex_accept(T_const);
             bool is_signed = lex_accept(T_signed);
+            bool is_unsigned = lex_accept(T_unsigned);
             bool is_long = lex_accept(T_long);
+            if (is_signed && is_unsigned)
+                error_at("both signed and unsigned specified", cur_token_loc());
             if (is_long) {
                 is_signed |= lex_accept(T_signed);
                 typedef_const |= lex_accept(T_const);
@@ -6363,7 +6503,21 @@ void read_global_statement(void)
                 if (lex_peek(T_identifier, base_type) &&
                     !strcmp(base_type, "int"))
                     lex_expect(T_identifier);
-                base = TY_int;
+                base = is_unsigned ? TY_uint : TY_int;
+            } else if (is_unsigned) {
+                if (lex_peek(T_identifier, base_type) &&
+                    (!strcmp(base_type, "int") || !strcmp(base_type, "char") ||
+                     !strcmp(base_type, "short"))) {
+                    lex_expect(T_identifier);
+                    if (!strcmp(base_type, "char"))
+                        base = TY_uchar;
+                    else if (!strcmp(base_type, "short"))
+                        base = TY_ushort;
+                    else
+                        base = TY_uint;
+                } else {
+                    base = TY_uint;
+                }
             } else if (is_signed && (!lex_peek(T_identifier, base_type) ||
                                      (strcmp(base_type, "int") &&
                                       strcmp(base_type, "char") &&
@@ -6381,6 +6535,7 @@ void read_global_statement(void)
             type->ptr_level = 0;
             type->is_const_qualified =
                 typedef_const || base->is_const_qualified;
+            type->is_unsigned = base->is_unsigned;
 
             /* Handle pointer types in typedef: typedef char *string; */
             while (lex_accept(T_asterisk)) {
@@ -6392,7 +6547,7 @@ void read_global_statement(void)
             lex_expect(T_semicolon);
         }
     } else if (lex_peek(T_identifier, NULL) || lex_peek(T_signed, NULL) ||
-               lex_peek(T_long, NULL)) {
+               lex_peek(T_unsigned, NULL) || lex_peek(T_long, NULL)) {
         read_global_decl(block, is_const, is_static);
     } else
         error_at("Syntax error in global statement", next_token_loc());
@@ -6420,13 +6575,28 @@ void parse_internal(void)
     TY_char->base_type = TYPE_char;
     TY_char->size = 1;
 
+    TY_uchar = add_named_type("unsigned char");
+    TY_uchar->base_type = TYPE_char;
+    TY_uchar->size = 1;
+    TY_uchar->is_unsigned = true;
+
     TY_int = add_named_type("int");
     TY_int->base_type = TYPE_int;
     TY_int->size = 4;
 
+    TY_uint = add_named_type("unsigned int");
+    TY_uint->base_type = TYPE_int;
+    TY_uint->size = 4;
+    TY_uint->is_unsigned = true;
+
     TY_short = add_named_type("short");
     TY_short->base_type = TYPE_short;
     TY_short->size = 2;
+
+    TY_ushort = add_named_type("unsigned short");
+    TY_ushort->base_type = TYPE_short;
+    TY_ushort->size = 2;
+    TY_ushort->is_unsigned = true;
 
     /* builtin type _Bool was introduced in C99 specification, it is more
      * well-known as macro type bool, which is defined in <std_bool.h> (in

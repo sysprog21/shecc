@@ -12,7 +12,7 @@
 
 /* Hash table constants */
 #define NUM_DIRECTIVES 11
-#define NUM_KEYWORDS 21
+#define NUM_KEYWORDS 22
 
 /* Token mapping structure for elegant initialization */
 typedef struct {
@@ -90,6 +90,7 @@ void lex_init_keywords(void)
         {"const", T_const},
         {"static", T_static},
         {"signed", T_signed},
+        {"unsigned", T_unsigned},
         {"long", T_long},
     };
 
@@ -494,6 +495,19 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
                 token_buffer[sz++] = ch;
                 ch = read_char(buf);
             }
+        }
+
+        /* C99's unsigned integer suffix belongs to the numeric token rather
+         * than starting an adjacent identifier. Width suffixes are handled with
+         * the later long/long-long work.
+         */
+        if ((ch | 32) == 'u') {
+            if (sz >= MAX_TOKEN_LEN - 1) {
+                loc->len = sz;
+                error_at("Token too long", loc);
+            }
+            token_buffer[sz++] = ch;
+            ch = read_char(buf);
         }
 
         token_buffer[sz] = '\0';
