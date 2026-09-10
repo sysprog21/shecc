@@ -349,7 +349,12 @@ typedef enum {
     T_continue,
     T_goto,
     T_const, /* const qualifier */
+    T_volatile,
     T_static,
+    T_extern,
+    T_register,
+    T_restrict,
+    T_inline,
     T_signed,
     T_unsigned,
     T_long,
@@ -560,12 +565,25 @@ struct var {
     char *var_name;
     int ptr_level;
     bool is_func;
+
+    /* A block-scope `extern int f(void);` hides a local object named f but
+     * resolves expressions through the translation unit's function table.
+     */
+    bool is_extern_function_alias;
     bool is_global;
     bool is_static;       /* declaration used the static storage class */
+    bool is_register;     /* declaration used the register storage class */
+    bool is_inline;       /* declaration used the inline function specifier */
     bool has_initializer; /* a file-scope definition supplied an initializer */
     bool is_const_qualified; /* true if variable has const qualifier */
+    bool is_volatile;        /* declaration used the volatile qualifier */
     bool is_const_pointer;   /* true for the outermost `* const` qualifier */
-    bool address_taken;      /* true if variable address was taken (&var) */
+    /* One bit per pointer level, counted from the base type. The legacy
+     * is_const_pointer flag describes only the outermost level; this retains
+     * qualifiers on intermediate pointers such as `int * const *`.
+     */
+    unsigned int pointer_const_mask;
+    bool address_taken; /* true if variable address was taken (&var) */
     /* Working state for strength_reduce(): how many instructions in the
      * function write the variable, whether it is written inside the loop being
      * examined, and how much its value moves per iteration when it does. All
@@ -598,7 +616,11 @@ struct var {
     bool in_select_arm;
     int array_size;
     bool has_unsized_array; /* `T name[]`: bound is supplied by initializer */
-    int array_dim2;         /* second dimension size for 2D arrays */
+    /* `T member[]` at the end of a struct has no initializer-supplied bound and
+     * contributes no bytes to the record's fixed layout.
+     */
+    bool is_flexible_array_member;
+    int array_dim2;  /* second dimension size for 2D arrays */
     int offset;      /* offset from stack or frame, index 0 is reserved */
     int init_val;    /* for global initialization */
     int init_val_hi; /* upper word of an 8-byte integer constant */
@@ -636,7 +658,11 @@ struct var {
     bool is_ternary_ret;
     bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
-    int phys_reg;  /* Physical register assignment (-1 if unassigned) */
+    int phys_reg;  /* low physical register (-1 if unassigned) */
+    /* The high word of a 32-bit-target wide scalar. It remains -1 for the
+     * ordinary single-register representation and on LP64 targets.
+     */
+    int phys_reg_hi;
     int first_use; /* First instruction index where variable is used */
     int last_use;  /* Last instruction index where variable is used */
     int use_count; /* Number of times variable is used */
@@ -727,6 +753,13 @@ struct ph2_ir {
     /* The register OP_cmov keeps when its condition does not hold. */
     int src2;
     int dest;
+
+    /* A 32-bit target represents a wide integer as low/high register pairs. -1
+     * means this instruction uses the existing single-register form.
+     */
+    int src0_hi;
+    int src1_hi;
+    int dest_hi;
     /* Type information for LP64 support */
     int size_bytes; /* Size in bytes for load/store/read/write operations */
 
@@ -774,13 +807,25 @@ struct type {
     var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
+    /* Qualifiers written after stars inside a typedef declarator. These bits
+     * are relative to the typedef's own pointer depth; var_t keeps any stars
+     * subsequently written at a use site.
+     */
+    unsigned int pointer_const_mask;
     bool is_union; /* preserves union semantics for anonymous typedef unions */
-    bool is_const_qualified; /* qualifier carried by a scalar typedef */
+    bool
+        has_flexible_array_member; /* cannot be embedded by value in a record */
+    bool is_const_qualified;       /* qualifier carried by a scalar typedef */
     /* Integer representation is distinct from signedness: unsigned char and
      * unsigned int keep the ordinary scalar widths but require zero extension
      * and unsigned arithmetic lowering.
      */
     bool is_unsigned;
+
+    /* Plain char and signed char share this target's representation but are
+     * distinct C types. Scalar typedefs preserve this fact.
+     */
+    bool is_signed_char;
 };
 
 /* lvalue details */
@@ -796,6 +841,7 @@ typedef struct {
     bool is_func;
     bool is_reference;
     bool is_const_qualified;
+    unsigned int pointer_const_mask;
     type_t *type;
     /* The declaration selected by the lvalue, including a struct member. */
     var_t *decl;

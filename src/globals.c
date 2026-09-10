@@ -37,6 +37,7 @@ int types_idx = 0;
 
 type_t *TY_void;
 type_t *TY_char;
+type_t *TY_schar;
 type_t *TY_uchar;
 type_t *TY_bool;
 type_t *TY_int;
@@ -779,7 +780,9 @@ int unescape_string(const char *input, char *output, int output_size)
             i++;
             break;
         case 'x': {
-            /* Hexadecimal escape sequence: \xhh */
+            /* C99 hexadecimal escapes consume the complete run of hex digits,
+             * unlike octal escapes which are limited to three.
+             */
             i++; /* Skips 'x' */
 
             if (!isxdigit(input[i])) {
@@ -791,12 +794,9 @@ int unescape_string(const char *input, char *output, int output_size)
             }
 
             int value = 0;
-            int count = 0;
-
-            while (isxdigit(input[i]) && count < 2) {
+            while (isxdigit(input[i])) {
                 value = (value << 4) + hex_digit_value(input[i]);
                 i++;
-                count++;
             }
 
             output[j++] = (char) value;
@@ -837,6 +837,22 @@ int unescape_string(const char *input, char *output, int output_size)
         return -1;
 
     return j;
+}
+
+/* C99 permits multi-character constants with an implementation-defined int
+ * value. shecc packs their first four bytes left to right.
+ */
+int parse_character_constant(const char *literal)
+{
+    char unescaped[MAX_TOKEN_LEN];
+    unsigned int value = 0;
+    int length = unescape_string(literal, unescaped, sizeof(unescaped));
+
+    if (length < 0)
+        return 0;
+    for (int i = 0; i < length && i < 4; i++)
+        value = (value << 8) | (unsigned char) unescaped[i];
+    return (int) value;
 }
 
 int parse_numeric_constant(const char *buffer)
@@ -1106,6 +1122,8 @@ var_t *find_var(char *token, block_t *parent)
 int size_var(var_t *var)
 {
     int size;
+    if (var->is_flexible_array_member)
+        return 0;
     if (var->ptr_level > 0 || var->is_func) {
         /* Pointers and function pointers occupy a target pointer, which is 8
          * bytes on LP64 targets and 4 on the 32-bit ones.
@@ -1808,6 +1826,18 @@ void global_release(void)
     if (TOKEN_ARENA)
         arena_free(TOKEN_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
+
+    /* Every value in TOKEN_CACHE is one heap-allocated token_stream_t: the
+     * tokens it spans come from TOKEN_ARENA, which is already gone, but the
+     * header itself is malloc'd by the two gen_*_token_stream functions and
+     * hashmap_free() releases only the table, never the values.
+     */
+    if (TOKEN_CACHE) {
+        for (int i = 0; i < TOKEN_CACHE->cap; i++) {
+            if (TOKEN_CACHE->table[i].occupied)
+                free(TOKEN_CACHE->table[i].val);
+        }
+    }
     hashmap_free(TOKEN_CACHE);
     hashmap_free(SRC_FILE_MAP);
     hashmap_free(FUNC_MAP);

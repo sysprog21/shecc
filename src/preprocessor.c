@@ -81,6 +81,7 @@ typedef struct macro {
     int param_num;
     token_t *param_names[MAX_PARAMS];
     token_t *replacement;
+    bool is_function_like;
     bool is_variadic;
     token_t *variadic_tk;
     bool is_disabled;
@@ -227,6 +228,9 @@ int pp_get_operator_prio(opcode_t op)
     case OP_gt:
     case OP_geq:
         return 10;
+    case OP_lshift:
+    case OP_rshift:
+        return 11;
     case OP_add:
     case OP_sub:
         return 12;
@@ -252,7 +256,11 @@ int pp_get_unary_operator_prio(opcode_t op)
     }
 }
 
-token_t *pp_get_operator(token_t *tk, opcode_t *op)
+/* Look ahead at the next operator. Infix parsing needs to inspect an operator's
+ * precedence before it consumes it, while unary parsing consumes its operator
+ * immediately.
+ */
+token_t *pp_get_operator(token_t *tk, opcode_t *op, bool consume)
 {
     tk = pp_lex_skip_space(tk);
 
@@ -266,6 +274,12 @@ token_t *pp_get_operator(token_t *tk, opcode_t *op)
         break;
     case T_minus:
         op[0] = OP_sub;
+        break;
+    case T_bit_not:
+        op[0] = OP_bit_not;
+        break;
+    case T_log_not:
+        op[0] = OP_log_not;
         break;
     case T_asterisk:
         op[0] = OP_mul;
@@ -323,11 +337,64 @@ token_t *pp_get_operator(token_t *tk, opcode_t *op)
         op[0] = OP_generic;
         return tk;
     }
-    tk = pp_lex_next_token(tk, true);
-    return tk;
+    return consume ? pp_lex_next_token(tk, true) : tk;
 }
 
-token_t *pp_read_constant_expr_operand(token_t *tk, int *val)
+token_t *pp_read_constant_infix_expr(int precedence,
+                                     token_t *tk,
+                                     int *val,
+                                     bool evaluate);
+
+/* Expand one function-like macro invocation in a #if token stream. The normal
+ * preprocessor already owns argument substitution, rescanning, and hide-set
+ * handling; give it only this balanced invocation so it cannot consume the rest
+ * of the directive.
+ */
+token_t *pp_expand_function_macro_in_constant_expr(token_t *before)
+{
+    token_t head;
+    token_t *tail = &head;
+    token_t *first = before->next;
+    token_t *end = first;
+    int bracket_depth = 0;
+    preprocess_ctx_t ctx;
+
+    head.next = NULL;
+    while (end) {
+        if (end->kind == T_open_bracket)
+            bracket_depth++;
+        else if (end->kind == T_close_bracket && --bracket_depth == 0)
+            break;
+        end = end->next;
+    }
+    if (!end)
+        error_at("Unterminated function-like macro invocation",
+                 &first->location);
+
+    for (token_t *cur = first;; cur = cur->next) {
+        tail->next = copy_token(cur);
+        tail = tail->next;
+        if (cur == end)
+            break;
+    }
+    tail->next = NULL;
+
+    ctx.expanded_from = first;
+    ctx.hide_set = NULL;
+    ctx.macro_args = NULL;
+    ctx.trim_eof = true;
+    token_t *expanded = pp_preprocess_internal(head.next, &ctx);
+    token_t *after = end->next;
+
+    before->next = expanded;
+    if (expanded)
+        ctx.end_of_token->next = after;
+    else
+        before->next = after;
+    return before;
+}
+
+token_t *pp_read_constant_expr_operand(token_t *tk, int *val, bool evaluate)
 {
     if (pp_lex_peek_token(tk, T_numeric, true)) {
         tk = pp_lex_next_token(tk, true);
@@ -335,27 +402,49 @@ token_t *pp_read_constant_expr_operand(token_t *tk, int *val)
         return tk;
     }
 
+    if (pp_lex_peek_token(tk, T_char, true)) {
+        char unescaped[MAX_TOKEN_LEN];
+
+        tk = pp_lex_next_token(tk, true);
+        if (unescape_string(tk->literal, unescaped, MAX_TOKEN_LEN) < 0)
+            error_at("Invalid escape sequence", &tk->location);
+        val[0] = parse_character_constant(tk->literal);
+        return tk;
+    }
+
     if (pp_lex_peek_token(tk, T_open_bracket, true)) {
         tk = pp_lex_next_token(tk, true);
-        tk = pp_read_constant_expr_operand(tk, val);
+        tk = pp_read_constant_infix_expr(0, tk, val, evaluate);
         tk = pp_lex_expect_token(tk, T_close_bracket, true);
         return tk;
     }
 
     if (pp_lex_peek_token(tk, T_identifier, true)) {
+        token_t *before_identifier = tk;
+
         tk = pp_lex_next_token(tk, true);
 
         if (!strcmp("defined", tk->literal)) {
-            tk = pp_lex_expect_token(tk, T_open_bracket, true);
+            bool parenthesized = pp_lex_peek_token(tk, T_open_bracket, true);
+
+            if (parenthesized)
+                tk = pp_lex_next_token(tk, true);
             tk = pp_lex_expect_token(tk, T_identifier, true);
             val[0] = is_macro_defined(tk->literal);
-            tk = pp_lex_expect_token(tk, T_close_bracket, true);
+            if (parenthesized)
+                tk = pp_lex_expect_token(tk, T_close_bracket, true);
         } else {
             /* Any identifier will fallback and evaluate as 0 */
             macro_t *macro = hashmap_get(MACROS, tk->literal);
 
             /* Disallow function-like macro to be expanded */
-            if (macro && !(macro->param_num > 0 || macro->is_variadic)) {
+            if (macro && macro->is_function_like) {
+                if (pp_lex_peek_token(tk, T_open_bracket, true)) {
+                    tk = pp_expand_function_macro_in_constant_expr(
+                        before_identifier);
+                    return pp_read_constant_expr_operand(tk, val, evaluate);
+                }
+            } else if (macro) {
                 token_t *expanded_tk, *tmp;
                 preprocess_ctx_t ctx;
                 ctx.expanded_from = tk;
@@ -368,7 +457,7 @@ token_t *pp_read_constant_expr_operand(token_t *tk, int *val)
                     tk->next = expanded_tk;
                     ctx.end_of_token->next = tmp;
                 }
-                return pp_read_constant_expr_operand(tk, val);
+                return pp_read_constant_expr_operand(tk, val, evaluate);
             }
 
             val[0] = 0;
@@ -385,115 +474,147 @@ token_t *pp_read_constant_expr_operand(token_t *tk, int *val)
     return tk;
 }
 
-token_t *pp_read_constant_infix_expr(int precedence, token_t *tk, int *val)
+token_t *pp_read_constant_infix_expr(int precedence,
+                                     token_t *tk,
+                                     int *val,
+                                     bool evaluate)
 {
-    int lhs, rhs;
+    int lhs = 0, rhs = 0;
 
     /* Evaluate unary expression first */
     opcode_t op;
-    tk = pp_get_operator(tk, &op);
+    tk = pp_get_operator(tk, &op, true);
     int current_precedence = pp_get_unary_operator_prio(op);
     if (current_precedence != 0 && current_precedence >= precedence) {
-        tk = pp_read_constant_infix_expr(current_precedence, tk, &lhs);
+        tk =
+            pp_read_constant_infix_expr(current_precedence, tk, &lhs, evaluate);
 
-        switch (op) {
-        case OP_add:
-            break;
-        case OP_sub:
-            lhs = -lhs;
-            break;
-        case OP_bit_not:
-            lhs = ~lhs;
-            break;
-        case OP_log_not:
-            lhs = !lhs;
-            break;
-        default: {
-            source_location_t *loc =
-                tk->next ? &tk->next->location : &tk->location;
+        if (evaluate) {
+            switch (op) {
+            case OP_add:
+                break;
+            case OP_sub:
+                lhs = -lhs;
+                break;
+            case OP_bit_not:
+                lhs = ~lhs;
+                break;
+            case OP_log_not:
+                lhs = !lhs;
+                break;
+            default: {
+                source_location_t *loc =
+                    tk->next ? &tk->next->location : &tk->location;
 
-            error_at("Unexpected unary token while evaluating constant", loc);
-        }
+                error_at("Unexpected unary token while evaluating constant",
+                         loc);
+            }
+            }
         }
     } else {
-        tk = pp_read_constant_expr_operand(tk, &lhs);
+        tk = pp_read_constant_expr_operand(tk, &lhs, evaluate);
     }
 
     while (true) {
-        tk = pp_get_operator(tk, &op);
+        tk = pp_get_operator(tk, &op, false);
         current_precedence = pp_get_operator_prio(op);
 
         if (current_precedence == 0 || current_precedence <= precedence)
             break;
 
-        tk = pp_read_constant_infix_expr(current_precedence, tk, &rhs);
+        tk = pp_lex_next_token(tk, true);
 
-        switch (op) {
-        case OP_add:
-            lhs += rhs;
-            break;
-        case OP_sub:
-            lhs -= rhs;
-            break;
-        case OP_mul:
-            lhs *= rhs;
-            break;
-        case OP_div:
-            lhs /= rhs;
-            break;
-        case OP_bit_and:
-            lhs &= rhs;
-            break;
-        case OP_bit_or:
-            lhs |= rhs;
-            break;
-        case OP_bit_xor:
-            lhs ^= rhs;
-            break;
-        case OP_lshift:
-            lhs <<= rhs;
-            break;
-        case OP_rshift:
-            lhs >>= rhs;
-            break;
-        case OP_gt:
-            lhs = lhs > rhs;
-            break;
-        case OP_geq:
-            lhs = lhs >= rhs;
-            break;
-        case OP_lt:
-            lhs = lhs < rhs;
-            break;
-        case OP_leq:
-            lhs = lhs <= rhs;
-            break;
-        case OP_eq:
-            lhs = lhs == rhs;
-            break;
-        case OP_neq:
-            lhs = lhs != rhs;
-            break;
-        case OP_log_and:
-            lhs = lhs && rhs;
-            break;
-        case OP_log_or:
-            lhs = lhs || rhs;
-            break;
-        default:
-            error_at("Unexpected infix token while evaluating constant",
-                     &tk->location);
+        if (op == OP_ternary) {
+            int if_true, if_false;
+
+            tk = pp_read_constant_infix_expr(0, tk, &if_true, evaluate && lhs);
+            tk = pp_lex_expect_token(tk, T_colon, true);
+            /* Conditional expressions are right-associative. */
+            tk = pp_read_constant_infix_expr(current_precedence - 1, tk,
+                                             &if_false, evaluate && !lhs);
+            if (evaluate)
+                lhs = lhs ? if_true : if_false;
+            continue;
         }
-        tk = pp_get_operator(tk, &op);
+
+        bool rhs_evaluate = evaluate;
+        if (op == OP_log_and && !lhs)
+            rhs_evaluate = false;
+        if (op == OP_log_or && lhs)
+            rhs_evaluate = false;
+        tk = pp_read_constant_infix_expr(current_precedence, tk, &rhs,
+                                         rhs_evaluate);
+
+        if (evaluate) {
+            switch (op) {
+            case OP_add:
+                lhs += rhs;
+                break;
+            case OP_sub:
+                lhs -= rhs;
+                break;
+            case OP_mul:
+                lhs *= rhs;
+                break;
+            case OP_div:
+                lhs /= rhs;
+                break;
+            case OP_mod:
+                lhs %= rhs;
+                break;
+            case OP_bit_and:
+                lhs &= rhs;
+                break;
+            case OP_bit_or:
+                lhs |= rhs;
+                break;
+            case OP_bit_xor:
+                lhs ^= rhs;
+                break;
+            case OP_lshift:
+                lhs <<= rhs;
+                break;
+            case OP_rshift:
+                lhs >>= rhs;
+                break;
+            case OP_gt:
+                lhs = lhs > rhs;
+                break;
+            case OP_geq:
+                lhs = lhs >= rhs;
+                break;
+            case OP_lt:
+                lhs = lhs < rhs;
+                break;
+            case OP_leq:
+                lhs = lhs <= rhs;
+                break;
+            case OP_eq:
+                lhs = lhs == rhs;
+                break;
+            case OP_neq:
+                lhs = lhs != rhs;
+                break;
+            case OP_log_and:
+                lhs = lhs && rhs;
+                break;
+            case OP_log_or:
+                lhs = lhs || rhs;
+                break;
+            default:
+                error_at("Unexpected infix token while evaluating constant",
+                         &tk->location);
+            }
+        }
     }
 
-    val[0] = lhs;
+    val[0] = evaluate ? lhs : 0;
     return tk;
 }
 
 token_t *pp_read_constant_expr(token_t *tk, int *val)
 {
-    tk = pp_read_constant_infix_expr(0, tk, val);
+    tk = pp_read_constant_infix_expr(0, tk, val, true);
     /* advance to fully consume constant expression */
     tk = pp_lex_next_token(tk, true);
     return tk;
@@ -595,6 +716,43 @@ token_t *pp_stringify(token_t *arg, source_location_t *loc)
     token_t *out = new_token(T_string, loc, n);
     out->literal = arena_strdup(TOKEN_ARENA, text);
     return out;
+}
+
+/* C99's #error directive displays the rest of its directive line as a
+ * diagnostic message. These are raw preprocessing tokens, not a macro
+ * replacement list, so spell them directly and retain their source order.
+ */
+__noreturn void pp_error_directive(token_t *directive)
+{
+    char message[MAX_LINE_LEN], scratch[MAX_TOKEN_LEN];
+    int len = 0;
+    bool needs_space = false;
+    source_location_t *loc = &directive->location;
+    token_t *tk = directive;
+
+    while (tk->next && tk->next->kind != T_newline && tk->next->kind != T_eof) {
+        tk = pp_lex_next_token(tk, false);
+        if (pp_is_layout(tk)) {
+            needs_space = len > 0;
+            continue;
+        }
+
+        char *spelling = token_to_string(tk, scratch);
+        if (!spelling)
+            continue;
+        if (needs_space && len < MAX_LINE_LEN - 1)
+            message[len++] = ' ';
+        needs_space = true;
+        loc = &tk->location;
+        for (int i = 0; spelling[i] && len < MAX_LINE_LEN - 1; i++)
+            message[len++] = spelling[i];
+    }
+
+    if (!len)
+        strcpy(message, "#error");
+    else
+        message[len] = '\0';
+    error_at(message, loc);
 }
 
 /* Join two tokens into one, as '##' requires.
@@ -873,7 +1031,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             }
 
             /* Check if this is a function-like macro invocation */
-            if (pp_lex_peek_token(tk, T_open_bracket, true)) {
+            if (macro->is_function_like &&
+                pp_lex_peek_token(tk, T_open_bracket, true)) {
                 token_t arg_head;
                 token_t *arg_cur = &arg_head;
                 int arg_idx = 0;
@@ -952,9 +1111,20 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                     }
 
                     token_t *param_tk;
+                    bool empty_zero_arg_call = bracket_depth < 0 &&
+                                               arg_idx == 0 && !arg_head.next &&
+                                               macro->param_num == 0;
 
-                    /* Bind argument to corresponding parameter */
-                    if (arg_idx < macro->param_num) {
+                    /* M() has no arguments when M declares none. A macro with
+                     * one parameter, in contrast, receives one empty argument
+                     * and must retain that distinction.
+                     */
+                    if (empty_zero_arg_call) {
+                        if (macro->is_variadic)
+                            hashmap_put(expansion_ctx.macro_args,
+                                        macro->variadic_tk->literal, NULL);
+                        /* Bind argument to corresponding parameter */
+                    } else if (arg_idx < macro->param_num) {
                         param_tk = macro->param_names[arg_idx++];
                         hashmap_put(expansion_ctx.macro_args, param_tk->literal,
                                     arg_head.next);
@@ -1056,6 +1226,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
         case T_cppd_include: {
             char inclusion_path[MAX_LINE_LEN];
             token_stream_t *file_tks = NULL;
+            token_t *include_tk = tk;
             preprocess_ctx_t inclusion_ctx;
             inclusion_ctx.hide_set = ctx->hide_set;
             inclusion_ctx.expanded_from = NULL;
@@ -1066,29 +1237,36 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 tk = pp_lex_next_token(tk, true);
                 strcpy(inclusion_path, tk->literal);
 
-                /* normalize path */
-                char path[MAX_LINE_LEN];
-                const char *file = tk->location.filename;
-                int c = strlen(file) - 1;
+                /* A header name may be supplied by an object-like macro. The
+                 * replacement is rescanned here rather than treating the macro
+                 * name as an angle include, and aliases may name another alias
+                 * before finally producing the required string token.
+                 */
+            } else if (pp_lex_peek_token(tk, T_identifier, true)) {
+                macro_t *aliases[MAX_TOKEN_LEN];
+                int alias_count = 0;
 
-                while (c > 0 && file[c] != '/')
-                    c--;
-
-                if (c) {
-                    if (c >= MAX_LINE_LEN - 1)
-                        c = MAX_LINE_LEN - 2;
-
-                    memcpy(path, file, c);
-                    path[c] = '\0';
-                } else {
-                    path[0] = '.';
-                    path[1] = '\0';
-                    c = 1;
+                tk = pp_lex_next_token(tk, true);
+                macro = hashmap_get(MACROS, tk->literal);
+                while (macro && !macro->is_disabled && !macro->param_num &&
+                       macro->replacement && !macro->replacement->next &&
+                       macro->replacement->kind == T_identifier) {
+                    for (int i = 0; i < alias_count; i++)
+                        if (aliases[i] == macro)
+                            error_at("cyclic macro expansion in #include",
+                                     &tk->location);
+                    if (alias_count == MAX_TOKEN_LEN)
+                        error_at("#include macro alias chain is too deep",
+                                 &tk->location);
+                    aliases[alias_count++] = macro;
+                    macro = hashmap_get(MACROS, macro->replacement->literal);
                 }
-
-                snprintf(path + c, MAX_LINE_LEN - c, "/%s", inclusion_path);
-                strncpy(inclusion_path, path, MAX_LINE_LEN - 1);
-                inclusion_path[MAX_LINE_LEN - 1] = '\0';
+                if (!macro || macro->is_disabled || macro->param_num ||
+                    !macro->replacement || macro->replacement->next ||
+                    macro->replacement->kind != T_string)
+                    error_at("#include macro must expand to a header name",
+                             &tk->location);
+                strcpy(inclusion_path, macro->replacement->literal);
             } else {
                 tk = pp_lex_expect_token(tk, T_lt, true);
 
@@ -1112,6 +1290,30 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 tk = pp_lex_next_token(tk, false);
                 continue;
             }
+
+            /* normalize path */
+            char path[MAX_LINE_LEN];
+            const char *file = include_tk->location.filename;
+            int c = strlen(file) - 1;
+
+            while (c > 0 && file[c] != '/')
+                c--;
+
+            if (c) {
+                if (c >= MAX_LINE_LEN - 1)
+                    c = MAX_LINE_LEN - 2;
+
+                memcpy(path, file, c);
+                path[c] = '\0';
+            } else {
+                path[0] = '.';
+                path[1] = '\0';
+                c = 1;
+            }
+
+            snprintf(path + c, MAX_LINE_LEN - c, "/%s", inclusion_path);
+            strncpy(inclusion_path, path, MAX_LINE_LEN - 1);
+            inclusion_path[MAX_LINE_LEN - 1] = '\0';
 
             tk = pp_lex_expect_token(tk, T_newline, true);
             tk = pp_lex_next_token(tk, false);
@@ -1142,8 +1344,17 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 macro->is_disabled = false;
             }
 
+            /* A redefinition replaces the complete macro signature, not only
+             * its replacement list.
+             */
+            macro->is_function_like = false;
+            macro->is_variadic = false;
+            macro->param_num = 0;
+            macro->variadic_tk = NULL;
+
             if (pp_lex_peek_token(tk, T_open_bracket, false)) {
                 /* function-like macro */
+                macro->is_function_like = true;
                 tk = pp_lex_next_token(tk, false);
                 while (pp_lex_peek_token(tk, T_identifier, true)) {
                     tk = pp_lex_next_token(tk, true);
@@ -1290,17 +1501,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             continue;
         }
         case T_cppd_error: {
-            if (pp_lex_peek_token(tk, T_string, true)) {
-                tk = pp_lex_next_token(tk, true);
-
-                error_at(tk->literal, &tk->location);
-            } else {
-                error_at(
-                    "Internal error, #error does not support non-string error "
-                    "message",
-                    &tk->location);
-            }
-            break;
+            pp_error_directive(tk);
         }
         case T_backslash: {
             /* This branch is designed to be failed since backslash should be
@@ -1358,6 +1559,25 @@ token_t *pp_strip_layout(token_t *tk)
         if (tk->kind == T_whitespace || tk->kind == T_newline ||
             tk->kind == T_tab)
             continue;
+
+        /* C99 translation phase 6 concatenates adjacent string literal tokens
+         * after macro expansion. Do it at the parser boundary: whitespace is
+         * already irrelevant there, and this covers both source-adjacent and
+         * macro-produced strings without changing -E's token spelling.
+         */
+        if (cur != &head && cur->kind == T_string && tk->kind == T_string) {
+            char combined[MAX_TOKEN_LEN];
+            int left_len = strlen(cur->literal);
+            int right_len = strlen(tk->literal);
+
+            if (left_len + right_len >= MAX_TOKEN_LEN)
+                error_at("Concatenated string literal too long", &tk->location);
+            memcpy(combined, cur->literal, left_len);
+            memcpy(combined + left_len, tk->literal, right_len + 1);
+            cur->literal = intern_string(combined);
+            cur->location.len += tk->location.len;
+            continue;
+        }
         cur->next = tk;
         cur = tk;
     }
@@ -1383,25 +1603,47 @@ token_t *preprocess(token_t *tk)
     synth_built_in_loc.line = 1;
     synth_built_in_loc.filename = "<built-in>";
 
-    macro_t *macro = calloc(1, sizeof(macro_t));
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = "__FILE__";
     macro->handler = file_macro_handler;
     hashmap_put(MACROS, "__FILE__", macro);
 
-    macro = calloc(1, sizeof(macro_t));
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = "__LINE__";
     macro->handler = line_macro_handler;
     hashmap_put(MACROS, "__LINE__", macro);
 
+    /* C99-required implementation macros. shecc supplies its own small runtime
+     * rather than a complete hosted library, so advertise freestanding mode
+     * while retaining the C99 language-version identifier.
+     */
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    macro->name = "__STDC__";
+    macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
+    macro->replacement->literal = "1";
+    hashmap_put(MACROS, "__STDC__", macro);
+
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    macro->name = "__STDC_VERSION__";
+    macro->replacement = new_token(T_numeric, &synth_built_in_loc, 7);
+    macro->replacement->literal = "199901L";
+    hashmap_put(MACROS, "__STDC_VERSION__", macro);
+
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    macro->name = "__STDC_HOSTED__";
+    macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
+    macro->replacement->literal = "0";
+    hashmap_put(MACROS, "__STDC_HOSTED__", macro);
+
     /* architecture defines */
-    macro = calloc(1, sizeof(macro_t));
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = ARCH_PREDEFINED;
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
     macro->replacement->literal = "1";
     hashmap_put(MACROS, ARCH_PREDEFINED, macro);
 
     /* shecc run-time defines */
-    macro = calloc(1, sizeof(macro_t));
+    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = "__SHECC__";
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
     macro->replacement->literal = "1";
@@ -1412,7 +1654,7 @@ token_t *preprocess(token_t *tk)
      * all -- are unavailable and libc resolves through the PLT instead.
      */
     if (dynlink) {
-        macro = calloc(1, sizeof(macro_t));
+        macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
         macro->name = "__SHECC_DYNLINK__";
         macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
         macro->replacement->literal = "1";

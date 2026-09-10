@@ -50,6 +50,7 @@ typedef enum {
     rv_ebreak = 1048691 /* 0b1110011 + (1 << 20) */,
     /* m */
     rv_mul = 33554483 /* 0b0110011 + (1 << 25) */,
+    rv_mulhu = 33566771 /* rv_mul + (3 << 12): unsigned high half */,
     rv_div = 33570867 /* 0b0110011 + (1 << 25) + (4 << 12) */,
     rv_divu = 33574963 /* 0b0110011 + (1 << 25) + (5 << 12) */,
     rv_mod = 33579059 /* 0b0110011 + (1 << 25) + (6 << 12) */,
@@ -193,6 +194,11 @@ int __add(rv_reg rd, rv_reg rs1, rv_reg rs2)
 int __sub(rv_reg rd, rv_reg rs1, rv_reg rs2)
 {
     return rv_encode_R(rv_sub, rd, rs1, rs2);
+}
+
+int __mulhu(rv_reg rd, rv_reg rs1, rv_reg rs2)
+{
+    return rv_encode_R(rv_mulhu, rd, rs1, rs2);
 }
 
 int __xor(rv_reg rd, rv_reg rs1, rv_reg rs2)

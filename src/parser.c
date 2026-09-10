@@ -42,7 +42,10 @@ source_location_t *next_token_loc(void);
 
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
 void perform_side_effect(block_t *parent, basic_block_t *bb);
-void read_inner_var_decl(var_t *vd, bool anon, bool is_param);
+void read_inner_var_decl(var_t *vd,
+                         bool anon,
+                         bool is_param,
+                         bool is_record_member);
 void read_partial_var_decl(var_t *vd, var_t *template);
 void parse_array_init(var_t *var,
                       block_t *parent,
@@ -134,6 +137,7 @@ var_t *require_var(block_t *blk)
     var->var_name = "";
     var->consumed = -1;
     var->phys_reg = -1;
+    var->phys_reg_hi = -1;
     var->first_use = -1;
     var->last_use = -1;
     var->use_count = 0;
@@ -175,6 +179,8 @@ var_t *require_typed_ptr_var(block_t *blk, type_t *type, int ptr)
     return var;
 }
 
+type_t *pointee_type_from_pointer_typedef(type_t *type);
+
 var_t *require_ref_var(block_t *blk, type_t *type, int ptr)
 {
     if (!type)
@@ -190,18 +196,52 @@ var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
     if (!type)
         error_at("Cannot dereference variable from NULL type", cur_token_loc());
 
+    int effective_ptr = ptr + type->ptr_level;
+
     /* Allowing integer dereferencing */
-    if (!ptr && type->base_type != TYPE_struct &&
+    if (!effective_ptr && type->base_type != TYPE_struct &&
         type->base_type != TYPE_typedef)
         return require_var(blk);
 
-    if (!ptr)
+    if (!effective_ptr)
         error_at("Cannot dereference from non-pointer typed variable",
                  cur_token_loc());
 
-    var_t *var = require_typed_var(blk, type);
-    var->ptr_level = ptr - 1;
+    var_t *var =
+        require_typed_var(blk, pointee_type_from_pointer_typedef(type));
+    var->ptr_level = effective_ptr - 1;
     return var;
+}
+
+/* A typedef keeps its stars (and their qualifiers) on type_t while ordinary
+ * declarators keep them on var_t. Expression results are ordinary vars, so
+ * dereferencing a typedef pointer must move the surviving qualifier bits into
+ * that representation instead of silently losing them.
+ */
+int effective_pointer_depth(const var_t *var)
+{
+    return var && var->type ? var->ptr_level + var->type->ptr_level : 0;
+}
+
+unsigned int effective_pointer_const_mask(const var_t *var)
+{
+    if (!var || !var->type)
+        return 0;
+    if (var->type->ptr_level >= 32)
+        return var->type->pointer_const_mask;
+    return var->type->pointer_const_mask |
+           (var->pointer_const_mask << var->type->ptr_level);
+}
+
+unsigned int dereferenced_pointer_const_mask(const var_t *var)
+{
+    int depth = effective_pointer_depth(var);
+    unsigned int mask = effective_pointer_const_mask(var);
+
+    /* The outermost pointer object was consumed by the dereference. */
+    if (depth > 0 && depth <= 32)
+        mask &= ~(1U << (depth - 1));
+    return mask;
 }
 
 /* A pointer typedef stores its pointer depth in type_t rather than var_t. After
@@ -222,7 +262,8 @@ type_t *pointee_type_from_pointer_typedef(type_t *type)
     case TYPE_void:
         return TY_void;
     case TYPE_char:
-        return type->is_unsigned ? TY_uchar : TY_char;
+        return type->is_unsigned ? TY_uchar
+                                 : (type->is_signed_char ? TY_schar : TY_char);
     case TYPE_short:
         return type->is_unsigned ? TY_ushort : TY_short;
     case TYPE_int:
@@ -234,6 +275,26 @@ type_t *pointee_type_from_pointer_typedef(type_t *type)
     default:
         return type;
     }
+}
+
+/* Scalar typedefs have their own descriptor, but C declaration compatibility is
+ * based on the represented type. Records retain nominal identity.
+ */
+bool compatible_decl_type(const type_t *left, const type_t *right)
+{
+    if (left == right)
+        return true;
+    if (!left || !right || left->base_type != right->base_type ||
+        left->size != right->size || left->ptr_level != right->ptr_level ||
+        left->is_unsigned != right->is_unsigned ||
+        left->is_signed_char != right->is_signed_char)
+        return false;
+    if (left->base_type == TYPE_struct || left->base_type == TYPE_union)
+        return false;
+    if (left->base_type == TYPE_typedef &&
+        (left->num_fields || right->num_fields))
+        return left->base_struct == right->base_struct;
+    return true;
 }
 
 /* An inline record pointer typedef stores PTR_SIZE in type->size, while its
@@ -272,6 +333,45 @@ var_t *type_add_field(type_t *type, int *idx)
     type_ensure_fields(type);
     *idx = i + 1;
     return &type->fields[i];
+}
+
+/* An incomplete array has a distinct meaning in a record: C99 permits it only
+ * as the final member of a struct, where it contributes no bytes to the
+ * record's fixed layout.
+ */
+void mark_flexible_array_member(var_t *field, bool is_union)
+{
+    if (!field->has_unsized_array)
+        return;
+    if (is_union)
+        error_at("Flexible array member is not permitted in a union",
+                 cur_token_loc());
+    field->is_flexible_array_member = true;
+}
+
+bool is_array_declarator(const var_t *var)
+{
+    return var->array_size > 0 || var->is_flexible_array_member;
+}
+
+bool type_has_flexible_array_member(const type_t *type)
+{
+    return type && (type->has_flexible_array_member ||
+                    (type->base_struct &&
+                     type->base_struct->has_flexible_array_member));
+}
+
+bool is_flexible_array_member_container(const var_t *field)
+{
+    return !field->ptr_level && type_has_flexible_array_member(field->type);
+}
+
+void reject_flexible_array_member_container(const var_t *field)
+{
+    if (is_flexible_array_member_container(field))
+        error_at(
+            "A struct with a flexible array member cannot be embedded by value",
+            cur_token_loc());
 }
 
 void opstack_push(var_t *var)
@@ -576,13 +676,37 @@ var_t *resize_to(block_t *block,
  */
 bool incompatible_const_pointer_conversion(const var_t *from, const var_t *to)
 {
-    if (!from || !to || !from->ptr_level || !to->ptr_level)
+    unsigned int from_mask, to_mask;
+    int from_depth, to_depth;
+
+    if (!from || !to)
+        return false;
+
+    from_depth = from->ptr_level + from->type->ptr_level;
+    to_depth = to->ptr_level + to->type->ptr_level;
+    if (!from_depth || !to_depth)
         return false;
 
     if (from->is_const_qualified && !to->is_const_qualified)
         return true;
 
-    return from->ptr_level > 1 && to->ptr_level > 1 &&
+    /* A top-level pointer qualifier belongs to the source or destination
+     * object, not to the pointed-to type used by a value conversion. Keep every
+     * inner level: `int * const *` must accept `&p` when p is an `int * const`,
+     * and converting it back to `int **` must be rejected.
+     */
+    from_mask = from->type->pointer_const_mask |
+                (from->pointer_const_mask << from->type->ptr_level);
+    to_mask = to->type->pointer_const_mask |
+              (to->pointer_const_mask << to->type->ptr_level);
+    if (from_depth <= 32)
+        from_mask &= ~(1U << (from_depth - 1));
+    if (to_depth <= 32)
+        to_mask &= ~(1U << (to_depth - 1));
+    if (from_mask & ~to_mask)
+        return true;
+
+    return from_depth > 1 && to_depth > 1 &&
            from->is_const_qualified != to->is_const_qualified;
 }
 
@@ -605,8 +729,37 @@ void diagnose_const_pointer_conversion(const var_t *from, const var_t *to)
     error_at("discarding const qualifier", cur_token_loc());
 }
 
+/* Plain, signed, and unsigned char are distinct C types despite sharing a byte
+ * representation. Preserve that identity for implicit pointer conversions
+ * without changing the legacy non-character pointer extensions.
+ */
+bool incompatible_character_pointer_conversion(const var_t *from,
+                                               const var_t *to)
+{
+    type_t *from_pointee, *to_pointee;
+
+    if (!from || !to || !(from->ptr_level || from->type->ptr_level) ||
+        !(to->ptr_level || to->type->ptr_level))
+        return false;
+
+    from_pointee = pointee_type_from_pointer_typedef(from->type);
+    to_pointee = pointee_type_from_pointer_typedef(to->type);
+    return from_pointee->base_type == TYPE_char &&
+           to_pointee->base_type == TYPE_char &&
+           !compatible_decl_type(from_pointee, to_pointee);
+}
+
 void read_parameter_list_decl(func_t *func, bool anon);
 var_t *integer_promote_operand(block_t *parent, basic_block_t **bb, var_t *var);
+var_t *resolve_global_declarator(block_t *block,
+                                 var_t *var,
+                                 bool is_static,
+                                 bool *is_redeclaration);
+void read_global_function_declarator(block_t *block,
+                                     var_t *var,
+                                     bool is_static);
+var_t *bind_block_extern_object(block_t *parent, var_t *var);
+int read_const_expr(block_t *scope);
 
 /* Forward declaration for ternary handling used by initializers */
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
@@ -781,9 +934,9 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         lex_ident(T_char, chtok);
         unescape_string(chtok, unescaped, MAX_TOKEN_LEN);
 
-        val = require_typed_var(parent, TY_char);
+        val = require_typed_var(parent, TY_int);
         val->var_name = gen_name();
-        val->init_val = unescaped[0];
+        val->init_val = parse_character_constant(chtok);
         add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
     } else if (lex_peek(T_string, NULL)) {
         lex_accept(T_string);
@@ -900,6 +1053,52 @@ void parse_array_field_row_init(block_t *parent,
     }
 }
 
+/* An array member can be initialized directly by a string literal just like a
+ * standalone character array. The member has no independent var_t storage, so
+ * write through its already-computed field address rather than routing this
+ * through parse_string_array_init().
+ */
+void parse_string_field_init(block_t *parent,
+                             basic_block_t **bb,
+                             const var_t *field,
+                             var_t *target_addr,
+                             bool emit_code)
+{
+    char literal[MAX_TOKEN_LEN], unescaped[MAX_TOKEN_LEN],
+        combined[MAX_LINE_LEN];
+    int len;
+
+    lex_ident(T_string, literal);
+    unescape_string(literal, combined, MAX_LINE_LEN);
+    while (lex_peek(T_string, NULL)) {
+        int used = strlen(combined);
+
+        lex_ident(T_string, literal);
+        unescape_string(literal, unescaped, MAX_LINE_LEN - used);
+        if (used + (int) strlen(unescaped) >= MAX_LINE_LEN - 1)
+            error_at("Concatenated string literal too long", cur_token_loc());
+        strcpy(combined + used, unescaped);
+    }
+
+    len = strlen(combined) + 1;
+    if (len > field->array_size)
+        error_at("String initializer is too long for character array",
+                 cur_token_loc());
+    if (!emit_code)
+        return;
+
+    for (int i = 0; i < field->array_size; i++) {
+        var_t *value = require_var(parent);
+        var_t *addr = compute_element_address(parent, bb, target_addr, i, 1);
+
+        value->var_name = gen_name();
+        value->init_val = i < len ? (unsigned char) combined[i] : 0;
+        value->is_const = true;
+        add_insn(parent, *bb, OP_load_constant, value, NULL, NULL, 0, NULL);
+        add_insn(parent, *bb, OP_write, NULL, addr, value, 1, NULL);
+    }
+}
+
 void parse_array_field_init(block_t *parent,
                             basic_block_t **bb,
                             const var_t *field,
@@ -987,6 +1186,18 @@ void parse_struct_field_init(block_t *parent,
     int field_idx = 0;
     int initializer_count = 0;
 
+    /* Both of these back a "field" pointer that outlives the designator block
+     * they are filled in from, so they have to live as long as the loop that
+     * dereferences it rather than as long as that block.
+     */
+    var_t array_element;
+    var_t pending_array_element;
+    var_t *pending_array_base = NULL;
+    int pending_array_index = 0;
+    int pending_array_count = 0;
+    int pending_array_elem_size = 0;
+    bool has_pending_array_element = false;
+
     /* Zero the complete struct before processing fields. Positional
      * initializers could defer this until the first omitted member, but a
      * designator may skip forward or return to an earlier member.
@@ -1016,23 +1227,114 @@ void parse_struct_field_init(block_t *parent,
         for (;;) {
             var_t *field_val_raw = NULL;
             var_t *field = NULL;
+            var_t *designated_field_addr = NULL;
+            bool consumed_pending_array_element = false;
 
             if (lex_accept(T_dot)) {
                 char field_name[MAX_ID_LEN];
-                bool found = false;
+                type_t *designator_type = struct_type;
+                var_t *designator_base = target_addr;
+                bool first = true;
 
-                lex_ident(T_identifier, field_name);
-                lex_expect(T_assign);
-                for (int i = 0; i < struct_type->num_fields; i++) {
-                    if (!strcmp(struct_type->fields[i].var_name, field_name)) {
-                        field_idx = i;
-                        found = true;
-                        break;
+                for (;;) {
+                    bool found = false;
+
+                    lex_ident(T_identifier, field_name);
+                    for (int i = 0; i < designator_type->num_fields; i++) {
+                        if (!strcmp(designator_type->fields[i].var_name,
+                                    field_name)) {
+                            if (first)
+                                field_idx = i;
+                            field = &designator_type->fields[i];
+                            found = true;
+                            break;
+                        }
                     }
+                    if (!found)
+                        error_at("Unknown field in record initializer",
+                                 cur_token_loc());
+
+                    designated_field_addr = compute_field_address(
+                        parent, bb, designator_base, field);
+                    if (lex_accept(T_open_square)) {
+                        int index, element_count, linear_index;
+                        int total_element_count;
+                        int elem_size;
+                        bool direct_array_member = first;
+                        var_t *array_base_addr = designated_field_addr;
+
+                        if (!field->array_size)
+                            error_at(
+                                "Array designator requires an array member",
+                                cur_token_loc());
+                        index = read_const_expr(parent);
+                        lex_expect(T_close_square);
+                        total_element_count = field->array_size;
+                        element_count = total_element_count;
+                        if (field->array_dim2)
+                            element_count /= field->array_dim2;
+                        if (index < 0 || index >= element_count)
+                            error_at("Array designator index is out of bounds",
+                                     cur_token_loc());
+                        elem_size =
+                            field->ptr_level ? PTR_SIZE : field->type->size;
+                        if (field->array_dim2)
+                            index *= field->array_dim2;
+                        linear_index = index;
+                        designated_field_addr = compute_element_address(
+                            parent, bb, designated_field_addr, index,
+                            elem_size);
+                        memcpy(&array_element, field, sizeof(var_t));
+                        array_element.array_size = field->array_dim2;
+                        array_element.array_dim2 = 0;
+                        field = &array_element;
+
+                        /* A first subscript of a two-dimensional member names a
+                         * row; a second selects its scalar element. Leaving it
+                         * as an array supports `.cells[row] = {...}`.
+                         */
+                        if (field->array_size && lex_accept(T_open_square)) {
+                            index = read_const_expr(parent);
+                            lex_expect(T_close_square);
+                            if (index < 0 || index >= field->array_size)
+                                error_at(
+                                    "Array designator index is out of bounds",
+                                    cur_token_loc());
+                            designated_field_addr = compute_element_address(
+                                parent, bb, designated_field_addr, index,
+                                elem_size);
+                            linear_index += index;
+                            array_element.array_size = 0;
+                        }
+                        if (direct_array_member && !field->array_size) {
+                            memcpy(&pending_array_element, field,
+                                   sizeof(var_t));
+                            pending_array_base = array_base_addr;
+                            pending_array_index = linear_index + 1;
+                            pending_array_count = total_element_count;
+                            pending_array_elem_size = elem_size;
+                            has_pending_array_element = true;
+                        }
+                    }
+                    if (!lex_accept(T_dot))
+                        break;
+                    if (!is_record_type(field->type))
+                        error_at("Nested designator requires a record member",
+                                 cur_token_loc());
+                    designator_type = field->type;
+                    if (designator_type->base_type == TYPE_typedef &&
+                        designator_type->base_struct)
+                        designator_type = designator_type->base_struct;
+                    designator_base = designated_field_addr;
+                    first = false;
                 }
-                if (!found)
-                    error_at("Unknown field in record initializer",
-                             cur_token_loc());
+                lex_expect(T_assign);
+            } else if (has_pending_array_element) {
+                field = &pending_array_element;
+                designated_field_addr = compute_element_address(
+                    parent, bb, pending_array_base, pending_array_index,
+                    pending_array_elem_size);
+                consumed_pending_array_element = true;
             }
 
             if (field_idx >= struct_type->num_fields ||
@@ -1042,19 +1344,32 @@ void parse_struct_field_init(block_t *parent,
                 error_at("Too many elements in record initializer",
                          next_token_loc());
 
-            if (field_idx < struct_type->num_fields)
+            if (!field && field_idx < struct_type->num_fields)
                 field = &struct_type->fields[field_idx];
 
-            if (field && lex_peek(T_open_curly, NULL) && field->array_size) {
+            if (field && field->array_size && !field->ptr_level &&
+                field->type == TY_char && lex_peek(T_string, NULL)) {
                 var_t *field_addr =
-                    compute_field_address(parent, bb, target_addr, field);
+                    designated_field_addr
+                        ? designated_field_addr
+                        : compute_field_address(parent, bb, target_addr, field);
+                parse_string_field_init(parent, bb, field, field_addr,
+                                        emit_code);
+            } else if (field && lex_peek(T_open_curly, NULL) &&
+                       field->array_size) {
+                var_t *field_addr =
+                    designated_field_addr
+                        ? designated_field_addr
+                        : compute_field_address(parent, bb, target_addr, field);
                 parse_array_field_init(parent, bb, field, field_addr,
                                        emit_code);
             } else if (field && lex_peek(T_open_curly, NULL) &&
                        is_record_type(field->type)) {
                 type_t *nested_type = field->type;
                 var_t *field_addr =
-                    compute_field_address(parent, bb, target_addr, field);
+                    designated_field_addr
+                        ? designated_field_addr
+                        : compute_field_address(parent, bb, target_addr, field);
 
                 if (nested_type->base_type == TYPE_typedef &&
                     nested_type->base_struct)
@@ -1077,7 +1392,9 @@ void parse_struct_field_init(block_t *parent,
 
             if (field_val_raw && field_idx < struct_type->num_fields) {
                 var_t *field_addr =
-                    compute_field_address(parent, bb, target_addr, field);
+                    designated_field_addr
+                        ? designated_field_addr
+                        : compute_field_address(parent, bb, target_addr, field);
 
                 if (is_record_type(field->type) &&
                     is_record_object(field_val_raw)) {
@@ -1092,7 +1409,16 @@ void parse_struct_field_init(block_t *parent,
                 }
             }
 
-            field_idx++;
+            if (has_pending_array_element) {
+                if (consumed_pending_array_element)
+                    pending_array_index++;
+                if (pending_array_index >= pending_array_count) {
+                    has_pending_array_element = false;
+                    field_idx++;
+                }
+            } else {
+                field_idx++;
+            }
             initializer_count++;
             if (!lex_accept(T_comma))
                 break;
@@ -1743,6 +2069,95 @@ var_t *scalarize_array_literal_if_needed(block_t *parent,
 int eval_expression_imm(opcode_t op, int op1, int op2);
 int read_const_expr(block_t *scope);
 
+/* Integer constant expressions may contain sizeof(type-name). This parser only
+ * needs type metadata, so keep it separate from expression lowering and avoid
+ * emitting the otherwise unevaluated sizeof IR into an array bound or
+ * enumerator declaration.
+ */
+int read_const_sizeof_type(block_t *scope)
+{
+    char token[MAX_ID_LEN];
+    type_t *type = NULL;
+    int ptr_level = 0;
+    bool is_unsigned = false;
+    bool is_signed = false;
+    int long_count = 0;
+
+    lex_expect(T_open_bracket);
+    if (lex_accept(T_struct) || lex_accept(T_union)) {
+        lex_ident(T_identifier, token);
+        type = find_type(token, 2);
+    } else if (lex_accept(T_enum)) {
+        lex_ident(T_identifier, token);
+        type = find_type_tag(token, scope);
+    } else {
+        /* Declaration specifiers may appear in any order: all of "unsigned long
+         * int", "long unsigned int", and "int unsigned" name the same type.
+         */
+        while (true) {
+            if (lex_accept(T_unsigned)) {
+                if (is_unsigned)
+                    error_at("duplicate unsigned type specifier",
+                             cur_token_loc());
+                is_unsigned = true;
+            } else if (lex_accept(T_signed)) {
+                if (is_signed)
+                    error_at("duplicate signed type specifier",
+                             cur_token_loc());
+                is_signed = true;
+            } else if (lex_accept(T_long)) {
+                long_count++;
+            } else if (lex_accept(T_const) || lex_accept(T_volatile) ||
+                       lex_accept(T_restrict)) {
+                ;
+            } else if (lex_peek(T_identifier, token)) {
+                type_t *candidate = find_type(token, true);
+
+                if (!candidate)
+                    break;
+                lex_expect(T_identifier);
+                type = candidate;
+            } else {
+                break;
+            }
+        }
+        if (is_unsigned && is_signed)
+            error_at("both signed and unsigned specified", cur_token_loc());
+        if (long_count > 2)
+            error_at("too many long type specifiers", cur_token_loc());
+        if (long_count) {
+            type = is_unsigned ? TY_ulong : TY_long;
+            if (long_count == 2)
+                type = is_unsigned ? TY_ulong_long : TY_long_long;
+        } else if (is_unsigned) {
+            if (type == TY_char)
+                type = TY_uchar;
+            else if (type == TY_short)
+                type = TY_ushort;
+            else
+                type = TY_uint;
+        } else if (is_signed) {
+            type = type == TY_char ? TY_schar : (type ? type : TY_int);
+        }
+    }
+    if (!type)
+        error_at(
+            "sizeof in an integer constant expression requires a type name",
+            cur_token_loc());
+    while (lex_accept(T_asterisk)) {
+        ptr_level++;
+        while (lex_accept(T_const) || lex_accept(T_volatile) ||
+               lex_accept(T_restrict))
+            ;
+    }
+    lex_expect(T_close_bracket);
+    if (ptr_level)
+        return PTR_SIZE;
+    if (type->size)
+        return type->size;
+    return type->base_struct->size;
+}
+
 int read_const_expr_operand(block_t *scope)
 {
     char buffer[MAX_TOKEN_LEN];
@@ -1755,6 +2170,8 @@ int read_const_expr_operand(block_t *scope)
         return ~read_const_expr_operand(scope);
     if (lex_accept(T_log_not))
         return !read_const_expr_operand(scope);
+    if (lex_accept(T_sizeof))
+        return read_const_sizeof_type(scope);
 
     if (lex_accept(T_open_bracket)) {
         int res = read_const_expr(scope);
@@ -1770,7 +2187,7 @@ int read_const_expr_operand(block_t *scope)
         lex_expect(T_char);
         if (unescape_string(buffer, unescaped, MAX_TOKEN_LEN) < 0)
             error_at("Invalid escape sequence", cur_token_loc());
-        return unescaped[0];
+        return parse_character_constant(buffer);
     }
     if (lex_peek(T_identifier, buffer)) {
         lex_expect(T_identifier);
@@ -1839,7 +2256,10 @@ int read_const_expr(block_t *scope)
     return val_stack[0];
 }
 
-void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
+void read_inner_var_decl(var_t *vd,
+                         bool anon,
+                         bool is_param,
+                         bool is_record_member)
 {
     /* Preserve typedef pointer level - don't reset if already inherited */
     vd->init_val = 0;
@@ -1858,8 +2278,18 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
          * require tracking const-ness of the pointer itself vs the pointed-to
          * data separately.
          */
-        while (lex_accept(T_const))
-            vd->is_const_pointer = true;
+        while (true) {
+            if (lex_accept(T_const)) {
+                vd->is_const_pointer = true;
+                if (vd->ptr_level <= 32)
+                    vd->pointer_const_mask |= 1U << (vd->ptr_level - 1);
+            } else if (lex_accept(T_volatile))
+                vd->is_volatile = true;
+            else if (lex_accept(T_restrict))
+                ; /* restrict is an aliasing contract, not storage state. */
+            else
+                break;
+        }
     }
 
     /* is it function pointer declaration? */
@@ -1867,6 +2297,16 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
         func_t *func = arena_alloc_func();
         char temp_name[MAX_VAR_LEN];
         lex_expect(T_asterisk);
+        while (true) {
+            if (lex_accept(T_const))
+                vd->is_const_pointer = true;
+            else if (lex_accept(T_volatile))
+                vd->is_volatile = true;
+            else if (lex_accept(T_restrict))
+                ; /* restrict is an aliasing contract, not storage state. */
+            else
+                break;
+        }
         lex_ident(T_identifier, temp_name);
         vd->var_name = intern_string(temp_name);
         lex_expect(T_close_bracket);
@@ -1934,7 +2374,13 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
             lex_expect(T_close_square);
             dims++;
         }
-        if (first_dim_empty && dims == 1) {
+        if (first_dim_empty && is_record_member) {
+            /* A record's omitted outer bound is its flexible array member.
+             * Inner dimensions still describe the complete element type, so
+             * retain their product and row stride for member indexing.
+             */
+            vd->has_unsized_array = true;
+        } else if (first_dim_empty && dims == 1) {
             /* An array parameter adjusts to a pointer, but an object declarator
              * such as `char text[] = "hi"` has an inferred array bound. Keeping
              * those cases distinct lets its initializer create writable array
@@ -1945,12 +2391,33 @@ void read_inner_var_decl(var_t *vd, bool anon, bool is_param)
             else
                 vd->has_unsized_array = true;
         }
+
+        /* C99 permits an object of a flexible-record type, but not an array
+         * whose elements have no fixed extent. An explicitly pointer-typed
+         * element remains valid, including through a pointer typedef.
+         */
+        if (vd->array_size > 0 && !vd->ptr_level && !vd->type->ptr_level &&
+            type_has_flexible_array_member(vd->type))
+            error_at(
+                "A struct with a flexible array member cannot be an array "
+                "element",
+                cur_token_loc());
         vd->is_func = false;
     }
+
+    /* The legacy flag remains the outermost pointer qualifier for lvalue
+     * writes. Intermediate qualifiers are retained in pointer_const_mask.
+     */
+    if (vd->ptr_level > 0 && vd->ptr_level <= 32)
+        vd->is_const_pointer =
+            vd->pointer_const_mask & (1U << (vd->ptr_level - 1));
 }
 
 /* starting next_token, need to check the type */
-void read_full_var_decl(var_t *vd, bool anon, bool is_param)
+void read_full_var_decl(var_t *vd,
+                        bool anon,
+                        bool is_param,
+                        bool is_record_member)
 {
     char type_name[MAX_ID_LEN];
 
@@ -1960,9 +2427,13 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
      * unqualified `const_int_pointer` only qualifies the pointed-to object.
      */
     bool declaration_const = vd->is_const_qualified;
+    bool declaration_inline = vd->is_inline;
+    bool declaration_volatile = vd->is_volatile;
     bool is_signed = false;
     bool is_unsigned = false;
     bool is_const = false;
+    bool is_inline = false;
+    bool is_volatile = false;
     bool is_long = false;
     bool is_long_long = false;
     type_t *leading_scalar_type = NULL;
@@ -1991,7 +2462,8 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
      * follow the same path.
      */
     while (lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
-           lex_peek(T_const, NULL) || lex_peek(T_long, NULL)) {
+           lex_peek(T_const, NULL) || lex_peek(T_inline, NULL) ||
+           lex_peek(T_volatile, NULL) || lex_peek(T_long, NULL)) {
         if (lex_accept(T_signed)) {
             if (is_signed)
                 error_at("duplicate signed type specifier", cur_token_loc());
@@ -2002,7 +2474,14 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
             is_unsigned = true;
         } else if (lex_accept(T_const))
             is_const = true;
-        else {
+        else if (lex_accept(T_volatile))
+            is_volatile = true;
+        else if (lex_accept(T_inline)) {
+            if (is_inline || declaration_inline)
+                error_at("duplicate inline function specifier",
+                         cur_token_loc());
+            is_inline = true;
+        } else {
             lex_expect(T_long);
             if (is_long_long)
                 error_at("too many long type specifiers", cur_token_loc());
@@ -2070,7 +2549,14 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
         if (leading_scalar_type == TY_short &&
             lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
             lex_expect(T_identifier);
-        type = leading_scalar_type;
+        type = leading_scalar_type == TY_char ? TY_schar : leading_scalar_type;
+    } else if (is_signed && lex_peek(T_identifier, type_name) &&
+               (!strcmp(type_name, "char") || !strcmp(type_name, "short") ||
+                !strcmp(type_name, "int"))) {
+        lex_expect(T_identifier);
+        type = !strcmp(type_name, "char")
+                   ? TY_schar
+                   : (!strcmp(type_name, "short") ? TY_short : TY_int);
     } else if (is_signed && find_type_flag == 1 &&
                (!lex_peek(T_identifier, type_name) ||
                 (strcmp(type_name, "int") && strcmp(type_name, "char") &&
@@ -2092,14 +2578,30 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
 
     vd->type = type;
     vd->is_const_qualified = type->is_const_qualified;
+    if (type->ptr_level && type->ptr_level <= 32)
+        vd->is_const_pointer =
+            type->pointer_const_mask & (1U << (type->ptr_level - 1));
 
     /* A qualifier may follow the base type as well as precede it: both "const
      * int" and "int const" qualify the object. Consume it before parsing
      * pointer declarators, where a following const instead qualifies the
      * pointer itself ("int * const").
      */
-    while (lex_accept(T_const))
-        is_const = true;
+    while (true) {
+        if (lex_accept(T_const))
+            is_const = true;
+        else if (lex_accept(T_volatile))
+            is_volatile = true;
+        else if (lex_accept(T_inline)) {
+            if (is_inline || declaration_inline)
+                error_at("duplicate inline function specifier",
+                         cur_token_loc());
+            is_inline = true;
+        } else
+            break;
+    }
+    vd->is_inline = declaration_inline || is_inline;
+    vd->is_volatile = declaration_volatile || is_volatile;
     if (is_const || declaration_const) {
         if (type->ptr_level)
             vd->is_const_pointer = true;
@@ -2107,7 +2609,7 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
             vd->is_const_qualified = true;
     }
 
-    read_inner_var_decl(vd, anon, is_param);
+    read_inner_var_decl(vd, anon, is_param, is_record_member);
 
     /* A 32-bit target can carry a pointer to an eight-byte object without a
      * paired-value register representation. Keep direct wide objects, arrays,
@@ -2125,7 +2627,7 @@ void read_full_var_decl(var_t *vd, bool anon, bool is_param)
 void read_partial_var_decl(var_t *vd, var_t *template)
 {
     UNUSED(template);
-    read_inner_var_decl(vd, false, false);
+    read_inner_var_decl(vd, false, false, false);
 }
 
 void read_parameter_list_decl(func_t *func, bool anon)
@@ -2139,7 +2641,7 @@ void read_parameter_list_decl(func_t *func, bool anon)
         if (lex_accept(T_close_bracket))
             return;
         func->param_defs[vn].type = TY_void;
-        read_inner_var_decl(&func->param_defs[vn], anon, true);
+        read_inner_var_decl(&func->param_defs[vn], anon, true, false);
         if (!func->param_defs[vn].ptr_level && !func->param_defs[vn].is_func &&
             !func->param_defs[vn].array_size)
             error_at("'void' must be the only parameter and unnamed",
@@ -2149,18 +2651,26 @@ void read_parameter_list_decl(func_t *func, bool anon)
     }
 
     while (lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL) ||
+           lex_peek(T_volatile, NULL) || lex_peek(T_register, NULL) ||
            lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
            lex_peek(T_long, NULL) || lex_peek(T_struct, NULL) ||
            lex_peek(T_union, NULL) || lex_peek(T_enum, NULL)) {
         /* Check for const qualifier */
         bool is_const = false;
+        bool is_register = false;
         if (lex_accept(T_const))
             is_const = true;
+        if (lex_accept(T_register))
+            is_register = true;
 
         if (vn >= MAX_PARAMS)
             error_at("Too many parameters", cur_token_loc());
-        read_full_var_decl(&func->param_defs[vn], anon, true);
+        read_full_var_decl(&func->param_defs[vn], anon, true, false);
+        if (func->param_defs[vn].is_inline)
+            error_at("inline specifier requires a function declarator",
+                     cur_token_loc());
         func->param_defs[vn].is_const_qualified |= is_const;
+        func->param_defs[vn].is_register = is_register;
         func->param_defs[vn].is_aggregate_param =
             is_record_type(func->param_defs[vn].type) &&
             !func->param_defs[vn].ptr_level;
@@ -2522,9 +3032,9 @@ void read_char_param(block_t *parent, basic_block_t *bb)
     lex_ident(T_char, literal);
     unescape_string(literal, unescaped, MAX_TOKEN_LEN);
 
-    var_t *vd = require_typed_var(parent, TY_char);
+    var_t *vd = require_typed_var(parent, TY_int);
     vd->var_name = gen_name();
-    vd->init_val = unescaped[0];
+    vd->init_val = parse_character_constant(literal);
     vd->is_const = true;
     opstack_push(vd);
     add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
@@ -2555,6 +3065,11 @@ void read_func_parameters(func_t *func, block_t *parent, basic_block_t **bb)
 
         if (func && param_num < func->num_params) {
             var_t *target = &func->param_defs[param_num];
+            if (incompatible_character_pointer_conversion(param, target))
+                error_at(
+                    "incompatible character pointer types for function "
+                    "argument",
+                    cur_token_loc());
             diagnose_const_pointer_conversion(param, target);
             if (is_record_type(target->type) && !target->ptr_level) {
                 /* A record parameter is a by-value object. Keep that promise
@@ -2677,13 +3192,21 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
     if (!lex_peek(T_identifier, token))
         error_at("Expected an identifier", next_token_loc());
     var_t *var = find_var(token, parent);
+    if (var && var->is_register)
+        error_at("cannot take address of register object", next_token_loc());
     read_lvalue(&lvalue, var, parent, bb, false, OP_generic, true);
 
     if (!lvalue.is_reference) {
         rs1 = opstack_pop();
         vd = require_ref_var(parent, lvalue.type, lvalue.ptr_level);
         vd->var_name = gen_name();
-        vd->is_const_qualified = lvalue.is_const_qualified;
+
+        /* Address-of moves a pointer object's qualification one level inward:
+         * `&p`, for `int * const p`, is `int * const *`, not `const int **`.
+         */
+        vd->is_const_qualified = lvalue.decl ? lvalue.decl->is_const_qualified
+                                             : lvalue.is_const_qualified;
+        vd->pointer_const_mask = lvalue.pointer_const_mask;
         opstack_push(vd);
         add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
     }
@@ -2707,7 +3230,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
          * defaults
          */
         type_t *deref_type = rs1->type ? rs1->type : TY_int;
-        int deref_ptr = rs1->ptr_level > 0 ? rs1->ptr_level - 1 : 0;
+        int deref_ptr = rs1->ptr_level + deref_type->ptr_level - 1;
 
         /* require_deref_var() takes the *source* pointer level and returns a
          * variable one level shallower. Passing the already-decremented value
@@ -2721,6 +3244,11 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
         else
             sz = deref_type->size;
         vd->var_name = gen_name();
+        vd->is_const_qualified = rs1->is_const_qualified;
+        vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
+        vd->is_const_pointer =
+            vd->ptr_level > 0 && vd->ptr_level <= 32 &&
+            (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
         opstack_push(vd);
         add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
     } else {
@@ -2735,7 +3263,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
 
         rs1 = opstack_pop();
         vd = require_deref_var(parent, var->type, var->ptr_level);
-        if (lvalue.ptr_level > 1)
+        if (var->ptr_level + var->type->ptr_level > 1)
             sz = PTR_SIZE;
         else {
             /* For typedef pointers, get the size of the pointed-to type */
@@ -2763,6 +3291,11 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             }
         }
         vd->var_name = gen_name();
+        vd->is_const_qualified = var->is_const_qualified;
+        vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
+        vd->is_const_pointer =
+            vd->ptr_level > 0 && vd->ptr_level <= 32 &&
+            (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
         opstack_push(vd);
         add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
     }
@@ -2849,6 +3382,11 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
             else
                 sz = deref_type->size;
             vd->var_name = gen_name();
+            vd->is_const_qualified = rs1->is_const_qualified;
+            vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
+            vd->is_const_pointer =
+                vd->ptr_level > 0 && vd->ptr_level <= 32 &&
+                (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
             opstack_push(vd);
             add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
         }
@@ -2897,22 +3435,156 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                 }
             }
             vd->var_name = gen_name();
+            vd->is_const_qualified = rs1->is_const_qualified;
+            vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
+            vd->is_const_pointer =
+                vd->ptr_level > 0 && vd->ptr_level <= 32 &&
+                (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
             opstack_push(vd);
             add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
         }
     }
 }
 
+void read_expr_operand(block_t *parent, basic_block_t **bb);
+
+/* Consume one adjacent-string-literal sequence and return the size of its C99
+ * array object, including the terminating null byte. This is deliberately
+ * independent of expression lowering: a string literal decays in an ordinary
+ * expression, but not when it is the operand of sizeof.
+ */
+int read_sizeof_string_literal(void)
+{
+    char literal[MAX_TOKEN_LEN];
+    char unescaped[MAX_TOKEN_LEN];
+    int size = 1;
+
+    do {
+        lex_ident(T_string, literal);
+        unescape_string(literal, unescaped, MAX_TOKEN_LEN);
+        size += strlen(unescaped);
+    } while (lex_peek(T_string, NULL));
+
+    return size;
+}
+
+int sizeof_array_object(const var_t *array)
+{
+    int element_size = array->type->size;
+
+    if (array->ptr_level || array->type->ptr_level || array->is_func)
+        element_size = PTR_SIZE;
+    return array->array_size * element_size;
+}
+
 void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 {
     char token[MAX_ID_LEN];
     int ptr_cnt = 0;
+    int array_size = 0;
     token_t *sizeof_tk = cur_token;
     type_t *type = NULL;
     bool is_function = false;
     var_t *vd;
 
-    lex_expect(T_open_bracket);
+    bool parenthesized = lex_accept(T_open_bracket);
+
+    /* A string literal is an array, not a pointer, before the array-to-pointer
+     * conversion that ordinary expression lowering applies. Parenthesized
+     * sizeof may take the fast path only when the literal sequence is the
+     * complete operand.
+     */
+    token_t *after_string = cur_token->next;
+    while (after_string && after_string->kind == T_string)
+        after_string = after_string->next;
+    if (lex_peek(T_string, NULL) &&
+        (!parenthesized ||
+         (after_string && after_string->kind == T_close_bracket))) {
+        vd = require_var(parent);
+        vd->init_val = read_sizeof_string_literal();
+        vd->var_name = gen_name();
+        if (parenthesized)
+            lex_expect(T_close_bracket);
+        opstack_push(vd);
+        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        return;
+    }
+
+    /* The type-name alternative requires parentheses, but C99 also permits a
+     * unary expression directly after sizeof. Keep direct array identifiers
+     * from decaying before their extent is observed.
+     */
+    if (!parenthesized) {
+        if (parent->func && lex_peek(T_identifier, token) &&
+            !strcmp(token, "__func__")) {
+            lex_expect(T_identifier);
+            vd = require_var(parent);
+            vd->init_val = strlen(parent->func->return_def.var_name) + 1;
+            vd->var_name = gen_name();
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+            return;
+        }
+
+        if (lex_peek(T_identifier, token)) {
+            var_t *array = find_var(token, parent);
+
+            if (array && array->array_size > 0) {
+                lex_expect(T_identifier);
+                vd = require_var(parent);
+                vd->init_val = sizeof_array_object(array);
+                vd->var_name = gen_name();
+                opstack_push(vd);
+                add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
+                         NULL);
+                return;
+            }
+        }
+
+        basic_block_t *unevaluated_bb = bb_create(parent);
+        int saved_side_effects = se_idx;
+        read_expr_operand(parent, &unevaluated_bb);
+        se_idx = saved_side_effects;
+        var_t *expr_var = opstack_pop();
+        type = expr_var->type;
+        ptr_cnt = expr_var->ptr_level;
+        array_size = expr_var->array_size;
+        is_function = expr_var->is_func;
+        if (type == TY_void && ptr_cnt == 0)
+            error_at("sizeof(void) is invalid", &sizeof_tk->location);
+        if (is_function && ptr_cnt == 0)
+            error_at("sizeof(function) is invalid", &sizeof_tk->location);
+
+        vd = require_var(parent);
+        vd->init_val = type->size;
+        if (array_size > 0)
+            vd->init_val = array_size * type->size;
+        if (ptr_cnt)
+            vd->init_val = PTR_SIZE;
+        vd->var_name = gen_name();
+        opstack_push(vd);
+        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        return;
+    }
+
+    /* C99 specifies __func__ as if each function contained a distinct `static
+     * const char []` initialized with its unadorned name. The normal expression
+     * lowering materializes its address, but sizeof must retain the array
+     * extent rather than observing that decayed pointer.
+     */
+    if (parent->func && lex_peek(T_identifier, token) &&
+        !strcmp(token, "__func__") && cur_token->next &&
+        cur_token->next->next &&
+        cur_token->next->next->kind == T_close_bracket) {
+        lex_expect(T_identifier);
+        lex_expect(T_close_bracket);
+        vd = require_var(parent);
+        vd->init_val = strlen(parent->func->return_def.var_name) + 1;
+        vd->var_name = gen_name();
+        opstack_push(vd);
+        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        return;
+    }
 
     /* A bare array identifier is the one expression form that must retain its
      * declared extent for sizeof; ordinary expression parsing intentionally
@@ -2926,7 +3598,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         if (array && array->array_size > 0) {
             lex_expect(T_identifier);
             vd = require_var(parent);
-            vd->init_val = array->array_size * array->type->size;
+            vd->init_val = sizeof_array_object(array);
             vd->var_name = gen_name();
             opstack_push(vd);
             lex_expect(T_close_bracket);
@@ -2955,7 +3627,8 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         }
     }
     while (lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
-           lex_peek(T_long, NULL) || lex_peek(T_const, NULL)) {
+           lex_peek(T_long, NULL) || lex_peek(T_const, NULL) ||
+           lex_peek(T_volatile, NULL)) {
         if (lex_accept(T_signed)) {
             if (has_signed_type)
                 error_at("duplicate signed type specifier", cur_token_loc());
@@ -2966,8 +3639,10 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
             has_unsigned_type = true;
         } else if (lex_accept(T_long))
             long_type_count++;
+        else if (lex_accept(T_const))
+            ;
         else
-            lex_expect(T_const);
+            lex_expect(T_volatile);
     }
     if (long_type_count > 2)
         error_at("too many long type specifiers", cur_token_loc());
@@ -2991,8 +3666,12 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         type = find_type_tag(token, parent);
         if (!type)
             error_at("Unknown enum type", cur_token_loc());
-        while (lex_accept(T_asterisk))
+        while (lex_accept(T_asterisk)) {
             ptr_cnt++;
+            while (lex_accept(T_const) || lex_accept(T_volatile) ||
+                   lex_accept(T_restrict))
+                ;
+        }
     } else if (has_long_type) {
         type = has_unsigned_type ? TY_ulong : TY_long;
         if (long_type_count > 1) {
@@ -3010,8 +3689,12 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         lex_accept(T_const);
         if (lex_peek(T_identifier, token) && !strcmp(token, "int"))
             lex_expect(T_identifier);
-        while (lex_accept(T_asterisk))
+        while (lex_accept(T_asterisk)) {
             ptr_cnt++;
+            while (lex_accept(T_const) || lex_accept(T_volatile) ||
+                   lex_accept(T_restrict))
+                ;
+        }
     } else if (has_unsigned_type) {
         if (leading_scalar_type == TY_char) {
             type = TY_uchar;
@@ -3029,45 +3712,66 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
                 type = TY_ushort;
         } else
             type = TY_uint;
-        while (lex_accept(T_asterisk))
+        while (lex_accept(T_asterisk)) {
             ptr_cnt++;
+            while (lex_accept(T_const) || lex_accept(T_volatile) ||
+                   lex_accept(T_restrict))
+                ;
+        }
     } else if (has_signed_type) {
         if (leading_scalar_type == TY_char || leading_scalar_type == TY_short) {
             if (leading_scalar_type == TY_short &&
                 lex_peek(T_identifier, token) && !strcmp(token, "int"))
                 lex_expect(T_identifier);
-            type = leading_scalar_type;
+            type =
+                leading_scalar_type == TY_char ? TY_schar : leading_scalar_type;
         } else if (lex_peek(T_identifier, token) &&
                    (!strcmp(token, "int") || !strcmp(token, "char") ||
                     !strcmp(token, "short"))) {
             lex_expect(T_identifier);
-            type = find_type(token, true);
+            type = !strcmp(token, "char") ? TY_schar : find_type(token, true);
         } else
             type = TY_int;
-        while (lex_accept(T_asterisk))
+        while (lex_accept(T_asterisk)) {
             ptr_cnt++;
+            while (lex_accept(T_const) || lex_accept(T_volatile) ||
+                   lex_accept(T_restrict))
+                ;
+        }
     } else if (leading_scalar_type) {
         type = leading_scalar_type;
-        while (lex_accept(T_asterisk))
+        while (lex_accept(T_asterisk)) {
             ptr_cnt++;
+            while (lex_accept(T_const) || lex_accept(T_volatile) ||
+                   lex_accept(T_restrict))
+                ;
+        }
     } else if (lex_peek(T_identifier, token)) {
         /* Try to parse as a type first */
         type = find_type(token, find_type_flag);
         if (type) {
             /* sizeof(type) */
             lex_expect(T_identifier);
-            while (lex_accept(T_asterisk))
+            while (lex_accept(T_asterisk)) {
                 ptr_cnt++;
+                while (lex_accept(T_const) || lex_accept(T_volatile) ||
+                       lex_accept(T_restrict))
+                    ;
+            }
         }
     }
 
     if (!type) {
         /* sizeof(expression) - parse the expression and get its type */
-        read_expr(parent, bb);
-        read_ternary_operation(parent, bb);
+        basic_block_t *unevaluated_bb = bb_create(parent);
+        int saved_side_effects = se_idx;
+        read_expr(parent, &unevaluated_bb);
+        read_ternary_operation(parent, &unevaluated_bb);
+        se_idx = saved_side_effects;
         var_t *expr_var = opstack_pop();
         type = expr_var->type;
         ptr_cnt = expr_var->ptr_level;
+        array_size = expr_var->array_size;
         is_function = expr_var->is_func;
     }
 
@@ -3079,7 +3783,11 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         error_at("sizeof(function) is invalid", &sizeof_tk->location);
 
     vd = require_var(parent);
-    vd->init_val = ptr_cnt ? PTR_SIZE : type->size;
+    vd->init_val = type->size;
+    if (array_size > 0)
+        vd->init_val = array_size * type->size;
+    if (ptr_cnt)
+        vd->init_val = PTR_SIZE;
     vd->var_name = gen_name();
     opstack_push(vd);
     lex_expect(T_close_bracket);
@@ -3090,6 +3798,17 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1;
     bool is_neg = false;
+
+    if (lex_accept(T_plus)) {
+        read_expr_operand(parent, bb);
+        rs1 = opstack_pop();
+        if (is_pointer_like_value(rs1) || rs1->is_func)
+            error_at("unary plus requires an arithmetic operand",
+                     cur_token_loc());
+        rs1 = integer_promote_operand(parent, bb, rs1);
+        opstack_push(rs1);
+        return;
+    }
 
     if (lex_accept(T_minus)) {
         is_neg = true;
@@ -3115,8 +3834,9 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
             vd = require_var(parent);
             vd->var_name = gen_name();
+            vd->type = TY_int;
             vd->is_const = true;
-            vd->init_val = !rs1->init_val;
+            vd->init_val = !(rs1->init_val || rs1->init_val_hi);
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
         } else {
@@ -3137,6 +3857,9 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         read_expr_operand(parent, bb);
 
         rs1 = opstack_pop();
+        if (is_pointer_like_value(rs1) || rs1->is_func)
+            error_at("bitwise complement requires an integer operand",
+                     cur_token_loc());
         rs1 = integer_promote_operand(parent, bb, rs1);
 
         /* Constant folding for bitwise NOT */
@@ -3146,6 +3869,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             vd->type = rs1->type;
             vd->is_const = true;
             vd->init_val = ~rs1->init_val;
+            vd->init_val_hi = ~rs1->init_val_hi;
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
         } else {
@@ -3176,6 +3900,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         int cast_array_size = 0;
         bool cast_const_qualified = false;
         bool cast_const_pointer = false;
+        unsigned int cast_pointer_const_mask = 0;
+        bool cast_volatile_qualified = false;
 
         /* Look ahead to see if we have a typename followed by ) */
         token_t *type_start = cur_token;
@@ -3199,10 +3925,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 leading_scalar_type = find_type(lookahead_token, true);
             }
         }
-        while (lex_peek(T_const, NULL) || lex_peek(T_signed, NULL) ||
-               lex_peek(T_unsigned, NULL) || lex_peek(T_long, NULL)) {
+        while (lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
+               lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
+               lex_peek(T_long, NULL)) {
             if (lex_accept(T_const))
                 has_const_type = true;
+            else if (lex_accept(T_volatile))
+                cast_volatile_qualified = true;
             else if (lex_accept(T_signed)) {
                 if (has_signed_type)
                     error_at("duplicate signed type specifier",
@@ -3294,13 +4023,16 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                         lex_peek(T_identifier, lookahead_token) &&
                         !strcmp(lookahead_token, "int"))
                         lex_expect(T_identifier);
-                    type = leading_scalar_type;
+                    type = leading_scalar_type == TY_char ? TY_schar
+                                                          : leading_scalar_type;
                 } else if (lex_peek(T_identifier, lookahead_token) &&
                            (!strcmp(lookahead_token, "int") ||
                             !strcmp(lookahead_token, "char") ||
                             !strcmp(lookahead_token, "short"))) {
                     lex_expect(T_identifier);
-                    type = find_type(lookahead_token, true);
+                    type = !strcmp(lookahead_token, "char")
+                               ? TY_schar
+                               : find_type(lookahead_token, true);
                 } else {
                     type = TY_int;
                 }
@@ -3319,15 +4051,30 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                     lex_expect(T_identifier);
 
                 /* A qualifier may appear before or after the base type. */
-                while (lex_accept(T_const))
-                    has_const_type = true;
+                while (lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL)) {
+                    if (lex_accept(T_const))
+                        has_const_type = true;
+                    else
+                        cast_volatile_qualified = true;
+                }
 
                 /* Check for pointer types: int*, char*, etc. */
                 int ptr_level = 0;
                 while (lex_accept(T_asterisk)) {
                     ptr_level++;
-                    while (lex_accept(T_const))
-                        cast_const_pointer = true;
+                    while (lex_peek(T_const, NULL) ||
+                           lex_peek(T_volatile, NULL) ||
+                           lex_peek(T_restrict, NULL)) {
+                        if (lex_accept(T_const)) {
+                            cast_const_pointer = true;
+                            if (ptr_level <= 32)
+                                cast_pointer_const_mask |= 1U
+                                                           << (ptr_level - 1);
+                        } else if (lex_accept(T_volatile))
+                            cast_volatile_qualified = true;
+                        else
+                            lex_expect(T_restrict);
+                    }
                 }
 
                 if (PTR_SIZE < 8 && type->base_type == TYPE_long_long &&
@@ -3396,6 +4143,8 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
             cast_var->var_name = gen_name();
             cast_var->is_const_qualified = cast_const_qualified;
             cast_var->is_const_pointer = cast_const_pointer;
+            cast_var->pointer_const_mask = cast_pointer_const_mask;
+            cast_var->is_volatile = cast_volatile_qualified;
 
             /* An explicit C cast is permitted to remove qualifiers, but it is
              * almost always a bug. Keep compiling it while making that loss
@@ -3462,15 +4211,9 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                     /* For pointer compound literals, store the address */
                     compound_var->init_val = ptr_val->init_val;
 
-                    /* Consume additional values if present (for pointer arrays)
-                     */
-                    while (lex_accept(T_comma)) {
-                        if (lex_peek(T_close_curly, NULL))
-                            break;
-                        read_expr(parent, bb);
-                        read_ternary_operation(parent, bb);
-                        opstack_pop();
-                    }
+                    if (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL))
+                        error_at("Too many elements in scalar compound literal",
+                                 cur_token_loc());
                 } else {
                     /* Empty pointer compound literal: (int*){} */
                     compound_var->init_val = 0; /* NULL pointer */
@@ -3517,7 +4260,18 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                     read_expr(parent, bb);
                     read_ternary_operation(parent, bb);
 
-                    /* Check if there are more elements (comma-separated) */
+                    /* A scalar compound literal has one initializer; a trailing
+                     * comma is permitted, but a second value is a C99
+                     * constraint violation.
+                     */
+                    if (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL))
+                        error_at("Too many elements in scalar compound literal",
+                                 cur_token_loc());
+
+                    /* Retained for the parser's array-literal extension; scalar
+                     * spellings above have already rejected a second
+                     * initializer.
+                     */
                     if (lex_peek(T_comma, NULL)) {
                         /* Array compound literal: (int[]){1, 2, 3} */
                         var_t *first_element = opstack_pop();
@@ -3629,7 +4383,43 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         var_t *var = find_var(token, parent);
         func_t *func = find_func(token);
 
-        if (con) {
+        /* A block-scope function prototype shadows an automatic object, but its
+         * designator is the file-scope function rather than an indirect call
+         * through that object.
+         */
+        if (var && var->is_extern_function_alias)
+            var = NULL;
+
+        if (!strcmp(token, "__func__")) {
+            if (!parent->func || !parent->func->return_def.var_name[0])
+                error_at("__func__ is only defined inside a function",
+                         next_token_loc());
+            lex_expect(T_identifier);
+            vd = require_typed_ptr_var(parent, TY_char, true);
+            vd->var_name = gen_name();
+            vd->init_val = write_symbol(parent->func->return_def.var_name);
+            vd->is_string_literal = true;
+            opstack_push(vd);
+            add_insn(parent, *bb, OP_load_rodata_address, vd, NULL, NULL, 0,
+                     NULL);
+            if (lex_accept(T_open_square)) {
+                var_t *base = opstack_pop();
+                var_t *index;
+                var_t *address;
+
+                read_expr(parent, bb);
+                read_ternary_operation(parent, bb);
+                index = opstack_pop();
+                lex_expect(T_close_square);
+                address = require_typed_ptr_var(parent, TY_char, true);
+                address->var_name = gen_name();
+                add_insn(parent, *bb, OP_add, address, base, index, 0, NULL);
+                vd = require_typed_var(parent, TY_char);
+                vd->var_name = gen_name();
+                opstack_push(vd);
+                add_insn(parent, *bb, OP_read, vd, address, NULL, 1, NULL);
+            }
+        } else if (con) {
             vd = require_var(parent);
             vd->init_val = con->value;
             vd->var_name = gen_name();
@@ -3683,6 +4473,9 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
 
         if (is_neg) {
             rs1 = opstack_pop();
+            if (is_pointer_like_value(rs1) || rs1->is_func)
+                error_at("unary minus requires an arithmetic operand",
+                         cur_token_loc());
             rs1 = integer_promote_operand(parent, bb, rs1);
 
             /* Constant folding for negation */
@@ -3692,6 +4485,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 vd->type = rs1->type;
                 vd->is_const = true;
                 vd->init_val = -rs1->init_val;
+                vd->init_val_hi = ~rs1->init_val_hi + (vd->init_val == 0);
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
                          NULL);
@@ -3832,6 +4626,14 @@ void handle_pointer_arithmetic(block_t *parent,
     var_t *int_var = NULL;
     int element_size = 0;
 
+    /* Functions are not objects, so no form of C99 pointer arithmetic may use a
+     * function pointer. Keep this before the add/sub split below: only the
+     * subtraction path performs the more specific compatible-pointee check.
+     */
+    if ((rs1 && rs1->is_func) || (rs2 && rs2->is_func))
+        error_at("Pointer arithmetic requires object pointers",
+                 cur_token_loc());
+
     if (is_direct_void_pointer(rs1) || is_direct_void_pointer(rs2))
         error_at("Pointer arithmetic on void* is invalid", cur_token_loc());
 
@@ -3846,31 +4648,49 @@ void handle_pointer_arithmetic(block_t *parent,
 
         /* If they have names, they might be variable references - look them up
          */
-        if (rs1->var_name[0] && !rs1->init_val) {
+        if (rs1->var_name[0]) {
             var_t *found = find_var(rs1->var_name, parent);
             if (found)
                 orig_rs1 = found;
         }
-        if (rs2->var_name[0] && !rs2->init_val) {
+        if (rs2->var_name[0]) {
             var_t *found = find_var(rs2->var_name, parent);
             if (found)
                 orig_rs2 = found;
         }
 
         /* Check if both have ptr_level or typedef pointer type */
-        bool rs1_is_ptr = is_pointer_like_value(orig_rs1);
-        bool rs2_is_ptr = is_pointer_like_value(orig_rs2);
+        bool rs1_is_ptr = is_pointer_like_value(orig_rs1) || orig_rs1->is_func;
+        bool rs2_is_ptr = is_pointer_like_value(orig_rs2) || orig_rs2->is_func;
 
         /* If variable lookup failed, check the passed variables directly */
         if (!rs1_is_ptr)
-            rs1_is_ptr = is_pointer_like_value(rs1);
+            rs1_is_ptr = is_pointer_like_value(rs1) || rs1->is_func;
         if (!rs2_is_ptr)
-            rs2_is_ptr = is_pointer_like_value(rs2);
+            rs2_is_ptr = is_pointer_like_value(rs2) || rs2->is_func;
 
         if (rs1_is_ptr && rs2_is_ptr) {
             /* Both are pointers - this is pointer difference Determine element
-             * size
+             * size C99 6.5.6 confines pointer subtraction to pointers to
+             * complete object types. A function pointer is pointer-like for
+             * calls and comparisons, but it has no object elements to count.
              */
+            if (orig_rs1->is_func || orig_rs2->is_func)
+                error_at("Pointer subtraction requires object pointers",
+                         cur_token_loc());
+            type_t *left_pointee =
+                pointee_type_from_pointer_typedef(orig_rs1->type);
+            type_t *right_pointee =
+                pointee_type_from_pointer_typedef(orig_rs2->type);
+            int left_depth = orig_rs1->ptr_level + orig_rs1->type->ptr_level;
+            int right_depth = orig_rs2->ptr_level + orig_rs2->type->ptr_level;
+
+            if (!compatible_decl_type(left_pointee, right_pointee) ||
+                left_depth != right_depth)
+                error_at(
+                    "Pointer subtraction requires compatible pointed-to types",
+                    cur_token_loc());
+
             element_size = PTR_SIZE; /* Default */
 
             element_size = get_pointer_element_size(orig_rs1);
@@ -3951,7 +4771,8 @@ bool is_pointer_operation(opcode_t op, var_t *rs1, var_t *rs2)
     if (op != OP_add && op != OP_sub)
         return false;
 
-    return is_pointer_like_value(rs1) || is_pointer_like_value(rs2);
+    return is_pointer_like_value(rs1) || is_pointer_like_value(rs2) ||
+           (rs1 && rs1->is_func) || (rs2 && rs2->is_func);
 }
 
 /* The first unsigned slice has the existing int/short/char widths. Narrow
@@ -4255,8 +5076,10 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
 
         bool rs1_is_placeholder = is_array_literal_placeholder(rs1);
         bool rs2_is_placeholder = is_array_literal_placeholder(rs2);
-        bool rs1_is_ptr_like = is_pointer_like_value(rs1);
-        bool rs2_is_ptr_like = is_pointer_like_value(rs2);
+        bool rs1_is_ptr_like =
+            is_pointer_like_value(rs1) || (rs1 && rs1->is_func);
+        bool rs2_is_ptr_like =
+            is_pointer_like_value(rs2) || (rs2 && rs2->is_func);
         bool pointer_context = (rs1_is_ptr_like && !rs1_is_placeholder) ||
                                (rs2_is_ptr_like && !rs2_is_placeholder);
 
@@ -4265,6 +5088,12 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
             handle_pointer_arithmetic(parent, bb, top_op, rs1, rs2);
             continue; /* skip normal processing */
         }
+
+        if ((top_op == OP_eq || top_op == OP_neq || top_op == OP_lt ||
+             top_op == OP_leq || top_op == OP_gt || top_op == OP_geq) &&
+            incompatible_character_pointer_conversion(rs1, rs2))
+            error_at("incompatible character pointer types in comparison",
+                     cur_token_loc());
 
         if (rs1_is_placeholder && rs2_is_placeholder) {
             rs1 = scalarize_array_literal(parent, bb, rs1, NULL);
@@ -4458,6 +5287,7 @@ void read_lvalue(lvalue_t *lvalue,
         (var->ptr_level || (var->type && var->type->ptr_level))
             ? var->is_const_pointer
             : var->is_const_qualified;
+    lvalue->pointer_const_mask = var->pointer_const_mask;
 
     opstack_push(var);
 
@@ -4486,7 +5316,7 @@ void read_lvalue(lvalue_t *lvalue,
              * pointers, check the type's ptr_level
              */
             bool is_typedef_pointer = (var->type && var->type->ptr_level > 0);
-            if (var->ptr_level == 0 && var->array_size == 0 &&
+            if (var->ptr_level == 0 && !is_array_declarator(var) &&
                 !is_typedef_pointer)
                 error_at("Cannot apply square operator to non-pointer",
                          cur_token_loc());
@@ -4499,8 +5329,8 @@ void read_lvalue(lvalue_t *lvalue,
             if (subscript_depth)
                 indexed_ptr_level = lvalue->value_ptr_level;
             else
-                indexed_ptr_level =
-                    var->ptr_level + var->type->ptr_level + !!var->array_size;
+                indexed_ptr_level = var->ptr_level + var->type->ptr_level +
+                                    !!is_array_declarator(var);
             lvalue->value_ptr_level =
                 indexed_ptr_level ? indexed_ptr_level - 1 : 0;
 
@@ -4508,7 +5338,7 @@ void read_lvalue(lvalue_t *lvalue,
              * which have ptr_level == 0
              */
             if ((var->ptr_level <= 1 || is_typedef_pointer) &&
-                var->array_size == 0) {
+                !is_array_declarator(var)) {
                 /* For typedef pointers, get the size of the base type that the
                  * pointer points to
                  */
@@ -4631,7 +5461,7 @@ void read_lvalue(lvalue_t *lvalue,
             /* if it is an array, get the address of first element instead of
              * its value.
              */
-            if (var->array_size > 0)
+            if (is_array_declarator(var))
                 lvalue->is_reference = false;
 
             /* move pointer to offset of structure */
@@ -4666,11 +5496,12 @@ void read_lvalue(lvalue_t *lvalue,
      * a pointer.
      */
     if (allow_ptr_arith && lex_peek(T_plus, NULL) &&
-        (var->ptr_level || var->array_size) && !lvalue->is_reference) {
-        if (!var->array_size &&
+        (var->ptr_level || is_array_declarator(var)) && !lvalue->is_reference) {
+        if (!is_array_declarator(var) &&
             is_direct_void_pointer_type(lvalue->type, lvalue->ptr_level))
             error_at("Pointer arithmetic on void* is invalid", cur_token_loc());
-        while (lex_peek(T_plus, NULL) && (var->ptr_level || var->array_size)) {
+        while (lex_peek(T_plus, NULL) &&
+               (var->ptr_level || is_array_declarator(var))) {
             lex_expect(T_plus);
             if (lvalue->is_reference) {
                 rs1 = opstack_pop();
@@ -4687,7 +5518,8 @@ void read_lvalue(lvalue_t *lvalue,
              * pointer that pointee is itself a pointer, so the stride is
              * PTR_SIZE rather than the base type's width.
              */
-            if (var->ptr_level > 1 || (var->array_size && var->ptr_level))
+            if (var->ptr_level > 1 ||
+                (is_array_declarator(var) && var->ptr_level))
                 lvalue->size = PTR_SIZE;
             else
                 lvalue->size = lvalue->type->size;
@@ -4716,11 +5548,16 @@ void read_lvalue(lvalue_t *lvalue,
              * first decay to a pointer, adding one level to the declaration's
              * element indirection.
              */
-            if (var->ptr_level || var->array_size) {
+            if (var->ptr_level || is_array_declarator(var)) {
                 vd->type = lvalue->type;
-                vd->ptr_level = var->ptr_level + !!var->array_size;
+                vd->ptr_level = var->ptr_level + !!is_array_declarator(var);
             }
             vd->var_name = gen_name();
+            vd->is_const_qualified = var->is_const_qualified;
+            vd->pointer_const_mask = var->pointer_const_mask;
+            vd->is_const_pointer =
+                vd->ptr_level > 0 && vd->ptr_level <= 32 &&
+                (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
             opstack_push(vd);
             add_insn(parent, *bb, OP_add, vd, rs1, rs2, 0, NULL);
         }
@@ -5269,6 +6106,11 @@ bool read_body_assignment(char *token,
 
                 read_expr(parent, bb);
 
+                /* read_expr stops before `?`; compound assignment has the same
+                 * conditional-expression RHS grammar as ordinary assignment.
+                 */
+                read_ternary_operation(parent, bb);
+
                 var_t *rhs_val = opstack_pop();
                 rhs_val = scalarize_array_literal_if_needed(
                     parent, bb, rhs_val, lvalue.type,
@@ -5364,6 +6206,10 @@ bool read_body_assignment(char *token,
                 vd = opstack_pop();
                 if (is_record_object(vd) && is_record_object(rs1)) {
                     emit_record_copy(parent, bb, vd, rs1);
+                } else if (incompatible_character_pointer_conversion(rs1, vd)) {
+                    error_at(
+                        "incompatible character pointer types in assignment",
+                        cur_token_loc());
                 } else if (incompatible_const_pointer_conversion(rs1, vd)) {
                     diagnose_const_pointer_conversion(rs1, vd);
                 } else {
@@ -5394,7 +6240,7 @@ int read_primary_constant(block_t *scope)
     } else if (lex_peek(T_char, buffer)) {
         char unescaped[MAX_TOKEN_LEN];
         unescape_string(buffer, unescaped, MAX_TOKEN_LEN);
-        res = unescaped[0];
+        res = parse_character_constant(buffer);
         lex_expect(T_char);
     } else if (lex_peek(T_identifier, buffer)) {
         constant_t *con;
@@ -5545,6 +6391,159 @@ bool wide_global_literal_appears_before_initializer_end(token_t *token)
 
 var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb);
 
+/* Fold the operations that only need word arithmetic before emitting global
+ * setup code. That setup block is deliberately conservative about constants,
+ * and previously allowed a paired add/subtract to lose its high half.
+ */
+bool emit_wide_global_word_arithmetic(block_t *parent,
+                                      basic_block_t *bb,
+                                      var_t *result,
+                                      opcode_t op,
+                                      var_t *left,
+                                      var_t *right)
+{
+    unsigned int lo = (unsigned int) left->init_val;
+    unsigned int hi = (unsigned int) left->init_val_hi;
+    unsigned int rhs_lo = right ? (unsigned int) right->init_val : 0;
+    unsigned int rhs_hi = right ? (unsigned int) right->init_val_hi : 0;
+    unsigned int out_lo, out_hi;
+
+    if (op == OP_div || op == OP_mod) {
+        unsigned int rem_lo = 0, rem_hi = 0, quo_lo = 0, quo_hi = 0;
+        bool is_unsigned = left->type->is_unsigned || right->type->is_unsigned;
+        bool neg_left = !is_unsigned && (hi >> 31);
+        bool neg_right = !is_unsigned && (rhs_hi >> 31);
+
+        if (rhs_lo == 0 && rhs_hi == 0)
+            return false;
+        if (neg_left) {
+            lo = ~lo + 1;
+            hi = ~hi + (lo == 0);
+        }
+        if (neg_right) {
+            rhs_lo = ~rhs_lo + 1;
+            rhs_hi = ~rhs_hi + (rhs_lo == 0);
+        }
+        for (int i = 0; i < 64; i++) {
+            unsigned int incoming = hi >> 31;
+
+            hi = (hi << 1) | (lo >> 31);
+            lo <<= 1;
+            rem_hi = (rem_hi << 1) | (rem_lo >> 31);
+            rem_lo = (rem_lo << 1) | incoming;
+            quo_hi = (quo_hi << 1) | (quo_lo >> 31);
+            quo_lo <<= 1;
+            if (rem_hi > rhs_hi || (rem_hi == rhs_hi && rem_lo >= rhs_lo)) {
+                unsigned int borrow = rem_lo < rhs_lo;
+
+                rem_lo -= rhs_lo;
+                rem_hi = rem_hi - rhs_hi - borrow;
+                quo_lo |= 1;
+            }
+        }
+        if (op == OP_div) {
+            out_lo = quo_lo;
+            out_hi = quo_hi;
+            if (neg_left != neg_right) {
+                out_lo = ~out_lo + 1;
+                out_hi = ~out_hi + (out_lo == 0);
+            }
+        } else {
+            out_lo = rem_lo;
+            out_hi = rem_hi;
+            if (neg_left) {
+                out_lo = ~out_lo + 1;
+                out_hi = ~out_hi + (out_lo == 0);
+            }
+        }
+        result->init_val = out_lo;
+        result->init_val_hi = out_hi;
+        result->is_const = true;
+        add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+        return true;
+    }
+
+    switch (op) {
+    case OP_add:
+        out_lo = lo + rhs_lo;
+        out_hi = hi + rhs_hi + (out_lo < lo);
+        break;
+    case OP_sub:
+        out_lo = lo - rhs_lo;
+        out_hi = hi - rhs_hi - (lo < rhs_lo);
+        break;
+    case OP_mul: {
+        unsigned int p0 = (lo & 0xffffU) * (rhs_lo & 0xffffU);
+        unsigned int p1 = (lo & 0xffffU) * (rhs_lo >> 16);
+        unsigned int p2 = (lo >> 16) * (rhs_lo & 0xffffU);
+        unsigned int p3 = (lo >> 16) * (rhs_lo >> 16);
+        unsigned int carry = (p0 >> 16) + (p1 & 0xffffU) + (p2 & 0xffffU);
+
+        out_lo = (p0 & 0xffffU) | (carry << 16);
+        out_hi = p3 + (p1 >> 16) + (p2 >> 16) + (carry >> 16) + hi * rhs_lo +
+                 lo * rhs_hi;
+        break;
+    }
+    case OP_lshift:
+        if (rhs_lo >= 64) {
+            out_lo = 0;
+            out_hi = 0;
+        } else if (rhs_lo >= 32) {
+            out_lo = 0;
+            out_hi = lo << (rhs_lo - 32);
+        } else if (rhs_lo == 0) {
+            out_lo = lo;
+            out_hi = hi;
+        } else {
+            out_lo = lo << rhs_lo;
+            out_hi = (hi << rhs_lo) | (lo >> (32 - rhs_lo));
+        }
+        break;
+    case OP_rshift:
+        if (rhs_lo >= 64) {
+            out_hi = left->type->is_unsigned || !(hi >> 31) ? 0 : ~0U;
+            out_lo = out_hi;
+        } else if (rhs_lo >= 32) {
+            out_lo = left->type->is_unsigned
+                         ? hi >> (rhs_lo - 32)
+                         : (unsigned int) ((int) hi >> (rhs_lo - 32));
+            out_hi = left->type->is_unsigned || !(hi >> 31) ? 0 : ~0U;
+        } else if (rhs_lo == 0) {
+            out_lo = lo;
+            out_hi = hi;
+        } else {
+            out_lo = (lo >> rhs_lo) | (hi << (32 - rhs_lo));
+            out_hi = left->type->is_unsigned
+                         ? hi >> rhs_lo
+                         : (unsigned int) ((int) hi >> rhs_lo);
+        }
+        break;
+    case OP_bit_and:
+        out_lo = lo & rhs_lo;
+        out_hi = hi & rhs_hi;
+        break;
+    case OP_bit_or:
+        out_lo = lo | rhs_lo;
+        out_hi = hi | rhs_hi;
+        break;
+    case OP_bit_xor:
+        out_lo = lo ^ rhs_lo;
+        out_hi = hi ^ rhs_hi;
+        break;
+    case OP_bit_not:
+        out_lo = ~lo;
+        out_hi = ~hi;
+        break;
+    default:
+        return false;
+    }
+    result->init_val = out_lo;
+    result->init_val_hi = out_hi;
+    result->is_const = true;
+    add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+    return true;
+}
+
 /* A grouped primary is lowered into the same global setup block as its parent.
  * The caller owns the closing parenthesis, so get_operator() naturally stops an
  * inner precedence stack without consuming its delimiter.
@@ -5583,7 +6582,8 @@ var_t *read_wide_global_literal_primary(block_t *parent, basic_block_t *bb)
         result = require_var(parent);
         result->var_name = gen_name();
         result->type = value->type;
-        add_insn(parent, bb, OP_sub, result, zero, value, 0, NULL);
+        emit_wide_global_word_arithmetic(parent, bb, result, OP_sub, zero,
+                                         value);
         return result;
     }
     if (lex_accept(T_bit_not)) {
@@ -5593,7 +6593,8 @@ var_t *read_wide_global_literal_primary(block_t *parent, basic_block_t *bb)
         result = require_var(parent);
         result->var_name = gen_name();
         result->type = value->type;
-        add_insn(parent, bb, OP_bit_not, result, value, NULL, 0, NULL);
+        emit_wide_global_word_arithmetic(parent, bb, result, OP_bit_not, value,
+                                         NULL);
         return result;
     }
     if (lex_accept(T_log_not)) {
@@ -5646,8 +6647,10 @@ var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb)
             result->var_name = gen_name();
             result->type = integer_binary_result_type(
                 op_stack[--op_stack_index], left, right);
-            add_insn(parent, bb, op_stack[op_stack_index], result, left, right,
-                     0, NULL);
+            if (!emit_wide_global_word_arithmetic(
+                    parent, bb, result, op_stack[op_stack_index], left, right))
+                add_insn(parent, bb, op_stack[op_stack_index], result, left,
+                         right, 0, NULL);
             val_stack[val_stack_index++] = result;
         }
         if (op_stack_index >= MAX_OPERATOR_STACK_SIZE ||
@@ -5666,8 +6669,10 @@ var_t *read_wide_global_literal_expression(block_t *parent, basic_block_t *bb)
         result->var_name = gen_name();
         result->type =
             integer_binary_result_type(op_stack[--op_stack_index], left, right);
-        add_insn(parent, bb, op_stack[op_stack_index], result, left, right, 0,
-                 NULL);
+        if (!emit_wide_global_word_arithmetic(
+                parent, bb, result, op_stack[op_stack_index], left, right))
+            add_insn(parent, bb, op_stack[op_stack_index], result, left, right,
+                     0, NULL);
         val_stack[val_stack_index++] = result;
     }
     return val_stack[0];
@@ -6037,7 +7042,7 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
                 char unescaped[MAX_TOKEN_LEN];
                 if (unescape_string(literal, unescaped, MAX_TOKEN_LEN) < 0)
                     error_at("Invalid escape sequence", next_token_loc());
-                case_val = unescaped[0];
+                case_val = parse_character_constant(literal);
                 lex_expect(T_char);
             } else if (lex_peek(T_identifier, token)) {
                 const constant_t *cd = find_scoped_constant(token, parent);
@@ -6142,6 +7147,10 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     opcode_t prefix_op = OP_generic;
     bool is_const = false;
     bool is_static = false;
+    bool is_extern = false;
+    bool is_register = false;
+    bool is_volatile = false;
+    bool for_decl_semicolon_consumed = false;
 
     lex_expect(T_open_bracket);
 
@@ -6153,17 +7162,34 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     bb_connect(bb, setup, NEXT);
 
     if (!lex_accept(T_semicolon)) {
-        while (lex_peek(T_static, NULL) || lex_peek(T_const, NULL)) {
+        while (lex_peek(T_static, NULL) || lex_peek(T_extern, NULL) ||
+               lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
+               lex_peek(T_register, NULL)) {
             if (lex_accept(T_static)) {
                 if (is_static)
                     error_at("duplicate static storage class specifier",
                              cur_token_loc());
                 is_static = true;
+            } else if (lex_accept(T_extern)) {
+                if (is_extern)
+                    error_at("duplicate extern storage class specifier",
+                             cur_token_loc());
+                is_extern = true;
+            } else if (lex_accept(T_register)) {
+                if (is_register)
+                    error_at("duplicate register storage class specifier",
+                             cur_token_loc());
+                is_register = true;
+            } else if (lex_accept(T_volatile)) {
+                is_volatile = true;
             } else {
                 lex_expect(T_const);
                 is_const = true;
             }
         }
+        if ((is_static && is_register) || (is_static && is_extern) ||
+            (is_register && is_extern))
+            error_at("incompatible storage class specifiers", cur_token_loc());
 
         bool has_builtin_type = lex_peek(T_signed, NULL) ||
                                 lex_peek(T_unsigned, NULL) ||
@@ -6181,79 +7207,115 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
         if (type) {
             var = require_typed_var(blk, type);
             var->is_static = is_static;
+            var->is_register = is_register;
             var->is_global = is_static;
             var->is_const_qualified = is_const;
-            read_full_var_decl(var, false, false);
-            add_insn(is_static ? GLOBAL_BLOCK : blk,
-                     is_static ? GLOBAL_FUNC->bbs : setup, OP_allocat, var,
-                     NULL, NULL, 0, NULL);
-            add_symbol(setup, var);
-            if (lex_accept(T_assign)) {
-                if (is_static) {
-                    if (lex_peek(T_open_curly, NULL) &&
-                        (var->array_size > 0 || var->has_unsized_array ||
-                         var->ptr_level > 0))
-                        parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs,
-                                         true);
-                    else if (lex_peek(T_open_curly, NULL))
-                        parse_global_record_init(var, GLOBAL_BLOCK);
-                    else
-                        read_global_assignment_var(var);
-                } else if (var->has_unsized_array && !var->ptr_level &&
-                           var->type == TY_char && lex_peek(T_string, NULL)) {
-                    parse_string_array_init(var, blk, &setup);
-                } else if (lex_peek(T_open_curly, NULL) &&
-                           (var->array_size > 0 || var->has_unsized_array ||
-                            var->ptr_level > 0)) {
-                    parse_array_init(var, blk, &setup, true);
+            var->is_volatile = is_volatile;
+            read_full_var_decl(var, false, false, false);
+            if (is_extern) {
+                if (var->is_func || lex_peek(T_open_bracket, NULL)) {
+                    /* This helper consumes the declaration's semicolon. */
+                    blk->locals.size--;
+                    GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] =
+                        var;
+                    read_global_function_declarator(GLOBAL_BLOCK, var, false);
+                    var_t *alias = require_var(blk);
+                    alias->var_name = var->var_name;
+                    alias->is_extern_function_alias = true;
+                    for_decl_semicolon_consumed = true;
                 } else {
-                    read_expr(blk, &setup);
-                    read_ternary_operation(blk, &setup);
-
-                    rs1 = resize_var(parent, &bb, opstack_pop(), var);
-                    add_insn(blk, setup, OP_assign, var, rs1, NULL, 0, NULL);
+                    for (;;) {
+                        var = bind_block_extern_object(blk, var);
+                        if (lex_peek(T_assign, NULL))
+                            error_at(
+                                "extern declaration cannot have an initializer",
+                                next_token_loc());
+                        if (!lex_accept(T_comma))
+                            break;
+                        var = require_typed_var(blk, type);
+                        var->is_const_qualified = is_const;
+                        var->is_volatile = is_volatile;
+                        read_partial_var_decl(var, NULL);
+                    }
                 }
-            }
-            while (lex_accept(T_comma)) {
-                var_t *nv;
-
-                /* add sequence point at T_comma */
-                perform_side_effect(blk, setup);
-
-                /* multiple (partial) declarations */
-                nv = require_typed_var(blk, type);
-                nv->is_static = is_static;
-                nv->is_global = is_static;
-                nv->is_const_qualified = is_const;
-                read_partial_var_decl(nv, var); /* partial */
+            } else {
                 add_insn(is_static ? GLOBAL_BLOCK : blk,
-                         is_static ? GLOBAL_FUNC->bbs : setup, OP_allocat, nv,
+                         is_static ? GLOBAL_FUNC->bbs : setup, OP_allocat, var,
                          NULL, NULL, 0, NULL);
-                add_symbol(setup, nv);
+                add_symbol(setup, var);
                 if (lex_accept(T_assign)) {
                     if (is_static) {
                         if (lex_peek(T_open_curly, NULL) &&
-                            (nv->array_size > 0 || nv->has_unsized_array ||
-                             nv->ptr_level > 0))
-                            parse_array_init(nv, GLOBAL_BLOCK,
+                            (var->array_size > 0 || var->has_unsized_array ||
+                             var->ptr_level > 0))
+                            parse_array_init(var, GLOBAL_BLOCK,
                                              &GLOBAL_FUNC->bbs, true);
                         else if (lex_peek(T_open_curly, NULL))
-                            parse_global_record_init(nv, GLOBAL_BLOCK);
+                            parse_global_record_init(var, GLOBAL_BLOCK);
                         else
-                            read_global_assignment_var(nv);
-                    } else if (nv->has_unsized_array && !nv->ptr_level &&
-                               nv->type == TY_char &&
+                            read_global_assignment_var(var);
+                    } else if (var->has_unsized_array && !var->ptr_level &&
+                               var->type == TY_char &&
                                lex_peek(T_string, NULL)) {
-                        parse_string_array_init(nv, blk, &setup);
+                        parse_string_array_init(var, blk, &setup);
                     } else if (lex_peek(T_open_curly, NULL) &&
-                               (nv->array_size > 0 || nv->has_unsized_array ||
-                                nv->ptr_level > 0)) {
-                        parse_array_init(nv, blk, &setup, true);
+                               (var->array_size > 0 || var->has_unsized_array ||
+                                var->ptr_level > 0)) {
+                        parse_array_init(var, blk, &setup, true);
                     } else {
                         read_expr(blk, &setup);
+                        read_ternary_operation(blk, &setup);
 
-                        rs1 = resize_var(parent, &bb, opstack_pop(), nv);
-                        add_insn(blk, setup, OP_assign, nv, rs1, NULL, 0, NULL);
+                        rs1 = resize_var(parent, &bb, opstack_pop(), var);
+                        add_insn(blk, setup, OP_assign, var, rs1, NULL, 0,
+                                 NULL);
+                    }
+                }
+                while (lex_accept(T_comma)) {
+                    var_t *nv;
+
+                    /* add sequence point at T_comma */
+                    perform_side_effect(blk, setup);
+
+                    /* multiple (partial) declarations */
+                    nv = require_typed_var(blk, type);
+                    nv->is_static = is_static;
+                    nv->is_register = is_register;
+                    nv->is_global = is_static;
+                    nv->is_const_qualified = is_const;
+                    nv->is_volatile = is_volatile;
+                    read_partial_var_decl(nv, var); /* partial */
+                    add_insn(is_static ? GLOBAL_BLOCK : blk,
+                             is_static ? GLOBAL_FUNC->bbs : setup, OP_allocat,
+                             nv, NULL, NULL, 0, NULL);
+                    add_symbol(setup, nv);
+                    if (lex_accept(T_assign)) {
+                        if (is_static) {
+                            if (lex_peek(T_open_curly, NULL) &&
+                                (nv->array_size > 0 || nv->has_unsized_array ||
+                                 nv->ptr_level > 0))
+                                parse_array_init(nv, GLOBAL_BLOCK,
+                                                 &GLOBAL_FUNC->bbs, true);
+                            else if (lex_peek(T_open_curly, NULL))
+                                parse_global_record_init(nv, GLOBAL_BLOCK);
+                            else
+                                read_global_assignment_var(nv);
+                        } else if (nv->has_unsized_array && !nv->ptr_level &&
+                                   nv->type == TY_char &&
+                                   lex_peek(T_string, NULL)) {
+                            parse_string_array_init(nv, blk, &setup);
+                        } else if (lex_peek(T_open_curly, NULL) &&
+                                   (nv->array_size > 0 ||
+                                    nv->has_unsized_array ||
+                                    nv->ptr_level > 0)) {
+                            parse_array_init(nv, blk, &setup, true);
+                        } else {
+                            read_expr(blk, &setup);
+
+                            rs1 = resize_var(parent, &bb, opstack_pop(), nv);
+                            add_insn(blk, setup, OP_assign, nv, rs1, NULL, 0,
+                                     NULL);
+                        }
                     }
                 }
             }
@@ -6261,7 +7323,8 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
             read_body_assignment(token, blk, OP_generic, &setup);
         }
 
-        lex_expect(T_semicolon);
+        if (!for_decl_semicolon_consumed)
+            lex_expect(T_semicolon);
     }
 
     basic_block_t *cond_ = bb_create(blk);
@@ -6443,7 +7506,7 @@ basic_block_t *handle_record_statement(block_t *parent, basic_block_t *bb)
 
             /* multiple (partial) declarations */
             nv = require_typed_var(parent, type);
-            read_inner_var_decl(nv, false, false);
+            read_inner_var_decl(nv, false, false, false);
             add_insn(parent, bb, OP_allocat, nv, NULL, NULL, 0, NULL);
             add_symbol(bb, nv);
             if (lex_accept(T_assign)) {
@@ -6595,6 +7658,33 @@ basic_block_t *handle_enum_statement(block_t *parent,
     return handle_enum_declarators(parent, bb, type, is_const, is_static);
 }
 
+/* Bind a block-scope extern declaration to the file-scope declaration table.
+ *
+ * The provisional declarator was added to @parent while its syntax was read. It
+ * must not become an automatic object: an extern declaration has no local
+ * storage. Move it to GLOBAL_BLOCK so the ordinary file-scope redeclaration
+ * checks and eventual definition share one var_t, then leave a scope alias in
+ * the current block. The alias matters when the declaration hides an outer
+ * automatic object of the same name.
+ */
+var_t *bind_block_extern_object(block_t *parent, var_t *var)
+{
+    bool is_redeclaration;
+
+    parent->locals.size--;
+    var->is_global = true;
+    var->is_static = false;
+    GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] = var;
+    var =
+        resolve_global_declarator(GLOBAL_BLOCK, var, false, &is_redeclaration);
+    if (!is_redeclaration)
+        add_insn(GLOBAL_BLOCK, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0,
+                 NULL);
+
+    parent->locals.elements[parent->locals.size++] = var;
+    return var;
+}
+
 /* Everything a statement can still be: a declaration, an assignment, a call, or
  * an expression evaluated for its effect.
  */
@@ -6607,18 +7697,38 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     opcode_t prefix_op = OP_generic;
     bool is_const = false;
     bool is_static = false;
+    bool is_extern = false;
+    bool is_register = false;
+    bool is_volatile = false;
 
-    while (lex_peek(T_static, NULL) || lex_peek(T_const, NULL)) {
+    while (lex_peek(T_static, NULL) || lex_peek(T_extern, NULL) ||
+           lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
+           lex_peek(T_register, NULL)) {
         if (lex_accept(T_static)) {
             if (is_static)
                 error_at("duplicate static storage class specifier",
                          cur_token_loc());
             is_static = true;
+        } else if (lex_accept(T_extern)) {
+            if (is_extern)
+                error_at("duplicate extern storage class specifier",
+                         cur_token_loc());
+            is_extern = true;
+        } else if (lex_accept(T_register)) {
+            if (is_register)
+                error_at("duplicate register storage class specifier",
+                         cur_token_loc());
+            is_register = true;
+        } else if (lex_accept(T_volatile)) {
+            is_volatile = true;
         } else {
             lex_expect(T_const);
             is_const = true;
         }
     }
+    if ((is_static && is_register) || (is_static && is_extern) ||
+        (is_register && is_extern))
+        error_at("incompatible storage class specifiers", cur_token_loc());
 
     if (lex_peek(T_enum, NULL))
         return handle_enum_statement(parent, bb, is_const, is_static);
@@ -6685,15 +7795,55 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
         }
     }
 
-    if (is_static && !type)
-        error_at("Expected declaration after static", next_token_loc());
+    if ((is_static || is_extern) && !type)
+        error_at("Expected declaration after storage class specifier",
+                 next_token_loc());
 
     if (type) {
         var = require_typed_var(parent, type);
         var->is_static = is_static;
+        var->is_register = is_register;
         var->is_global = is_static;
         var->is_const_qualified = is_const;
-        read_full_var_decl(var, false, false);
+        var->is_volatile = is_volatile;
+        read_full_var_decl(var, false, false, false);
+        if (var->is_inline)
+            error_at("inline specifier requires a function declarator",
+                     next_token_loc());
+        if (is_extern) {
+            if (var->is_func || lex_peek(T_open_bracket, NULL)) {
+                /* The global helper owns function redeclaration compatibility
+                 * and parameter parsing. Unlike an object declaration it
+                 * consumes the trailing semicolon itself.
+                 */
+                parent->locals.size--;
+                GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] =
+                    var;
+                read_global_function_declarator(GLOBAL_BLOCK, var, false);
+
+                /* Keep a lexical marker so this declaration hides an outer
+                 * automatic object of the same name.
+                 */
+                var_t *alias = require_var(parent);
+                alias->var_name = var->var_name;
+                alias->is_extern_function_alias = true;
+                return bb;
+            }
+            for (;;) {
+                var = bind_block_extern_object(parent, var);
+                if (lex_peek(T_assign, NULL))
+                    error_at("extern declaration cannot have an initializer",
+                             next_token_loc());
+                if (!lex_accept(T_comma))
+                    break;
+                var = require_typed_var(parent, type);
+                var->is_const_qualified = is_const;
+                var->is_volatile = is_volatile;
+                read_partial_var_decl(var, NULL);
+            }
+            lex_expect(T_semicolon);
+            return bb;
+        }
         add_insn(is_static ? GLOBAL_BLOCK : parent,
                  is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, var, NULL, NULL,
                  0, NULL);
@@ -6786,8 +7936,10 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             /* multiple (partial) declarations */
             nv = require_typed_var(parent, type);
             nv->is_static = is_static;
+            nv->is_register = is_register;
             nv->is_global = is_static;
             nv->is_const_qualified = var->is_const_qualified;
+            nv->is_volatile = var->is_volatile;
             read_partial_var_decl(nv, var); /* partial */
             add_insn(is_static ? GLOBAL_BLOCK : parent,
                      is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, nv, NULL,
@@ -6851,7 +8003,8 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     }
 
     /* is a function call? Skip function call check when has_asterisk is true */
-    if (!has_asterisk && !find_local_var(token, parent)) {
+    var_t *local = find_local_var(token, parent);
+    if (!has_asterisk && (!local || local->is_extern_function_alias)) {
         func = find_func(token);
         if (func) {
             lex_expect(T_identifier);
@@ -6878,7 +8031,11 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             read_ternary_operation(parent, &bb);
             var_t *addr = opstack_pop();
 
-            if (addr->is_const_qualified)
+            int addr_depth = effective_pointer_depth(addr);
+            unsigned int addr_mask = effective_pointer_const_mask(addr);
+            if (addr->is_const_qualified ||
+                (addr_depth > 1 && addr_depth <= 32 &&
+                 (addr_mask & (1U << (addr_depth - 2)))))
                 error_at("assignment of read-only location", next_token_loc());
 
             /* The width of the store is the pointee's, not the address's. */
@@ -7193,7 +8350,8 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
     read_parameter_list_decl(func, 0);
 
     if (check_decl) {
-        if (func->return_def.type != func_tmp.return_def.type ||
+        if (!compatible_decl_type(func->return_def.type,
+                                  func_tmp.return_def.type) ||
             func->return_def.ptr_level != func_tmp.return_def.ptr_level ||
             func->return_def.is_const_qualified !=
                 func_tmp.return_def.is_const_qualified)
@@ -7207,7 +8365,7 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
             const var_t *now = &func->param_defs[i];
             const var_t *before = &func_tmp.param_defs[i];
 
-            if (now->type != before->type ||
+            if (!compatible_decl_type(now->type, before->type) ||
                 now->ptr_level != before->ptr_level ||
                 now->is_const_qualified != before->is_const_qualified)
                 error_at("conflicting types for function declaration",
@@ -7260,7 +8418,8 @@ var_t *resolve_global_declarator(block_t *block,
 
     *is_redeclaration = true;
 
-    if (previous->type != var->type || previous->ptr_level != var->ptr_level ||
+    if (!compatible_decl_type(previous->type, var->type) ||
+        previous->ptr_level != var->ptr_level ||
         previous->array_size != var->array_size ||
         previous->array_dim2 != var->array_dim2 ||
         previous->is_const_qualified != var->is_const_qualified)
@@ -7287,14 +8446,16 @@ var_t *resolve_global_declarator(block_t *block,
 bool read_global_declarator(block_t *block,
                             type_t *decl_type,
                             bool is_const,
-                            bool is_static)
+                            bool is_static,
+                            bool is_volatile)
 {
     bool is_redeclaration;
     var_t *nv = require_typed_var(block, decl_type);
     nv->is_global = true;
     nv->is_static = is_static;
     nv->is_const_qualified = is_const;
-    read_inner_var_decl(nv, false, false);
+    nv->is_volatile = is_volatile;
+    read_inner_var_decl(nv, false, false, false);
     if (lex_peek(T_open_bracket, NULL)) {
         read_global_function_declarator(block, nv, is_static);
         return true;
@@ -7452,7 +8613,7 @@ void read_global_record_declarator(block_t *block,
     var->is_global = true;
     var->is_static = is_static;
     var->is_const_qualified = is_const;
-    read_inner_var_decl(var, false, false);
+    read_inner_var_decl(var, false, false, false);
     var = resolve_global_declarator(block, var, is_static, &is_redeclaration);
     if (!is_redeclaration)
         add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
@@ -7480,21 +8641,30 @@ void read_global_record_declarator(block_t *block,
     discard_global_declarator_operand(var);
 }
 
-void read_global_decl(block_t *block, bool is_const, bool is_static)
+void read_global_decl(block_t *block,
+                      bool is_const,
+                      bool is_static,
+                      bool is_inline,
+                      bool is_volatile)
 {
     bool is_redeclaration;
     var_t *var = require_var(block);
     var->is_global = true;
     var->is_static = is_static;
+    var->is_inline = is_inline;
     var->is_const_qualified = is_const;
+    var->is_volatile = is_volatile;
 
     /* new function, or variables under parent */
-    read_full_var_decl(var, false, false);
+    read_full_var_decl(var, false, false, false);
 
     if (lex_peek(T_open_bracket, NULL)) {
         read_global_function_declarator(block, var, is_static);
         return;
     } else {
+        if (var->is_inline)
+            error_at("inline specifier requires a function declarator",
+                     next_token_loc());
         var =
             resolve_global_declarator(block, var, is_static, &is_redeclaration);
         if (!is_redeclaration)
@@ -7517,7 +8687,7 @@ void read_global_decl(block_t *block, bool is_const, bool is_static)
      */
     while (lex_accept(T_comma))
         read_global_declarator(block, var->type, var->is_const_qualified,
-                               is_static);
+                               is_static, var->is_volatile);
 
     lex_expect(T_semicolon);
     return;
@@ -7577,22 +8747,43 @@ void read_global_statement(void)
     block_t *block = GLOBAL_BLOCK; /* global block */
     bool is_const = false;
     bool is_static = false;
+    bool is_extern = false;
+    bool is_inline = false;
+    bool is_volatile = false;
 
     /* These specifiers may appear in either order. */
-    while (lex_peek(T_const, NULL) || lex_peek(T_static, NULL)) {
+    while (lex_peek(T_const, NULL) || lex_peek(T_static, NULL) ||
+           lex_peek(T_extern, NULL) || lex_peek(T_inline, NULL) ||
+           lex_peek(T_volatile, NULL)) {
         if (lex_accept(T_const))
             is_const = true;
-        else {
-            lex_expect(T_static);
+        else if (lex_accept(T_volatile))
+            is_volatile = true;
+        else if (lex_accept(T_static)) {
             if (is_static)
                 error_at("duplicate static storage class specifier",
                          cur_token_loc());
             is_static = true;
+        } else if (lex_accept(T_inline)) {
+            if (is_inline)
+                error_at("duplicate inline function specifier",
+                         cur_token_loc());
+            is_inline = true;
+        } else {
+            lex_expect(T_extern);
+            if (is_extern)
+                error_at("duplicate extern storage class specifier",
+                         cur_token_loc());
+            is_extern = true;
         }
     }
+    if (is_static && is_extern)
+        error_at("static and extern storage classes cannot be combined",
+                 cur_token_loc());
 
     if (lex_accept(T_struct)) {
         int i = 0, size = 0;
+        bool has_flexible_array_member = false;
 
         lex_ident(T_identifier, token);
         token_t *id_tk = cur_token;
@@ -7623,24 +8814,47 @@ void read_global_statement(void)
         lex_expect(T_open_curly);
         do {
             var_t *v = type_add_field(type, &i);
-            read_full_var_decl(v, false, true);
+            var_t *last = v;
+            read_full_var_decl(v, false, false, true);
+            reject_flexible_array_member_container(v);
+            mark_flexible_array_member(v, false);
             v->offset = size;
             size += size_var(v);
 
             /* Handle multiple variable declarations with same base type */
             while (lex_accept(T_comma)) {
+                if (last->is_flexible_array_member)
+                    error_at(
+                        "Flexible array member must be the final struct member",
+                        cur_token_loc());
                 var_t *nv = type_add_field(type, &i);
                 initialize_struct_field(nv, v, 0);
-                read_inner_var_decl(nv, false, true);
+                read_inner_var_decl(nv, false, false, true);
+                reject_flexible_array_member_container(nv);
+                mark_flexible_array_member(nv, false);
+                last = nv;
                 nv->offset = size;
                 size += size_var(nv);
             }
 
             lex_expect(T_semicolon);
+            if (last->is_flexible_array_member) {
+                if (!lex_peek(T_close_curly, NULL))
+                    error_at(
+                        "Flexible array member must be the final struct member",
+                        cur_token_loc());
+                if (i == 1)
+                    error_at(
+                        "Struct needs a named member before its flexible array "
+                        "member",
+                        cur_token_loc());
+                has_flexible_array_member = true;
+            }
         } while (!lex_accept(T_close_curly));
 
         type->size = size;
         type->num_fields = i;
+        type->has_flexible_array_member = has_flexible_array_member;
 
         /* A record definition may be followed by its declarators, as in "struct
          * pair { int x, y; } first, *second;".
@@ -7653,6 +8867,7 @@ void read_global_statement(void)
         lex_expect(T_semicolon);
     } else if (lex_accept(T_union)) {
         int i = 0, max_size = 0;
+        bool has_flexible_array_member = false;
 
         lex_ident(T_identifier, token);
 
@@ -7667,7 +8882,9 @@ void read_global_statement(void)
         lex_expect(T_open_curly);
         do {
             var_t *v = type_add_field(type, &i);
-            read_full_var_decl(v, false, true);
+            read_full_var_decl(v, false, false, true);
+            has_flexible_array_member |= is_flexible_array_member_container(v);
+            mark_flexible_array_member(v, true);
             v->offset = 0; /* All union fields start at offset 0 */
             int field_size = size_var(v);
             if (field_size > max_size)
@@ -7678,7 +8895,10 @@ void read_global_statement(void)
                 var_t *nv = type_add_field(type, &i);
                 /* All union fields start at offset 0 */
                 initialize_struct_field(nv, v, 0);
-                read_inner_var_decl(nv, false, true);
+                read_inner_var_decl(nv, false, false, true);
+                has_flexible_array_member |=
+                    is_flexible_array_member_container(nv);
+                mark_flexible_array_member(nv, true);
                 field_size = size_var(nv);
                 if (field_size > max_size)
                     max_size = field_size;
@@ -7689,6 +8909,7 @@ void read_global_statement(void)
 
         type->size = max_size;
         type->num_fields = i;
+        type->has_flexible_array_member = has_flexible_array_member;
 
         if (!lex_peek(T_semicolon, NULL)) {
             read_global_record_declarator(block, type, is_const, is_static);
@@ -7716,10 +8937,12 @@ void read_global_statement(void)
             type = find_type(token, true);
             if (!type)
                 error_at("Unknown enum type", cur_token_loc());
-            if (read_global_declarator(block, type, is_const, is_static))
+            if (read_global_declarator(block, type, is_const, is_static,
+                                       is_volatile))
                 return;
             while (lex_accept(T_comma))
-                read_global_declarator(block, type, is_const, is_static);
+                read_global_declarator(block, type, is_const, is_static,
+                                       is_volatile);
             lex_expect(T_semicolon);
             return;
         }
@@ -7740,10 +8963,12 @@ void read_global_statement(void)
         } while (lex_accept(T_comma));
         lex_expect(T_close_curly);
         if (!lex_peek(T_semicolon, NULL)) {
-            if (read_global_declarator(block, type, is_const, is_static))
+            if (read_global_declarator(block, type, is_const, is_static,
+                                       is_volatile))
                 return;
             while (lex_accept(T_comma))
-                read_global_declarator(block, type, is_const, is_static);
+                read_global_declarator(block, type, is_const, is_static,
+                                       is_volatile);
         }
         lex_expect(T_semicolon);
     } else if (lex_accept(T_typedef)) {
@@ -7767,6 +8992,7 @@ void read_global_statement(void)
         } else if (lex_accept(T_struct)) {
             int i = 0, size = 0;
             bool has_struct_def = false;
+            bool has_flexible_array_member = false;
             type_t *tag = NULL, *type = add_type();
 
             /* is struct definition? */
@@ -7787,21 +9013,45 @@ void read_global_statement(void)
                 has_struct_def = true;
                 do {
                     var_t *v = type_add_field(type, &i);
-                    read_full_var_decl(v, false, true);
+                    var_t *last = v;
+                    read_full_var_decl(v, false, false, true);
+                    reject_flexible_array_member_container(v);
+                    mark_flexible_array_member(v, false);
                     v->offset = size;
                     size += size_var(v);
 
                     /* Handle multiple variable declarations with same base type
                      */
                     while (lex_accept(T_comma)) {
+                        if (last->is_flexible_array_member)
+                            error_at(
+                                "Flexible array member must be the final "
+                                "struct member",
+                                cur_token_loc());
                         var_t *nv = type_add_field(type, &i);
                         initialize_struct_field(nv, v, 0);
-                        read_inner_var_decl(nv, false, true);
+                        read_inner_var_decl(nv, false, false, true);
+                        reject_flexible_array_member_container(nv);
+                        mark_flexible_array_member(nv, false);
+                        last = nv;
                         nv->offset = size;
                         size += size_var(nv);
                     }
 
                     lex_expect(T_semicolon);
+                    if (last->is_flexible_array_member) {
+                        if (!lex_peek(T_close_curly, NULL))
+                            error_at(
+                                "Flexible array member must be the final "
+                                "struct member",
+                                cur_token_loc());
+                        if (i == 1)
+                            error_at(
+                                "Struct needs a named member before its "
+                                "flexible array member",
+                                cur_token_loc());
+                        has_flexible_array_member = true;
+                    }
                 } while (!lex_accept(T_close_curly));
             }
 
@@ -7813,6 +9063,7 @@ void read_global_statement(void)
             type->size = type->ptr_level ? PTR_SIZE : size;
             type->num_fields = i;
             type->base_type = TYPE_typedef;
+            type->has_flexible_array_member = has_flexible_array_member;
 
             if (tag && has_struct_def == 1) {
                 strcpy(token, tag->type_name);
@@ -7831,6 +9082,7 @@ void read_global_statement(void)
         } else if (lex_accept(T_union)) {
             int i = 0, max_size = 0;
             bool has_union_def = false;
+            bool has_flexible_array_member = false;
             type_t *tag = NULL, *type = add_type();
 
             /* is union definition? */
@@ -7851,7 +9103,10 @@ void read_global_statement(void)
                 has_union_def = true;
                 do {
                     var_t *v = type_add_field(type, &i);
-                    read_full_var_decl(v, false, true);
+                    read_full_var_decl(v, false, false, true);
+                    has_flexible_array_member |=
+                        is_flexible_array_member_container(v);
+                    mark_flexible_array_member(v, true);
                     v->offset = 0; /* All union fields start at offset 0 */
                     int field_size = size_var(v);
                     if (field_size > max_size)
@@ -7863,7 +9118,10 @@ void read_global_statement(void)
                         var_t *nv = type_add_field(type, &i);
                         /* All union fields start at offset 0 */
                         initialize_struct_field(nv, v, 0);
-                        read_inner_var_decl(nv, false, true);
+                        read_inner_var_decl(nv, false, false, true);
+                        has_flexible_array_member |=
+                            is_flexible_array_member_container(nv);
+                        mark_flexible_array_member(nv, true);
                         field_size = size_var(nv);
                         if (field_size > max_size)
                             max_size = field_size;
@@ -7882,6 +9140,7 @@ void read_global_statement(void)
             type->num_fields = i;
             type->base_type = TYPE_typedef;
             type->is_union = true;
+            type->has_flexible_array_member = has_flexible_array_member;
 
             if (tag && has_union_def == 1) {
                 strcpy(token, tag->type_name);
@@ -7990,13 +9249,22 @@ void read_global_statement(void)
                         base = TY_uint;
                     }
                 }
+            } else if (is_signed && lex_peek(T_identifier, base_type) &&
+                       (!strcmp(base_type, "char") ||
+                        !strcmp(base_type, "short") ||
+                        !strcmp(base_type, "int"))) {
+                lex_expect(T_identifier);
+                base = !strcmp(base_type, "char")
+                           ? TY_schar
+                           : (!strcmp(base_type, "short") ? TY_short : TY_int);
             } else if (is_signed && (leading_scalar_type == TY_char ||
                                      leading_scalar_type == TY_short)) {
                 if (leading_scalar_type == TY_short &&
                     lex_peek(T_identifier, base_type) &&
                     !strcmp(base_type, "int"))
                     lex_expect(T_identifier);
-                base = leading_scalar_type;
+                base = leading_scalar_type == TY_char ? TY_schar
+                                                      : leading_scalar_type;
             } else if (is_signed && (!lex_peek(T_identifier, base_type) ||
                                      (strcmp(base_type, "int") &&
                                       strcmp(base_type, "char") &&
@@ -8013,15 +9281,28 @@ void read_global_statement(void)
             type->base_type = base->base_type;
             type->size = base->size;
             type->num_fields = 0;
-            type->ptr_level = 0;
+            type->ptr_level = base->ptr_level;
+            type->pointer_const_mask = base->pointer_const_mask;
             type->is_const_qualified =
                 typedef_const || base->is_const_qualified;
             type->is_unsigned = base->is_unsigned;
+            type->is_signed_char = base->is_signed_char;
 
             /* Handle pointer types in typedef: typedef char *string; */
             while (lex_accept(T_asterisk)) {
                 type->ptr_level++;
                 type->size = PTR_SIZE;
+                while (true) {
+                    if (lex_accept(T_const)) {
+                        if (type->ptr_level <= 32)
+                            type->pointer_const_mask |=
+                                1U << (type->ptr_level - 1);
+                    } else if (lex_accept(T_volatile) ||
+                               lex_accept(T_restrict)) {
+                        ;
+                    } else
+                        break;
+                }
             }
 
             lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
@@ -8029,7 +9310,7 @@ void read_global_statement(void)
         }
     } else if (lex_peek(T_identifier, NULL) || lex_peek(T_signed, NULL) ||
                lex_peek(T_unsigned, NULL) || lex_peek(T_long, NULL)) {
-        read_global_decl(block, is_const, is_static);
+        read_global_decl(block, is_const, is_static, is_inline, is_volatile);
     } else
         error_at("Syntax error in global statement", next_token_loc());
 }
@@ -8055,6 +9336,11 @@ void parse_internal(void)
     TY_char = add_named_type("char");
     TY_char->base_type = TYPE_char;
     TY_char->size = 1;
+
+    TY_schar = add_named_type("signed char");
+    TY_schar->base_type = TYPE_char;
+    TY_schar->size = 1;
+    TY_schar->is_signed_char = true;
 
     TY_uchar = add_named_type("unsigned char");
     TY_uchar->base_type = TYPE_char;

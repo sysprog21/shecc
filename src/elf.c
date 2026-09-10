@@ -512,7 +512,9 @@ void elf_generate_program_headers(void)
     /* program header - readable and writable segment */
     phdr.p_type = 1; /* PT_LOAD */
     phdr.p_offset = elf_header_len + elf_code->size +
-                    elf_rodata->size;             /* offset of segment */
+                    elf_rodata->size; /* offset of segment */
+    if (!dynlink)
+        phdr.p_offset = ALIGN_UP(phdr.p_offset, PAGESIZE);
     phdr.p_vaddr = elf_data_start;                /* virtual address */
     phdr.p_paddr = elf_data_start;                /* physical address */
     phdr.p_filesz = elf_data->size;               /* size in file */
@@ -802,6 +804,9 @@ void elf_generate_section_headers(void)
         ofs += dynamic_sections.elf_dynamic->size;
         sh_name += strlen(".dynamic") + 1;
     }
+
+    if (!dynlink)
+        ofs = ALIGN_UP(ofs, PAGESIZE);
 
     /* .data */
     shdr.sh_name = sh_name;
@@ -1263,18 +1268,13 @@ void elf_preprocess(void)
         /* To prevent two load segments from sharing a common page, add PAGESIZE
          * to elf_data_start, since the first section of the second load segment
          * is .data in static linking mode. ELF requires p_offset and p_vaddr to
-         * agree modulo p_align. ELF64 output pads the file to the next page
-         * before .data, so derive its virtual address from that same aligned
-         * file offset rather than merely adding a page to the preceding virtual
-         * end.
+         * agree modulo p_align. Derive its virtual address from the same
+         * aligned file offset used before .data, rather than merely adding a
+         * page to the preceding virtual end.
          */
-#if ELF_IS_64 == 1
         elf_data_start =
             ELF_START +
             ALIGN_UP(elf_header_len + elf_offset + elf_rodata->size, PAGESIZE);
-#else
-        elf_data_start = elf_rodata_start + elf_rodata->size + PAGESIZE;
-#endif
     }
     elf_bss_start = elf_data_start + elf_data->size;
     elf_align(elf_symtab);
@@ -1360,7 +1360,7 @@ void elf_generate(const char *outfile)
         elf_write_all(fp, dynamic_sections.elf_dynamic->elements,
                       dynamic_sections.elf_dynamic->size);
     }
-#if ELF_IS_64 == 1
+
     /* Statically linked, .data begins the second load segment and has to start
      * on a page boundary so that p_vaddr === p_offset (mod p_align). Linked
      * dynamically that segment starts back at .interp, and everything from
@@ -1386,7 +1386,6 @@ void elf_generate(const char *outfile)
             left -= n;
         }
     }
-#endif
     /* Readable and writable sections */
     elf_write_all(fp, elf_data->elements, elf_data->size);
 

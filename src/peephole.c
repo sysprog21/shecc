@@ -73,6 +73,7 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
              * Example: {add t1, a, b; mv result, t1} → {add result, a, b}
              */
             ph2_ir->dest = next->dest;
+            ph2_ir->dest_hi = next->dest_hi;
             ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
@@ -762,7 +763,8 @@ void peephole(void)
                  * handles most cases, but register allocation might create new
                  * self-assignments
                  */
-                if (next->op == OP_assign && next->dest == next->src0) {
+                if (next->op == OP_assign && next->dest == next->src0 &&
+                    next->dest_hi == next->src0_hi) {
                     ph2_ir_drop_after(bb, ir, next);
                     continue;
                 }

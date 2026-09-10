@@ -89,7 +89,7 @@ void bb_forward_traversal(bb_traversal_args_t *args)
     basic_block_t *bb = args->bb;
     func_t *func = args->func;
 
-    bb->visited++;
+    bb->visited = func->visited;
 
     if (args->preorder_cb)
         args->preorder_cb(func, bb);
@@ -125,7 +125,7 @@ void bb_backward_traversal(bb_traversal_args_t *args)
     basic_block_t *bb = args->bb;
     func_t *func = args->func;
 
-    bb->visited++;
+    bb->visited = func->visited;
 
     if (args->preorder_cb)
         args->preorder_cb(func, bb);
@@ -888,6 +888,12 @@ void new_name(block_t *block, var_t **var)
     var_t *vd = require_var(block);
     memcpy(vd, *var, sizeof(var_t));
     var_reset_subscripts(vd); /* the copy shares nothing with its base */
+    /* A fresh SSA definition has no physical-register residence. In particular,
+     * it must not inherit either half of a future wide pair from the version it
+     * was copied from.
+     */
+    vd->phys_reg = -1;
+    vd->phys_reg_hi = -1;
     vd->base = *var;
     vd->subscript = i;
     var_add_subscript(v, vd);
@@ -1015,6 +1021,8 @@ void solve_phi_params(void)
             var_t *base = &func->param_defs[i];
             memcpy(var, base, sizeof(var_t));
             var_reset_subscripts(var); /* the copy shares nothing with base */
+            var->phys_reg = -1;
+            var->phys_reg_hi = -1;
             var->base = base;
             var->subscript = 0;
 
@@ -3381,7 +3389,7 @@ bool mark_const(insn_t *insn)
      * materialise the initialiser instead of reading the slot, which is how
      * "int a = 0; f(&a); int b = a;" left b holding zero.
      */
-    if (insn->rd && insn->rd->address_taken)
+    if (insn->rd && (insn->rd->address_taken || insn->rd->is_volatile))
         return false;
 
     if (insn->opcode == OP_load_constant) {
@@ -3400,7 +3408,7 @@ bool mark_const(insn_t *insn)
     /* Copying from such a variable is no better: the value read is whatever the
      * pointer last wrote, not the constant the source was assigned.
      */
-    if (insn->rs1->address_taken)
+    if (insn->rs1->address_taken || insn->rs1->is_volatile)
         return false;
     if (!insn->rs1->is_const) {
         if (insn->rs1->init_val_hi)
@@ -3802,7 +3810,7 @@ void dce_sweep(void)
                         basic_block_t *jump_bb = bb->r_idom;
                         bb_disconnect(bb, bb->then_);
                         bb_disconnect(bb, bb->else_);
-                        while (jump_bb != bb->belong_to->exit) {
+                        while (jump_bb && jump_bb != bb->belong_to->exit) {
                             if (jump_bb->useful) {
                                 bb_connect(bb, jump_bb, NEXT);
                                 break;
