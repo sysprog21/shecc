@@ -643,6 +643,12 @@ void abort(void)
     exit(-1);
 }
 
+void __assert_fail(const char *expr, const char *file, int line)
+{
+    printf("Assertion failed: %s, file %s, line %d\n", expr, file, line);
+    abort();
+}
+
 FILE *fopen(const char *filename, const char *mode)
 {
     int fd;

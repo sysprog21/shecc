@@ -51,7 +51,7 @@ This document tracks compliance gaps and non-standard behaviors.
 | `static` | Partial | File-scope internal linkage and persistent block-scope objects work, including C99 `for` initializers; cross-translation-unit linkage remains incomplete. |
 | `extern` | Partial | File- and block-scope object declarations plus function prototypes bind to global declarations; remaining C99 forms need coverage. |
 | `register` | Partial | Block-scope declarations and parameters lower as automatic objects and reject address-taking; no allocation hint is implemented. |
-| `auto` | Not implemented | Default storage class (implicit) |
+| `auto` | Supported | Block-scope declarations and C99 `for` initializers use ordinary automatic storage. |
 | `const` | Supported | Enforced for direct and indirect lvalues; pointer-level conversions are checked. |
 | `volatile` | Partial | Preserved through declarations and prevents key optimizations; exhaustive optimizer audit remains. |
 | `restrict` | Partial | Parsed and retained as an aliasing qualifier; does not yet drive optimization. |
@@ -98,7 +98,7 @@ This document tracks compliance gaps and non-standard behaviors.
 |---------|--------|-------------|
 | Designated initializers | Partial | Record and bounded-array designators work for local, static, and file-scope objects; higher-rank continuation cases remain incomplete. |
 | Compound literals | Partial | Limited support |
-| Flexible array members | Missing | No `[]` at struct end |
+| Flexible array members | Supported | Final `[]` struct members have zero fixed extent, support pointer-based element access, and enforce C99 placement constraints. |
 | Variable-length arrays | Missing | No runtime-sized arrays |
 | `_Complex` | Missing | No complex numbers |
 | `_Imaginary` | Missing | No imaginary numbers |

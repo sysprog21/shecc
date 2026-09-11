@@ -288,10 +288,13 @@ typedef enum {
     T_start, /* FIXME: Unused, intended for lexer state machine init */
     T_eof,   /* end-of-file (EOF) */
     T_numeric,
+    T_floating, /* C99 floating literal; lowering is staged separately */
     T_identifier,
-    T_comma,  /* , */
-    T_string, /* null-terminated string */
+    T_comma,   /* , */
+    T_string,  /* null-terminated string */
+    T_wstring, /* L"..." wide string literal */
     T_char,
+    T_wchar,         /* L'...' wide character constant */
     T_open_bracket,  /* ( */
     T_close_bracket, /* ) */
     T_open_curly,    /* { */
@@ -359,11 +362,16 @@ typedef enum {
     T_static,
     T_extern,
     T_register,
+    T_auto,
     T_restrict,
     T_inline,
     T_signed,
     T_unsigned,
     T_long,
+    T_float,
+    T_double,
+    T_complex,
+    T_imaginary,
     /* C pre-processor directives */
     T_cppd_include,
     T_cppd_define,
@@ -701,6 +709,18 @@ struct var {
      */
     bool is_compound_literal;
 
+    /* A scalar value read from a compound-literal aggregate. This points at its
+     * element/member address so a following prefix update can write back
+     * through the automatic aggregate rather than assign the temporary.
+     */
+    bool is_compound_literal_reference;
+    struct var *compound_literal_address;
+
+    /* A non-NULL field means the reference is a bit-field and must use the
+     * mask-and-merge store path rather than a byte/word OP_write.
+     */
+    struct var *compound_literal_bitfield;
+
     /* String literals have immutable storage duration in C. Preserve that
      * provenance separately from the pointer type so the compatibility warning
      * can remain opt-in while legacy source still compiles.
@@ -842,6 +862,15 @@ struct type {
     var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
+    /* Array bounds carried by an array typedef. Object declarators copy these
+     * into var_t, where ordinary indexing and initialization already retain
+     * their row-major representation.
+     */
+    int array_size;
+    int array_dim2;
+    int array_dim3;
+    int array_dim4;
+
     /* Qualifiers written after stars inside a typedef declarator. These bits
      * are relative to the typedef's own pointer depth; var_t keeps any stars
      * subsequently written at a use site.
@@ -861,6 +890,11 @@ struct type {
      * distinct C types. Scalar typedefs preserve this fact.
      */
     bool is_signed_char;
+
+    /* `_Bool` otherwise shares the byte-sized TYPE_char representation. Keep
+     * its C type identity through typedefs where pointer equality is lost.
+     */
+    bool is_bool;
 };
 
 /* lvalue details */
@@ -1099,6 +1133,11 @@ struct func {
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
+
+    /* `f()` has no prototype in C99, while `f(void)` and every typed parameter
+     * list constrain call arity.
+     */
+    bool has_prototype;
     bool is_static; /* internal-linkage declaration */
 
     /* inline_calls()'s verdict on this body and the return that ends it,

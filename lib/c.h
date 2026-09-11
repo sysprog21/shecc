@@ -153,6 +153,7 @@ int fflush(FILE *stream);
 /* Terminating program */
 void exit(int exit_code);
 void abort(void);
+void __assert_fail(const char *expr, const char *file, int line);
 
 /* Dynamic memory allocation/deallocation functions */
 void *malloc(int size);

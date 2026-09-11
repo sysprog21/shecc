@@ -111,6 +111,8 @@ int main(int argc, char *argv[])
             dump_ir = true;
         else if (!strcmp(argv[i], "--warn-string-literals"))
             warn_string_literals = true;
+        else if (!strcmp(argv[i], "--std=c99"))
+            strict_c99 = true;
         else if (!strcmp(argv[i], "--dot"))
             dump_dot = true;
         else if (!strcmp(argv[i], "+m"))
@@ -146,7 +148,7 @@ int main(int argc, char *argv[])
     if (!in) {
         printf(
             "Usage: shecc [-I directory] [-o output] [+m] [--dot] [--dump-ir] "
-            "[--warn-string-literals] [--no-libc] "
+            "[--warn-string-literals] [--std=c99] [--no-libc] "
             "[--dynlink] [-E] <input.c>\n");
         usage_error("Missing source file");
     }

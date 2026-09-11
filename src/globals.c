@@ -115,6 +115,7 @@ bool dump_ir = false;
 bool dump_dot = false;
 bool hard_mul_div = false;
 bool warn_string_literals = false;
+bool strict_c99 = false;
 char *include_dirs[MAX_INCLUDE_DIRS];
 int include_dirs_idx = 0;
 
@@ -778,6 +779,10 @@ int unescape_string(const char *input, char *output, int output_size)
             i++;
             break;
         case 'e':
+            if (strict_c99) {
+                output[j] = '\0';
+                return -1;
+            }
             output[j++] = 27;
             i++;
             break;

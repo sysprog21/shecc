@@ -12,7 +12,7 @@
 
 /* Hash table constants */
 #define NUM_DIRECTIVES 12
-#define NUM_KEYWORDS 27
+#define NUM_KEYWORDS 32
 
 /* Token mapping structure for elegant initialization */
 typedef struct {
@@ -92,11 +92,16 @@ void lex_init_keywords(void)
         {"static", T_static},
         {"extern", T_extern},
         {"register", T_register},
+        {"auto", T_auto},
         {"restrict", T_restrict},
         {"inline", T_inline},
         {"signed", T_signed},
         {"unsigned", T_unsigned},
         {"long", T_long},
+        {"float", T_float},
+        {"double", T_double},
+        {"_Complex", T_complex},
+        {"_Imaginary", T_imaginary},
     };
 
     /* hashmap insertion */
@@ -154,19 +159,95 @@ void lexer_cleanup(void)
     keyword_tokens_storage = NULL;
 }
 
+/* C99 translation phase 1 replaces trigraphs before every later lexical
+ * decision. Keep the source buffer immutable so locations and quoted-include
+ * recovery retain physical offsets; this view maps one logical character to
+ * either one physical byte or a three-byte trigraph spelling.
+ */
+char trigraph_char_at(strbuf_t *buf, int pos)
+{
+    char third;
+
+    if (pos + 2 >= buf->capacity || buf->elements[pos] != '?' ||
+        buf->elements[pos + 1] != '?')
+        return '\0';
+    third = buf->elements[pos + 2];
+    switch (third) {
+    case '=':
+        return '#';
+    case '/':
+        return '\\';
+    case '\'':
+        return '^';
+    case '(':
+        return '[';
+    case ')':
+        return ']';
+    case '!':
+        return '|';
+    case '<':
+        return '{';
+    case '>':
+        return '}';
+    case '-':
+        return '~';
+    default:
+        return '\0';
+    }
+}
+
+int source_char_width(strbuf_t *buf, int pos)
+{
+    return trigraph_char_at(buf, pos) ? 3 : 1;
+}
+
+char source_char_at(strbuf_t *buf, int pos)
+{
+    char replacement;
+
+    if (pos >= buf->capacity)
+        return '\0';
+    replacement = trigraph_char_at(buf, pos);
+    return replacement ? replacement : buf->elements[pos];
+}
+
+/* Phase 2 operates on the phase-1 trigraph view. Preserve physical source
+ * bytes, but skip every logical backslash/newline pair before token formation.
+ */
+int skip_splices(strbuf_t *buf, int pos)
+{
+    int width;
+
+    while (pos < buf->capacity) {
+        width = source_char_width(buf, pos);
+        if (source_char_at(buf, pos) != '\\' ||
+            source_char_at(buf, pos + width) != '\n')
+            break;
+        pos += width + 1;
+    }
+    return pos;
+}
+
 char peek_char(strbuf_t *buf, int offset)
 {
-    if (buf->size + offset >= buf->capacity)
-        return '\0';
-    return buf->elements[buf->size + offset];
+    int pos = skip_splices(buf, buf->size);
+
+    while (offset-- > 0 && pos < buf->capacity) {
+        pos += source_char_width(buf, pos);
+        pos = skip_splices(buf, pos);
+    }
+    return source_char_at(buf, pos);
 }
 
 char read_char(strbuf_t *buf)
 {
-    if (buf->size + 1 >= buf->capacity)
-        return buf->elements[buf->capacity - 1];
-    buf->size++;
-    return buf->elements[buf->size];
+    int pos = skip_splices(buf, buf->size);
+
+    if (pos + source_char_width(buf, pos) >= buf->capacity)
+        return source_char_at(buf, buf->capacity - 1);
+    pos += source_char_width(buf, pos);
+    buf->size = skip_splices(buf, pos);
+    return source_char_at(buf, buf->size);
 }
 
 /* Fill @dst with @len bytes of @f, returning how many arrived.
@@ -253,6 +334,31 @@ token_t *new_token(token_kind_t kind, const source_location_t *loc, int len)
  * below does that by starting a fresh token here.
  */
 token_t *lex_token(strbuf_t *buf, source_location_t *loc);
+char read_layout_char(strbuf_t *buf, source_location_t *loc);
+
+/* Readers consume logical characters, but diagnostics index immutable physical
+ * source bytes. The source span is finalized at each lex_token() exit; readers
+ * which cross a newline update the logical cursor themselves.
+ */
+#define RETURN_LEX_TOKEN(tk)                             \
+    do {                                                 \
+        int pos, line, column;                           \
+        tk->location.len = buf->size - tk->location.pos; \
+        pos = tk->location.pos;                          \
+        line = tk->location.line;                        \
+        column = tk->location.column;                    \
+        while (pos < buf->size) {                        \
+            if (buf->elements[pos] == '\n') {            \
+                line++;                                  \
+                column = 1;                              \
+            } else                                       \
+                column++;                                \
+            pos++;                                       \
+        }                                                \
+        loc->line = line;                                \
+        loc->column = column;                            \
+        return tk;                                       \
+    } while (0)
 
 /* Preprocessor directives, comments, and the whitespace between tokens.
  *
@@ -264,36 +370,55 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
     token_t *token;
     char token_buffer[MAX_TOKEN_LEN];
 
-    if (ch == '#') {
+    if (ch == '#' || (ch == '%' && peek_char(buf, 1) == ':')) {
+        bool is_digraph_hash = ch == '%';
+        int hash_len = is_digraph_hash ? 2 : source_char_width(buf, buf->size);
+
         /* Inside a macro replacement list '#' stringifies the parameter that
          * follows and '##' pastes its neighbours. Neither can be a directive,
          * which only exists at the start of a line.
          */
-        if (peek_char(buf, 1) == '#') {
-            read_char(buf);
-            read_char(buf);
-            token = new_token(T_hashhash, loc, 2);
-            loc->column += 2;
+        if ((ch == '#' && peek_char(buf, 1) == '#') ||
+            (ch == '%' && peek_char(buf, 1) == ':' &&
+             peek_char(buf, 2) == '%' && peek_char(buf, 3) == ':')) {
+            int paste_chars = ch == '#' ? 2 : 4;
+            int paste_len = 0;
+
+            for (int i = 0; i < paste_chars; i++) {
+                paste_len += source_char_width(buf, buf->size);
+                read_char(buf);
+            }
+            token = new_token(T_hashhash, loc, paste_len);
+            loc->column += paste_len;
             return token;
         }
 
         if (loc->column != 1) {
-            read_char(buf);
-            token = new_token(T_hash, loc, 1);
-            loc->column++;
+            int hash_chars = is_digraph_hash ? 2 : 1;
+
+            for (int i = 0; i < hash_chars; i++)
+                read_char(buf);
+            token = new_token(T_hash, loc, hash_len);
+            loc->column += hash_len;
             return token;
         }
 
-        int sz = 0;
+        int sz = 0, source_len = hash_len;
 
-        do {
+        token_buffer[sz++] = '#';
+        int hash_chars = is_digraph_hash ? 2 : 1;
+        for (int i = 0; i < hash_chars; i++)
+            ch = read_char(buf);
+
+        while (isalnum(ch) || ch == '_') {
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz;
                 error_at("Token too long", loc);
             }
             token_buffer[sz++] = ch;
             ch = read_char(buf);
-        } while (isalnum(ch) || ch == '_');
+            source_len++;
+        }
         token_buffer[sz] = '\0';
 
         token_kind_t directive_kind = lookup_directive(token_buffer);
@@ -302,8 +427,8 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
             error_at("Unsupported directive", loc);
         }
 
-        token = new_token(directive_kind, loc, sz);
-        loc->column += sz;
+        token = new_token(directive_kind, loc, source_len);
+        loc->column += source_len;
         return token;
     }
 
@@ -330,33 +455,25 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
 
         if (ch == '*') {
             /* C-style comment */
-            int pos = buf->size;
-            do {
-                /* advance one char */
-                pos++;
-                loc->column++;
-                ch = buf->elements[pos];
-                if (ch == '*') {
-                    /* look ahead */
-                    pos++;
-                    loc->column++;
-                    ch = buf->elements[pos];
-                    if (ch == '/') {
-                        /* consume closing '/', then commit and skip trailing
-                         * whitespaces
-                         */
-                        pos++;
-                        loc->column += 2;
-                        buf->size = pos;
-                        return lex_token(buf, loc);
-                    }
+            loc->column += source_char_width(buf, loc->pos);
+            loc->column += source_char_width(buf, buf->size);
+            read_layout_char(buf, loc);
+            while (peek_char(buf, 0)) {
+                ch = peek_char(buf, 0);
+                if (ch == '*' && peek_char(buf, 1) == '/') {
+                    loc->column += source_char_width(buf, buf->size);
+                    read_layout_char(buf, loc);
+                    loc->column += source_char_width(buf, buf->size);
+                    read_layout_char(buf, loc);
+                    return lex_token(buf, loc);
                 }
-
                 if (ch == '\n') {
-                    loc->line++;
-                    loc->column = 1;
+                    read_layout_char(buf, loc);
+                    continue;
                 }
-            } while (ch);
+                loc->column += source_char_width(buf, buf->size);
+                read_layout_char(buf, loc);
+            }
 
             error_at("Unenclosed C-style comment", loc);
             return NULL;
@@ -364,13 +481,13 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
 
         if (ch == '/') {
             /* C++-style comment */
-            int pos = buf->size;
-            do {
-                pos++;
-                ch = buf->elements[pos];
-            } while (ch && !is_newline(ch));
-            loc->column += pos - buf->size + 1;
-            buf->size = pos;
+            loc->column += source_char_width(buf, loc->pos);
+            loc->column += source_char_width(buf, buf->size);
+            read_layout_char(buf, loc);
+            while (peek_char(buf, 0) && peek_char(buf, 0) != '\n') {
+                loc->column += source_char_width(buf, buf->size);
+                read_layout_char(buf, loc);
+            }
             return lex_token(buf, loc);
         }
 
@@ -425,13 +542,31 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
     token_t *token;
     char token_buffer[MAX_TOKEN_LEN];
 
-    if (isdigit(ch)) {
+    if (isdigit(ch) || (ch == '.' && isdigit(peek_char(buf, 1)))) {
         int sz = 0;
-        token_buffer[sz++] = ch;
-        ch = read_char(buf);
+        bool is_floating = ch == '.';
+        bool is_hex = false;
+        bool has_hex_exponent = false;
+        bool has_hex_significand = false;
+        if (is_floating) {
+            token_buffer[sz++] = ch;
+            ch = read_char(buf);
+            while (isdigit(ch)) {
+                if (sz >= MAX_TOKEN_LEN - 1) {
+                    loc->len = sz;
+                    error_at("Token too long", loc);
+                }
+                token_buffer[sz++] = ch;
+                ch = read_char(buf);
+            }
+        } else {
+            token_buffer[sz++] = ch;
+            ch = read_char(buf);
+        }
 
-        if (token_buffer[0] == '0' && ((ch | 32) == 'x')) {
+        if (!is_floating && token_buffer[0] == '0' && ((ch | 32) == 'x')) {
             /* Hexadecimal: starts with 0x or 0X */
+            is_hex = true;
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz;
                 error_at("Token too long", loc);
@@ -439,23 +574,26 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
             token_buffer[sz++] = ch;
 
             ch = read_char(buf);
-            if (!isxdigit(ch)) {
-                loc->len = 3;
-                error_at("Invalid hex literal: expected hex digit after 0x",
-                         loc);
-            }
 
-            do {
+            /* C99 also permits the first hexadecimal significand digit after
+             * the point (`0x.8p2`), so defer the nonempty-significand check
+             * until the floating spelling has been recognized.
+             */
+            while (isxdigit(ch)) {
                 if (sz >= MAX_TOKEN_LEN - 1) {
                     loc->len = sz;
                     error_at("Token too long", loc);
                 }
                 token_buffer[sz++] = ch;
+                has_hex_significand = true;
                 ch = read_char(buf);
-            } while (isxdigit(ch));
+            }
 
-        } else if (token_buffer[0] == '0' && ((ch | 32) == 'b')) {
+        } else if (!is_floating && token_buffer[0] == '0' &&
+                   ((ch | 32) == 'b')) {
             /* Binary literal: 0b or 0B */
+            if (strict_c99)
+                error_at("binary literals are a GNU extension in C99", loc);
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz;
                 error_at("Token too long", loc);
@@ -477,14 +615,9 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
                 ch = read_char(buf);
             } while (ch == '0' || ch == '1');
 
-        } else if (token_buffer[0] == '0') {
+        } else if (!is_floating && token_buffer[0] == '0') {
             /* Octal: starts with 0 but not followed by 'x' or 'b' */
             while (isdigit(ch)) {
-                if (ch >= '8') {
-                    loc->pos += sz;
-                    loc->column += sz;
-                    error_at("Invalid octal digit, must be in range 0-7", loc);
-                }
                 if (sz >= MAX_TOKEN_LEN - 1) {
                     loc->len = sz;
                     error_at("Token too long", loc);
@@ -493,7 +626,7 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
                 ch = read_char(buf);
             }
 
-        } else {
+        } else if (!is_floating) {
             /* Decimal */
             while (isdigit(ch)) {
                 if (sz >= MAX_TOKEN_LEN - 1) {
@@ -504,6 +637,85 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
                 ch = read_char(buf);
             }
         }
+
+        /* Decimal floating forms are admitted lexically now. They retain the
+         * original spelling as payload; semantic float types/lowering remain
+         * deliberately outside this lexer stage.
+         */
+        if (ch == '.') {
+            is_floating = true;
+            token_buffer[sz++] = ch;
+            ch = read_char(buf);
+            if (is_hex) {
+                while (isxdigit(ch)) {
+                    if (sz >= MAX_TOKEN_LEN - 1) {
+                        loc->len = sz;
+                        error_at("Token too long", loc);
+                    }
+                    token_buffer[sz++] = ch;
+                    has_hex_significand = true;
+                    ch = read_char(buf);
+                }
+            } else {
+                while (isdigit(ch)) {
+                    if (sz >= MAX_TOKEN_LEN - 1) {
+                        loc->len = sz;
+                        error_at("Token too long", loc);
+                    }
+                    token_buffer[sz++] = ch;
+                    ch = read_char(buf);
+                }
+            }
+        }
+        if ((!is_hex && (ch | 32) == 'e') || (is_hex && (ch | 32) == 'p')) {
+            is_floating = true;
+            if (is_hex)
+                has_hex_exponent = true;
+            token_buffer[sz++] = ch;
+            ch = read_char(buf);
+            if (ch == '+' || ch == '-') {
+                token_buffer[sz++] = ch;
+                ch = read_char(buf);
+            }
+            if (!isdigit(ch))
+                error_at("Floating literal needs an exponent", loc);
+            do {
+                if (sz >= MAX_TOKEN_LEN - 1) {
+                    loc->len = sz;
+                    error_at("Token too long", loc);
+                }
+                token_buffer[sz++] = ch;
+                ch = read_char(buf);
+            } while (isdigit(ch));
+        }
+        if (is_floating) {
+            if (is_hex && !has_hex_exponent)
+                error_at("Hexadecimal floating literal needs a p exponent",
+                         loc);
+            if (is_hex && !has_hex_significand)
+                error_at("Hexadecimal floating literal needs a significand",
+                         loc);
+            if ((ch | 32) == 'f' || (ch | 32) == 'l') {
+                token_buffer[sz++] = ch;
+                ch = read_char(buf);
+            }
+            token_buffer[sz] = '\0';
+            token = new_token(T_floating, loc, sz);
+            token->literal = intern_string(token_buffer);
+            loc->column += sz;
+            return token;
+        }
+        if (!is_hex && token_buffer[0] == '0') {
+            for (int i = 1; i < sz; i++) {
+                if (token_buffer[i] >= '8' && token_buffer[i] <= '9') {
+                    loc->pos += i;
+                    loc->column += i;
+                    error_at("Invalid octal digit, must be in range 0-7", loc);
+                }
+            }
+        }
+        if ((ch | 32) == 'p')
+            error_at("Hexadecimal floating literal needs a significand", loc);
 
         /* C99 integer suffixes belong to the numeric token rather than starting
          * an adjacent identifier. The existing `long` spelling has the same
@@ -556,6 +768,14 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
 
         ch = read_char(buf);
         while (ch != '"' || special) {
+            if (ch == '\\' && peek_char(buf, 1) == '\n') {
+                read_char(buf);
+                ch = read_char(buf);
+                loc->line++;
+                loc->column = 1;
+                special = false;
+                continue;
+            }
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz + 1;
                 error_at("String literal too long", loc);
@@ -591,6 +811,13 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
 
         ch = read_char(buf);
         while (ch && ch != '\'') {
+            if (ch == '\\' && peek_char(buf, 1) == '\n') {
+                read_char(buf);
+                ch = read_char(buf);
+                loc->line++;
+                loc->column = 1;
+                continue;
+            }
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz + 1;
                 error_at("Character literal too long", loc);
@@ -659,10 +886,26 @@ token_t *lex_punct(strbuf_t *buf, source_location_t *loc, char ch)
         return token;
     }
 
+    if (ch == '<' && peek_char(buf, 1) == '%') {
+        read_char(buf);
+        read_char(buf);
+        token = new_token(T_open_curly, loc, 2);
+        loc->column += 2;
+        return token;
+    }
+
     if (ch == '}') {
         ch = read_char(buf);
         token = new_token(T_close_curly, loc, 1);
         loc->column++;
+        return token;
+    }
+
+    if (ch == '%' && peek_char(buf, 1) == '>') {
+        read_char(buf);
+        read_char(buf);
+        token = new_token(T_close_curly, loc, 2);
+        loc->column += 2;
         return token;
     }
 
@@ -673,10 +916,26 @@ token_t *lex_punct(strbuf_t *buf, source_location_t *loc, char ch)
         return token;
     }
 
+    if (ch == '<' && peek_char(buf, 1) == ':') {
+        read_char(buf);
+        read_char(buf);
+        token = new_token(T_open_square, loc, 2);
+        loc->column += 2;
+        return token;
+    }
+
     if (ch == ']') {
         ch = read_char(buf);
         token = new_token(T_close_square, loc, 1);
         loc->column++;
+        return token;
+    }
+
+    if (ch == ':' && peek_char(buf, 1) == '>') {
+        read_char(buf);
+        read_char(buf);
+        token = new_token(T_close_square, loc, 2);
+        loc->column += 2;
         return token;
     }
 
@@ -1119,7 +1378,7 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
                 kind = T_goto;
             break;
 
-        case 5: /* 5-letter keywords: while, break, union, const */
+        case 5: /* 5-letter keywords: while, break, union, const, float */
             if (token_buffer[0] == 'w' && !memcmp(token_buffer, "while", 5))
                 kind = T_while;
             else if (token_buffer[0] == 'b' &&
@@ -1131,6 +1390,9 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
             else if (token_buffer[0] == 'c' &&
                      !memcmp(token_buffer, "const", 5))
                 kind = T_const;
+            else if (token_buffer[0] == 'f' &&
+                     !memcmp(token_buffer, "float", 5))
+                kind = T_float;
             break;
 
         case 6: /* 6-letter keywords: return, struct, switch, sizeof, static,
@@ -1144,6 +1406,9 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
             else if (token_buffer[0] == 'i' &&
                      !memcmp(token_buffer, "inline", 6))
                 kind = T_inline;
+            else if (token_buffer[0] == 'd' &&
+                     !memcmp(token_buffer, "double", 6))
+                kind = T_double;
             else if (token_buffer[0] == 's') {
                 if (!memcmp(token_buffer, "struct", 6))
                     kind = T_struct;
@@ -1184,7 +1449,9 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
          * name outside that range cannot be one and needs no lookup -- which is
          * most of the identifiers in a real program.
          */
-        if (kind == T_identifier && sz >= 2 && sz <= 8)
+        if (kind == T_identifier && !strcmp(token_buffer, "_Imaginary"))
+            kind = T_imaginary;
+        else if (kind == T_identifier && sz >= 2 && sz <= 8)
             kind = lookup_keyword(token_buffer);
 
         token = new_token(kind, loc, source_len);
@@ -1204,31 +1471,83 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
 token_t *lex_token(strbuf_t *buf, source_location_t *loc)
 {
     token_t *token;
-    char ch = peek_char(buf, 0);
+    char ch;
 
+    while (source_char_at(buf, buf->size) == '\\' &&
+           source_char_at(buf, buf->size + source_char_width(buf, buf->size)) ==
+               '\n') {
+        buf->size += source_char_width(buf, buf->size) + 1;
+        loc->line++;
+        loc->column = 1;
+    }
+    ch = peek_char(buf, 0);
     loc->pos = buf->size;
 
     token = lex_layout(buf, loc, ch);
     if (token)
-        return token;
+        RETURN_LEX_TOKEN(token);
     token = lex_number(buf, loc, ch);
     if (token)
-        return token;
+        RETURN_LEX_TOKEN(token);
+    if (ch == 'L' && peek_char(buf, 1) == '\'') {
+        /* Keep the prefix in the source span, while the literal reader owns
+         * escape validation and the quoted payload. Wide strings remain a
+         * separate object-layout task.
+         */
+        read_char(buf);
+        token = lex_literal(buf, loc, '\'');
+        token->kind = T_wchar;
+        token->location.len++;
+        loc->column++;
+        RETURN_LEX_TOKEN(token);
+    }
+    if (ch == 'L' && peek_char(buf, 1) == '"') {
+        /* Keep the prefix in the source span. The parser owns the execution
+         * wide-character representation, but the lexer must preserve this as a
+         * distinct phase-6 literal so it cannot concatenate with bytes.
+         */
+        read_char(buf);
+        token = lex_literal(buf, loc, '"');
+        token->kind = T_wstring;
+        token->location.len++;
+        loc->column++;
+        RETURN_LEX_TOKEN(token);
+    }
     token = lex_literal(buf, loc, ch);
     if (token)
-        return token;
+        RETURN_LEX_TOKEN(token);
     token = lex_punct(buf, loc, ch);
     if (token)
-        return token;
+        RETURN_LEX_TOKEN(token);
     token = lex_operator(buf, loc, ch);
     if (token)
-        return token;
+        RETURN_LEX_TOKEN(token);
     token = lex_word(buf, loc, ch);
     if (token)
-        return token;
+        RETURN_LEX_TOKEN(token);
 
     error_at("Unexpected token", loc);
     return NULL;
+}
+
+#undef RETURN_LEX_TOKEN
+
+/* read_char() hides phase-2 pairs. Comments do not produce a token for the
+ * finalizer above, so account for any physical newlines it crosses here.
+ */
+char read_layout_char(strbuf_t *buf, source_location_t *loc)
+{
+    int pos = buf->size;
+    char ch = read_char(buf);
+
+    while (pos < buf->size) {
+        if (buf->elements[pos] == '\n') {
+            loc->line++;
+            loc->column = 1;
+        }
+        pos++;
+    }
+    return ch;
 }
 
 /* Return one lexical spelling for a source path. This deliberately does not

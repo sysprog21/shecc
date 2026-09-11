@@ -262,11 +262,13 @@ function try()
     # Keep the compiler's diagnostic rather than discarding it: without it a
     # failure reports only an exit-code mismatch and never says why.
     $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2> "$tmp_err"
-    chmod +x $tmp_exe
-
-    local output=''
-    output=$(${TARGET_EXEC:-} "$tmp_exe")
     local actual="$?"
+    local output=''
+    if [ "$actual" -eq 0 ]; then
+        chmod +x "$tmp_exe"
+        output=$(${TARGET_EXEC:-} "$tmp_exe")
+        actual="$?"
+    fi
 
     ((TOTAL_TESTS++))
     ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
@@ -385,6 +387,91 @@ function try_compile_error()
     fi
 }
 
+# Compile invalid input with an explicit compiler option (for conformance-mode
+# diagnostics) while preserving the normal test runner's accounting.
+function try_compile_error_flag()
+{
+    local extra_flag="$1"
+    local input=$(cat)
+    test_selected || return 0
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    echo "$input" > "$tmp_in"
+
+    (
+        set +m 2> /dev/null
+        $SHECC $SHECC_CFLAGS $extra_flag -o "$tmp_exe" "$tmp_in" 2>&1
+    ) > /dev/null 2>&1
+    local exit_code=$?
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ 0 == $exit_code ]; then
+        report_test_failure "CONFORMANCE ERROR TEST" "$tmp_in" "$tmp_exe" \
+            "non-zero" "0" "Compilation succeeded unexpectedly"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
+function try_compile_flag()
+{
+    local extra_flag="$1"
+    local input=$(cat)
+    test_selected || return 0
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    local tmp_err="$(mktemp)"
+    echo "$input" > "$tmp_in"
+    $SHECC $SHECC_CFLAGS $extra_flag -o "$tmp_exe" "$tmp_in" 2> "$tmp_err"
+    local exit_code=$?
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$exit_code" -ne 0 ]; then
+        report_test_failure "CONFORMANCE COMPILE TEST" "$tmp_in" "$tmp_exe" \
+            "0" "$exit_code" "$(< "$tmp_err")" "" "$tmp_err"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
+function try_failure_output()
+{
+    local expected_text="$1"
+    local input=$(cat)
+    test_selected || return 0
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    local tmp_log="$(mktemp)"
+    echo "$input" > "$tmp_in"
+    $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" > "$tmp_log" 2>&1
+    local compile_status=$?
+    local run_status=0
+    if [ "$compile_status" -eq 0 ]; then
+        chmod +x "$tmp_exe"
+        ${TARGET_EXEC:-} "$tmp_exe" >> "$tmp_log" 2>&1
+        run_status=$?
+    fi
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$compile_status" -ne 0 ] || [ "$run_status" -eq 0 ] \
+        || ! grep -Fq -- "$expected_text" "$tmp_log"; then
+        report_test_failure "FAILURE OUTPUT TEST" "$tmp_in" "$tmp_exe" \
+            "non-zero; $expected_text" "$run_status" "$(< "$tmp_log")" \
+            "" "$tmp_log"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
 function try_compile_error_message()
 {
     local expected="$1"
@@ -497,7 +584,7 @@ function try_large()
 
     # Wrap the input to print the return value
     cat > "$tmp_in" << EOF
-int printf(char *format, ...);
+int printf(const char *format, ...);
 $input
 int main() {
     int result = test_function();
@@ -573,8 +660,195 @@ try_file 0 '' "$TESTS_DIR/strength-reduce.c"
 # Category: Basic Literals and Constants
 begin_category "Literals and Constants" "Testing integer, character, and string literals"
 
+try_compile_error << EOF
+int main(void) { return 1.5; }
+EOF
+try_compile_error << EOF
+int main(void) { return 1e3; }
+EOF
+try_compile_error << EOF
+int main(void) { return .5; }
+EOF
+try_compile_error << EOF
+int main(void) { return 0x1p3; }
+EOF
+try_compile_error << EOF
+int main(void) { return 3.25F; }
+EOF
+try_compile_error << EOF
+int main(void) { return 0x1.8p+2L; }
+EOF
+try_compile_error << EOF
+int main(void) { return 0x.8p2; }
+EOF
+try_compile_error << EOF
+int main(void) { return 0x.ABp2; }
+EOF
+try_compile_error << EOF
+int main(void) { return 0x.p1; }
+EOF
+try_compile_error << EOF
+int main(void) { return 08.5; }
+EOF
+try_compile_error << EOF
+#define FLOAT_MACRO 1.25e+1F
+int main(void) { return FLOAT_MACRO; }
+EOF
+try_compile_error << EOF
+#if 1.0
+#endif
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int float;
+EOF
+try_compile_error << EOF
+double value;
+EOF
+try_compile_error << EOF
+int main(void) { float value; return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { return (float)1; }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(double); }
+EOF
+try_compile_error << EOF
+int identity(float value) { return 0; }
+EOF
+try_compile_error << EOF
+int identity(long double value) { return 0; }
+EOF
+try_compile_error << EOF
+long double value;
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(long double); }
+EOF
+try_compile_error << EOF
+int _Complex;
+EOF
+try_compile_error << EOF
+int _Imaginary;
+EOF
+try_compile_error << EOF
+#define FLOAT_TYPE float
+FLOAT_TYPE value;
+EOF
+
 # just a number
 expr 0 0
+
+# The current execution wide-character representation is int. Wide character
+# constants therefore share ordinary scalar expression and ICE lowering.
+try_ 3 << EOF
+enum { wide_a = L'A' };
+static int wide_b = L'\x42';
+int main(void) { return (wide_a == 65) + (wide_b == 66) + (L'C' == 67); }
+EOF
+try_ 1 << EOF
+#define WIDE_A L'A'
+int main(void) { return WIDE_A == 65; }
+EOF
+
+try_ 0 << EOF
+int main(void) {
+    wchar_t values[] = L"ab";
+    return sizeof L"ab" != 3 * sizeof(wchar_t) ||
+           values[0] != 'a' || values[1] != 'b' || values[2] != 0;
+}
+EOF
+
+try_ 0 << EOF
+struct item { wchar_t text[3]; };
+int main(void) {
+    struct item local = { L"ab" };
+    static struct item saved = { .text = L"ok" };
+    return local.text[1] != 'b' || saved.text[0] != 'o' ||
+           saved.text[2] != 0;
+}
+EOF
+
+try_ 0 << EOF
+typedef wchar_t wide_unit;
+int main(void) {
+    wide_unit values[] = L"x";
+    return values[0] != 'x' || values[1] != 0;
+}
+EOF
+
+try_ 0 << EOF
+enum { wide_count = sizeof L"ab" / sizeof(wchar_t) };
+wchar_t *global_pointer = L"xy";
+int main(void) {
+    L"statement";
+    return wide_count != 3 || global_pointer[1] != 'y';
+}
+EOF
+
+try_ 0 << EOF
+int main(void) {
+    wchar_t values[] = L"\u00e9";
+    return sizeof values != 2 * sizeof(wchar_t) || values[0] != 0xe9 ||
+           values[1] != 0;
+}
+EOF
+
+try_ 0 << EOF
+#define LEFT L"a"
+#define RIGHT L"b"
+int main(void) {
+    wchar_t values[] = LEFT RIGHT;
+    return sizeof(LEFT RIGHT) != 3 * sizeof(wchar_t) || values[1] != 'b';
+}
+EOF
+
+try_compile_error << EOF
+int main(void) { char values[] = "a" L"b"; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(void) { char values[] = L"x"; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(void) { wchar_t values[] = "x"; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(void) { wchar_t values[] = L"\U00110000"; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(void) { wchar_t values[] = L"\xFFFFFFFF"; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(void) { wchar_t values[2][3] = L"ab"; return 0; }
+EOF
+
+try_compile_error << EOF
+struct item { wchar_t values[2][3]; };
+int main(void) { struct item value = { L"ab" }; return 0; }
+EOF
+
+try_ 0 << EOF
+wchar_t global_values[] = L"go";
+int main(void) {
+    static wchar_t local_values[] = L"ok";
+    return global_values[1] != 'o' || global_values[2] != 0 ||
+           local_values[0] != 'o' || local_values[1] != 'k';
+}
+EOF
+
+try_ 0 << EOF
+int main(void) {
+    wchar_t fixed[5] = L"A\0B";
+    return fixed[0] != 'A' || fixed[1] != 0 || fixed[2] != 'B' ||
+           fixed[3] != 0 || fixed[4] != 0;
+}
+EOF
 
 # C99 _Bool conversions store the truth value, not a truncated source byte.
 try_ 4 << EOF
@@ -1011,6 +1285,21 @@ int main(void) {
            (sizeof(2147483648) == 8) +
            (sizeof(0xffffffff) == 4) +
            (sizeof(0x100000000) == 8);
+}
+EOF
+    try_ 2 << EOF
+int main(void) {
+    return (sizeof(-2147483648) == 8) +
+           (sizeof(-2147483648L) == 8);
+}
+EOF
+    try_flags 6 "--no-libc" << EOF
+#include <limits.h>
+#include <stdint.h>
+int main(void) {
+    return (sizeof(INT_MIN) == 4) + (sizeof(LONG_MIN) == 4) +
+           (sizeof(INT32_MIN) == 4) + (sizeof(INT64_MIN) == 8) +
+           (sizeof(LLONG_MIN) == 8) + (sizeof(INTMAX_MIN) == 8);
 }
 EOF
     try_ 6 << EOF
@@ -1864,12 +2153,70 @@ begin_category "Return Statements" "Testing return statement functionality"
 declare -a return_tests=(
     "1 return 1;"
     "42 return 2*21;"
+    "4 int value = 1; return value++, value + 2;"
+    "4 int value = 0; return 1 ? value++, value + 3 : 0;"
+    "5 int value = 0; return 1 ? value = 2, value + 3 : 0;"
+    "3 return 0 ? 1 : 0 ? 2 : 3;"
+    "3 return 1 ? 0 ? 2 : 3 : 4;"
 )
 
 run_items_tests return_tests
 
 # Category: Variables and Assignments
 begin_category "Variables and Assignments" "Testing variable declarations and assignments"
+
+items 7 "auto int value = 7; return value;"
+items 3 "int total = 0; for (auto int value = 0; value < 3; value++) total += value; return total;"
+items 6 "int first = 1, second = 2; first++, second += 2; return first + second;"
+items 6 "int first = 0; int second = first = 3; return first + second;"
+try_ 2 << EOF
+int main(void) {
+    int value = 0;
+    value ? value = 1 : value = 2;
+    return value;
+}
+EOF
+try_ 3 << EOF
+int main(void) {
+    int first = 0, second = 0;
+    (first = 1, second = 2);
+    return first + second;
+}
+EOF
+try_ 1 << EOF
+int main(void) {
+    int value = 1;
+    value + 4;
+    return value;
+}
+EOF
+try_ 7 << EOF
+struct pair { int left; int right; };
+int main(void) {
+    struct pair first = {1, 2};
+    struct pair second = {3, 4};
+    (first = second);
+    return first.left + first.right;
+}
+EOF
+try_ 7 << EOF
+struct pair { int left; int right; };
+int main(void) {
+    struct pair first = {1, 2};
+    struct pair second = {3, 4};
+    struct pair copied = (first = second);
+    return copied.left + copied.right;
+}
+EOF
+try_compile_error << EOF
+int main(void) { auto auto int value = 0; return value; }
+EOF
+try_compile_error << EOF
+int main(void) { static auto int value = 0; return value; }
+EOF
+try_compile_error << EOF
+auto int file_scope;
+EOF
 
 declare -a variable_tests=(
     "10 int var; var = 10; return var;"
@@ -1912,6 +2259,31 @@ int main(void) {
 }
 EOF
 
+try_ 2 << EOF
+typedef int *int_pointer;
+int main(void) {
+    int value = 1;
+    int_pointer restrict pointer = &value;
+    *pointer += 1;
+    return value;
+}
+EOF
+
+try_ 2 << EOF
+typedef int *int_pointer;
+int increment(int_pointer restrict pointer) { *pointer += 1; return *pointer; }
+int main(void) { int value = 1; return increment(&value); }
+EOF
+
+try_compile_error << EOF
+int restrict value;
+EOF
+
+try_compile_error << EOF
+typedef int (*callback)(void);
+callback restrict function;
+EOF
+
 try_ 14 << EOF
 inline int increment_inline(int value) { return value + 1; }
 static inline int twice_inline(int value) { return value * 2; }
@@ -1921,9 +2293,72 @@ int main(void) {
 }
 EOF
 
+try_ 13 << EOF
+int third(int values[static 3]) { return values[2]; }
+int sum_pair(int values[restrict static 2]) { return values[0] + values[1]; }
+int main(void) {
+    int values[3] = { 3, 4, 6 };
+    return third(values) + sum_pair(values);
+}
+EOF
+
+try_ 0 << EOF
+int increment(int value) { return value + 1; }
+int apply(int (*callbacks[static 1])(int)) { return callbacks[0](2) != 3; }
+int main(void) { int (*callback)(int) = increment; return apply(&callback); }
+EOF
+
+try_compile_error << EOF
+int invalid(int values[static]);
+EOF
+
+try_compile_error << EOF
+int invalid(int values[2][static 2]);
+EOF
+
+try_compile_error << EOF
+int invalid(int (*callbacks[2][static 1])(int));
+EOF
+
+try_compile_error << EOF
+int invalid(int values[static 0]);
+EOF
+
+try_compile_error << EOF
+int invalid(int values[static -1]);
+EOF
+
+try_compile_error << EOF
+int values[static 2];
+EOF
+
+try_compile_error << EOF
+int invalid(int values[const 2]) { values = 0; return 0; }
+EOF
+
+try_compile_error << EOF
+int invalid(int values[const]) { values = 0; return 0; }
+EOF
+
 try_compile_error << EOF
 inline int invalid_inline_object;
 int main(void) { return 0; }
+EOF
+
+try_compile_error << EOF
+inline struct invalid_inline_record { int value; } object;
+EOF
+
+try_compile_error << EOF
+inline union invalid_inline_union { int value; } object;
+EOF
+
+try_compile_error << EOF
+inline enum invalid_inline_enum { invalid_inline_value } object;
+EOF
+
+try_compile_error << EOF
+inline typedef int invalid_inline_typedef;
 EOF
 
 try_ 13 << EOF
@@ -2132,6 +2567,264 @@ EOF
 
 # Category: Compound Literals
 begin_category "Compound Literals" "Testing C99 compound literal features"
+
+try_ 7 << EOF
+int main(void) { return (int){3} = 7; }
+EOF
+try_ 7 << EOF
+int main(void) { return (int){3} += 4; }
+EOF
+try_ 9 << EOF
+int main(void) {
+    int first = 3, second = 9;
+    int *pointer = (int *){&first} = &second;
+    return *pointer;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    int values[3] = {1, 2, 3};
+    int *pointer = ++(int *){values};
+    return *pointer;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    int values[3] = {1, 2, 3};
+    int *pointer = --(int *){&values[2]};
+    return *pointer;
+}
+EOF
+try_ 3 << EOF
+int main(void) {
+    int values[4] = {1, 2, 3, 4};
+    int *pointer = ((int *){values} += 2);
+    return *pointer;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    int values[4] = {1, 2, 3, 4};
+    int *pointer = ((int *){&values[3]} -= 2);
+    return *pointer;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    int values[4] = {1, 2, 3, 4};
+    int *pointer = (int *){values};
+    pointer += 2;
+    pointer -= 1;
+    return *pointer;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    int value = 3;
+    return (int * const){&value} = &value;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    int value = 3;
+    return (int * const){&value}++;
+}
+EOF
+try_ 4 << EOF
+int main(void) { return (unsigned char){250} += 10; }
+EOF
+try_ 1 << EOF
+int main(void) { return (_Bool){0} = 2; }
+EOF
+try_ 1 << EOF
+int main(void) { return (_Bool){1} += 2; }
+EOF
+try_compile_error << EOF
+int main(void) { return (const int){3} += 4; }
+EOF
+try_ 7 << EOF
+int main(void) { return (int[]){1, 2}[1] = 7; }
+EOF
+try_ 6 << EOF
+int main(void) {
+    return (int[2][3]){{1, 2, 3}, {4, 5, 6}}[1][2];
+}
+EOF
+try_ 3 << EOF
+int main(void) {
+    return (int[][2]){{1, 2}, {3, 4}}[1][0];
+}
+EOF
+try_ 6 << EOF
+typedef int matrix[2][3];
+int main(void) {
+    return (matrix){{1, 2, 3}, {4, 5, 6}}[1][2];
+}
+EOF
+try_ 24 << EOF
+int main(void) {
+    return sizeof((int[2][3]){{1, 2, 3}, {4, 5, 6}});
+}
+EOF
+try_ 7 << EOF
+typedef int matrix[2][2];
+int main(void) {
+    matrix value = {{1, 2}, {3, 4}};
+    return value[1][1] + value[0][0] * 3;
+}
+EOF
+try_ 7 << EOF
+typedef int row[2];
+typedef row matrix[2];
+int main(void) {
+    matrix value = {{1, 2}, {3, 4}};
+    return value[1][1] + value[0][0] * 3;
+}
+EOF
+try_ 11 << EOF
+typedef int row[2];
+typedef row matrix[2];
+typedef matrix cube[2];
+int main(void) {
+    cube value = {{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}};
+    return value[1][1][1] + value[0][0][0] * 3;
+}
+EOF
+try_ 11 << EOF
+int main(void) {
+    return (int[2][2]){{1, 2}, {3, 4}}[1][0] += 8;
+}
+EOF
+try_ 3 << EOF
+int main(void) {
+    return (int[2][2]){{1, 2}, {3, 4}}[1][0]++;
+}
+EOF
+try_ 5 << EOF
+int main(void) {
+    return (int[2]){4, 5}[1]--;
+}
+EOF
+try_ 4 << EOF
+int main(void) {
+    return ++(int[2][2]){{1, 2}, {3, 4}}[1][0];
+}
+EOF
+try_compile_error << EOF
+int main(void) { return ++(const int[1]){1}[0]; }
+EOF
+try_compile_error << EOF
+int main(void) { return (int[2][2])0; }
+EOF
+try_ 7 << EOF
+int main(void) { return (int[]){1, 2}[1] += 5; }
+EOF
+try_ 7 << EOF
+struct point { int x; int y; };
+int main(void) { return (struct point){1, 2}.x = 7; }
+EOF
+try_ 7 << EOF
+struct flags { unsigned int value : 3; };
+int main(void) { return (struct flags){1}.value += 6; }
+EOF
+try_ 1 << EOF
+struct point { int x; };
+int main(void) { return (struct point){1}.x++; }
+EOF
+try_ 2 << EOF
+struct point { int x; };
+int main(void) { return ++(struct point){1}.x; }
+EOF
+try_ 7 << EOF
+struct flags { unsigned int value : 3; };
+int main(void) { return (struct flags){7}.value++; }
+EOF
+try_ 1 << EOF
+struct flags { unsigned int value : 3; };
+int main(void) { return ++(struct flags){0}.value; }
+EOF
+try_compile_error << EOF
+struct point { int x; };
+int main(void) { return (const struct point){1}.x++; }
+EOF
+try_compile_error << EOF
+struct point { int x; };
+int main(void) { return ++(const struct point){1}.x; }
+EOF
+try_ 7 << EOF
+struct holder { int items[2]; };
+int main(void) { return (struct holder){{1, 2}}.items[1] = 7; }
+EOF
+try_ 3 << EOF
+struct holder { int items[2]; };
+int main(void) { return ++(struct holder){{1, 2}}.items[1]; }
+EOF
+try_compile_error << EOF
+struct holder { int items[2]; };
+int main(void) { return ++(const struct holder){{1, 2}}.items[1]; }
+EOF
+try_ 7 << EOF
+struct holder { int items[2][2]; };
+int main(void) {
+    return (struct holder){{{1, 2}, {3, 4}}}.items[1][0] = 7;
+}
+EOF
+try_ 8 << EOF
+struct holder { int items[2][2]; };
+int main(void) {
+    return (struct holder){{{1, 2}, {3, 4}}}.items[1][0] += 5;
+}
+EOF
+try_ 9 << EOF
+struct holder { int items[2][2][2]; };
+int main(void) {
+    return (struct holder){{{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}}}
+        .items[1][0][1] = 9;
+}
+EOF
+try_ 7 << EOF
+struct point { int x; };
+struct holder { struct point point; };
+int main(void) { return (struct holder){{1}}.point.x = 7; }
+EOF
+try_compile_error << EOF
+int main(void) { return (const int){1} = 2; }
+EOF
+try_compile_error << EOF
+struct point { int x; };
+int main(void) { return (const struct point){1}.x = 2; }
+EOF
+try_compile_error << EOF
+int main(void) { return (const int[]){1}[0] = 2; }
+EOF
+try_ 1 << EOF
+int main(void) { return (int){1}++; }
+EOF
+try_compile_error << EOF
+int main(void) { return (const int){1}++; }
+EOF
+try_ 2 << EOF
+int main(void) { return ++(int){1}; }
+EOF
+try_compile_error << EOF
+int main(void) { return ++(const int){1}; }
+EOF
+try_ 7 << EOF
+struct point { int x; };
+int main(void) {
+    struct point point = {0};
+    struct point *pointer = &point;
+    return (*pointer).x = 7;
+}
+EOF
+try_ 7 << EOF
+struct flags { unsigned int value : 3; };
+int main(void) {
+    struct flags flags = {1};
+    struct flags *pointer = &flags;
+    return (*pointer).value += 6;
+}
+EOF
 
 # C99 permits long to use int's representation where both meet the required
 # minimum range. Exercise spelling, typedefs, pointer scaling, and ABI slots.
@@ -2935,6 +3628,8 @@ items 5 "if (1) return 5; else return 20;"
 items 10 "if (0) return 5; else if (0) return 20; else return 10;"
 items 10 "int a; a = 0; int b; b = 0; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
 items 27 "int a; a = 15; int b; b = 2; if(a - 15) b = 10; else if (b) return a + b + 10; else if (a) return b; else return 10;"
+items 4 "int value = 1; if (value++, value == 2) return value + 2; return 0;"
+items 2 "if (0 ? 1 : 0) return 1; return 2;"
 
 items 8 "if (1) return 010; else return 11;"
 items 10 "int a; a = 012 - 10; int b; b = 0100 - 64; if (a) b = 10; else if (0) return a; else if (a) return b; else return 10;"
@@ -2992,6 +3687,13 @@ items 14 "int n = 0; for (int i = 0; i < 20;) { i++; if (i < 14) { continue; } n
 items 6 "int sum = 0; for (register int i = 1; i < 4; i++) sum += i; return sum;"
 items 14 "int i = 0; for (; i < 14;) { i++; } return i;"
 items 0 "int i = 0; for (;; i++) { break; } return i;"
+items 3 "int i = 0; while (i++, i < 3) {} return i;"
+items 3 "int i = 0; for (; i++, i < 3;) {} return i;"
+items 3 "int i = 0; do {} while (i++, i < 3); return i;"
+items 9 "int i, j; for (i = 0, j = 0; i < 3; i++, j += 2) {} return i + j;"
+items 2 "int i = 0; while (i < 2 ? 1 : 0) i++; return i;"
+items 2 "int i = 0; do i++; while (i < 2 ? 1 : 0); return i;"
+items 2 "int i = 0; for (; i < 2 ? 1 : 0; i++) {} return i;"
 
 # Category: Comments
 begin_category "Comments" "Testing C-style and C++-style comment parsing"
@@ -3078,6 +3780,89 @@ EOF
 try_ 0 << EOF
 int main(void) {
     return 0;
+}
+EOF
+
+# Assignment expressions yield their stored value in argument and explicitly
+# parenthesized comma-expression contexts.
+try_ 17 << EOF
+int twice(int value) { return value * 2; }
+int main(void) {
+    int value = 1;
+    return twice(value = 5) + (value = 6, value + 1);
+}
+EOF
+try_ 3 << EOF
+int main(void) {
+    int first = 0, second = 0;
+    return first = second = 3;
+}
+EOF
+try_ 9 << EOF
+int main(void) {
+    int value = 0;
+    return 1 ? value = 9 : value = 2;
+}
+EOF
+try_ 1 << EOF
+struct flags { unsigned int value : 3; };
+int main(void) {
+    struct flags flags = {0};
+    return flags.value = 9;
+}
+EOF
+try_ 1 << EOF
+struct value { unsigned char byte; };
+int main(void) {
+    struct value value = {0};
+    return value.byte = 257;
+}
+EOF
+try_ 7 << EOF
+int main(void) {
+    int value = 0;
+    if (value = 1)
+        value = 3;
+    switch (value = 4) {
+    case 4: return value = 7;
+    default: return 0;
+    }
+}
+EOF
+try_ 7 << EOF
+int main(void) {
+    int value = 3;
+    int *pointer = &value;
+    return *pointer += 4;
+}
+EOF
+try_ 1 << EOF
+int main(void) {
+    unsigned char value = 0;
+    unsigned char *pointer = &value;
+    return *pointer = 257;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    const int value = 0;
+    const int *pointer = &value;
+    return *pointer = 1;
+}
+EOF
+try_ 13 << EOF
+int main(void) {
+    int values[1] = {0};
+    int *pointer = values;
+    return ((values[0])) = 6 + ((*pointer) = 7);
+}
+EOF
+try_compile_error << EOF
+struct point { int x; };
+int main(void) {
+    const struct point point = {0};
+    const struct point *pointer = &point;
+    return (*pointer).x = 7;
 }
 EOF
 
@@ -3268,6 +4053,28 @@ items 7 "int a; a = 3; int *b; b = &a; b[0] = 7; exit(a);"
 items 42 "int x; x = 42; int *p; p = &x; int y; y = *p; exit(y);"
 items 15 "int val; val = 15; int *ptr; ptr = &val; exit(*ptr);"
 items 100 "int a; a = 100; int *b; b = &a; int c; c = *b; exit(c);"
+try_ 2 << EOF
+int main(void) {
+    int values[3] = {1, 2, 3};
+    int *pointer = values;
+    return *++pointer;
+}
+EOF
+try_ 2 << EOF
+int main(void) {
+    int values[3] = {1, 2, 3};
+    int *pointer = &values[2];
+    return *--pointer;
+}
+EOF
+try_ 7 << EOF
+int main(void) {
+    int values[3] = {1, 2, 3};
+    int *pointer = values;
+    *++pointer = 7;
+    return values[1];
+}
+EOF
 
 # complex pointer dereference patterns after declaration
 try_ 25 << EOF
@@ -3481,6 +4288,18 @@ int main() {
     int_ptr p = values;
     ++p;  /* Prefix increment */
     return *p;  /* Should return 20 */
+}
+EOF
+
+# Test 14b: Typedef pointer arithmetic - prefix decrement as an expression
+# statement must use the same pointed-to stride as prefix increment.
+try_ 20 << EOF
+typedef int *int_ptr;
+int main() {
+    int values[3] = {10, 20, 30};
+    int_ptr p = &values[2];
+    --p;
+    return *p;
 }
 EOF
 
@@ -4644,6 +5463,349 @@ EOF
 begin_category "Global Variables" "Testing global variable initialization and access"
 
 # global initialization
+try_compile_error << EOF
+struct gb_incomplete;
+static int gb_incomplete_size = sizeof(struct gb_incomplete);
+int main(void) { return 0; }
+EOF
+try_ 5 << EOF
+static int global_size = sizeof(int) + sizeof(char);
+int main(void) { return global_size; }
+EOF
+try_ 8 << EOF
+static int global_expression_size = sizeof 1 + sizeof 'A';
+int main(void) { return global_expression_size; }
+EOF
+try_ 4 << EOF
+static int global_sizeof_scalar;
+static int global_sizeof_expression = sizeof(global_sizeof_scalar + 1);
+int main(void) { return global_sizeof_expression; }
+EOF
+try_ 4 << EOF
+static int global_sizeof_grouped_scalar;
+static int global_sizeof_nested_group = sizeof(((global_sizeof_grouped_scalar)));
+int main(void) { return global_sizeof_nested_group; }
+EOF
+try_ 4 << EOF
+static int global_sizeof_assignment_object;
+static int global_sizeof_assignment = sizeof(global_sizeof_assignment_object = 1);
+int main(void) {
+    return global_sizeof_assignment + global_sizeof_assignment_object;
+}
+EOF
+try_ 4 << EOF
+static int global_sizeof_prefix_object;
+static int global_sizeof_prefix = sizeof(++global_sizeof_prefix_object);
+int main(void) {
+    return global_sizeof_prefix + global_sizeof_prefix_object;
+}
+EOF
+try_ 4 << EOF
+static int global_sizeof_postfix_object;
+static int global_sizeof_postfix = sizeof(global_sizeof_postfix_object++);
+int main(void) {
+    return global_sizeof_postfix + global_sizeof_postfix_object;
+}
+EOF
+try_ 16 << EOF
+static int global_sizeof_unary_object;
+static int global_sizeof_unary = sizeof(+global_sizeof_unary_object) +
+                                 sizeof(-global_sizeof_unary_object) +
+                                 sizeof(~global_sizeof_unary_object) +
+                                 sizeof(!global_sizeof_unary_object);
+int main(void) { return global_sizeof_unary + global_sizeof_unary_object; }
+EOF
+try_ 5 << EOF
+static int global_sizeof_bare_unary_object;
+static int global_sizeof_bare_unary = sizeof -global_sizeof_bare_unary_object + 1;
+int main(void) { return global_sizeof_bare_unary + global_sizeof_bare_unary_object; }
+EOF
+try_ 4 << EOF
+static int global_sizeof_function(void);
+static int global_sizeof_call = sizeof(global_sizeof_function());
+int main(void) { return global_sizeof_call; }
+EOF
+try_ 4 << EOF
+static int global_sizeof_condition;
+static int global_sizeof_conditional =
+    sizeof(global_sizeof_condition ? 1 : 2);
+int main(void) { return global_sizeof_conditional; }
+EOF
+try_ 4 << EOF
+static int global_sizeof_comma_object;
+static int global_sizeof_comma = sizeof((global_sizeof_comma_object++, 1));
+int main(void) { return global_sizeof_comma + global_sizeof_comma_object; }
+EOF
+try_ $PTR_SZ << EOF
+static int global_sizeof_comma_pointer_object;
+static int global_sizeof_comma_pointer =
+    sizeof((global_sizeof_comma_pointer_object, "text"));
+int main(void) { return global_sizeof_comma_pointer; }
+EOF
+try_ 5 << EOF
+typedef short global_sizeof_short;
+static int global_sizeof_cast_source;
+static int global_sizeof_casts = sizeof((char)global_sizeof_cast_source) +
+                                 sizeof((global_sizeof_short)global_sizeof_cast_source) +
+                                 sizeof((unsigned short)global_sizeof_cast_source);
+int main(void) { return global_sizeof_casts; }
+EOF
+try_ $PTR_SZ << EOF
+static int global_sizeof_pointer_cast_object;
+static int global_sizeof_pointer_cast =
+    sizeof((void *)&global_sizeof_pointer_cast_object);
+int main(void) { return global_sizeof_pointer_cast; }
+EOF
+try_ 4 << EOF
+static int global_sizeof_compound = sizeof((int){1});
+int main(void) { return global_sizeof_compound; }
+EOF
+try_ 8 << EOF
+struct global_sizeof_compound_record { char tag; int value; };
+static int global_sizeof_record_compound =
+    sizeof((struct global_sizeof_compound_record){0, 0});
+int main(void) { return global_sizeof_record_compound; }
+EOF
+try_ 8 << EOF
+static int global_sizeof_array_compound = sizeof((int[2]){1, 2});
+int main(void) { return global_sizeof_array_compound; }
+EOF
+try_ 12 << EOF
+static int global_sizeof_inferred_array_compound = sizeof((int[]){1, 2, 3});
+int main(void) { return global_sizeof_inferred_array_compound; }
+EOF
+try_ 24 << EOF
+static int global_sizeof_matrix_compound =
+    sizeof((int[2][3]){{1, 2, 3}, {4, 5, 6}});
+int main(void) { return global_sizeof_matrix_compound; }
+EOF
+try_ 16 << EOF
+static int global_sizeof_inferred_matrix_compound =
+    sizeof((int[][2]){{1, 2}, {3, 4}});
+int main(void) { return global_sizeof_inferred_matrix_compound; }
+EOF
+try_ 16 << EOF
+typedef int global_sizeof_matrix_type[2][2];
+static int global_sizeof_typedef_matrix_compound =
+    sizeof((global_sizeof_matrix_type){{1, 2}, {3, 4}});
+int main(void) { return global_sizeof_typedef_matrix_compound; }
+EOF
+try_ $PTR_SZ << EOF
+static int global_addressed_size_object[2];
+static int global_addressed_size = sizeof &global_addressed_size_object;
+int main(void) { return global_addressed_size; }
+EOF
+try_ $PTR_SZ << EOF
+static int grouped_global_addressed_size_object[2];
+static int grouped_global_addressed_size =
+    sizeof(&grouped_global_addressed_size_object[1]);
+int main(void) { return grouped_global_addressed_size; }
+EOF
+try_ $PTR_SZ << EOF
+struct global_addressed_size_record { int value; };
+static struct global_addressed_size_record global_addressed_size_member_object;
+static int global_addressed_member_size =
+    sizeof &global_addressed_size_member_object.value;
+int main(void) { return global_addressed_member_size; }
+EOF
+try_ 12 << EOF
+static int global_dereferenced_size_object[2];
+static int global_dereferenced_size =
+    sizeof *&global_dereferenced_size_object +
+    sizeof(*&global_dereferenced_size_object[1]);
+int main(void) { return global_dereferenced_size; }
+EOF
+try_ 4 << EOF
+struct gd_member_record { int values[2]; };
+static struct gd_member_record gd_member;
+static int gd_member_size = sizeof *&gd_member.values[1];
+int main(void) { return gd_member_size; }
+EOF
+try_ 12 << EOF
+static int global_items[3];
+static int global_array_size = sizeof global_items;
+int main(void) { return global_array_size; }
+EOF
+try_ 12 << EOF
+static int global_nested_group_items[3];
+static int global_nested_group_array_size = sizeof(((global_nested_group_items)));
+int main(void) { return global_nested_group_array_size; }
+EOF
+try_ 12 << EOF
+static int global_deep_group_items[3];
+static int global_deep_group_array_size = sizeof((((global_deep_group_items))));
+int main(void) { return global_deep_group_array_size; }
+EOF
+try_ 4 << EOF
+enum global_size_enum { global_size_value };
+static int global_enumerator_size = sizeof global_size_value;
+int main(void) { return global_enumerator_size; }
+EOF
+try_ 4 << EOF
+enum grouped_size_enum { grouped_size_value };
+static int grouped_enumerator_size = sizeof((grouped_size_value));
+int main(void) { return grouped_enumerator_size; }
+EOF
+try_ 8 << EOF
+struct global_size_record { char tag; int values[2]; };
+static struct global_size_record global_size_object;
+static int global_member_array_size = sizeof global_size_object.values;
+int main(void) { return global_member_array_size; }
+EOF
+try_ 60 << EOF
+struct gp_size_record { int values[2][3]; };
+static struct gp_size_record *gp_size_pointer;
+static int gp_size = sizeof gp_size_pointer->values[1] +
+                     sizeof(gp_size_pointer->values) +
+                     sizeof((gp_size_pointer->values)[1]) +
+                     sizeof *&gp_size_pointer->values[1];
+int main(void) { return gp_size; }
+EOF
+try_ 36 << EOF
+struct pd_size_record { int values[2][3]; };
+static struct pd_size_record *pd_size_pointer;
+static int pd_size = sizeof((*pd_size_pointer).values) +
+                     sizeof((*pd_size_pointer).values[1]);
+int main(void) { return pd_size; }
+EOF
+try_ 8 << EOF
+typedef struct { int values[2]; } pd_typedef_record;
+typedef pd_typedef_record *pd_typedef_pointer;
+static pd_typedef_pointer pd_typedef_value;
+static int pd_typedef_size = sizeof((*pd_typedef_value).values);
+int main(void) { return pd_typedef_size; }
+EOF
+try_compile_error << EOF
+struct bad_global_member_access { int value; };
+static struct bad_global_member_access *bad_global_member_pointer;
+static int bad_global_member_size = sizeof bad_global_member_pointer.value;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct bad_global_arrow_access { int value; };
+static struct bad_global_arrow_access bad_global_arrow_object;
+static int bad_global_arrow_size = sizeof bad_global_arrow_object->value;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_addr_bits { unsigned int value : 1; };
+static struct gb_addr_bits gb_addr_value;
+static int gb_addr_size = sizeof &gb_addr_value.value;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_size_bits { unsigned int value : 1; };
+static struct gb_size_bits gb_size_value;
+static int gb_size_direct = sizeof gb_size_value.value;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_psize_bits { unsigned int value : 1; };
+static struct gb_psize_bits gb_psize_value;
+static int gb_size_parenthesized = sizeof(gb_psize_value.value);
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_gsize_bits { unsigned int value : 1; };
+static struct gb_gsize_bits gb_gsize_value;
+static int gb_size_grouped = sizeof((gb_gsize_value.value));
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_deref_bits { unsigned int value : 1; };
+static struct gb_deref_bits *gb_deref_value;
+static int gb_size_dereferenced = sizeof((*gb_deref_value).value);
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_flex_size { int count; int values[]; };
+static struct gb_flex_size gb_flex_value;
+static int gb_flex_direct = sizeof gb_flex_value.values;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_pflex_size { int count; int values[]; };
+static struct gb_pflex_size *gb_pflex_value;
+static int gb_flex_pointer = sizeof(gb_pflex_value->values);
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_dflex_size { int count; int values[]; };
+static struct gb_dflex_size *gb_dflex_value;
+static int gb_flex_dereferenced = sizeof((*gb_dflex_value).values);
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct gb_gflex_size { int count; int values[]; };
+static struct gb_gflex_size gb_gflex_value;
+static int gb_flex_grouped = sizeof((gb_gflex_value.values));
+int main(void) { return 0; }
+EOF
+try_ 8 << EOF
+struct psize_record { int values[2]; };
+static struct psize_record psize_object;
+static int psize_member_array = sizeof(psize_object.values);
+int main(void) { return psize_member_array; }
+EOF
+try_ 8 << EOF
+struct psize_inner { int values[2]; };
+struct psize_outer { struct psize_inner inner; };
+static struct psize_outer psize_nested_object;
+static int psize_nested_member_array = sizeof(psize_nested_object.inner.values);
+int main(void) { return psize_nested_member_array; }
+EOF
+try_ 12 << EOF
+struct psize_rows { int values[2][3]; };
+static struct psize_rows psize_rows_object;
+static int psize_member_row = sizeof((psize_rows_object.values)[1]);
+int main(void) { return psize_member_row; }
+EOF
+try_ 4 << EOF
+struct global_element_size_record { int values[2]; };
+static struct global_element_size_record global_element_size_object;
+static int global_member_element_size = sizeof global_element_size_object.values[1];
+int main(void) { return global_member_element_size; }
+EOF
+try_ 12 << EOF
+struct global_row_size_record { int values[2][3]; };
+static struct global_row_size_record global_row_size_object;
+static int global_member_row_size = sizeof global_row_size_object.values[1];
+int main(void) { return global_member_row_size; }
+EOF
+try_ 8 << EOF
+struct global_size_inner { int values[2]; };
+struct global_size_outer { char tag; struct global_size_inner inner; };
+static struct global_size_outer global_nested_size_object;
+static int global_nested_member_array_size =
+    sizeof global_nested_size_object.inner.values;
+int main(void) { return global_nested_member_array_size; }
+EOF
+try_ 16 << EOF
+static int parenthesized_items[3];
+static int parenthesized_size = sizeof(1) + sizeof(parenthesized_items);
+int main(void) { return parenthesized_size; }
+EOF
+try_ 4 << EOF
+static int global_grouped_string_size = sizeof(("a" "bc"));
+int main(void) { return global_grouped_string_size; }
+EOF
+try_ 4 << EOF
+static int folded_expression_size = sizeof(1 + 2 * 3);
+int main(void) { return folded_expression_size; }
+EOF
+try_ 4 << EOF
+static int unary_expression_size = sizeof -1;
+int main(void) { return unary_expression_size; }
+EOF
+try_ 4 << EOF
+static int nested_expression_size = sizeof((1 + 2));
+int main(void) { return nested_expression_size; }
+EOF
+try_ 11 << EOF
+static int string_expression_size =
+    sizeof "abc" + sizeof "a" "bc" + sizeof "\0x";
+int main(void) { return string_expression_size; }
+EOF
 try_ 20 << EOF
 int a = 5 * 2;
 int b = -4 * 3 + 7 + 9 / 3 * 5;
@@ -5979,6 +7141,57 @@ int main(void) {
 }
 EOF
 
+# C99 prototype calls require exactly the declared fixed argument count.
+try_compile_error << EOF
+int identity(int value) { return value; }
+int main(void) { return identity(); }
+EOF
+try_compile_error << EOF
+int identity(int value) { return value; }
+int main(void) { return identity(1, 2); }
+EOF
+try_compile_error << EOF
+int identity(int value) { return value; }
+int main(void) { int (*fn)(int) = identity; return fn(); }
+EOF
+try_compile_error << EOF
+int sum(int first, ...) { return first; }
+int main(void) { return sum(); }
+EOF
+try_ 4 << EOF
+/* An empty parameter list is not a prototype in C99. */
+int legacy() { return 4; }
+int main(void) { return legacy(1, 2); }
+EOF
+try_ 4 << EOF
+int refined();
+int refined(int value) { return value; }
+int main(void) { return refined(4); }
+EOF
+try_ 4 << EOF
+int qualified_parameter(const int value);
+int qualified_parameter(int value) { return value; }
+int main(void) { return qualified_parameter(4); }
+EOF
+try_compile_error << EOF
+int incompatible_parameter(const int *value);
+int incompatible_parameter(int *value) { return *value; }
+EOF
+try_compile_error << EOF
+int incompatible_volatile_parameter(volatile int *value);
+int incompatible_volatile_parameter(int *value) { return *value; }
+EOF
+try_compile_error << EOF
+int retained(int value);
+int retained();
+int retained(int value) { return value; }
+int main(void) { return retained(); }
+EOF
+try_compile_error << EOF
+int incompatible_definition(int value);
+int incompatible_definition() { return 0; }
+EOF
+
 try_compile_error << EOF
 int main(void) {
     int value = 1;
@@ -6384,6 +7597,7 @@ items 16 "int values[2][2][2][2]; return sizeof(values[0][0]);"
 items 8 "int values[2][2][2][2]; return sizeof(values[0][0][0]);"
 items 4 "int values[2][2][2][2]; return sizeof(values[0][0][0][0]);"
 items 12 "struct holder { int values[3]; }; struct holder value; return sizeof value.values;"
+items 12 "struct holder { int values[3]; }; struct holder value; return sizeof((value.values));"
 items 12 "struct holder { int values[2][3]; }; struct holder value; return sizeof(value.values[0]);"
 items 12 "struct holder { int values[2][3]; }; struct holder value; return sizeof value.values[0];"
 items 4 "struct holder { int values[2][3]; }; struct holder value; return sizeof(value.values[0][0]);"
@@ -6417,10 +7631,16 @@ int main(void)
 }
 EOF
 items 4 "int arr[5]; return sizeof(arr[0]);"
+items 4 "int value = 0; return sizeof(value = 9);"
+items 7 "int value = 3; int size = sizeof(value = 9); return value + size;"
+items 4 "int value = 0; return sizeof((value = 9, value)) + value;"
 items 4 "int x = 10; int *ptr = &x; return sizeof(*ptr);"
 items 1 "char c = 'A'; return sizeof(c);"
 items 2 "short s = 100; return sizeof(s);"
 items 4 "int a = 1, b = 2; return sizeof(a + b);"
+items 3 "return (1, 3);"
+items 4 "int value = 1; return (value++, value + 2);"
+items 3 "return (1, (2, 3));"
 items 7 "int value = 7; return +value;"
 items 255 "unsigned char value = 255; return +value;"
 try_compile_error << EOF
@@ -6489,6 +7709,8 @@ begin_category "Switch Statements" "Testing switch-case control flow"
 # switch-case
 items 10 "int a; a = 0; switch (3) { case 0: return 2; case 3: a = 10; break; case 1: return 0; } return a;"
 items 10 "int a; a = 0; switch (3) { case 0: return 2; default: a = 10; break; } return a;"
+items 7 "int value = 1; switch (value++, value + 1) { case 3: return value + 5; default: return 0; }"
+items 2 "switch (0 ? 1 : 2) { case 2: return 2; default: return 0; }"
 
 # Category: Enumerations
 begin_category "Enumerations" "Testing enum declarations and usage"
@@ -6497,6 +7719,13 @@ begin_category "Enumerations" "Testing enum declarations and usage"
 try_ 6 << EOF
 typedef enum { enum1 = 5, enum2 } enum_t;
 int main() { enum_t v = enum2; return v; }
+EOF
+try_ 2 << EOF
+enum trailing_values { trailing_first = 2, };
+int main(void) { return trailing_first; }
+EOF
+try_compile_error << EOF
+enum invalid_values { last_int = 2147483647, out_of_range };
 EOF
 
 # Block-scope enum definitions supply integer constants to expressions and
@@ -6696,6 +7925,112 @@ int main(void) {
            ((1 xor 3) == 2) and ((compl 0) < 0);
 }
 EOF
+try_flags 14 "--no-libc" << EOF
+#include <limits.h>
+#include <limits.h>
+#if CHAR_BIT != 8 || INT_MAX != 2147483647
+#error builtin limits.h macros are incorrect
+#endif
+int main(void) {
+    return (SCHAR_MIN == -128) + (SCHAR_MAX == 127) +
+           (UCHAR_MAX == 255U) + (CHAR_MIN == -128) +
+           (CHAR_MAX == 127) + (SHRT_MIN == -32768) +
+           (SHRT_MAX == 32767) + (USHRT_MAX == 65535U) +
+           (INT_MIN < 0) + (UINT_MAX > INT_MAX) +
+           (LONG_MIN < 0) + (ULONG_MAX > LONG_MAX) +
+           (LLONG_MIN < 0) + (ULLONG_MAX > LLONG_MAX);
+}
+EOF
+try_flags 24 "--no-libc" << EOF
+#include <stddef.h>
+#include <stddef.h>
+int main(void) {
+    int value = 3;
+    int *pointer = NULL;
+    size_t count = sizeof(pointer);
+    ptrdiff_t delta = -2;
+    wchar_t code = 65;
+    return (pointer == NULL) + ((pointer ? 0 : value) == 3) +
+           sizeof(count) + sizeof(delta) + sizeof(code) + (delta < 0) +
+           (code == 65);
+}
+EOF
+try_flags 4 "--no-libc" << EOF
+#include <stddef.h>
+struct inner { char tag; int value; };
+struct outer { char lead; struct inner nested; short tail; };
+typedef struct outer outer_t;
+static int tail_offset = offsetof(outer_t, tail);
+int main(void) {
+    return (offsetof(struct outer, nested) == 4) +
+           (offsetof(struct inner, value) == 4) +
+           (offsetof(struct outer, nested.value) == 8) +
+           (tail_offset == 12);
+}
+EOF
+try_flags 46 "--no-libc" << EOF
+#include <stdint.h>
+int main(void) {
+    return sizeof(int8_t) + sizeof(uint16_t) + sizeof(int32_t) +
+           sizeof(uint64_t) + sizeof(int_least8_t) +
+           sizeof(uint_least16_t) + sizeof(int_fast32_t) +
+           sizeof(uint_fast64_t) + sizeof(intmax_t) + sizeof(uintptr_t);
+}
+EOF
+try_flags 18 "--no-libc" << EOF
+#include <stdint.h>
+int main(void) {
+    return (INT8_MIN == -128) + (INT8_MAX == 127) + (UINT8_MAX == 255U) +
+           (INT16_MIN == -32768) + (INT16_MAX == 32767) + (UINT16_MAX == 65535U) +
+           (INT32_MIN < 0) + (INT32_MAX > 0) + (UINT32_MAX > INT32_MAX) +
+           (INT64_MIN < 0) + (INT64_MAX > 0) + (UINT64_MAX > INT64_MAX) +
+           (INTMAX_MIN < 0) + (INTMAX_MAX > 0) + (UINTMAX_MAX > INTMAX_MAX) +
+           (INTPTR_MIN < 0) + (INTPTR_MAX > INT32_MAX) + (UINTPTR_MAX > INTPTR_MAX);
+}
+EOF
+try_flags 10 "--no-libc" << EOF
+#include <stdint.h>
+#include <signal.h>
+#include <wchar.h>
+int main(void) {
+    sig_atomic_t signal_value = SIG_ATOMIC_MAX;
+    wint_t wide_value = WINT_MAX;
+    return (sizeof(size_t) == sizeof(ptrdiff_t)) +
+           (sizeof(sig_atomic_t) == 4) + (sizeof(wint_t) == 4) +
+           (PTRDIFF_MIN < 0) + (PTRDIFF_MAX > 0) +
+           (SIZE_MAX > PTRDIFF_MAX) + (SIG_ATOMIC_MIN < 0) +
+           (WCHAR_MIN < 0) + (WINT_MIN == 0U) +
+           (signal_value > 0 && wide_value == WINT_MAX);
+}
+EOF
+try_flags 16 "--no-libc" << EOF
+#include <stdint.h>
+int main(void) {
+    return (INT_LEAST8_MIN < 0) + (UINT_LEAST8_MAX > 0) +
+           (INT_LEAST16_MIN < 0) + (UINT_LEAST16_MAX > 0) +
+           (INT_LEAST32_MIN < 0) + (UINT_LEAST32_MAX > INT_LEAST32_MAX) +
+           (INT_LEAST64_MIN < 0) + (UINT_LEAST64_MAX > INT_LEAST64_MAX) +
+           (INT_FAST8_MIN < 0) + (UINT_FAST8_MAX > INT_FAST8_MAX) +
+           (INT_FAST16_MIN < 0) + (UINT_FAST16_MAX > INT_FAST16_MAX) +
+           (INT_FAST32_MIN < 0) + (UINT_FAST32_MAX > INT_FAST32_MAX) +
+           (INT_FAST64_MIN < 0) + (UINT_FAST64_MAX > INT_FAST64_MAX);
+}
+EOF
+try_flags 20 "--no-libc" << EOF
+#include <stdint.h>
+int main(void) {
+    return (INT8_C(12) == 12) + (UINT8_C(12) == 12) +
+           (INT16_C(12) == 12) + (UINT16_C(12) == 12) +
+           (INT32_C(12) == 12) + (UINT32_C(12) == 12U) +
+           (INT64_C(12) == 12LL) + (UINT64_C(12) == 12ULL) +
+           (INTMAX_C(12) == 12LL) + (UINTMAX_C(12) == 12ULL) +
+           (sizeof(INT8_C(12)) == 4) + (sizeof(UINT8_C(12)) == 4) +
+           (sizeof(INT16_C(12)) == 4) + (sizeof(UINT16_C(12)) == 4) +
+           (sizeof(INT32_C(12)) == 4) + (sizeof(UINT32_C(12)) == 4) +
+           (sizeof(INT64_C(12)) == 8) + (sizeof(UINT64_C(12)) == 8) +
+           (sizeof(INTMAX_C(12)) == 8) + (sizeof(UINTMAX_C(12)) == 8);
+}
+EOF
 try_compile_error_message "Angle header not found in -I search paths" << EOF
 #include <missing-shecc-header.h>
 EOF
@@ -6721,6 +8056,56 @@ int main(void) { return 0; }
 EOF
 try_compile_error << EOF
 _Pragma(123)
+EOF
+try_ 8 << EOF
+??=define TRI_LEFT 4 ??/
++ 3
+??=if TRI_LEFT == 7
+??=define TRI_ENABLED 1
+??=else
+??=define TRI_ENABLED 0
+??=endif
+??=define JOIN_TRI(left, right) left ??=??= right
+int JOIN_TRI(tri, graph) = TRI_LEFT;
+int main(void) ??< int values??(2??) = ??< 3, trigraph ??>; char *word = "??/n"; return TRI_ENABLED * values??(1??) + (word??(0??) == '\n'); ??>
+EOF
+try_ 1 << EOF
+int main(void) {
+    // ??/
+    return 0;
+    return 1;
+}
+EOF
+try_ 8 << EOF
+int main(void) {
+    char *raw = "a\
+b";
+    char *trigraph = "a??/
+b";
+    return (1 \
++ 2) + (1 ??/
++ 2) + (raw[1] == 'b') + (trigraph[1] == 'b');
+}
+EOF
+try_ 7 << EOF
+#def\
+ine RAW_NAME ma\
+in
+??=def??/
+ine TRI_VALUE 7
+int RAW_NAME(void) { return TRI_VALUE; }
+EOF
+try_ 8 << EOF
+%:define DIGRAPH_VALUE 7
+%:if DIGRAPH_VALUE == 7
+%:define DIGRAPH_ENABLED 1
+%:else
+%:define DIGRAPH_ENABLED 0
+%:endif
+%:define JOIN(left, right) left %:%: right
+%:define STRINGIFY(value) %: value
+int JOIN(di, graph) = DIGRAPH_VALUE;
+int main(void) <% int values<:2:> = <% 3, digraph %>; char *word = STRINGIFY(ok); return DIGRAPH_ENABLED * values<:1:> + (word<:0:> == 'o'); %>
 EOF
 
 # #ifdef...#else...#endif
@@ -6861,6 +8246,17 @@ try_ 16 << EOF
 int main(void) { return OR_RESULT + AND_RESULT + TERNARY_RESULT; }
 EOF
 
+# An active invalid arithmetic operation in a #if expression must be diagnosed
+# by the preprocessor rather than reaching host division/modulo behavior.
+try_compile_error << EOF
+#if 1 / 0
+#endif
+EOF
+try_compile_error << EOF
+#if 1 % 0
+#endif
+EOF
+
 # Character constants are integer constants in a C99 #if expression.
 try_ 14 << EOF
 #if 'A' == 65 && '\\n' == 10
@@ -6887,6 +8283,33 @@ try_ 2 << EOF
 #define MULTI_CHARACTER_RESULT 0
 #endif
 int main(void) { return ('AB' == 0x4142) + MULTI_CHARACTER_RESULT; }
+EOF
+
+try_ 3 << EOF
+#define PREPROCESSOR_WIDE_CHARACTER L'C'
+#if L'A' == 65 && L'\x42' == 66 && PREPROCESSOR_WIDE_CHARACTER == 67
+#define WIDE_CHARACTER_RESULT 3
+#else
+#define WIDE_CHARACTER_RESULT 0
+#endif
+int main(void) { return WIDE_CHARACTER_RESULT; }
+EOF
+
+try_ 1 << EOF
+#include <stdint.h>
+#if INT64_MIN < 0 && UINT64_MAX > 0 && UINT64_MAX > INT64_MAX && \
+    (UINT64_MAX >> 63) == 1 && ~0ULL == UINT64_MAX && \
+    UINT64_MAX + 1ULL == 0 && UINT64_MAX / 2ULL == INT64_MAX && \
+    UINT64_MAX % 2ULL == 1 && -1LL > 1ULL && -2LL < -1LL && \
+    (-2LL >> 1) == -1LL && (-1LL >> 33) == -1LL && \
+    -7LL / 3LL == -2LL && -7LL % 3LL == -1LL && \
+    0xffffffffffffffff == UINT64_MAX && \
+    01777777777777777777777 == UINT64_MAX
+#define WIDE_INTEGER_CONDITION 1
+#else
+#define WIDE_INTEGER_CONDITION 0
+#endif
+int main(void) { return WIDE_INTEGER_CONDITION; }
 EOF
 
 try_ 1 << EOF
@@ -10712,6 +12135,25 @@ int main()
 EOF
 
 begin_category "Bit-fields"
+try_ 0 << EOF
+typedef _Bool bool_alias;
+struct flags { bool_alias value : 1; };
+int main(void) {
+    struct flags value = {2};
+    value.value = 3;
+    return value.value != 1 || sizeof(struct flags) != 1;
+}
+EOF
+try_ 0 << EOF
+typedef _Bool bool_alias;
+struct flags { bool_alias value : 1; };
+static struct flags value = {2};
+int main(void) { return value.value != 1; }
+EOF
+try_compile_error << EOF
+typedef _Bool bool_alias;
+int main(void) { bool_alias values[] = "x"; return 0; }
+EOF
 try_ 37 << EOF
 struct flags {
     unsigned int low : 3;
@@ -10768,12 +12210,47 @@ int main(void) {
     return value.left + value.right;
 }
 EOF
+try_ 6 << EOF
+struct flags { unsigned int value : 3; };
+int main(void) {
+    struct flags flags = {2};
+    return (flags.value += 9) + flags.value;
+}
+EOF
+try_ 10 << EOF
+struct flags { unsigned int value : 3; unsigned int adjacent : 3; };
+int main(void) {
+    struct flags flags = {2, 4};
+    struct flags *pointer = &flags;
+    return (pointer->value += 9) + pointer->value + pointer->adjacent;
+}
+EOF
 try_ 9 << EOF
 struct flags { unsigned int left : 3; unsigned int right : 3; };
 int main(void) {
     struct flags value = {2, 4};
     int old = value.left++;
     return old + value.left + value.right;
+}
+EOF
+try_ 90 << EOF
+struct flags { int signed_value : 4; unsigned int adjacent : 4; };
+int main(void) {
+    struct flags value = {-3, 5};
+    struct flags *pointer = &value;
+    int old = pointer->signed_value++;
+    pointer->adjacent += 5;
+    return (old + 4) * 64 + (pointer->signed_value + 4) * 8 +
+           pointer->adjacent;
+}
+EOF
+try_ 0 << EOF
+struct flags { int signed_value : 3; unsigned int adjacent : 3; };
+int main(void) {
+    struct flags value = {0};
+    struct flags *pointer = &value;
+    return (pointer->signed_value = 7) + pointer->signed_value +
+           (pointer->adjacent = 9) + pointer->adjacent;
 }
 EOF
 try_ 2 << EOF
@@ -10839,6 +12316,11 @@ struct flags { unsigned int left : 3; unsigned int right : 3; };
 static struct flags value = {.left = 7, .right = 3, .left = 2};
 int main(void) { return value.left + value.right; }
 EOF
+try_ 2 << EOF
+struct flags { int signed_value : 4; unsigned int narrow : 3; };
+static struct flags value = {-3, 9};
+int main(void) { return value.signed_value + value.narrow + 4; }
+EOF
 try_ 7 << EOF
 struct flags { unsigned int left : 3; unsigned int right : 3; };
 static struct flags values[2] = {{1, 2}, {.left = 3, .right = 4}};
@@ -10871,12 +12353,586 @@ try_compile_error << EOF
 struct invalid { _Bool value : 2; };
 EOF
 try_compile_error << EOF
+struct invalid { static unsigned int value : 1; };
+EOF
+try_compile_error << EOF
+struct invalid { extern unsigned int value : 1; };
+EOF
+try_compile_error << EOF
 struct flags { unsigned int value : 1; };
 int main(void) { struct flags value; return (int)&value.value; }
 EOF
 try_compile_error << EOF
 struct flags { unsigned int value : 1; };
 int main(void) { struct flags value; return sizeof(value.value); }
+EOF
+try_compile_error << EOF
+struct flags { const unsigned int value : 3; };
+int main(void) { struct flags value = {1}; value.value = 2; return value.value; }
+EOF
+
+begin_category "Flexible array members"
+try_ 16 << EOF
+struct packet { int count; int values[]; };
+int main(void) {
+    int storage[4] = {0};
+    struct packet *packet = (struct packet *)storage;
+    packet->count = 3;
+    packet->values[0] = 3;
+    packet->values[1] = 5;
+    packet->values[2] = 4;
+    return packet->count + packet->values[0] + packet->values[1] +
+           packet->values[2] + (sizeof(struct packet) == sizeof(int));
+}
+EOF
+try_compile_error << EOF
+union invalid { int values[]; };
+EOF
+try_compile_error << EOF
+struct invalid { int values[]; int trailing; };
+EOF
+try_compile_error << EOF
+struct invalid { int values[]; };
+EOF
+try_compile_error << EOF
+struct flexible { int count; int values[]; };
+struct invalid { struct flexible member; };
+EOF
+try_compile_error << EOF
+struct flexible { int count; int values[]; };
+struct flexible invalid[2];
+EOF
+try_compile_error << EOF
+struct flexible { int count; int values[]; };
+int main(void) {
+    int storage[2];
+    struct flexible *value = (struct flexible *)storage;
+    return sizeof(value->values);
+}
+EOF
+try_compile_error << EOF
+struct flexible { int count; int values[]; };
+int main(void) {
+    int storage[2];
+    struct flexible *value = (struct flexible *)storage;
+    return sizeof((value->values));
+}
+EOF
+try_compile_error << EOF
+struct flexible { int count; int values[]; };
+int main(void) {
+    int storage[2];
+    struct flexible *value = (struct flexible *)storage;
+    return sizeof((*value).values);
+}
+EOF
+
+begin_category "C99 Conformance Mode" "Testing --std=c99 extension diagnostics"
+
+# The default remains intentionally permissive for existing users and suite
+# coverage; strict mode makes the C99 boundary explicit.
+try_ 2 << EOF
+int main(void) { return 0b10; }
+EOF
+try_ 27 << EOF
+int main(void) { return '\e'; }
+EOF
+try_ 1 << EOF
+int main(void) { int value = (int[]){1, 2}; return value; }
+EOF
+
+try_compile_error_flag --std=c99 << EOF
+int main(void) { return 0b10; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { return '\e'; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { int value = (int[]){1, 2}; return value; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { char value = (char[]){1, 2}; return value; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { return (int[]){1, 2}; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { int values[1] = {}; return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+struct value { int member; };
+int main(void) { struct value item = {}; return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { int value = (int){}; return value; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { int *value = (int*){}; return value != 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { int *value = (int[]){}; return value != 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int variadic(...) { return 0; }
+int main(void) { return variadic(); }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { int (*callback)(...) = 0; return callback != 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int identity(int value) { return value; }
+int main(void) { return identity(1,); }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int identity(int value) { return value; }
+int main(void) { int (*callback)(int) = identity; return callback(1,); }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int prototype(int,);
+int main(void) { return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int definition(int value,) { return value; }
+int main(void) { return definition(0); }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { int (*callback)(int,) = 0; return callback != 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int prototype(void *value,);
+int main(void) { return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+void value_return(void) { return 1; }
+int main(void) { value_return(); return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int bare_return(void) { return; }
+int main(void) { return bare_return(); }
+EOF
+try_compile_error_flag --std=c99 << EOF
+void *bare_pointer_return(void) { return; }
+int main(void) { return bare_pointer_return() != 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) {
+    switch (0) { case 1: return 1; case 1: return 2; }
+    return 0;
+}
+EOF
+try_compile_error_flag --std=c99 << EOF
+enum { first = 1, second = 1 };
+int main(void) {
+    switch (0) { case first: return 1; case second: return 2; }
+    return 0;
+}
+EOF
+
+# Ordinary C99 spellings remain accepted in strict mode.
+try_flags 2 --std=c99 << EOF
+int main(void) { return 0x2; }
+EOF
+try_flags 27 --std=c99 << EOF
+int main(void) { return '\033'; }
+EOF
+try_flags 0 --std=c99 << EOF
+int main(void) { int *value = (int[]){1, 2}; return value[0] != 1; }
+EOF
+try_ 0 << EOF
+struct value { int member; };
+int main(void) {
+    int values[1] = {};
+    struct value item = {};
+    int value = (int){};
+    int *pointer = (int*){};
+    return values[0] || item.member || value || pointer != 0;
+}
+EOF
+try_compile_flag --std=c99 << EOF
+typedef int *int_pointer;
+int_pointer values(void) { return (int[]){1, 2}; }
+int main(void) { values(); return 0; }
+EOF
+try_compile_flag --std=c99 << EOF
+typedef int *int_pointer;
+int second(int_pointer value) { return value[1]; }
+int main(void) {
+    int_pointer value = (int[]){1, 2};
+    return second((int[]){1, 2}) != 2 || value[0] != 1;
+}
+EOF
+try_flags 7 --std=c99 << EOF
+int variadic(int value, ...) { return value; }
+int main(void) { return variadic(7, 1, 2); }
+EOF
+try_flags 2 --std=c99 << EOF
+int identity(int value) { return value; }
+int main(void) { return identity((1, 2)); }
+EOF
+try_compile_flag --std=c99 << EOF
+int prototype(int value);
+int variadic(int value, ...);
+int main(void) { return 0; }
+EOF
+try_flags 1 --std=c99 << EOF
+void no_value(void) { return; }
+int with_value(void) { return 1; }
+int main(void) { no_value(); return with_value(); }
+EOF
+try_flags 2 --std=c99 << EOF
+int main(void) {
+    switch (2) { case 1: return 1; case 2: return 2; }
+    return 0;
+}
+EOF
+try_ 0 << EOF
+int variadic(...) { return 0; }
+int main(void) { return variadic(); }
+EOF
+try_ 1 << EOF
+int identity(int value) { return value; }
+int main(void) { return identity(1,); }
+EOF
+
+begin_category "C99 assert.h" "Testing freestanding assertion semantics"
+
+try_ 0 << EOF
+#include <assert.h>
+int main(void) { int calls = 0; assert(++calls == 1); return calls - 1; }
+EOF
+try_ 0 << EOF
+#define NDEBUG
+#include <assert.h>
+int main(void) { int calls = 0; assert(++calls); return calls; }
+EOF
+try_ 0 << EOF
+#define NDEBUG
+#include <assert.h>
+int main(void) { int calls = 0; (assert(++calls), calls); return calls; }
+EOF
+try_failure_output "Assertion failed: 0" << EOF
+#define NDEBUG
+#include <assert.h>
+#undef NDEBUG
+#include <assert.h>
+int main(void) { assert(0); return 0; }
+EOF
+try_ 0 << EOF
+#include <assert.h>
+#define NDEBUG
+#include <assert.h>
+int main(void) { int calls = 0; assert(++calls); return calls; }
+EOF
+try_failure_output "Assertion failed: 2 + 2 == 5" << EOF
+#include <assert.h>
+int main(void) { assert(2 + 2 == 5); return 0; }
+EOF
+try_failure_output "Assertion failed: SUM(1, 1) == 3" << EOF
+#include <assert.h>
+#define SUM(a, b) a + b
+int main(void) { assert(SUM(1, 1) == 3); return 0; }
+EOF
+
+begin_category "C99 stdarg.h" "Testing variadic argument macros"
+
+try_ 0 << EOF
+#include <stdarg.h>
+int sum(int count, ...) {
+    va_list ap;
+    int total = 0;
+    va_start(ap, count);
+    for (int i = 0; i < count; i++) total += va_arg(ap, int);
+    va_end(ap);
+    return total;
+}
+int main(void) { return sum(3, 1, 2, 3) != 6; }
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+int tenth(int count, ...) {
+    va_list ap;
+    int value = 0;
+    va_start(ap, count);
+    for (int i = 0; i < count; i++) value = va_arg(ap, int);
+    va_end(ap);
+    return value;
+}
+int main(void) { return tenth(7, 1, 2, 3, 4, 5, 6, 7) != 7; }
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+int after_char(char last, ...) {
+    va_list ap;
+    va_start(ap, last);
+    return va_arg(ap, int);
+}
+int after_pointer(int *last, ...) {
+    va_list ap;
+    va_start(ap, last);
+    return va_arg(ap, int);
+}
+int after_wide(long long last, ...) {
+    va_list ap;
+    va_start(ap, last);
+    return va_arg(ap, int);
+}
+int main(void) {
+    int value = 0;
+    return after_char(0, 2) != 2 || after_pointer(&value, 3) != 3 ||
+           after_wide(0, 4) != 4;
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+long long wide_argument(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, long long);
+}
+int main(void) { return wide_argument(1, 1234567890123LL) != 1234567890123LL; }
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+typedef int *int_pointer;
+struct item { int value; };
+int type_names(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    unsigned int u = va_arg(ap, unsigned int);
+    unsigned long l = va_arg(ap, unsigned long);
+    const int *p = va_arg(ap, const int *);
+    int_pointer q = va_arg(ap, int_pointer);
+    struct item *r = va_arg(ap, struct item *);
+    va_end(ap);
+    return u != 7U || l != 8UL || *p != 9 || *q != 10 || r->value != 11;
+}
+int main(void) {
+    int p = 9, q = 10;
+    struct item r = { 11 };
+    return type_names(5, 7U, 8UL, &p, &q, &r);
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+enum colour { red = 3, blue = 7 };
+int enum_argument(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    enum colour shade = va_arg(ap, enum colour);
+    va_end(ap);
+    return shade != blue;
+}
+int main(void) {
+    return enum_argument(1, blue);
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+int direct_pointer_to_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, int (*)[2])[0][1] != 7;
+}
+int main(void) { int row[2] = { 1, 7 }; return direct_pointer_to_array(1, &row); }
+EOF
+
+try_compile_error << EOF
+#include <stdarg.h>
+typedef int row[2];
+int unsupported_typedef(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, row);
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+typedef int row[2];
+int typedef_pointer_to_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, row *)[0][1] != 9;
+}
+int main(void) { row value = { 4, 9 }; return typedef_pointer_to_array(1, &value); }
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+typedef int row[2];
+typedef row *row_pointer;
+int typedef_alias_pointer_to_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, row_pointer)[0][1] != 9;
+}
+int main(void) { row value = { 4, 9 }; return typedef_alias_pointer_to_array(1, &value); }
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+typedef int row3[3];
+typedef row3 *row3_pointer;
+int typedef_alias_row3(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, row3_pointer)[0][2] != 9;
+}
+int main(void) { row3 value = { 1, 2, 9 }; return typedef_alias_row3(1, &value); }
+EOF
+
+try_compile_error << EOF
+#include <stdarg.h>
+struct item { int first; int second; };
+typedef struct item rows[2];
+typedef rows *rows_pointer;
+int unsupported_aggregate_pointer_to_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, rows_pointer)[0][1].second;
+}
+EOF
+
+try_compile_error << EOF
+#include <stdarg.h>
+struct item { int value; };
+int unsupported_direct_aggregate_pointer_to_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, struct item (*)[2])[0][1].value;
+}
+EOF
+
+try_compile_error << EOF
+#include <stdarg.h>
+int unsupported_pointer_element_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return *va_arg(ap, int * (*)[2])[0][1];
+}
+EOF
+
+try_compile_error << EOF
+#include <stdarg.h>
+int unsupported_void_pointer_to_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, void (*)[2]) != 0;
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+int two_dimensional_pointer_to_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, int (*)[2][3])[1][1][2] != 12;
+}
+int main(void) {
+    int matrices[2][2][3] = {
+        { { 1, 2, 3 }, { 4, 5, 6 } },
+        { { 7, 8, 9 }, { 10, 11, 12 } }
+    };
+    return two_dimensional_pointer_to_array(1, matrices);
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+int plus_five(int value) { return value + 5; }
+int invoke(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, int (*)(int))(4) != 9;
+}
+int main(void) { int (*callback)(int) = plus_five; return invoke(1, callback); }
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+int once(int count, ...) {
+    va_list cursors[2];
+    int i = 0;
+    va_start(cursors[0], count);
+    int value = va_arg(cursors[i++], int);
+    return value != 12 ? 1 : i != 1 ? 2 : 0;
+}
+int main(void) { return once(1, 12); }
+EOF
+
+try_compile_error << EOF
+#include <stdarg.h>
+int bad(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    va_arg(ap, void);
+    return 0;
+}
+EOF
+
+try_compile_error << EOF
+#include <stdarg.h>
+struct incomplete;
+int bad(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    va_arg(ap, struct incomplete);
+    return 0;
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+struct payload { int first; int second; int third; };
+union word { int value; int other; };
+int consume(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    struct payload item = va_arg(ap, struct payload);
+    union word choice = va_arg(ap, union word);
+    int sum = item.first + item.second + item.third + choice.value;
+    item.first = 99;
+    va_end(ap);
+    return sum;
+}
+int main(void) {
+    struct payload value = { 1, 2, 3 };
+    union word choice = { 4 };
+    return consume(2, value, choice) != 10 || value.first != 1;
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+int inspect(int count, ...) {
+    int *pointer;
+    va_list ap, copy;
+    va_start(ap, count);
+    va_copy(copy, ap);
+    va_arg(ap, int);
+    pointer = va_arg(ap, int *);
+    int value = va_arg(copy, int);
+    va_end(copy);
+    va_end(ap);
+    return value != 4 || *pointer != 9;
+}
+int main(void) { int marker = 9; return inspect(2, 4, &marker); }
+EOF
+
+try_flags 0 "--no-libc" << EOF
+#include <stdarg.h>
+int first(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return va_arg(ap, int);
+}
+int main(void) { return first(1, 0); }
 EOF
 
 # Test Results Summary

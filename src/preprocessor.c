@@ -105,9 +105,10 @@ bool is_builtin_system_header(const char *name)
     return !strcmp(name, "assert.h") || !strcmp(name, "ctype.h") ||
            !strcmp(name, "errno.h") || !strcmp(name, "limits.h") ||
            !strcmp(name, "stdarg.h") || !strcmp(name, "stdbool.h") ||
-           !strcmp(name, "stddef.h") || !strcmp(name, "stdio.h") ||
-           !strcmp(name, "stdlib.h") || !strcmp(name, "string.h") ||
-           !strcmp(name, "sys/stat.h");
+           !strcmp(name, "stddef.h") || !strcmp(name, "stdint.h") ||
+           !strcmp(name, "signal.h") || !strcmp(name, "wchar.h") ||
+           !strcmp(name, "stdio.h") || !strcmp(name, "stdlib.h") ||
+           !strcmp(name, "string.h") || !strcmp(name, "sys/stat.h");
 }
 
 void define_builtin_object_macro(const char *name,
@@ -121,6 +122,255 @@ void define_builtin_object_macro(const char *name,
         new_token(kind, &synth_built_in_loc, strlen(replacement));
     macro->replacement->literal = intern_string((char *) replacement);
     hashmap_put(MACROS, macro->name, macro);
+}
+
+/* Integer minimum macros are preprocessing token sequences rather than one
+ * negative literal token: this preserves C's ordinary unary-minus spelling for
+ * INT_MIN and LLONG_MIN after macro expansion.
+ */
+void define_builtin_negative_macro(const char *name, const char *magnitude)
+{
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    token_t *minus = new_token(T_minus, &synth_built_in_loc, 1);
+    token_t *numeric =
+        new_token(T_numeric, &synth_built_in_loc, strlen(magnitude));
+
+    macro->name = intern_string((char *) name);
+    minus->literal = "-";
+    numeric->literal = intern_string((char *) magnitude);
+    minus->next = numeric;
+    macro->replacement = minus;
+    hashmap_put(MACROS, macro->name, macro);
+}
+
+token_t *append_builtin_macro_token(token_t **replacement,
+                                    token_t **tail,
+                                    token_kind_t kind,
+                                    const char *literal);
+
+/* C99's integer construction macros append a target representation suffix to
+ * their single integer-token argument. The preprocessor's ordinary ## path
+ * rescans the joined spelling, so the replacement remains a numeric token.
+ */
+void define_builtin_integer_construction_macro(const char *name,
+                                               const char *suffix)
+{
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    token_t *tail = NULL;
+
+    macro->name = intern_string((char *) name);
+    macro->is_function_like = true;
+    macro->param_num = 1;
+    macro->param_names[0] = new_token(T_identifier, &synth_built_in_loc, 5);
+    macro->param_names[0]->literal = "value";
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "value");
+    if (suffix[0]) {
+        append_builtin_macro_token(&macro->replacement, &tail, T_hashhash,
+                                   "##");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   suffix);
+    }
+    hashmap_put(MACROS, macro->name, macro);
+}
+
+token_t *append_builtin_macro_token(token_t **replacement,
+                                    token_t **tail,
+                                    token_kind_t kind,
+                                    const char *literal)
+{
+    token_t *token = new_token(kind, &synth_built_in_loc, strlen(literal));
+
+    token->literal = intern_string((char *) literal);
+    if (*tail) {
+        token_t *previous = *tail;
+
+        previous->next = token;
+    } else
+        *replacement = token;
+    *tail = token;
+    return token;
+}
+
+/* Spell signed minima as subtraction from a representable maximum. This keeps
+ * the macro's expression type equal to the represented C type.
+ */
+void define_builtin_minimum_macro(const char *name,
+                                  const char *maximum,
+                                  const char *one)
+{
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    token_t *tail = NULL;
+
+    macro->name = intern_string((char *) name);
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_minus, "-");
+    append_builtin_macro_token(&macro->replacement, &tail, T_numeric, maximum);
+    append_builtin_macro_token(&macro->replacement, &tail, T_minus, "-");
+    append_builtin_macro_token(&macro->replacement, &tail, T_numeric, one);
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    hashmap_put(MACROS, macro->name, macro);
+}
+
+/* offsetof is specified as a function-like macro. Route its type/member
+ * operands to the parser so record layout, rather than a null-pointer member
+ * expression, determines the result.
+ */
+void install_stddef_offsetof_macro(void)
+{
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    token_t *tail = NULL;
+
+    macro->name = intern_string("offsetof");
+    macro->is_function_like = true;
+    macro->param_num = 2;
+    macro->param_names[0] = new_token(T_identifier, &synth_built_in_loc, 4);
+    macro->param_names[0]->literal = "type";
+    macro->param_names[1] = new_token(T_identifier, &synth_built_in_loc, 6);
+    macro->param_names[1]->literal = "member";
+
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "__builtin_offsetof");
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "type");
+    append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "member");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    hashmap_put(MACROS, macro->name, macro);
+}
+
+/* shecc currently has signed plain char, 16-bit short, 32-bit int/long, and
+ * 64-bit long long on every target. Keep <limits.h> tied to those actual
+ * language types rather than to the host compiler's ABI.
+ */
+void install_limits_header(void)
+{
+    define_builtin_object_macro("CHAR_BIT", T_numeric, "8");
+    define_builtin_object_macro("SCHAR_MAX", T_numeric, "127");
+    define_builtin_object_macro("UCHAR_MAX", T_numeric, "255U");
+    define_builtin_object_macro("CHAR_MAX", T_numeric, "127");
+    define_builtin_object_macro("SHRT_MAX", T_numeric, "32767");
+    define_builtin_object_macro("USHRT_MAX", T_numeric, "65535U");
+    define_builtin_object_macro("INT_MAX", T_numeric, "2147483647");
+    define_builtin_object_macro("UINT_MAX", T_numeric, "4294967295U");
+    define_builtin_object_macro("LONG_MAX", T_numeric, "2147483647L");
+    define_builtin_object_macro("ULONG_MAX", T_numeric, "4294967295UL");
+    define_builtin_object_macro("LLONG_MAX", T_numeric,
+                                "9223372036854775807LL");
+    define_builtin_object_macro("ULLONG_MAX", T_numeric,
+                                "18446744073709551615ULL");
+    define_builtin_object_macro("MB_LEN_MAX", T_numeric, "1");
+
+    define_builtin_negative_macro("SCHAR_MIN", "128");
+    define_builtin_negative_macro("CHAR_MIN", "128");
+    define_builtin_negative_macro("SHRT_MIN", "32768");
+    define_builtin_minimum_macro("INT_MIN", "2147483647", "1");
+    define_builtin_minimum_macro("LONG_MIN", "2147483647L", "1L");
+    define_builtin_minimum_macro("LLONG_MIN", "9223372036854775807LL", "1LL");
+}
+
+/* A C null pointer constant may be the integer constant expression 0. */
+void install_stddef_header(void)
+{
+    define_builtin_object_macro("NULL", T_numeric, "0");
+    install_stddef_offsetof_macro();
+}
+
+/* <stdint.h>'s typedefs are parser-provided target types; install the target
+ * macro surface alongside them when the header is included.
+ */
+void install_stdint_header(void)
+{
+    define_builtin_negative_macro("INT8_MIN", "128");
+    define_builtin_object_macro("INT8_MAX", T_numeric, "127");
+    define_builtin_object_macro("UINT8_MAX", T_numeric, "255U");
+    define_builtin_negative_macro("INT16_MIN", "32768");
+    define_builtin_object_macro("INT16_MAX", T_numeric, "32767");
+    define_builtin_object_macro("UINT16_MAX", T_numeric, "65535U");
+    define_builtin_minimum_macro("INT32_MIN", "2147483647", "1");
+    define_builtin_object_macro("INT32_MAX", T_numeric, "2147483647");
+    define_builtin_object_macro("UINT32_MAX", T_numeric, "4294967295U");
+    define_builtin_minimum_macro("INT64_MIN", "9223372036854775807LL", "1LL");
+    define_builtin_object_macro("INT64_MAX", T_numeric,
+                                "9223372036854775807LL");
+    define_builtin_object_macro("UINT64_MAX", T_numeric,
+                                "18446744073709551615ULL");
+    define_builtin_minimum_macro("INTMAX_MIN", "9223372036854775807LL", "1LL");
+    define_builtin_object_macro("INTMAX_MAX", T_numeric,
+                                "9223372036854775807LL");
+    define_builtin_object_macro("UINTMAX_MAX", T_numeric,
+                                "18446744073709551615ULL");
+    define_builtin_minimum_macro("SIG_ATOMIC_MIN", "2147483647", "1");
+    define_builtin_object_macro("SIG_ATOMIC_MAX", T_numeric, "2147483647");
+    define_builtin_minimum_macro("WCHAR_MIN", "2147483647", "1");
+    define_builtin_object_macro("WCHAR_MAX", T_numeric, "2147483647");
+    define_builtin_object_macro("WINT_MIN", T_numeric, "0U");
+    define_builtin_object_macro("WINT_MAX", T_numeric, "4294967295U");
+    define_builtin_negative_macro("INT_LEAST8_MIN", "128");
+    define_builtin_object_macro("INT_LEAST8_MAX", T_numeric, "127");
+    define_builtin_object_macro("UINT_LEAST8_MAX", T_numeric, "255U");
+    define_builtin_negative_macro("INT_LEAST16_MIN", "32768");
+    define_builtin_object_macro("INT_LEAST16_MAX", T_numeric, "32767");
+    define_builtin_object_macro("UINT_LEAST16_MAX", T_numeric, "65535U");
+    define_builtin_minimum_macro("INT_LEAST32_MIN", "2147483647", "1");
+    define_builtin_object_macro("INT_LEAST32_MAX", T_numeric, "2147483647");
+    define_builtin_object_macro("UINT_LEAST32_MAX", T_numeric, "4294967295U");
+    define_builtin_minimum_macro("INT_LEAST64_MIN", "9223372036854775807LL",
+                                 "1LL");
+    define_builtin_object_macro("INT_LEAST64_MAX", T_numeric,
+                                "9223372036854775807LL");
+    define_builtin_object_macro("UINT_LEAST64_MAX", T_numeric,
+                                "18446744073709551615ULL");
+    define_builtin_minimum_macro("INT_FAST8_MIN", "2147483647", "1");
+    define_builtin_object_macro("INT_FAST8_MAX", T_numeric, "2147483647");
+    define_builtin_object_macro("UINT_FAST8_MAX", T_numeric, "4294967295U");
+    define_builtin_minimum_macro("INT_FAST16_MIN", "2147483647", "1");
+    define_builtin_object_macro("INT_FAST16_MAX", T_numeric, "2147483647");
+    define_builtin_object_macro("UINT_FAST16_MAX", T_numeric, "4294967295U");
+    define_builtin_minimum_macro("INT_FAST32_MIN", "2147483647", "1");
+    define_builtin_object_macro("INT_FAST32_MAX", T_numeric, "2147483647");
+    define_builtin_object_macro("UINT_FAST32_MAX", T_numeric, "4294967295U");
+    define_builtin_minimum_macro("INT_FAST64_MIN", "9223372036854775807LL",
+                                 "1LL");
+    define_builtin_object_macro("INT_FAST64_MAX", T_numeric,
+                                "9223372036854775807LL");
+    define_builtin_object_macro("UINT_FAST64_MAX", T_numeric,
+                                "18446744073709551615ULL");
+    define_builtin_integer_construction_macro("INT8_C", "");
+    define_builtin_integer_construction_macro("UINT8_C", "");
+    define_builtin_integer_construction_macro("INT16_C", "");
+    define_builtin_integer_construction_macro("UINT16_C", "");
+    define_builtin_integer_construction_macro("INT32_C", "");
+    define_builtin_integer_construction_macro("UINT32_C", "U");
+    define_builtin_integer_construction_macro("INT64_C", "LL");
+    define_builtin_integer_construction_macro("UINT64_C", "ULL");
+    define_builtin_integer_construction_macro("INTMAX_C", "LL");
+    define_builtin_integer_construction_macro("UINTMAX_C", "ULL");
+    if (PTR_SIZE == 8) {
+        define_builtin_minimum_macro("INTPTR_MIN", "9223372036854775807LL",
+                                     "1LL");
+        define_builtin_object_macro("INTPTR_MAX", T_numeric,
+                                    "9223372036854775807LL");
+        define_builtin_object_macro("UINTPTR_MAX", T_numeric,
+                                    "18446744073709551615ULL");
+        define_builtin_minimum_macro("PTRDIFF_MIN", "9223372036854775807LL",
+                                     "1LL");
+        define_builtin_object_macro("PTRDIFF_MAX", T_numeric,
+                                    "9223372036854775807LL");
+        define_builtin_object_macro("SIZE_MAX", T_numeric,
+                                    "18446744073709551615ULL");
+    } else {
+        define_builtin_minimum_macro("INTPTR_MIN", "2147483647L", "1L");
+        define_builtin_object_macro("INTPTR_MAX", T_numeric, "2147483647L");
+        define_builtin_object_macro("UINTPTR_MAX", T_numeric, "4294967295UL");
+        define_builtin_minimum_macro("PTRDIFF_MIN", "2147483647L", "1L");
+        define_builtin_object_macro("PTRDIFF_MAX", T_numeric, "2147483647L");
+        define_builtin_object_macro("SIZE_MAX", T_numeric, "4294967295UL");
+    }
 }
 
 /* stdbool.h is entirely macro-defined in C99. Supplying it here makes the
@@ -152,6 +402,161 @@ void install_iso646_header(void)
     define_builtin_object_macro("or_eq", T_oreq, "|=");
     define_builtin_object_macro("xor", T_bit_xor, "^");
     define_builtin_object_macro("xor_eq", T_xoreq, "^=");
+}
+
+/* assert.h is a function-like macro header. Reinstall it on each inclusion so
+ * an NDEBUG definition made before that inclusion controls its replacement.
+ */
+void install_assert_header(void)
+{
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    token_t *tail = NULL;
+
+    macro->name = intern_string("assert");
+    macro->is_function_like = true;
+    macro->param_num = 1;
+    macro->param_names[0] = new_token(T_identifier, &synth_built_in_loc, 4);
+    macro->param_names[0]->literal = "expr";
+
+    if (!is_macro_defined("NDEBUG")) {
+        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
+                                   "(");
+        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
+                                   "(");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   "expr");
+        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                                   ")");
+        append_builtin_macro_token(&macro->replacement, &tail, T_question, "?");
+        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
+                                   "(");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   "void");
+        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                                   ")");
+        append_builtin_macro_token(&macro->replacement, &tail, T_numeric, "0");
+        append_builtin_macro_token(&macro->replacement, &tail, T_colon, ":");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   "__assert_fail");
+        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
+                                   "(");
+        append_builtin_macro_token(&macro->replacement, &tail, T_hash, "#");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   "expr");
+        append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   "__FILE__");
+        append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   "__LINE__");
+        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                                   ")");
+        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                                   ")");
+    } else {
+        /* C99 requires the disabled form to remain a void expression while not
+         * evaluating its operand.
+         */
+        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
+                                   "(");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   "void");
+        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                                   ")");
+        append_builtin_macro_token(&macro->replacement, &tail, T_numeric, "0");
+    }
+    hashmap_put(MACROS, macro->name, macro);
+}
+
+macro_t *new_stdarg_macro(const char *name,
+                          const char *first_param,
+                          const char *second_param)
+{
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+
+    macro->name = intern_string((char *) name);
+    macro->is_function_like = true;
+    macro->param_num = second_param ? 2 : 1;
+    macro->param_names[0] =
+        new_token(T_identifier, &synth_built_in_loc, strlen(first_param));
+    macro->param_names[0]->literal = intern_string((char *) first_param);
+    if (second_param) {
+        macro->param_names[1] =
+            new_token(T_identifier, &synth_built_in_loc, strlen(second_param));
+        macro->param_names[1]->literal = intern_string((char *) second_param);
+    }
+    return macro;
+}
+
+/* The current ABI spills every variadic argument into a pointer-sized slot.
+ * These macros deliberately cover integer and pointer arguments only; floating
+ * argument promotion waits for the compiler's explicit FP ABI support.
+ */
+void install_stdarg_header(void)
+{
+    macro_t *macro;
+    token_t *tail;
+
+    define_builtin_object_macro("__VA_SLOT_WORDS", T_numeric,
+                                PTR_SIZE == 8 ? "2" : "1");
+
+    macro = new_stdarg_macro("va_start", "ap", "last");
+    tail = NULL;
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier, "ap");
+    append_builtin_macro_token(&macro->replacement, &tail, T_assign, "=");
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "va_list");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    append_builtin_macro_token(&macro->replacement, &tail, T_ampersand, "&");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "last");
+    append_builtin_macro_token(&macro->replacement, &tail, T_plus, "+");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "__VA_SLOT_WORDS");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    hashmap_put(MACROS, macro->name, macro);
+
+    macro = new_stdarg_macro("va_arg", "ap", "type");
+    tail = NULL;
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "__builtin_va_arg");
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_ampersand, "&");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier, "ap");
+    append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "type");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    hashmap_put(MACROS, macro->name, macro);
+
+    macro = new_stdarg_macro("va_copy", "dest", "src");
+    tail = NULL;
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "dest");
+    append_builtin_macro_token(&macro->replacement, &tail, T_assign, "=");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier, "src");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    hashmap_put(MACROS, macro->name, macro);
+
+    macro = new_stdarg_macro("va_end", "ap", NULL);
+    tail = NULL;
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "void");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    append_builtin_macro_token(&macro->replacement, &tail, T_numeric, "0");
+    hashmap_put(MACROS, macro->name, macro);
 }
 
 /* An angle header is lexed as ordinary preprocessing tokens. Recover its raw
@@ -192,6 +597,26 @@ bool resolve_angle_include(token_t *open,
     }
     if (!strcmp(name, "iso646.h")) {
         install_iso646_header();
+        return false;
+    }
+    if (!strcmp(name, "limits.h")) {
+        install_limits_header();
+        return false;
+    }
+    if (!strcmp(name, "stddef.h")) {
+        install_stddef_header();
+        return false;
+    }
+    if (!strcmp(name, "stdint.h")) {
+        install_stdint_header();
+        return false;
+    }
+    if (!strcmp(name, "assert.h")) {
+        install_assert_header();
+        return false;
+    }
+    if (!strcmp(name, "stdarg.h")) {
+        install_stdarg_header();
         return false;
     }
     if (is_builtin_system_header(name))
@@ -530,9 +955,284 @@ token_t *pp_get_operator(token_t *tk, opcode_t *op, bool consume)
     return consume ? pp_lex_next_token(tk, true) : tk;
 }
 
+/* C99 evaluates all integer constants in #if as intmax_t or uintmax_t. Keep the
+ * bit pattern separate from its signedness so unsigned comparisons and shifts
+ * do not accidentally use the host compiler's signed int semantics.
+ */
+typedef struct pp_integer {
+    unsigned int lo;
+    unsigned int hi;
+    unsigned int is_unsigned;
+} pp_integer_t;
+
+void pp_set_boolean(pp_integer_t *val, int truth)
+{
+    val->lo = truth != 0;
+    val->hi = 0;
+    val->is_unsigned = false;
+}
+
+int pp_is_true(const pp_integer_t *val)
+{
+    return val->lo || val->hi;
+}
+
+int PP_USES_UNSIGNED(const pp_integer_t *lhs, const pp_integer_t *rhs)
+{
+    return lhs->is_unsigned || rhs->is_unsigned;
+}
+
+int pp_is_negative(const pp_integer_t *val)
+{
+    return !val->is_unsigned && (val->hi & 0x80000000U);
+}
+
+int pp_compare_unsigned(const pp_integer_t *lhs, const pp_integer_t *rhs)
+{
+    if (lhs->hi != rhs->hi)
+        return lhs->hi > rhs->hi ? 1 : -1;
+    if (lhs->lo != rhs->lo)
+        return lhs->lo > rhs->lo ? 1 : -1;
+    return 0;
+}
+
+void pp_negate(pp_integer_t *val)
+{
+    val->lo = ~val->lo;
+    val->hi = ~val->hi;
+    val->lo++;
+    if (val->lo == 0)
+        val->hi++;
+}
+
+void pp_add(pp_integer_t *lhs, const pp_integer_t *rhs)
+{
+    unsigned int old_lo = lhs->lo;
+
+    lhs->lo += rhs->lo;
+    lhs->hi += rhs->hi + (lhs->lo < old_lo);
+}
+
+void pp_subtract(pp_integer_t *lhs, const pp_integer_t *rhs)
+{
+    unsigned int old_lo = lhs->lo;
+
+    lhs->lo -= rhs->lo;
+    lhs->hi -= rhs->hi + (old_lo < rhs->lo);
+}
+
+void pp_shift_left_one(pp_integer_t *val)
+{
+    val->hi = (val->hi << 1) | (val->lo >> 31);
+    val->lo <<= 1;
+}
+
+void pp_multiply_small(pp_integer_t *val, unsigned int amount)
+{
+    unsigned int original_lo = val->lo, original_hi = val->hi;
+
+    val->lo = val->hi = 0;
+    for (unsigned int i = 0; i < amount; i++) {
+        unsigned int old_lo = val->lo;
+
+        val->lo += original_lo;
+        val->hi += original_hi + (val->lo < old_lo);
+    }
+}
+
+int pp_literal_will_overflow(const pp_integer_t *value, int base, int digit)
+{
+    unsigned int limit_lo, limit_hi;
+    int remainder;
+
+    if (base == 2) {
+        limit_lo = 0xffffffffU;
+        limit_hi = 0x7fffffffU;
+        remainder = 1;
+    } else if (base == 8) {
+        limit_lo = 0xffffffffU;
+        limit_hi = 0x1fffffffU;
+        remainder = 7;
+    } else if (base == 10) {
+        limit_lo = 0x99999999U;
+        limit_hi = 0x19999999U;
+        remainder = 5;
+    } else {
+        limit_lo = 0xffffffffU;
+        limit_hi = 0x0fffffffU;
+        remainder = 15;
+    }
+    return value->hi > limit_hi ||
+           (value->hi == limit_hi && value->lo > limit_lo) ||
+           (value->hi == limit_hi && value->lo == limit_lo &&
+            digit > remainder);
+}
+
+int pp_numeric_suffix_is_valid(const char *suffix)
+{
+    int pos = 0;
+
+    if ((suffix[pos] | 32) == 'u')
+        pos++;
+    if ((suffix[pos] | 32) == 'l') {
+        pos++;
+        if ((suffix[pos] | 32) == 'l')
+            pos++;
+    }
+    if ((suffix[pos] | 32) == 'u')
+        pos++;
+    return suffix[pos] == '\0';
+}
+
+void pp_multiply(pp_integer_t *lhs, const pp_integer_t *rhs)
+{
+    pp_integer_t multiplicand, multiplier, product = {0};
+
+    multiplicand.lo = lhs->lo;
+    multiplicand.hi = lhs->hi;
+    multiplicand.is_unsigned = lhs->is_unsigned;
+    multiplier.lo = rhs->lo;
+    multiplier.hi = rhs->hi;
+    multiplier.is_unsigned = rhs->is_unsigned;
+
+    for (int i = 0; i < 64; i++) {
+        if (multiplier.lo & 1)
+            pp_add(&product, &multiplicand);
+        multiplier.lo = (multiplier.lo >> 1) | (multiplier.hi << 31);
+        multiplier.hi >>= 1;
+        pp_shift_left_one(&multiplicand);
+    }
+    product.is_unsigned = PP_USES_UNSIGNED(lhs, rhs);
+    lhs->lo = product.lo;
+    lhs->hi = product.hi;
+    lhs->is_unsigned = product.is_unsigned;
+}
+
+void pp_shift_right_one(pp_integer_t *val, int arithmetic)
+{
+    unsigned int sign = arithmetic && (val->hi & 0x80000000U) ? 0x80000000U : 0;
+
+    val->lo = (val->lo >> 1) | (val->hi << 31);
+    val->hi = (val->hi >> 1) | sign;
+}
+
+void pp_divmod_unsigned(const pp_integer_t *numerator,
+                        const pp_integer_t *denominator,
+                        pp_integer_t *quotient,
+                        pp_integer_t *remainder)
+{
+    quotient->lo = quotient->hi = remainder->lo = remainder->hi = 0;
+    quotient->is_unsigned = remainder->is_unsigned = false;
+    for (int i = 63; i >= 0; i--) {
+        unsigned int bit = i >= 32 ? (numerator->hi >> (i - 32)) & 1
+                                   : (numerator->lo >> i) & 1;
+
+        pp_shift_left_one(remainder);
+        remainder->lo |= bit;
+        pp_shift_left_one(quotient);
+        if (pp_compare_unsigned(remainder, denominator) >= 0) {
+            pp_subtract(remainder, denominator);
+            quotient->lo |= 1;
+        }
+    }
+}
+
+void pp_divmod(pp_integer_t *lhs, const pp_integer_t *rhs, int remainder)
+{
+    int use_unsigned = PP_USES_UNSIGNED(lhs, rhs);
+    int lhs_negative = !use_unsigned && pp_is_negative(lhs);
+    int rhs_negative = !use_unsigned && pp_is_negative(rhs);
+    pp_integer_t numerator, denominator, quotient, modulo;
+
+    numerator.lo = lhs->lo;
+    numerator.hi = lhs->hi;
+    numerator.is_unsigned = lhs->is_unsigned;
+    denominator.lo = rhs->lo;
+    denominator.hi = rhs->hi;
+    denominator.is_unsigned = rhs->is_unsigned;
+
+    if (lhs_negative)
+        pp_negate(&numerator);
+    if (rhs_negative)
+        pp_negate(&denominator);
+    pp_divmod_unsigned(&numerator, &denominator, &quotient, &modulo);
+    if (!remainder && lhs_negative != rhs_negative)
+        pp_negate(&quotient);
+    if (remainder && lhs_negative)
+        pp_negate(&modulo);
+    if (remainder) {
+        lhs->lo = modulo.lo;
+        lhs->hi = modulo.hi;
+    } else {
+        lhs->lo = quotient.lo;
+        lhs->hi = quotient.hi;
+    }
+    lhs->is_unsigned = use_unsigned;
+}
+
+void pp_parse_integer_literal(token_t *tk, pp_integer_t *val)
+{
+    const char *literal = tk->literal;
+    int i = 0, base = 10;
+    int is_decimal;
+    pp_integer_t parsed = {0};
+
+    if (literal[0] == '0') {
+        if ((literal[1] | 32) == 'x') {
+            base = 16;
+            i = 2;
+        } else if ((literal[1] | 32) == 'b') {
+            base = 2;
+            i = 2;
+        } else if (literal[1] && (literal[1] | 32) != 'u' &&
+                   (literal[1] | 32) != 'l') {
+            base = 8;
+            i = 1;
+        }
+    }
+    is_decimal = base == 10;
+    while (literal[i] && (literal[i] | 32) != 'u' && (literal[i] | 32) != 'l') {
+        int digit;
+        char c = literal[i++];
+
+        if (isdigit(c))
+            digit = c - '0';
+        else {
+            c |= 32;
+            digit = c - 'a' + 10;
+        }
+        if (digit < 0 || digit >= base)
+            error_at("Invalid digit in integer constant", &tk->location);
+        if (pp_literal_will_overflow(&parsed, base, digit))
+            error_at("Integer constant exceeds uintmax_t", &tk->location);
+        pp_multiply_small(&parsed, base);
+        pp_integer_t addend = {digit, 0, false};
+
+        pp_add(&parsed, &addend);
+    }
+    val->is_unsigned = false;
+    const char *suffix = literal + i;
+    while (literal[i]) {
+        if (literal[i] == 'u' || literal[i] == 'U') {
+            val->is_unsigned = true;
+        } else if (literal[i] != 'l' && literal[i] != 'L')
+            error_at("Invalid integer constant suffix", &tk->location);
+        i++;
+    }
+    if (!pp_numeric_suffix_is_valid(suffix))
+        error_at("Invalid integer constant suffix", &tk->location);
+    if (!val->is_unsigned && (parsed.hi & 0x80000000U)) {
+        if (is_decimal)
+            error_at("Integer constant exceeds intmax_t", &tk->location);
+        val->is_unsigned = true;
+    }
+    val->lo = parsed.lo;
+    val->hi = parsed.hi;
+}
+
 token_t *pp_read_constant_infix_expr(int precedence,
                                      token_t *tk,
-                                     int *val,
+                                     pp_integer_t *val,
                                      bool evaluate);
 
 /* Expand one function-like macro invocation in a #if token stream. The normal
@@ -584,21 +1284,49 @@ token_t *pp_expand_function_macro_in_constant_expr(token_t *before)
     return before;
 }
 
-token_t *pp_read_constant_expr_operand(token_t *tk, int *val, bool evaluate)
+token_t *pp_read_constant_expr_operand(token_t *tk,
+                                       pp_integer_t *val,
+                                       bool evaluate)
 {
-    if (pp_lex_peek_token(tk, T_numeric, true)) {
+    opcode_t unary;
+
+    tk = pp_get_operator(tk, &unary, false);
+    if (pp_get_unary_operator_prio(unary)) {
         tk = pp_lex_next_token(tk, true);
-        val[0] = parse_numeric_constant(tk->literal);
+        tk = pp_read_constant_expr_operand(tk, val, evaluate);
+        if (evaluate) {
+            if (unary == OP_sub)
+                pp_negate(val);
+            else if (unary == OP_bit_not)
+                val->lo = ~val->lo, val->hi = ~val->hi;
+            else if (unary == OP_log_not)
+                pp_set_boolean(val, !pp_is_true(val));
+        }
         return tk;
     }
 
-    if (pp_lex_peek_token(tk, T_char, true)) {
+    if (pp_lex_peek_token(tk, T_floating, true))
+        error_at("Floating constant is not permitted in #if expression",
+                 &tk->location);
+
+    if (pp_lex_peek_token(tk, T_numeric, true)) {
+        tk = pp_lex_next_token(tk, true);
+        pp_parse_integer_literal(tk, val);
+        return tk;
+    }
+
+    if (pp_lex_peek_token(tk, T_char, true) ||
+        pp_lex_peek_token(tk, T_wchar, true)) {
         char unescaped[MAX_TOKEN_LEN];
 
         tk = pp_lex_next_token(tk, true);
         if (unescape_string(tk->literal, unescaped, MAX_TOKEN_LEN) < 0)
             error_at("Invalid escape sequence", &tk->location);
-        val[0] = parse_character_constant(tk->literal);
+        int character = parse_character_constant(tk->literal);
+
+        val->lo = character;
+        val->hi = character < 0 ? ~0U : 0;
+        val->is_unsigned = false;
         return tk;
     }
 
@@ -620,7 +1348,7 @@ token_t *pp_read_constant_expr_operand(token_t *tk, int *val, bool evaluate)
             if (parenthesized)
                 tk = pp_lex_next_token(tk, true);
             tk = pp_lex_expect_token(tk, T_identifier, true);
-            val[0] = is_macro_defined(tk->literal);
+            pp_set_boolean(val, is_macro_defined(tk->literal));
             if (parenthesized)
                 tk = pp_lex_expect_token(tk, T_close_bracket, true);
         } else {
@@ -650,7 +1378,7 @@ token_t *pp_read_constant_expr_operand(token_t *tk, int *val, bool evaluate)
                 return pp_read_constant_expr_operand(tk, val, evaluate);
             }
 
-            val[0] = 0;
+            pp_set_boolean(val, false);
         }
 
         return tk;
@@ -666,10 +1394,11 @@ token_t *pp_read_constant_expr_operand(token_t *tk, int *val, bool evaluate)
 
 token_t *pp_read_constant_infix_expr(int precedence,
                                      token_t *tk,
-                                     int *val,
+                                     pp_integer_t *val,
                                      bool evaluate)
 {
-    int lhs = 0, rhs = 0;
+    pp_integer_t lhs = {0}, rhs = {0};
+    int comparison;
 
     /* Evaluate unary expression first */
     opcode_t op;
@@ -684,13 +1413,14 @@ token_t *pp_read_constant_infix_expr(int precedence,
             case OP_add:
                 break;
             case OP_sub:
-                lhs = -lhs;
+                pp_negate(&lhs);
                 break;
             case OP_bit_not:
-                lhs = ~lhs;
+                lhs.lo = ~lhs.lo;
+                lhs.hi = ~lhs.hi;
                 break;
             case OP_log_not:
-                lhs = !lhs;
+                pp_set_boolean(&lhs, !pp_is_true(&lhs));
                 break;
             default: {
                 source_location_t *loc =
@@ -715,81 +1445,150 @@ token_t *pp_read_constant_infix_expr(int precedence,
         tk = pp_lex_next_token(tk, true);
 
         if (op == OP_ternary) {
-            int if_true, if_false;
+            pp_integer_t if_true = {0}, if_false = {0};
+            bool condition = pp_is_true(&lhs);
 
-            tk = pp_read_constant_infix_expr(0, tk, &if_true, evaluate && lhs);
+            tk = pp_read_constant_infix_expr(0, tk, &if_true,
+                                             evaluate && condition);
             tk = pp_lex_expect_token(tk, T_colon, true);
             /* Conditional expressions are right-associative. */
             tk = pp_read_constant_infix_expr(current_precedence - 1, tk,
-                                             &if_false, evaluate && !lhs);
-            if (evaluate)
-                lhs = lhs ? if_true : if_false;
+                                             &if_false, evaluate && !condition);
+            bool result_is_unsigned = PP_USES_UNSIGNED(&if_true, &if_false);
+            if (evaluate) {
+                pp_integer_t *selected = condition ? &if_true : &if_false;
+
+                lhs.lo = selected->lo;
+                lhs.hi = selected->hi;
+            } else
+                lhs.lo = lhs.hi = 0;
+            lhs.is_unsigned = result_is_unsigned;
             continue;
         }
 
         bool rhs_evaluate = evaluate;
-        if (op == OP_log_and && !lhs)
+        if (op == OP_log_and && !pp_is_true(&lhs))
             rhs_evaluate = false;
-        if (op == OP_log_or && lhs)
+        if (op == OP_log_or && pp_is_true(&lhs))
             rhs_evaluate = false;
         tk = pp_read_constant_infix_expr(current_precedence, tk, &rhs,
                                          rhs_evaluate);
 
+        switch (op) {
+        case OP_add:
+        case OP_sub:
+        case OP_mul:
+        case OP_div:
+        case OP_mod:
+        case OP_bit_and:
+        case OP_bit_or:
+        case OP_bit_xor:
+            lhs.is_unsigned = PP_USES_UNSIGNED(&lhs, &rhs);
+            break;
+        default:
+            break;
+        }
+
         if (evaluate) {
             switch (op) {
             case OP_add:
-                lhs += rhs;
+                pp_add(&lhs, &rhs);
+                lhs.is_unsigned = PP_USES_UNSIGNED(&lhs, &rhs);
                 break;
             case OP_sub:
-                lhs -= rhs;
+                pp_subtract(&lhs, &rhs);
+                lhs.is_unsigned = PP_USES_UNSIGNED(&lhs, &rhs);
                 break;
             case OP_mul:
-                lhs *= rhs;
+                pp_multiply(&lhs, &rhs);
                 break;
             case OP_div:
-                lhs /= rhs;
+                if (!pp_is_true(&rhs))
+                    error_at("Division by zero in #if expression",
+                             &tk->location);
+                pp_divmod(&lhs, &rhs, false);
                 break;
             case OP_mod:
-                lhs %= rhs;
+                if (!pp_is_true(&rhs))
+                    error_at("Modulo by zero in #if expression", &tk->location);
+                pp_divmod(&lhs, &rhs, true);
                 break;
             case OP_bit_and:
-                lhs &= rhs;
+                lhs.lo &= rhs.lo;
+                lhs.hi &= rhs.hi;
+                lhs.is_unsigned = PP_USES_UNSIGNED(&lhs, &rhs);
                 break;
             case OP_bit_or:
-                lhs |= rhs;
+                lhs.lo |= rhs.lo;
+                lhs.hi |= rhs.hi;
+                lhs.is_unsigned = PP_USES_UNSIGNED(&lhs, &rhs);
                 break;
             case OP_bit_xor:
-                lhs ^= rhs;
+                lhs.lo ^= rhs.lo;
+                lhs.hi ^= rhs.hi;
+                lhs.is_unsigned = PP_USES_UNSIGNED(&lhs, &rhs);
                 break;
             case OP_lshift:
-                lhs <<= rhs;
+                if (rhs.hi || rhs.lo >= 64)
+                    error_at("Shift count out of range in #if expression",
+                             &tk->location);
+                for (unsigned int i = 0; i < rhs.lo; i++)
+                    pp_shift_left_one(&lhs);
                 break;
             case OP_rshift:
-                lhs >>= rhs;
+                if (rhs.hi || rhs.lo >= 64)
+                    error_at("Shift count out of range in #if expression",
+                             &tk->location);
+                for (unsigned int i = 0; i < rhs.lo; i++)
+                    pp_shift_right_one(&lhs, !lhs.is_unsigned);
                 break;
             case OP_gt:
-                lhs = lhs > rhs;
+                if (!lhs.is_unsigned && !rhs.is_unsigned &&
+                    (lhs.hi >> 31) != (rhs.hi >> 31))
+                    pp_set_boolean(&lhs, !(lhs.hi >> 31));
+                else {
+                    comparison = pp_compare_unsigned(&lhs, &rhs);
+                    pp_set_boolean(&lhs, comparison > 0);
+                }
                 break;
             case OP_geq:
-                lhs = lhs >= rhs;
+                if (!lhs.is_unsigned && !rhs.is_unsigned &&
+                    (lhs.hi >> 31) != (rhs.hi >> 31))
+                    pp_set_boolean(&lhs, !(lhs.hi >> 31));
+                else {
+                    comparison = pp_compare_unsigned(&lhs, &rhs);
+                    pp_set_boolean(&lhs, comparison >= 0);
+                }
                 break;
             case OP_lt:
-                lhs = lhs < rhs;
+                if (!lhs.is_unsigned && !rhs.is_unsigned &&
+                    (lhs.hi >> 31) != (rhs.hi >> 31))
+                    pp_set_boolean(&lhs, lhs.hi >> 31);
+                else {
+                    comparison = pp_compare_unsigned(&lhs, &rhs);
+                    pp_set_boolean(&lhs, comparison < 0);
+                }
                 break;
             case OP_leq:
-                lhs = lhs <= rhs;
+                if (!lhs.is_unsigned && !rhs.is_unsigned &&
+                    (lhs.hi >> 31) != (rhs.hi >> 31))
+                    pp_set_boolean(&lhs, lhs.hi >> 31);
+                else {
+                    comparison = pp_compare_unsigned(&lhs, &rhs);
+                    pp_set_boolean(&lhs, comparison <= 0);
+                }
                 break;
             case OP_eq:
-                lhs = lhs == rhs;
+                pp_set_boolean(&lhs, lhs.lo == rhs.lo && lhs.hi == rhs.hi);
                 break;
             case OP_neq:
-                lhs = lhs != rhs;
+                pp_set_boolean(&lhs, lhs.lo != rhs.lo || lhs.hi != rhs.hi);
                 break;
             case OP_log_and:
-                lhs = lhs && rhs;
+                pp_set_boolean(&lhs, pp_is_true(&lhs) && pp_is_true(&rhs));
                 break;
             case OP_log_or:
-                lhs = lhs || rhs;
+                pp_set_boolean(&lhs, pp_is_true(&lhs) || pp_is_true(&rhs));
                 break;
             default:
                 error_at("Unexpected infix token while evaluating constant",
@@ -798,11 +1597,15 @@ token_t *pp_read_constant_infix_expr(int precedence,
         }
     }
 
-    val[0] = evaluate ? lhs : 0;
+    if (!evaluate)
+        lhs.lo = lhs.hi = 0;
+    val->lo = lhs.lo;
+    val->hi = lhs.hi;
+    val->is_unsigned = lhs.is_unsigned;
     return tk;
 }
 
-token_t *pp_read_constant_expr(token_t *tk, int *val)
+token_t *pp_read_constant_expr(token_t *tk, pp_integer_t *val)
 {
     tk = pp_read_constant_infix_expr(0, tk, val, true);
     /* advance to fully consume constant expression */
@@ -1623,8 +2426,6 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                                  &tk->location);
                     else
                         tk = pp_lex_expect_token(tk, T_newline, false);
-
-                    tk = pp_lex_next_token(tk, false);
                     continue;
                 }
 
@@ -1660,11 +2461,11 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
         }
         case T_cppd_if: {
             token_t *cond_tk = tk;
-            int defined;
-            tk = pp_read_constant_expr(tk, &defined);
-            ci = push_cond(ci, cond_tk, defined);
+            pp_integer_t condition;
+            tk = pp_read_constant_expr(tk, &condition);
+            ci = push_cond(ci, cond_tk, pp_is_true(&condition));
 
-            if (!defined)
+            if (!pp_is_true(&condition))
                 tk = pp_skip_cond_incl(tk);
             continue;
         }
@@ -1695,11 +2496,11 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
         case T_cppd_elif: {
             if (!ci || ci->ctx == CK_else_then)
                 error_at("Stray #elif", &tk->location);
-            int included;
+            pp_integer_t included;
             ci->ctx = CK_elif_then;
             tk = pp_read_constant_expr(tk, &included);
 
-            if (!ci->included && included)
+            if (!ci->included && pp_is_true(&included))
                 ci->included = true;
             else
                 tk = pp_skip_cond_incl(tk);
@@ -1819,7 +2620,9 @@ token_t *pp_strip_layout(token_t *tk)
          * already irrelevant there, and this covers both source-adjacent and
          * macro-produced strings without changing -E's token spelling.
          */
-        if (cur != &head && cur->kind == T_string && tk->kind == T_string) {
+        if (cur != &head &&
+            ((cur->kind == T_string && tk->kind == T_string) ||
+             (cur->kind == T_wstring && tk->kind == T_wstring))) {
             char combined[MAX_TOKEN_LEN];
             int left_len = strlen(cur->literal);
             int right_len = strlen(tk->literal);
@@ -1832,6 +2635,10 @@ token_t *pp_strip_layout(token_t *tk)
             cur->location.len += tk->location.len;
             continue;
         }
+        if (cur != &head && ((cur->kind == T_string && tk->kind == T_wstring) ||
+                             (cur->kind == T_wstring && tk->kind == T_string)))
+            error_at("Cannot concatenate narrow and wide string literals",
+                     &tk->location);
         cur->next = tk;
         cur = tk;
     }
@@ -1943,14 +2750,21 @@ char *token_to_string(token_t *tk, char *dest)
                 &tk->location);
         return NULL;
     case T_numeric:
+    case T_floating:
         return tk->literal;
     case T_identifier:
         return tk->literal;
     case T_string:
         snprintf(dest, MAX_TOKEN_LEN, "\"%s\"", tk->literal);
         return dest;
+    case T_wstring:
+        snprintf(dest, MAX_TOKEN_LEN, "L\"%s\"", tk->literal);
+        return dest;
     case T_char:
         snprintf(dest, MAX_TOKEN_LEN, "'%s'", tk->literal);
+        return dest;
+    case T_wchar:
+        snprintf(dest, MAX_TOKEN_LEN, "L'%s'", tk->literal);
         return dest;
     case T_comma:
         return ",";
@@ -2080,6 +2894,14 @@ char *token_to_string(token_t *tk, char *dest)
         return "goto";
     case T_const:
         return "const";
+    case T_float:
+        return "float";
+    case T_double:
+        return "double";
+    case T_complex:
+        return "_Complex";
+    case T_imaginary:
+        return "_Imaginary";
     case T_newline:
         return "\n";
     case T_backslash:
