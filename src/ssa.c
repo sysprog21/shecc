@@ -727,6 +727,9 @@ bool var_check_in_scope(const var_t *var, block_t *block)
             return true;
     }
 
+    if (func->returns_aggregate && &func->sret_def == var)
+        return true;
+
     return false;
 }
 
@@ -1013,12 +1016,18 @@ void solve_phi_params(void)
         if (!func->bbs)
             continue;
 
-        for (int i = 0; i < func->num_params; i++) {
+        /* The aggregate return destination is an ABI parameter even though it
+         * is not a source-language parameter. Build its entry SSA version
+         * before the visible parameters.
+         */
+        for (int i = -1; i < func->num_params; i++) {
             /* FIXME: Direct argument renaming in SSA construction phase may
              * interfere with later optimization passes
              */
             var_t *var = require_var(func->bbs->scope);
-            var_t *base = &func->param_defs[i];
+            if (i < 0 && !func->returns_aggregate)
+                continue;
+            var_t *base = i < 0 ? &func->sret_def : &func->param_defs[i];
             memcpy(var, base, sizeof(var_t));
             var_reset_subscripts(var); /* the copy shares nothing with base */
             var->phys_reg = -1;
@@ -4467,6 +4476,8 @@ void liveness_analysis(void)
         bb_forward_traversal(args);
 
         /* Add function parameters as killed in entry block */
+        if (func->returns_aggregate)
+            bb_add_killed_var(func->bbs, var_subscript0(&func->sret_def));
         for (int i = 0; i < func->num_params; i++)
             bb_add_killed_var(func->bbs, var_subscript0(&func->param_defs[i]));
     }

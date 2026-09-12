@@ -183,7 +183,7 @@ int abi_arg_next(int cursor, const var_t *var)
 
 int abi_param_start(const func_t *func, int param_idx)
 {
-    int cursor = 0;
+    int cursor = func->returns_aggregate ? 1 : 0;
 
     for (int i = 0; i < param_idx; i++)
         cursor = abi_arg_next(cursor, &func->param_defs[i]);
@@ -1029,7 +1029,7 @@ void pin_registers(func_t *func)
          * them; the variable would then read a parameter's value instead.
          */
         int reg = REG_CNT - 1 - taken;
-        int arg_words_in_reg = 0;
+        int arg_words_in_reg = func->returns_aggregate ? 1 : 0;
         for (int i = 0; i < func->num_params; i++) {
             int word = abi_param_start(func, i);
 
@@ -1690,13 +1690,16 @@ void prepare_pair_argument(basic_block_t *bb, var_t *var, int low)
 /* Return whether extra arguments are pushed onto stack. */
 bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
 {
-    insn_t *pushes[MAX_PARAMS];
-    int starts[MAX_PARAMS];
+    /* An aggregate-return call has one ABI-only destination in addition to the
+     * MAX_PARAMS source arguments.
+     */
+    insn_t *pushes[MAX_PARAMS + 1];
+    int starts[MAX_PARAMS + 1];
     int num_of_args = 0;
     int cursor = 0;
 
     while (insn && insn->opcode == OP_push) {
-        if (num_of_args >= MAX_PARAMS)
+        if (num_of_args >= MAX_PARAMS + 1)
             fatal("Too many call arguments");
         starts[num_of_args] = abi_arg_start(cursor, insn->rs1);
         pushes[num_of_args++] = insn;
@@ -2439,7 +2442,16 @@ void reg_alloc_global(insn_t *global_insn)
             global_insn->rd->ptr_level ? PTR_SIZE : global_insn->rd->type->size;
         break;
     case OP_assign:
-        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        if (global_insn->rs1 && global_insn->rs1->is_global_address) {
+            src0 =
+                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rs1, -1, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+            ir->src0 = global_insn->rs1->offset;
+            ir->dest = src0;
+            ir->is_pointer = true;
+            ir->size_bytes = PTR_SIZE;
+        } else
+            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
         dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_assign);
         ir->src0 = src0;
@@ -2469,12 +2481,24 @@ void reg_alloc_global(insn_t *global_insn)
         ir->dest = dest;
         ir->is_pointer = true;
         ir->size_bytes = PTR_SIZE;
+        if (global_insn->rd->is_global_address) {
+            global_insn->rd->offset = ir->src0;
+            global_insn->rd->space_is_allocated = true;
+        }
         break;
     case OP_add: {
         /* Special-case address computation for globals: if rs1 is a global base
          * and rs2 is a constant, propagate absolute offset to rd so OP_write
          * can fold into OP_global_store.
          */
+        if (global_insn->rs1 && global_insn->rs1->is_global_address &&
+            global_insn->rs2) {
+            global_insn->rd->offset =
+                global_insn->rs1->offset + global_insn->rs2->init_val;
+            global_insn->rd->is_global_address = true;
+            global_insn->rd->space_is_allocated = true;
+            break;
+        }
         if (global_insn->rs1 && global_insn->rs1->is_global &&
             global_insn->rs2) {
             int base_off = global_insn->rs1->offset;
@@ -2579,7 +2603,18 @@ void reg_alloc_global(insn_t *global_insn)
         }
         /* Fold (addr, val) where addr carries GP-relative offset */
         if (global_insn->rs1 && (global_insn->rs1->is_global)) {
-            int vreg = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
+            int vreg;
+
+            if (global_insn->rs2 && global_insn->rs2->is_global_address) {
+                vreg = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rs2,
+                                    -1, -1);
+                ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+                ir->src0 = global_insn->rs2->offset;
+                ir->dest = vreg;
+                ir->is_pointer = true;
+                ir->size_bytes = PTR_SIZE;
+            } else
+                vreg = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_store);
             ir->src0 = vreg;
 
@@ -2749,6 +2784,16 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             /* For arrays, store the base address just like global arrays do */
             if (insn->rd->array_size)
                 spill_var(bb, insn->rd, dest);
+            else if (insn->rd->is_func) {
+                /* OP_allocat's result is the backing address for a callback
+                 * object, not the pointer value stored in that object. Keeping
+                 * it mapped as the object lets a later conservative spill
+                 * overwrite an initialized callback with its own address.
+                 */
+                REGS[dest].var = NULL;
+                REGS[dest].polluted = 0;
+                vreg_clear_phys(insn->rd);
+            }
             break;
         case OP_load_constant:
         case OP_load_data_address:
@@ -3328,6 +3373,10 @@ void reg_alloc(void)
          * whereas param_defs is indexed by source parameter.
          */
         int args_in_reg = 0;
+        if (func->returns_aggregate) {
+            REGS[0].var = var_subscript0(&func->sret_def);
+            REGS[0].polluted = 1;
+        }
         for (int i = 0; i < func->num_params; i++) {
             int word = abi_param_start(func, i);
 

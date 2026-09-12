@@ -64,6 +64,28 @@ token_t *pp_lex_expect_token(token_t *tk, token_kind_t kind, bool skip_space)
     return tk;
 }
 
+/* A single wide UCN character constant represents its execution-wide unit in a
+ * preprocessing integer constant expression.
+ */
+int pp_parse_wide_character_constant(const char *literal)
+{
+    unsigned int value = 0;
+    int digits;
+
+    if (literal[0] != '\\' || (literal[1] != 'u' && literal[1] != 'U'))
+        return parse_character_constant(literal);
+    digits = literal[1] == 'u' ? 4 : 8;
+    for (int i = 0; i < digits; i++) {
+        if (!isxdigit(literal[i + 2]))
+            return parse_character_constant(literal);
+        value = (value << 4) + hex_digit_value(literal[i + 2]);
+    }
+    if (literal[digits + 2] || value > 0x10ffff ||
+        (value >= 0xd800 && value <= 0xdfff))
+        return parse_character_constant(literal);
+    return (int) value;
+}
+
 /* Copies and isolate the given copied token */
 token_t *copy_token(const token_t *tk)
 {
@@ -963,13 +985,55 @@ typedef struct pp_integer {
     unsigned int lo;
     unsigned int hi;
     unsigned int is_unsigned;
+    int enum_width;
 } pp_integer_t;
+
+/* The parser reuses this exact two-word evaluator for typed enum constant
+ * expressions. Outside that narrowly scoped use, #if's standard rule still
+ * treats unknown identifiers as zero.
+ */
+block_t *pp_integer_constant_scope = NULL;
+
+void pp_enum_normalize(pp_integer_t *val)
+{
+    if (val->enum_width != 32)
+        return;
+    val->hi = val->is_unsigned || !(val->lo & 0x80000000U) ? 0 : ~0U;
+}
+
+void pp_enum_convert_width(pp_integer_t *val, int width, int is_unsigned)
+{
+    if (width == 64 && val->enum_width == 32 && !val->is_unsigned &&
+        (val->lo & 0x80000000U))
+        val->hi = ~0U;
+    if (width == 32)
+        val->hi = 0;
+    val->enum_width = width;
+    val->is_unsigned = is_unsigned;
+    pp_enum_normalize(val);
+}
+
+void pp_enum_usual_arithmetic(pp_integer_t *lhs, pp_integer_t *rhs)
+{
+    int width =
+        lhs->enum_width > rhs->enum_width ? lhs->enum_width : rhs->enum_width;
+    int is_unsigned;
+
+    if (width == 64)
+        is_unsigned = (lhs->enum_width == 64 && lhs->is_unsigned) ||
+                      (rhs->enum_width == 64 && rhs->is_unsigned);
+    else
+        is_unsigned = lhs->is_unsigned || rhs->is_unsigned;
+    pp_enum_convert_width(lhs, width, is_unsigned);
+    pp_enum_convert_width(rhs, width, is_unsigned);
+}
 
 void pp_set_boolean(pp_integer_t *val, int truth)
 {
     val->lo = truth != 0;
     val->hi = 0;
     val->is_unsigned = false;
+    val->enum_width = 32;
 }
 
 int pp_is_true(const pp_integer_t *val)
@@ -1103,9 +1167,11 @@ void pp_multiply(pp_integer_t *lhs, const pp_integer_t *rhs)
         pp_shift_left_one(&multiplicand);
     }
     product.is_unsigned = PP_USES_UNSIGNED(lhs, rhs);
+    product.enum_width = lhs->enum_width;
     lhs->lo = product.lo;
     lhs->hi = product.hi;
     lhs->is_unsigned = product.is_unsigned;
+    lhs->enum_width = product.enum_width;
 }
 
 void pp_shift_right_one(pp_integer_t *val, int arithmetic)
@@ -1140,6 +1206,7 @@ void pp_divmod_unsigned(const pp_integer_t *numerator,
 void pp_divmod(pp_integer_t *lhs, const pp_integer_t *rhs, int remainder)
 {
     int use_unsigned = PP_USES_UNSIGNED(lhs, rhs);
+    int enum_width = lhs->enum_width;
     int lhs_negative = !use_unsigned && pp_is_negative(lhs);
     int rhs_negative = !use_unsigned && pp_is_negative(rhs);
     pp_integer_t numerator, denominator, quotient, modulo;
@@ -1168,6 +1235,7 @@ void pp_divmod(pp_integer_t *lhs, const pp_integer_t *rhs, int remainder)
         lhs->hi = quotient.hi;
     }
     lhs->is_unsigned = use_unsigned;
+    lhs->enum_width = enum_width;
 }
 
 void pp_parse_integer_literal(token_t *tk, pp_integer_t *val)
@@ -1206,7 +1274,7 @@ void pp_parse_integer_literal(token_t *tk, pp_integer_t *val)
         if (pp_literal_will_overflow(&parsed, base, digit))
             error_at("Integer constant exceeds uintmax_t", &tk->location);
         pp_multiply_small(&parsed, base);
-        pp_integer_t addend = {digit, 0, false};
+        pp_integer_t addend = {digit, 0, false, 0};
 
         pp_add(&parsed, &addend);
     }
@@ -1228,6 +1296,27 @@ void pp_parse_integer_literal(token_t *tk, pp_integer_t *val)
     }
     val->lo = parsed.lo;
     val->hi = parsed.hi;
+    if (pp_integer_constant_scope) {
+        int long_count = 0;
+
+        for (int j = 0; suffix[j]; j++)
+            if ((suffix[j] | 32) == 'l')
+                long_count++;
+        if (long_count >= 2) {
+            val->enum_width = 64;
+        } else if (val->is_unsigned) {
+            val->enum_width = parsed.hi ? 64 : 32;
+        } else if (!is_decimal && !parsed.hi && parsed.lo > 0x7fffffffU) {
+            /* In this ILP32 model, nondecimal constants select unsigned int or
+             * unsigned long before they reach signed long long.
+             */
+            val->is_unsigned = true;
+            val->enum_width = 32;
+        } else {
+            val->enum_width = parsed.hi || parsed.lo > 0x7fffffffU ? 64 : 32;
+        }
+        pp_enum_normalize(val);
+    }
 }
 
 token_t *pp_read_constant_infix_expr(int precedence,
@@ -1309,6 +1398,22 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
         error_at("Floating constant is not permitted in #if expression",
                  &tk->location);
 
+    /* Parser-side enum evaluation shares this token walker, but unlike #if it
+     * admits C's sizeof integer constant expressions. Reuse the parser's
+     * unevaluated type reader and leave both cursors at the consumed operand.
+     */
+    if (pp_integer_constant_scope && pp_lex_peek_token(tk, T_sizeof, true)) {
+        cur_token = tk;
+        lex_expect(T_sizeof);
+        val->lo = lex_peek(T_wstring, NULL)
+                      ? read_const_wstring_size()
+                      : read_const_sizeof_type(pp_integer_constant_scope);
+        val->hi = 0;
+        val->is_unsigned = false;
+        val->enum_width = 32;
+        return cur_token;
+    }
+
     if (pp_lex_peek_token(tk, T_numeric, true)) {
         tk = pp_lex_next_token(tk, true);
         pp_parse_integer_literal(tk, val);
@@ -1322,7 +1427,9 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
         tk = pp_lex_next_token(tk, true);
         if (unescape_string(tk->literal, unescaped, MAX_TOKEN_LEN) < 0)
             error_at("Invalid escape sequence", &tk->location);
-        int character = parse_character_constant(tk->literal);
+        int character = tk->kind == T_wchar
+                            ? pp_parse_wide_character_constant(tk->literal)
+                            : parse_character_constant(tk->literal);
 
         val->lo = character;
         val->hi = character < 0 ? ~0U : 0;
@@ -1342,7 +1449,18 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
 
         tk = pp_lex_next_token(tk, true);
 
-        if (!strcmp("defined", tk->literal)) {
+        if (pp_integer_constant_scope) {
+            constant_t *constant =
+                find_scoped_constant(tk->literal, pp_integer_constant_scope);
+
+            if (!constant)
+                error_at("Identifier is not an integer constant",
+                         &tk->location);
+            val->lo = constant->value;
+            val->hi = constant->value < 0 ? ~0U : 0;
+            val->is_unsigned = false;
+            val->enum_width = 32;
+        } else if (!strcmp("defined", tk->literal)) {
             bool parenthesized = pp_lex_peek_token(tk, T_open_bracket, true);
 
             if (parenthesized)
@@ -1352,8 +1470,8 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
             if (parenthesized)
                 tk = pp_lex_expect_token(tk, T_close_bracket, true);
         } else {
-            /* Any identifier will fallback and evaluate as 0 */
-            macro_t *macro = hashmap_get(MACROS, tk->literal);
+            /* Any identifier in #if falls back to zero. */
+            macro_t *macro = MACROS ? hashmap_get(MACROS, tk->literal) : NULL;
 
             /* Disallow function-like macro to be expanded */
             if (macro && macro->is_function_like) {
@@ -1454,12 +1572,15 @@ token_t *pp_read_constant_infix_expr(int precedence,
             /* Conditional expressions are right-associative. */
             tk = pp_read_constant_infix_expr(current_precedence - 1, tk,
                                              &if_false, evaluate && !condition);
+            if (pp_integer_constant_scope)
+                pp_enum_usual_arithmetic(&if_true, &if_false);
             bool result_is_unsigned = PP_USES_UNSIGNED(&if_true, &if_false);
             if (evaluate) {
                 pp_integer_t *selected = condition ? &if_true : &if_false;
 
                 lhs.lo = selected->lo;
                 lhs.hi = selected->hi;
+                lhs.enum_width = selected->enum_width;
             } else
                 lhs.lo = lhs.hi = 0;
             lhs.is_unsigned = result_is_unsigned;
@@ -1473,6 +1594,9 @@ token_t *pp_read_constant_infix_expr(int precedence,
             rhs_evaluate = false;
         tk = pp_read_constant_infix_expr(current_precedence, tk, &rhs,
                                          rhs_evaluate);
+
+        if (pp_integer_constant_scope && op != OP_lshift && op != OP_rshift)
+            pp_enum_usual_arithmetic(&lhs, &rhs);
 
         switch (op) {
         case OP_add:
@@ -1529,14 +1653,26 @@ token_t *pp_read_constant_infix_expr(int precedence,
                 lhs.is_unsigned = PP_USES_UNSIGNED(&lhs, &rhs);
                 break;
             case OP_lshift:
-                if (rhs.hi || rhs.lo >= 64)
+                if (rhs.hi ||
+                    rhs.lo >= (unsigned int) (pp_integer_constant_scope
+                                                  ? lhs.enum_width
+                                                  : 64))
                     error_at("Shift count out of range in #if expression",
                              &tk->location);
-                for (unsigned int i = 0; i < rhs.lo; i++)
+                for (unsigned int i = 0; i < rhs.lo; i++) {
+                    if (pp_integer_constant_scope && !lhs.is_unsigned &&
+                        (lhs.enum_width == 32 ? lhs.lo & 0x40000000U
+                                              : lhs.hi & 0x40000000U))
+                        error_at("Enumerator value exceeds int range",
+                                 &tk->location);
                     pp_shift_left_one(&lhs);
+                }
                 break;
             case OP_rshift:
-                if (rhs.hi || rhs.lo >= 64)
+                if (rhs.hi ||
+                    rhs.lo >= (unsigned int) (pp_integer_constant_scope
+                                                  ? lhs.enum_width
+                                                  : 64))
                     error_at("Shift count out of range in #if expression",
                              &tk->location);
                 for (unsigned int i = 0; i < rhs.lo; i++)
@@ -1594,6 +1730,8 @@ token_t *pp_read_constant_infix_expr(int precedence,
                 error_at("Unexpected infix token while evaluating constant",
                          &tk->location);
             }
+            if (pp_integer_constant_scope)
+                pp_enum_normalize(&lhs);
         }
     }
 
@@ -1602,6 +1740,7 @@ token_t *pp_read_constant_infix_expr(int precedence,
     val->lo = lhs.lo;
     val->hi = lhs.hi;
     val->is_unsigned = lhs.is_unsigned;
+    val->enum_width = lhs.enum_width;
     return tk;
 }
 

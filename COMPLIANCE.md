@@ -19,7 +19,10 @@ This document tracks compliance gaps and non-standard behaviors.
 - `if`/`else` statements
 - `goto` and label statements
 - `while`, `do-while`, `for` loops
-- `switch`/`case`/`default` statements
+- `switch`/`case`/`default` statements, including labels after ordinary
+  statements and within nested compound blocks; strict C99 rejects duplicate
+  case values and declarations immediately following an ordinary, case, or
+  default label
 - `break`, `continue`, `return` statements
 
 ### Operators
@@ -75,10 +78,10 @@ This document tracks compliance gaps and non-standard behaviors.
 | Feature | Status | Current Behavior |
 |---------|--------|-----------------|
 | Integer suffixes (`u`, `l`, `ll`) | Partial | Common suffix spellings and x64 wide literals are parsed; full candidate-type selection remains incomplete. |
-| Wide characters (`L'c'`) | Not supported | Single-byte only |
-| Wide strings (`L"..."`) | Not supported | Single-byte only |
+| Wide characters (`L'c'`) | Supported | Lowered as the implementation's `int`-sized execution-wide-character representation. |
+| Wide strings (`L"..."`) | Supported | Lowered as NUL-terminated `wchar_t` rodata; supported in expressions, `sizeof`, pointers, and compatible array initialization. |
 | Multi-character constants | Supported | Implementation-defined left-to-right packing of up to four bytes. |
-| Universal characters (`\u`, `\U`) | Partial | Narrow literals and identifiers are validated and decoded to UTF-8; wide literals remain unsupported. |
+| Universal characters (`\u`, `\U`) | Partial | Narrow literals, identifiers, and wide character constants use the implementation's UTF-8 decoding; wide string literals decode to execution-wide-character units. |
 | Hex escapes (`\x...`) | Supported | The full following hexadecimal run is consumed before narrowing. |
 
 ### Preprocessor Gaps
@@ -98,6 +101,7 @@ This document tracks compliance gaps and non-standard behaviors.
 |---------|--------|-------------|
 | Designated initializers | Partial | Record and bounded-array designators work for local, static, and file-scope objects; higher-rank continuation cases remain incomplete. |
 | Compound literals | Partial | Limited support |
+| `sizeof` type names | Partial | Fixed arrays, pointer-to-array, array-of-pointer, and recursive function-pointer declarators are supported, including callback arrays and global constant expressions; arbitrary mixed derived declarators and a shared general type-name parser remain incomplete. |
 | Flexible array members | Supported | Final `[]` struct members have zero fixed extent, support pointer-based element access, and enforce C99 placement constraints. |
 | Variable-length arrays | Missing | No runtime-sized arrays |
 | `_Complex` | Missing | No complex numbers |

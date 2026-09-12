@@ -711,8 +711,301 @@ EOF
 try_compile_error << EOF
 int main(void) { return (float)1; }
 EOF
+try_ "$((4 + 8 + (PTR_SZ == 8 ? 16 : 8) + PTR_SZ))" << EOF
+int main(void) {
+    return sizeof(float) + sizeof(double) + sizeof(long double) +
+           sizeof(float *);
+}
+EOF
+try_ "$((4 + 8 + (PTR_SZ == 8 ? 16 : 8)))" << EOF
+typedef float float_alias;
+typedef double double_alias;
+typedef long double long_double_alias;
+int main(void) {
+    return sizeof(float_alias) + sizeof(double_alias) +
+           sizeof(long_double_alias);
+}
+EOF
 try_compile_error << EOF
-int main(void) { return sizeof(double); }
+int main(void) { return sizeof(unsigned double); }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(long float); }
+EOF
+try_compile_error << EOF
+typedef float float_alias;
+float_alias value;
+EOF
+try_compile_error << EOF
+typedef double double_alias;
+int identity(double_alias value) { return 0; }
+EOF
+try_compile_error << EOF
+typedef float float_alias;
+int main(void) { return (float_alias)1; }
+EOF
+
+try_ 0 << EOF
+int main(void) {
+    return sizeof(2147483648U) != sizeof(unsigned int) ||
+           sizeof(4294967296U) != 8 ||
+           0xffffffff > -1 || (0xffffffff >> 31) != 1;
+}
+EOF
+
+try_ 0 << EOF
+enum { global_unsigned_shift_count = 1 };
+unsigned int global_unsigned_shift = 0xffffffff >> 31;
+int global_unsigned_compare = 0xffffffff > -1;
+unsigned int global_unsigned_quotient = 0xffffffff / 2;
+unsigned int global_unsigned_enum_shift =
+    0xffffffff >> global_unsigned_shift_count;
+int main(void) {
+    return global_unsigned_shift != 1U || global_unsigned_compare ||
+           global_unsigned_quotient != 2147483647U ||
+           global_unsigned_enum_shift != 2147483647U;
+}
+EOF
+
+try_ 0 << EOF
+int static_unsigned_initializer(void) {
+    enum { local_unsigned_shift_count = 1 };
+    static unsigned int value = 0xffffffff >> local_unsigned_shift_count;
+    return value != 2147483647U;
+}
+int main(void) { return static_unsigned_initializer(); }
+EOF
+
+try_ 0 << EOF
+int main(void) {
+    return sizeof(int[2]) != 2 * sizeof(int) ||
+           sizeof(int[2][3]) != 6 * sizeof(int);
+}
+EOF
+
+try_ 0 << EOF
+int global_abstract_array_size = sizeof(int[2][3]);
+int main(void) { return global_abstract_array_size != 6 * sizeof(int); }
+EOF
+
+try_ 0 << EOF
+struct abstract_array_pair { int first; int second; };
+int global_abstract_record_array_size =
+    sizeof(struct abstract_array_pair[2]);
+int main(void) {
+    return global_abstract_record_array_size !=
+           4 * sizeof(int);
+}
+EOF
+
+try_ 0 << EOF
+int global_pointer_to_array_size = sizeof(int (*)[2]);
+int global_array_of_pointer_size = sizeof(int (*[2]));
+int global_pointer_to_matrix_size = sizeof(int (*)[2][3]);
+int global_matrix_of_pointer_size = sizeof(int (*[2][3]));
+int main(void) {
+    return global_pointer_to_array_size != sizeof(int *) ||
+           global_array_of_pointer_size != 2 * sizeof(int *) ||
+           global_pointer_to_matrix_size != sizeof(int *) ||
+           global_matrix_of_pointer_size != 6 * sizeof(int *);
+}
+EOF
+
+try_ 0 << EOF
+int global_function_pointer_size = sizeof(int (*)(void));
+int global_typed_function_pointer_size = sizeof(int (*)(int, const char *));
+int global_unprototyped_function_pointer_size = sizeof(int (*)());
+int global_variadic_function_pointer_size = sizeof(int (*)(int, ...));
+int global_float_function_pointer_size =
+    sizeof(int (*)(float, double, long double));
+int global_nested_function_pointer_size = sizeof(int (*(*)(int))[2]);
+int global_returned_function_pointer_size = sizeof(int (*(*)(int))(int));
+int global_deep_returned_function_pointer_size =
+    sizeof(int (*(*(*)(int))(int))(int));
+int global_mixed_returned_function_pointer_size =
+    sizeof(int (*(*(*)(int))[2])(int));
+int global_pointer_to_callback_array_size = sizeof(int (*(*)[2])(int));
+int global_callback_array_returning_callback_size =
+    sizeof(int (*(*[2])(int))(int));
+int global_matrix_of_callbacks_size = sizeof(int (*[2][3])(int));
+int global_matrix_of_callbacks_returning_callbacks_size =
+    sizeof(int (*(*[2][3])(int))(int));
+int global_callback_array_returning_array_size =
+    sizeof(int (*(*[2])(int))[3]);
+int global_array_of_callback_array_pointers_size =
+    sizeof(int (*(*[2])[3])(int));
+int global_matrix_of_callback_array_pointers_size =
+    sizeof(int (*(*[2][3])[4])(int));
+int main(void) {
+    return sizeof(int (*)(void)) != sizeof(int *) ||
+           global_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*)(int, const char *)) != sizeof(int *) ||
+           global_typed_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*)()) != sizeof(int *) ||
+           global_unprototyped_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*)(int, ...)) != sizeof(int *) ||
+           global_variadic_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*)(float, double, long double)) != sizeof(int *) ||
+           global_float_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*(*)(int))[2]) != sizeof(int *) ||
+           global_nested_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*(*)(int))(int)) != sizeof(int *) ||
+           global_returned_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*(*(*)(int))(int))(int)) != sizeof(int *) ||
+           global_deep_returned_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*(*(*)(int))[2])(int)) != sizeof(int *) ||
+           global_mixed_returned_function_pointer_size != sizeof(int *) ||
+           sizeof(int (*(*)[2])(int)) != sizeof(int *) ||
+           global_pointer_to_callback_array_size != sizeof(int *) ||
+           sizeof(int (*(*[2])(int))(int)) != 2 * sizeof(int *) ||
+           global_callback_array_returning_callback_size != 2 * sizeof(int *) ||
+           sizeof(int (*[2][3])(int)) != 6 * sizeof(int *) ||
+           global_matrix_of_callbacks_size != 6 * sizeof(int *) ||
+           sizeof(int (*(*[2][3])(int))(int)) != 6 * sizeof(int *) ||
+           global_matrix_of_callbacks_returning_callbacks_size !=
+               6 * sizeof(int *) ||
+           sizeof(int (*(*[2])(int))[3]) != 2 * sizeof(int *) ||
+           global_callback_array_returning_array_size != 2 * sizeof(int *) ||
+           sizeof(int (*(*[2])[3])(int)) != 2 * sizeof(int *) ||
+           global_array_of_callback_array_pointers_size !=
+               2 * sizeof(int *) ||
+           sizeof(int (*(*[2][3])[4])(int)) != 6 * sizeof(int *) ||
+           global_matrix_of_callback_array_pointers_size !=
+               6 * sizeof(int *);
+}
+EOF
+
+try_ 0 << EOF
+int global_nested_designated[2][2][2] = { [0] = { [1] = { 2 } }, 3, 4, 5 };
+int nested_designated(void) {
+    static int local[2][2][2] = { [0] = { [1] = { 2 } }, 3, 4, 5 };
+    return local[0][1][0] != 2 || local[0][1][1] != 0 ||
+           local[1][0][0] != 3 || local[1][0][1] != 4 ||
+           local[1][1][0] != 5 || global_nested_designated[0][1][0] != 2 ||
+           global_nested_designated[1][0][0] != 3 ||
+           global_nested_designated[1][0][1] != 4 ||
+           global_nested_designated[1][1][0] != 5;
+}
+int main(void) { return nested_designated(); }
+EOF
+
+# A C99 designator may traverse a record member and then select an array element
+# in a file-scope aggregate initializer.
+try_ 0 << EOF
+struct item { int values[3]; };
+struct outer { struct item member; };
+struct outer value = {
+    .member.values[2] = 7,
+    .member.values[0] = 3,
+};
+int main(void) {
+    return value.member.values[0] != 3 || value.member.values[1] != 0 ||
+           value.member.values[2] != 7;
+}
+EOF
+
+try_ 0 << EOF
+int nested_hyperplane_designated(void) {
+    int values[2][2][2][2] = { [0] = { [1] = { [1] = { 2 } } }, 3, 4, 5 };
+    return values[0][1][1][0] != 2 || values[0][1][1][1] != 0 ||
+           values[1][0][0][0] != 3 || values[1][0][0][1] != 4 ||
+           values[1][0][1][0] != 5;
+}
+int main(void) { return nested_hyperplane_designated(); }
+EOF
+
+try_ 0 << EOF
+int global_unbraced_designated[2][2][2] = { [0] = { [1] = 2, 3 }, 4, 5 };
+int nested_unbraced_designated(void) {
+    int automatic_values[2][2][2] = { [0] = { [1] = 2, 3 }, 4, 5 };
+    static int static_values[2][2][2] = { [0] = { [1] = 2, 3 }, 4, 5 };
+    return automatic_values[0][1][0] != 2 ||
+           automatic_values[0][1][1] != 3 ||
+           automatic_values[1][0][0] != 4 ||
+           automatic_values[1][0][1] != 5 ||
+           static_values[0][1][0] != 2 || static_values[0][1][1] != 3 ||
+           static_values[1][0][0] != 4 || static_values[1][0][1] != 5 ||
+           global_unbraced_designated[0][1][0] != 2 ||
+           global_unbraced_designated[0][1][1] != 3 ||
+           global_unbraced_designated[1][0][0] != 4 ||
+           global_unbraced_designated[1][0][1] != 5;
+}
+int main(void) { return nested_unbraced_designated(); }
+EOF
+
+try_ 0 << EOF
+int global_unbraced_hyperplane[2][2][2][2] =
+    { [0] = { [1] = 2, 3, 4, 5 }, 6, 7, 8 };
+int nested_unbraced_hyperplane(void) {
+    int automatic_values[2][2][2][2] =
+        { [0] = { [1] = 2, 3, 4, 5 }, 6, 7, 8 };
+    static int static_values[2][2][2][2] =
+        { [0] = { [1] = 2, 3, 4, 5 }, 6, 7, 8 };
+    return automatic_values[0][1][0][0] != 2 ||
+           automatic_values[0][1][0][1] != 3 ||
+           automatic_values[0][1][1][0] != 4 ||
+           automatic_values[0][1][1][1] != 5 ||
+           automatic_values[1][0][0][0] != 6 ||
+           automatic_values[1][0][0][1] != 7 ||
+           automatic_values[1][0][1][0] != 8 ||
+           static_values[0][1][0][0] != 2 ||
+           static_values[0][1][0][1] != 3 ||
+           static_values[0][1][1][0] != 4 ||
+           static_values[0][1][1][1] != 5 ||
+           static_values[1][0][0][0] != 6 ||
+           static_values[1][0][0][1] != 7 ||
+           static_values[1][0][1][0] != 8 ||
+           global_unbraced_hyperplane[0][1][0][0] != 2 ||
+           global_unbraced_hyperplane[0][1][0][1] != 3 ||
+           global_unbraced_hyperplane[0][1][1][0] != 4 ||
+           global_unbraced_hyperplane[0][1][1][1] != 5 ||
+           global_unbraced_hyperplane[1][0][0][0] != 6 ||
+           global_unbraced_hyperplane[1][0][0][1] != 7 ||
+           global_unbraced_hyperplane[1][0][1][0] != 8;
+}
+int main(void) { return nested_unbraced_hyperplane(); }
+EOF
+
+try_ 1 << EOF
+int type_only_float_parameter = sizeof(int (*)(double));
+double still_an_unsupported_object;
+EOF
+
+try_ 0 << EOF
+typedef int (*float_callback_type)(double);
+int global_float_callback_type_size = sizeof(float_callback_type);
+int main(void) {
+    return sizeof(float_callback_type) != sizeof(int *) ||
+           global_float_callback_type_size != sizeof(int *);
+}
+EOF
+
+try_ 1 << EOF
+typedef int (*float_callback_type)(double);
+double still_an_unsupported_object;
+EOF
+
+try_ 1 << EOF
+typedef int (*float_callback_type)(double);
+float_callback_type still_an_unsupported_callback_object;
+EOF
+
+try_ 0 << EOF
+int global_float_type_size = sizeof(float) + sizeof(double) +
+                             sizeof(long double);
+typedef double global_sizeof_real;
+int global_typedef_float_array_size = sizeof(global_sizeof_real[2]);
+int global_float_array_size = sizeof(float[2][3]);
+int global_double_pointer_size = sizeof(double (*)[2]);
+int main(void) {
+    return global_float_type_size != 4 + 8 + (sizeof(void *) == 8 ? 16 : 8) ||
+           global_float_array_size != 6 * sizeof(float) ||
+           global_typedef_float_array_size != 2 * sizeof(double) ||
+           global_double_pointer_size != sizeof(double *);
+}
+EOF
+try_compile_error << EOF
+int invalid_global_float_type_size = sizeof(unsigned double);
 EOF
 try_compile_error << EOF
 int identity(float value) { return 0; }
@@ -722,9 +1015,6 @@ int identity(long double value) { return 0; }
 EOF
 try_compile_error << EOF
 long double value;
-EOF
-try_compile_error << EOF
-int main(void) { return sizeof(long double); }
 EOF
 try_compile_error << EOF
 int _Complex;
@@ -793,6 +1083,35 @@ int main(void) {
     return sizeof values != 2 * sizeof(wchar_t) || values[0] != 0xe9 ||
            values[1] != 0;
 }
+EOF
+try_ 0 << EOF
+enum { wide_ucn = L'\u00e9' };
+int main(void) { return wide_ucn != 0xe9 || L'\u00e9' != 0xe9; }
+EOF
+try_flags 0 "--no-libc" << EOF
+#if L'\u00e9' != 0xe9
+#error wide UCN preprocessing value is incorrect
+#endif
+int main(void) { return 0; }
+EOF
+try_ 0 << EOF
+struct values { int code; };
+struct values global_values = {L'\u00e9'};
+int main(void) { return global_values.code != 0xe9; }
+EOF
+try_ 0 << EOF
+int global_values[] = {L'\u00e9'};
+int main(void) { return global_values[0] != 0xe9; }
+EOF
+try_ 0 << EOF
+int main(void) { return sizeof L'\u00e9' != sizeof(int); }
+EOF
+try_ 0 << EOF
+int global_size = sizeof(L'\u00e9');
+int main(void) { return global_size != sizeof(int); }
+EOF
+try_ 0 << EOF
+int main(void) { return L'a\u00e9' != 0x61c3a9; }
 EOF
 
 try_ 0 << EOF
@@ -1005,6 +1324,23 @@ EOF
 
 # Category: Arithmetic Operations
 begin_category "Arithmetic Operations" "Testing +, -, *, /, % operators"
+
+# C99 integer promotions and signed/unsigned common-type selection must retain
+# the promoted arithmetic result across character, short, int, and long ranks.
+try_ 0 << EOF
+int main(void) {
+    signed char signed_byte = -1;
+    unsigned char unsigned_byte = 255;
+    short signed_short = -2;
+    unsigned short unsigned_short = 65535;
+    unsigned int unsigned_int = 1;
+    long signed_long = -1;
+    unsigned long unsigned_long = 1;
+    return signed_byte + unsigned_byte != 254 ||
+           signed_short + unsigned_short != 65533 ||
+           signed_byte < unsigned_int || signed_long < unsigned_long;
+}
+EOF
 
 # Unsigned int operations must use modular arithmetic, logical right shift,
 # unsigned division, and unsigned relational comparisons after the value's high
@@ -2293,6 +2629,62 @@ int main(void) {
 }
 EOF
 
+# C99 6.7.4 forbids an external-linkage inline definition from containing a
+# modifiable static definition or naming an internal-linkage object/function.
+try_compile_error << EOF
+inline int invalid_external_inline_static(void) {
+    static int value;
+    return value;
+}
+EOF
+
+try_compile_error << EOF
+static int hidden_external_inline_object;
+inline int invalid_external_inline_object(void) {
+    return hidden_external_inline_object;
+}
+EOF
+
+try_compile_error << EOF
+static int hidden_external_inline_function(void) { return 1; }
+inline int invalid_external_inline_function(void) {
+    return hidden_external_inline_function();
+}
+EOF
+
+try_compile_error << EOF
+static int hidden_external_inline_address(void) { return 1; }
+inline int invalid_external_inline_address(void) {
+    return (&hidden_external_inline_address) != 0;
+}
+EOF
+
+try_compile_error << EOF
+static int hidden_external_inline_sizeof;
+inline int invalid_external_inline_sizeof(void) {
+    return sizeof hidden_external_inline_sizeof;
+}
+EOF
+
+try_ 3 << EOF
+static inline int permitted_internal_inline(void) {
+    static int value;
+    return ++value;
+}
+int main(void) {
+    return permitted_internal_inline() + permitted_internal_inline();
+}
+EOF
+
+try_ 2 << EOF
+inline int permitted_external_inline_const(void) {
+    static int const value = 1;
+    static int * const pointer = 0;
+    return value + (pointer == 0);
+}
+int main(void) { return permitted_external_inline_const(); }
+EOF
+
 try_ 13 << EOF
 int third(int values[static 3]) { return values[2]; }
 int sum_pair(int values[restrict static 2]) { return values[0] + values[1]; }
@@ -2314,6 +2706,18 @@ EOF
 
 try_compile_error << EOF
 int invalid(int values[2][static 2]);
+EOF
+
+try_compile_error << EOF
+int invalid(int values[2][const 2]);
+EOF
+
+try_compile_error << EOF
+int invalid(int values[2][volatile 2]);
+EOF
+
+try_compile_error << EOF
+int invalid(int values[2][restrict 2]);
 EOF
 
 try_compile_error << EOF
@@ -2653,6 +3057,21 @@ EOF
 try_ 3 << EOF
 int main(void) {
     return (int[][2]){{1, 2}, {3, 4}}[1][0];
+}
+EOF
+try_ 16 << EOF
+int main(void) {
+    return (int[2][2][2]){{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}}[1][1][1] +
+           ((int[2][2][2]){{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}})[1][0][0] +
+           (int[][2][2]){{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}}[0][1][0];
+}
+EOF
+try_ 17 << EOF
+int main(void) {
+    return (int[2][2][2][2]){{{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}},
+                              {{{9, 10}, {11, 12}}, {{13, 14}, {15, 16}}}}[1][0][1][0] +
+           ((int[2][2][2][2]){{{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}},
+                                {{{9, 10}, {11, 12}}, {{13, 14}, {15, 16}}}})[0][1][0][1];
 }
 EOF
 try_ 6 << EOF
@@ -3220,6 +3639,68 @@ int main(void) {
     return values[2] != 0 || values[3] != 0;
 }
 EOF
+try_ 0 << EOF
+int a = 2, b = 3, c = 5, d = 7;
+int *(*p)[2] = (int *[2][2]){{&a, &b}, {&c, &d}};
+int main(void) {
+    return *p[1][0] != 5 || *p[0][1] != 3;
+}
+EOF
+try_ 0 << EOF
+int values[2][3] = {{2, 3, 5}, {7, 11, 13}};
+int *(*rows)[2] = (int *[1][2]){{&values[0][1], &values[1][2]}};
+int main(void) {
+    int first = *rows[0][0];
+    int second = *rows[0][1];
+    return first != 3 || second != 13;
+}
+EOF
+try_ 0 << EOF
+int values[2][3] = {{2, 3, 5}, {7, 11, 13}};
+int *pointers[1] = {&values[1][1]};
+int main(void) { return *pointers[0] != 11; }
+EOF
+try_ 0 << EOF
+int values[2][3] = {{2, 3, 5}, {7, 11, 13}};
+int (*next_row)[3] = &values[0] + 1;
+int main(void) { return next_row[0][2] != 13; }
+EOF
+try_ 0 << EOF
+int values[2][3] = {{2, 3, 5}, {7, 11, 13}};
+struct holder { int (*row)[3]; };
+struct holder value = {&values[0] + 1};
+int main(void) { return value.row[0][1] != 11; }
+EOF
+try_ 0 << EOF
+int main(void) {
+    int a = 2, b = 3, c = 5, d = 7;
+    int *data[2][2] = {{&a, &b}, {&c, &d}};
+    int *(*p)[2] = data;
+    return *p[1][0] != 5 || *p[0][1] != 3;
+}
+EOF
+try_ 1 << EOF
+int main(void) {
+    int (**rows)[2] = (int (*[])[2]){0, 0};
+    return rows[0] == 0 && rows[1] == 0;
+}
+EOF
+try_ 13 << EOF
+int main(void) {
+    int first[2] = {3, 4};
+    int second[2] = {9, 10};
+    int (**rows)[2] = (int (*[])[2]){&first, &second};
+    return rows[0][0][1] + rows[1][0][0];
+}
+EOF
+try_ 7 << EOF
+int main(void) {
+    int values[2] = {3, 7};
+    int *items[1] = {values};
+    int **p = items;
+    return p[0][1];
+}
+EOF
 try_compile_error << EOF
 int main(void) {
     int *values = (int[2]){3, 4, 5};
@@ -3349,6 +3830,190 @@ int *global_compound_bounded = (int[4]){5};
 int main(void) {
     return global_compound_bounded[0] + global_compound_bounded[1] +
            global_compound_bounded[2] + global_compound_bounded[3];
+}
+EOF
+try_ 5 << EOF
+int global_pointer_array_rows[2][2] = {{1, 2}, {3, 4}};
+int (*global_pointer_array)[2] = global_pointer_array_rows;
+int main(void) {
+    return global_pointer_array[1][0] + global_pointer_array[0][1];
+}
+EOF
+try_ 13 << EOF
+int global_pointer_array_cubes[2][2][2] =
+    {{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}};
+int (*global_pointer_cube)[2][2] = global_pointer_array_cubes;
+int main(void) {
+    return global_pointer_cube[1][0][0] + global_pointer_cube[0][1][1] * 2;
+}
+EOF
+try_ 6 << EOF
+int global_pointer_array_rectangles[2][2][3] =
+    {{{1, 2, 3}, {4, 5, 6}}, {{7, 8, 9}, {10, 11, 12}}};
+int (*global_pointer_rectangle)[2][3] = global_pointer_array_rectangles;
+int main(void) {
+    return global_pointer_rectangle[0][1][2];
+}
+EOF
+try_ 1 << EOF
+int **global_compound_pointer_array = (int *[]){0, 0};
+int main(void) {
+    return global_compound_pointer_array[0] == 0 &&
+           global_compound_pointer_array[1] == 0;
+}
+EOF
+try_ 1 << EOF
+int **global_compound_bounded_pointer_array = (int *[2]){0, 0};
+int main(void) {
+    return global_compound_bounded_pointer_array[0] == 0 &&
+           global_compound_bounded_pointer_array[1] == 0;
+}
+EOF
+try_ 0 << EOF
+typedef int global_compound_row[2];
+global_compound_row *global_compound_typedef_rows =
+    (global_compound_row[]){ {3, 8}, {4, 9} };
+int main(void) {
+    return global_compound_typedef_rows[1][0] != 4 ||
+           global_compound_typedef_rows[0][1] != 8;
+}
+EOF
+try_ 0 << EOF
+typedef int global_compound_bounded_row[2];
+global_compound_bounded_row *global_compound_bounded_typedef_rows =
+    (global_compound_bounded_row[2]){ {5, 1}, {6, 7} };
+int main(void) {
+    return global_compound_bounded_typedef_rows[1][1] != 7 ||
+           global_compound_bounded_typedef_rows[0][0] != 5;
+}
+EOF
+try_ 1 << EOF
+int (**global_compound_pointer_rows)[2] = (int (*[])[2]){0, 0};
+int main(void) {
+    return global_compound_pointer_rows[0] == 0 &&
+           global_compound_pointer_rows[1] == 0;
+}
+EOF
+try_ 0 << EOF
+int global_compound_source_rows[2][2] = {{1, 2}, {3, 4}};
+int (**global_compound_initialized_pointer_rows)[2] =
+    (int (*[])[2]){global_compound_source_rows,
+                    global_compound_source_rows + 1,
+                    global_compound_source_rows - 0};
+int main(void) {
+    return global_compound_initialized_pointer_rows[1][0][1] != 4 ||
+           global_compound_initialized_pointer_rows[0][0][0] != 1 ||
+           global_compound_initialized_pointer_rows[2][1][0] != 3;
+}
+EOF
+try_ 0 << EOF
+int global_compound_bounded_source_rows[2][2] = {{5, 6}, {7, 8}};
+int (**global_compound_bounded_initialized_pointer_rows)[2] =
+    (int (*[2])[2]){global_compound_bounded_source_rows + 1,
+                    global_compound_bounded_source_rows};
+int main(void) {
+    return global_compound_bounded_initialized_pointer_rows[0][0][0] != 7 ||
+           global_compound_bounded_initialized_pointer_rows[1][0][1] != 6;
+}
+EOF
+try_ 0 << EOF
+int global_compound_address_value = 12;
+int **global_compound_address_values =
+    (int *[]){&global_compound_address_value};
+int main(void) { return **global_compound_address_values != 12; }
+EOF
+try_ 0 << EOF
+int global_compound_address_elements[2] = {10, 13};
+int **global_compound_address_element_values =
+    (int *[]){&global_compound_address_elements[1]};
+int main(void) {
+    int *element = global_compound_address_element_values[0];
+    return *element != 13;
+}
+EOF
+try_ 0 << EOF
+int global_compound_pointer_decay_values[2] = {3, 5};
+int *global_compound_pointer_decay_rows[1] =
+    {global_compound_pointer_decay_values};
+int ***global_compound_pointer_decay =
+    (int **[]){global_compound_pointer_decay_rows};
+int ***global_compound_pointer_address =
+    (int **[]){&global_compound_pointer_decay_rows[0]};
+int main(void) {
+    int **row = global_compound_pointer_decay[0];
+    int **addressed_row = global_compound_pointer_address[0];
+    int *element = row[0];
+    int *addressed_element = addressed_row[0];
+    return element[1] != 5 || addressed_element[1] != 5;
+}
+EOF
+try_ 0 << EOF
+int global_compound_address_matrix[2][3] = {{2, 3, 5}, {7, 11, 13}};
+int (**global_compound_address_matrix_rows)[3] =
+    (int (*[])[3]){&global_compound_address_matrix[1]};
+int main(void) {
+    int (*row)[3] = global_compound_address_matrix_rows[0];
+    return row != &global_compound_address_matrix[1];
+}
+EOF
+try_ 0 << EOF
+int global_compound_address_offset_values[3] = {17, 19, 23};
+int **global_compound_address_offset_pointers =
+    (int *[]){&global_compound_address_offset_values[0] + 2,
+              &global_compound_address_offset_values[2] - 1};
+int main(void) {
+    int *forward = global_compound_address_offset_pointers[0];
+    int *backward = global_compound_address_offset_pointers[1];
+    return *forward != 23 || *backward != 19;
+}
+EOF
+try_ 0 << EOF
+int global_address_row_matrix[2][3] = {{2, 3, 5}, {7, 11, 13}};
+int (*global_address_row)[3] = &global_address_row_matrix[1];
+int *global_address_matrix_element = &global_address_row_matrix[1][2];
+int (*global_address_decay_row)[3] = global_address_row_matrix + 1;
+struct global_address_matrix_holder { int matrix[2][3]; };
+struct global_address_matrix_holder global_address_matrix_object =
+    {{{29, 31, 37}, {41, 43, 47}}};
+int *global_address_matrix_member =
+    &global_address_matrix_object.matrix[1][2];
+int main(void) {
+    return global_address_row != &global_address_row_matrix[1] ||
+           global_address_decay_row != &global_address_row_matrix[1] ||
+           *global_address_matrix_element != 13 ||
+           *global_address_matrix_member != 47;
+}
+EOF
+try_ 1 << EOF
+int (**global_compound_bounded_pointer_rows)[2] = (int (*[2])[2]){0, 0};
+int main(void) {
+    return global_compound_bounded_pointer_rows[0] == 0 &&
+           global_compound_bounded_pointer_rows[1] == 0;
+}
+EOF
+try_ 1 << EOF
+int (**global_compound_constant_bound_pointer_rows)[2] =
+    (int (*[1 + 1])[2]){0, 0};
+int main(void) {
+    return global_compound_constant_bound_pointer_rows[0] == 0 &&
+           global_compound_constant_bound_pointer_rows[1] == 0;
+}
+EOF
+try_ 1 << EOF
+int (***global_compound_nested_pointer_rows)[2] =
+    (int (**[])[2]){0, 0};
+int main(void) {
+    return global_compound_nested_pointer_rows[0] == 0 &&
+           global_compound_nested_pointer_rows[1] == 0;
+}
+EOF
+try_ 1 << EOF
+struct global_compound_row_record { int value; };
+struct global_compound_row_record (**global_compound_record_rows)[2] =
+    (struct global_compound_row_record (*[])[2]){0, 0};
+int main(void) {
+    return global_compound_record_rows[0] == 0 &&
+           global_compound_record_rows[1] == 0;
 }
 EOF
 
@@ -3780,6 +4445,165 @@ EOF
 try_ 0 << EOF
 int main(void) {
     return 0;
+}
+EOF
+
+# Identifier-led function calls must use the ordinary full-expression path:
+# their results may participate in arithmetic and comma sequencing instead of
+# being forced to be a standalone statement by declaration dispatch.
+try_ 12 << EOF
+int bump(int *value) { *value += 1; return *value; }
+int scale(int value) { return value * 3; }
+int main(void)
+{
+    int value = 0;
+    bump(&value), bump(&value);
+    return scale(value) + bump(&value) + value;
+}
+EOF
+try_ 0 << EOF
+int function_designator_statement(void) { return 1; }
+int main(void)
+{
+    function_designator_statement;
+    return 0;
+}
+EOF
+try_ 0 << EOF
+int function_designator_condition(void) { return 1; }
+int main(void)
+{
+    if (function_designator_condition)
+        return 0;
+    return 1;
+}
+EOF
+try_ 0 << EOF
+int function_designator_logical(void) { return 1; }
+int main(void)
+{
+    if (function_designator_logical && 1)
+        return 0;
+    return 1;
+}
+EOF
+try_ 0 << EOF
+int function_designator_or(void) { return 1; }
+int main(void)
+{
+    if (function_designator_or || 0)
+        return 0;
+    return 1;
+}
+EOF
+try_ 0 << EOF
+int function_designator_not(void) { return 1; }
+int main(void)
+{
+    if (!function_designator_not)
+        return 1;
+    return 0;
+}
+EOF
+try_ 0 << EOF
+int function_designator_equality(void) { return 1; }
+int main(void) { return function_designator_equality == 0 ? 1 : 0; }
+EOF
+try_ 0 << EOF
+int function_designator_inequality(void) { return 1; }
+int main(void) { return function_designator_inequality != 0 ? 0 : 1; }
+EOF
+try_compile_error << EOF
+int incompatible_equality_left(int value) { return value; }
+int incompatible_equality_right(void) { return 0; }
+int main(void) {
+    return incompatible_equality_left == incompatible_equality_right;
+}
+EOF
+try_compile_error << EOF
+int invalid_function_relational(int value) { return value; }
+int main(void) {
+    return invalid_function_relational < invalid_function_relational;
+}
+EOF
+try_ 8 << EOF
+typedef int (*function_selector_t)(int);
+int increment_selected(int value) { return value + 1; }
+int decrement_selected(int value) { return value - 1; }
+int select_and_call(int select)
+{
+    function_selector_t callback =
+        select ? increment_selected : decrement_selected;
+    return callback(4);
+}
+int main(void) { return select_and_call(1) + select_and_call(0); }
+EOF
+try_ 5 << EOF
+typedef int (*nullable_selector_t)(int);
+int nullable_increment(int value) { return value + 1; }
+int main(void)
+{
+    nullable_selector_t callback = 1 ? nullable_increment : 0;
+    return callback ? callback(4) : 0;
+}
+EOF
+try_ 5 << EOF
+int direct_increment(int value) { return value + 1; }
+int direct_decrement(int value) { return value - 1; }
+int main(void) { return (1 ? direct_increment : direct_decrement)(4); }
+EOF
+try_ 5 << EOF
+int direct_nullable_increment(int value) { return value + 1; }
+int main(void) { return (1 ? direct_nullable_increment : 0)(4); }
+EOF
+try_ 5 << EOF
+int cast_nullable_increment(int value) { return value + 1; }
+int main(void) { return (1 ? cast_nullable_increment : (int)0)(4); }
+EOF
+try_ 5 << EOF
+int sizeof_nullable_increment(int value) { return value + 1; }
+int main(void) {
+    return (1 ? sizeof_nullable_increment : sizeof(int) - 4)(4);
+}
+EOF
+try_ 5 << EOF
+int narrow_nullable_increment(int value) { return value + 1; }
+int main(void) {
+    return (1 ? narrow_nullable_increment : (unsigned char)256)(4);
+}
+EOF
+try_ 5 << EOF
+int wide_nullable_increment(int value) { return value + 1; }
+int main(void) {
+    return (1 ? wide_nullable_increment : (int)4294967296LL)(4);
+}
+EOF
+try_compile_error << EOF
+int void_cast_increment(int value) { return value + 1; }
+int main(void) { return (1 ? void_cast_increment : (void)0)(4); }
+EOF
+try_compile_error << EOF
+int bool_cast_increment(int value) { return value + 1; }
+int main(void) {
+    return (1 ? bool_cast_increment : (_Bool)4294967296LL)(4);
+}
+EOF
+try_compile_error << EOF
+typedef int (*invalid_selector_t)(int);
+int invalid_increment(int value) { return value + 1; }
+int main(void) {
+    invalid_selector_t callback = 1 ? invalid_increment : 1;
+    return callback(0);
+}
+EOF
+try_compile_error << EOF
+typedef int (*incompatible_selector_t)(int);
+int incompatible_increment(int value) { return value + 1; }
+int incompatible_wrong(void) { return 0; }
+int main(void) {
+    incompatible_selector_t callback =
+        1 ? incompatible_increment : incompatible_wrong;
+    return callback(0);
 }
 EOF
 
@@ -4571,13 +5395,63 @@ int main() {
 }
 EOF
 
+try_compile_error << EOF
+typedef void *void_pointer_t;
+int main() {
+    void_pointer_t value = 0;
+    return value + 1;
+}
+EOF
+
 # A pointer-to-void-pointer advances over pointer objects, so it remains valid.
+try_ 1 << EOF
+int main() {
+    void *values[2];
+    return (char *)(values + 1) - (char *)values == sizeof(void *);
+}
+EOF
+
+try_ 1 << EOF
+typedef void *void_pointer_t;
+int main() {
+    void_pointer_t values[2];
+    return (char *)(values + 1) - (char *)values == sizeof(void *);
+}
+EOF
+
 try_ 1 << EOF
 int main() {
     void *values[2];
     void **p = values;
     p += 1;
     return (char *)p - (char *)values == sizeof(void *);
+}
+EOF
+
+try_ 1 << EOF
+int main() {
+    void *values[2];
+    void **p = values;
+    return (char *)(p + 1) - (char *)values == sizeof(void *);
+}
+EOF
+
+try_ 1 << EOF
+typedef void **void_pointer_slot_t;
+int main() {
+    void *values[2];
+    void_pointer_slot_t p = values;
+    p += 1;
+    return (char *)p - (char *)values == sizeof(void *);
+}
+EOF
+
+try_ 1 << EOF
+typedef void **void_pointer_slot_t;
+int main() {
+    void *values[2];
+    void_pointer_slot_t p = values;
+    return (char *)(p + 1) - (char *)values == sizeof(void *);
 }
 EOF
 
@@ -4748,6 +5622,293 @@ int main() {
 }
 EOF
 
+# C99 function designators decay to a function-pointer value when supplied as an
+# argument, whether named directly, addressed explicitly, or parenthesized.
+try_ 0 << EOF
+int plus1(int value) { return value + 1; }
+int invoke(int (*callback)(int)) { return callback(4) - 5; }
+int main(void) {
+    return invoke(plus1) || invoke(&plus1) || invoke((plus1));
+}
+EOF
+
+# A parenthesized function designator remains an address constant for a
+# file-scope callback initializer, not merely a call-argument convenience.
+try_ 0 << EOF
+int plus1(int value);
+int (*callback)(int) = (plus1);
+int (*addressed_callback)(int) = &(plus1);
+int plus1(int value) { return value + 1; }
+int main(void) { return callback(4) != 5 || addressed_callback(5) != 6; }
+EOF
+
+# Aggregate constant initializers retain grouped function designators too.
+try_ 0 << EOF
+struct holder { int (*callback)(int); };
+int plus1(int value) { return value + 1; }
+struct holder global_holder = { (plus1) };
+int main(void) { return global_holder.callback(6) != 7; }
+EOF
+
+try_ 0 << EOF
+int plus1(int value) { return value + 1; }
+int (*callbacks[2])(int) = { (plus1), &(plus1) };
+int main(void) { return callbacks[0](7) != 8 || callbacks[1](8) != 9; }
+EOF
+
+# Unary address/dereference pairs around a function designator cancel before
+# static initialization, while preserving the deferred code-address relocation.
+try_ 0 << EOF
+int plus1(int value) { return value + 1; }
+int (*first)(int) = &*plus1;
+int (*second)(int) = *&plus1;
+struct callbacks { int (*third)(int); int (*fourth)(int); };
+struct callbacks grouped = {&*plus1, *&plus1};
+int (*array[2])(int) = {&*plus1, *&plus1};
+int main(void) {
+    return first(1) != 2 || second(2) != 3 || grouped.third(3) != 4 ||
+           grouped.fourth(4) != 5 || array[0](5) != 6 || array[1](6) != 7;
+}
+EOF
+
+try_ 0 << EOF
+int plus1(int value) { return value + 1; }
+int (*first)(int) = &*(plus1);
+int (*second)(int) = (*&plus1);
+int (*third)(int) = (&*plus1);
+int (*fourth)(int) = &(*plus1);
+int (*fifth)(int) = *(&plus1);
+int main(void) {
+    return first(1) != 2 || second(2) != 3 || third(3) != 4 ||
+           fourth(4) != 5 || fifth(5) != 6;
+}
+EOF
+
+# Function-pointer typedefs retain their prototype through an alias chain. A
+# callback parameter is already an SSA pointer value, so calling it must not
+# reload its stack slot as though the slot held another function pointer.
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+typedef callback_t callback_alias_t;
+int plus1(int value) { return value + 1; }
+int invoke(callback_alias_t callback) { return callback(4) - 5; }
+int main(void) {
+    callback_t callback = plus1;
+    return invoke(callback) || sizeof(callback_t) != sizeof(void *);
+}
+EOF
+
+# A callback typedef preserves its prototype and relocation semantics in every
+# ordinary declaration context: file scope, local storage, and parameters.
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+callback_t global_callback = plus1;
+int invoke(callback_t callback) { return callback(4); }
+int main(void) {
+    callback_t local_callback = global_callback;
+    return invoke(local_callback) != 5;
+}
+EOF
+
+# A callback typedef used as a cast remains a pointer-valued callable result.
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int main(void) { return ((callback_t)plus1)(4) != 5; }
+EOF
+
+# Callback typedef values decay on return, and a direct call result remains
+# callable as a postfix expression.
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+callback_t maker(void) { callback_t callback = plus1; return callback; }
+int main(void) { return maker()(4) != 5; }
+EOF
+
+# The comma operator yields its final function designator, which decays before
+# the callback-pointer initializer stores it.
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = (0, plus1);
+    return callback(4) != 5;
+}
+EOF
+
+# Pointer depth before the parenthesized callback declarator belongs to the
+# callback return type, not to the typedef alias itself.
+try_ 0 << EOF
+typedef int *(*alloc_t)(int);
+int value;
+int *pick(int ignored) { return &value; }
+int main(void) {
+    alloc_t callback = pick;
+    int *result = callback(0);
+    return result != &value;
+}
+EOF
+
+# Aliases with different callback prototypes must not make incompatible function
+# declarations appear equivalent merely because both are pointer-sized.
+try_ 1 << EOF
+typedef int (*one_arg_t)(int);
+typedef int (*long_arg_t)(long);
+one_arg_t factory(void);
+long_arg_t factory(void);
+EOF
+
+# A derived callback alias is not a direct callback object. Until the
+# dereference/subscript path carries its element prototype, reject this rather
+# than treating the address of the callback object as a function address.
+try_ 1 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = plus1;
+    callback_t *slot = &callback;
+    return slot(4);
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int plus2(int value) { return value + 2; }
+int main(void) {
+    callback_t callbacks[2] = {plus1, plus2};
+    callback_t *slot = callbacks;
+    return (*++slot)(4) != 6;
+}
+EOF
+try_ 1 << EOF
+typedef int (*callback_t)(int);
+typedef callback_t *callback_slot_t;
+int main(void) {
+    callback_slot_t slot;
+    return slot(4);
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = plus1;
+    callback_t *slot = &callback;
+    return (*slot)(4) != 5;
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callbacks[1] = {plus1};
+    return callbacks[0](4) != 5;
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+typedef callback_t *callback_slot_t;
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = plus1;
+    callback_slot_t slot = &callback;
+    return (*slot)(4) != 5;
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int plus2(int value) { return value + 2; }
+int main(void) {
+    callback_t callbacks[2][1] = {{plus1}, {plus2}};
+    return callbacks[1][0](4) != 6;
+}
+EOF
+try_ 1 << EOF
+typedef int (*callback_t)(int);
+typedef callback_t *callback_slot_t;
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = plus1;
+    callback_slot_t slots[1] = {&callback};
+    return slots[0](4);
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+typedef callback_t *callback_slot_t;
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = plus1;
+    callback_slot_t slots[1] = {&callback};
+    return (*slots[0])(4) != 5;
+}
+EOF
+try_ 1 << EOF
+typedef int (*callback_t)(int);
+typedef struct { callback_t *slot; } holder_t;
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = plus1;
+    holder_t holder = {&callback};
+    return holder.slot(4);
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+typedef struct { callback_t callback; } holder_t;
+int plus1(int value) { return value + 1; }
+int main(void) {
+    holder_t holder = {plus1};
+    return holder.callback(4) != 5;
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int plus2(int value) { return value + 2; }
+int main(void) {
+    callback_t callbacks[2] = {plus1, plus2};
+    callback_t *slot = callbacks;
+    return (*(slot + 1))(4) != 6;
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(int);
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = plus1;
+    callback_t *slot = &callback;
+    callback_t **slots = &slot;
+    return (**slots)(4) != 5;
+}
+EOF
+try_ 1 << EOF
+typedef int (*callback_t)(int);
+typedef callback_t *callback_slot_t;
+int plus1(int value) { return value + 1; }
+int main(void) {
+    callback_t callback = plus1;
+    callback_slot_t slots[1] = {&callback};
+    return (*(slots + 0))(4);
+}
+EOF
+
+# The shared argument reader also serves indirect calls and must preserve a raw
+# designator when it follows an ordinary scalar argument.
+try_ 0 << EOF
+int plus1(int value) { return value + 1; }
+int apply(int offset, int (*callback)(int)) {
+    return offset + callback(4) - 7;
+}
+int main(void) {
+    int (*indirect)(int, int (*)(int)) = apply;
+    return apply(2, plus1) || indirect(2, plus1);
+}
+EOF
+
 # Local function pointer, direct struct member, and pointer-to-struct member.
 # The first path must use the pointer value directly; the latter two must load
 # the pointer from the member slot.
@@ -4881,6 +6042,25 @@ int main(void)
 }
 EOF
 fi
+
+# C99 permits neither addition nor subtraction on function pointers: only
+# pointers to complete object types have elements to scale or subtract.
+try_compile_error << EOF
+int callback(int value) { return value; }
+int main(void) { return callback + 1 != 0; }
+EOF
+try_compile_error << EOF
+int callback(int value) { return value; }
+int main(void) { return 1 + callback != 0; }
+EOF
+try_compile_error << EOF
+int callback(int value) { return value; }
+int main(void) { return callback - 1 != 0; }
+EOF
+try_compile_error << EOF
+int callback(int value) { return value; }
+int main(void) { return callback - callback; }
+EOF
 
 # Assignment between function-pointer variables copies the stored function
 # address; it must not treat the RHS variable name as a function symbol.
@@ -6039,13 +7219,16 @@ try_compile_error << EOF
 int too_many_dimensions[1][1][1][1][1];
 EOF
 
-# Forward record tags may be used through pointers before their complete
-# definition; both global static storage and block scope retain that rule.
+# Forward record tags, including aliases of them, may be used through pointers
+# before their complete definition; both global static storage and block scope
+# retain that rule.
 try_ 17 << EOF
 struct node;
 union payload;
+typedef struct deferred deferred_t;
 static struct node *head;
 static union payload *slot;
+static deferred_t *deferred;
 struct node { struct node *next; int value; };
 union payload { int number; char bytes[4]; };
 int local_forward(void) {
@@ -6067,6 +7250,47 @@ EOF
 try_compile_error << EOF
 struct incomplete;
 struct incomplete value;
+EOF
+try_compile_error << EOF
+typedef struct incomplete incomplete_t;
+incomplete_t value;
+EOF
+try_compile_error << EOF
+int main(void) {
+    typedef union incomplete incomplete_t;
+    incomplete_t value;
+    return 0;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    typedef struct incomplete incomplete_t;
+    for (incomplete_t value; ; )
+        return 0;
+}
+EOF
+try_compile_error << EOF
+typedef struct incomplete incomplete_t;
+void invalid(incomplete_t value) { }
+EOF
+try_compile_error << EOF
+typedef struct incomplete incomplete_t;
+incomplete_t invalid(void) { }
+EOF
+try_ 0 << EOF
+typedef struct incomplete incomplete_t;
+void valid(incomplete_t values[2]) { }
+int main(void) { return 0; }
+EOF
+try_ 9 << EOF
+struct external;
+typedef struct external external_t;
+extern struct external direct;
+extern external_t alias;
+struct external { int value; };
+struct external direct = {4};
+external_t alias = {5};
+int main(void) { return direct.value + alias.value; }
 EOF
 
 # Three-dimensional member paths retain both inner strides. A leaf designator
@@ -6351,6 +7575,29 @@ int static_compound_literals(void)
     return scalar + values[1] + pair.left + pair.right;
 }
 int main(void) { return static_compound_literals(); }
+EOF
+
+# A block-scope static compound literal has global storage duration and must
+# retain nested designated initializers through the global aggregate path.
+try_ 11 << EOF
+struct static_compound_inner { int left; int right; };
+struct static_compound_outer { struct static_compound_inner inner; int tail; };
+int static_nested_compound_literal(void)
+{
+    static struct static_compound_outer value =
+        (struct static_compound_outer){.inner.right = 7, .tail = 4};
+    return value.inner.left + value.inner.right + value.tail;
+}
+int main(void) { return static_nested_compound_literal(); }
+EOF
+
+try_ 9 << EOF
+int static_designated_array_compound_literal(void)
+{
+    static int *values = (int[4]){[3] = 7, [1] = 2};
+    return values[0] + values[1] + values[2] + values[3];
+}
+int main(void) { return static_designated_array_compound_literal(); }
 EOF
 
 try_compile_error << EOF
@@ -6731,6 +7978,66 @@ int main(void) {
     return *global_last + *global_first + *member_last + global_marker +
            global_half;
 }
+EOF
+try_ 0 << EOF
+int global_wide_offset_values[] = {17, 23};
+int *global_wide_offset =
+    &global_wide_offset_values[0] + (0x100000000ULL >> 32);
+int *global_wide_decay_offset =
+    global_wide_offset_values + (0x100000000ULL >> 32);
+int *global_wide_negative_offset =
+    &global_wide_offset_values[1] - (0x100000000ULL >> 32);
+struct global_wide_offset_holder { int *value; };
+struct global_wide_offset_holder global_wide_offset_aggregate = {
+    &global_wide_offset_values[0] + (0x100000000ULL >> 32)};
+int main(void) {
+    int *aggregate_value = global_wide_offset_aggregate.value;
+    return *global_wide_offset != 23 || *global_wide_decay_offset != 23 ||
+           *global_wide_negative_offset != 17 ||
+           *aggregate_value != 23;
+}
+EOF
+try_ 0 << EOF
+struct pointer_member_holder { int *value; };
+typedef char *pointer_member_char_ptr;
+struct pointer_member_indirect_holder {
+    pointer_member_char_ptr character;
+    int **value;
+};
+int main(void) {
+    int direct = 29;
+    int *direct_pointer = &direct;
+    char character = 'x';
+    struct pointer_member_holder holder = {&direct};
+    struct pointer_member_holder *pointer = &holder;
+    struct pointer_member_indirect_holder indirect = {&character,
+                                                       &direct_pointer};
+    struct pointer_member_indirect_holder *indirect_pointer = &indirect;
+    return *holder.value != 29 || *pointer->value != 29 ||
+           *indirect.character != 'x' || **indirect.value != 29 ||
+           **indirect_pointer->value != 29;
+}
+EOF
+try_ 0 << EOF
+struct pointer_member_inner { int field; };
+struct pointer_member_outer { struct pointer_member_inner *member; };
+typedef int (*pointer_member_callback)(int);
+struct pointer_member_callback_holder { pointer_member_callback callback; };
+int add_one(int value) { return value + 1; }
+int main(void) {
+    struct pointer_member_inner inner = {55};
+    struct pointer_member_outer outer = {&inner};
+    struct pointer_member_outer *outer_pointer = &outer;
+    struct pointer_member_callback_holder callback_holder = {add_one};
+    return (*outer.member).field != 55 ||
+           (*outer_pointer->member).field != 55 ||
+           (*callback_holder.callback)(41) != 42;
+}
+EOF
+try_compile_error << EOF
+int global_wide_offset_range_values[1];
+int *global_wide_offset_out_of_range =
+    &global_wide_offset_range_values[0] + 0x100000000ULL;
 EOF
 
 # Repeated compatible file-scope declarations name the same static object. A
@@ -7600,6 +8907,7 @@ items 12 "struct holder { int values[3]; }; struct holder value; return sizeof v
 items 12 "struct holder { int values[3]; }; struct holder value; return sizeof((value.values));"
 items 12 "struct holder { int values[2][3]; }; struct holder value; return sizeof(value.values[0]);"
 items 12 "struct holder { int values[2][3]; }; struct holder value; return sizeof value.values[0];"
+items 12 "struct holder { int values[2][3]; }; struct holder value; int index = 0; return sizeof((value.values[index++])) + index;"
 items 4 "struct holder { int values[2][3]; }; struct holder value; return sizeof(value.values[0][0]);"
 items 12 "struct holder { int values[2][3]; }; struct holder *value = 0; return sizeof(value->values[0]);"
 items 12 "struct holder { int values[3]; }; struct holder *value = 0; return sizeof(value->values);"
@@ -7727,6 +9035,95 @@ EOF
 try_compile_error << EOF
 enum invalid_values { last_int = 2147483647, out_of_range };
 EOF
+try_compile_error << EOF
+enum explicit_out_of_range { value = 2147483648 };
+EOF
+try_compile_error << EOF
+enum expression_out_of_range { value = 2147483647 + 1 };
+EOF
+try_compile_error << EOF
+enum unsigned_out_of_range { value = 0xffffffffU };
+EOF
+try_ 1 << EOF
+enum signed_minimum { value = -2147483648 };
+int main(void) { return value < 0; }
+EOF
+try_ 1 << EOF
+enum suffixed_signed_minimum { value = -2147483648L };
+int main(void) { return value < 0; }
+EOF
+try_ 0 << EOF
+enum conditional_range { value = 0 ? 2147483648 : 1 };
+int main(void) { return value - 1; }
+EOF
+try_ 0 << EOF
+enum unsigned_int_range { zero = 0U, maximum = 2147483647U,
+                          value = -1U + 1U };
+int main(void) { return zero + maximum - 2147483647 + value; }
+EOF
+try_ 0 << EOF
+enum wide_intermediates { one = 2147483648L - 2147483647L,
+                          zero = 2147483648L - 2147483648L,
+                          minimum = -2147483649L + 1L };
+int main(void) { return one + zero + (minimum < 0) - 2; }
+EOF
+try_ 1 << EOF
+enum explicit_reset { maximum = 2147483647, reset = 0, successor };
+int main(void) { return successor; }
+EOF
+try_ 2 << EOF
+enum typed_named_values { first = 1, second = first + 1U };
+int main(void) { return second; }
+EOF
+try_ 0 << EOF
+enum unsigned_wrap_values { first = 4294967295U + 1U,
+                            second = 2147483647U + 2147483649U,
+                            third = 0x80000000 * 2,
+                            fourth = 0xffffffffL + 1L,
+                            fifth = 0x80000000L * 2L };
+int main(void) { return first + second + third + fourth + fifth; }
+EOF
+try_ 0 << EOF
+enum typed_sizeof_values { first = sizeof(int) + 1U,
+                           second = 0 ? sizeof(int) : 1U };
+int main(void) { return first + second - 6; }
+EOF
+try_ 1 << EOF
+enum conditional_wide_rank { first = 1 ? -1LL : 1U,
+                             second = first + 1U };
+int main(void) { return (first < 0) + second; }
+EOF
+try_ 1 << EOF
+enum preserved_wide_rank { value = (-2147483648LL / 1LL) + 2147483647U };
+int main(void) { return value < 0; }
+EOF
+try_ 3 << EOF
+int main(void) {
+    enum typed_local_values { first = 2, second = first + 1U };
+    return second;
+}
+EOF
+try_compile_error << EOF
+enum negative_out_of_range { value = -2147483649 };
+EOF
+try_compile_error << EOF
+enum implicit_out_of_range { maximum = 2147483647, successor };
+EOF
+try_compile_error << EOF
+enum unary_out_of_range { value = -(-2147483648) };
+EOF
+try_compile_error << EOF
+enum named_unary_out_of_range { minimum = -2147483648, value = -minimum };
+EOF
+try_compile_error << EOF
+enum shifted_out_of_range { value = 1 << 31 };
+EOF
+try_compile_error << EOF
+enum typed_shift_count_out_of_range { value = 1U << 32 };
+EOF
+try_compile_error << EOF
+enum typed_signed_shift_out_of_range { value = (1LL << 63) >> 63 };
+EOF
 
 # Block-scope enum definitions supply integer constants to expressions and
 # accept C99's trailing comma after their final enumerator.
@@ -7834,6 +9231,47 @@ enum api_state echo_api_state(const enum api_state value)
 int main(void)
 {
     return echo_api_state(api_ready) + sizeof(enum api_state) + 3;
+}
+EOF
+
+# C99 leaves an enum's compatible integer type implementation-defined. shecc
+# selects int, so the choice must remain consistent for objects, aggregate
+# layout, conversions, and the ordinary multi-argument call ABI.
+try_ 0 << EOF
+enum representation_state { representation_low = -3, representation_high = 7 };
+struct enum_representation_record {
+    char first;
+    enum representation_state state;
+    char last;
+};
+union enum_representation_union {
+    enum representation_state state;
+    int integer;
+};
+enum representation_state pass_representation(int a, int b, int c, int d,
+                                                int e, int f,
+                                                enum representation_state state)
+{
+    return (enum representation_state) (state + a - b + c - d + e - f);
+}
+enum representation_state return_negative_representation(void)
+{
+    return representation_low;
+}
+int main(void)
+{
+    enum representation_state values[2] = {
+        representation_low, representation_high
+    };
+    struct enum_representation_record record = { 0, representation_high, 0 };
+    union enum_representation_union value = { representation_low };
+    return sizeof(enum representation_state) != sizeof(int) ||
+           sizeof values != 2 * sizeof(int) ||
+           /* Current shecc ABI: int fields align to four bytes. */
+           sizeof record != 12 || sizeof value != sizeof(int) ||
+           (int) values[0] != -3 || value.integer != -3 ||
+           (int) return_negative_representation() != -3 ||
+           pass_representation(1, 2, 3, 4, 5, 6, record.state) != 4;
 }
 EOF
 
@@ -12019,6 +13457,203 @@ EOF
 
 begin_category "Function parsing" "Forward declaration and implementation"
 
+# C99 functions may return object or void types, but never an array or another
+# function. Keep declaration-only forms covered because no function body is
+# needed for the constraint to apply.
+try_compile_error << EOF
+int returns_array(void)[2];
+EOF
+try_compile_error << EOF
+int returns_function(void)(void);
+EOF
+try_compile_error << EOF
+typedef int array_t[2];
+array_t typedef_returns_array(void);
+EOF
+try_compile_error << EOF
+typedef int function_t(void);
+function_t typedef_returns_function(void);
+EOF
+try_compile_flag --std=c99 << EOF
+typedef int row_t[2];
+typedef row_t *row_ptr_t;
+row_ptr_t returns_row(void);
+EOF
+try_ 7 << EOF
+int callback(void) { return 7; }
+int main(void) { return (*callback)(); }
+EOF
+try_ 3 << EOF
+int callback(void) { return 7; }
+_Bool returns_callback(void) { return callback; }
+int main(void) {
+    _Bool initialized = callback;
+    _Bool assigned = 0;
+    assigned = callback;
+    return initialized + assigned + returns_callback();
+}
+EOF
+try_ 7 << EOF
+struct pair { int left; int right; };
+struct pair make_pair(int left, int right) {
+    struct pair value = {left, right};
+    return value;
+}
+int main(void) {
+    struct pair value = make_pair(3, 4);
+    return value.left + value.right;
+}
+EOF
+try_ 0 << EOF
+struct pair { int left; int right; };
+void use(void) { struct pair (*callback)(void); }
+int main(void) { use(); return 0; }
+EOF
+try_ 12 << EOF
+struct triple { int first; int second; int third; };
+struct triple make_triple(int first, int second, int third) {
+    struct triple value = {first, second, third};
+    return value;
+}
+int main(void) {
+    struct triple value = make_triple(3, 4, 5);
+    return value.first + value.second + value.third;
+}
+EOF
+try_ 44 << EOF
+struct pair { int left; int right; };
+struct pair make_pair(int left, int right) {
+    struct pair value = {left, right};
+    return value;
+}
+int sum_pair(struct pair value) { return value.left + value.right; }
+int main(void) {
+    struct pair (*callback)(int, int) = make_pair;
+    struct pair (*assigned)(int, int);
+    struct pair indirect = callback(7, 8);
+    assigned = make_pair;
+    struct pair assigned_result = assigned(2, 3);
+    struct pair parenthesized = (make_pair)(9, 10);
+    struct pair dereferenced = (*callback)(1, 2);
+    make_pair(0, 0);
+    return sum_pair(make_pair(12, 13)) + indirect.left +
+           parenthesized.left + dereferenced.left + assigned_result.left;
+}
+EOF
+try_ 40 << EOF
+union number { int value; char bytes[4]; };
+union number make_number(int value) {
+    union number result;
+    result.value = value;
+    return result;
+}
+int take_number(union number value) { return value.value; }
+int main(void) {
+    union number (*callback)(int) = make_number;
+    union number indirect = callback(17);
+    return indirect.value + take_number(make_number(23));
+}
+EOF
+try_compile_error << EOF
+struct pair { int value; };
+extern struct pair foreign_pair(void);
+int main(void) { foreign_pair(); return 0; }
+EOF
+try_compile_error << EOF
+struct pair { int value; };
+extern struct pair foreign_pair(void);
+int main(void) {
+    struct pair (*callback)(void) = foreign_pair;
+    callback();
+    return 0;
+}
+EOF
+try_compile_error << EOF
+struct pair { int value; };
+struct pair local_pair(void) { struct pair value = {1}; return value; }
+extern struct pair foreign_pair(void);
+int main(int choose_foreign) {
+    struct pair (*callback)(void);
+    if (choose_foreign) callback = foreign_pair;
+    else callback = local_pair;
+    callback();
+    return 0;
+}
+EOF
+try_ 9 << EOF
+typedef int row[2];
+row *rows(void) { static row value = {4, 5}; return &value; }
+int main(void) { return rows()[0][0] + rows()[0][1]; }
+EOF
+try_ 6 << EOF
+typedef int grid[2][3];
+grid *grids(void) {
+    static grid value = {{1, 2, 3}, {4, 5, 6}};
+    return &value;
+}
+int main(void) { return grids()[0][1][2]; }
+EOF
+try_ 9 << EOF
+typedef int row[2];
+row *rows(void) { static row value = {4, 5}; return &value; }
+int main(void) { rows()[0][1] = 9; return rows()[0][1]; }
+EOF
+try_ 4 << EOF
+typedef int *row[2];
+static int second = 4;
+row *pointers(void) {
+    static int first = 3;
+    static row value = {&first, &second};
+    return &value;
+}
+int main(void) { return pointers()[0][1] == &second ? 4 : 0; }
+EOF
+try_ 15 << EOF
+typedef int row[2];
+row *rows(void) { static row value = {4, 5}; return &value; }
+int main(void) {
+    int old;
+    rows()[0][1] += 2;
+    old = rows()[0][1]++;
+    return old + rows()[0][1];
+}
+EOF
+try_ 6 << EOF
+typedef int row[2];
+row *rows(void) { static row value = {4, 5}; return &value; }
+int main(void) { return ++rows()[0][1]; }
+EOF
+try_compile_error << EOF
+typedef const int row[2];
+row *rows(void);
+int main(void) { rows()[0][1] = 1; return 0; }
+EOF
+try_compile_error << EOF
+typedef int row[2];
+const row *rows(void);
+int main(void) { rows()[0][1] = 1; return 0; }
+EOF
+try_ 6 << EOF
+typedef int row[2];
+row *rows(void) { static row value = {4, 5}; return &value; }
+int main(void) { return ++(rows())[0][1]; }
+EOF
+try_ 6 << EOF
+typedef int row[2];
+row *rows(void) { static row value = {4, 5}; return &value; }
+int main(void) { row *(*callback)(void) = rows; return ++callback()[0][1]; }
+EOF
+try_ 6 << EOF
+typedef int (*row[2])(int);
+int increment(int value) { return value + 1; }
+int add_two(int value) { return value + 2; }
+static int (*callback_storage[2])(int) = {increment, add_two};
+row *callbacks(void) {
+    return &callback_storage;
+}
+int main(void) { return callbacks()[0][1](4); }
+EOF
+
 # Normal case
 try_output 0 "Hello" << EOF
 void func(char *ptr);
@@ -12132,6 +13767,49 @@ int main()
     func();
     return 0;
 }
+EOF
+
+# Function-pointer parameter declarations carry a nested function type, not
+# merely pointer-sized storage. Redeclarations must reject every incompatible
+# part of that nested type.
+try_compile_error << EOF
+int callback(int (*)(int));
+int callback(int (*)(long));
+EOF
+try_compile_error << EOF
+int callback(int (*)(int));
+int callback(int (*)(int, int));
+EOF
+try_compile_error << EOF
+int callback(int (*)(int));
+int callback(long (*)(int));
+EOF
+try_compile_error << EOF
+int callback(int (*)(int, ...));
+int callback(int (*)(int));
+EOF
+try_compile_error << EOF
+int callback(int (*)(int));
+int callback(int *);
+EOF
+try_compile_error << EOF
+int nested(int (*)(int (*)(int)));
+int nested(int (*)(int (*)(long)));
+EOF
+
+# Parameter names and top-level qualifiers on the callback pointer do not change
+# a C99 function type.
+try_ 0 << EOF
+int plus1(int value) { return value + 1; }
+int invoke(int (*)(int));
+int invoke(int (* const callback)(int)) { return callback(4) - 5; }
+int main(void) { int (*callback)(int) = plus1; return invoke(callback); }
+EOF
+try_ 0 << EOF
+int plus1(int value) { return value + 1; }
+int legacy(int (*)());
+int legacy(int (*callback)(int)) { return callback(3) - 4; }
+int main(void) { int (*callback)(int) = plus1; return legacy(callback); }
 EOF
 
 begin_category "Bit-fields"
@@ -12353,6 +14031,15 @@ try_compile_error << EOF
 struct invalid { _Bool value : 2; };
 EOF
 try_compile_error << EOF
+struct invalid { char value : 1; };
+EOF
+try_compile_error << EOF
+struct invalid { unsigned int *value : 1; };
+EOF
+try_compile_error << EOF
+struct invalid { unsigned int value[1] : 1; };
+EOF
+try_compile_error << EOF
 struct invalid { static unsigned int value : 1; };
 EOF
 try_compile_error << EOF
@@ -12445,6 +14132,22 @@ try_compile_error_flag --std=c99 << EOF
 int main(void) { return 0b10; }
 EOF
 try_compile_error_flag --std=c99 << EOF
+struct empty_extension { };
+int main(void) { return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+union empty_extension { };
+int main(void) { return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+enum empty_extension { };
+int main(void) { return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int invalid_static_bound(int values[static 0]) { return values[0]; }
+int main(void) { int values[1] = {0}; return invalid_static_bound(values); }
+EOF
+try_compile_error_flag --std=c99 << EOF
 int main(void) { return '\e'; }
 EOF
 try_compile_error_flag --std=c99 << EOF
@@ -12521,14 +14224,68 @@ int main(void) {
 }
 EOF
 try_compile_error_flag --std=c99 << EOF
+int main(void) {
+    switch (1) { case 1: int value = 1; return value; }
+    return 0;
+}
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { label: int value = 1; return value; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { label: typedef int value; return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
 enum { first = 1, second = 1 };
 int main(void) {
     switch (0) { case first: return 1; case second: return 2; }
     return 0;
 }
 EOF
+try_compile_error_flag --std=c99 << EOF
+int invalid(int) { return 0; }
+int main(void) { return invalid(0); }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int invalid(int, int value) { return value; }
+int main(void) { return invalid(0, 1); }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int invalid(int (*)(int)) { return 0; }
+int main(void) { return invalid(0); }
+EOF
+try_compile_error_flag --std=c99 << EOF
+main(void) { return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+extern legacy(void);
+int main(void) { return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int invalid(int values[const]) { values = 0; return 0; }
+int main(void) { return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int legacy();
+int legacy(char value) { return value; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int legacy();
+int legacy(short value) { return value; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int legacy();
+int legacy(_Bool value) { return value; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int legacy();
+int legacy(int value, ...) { return value; }
+EOF
 
 # Ordinary C99 spellings remain accepted in strict mode.
+try_flags 0 --std=c99 << EOF
+int main(void) { label: ; return 0; }
+EOF
 try_flags 2 --std=c99 << EOF
 int main(void) { return 0x2; }
 EOF
@@ -12574,6 +14331,45 @@ int prototype(int value);
 int variadic(int value, ...);
 int main(void) { return 0; }
 EOF
+try_flags 4 --std=c99 << EOF
+int twice(int);
+int twice(int value) { return value * 2; }
+int main(void) {
+    extern int twice(int);
+    return twice(2);
+}
+EOF
+try_flags 5 --std=c99 << EOF
+int legacy();
+int legacy(int value) { return value; }
+int pointer_legacy();
+int pointer_legacy(int *value) { return *value; }
+int main(void) { int value = 3; return legacy(2) + pointer_legacy(&value); }
+EOF
+try_compile_flag --std=c99 << EOF
+int consume(const int *, int [static 2]);
+int consume(const int *first, int values[static 2]) {
+    return *first + values[1];
+}
+int (*callback)(int);
+int main(void) { return 0; }
+EOF
+try_flags 5 --std=c99 << EOF
+int first(const int values[const]) { return values[0]; }
+int bump(int values[restrict]) { values[0]++; return values[0]; }
+int main(void) {
+    int values[1] = {3};
+    return first(values) + bump(values) - 2;
+}
+EOF
+try_flags 0 --std=c99 << EOF
+int plus1(int value) { return value + 1; }
+int invoke(int (*)(int));
+int invoke(int (*callback)(int)) { return callback(4) - 5; }
+int takes(int (*)(int, int));
+int takes_const(int (* const)(int));
+int main(void) { int (*callback)(int) = plus1; return invoke(callback); }
+EOF
 try_flags 1 --std=c99 << EOF
 void no_value(void) { return; }
 int with_value(void) { return 1; }
@@ -12583,6 +14379,73 @@ try_flags 2 --std=c99 << EOF
 int main(void) {
     switch (2) { case 1: return 1; case 2: return 2; }
     return 0;
+}
+EOF
+try_flags 11 --std=c99 << EOF
+enum { base = 2 };
+int main(void) {
+    switch (sizeof(int) + base) {
+    case -(-((0 ? 1 : 1) << base)) + sizeof(short): return 11;
+    default: return 0;
+    }
+}
+EOF
+try_flags 4 --std=c99 << EOF
+int select_value(int value) {
+    switch (value) { default: return 3; case 1: return 1; }
+}
+int main(void) { return select_value(1) + select_value(2); }
+EOF
+try_flags 17 --std=c99 << EOF
+int score(int value) {
+    int total = 0;
+    switch (value) {
+    case 1: total = 1;
+    default: total += 2;
+    case 2: total += 4;
+    }
+    return total;
+}
+int main(void) { return score(1) + score(2) + score(9); }
+EOF
+try_flags 7 --std=c99 << EOF
+int select_label_statement(int value) {
+    int total = 0;
+    switch (value) {
+    total = 100;
+    case 1: total += 1; break;
+    {
+    case 2: total += 2; break;
+    }
+    default: total += 4;
+    }
+    return total;
+}
+int main(void) {
+    return select_label_statement(1) + select_label_statement(2) +
+           select_label_statement(9);
+}
+EOF
+try_flags 2 --std=c99 << EOF
+int main(void) {
+    int value = 0;
+    switch (3) {
+    default:
+        switch (2) { default: value += 1; case 2: value += 2; }
+        break;
+    case 1: value += 0;
+    }
+    return value;
+}
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) {
+    switch (0) { default: return 1; default: return 2; }
+}
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) {
+    switch (0) { case 1 + 1: return 1; case 2: return 2; }
 }
 EOF
 try_ 0 << EOF
@@ -12787,34 +14650,58 @@ int typedef_alias_row3(int count, ...) {
 int main(void) { row3 value = { 1, 2, 9 }; return typedef_alias_row3(1, &value); }
 EOF
 
-try_compile_error << EOF
+try_ 0 << EOF
 #include <stdarg.h>
 struct item { int first; int second; };
-typedef struct item rows[2];
-typedef rows *rows_pointer;
-int unsupported_aggregate_pointer_to_array(int count, ...) {
+typedef struct item item_t;
+int aggregate_pointer_to_array(int count, ...) {
     va_list ap;
     va_start(ap, count);
-    return va_arg(ap, rows_pointer)[0][1].second;
+    item_t result = va_arg(ap, item_t (*)[2])[0][1];
+    return result.second != 9;
 }
+int main(void) { item_t value[2] = {{1, 2}, {3, 9}}; return aggregate_pointer_to_array(1, &value); }
 EOF
 
-try_compile_error << EOF
+try_ 0 << EOF
 #include <stdarg.h>
 struct item { int value; };
-int unsupported_direct_aggregate_pointer_to_array(int count, ...) {
+int direct_aggregate_pointer_to_array(int count, ...) {
     va_list ap;
     va_start(ap, count);
-    return va_arg(ap, struct item (*)[2])[0][1].value;
+    struct item result = va_arg(ap, struct item (*)[2])[0][1];
+    return result.value != 8;
+}
+int main(void) { struct item value[2] = {{4}, {8}}; return direct_aggregate_pointer_to_array(1, &value); }
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+int pointer_element_array(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return *va_arg(ap, int * (*)[2])[0][1] != 9;
+}
+int main(void) {
+    int first = 4, second = 9;
+    int *value[2] = { &first, &second };
+    return pointer_element_array(1, &value);
 }
 EOF
 
-try_compile_error << EOF
+try_ 0 << EOF
 #include <stdarg.h>
-int unsupported_pointer_element_array(int count, ...) {
+typedef int *pointer;
+typedef pointer row[2];
+int typedef_pointer_element_array(int count, ...) {
     va_list ap;
     va_start(ap, count);
-    return *va_arg(ap, int * (*)[2])[0][1];
+    return *va_arg(ap, row *)[0][1] != 8;
+}
+int main(void) {
+    int first = 3, second = 8;
+    row value = { &first, &second };
+    return typedef_pointer_element_array(1, &value);
 }
 EOF
 

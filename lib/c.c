@@ -242,10 +242,11 @@ void __str_base10(char *pb, int val)
     int i = INT_BUF_LEN - 1;
 
     /* val is an int on every target: negating INT_MIN overflows even when
-     * pointers and registers are 64-bit. Spell it directly so the digit loop
-     * never walks its stack buffer backwards indefinitely.
+     * pointers and registers are 64-bit. Form it from int-range literals so
+     * 32-bit targets need no long-long lowering, and the digit loop never walks
+     * its stack buffer backwards indefinitely.
      */
-    if (val == -2147483648) {
+    if (val == (-2147483647 - 1)) {
         strncpy(pb + INT_BUF_LEN - 11, "-2147483648", 11);
         return;
     }

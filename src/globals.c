@@ -48,6 +48,9 @@ type_t *TY_short;
 type_t *TY_ushort;
 type_t *TY_long_long;
 type_t *TY_ulong_long;
+type_t *TY_float;
+type_t *TY_double;
+type_t *TY_long_double;
 
 /* Arenas */
 

@@ -445,6 +445,9 @@ typedef enum {
     TYPE_short,
     TYPE_long,
     TYPE_long_long,
+    TYPE_float,
+    TYPE_double,
+    TYPE_long_double,
     TYPE_struct,
     TYPE_union,
     TYPE_typedef
@@ -591,7 +594,13 @@ struct var {
      */
     bool is_extern_function_alias;
     bool is_global;
+
+    /* A compile-time address of static storage, kept distinct from reading a
+     * global object's value while lowering aggregate initializers.
+     */
+    bool is_global_address;
     bool is_static;       /* declaration used the static storage class */
+    bool is_extern;       /* file-scope declaration used extern */
     bool is_register;     /* declaration used the register storage class */
     bool is_inline;       /* declaration used the inline function specifier */
     bool has_initializer; /* a file-scope definition supplied an initializer */
@@ -643,7 +652,21 @@ struct var {
     int array_dim2; /* second dimension size for multidimensional arrays */
     int array_dim3; /* third dimension size for multidimensional arrays */
     int array_dim4; /* fourth dimension size for multidimensional arrays */
-    int offset;     /* offset from stack or frame, index 0 is reserved */
+    /* Bounds of the array addressed by a parenthesized pointer declarator, e.g.
+     * `int (*row)[2]`. They describe the pointee, not this pointer-sized
+     * object, so they must never participate in size_var().
+     */
+    int pointee_array_size;
+    int pointee_array_dim2;
+    int pointee_array_dim3;
+    int pointee_array_dim4;
+
+    /* Pointer depth of one element in the array described above. This
+     * distinguishes `int (*p)[2]` from `int *(*p)[2]`: both address rows, but
+     * the latter's row elements are pointers.
+     */
+    int pointee_array_element_ptr_level;
+    int offset; /* offset from stack or frame, index 0 is reserved */
     /* Record bit-field metadata. `offset` is the containing storage unit's byte
      * offset. `is_bitfield` distinguishes an ordinary member from the valid
      * unnamed zero-width field used as an allocation-unit barrier.
@@ -743,6 +766,16 @@ struct var {
      */
     void *func_signature;
 
+    /* When a function pointer was initialized from a visible function
+     * designator, retain that concrete target for internal-ABI validation.
+     */
+    void *func_target;
+
+    /* Once an assignment may have supplied an unknown/external target, parser
+     * order cannot prove provenance across later control-flow joins.
+     */
+    bool func_target_invalid;
+
     /* C ABI lowering passes record parameters as pointers to caller-owned
      * copies. The source-level declaration remains a record so field access and
      * record assignment keep their C semantics; OP_address_of materializes the
@@ -768,6 +801,9 @@ struct block {
 };
 
 typedef struct block block_t;
+
+int read_const_sizeof_type(block_t *scope);
+int read_const_wstring_size(void);
 typedef struct basic_block basic_block_t;
 
 /* Definition of a growable buffer for a mutable null-terminated string
@@ -862,6 +898,11 @@ struct type {
     var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
+    /* A function-pointer typedef retains its parsed prototype here. Keep it
+     * opaque because type_t is declared before func_t is complete.
+     */
+    void *func_signature;
+
     /* Array bounds carried by an array typedef. Object declarators copy these
      * into var_t, where ordinary indexing and initialization already retain
      * their row-major representation.
@@ -870,6 +911,11 @@ struct type {
     int array_dim2;
     int array_dim3;
     int array_dim4;
+
+    /* Pointer depth of one element of an array typedef. This is distinct from
+     * ptr_level when a later typedef adds a pointer to the whole array.
+     */
+    int array_element_ptr_level;
 
     /* Qualifiers written after stars inside a typedef declarator. These bits
      * are relative to the typedef's own pointer depth; var_t keeps any stars
@@ -885,6 +931,12 @@ struct type {
      * and unsigned arithmetic lowering.
      */
     bool is_unsigned;
+
+    /* Floating scalars require a distinct IR/register class. This identity is
+     * intentionally separate from width and signedness so they can never be
+     * lowered as integer values by accident.
+     */
+    bool is_floating;
 
     /* Plain char and signed char share this target's representation but are
      * distinct C types. Scalar typedefs preserve this fact.
@@ -1130,6 +1182,13 @@ typedef struct {
 struct func {
     /* Syntatic info */
     var_t return_def;
+
+    /* By-value record returns use a private caller-provided destination pointer
+     * as ABI argument zero. It is deliberately outside param_defs so C
+     * prototype arity and compatibility remain source-level facts.
+     */
+    bool returns_aggregate;
+    var_t sret_def;
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
@@ -1139,6 +1198,10 @@ struct func {
      */
     bool has_prototype;
     bool is_static; /* internal-linkage declaration */
+    /* The definition used the inline function specifier. C99 applies extra
+     * linkage constraints to external-linkage inline definitions.
+     */
+    bool is_inline;
 
     /* inline_calls()'s verdict on this body and the return that ends it,
      * stamped with the round that reached them: a body is examined once per
@@ -1171,6 +1234,8 @@ struct func {
 
     /* Information used for dynamic linking */
     bool is_used;
+    /* A direct aggregate-return call requires shecc's private sret ABI. */
+    bool aggregate_call_used;
     int plt_offset;
 
     struct func *next;
