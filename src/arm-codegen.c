@@ -358,6 +358,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     switch (ph2_ir->op) {
     case OP_define:
+        fatal_function_context = ph2_ir->func_name;
+
         /* We should handle the function entry point carefully due to the
          * following constraints:
          * - according to AAPCS, the callee must preserve r4-r11 for the caller,
@@ -522,7 +524,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         else if (ph2_ir->src1 == 4)
             emit(__lw(__AL, rd, rn, 0));
         else
-            abort();
+            fatal("unsupported Arm load width");
         return;
     case OP_write:
         if (ph2_ir->dest == 1)
@@ -532,7 +534,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         else if (ph2_ir->dest == 4)
             emit(__sw(__AL, rm, rn, 0));
         else
-            abort();
+            fatal("unsupported Arm store width");
         return;
     case OP_branch:
         emit(__teq(rn));

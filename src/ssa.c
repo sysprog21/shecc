@@ -3216,6 +3216,20 @@ void prune_unused_funcs(void)
     for (func_t *func = FUNC_LIST.head; func;) {
         func_t *next = func->next;
 
+        /* A reachable call to a function with no body is resolved by the
+         * dynamic linker, which cannot see a static function and is absent from
+         * a static link. Either way the input is incomplete, so report it here
+         * once rather than leave every backend its own abort.
+         */
+        if (func->is_used && !func->bbs && (func->is_static || !dynlink)) {
+            char message[MAX_LINE_LEN];
+
+            snprintf(message, MAX_LINE_LEN, "undefined %sfunction '%s'",
+                     func->is_static ? "static " : "",
+                     func->return_def.var_name);
+            error_at(message, NULL);
+        }
+
         func->next = NULL;
         if (func->bbs && !func->is_used) {
             func = next;

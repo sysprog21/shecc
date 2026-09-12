@@ -387,6 +387,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
     switch (ph2_ir->op) {
     case OP_define:
+        fatal_function_context = ph2_ir->func_name;
         ofs = ALIGN_UP(ph2_ir->src0 + 4, RV32_ALIGNMENT);
         emit(__sw(__ra, __sp, -4));
         emit(__lui(__t0, rv_hi(ofs)));
@@ -502,7 +503,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         else if (ph2_ir->src1 == 4)
             emit(__lw(rd, rs1, 0));
         else
-            abort();
+            fatal("unsupported RISC-V load width");
         return;
     case OP_write:
         if (ph2_ir->dest == 1)
@@ -512,7 +513,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         else if (ph2_ir->dest == 4)
             emit(__sw(rs2, rs1, 0));
         else
-            abort();
+            fatal("unsupported RISC-V store width");
         return;
     case OP_branch:
         ofs = elf_code_start + ph2_ir->then_bb->elf_offset;

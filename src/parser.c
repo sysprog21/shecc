@@ -4958,10 +4958,11 @@ void read_full_var_decl(var_t *vd,
     }
 
     if (!type) {
-        printf("Could not find type %s%s\n",
-               find_type_flag == 2 ? "struct/union " : "", type_name);
-        fflush(stdout); /* see fatal() */
-        abort();
+        char message[MAX_LINE_LEN];
+
+        snprintf(message, MAX_LINE_LEN, "Could not find type %s%s",
+                 find_type_flag == 2 ? "struct/union " : "", type_name);
+        error_at(message, cur_token_loc());
     }
 
     vd->type = type;
@@ -16872,7 +16873,8 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
             error_at("function definition cannot return incomplete record type",
                      next_token_loc());
         for (int i = 0; i < func->num_params; i++)
-            if (!func->param_defs[i].var_name[0])
+            if (!func->param_defs[i].var_name ||
+                !func->param_defs[i].var_name[0])
                 error_at("function definition parameter requires an identifier",
                          next_token_loc());
             else if (!func->param_defs[i].array_size &&

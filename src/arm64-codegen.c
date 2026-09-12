@@ -431,6 +431,8 @@ void emit_ph2_ir(ph2_ir_t *p)
     switch (p->op) {
     case OP_define: {
         bool reload_global_base = dynlink && !strcmp(p->func_name, "main");
+
+        fatal_function_context = p->func_name;
         emit(0xa9bf7bfd); /* stp x29, x30, [sp, #-16]! */
         emit(0x910003fd); /* mov x29, sp                */
         emit(0xa9bf57f4); /* stp x20, x21, [sp, #-16]!  */

@@ -2038,6 +2038,12 @@ void global_release(void)
     strbuf_free(dynamic_sections.elf_got);
 }
 
+/* The function whose body the back half of the pipeline is working on, or NULL
+ * before register allocation. An internal failure there carries no source
+ * position, so naming the function is what points back at the input.
+ */
+char *fatal_function_context = NULL;
+
 /* Reports a broken invariant, which has no position in the source to point at
  * because nothing in the source is necessarily wrong. This one abort()s: a core
  * dump is what makes an internal failure debuggable. A mistake in the input
@@ -2045,7 +2051,10 @@ void global_release(void)
  */
 __noreturn void fatal(const char *msg)
 {
-    printf("[Error]: %s\n", msg);
+    if (fatal_function_context)
+        printf("[Error]: %s (in function '%s')\n", msg, fatal_function_context);
+    else
+        printf("[Error]: %s\n", msg);
 
     /* abort() does not flush, so a diagnostic written to a pipe -- a build log,
      * or any invocation whose output is captured -- is discarded and the

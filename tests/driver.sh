@@ -365,7 +365,8 @@ function try_compile_error()
     echo "$input" > "$tmp_in"
 
     # Suppress compiler error output and "Aborted" messages completely Run in a
-    # subshell with job control disabled
+    # subshell with job control disabled. A mistake in the input must end in a
+    # diagnostic exit, so a crash (an exit status above 128) fails the test.
     (
         set +m 2> /dev/null # Disable job control messages
         $SHECC $SHECC_CFLAGS -o "$tmp_exe" "$tmp_in" 2>&1
@@ -377,6 +378,9 @@ function try_compile_error()
 
     if [ 0 == $exit_code ]; then
         report_test_failure "COMPILE ERROR TEST" "$tmp_in" "$tmp_exe" "non-zero" "0" "Compilation succeeded unexpectedly"
+    elif [ "$exit_code" -gt 128 ]; then
+        report_test_failure "COMPILE ERROR TEST" "$tmp_in" "$tmp_exe" \
+            "diagnostic exit" "$exit_code" "Compiler crashed instead of reporting an error"
     else
         ((PASSED_TESTS++))
         ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
@@ -409,6 +413,9 @@ function try_compile_error_flag()
     if [ 0 == $exit_code ]; then
         report_test_failure "CONFORMANCE ERROR TEST" "$tmp_in" "$tmp_exe" \
             "non-zero" "0" "Compilation succeeded unexpectedly"
+    elif [ "$exit_code" -gt 128 ]; then
+        report_test_failure "CONFORMANCE ERROR TEST" "$tmp_in" "$tmp_exe" \
+            "diagnostic exit" "$exit_code" "Compiler crashed instead of reporting an error"
     else
         ((PASSED_TESTS++))
         ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
@@ -487,7 +494,8 @@ function try_compile_error_message()
 
     ((TOTAL_TESTS++))
     ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
-    if [ "$exit_code" -eq 0 ] || ! grep -Fq -- "$expected" "$tmp_log"; then
+    if [ "$exit_code" -eq 0 ] || [ "$exit_code" -gt 128 ] \
+        || ! grep -Fq -- "$expected" "$tmp_log"; then
         report_test_failure "COMPILE ERROR MESSAGE TEST" "$tmp_in" "$tmp_exe" \
             "$expected" "$exit_code" "$(< "$tmp_log")"
     else
@@ -3989,7 +3997,7 @@ int main(void) {
     return 0;
 }
 EOF
-try_ 16 << EOF
+try_ "$((2 * PTR_SZ))" << EOF
 int main(void) {
     typedef int *pointer_row[2];
     return sizeof(pointer_row);
@@ -4686,7 +4694,7 @@ int main(void) {
     return callback(7);
 }
 EOF
-try_ 8 << EOF
+try_ "$PTR_SZ" << EOF
 int main(void) {
     typedef int (*callback_t)(int);
     return sizeof(callback_t);
@@ -4701,7 +4709,7 @@ int main(void) {
     return apply(plus1, 7);
 }
 EOF
-try_ 8 << EOF
+try_ "$PTR_SZ" << EOF
 int main(void) {
     typedef int (*callback_t)(int);
     extern callback_t choose(void);
@@ -5085,7 +5093,7 @@ int main(void) {
     return 0;
 }
 EOF
-try_ 8 << EOF
+try_ "$PTR_SZ" << EOF
 int main(void) { typedef int unary_t(int); return sizeof(unary_t *); }
 EOF
 try_ 9 << EOF
@@ -5097,7 +5105,7 @@ int main(void) {
     return callbacks[0](3) + callbacks[1](3);
 }
 EOF
-try_ 16 << EOF
+try_ "$((2 * PTR_SZ))" << EOF
 int main(void) {
     typedef int (*callbacks_t[2])(int);
     return sizeof(callbacks_t);
@@ -5112,7 +5120,7 @@ int main(void) {
     return callbacks[1][0](3) + callbacks[1][1](3);
 }
 EOF
-try_ 32 << EOF
+try_ "$((4 * PTR_SZ))" << EOF
 int main(void) {
     typedef int (*callbacks_t[2][2])(int);
     return sizeof(callbacks_t);
@@ -5130,7 +5138,7 @@ int main(void) {
     return callbacks[1][1][0](3) + callbacks[1][0][0](3);
 }
 EOF
-try_ 64 << EOF
+try_ "$((8 * PTR_SZ))" << EOF
 int main(void) {
     typedef int (*callbacks_t[2][2][2])(int);
     return sizeof(callbacks_t);
@@ -5148,7 +5156,7 @@ int main(void) {
     return callbacks[1][1][1][1](3) + callbacks[1][0][0][0](3);
 }
 EOF
-try_ 128 << EOF
+try_ "$((16 * PTR_SZ))" << EOF
 int main(void) {
     typedef int (*callbacks_t[2][2][2][2])(int);
     return sizeof(callbacks_t);
@@ -5164,7 +5172,7 @@ int main(void) {
         {{{plus1, plus2}, {plus2, plus1}}, {{plus2, plus1}, {plus1, plus2}}},
         {{{plus2, plus1}, {plus1, plus2}}, {{plus1, plus2}, {plus2, plus1}}}
     };
-    return callbacks[0][1][0][1](6) + (sizeof(callbacks_alias_t) != 128);
+    return callbacks[0][1][0][1](6) + (sizeof(callbacks_alias_t) != 16 * sizeof(void *));
 }
 EOF
 try_ 7 << EOF
@@ -5203,7 +5211,7 @@ int main(void) {
         {{plus1, plus2}, {plus2, plus1}},
         {{plus2, plus1}, {plus1, plus2}}
     };
-    return callbacks[1][0][1](6) + (sizeof(callbacks_alias_t) != 64);
+    return callbacks[1][0][1](6) + (sizeof(callbacks_alias_t) != 8 * sizeof(void *));
 }
 EOF
 try_ 7 << EOF
@@ -5449,7 +5457,7 @@ int main(void) {
     }
 }
 EOF
-try_ 16 << EOF
+try_ "$((2 * PTR_SZ))" << EOF
 int main(void) {
     typedef int *(*rows_t)[2];
     int first = 3, second = 7;
@@ -5481,7 +5489,7 @@ EOF
 try_compile_error << EOF
 int main(void) { typedef int *(*bad)[]; return 0; }
 EOF
-try_ 16 << EOF
+try_ "$((8 + PTR_SZ))" << EOF
 int main(void) {
     int rows[2][2] = { { 1, 2 }, { 3, 4 } };
     for (typedef int (*row_pointer)[2]; sizeof(row_pointer) == sizeof(int *); ) {
@@ -8056,12 +8064,14 @@ int main(void) {
     return (1 ? narrow_nullable_increment : (unsigned char)256)(4);
 }
 EOF
-try_ 5 << EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 5 << EOF
 int wide_nullable_increment(int value) { return value + 1; }
 int main(void) {
     return (1 ? wide_nullable_increment : (int)4294967296LL)(4);
 }
 EOF
+fi
 try_compile_error << EOF
 int void_cast_increment(int value) { return value + 1; }
 int main(void) { return (1 ? void_cast_increment : (void)0)(4); }
@@ -11354,7 +11364,7 @@ static int helper(void);
 int helper(void) { return 42; }
 int main(void) { return helper(); }
 EOF
-try_compile_error << EOF
+try_compile_error_message "undefined static function 'missing_static_function'" << EOF
 static int missing_static_function(void);
 int main(void) { return missing_static_function(); }
 EOF
@@ -13279,7 +13289,7 @@ int main(void) {
            ((1 xor 3) == 2) and ((compl 0) < 0);
 }
 EOF
-try_flags 14 "--no-libc" << EOF
+try_flags 12 "--no-libc" << EOF
 #include <limits.h>
 #include <limits.h>
 #if CHAR_BIT != 8 || INT_MAX != 2147483647
@@ -13291,11 +13301,16 @@ int main(void) {
            (CHAR_MAX == 127) + (SHRT_MIN == -32768) +
            (SHRT_MAX == 32767) + (USHRT_MAX == 65535U) +
            (INT_MIN < 0) + (UINT_MAX > INT_MAX) +
-           (LONG_MIN < 0) + (ULONG_MAX > LONG_MAX) +
-           (LLONG_MIN < 0) + (ULLONG_MAX > LLONG_MAX);
+           (LONG_MIN < 0) + (ULONG_MAX > LONG_MAX);
 }
 EOF
-try_flags 24 "--no-libc" << EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_flags 2 "--no-libc" << EOF
+#include <limits.h>
+int main(void) { return (LLONG_MIN < 0) + (ULLONG_MAX > LLONG_MAX); }
+EOF
+fi
+try_flags "$((8 + 2 * PTR_SZ))" "--no-libc" << EOF
 #include <stddef.h>
 #include <stddef.h>
 int main(void) {
@@ -13399,7 +13414,7 @@ try_compile_error << EOF
 struct offsetof_cube_holder { int values[2][3][4]; };
 int invalid_offsetof = offsetof(struct offsetof_cube_holder, values[1][3][0]);
 EOF
-try_flags 46 "--no-libc" << EOF
+try_flags "$((38 + PTR_SZ))" "--no-libc" << EOF
 #include <stdint.h>
 int main(void) {
     return sizeof(int8_t) + sizeof(uint16_t) + sizeof(int32_t) +
@@ -13408,17 +13423,24 @@ int main(void) {
            sizeof(uint_fast64_t) + sizeof(intmax_t) + sizeof(uintptr_t);
 }
 EOF
-try_flags 18 "--no-libc" << EOF
+try_flags 9 "--no-libc" << EOF
 #include <stdint.h>
 int main(void) {
     return (INT8_MIN == -128) + (INT8_MAX == 127) + (UINT8_MAX == 255U) +
            (INT16_MIN == -32768) + (INT16_MAX == 32767) + (UINT16_MAX == 65535U) +
-           (INT32_MIN < 0) + (INT32_MAX > 0) + (UINT32_MAX > INT32_MAX) +
-           (INT64_MIN < 0) + (INT64_MAX > 0) + (UINT64_MAX > INT64_MAX) +
+           (INT32_MIN < 0) + (INT32_MAX > 0) + (UINT32_MAX > INT32_MAX);
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_flags 9 "--no-libc" << EOF
+#include <stdint.h>
+int main(void) {
+    return (INT64_MIN < 0) + (INT64_MAX > 0) + (UINT64_MAX > INT64_MAX) +
            (INTMAX_MIN < 0) + (INTMAX_MAX > 0) + (UINTMAX_MAX > INTMAX_MAX) +
            (INTPTR_MIN < 0) + (INTPTR_MAX > INT32_MAX) + (UINTPTR_MAX > INTPTR_MAX);
 }
 EOF
+fi
 try_flags 10 "--no-libc" << EOF
 #include <stdint.h>
 #include <signal.h>
@@ -13434,34 +13456,48 @@ int main(void) {
            (signal_value > 0 && wide_value == WINT_MAX);
 }
 EOF
-try_flags 16 "--no-libc" << EOF
+try_flags 12 "--no-libc" << EOF
 #include <stdint.h>
 int main(void) {
     return (INT_LEAST8_MIN < 0) + (UINT_LEAST8_MAX > 0) +
            (INT_LEAST16_MIN < 0) + (UINT_LEAST16_MAX > 0) +
            (INT_LEAST32_MIN < 0) + (UINT_LEAST32_MAX > INT_LEAST32_MAX) +
-           (INT_LEAST64_MIN < 0) + (UINT_LEAST64_MAX > INT_LEAST64_MAX) +
            (INT_FAST8_MIN < 0) + (UINT_FAST8_MAX > INT_FAST8_MAX) +
            (INT_FAST16_MIN < 0) + (UINT_FAST16_MAX > INT_FAST16_MAX) +
-           (INT_FAST32_MIN < 0) + (UINT_FAST32_MAX > INT_FAST32_MAX) +
+           (INT_FAST32_MIN < 0) + (UINT_FAST32_MAX > INT_FAST32_MAX);
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_flags 4 "--no-libc" << EOF
+#include <stdint.h>
+int main(void) {
+    return (INT_LEAST64_MIN < 0) + (UINT_LEAST64_MAX > INT_LEAST64_MAX) +
            (INT_FAST64_MIN < 0) + (UINT_FAST64_MAX > INT_FAST64_MAX);
 }
 EOF
-try_flags 20 "--no-libc" << EOF
+fi
+try_flags 12 "--no-libc" << EOF
 #include <stdint.h>
 int main(void) {
     return (INT8_C(12) == 12) + (UINT8_C(12) == 12) +
            (INT16_C(12) == 12) + (UINT16_C(12) == 12) +
            (INT32_C(12) == 12) + (UINT32_C(12) == 12U) +
-           (INT64_C(12) == 12LL) + (UINT64_C(12) == 12ULL) +
-           (INTMAX_C(12) == 12LL) + (UINTMAX_C(12) == 12ULL) +
            (sizeof(INT8_C(12)) == 4) + (sizeof(UINT8_C(12)) == 4) +
            (sizeof(INT16_C(12)) == 4) + (sizeof(UINT16_C(12)) == 4) +
-           (sizeof(INT32_C(12)) == 4) + (sizeof(UINT32_C(12)) == 4) +
+           (sizeof(INT32_C(12)) == 4) + (sizeof(UINT32_C(12)) == 4);
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_flags 8 "--no-libc" << EOF
+#include <stdint.h>
+int main(void) {
+    return (INT64_C(12) == 12LL) + (UINT64_C(12) == 12ULL) +
+           (INTMAX_C(12) == 12LL) + (UINTMAX_C(12) == 12ULL) +
            (sizeof(INT64_C(12)) == 8) + (sizeof(UINT64_C(12)) == 8) +
            (sizeof(INTMAX_C(12)) == 8) + (sizeof(UINTMAX_C(12)) == 8);
 }
 EOF
+fi
 try_compile_error_message "Angle header not found in -I search paths" << EOF
 #include <missing-shecc-header.h>
 EOF
@@ -18590,17 +18626,22 @@ int after_pointer(int *last, ...) {
     va_start(ap, last);
     return va_arg(ap, int);
 }
+int main(void) {
+    int value = 0;
+    return after_char(0, 2) != 2 || after_pointer(&value, 3) != 3;
+}
+EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 0 << EOF
+#include <stdarg.h>
 int after_wide(long long last, ...) {
     va_list ap;
     va_start(ap, last);
     return va_arg(ap, int);
 }
-int main(void) {
-    int value = 0;
-    return after_char(0, 2) != 2 || after_pointer(&value, 3) != 3 ||
-           after_wide(0, 4) != 4;
-}
+int main(void) { return after_wide(0, 4) != 4; }
 EOF
+fi
 
 try_ 0 << EOF
 #include <stdarg.h>
@@ -18647,7 +18688,8 @@ int main(void) {
 }
 EOF
 
-try_ 0 << EOF
+if [ "$PTR_SZ" -ge 8 ]; then
+    try_ 0 << EOF
 #include <stdarg.h>
 long long wide_argument(int count, ...) {
     va_list ap;
@@ -18656,6 +18698,7 @@ long long wide_argument(int count, ...) {
 }
 int main(void) { return wide_argument(1, 1234567890123LL) != 1234567890123LL; }
 EOF
+fi
 
 try_ 0 << EOF
 #include <stdarg.h>

@@ -3393,6 +3393,7 @@ void reg_alloc(void)
             continue;
 
         func->visited++;
+        fatal_function_context = func->return_def.var_name;
 
         if (!strcmp(func->return_def.var_name, "main"))
             MAIN_BB = func->bbs;

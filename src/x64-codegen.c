@@ -3298,6 +3298,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit_logic_cast(ph2_ir, rd, rs1);
         break;
     case OP_define:
+        fatal_function_context = ph2_ir->func_name;
         /* Update the function's actual offset to current code position */
         {
             func_t *func = find_func(ph2_ir->func_name);

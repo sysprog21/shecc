@@ -109,7 +109,8 @@ endif
 # previous architecture's generated config, so require an explicit reconfigure
 # instead.
 #
-# Naming "config" or "distclean" anywhere in the goals is that reconfigure: the
+# Naming "config", "distclean", or "check-all-targets" anywhere in the goals
+# is that reconfigure: the
 # record is about to be rewritten or removed, so the architecture it still holds
 # does not apply and the check must not fire. Testing for their presence rather
 # than filtering them out is what lets a goal list combine them with real work,
@@ -117,7 +118,7 @@ endif
 # generated config, so a mismatch cannot affect it either.
 CONFIGURED_ARCH := $(shell sed -n 's/^ARCH=//p' $(BUILD_SESSION) 2>/dev/null)
 ifneq (,$(CONFIGURED_ARCH))
-ifeq (,$(filter config distclean,$(MAKECMDGOALS)))
+ifeq (,$(filter config distclean check-all-targets,$(MAKECMDGOALS)))
 ifneq (,$(filter-out clean,$(or $(MAKECMDGOALS),all)))
 ifneq ($(CONFIGURED_ARCH),$(ARCH))
 $(error Tree is configured for ARCH=$(CONFIGURED_ARCH). Run "make config ARCH=$(ARCH)" to switch)
@@ -152,6 +153,26 @@ config:
 .PHONY: $(STYLE_GOALS)
 
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2
+
+# Run the complete check -- driver and ABI suites at stages 0 and 2 -- on every
+# backend, as CI does. Driver cases that need 64-bit values are gated on the
+# target's pointer width, so each target runs everything it can represent.
+# Configuration is global to this worktree, so keep recursive invocations
+# sequential and restore the caller's architecture even when a target fails.
+# Each target is rebuilt after its own `config`, preventing an old compiler from
+# being paired with a newly selected backend. This make exported the emulator
+# for the caller's architecture, so each recursive make has to derive its own:
+# an inherited qemu-arm would run the x64 binaries.
+.PHONY: check-all-targets
+check-all-targets:
+	$(Q)set -e; \
+	unset TARGET_EXEC; \
+	active_arch='$(or $(CONFIGURED_ARCH),$(ARCH))'; \
+	trap '$(MAKE) config ARCH="$$active_arch"' EXIT; \
+	for target_arch in $(ARCHS); do \
+		$(MAKE) config ARCH="$$target_arch"; \
+		$(MAKE) check ARCH="$$target_arch"; \
+	done
 
 # One checker per target: they share nothing, so "make -j check-style" runs them
 # concurrently and finishes in the time the slowest one takes.
