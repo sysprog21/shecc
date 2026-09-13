@@ -867,11 +867,15 @@ typedef struct basic_block basic_block_t;
  * @size: Current number of elements in the array
  * @capacity: Number of elements that can be stored without resizing
  * @elements: Pointer to the array of characters
+ * @plain_source: set by the lexer once it has checked that a source buffer has
+ *                no trigraph and no line splice, so phases 1 and 2 are the
+ *                identity on it
  */
 typedef struct {
     int size;
     int capacity;
     char *elements;
+    bool plain_source;
 } strbuf_t;
 
 /* phase-2 IR definition */

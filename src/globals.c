@@ -1183,16 +1183,22 @@ void add_block_typedef(block_t *block, char name[], type_t *type)
 type_t *find_visible_type(const char *name, block_t *block)
 {
     func_t *func = block ? block->func : NULL;
+    char head = name[0];
 
+    /* Every declaration spelling passes through here, and a block's locals
+     * include all of its IR temporaries, so settle the first byte before the
+     * library call, as find_local_var() does.
+     */
     for (; block; block = block->parent) {
         for (int i = block->locals.size - 1; i >= 0; i--) {
             var_t *var = block->locals.elements[i];
-            if (var && var->var_name && !strcmp(var->var_name, name))
+            if (var && var->var_name && var->var_name[0] == head &&
+                !strcmp(var->var_name, name))
                 return NULL;
         }
         for (typedef_binding_t *binding = block->typedefs; binding;
              binding = binding->next)
-            if (!strcmp(binding->name, name))
+            if (binding->name[0] == head && !strcmp(binding->name, name))
                 return binding->type;
     }
 
@@ -1203,7 +1209,8 @@ type_t *find_visible_type(const char *name, block_t *block)
         for (int i = 0; i < func->num_params; i++) {
             var_t *param = &func->param_defs[i];
 
-            if (param->var_name && !strcmp(param->var_name, name))
+            if (param->var_name && param->var_name[0] == head &&
+                !strcmp(param->var_name, name))
                 return NULL;
         }
     }
@@ -1691,6 +1698,7 @@ strbuf_t *strbuf_create(int init_capacity)
 
     array->size = 0;
     array->capacity = init_capacity;
+    array->plain_source = false;
     array->elements = malloc(array->capacity * sizeof(char));
     if (!array->elements) {
         free(array);

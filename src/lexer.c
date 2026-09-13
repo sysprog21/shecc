@@ -168,8 +168,8 @@ char trigraph_char_at(strbuf_t *buf, int pos)
 {
     char third;
 
-    if (pos + 2 >= buf->capacity || buf->elements[pos] != '?' ||
-        buf->elements[pos + 1] != '?')
+    if (buf->plain_source || pos + 2 >= buf->capacity ||
+        buf->elements[pos] != '?' || buf->elements[pos + 1] != '?')
         return '\0';
     third = buf->elements[pos + 2];
     switch (third) {
@@ -218,6 +218,8 @@ int skip_splices(strbuf_t *buf, int pos)
 {
     int width;
 
+    if (buf->plain_source)
+        return pos;
     while (pos < buf->capacity) {
         width = source_char_width(buf, pos);
         if (source_char_at(buf, pos) != '\\' ||
@@ -230,7 +232,18 @@ int skip_splices(strbuf_t *buf, int pos)
 
 char peek_char(strbuf_t *buf, int offset)
 {
-    int pos = skip_splices(buf, buf->size);
+    int pos = buf->size;
+
+    if (buf->plain_source) {
+        if (pos < buf->capacity) {
+            pos += offset;
+            if (pos > buf->capacity)
+                pos = buf->capacity;
+        }
+        return pos >= buf->capacity ? '\0' : buf->elements[pos];
+    }
+
+    pos = skip_splices(buf, pos);
 
     while (offset-- > 0 && pos < buf->capacity) {
         pos += source_char_width(buf, pos);
@@ -241,13 +254,41 @@ char peek_char(strbuf_t *buf, int offset)
 
 char read_char(strbuf_t *buf)
 {
-    int pos = skip_splices(buf, buf->size);
+    int pos = buf->size;
+
+    if (buf->plain_source) {
+        if (pos + 1 >= buf->capacity)
+            return buf->elements[buf->capacity - 1];
+        buf->size = pos + 1;
+        return buf->elements[buf->size];
+    }
+
+    pos = skip_splices(buf, pos);
 
     if (pos + source_char_width(buf, pos) >= buf->capacity)
         return source_char_at(buf, buf->capacity - 1);
     pos += source_char_width(buf, pos);
     buf->size = skip_splices(buf, pos);
     return source_char_at(buf, buf->size);
+}
+
+/* Translation phases 1 and 2 are the identity on a source with no "??" and no
+ * backslash-newline, which is nearly every file. Check that once per buffer so
+ * the per-character readers above can index its bytes directly instead of
+ * testing each position for a trigraph and a splice.
+ */
+void classify_plain_source(strbuf_t *buf)
+{
+    buf->plain_source = true;
+    for (int i = 0; i + 1 < buf->capacity; i++) {
+        char c = buf->elements[i];
+
+        if ((c == '?' && buf->elements[i + 1] == '?') ||
+            (c == '\\' && buf->elements[i + 1] == '\n')) {
+            buf->plain_source = false;
+            return;
+        }
+    }
 }
 
 /* Fill @dst with @len bytes of @f, returning how many arrived.
@@ -1635,6 +1676,7 @@ token_stream_t *gen_file_token_stream(char *filename)
         return tks;
 
     buf = get_file_buf(filename);
+    classify_plain_source(buf);
 
     /* Borrows strbuf_t#size to use as source index */
     buf->size = 0;
@@ -1694,6 +1736,7 @@ token_stream_t *gen_libc_token_stream(void)
     if (!buf->size || buf->elements[buf->size - 1])
         strbuf_putc(buf, 0);
     buf->capacity = buf->size;
+    classify_plain_source(buf);
 
     /* Borrows strbuf_t#size to use as source index */
     buf->size = 0;
