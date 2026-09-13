@@ -537,7 +537,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_branch:
         emit(__teq(rn));
         if (ph2_ir->is_branch_detached) {
-            emit(__b(__NE, 8));
+            /* The else block does not follow, and nothing says the then block
+             * does either: a loop's back edge lands behind this one. Jump to
+             * both explicitly rather than skipping over the else jump into
+             * whatever was laid out next. The estimator charges 12 bytes for
+             * this form either way.
+             */
+            emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code->size));
             emit(__b(__AL, ph2_ir->else_bb->elf_offset - elf_code->size));
         } else
             emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code->size));

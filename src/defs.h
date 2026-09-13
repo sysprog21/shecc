@@ -35,6 +35,12 @@
 #define MAX_TOKEN_LEN 256
 #define MAX_ID_LEN 64
 #define MAX_LINE_LEN 256
+
+/* A string literal after its adjacent pieces are decoded and joined. Each piece
+ * is still one token of at most MAX_TOKEN_LEN, but a long message is routinely
+ * written as many of them.
+ */
+#define MAX_STRING_LEN 4096
 #define MAX_INCLUDE_DIRS 16
 #define MAX_VAR_LEN 128
 /* ".label." plus an int, for basic_block_t's dump name. */
@@ -45,7 +51,11 @@
  * operator and 41 bytes of markup.
  */
 #define DUMP_INSN_LEN 512
-#define MAX_TYPE_LEN 32
+
+/* A type name is a struct, union, enum or typedef identifier, which the lexer
+ * already bounds by MAX_ID_LEN; a narrower buffer rejects valid tags.
+ */
+#define MAX_TYPE_LEN MAX_ID_LEN
 
 /* Declaration limit, and with MAX_ARGS_IN_REG it also sizes the outgoing
  * stack-argument area every frame reserves (see add_func() in globals.c). A

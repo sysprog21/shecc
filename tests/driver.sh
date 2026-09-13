@@ -6265,6 +6265,55 @@ int main(void) {
 }
 EOF
 
+# Brace elision: scalars that meet an array member without braces fill its
+# elements in order before the next member, in automatic and static records and
+# in unions. The 32-byte member is wider than any store a backend emits.
+try_ 8 << EOF
+typedef struct { char name[32]; int a; } named_t;
+typedef struct { char tag[4]; int a; } tagged_t;
+typedef struct { int m[2][2]; int b; } matrix_t;
+typedef struct { int *p[2]; int c; } slots_t;
+typedef union { char buf[4]; int x; } bytes_t;
+int first = 5, second = 6;
+tagged_t global_tagged = {1, 2, 3, 4, 5};
+static slots_t global_slots = {&first, &second, 7};
+int main(void) {
+    named_t zero = {0};
+    tagged_t tagged = {1, 2};
+    matrix_t matrix = {1, 2, 3, 4, 5};
+    bytes_t bytes = {1, 2};
+    int r = zero.name[0] == 0 && zero.a == 0;
+    r += tagged.tag[1] == 2 && tagged.tag[2] == 0 && tagged.a == 0;
+    r += matrix.m[1][1] == 4 && matrix.b == 5;
+    r += bytes.buf[0] == 1 && bytes.buf[1] == 2;
+    r += global_tagged.tag[3] == 4 && global_tagged.a == 5;
+    r += *global_slots.p[1] == 6 && global_slots.c == 7;
+    zero.a = 2;
+    return r + zero.a;
+}
+EOF
+# An array of pointers to records is still an array of scalars for elision.
+try_ 7 << EOF
+struct row { int values[2][3]; };
+struct rows { struct row *slots[2]; int tail; };
+static struct row first_row, second_row;
+static struct rows global_rows = {&first_row, &second_row, 4};
+int main(void) {
+    struct rows local_rows = {&second_row};
+    return (global_rows.slots[0] == &first_row) +
+           2 * (global_rows.slots[1] == &second_row) +
+           (local_rows.slots[0] == &second_row) + global_rows.tail - 1;
+}
+EOF
+# A tag is an identifier, so it may be as long as any other identifier.
+try_ 4 << EOF
+struct a_record_tag_name_longer_than_thirty_two_bytes { int value; };
+int main(void) {
+    struct a_record_tag_name_longer_than_thirty_two_bytes item = {4};
+    return item.value;
+}
+EOF
+
 # Category: Compound Literals
 begin_category "Compound Literals" "Testing C99 compound literal features"
 
@@ -7779,6 +7828,21 @@ EOF
 items 2 "int i = 0; while (i < 2 ? 1 : 0) i++; return i;"
 items 2 "int i = 0; do i++; while (i < 2 ? 1 : 0); return i;"
 items 2 "int i = 0; for (; i < 2 ? 1 : 0; i++) {} return i;"
+
+# A loop whose back edge leads to a block laid out before the branch: neither
+# arm of the conditional falls through, so both need an explicit jump.
+try_ 3 << EOF
+int count(void) {
+    int n = 0;
+    do {
+        n++;
+        if (n == 3)
+            break;
+    } while (1);
+    return n;
+}
+int main(void) { return count(); }
+EOF
 
 # Category: Comments
 begin_category "Comments" "Testing C-style and C++-style comment parsing"
@@ -11579,6 +11643,30 @@ int main(void) {
 }
 EOF
 
+# Address constants inside aggregate static initializers accept the same
+# designators as scalar ones: members, constant-expression subscripts, offsets.
+try_ 31 << EOF
+struct inner { int pad; int values[3]; };
+struct outer { int tag; struct inner nested[2]; };
+enum { SECOND = 1 };
+static struct outer record = {7, {{1, {2, 3, 4}}, {5, {6, 7, 8}}}};
+struct slots { int *first; int *second; int *third; };
+static struct slots table = {&record.tag, &record.nested[SECOND].values[1 + 1],
+                             &record.nested[0].values[0] + 2};
+int main(void) {
+    static int *local[2] = {&record.nested[SECOND].pad,
+                            &record.nested[1].values[0] + 1};
+    return *table.first + *table.second + *table.third + *local[0] + *local[1];
+}
+EOF
+
+# An initializer large enough that its setup spills temporaries must keep them
+# in the global data area, not past the top of the stack.
+try_ 4 << EOF
+int table[1500] = {0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1};
+int main(void) { return table[1499] + table[3]; }
+EOF
+
 # Category: Const Qualifiers
 begin_category "Const Qualifiers" "Testing const qualifier support for variables and parameters"
 
@@ -12233,6 +12321,37 @@ begin_category "Ternary Operator" "Testing conditional ?: operator"
 expr 10 "1 ? 10 : 5"
 expr 25 "0 ? 10 : 25"
 
+# Record operands are objects: the selected one is copied whole, not joined as a
+# truncated scalar, whether it comes from a variable or a call result.
+try_ 131 << EOF
+typedef struct { int rank; int bounds[4]; } shape_t;
+typedef struct { char c; short s; } narrow_t;
+shape_t wide(void) { shape_t s = {3, {10, 20, 30, 40}}; return s; }
+shape_t low(void) { shape_t s = {1, {5, 6, 7, 8}}; return s; }
+int pick(int c) {
+    shape_t local = {9, {1, 2, 3, 4}};
+    shape_t chosen;
+    chosen = c ? wide() : low();
+    shape_t mixed = c ? local : low();
+    narrow_t a = {1, 300}, b = {2, 400};
+    narrow_t nested = c > 1 ? a : c ? b : a;
+    return chosen.rank + chosen.bounds[3] + mixed.bounds[0] + mixed.rank +
+           nested.s / 100;
+}
+int main(void) { return pick(1) + pick(0) + pick(2); }
+EOF
+try_compile_error_message "Conditional record operands must have the same type" << EOF
+typedef struct { int a; } one_t;
+typedef struct { int a; int b; } two_t;
+int main(void) {
+    one_t x = {1};
+    two_t y = {1, 2};
+    int c = 1;
+    one_t z = c ? x : y;
+    return z.a;
+}
+EOF
+
 # Category: Compound Assignment
 begin_category "Compound Assignment" "Testing +=, -=, *=, /=, %=, <<=, >>=, ^= operators"
 
@@ -12775,6 +12894,16 @@ try_ 4 << EOF
 int main() {
     int a = 5, b = 10;
     return sizeof(a > b ? a : b);
+}
+EOF
+
+# A row or element of an array of pointers is pointer-sized per element.
+try_ 7 << EOF
+int main(void) {
+    int *rows[2][3];
+    return (sizeof rows[0] == 3 * sizeof(int *)) +
+           2 * (sizeof(rows[1]) == 3 * sizeof(int *)) +
+           4 * (sizeof rows[1][2] == sizeof(int *));
 }
 EOF
 
@@ -15549,6 +15678,15 @@ int main() {
     char *s = "Multiple " "adjacent " "strings " "work!";
     printf("%s", s);
     return 0;
+}
+EOF
+
+# A joined literal may be longer than any single token.
+try_ 2 << EOF
+char joined_array[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+int main(void) {
+    const char *joined = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    return (sizeof(joined_array) == 601) + (strlen(joined) == 600);
 }
 EOF
 
@@ -18489,6 +18627,23 @@ int after_trailing_record(int tag, struct trailing_record last, ...) {
 int main(void) {
     struct trailing_record value = {1, 2, 3};
     return after_trailing_record(4, value, 10);
+}
+EOF
+
+# A record element selected through a pointer-to-array va_arg type is copied
+# whole; a record wider than a register must not be read as one scalar.
+try_ 29 << EOF
+#include <stdarg.h>
+struct wide_item { int first; int second; int third; };
+int pick_wide_item(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    struct wide_item result = va_arg(ap, struct wide_item (*)[2])[0][1];
+    return result.second + result.third;
+}
+int main(void) {
+    struct wide_item items[2] = {{1, 2, 3}, {4, 9, 20}};
+    return pick_wide_item(1, &items);
 }
 EOF
 

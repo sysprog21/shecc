@@ -1778,9 +1778,9 @@ bool lex_peek(token_kind_t kind, char *value)
 }
 
 /* Copies a token literal into a caller buffer of n bytes. Identifiers are
- * bounded by MAX_ID_LEN when scanned, but some destinations are narrower --
- * 'type_name' is only MAX_TYPE_LEN -- so the bound has to travel with the
- * destination rather than be assumed from the source.
+ * bounded by MAX_ID_LEN when scanned, but numeric literals run to
+ * MAX_TOKEN_LEN, so the bound has to travel with the destination rather than be
+ * assumed from the source.
  */
 void lex_copy_literal(token_t *tk, char *value, int n)
 {

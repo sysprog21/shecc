@@ -2785,11 +2785,11 @@ token_t *pp_strip_layout(token_t *tk)
         if (cur != &head &&
             ((cur->kind == T_string && tk->kind == T_string) ||
              (cur->kind == T_wstring && tk->kind == T_wstring))) {
-            char combined[MAX_TOKEN_LEN];
+            char combined[MAX_STRING_LEN];
             int left_len = strlen(cur->literal);
             int right_len = strlen(tk->literal);
 
-            if (left_len + right_len >= MAX_TOKEN_LEN)
+            if (left_len + right_len >= MAX_STRING_LEN)
                 error_at("Concatenated string literal too long", &tk->location);
             memcpy(combined, cur->literal, left_len);
             memcpy(combined + left_len, tk->literal, right_len + 1);

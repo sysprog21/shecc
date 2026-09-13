@@ -1270,7 +1270,7 @@ int parse_wide_character_constant(const char *literal)
 
 int read_wstring_units(int *units, int capacity)
 {
-    char literal[MAX_TOKEN_LEN];
+    char literal[MAX_STRING_LEN];
     int length = 0;
 
     do {
@@ -1814,6 +1814,75 @@ void emit_object_assignment(block_t *parent,
     }
 }
 
+/* Lower the designator that follows "&object" in a static initializer: member
+ * selections and constant subscripts in any order, then an optional constant
+ * offset. @object_addr is the address of @object; the address of the designated
+ * subobject is returned and that subobject is left in @object. The scalar and
+ * the aggregate initializer readers both come through here, so the forms they
+ * accept, the scope names resolve in, and the diagnostics cannot drift apart.
+ */
+var_t *read_global_address_designator(block_t *scope,
+                                      block_t *parent,
+                                      basic_block_t **bb,
+                                      var_t **object,
+                                      var_t *object_addr)
+{
+    var_t *target = *object;
+    fixed_array_shape_t shape = fixed_array_shape_from_var(target);
+    int subscripts = 0;
+
+    for (;;) {
+        if (lex_accept(T_dot)) {
+            char field_name[MAX_ID_LEN];
+            var_t *field;
+
+            lex_ident(T_identifier, field_name);
+            field = find_member(field_name, target->type);
+            if (!field)
+                error_at("Unknown struct or union member", cur_token_loc());
+            object_addr = compute_field_address(parent, bb, object_addr, field);
+            target = field;
+            shape = fixed_array_shape_from_var(target);
+            subscripts = 0;
+        } else if (lex_accept(T_open_square)) {
+            int element_size =
+                target->ptr_level ? PTR_SIZE : target->type->size;
+            int index;
+
+            if (!target->array_size || subscripts >= shape.rank)
+                error_at("Subscripted global address needs an array object",
+                         cur_token_loc());
+            index = read_const_expr(scope);
+            lex_expect(T_close_square);
+            object_addr = compute_element_address(
+                parent, bb, object_addr, index,
+                fixed_array_shape_stride(&shape, subscripts, element_size));
+            subscripts++;
+        } else
+            break;
+        object_addr->ptr_level = target->ptr_level + 1;
+        object_addr->is_global_address = true;
+    }
+
+    /* A trailing offset after a partial multidimensional subscript advances by
+     * the remaining row or plane, the complete pointed-to object, rather than
+     * by its scalar leaf. read_global_address_offset() takes the sign as part
+     * of the constant expression.
+     */
+    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL)) {
+        int element_size = target->ptr_level ? PTR_SIZE : target->type->size;
+        int index = read_global_address_offset(scope, parent, *bb);
+
+        object_addr = compute_element_address(
+            parent, bb, object_addr, index,
+            fixed_array_shape_stride(&shape, subscripts - 1, element_size));
+        object_addr->ptr_level = target->ptr_level + 1;
+        object_addr->is_global_address = true;
+    }
+    *object = target;
+    return object_addr;
+}
+
 var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
 {
     var_t *val = NULL;
@@ -1868,12 +1937,6 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
                 var_t *object = find_var(name, scope);
 
                 if (object && object->is_global) {
-                    fixed_array_shape_t shape =
-                        fixed_array_shape_from_var(object);
-                    int subscript_count = 0;
-                    int element_size =
-                        object->ptr_level ? PTR_SIZE : object->type->size;
-
                     lex_expect(T_identifier);
                     val = require_ref_var(parent, object->type,
                                           object->ptr_level);
@@ -1881,50 +1944,8 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
                     val->is_global_address = true;
                     add_insn(parent, *bb, OP_address_of, val, object, NULL, 0,
                              NULL);
-                    while (lex_accept(T_open_square)) {
-                        int index;
-                        int stride = element_size;
-
-                        if (!object->array_size ||
-                            subscript_count >= shape.rank)
-                            error_at(
-                                "Subscripted global address needs an "
-                                "array object",
-                                cur_token_loc());
-                        stride = fixed_array_shape_stride(
-                            &shape, subscript_count, element_size);
-                        index = read_const_expr(scope);
-                        lex_expect(T_close_square);
-                        val = compute_element_address(parent, bb, val, index,
-                                                      stride);
-
-                        /* The offset still denotes an address constant. The
-                         * generic helper only constructs arithmetic IR, so
-                         * retain the pointer value metadata required by the
-                         * global-store relocation path.
-                         */
-                        val->ptr_level = object->ptr_level + 1;
-                        val->is_global_address = true;
-                        subscript_count++;
-                    }
-                    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL)) {
-                        int index =
-                            read_global_address_offset(scope, parent, *bb);
-                        int stride;
-
-                        /* After a partial multidimensional subscript, the
-                         * address still points at the remaining row/plane. C
-                         * pointer arithmetic advances by that complete
-                         * pointed-to object, not by its scalar leaf.
-                         */
-                        stride = fixed_array_shape_stride(
-                            &shape, subscript_count - 1, element_size);
-                        val = compute_element_address(parent, bb, val, index,
-                                                      stride);
-                        val->ptr_level = object->ptr_level + 1;
-                        val->is_global_address = true;
-                    }
-                    return val;
+                    return read_global_address_designator(scope, parent, bb,
+                                                          &object, val);
                 }
             }
         }
@@ -2251,6 +2272,33 @@ void parse_array_field_hyperplane_init(block_t *parent,
     }
 }
 
+/* Read a string literal and every adjacent one after it, decoded and joined
+ * into @combined, which holds MAX_STRING_LEN bytes (C99 translation phase 6).
+ * Each piece is decoded in place at the end of what came before, so the
+ * capacity handed to the decoder and the buffer it writes are the same object.
+ * Returns the joined length.
+ */
+int read_concatenated_string(char *combined)
+{
+    char literal[MAX_STRING_LEN];
+    int used;
+
+    lex_ident(T_string, literal);
+    unescape_string(literal, combined, MAX_STRING_LEN);
+    used = strlen(combined);
+    while (lex_peek(T_string, NULL)) {
+        int added;
+
+        lex_ident(T_string, literal);
+        unescape_string(literal, combined + used, MAX_STRING_LEN - used);
+        added = strlen(combined + used);
+        if (used + added >= MAX_STRING_LEN - 1)
+            error_at("Concatenated string literal too long", cur_token_loc());
+        used += added;
+    }
+    return used;
+}
+
 /* An array member can be initialized directly by a string literal just like a
  * standalone character array. The member has no independent var_t storage, so
  * write through its already-computed field address rather than routing this
@@ -2262,21 +2310,10 @@ void parse_string_field_init(block_t *parent,
                              var_t *target_addr,
                              bool emit_code)
 {
-    char literal[MAX_TOKEN_LEN], unescaped[MAX_TOKEN_LEN],
-        combined[MAX_LINE_LEN];
+    char combined[MAX_STRING_LEN];
     int len;
 
-    lex_ident(T_string, literal);
-    unescape_string(literal, combined, MAX_LINE_LEN);
-    while (lex_peek(T_string, NULL)) {
-        int used = strlen(combined);
-
-        lex_ident(T_string, literal);
-        unescape_string(literal, unescaped, MAX_LINE_LEN - used);
-        if (used + (int) strlen(unescaped) >= MAX_LINE_LEN - 1)
-            error_at("Concatenated string literal too long", cur_token_loc());
-        strcpy(combined + used, unescaped);
-    }
+    read_concatenated_string(combined);
 
     len = strlen(combined) + 1;
     if (len > field->array_size)
@@ -2334,11 +2371,11 @@ void parse_wstring_field_init(block_t *parent,
                               var_t *target_addr,
                               bool emit_code)
 {
-    int values[MAX_LINE_LEN];
+    int values[MAX_STRING_LEN];
     int length;
     int units;
 
-    length = read_wstring_units(values, MAX_LINE_LEN);
+    length = read_wstring_units(values, MAX_STRING_LEN);
 
     units = length + 1;
     if (units > field->array_size)
@@ -2679,12 +2716,42 @@ void parse_struct_field_init(block_t *parent,
             if (field_idx >= struct_type->num_fields ||
                 ((struct_type->base_type == TYPE_union ||
                   struct_type->is_union) &&
-                 initializer_count > 0))
+                 initializer_count > 0 && !consumed_pending_array_element))
                 error_at("Too many elements in record initializer",
                          next_token_loc());
 
             if (!field && field_idx < struct_type->num_fields)
                 field = &struct_type->fields[field_idx];
+
+            /* A scalar that meets an array member without braces initializes
+             * the member's first element, and the following scalars fill the
+             * rest before the next member (C99 6.7.8p20). Writing it at the
+             * member's aggregate size instead corrupts the elements and gives
+             * narrow backends a store width they cannot encode.
+             */
+            if (field && !designated_field_addr && !has_pending_array_element &&
+                field->array_size &&
+                (field->ptr_level || !is_record_type(field->type)) &&
+                !lex_peek(T_open_curly, NULL) && !lex_peek(T_string, NULL) &&
+                !lex_peek(T_wstring, NULL)) {
+                pending_array_base =
+                    compute_field_address(parent, bb, target_addr, field);
+                pending_array_elem_size = (field->ptr_level || field->is_func)
+                                              ? PTR_SIZE
+                                              : field->type->size;
+                pending_array_count = field->array_size;
+                pending_array_index = 0;
+                memcpy(&pending_array_element, field, sizeof(var_t));
+                pending_array_element.array_size = 0;
+                pending_array_element.array_dim2 = 0;
+                pending_array_element.array_dim3 = 0;
+                pending_array_element.array_dim4 = 0;
+                field = &pending_array_element;
+                designated_field_addr = compute_element_address(
+                    parent, bb, pending_array_base, 0, pending_array_elem_size);
+                has_pending_array_element = true;
+                consumed_pending_array_element = true;
+            }
 
             if (field && field->array_size && !field->ptr_level &&
                 (lex_peek(T_string, NULL) || lex_peek(T_wstring, NULL)) &&
@@ -5076,26 +5143,9 @@ void read_parameter_list_decl(func_t *func, bool anon)
 
 void read_literal_param(block_t *parent, basic_block_t *bb)
 {
-    char literal[MAX_TOKEN_LEN], unescaped[MAX_TOKEN_LEN],
-        combined[MAX_LINE_LEN];
-    int combined_len = 0;
+    char combined[MAX_STRING_LEN];
 
-    /* Read first string literal */
-    lex_ident(T_string, literal);
-    unescape_string(literal, combined, MAX_LINE_LEN);
-    combined_len = strlen(combined);
-
-    /* Check for adjacent string literals and concatenate them */
-    while (lex_peek(T_string, NULL)) {
-        lex_ident(T_string, literal);
-        unescape_string(literal, unescaped, MAX_LINE_LEN - combined_len);
-        int unescaped_len = strlen(unescaped);
-        if (combined_len + unescaped_len >= MAX_LINE_LEN - 1)
-            error_at("Concatenated string literal too long", cur_token_loc());
-
-        strcpy(combined + combined_len, unescaped);
-        combined_len += unescaped_len;
-    }
+    read_concatenated_string(combined);
 
     const int index = write_symbol(combined);
 
@@ -5116,21 +5166,10 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
  */
 void parse_string_array_init(var_t *var, block_t *parent, basic_block_t **bb)
 {
-    char literal[MAX_TOKEN_LEN], unescaped[MAX_TOKEN_LEN],
-        combined[MAX_LINE_LEN];
+    char combined[MAX_STRING_LEN];
     int len;
 
-    lex_ident(T_string, literal);
-    unescape_string(literal, combined, MAX_LINE_LEN);
-    while (lex_peek(T_string, NULL)) {
-        int used = strlen(combined);
-
-        lex_ident(T_string, literal);
-        unescape_string(literal, unescaped, MAX_LINE_LEN - used);
-        if (used + (int) strlen(unescaped) >= MAX_LINE_LEN - 1)
-            error_at("Concatenated string literal too long", cur_token_loc());
-        strcpy(combined + used, unescaped);
-    }
+    read_concatenated_string(combined);
 
     len = strlen(combined) + 1;
     if (var->has_unsized_array) {
@@ -5155,11 +5194,11 @@ void parse_string_array_init(var_t *var, block_t *parent, basic_block_t **bb)
 
 void parse_wstring_array_init(var_t *var, block_t *parent, basic_block_t **bb)
 {
-    int values[MAX_LINE_LEN];
+    int values[MAX_STRING_LEN];
     int length;
     int units;
 
-    length = read_wstring_units(values, MAX_LINE_LEN);
+    length = read_wstring_units(values, MAX_STRING_LEN);
 
     units = length + 1;
     if (var->has_unsized_array) {
@@ -5464,12 +5503,23 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
         error_at("Decimal integer literal exceeds signed long long range",
                  cur_token_loc());
 
+    /* C99 gives the magnitude in -2147483648 type long long. A target without
+     * paired 64-bit lowering cannot hold a long long value, yet the negated
+     * result is INT_MIN, which int represents exactly; typing that one spelling
+     * as int keeps INT_MIN usable there instead of rejecting it.
+     */
+    bool narrow_int_min = PTR_SIZE < 8 && is_neg && is_decimal &&
+                          !has_unsigned_suffix && !long_suffix_count &&
+                          !value_hi && value == 0x80000000U;
+
     var_t *vd = require_var(parent);
     vd->var_name = gen_name();
-    if (is_long_long || value_hi ||
-        (is_decimal && !has_unsigned_suffix &&
-         numeric_literal_needs_wide_path(token)) ||
-        (is_decimal && !has_unsigned_suffix && value > 0x80000000U)) {
+    if (narrow_int_min) {
+        vd->type = TY_int;
+    } else if (is_long_long || value_hi ||
+               (is_decimal && !has_unsigned_suffix &&
+                numeric_literal_needs_wide_path(token)) ||
+               (is_decimal && !has_unsigned_suffix && value > 0x80000000U)) {
         if (PTR_SIZE < 8)
             error_at("long long literal needs 64-bit target lowering",
                      cur_token_loc());
@@ -5533,8 +5583,8 @@ void read_wchar_param(block_t *parent, basic_block_t *bb)
 
 void read_wstring_param(block_t *parent, basic_block_t *bb)
 {
-    int values[MAX_LINE_LEN];
-    int length = read_wstring_units(values, MAX_LINE_LEN);
+    int values[MAX_STRING_LEN];
+    int length = read_wstring_units(values, MAX_STRING_LEN);
 
     var_t *vd = require_typed_ptr_var(parent, find_type("wchar_t", true), 1);
     vd->var_name = gen_name();
@@ -6402,7 +6452,21 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
                 address->var_name = gen_name();
                 add_insn(parent, *bb, OP_add, address, base, index, 0, NULL);
                 depth++;
-                if (depth == dimension_count + 1) {
+                if (depth == dimension_count + 1 &&
+                    !requested.pointee_element_ptr_level &&
+                    is_record_type(requested.type)) {
+                    /* A record element is an object: copy it whole rather than
+                     * read one scalar of the record's size, which drops bytes
+                     * and is a width no narrow backend can load.
+                     */
+                    var_t *value = require_typed_var(parent, requested.type);
+
+                    value->var_name = gen_name();
+                    add_insn(parent, *bb, OP_allocat, value, NULL, NULL, 0,
+                             NULL);
+                    emit_record_copy_from_address(parent, bb, value, address);
+                    base = value;
+                } else if (depth == dimension_count + 1) {
                     var_t *value = require_typed_ptr_var(
                         parent, requested.type,
                         requested.pointee_element_ptr_level);
@@ -7338,13 +7402,13 @@ void read_expr_operand(block_t *parent, basic_block_t **bb);
  */
 int read_sizeof_string_literal(void)
 {
-    char literal[MAX_TOKEN_LEN];
-    char unescaped[MAX_TOKEN_LEN];
+    char literal[MAX_STRING_LEN];
+    char unescaped[MAX_STRING_LEN];
     int size = 1;
 
     do {
         lex_ident(T_string, literal);
-        unescape_string(literal, unescaped, MAX_TOKEN_LEN);
+        unescape_string(literal, unescaped, MAX_STRING_LEN);
         size += strlen(unescaped);
     } while (lex_peek(T_string, NULL));
 
@@ -7353,9 +7417,9 @@ int read_sizeof_string_literal(void)
 
 int read_sizeof_wstring_literal(void)
 {
-    int values[MAX_LINE_LEN];
+    int values[MAX_STRING_LEN];
     type_t *wide_type = find_type("wchar_t", true);
-    return (read_wstring_units(values, MAX_LINE_LEN) + 1) * wide_type->size;
+    return (read_wstring_units(values, MAX_STRING_LEN) + 1) * wide_type->size;
 }
 
 int sizeof_array_object(const var_t *array)
@@ -7367,6 +7431,14 @@ int sizeof_array_object(const var_t *array)
     return array->array_size * element_size;
 }
 
+/* What a type-only walk over a sizeof operand has seen. */
+typedef struct {
+    int members;       /* record member selections */
+    int subscripts;    /* array subscripts */
+    bool element_leaf; /* the last subscript selected a non-array element */
+    bool addressed;    /* the operand so far is "&array" */
+} sizeof_walk_t;
+
 /* A sizeof operand needs the declared type of an lvalue, before ordinary
  * expression lowering decays an array or evaluates a postfix operand. Keep this
  * descriptor as a copy of the declaration metadata: no IR value is ever
@@ -7375,26 +7447,64 @@ int sizeof_array_object(const var_t *array)
 static bool scan_sizeof_postfix_operand(block_t *scope,
                                         token_t **cursor,
                                         var_t *object,
-                                        int *members)
+                                        sizeof_walk_t *walk)
 {
     token_t *token = *cursor;
 
     if (!token)
         return false;
     if (token->kind == T_asterisk) {
+        bool addressed;
         int depth;
 
         token = token->next;
-        if (!scan_sizeof_postfix_operand(scope, &token, object, members))
+        if (!scan_sizeof_postfix_operand(scope, &token, object, walk))
             return false;
+        addressed = walk->addressed;
         depth = effective_pointer_depth(object);
         if (depth <= 0)
             return false;
-        object->type = pointee_type_from_pointer_typedef(object->type);
-        object->ptr_level = depth - 1;
+        if (object->pointee_array_size > 0 &&
+            depth == object->pointee_array_element_ptr_level + 1) {
+            /* A pointer to an array designates the complete array, so the
+             * dereference restores its bounds rather than decaying them.
+             */
+            fixed_array_shape_t shape =
+                fixed_array_shape_from_pointee_var(object);
+
+            if (!addressed && object->type->pointee_array_element_type)
+                object->type = object->type->pointee_array_element_type;
+            fixed_array_shape_to_var(object, &shape);
+            object->ptr_level = object->pointee_array_element_ptr_level;
+            object->pointee_array_size = 0;
+            object->pointee_array_dim2 = 0;
+            object->pointee_array_dim3 = 0;
+            object->pointee_array_dim4 = 0;
+            object->pointee_array_element_ptr_level = 0;
+        } else {
+            object->type = pointee_type_from_pointer_typedef(object->type);
+            object->ptr_level = depth - 1;
+        }
+        walk->addressed = false;
+        walk->element_leaf = false;
+    } else if (token->kind == T_ampersand) {
+        token = token->next;
+        if (!scan_sizeof_postfix_operand(scope, &token, object, walk))
+            return false;
+        walk->addressed = object->array_size > 0;
+        if (walk->addressed) {
+            fixed_array_shape_t shape = fixed_array_shape_from_var(object);
+            fixed_array_shape_t scalar = {0};
+
+            fixed_array_shape_to_pointee_var(object, &shape);
+            object->pointee_array_element_ptr_level = object->ptr_level;
+            fixed_array_shape_to_var(object, &scalar);
+        }
+        object->ptr_level++;
+        walk->element_leaf = false;
     } else if (token->kind == T_open_bracket) {
         token = token->next;
-        if (!scan_sizeof_postfix_operand(scope, &token, object, members) ||
+        if (!scan_sizeof_postfix_operand(scope, &token, object, walk) ||
             !token || token->kind != T_close_bracket)
             return false;
         token = token->next;
@@ -7410,6 +7520,7 @@ static bool scan_sizeof_postfix_operand(block_t *scope,
 
     while (token && (token->kind == T_dot || token->kind == T_arrow ||
                      token->kind == T_open_square)) {
+        walk->addressed = false;
         if (token->kind == T_dot || token->kind == T_arrow) {
             bool through_pointer = token->kind == T_arrow;
             type_t *record;
@@ -7429,7 +7540,8 @@ static bool scan_sizeof_postfix_operand(block_t *scope,
             if (!field)
                 return false;
             memcpy(object, field, sizeof(*object));
-            *members = *members + 1;
+            walk->members++;
+            walk->element_leaf = false;
             token = token->next;
         } else {
             int depth = 0;
@@ -7455,6 +7567,8 @@ static bool scan_sizeof_postfix_operand(block_t *scope,
             if (!fixed_array_shape_drop_outer(&shape))
                 return false;
             fixed_array_shape_to_var(object, &shape);
+            walk->subscripts++;
+            walk->element_leaf = !object->array_size;
         }
     }
     *cursor = token;
@@ -7463,14 +7577,20 @@ static bool scan_sizeof_postfix_operand(block_t *scope,
 
 /* The preceding scan proves the exact token shape and type constraints before
  * this pass advances the lexer. Each subscript is read in a detached block so
- * its side effects remain unevaluated.
+ * its side effects remain unevaluated. @open_consumed says the operand's
+ * opening parenthesis was already taken as the one following sizeof.
  */
-static void consume_sizeof_postfix_operand(block_t *parent, basic_block_t **bb)
+static void consume_sizeof_postfix_operand(block_t *parent,
+                                           basic_block_t **bb,
+                                           bool open_consumed)
 {
-    if (lex_accept(T_asterisk))
-        consume_sizeof_postfix_operand(parent, bb);
+    if (open_consumed) {
+        consume_sizeof_postfix_operand(parent, bb, false);
+        lex_expect(T_close_bracket);
+    } else if (lex_accept(T_asterisk) || lex_accept(T_ampersand))
+        consume_sizeof_postfix_operand(parent, bb, false);
     else if (lex_accept(T_open_bracket)) {
-        consume_sizeof_postfix_operand(parent, bb);
+        consume_sizeof_postfix_operand(parent, bb, false);
         lex_expect(T_close_bracket);
     } else
         lex_expect(T_identifier);
@@ -7495,55 +7615,101 @@ static void consume_sizeof_postfix_operand(block_t *parent, basic_block_t **bb)
     }
 }
 
+/* The operand must end where sizeof's operand ends: at the closing parenthesis
+ * of a parenthesized one, and otherwise before anything that would keep it
+ * going as a call or an update.
+ */
+static bool sizeof_operand_tail_ends(const token_t *tail, bool parenthesized)
+{
+    return tail && (parenthesized ? tail->kind == T_close_bracket
+                                  : tail->kind != T_open_bracket &&
+                                        tail->kind != T_increment &&
+                                        tail->kind != T_decrement);
+}
+
 /* A non-mutating admission check for callers that need to hand a global sizeof
- * operand to the detached local parser. Keep its accepted grammar in lockstep
- * with read_sizeof_postfix_operand() so type names and scalar forms remain
- * owned by their existing global constant paths.
+ * operand to the detached local parser. It admits only a member array, so type
+ * names and scalar forms remain owned by their existing global constant paths.
  */
 static bool can_scan_sizeof_postfix_extent(block_t *scope,
                                            token_t *start,
-                                           bool parenthesized)
+                                           bool parenthesized,
+                                           bool allow_flexible)
 {
     token_t *tail = start;
     var_t object;
-    int members = 0;
+    sizeof_walk_t walk = {0};
 
-    return scan_sizeof_postfix_operand(scope, &tail, &object, &members) &&
-           members && tail &&
-           (parenthesized
-                ? tail->kind == T_close_bracket
-                : tail->kind != T_open_bracket && tail->kind != T_increment &&
-                      tail->kind != T_decrement) &&
-           !effective_pointer_depth(&object) && object.array_size > 0;
+    return scan_sizeof_postfix_operand(scope, &tail, &object, &walk) &&
+           walk.members && sizeof_operand_tail_ends(tail, parenthesized) &&
+           !effective_pointer_depth(&object) &&
+           (object.array_size > 0 ||
+            (allow_flexible && object.is_flexible_array_member));
 }
 
-/* First staged type-only postfix walker: identifier roots, balanced grouping,
- * record members, and fixed-array postfixes. Other sizeof forms keep their
- * dedicated fallbacks until their primary operations are migrated here.
+/* Walk a local sizeof operand from @start and say whether this walker owns it:
+ * an operand that still designates an array, whatever the path to it, or a
+ * single element selected from one. Anything else keeps the ordinary
+ * unevaluated-expression path.
+ */
+static bool walk_local_sizeof_operand(block_t *parent,
+                                      token_t *start,
+                                      bool parenthesized,
+                                      var_t *object)
+{
+    token_t *tail = start;
+    sizeof_walk_t walk = {0};
+
+    if (!scan_sizeof_postfix_operand(parent, &tail, object, &walk) ||
+        !sizeof_operand_tail_ends(tail, parenthesized))
+        return false;
+    if (object->is_flexible_array_member)
+        return walk.members > 0;
+    return object->array_size > 0 || walk.element_leaf;
+}
+
+/* Every sizeof operand made of an identifier, grouping, dereference, address,
+ * member selections and constant or runtime subscripts goes through here: the
+ * result is the declared extent of what the operand designates, which ordinary
+ * expression lowering would decay or evaluate.
  */
 static bool read_sizeof_postfix_operand(block_t *parent,
                                         basic_block_t **bb,
                                         bool parenthesized)
 {
-    token_t *tail = cur_token->next;
+    bool open_consumed = false;
     var_t object;
-    int members = 0;
     var_t *result;
+    int size;
 
-    if (!can_scan_sizeof_postfix_extent(parent, tail, parenthesized))
-        return false;
-    scan_sizeof_postfix_operand(parent, &tail, &object, &members);
+    if (!walk_local_sizeof_operand(parent, cur_token->next, parenthesized,
+                                   &object)) {
+        /* In "sizeof (*p).member" the parenthesis taken as sizeof's own opens a
+         * grouping inside a longer unary expression. Walk it again from that
+         * parenthesis as an operand without one.
+         */
+        if (!parenthesized || cur_token->kind != T_open_bracket ||
+            !walk_local_sizeof_operand(parent, cur_token, false, &object))
+            return false;
+        open_consumed = true;
+    }
     if (object.is_flexible_array_member)
         error_at("sizeof cannot be applied to a flexible array member",
                  cur_token_loc());
     if (is_bitfield(&object))
         error_at("sizeof cannot be applied to a bit-field", cur_token_loc());
 
-    consume_sizeof_postfix_operand(parent, bb);
-    if (parenthesized)
+    consume_sizeof_postfix_operand(parent, bb, open_consumed);
+    if (parenthesized && !open_consumed)
         lex_expect(T_close_bracket);
+    if (object.array_size > 0)
+        size = sizeof_array_object(&object);
+    else if (object.ptr_level || object.type->ptr_level || object.is_func)
+        size = PTR_SIZE;
+    else
+        size = object.type->size;
     result = require_var(parent);
-    result->init_val = sizeof_array_object(&object);
+    result->init_val = size;
     result->var_name = gen_name();
     opstack_push(result);
     add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
@@ -7558,528 +7724,6 @@ static bool is_direct_fixed_array_pointer_slot(const var_t *pointer)
            ((pointer->ptr_level == 1 && !pointer->type->ptr_level) ||
             (!pointer->ptr_level && pointer->type->ptr_level == 1 &&
              pointer->type->array_element_ptr_level == 1));
-}
-
-/* A direct pointer-to-fixed-array dereference designates its complete row.
- * Ordinary expression lowering decays that row before sizeof can observe it, so
- * retain this exact unary form while the declaration's pointee extent is still
- * available.
- */
-static bool read_sizeof_dereference_pointee_array(block_t *parent,
-                                                  basic_block_t **bb,
-                                                  bool parenthesized)
-{
-    token_t *star = cur_token->next;
-    token_t *identifier;
-    token_t *tail;
-    var_t *pointer;
-    type_t *element_type;
-    var_t *result;
-    int element_size;
-    bool indexes_fixed_array_pointer_slot = false;
-
-    if (!star || star->kind != T_asterisk || !(identifier = star->next) ||
-        identifier->kind != T_identifier)
-        return false;
-    pointer = find_var(identifier->literal, parent);
-    if (!pointer || !pointer->pointee_array_size)
-        return false;
-    tail = identifier->next;
-    if (tail && tail->kind == T_open_square) {
-        int depth = 0;
-
-        indexes_fixed_array_pointer_slot =
-            is_direct_fixed_array_pointer_slot(pointer);
-        for (; tail; tail = tail->next) {
-            if (tail->kind == T_open_square)
-                depth++;
-            else if (tail->kind == T_close_square && --depth == 0) {
-                tail = tail->next;
-                break;
-            }
-        }
-        if (!indexes_fixed_array_pointer_slot || depth)
-            return false;
-    }
-    if (parenthesized && (!tail || tail->kind != T_close_bracket))
-        return false;
-    if (effective_pointer_depth(pointer) !=
-        pointer->pointee_array_element_ptr_level + 1)
-        return false;
-
-    element_type = pointer->type->pointee_array_element_type
-                       ? pointer->type->pointee_array_element_type
-                       : pointer->type;
-    element_size = pointer->pointee_array_element_ptr_level
-                       ? PTR_SIZE
-                       : element_type->size;
-    lex_expect(T_asterisk);
-    lex_expect(T_identifier);
-    if (indexes_fixed_array_pointer_slot) {
-        basic_block_t *unevaluated_bb;
-        int saved_side_effects;
-
-        lex_expect(T_open_square);
-        unevaluated_bb = bb_create(parent);
-        saved_side_effects = se_idx;
-        read_expr(parent, &unevaluated_bb);
-        read_ternary_operation(parent, &unevaluated_bb);
-        opstack_pop();
-        se_idx = saved_side_effects;
-        lex_expect(T_close_square);
-    }
-    if (parenthesized)
-        lex_expect(T_close_bracket);
-    result = require_var(parent);
-    result->init_val = pointer->pointee_array_size * element_size;
-    result->var_name = gen_name();
-    opstack_push(result);
-    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
-    return true;
-}
-
-/* `&array` points to the complete array object, and dereferencing that pointer
- * restores an array lvalue. Ordinary expression lowering deliberately decays
- * arrays before it can represent the unary pair, so recognize the complete
- * `*&identifier` operand here while sizeof still has access to its declaration.
- */
-bool read_sizeof_address_dereference_array(block_t *parent,
-                                           basic_block_t **bb,
-                                           bool parenthesized)
-{
-    token_t *star = cur_token->next;
-    token_t *ampersand;
-    token_t *identifier;
-    var_t *array;
-    var_t *result;
-
-    if (!star || star->kind != T_asterisk || !star->next ||
-        star->next->kind != T_ampersand || !star->next->next ||
-        star->next->next->kind != T_identifier)
-        return false;
-    ampersand = star->next;
-    identifier = ampersand->next;
-    if (parenthesized &&
-        (!identifier->next || identifier->next->kind != T_close_bracket))
-        return false;
-
-    array = find_var(identifier->literal, parent);
-    if (!array || array->array_size <= 0)
-        return false;
-
-    lex_expect(T_asterisk);
-    lex_expect(T_ampersand);
-    lex_expect(T_identifier);
-    if (parenthesized)
-        lex_expect(T_close_bracket);
-
-    result = require_var(parent);
-    result->init_val = sizeof_array_object(array);
-    result->var_name = gen_name();
-    opstack_push(result);
-    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
-    return true;
-}
-
-/* A member access is also an array lvalue before the usual array-to-pointer
- * conversion. Resolve a complete dot-member path against its declarations so
- * sizeof can observe the last member's extent without changing ordinary member
- * expression lowering.
- */
-bool read_sizeof_member_array(block_t *parent,
-                              basic_block_t **bb,
-                              bool parenthesized)
-{
-    token_t *object_token = cur_token->next;
-    token_t *member_token;
-    token_t *tail;
-    var_t *object;
-    var_t *field = NULL;
-    int object_ptr_level;
-    int nested_parentheses = 0;
-
-    /* A parenthesized member-array expression remains an array lvalue for
-     * sizeof. Peel only enclosing parentheses here; the ordinary member path
-     * below still owns the dot/arrow grammar and rejects other expressions.
-     */
-    while (object_token && object_token->kind == T_open_bracket) {
-        nested_parentheses++;
-        object_token = object_token->next;
-    }
-
-    if (!object_token || object_token->kind != T_identifier ||
-        !object_token->next ||
-        (object_token->next->kind != T_dot &&
-         object_token->next->kind != T_arrow) ||
-        !object_token->next->next ||
-        object_token->next->next->kind != T_identifier)
-        return false;
-    object = find_var(object_token->literal, parent);
-    object_ptr_level = object ? object->ptr_level + object->type->ptr_level : 0;
-    if (!object ||
-        ((object_token->next->kind == T_dot && object_ptr_level != 0) ||
-         (object_token->next->kind == T_arrow && object_ptr_level != 1)))
-        return false;
-
-    member_token = object_token->next->next;
-    for (;;) {
-        field = find_member(member_token->literal,
-                            field ? field->type : object->type);
-        if (!field || field->ptr_level)
-            return false;
-        tail = member_token;
-        if (!tail->next || tail->next->kind != T_dot)
-            break;
-        if (!tail->next->next || tail->next->next->kind != T_identifier)
-            return false;
-        member_token = tail->next->next;
-    }
-    if (field->is_flexible_array_member)
-        error_at("sizeof cannot be applied to a flexible array member",
-                 cur_token_loc());
-    if (field->array_size <= 0 ||
-        (tail->next && tail->next->kind == T_open_square) ||
-        (parenthesized && (!tail->next || tail->next->kind != T_close_bracket)))
-        return false;
-
-    token_t *closing = tail->next;
-    for (int i = 0; i < nested_parentheses; i++) {
-        if (!closing || closing->kind != T_close_bracket)
-            return false;
-        closing = closing->next;
-    }
-    if (parenthesized && (!closing || closing->kind != T_close_bracket))
-        return false;
-
-    for (int i = 0; i < nested_parentheses; i++)
-        lex_expect(T_open_bracket);
-    lex_expect(T_identifier);
-    if (object_token->next->kind == T_arrow)
-        lex_expect(T_arrow);
-    else
-        lex_expect(T_dot);
-    lex_expect(T_identifier);
-    while (lex_peek(T_dot, NULL)) {
-        lex_expect(T_dot);
-        lex_expect(T_identifier);
-    }
-    for (int i = 0; i < nested_parentheses; i++)
-        lex_expect(T_close_bracket);
-    if (parenthesized)
-        lex_expect(T_close_bracket);
-
-    var_t *result = require_var(parent);
-    result->init_val = sizeof_array_object(field);
-    result->var_name = gen_name();
-    opstack_push(result);
-    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
-    return true;
-}
-
-/* Preserve the remaining row type for a direct multidimensional array member.
- * The index expressions are parsed in detached IR, just like direct arrays, so
- * sizeof does not evaluate them.
- */
-bool read_sizeof_member_array_row(block_t *parent,
-                                  basic_block_t **bb,
-                                  bool parenthesized)
-{
-    token_t *object_token = cur_token->next;
-    token_t *member_token;
-    token_t *tail;
-    var_t *object;
-    var_t *field = NULL;
-    type_t *member_record;
-    int object_ptr_level;
-    int subscript_count = 0;
-    int dimensions;
-    int row_elements;
-    int nested_parentheses = 0;
-    int grouped_member_closes = 0;
-
-    /* sizeof((object.member[index])) preserves the member-array lvalue just
-     * like the ungrouped spelling. Peel only groups that enclose the complete
-     * member expression; the trailing closes are consumed after its detached
-     * subscripts so index side effects remain unevaluated.
-     */
-    while (object_token && object_token->kind == T_open_bracket) {
-        nested_parentheses++;
-        object_token = object_token->next;
-    }
-
-    if (!object_token || object_token->kind != T_identifier ||
-        !object_token->next ||
-        (object_token->next->kind != T_dot &&
-         object_token->next->kind != T_arrow) ||
-        !object_token->next->next ||
-        object_token->next->next->kind != T_identifier)
-        return false;
-    object = find_var(object_token->literal, parent);
-    object_ptr_level = object ? object->ptr_level + object->type->ptr_level : 0;
-    if (!object ||
-        ((object_token->next->kind == T_dot && object_ptr_level != 0) ||
-         (object_token->next->kind == T_arrow && object_ptr_level != 1)))
-        return false;
-    member_token = object_token->next->next;
-    member_record = object->type;
-    for (;;) {
-        field = find_member(member_token->literal, member_record);
-        if (!field)
-            return false;
-        tail = member_token->next;
-        if (!tail || (tail->kind != T_dot && tail->kind != T_arrow))
-            break;
-        if (!tail->next || tail->next->kind != T_identifier)
-            return false;
-        if (tail->kind == T_dot) {
-            if (effective_pointer_depth(field) != 0)
-                return false;
-            member_record = field->type;
-        } else {
-            if (effective_pointer_depth(field) != 1)
-                return false;
-            member_record = pointee_type_from_pointer_typedef(field->type);
-        }
-        member_token = tail->next;
-    }
-    if (!field || effective_pointer_depth(field) || field->array_dim2 <= 0)
-        return false;
-
-    /* A group can enclose the member lvalue before a following subscript, e.g.
-     * sizeof((((record.rows)))[1]). Consume only its matched closes; any
-     * remaining groups still enclose the complete postfix expression.
-     */
-    while (grouped_member_closes < nested_parentheses && tail &&
-           tail->kind == T_close_bracket) {
-        grouped_member_closes++;
-        tail = tail->next;
-    }
-    while (tail && tail->kind == T_open_square) {
-        int depth = 0;
-        for (; tail; tail = tail->next) {
-            if (tail->kind == T_open_square)
-                depth++;
-            else if (tail->kind == T_close_square && --depth == 0) {
-                tail = tail->next;
-                break;
-            }
-        }
-        if (depth)
-            return false;
-        subscript_count++;
-    }
-    if (!tail)
-        return false;
-    for (int i = grouped_member_closes; i < nested_parentheses; i++) {
-        if (!tail || tail->kind != T_close_bracket)
-            return false;
-        tail = tail->next;
-    }
-    if (parenthesized && (!tail || tail->kind != T_close_bracket))
-        return false;
-    dimensions = 2;
-    if (field->array_dim3)
-        dimensions = 3;
-    if (field->array_dim4)
-        dimensions = 4;
-    if (subscript_count > dimensions)
-        return false;
-
-    for (int i = 0; i < nested_parentheses; i++)
-        lex_expect(T_open_bracket);
-    lex_expect(T_identifier);
-    if (object_token->next->kind == T_arrow)
-        lex_expect(T_arrow);
-    else
-        lex_expect(T_dot);
-    lex_expect(T_identifier);
-    while (lex_peek(T_dot, NULL) || lex_peek(T_arrow, NULL)) {
-        if (lex_peek(T_arrow, NULL))
-            lex_expect(T_arrow);
-        else
-            lex_expect(T_dot);
-        lex_expect(T_identifier);
-    }
-    for (int i = 0; i < grouped_member_closes; i++)
-        lex_expect(T_close_bracket);
-    for (int i = 0; i < subscript_count; i++) {
-        lex_expect(T_open_square);
-        basic_block_t *unevaluated_bb = bb_create(parent);
-        int saved_side_effects = se_idx;
-        read_expr(parent, &unevaluated_bb);
-        read_ternary_operation(parent, &unevaluated_bb);
-        opstack_pop();
-        se_idx = saved_side_effects;
-        lex_expect(T_close_square);
-    }
-    for (int i = grouped_member_closes; i < nested_parentheses; i++)
-        lex_expect(T_close_bracket);
-    if (parenthesized)
-        lex_expect(T_close_bracket);
-
-    row_elements = 1;
-    if (subscript_count < 2)
-        row_elements *= field->array_dim2;
-    if (subscript_count < 3 && field->array_dim3)
-        row_elements *= field->array_dim3;
-    if (subscript_count < 4 && field->array_dim4)
-        row_elements *= field->array_dim4;
-    var_t *result = require_var(parent);
-    result->init_val = row_elements * field->type->size;
-    result->var_name = gen_name();
-    opstack_push(result);
-    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
-    return true;
-}
-
-/* Parenthesized dereference is another spelling of a direct record member
- * lvalue. Preserve a trailing array member for sizeof without teaching normal
- * expression lowering to suppress its usual array conversion.
- */
-bool read_sizeof_dereference_member_array(block_t *parent,
-                                          basic_block_t **bb,
-                                          bool parenthesized)
-{
-    bool sizeof_open_is_deref =
-        parenthesized && cur_token->next && cur_token->next->kind == T_asterisk;
-    token_t *open = sizeof_open_is_deref ? cur_token : cur_token->next;
-    token_t *star = open ? open->next : NULL;
-    token_t *pointer_token;
-    token_t *member_token;
-    token_t *tail;
-    var_t *pointer;
-    var_t *field = NULL;
-    int pointer_level;
-
-    if (!open || open->kind != T_open_bracket || !star ||
-        star->kind != T_asterisk || !star->next ||
-        star->next->kind != T_identifier || !star->next->next ||
-        star->next->next->kind != T_close_bracket || !star->next->next->next ||
-        star->next->next->next->kind != T_dot ||
-        !star->next->next->next->next ||
-        star->next->next->next->next->kind != T_identifier)
-        return false;
-    pointer_token = star->next;
-    pointer = find_var(pointer_token->literal, parent);
-    pointer_level = pointer ? pointer->ptr_level + pointer->type->ptr_level : 0;
-    if (!pointer || pointer_level != 1)
-        return false;
-
-    member_token = star->next->next->next->next;
-    for (;;) {
-        field = find_member(member_token->literal,
-                            field ? field->type : pointer->type);
-        if (!field || field->ptr_level)
-            return false;
-        tail = member_token;
-        if (!tail->next || tail->next->kind != T_dot)
-            break;
-        if (!tail->next->next || tail->next->next->kind != T_identifier)
-            return false;
-        member_token = tail->next->next;
-    }
-    if (field->is_flexible_array_member)
-        error_at("sizeof cannot be applied to a flexible array member",
-                 cur_token_loc());
-    if (field->array_size <= 0 ||
-        (parenthesized && !sizeof_open_is_deref &&
-         (!tail->next || tail->next->kind != T_close_bracket)))
-        return false;
-
-    if (!sizeof_open_is_deref)
-        lex_expect(T_open_bracket);
-    lex_expect(T_asterisk);
-    lex_expect(T_identifier);
-    lex_expect(T_close_bracket);
-    do {
-        lex_expect(T_dot);
-        lex_expect(T_identifier);
-    } while (lex_peek(T_dot, NULL));
-    if (parenthesized && !sizeof_open_is_deref)
-        lex_expect(T_close_bracket);
-
-    var_t *result = require_var(parent);
-    result->init_val = sizeof_array_object(field);
-    result->var_name = gen_name();
-    opstack_push(result);
-    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
-    return true;
-}
-
-/* Subscripted multidimensional arrays retain their remaining inner array type
- * under sizeof. Parse the index in detached IR for the ordinary expression
- * constraints, but never emit its side effects.
- */
-bool read_sizeof_array_row(block_t *parent,
-                           basic_block_t **bb,
-                           bool parenthesized)
-{
-    token_t *identifier = cur_token->next;
-    token_t *tail;
-    var_t *array;
-    int subscript_count = 0;
-    int dimensions;
-    int row_elements;
-
-    if (!identifier || identifier->kind != T_identifier || !identifier->next ||
-        identifier->next->kind != T_open_square)
-        return false;
-    tail = identifier->next;
-    while (tail && tail->kind == T_open_square) {
-        int depth = 0;
-        for (; tail; tail = tail->next) {
-            if (tail->kind == T_open_square)
-                depth++;
-            else if (tail->kind == T_close_square && --depth == 0) {
-                tail = tail->next;
-                break;
-            }
-        }
-        if (depth)
-            return false;
-        subscript_count++;
-    }
-    if (!tail || (parenthesized && tail->kind != T_close_bracket))
-        return false;
-
-    array = find_var(identifier->literal, parent);
-    if (!array || array->array_dim2 <= 0)
-        return false;
-    dimensions = 2;
-    if (array->array_dim3)
-        dimensions = 3;
-    if (array->array_dim4)
-        dimensions = 4;
-    if (subscript_count > dimensions)
-        return false;
-
-    lex_expect(T_identifier);
-    for (int i = 0; i < subscript_count; i++) {
-        lex_expect(T_open_square);
-        basic_block_t *unevaluated_bb = bb_create(parent);
-        int saved_side_effects = se_idx;
-        read_expr(parent, &unevaluated_bb);
-        read_ternary_operation(parent, &unevaluated_bb);
-        opstack_pop();
-        se_idx = saved_side_effects;
-        lex_expect(T_close_square);
-    }
-    if (parenthesized)
-        lex_expect(T_close_bracket);
-
-    row_elements = 1;
-    if (subscript_count < 2)
-        row_elements *= array->array_dim2;
-    if (subscript_count < 3 && array->array_dim3)
-        row_elements *= array->array_dim3;
-    if (subscript_count < 4 && array->array_dim4)
-        row_elements *= array->array_dim4;
-    var_t *result = require_var(parent);
-    result->init_val = row_elements * array->type->size;
-    result->var_name = gen_name();
-    opstack_push(result);
-    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
-    return true;
 }
 
 void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
@@ -8132,19 +7776,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         return;
     }
 
-    if (read_sizeof_dereference_pointee_array(parent, bb, parenthesized))
-        return;
-    if (read_sizeof_address_dereference_array(parent, bb, parenthesized))
-        return;
     if (read_sizeof_postfix_operand(parent, bb, parenthesized))
-        return;
-    if (read_sizeof_member_array(parent, bb, parenthesized))
-        return;
-    if (read_sizeof_member_array_row(parent, bb, parenthesized))
-        return;
-    if (read_sizeof_dereference_member_array(parent, bb, parenthesized))
-        return;
-    if (read_sizeof_array_row(parent, bb, parenthesized))
         return;
 
     /* The type-name alternative requires parentheses, but C99 also permits a
@@ -12565,6 +12197,45 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
         parent, &else_, false_val, true_val ? true_val->type : NULL,
         false_array && !true_ptr_like);
 
+    if (is_record_object(true_val) || is_record_object(false_val)) {
+        var_t *true_addr;
+        var_t *false_addr;
+        var_t *selected;
+
+        if (!is_record_object(true_val) || !is_record_object(false_val) ||
+            size_var(true_val) != size_var(false_val))
+            error_at("Conditional record operands must have the same type",
+                     cur_token_loc());
+
+        /* A record operand is an object, not a register value, so joining the
+         * two operands as scalars would keep only a truncated prefix. Select
+         * the operand's address instead and copy the chosen object into a
+         * temporary after the join, which dominates every later use.
+         */
+        true_addr = require_ref_var(parent, true_val->type, 0);
+        false_addr = require_ref_var(parent, false_val->type, 0);
+        selected = require_ref_var(parent, true_val->type, 0);
+        true_addr->var_name = gen_name();
+        false_addr->var_name = gen_name();
+        selected->var_name = gen_name();
+        add_insn(parent, then_, OP_address_of, true_addr, true_val, NULL, 0,
+                 NULL);
+        add_insn(parent, else_, OP_address_of, false_addr, false_val, NULL, 0,
+                 NULL);
+        add_insn(parent, then_, OP_assign, selected, true_addr, NULL, 0, NULL);
+        add_insn(parent, else_, OP_assign, selected, false_addr, NULL, 0, NULL);
+        bb_connect(then_, end_ternary, NEXT);
+        bb_connect(else_, end_ternary, NEXT);
+
+        vd = require_typed_var(parent, true_val->type);
+        vd->var_name = gen_name();
+        add_insn(parent, end_ternary, OP_allocat, vd, NULL, NULL, 0, NULL);
+        emit_record_copy_from_address(parent, &end_ternary, vd, selected);
+        opstack_push(vd);
+        bb[0] = end_ternary;
+        return;
+    }
+
     vd = require_var(parent);
     vd->var_name = gen_name();
     if (true_pointee_signature || false_pointee_signature) {
@@ -13473,8 +13144,8 @@ static int read_global_sizeof_expression(block_t *scope)
 
 static int read_const_string_size(void)
 {
-    char buffer[MAX_TOKEN_LEN];
-    char unescaped[MAX_TOKEN_LEN];
+    char buffer[MAX_STRING_LEN];
+    char unescaped[MAX_STRING_LEN];
     int res = 0;
 
     do {
@@ -13491,15 +13162,21 @@ static int read_const_string_size(void)
 
 int read_const_wstring_size(void)
 {
-    int values[MAX_LINE_LEN];
+    int values[MAX_STRING_LEN];
     type_t *wide_type = find_type("wchar_t", true);
-    return (read_wstring_units(values, MAX_LINE_LEN) + 1) * wide_type->size;
+    return (read_wstring_units(values, MAX_STRING_LEN) + 1) * wide_type->size;
 }
 
 int read_primary_constant(block_t *scope)
 {
     /* return signed constant */
     int isneg = 0, res;
+
+    /* This recurses once per nesting level of a constant expression, so the
+     * buffer holds only what is copied into it: a number, a character constant
+     * or an identifier, each at most MAX_TOKEN_LEN. A string is only tested for
+     * and never copied.
+     */
     char buffer[MAX_TOKEN_LEN];
     if (lex_accept(T_minus))
         isneg = 1;
@@ -13531,11 +13208,11 @@ int read_primary_constant(block_t *scope)
                  i++)
                 nested_after = nested_after->next;
         }
-        if (can_scan_sizeof_postfix_extent(scope,
-                                           lex_peek(T_open_bracket, NULL)
-                                               ? cur_token->next->next
+        if (can_scan_sizeof_postfix_extent(
+                scope,
+                lex_peek(T_open_bracket, NULL) ? cur_token->next->next
                                                : cur_token->next,
-                                           lex_peek(T_open_bracket, NULL))) {
+                lex_peek(T_open_bracket, NULL), false)) {
             /* The shared postfix walker has already proved this is an
              * identifier-rooted fixed array extent, so the detached parser can
              * preserve it without a global-prefix spelling table.
@@ -13767,9 +13444,9 @@ int read_primary_constant(block_t *scope)
                    lex_peek(T_wchar, buffer)) {
             read_primary_constant(scope);
             res = TY_int->size;
-        } else if (lex_peek(T_string, buffer)) {
+        } else if (lex_peek(T_string, NULL)) {
             res = read_const_string_size();
-        } else if (lex_peek(T_wstring, buffer)) {
+        } else if (lex_peek(T_wstring, NULL)) {
             res = read_const_wstring_size();
         } else if (lex_peek(T_ampersand, NULL)) {
             read_const_addressed_object(scope, NULL);
@@ -14701,7 +14378,6 @@ bool read_global_assignment_var(var_t *var)
             if (object && object->is_global &&
                 (explicit_address || object->array_size)) {
                 fixed_array_shape_t shape = fixed_array_shape_from_var(object);
-                int array_subscript = 0;
                 var_t *object_addr =
                     require_ref_var(parent, object->type, object->ptr_level);
 
@@ -14740,66 +14416,9 @@ bool read_global_assignment_var(var_t *var)
                              byte_offset, 0, NULL);
                     object_addr = offset_addr;
                 }
-                while (explicit_address) {
-                    if (lex_accept(T_dot)) {
-                        char field_name[MAX_ID_LEN];
-                        var_t *field;
-
-                        lex_ident(T_identifier, field_name);
-                        field = find_member(field_name, object->type);
-                        if (!field)
-                            error_at("Unknown struct or union member",
-                                     cur_token_loc());
-                        object_addr = compute_field_address(parent, &bb,
-                                                            object_addr, field);
-                        object_addr->is_global_address = true;
-                        object = field;
-                        shape = fixed_array_shape_from_var(object);
-                        array_subscript = 0;
-                    } else if (object->array_size &&
-                               lex_accept(T_open_square)) {
-                        int index = read_primary_constant(scope);
-                        int stride =
-                            object->ptr_level ? PTR_SIZE : object->type->size;
-
-                        lex_expect(T_close_square);
-                        stride = fixed_array_shape_stride(
-                            &shape, array_subscript, stride);
-                        object_addr = compute_element_address(
-                            parent, &bb, object_addr, index, stride);
-                        object_addr->is_global_address = true;
-                        array_subscript++;
-                    } else
-                        break;
-                }
-
-                /* An address constant may be offset after an explicitly
-                 * addressed member or element too. Array decay had this
-                 * handling above, but forms such as "&record.items[0] + 1"
-                 * stopped at the plus token. Keep the offset byte-scaled here
-                 * so global setup receives a literal byte offset.
-                 */
-                if (explicit_address &&
-                    (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL))) {
-                    /* read_const_expr accepts the leading binary sign as a
-                     * unary sign here and consumes the entire integer constant
-                     * expression, including grouping and enum constants.
-                     */
-                    int index = read_global_address_offset(scope, parent, bb);
-                    int elem_size =
-                        object->ptr_level ? PTR_SIZE : object->type->size;
-
-                    /* An address of a partially subscripted array retains the
-                     * remaining row dimensions. Its trailing constant offset
-                     * must therefore use the row/plane stride.
-                     */
-                    elem_size = fixed_array_shape_stride(
-                        &shape, array_subscript - 1, elem_size);
-
-                    object_addr = compute_element_address(
-                        parent, &bb, object_addr, index, elem_size);
-                    object_addr->is_global_address = true;
-                }
+                if (explicit_address)
+                    object_addr = read_global_address_designator(
+                        scope, parent, &bb, &object, object_addr);
                 if (incompatible_pointee_callback_conversion(object_addr, var))
                     error_at("incompatible callback slot types in initializer",
                              cur_token_loc());

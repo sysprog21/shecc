@@ -3572,6 +3572,20 @@ void code_generate(void)
              ph2_ir = ph2_ir->next) {
             if (x64_debug)
                 fprintf(stderr, "[x64] emit global op=%d\n", ph2_ir->op);
+
+            /* The initializer runs through a CALL with no frame of its own, and
+             * the slots it spills temporaries to are allocated from the global
+             * data area, which sits behind R15 on this target rather than on
+             * the stack as on the others. Addressing them from RSP wrote past
+             * the top of the stack once an initializer was large enough to
+             * spill.
+             */
+            if (ph2_ir->op == OP_load)
+                ph2_ir->op = OP_global_load;
+            else if (ph2_ir->op == OP_store)
+                ph2_ir->op = OP_global_store;
+            else if (ph2_ir->op == OP_address_of)
+                ph2_ir->op = OP_global_address_of;
             emit_next_ir = NULL;
             emit_ph2_ir(ph2_ir);
         }
