@@ -1994,13 +1994,13 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
          * the save/restore around it: SAR r64, imm8 is one instruction.
          */
         if (src1_const_known && src1_const >= 0 && src1_const < 64) {
-            if (ph2_ir->is_unsigned)
+            if (ph2_ir->src0_is_unsigned)
                 emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
             else
                 emit_mov_reg(rd, rs1);
-            emit_shift_imm(rd,
-                           ph2_ir->is_unsigned ? SHIFT_EXT_SHR : SHIFT_EXT_SAR,
-                           src1_const);
+            emit_shift_imm(
+                rd, ph2_ir->src0_is_unsigned ? SHIFT_EXT_SHR : SHIFT_EXT_SAR,
+                src1_const);
             if (ph2_ir->size_bytes <= 4 &&
                 !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
                 wrap_to_int(rd, ph2_ir->is_pointer);
@@ -2026,7 +2026,7 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
         emit_byte(REX_W | REX_B); /* SAR/SHR r11, cl */
         emit_byte(0xD3);
-        emit_byte(modrm(MOD_DIRECT, ph2_ir->is_unsigned ? 5 : 7, 3));
+        emit_byte(modrm(MOD_DIRECT, ph2_ir->src0_is_unsigned ? 5 : 7, 3));
         emit_byte(REX_W | REX_R); /* MOV rcx, r10 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 1));

@@ -45,12 +45,168 @@ int unevaluated_expression_depth = 0;
  * pointee. It never introduces a floating value into IR or an ABI boundary.
  */
 bool parsing_sizeof_function_signature = false;
+static bool parsing_block_typedef_declarator = false;
+static bool parsing_for_initializer_declaration = false;
+static block_t *global_constant_initializer_scope = NULL;
+
+/* Keep the current storage contract explicit while shape handling is migrated
+ * to helpers. Later rank expansion changes this one limit and its consumers,
+ * rather than duplicating bound ordering and products at every call site.
+ */
+#define MAX_FIXED_ARRAY_RANK 4
+
+typedef struct fixed_array_shape {
+    int rank;
+    int bounds[MAX_FIXED_ARRAY_RANK];
+} fixed_array_shape_t;
 
 /* Forward declarations */
 source_location_t *cur_token_loc(void);
 source_location_t *next_token_loc(void);
 
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
+static fixed_array_shape_t fixed_array_shape_from_type(const type_t *type)
+{
+    fixed_array_shape_t shape = {0};
+    int trailing = 1;
+
+    if (!type->array_size)
+        return shape;
+    if (type->array_dim2)
+        trailing *= type->array_dim2;
+    if (type->array_dim3)
+        trailing *= type->array_dim3;
+    if (type->array_dim4)
+        trailing *= type->array_dim4;
+    shape.bounds[shape.rank++] = type->array_size / trailing;
+    if (type->array_dim2)
+        shape.bounds[shape.rank++] = type->array_dim2;
+    if (type->array_dim3)
+        shape.bounds[shape.rank++] = type->array_dim3;
+    if (type->array_dim4)
+        shape.bounds[shape.rank++] = type->array_dim4;
+    return shape;
+}
+
+static fixed_array_shape_t fixed_array_shape_from_var(const var_t *var)
+{
+    type_t shape = {0};
+
+    shape.array_size = var->array_size;
+    shape.array_dim2 = var->array_dim2;
+    shape.array_dim3 = var->array_dim3;
+    shape.array_dim4 = var->array_dim4;
+    return fixed_array_shape_from_type(&shape);
+}
+
+static fixed_array_shape_t fixed_array_shape_from_pointee_type(
+    const type_t *type)
+{
+    type_t shape = {0};
+
+    shape.array_size = type->pointee_array_size;
+    shape.array_dim2 = type->pointee_array_dim2;
+    shape.array_dim3 = type->pointee_array_dim3;
+    shape.array_dim4 = type->pointee_array_dim4;
+    return fixed_array_shape_from_type(&shape);
+}
+
+static fixed_array_shape_t fixed_array_shape_from_pointee_var(const var_t *var)
+{
+    type_t shape = {0};
+
+    shape.array_size = var->pointee_array_size;
+    shape.array_dim2 = var->pointee_array_dim2;
+    shape.array_dim3 = var->pointee_array_dim3;
+    shape.array_dim4 = var->pointee_array_dim4;
+    return fixed_array_shape_from_type(&shape);
+}
+
+static void fixed_array_shape_to_type(type_t *type,
+                                      const fixed_array_shape_t *shape)
+{
+    type->array_size = shape->rank ? shape->bounds[0] : 0;
+    type->array_dim2 = type->array_dim3 = type->array_dim4 = 0;
+    for (int i = 1; i < shape->rank; i++) {
+        type->array_size *= shape->bounds[i];
+        if (i == 1)
+            type->array_dim2 = shape->bounds[i];
+        else if (i == 2)
+            type->array_dim3 = shape->bounds[i];
+        else
+            type->array_dim4 = shape->bounds[i];
+    }
+}
+
+static void fixed_array_shape_to_var(var_t *var,
+                                     const fixed_array_shape_t *shape)
+{
+    var->array_size = shape->rank ? shape->bounds[0] : 0;
+    var->array_dim2 = var->array_dim3 = var->array_dim4 = 0;
+    for (int i = 1; i < shape->rank; i++) {
+        var->array_size *= shape->bounds[i];
+        if (i == 1)
+            var->array_dim2 = shape->bounds[i];
+        else if (i == 2)
+            var->array_dim3 = shape->bounds[i];
+        else
+            var->array_dim4 = shape->bounds[i];
+    }
+}
+
+static void fixed_array_shape_to_pointee_var(var_t *var,
+                                             const fixed_array_shape_t *shape)
+{
+    var->pointee_array_size = shape->rank ? shape->bounds[0] : 0;
+    var->pointee_array_dim2 = var->pointee_array_dim3 =
+        var->pointee_array_dim4 = 0;
+    for (int i = 1; i < shape->rank; i++) {
+        var->pointee_array_size *= shape->bounds[i];
+        if (i == 1)
+            var->pointee_array_dim2 = shape->bounds[i];
+        else if (i == 2)
+            var->pointee_array_dim3 = shape->bounds[i];
+        else
+            var->pointee_array_dim4 = shape->bounds[i];
+    }
+}
+
+static fixed_array_shape_t fixed_array_shape_prepend(
+    const fixed_array_shape_t *outer,
+    const fixed_array_shape_t *inner)
+{
+    fixed_array_shape_t shape = {0};
+
+    if (outer->rank + inner->rank > MAX_FIXED_ARRAY_RANK)
+        error_at("Array declarators support at most four dimensions",
+                 cur_token_loc());
+    for (int i = 0; i < outer->rank; i++)
+        shape.bounds[shape.rank++] = outer->bounds[i];
+    for (int i = 0; i < inner->rank; i++)
+        shape.bounds[shape.rank++] = inner->bounds[i];
+    return shape;
+}
+
+static int fixed_array_shape_stride(const fixed_array_shape_t *shape,
+                                    int subscript_depth,
+                                    int element_size);
+
+static void compose_block_typedef_array(type_t *alias,
+                                        type_t *base,
+                                        var_t *decl)
+{
+    fixed_array_shape_t base_shape = fixed_array_shape_from_type(base);
+    fixed_array_shape_t decl_shape = fixed_array_shape_from_var(decl);
+    fixed_array_shape_t shape;
+
+    shape = fixed_array_shape_prepend(&decl_shape, &base_shape);
+    fixed_array_shape_to_type(alias, &shape);
+    alias->array_element_ptr_level = decl->ptr_level;
+    alias->array_element_type = base;
+}
+
+basic_block_t *handle_block_typedef_statement(block_t *parent,
+                                              basic_block_t *bb);
 void perform_side_effect(block_t *parent, basic_block_t *bb);
 bool read_assignment_expression(block_t *parent, basic_block_t **bb);
 bool is_null_pointer_constant(var_t *value);
@@ -485,6 +641,7 @@ type_t *pointee_type_from_pointer_typedef(type_t *type)
  * based on the represented type. Records retain nominal identity.
  */
 bool compatible_function_signature(const func_t *left, const func_t *right);
+func_t *find_visible_func(char *name, block_t *scope);
 var_t *materialize_function_designator(block_t *parent,
                                        basic_block_t **bb,
                                        var_t *value);
@@ -498,10 +655,39 @@ var_t *emit_indirect_call_result(var_t *callee,
                                  block_t *parent,
                                  basic_block_t **bb);
 
+static int callback_pointer_indirection(const var_t *var)
+{
+    if (!var || !var->is_func)
+        return 0;
+    if (var->parenthesized_function_pointer_level)
+        return var->parenthesized_function_pointer_level;
+
+    /* A non-direct function typedef denotes the established one-pointer
+     * callback object representation.
+     */
+    if (var->type && var->type->func_signature &&
+        !var->type->is_direct_function_type)
+        return 1;
+    return 0;
+}
+
 bool compatible_decl_type(const type_t *left, const type_t *right)
 {
     if (left == right)
         return true;
+
+    /* A callback-pointer typedef may use a distinct descriptor at block and
+     * file scope while still denoting the same pointer-to-function type.
+     */
+    if (left && right && left->func_signature && right->func_signature &&
+        !left->is_direct_function_type && !right->is_direct_function_type)
+        return left->size == right->size &&
+               left->ptr_level == right->ptr_level &&
+               left->pointer_const_mask == right->pointer_const_mask &&
+               left->is_const_qualified == right->is_const_qualified &&
+               left->is_volatile_qualified == right->is_volatile_qualified &&
+               compatible_function_signature(left->func_signature,
+                                             right->func_signature);
     if (!left || !right || left->base_type != right->base_type ||
         left->size != right->size || left->ptr_level != right->ptr_level ||
         left->is_unsigned != right->is_unsigned ||
@@ -533,17 +719,28 @@ bool compatible_function_param_decl(const var_t *left, const var_t *right)
     bool left_points_to_value;
     bool right_points_to_value;
 
-    if (!left || !right || left->is_func != right->is_func ||
-        !compatible_decl_type(left->type, right->type) ||
-        left->ptr_level != right->ptr_level)
+    if (!left || !right || left->is_func != right->is_func)
         return false;
 
     if (left->is_func) {
         if (!left->func_signature || !right->func_signature)
             return false;
-        return compatible_function_signature(left->func_signature,
+        return callback_pointer_indirection(left) ==
+                   callback_pointer_indirection(right) &&
+               compatible_function_signature(left->func_signature,
                                              right->func_signature);
     }
+
+    if (left->pointee_func_signature || right->pointee_func_signature) {
+        if (!left->pointee_func_signature || !right->pointee_func_signature ||
+            !compatible_function_signature(left->pointee_func_signature,
+                                           right->pointee_func_signature))
+            return false;
+    }
+
+    if (!compatible_decl_type(left->type, right->type) ||
+        left->ptr_level != right->ptr_level)
+        return false;
 
     left_points_to_value = left->ptr_level || left->type->ptr_level;
     right_points_to_value = right->ptr_level || right->type->ptr_level;
@@ -602,6 +799,22 @@ bool compatible_function_signature(const func_t *left, const func_t *right)
                                             &right->param_defs[i]))
             return false;
     return true;
+}
+
+/* Function linkage and ordinary-identifier scope are separate in C. A prototype
+ * first introduced in a block stays in the translation-unit table for
+ * compatibility with a later definition, but expressions may name it only while
+ * its lexical function alias is visible.
+ */
+func_t *find_visible_func(char *name, block_t *scope)
+{
+    func_t *func = find_func(name);
+    var_t *binding;
+
+    if (!func || !func->is_block_scope_only_declaration)
+        return func;
+    binding = find_var(name, scope);
+    return binding && binding->is_extern_function_alias ? func : NULL;
 }
 
 /* An inline record pointer typedef stores PTR_SIZE in type->size, while its
@@ -1397,6 +1610,42 @@ bool incompatible_character_pointer_conversion(const var_t *from,
            !compatible_decl_type(from_pointee, to_pointee);
 }
 
+bool incompatible_pointee_callback_conversion(const var_t *from,
+                                              const var_t *to)
+{
+    func_t *from_signature;
+    func_t *to_signature;
+
+    if (!from || !to)
+        return false;
+    if (is_null_pointer_constant((var_t *) from) ||
+        (!from->pointee_func_signature && !from->func_signature &&
+         !(from->ptr_level || from->type->ptr_level) && !from->is_func &&
+         !from->init_val && !from->init_val_hi))
+        return false;
+    from_signature = from->pointee_func_signature;
+    to_signature = to->pointee_func_signature;
+
+    /* An array parameter of callbacks is adjusted to a callback slot. The
+     * parser keeps its element callback signature in `func_signature` while
+     * retaining the written array bound, rather than in the ordinary slot field
+     * used by a spelled `(**slot)` declarator.
+     */
+    if (!to_signature && to->func_signature &&
+        (to->array_size || to->has_unsized_array))
+        to_signature = to->func_signature;
+    if (!from_signature && effective_pointer_depth(from) > 0 && from->type &&
+        from->type->func_signature && !from->type->is_direct_function_type)
+        from_signature = from->type->func_signature;
+    if (!to_signature && effective_pointer_depth(to) > 0 && to->type &&
+        to->type->func_signature && !to->type->is_direct_function_type)
+        to_signature = to->type->func_signature;
+    if (!(from_signature || to_signature))
+        return false;
+    return !from_signature || !to_signature ||
+           !compatible_function_signature(from_signature, to_signature);
+}
+
 void read_parameter_list_decl(func_t *func, bool anon);
 void read_indirect_call(var_t *callee, block_t *parent, basic_block_t **bb);
 var_t *integer_promote_operand(block_t *parent, basic_block_t **bb, var_t *var);
@@ -1568,6 +1817,9 @@ void emit_object_assignment(block_t *parent,
 var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
 {
     var_t *val = NULL;
+    block_t *scope = global_constant_initializer_scope
+                         ? global_constant_initializer_scope
+                         : parent;
     bool address_dereference =
         global_function_address_dereference_starts_here();
     token_t *address_dereference_identifier = NULL;
@@ -1577,6 +1829,9 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
     if (address_dereference) {
         address_dereference_identifier =
             consume_global_function_address_dereference();
+        if (!find_visible_func(address_dereference_identifier->literal, scope))
+            error_at("Function address requires a visible declaration",
+                     cur_token_loc());
         val = require_func_symbol_var(parent);
         val->var_name = intern_string(address_dereference_identifier->literal);
         val->is_func = true;
@@ -1594,7 +1849,7 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         char name[MAX_ID_LEN];
 
         if (lex_peek(T_identifier, name)) {
-            func_t *func = find_func(name);
+            func_t *func = find_visible_func(name, scope);
             if (func) {
                 lex_expect(T_identifier);
                 if (grouped_function_designator)
@@ -1605,33 +1860,20 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
                 return val;
             }
             if (explicit_address) {
-                var_t *object = find_var(name, GLOBAL_BLOCK);
+                /* A block-scope static initializer lowers through this global
+                 * constant path, yet its names, subscripts, and offsets resolve
+                 * in the declaration's lexical scope. The is_global test still
+                 * rejects the address of an automatic object.
+                 */
+                var_t *object = find_var(name, scope);
 
                 if (object && object->is_global) {
-                    int array_bounds[4] = {0, 0, 0, 0};
-                    int array_dims = 0;
+                    fixed_array_shape_t shape =
+                        fixed_array_shape_from_var(object);
                     int subscript_count = 0;
                     int element_size =
                         object->ptr_level ? PTR_SIZE : object->type->size;
 
-                    if (object->array_size) {
-                        int inner_size = 1;
-
-                        if (object->array_dim2)
-                            inner_size *= object->array_dim2;
-                        if (object->array_dim3)
-                            inner_size *= object->array_dim3;
-                        if (object->array_dim4)
-                            inner_size *= object->array_dim4;
-                        array_bounds[array_dims++] =
-                            object->array_size / inner_size;
-                        if (object->array_dim2)
-                            array_bounds[array_dims++] = object->array_dim2;
-                        if (object->array_dim3)
-                            array_bounds[array_dims++] = object->array_dim3;
-                        if (object->array_dim4)
-                            array_bounds[array_dims++] = object->array_dim4;
-                    }
                     lex_expect(T_identifier);
                     val = require_ref_var(parent, object->type,
                                           object->ptr_level);
@@ -1644,15 +1886,14 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
                         int stride = element_size;
 
                         if (!object->array_size ||
-                            subscript_count >= array_dims)
+                            subscript_count >= shape.rank)
                             error_at(
                                 "Subscripted global address needs an "
                                 "array object",
                                 cur_token_loc());
-                        for (int dim = subscript_count + 1; dim < array_dims;
-                             dim++)
-                            stride *= array_bounds[dim];
-                        index = read_const_expr(parent);
+                        stride = fixed_array_shape_stride(
+                            &shape, subscript_count, element_size);
+                        index = read_const_expr(scope);
                         lex_expect(T_close_square);
                         val = compute_element_address(parent, bb, val, index,
                                                       stride);
@@ -1668,16 +1909,16 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
                     }
                     if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL)) {
                         int index =
-                            read_global_address_offset(parent, parent, *bb);
-                        int stride = element_size;
+                            read_global_address_offset(scope, parent, *bb);
+                        int stride;
 
                         /* After a partial multidimensional subscript, the
                          * address still points at the remaining row/plane. C
                          * pointer arithmetic advances by that complete
                          * pointed-to object, not by its scalar leaf.
                          */
-                        for (int dim = subscript_count; dim < array_dims; dim++)
-                            stride *= array_bounds[dim];
+                        stride = fixed_array_shape_stride(
+                            &shape, subscript_count - 1, element_size);
                         val = compute_element_address(parent, bb, val, index,
                                                       stride);
                         val->ptr_level = object->ptr_level + 1;
@@ -1688,7 +1929,7 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
             }
         }
         if (explicit_address)
-            error_at("Expected function after '&' in global initializer",
+            error_at("Expected a global object or function after '&'",
                      cur_token_loc());
         error_at("Global aggregate initializer requires a constant value",
                  cur_token_loc());
@@ -2886,6 +3127,9 @@ void parse_array_init(var_t *var,
 
     if (parent == GLOBAL_BLOCK && var->scope && var->scope != GLOBAL_BLOCK)
         initializer_scope = var->scope;
+    block_t *saved_initializer_scope = global_constant_initializer_scope;
+    if (parent == GLOBAL_BLOCK)
+        global_constant_initializer_scope = initializer_scope;
 
     /* Elements of a pointer array are pointer-sized. Using the base type's
      * width strided "char *a[2] = {...}" by one byte, so every element but the
@@ -3081,7 +3325,8 @@ void parse_array_init(var_t *var,
                  * initializer on a local worked.
                  */
                 if (parent == GLOBAL_BLOCK &&
-                    (grouped_global_function_designator_starts_here(true) ||
+                    (lex_peek(T_ampersand, NULL) ||
+                     grouped_global_function_designator_starts_here(true) ||
                      global_function_address_dereference_starts_here())) {
                     val = parse_global_constant_value(parent, bb);
                 } else {
@@ -3089,7 +3334,7 @@ void parse_array_init(var_t *var,
                     char global_token[MAX_ID_LEN];
                     bool function_initializer =
                         lex_peek(T_identifier, initializer_name) &&
-                        find_func(initializer_name);
+                        find_visible_func(initializer_name, initializer_scope);
                     var_t *object_constant = NULL;
 
                     if (parent == GLOBAL_BLOCK &&
@@ -3121,7 +3366,7 @@ void parse_array_init(var_t *var,
                                 find_scoped_constant(token, parent);
                             bool function_constant =
                                 lex_peek(T_identifier, token) &&
-                                find_func(token);
+                                find_visible_func(token, initializer_scope);
 
                             if (!lex_peek(T_numeric, NULL) &&
                                 !lex_peek(T_minus, NULL) &&
@@ -3140,135 +3385,9 @@ void parse_array_init(var_t *var,
                                     next_token_loc());
                         }
 
-                        /* `&function` is an address constant, but the ordinary
-                         * expression reader only treats a bare function
-                         * designator as a value. Preserve the symbol through
-                         * global lowering so its final code address can be
-                         * relocated.
-                         */
-                        if (parent == GLOBAL_BLOCK && lex_accept(T_ampersand)) {
-                            char function_name[MAX_ID_LEN];
-
-                            if (lex_peek(T_identifier, function_name) &&
-                                find_func(function_name)) {
-                                lex_ident(T_identifier, function_name);
-                                val = require_func_symbol_var(parent);
-                                val->is_func = true;
-                                val->var_name = intern_string(function_name);
-                            } else {
-                                int index = 0;
-                                int address_elem_size;
-
-                                if (lex_peek(T_identifier, global_token))
-                                    object_constant = find_var(
-                                        global_token, initializer_scope);
-                                if (!object_constant ||
-                                    !object_constant->is_global)
-                                    error_at(
-                                        "Global array address initializer "
-                                        "requires a declared global object "
-                                        "or function",
-                                        next_token_loc());
-                                address_elem_size =
-                                    object_constant->ptr_level
-                                        ? PTR_SIZE
-                                        : object_constant->type->size;
-                                if (object_constant->array_dim2)
-                                    address_elem_size *=
-                                        object_constant->array_dim2;
-                                if (object_constant->array_dim3)
-                                    address_elem_size *=
-                                        object_constant->array_dim3;
-                                if (object_constant->array_dim4)
-                                    address_elem_size *=
-                                        object_constant->array_dim4;
-
-                                val = require_ref_var(
-                                    parent, object_constant->type,
-                                    object_constant->ptr_level);
-                                val->var_name = gen_name();
-                                val->is_global_address = true;
-                                lex_ident(T_identifier, global_token);
-                                add_insn(parent, *bb, OP_address_of, val,
-                                         object_constant, NULL, 0, NULL);
-                                if (object_constant->array_size) {
-                                    int array_bounds[4] = {0, 0, 0, 0};
-                                    int array_dims = 0;
-                                    int subscript_count = 0;
-                                    int inner_size = 1;
-
-                                    if (object_constant->array_dim2)
-                                        inner_size *=
-                                            object_constant->array_dim2;
-                                    if (object_constant->array_dim3)
-                                        inner_size *=
-                                            object_constant->array_dim3;
-                                    if (object_constant->array_dim4)
-                                        inner_size *=
-                                            object_constant->array_dim4;
-                                    array_bounds[array_dims++] =
-                                        object_constant->array_size /
-                                        inner_size;
-                                    if (object_constant->array_dim2)
-                                        array_bounds[array_dims++] =
-                                            object_constant->array_dim2;
-                                    if (object_constant->array_dim3)
-                                        array_bounds[array_dims++] =
-                                            object_constant->array_dim3;
-                                    if (object_constant->array_dim4)
-                                        array_bounds[array_dims++] =
-                                            object_constant->array_dim4;
-                                    while (lex_accept(T_open_square)) {
-                                        int stride =
-                                            object_constant->ptr_level
-                                                ? PTR_SIZE
-                                                : object_constant->type->size;
-
-                                        if (subscript_count >= array_dims)
-                                            error_at(
-                                                "Subscripted global address "
-                                                "needs an array object",
-                                                cur_token_loc());
-                                        for (int dim = subscript_count + 1;
-                                             dim < array_dims; dim++)
-                                            stride *= array_bounds[dim];
-                                        index =
-                                            read_const_expr(initializer_scope);
-                                        lex_expect(T_close_square);
-                                        val = compute_element_address(
-                                            parent, bb, val, index, stride);
-                                        val->ptr_level =
-                                            object_constant->ptr_level + 1;
-                                        val->is_global_address = true;
-                                        subscript_count++;
-                                    }
-                                } else if (lex_accept(T_open_square)) {
-                                    error_at(
-                                        "Subscripted global address needs an "
-                                        "array object",
-                                        cur_token_loc());
-                                }
-                                if (lex_accept(T_plus)) {
-                                    index = read_const_expr(initializer_scope);
-                                    val = compute_element_address(
-                                        parent, bb, val, index,
-                                        address_elem_size);
-                                    val->ptr_level =
-                                        object_constant->ptr_level + 1;
-                                    val->is_global_address = true;
-                                } else if (lex_accept(T_minus)) {
-                                    index = read_const_expr(initializer_scope);
-                                    val = compute_element_address(
-                                        parent, bb, val, -index,
-                                        address_elem_size);
-                                    val->ptr_level =
-                                        object_constant->ptr_level + 1;
-                                    val->is_global_address = true;
-                                }
-                            }
-                        } else if (parent == GLOBAL_BLOCK && object_constant &&
-                                   object_constant->is_global &&
-                                   object_constant->array_size) {
+                        if (parent == GLOBAL_BLOCK && object_constant &&
+                            object_constant->is_global &&
+                            object_constant->array_size) {
                             int stride = (object_constant->ptr_level ||
                                           object_constant->is_func)
                                              ? PTR_SIZE
@@ -3315,6 +3434,25 @@ void parse_array_init(var_t *var,
             if (is_implicit && count >= MAX_IMPLICIT_ARRAY)
                 error_at("Too many elements in array initializer",
                          next_token_loc());
+
+            if (val && var->type->array_element_pointee_func_signature) {
+                /* The array descriptor is not an element descriptor. Build the
+                 * slot type that this scalar initializer is about to store so
+                 * callback prototype validation remains elementwise.
+                 */
+                var_t element_target = {0};
+
+                element_target.type = var->type;
+                element_target.ptr_level = var->type->array_element_ptr_level;
+                element_target.pointee_func_signature =
+                    var->type->array_element_pointee_func_signature;
+                if (incompatible_pointee_callback_conversion(val,
+                                                             &element_target))
+                    error_at(
+                        "incompatible callback slot types in array "
+                        "initializer",
+                        cur_token_loc());
+            }
 
             if (val && emit_code && (is_implicit || count < var->array_size)) {
                 /* Keep a function symbol intact until OP_address_of_func can
@@ -3379,6 +3517,7 @@ void parse_array_init(var_t *var,
         var->array_size = inferred_size;
         var->has_unsized_array = false;
     }
+    global_constant_initializer_scope = saved_initializer_scope;
 }
 
 void parse_array_compound_literal(var_t *var,
@@ -3739,7 +3878,7 @@ int read_const_sizeof_type(block_t *scope)
                        lex_accept(T_restrict)) {
                 ;
             } else if (lex_peek(T_identifier, token)) {
-                type_t *candidate = find_type(token, true);
+                type_t *candidate = find_visible_type(token, scope);
 
                 if (!candidate)
                     break;
@@ -3877,12 +4016,57 @@ int read_const_sizeof_type(block_t *scope)
     lex_expect(T_close_bracket);
     if (ptr_level)
         return PTR_SIZE;
+    if (type == TY_void)
+        error_at("sizeof cannot be applied to void", cur_token_loc());
+    if (type->is_direct_function_type)
+        error_at("sizeof(function) is invalid", cur_token_loc());
+    if (!type->size && (!type->base_struct || !type->base_struct->size))
+        error_at("sizeof cannot be applied to an incomplete type",
+                 cur_token_loc());
+    if (!array_size && !ptr_level && type->array_size)
+        array_size = type->array_size;
     if (array_size)
         return array_size *
                (array_element_size ? array_element_size : type->size);
     if (type->size)
         return type->size;
     return type->base_struct->size;
+}
+
+/* Return the row-major offset contributed by a fixed terminal array member in
+ * offsetof. A one-past designator is valid only for the final dimension.
+ */
+static int read_offsetof_array_subscripts(var_t *field, block_t *scope)
+{
+    int offset = 0;
+    fixed_array_shape_t shape;
+    int dimensions;
+
+    if (!lex_accept(T_open_square))
+        return 0;
+    if (field->array_size <= 0)
+        error_at("offsetof subscript requires a fixed array member",
+                 cur_token_loc());
+    shape = fixed_array_shape_from_var(field);
+    dimensions = shape.rank;
+    for (int dim = 0;; dim++) {
+        int index = read_const_expr(scope);
+
+        lex_expect(T_close_square);
+        if (index < 0 || index > shape.bounds[dim])
+            error_at("offsetof array subscript is out of bounds",
+                     cur_token_loc());
+        offset += index * fixed_array_shape_stride(&shape, dim, 1) *
+                  field->type->size;
+        if (!lex_accept(T_open_square))
+            return offset;
+        if (dim + 1 == dimensions)
+            error_at("offsetof subscript exceeds array dimensions",
+                     cur_token_loc());
+        if (index == shape.bounds[dim])
+            error_at("offsetof one-past array row cannot be subscripted",
+                     cur_token_loc());
+    }
 }
 
 int read_const_expr_operand(block_t *scope)
@@ -3954,6 +4138,7 @@ int read_const_expr_operand(block_t *scope)
                 if (!field)
                     error_at("Unknown record member", cur_token_loc());
                 offset += field->offset;
+                offset += read_offsetof_array_subscripts(field, scope);
                 record = field->type;
                 has_nested_member = lex_accept(T_dot);
                 if (has_nested_member &&
@@ -4041,11 +4226,15 @@ void read_inner_var_decl(var_t *vd,
 {
     /* Preserve typedef pointer level - don't reset if already inherited */
     vd->init_val = 0;
+    vd->has_direct_array_declarator = false;
+    vd->has_direct_pointee_array_declarator = false;
 
-    /* Declarator continuations inherit base metadata. A new suffix must not
-     * retain a fourth bound from an earlier declarator.
+    /* A plain typedef alias inherits every recorded bound, including the fourth
+     * one. Fresh declarators start with no bound metadata; a derived suffix is
+     * later composed against its base by the declaration path.
      */
-    vd->array_dim4 = 0;
+    if (!vd->type || !vd->type->array_size)
+        vd->array_dim4 = 0;
     if (is_param) {
         /* However, if the parsed variable is a function parameter, reset its
          * pointer level to zero.
@@ -4081,14 +4270,11 @@ void read_inner_var_decl(var_t *vd,
      * allocation loads p's value and postfix indexing still advances a row.
      */
     if (vd->ptr_level && vd->type && vd->type->array_size) {
-        vd->pointee_array_size = vd->type->array_size;
-        vd->pointee_array_dim2 = vd->type->array_dim2;
-        vd->pointee_array_dim3 = vd->type->array_dim3;
-        vd->pointee_array_dim4 = vd->type->array_dim4;
-        vd->array_size = 0;
-        vd->array_dim2 = 0;
-        vd->array_dim3 = 0;
-        vd->array_dim4 = 0;
+        fixed_array_shape_t shape = fixed_array_shape_from_type(vd->type);
+        fixed_array_shape_t empty_shape = {0};
+
+        fixed_array_shape_to_pointee_var(vd, &shape);
+        fixed_array_shape_to_var(vd, &empty_shape);
     }
 
     /* is it function pointer declaration? */
@@ -4101,13 +4287,34 @@ void read_inner_var_decl(var_t *vd,
             lex_expect(T_asterisk);
             nested_ptr_level++;
             while (true) {
-                if (lex_accept(T_const))
+                if (lex_accept(T_const)) {
+                    vd->parenthesized_function_pointer_const = true;
+                    if (nested_ptr_level == 2)
+                        vd->parenthesized_function_pointer_outer_const = true;
+                    else
+                        vd->parenthesized_function_pointer_inner_qualified =
+                            true;
                     vd->is_const_pointer = true;
-                else if (lex_accept(T_volatile))
+                    if (vd->ptr_level + nested_ptr_level <= 32)
+                        vd->pointer_const_mask |=
+                            1U << (vd->ptr_level + nested_ptr_level - 1);
+                } else if (lex_accept(T_volatile)) {
+                    if (nested_ptr_level == 2)
+                        vd->parenthesized_function_pointer_outer_volatile =
+                            true;
+                    else
+                        vd->parenthesized_function_pointer_inner_qualified =
+                            true;
                     vd->is_volatile = true;
-                else if (lex_accept(T_restrict))
-                    ; /* restrict is an aliasing contract, not storage state. */
-                else
+                } else if (lex_accept(T_restrict)) {
+                    vd->parenthesized_function_pointer_restrict = true;
+                    if (nested_ptr_level == 2)
+                        vd->parenthesized_function_pointer_outer_restrict =
+                            true;
+                    else
+                        vd->parenthesized_function_pointer_inner_qualified =
+                            true;
+                } else
                     break;
             }
         } while (lex_peek(T_asterisk, NULL));
@@ -4192,9 +4399,18 @@ void read_inner_var_decl(var_t *vd,
         if (lex_peek(T_open_square, NULL)) {
             int dims = 0;
 
+            /* The nested stars make this a pointer-to-array. Preserve whether
+             * its array element was plain void before adding them; a typedef or
+             * explicit pointer to void is a valid element.
+             */
+            bool void_array_element = vd->type &&
+                                      vd->type->base_type == TYPE_void &&
+                                      !effective_pointer_depth(vd);
+
             vd->ptr_level += nested_ptr_level;
             vd->pointee_array_element_ptr_level =
                 vd->ptr_level - nested_ptr_level;
+            vd->has_direct_pointee_array_declarator = true;
             while (lex_accept(T_open_square)) {
                 int bound;
 
@@ -4221,6 +4437,9 @@ void read_inner_var_decl(var_t *vd,
                 lex_expect(T_close_square);
                 dims++;
             }
+            if (dims && void_array_element)
+                error_at("void type cannot be an array element",
+                         cur_token_loc());
             return;
         }
 
@@ -4234,6 +4453,37 @@ void read_inner_var_decl(var_t *vd,
         read_parameter_list_decl(func, true);
         vd->func_signature = func;
         vd->is_func = true;
+        vd->parenthesized_function_pointer_level = nested_ptr_level;
+        if (nested_ptr_level == 2) {
+            /* `int (**slot)(int)` is an ordinary pointer object whose pointee
+             * is the compact one-pointer callback representation. Keep that
+             * outer object pointer in var_t; the final unary dereference
+             * restores the callback signature before a call.
+             */
+            if (vd->parenthesized_function_pointer_inner_qualified)
+                error_at(
+                    "inner callback-slot pointer qualifiers are not yet "
+                    "supported",
+                    cur_token_loc());
+            if (vd->parenthesized_function_pointer_restrict &&
+                !vd->parenthesized_function_pointer_outer_restrict)
+                error_at("callback-slot restrict typedef is not yet supported",
+                         cur_token_loc());
+
+            /* The second star is the outer slot pointer. After collapsing the
+             * compact callback representation to one retained pointer level,
+             * move that star's const bit from level two to level one.
+             */
+            if (vd->parenthesized_function_pointer_outer_const) {
+                vd->pointer_const_mask &= ~2U;
+                vd->pointer_const_mask |= 1U;
+                vd->is_const_pointer = true;
+            }
+            vd->ptr_level += nested_ptr_level - 1;
+            vd->pointee_func_signature = vd->func_signature;
+            vd->func_signature = NULL;
+            vd->is_func = false;
+        }
     } else {
         /* Parameter declarations may use an abstract declarator in a prototype,
          * but a spelled identifier still has to be consumed even when callers
@@ -4268,7 +4518,26 @@ void read_inner_var_decl(var_t *vd,
         bool first_dim_empty = false;
         int dims = 0;
 
+        /* Preserve the element shape before an unsized parameter array is
+         * adjusted to a pointer. Arrays of void pointers remain valid.
+         */
+        bool void_array_element = vd->type &&
+                                  vd->type->base_type == TYPE_void &&
+                                  !effective_pointer_depth(vd);
+
+        /* A block typedef's base array shape is retained in vd->type for
+         * compose_block_typedef_array(). A new direct suffix contributes only
+         * its own bounds; otherwise inherited inner bounds are appended twice
+         * when aliases are composed.
+         */
+        if (parsing_block_typedef_declarator && vd->type &&
+            vd->type->array_size && lex_peek(T_open_square, NULL)) {
+            vd->array_size = 0;
+            vd->array_dim2 = vd->array_dim3 = vd->array_dim4 = 0;
+        }
+
         for (int dim = 0; lex_accept(T_open_square); dim++) {
+            vd->has_direct_array_declarator = true;
             bool parameter_static_bound = false;
             bool parameter_const_bound = false;
 
@@ -4358,6 +4627,14 @@ void read_inner_var_decl(var_t *vd,
             vd->ptr_level++;
         }
 
+        /* Parameter adjustment turns `void values[]` into a pointer-shaped
+         * declarator, but C99 still forbids void as an array element type. The
+         * pre-suffix shape distinguishes it from an array of void pointers,
+         * including a pointer typedef.
+         */
+        if (dims && void_array_element)
+            error_at("void type cannot be an array element", cur_token_loc());
+
         /* C99 permits an object of a flexible-record type, but not an array
          * whose elements have no fixed extent. An explicitly pointer-typed
          * element remains valid, including through a pointer typedef.
@@ -4369,11 +4646,49 @@ void read_inner_var_decl(var_t *vd,
                 "element",
                 cur_token_loc());
 
+        /* The ordinary declarator spelling `result name(parameters)` is a
+         * function type just as the parenthesized pointer form above is. Keep
+         * this syntax-only signature on the declaration; block typedefs can
+         * then bind a direct function alias without creating an object or IR.
+         */
+        if ((parsing_block_typedef_declarator ||
+             (strict_c99 && parsing_for_initializer_declaration)) &&
+            lex_peek(T_open_bracket, NULL) && !vd->array_size &&
+            !vd->has_unsized_array) {
+            func_t *func = arena_alloc_func();
+            bool saved_block_typedef_declarator =
+                parsing_block_typedef_declarator;
+
+            memcpy(&func->return_def, vd, sizeof(var_t));
+            func->returns_aggregate = is_record_type(func->return_def.type) &&
+                                      !has_effective_pointer(&func->return_def);
+
+            /* The enclosing typedef is the only declaration entitled to use
+             * this direct-function syntax. Parameter declarators continue
+             * through their established parsing path.
+             */
+            parsing_block_typedef_declarator = false;
+            read_parameter_list_decl(func, true);
+            parsing_block_typedef_declarator = saved_block_typedef_declarator;
+            vd->func_signature = func;
+            vd->is_func = true;
+            vd->is_direct_function_declarator = true;
+            return;
+        }
+
         /* An ordinary declarator can name a function-pointer typedef. Its
          * prototype belongs to the typedef's type descriptor, while the object
          * retains the existing function-pointer representation.
          */
-        if (vd->ptr_level || vd->type->ptr_level || vd->array_size) {
+        if (vd->ptr_level == 1 && !vd->array_size &&
+            vd->type->is_direct_function_type && vd->type->func_signature) {
+            /* A pointer applied directly to a function typedef is a callable
+             * function-pointer object. It is not a function designator, but
+             * indirect-call lowering needs its prototype.
+             */
+            vd->func_signature = vd->type->func_signature;
+            vd->is_func = false;
+        } else if (vd->ptr_level || vd->type->ptr_level || vd->array_size) {
             /* A derived declarator is not itself a callable callback object.
              * Preserve no direct-call marker until dereference/subscript
              * lowering can carry the element prototype separately.
@@ -4391,6 +4706,15 @@ void read_inner_var_decl(var_t *vd,
     if (vd->ptr_level > 0 && vd->ptr_level <= 32)
         vd->is_const_pointer =
             vd->pointer_const_mask & (1U << (vd->ptr_level - 1));
+
+    /* C99 permits void only as a function return type, a pointer target, or the
+     * separately validated lone parameter-list sentinel. A by-value void
+     * declarator has no object size and must not reach allocation or layout.
+     */
+    if (vd->type && vd->type->base_type == TYPE_void &&
+        !effective_pointer_depth(vd) && !vd->is_func &&
+        !lex_peek(T_open_bracket, NULL))
+        error_at("void type cannot define an object", cur_token_loc());
 }
 
 /* starting next_token, need to check the type */
@@ -4480,10 +4804,11 @@ void read_full_var_decl(var_t *vd,
     if (is_enum_type && (is_signed || is_unsigned || is_long))
         error_at("enum type cannot be combined with integer specifiers",
                  cur_token_loc());
+    bool is_record_type = lex_peek(T_struct, NULL) || lex_peek(T_union, NULL);
+    bool is_union_type = lex_accept(T_union);
     int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-    if (find_type_flag == 1 && lex_accept(T_union)) {
+    if (is_union_type)
         find_type_flag = 2;
-    }
     type_t *type;
 
     /* `signed` has the existing signed scalar semantics. C permits its `int`
@@ -4554,7 +4879,15 @@ void read_full_var_decl(var_t *vd,
         type = leading_scalar_type;
     } else {
         lex_ident(T_identifier, type_name);
-        type = find_type(type_name, find_type_flag);
+        type = find_type_flag == 2 ? find_record_tag(type_name, vd->scope)
+                                   : find_visible_type(type_name, vd->scope);
+        if (!type && find_type_flag == 2)
+            type = find_type(type_name, 2);
+        if (find_type_flag == 2 &&
+            (!type || !is_record_type ||
+             (is_union_type ? type->base_type != TYPE_union
+                            : type->base_type != TYPE_struct)))
+            error_at("Unknown struct/union type", cur_token_loc());
     }
 
     if (!type) {
@@ -4566,13 +4899,25 @@ void read_full_var_decl(var_t *vd,
 
     vd->type = type;
     vd->func_signature = type->ptr_level ? NULL : type->func_signature;
+    vd->pointee_func_signature = type->pointee_func_signature;
     vd->is_func = vd->func_signature != NULL;
     vd->is_const_qualified = type->is_const_qualified;
+    if (type->func_signature && !type->is_direct_function_type &&
+        (type->pointer_const_mask & 1U)) {
+        vd->is_const_pointer = true;
+        vd->pointer_const_mask |= 1U;
+    }
     if (type->array_size) {
-        vd->array_size = type->array_size;
-        vd->array_dim2 = type->array_dim2;
-        vd->array_dim3 = type->array_dim3;
-        vd->array_dim4 = type->array_dim4;
+        fixed_array_shape_t shape = fixed_array_shape_from_type(type);
+
+        fixed_array_shape_to_var(vd, &shape);
+    }
+    if (type->pointee_array_size) {
+        fixed_array_shape_t shape = fixed_array_shape_from_pointee_type(type);
+
+        fixed_array_shape_to_pointee_var(vd, &shape);
+        vd->pointee_array_element_ptr_level =
+            type->pointee_array_element_ptr_level;
     }
     if (type->ptr_level && type->ptr_level <= 32)
         vd->is_const_pointer =
@@ -4589,7 +4934,14 @@ void read_full_var_decl(var_t *vd,
         else if (lex_accept(T_volatile))
             is_volatile = true;
         else if (lex_accept(T_restrict)) {
-            if (!type->ptr_level)
+            /* A typedef-hidden array may be qualified when its elements are
+             * pointers. As for `const` and `volatile`, the qualifier then
+             * applies to the element type rather than to an array object.
+             */
+            if (!type->ptr_level &&
+                !(type->array_size && type->array_element_ptr_level &&
+                  (!type->func_signature ||
+                   type->array_element_pointee_func_signature)))
                 error_at("restrict requires a pointer type", cur_token_loc());
         } else if (lex_accept(T_inline)) {
             if (is_inline || declaration_inline)
@@ -4600,11 +4952,14 @@ void read_full_var_decl(var_t *vd,
             break;
     }
     vd->is_inline = declaration_inline || is_inline;
-    vd->is_volatile = declaration_volatile || is_volatile;
+    vd->is_volatile =
+        declaration_volatile || is_volatile || type->is_volatile_qualified;
     if (is_const || declaration_const) {
-        if (type->ptr_level)
+        if (type->ptr_level) {
             vd->is_const_pointer = true;
-        else
+            if (type->pointee_func_signature && type->ptr_level == 1)
+                vd->pointer_const_mask |= 1U;
+        } else
             vd->is_const_qualified = true;
     }
 
@@ -4656,6 +5011,7 @@ void read_parameter_list_decl(func_t *func, bool anon)
             return;
         }
         func->param_defs[vn].type = TY_void;
+        func->param_defs[vn].scope = func->return_def.scope;
         read_inner_var_decl(&func->param_defs[vn], anon, true, false);
         if (!func->param_defs[vn].ptr_level && !func->param_defs[vn].is_func &&
             !func->param_defs[vn].array_size)
@@ -4688,6 +5044,7 @@ void read_parameter_list_decl(func_t *func, bool anon)
 
         if (vn >= MAX_PARAMS)
             error_at("Too many parameters", cur_token_loc());
+        func->param_defs[vn].scope = func->return_def.scope;
         read_full_var_decl(&func->param_defs[vn], anon, true, false);
         if (func->param_defs[vn].is_inline)
             error_at("inline specifier requires a function declarator",
@@ -4921,6 +5278,14 @@ bool numeric_literal_needs_wide_path(const char *token)
  */
 void force_wide_global_literal_type(var_t *value, const char *token)
 {
+    /* The typed global path also handles a one-word unsigned literal such as
+     * 0xffffffff: it must retain TY_uint for shifts, comparisons, and division,
+     * but it is not a long-long candidate. Promoting it here made every 32-bit
+     * target reject a valid C99 unsigned-int initializer merely because that
+     * path was selected.
+     */
+    if (!numeric_literal_needs_wide_path(token))
+        return;
     if (value->type->size >= 8)
         return;
     if (PTR_SIZE < 8)
@@ -5219,6 +5584,11 @@ void read_func_parameters_with_sret(func_t *func,
                     "incompatible character pointer types for function "
                     "argument",
                     cur_token_loc());
+            if (incompatible_pointee_callback_conversion(param, target))
+                error_at(
+                    "incompatible callback slot types for function "
+                    "argument",
+                    cur_token_loc());
             diagnose_const_pointer_conversion(param, target);
             if (is_record_type(target->type) &&
                 !has_effective_pointer(target)) {
@@ -5335,20 +5705,14 @@ void read_func_call(func_t *func, block_t *parent, basic_block_t **bb)
  */
 void copy_call_result_array_shape(var_t *result, const var_t *return_def)
 {
+    fixed_array_shape_t shape;
+
     if (!result || !return_def)
         return;
-    result->pointee_array_size = return_def->pointee_array_size
-                                     ? return_def->pointee_array_size
-                                     : return_def->type->array_size;
-    result->pointee_array_dim2 = return_def->pointee_array_dim2
-                                     ? return_def->pointee_array_dim2
-                                     : return_def->type->array_dim2;
-    result->pointee_array_dim3 = return_def->pointee_array_dim3
-                                     ? return_def->pointee_array_dim3
-                                     : return_def->type->array_dim3;
-    result->pointee_array_dim4 = return_def->pointee_array_dim4
-                                     ? return_def->pointee_array_dim4
-                                     : return_def->type->array_dim4;
+    shape = return_def->pointee_array_size
+                ? fixed_array_shape_from_pointee_var(return_def)
+                : fixed_array_shape_from_type(return_def->type);
+    fixed_array_shape_to_pointee_var(result, &shape);
     result->pointee_array_element_ptr_level =
         return_def->pointee_array_element_ptr_level
             ? return_def->pointee_array_element_ptr_level
@@ -5363,6 +5727,7 @@ void lower_call_result_array_postfix(var_t **value,
 {
     var_t *base;
     var_t *address;
+    fixed_array_shape_t shape;
     int dimensions;
     int depth = 0;
 
@@ -5370,11 +5735,12 @@ void lower_call_result_array_postfix(var_t **value,
         !lex_peek(T_open_square, NULL))
         return;
 
+    shape = fixed_array_shape_from_pointee_var(base);
+
     /* One subscript selects the pointed-to array; its outer bound and every
      * inner bound then consume their own postfix subscript.
      */
-    dimensions = 2 + !!base->pointee_array_dim2 + !!base->pointee_array_dim3 +
-                 !!base->pointee_array_dim4;
+    dimensions = shape.rank + 1;
     opstack_pop();
     address = base;
     do {
@@ -5387,19 +5753,8 @@ void lower_call_result_array_postfix(var_t **value,
                      cur_token_loc());
         if (depth == 0) {
             stride *= base->pointee_array_size;
-        } else if (depth == 1 && base->pointee_array_dim2) {
-            stride *= base->pointee_array_dim2;
-            if (base->pointee_array_dim3)
-                stride *= base->pointee_array_dim3;
-            if (base->pointee_array_dim4)
-                stride *= base->pointee_array_dim4;
-        } else if (depth == 2 && base->pointee_array_dim3) {
-            stride *= base->pointee_array_dim3;
-            if (base->pointee_array_dim4)
-                stride *= base->pointee_array_dim4;
-        } else if (depth == 3 && base->pointee_array_dim4) {
-            stride *= base->pointee_array_dim4;
-        }
+        } else
+            stride = fixed_array_shape_stride(&shape, depth - 1, stride);
 
         lex_expect(T_open_square);
         if (!read_assignment_expression(parent, bb)) {
@@ -5590,6 +5945,7 @@ void read_builtin_offsetof(block_t *parent, basic_block_t **bb)
         if (!field)
             error_at("Unknown record member", cur_token_loc());
         offset += field->offset;
+        offset += read_offsetof_array_subscripts(field, parent);
         record = field->type;
         has_nested_member = lex_accept(T_dot);
         if (has_nested_member && (field->ptr_level || !is_record_type(record)))
@@ -6430,7 +6786,7 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
      * objects and previously made `&function` fail outside file-scope scalar
      * initializers.
      */
-    func_t *addressed_func = find_func(token);
+    func_t *addressed_func = find_visible_func(token, parent);
     if (addressed_func) {
         if (parent->func && parent->func->is_inline &&
             !parent->func->is_static && addressed_func->is_static)
@@ -6464,6 +6820,11 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
         vd->is_const_qualified = lvalue.decl ? lvalue.decl->is_const_qualified
                                              : lvalue.is_const_qualified;
         vd->pointer_const_mask = lvalue.pointer_const_mask;
+        vd->pointee_func_signature =
+            lvalue.decl ? (lvalue.decl->pointee_func_signature
+                               ? lvalue.decl->pointee_func_signature
+                               : lvalue.decl->func_signature)
+                        : NULL;
         opstack_push(vd);
         if (lvalue.decl && is_array_declarator(lvalue.decl)) {
             /* An array expression already denotes its backing address in the
@@ -6477,6 +6838,136 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
         } else
             add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
     }
+}
+
+/* A scalar pointer-to-array dereference designates the addressed row; it does
+ * not load a scalar object. Retain that row as an array descriptor so a
+ * following grouped postfix subscript can use the ordinary array path.
+ */
+static bool lower_scalar_pointee_array_dereference(var_t *source,
+                                                   block_t *parent,
+                                                   basic_block_t **bb)
+{
+    type_t *element_type;
+    var_t *row;
+
+    if (!source || !source->type || !source->pointee_array_size ||
+        source->pointee_array_element_ptr_level ||
+        effective_pointer_depth(source) != 1)
+        return false;
+
+    element_type = source->type->pointee_array_element_type
+                       ? source->type->pointee_array_element_type
+                       : source->type;
+    row = require_var(parent);
+    row->type = element_type;
+    fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
+
+    fixed_array_shape_to_var(row, &shape);
+    row->is_const_qualified =
+        source->is_const_qualified || element_type->is_const_qualified;
+    row->var_name = gen_name();
+    add_insn(parent, *bb, OP_assign, row, source, NULL, 0, NULL);
+    opstack_push(row);
+    return true;
+}
+
+static void copy_pointee_array_shape(var_t *destination, const var_t *source)
+{
+    fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
+
+    fixed_array_shape_to_pointee_var(destination, &shape);
+    destination->pointee_array_element_ptr_level =
+        source->pointee_array_element_ptr_level;
+}
+
+static bool is_scalar_pointee_array_pointer(const var_t *var)
+{
+    return var && var->type && var->pointee_array_size > 0 &&
+           !var->pointee_array_element_ptr_level &&
+           effective_pointer_depth(var) == 1;
+}
+
+static int scalar_pointee_array_row_stride(const var_t *var)
+{
+    type_t *element_type = var->type->pointee_array_element_type
+                               ? var->type->pointee_array_element_type
+                               : var->type;
+
+    return var->pointee_array_size * element_type->size;
+}
+
+/* Byte extent remaining after direct-array subscript depth. This is shared by
+ * ordinary postfix indexing and the bounded grouped pointer-to-array path.
+ */
+static int fixed_array_shape_stride(const fixed_array_shape_t *shape,
+                                    int subscript_depth,
+                                    int element_size)
+{
+    int stride = element_size;
+
+    for (int i = subscript_depth + 1; i < shape->rank; i++)
+        stride *= shape->bounds[i];
+    return stride;
+}
+
+static bool fixed_array_shape_drop_outer(fixed_array_shape_t *shape)
+{
+    if (!shape->rank)
+        return false;
+    for (int i = 1; i < shape->rank; i++)
+        shape->bounds[i - 1] = shape->bounds[i];
+    shape->rank--;
+    return true;
+}
+
+static int fixed_array_subscript_stride(const var_t *var,
+                                        int subscript_depth,
+                                        int element_size)
+{
+    fixed_array_shape_t shape = fixed_array_shape_from_var(var);
+
+    return fixed_array_shape_stride(&shape, subscript_depth, element_size);
+}
+
+static int fixed_pointee_array_subscript_stride(const var_t *var,
+                                                int subscript_depth,
+                                                int element_size)
+{
+    fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(var);
+
+    if (subscript_depth == 0)
+        return var->pointee_array_size * element_size;
+    return fixed_array_shape_stride(&shape, subscript_depth - 1, element_size);
+}
+
+static int fixed_array_decay_stride(const var_t *var)
+{
+    return fixed_array_subscript_stride(var, 0, var->type->size);
+}
+
+static bool scalar_pointee_array_shapes_compatible(const var_t *left,
+                                                   const var_t *right)
+{
+    type_t *left_element;
+    type_t *right_element;
+
+    if (!is_scalar_pointee_array_pointer(left) ||
+        !is_scalar_pointee_array_pointer(right))
+        return false;
+    left_element = left->type->pointee_array_element_type
+                       ? left->type->pointee_array_element_type
+                       : left->type;
+    right_element = right->type->pointee_array_element_type
+                        ? right->type->pointee_array_element_type
+                        : right->type;
+    return left->pointee_array_size == right->pointee_array_size &&
+           left->pointee_array_dim2 == right->pointee_array_dim2 &&
+           left->pointee_array_dim3 == right->pointee_array_dim3 &&
+           left->pointee_array_dim4 == right->pointee_array_dim4 &&
+           left->pointee_array_element_ptr_level ==
+               right->pointee_array_element_ptr_level &&
+           compatible_decl_type(left_element, right_element);
 }
 
 void handle_single_dereference(block_t *parent, basic_block_t **bb)
@@ -6504,6 +6995,9 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
             return;
         }
+
+        if (lower_scalar_pointee_array_dereference(rs1, parent, bb))
+            return;
 
         /* For pointer dereference, we need to determine the target type and
          * size. Since we do not have full type tracking in expressions, use
@@ -6611,7 +7105,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
          * route it through the same symbol representation used by ordinary
          * direct calls instead of asking read_lvalue() to find object storage.
          */
-        if (!var && find_func(token)) {
+        if (!var && find_visible_func(token, parent)) {
             lex_expect(T_identifier);
             rs1 = require_func_symbol_var(parent);
             rs1->var_name = intern_string(token);
@@ -6630,6 +7124,8 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             opstack_push(load_function_pointer_object(parent, bb, rs1));
             return;
         }
+        if (lower_scalar_pointee_array_dereference(rs1, parent, bb))
+            return;
 
         /* A member function-pointer typedef was already loaded by
          * read_lvalue(). Unary `*` turns that pointer into a function
@@ -6663,12 +7159,14 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
          * cleared to prevent the invalid `slot(...)` form, so restore the
          * element signature only after the real dereference has occurred.
          */
-        if ((rs1->func_signature ||
+        if ((rs1->func_signature || rs1->pointee_func_signature ||
              (deref_type && deref_type->func_signature)) &&
             effective_pointer_depth(rs1) == 1) {
             vd->func_signature = rs1->func_signature
                                      ? rs1->func_signature
-                                     : deref_type->func_signature;
+                                     : (rs1->pointee_func_signature
+                                            ? rs1->pointee_func_signature
+                                            : deref_type->func_signature);
             vd->ptr_level = 1;
             sz = PTR_SIZE;
         }
@@ -6869,6 +7367,277 @@ int sizeof_array_object(const var_t *array)
     return array->array_size * element_size;
 }
 
+/* A sizeof operand needs the declared type of an lvalue, before ordinary
+ * expression lowering decays an array or evaluates a postfix operand. Keep this
+ * descriptor as a copy of the declaration metadata: no IR value is ever
+ * constructed while walking it.
+ */
+static bool scan_sizeof_postfix_operand(block_t *scope,
+                                        token_t **cursor,
+                                        var_t *object,
+                                        int *members)
+{
+    token_t *token = *cursor;
+
+    if (!token)
+        return false;
+    if (token->kind == T_asterisk) {
+        int depth;
+
+        token = token->next;
+        if (!scan_sizeof_postfix_operand(scope, &token, object, members))
+            return false;
+        depth = effective_pointer_depth(object);
+        if (depth <= 0)
+            return false;
+        object->type = pointee_type_from_pointer_typedef(object->type);
+        object->ptr_level = depth - 1;
+    } else if (token->kind == T_open_bracket) {
+        token = token->next;
+        if (!scan_sizeof_postfix_operand(scope, &token, object, members) ||
+            !token || token->kind != T_close_bracket)
+            return false;
+        token = token->next;
+    } else if (token->kind == T_identifier) {
+        var_t *root = find_var(token->literal, scope);
+
+        if (!root)
+            return false;
+        memcpy(object, root, sizeof(*object));
+        token = token->next;
+    } else
+        return false;
+
+    while (token && (token->kind == T_dot || token->kind == T_arrow ||
+                     token->kind == T_open_square)) {
+        if (token->kind == T_dot || token->kind == T_arrow) {
+            bool through_pointer = token->kind == T_arrow;
+            type_t *record;
+            var_t *field;
+
+            token = token->next;
+            if (!token || token->kind != T_identifier ||
+                (through_pointer && effective_pointer_depth(object) != 1) ||
+                (!through_pointer && effective_pointer_depth(object) != 0))
+                return false;
+            record = through_pointer
+                         ? pointee_type_from_pointer_typedef(object->type)
+                         : object->type;
+            if (!is_record_type(record))
+                return false;
+            field = find_member(token->literal, record);
+            if (!field)
+                return false;
+            memcpy(object, field, sizeof(*object));
+            *members = *members + 1;
+            token = token->next;
+        } else {
+            int depth = 0;
+            fixed_array_shape_t shape;
+
+            /* An array may legitimately have pointer elements. Reject a scalar
+             * pointer here, but retain the element pointer depth until after
+             * this array subscript so a following `->` can consume it.
+             */
+            if (object->array_size <= 0)
+                return false;
+            for (; token; token = token->next) {
+                if (token->kind == T_open_square)
+                    depth++;
+                else if (token->kind == T_close_square && --depth == 0) {
+                    token = token->next;
+                    break;
+                }
+            }
+            if (depth)
+                return false;
+            shape = fixed_array_shape_from_var(object);
+            if (!fixed_array_shape_drop_outer(&shape))
+                return false;
+            fixed_array_shape_to_var(object, &shape);
+        }
+    }
+    *cursor = token;
+    return true;
+}
+
+/* The preceding scan proves the exact token shape and type constraints before
+ * this pass advances the lexer. Each subscript is read in a detached block so
+ * its side effects remain unevaluated.
+ */
+static void consume_sizeof_postfix_operand(block_t *parent, basic_block_t **bb)
+{
+    if (lex_accept(T_asterisk))
+        consume_sizeof_postfix_operand(parent, bb);
+    else if (lex_accept(T_open_bracket)) {
+        consume_sizeof_postfix_operand(parent, bb);
+        lex_expect(T_close_bracket);
+    } else
+        lex_expect(T_identifier);
+
+    while (lex_peek(T_dot, NULL) || lex_peek(T_arrow, NULL) ||
+           lex_peek(T_open_square, NULL)) {
+        if (lex_accept(T_dot) || lex_accept(T_arrow))
+            lex_expect(T_identifier);
+        else {
+            basic_block_t *unevaluated_bb;
+            int saved_side_effects;
+
+            lex_expect(T_open_square);
+            unevaluated_bb = bb_create(parent);
+            saved_side_effects = se_idx;
+            read_expr(parent, &unevaluated_bb);
+            read_ternary_operation(parent, &unevaluated_bb);
+            opstack_pop();
+            se_idx = saved_side_effects;
+            lex_expect(T_close_square);
+        }
+    }
+}
+
+/* A non-mutating admission check for callers that need to hand a global sizeof
+ * operand to the detached local parser. Keep its accepted grammar in lockstep
+ * with read_sizeof_postfix_operand() so type names and scalar forms remain
+ * owned by their existing global constant paths.
+ */
+static bool can_scan_sizeof_postfix_extent(block_t *scope,
+                                           token_t *start,
+                                           bool parenthesized)
+{
+    token_t *tail = start;
+    var_t object;
+    int members = 0;
+
+    return scan_sizeof_postfix_operand(scope, &tail, &object, &members) &&
+           members && tail &&
+           (parenthesized
+                ? tail->kind == T_close_bracket
+                : tail->kind != T_open_bracket && tail->kind != T_increment &&
+                      tail->kind != T_decrement) &&
+           !effective_pointer_depth(&object) && object.array_size > 0;
+}
+
+/* First staged type-only postfix walker: identifier roots, balanced grouping,
+ * record members, and fixed-array postfixes. Other sizeof forms keep their
+ * dedicated fallbacks until their primary operations are migrated here.
+ */
+static bool read_sizeof_postfix_operand(block_t *parent,
+                                        basic_block_t **bb,
+                                        bool parenthesized)
+{
+    token_t *tail = cur_token->next;
+    var_t object;
+    int members = 0;
+    var_t *result;
+
+    if (!can_scan_sizeof_postfix_extent(parent, tail, parenthesized))
+        return false;
+    scan_sizeof_postfix_operand(parent, &tail, &object, &members);
+    if (object.is_flexible_array_member)
+        error_at("sizeof cannot be applied to a flexible array member",
+                 cur_token_loc());
+    if (is_bitfield(&object))
+        error_at("sizeof cannot be applied to a bit-field", cur_token_loc());
+
+    consume_sizeof_postfix_operand(parent, bb);
+    if (parenthesized)
+        lex_expect(T_close_bracket);
+    result = require_var(parent);
+    result->init_val = sizeof_array_object(&object);
+    result->var_name = gen_name();
+    opstack_push(result);
+    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+    return true;
+}
+
+static bool is_direct_fixed_array_pointer_slot(const var_t *pointer)
+{
+    return pointer && is_array_declarator(pointer) && !pointer->array_dim2 &&
+           pointer->pointee_array_size > 0 &&
+           !pointer->pointee_array_element_ptr_level &&
+           ((pointer->ptr_level == 1 && !pointer->type->ptr_level) ||
+            (!pointer->ptr_level && pointer->type->ptr_level == 1 &&
+             pointer->type->array_element_ptr_level == 1));
+}
+
+/* A direct pointer-to-fixed-array dereference designates its complete row.
+ * Ordinary expression lowering decays that row before sizeof can observe it, so
+ * retain this exact unary form while the declaration's pointee extent is still
+ * available.
+ */
+static bool read_sizeof_dereference_pointee_array(block_t *parent,
+                                                  basic_block_t **bb,
+                                                  bool parenthesized)
+{
+    token_t *star = cur_token->next;
+    token_t *identifier;
+    token_t *tail;
+    var_t *pointer;
+    type_t *element_type;
+    var_t *result;
+    int element_size;
+    bool indexes_fixed_array_pointer_slot = false;
+
+    if (!star || star->kind != T_asterisk || !(identifier = star->next) ||
+        identifier->kind != T_identifier)
+        return false;
+    pointer = find_var(identifier->literal, parent);
+    if (!pointer || !pointer->pointee_array_size)
+        return false;
+    tail = identifier->next;
+    if (tail && tail->kind == T_open_square) {
+        int depth = 0;
+
+        indexes_fixed_array_pointer_slot =
+            is_direct_fixed_array_pointer_slot(pointer);
+        for (; tail; tail = tail->next) {
+            if (tail->kind == T_open_square)
+                depth++;
+            else if (tail->kind == T_close_square && --depth == 0) {
+                tail = tail->next;
+                break;
+            }
+        }
+        if (!indexes_fixed_array_pointer_slot || depth)
+            return false;
+    }
+    if (parenthesized && (!tail || tail->kind != T_close_bracket))
+        return false;
+    if (effective_pointer_depth(pointer) !=
+        pointer->pointee_array_element_ptr_level + 1)
+        return false;
+
+    element_type = pointer->type->pointee_array_element_type
+                       ? pointer->type->pointee_array_element_type
+                       : pointer->type;
+    element_size = pointer->pointee_array_element_ptr_level
+                       ? PTR_SIZE
+                       : element_type->size;
+    lex_expect(T_asterisk);
+    lex_expect(T_identifier);
+    if (indexes_fixed_array_pointer_slot) {
+        basic_block_t *unevaluated_bb;
+        int saved_side_effects;
+
+        lex_expect(T_open_square);
+        unevaluated_bb = bb_create(parent);
+        saved_side_effects = se_idx;
+        read_expr(parent, &unevaluated_bb);
+        read_ternary_operation(parent, &unevaluated_bb);
+        opstack_pop();
+        se_idx = saved_side_effects;
+        lex_expect(T_close_square);
+    }
+    if (parenthesized)
+        lex_expect(T_close_bracket);
+    result = require_var(parent);
+    result->init_val = pointer->pointee_array_size * element_size;
+    result->var_name = gen_name();
+    opstack_push(result);
+    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+    return true;
+}
+
 /* `&array` points to the complete array object, and dereferencing that pointer
  * restores an array lvalue. Ordinary expression lowering deliberately decays
  * arrays before it can represent the unary pair, so recognize the complete
@@ -7019,12 +7788,14 @@ bool read_sizeof_member_array_row(block_t *parent,
     token_t *member_token;
     token_t *tail;
     var_t *object;
-    var_t *field;
+    var_t *field = NULL;
+    type_t *member_record;
     int object_ptr_level;
     int subscript_count = 0;
     int dimensions;
     int row_elements;
     int nested_parentheses = 0;
+    int grouped_member_closes = 0;
 
     /* sizeof((object.member[index])) preserves the member-array lvalue just
      * like the ungrouped spelling. Peel only groups that enclose the complete
@@ -7041,9 +7812,7 @@ bool read_sizeof_member_array_row(block_t *parent,
         (object_token->next->kind != T_dot &&
          object_token->next->kind != T_arrow) ||
         !object_token->next->next ||
-        object_token->next->next->kind != T_identifier ||
-        !object_token->next->next->next ||
-        object_token->next->next->next->kind != T_open_square)
+        object_token->next->next->kind != T_identifier)
         return false;
     object = find_var(object_token->literal, parent);
     object_ptr_level = object ? object->ptr_level + object->type->ptr_level : 0;
@@ -7052,11 +7821,39 @@ bool read_sizeof_member_array_row(block_t *parent,
          (object_token->next->kind == T_arrow && object_ptr_level != 1)))
         return false;
     member_token = object_token->next->next;
-    field = find_member(member_token->literal, object->type);
-    if (!field || field->ptr_level || field->array_dim2 <= 0)
+    member_record = object->type;
+    for (;;) {
+        field = find_member(member_token->literal, member_record);
+        if (!field)
+            return false;
+        tail = member_token->next;
+        if (!tail || (tail->kind != T_dot && tail->kind != T_arrow))
+            break;
+        if (!tail->next || tail->next->kind != T_identifier)
+            return false;
+        if (tail->kind == T_dot) {
+            if (effective_pointer_depth(field) != 0)
+                return false;
+            member_record = field->type;
+        } else {
+            if (effective_pointer_depth(field) != 1)
+                return false;
+            member_record = pointee_type_from_pointer_typedef(field->type);
+        }
+        member_token = tail->next;
+    }
+    if (!field || effective_pointer_depth(field) || field->array_dim2 <= 0)
         return false;
 
-    tail = member_token->next;
+    /* A group can enclose the member lvalue before a following subscript, e.g.
+     * sizeof((((record.rows)))[1]). Consume only its matched closes; any
+     * remaining groups still enclose the complete postfix expression.
+     */
+    while (grouped_member_closes < nested_parentheses && tail &&
+           tail->kind == T_close_bracket) {
+        grouped_member_closes++;
+        tail = tail->next;
+    }
     while (tail && tail->kind == T_open_square) {
         int depth = 0;
         for (; tail; tail = tail->next) {
@@ -7073,7 +7870,7 @@ bool read_sizeof_member_array_row(block_t *parent,
     }
     if (!tail)
         return false;
-    for (int i = 0; i < nested_parentheses; i++) {
+    for (int i = grouped_member_closes; i < nested_parentheses; i++) {
         if (!tail || tail->kind != T_close_bracket)
             return false;
         tail = tail->next;
@@ -7096,6 +7893,15 @@ bool read_sizeof_member_array_row(block_t *parent,
     else
         lex_expect(T_dot);
     lex_expect(T_identifier);
+    while (lex_peek(T_dot, NULL) || lex_peek(T_arrow, NULL)) {
+        if (lex_peek(T_arrow, NULL))
+            lex_expect(T_arrow);
+        else
+            lex_expect(T_dot);
+        lex_expect(T_identifier);
+    }
+    for (int i = 0; i < grouped_member_closes; i++)
+        lex_expect(T_close_bracket);
     for (int i = 0; i < subscript_count; i++) {
         lex_expect(T_open_square);
         basic_block_t *unevaluated_bb = bb_create(parent);
@@ -7106,7 +7912,7 @@ bool read_sizeof_member_array_row(block_t *parent,
         se_idx = saved_side_effects;
         lex_expect(T_close_square);
     }
-    for (int i = 0; i < nested_parentheses; i++)
+    for (int i = grouped_member_closes; i < nested_parentheses; i++)
         lex_expect(T_close_bracket);
     if (parenthesized)
         lex_expect(T_close_bracket);
@@ -7326,7 +8132,11 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         return;
     }
 
+    if (read_sizeof_dereference_pointee_array(parent, bb, parenthesized))
+        return;
     if (read_sizeof_address_dereference_array(parent, bb, parenthesized))
+        return;
+    if (read_sizeof_postfix_operand(parent, bb, parenthesized))
         return;
     if (read_sizeof_member_array(parent, bb, parenthesized))
         return;
@@ -7594,7 +8404,8 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         }
     } else if (lex_peek(T_identifier, token)) {
         /* Try to parse as a type first */
-        type = find_type(token, find_type_flag);
+        type = find_type_flag == 2 ? find_type(token, find_type_flag)
+                                   : find_visible_type(token, parent);
         if (type) {
             /* sizeof(type) */
             lex_expect(T_identifier);
@@ -7731,15 +8542,20 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         ptr_cnt = expr_var->ptr_level;
         array_size = expr_var->array_size;
         is_function = expr_var->is_func;
+        if (is_incomplete_record_object(expr_var))
+            error_at("sizeof cannot be applied to an incomplete record type",
+                     &sizeof_tk->location);
     }
 
     if (!type)
         error_at("Unable to determine type in sizeof", &sizeof_tk->location);
     if (type == TY_void && ptr_cnt == 0)
         error_at("sizeof(void) is invalid", &sizeof_tk->location);
-    if (is_function && ptr_cnt == 0)
+    if ((is_function || type->is_direct_function_type) && ptr_cnt == 0)
         error_at("sizeof(function) is invalid", &sizeof_tk->location);
 
+    if (!array_size && !ptr_cnt && type->array_size)
+        array_size = type->array_size;
     vd = require_var(parent);
     vd->init_val = type->size;
     if (array_size > 0)
@@ -7758,18 +8574,288 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 }
 
+/* Keep grouped row-element postfix support deliberately exact until general
+ * grouped lvalues have an address representation. This scanner never consumes
+ * tokens, so every non-match remains owned by ordinary expression parsing.
+ */
+static bool grouped_scalar_pointee_row_postfix_starts(void)
+{
+    token_t *token = cur_token ? cur_token->next : NULL;
+    int suffixes = 0;
+
+    if (!token || token->kind != T_open_bracket || !(token = token->next) ||
+        token->kind != T_asterisk || !(token = token->next) ||
+        token->kind != T_identifier || !(token = token->next) ||
+        token->kind != T_close_bracket || !(token = token->next))
+        return false;
+
+    while (suffixes < 4 && token && token->kind == T_open_square) {
+        int depth = 0;
+
+        for (; token; token = token->next) {
+            if (token->kind == T_open_square || token->kind == T_open_bracket ||
+                token->kind == T_open_curly)
+                depth++;
+            else if (token->kind == T_close_square ||
+                     token->kind == T_close_bracket ||
+                     token->kind == T_close_curly) {
+                if (!--depth) {
+                    token = token->next;
+                    break;
+                }
+            }
+        }
+        if (!token)
+            return false;
+        suffixes++;
+    }
+
+    return suffixes &&
+           (token->kind == T_increment || token->kind == T_decrement);
+}
+
+static void handle_grouped_scalar_pointee_row_postfix(block_t *parent,
+                                                      basic_block_t **bb)
+{
+    char name[MAX_VAR_LEN];
+    var_t *source, *row, *index, *address, *old, *one, *updated;
+    fixed_array_shape_t shape;
+    int dimensions;
+    int depth = 0;
+    opcode_t op;
+
+    lex_expect(T_open_bracket);
+    lex_expect(T_asterisk);
+    lex_ident(T_identifier, name);
+    source = find_var(name, parent);
+    if (!source)
+        error_at("Undeclared identifier", cur_token_loc());
+    if (!lower_scalar_pointee_array_dereference(source, parent, bb))
+        error_at("Grouped pointer-to-array update requires a scalar fixed row",
+                 cur_token_loc());
+    row = opstack_pop();
+    if (row->is_const_qualified)
+        error_at("assignment of read-only location", cur_token_loc());
+    shape = fixed_array_shape_from_var(row);
+    dimensions = shape.rank;
+    if (dimensions >= 3 &&
+        (is_record_type(row->type) || row->type->is_floating))
+        error_at(
+            "Grouped rank-three/four postfix update requires an integer scalar",
+            cur_token_loc());
+    if (dimensions > 4)
+        error_at(
+            "Grouped pointer-to-array postfix update supports at most four "
+            "dimensions",
+            cur_token_loc());
+    lex_expect(T_close_bracket);
+    address = row;
+    while (lex_accept(T_open_square)) {
+        int stride;
+
+        if (depth >= dimensions)
+            error_at("Too many grouped array subscripts", cur_token_loc());
+        if (!read_assignment_expression(parent, bb)) {
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+        }
+        index = opstack_pop();
+        lex_expect(T_close_square);
+        stride = fixed_array_shape_stride(&shape, depth, row->type->size);
+        if (stride != 1) {
+            one = require_var(parent);
+            one->var_name = gen_name();
+            one->init_val = stride;
+            add_insn(parent, *bb, OP_load_constant, one, NULL, NULL, 0, NULL);
+            updated = require_var(parent);
+            updated->var_name = gen_name();
+            add_insn(parent, *bb, OP_mul, updated, index, one, 0, NULL);
+            index = updated;
+        }
+        updated = require_typed_ptr_var(parent, row->type, 1);
+        updated->var_name = gen_name();
+        add_insn(parent, *bb, OP_add, updated, address, index, 0, NULL);
+        address = updated;
+        depth++;
+    }
+    if (depth != dimensions)
+        error_at("Grouped pointer-to-array postfix update needs all subscripts",
+                 cur_token_loc());
+    old = require_typed_var(parent, row->type);
+    old->var_name = gen_name();
+    add_insn(parent, *bb, OP_read, old, address, NULL, row->type->size, NULL);
+    if (lex_accept(T_increment))
+        op = OP_add;
+    else {
+        lex_expect(T_decrement);
+        op = OP_sub;
+    }
+    one = require_typed_var(parent, TY_int);
+    one->var_name = gen_name();
+    one->init_val = 1;
+    add_insn(parent, *bb, OP_load_constant, one, NULL, NULL, 0, NULL);
+    updated = require_var(parent);
+    updated->var_name = gen_name();
+    updated->type = integer_binary_result_type(op, old, one);
+    add_insn(parent, *bb, op, updated, old, one, 0, NULL);
+    updated = resize_to(parent, bb, updated, row->type, 0);
+    add_insn(parent, *bb, OP_write, NULL, address, updated, row->type->size,
+             NULL);
+    opstack_push(old);
+}
+
+/* Keep prefix support equally narrow: the generic prefix path has no general
+ * grouped-lvalue address representation. This scanner is non-mutating so a
+ * non-match remains entirely owned by that generic path.
+ */
+static bool grouped_scalar_pointee_row_prefix_starts(void)
+{
+    token_t *token = cur_token ? cur_token->next : NULL;
+    int suffixes = 0;
+
+    if (!token || (token->kind != T_increment && token->kind != T_decrement) ||
+        !(token = token->next) || token->kind != T_open_bracket ||
+        !(token = token->next) || token->kind != T_asterisk ||
+        !(token = token->next) || token->kind != T_identifier ||
+        !(token = token->next) || token->kind != T_close_bracket ||
+        !(token = token->next))
+        return false;
+
+    while (suffixes < 4 && token && token->kind == T_open_square) {
+        int depth = 0;
+
+        for (; token; token = token->next) {
+            if (token->kind == T_open_square || token->kind == T_open_bracket ||
+                token->kind == T_open_curly)
+                depth++;
+            else if (token->kind == T_close_square ||
+                     token->kind == T_close_bracket ||
+                     token->kind == T_close_curly) {
+                if (!--depth) {
+                    token = token->next;
+                    break;
+                }
+            }
+        }
+        if (!token)
+            return false;
+        suffixes++;
+    }
+    return suffixes;
+}
+
+static void handle_grouped_scalar_pointee_row_prefix(block_t *parent,
+                                                     basic_block_t **bb)
+{
+    char name[MAX_VAR_LEN];
+    var_t *source, *row, *index, *address, *current, *one, *updated;
+    fixed_array_shape_t shape;
+    int dimensions;
+    int depth = 0;
+    opcode_t op;
+
+    if (lex_accept(T_increment))
+        op = OP_add;
+    else {
+        lex_expect(T_decrement);
+        op = OP_sub;
+    }
+    lex_expect(T_open_bracket);
+    lex_expect(T_asterisk);
+    lex_ident(T_identifier, name);
+    source = find_var(name, parent);
+    if (!source)
+        error_at("Undeclared identifier", cur_token_loc());
+    if (!lower_scalar_pointee_array_dereference(source, parent, bb))
+        error_at("Grouped pointer-to-array update requires a scalar fixed row",
+                 cur_token_loc());
+    row = opstack_pop();
+    if (row->is_const_qualified)
+        error_at("assignment of read-only location", cur_token_loc());
+    shape = fixed_array_shape_from_var(row);
+    dimensions = shape.rank;
+    if (dimensions >= 3 &&
+        (is_record_type(row->type) || row->type->is_floating))
+        error_at(
+            "Grouped rank-three/four prefix update requires an integer scalar",
+            cur_token_loc());
+    if (dimensions > 4)
+        error_at(
+            "Grouped pointer-to-array prefix update supports at most four "
+            "dimensions",
+            cur_token_loc());
+    lex_expect(T_close_bracket);
+    address = row;
+    while (lex_accept(T_open_square)) {
+        int stride;
+
+        if (depth >= dimensions)
+            error_at("Too many grouped array subscripts", cur_token_loc());
+        if (!read_assignment_expression(parent, bb)) {
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+        }
+        index = opstack_pop();
+        lex_expect(T_close_square);
+        stride = fixed_array_shape_stride(&shape, depth, row->type->size);
+        if (stride != 1) {
+            one = require_var(parent);
+            one->var_name = gen_name();
+            one->init_val = stride;
+            add_insn(parent, *bb, OP_load_constant, one, NULL, NULL, 0, NULL);
+            updated = require_var(parent);
+            updated->var_name = gen_name();
+            add_insn(parent, *bb, OP_mul, updated, index, one, 0, NULL);
+            index = updated;
+        }
+        updated = require_typed_ptr_var(parent, row->type, 1);
+        updated->var_name = gen_name();
+        add_insn(parent, *bb, OP_add, updated, address, index, 0, NULL);
+        address = updated;
+        depth++;
+    }
+    if (depth != dimensions)
+        error_at("Grouped pointer-to-array prefix update needs all subscripts",
+                 cur_token_loc());
+    current = require_typed_var(parent, row->type);
+    current->var_name = gen_name();
+    add_insn(parent, *bb, OP_read, current, address, NULL, row->type->size,
+             NULL);
+    one = require_typed_var(parent, TY_int);
+    one->var_name = gen_name();
+    one->init_val = 1;
+    add_insn(parent, *bb, OP_load_constant, one, NULL, NULL, 0, NULL);
+    updated = require_var(parent);
+    updated->var_name = gen_name();
+    updated->type = integer_binary_result_type(op, current, one);
+    add_insn(parent, *bb, op, updated, current, one, 0, NULL);
+    updated = resize_to(parent, bb, updated, row->type, 0);
+    add_insn(parent, *bb, OP_write, NULL, address, updated, row->type->size,
+             NULL);
+    opstack_push(updated);
+}
+
 void read_expr_operand(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1;
     var_t *compound_object = NULL;
     bool is_neg = false;
 
+    if (grouped_scalar_pointee_row_postfix_starts()) {
+        handle_grouped_scalar_pointee_row_postfix(parent, bb);
+        return;
+    }
+
+    if ((lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) &&
+        grouped_scalar_pointee_row_prefix_starts()) {
+        handle_grouped_scalar_pointee_row_prefix(parent, bb);
+        return;
+    }
+
     bool prefix_increment = lex_peek(T_increment, NULL);
     bool prefix_decrement = lex_peek(T_decrement, NULL);
     if ((prefix_increment || prefix_decrement) && cur_token->next->next &&
-        (cur_token->next->next->kind == T_open_bracket ||
-         (cur_token->next->next->next &&
-          cur_token->next->next->next->kind == T_open_square))) {
+        cur_token->next->next->kind == T_open_bracket) {
         opcode_t op = prefix_increment ? OP_add : OP_sub;
         var_t *object;
         var_t *one;
@@ -8815,20 +9901,28 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
                 add_insn(parent, *bb, OP_address_of, base_addr, base, NULL, 0,
                          NULL);
                 address = base_addr;
-                do {
+                while (1) {
                     lex_ident(T_identifier, field_name);
                     field = find_member(field_name, record_type);
                     if (!field)
                         error_at("Unknown record member", cur_token_loc());
                     address = compute_field_address(parent, bb, address, field);
-                    if (!lex_accept(T_dot))
+
+                    /* The member-chain delimiter is already a token stream
+                     * property. Advance it directly rather than depending on a
+                     * boolean helper result after the current field's IR
+                     * lowering; this keeps the syntactic chain intact through
+                     * self-hosted target builds as well.
+                     */
+                    if (!cur_token->next || cur_token->next->kind != T_dot)
                         break;
+                    lex_next();
                     if (!is_record_type(field->type) || field->ptr_level ||
                         field->array_size)
                         error_at("Member access requires a record",
                                  cur_token_loc());
                     record_type = field->type;
-                } while (true);
+                }
                 value_type = field->type;
                 value_ptr_level = field->ptr_level;
                 value_size = field->type->size;
@@ -9324,7 +10418,7 @@ void read_expr_operand(block_t *parent, basic_block_t **bb)
         /* is a constant or variable? */
         const constant_t *con = find_scoped_constant(token, parent);
         var_t *var = find_var(token, parent);
-        func_t *func = find_func(token);
+        func_t *func = find_visible_func(token, parent);
 
         /* A block-scope function prototype shadows an automatic object, but its
          * designator is the file-scope function rather than an indirect call
@@ -9690,7 +10784,14 @@ void handle_pointer_arithmetic(block_t *parent,
                 pointee_type_from_pointer_typedef(orig_rs2->type);
             int left_depth = orig_rs1->ptr_level + orig_rs1->type->ptr_level;
             int right_depth = orig_rs2->ptr_level + orig_rs2->type->ptr_level;
+            bool left_scalar_row = is_scalar_pointee_array_pointer(orig_rs1);
+            bool right_scalar_row = is_scalar_pointee_array_pointer(orig_rs2);
 
+            if ((left_scalar_row || right_scalar_row) &&
+                !scalar_pointee_array_shapes_compatible(orig_rs1, orig_rs2))
+                error_at(
+                    "Pointer subtraction requires compatible pointed-to types",
+                    cur_token_loc());
             if (!compatible_decl_type(left_pointee, right_pointee) ||
                 left_depth != right_depth)
                 error_at(
@@ -9699,7 +10800,9 @@ void handle_pointer_arithmetic(block_t *parent,
 
             element_size = PTR_SIZE; /* Default */
 
-            element_size = get_pointer_element_size(orig_rs1);
+            element_size = left_scalar_row
+                               ? scalar_pointee_array_row_stride(orig_rs1)
+                               : get_pointer_element_size(orig_rs1);
 
             /* Perform subtraction first */
             var_t *diff = require_var(parent);
@@ -9729,13 +10832,25 @@ void handle_pointer_arithmetic(block_t *parent,
     if (is_pointer_like_value(rs1)) {
         ptr_var = rs1;
         int_var = rs2;
-        element_size = get_pointer_element_size(rs1);
+        element_size =
+            is_scalar_pointee_array_pointer(rs1)
+                ? scalar_pointee_array_row_stride(rs1)
+                : (is_array_declarator(rs1) && rs1->array_dim2 &&
+                           !has_effective_pointer(rs1) && !rs1->is_func
+                       ? fixed_array_decay_stride(rs1)
+                       : get_pointer_element_size(rs1));
     } else if (is_pointer_like_value(rs2)) {
         /* Only for addition (p + n == n + p) */
         if (op == OP_add) {
             ptr_var = rs2;
             int_var = rs1;
-            element_size = get_pointer_element_size(rs2);
+            element_size =
+                is_scalar_pointee_array_pointer(rs2)
+                    ? scalar_pointee_array_row_stride(rs2)
+                    : (is_array_declarator(rs2) && rs2->array_dim2 &&
+                               !has_effective_pointer(rs2) && !rs2->is_func
+                           ? fixed_array_decay_stride(rs2)
+                           : get_pointer_element_size(rs2));
             /* Swap operands so pointer is rs1 */
             rs1 = ptr_var;
             rs2 = int_var;
@@ -9770,6 +10885,15 @@ void handle_pointer_arithmetic(block_t *parent,
          * typedefs cannot be mistaken for a direct callback value.
          */
         vd->ptr_level = ptr_var->ptr_level + !!ptr_var->array_size;
+        if (is_scalar_pointee_array_pointer(ptr_var))
+            copy_pointee_array_shape(vd, ptr_var);
+        else if (is_array_declarator(ptr_var) && ptr_var->array_dim2 &&
+                 !has_effective_pointer(ptr_var) && !ptr_var->is_func) {
+            fixed_array_shape_t shape = fixed_array_shape_from_var(ptr_var);
+
+            fixed_array_shape_drop_outer(&shape);
+            fixed_array_shape_to_pointee_var(vd, &shape);
+        }
     }
     vd->var_name = gen_name();
     opstack_push(vd);
@@ -10306,6 +11430,10 @@ void read_lvalue(lvalue_t *lvalue,
                  bool allow_ptr_arith)
 {
     var_t *vd, *rs1, *rs2;
+    var_t *loaded_scalar_row = NULL;
+    type_t *pointer_row_element_type = NULL;
+    bool pending_scalar_row_pointer_slot = false;
+    bool pending_fixed_array_pointer_slot = false;
     bool is_address_got = false;
     bool is_member = false;
     int subscript_depth = 0;
@@ -10338,6 +11466,7 @@ void read_lvalue(lvalue_t *lvalue,
     lvalue->value_ptr_level = var->ptr_level + var->type->ptr_level;
     lvalue->is_func = var->is_func;
     lvalue->is_reference = false;
+    lvalue->pointee_func_signature = NULL;
 
     /* A pointer hidden in a typedef keeps its depth on the type rather than the
      * declarator. Its outer const still makes the pointer object read-only,
@@ -10345,7 +11474,7 @@ void read_lvalue(lvalue_t *lvalue,
      */
     lvalue->is_const_qualified =
         (var->ptr_level || (var->type && var->type->ptr_level) ||
-         var->array_size || var->has_unsized_array)
+         var->is_func || var->array_size || var->has_unsized_array)
             ? var->is_const_pointer
             : var->is_const_qualified;
     lvalue->pointer_const_mask = var->pointer_const_mask;
@@ -10360,16 +11489,41 @@ void read_lvalue(lvalue_t *lvalue,
            lex_peek(T_dot, NULL)) {
         if (lex_accept(T_open_square)) {
             int indexed_ptr_level;
+            bool indexes_fixed_array_pointer_slot;
             bool indexes_direct_pointee_array;
+            bool indexes_scalar_pointee_row;
+            bool indexes_loaded_scalar_pointee_row;
+            bool indexes_pointee_row;
 
             /* if subscripted member's is not yet resolved, dereference to
              * resolve base address. e.g., dereference of "->" in "data->raw[0]"
              * would be performed here.
              */
-            if (lvalue->is_reference && lvalue->ptr_level && is_member) {
+            if (lvalue->is_reference &&
+                (lvalue->ptr_level || pending_fixed_array_pointer_slot) &&
+                is_member) {
                 rs1 = opstack_pop();
                 vd = require_var(parent);
                 vd->var_name = gen_name();
+                if (pending_scalar_row_pointer_slot) {
+                    vd->type = var->type;
+                    vd->ptr_level = 1;
+                    copy_pointee_array_shape(vd, var);
+                    loaded_scalar_row = vd;
+                    pending_scalar_row_pointer_slot = false;
+                } else if (pending_fixed_array_pointer_slot) {
+                    /* A direct `int (*planes[])[rows][columns]` array selects a
+                     * pointer slot before it selects a row. Load that slot once
+                     * and retain its fixed pointee shape.
+                     */
+                    vd->type = var->type->pointee_array_element_type
+                                   ? var->type->pointee_array_element_type
+                                   : var->type;
+                    vd->ptr_level = 1;
+                    copy_pointee_array_shape(vd, var);
+                    loaded_scalar_row = vd;
+                    pending_fixed_array_pointer_slot = false;
+                }
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_read, vd, rs1, NULL, PTR_SIZE, NULL);
 
@@ -10401,10 +11555,28 @@ void read_lvalue(lvalue_t *lvalue,
             else
                 indexed_ptr_level = var->ptr_level + var->type->ptr_level +
                                     !!is_array_declarator(var);
+            indexes_fixed_array_pointer_slot =
+                !subscript_depth && is_direct_fixed_array_pointer_slot(var);
             indexes_direct_pointee_array =
                 !subscript_depth && var->pointee_array_size > 0 &&
                 var->pointee_array_element_ptr_level > 0 &&
                 indexed_ptr_level == var->pointee_array_element_ptr_level + 1;
+
+            /* `int (*p)[N]` selects an array row on its first subscript even
+             * though that row's scalar elements have no pointer depth. Keep
+             * this distinct from the pointer-element row case above: the row
+             * decays to `int *` for exactly the following scalar subscript.
+             */
+            indexes_scalar_pointee_row =
+                !subscript_depth && !is_array_declarator(var) &&
+                var->pointee_array_size > 0 &&
+                var->pointee_array_element_ptr_level == 0 &&
+                effective_pointer_depth(var) == 1;
+            indexes_loaded_scalar_pointee_row =
+                loaded_scalar_row && subscript_depth == 1;
+            indexes_pointee_row = indexes_direct_pointee_array ||
+                                  indexes_scalar_pointee_row ||
+                                  indexes_loaded_scalar_pointee_row;
 
             /* Selecting a row designates an array, which immediately decays
              * back to a pointer to its first element for a following postfix
@@ -10412,15 +11584,39 @@ void read_lvalue(lvalue_t *lvalue,
              * an indirection as though the row itself were a pointer object.
              */
             lvalue->value_ptr_level =
-                indexes_direct_pointee_array
+                indexes_pointee_row
                     ? indexed_ptr_level
                     : (indexed_ptr_level ? indexed_ptr_level - 1 : 0);
 
             /* if nested pointer, still pointer Also handle typedef pointers
              * which have ptr_level == 0
              */
-            if ((var->ptr_level <= 1 || is_typedef_pointer) &&
-                !is_array_declarator(var)) {
+            if (indexes_direct_pointee_array) {
+                /* Preserve the row's base element separately. The row itself
+                 * must retain its existing address lowering, but a following
+                 * subscript reads a pointer element whose value cannot carry a
+                 * lexical alias's outer row-pointer descriptor.
+                 */
+                pointer_row_element_type =
+                    var->type->pointee_array_element_type
+                        ? var->type->pointee_array_element_type
+                        : var->type;
+            } else if (!subscript_depth && is_array_declarator(var) &&
+                       var->type->array_element_ptr_level > 0) {
+                pointer_row_element_type = var->type->array_element_type
+                                               ? var->type->array_element_type
+                                               : var->type;
+            } else if (indexes_scalar_pointee_row ||
+                       indexes_loaded_scalar_pointee_row) {
+                var_t *row_source =
+                    indexes_loaded_scalar_pointee_row ? loaded_scalar_row : var;
+                lvalue->type =
+                    row_source->type->pointee_array_element_type
+                        ? row_source->type->pointee_array_element_type
+                        : row_source->type;
+                lvalue->size = lvalue->type->size;
+            } else if ((var->ptr_level <= 1 || is_typedef_pointer) &&
+                       !is_array_declarator(var)) {
                 /* For typedef pointers, get the size of the base type that the
                  * pointer points to
                  */
@@ -10447,33 +11643,25 @@ void read_lvalue(lvalue_t *lvalue,
             int multiplier = lvalue->size;
 
             if (subscript_depth == 0 && var->array_dim2 > 0) {
-                multiplier = var->array_dim2 * lvalue->size;
-                if (var->array_dim3 > 0)
-                    multiplier *= var->array_dim3;
-                if (var->array_dim4 > 0)
-                    multiplier *= var->array_dim4;
-            } else if (var->pointee_array_size > 0 &&
-                       (indexes_direct_pointee_array ||
-                        indexed_ptr_level == 1)) {
-                multiplier = var->pointee_array_size * lvalue->size;
-            } else if (subscript_depth == 1 && var->pointee_array_dim2 > 0) {
-                multiplier = var->pointee_array_dim2 * lvalue->size;
-                if (var->pointee_array_dim3 > 0)
-                    multiplier *= var->pointee_array_dim3;
-                if (var->pointee_array_dim4 > 0)
-                    multiplier *= var->pointee_array_dim4;
-            } else if (subscript_depth == 2 && var->pointee_array_dim3 > 0) {
-                multiplier = var->pointee_array_dim3 * lvalue->size;
-                if (var->pointee_array_dim4 > 0)
-                    multiplier *= var->pointee_array_dim4;
-            } else if (subscript_depth == 3 && var->pointee_array_dim4 > 0) {
-                multiplier = var->pointee_array_dim4 * lvalue->size;
-            } else if (subscript_depth == 1 && var->array_dim3 > 0) {
-                multiplier = var->array_dim3 * lvalue->size;
-                if (var->array_dim4 > 0)
-                    multiplier *= var->array_dim4;
-            } else if (subscript_depth == 2 && var->array_dim4 > 0) {
-                multiplier = var->array_dim4 * lvalue->size;
+                multiplier = fixed_array_subscript_stride(var, subscript_depth,
+                                                          lvalue->size);
+            } else if (subscript_depth == 0 && var->pointee_array_size > 0 &&
+                       indexes_pointee_row) {
+                multiplier = fixed_pointee_array_subscript_stride(
+                    var, subscript_depth, lvalue->size);
+            } else if (indexes_loaded_scalar_pointee_row) {
+                multiplier = fixed_pointee_array_subscript_stride(
+                    loaded_scalar_row, 0, lvalue->size);
+            } else if (loaded_scalar_row) {
+                multiplier = fixed_pointee_array_subscript_stride(
+                    loaded_scalar_row, subscript_depth - 1, lvalue->size);
+            } else if (subscript_depth >= 1 && var->pointee_array_size > 0) {
+                multiplier = fixed_pointee_array_subscript_stride(
+                    var, subscript_depth, lvalue->size);
+            } else if ((subscript_depth == 1 && var->array_dim3 > 0) ||
+                       (subscript_depth == 2 && var->array_dim4 > 0)) {
+                multiplier = fixed_array_subscript_stride(var, subscript_depth,
+                                                          lvalue->size);
             }
 
             if (multiplier != 1) {
@@ -10522,15 +11710,43 @@ void read_lvalue(lvalue_t *lvalue,
              * every subscript as a member would dereference row data on its
              * next index.
              */
-            is_member =
-                !indexes_direct_pointee_array && lvalue->value_ptr_level > 0;
+            is_member = !indexes_pointee_row && lvalue->value_ptr_level > 0;
             subscript_depth++;
-            lvalue->is_reference = !indexes_direct_pointee_array;
+            lvalue->is_reference = !indexes_pointee_row;
+            if (subscript_depth == 1 && var->pointee_array_size > 0 &&
+                var->pointee_array_element_ptr_level == 0 &&
+                effective_pointer_depth(var) == 2)
+                pending_scalar_row_pointer_slot = true;
+            if (indexes_fixed_array_pointer_slot)
+                pending_fixed_array_pointer_slot = true;
+            if (loaded_scalar_row) {
+                fixed_array_shape_t loaded_shape =
+                    fixed_array_shape_from_pointee_var(loaded_scalar_row);
+
+                if (subscript_depth >= 1 + loaded_shape.rank)
+                    loaded_scalar_row = NULL;
+            }
+
+            /* A multidimensional slot array carries the slot descriptor on the
+             * whole array. Only its final subscript selects an element; earlier
+             * subscripts select rows that decay for the next index.
+             */
+            if (var->type->array_element_pointee_func_signature) {
+                int array_dims = 1 + !!var->array_dim2 + !!var->array_dim3 +
+                                 !!var->array_dim4;
+
+                if (subscript_depth == array_dims)
+                    lvalue->pointee_func_signature =
+                        var->type->array_element_pointee_func_signature;
+            }
 
             /* A subscript designates the pointee, whose qualification is the
              * declaration's base qualification rather than `* const`.
              */
-            lvalue->is_const_qualified = var->is_const_qualified;
+            lvalue->is_const_qualified =
+                var->is_const_qualified ||
+                (lvalue->pointee_func_signature &&
+                 var->type->array_element_is_const_pointer);
         } else {
             char token[MAX_ID_LEN];
 
@@ -10613,13 +11829,16 @@ void read_lvalue(lvalue_t *lvalue,
      * been dereferenced. After array indexing like arr[0], we have a value, not
      * a pointer.
      */
+    bool scalar_pointee_row = is_scalar_pointee_array_pointer(var);
     if (allow_ptr_arith && lex_peek(T_plus, NULL) &&
-        (var->ptr_level || is_array_declarator(var)) && !lvalue->is_reference) {
+        (var->ptr_level || is_array_declarator(var) || scalar_pointee_row) &&
+        !lvalue->is_reference) {
         if (!is_array_declarator(var) &&
             is_direct_void_pointer_type(lvalue->type, lvalue->ptr_level))
             error_at("Pointer arithmetic on void* is invalid", cur_token_loc());
         while (lex_peek(T_plus, NULL) &&
-               (var->ptr_level || is_array_declarator(var))) {
+               (var->ptr_level || is_array_declarator(var) ||
+                scalar_pointee_row)) {
             lex_expect(T_plus);
             if (lvalue->is_reference) {
                 rs1 = opstack_pop();
@@ -10636,8 +11855,13 @@ void read_lvalue(lvalue_t *lvalue,
              * pointer that pointee is itself a pointer, so the stride is
              * PTR_SIZE rather than the base type's width.
              */
-            if (var->ptr_level > 1 ||
-                (is_array_declarator(var) && var->ptr_level))
+            if (scalar_pointee_row) {
+                lvalue->size = scalar_pointee_array_row_stride(var);
+            } else if (is_array_declarator(var) && var->array_dim2 &&
+                       !has_effective_pointer(var) && !var->is_func) {
+                lvalue->size = fixed_array_decay_stride(var);
+            } else if (var->ptr_level > 1 ||
+                       (is_array_declarator(var) && var->ptr_level))
                 lvalue->size = PTR_SIZE;
             else
                 lvalue->size = lvalue->type->size;
@@ -10666,9 +11890,19 @@ void read_lvalue(lvalue_t *lvalue,
              * first decay to a pointer, adding one level to the declaration's
              * element indirection.
              */
-            if (var->ptr_level || is_array_declarator(var)) {
+            if (var->ptr_level || is_array_declarator(var) ||
+                scalar_pointee_row) {
                 vd->type = lvalue->type;
                 vd->ptr_level = var->ptr_level + !!is_array_declarator(var);
+                if (scalar_pointee_row)
+                    copy_pointee_array_shape(vd, var);
+                else if (is_array_declarator(var) && var->array_dim2 &&
+                         !has_effective_pointer(var) && !var->is_func) {
+                    fixed_array_shape_t shape = fixed_array_shape_from_var(var);
+
+                    fixed_array_shape_drop_outer(&shape);
+                    fixed_array_shape_to_pointee_var(vd, &shape);
+                }
             }
             vd->var_name = gen_name();
             vd->is_const_qualified = var->is_const_qualified;
@@ -10693,14 +11927,30 @@ void read_lvalue(lvalue_t *lvalue,
             rs1 = operand_stack[operand_stack_idx - 1];
             t = require_var(parent);
             t->var_name = gen_name();
-            t->type = pointee_type_from_pointer_typedef(lvalue->type);
+            t->type = pointer_row_element_type
+                          ? pointer_row_element_type
+                          : pointee_type_from_pointer_typedef(lvalue->type);
             t->ptr_level = lvalue->value_ptr_level;
+            if (pointer_row_element_type)
+                t->is_const_qualified = lvalue->type->is_const_qualified;
 
             /* Retain a callback prototype even through a selected slot. A
              * direct loaded callback is callable, while unary `*` restores this
              * marker after consuming an extra object-pointer level.
              */
             t->func_signature = lvalue->type->func_signature;
+            if (lvalue->pointee_func_signature) {
+                /* `slots[i]` loads a callback slot, not a callable callback.
+                 * Preserve the element's prototype until one unary `*` consumes
+                 * this outer object-pointer level.
+                 */
+                t->ptr_level = 1;
+                t->func_signature = NULL;
+                t->pointee_func_signature = lvalue->pointee_func_signature;
+                t->is_const_pointer = var->type->array_element_is_const_pointer;
+                t->pointer_const_mask = t->is_const_pointer ? 1U : 0;
+                t->is_volatile = var->type->array_element_is_volatile;
+            }
             opstack_push(t);
             if (is_bitfield(lvalue->decl)) {
                 /* Bit-fields are values, never independently addressable
@@ -10724,7 +11974,9 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* For pointer arithmetic, increment by the size of pointed-to type
              */
-            if (lvalue->ptr_level > 1)
+            if (!lvalue->is_reference && is_scalar_pointee_array_pointer(var))
+                vd->init_val = scalar_pointee_array_row_stride(var);
+            else if (lvalue->ptr_level > 1)
                 vd->init_val = PTR_SIZE;
             else if (lvalue->ptr_level)
                 vd->init_val = lvalue->type->size;
@@ -10802,7 +12054,9 @@ void read_lvalue(lvalue_t *lvalue,
 
             /* Calculate increment size based on pointer type */
             int increment_size = 1;
-            if (lvalue->ptr_level > 1 && !lvalue->is_reference) {
+            if (!lvalue->is_reference && is_scalar_pointee_array_pointer(var)) {
+                increment_size = scalar_pointee_array_row_stride(var);
+            } else if (lvalue->ptr_level > 1 && !lvalue->is_reference) {
                 increment_size = PTR_SIZE;
             } else if (lvalue->ptr_level && !lvalue->is_reference) {
                 increment_size = lvalue->type->size;
@@ -10853,6 +12107,11 @@ void read_lvalue(lvalue_t *lvalue,
                 side_effect[se_idx].rs1 = operand_stack[operand_stack_idx - 1];
             vd = require_var(parent);
             vd->var_name = gen_name();
+            if (!lvalue->is_reference && is_scalar_pointee_array_pointer(var)) {
+                vd->type = lvalue->type;
+                vd->ptr_level = var->ptr_level;
+                copy_pointee_array_shape(vd, var);
+            }
             side_effect[se_idx].rd = vd;
             se_idx++;
 
@@ -11081,6 +12340,124 @@ basic_block_t *read_full_expression_statement(block_t *parent,
     return bb;
 }
 
+/* This is deliberately narrower than expression assignment recognition: a
+ * grouped pointer-to-row store has no general lvalue representation yet.
+ */
+static bool grouped_scalar_pointee_row_store_starts(void)
+{
+    token_t *token = cur_token ? cur_token->next : NULL;
+    int depth = 0;
+
+    if (!token || token->kind != T_open_bracket || !(token = token->next) ||
+        token->kind != T_asterisk || !(token = token->next) ||
+        token->kind != T_identifier || !(token = token->next) ||
+        token->kind != T_close_bracket || !(token = token->next) ||
+        token->kind != T_open_square)
+        return false;
+    for (; token; token = token->next) {
+        if (token->kind == T_open_square || token->kind == T_open_bracket ||
+            token->kind == T_open_curly)
+            depth++;
+        else if (token->kind == T_close_square ||
+                 token->kind == T_close_bracket ||
+                 token->kind == T_close_curly) {
+            if (!--depth)
+                break;
+        }
+    }
+    if (!token || !(token = token->next) ||
+        (token->kind != T_assign && token->kind != T_pluseq &&
+         token->kind != T_minuseq))
+        return false;
+    for (depth = 0, token = token->next; token; token = token->next) {
+        if (token->kind == T_open_square || token->kind == T_open_bracket ||
+            token->kind == T_open_curly)
+            depth++;
+        else if (token->kind == T_close_square ||
+                 token->kind == T_close_bracket || token->kind == T_close_curly)
+            depth--;
+        else if (!depth && token->kind == T_comma)
+            return false;
+        else if (!depth && token->kind == T_semicolon)
+            return true;
+    }
+    return false;
+}
+
+static basic_block_t *handle_grouped_scalar_pointee_row_store(block_t *parent,
+                                                              basic_block_t *bb)
+{
+    char name[MAX_VAR_LEN];
+    var_t *source, *row, *index, *address, *value;
+
+    lex_expect(T_open_bracket);
+    lex_expect(T_asterisk);
+    lex_ident(T_identifier, name);
+    source = find_var(name, parent);
+    if (!source)
+        error_at("Undeclared identifier", cur_token_loc());
+    if (!lower_scalar_pointee_array_dereference(source, parent, &bb))
+        error_at("Grouped pointer-to-array store requires a scalar fixed row",
+                 cur_token_loc());
+    row = opstack_pop();
+    if (row->is_const_qualified)
+        error_at("assignment of read-only location", cur_token_loc());
+    lex_expect(T_close_bracket);
+    lex_expect(T_open_square);
+    if (!read_assignment_expression(parent, &bb)) {
+        read_expr(parent, &bb);
+        read_ternary_operation(parent, &bb);
+    }
+    index = opstack_pop();
+    lex_expect(T_close_square);
+    if (row->type->size != 1) {
+        var_t *scale = require_var(parent);
+        var_t *scaled = require_var(parent);
+        scale->var_name = gen_name();
+        scale->init_val = row->type->size;
+        add_insn(parent, bb, OP_load_constant, scale, NULL, NULL, 0, NULL);
+        scaled->var_name = gen_name();
+        add_insn(parent, bb, OP_mul, scaled, index, scale, 0, NULL);
+        index = scaled;
+    }
+    address = require_typed_ptr_var(parent, row->type, 1);
+    address->var_name = gen_name();
+    add_insn(parent, bb, OP_add, address, row, index, 0, NULL);
+    opcode_t compound_op = OP_generic;
+    if (lex_accept(T_pluseq))
+        compound_op = OP_add;
+    else if (lex_accept(T_minuseq))
+        compound_op = OP_sub;
+    else
+        lex_expect(T_assign);
+    if (!read_assignment_expression(parent, &bb)) {
+        read_expr(parent, &bb);
+        read_ternary_operation(parent, &bb);
+    }
+    value = opstack_pop();
+    if (compound_op != OP_generic) {
+        if (value->is_func || is_pointer_like_value(value) ||
+            is_record_type(value->type))
+            error_at("Invalid compound assignment operand", cur_token_loc());
+        var_t *current = require_typed_var(parent, row->type);
+        current->var_name = gen_name();
+        add_insn(parent, bb, OP_read, current, address, NULL, row->type->size,
+                 NULL);
+        current = integer_promote_operand(parent, &bb, current);
+        value = integer_promote_operand(parent, &bb, value);
+        normalize_integer_binary_operands(parent, &bb, compound_op, &current,
+                                          &value);
+        var_t *updated = require_var(parent);
+        updated->var_name = gen_name();
+        updated->type = integer_binary_result_type(compound_op, current, value);
+        add_insn(parent, bb, compound_op, updated, current, value, 0, NULL);
+        value = resize_to(parent, &bb, updated, row->type, 0);
+    }
+    add_insn(parent, bb, OP_write, NULL, address, value, row->type->size, NULL);
+    lex_expect(T_semicolon);
+    return bb;
+}
+
 /* The middle operand of ?: is an expression, rather than merely an
  * assignment-expression, so top-level commas belong to the selected true
  * branch. Keep this small sequencing layer here until all full-expression entry
@@ -11164,6 +12541,8 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     false_val = materialize_function_designator(parent, &else_, false_val);
     func_t *true_signature = get_func_signature(true_val);
     func_t *false_signature = get_func_signature(false_val);
+    func_t *true_pointee_signature = true_val->pointee_func_signature;
+    func_t *false_pointee_signature = false_val->pointee_func_signature;
     bool true_array = is_array_literal_placeholder(true_val);
     bool false_array = is_array_literal_placeholder(false_val);
     bool true_ptr_like = is_pointer_like_value(true_val);
@@ -11188,7 +12567,28 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
 
     vd = require_var(parent);
     vd->var_name = gen_name();
-    if (true_signature || false_signature) {
+    if (true_pointee_signature || false_pointee_signature) {
+        func_t *signature = true_pointee_signature ? true_pointee_signature
+                                                   : false_pointee_signature;
+        var_t *pointer_value = true_pointee_signature ? true_val : false_val;
+        var_t *other_value = true_pointee_signature ? false_val : true_val;
+
+        if ((true_pointee_signature && false_pointee_signature &&
+             !compatible_function_signature(true_pointee_signature,
+                                            false_pointee_signature)) ||
+            (!other_value->pointee_func_signature &&
+             !is_null_pointer_constant(other_value)))
+            error_at("Conditional callback slots must be compatible or null",
+                     cur_token_loc());
+
+        /* A matching conditional slot remains non-callable until dereferenced,
+         * so preserve its pointee signature rather than presenting the outer
+         * pointer as a function pointer.
+         */
+        vd->type = pointer_value->type;
+        vd->ptr_level = pointer_value->ptr_level;
+        vd->pointee_func_signature = signature;
+    } else if (true_signature || false_signature) {
         func_t *signature = true_signature ? true_signature : false_signature;
         var_t *pointer_value = true_signature ? true_val : false_val;
         var_t *other_value = true_signature ? false_val : true_val;
@@ -11314,7 +12714,10 @@ bool read_body_assignment(char *token,
             /* if we have a pointer, shift it by element size But not if we are
              * operating on a dereferenced value (array indexing)
              */
-            if (lvalue.ptr_level > 1 && !lvalue.is_reference)
+            if (!one && (op == OP_add || op == OP_sub) &&
+                !lvalue.is_reference && is_scalar_pointee_array_pointer(var))
+                increment_size = scalar_pointee_array_row_stride(var);
+            else if (lvalue.ptr_level > 1 && !lvalue.is_reference)
                 increment_size = PTR_SIZE;
             else if (lvalue.ptr_level && !lvalue.is_reference)
                 increment_size = lvalue.type->size;
@@ -11551,6 +12954,27 @@ bool read_body_assignment(char *token,
             } else if (lvalue.is_reference) {
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
+                if (lvalue.pointee_func_signature) {
+                    /* `slots[index]` denotes a callback slot whose descriptor
+                     * is carried by the array, not by its scalar base type.
+                     * Reconstruct that element target before writing so an
+                     * ordinary indexed assignment observes the same prototype
+                     * rule as a brace initializer.
+                     */
+                    var_t element_target = {0};
+
+                    element_target.type = lvalue.decl->type;
+                    element_target.ptr_level =
+                        lvalue.decl->type->array_element_ptr_level;
+                    element_target.pointee_func_signature =
+                        lvalue.pointee_func_signature;
+                    if (incompatible_pointee_callback_conversion(
+                            rs2, &element_target))
+                        error_at(
+                            "incompatible callback slot types in array "
+                            "assignment",
+                            cur_token_loc());
+                }
                 if (is_bitfield(lvalue.decl))
                     write_bitfield_value(parent, bb, rs1, rs2, lvalue.decl);
                 else
@@ -11593,6 +13017,9 @@ bool read_body_assignment(char *token,
                     error_at(
                         "incompatible character pointer types in assignment",
                         cur_token_loc());
+                } else if (incompatible_pointee_callback_conversion(rs1, vd)) {
+                    error_at("incompatible callback slot types in assignment",
+                             cur_token_loc());
                 } else if (incompatible_const_pointer_conversion(rs1, vd)) {
                     diagnose_const_pointer_conversion(rs1, vd);
                 } else {
@@ -11606,6 +13033,7 @@ bool read_body_assignment(char *token,
         }
         return true;
     }
+
     return false;
 }
 
@@ -11713,6 +13141,7 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
         var_t *field = NULL;
         opcode_t compound_op = OP_generic;
         int store_size;
+        int grouped_fixed_array_dimensions = 0;
         type_t *value_type;
         int value_ptr_level;
 
@@ -11727,6 +13156,77 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
         object_address = address;
         while (lvalue_paren_depth-- > 0)
             lex_expect(T_close_bracket);
+
+        /* The ordinary `(*pointer)` assignment path historically stopped at the
+         * grouping close. Admit only exact scalar fixed-array suffixes here,
+         * retaining its common store/result lowering below.
+         */
+        if (lex_peek(T_open_square, NULL)) {
+            var_t shape = {0};
+            fixed_array_shape_t array_shape;
+            int depth = 0;
+            int dimensions;
+
+            if (!address->pointee_array_size ||
+                address->pointee_array_element_ptr_level ||
+                effective_pointer_depth(address) != 1)
+                error_at(
+                    "Grouped subscript requires a scalar fixed array pointer",
+                    cur_token_loc());
+            shape.type = address->type->pointee_array_element_type
+                             ? address->type->pointee_array_element_type
+                             : address->type;
+            array_shape = fixed_array_shape_from_pointee_var(address);
+            fixed_array_shape_to_var(&shape, &array_shape);
+            dimensions = array_shape.rank;
+            grouped_fixed_array_dimensions = dimensions;
+            if (dimensions > 4)
+                error_at(
+                    "Grouped fixed-array assignment supports at most four "
+                    "dimensions",
+                    cur_token_loc());
+            while (lex_accept(T_open_square)) {
+                var_t *index;
+                var_t *scale;
+                var_t *offset;
+                var_t *next;
+                int stride;
+
+                if (depth >= dimensions)
+                    error_at("Too many grouped array subscripts",
+                             cur_token_loc());
+                if (!read_assignment_expression(parent, bb)) {
+                    read_expr(parent, bb);
+                    read_ternary_operation(parent, bb);
+                }
+                index = opstack_pop();
+                lex_expect(T_close_square);
+                stride = fixed_array_subscript_stride(&shape, depth,
+                                                      shape.type->size);
+                offset = index;
+                if (stride != 1) {
+                    scale = require_var(parent);
+                    scale->var_name = gen_name();
+                    scale->init_val = stride;
+                    add_insn(parent, *bb, OP_load_constant, scale, NULL, NULL,
+                             0, NULL);
+                    offset = require_var(parent);
+                    offset->var_name = gen_name();
+                    add_insn(parent, *bb, OP_mul, offset, index, scale, 0,
+                             NULL);
+                }
+                next = require_typed_ptr_var(parent, shape.type, 1);
+                next->var_name = gen_name();
+                next->is_const_qualified = object_address->is_const_qualified ||
+                                           shape.type->is_const_qualified;
+                add_insn(parent, *bb, OP_add, next, address, offset, 0, NULL);
+                address = next;
+                depth++;
+            }
+            if (depth != dimensions)
+                error_at("Grouped fixed-array assignment needs all subscripts",
+                         cur_token_loc());
+        }
 
         value_type = pointee_type_from_pointer_typedef(address->type);
         value_ptr_level = address->ptr_level > 1 ? address->ptr_level - 1 : 0;
@@ -11770,12 +13270,29 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
         if (!lex_accept(T_assign) && !accept_compound_assign_op(&compound_op))
             error_at("Expected assignment after pointer dereference",
                      cur_token_loc());
+        if (grouped_fixed_array_dimensions >= 3 && compound_op != OP_generic &&
+            compound_op != OP_add && compound_op != OP_sub &&
+            compound_op != OP_mul && compound_op != OP_div &&
+            compound_op != OP_mod && compound_op != OP_lshift &&
+            compound_op != OP_rshift && compound_op != OP_bit_and &&
+            compound_op != OP_bit_xor && compound_op != OP_bit_or)
+            error_at("Unsupported rank-three/four grouped compound assignment",
+                     cur_token_loc());
 
         if (!read_assignment_expression(parent, bb)) {
             read_expr(parent, bb);
             read_ternary_operation(parent, bb);
         }
         value = opstack_pop();
+
+        if (grouped_fixed_array_dimensions >= 3 && compound_op != OP_generic &&
+            (value_ptr_level != 0 || is_record_type(value_type) ||
+             value_type->is_floating || value->is_func ||
+             is_pointer_like_value(value) || is_record_type(value->type) ||
+             value->type->is_floating))
+            error_at(
+                "Invalid rank-three/four grouped compound assignment operand",
+                cur_token_loc());
 
         if (compound_op != OP_generic) {
             var_t *current;
@@ -11994,6 +13511,7 @@ int read_primary_constant(block_t *scope)
         token_t *inside =
             lex_peek(T_open_bracket, NULL) ? cur_token->next->next : NULL;
         var_t *nested_array = NULL;
+        token_t *nested_root = NULL;
         token_t *nested_after = NULL;
         int nested_groups = 0;
 
@@ -12004,6 +13522,7 @@ int read_primary_constant(block_t *scope)
                 nested_groups++;
                 token = token->next;
             }
+            nested_root = token;
             if (token && token->kind == T_identifier)
                 nested_array = find_var(token->literal, scope);
             nested_after = token ? token->next : NULL;
@@ -12012,8 +13531,18 @@ int read_primary_constant(block_t *scope)
                  i++)
                 nested_after = nested_after->next;
         }
-        if (inside && inside->kind == T_open_bracket && inside->next &&
-            inside->next->kind == T_string) {
+        if (can_scan_sizeof_postfix_extent(scope,
+                                           lex_peek(T_open_bracket, NULL)
+                                               ? cur_token->next->next
+                                               : cur_token->next,
+                                           lex_peek(T_open_bracket, NULL))) {
+            /* The shared postfix walker has already proved this is an
+             * identifier-rooted fixed array extent, so the detached parser can
+             * preserve it without a global-prefix spelling table.
+             */
+            res = read_global_sizeof_expression(scope);
+        } else if (inside && inside->kind == T_open_bracket && inside->next &&
+                   inside->next->kind == T_string) {
             lex_expect(T_open_bracket);
             lex_expect(T_open_bracket);
             res = read_const_string_size();
@@ -12032,6 +13561,16 @@ int read_primary_constant(block_t *scope)
                 lex_expect(T_close_bracket);
             lex_expect(T_close_bracket);
             res = size_var(nested_array);
+        } else if (nested_array && nested_groups > 0 && nested_root &&
+                   nested_root->next &&
+                   (nested_root->next->kind == T_dot ||
+                    nested_root->next->kind == T_arrow)) {
+            /* The local sizeof helper preserves a member-array lvalue through
+             * arbitrary grouping before a postfix subscript. Reuse it in a
+             * detached block for a global constant instead of duplicating that
+             * type-only traversal here.
+             */
+            res = read_global_sizeof_expression(scope);
         } else if (inside && inside->kind == T_open_bracket && inside->next &&
                    inside->next->kind == T_open_bracket && inside->next->next &&
                    inside->next->next->kind == T_identifier) {
@@ -12120,6 +13659,15 @@ int read_primary_constant(block_t *scope)
             lex_expect(T_close_bracket);
             validate_global_sizeof_object(object);
             res = sizeof_subscripted_array(object, subscript_depth);
+        } else if (inside && inside->kind == T_asterisk && inside->next &&
+                   inside->next->kind == T_identifier && inside->next->next &&
+                   inside->next->next->kind == T_open_square &&
+                   is_direct_fixed_array_pointer_slot(
+                       find_var(inside->next->literal, scope))) {
+            /* The shared direct-pointer helper also owns the supported global
+             * pointer-array slot form.
+             */
+            res = read_global_sizeof_expression(scope);
         } else if (inside && inside->kind == T_asterisk && inside->next &&
                    inside->next->kind == T_ampersand) {
             var_t *object;
@@ -12490,6 +14038,8 @@ int read_global_address_offset(block_t *scope,
     return read_const_expr(scope);
 }
 
+static int wide_global_unevaluated_depth;
+
 /* Fold the operations that only need word arithmetic before emitting global
  * setup code. That setup block is deliberately conservative about constants,
  * and previously allowed a paired add/subtract to lose its high half.
@@ -12507,6 +14057,95 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
     unsigned int rhs_hi = right ? (unsigned int) right->init_val_hi : 0;
     unsigned int out_lo, out_hi;
 
+    if (wide_global_unevaluated_depth) {
+        result->init_val = 0;
+        result->init_val_hi = 0;
+        result->is_const = true;
+        return true;
+    }
+
+    /* The restricted global evaluator selects a conditional arm while parsing,
+     * so comparison results must carry their constant payload rather than exist
+     * only as setup-block IR. Keep this in the compiler's existing two-word
+     * representation: it must also self-host on targets without a complete
+     * host-level 64-bit value ABI.
+     */
+    if (op == OP_eq || op == OP_neq || op == OP_lt || op == OP_leq ||
+        op == OP_gt || op == OP_geq) {
+        type_t *common = integer_common_type(left, right);
+        bool equal;
+        bool less;
+        bool comparison;
+
+        /* Materialize the usual arithmetic conversion in word form. A narrow
+         * signed source sign-extends to either signed long long or unsigned
+         * long long; a narrow unsigned source zero-extends in both cases.
+         */
+        if (left->type->size <= TY_int->size)
+            hi = left->type->is_unsigned || !(lo & 0x80000000U) ? 0
+                                                                : 0xffffffffU;
+        if (right->type->size <= TY_int->size)
+            rhs_hi = right->type->is_unsigned || !(rhs_lo & 0x80000000U)
+                         ? 0
+                         : 0xffffffffU;
+
+        if (common->size <= TY_int->size) {
+            equal = lo == rhs_lo;
+            if (common->is_unsigned)
+                less = lo < rhs_lo;
+            else if ((lo ^ rhs_lo) & 0x80000000U)
+                less = lo & 0x80000000U;
+            else
+                less = lo < rhs_lo;
+        } else {
+            equal = hi == rhs_hi && lo == rhs_lo;
+            if (common->is_unsigned)
+                less = hi < rhs_hi || (hi == rhs_hi && lo < rhs_lo);
+            else if ((hi ^ rhs_hi) & 0x80000000U)
+                less = hi & 0x80000000U;
+            else
+                less = hi < rhs_hi || (hi == rhs_hi && lo < rhs_lo);
+        }
+
+        switch (op) {
+        case OP_eq:
+            comparison = equal;
+            break;
+        case OP_neq:
+            comparison = !equal;
+            break;
+        case OP_lt:
+            comparison = less;
+            break;
+        case OP_leq:
+            comparison = less || equal;
+            break;
+        case OP_gt:
+            comparison = !less && !equal;
+            break;
+        default:
+            comparison = !less;
+            break;
+        }
+        result->init_val = comparison;
+        result->init_val_hi = 0;
+        result->is_const = true;
+        add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+        return true;
+    }
+
+    if (op == OP_log_and || op == OP_log_or) {
+        bool left_true = lo || hi;
+        bool right_true = rhs_lo || rhs_hi;
+
+        result->init_val = op == OP_log_and ? left_true && right_true
+                                            : left_true || right_true;
+        result->init_val_hi = 0;
+        result->is_const = true;
+        add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+        return true;
+    }
+
     if (op == OP_div || op == OP_mod) {
         unsigned int rem_lo = 0, rem_hi = 0, quo_lo = 0, quo_hi = 0;
         bool is_unsigned = left->type->is_unsigned || right->type->is_unsigned;
@@ -12514,7 +14153,8 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
         bool neg_right = !is_unsigned && (rhs_hi >> 31);
 
         if (rhs_lo == 0 && rhs_hi == 0)
-            return false;
+            error_at("division by zero in global constant expression",
+                     cur_token_loc());
         if (neg_left) {
             lo = ~lo + 1;
             hi = ~hi + (lo == 0);
@@ -12704,8 +14344,83 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         value = read_wide_global_literal_primary(parent, bb, scope);
         result = require_typed_var(parent, TY_int);
         result->var_name = gen_name();
-        add_insn(parent, bb, OP_log_not, result, value, NULL, 0, NULL);
+        result->init_val = !(value->init_val || value->init_val_hi);
+        result->init_val_hi = 0;
+        result->is_const = true;
+        if (!wide_global_unevaluated_depth)
+            add_insn(parent, bb, OP_log_not, result, value, NULL, 0, NULL);
         return result;
+    }
+    if (lex_accept(T_sizeof)) {
+        char sizeof_name[MAX_ID_LEN];
+
+        value = require_typed_var(parent, find_type("size_t", true));
+        value->var_name = gen_name();
+        if (lex_peek(T_string, NULL))
+            value->init_val = read_const_string_size();
+        else if (lex_peek(T_wstring, NULL))
+            value->init_val = read_const_wstring_size();
+        else if (lex_peek(T_numeric, NULL))
+            value->init_val = read_global_sizeof_expression(scope);
+        else if (lex_peek(T_open_bracket, NULL) && cur_token->next &&
+                 cur_token->next->next &&
+                 cur_token->next->next->kind == T_string) {
+            lex_expect(T_open_bracket);
+            value->init_val = read_const_string_size();
+            lex_expect(T_close_bracket);
+        } else if (lex_peek(T_open_bracket, NULL) && cur_token->next &&
+                   cur_token->next->next &&
+                   cur_token->next->next->kind == T_wstring) {
+            lex_expect(T_open_bracket);
+            value->init_val = read_const_wstring_size();
+            lex_expect(T_close_bracket);
+        } else if (lex_peek(T_open_bracket, NULL) && cur_token->next &&
+                   cur_token->next->next &&
+                   cur_token->next->next->kind == T_numeric) {
+            value->init_val = read_global_sizeof_expression(scope);
+        } else if (lex_peek(T_open_bracket, NULL) && cur_token->next &&
+                   cur_token->next->next &&
+                   cur_token->next->next->kind == T_open_bracket) {
+            /* A nested group is an expression operand, e.g. sizeof((void)1) or
+             * sizeof((*incomplete_pointer)).
+             */
+            value->init_val = read_global_sizeof_expression(scope);
+        } else if (lex_peek(T_open_bracket, NULL) && cur_token->next &&
+                   cur_token->next->next &&
+                   cur_token->next->next->kind == T_asterisk &&
+                   cur_token->next->next->next &&
+                   cur_token->next->next->next->kind == T_identifier &&
+                   cur_token->next->next->next->next &&
+                   cur_token->next->next->next->next->kind == T_open_square &&
+                   is_direct_fixed_array_pointer_slot(
+                       find_var(cur_token->next->next->next->literal, scope))) {
+            value->init_val = read_global_sizeof_expression(scope);
+        } else if (lex_peek(T_open_bracket, NULL) && cur_token->next &&
+                   cur_token->next->next &&
+                   cur_token->next->next->kind == T_identifier &&
+                   cur_token->next->next->next &&
+                   cur_token->next->next->next->kind == T_close_bracket &&
+                   find_var(cur_token->next->next->literal, scope)) {
+            value->init_val = read_global_sizeof_expression(scope);
+        } else if (lex_peek(T_identifier, sizeof_name) &&
+                   find_var(sizeof_name, scope)) {
+            value->init_val = read_global_sizeof_expression(scope);
+        } else if (lex_peek(T_open_bracket, NULL) && cur_token->next &&
+                   cur_token->next->next &&
+                   cur_token->next->next->kind == T_identifier &&
+                   cur_token->next->next->next &&
+                   cur_token->next->next->next->kind == T_close_bracket &&
+                   find_func(cur_token->next->next->literal)) {
+            value->init_val = read_global_sizeof_expression(scope);
+        } else if (lex_peek(T_identifier, sizeof_name) &&
+                   find_func(sizeof_name)) {
+            value->init_val = read_global_sizeof_expression(scope);
+        } else
+            value->init_val = read_const_sizeof_type(scope);
+        value->init_val_hi = 0;
+        value->is_const = true;
+        add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
+        return value;
     }
     if (lex_accept(T_open_bracket)) {
         value = read_wide_global_literal_expression(parent, bb, scope);
@@ -12744,6 +14459,7 @@ var_t *read_wide_global_literal_expression(block_t *parent,
                                            block_t *scope)
 {
     opcode_t op_stack[MAX_OPERATOR_STACK_SIZE];
+    bool protected_rhs[MAX_OPERATOR_STACK_SIZE] = {0};
     var_t *val_stack[MAX_OPERATOR_STACK_SIZE];
     int op_stack_index = 0, val_stack_index = 0;
     opcode_t op;
@@ -12752,9 +14468,65 @@ var_t *read_wide_global_literal_expression(block_t *parent,
         read_wide_global_literal_primary(parent, bb, scope);
     op = get_operator();
     while (op != OP_generic) {
-        if (op == OP_ternary || is_logical(op))
-            error_at("Wide global initializer needs arithmetic literals",
-                     cur_token_loc());
+        if (op == OP_ternary) {
+            var_t *condition;
+            var_t *when_true;
+            var_t *when_false;
+            type_t *common;
+            bool condition_true;
+
+            /* `?:` has the lowest precedence. Fold every pending binary
+             * operator first so the condition is the complete expression, not
+             * merely the primary immediately before `?`.
+             */
+            while (op_stack_index > 0) {
+                var_t *right = val_stack[--val_stack_index];
+                var_t *left = val_stack[--val_stack_index];
+                var_t *result = require_var(parent);
+
+                op_stack_index--;
+                if (protected_rhs[op_stack_index])
+                    wide_global_unevaluated_depth--;
+                result->var_name = gen_name();
+                result->type = integer_binary_result_type(
+                    op_stack[op_stack_index], left, right);
+                if (!emit_wide_global_word_arithmetic(parent, bb, result,
+                                                      op_stack[op_stack_index],
+                                                      left, right))
+                    add_insn(parent, bb, op_stack[op_stack_index], result, left,
+                             right, 0, NULL);
+                val_stack[val_stack_index++] = result;
+            }
+            condition = val_stack[--val_stack_index];
+            condition_true = condition->init_val || condition->init_val_hi;
+
+            /* A global conditional expression is still an integer constant
+             * expression, but both arms undergo the usual arithmetic
+             * conversions before the constant condition selects one. Parse both
+             * through the wide reader so a discarded high word can never leak
+             * through the legacy int-only evaluator.
+             */
+            lex_expect(T_question);
+            if (!condition_true)
+                wide_global_unevaluated_depth++;
+            when_true = read_wide_global_literal_expression(parent, bb, scope);
+            if (!condition_true)
+                wide_global_unevaluated_depth--;
+            lex_expect(T_colon);
+            if (condition_true)
+                wide_global_unevaluated_depth++;
+            when_false = read_wide_global_literal_expression(parent, bb, scope);
+            if (condition_true)
+                wide_global_unevaluated_depth--;
+            common = integer_common_type(when_true, when_false);
+            normalize_integer_binary_operands(parent, &bb, OP_add, &when_true,
+                                              &when_false);
+            if (when_true->type != common)
+                when_true = resize_to(parent, &bb, when_true, common, 0);
+            if (when_false->type != common)
+                when_false = resize_to(parent, &bb, when_false, common, 0);
+            return condition_true ? when_true : when_false;
+        }
         while (op_stack_index > 0 &&
                get_operator_prio(op_stack[op_stack_index - 1]) >=
                    get_operator_prio(op)) {
@@ -12762,9 +14534,12 @@ var_t *read_wide_global_literal_expression(block_t *parent,
             var_t *left = val_stack[--val_stack_index];
             var_t *result = require_var(parent);
 
+            op_stack_index--;
+            if (protected_rhs[op_stack_index])
+                wide_global_unevaluated_depth--;
             result->var_name = gen_name();
-            result->type = integer_binary_result_type(
-                op_stack[--op_stack_index], left, right);
+            result->type = integer_binary_result_type(op_stack[op_stack_index],
+                                                      left, right);
             if (!emit_wide_global_word_arithmetic(
                     parent, bb, result, op_stack[op_stack_index], left, right))
                 add_insn(parent, bb, op_stack[op_stack_index], result, left,
@@ -12774,7 +14549,18 @@ var_t *read_wide_global_literal_expression(block_t *parent,
         if (op_stack_index >= MAX_OPERATOR_STACK_SIZE ||
             val_stack_index >= MAX_OPERATOR_STACK_SIZE)
             fatal("Wide global initializer is too complex");
+        protected_rhs[op_stack_index] =
+            is_logical(op) &&
+            ((op == OP_log_and &&
+              !(val_stack[val_stack_index - 1]->init_val ||
+                val_stack[val_stack_index - 1]->init_val_hi)) ||
+             (op == OP_log_or &&
+              (val_stack[val_stack_index - 1]->init_val ||
+               val_stack[val_stack_index - 1]->init_val_hi)));
         op_stack[op_stack_index++] = op;
+        if (protected_rhs[op_stack_index - 1]) {
+            wide_global_unevaluated_depth++;
+        }
         val_stack[val_stack_index++] =
             read_wide_global_literal_primary(parent, bb, scope);
         op = get_operator();
@@ -12784,9 +14570,12 @@ var_t *read_wide_global_literal_expression(block_t *parent,
         var_t *left = val_stack[--val_stack_index];
         var_t *result = require_var(parent);
 
+        op_stack_index--;
+        if (protected_rhs[op_stack_index])
+            wide_global_unevaluated_depth--;
         result->var_name = gen_name();
         result->type =
-            integer_binary_result_type(op_stack[--op_stack_index], left, right);
+            integer_binary_result_type(op_stack[op_stack_index], left, right);
         if (!emit_wide_global_word_arithmetic(
                 parent, bb, result, op_stack[op_stack_index], left, right))
             add_insn(parent, bb, op_stack[op_stack_index], result, left, right,
@@ -12857,6 +14646,10 @@ bool read_global_assignment_var(var_t *var)
 
             address_dereference_identifier =
                 consume_global_function_address_dereference();
+            if (!find_visible_func(address_dereference_identifier->literal,
+                                   scope))
+                error_at("Function address requires a visible declaration",
+                         cur_token_loc());
             if (!var->is_func && !var->ptr_level &&
                 !(var->type && var->type->ptr_level))
                 error_at("Function address requires a pointer initializer",
@@ -12878,7 +14671,7 @@ bool read_global_assignment_var(var_t *var)
         }
         char token[MAX_ID_LEN];
         if (lex_peek(T_identifier, token)) {
-            func_t *func = find_func(token);
+            func_t *func = find_visible_func(token, scope);
             if (func) {
                 if (!var->is_func && !var->ptr_level &&
                     !(var->type && var->type->ptr_level))
@@ -12907,32 +14700,23 @@ bool read_global_assignment_var(var_t *var)
             var_t *object = find_var(token, scope);
             if (object && object->is_global &&
                 (explicit_address || object->array_size)) {
-                int array_bounds[4] = {0, 0, 0, 0};
-                int array_dims = 0;
+                fixed_array_shape_t shape = fixed_array_shape_from_var(object);
                 int array_subscript = 0;
                 var_t *object_addr =
                     require_ref_var(parent, object->type, object->ptr_level);
 
-                if (object->array_size) {
-                    int inner_size = 1;
-
-                    if (object->array_dim2)
-                        inner_size *= object->array_dim2;
-                    if (object->array_dim3)
-                        inner_size *= object->array_dim3;
-                    if (object->array_dim4)
-                        inner_size *= object->array_dim4;
-                    array_bounds[array_dims++] =
-                        object->array_size / inner_size;
-                    if (object->array_dim2)
-                        array_bounds[array_dims++] = object->array_dim2;
-                    if (object->array_dim3)
-                        array_bounds[array_dims++] = object->array_dim3;
-                    if (object->array_dim4)
-                        array_bounds[array_dims++] = object->array_dim4;
-                }
                 object_addr->var_name = gen_name();
                 object_addr->is_global_address = true;
+
+                /* Taking the address of a callback object creates a slot.
+                 * Retain the callback prototype on that non-callable outer
+                 * pointer so the global initializer conversion below has the
+                 * same information as block-scope `&callback`.
+                 */
+                object_addr->pointee_func_signature =
+                    object->pointee_func_signature
+                        ? object->pointee_func_signature
+                        : object->func_signature;
                 lex_expect(T_identifier);
                 add_insn(parent, bb, OP_address_of, object_addr, object, NULL,
                          0, NULL);
@@ -12945,12 +14729,7 @@ bool read_global_assignment_var(var_t *var)
                     var_t *offset_addr = require_ref_var(parent, object->type,
                                                          object->ptr_level);
 
-                    if (object->array_dim2)
-                        stride *= object->array_dim2;
-                    if (object->array_dim3)
-                        stride *= object->array_dim3;
-                    if (object->array_dim4)
-                        stride *= object->array_dim4;
+                    stride = fixed_array_shape_stride(&shape, 0, stride);
                     byte_offset->var_name = gen_name();
                     byte_offset->init_val = index * stride;
                     add_insn(parent, bb, OP_load_constant, byte_offset, NULL,
@@ -12975,26 +14754,8 @@ bool read_global_assignment_var(var_t *var)
                                                             object_addr, field);
                         object_addr->is_global_address = true;
                         object = field;
-                        array_dims = 0;
+                        shape = fixed_array_shape_from_var(object);
                         array_subscript = 0;
-                        if (object->array_size) {
-                            int inner_size = 1;
-
-                            if (object->array_dim2)
-                                inner_size *= object->array_dim2;
-                            if (object->array_dim3)
-                                inner_size *= object->array_dim3;
-                            if (object->array_dim4)
-                                inner_size *= object->array_dim4;
-                            array_bounds[array_dims++] =
-                                object->array_size / inner_size;
-                            if (object->array_dim2)
-                                array_bounds[array_dims++] = object->array_dim2;
-                            if (object->array_dim3)
-                                array_bounds[array_dims++] = object->array_dim3;
-                            if (object->array_dim4)
-                                array_bounds[array_dims++] = object->array_dim4;
-                        }
                     } else if (object->array_size &&
                                lex_accept(T_open_square)) {
                         int index = read_primary_constant(scope);
@@ -13002,9 +14763,8 @@ bool read_global_assignment_var(var_t *var)
                             object->ptr_level ? PTR_SIZE : object->type->size;
 
                         lex_expect(T_close_square);
-                        for (int dim = array_subscript + 1; dim < array_dims;
-                             dim++)
-                            stride *= array_bounds[dim];
+                        stride = fixed_array_shape_stride(
+                            &shape, array_subscript, stride);
                         object_addr = compute_element_address(
                             parent, &bb, object_addr, index, stride);
                         object_addr->is_global_address = true;
@@ -13033,13 +14793,16 @@ bool read_global_assignment_var(var_t *var)
                      * remaining row dimensions. Its trailing constant offset
                      * must therefore use the row/plane stride.
                      */
-                    for (int dim = array_subscript; dim < array_dims; dim++)
-                        elem_size *= array_bounds[dim];
+                    elem_size = fixed_array_shape_stride(
+                        &shape, array_subscript - 1, elem_size);
 
                     object_addr = compute_element_address(
                         parent, &bb, object_addr, index, elem_size);
                     object_addr->is_global_address = true;
                 }
+                if (incompatible_pointee_callback_conversion(object_addr, var))
+                    error_at("incompatible callback slot types in initializer",
+                             cur_token_loc());
                 add_insn(parent, bb, OP_assign, var, object_addr, NULL, 0,
                          NULL);
                 return true;
@@ -13333,6 +15096,18 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
     lex_expect(T_open_bracket);
     read_control_expression(parent, &bb);
     lex_expect(T_close_bracket);
+    var_t *control = operand_stack[operand_stack_idx - 1];
+
+    /* C99 6.8.4.2 requires an integer controlling expression. After the
+     * ordinary expression reader produces the operand, enforce that constraint
+     * and apply integer promotions before deferred dispatch captures it.
+     */
+    if (!control->type || control->type == TY_void ||
+        is_pointer_like_value(control) || control->is_func ||
+        is_record_type(control->type))
+        error_at("switch controlling expression must have integer type",
+                 cur_token_loc());
+    control = integer_promote_operand(parent, &bb, control);
 
     /* create exit jump for breaks */
     switch_end = bb_create(parent);
@@ -13341,7 +15116,7 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
         fatal("Too many nested switch statements");
     context = &switch_label_contexts[switch_label_context_idx++];
     context->dispatch_parent = parent;
-    context->control = operand_stack[operand_stack_idx - 1];
+    context->control = control;
     context->dispatch_tail = bb;
     context->default_body = NULL;
     context->seen_cases = NULL;
@@ -13393,13 +15168,13 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     var_t *vd;
     var_t *rs1;
     var_t *var;
-    opcode_t prefix_op = OP_generic;
     bool is_const = false;
     bool is_static = false;
     bool is_extern = false;
     bool is_register = false;
     bool is_auto = false;
     bool is_volatile = false;
+    bool saw_decl_specifier = false;
     bool for_decl_semicolon_consumed = false;
 
     lex_expect(T_open_bracket);
@@ -13411,10 +15186,22 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     basic_block_t *setup = bb_create(blk);
     bb_connect(bb, setup, NEXT);
 
-    if (!lex_accept(T_semicolon)) {
+    if (lex_peek(T_typedef, NULL)) {
+        if (strict_c99)
+            error_at("C99 for initializer cannot declare a typedef",
+                     next_token_loc());
+
+        /* The default-mode typedef extension owns the loop's synthetic block
+         * scope. The typedef parser consumes its terminating semicolon and
+         * emits no setup IR.
+         */
+        handle_block_typedef_statement(blk, setup);
+        for_decl_semicolon_consumed = true;
+    } else if (!lex_accept(T_semicolon)) {
         while (lex_peek(T_static, NULL) || lex_peek(T_extern, NULL) ||
                lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
                lex_peek(T_register, NULL) || lex_peek(T_auto, NULL)) {
+            saw_decl_specifier = true;
             if (lex_accept(T_static)) {
                 if (is_static)
                     error_at("duplicate static storage class specifier",
@@ -13449,28 +15236,54 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
         bool has_builtin_type = lex_peek(T_signed, NULL) ||
                                 lex_peek(T_unsigned, NULL) ||
                                 lex_peek(T_long, NULL);
-        if (!has_builtin_type && !lex_peek(T_identifier, token) &&
-            !lex_peek(T_struct, NULL) && !lex_peek(T_union, NULL))
-            error_at("Unexpected token when parsing for loop",
-                     next_token_loc());
-
-        int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-        if (find_type_flag == 1 && lex_accept(T_union)) {
-            find_type_flag = 2;
+        bool has_identifier = lex_peek(T_identifier, token);
+        bool has_record_type = lex_peek(T_struct, NULL) ||
+                               lex_peek(T_union, NULL) ||
+                               lex_peek(T_enum, NULL);
+        bool has_enum_type = lex_peek(T_enum, NULL);
+        bool has_tagged_record =
+            lex_peek(T_struct, NULL) || lex_peek(T_union, NULL);
+        if (has_enum_type) {
+            /* read_full_var_decl() owns consuming and resolving `enum TAG`. Use
+             * a scalar placeholder only to select its declaration path.
+             */
+            type = TY_int;
+        } else if (has_tagged_record) {
+            /* read_full_var_decl() owns consuming and resolving the tag. */
+            type = TY_int;
+        } else {
+            type = has_builtin_type                    ? TY_int
+                   : has_identifier || has_record_type ? find_type(token, 1)
+                                                       : NULL;
         }
-        type = has_builtin_type ? TY_int : find_type(token, find_type_flag);
+        if (!type && saw_decl_specifier)
+            error_at("declaration specifier requires a type", cur_token_loc());
         if (type) {
+            /* C99 6.8.5.3 admits only automatic or register object declarations
+             * here. The default mode retains its historical block-scope
+             * static/extern extension.
+             */
+            if (strict_c99 && (is_static || is_extern))
+                error_at(
+                    "C99 for initializer permits only auto or register objects",
+                    cur_token_loc());
             var = require_typed_var(blk, type);
             var->is_static = is_static;
             var->is_register = is_register;
             var->is_global = is_static;
             var->is_const_qualified = is_const;
             var->is_volatile = is_volatile;
+            parsing_for_initializer_declaration = true;
             read_full_var_decl(var, false, false, false);
+            parsing_for_initializer_declaration = false;
+            if (strict_c99 && var->is_func)
+                error_at("C99 for initializer cannot declare a function",
+                         cur_token_loc());
             if (is_extern) {
                 if (var->is_func || lex_peek(T_open_bracket, NULL)) {
                     /* This helper consumes the declaration's semicolon. */
                     blk->locals.size--;
+                    var->is_block_scope_function_declaration = true;
                     GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] =
                         var;
                     read_global_function_declarator(GLOBAL_BLOCK, var, false);
@@ -13597,14 +15410,9 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
                 }
             }
         } else {
-            do {
-                read_body_assignment(token, blk, OP_generic, &setup, NULL, 0);
-                perform_side_effect(blk, setup);
-                if (!lex_peek(T_comma, NULL))
-                    break;
-                lex_expect(T_comma);
-                lex_peek(T_identifier, token);
-            } while (true);
+            read_control_expression(blk, &setup);
+            opstack_pop();
+            perform_side_effect(blk, setup);
         }
 
         if (!for_decl_semicolon_consumed)
@@ -13639,16 +15447,9 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
 
     /* increment after each loop */
     if (!lex_accept(T_close_bracket)) {
-        do {
-            prefix_op = OP_generic;
-            if (lex_accept(T_increment))
-                prefix_op = OP_add;
-            else if (lex_accept(T_decrement))
-                prefix_op = OP_sub;
-            lex_peek(T_identifier, token);
-            read_body_assignment(token, blk, prefix_op, &inc_, NULL, 0);
-            perform_side_effect(blk, inc_);
-        } while (lex_accept(T_comma));
+        read_control_expression(blk, &inc_);
+        opstack_pop();
+        perform_side_effect(blk, inc_);
         lex_expect(T_close_bracket);
     }
 
@@ -14174,6 +15975,13 @@ var_t *bind_block_extern_object(block_t *parent, var_t *var)
     return var;
 }
 
+static void reject_ordinary_typedef_collision(block_t *block, var_t *var)
+{
+    if (find_block_typedef(block, var->var_name))
+        error_at("ordinary identifier conflicts with typedef name",
+                 cur_token_loc());
+}
+
 /* Everything a statement can still be: a declaration, an assignment, a call, or
  * an expression evaluated for its effect.
  */
@@ -14266,7 +16074,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
 
         if (lex_peek(T_identifier, next_ident)) {
             /* Check if it's a type name */
-            type = find_type(next_ident, 0);
+            type = find_visible_type(next_ident, parent);
             if (type)
                 could_be_type = true;
         }
@@ -14289,7 +16097,8 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
                 find_type_flag = 2;
             if (find_type_flag == 2)
                 lex_peek(T_identifier, token);
-            type = find_type(token, find_type_flag);
+            type = find_type_flag == 2 ? find_type(token, find_type_flag)
+                                       : find_visible_type(token, parent);
             if (find_type_flag == 2)
                 cur_token = type_token;
         }
@@ -14307,6 +16116,53 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
         var->is_const_qualified = is_const;
         var->is_volatile = is_volatile;
         read_full_var_decl(var, false, false, false);
+        reject_ordinary_typedef_collision(parent, var);
+
+        /* A direct function typedef used without a star declares a function,
+         * not an automatic object. Bind it through the file-scope function
+         * table and leave a lexical function alias so it also hides an outer
+         * local object of the same ordinary identifier.
+         */
+        if (var->is_func && var->type->is_direct_function_type) {
+            for (;;) {
+                if (is_static || is_register || is_auto)
+                    error_at(
+                        "invalid storage class for block function declaration",
+                        cur_token_loc());
+                if (is_const || is_volatile || var->is_const_qualified ||
+                    var->is_volatile)
+                    error_at("function type cannot be qualified",
+                             cur_token_loc());
+                parent->locals.size--;
+                var->is_block_scope_function_declaration = true;
+                GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] =
+                    var;
+                read_global_function_declarator(GLOBAL_BLOCK, var, false);
+                var_t *alias = require_var(parent);
+
+                alias->var_name = var->var_name;
+                alias->is_extern_function_alias = true;
+                if (!lex_accept(T_comma))
+                    return bb;
+
+                var = require_typed_var(parent, type);
+                var->is_const_qualified = is_const;
+                var->is_volatile = is_volatile;
+                var->func_signature = type->func_signature;
+                var->is_func = var->func_signature != NULL;
+                read_partial_var_decl(var, NULL);
+                reject_ordinary_typedef_collision(parent, var);
+                if (!(var->is_func && var->type->is_direct_function_type))
+
+                    /* The comma list may continue with an object derived from
+                     * the direct-function typedef, such as `unary_t declared,
+                     * *callback`. The function declaration above has already
+                     * been registered; hand this fully parsed object to the
+                     * ordinary declaration lowering below.
+                     */
+                    break;
+            }
+        }
         if (var->is_inline)
             error_at("inline specifier requires a function declarator",
                      next_token_loc());
@@ -14327,6 +16183,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
                  * consumes the trailing semicolon itself.
                  */
                 parent->locals.size--;
+                var->is_block_scope_function_declaration = true;
                 GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] =
                     var;
                 read_global_function_declarator(GLOBAL_BLOCK, var, false);
@@ -14455,6 +16312,9 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
                     expr_result = first_elem;
                 }
 
+                if (incompatible_pointee_callback_conversion(expr_result, var))
+                    error_at("incompatible callback slot types in initializer",
+                             cur_token_loc());
                 diagnose_const_pointer_conversion(expr_result, var);
                 emit_object_assignment(parent, &bb, var, expr_result);
             }
@@ -14475,6 +16335,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             nv->is_const_qualified = var->is_const_qualified;
             nv->is_volatile = var->is_volatile;
             read_partial_var_decl(nv, var); /* partial */
+            reject_ordinary_typedef_collision(parent, nv);
             if (is_incomplete_record_object(nv))
                 error_at("Incomplete struct/union type cannot define an object",
                          cur_token_loc());
@@ -14572,7 +16433,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             }
         }
         if (matched_call && end && end->kind == T_semicolon && call) {
-            func = find_func(token);
+            func = find_visible_func(token, parent);
             if (func) {
                 lex_expect(T_identifier);
                 emit_direct_call_result(func, false, parent, &bb);
@@ -14699,6 +16560,307 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     return NULL;
 }
 
+/* Lexical typedef aliases are declaration-only bindings on the current block,
+ * never ordinary objects or global type names. This bounded parser admits
+ * selected direct-function, callback-pointer, and fixed callback-array forms;
+ * remaining derived declarations await the shared declarator path.
+ */
+basic_block_t *handle_block_typedef_statement(block_t *parent,
+                                              basic_block_t *bb)
+{
+    var_t decl = {0};
+
+    lex_expect(T_typedef);
+    decl.scope = parent;
+    parsing_block_typedef_declarator = true;
+    read_full_var_decl(&decl, false, false, false);
+    parsing_block_typedef_declarator = false;
+    do {
+        type_t *base = decl.type;
+        type_t *alias = add_type();
+        func_t *direct_function_signature = decl.func_signature;
+        func_t *callback_signature = decl.func_signature;
+        func_t *callback_slot_signature = decl.pointee_func_signature;
+        bool direct_array = decl.has_direct_array_declarator;
+        bool direct_pointee_array = decl.has_direct_pointee_array_declarator;
+        bool inherited_pointee_array = base->pointee_array_size != 0;
+        bool direct_function_alias =
+            decl.is_direct_function_declarator && decl.is_func &&
+            decl.func_signature && !decl.ptr_level && !decl.array_size &&
+            !decl.pointee_array_size && !base->ptr_level &&
+            !is_record_type(base) && !base->is_floating &&
+            !direct_function_signature->va_args &&
+            !direct_function_signature->returns_aggregate;
+        bool callback_pointer_alias =
+            decl.is_func && decl.func_signature &&
+            decl.parenthesized_function_pointer_level == 1 && !decl.ptr_level &&
+            !decl.array_size && !decl.pointee_array_size && !base->ptr_level &&
+            !is_record_type(base) && !base->is_floating &&
+            !callback_signature->va_args &&
+            !callback_signature->returns_aggregate;
+        bool callback_pointer_realias =
+            decl.is_func && decl.func_signature &&
+            !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
+            !decl.array_size && !decl.pointee_array_size && !base->ptr_level &&
+            base->func_signature && !base->is_direct_function_type;
+
+        /* `int (**slot_t)(int)` is a pointer-to-callback object, not a callable
+         * callback pointer. The shared declarator parser has already normalized
+         * the extra star into decl.ptr_level and retained the prototype as
+         * pointee metadata. Keep this first exact typedef form equally narrow:
+         * scalar/void, no arrays or qualifiers, and no deeper pointer
+         * composition.
+         */
+        bool callback_slot_alias =
+            callback_slot_signature &&
+            decl.parenthesized_function_pointer_level == 2 &&
+            decl.ptr_level == 1 && !decl.array_size &&
+            !decl.pointee_array_size && !base->ptr_level &&
+            !is_record_type(base) && !base->is_floating &&
+            !decl.is_const_qualified &&
+            !decl.parenthesized_function_pointer_inner_qualified &&
+            !callback_slot_signature->va_args &&
+            !callback_slot_signature->returns_aggregate;
+        bool callback_slot_realias =
+            decl.pointee_func_signature &&
+            !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
+            !decl.array_size && !decl.pointee_array_size &&
+            base->ptr_level == 1 && base->pointee_func_signature &&
+            !decl.is_const_qualified &&
+            !decl.parenthesized_function_pointer_inner_qualified &&
+            !decl.parenthesized_function_pointer_restrict;
+        bool callback_slot_array_alias =
+            callback_slot_signature &&
+            decl.parenthesized_function_pointer_level == 2 &&
+            decl.ptr_level == 1 && decl.array_size > 0 &&
+            !decl.has_unsized_array && !decl.pointee_array_size &&
+            !base->ptr_level && !base->array_size && !is_record_type(base) &&
+            !base->is_floating && !decl.is_const_qualified &&
+            (!decl.is_const_pointer ||
+             decl.parenthesized_function_pointer_outer_const) &&
+            (!decl.pointer_const_mask ||
+             (decl.parenthesized_function_pointer_outer_const &&
+              decl.pointer_const_mask == 1U)) &&
+            (!decl.is_volatile ||
+             decl.parenthesized_function_pointer_outer_volatile) &&
+            !decl.parenthesized_function_pointer_inner_qualified &&
+            (!decl.parenthesized_function_pointer_restrict ||
+             decl.parenthesized_function_pointer_outer_restrict) &&
+            !callback_slot_signature->va_args &&
+            !callback_slot_signature->returns_aggregate;
+        bool callback_slot_array_realias =
+            !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
+            !decl.pointee_array_size && base->array_size > 0 &&
+            base->array_element_ptr_level == 1 &&
+            base->array_element_pointee_func_signature &&
+            !decl.is_const_pointer && !decl.pointer_const_mask &&
+            !decl.parenthesized_function_pointer_restrict;
+        bool callback_array_alias =
+            decl.is_func && decl.func_signature &&
+            decl.parenthesized_function_pointer_level == 1 &&
+            decl.array_size > 0 && !decl.ptr_level &&
+            !decl.pointee_array_size && !base->ptr_level &&
+            !is_record_type(base) && !base->is_floating &&
+            !callback_signature->va_args &&
+            !callback_signature->returns_aggregate;
+        bool callback_array_realias =
+            decl.is_func && decl.func_signature &&
+            !decl.parenthesized_function_pointer_level && !direct_array &&
+            !decl.ptr_level && !decl.pointee_array_size &&
+            base->array_size > 0 && base->array_element_ptr_level == 1 &&
+            base->func_signature && !base->is_direct_function_type;
+
+        if (decl.parenthesized_function_pointer_level > 1 &&
+            !callback_slot_alias && !callback_slot_array_alias)
+            error_at(
+                "deeper block callback-pointer typedef is not yet supported",
+                cur_token_loc());
+        if (callback_pointer_alias &&
+            decl.parenthesized_function_pointer_restrict)
+            error_at("restrict requires a pointer to an object type",
+                     cur_token_loc());
+        if (callback_array_alias &&
+            (decl.is_const_pointer || (decl.pointer_const_mask & 1U) ||
+             decl.parenthesized_function_pointer_const || decl.is_volatile ||
+             decl.parenthesized_function_pointer_restrict))
+            error_at(
+                "qualified block callback-array typedef is not yet supported",
+                cur_token_loc());
+        if (direct_array && base->func_signature &&
+            !base->is_direct_function_type &&
+            (decl.is_const_qualified || decl.is_volatile))
+            error_at(
+                "qualified block callback-array typedef is not yet supported",
+                cur_token_loc());
+        if (direct_array && base->array_size &&
+            base->array_element_ptr_level == 1 && base->func_signature &&
+            !base->is_direct_function_type)
+            error_at(
+                "derived block callback-array typedef is not yet supported",
+                cur_token_loc());
+
+        /* Keep pointer-to-array aliases intentionally narrow until their
+         * composition rules share the full declarator path. The supported forms
+         * are exactly fixed scalar rows and fixed one-pointer-element rows,
+         * plus a plain re-alias of a completed type.
+         */
+        if (decl.has_unsized_array ||
+            ((decl.is_func || decl.func_signature) && !direct_function_alias &&
+             !callback_pointer_alias && !callback_pointer_realias &&
+             !callback_array_alias && !callback_array_realias &&
+             !callback_slot_alias && !callback_slot_realias &&
+             !callback_slot_array_alias && !callback_slot_array_realias) ||
+            (base->pointee_func_signature && !callback_slot_realias) ||
+            (base->array_element_pointee_func_signature &&
+             !callback_slot_array_realias) ||
+            (direct_array &&
+             ((base->ptr_level && !inherited_pointee_array) ||
+              (inherited_pointee_array && decl.array_dim2) ||
+              (decl.ptr_level && (decl.array_dim2 || decl.ptr_level > 1)))) ||
+            (direct_pointee_array &&
+             (base->ptr_level || base->array_size ||
+              decl.ptr_level != decl.pointee_array_element_ptr_level + 1 ||
+              decl.pointee_array_element_ptr_level > 1)) ||
+            (inherited_pointee_array &&
+             (decl.ptr_level || direct_pointee_array)))
+            error_at("block typedef derived declarator is not yet supported",
+                     cur_token_loc());
+        if (lex_peek(T_assign, NULL))
+            error_at("typedef declaration cannot have an initializer",
+                     next_token_loc());
+        memcpy(alias, base, sizeof(*alias));
+        alias->base_type = TYPE_typedef;
+        alias->base_struct = is_record_type(base) ? base : base->base_struct;
+        alias->ptr_level = base->ptr_level + decl.ptr_level;
+        alias->pointer_const_mask =
+            base->pointer_const_mask |
+            (decl.pointer_const_mask << base->ptr_level);
+        alias->is_const_qualified = decl.is_const_qualified;
+        if (callback_pointer_realias && decl.is_const_qualified) {
+            /* A callback alias itself is a pointer type, even though its
+             * compact descriptor stores no ordinary pointer depth.
+             */
+            alias->pointer_const_mask |= 1U;
+            alias->is_const_qualified = false;
+        }
+        alias->is_volatile_qualified =
+            decl.is_volatile || base->is_volatile_qualified;
+        if (direct_function_alias) {
+            alias->func_signature = decl.func_signature;
+            alias->is_direct_function_type = true;
+        }
+        if (callback_pointer_alias) {
+            alias->size = PTR_SIZE;
+            alias->func_signature = decl.func_signature;
+            alias->is_direct_function_type = false;
+        }
+        if (callback_slot_alias) {
+            alias->size = PTR_SIZE;
+            alias->alignment = PTR_SIZE;
+            alias->func_signature = NULL;
+            alias->pointee_func_signature = callback_slot_signature;
+            alias->is_direct_function_type = false;
+        }
+        if (callback_slot_array_alias) {
+            alias->ptr_level = 0;
+            alias->size = PTR_SIZE;
+            alias->alignment = PTR_SIZE;
+            alias->func_signature = NULL;
+            alias->pointee_func_signature = NULL;
+            alias->is_direct_function_type = false;
+            alias->pointer_const_mask = 0;
+            alias->is_volatile_qualified = false;
+            compose_block_typedef_array(alias, base, &decl);
+            alias->array_element_ptr_level = 1;
+            alias->array_element_pointee_func_signature =
+                callback_slot_signature;
+            alias->array_element_is_const_pointer =
+                decl.parenthesized_function_pointer_outer_const;
+            alias->array_element_is_volatile =
+                decl.parenthesized_function_pointer_outer_volatile;
+        }
+        if (callback_slot_array_realias && direct_array) {
+            /* Wrapping a completed slot-array alias prepends bounds but must
+             * keep its element as a callback slot. compose_* records the
+             * declaration's zero direct pointer depth, so restore the completed
+             * element descriptor after composition.
+             */
+            compose_block_typedef_array(alias, base, &decl);
+            alias->array_element_ptr_level = base->array_element_ptr_level;
+            alias->array_element_pointee_func_signature =
+                base->array_element_pointee_func_signature;
+        }
+        if (callback_slot_array_realias) {
+            /* Qualifying an array typedef qualifies its element type. Keep that
+             * fact on the final callback-slot lvalue rather than making the
+             * array object itself const or volatile. `restrict` has no runtime
+             * representation, but was validated while parsing.
+             */
+            alias->is_const_qualified = false;
+            alias->is_volatile_qualified = false;
+            alias->array_element_is_const_pointer |= decl.is_const_qualified;
+            alias->array_element_is_volatile |= decl.is_volatile;
+        }
+        if (callback_slot_realias && decl.is_const_pointer) {
+            /* `slot_t const` qualifies the typedef-hidden outer slot pointer,
+             * so do not shift the declaration's compact bit past it.
+             */
+            alias->pointer_const_mask |= 1U;
+            alias->is_const_qualified = false;
+        }
+        if (callback_array_alias) {
+            alias->size = PTR_SIZE;
+            alias->alignment = PTR_SIZE;
+            alias->func_signature = decl.func_signature;
+            alias->is_direct_function_type = false;
+        }
+        if (direct_array || callback_array_alias) {
+            compose_block_typedef_array(alias, base, &decl);
+            if (callback_array_alias)
+                alias->array_element_ptr_level = 1;
+            if (direct_array && inherited_pointee_array) {
+                /* A direct array suffix around `int (*row_t)[N]` stores
+                 * pointer-to-row elements. Keep the row descriptor on the
+                 * completed array and mark the selected element as that pointer
+                 * slot so its later load retains the row stride.
+                 */
+                alias->array_element_ptr_level = base->ptr_level;
+                alias->array_element_type =
+                    base->pointee_array_element_type
+                        ? base->pointee_array_element_type
+                        : base;
+            }
+        }
+        if (direct_pointee_array) {
+            alias->pointee_array_size = decl.pointee_array_size;
+            alias->pointee_array_dim2 = decl.pointee_array_dim2;
+            alias->pointee_array_dim3 = decl.pointee_array_dim3;
+            alias->pointee_array_dim4 = decl.pointee_array_dim4;
+            alias->pointee_array_element_ptr_level =
+                decl.pointee_array_element_ptr_level;
+            alias->pointee_array_element_type = base;
+        }
+        if (alias->ptr_level)
+            alias->size = PTR_SIZE;
+        alias->type_name[0] = '\0';
+        add_block_typedef(parent, decl.var_name, alias);
+        if (!lex_accept(T_comma))
+            break;
+        decl = (var_t) {0};
+        decl.scope = parent;
+        decl.type = base;
+
+        /* A comma continuation may itself be the bounded direct function
+         * typedef form, e.g. `typedef int *p_t, unary_t(int);`.
+         */
+        parsing_block_typedef_declarator = true;
+        read_partial_var_decl(&decl, NULL);
+        parsing_block_typedef_declarator = false;
+    } while (true);
+    lex_expect(T_semicolon);
+    return bb;
+}
+
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
 {
     /* statement can be:
@@ -14755,9 +16917,15 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (lex_accept(T_goto))
         return handle_goto_statement(parent, bb);
 
+    if (lex_peek(T_typedef, NULL))
+        return handle_block_typedef_statement(parent, bb);
+
     /* empty statement */
     if (lex_accept(T_semicolon))
         return bb;
+
+    if (grouped_scalar_pointee_row_store_starts())
+        return handle_grouped_scalar_pointee_row_store(parent, bb);
 
     /* These cannot begin a declaration, so they are unambiguously expression
      * statements. Identifiers remain delegated to handle_declaration(), which
@@ -14956,6 +17124,9 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
     func_t *func = find_func(var->var_name);
     func_t func_tmp;
     bool check_decl = false;
+    bool inherited_direct_function_type =
+        var->is_func && var->type->is_direct_function_type;
+    func_t *inherited_signature = var->func_signature;
 
     if (func) {
         memcpy(&func_tmp, func, sizeof(func_t));
@@ -14963,8 +17134,18 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
     } else {
         func = add_func(var->var_name, false);
     }
+    if (!var->is_block_scope_function_declaration)
+        func->is_block_scope_only_declaration = false;
+    else if (!check_decl)
+        func->is_block_scope_only_declaration = true;
 
-    memcpy(&func->return_def, var, sizeof(var_t));
+    if (inherited_direct_function_type) {
+        memcpy(&func->return_def, &inherited_signature->return_def,
+               sizeof(var_t));
+        func->return_def.var_name = var->var_name;
+    } else {
+        memcpy(&func->return_def, var, sizeof(var_t));
+    }
     func->returns_aggregate = is_record_type(func->return_def.type) &&
                               !has_effective_pointer(&func->return_def);
 
@@ -14987,17 +17168,26 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
 
     /* Parse this declarator independently of any earlier declaration. A later
      * `f()` must not inherit stale parameter slots while a later typed list may
-     * legitimately refine an earlier unprototyped declaration.
+     * legitimately refine an earlier unprototyped declaration. A block direct
+     * function typedef has already parsed its prototype, so copy that exact
+     * syntax-only signature instead of trying to consume another suffix.
      */
     func->num_params = 0;
     func->va_args = 0;
     func->has_prototype = false;
     memset(func->param_defs, 0, sizeof(func->param_defs));
-
-    /* Parameter identifiers are optional in declarations. Definitions check for
-     * them below before body lowering makes parameter symbols visible.
-     */
-    read_parameter_list_decl(func, true);
+    if (inherited_direct_function_type) {
+        func->num_params = inherited_signature->num_params;
+        func->va_args = inherited_signature->va_args;
+        func->has_prototype = inherited_signature->has_prototype;
+        memcpy(func->param_defs, inherited_signature->param_defs,
+               sizeof(func->param_defs));
+    } else {
+        /* Parameter identifiers are optional in declarations. Definitions check
+         * for them below before body lowering makes parameter symbols visible.
+         */
+        read_parameter_list_decl(func, true);
+    }
 
     if (check_decl) {
         if (!compatible_decl_type(func->return_def.type,
@@ -15074,6 +17264,8 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
         read_func_body(func);
         return;
     }
+    if (inherited_direct_function_type && lex_peek(T_comma, NULL))
+        return;
     if (!lex_accept(T_semicolon))
         error_at("Syntax error in global declaration", next_token_loc());
 }
@@ -15114,6 +17306,10 @@ var_t *resolve_global_declarator(block_t *block,
     *is_redeclaration = true;
 
     if (!compatible_decl_type(previous->type, var->type) ||
+        (!!previous->pointee_func_signature != !!var->pointee_func_signature) ||
+        (previous->pointee_func_signature &&
+         !compatible_function_signature(previous->pointee_func_signature,
+                                        var->pointee_func_signature)) ||
         previous->ptr_level != var->ptr_level ||
         previous->array_size != var->array_size ||
         previous->array_dim2 != var->array_dim2 ||
@@ -15186,12 +17382,16 @@ void consume_global_compound_literal(void);
 void parse_global_record_init(var_t *var, block_t *block)
 {
     type_t *record_type = var->type;
+    block_t *saved_initializer_scope = global_constant_initializer_scope;
+    if (var->scope)
+        global_constant_initializer_scope = var->scope;
     if (record_type->base_type == TYPE_typedef && record_type->base_struct)
         record_type = record_type->base_struct;
 
     lex_expect(T_open_curly);
     parse_struct_field_init(block, &GLOBAL_FUNC->bbs, record_type, var, true);
     lex_expect(T_close_curly);
+    global_constant_initializer_scope = saved_initializer_scope;
 }
 
 /* At file scope a compound literal has static storage duration. The target
@@ -16289,6 +18489,7 @@ void read_global_statement(void)
             type->array_dim3 = base->array_dim3;
             type->array_dim4 = base->array_dim4;
             type->array_element_ptr_level = base->array_element_ptr_level;
+            type->array_element_type = base->array_element_type;
             type->func_signature = base->func_signature;
 
             /* Handle pointer types in typedef: typedef char *string; */
@@ -16357,7 +18558,8 @@ void read_global_statement(void)
                  * pointer-sized callback object, not a derived pointer alias.
                  */
                 type->ptr_level = 0;
-                type->pointer_const_mask = 0;
+                type->pointer_const_mask = declarator.pointer_const_mask;
+                type->is_volatile_qualified = declarator.is_volatile;
                 lex_expect(T_semicolon);
                 return;
             }
@@ -16369,31 +18571,12 @@ void read_global_statement(void)
              * them to the base alias's bounds instead of overwriting the inner
              * extent.
              */
-            int base_bounds[4];
-            int decl_bounds[4];
-            int base_dims = 0;
-            int decl_dims = 0;
-            if (type->array_size) {
-                int trailing = 1;
-
-                if (type->array_dim2)
-                    trailing *= type->array_dim2;
-                if (type->array_dim3)
-                    trailing *= type->array_dim3;
-                if (type->array_dim4)
-                    trailing *= type->array_dim4;
-                base_bounds[base_dims++] = type->array_size / trailing;
-                if (type->array_dim2)
-                    base_bounds[base_dims++] = type->array_dim2;
-                if (type->array_dim3)
-                    base_bounds[base_dims++] = type->array_dim3;
-                if (type->array_dim4)
-                    base_bounds[base_dims++] = type->array_dim4;
-            }
+            fixed_array_shape_t base_shape = fixed_array_shape_from_type(type);
+            fixed_array_shape_t decl_shape = {0};
             while (lex_accept(T_open_square)) {
                 int bound;
 
-                if (decl_dims >= 4)
+                if (decl_shape.rank >= MAX_FIXED_ARRAY_RANK)
                     error_at(
                         "Array declarators support at most four dimensions",
                         cur_token_loc());
@@ -16404,40 +18587,26 @@ void read_global_statement(void)
                 if (bound <= 0)
                     error_at("Typedef array needs a positive bound",
                              cur_token_loc());
-                decl_bounds[decl_dims++] = bound;
+                decl_shape.bounds[decl_shape.rank++] = bound;
                 lex_expect(T_close_square);
             }
-            if (decl_dims) {
-                int all_bounds[4];
-                int all_dims = decl_dims + base_dims;
+            if (decl_shape.rank) {
+                fixed_array_shape_t shape =
+                    fixed_array_shape_prepend(&decl_shape, &base_shape);
 
-                if (all_dims > 4)
-                    error_at(
-                        "Array declarators support at most four dimensions",
-                        cur_token_loc());
-                for (int i = 0; i < decl_dims; i++)
-                    all_bounds[i] = decl_bounds[i];
-                for (int i = 0; i < base_dims; i++)
-                    all_bounds[decl_dims + i] = base_bounds[i];
-                type->array_size = all_bounds[0];
-                type->array_dim2 = 0;
-                type->array_dim3 = 0;
-                type->array_dim4 = 0;
-                for (int i = 1; i < all_dims; i++) {
-                    type->array_size *= all_bounds[i];
-                    if (i == 1)
-                        type->array_dim2 = all_bounds[i];
-                    else if (i == 2)
-                        type->array_dim3 = all_bounds[i];
-                    else
-                        type->array_dim4 = all_bounds[i];
-                }
+                fixed_array_shape_to_type(type, &shape);
 
                 /* At the point an array typedef is introduced, ptr_level
                  * describes each array element. A later alias may add a pointer
                  * to the whole array, so preserve this separately.
                  */
                 type->array_element_ptr_level = type->ptr_level;
+                type->array_element_type =
+                    base->array_element_type
+                        ? base->array_element_type
+                        : (base->ptr_level ? pointee_type_from_pointer_typedef(
+                                                 (type_t *) base)
+                                           : (type_t *) base);
             }
             lex_expect(T_semicolon);
         }

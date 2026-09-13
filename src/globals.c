@@ -15,6 +15,9 @@
 
 #include "defs.h"
 
+source_location_t *cur_token_loc(void);
+__noreturn void error_at(char *msg, source_location_t *loc);
+
 /* Forward declaration for string interning */
 char *intern_string(char *str);
 
@@ -669,6 +672,7 @@ block_t *add_block(block_t *parent, func_t *func)
         arena_alloc(BLOCK_ARENA, blk->locals.capacity * sizeof(var_t *));
     blk->type_tags = NULL;
     blk->constants = NULL;
+    blk->typedefs = NULL;
     blk->parent = parent;
     blk->func = func;
     blk->next = NULL;
@@ -1103,12 +1107,107 @@ type_t *find_type_tag(char name[], block_t *block)
     return find_type(name, 1);
 }
 
+/* Struct and union tags use a namespace distinct from ordinary typedef names.
+ * Keep this narrower lookup separate from find_type_tag(), which also serves
+ * enum-tag parsing.
+ */
+type_t *find_record_tag(char name[], block_t *block)
+{
+    for (; block; block = block->parent) {
+        for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
+            if (!strcmp(tag->name, name))
+                return tag->type;
+    }
+    return find_type(name, 2);
+}
+
 type_t *find_local_type_tag(char name[], block_t *block)
 {
     for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
         if (!strcmp(tag->name, name))
             return tag->type;
     return NULL;
+}
+
+bool find_block_typedef(block_t *block, const char *name)
+{
+    for (typedef_binding_t *binding = block->typedefs; binding;
+         binding = binding->next)
+        if (!strcmp(binding->name, name))
+            return true;
+    return false;
+}
+
+static bool block_has_ordinary_name(block_t *block, const char *name)
+{
+    for (int i = 0; i < block->locals.size; i++) {
+        var_t *var = block->locals.elements[i];
+
+        if (var && var->var_name && !strcmp(var->var_name, name))
+            return true;
+    }
+
+    /* The function body's outermost block shares the parameter namespace. A
+     * nested block may, however, legally shadow a parameter with a typedef.
+     */
+    if (!block->parent && block->func) {
+        for (int i = 0; i < block->func->num_params; i++) {
+            var_t *param = &block->func->param_defs[i];
+
+            if (param->var_name && !strcmp(param->var_name, name))
+                return true;
+        }
+    }
+    return false;
+}
+
+void add_block_typedef(block_t *block, char name[], type_t *type)
+{
+    if (find_block_typedef(block, name) || block_has_ordinary_name(block, name))
+        error_at("typedef name conflicts with an ordinary identifier",
+                 cur_token_loc());
+
+    typedef_binding_t *binding;
+
+    binding = arena_alloc(BLOCK_ARENA, sizeof(*binding));
+    binding->name = intern_string(name);
+    binding->type = type;
+    binding->next = block->typedefs;
+    block->typedefs = binding;
+}
+
+/* Ordinary identifiers and typedef names share C's ordinary identifier
+ * namespace. Search each lexical scope inward-out so an object declaration
+ * masks an outer typedef before the global type table is considered.
+ */
+type_t *find_visible_type(const char *name, block_t *block)
+{
+    func_t *func = block ? block->func : NULL;
+
+    for (; block; block = block->parent) {
+        for (int i = block->locals.size - 1; i >= 0; i--) {
+            var_t *var = block->locals.elements[i];
+            if (var && var->var_name && !strcmp(var->var_name, name))
+                return NULL;
+        }
+        for (typedef_binding_t *binding = block->typedefs; binding;
+             binding = binding->next)
+            if (!strcmp(binding->name, name))
+                return binding->type;
+    }
+
+    /* Parameters remain visible throughout the function body unless an inner
+     * lexical binding above has already hidden them.
+     */
+    if (func) {
+        for (int i = 0; i < func->num_params; i++) {
+            var_t *param = &func->param_defs[i];
+
+            if (param->var_name && !strcmp(param->var_name, name))
+                return NULL;
+        }
+    }
+    return find_type(name, 1);
 }
 
 var_t *find_member(const char token[], type_t *type)

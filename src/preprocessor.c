@@ -521,6 +521,8 @@ void install_stdarg_header(void)
 
     define_builtin_object_macro("__VA_SLOT_WORDS", T_numeric,
                                 PTR_SIZE == 8 ? "2" : "1");
+    define_builtin_object_macro("__VA_SLOT_BYTES", T_numeric,
+                                PTR_SIZE == 8 ? "8" : "4");
 
     macro = new_stdarg_macro("va_start", "ap", "last");
     tail = NULL;
@@ -537,6 +539,27 @@ void install_stdarg_header(void)
     append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
                                "last");
     append_builtin_macro_token(&macro->replacement, &tail, T_plus, "+");
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_sizeof, "sizeof");
+    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "last");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    append_builtin_macro_token(&macro->replacement, &tail, T_plus, "+");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "__VA_SLOT_BYTES");
+    append_builtin_macro_token(&macro->replacement, &tail, T_minus, "-");
+    append_builtin_macro_token(&macro->replacement, &tail, T_numeric, "1");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    append_builtin_macro_token(&macro->replacement, &tail, T_divide, "/");
+    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                               "__VA_SLOT_BYTES");
+    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
+                               ")");
+    append_builtin_macro_token(&macro->replacement, &tail, T_asterisk, "*");
     append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
                                "__VA_SLOT_WORDS");
     append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,

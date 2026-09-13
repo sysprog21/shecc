@@ -2484,6 +2484,18 @@ void reg_alloc_global(insn_t *global_insn)
         if (global_insn->rd->is_global_address) {
             global_insn->rd->offset = ir->src0;
             global_insn->rd->space_is_allocated = true;
+
+            /* This temporary carries a compile-time GP-relative offset, not a
+             * stack-resident value. Leaving it mapped in REGS[] lets the next
+             * global setup instruction spill its address to `sp + offset`; on a
+             * global array that offset is the backing-region address, so the
+             * spill overwrites an initialized element. The folded
+             * OP_add/OP_assign paths rematerialize this address from offset, so
+             * it has no runtime register lifetime.
+             */
+            REGS[dest].polluted = 0;
+            vreg_clear_phys(global_insn->rd);
+            REGS[dest].var = NULL;
         }
         break;
     case OP_add: {
@@ -2633,6 +2645,18 @@ void reg_alloc_global(insn_t *global_insn)
             ir->size_bytes = global_insn->sz;
             ir->is_pointer = global_insn->rs2->ptr_level > 0;
             ir->is_unsigned = is_unsigned_scalar(global_insn->rs2);
+
+            /* A materialized global address is consumed by this one store. Its
+             * descriptor offset is GP-relative data, not a spill slot;
+             * retaining the vreg mapping lets the next initializer spill the
+             * address at sp + offset and overwrite the source element (for
+             * example, a pointer row initialized from &values[0][1]).
+             */
+            if (global_insn->rs2 && global_insn->rs2->is_global_address) {
+                REGS[vreg].polluted = 0;
+                vreg_clear_phys(global_insn->rs2);
+                REGS[vreg].var = NULL;
+            }
             break;
         }
         /* Fallback generic write */
@@ -2840,7 +2864,20 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                     fatal("Aggregate parameter is not owned by its function");
 
                 dest = prepare_dest(bb, insn, insn->rd, -1, -1);
-                if (insn->rs1->space_is_allocated) {
+
+                /* A variadic callee reserves the final named aggregate's
+                 * complete ABI footprint in its contiguous argument-save area.
+                 * `va_start` obtains that slot's address, then advances by the
+                 * same rounded extent to the first unnamed argument.
+                 */
+                if (func->va_args && param_idx + 1 == func->num_params &&
+                    insn->rs1->space_is_allocated) {
+                    ir = bb_add_ph2_ir(bb, OP_address_of);
+                    ir->src0 = insn->rs1->offset;
+                    ir->dest = dest;
+                    ir->ofs_based_on_stack_top =
+                        insn->rs1->ofs_based_on_stack_top;
+                } else if (insn->rs1->space_is_allocated) {
                     ir = bb_add_ph2_ir(bb, OP_load);
                     ir->src0 = insn->rs1->offset;
                     ir->dest = dest;
@@ -3442,6 +3479,19 @@ void reg_alloc(void)
                 ir->src0 = src0;
                 ir->src1 = func->stack_size;
                 func->stack_size += PTR_SIZE;
+                if (i < args_in_reg) {
+                    var_t *param = var_subscript0(&func->param_defs[i]);
+
+                    if (i + 1 == func->num_params &&
+                        param->is_aggregate_param) {
+                        int footprint = ALIGN_UP(param->type->size, PTR_SIZE);
+
+                        /* The first word was just saved above. Reserve the
+                         * remaining words before spilling unnamed arguments.
+                         */
+                        func->stack_size += footprint - PTR_SIZE;
+                    }
+                }
             }
         } else {
             /* If the number of function arguments is fixed, the extra arguments

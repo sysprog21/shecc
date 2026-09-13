@@ -589,10 +589,44 @@ struct var {
     int ptr_level;
     bool is_func;
 
+    /* A pointer-to-callback object is not callable itself. Its compact callback
+     * pointee signature is restored only after one dereference.
+     */
+    void *pointee_func_signature;
+
+    /* Set only for the unparenthesized `result name(parameters)` spelling.
+     * Block typedef support uses it to keep direct function aliases distinct
+     * from the older parenthesized pointer-to-function declarator path.
+     */
+    bool is_direct_function_declarator;
+
+    /* The parenthesized callback spelling `int (*name)(int)` is distinct from a
+     * direct function declarator. Block typedef lowering uses this count to
+     * admit exactly one pointer layer as a callback-pointer alias.
+     */
+    int parenthesized_function_pointer_level;
+    bool parenthesized_function_pointer_const;
+    bool parenthesized_function_pointer_restrict;
+
+    /* For a depth-two callback slot, only the second (outer) star denotes the
+     * pointer object retained after normalization. Keep qualifier placement so
+     * its mask can be collapsed with that object rather than silently lost.
+     */
+    bool parenthesized_function_pointer_outer_const;
+    bool parenthesized_function_pointer_outer_volatile;
+    bool parenthesized_function_pointer_outer_restrict;
+    bool parenthesized_function_pointer_inner_qualified;
+
     /* A block-scope `extern int f(void);` hides a local object named f but
      * resolves expressions through the translation unit's function table.
      */
     bool is_extern_function_alias;
+
+    /* A function declaration originated in a block. Its linkage metadata
+     * remains global, but its ordinary identifier is lexical until a real
+     * file-scope declaration appears.
+     */
+    bool is_block_scope_function_declaration;
     bool is_global;
 
     /* A compile-time address of static storage, kept distinct from reading a
@@ -644,6 +678,7 @@ struct var {
      */
     bool in_select_arm;
     int array_size;
+    bool has_direct_array_declarator;
     bool has_unsized_array; /* `T name[]`: bound is supplied by initializer */
     /* `T member[]` at the end of a struct has no initializer-supplied bound and
      * contributes no bytes to the record's fixed layout.
@@ -657,6 +692,7 @@ struct var {
      * object, so they must never participate in size_var().
      */
     int pointee_array_size;
+    bool has_direct_pointee_array_declarator;
     int pointee_array_dim2;
     int pointee_array_dim3;
     int pointee_array_dim4;
@@ -786,6 +822,12 @@ struct var {
 
 typedef struct func func_t;
 
+typedef struct typedef_binding {
+    char *name;
+    type_t *type;
+    struct typedef_binding *next;
+} typedef_binding_t;
+
 /* block definition */
 struct block {
     var_list_t locals;
@@ -795,6 +837,7 @@ struct block {
      */
     void *type_tags;
     void *constants;
+    typedef_binding_t *typedefs;
     struct block *parent;
     func_t *func;
     struct block *next;
@@ -804,6 +847,10 @@ typedef struct block block_t;
 
 int read_const_sizeof_type(block_t *scope);
 int read_const_wstring_size(void);
+void add_block_typedef(block_t *block, char name[], type_t *type);
+bool find_block_typedef(block_t *block, const char *name);
+type_t *find_visible_type(const char *name, block_t *block);
+type_t *find_record_tag(char name[], block_t *block);
 typedef struct basic_block basic_block_t;
 
 /* Definition of a growable buffer for a mutable null-terminated string
@@ -903,6 +950,22 @@ struct type {
      */
     void *func_signature;
 
+    /* A pointer-to-callback typedef is itself non-callable, but its pointee
+     * callback prototype must survive object declarations and conversions.
+     */
+    void *pointee_func_signature;
+
+    /* Unlike a pointer-to-function typedef, this descriptor denotes the
+     * function type itself. A single use-site star then forms a callable
+     * function-pointer object.
+     */
+    bool is_direct_function_type;
+
+    /* Qualifiers on a callback-pointer typedef apply to each pointer object,
+     * not to its function return type.
+     */
+    bool is_volatile_qualified;
+
     /* Array bounds carried by an array typedef. Object declarators copy these
      * into var_t, where ordinary indexing and initialization already retain
      * their row-major representation.
@@ -916,6 +979,40 @@ struct type {
      * ptr_level when a later typedef adds a pointer to the whole array.
      */
     int array_element_ptr_level;
+
+    /* Scalar base descriptor of an array typedef's element. Pointer-element
+     * arrays need this after a subscript: the outer typedef descriptor still
+     * carries the array's pointer depth and is not the loaded element type.
+     */
+    struct type *array_element_type;
+
+    /* An array of callback slots is not itself a slot. Preserve the
+     * non-callable callback prototype on each element for subscript loads.
+     */
+    void *array_element_pointee_func_signature;
+
+    /* Qualifiers on `(**const slots[N])` and `(**volatile slots[N])` apply to
+     * each selected outer slot pointer, not to the array object or the callback
+     * pointer reached after one dereference.
+     */
+    bool array_element_is_const_pointer;
+    bool array_element_is_volatile;
+
+    /* Bounds carried by a pointer-to-array typedef, e.g. `int (*)[2]`. These
+     * describe the pointed-to array rather than the pointer-sized alias itself
+     * and are copied to var_t when the typedef names an object.
+     */
+    int pointee_array_size;
+    int pointee_array_dim2;
+    int pointee_array_dim3;
+    int pointee_array_dim4;
+    int pointee_array_element_ptr_level;
+
+    /* The scalar element descriptor of a pointer-to-array typedef. Unlike an
+     * ordinary pointer typedef, its outer descriptor is TYPE_typedef and
+     * pointer-sized, so row indexing cannot recover this from `size`.
+     */
+    struct type *pointee_array_element_type;
 
     /* Qualifiers written after stars inside a typedef declarator. These bits
      * are relative to the typedef's own pointer depth; var_t keeps any stars
@@ -964,6 +1061,11 @@ typedef struct {
     bool is_const_qualified;
     unsigned int pointer_const_mask;
     type_t *type;
+
+    /* A selected array element can be a non-callable callback slot even when
+     * the array's scalar base type has no ordinary pointer descriptor.
+     */
+    void *pointee_func_signature;
     /* The declaration selected by the lvalue, including a struct member. */
     var_t *decl;
 } lvalue_t;
@@ -1197,6 +1299,12 @@ struct func {
      * list constrain call arity.
      */
     bool has_prototype;
+
+    /* A declaration introduced only within a block still has linkage, but its
+     * ordinary identifier is visible only through that block's lexical alias
+     * until a file-scope declaration or definition appears.
+     */
+    bool is_block_scope_only_declaration;
     bool is_static; /* internal-linkage declaration */
     /* The definition used the inline function specifier. C99 applies extra
      * linkage constraints to external-linkage inline definitions.
