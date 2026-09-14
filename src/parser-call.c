@@ -440,16 +440,8 @@ typedef struct va_arg_type {
 
 void read_builtin_va_arg_type(block_t *parent, va_arg_type_t *result)
 {
-    char name[MAX_ID_LEN];
     type_t *type;
-    bool is_signed = false;
-    bool is_unsigned = false;
-    int long_count = 0;
-    bool is_short = false;
-    bool is_char = false;
-    bool saw_base = false;
 
-    (void) parent;
     result->ptr_level = 0;
     result->is_array = false;
     result->is_function = false;
@@ -460,80 +452,7 @@ void read_builtin_va_arg_type(block_t *parent, va_arg_type_t *result)
     result->pointee_array_dim4 = 0;
     result->pointee_element_size = 0;
     result->pointee_element_ptr_level = 0;
-    while (true) {
-        if (lex_accept(T_const) || lex_accept(T_volatile))
-            continue;
-        if (lex_accept(T_signed)) {
-            if (is_signed)
-                error_at("duplicate signed type specifier", cur_token_loc());
-            is_signed = true;
-            continue;
-        }
-        if (lex_accept(T_unsigned)) {
-            if (is_unsigned)
-                error_at("duplicate unsigned type specifier", cur_token_loc());
-            is_unsigned = true;
-            continue;
-        }
-        if (lex_accept(T_long)) {
-            long_count++;
-            continue;
-        }
-        if (lex_peek(T_identifier, name) && !strcmp(name, "short")) {
-            if (is_short)
-                error_at("duplicate short type specifier", cur_token_loc());
-            lex_expect(T_identifier);
-            is_short = true;
-            continue;
-        }
-        if (lex_peek(T_identifier, name) &&
-            (!strcmp(name, "int") || !strcmp(name, "char"))) {
-            if (saw_base)
-                error_at("duplicate type specifier", cur_token_loc());
-            is_char = !strcmp(name, "char");
-            saw_base = true;
-            lex_expect(T_identifier);
-            continue;
-        }
-        break;
-    }
-    if (is_signed && is_unsigned)
-        error_at("both signed and unsigned specified", cur_token_loc());
-    if (long_count > 2 || (is_short && long_count))
-        error_at("invalid va_arg integer type", cur_token_loc());
-
-    base_type_t record_kind = accept_record_keyword();
-    if (record_kind) {
-        if (is_signed || is_unsigned || long_count || is_short)
-            error_at("record type cannot have integer specifiers",
-                     cur_token_loc());
-        lex_ident(T_identifier, name);
-        type = find_record_tag(name, parent, record_kind);
-    } else if (lex_accept(T_enum)) {
-        if (is_signed || is_unsigned || long_count || is_short || saw_base)
-            error_at("enum type cannot have integer specifiers",
-                     cur_token_loc());
-        lex_ident(T_identifier, name);
-        type = reference_enum_tag(name, parent);
-    } else {
-        if (!saw_base && !is_signed && !is_unsigned && !long_count &&
-            !is_short) {
-            lex_ident(T_identifier, name);
-            type = find_type(name, true);
-            goto parsed_base_type;
-        }
-
-        if (long_count)
-            type = is_unsigned ? (long_count == 2 ? TY_ulong_long : TY_ulong)
-                               : (long_count == 2 ? TY_long_long : TY_long);
-        else if (is_short)
-            type = is_unsigned ? TY_ushort : TY_short;
-        else if (is_char)
-            type = is_unsigned ? TY_uchar : (is_signed ? TY_schar : TY_char);
-        else
-            type = is_unsigned ? TY_uint : TY_int;
-    }
-parsed_base_type:
+    type = read_type_name_specifiers(parent);
     if (!type)
         error_at("Unknown va_arg type", cur_token_loc());
     while (lex_accept(T_const) || lex_accept(T_volatile))
@@ -702,6 +621,12 @@ parsed_base_type:
             } while (depth > 0);
         }
     }
+
+    /* A floating value would enter the integer-only IR and argument ABI,
+     * whether the type name spells it directly or through a typedef.
+     */
+    if (type->is_floating && !result->ptr_level && !type->ptr_level)
+        error_at("Floating point types are not yet supported", cur_token_loc());
     result->type = type;
 }
 
@@ -748,7 +673,10 @@ void mark_value_reference(var_t *value, var_t *address, var_t *bitfield)
 
 /* Load the object of @value's type stored at @address into @value and push it.
  * A record is not a register value: one OP_read of its whole size loaded only a
- * word of it, so it is copied into @value's own storage instead.
+ * word of it. Nor is it copied into storage of its own, which cost instructions
+ * in proportion to its size even when only a member was then selected: @value
+ * stands for the object in place, and whatever copies the record reads it
+ * there.
  */
 void push_object_at(block_t *parent,
                     basic_block_t **bb,
@@ -757,10 +685,9 @@ void push_object_at(block_t *parent,
                     int size)
 {
     if (is_record_object(value) && !value->func_signature &&
-        !is_incomplete_record_object(value)) {
-        add_insn(parent, *bb, OP_allocat, value, NULL, NULL, 0, NULL);
-        emit_record_copy_from_address(parent, bb, value, address);
-    } else
+        !is_incomplete_record_object(value))
+        value->defers_record_copy = true;
+    else
         add_insn(parent, *bb, OP_read, value, address, NULL, size, NULL);
     mark_value_reference(value, address, NULL);
     opstack_push(value);
@@ -1347,8 +1274,7 @@ void read_lvalue(lvalue_t *lvalue,
                  block_t *parent,
                  basic_block_t **bb,
                  bool eval,
-                 opcode_t op,
-                 bool allow_ptr_arith);
+                 opcode_t op);
 
 static bool is_function_parameter(const var_t *var, block_t *parent);
 
@@ -1395,7 +1321,6 @@ static void take_expression_address(block_t *parent, basic_block_t **bb)
         /* &*E is E, except that it is not an lvalue; neither operator is
          * evaluated (C99 6.5.3.2p3).
          */
-        reading_unary_operand = true;
         read_expr_operand(parent, bb);
         operand = opstack_pop();
         if (operand->is_func) {
@@ -1462,11 +1387,10 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
 {
     char token[MAX_VAR_LEN];
     lvalue_t lvalue;
-    var_t *vd, *rs1;
+    var_t *vd, *rs1, *var = NULL;
 
     if (!lex_peek(T_identifier, token) ||
-        (find_var(token, parent) &&
-         is_swapped_subscript_base(find_var(token, parent)))) {
+        ((var = find_var(token, parent)) && is_swapped_subscript_base(var))) {
         take_expression_address(parent, bb);
         return;
     }
@@ -1505,10 +1429,9 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
         opstack_push(vd);
         return;
     }
-    var_t *var = find_var(token, parent);
     if (var && var->is_register)
         error_at("cannot take address of register object", next_token_loc());
-    read_lvalue(&lvalue, var, parent, bb, false, OP_generic, true);
+    read_lvalue(&lvalue, var, parent, bb, false, OP_generic);
 
     if (is_bitfield(lvalue.decl))
         error_at("cannot take address of bit-field", next_token_loc());
@@ -1724,12 +1647,58 @@ static bool pointee_array_shapes_compatible(const var_t *left,
            compatible_decl_type(left_element, right_element);
 }
 
+/* Whether unary `*` on @array reads through the pointer to its first element
+ * that the array decays to. An array has no pointer level of its own, and the
+ * dereference paths read it as an int-sized word: a record, a row, a pointer or
+ * a long long element was wrongly loaded. An array of callbacks keeps its own
+ * paths.
+ */
+static bool decays_when_dereferenced(const var_t *array)
+{
+    return is_array_declarator(array) && !array->is_func &&
+           !array->func_signature && !array->pointee_func_signature;
+}
+
+/* The pointer to its first element that the array @array decays to, for a unary
+ * `*` to read or store through.
+ */
+static var_t *decay_dereferenced_array(block_t *parent,
+                                       basic_block_t **bb,
+                                       var_t *array)
+{
+    var_t *pointer =
+        require_typed_ptr_var(parent, array->type, array->ptr_level + 1);
+
+    if (array->array_dim2) {
+        fixed_array_shape_t shape = fixed_array_shape_from_var(array);
+
+        fixed_array_shape_drop_outer(&shape);
+        fixed_array_shape_to_pointee_var(pointer, &shape);
+        pointer->pointee_array_element_ptr_level = array->ptr_level;
+    }
+    pointer->var_name = gen_name();
+    pointer->is_const_qualified = array->is_const_qualified;
+    add_insn(parent, *bb, OP_assign, pointer, array, NULL, 0, NULL);
+    return pointer;
+}
+
+/* Whether the identifier at the next token is called, as in `*get(1)`, where
+ * the dereference applies to the call result rather than to the name.
+ */
+static bool dereferenced_call_follows(void)
+{
+    return lex_peek(T_identifier, NULL) && cur_token->next->next &&
+           cur_token->next->next->kind == T_open_bracket;
+}
+
 /* Dereference the pointer value @rs1 and push the object it designates. */
 void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1)
 {
     var_t *vd;
     int sz;
 
+    if (decays_when_dereferenced(rs1))
+        rs1 = decay_dereferenced_array(parent, bb, rs1);
     if (rs1->is_func_name_array_address) {
         /* The address of an array has the same runtime value as its first
          * element. Dereferencing it restores the array, which immediately
@@ -1789,12 +1758,13 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
     int sz;
 
     if (lex_peek(T_open_bracket, NULL) || lex_peek(T_increment, NULL) ||
-        lex_peek(T_decrement, NULL) || lex_peek(T_ampersand, NULL)) {
+        lex_peek(T_decrement, NULL) || lex_peek(T_ampersand, NULL) ||
+        dereferenced_call_follows()) {
         /* Handle general expression dereference: *(expr), and a prefix update,
          * which is itself a unary expression: `*++pointer` dereferences its
          * updated result. The group is a whole unary operand, so postfix
          * operators after it apply before the dereference: `*(*q).p` loads
-         * through the member.
+         * through the member, and `*get(1)` through the call result.
          */
         read_expr_operand(parent, bb);
         push_dereference(parent, bb, opstack_pop());
@@ -1845,9 +1815,13 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             opstack_push(rs1);
             return;
         }
-        read_lvalue(&lvalue, var, parent, bb, true, OP_generic, false);
+        read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
 
         rs1 = opstack_pop();
+        if (decays_when_dereferenced(rs1)) {
+            push_dereference(parent, bb, rs1);
+            return;
+        }
         if (var->is_func) {
             /* C99 6.3.2.1 makes a function-pointer dereference a function
              * designator. The pointer object itself therefore needs one load,
@@ -1919,7 +1893,8 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
         deref_count++;
 
     /* Check if we have a parenthesized expression or simple identifier */
-    if (lex_peek(T_open_bracket, NULL) || lex_peek(T_ampersand, NULL)) {
+    if (lex_peek(T_open_bracket, NULL) || lex_peek(T_ampersand, NULL) ||
+        dereferenced_call_follows()) {
         /* Handle ***(expr) case, with any postfix operators after the group */
         read_expr_operand(parent, bb);
 
@@ -1934,11 +1909,15 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
         if (!lex_peek(T_identifier, token))
             error_at("Expected an identifier", next_token_loc());
         var_t *var = find_var(token, parent);
-        read_lvalue(&lvalue, var, parent, bb, true, OP_generic, false);
+        read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
 
         /* Apply dereferences one by one */
         for (int i = 0; i < deref_count; i++) {
             rs1 = opstack_pop();
+            if (decays_when_dereferenced(rs1)) {
+                push_dereference(parent, bb, rs1);
+                continue;
+            }
 
             /* A member lvalue has already been read into rs1. Each unary
              * asterisk must consume that evaluated pointer, not re-derive its
@@ -1980,19 +1959,19 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
 }
 
 /* Lower a postfix member chain from the record at @address, of @record_type,
- * and return the selected value on the operand stack. The chain starts with
- * `->` when @arrow_first, @address then being the pointer operand, and with `.`
+ * and push the selected value on the operand stack. The chain starts with `->`
+ * when @arrow_first, @address then being the pointer operand, and with `.`
  * otherwise. @is_lvalue says the record designates an object; a chain that
  * follows a pointer member reaches an object in any case. An array member left
- * with dimensions unconsumed decays to a pointer, and a record member is copied
- * out whole, as a record element is.
+ * with dimensions unconsumed decays to a pointer, and a record member is pushed
+ * through push_object_at(), as a record element is.
  */
-var_t *lower_member_postfix(var_t *address,
-                            type_t *record_type,
-                            bool arrow_first,
-                            bool is_lvalue,
-                            block_t *parent,
-                            basic_block_t **bb)
+void lower_member_postfix(var_t *address,
+                          type_t *record_type,
+                          bool arrow_first,
+                          bool is_lvalue,
+                          block_t *parent,
+                          basic_block_t **bb)
 {
     var_t *field = NULL;
     var_t *result;
@@ -2045,8 +2024,6 @@ var_t *lower_member_postfix(var_t *address,
                 error_at(arrow_first ? "Cannot apply dot operator to pointer"
                                      : "Cannot apply arrow operator to record",
                          next_token_loc());
-            if (arrow_first)
-                is_lvalue = true;
         } else if (lex_accept(T_arrow)) {
             /* Only a selected pointer-to-record member can be followed. */
             if (depth < shape.rank || field->ptr_level != 1 ||
@@ -2127,30 +2104,4 @@ var_t *lower_member_postfix(var_t *address,
          lex_peek(T_decrement, NULL)))
         error_at("member of a function call result is not assignable",
                  next_token_loc());
-    return result;
-}
-
-/* A record returned by value is an rvalue, yet C99 6.5.2.3 still lets a postfix
- * member chain select from it: `make().inner.value`, `make().items[1]` or
- * `make().next->value`. Aggregate calls already write their result to
- * caller-owned storage, so each member is lowered from that storage's address.
- */
-void lower_call_result_member_postfix(var_t **value,
-                                      block_t *parent,
-                                      basic_block_t **bb)
-{
-    var_t *base;
-    var_t *address;
-
-    if (!value || !(base = *value) || !lex_peek(T_dot, NULL) ||
-        !is_record_type(base->type) || effective_pointer_depth(base) ||
-        base->array_size)
-        return;
-
-    opstack_pop();
-    address = require_ref_var(parent, base->type, 0);
-    address->var_name = gen_name();
-    add_insn(parent, *bb, OP_address_of, address, base, NULL, 0, NULL);
-    *value =
-        lower_member_postfix(address, base->type, false, false, parent, bb);
 }

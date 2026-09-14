@@ -41,15 +41,6 @@ int operand_stack_idx = 0;
  */
 int unevaluated_expression_depth = 0;
 
-/* Set before reading an operand that a following `+` must not extend.
- * read_lvalue() normally takes `+ n` after a pointer as part of the operand.
- * That is wrong for the operand of a unary operator, which binds tighter: a
- * cast in `(char *) p + 1` applies to p alone, and the sum advances by one byte
- * rather than by an int. It is equally wrong for the right operand of a binary
- * operator binding at least as tightly as `+`, as in `end - start + 1`.
- */
-bool reading_unary_operand = false;
-
 /* A function prototype nested in a sizeof type-name describes only a pointer
  * pointee. It never introduces a floating value into IR or an ABI boundary.
  */
@@ -272,10 +263,7 @@ void read_inner_var_decl(var_t *vd,
                          bool is_param,
                          bool is_record_member);
 void read_partial_var_decl(var_t *vd, var_t *template);
-void parse_array_init(var_t *var,
-                      block_t *parent,
-                      basic_block_t **bb,
-                      bool emit_code);
+void parse_array_init(var_t *var, block_t *parent, basic_block_t **bb);
 void parse_string_array_init(var_t *var, block_t *parent, basic_block_t **bb);
 void parse_wstring_array_init(var_t *var, block_t *parent, basic_block_t **bb);
 void parse_global_record_init(var_t *var, block_t *block);
@@ -290,9 +278,6 @@ void copy_call_result_array_shape(var_t *result, const var_t *return_def);
 void lower_call_result_array_postfix(var_t **value,
                                      block_t *parent,
                                      basic_block_t **bb);
-void lower_call_result_member_postfix(var_t **value,
-                                      block_t *parent,
-                                      basic_block_t **bb);
 void lower_call_result_prefix_update(var_t **value,
                                      opcode_t op,
                                      block_t *parent,
@@ -311,12 +296,12 @@ var_t *lower_reference_update(var_t *object,
                               opcode_t op,
                               block_t *parent,
                               basic_block_t **bb);
-var_t *lower_member_postfix(var_t *address,
-                            type_t *record_type,
-                            bool arrow_first,
-                            bool is_lvalue,
-                            block_t *parent,
-                            basic_block_t **bb);
+void lower_member_postfix(var_t *address,
+                          type_t *record_type,
+                          bool arrow_first,
+                          bool is_lvalue,
+                          block_t *parent,
+                          basic_block_t **bb);
 void lower_postfix_operators(block_t *parent, basic_block_t **bb);
 void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1);
 bool is_swapped_subscript_base(const var_t *var);
@@ -763,6 +748,17 @@ static int callback_pointer_indirection(const var_t *var)
     return 0;
 }
 
+/* The record a typedef names through base_struct, or @type itself. Unlike
+ * is_plain_record_alias() below this does not look at the typedef's own
+ * declarator, so callers apply it once they know they have a record object.
+ */
+type_t *resolve_record_type(type_t *type)
+{
+    if (type->base_type == TYPE_typedef && type->base_struct)
+        return type->base_struct;
+    return type;
+}
+
 /* A typedef naming a struct or union type with no derived declarator of its
  * own, as in "typedef volatile struct S vs_t;".
  */
@@ -929,12 +925,16 @@ func_t *find_visible_func(char *name, block_t *scope)
 /* An inline record pointer typedef stores PTR_SIZE in type->size, while its
  * fields still describe the pointee layout. Recover that layout for indexing;
  * this differs on 32-bit targets whenever the record is wider than a pointer.
+ * The record the alias reaches through base_struct has the padded size, which
+ * the end of the last member falls short of.
  */
 int pointer_typedef_pointee_size(type_t *type, type_t *pointee)
 {
     if (!type || !type->ptr_level || type->base_type != TYPE_typedef ||
         !type->num_fields)
         return pointee == TY_void ? 1 : pointee->size;
+    if (type->ptr_level == 1 && type->base_struct)
+        return type->base_struct->size;
 
     int size = 0;
     for (int i = 0; i < type->num_fields; i++) {
@@ -1473,8 +1473,14 @@ var_t *convert_stored_value(block_t *block,
 
 var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
 {
-    bool is_from_ptr = from->ptr_level || from->array_size,
-         is_to_ptr = to->ptr_level || to->array_size ||
+    /* A function designator and a function pointer are addresses too, whatever
+     * the return type their signature spells: a bool (*)(int) argument must not
+     * be converted to _Bool.
+     */
+    bool is_from_ptr = from->ptr_level || from->array_size || from->is_func ||
+                       from->func_signature,
+         is_to_ptr = to->ptr_level || to->array_size || to->is_func ||
+                     to->func_signature ||
                      (to->type && to->type->ptr_level > 0);
 
     if (is_from_ptr && is_to_ptr)

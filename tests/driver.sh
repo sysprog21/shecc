@@ -748,6 +748,13 @@ EOF
 try_compile_error_message "Token too long" << EOF
 int main(void) { return sizeof($(printf '1%.0s' {1..255}).f); }
 EOF
+
+# Record bodies nested past the type table are diagnosed, not aborted: each one
+# takes a type entry before its members are read.
+try_compile_error_message "Maximum number of types exceeded" << EOF
+struct deep { $(printf 'struct { %.0s' {1..300}) int x; $(printf '} m;%.0s' {1..300}) };
+int main(void) { return 0; }
+EOF
 try_compile_error << EOF
 int main(void) { return 08.5; }
 EOF
@@ -1025,6 +1032,22 @@ int nested_hyperplane_designated(void) {
            values[1][0][1][0] != 5;
 }
 int main(void) { return nested_hyperplane_designated(); }
+EOF
+
+# A two-subscript designator of a four-dimensional array names a plane, so its
+# braces hold rows. Parsing them as a whole hyperplane dropped the second row.
+try_ 0 << EOF
+int global_plane[2][2][2][2] = { [1][1] = { {1, 2}, {3, 4} }, [0][1][1] = { 5, 6 } };
+int main(void) {
+    int local_plane[2][2][2][2] = { [1][1] = { {1, 2}, {3, 4} }, [0][1][1] = { 5, 6 } };
+    static int static_plane[2][2][2][2] = { [1][1] = { {1, 2}, {3, 4} }, [0][1][1] = { 5, 6 } };
+    return global_plane[1][1][1][0] + global_plane[1][1][1][1] +
+           global_plane[0][1][1][1] + local_plane[1][1][1][0] +
+           local_plane[1][1][1][1] + local_plane[0][1][1][1] +
+           static_plane[1][1][1][0] + static_plane[1][1][1][1] +
+           static_plane[0][1][1][1] != 39 || local_plane[1][1][0][1] != 2 ||
+           local_plane[1][0][1][1] != 0;
+}
 EOF
 
 try_ 0 << EOF
@@ -1624,6 +1647,22 @@ int main(void)
 }
 EOF
 
+# A function passed for, assigned to, or initializing a pointer to a function
+# returning _Bool stays an address: only _Bool objects convert to 0 or 1.
+try_ 0 << EOF
+_Bool odd(int v) { return v & 1; }
+_Bool call(_Bool (*m)(int), int v) { if (m(v)) return 1; return 0; }
+_Bool (*global_ptr)(int) = odd;
+int main(void)
+{
+    _Bool (*local_ptr)(int) = odd;
+    _Bool (*assigned)(int);
+    assigned = odd;
+    return !call(odd, 3) | !call(local_ptr, 5) << 1 | !assigned(7) << 2 |
+           !global_ptr(9) << 3 | call(odd, 2) << 4;
+}
+EOF
+
 # Stores into _Bool objects reached through subscripts, pointers and members,
 # and objects declared through a _Bool typedef, keep only the truth value.
 try_output 0 "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1" << EOF
@@ -2016,6 +2055,39 @@ int main(void)
 }
 EOF
 
+# Any unary expression may follow a unary minus (C99 6.5.3), another unary
+# operator among them: these were rejected as an unexpected token.
+try_ 1 << EOF
+int arr[3] = {1, 2, 3};
+int main(void) {
+    int x = 5, *p = &x;
+    long long w = 3;
+    int r = 0;
+    r += (- - x == 5);
+    r += (- -x == 5) * 2;
+    r += (~ - x == 4) * 4;
+    r += (! - x == 0) * 8;
+    r += (- ~ x == 6) * 16;
+    r += (-*p == -5) * 32;
+    r += (-'a' == -97) * 64;
+    r += (-(int) sizeof(int) == -4 && -sizeof(char) + 1 == 0) * 128;
+    r += (- + x == -5) * 256;
+    r += (- ++x == -6 && x == 6) * 512;
+    r += (-2[arr] == -3 && -(x) - -1 == -5) * 1024;
+    r += (- - - -w == 3 && - - -1 == -1) * 2048;
+    r += (-(int) 7 == -7 && -(char) 300 == -44) * 4096;
+    r += (-arr[1] == -2 && -x-- == -6) * 8192;
+    r += (x == 5) * 16384;
+    return r == 32767;
+}
+EOF
+try_compile_error << EOF
+int main(void) { int *p = 0; return - -p != 0; }
+EOF
+try_compile_error << EOF
+int main(void) { return - ; }
+EOF
+
 # C99 integer promotions and signed/unsigned common-type selection must retain
 # the promoted arithmetic result across character, short, int, and long ranks.
 try_ 0 << EOF
@@ -2337,6 +2409,55 @@ int main(void) { long char int value = 1; return value; }
 EOF
 try_compile_error << EOF
 int main(void) { short long int value = 1; return value; }
+EOF
+
+# A cast type name reads its specifiers with the declaration reader, so a
+# qualifier may stand anywhere among the scalar words. A qualifier after the
+# base word used to spin the cast reader forever. The name is looked up in the
+# scope of the cast: a block typedef names a type, and a variable hides one.
+try_ 64 << EOF
+typedef int T;
+struct S { int a; };
+enum E { E0, E1 };
+typedef int *P;
+int main(void) {
+    typedef short B;
+    int x = 5, *p = &x;
+    struct S s = { 3 };
+    int r = ((char volatile) 1 - 1 == 0) +
+            ((int volatile signed const) -1 == -1) * 2 +
+            ((short const int unsigned) -1 == 65535) * 4 +
+            ((B) 65539 == 3) * 8 +
+            ((struct S const *) &s)->a;
+    {
+        int T = 3;
+        r += ((T) - 1 == 2) * 16;
+    }
+    r += (*(P restrict) p == 5) * 32 + ((enum E volatile) 1 == E1) - 3;
+    return r + (sizeof(enum E const) == sizeof(int)) - 1;
+}
+EOF
+try_compile_error << EOF
+int main(void) { return (int char volatile) 1; }
+EOF
+try_compile_error << EOF
+int main(void) { return (signed volatile unsigned) 1; }
+EOF
+try_compile_error_message "restrict requires a pointer type" << EOF
+int main(void) { return (int restrict){7}; }
+EOF
+
+# A storage class may follow any scalar word, not only a trailing int.
+try_ 7 << EOF
+int const volatile short unsigned typedef U;
+U u = 65535;
+int main(void) {
+    const volatile const int short auto s = 259;
+    int char_ok = 0;
+    char unsigned static c = 255;
+    char_ok = c == 255;
+    return (u == 65535) + (s == 259) * 2 + char_ok * 4;
+}
 EOF
 try_ 1 << EOF
 int main(void) { return (unsigned long long) 1 == 1ULL; }
@@ -3942,6 +4063,81 @@ int main(void) {
     return pointer[1].left + pointer[1].right;
 }
 EOF
+
+# A pointer typedef that defines its record, tagged or not, reaches the record
+# through base_struct: sizeof(*p) and sizeof p[0] are the record's size, not a
+# pointer's. Its step is the padded record size, for postfix as well as prefix
+# updates, and the alias is a pointer operand, never a record one.
+try_ 1 << EOF
+typedef struct { int x, y; char c; } *PA, A;
+typedef PA *PPA;
+typedef struct T { int x, y; char c; } *TP;
+typedef struct { int x, y; char c; } B, *PB;
+typedef int **PP;
+A arr[3];
+B brr[3];
+struct T trr[3];
+int main(void) {
+    typedef struct { char b[5]; int z; } *LP;
+    LP lp = 0;
+    PA pa = arr, pa2 = arr;
+    PPA ppa = &pa;
+    TP tp = trr;
+    PB pb = brr;
+    int v = 0, *vp = &v, *vq = &v;
+    PP pp = &vp;
+    int r = (sizeof(*pa) == sizeof(A)) + (sizeof pa[0] == sizeof(A)) * 2 +
+            (sizeof(*pa).c == 1) * 4 + (sizeof **ppa == sizeof(A)) * 8 +
+            (sizeof *lp == 3 * sizeof(int)) * 16;
+    pa++;
+    ++pa2;
+    tp++;
+    pb--;
+    pb += 2;
+    pp++;
+    r += ((pa - arr) == 1 && pa2 == pa) * 32;
+    r += ((char *) pa - (char *) arr == sizeof(A)) * 64;
+    r += (tp - trr == 1 && pb - brr == 1) * 128;
+    r += ((char *) (lp + 1) - (char *) lp == 3 * sizeof(int)) * 256;
+    r += ((char *) pp - (char *) &vp == sizeof(int *)) * 512;
+    (void) vq;
+    return r == 1023;
+}
+EOF
+
+# An array operand of a cast is its address: an element wider than a pointer
+# made the cast a truncation of the array, which read back garbage once the
+# address had to be reloaded around a call.
+try_output 0 "12 12 24" << EOF
+struct S { int x, y; char c; };
+struct S srr[3];
+struct S trr[3];
+int main(void) {
+    struct S *p = srr + 1;
+    struct S *q = trr + 2;
+    printf("%d ", (int) ((char *) p - (char *) srr));
+    printf("%d %d", (int) ((char *) p - (char *) srr),
+           (int) ((char *) q - (char *) trr));
+    return 0;
+}
+EOF
+
+# A typedef that defines a tagged record through a pointer declarator names the
+# pointer, not the record: the tag keeps the record's own layout.
+try_ 6 << EOF
+typedef struct wide { char bytes[100]; int count; } *wide_ptr, wide_t;
+typedef union mixed { char bytes[50]; int value; } *mixed_ptr;
+int main(void) {
+    struct wide w;
+    union mixed m;
+    wide_ptr p = &w;
+    p->bytes[99] = 3;
+    p->count = 4;
+    return (sizeof(struct wide) == 104) + (sizeof(w) == 104) +
+           (sizeof(wide_t) == 104) + (sizeof(union mixed) == 52) +
+           (sizeof(m) == 52) + (w.bytes[99] + w.count == 7);
+}
+EOF
 try_ 2 << EOF
 int main(void) {
     unsigned char bytes[1] = {255};
@@ -4857,38 +5053,38 @@ int first_owner(void) { struct own_tag { int a, b; } x; x.a = 0; return sizeof(s
 int second_owner(void) { struct own_tag { char c; } y; y.c = 0; return sizeof(struct own_tag) + y.c; }
 int main(void) { return local_sizeof() + first_owner() + second_owner() + 8; }
 EOF
-# Every declaration of a tag names the same kind of record.
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+# Every declaration of a tag names the same kind of tag.
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 union mismatched_tag { int value; };
 struct mismatched_tag;
 int main(void) { return 0; }
 EOF
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 struct mismatched_definition;
 union mismatched_definition { int value; };
 int main(void) { return 0; }
 EOF
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 union mismatched_use { int value; };
 struct mismatched_use object;
 int main(void) { return 0; }
 EOF
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 union mismatched_alias { int value; };
 typedef struct mismatched_alias mismatched_alias_t;
 int main(void) { return 0; }
 EOF
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 enum mismatched_enum { MISMATCHED_ENUM };
 int main(void) { struct mismatched_enum *p = 0; return p != 0; }
 EOF
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 int main(void) { struct block_kind; union block_kind u; return 0; }
 EOF
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 int main(void) { struct implicit_kind *p = 0; union implicit_kind *q = 0; return p != 0; }
 EOF
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 struct offsetof_kind { int a; };
 int main(void) { return __builtin_offsetof(union offsetof_kind, a); }
 EOF
@@ -4919,7 +5115,7 @@ try_compile_error_message "tag was previously declared as a different kind of ta
 union cast_enum_use { int a; };
 int main(void) { return (enum cast_enum_use) 0; }
 EOF
-try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
 int main(void) { enum block_record { BLOCK_RECORD }; struct block_record { int a; }; return 0; }
 EOF
 
@@ -4979,6 +5175,61 @@ int main(void) { struct twice { int a; }; struct twice { int b; }; return 0; }
 EOF
 try_compile_error_message "redefinition of struct or union tag" << EOF
 int main(void) { union twice { int a; } u; typedef union twice { int b; } t; return 0; }
+EOF
+
+# A member list opens no scope, so defining the tag again inside its own member
+# list is a redefinition, although the tag is still incomplete there.
+try_compile_error_message "redefinition of struct or union tag" << EOF
+struct self { struct self { int x; } inner; };
+int main(void) { return sizeof(struct self); }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+union self { int a; union self { int x; } inner; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+struct self { struct middle { struct self { int y; } deepest; } inner; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+typedef struct self { struct self { int x; } inner; } self_t;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+typedef union self { union self { int x; } inner; } self_t;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+int main(void) { struct self { struct self { int x; } inner; } s; return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+int main(void) { union self { int a; union self { int x; } inner; } u; return 0; }
+EOF
+try_compile_error << EOF
+enum self { SELF_A = sizeof(struct { enum self { SELF_B } e; }) };
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { enum self { SELF_A = sizeof(struct { enum self { SELF_B } e; }) }; return 0; }
+EOF
+# The tag may still be named, by pointer, and redefined in an inner block.
+try_ 5 << EOF
+int main(void) {
+    struct self { struct self *next; struct back { struct self *owner; } b; } s;
+    s.b.owner = &s;
+    return s.b.owner == &s ? 5 : 0;
+}
+EOF
+try_ 4 << EOF
+int main(void) {
+    struct self { int x; };
+    {
+        struct self { struct self *p; int y; } s;
+        s.p = &s;
+        s.y = 4;
+        return s.p->y;
+    }
+}
 EOF
 try_compile_error_message "redefinition of enum tag" << EOF
 enum twice { TWICE_A };
@@ -9306,6 +9557,15 @@ int main(void) {
 }
 EOF
 
+# A negative designator is outside every array, including one whose bound the
+# compound literal leaves to be inferred.
+try_compile_error_message "Array designator index is out of bounds" << EOF
+int main(void) {
+    int *values = (int[]){[-1] = 1, 2};
+    return values[0];
+}
+EOF
+
 # Array compound literals use the same aggregate-element path as ordinary array
 # initializers, including nested braces, omitted members, and element
 # designators.
@@ -9552,6 +9812,141 @@ int main(void) {
     r = read_through(&arr[1]);
     return first + r.e - q.a - p->c + source.e;
 }
+EOF
+
+# Selecting a member of, or taking the address within, a record reached through
+# a pointer reads the object in place. Copying the whole record out first cost
+# instructions in proportion to its size, seconds for these 64 KiB records.
+try_ 44 << EOF
+struct big { char a[65536]; int m; struct { int x; int y; } in; };
+struct big store;
+int get_m(struct big *q) { return (*q).m; }
+int get_a(struct big *q) { return (*q).a[3]; }
+int *addr_m(struct big *q) { return &(*q).m; }
+int main(void) {
+    struct big *q = &store;
+    store.a[3] = 5;
+    store.m = 10;
+    (*q).m++;
+    ++(*q).in.y;
+    (*q).in.x = 2;
+    *addr_m(q) += 1;
+    (void) *q;
+    *q;
+    return get_m(q) + get_a(q) + (*q).in.x + (*q).in.y + ((*q).in).x * 10 +
+           (*(q + 0)).a[3] - 1;
+}
+EOF
+
+# A record read through a pointer and then used whole is copied from the object
+# it designates, once, into whatever it initializes or is assigned to.
+try_output 0 "1 2 3 4 5 6 9 8 7" << EOF
+struct in { int x; int y; };
+struct rec { char tag; struct in in; int m; };
+struct in make_in(int x) { struct in v = {x, x + 1}; return v; }
+int sum(struct in v) { return v.x + v.y; }
+int main(void) {
+    struct rec a = {0, {1, 2}, 3}, b = {0, {7, 8}, 9};
+    struct rec *p = &a, *q = &b;
+    struct rec pair[2] = {*p, *q};
+    struct in in = (*p).in;
+    struct in picked = 0 ? (*p).in : q->in;
+    struct rec c;
+    c = 1 ? *p : *q;
+    printf("%d %d %d ", pair[0].in.x, in.y, c.m);
+    *p = *q;
+    q->m = 4;
+    *q = (*q, *q);
+    printf("%d %d %d ", q->m, sum(p->in) - 10, (make_in(5), make_in(6)).x);
+    printf("%d %d %d", (*p).m, picked.y, (1 ? *p : *q).in.x);
+    return 0;
+}
+EOF
+
+# A dereferenced call result, array name or double pointer is a whole record
+# too. `*get(1)` applied the star to the function name, and `*table` on an array
+# of records had no pointer to read through, so neither could be copied.
+try_ 1 << EOF
+struct S { int a; char b; long long c; };
+struct S table[2] = { { 1, 2, 3 }, { 4, 5, 6 } };
+struct S *get(int i) { return &table[i]; }
+struct S *ptab = table;
+struct S **pp = &ptab;
+int take(struct S s) { return s.a * 100 + s.b * 10 + (int) s.c; }
+struct S ret1(void) { return *get(1); }
+struct S ret2(void) { return *table; }
+struct S ret3(void) { return **pp; }
+int main(void) {
+    struct S s;
+    int r = 0;
+    s = *get(1);
+    r += (s.a == 4 && s.b == 5 && s.c == 6);
+    struct S t = *table;
+    r += (t.a == 1 && t.c == 3) * 2;
+    struct S s6 = **pp;
+    r += (s6.a == 1 && s6.b == 2) * 4;
+    r += (take(*get(0)) == 123) * 8;
+    r += (take(*table) == 123 && take(**pp) == 123) * 16;
+    r += (ret1().a == 4 && ret2().b == 2 && ret3().c == 3) * 32;
+    s = *table;
+    r += (s.a == 1) * 64;
+    s = **pp;
+    r += (s.b == 2) * 128;
+    struct S u = *get(1);
+    r += (u.c == 6) * 256;
+    t = *(table + 1);
+    r += (t.a == 4) * 512;
+    return r == 1023;
+}
+EOF
+
+# A unary star on an array name reads or stores its first element, whatever the
+# element: read_lvalue() took `*a = v` for an assignment to the array itself,
+# `**ptrs` read an int-sized word of the first pointer, and `**rows` loaded the
+# first row as if it were a pointer.
+try_output 0 "9 9 1 x 12 6 6 8 7 3 7" << EOF
+typedef int *ip;
+struct S { int a; char b; long long c; };
+int ga[3];
+void fill(int a[4], int n) { *a = n; *a += 1; }
+void fill2(int a[][2]) { **a = 3; }
+int main(void) {
+    int a[3] = { 1, 2, 3 };
+    long long la[2];
+    char buf[4];
+    int rows[2][2];
+    int x = 0, y = 5;
+    ip tps[2];
+    int *ptrs[2];
+    int loc[4];
+    int m[2][2];
+    struct S t[2], s = { 1, 2, 3 };
+    *a += 2;
+    (*a) *= 2;
+    *(a) -= 1;
+    x = *a = 9;
+    *la = 1LL << 40;
+    *buf = 'x';
+    **rows = 4;
+    **rows *= 3;
+    *tps = &y;
+    *ptrs = &y;
+    **ptrs += 1;
+    *ga = 8;
+    fill(loc, 6);
+    fill2(m);
+    *t = s;
+    (*t).a = 5;
+    printf("%d %d %d %c %d ", *a, x, (int) (*la >> 40), *buf, **rows);
+    printf("%d %d %d %d %d %d", **tps, **ptrs, *ga, *loc, **m, (*t).a + t->b);
+    return 0;
+}
+EOF
+try_compile_error_message "assignment to expression with array type" << EOF
+int main(void) { int rows[2][2], r[2]; *rows = r; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int main(void) { const int a[2] = {1, 2}; *a = 3; return 0; }
 EOF
 
 # Record arguments are passed by value: the callee receives every byte, but a
@@ -10530,6 +10925,16 @@ try_compile_error_message "ordinary identifier conflicts with typedef name" << E
 int main(void) { typedef int T; union { int a; } T; return 0; }
 EOF
 
+# An enumeration constant is an ordinary identifier too: it conflicts with a
+# typedef of its block and hides an outer one.
+try_compile_error_message "typedef name conflicts with an ordinary identifier" << EOF
+int main(void) { enum { A }; typedef int A; return 0; }
+EOF
+try_ 4 << EOF
+typedef int T;
+int main(void) { enum { T = 3 }; { T: return T + 1; } }
+EOF
+
 # Category: Loop Constructs
 begin_category "Loop Constructs" "Testing while, do-while, and for loops"
 
@@ -11353,6 +11758,60 @@ items 2 "short x; short *y; short z; z = 2; y = &z; x = *y; return x;"
 items 42 "int x; x = 10; int *p; p = &x; p[0] = 42; exit(x);"
 items 10 "int val; val = 5; int *ptr; ptr = &val; ptr[0] = 10; exit(val);"
 items 7 "int a; a = 3; int *b; b = &a; b[0] = 7; exit(a);"
+
+# Pointer arithmetic follows operator precedence. A pointer operand used to take
+# a following "+ n" as part of itself, so p + a * b became (p + a) * b and read
+# past the array, and so did p + sizeof(int) * 2.
+try_output 0 "2 2 9 5 2 2 2 4 7 12 21 8 6 4 7 1 1 6" << EOF
+int *id(int *p) { return p; }
+int main(void) {
+    int arr[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    int m[3][4];
+    int (*pa)[4] = m;
+    int *p = arr;
+    int a = 1, b = 2;
+    long off = 3;
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 4; c++)
+            m[r][c] = r * 10 + c;
+    printf("%d %d %d ", *(p + 1 * 2), *(p + a * b), *(p + 5 - 2 + 3 * 2));
+    printf("%d %d %d ", *(5 + p), *(a * b + p), *(p + a + a));
+    printf("%d %d %d ", *(id(p) + a * b), *(arr + 2 * 2), *(arr + a + b * 3));
+    printf("%d %d ", (*(pa + 1))[2], *(*(pa + a * 2) + 1));
+    printf("%d %d %d ", *(p + sizeof(int) * 2), *(p + off * 2),
+           *(p + a * b + a * b));
+    int *z = arr + a * b + b % 2 + b / 2 * 5 - a * 4;
+    printf("%d %d %d ", *z + 4, p + a * 0 ? 1 : 2, (int) ((char *) p + 1 - (char *) p));
+    p = p + 2 * 3;
+    printf("%d", *p);
+    return 0;
+}
+EOF
+
+# Unary operators and casts read their operand recursively without passing
+# through read_expr(), so a long chain of them overflowed the stack instead of
+# reaching the expression nesting limit.
+try_ 7 << EOF
+int main(void)
+{
+    int x = 7;
+    return $(printf '*&%.0s' $(seq 100))x + $(printf '(int)%.0s' $(seq 100))0;
+}
+EOF
+try_compile_error_message "Expression nesting too deep" << EOF
+int main(void)
+{
+    int x = 3;
+    return $(printf '*&%.0s' $(seq 20000))x;
+}
+EOF
+try_compile_error_message "Expression nesting too deep" << EOF
+int main(void)
+{
+    int x = 3;
+    return $(printf '(int)%.0s' $(seq 20000))x;
+}
+EOF
 
 # The address of a member has the member's pointer type, so arithmetic on it
 # advances by whole members.
@@ -14185,6 +14644,41 @@ static pd_typedef_pointer pd_typedef_value;
 static int pd_typedef_size = sizeof((*pd_typedef_value).values);
 int main(void) { return pd_typedef_size; }
 EOF
+
+# A sizeof in an integer constant expression has the value the same operand has
+# at block scope, through any grouping, operator, subscript of a pointer or
+# dereference of a pointer to an array. Each operand below used to fail to parse
+# or to report the size of the wrong object.
+try_ 0 << EOF
+enum { ce_k = 3 };
+int ce_g[4];
+int ce_m[2][3];
+int ce_v;
+char *ce_cp;
+int *ce_pa[3];
+int (*ce_pp)[6];
+int ce_sizes[] = {
+    sizeof(((ce_g))[0]), sizeof((ce_m[1])[2]), sizeof((ce_v) + 1),
+    sizeof(((ce_g)) + 1), sizeof(((ce_k))), sizeof(ce_k + 1), sizeof(ce_cp[1]),
+    sizeof(ce_pa[1]), sizeof((*ce_pa[1])), sizeof((*ce_pp)), sizeof((*ce_pp)[1]),
+};
+enum { ce_row = sizeof((ce_m[1])[2]), ce_slot = sizeof(ce_pa[1]) };
+int main(void) {
+    char bound[sizeof((*ce_pp))];
+    static int local = sizeof(((ce_m))[1]);
+    int expected[] = {
+        sizeof(((ce_g))[0]), sizeof((ce_m[1])[2]), sizeof((ce_v) + 1),
+        sizeof(((ce_g)) + 1), sizeof(((ce_k))), sizeof(ce_k + 1), sizeof(ce_cp[1]),
+        sizeof(ce_pa[1]), sizeof((*ce_pa[1])), sizeof((*ce_pp)), sizeof((*ce_pp)[1]),
+    };
+    for (int i = 0; i < 11; i++)
+        if (ce_sizes[i] != expected[i])
+            return i + 1;
+    return ce_row != sizeof(int) || ce_slot != sizeof(int *) ||
+           sizeof(bound) != 6 * sizeof(int) || local != 3 * sizeof(int) ||
+           expected[7] != sizeof(int *) || expected[9] != 6 * sizeof(int);
+}
+EOF
 try_compile_error << EOF
 struct bad_global_member_access { int value; };
 static struct bad_global_member_access *bad_global_member_pointer;
@@ -14864,6 +15358,19 @@ int static_grid(void) {
 int main(void) {
     return global_grid.cells[1][0][1] + global_grid.cells[1][1][0] +
            global_grid.cells[1][1][1] + local_grid() + static_grid();
+}
+EOF
+
+# The subscripts of a block-scope static's member designators are constant
+# expressions of the declaration's block, even though its storage is lowered
+# through the file-scope initializer.
+try_ 26 << EOF
+struct S { int a[3]; int m[2][2]; };
+int main(void) {
+    enum { K = 1 };
+    static struct S s = {.a[K] = 5, .m[K][K] = 6};
+    static struct S t = {.a = {[K] = 7}, .m = {[K] = {[K] = 8}}};
+    return s.a[1] + s.m[1][1] + t.a[1] + t.m[1][1];
 }
 EOF
 
@@ -16736,6 +17243,49 @@ expr 1 "sizeof(_Bool)"
 expr 1 "sizeof(char)"
 expr 2 "sizeof(short)"
 expr 4 "sizeof(int)"
+
+# Type specifiers may appear in any order, qualifiers among them, in every type
+# name and declaration; each reader shares one specifier parser.
+try_ 73 << EOF
+char spelled[sizeof(char const) + sizeof(short volatile int const)];
+int main(void) {
+    typedef int volatile unsigned const U;
+    struct { const int signed a; char c; } r = {-1, 0};
+    return sizeof(spelled) + sizeof(unsigned volatile char const) * 10 +
+           (sizeof(U) == 4) * 20 + (r.a < 0) * 40;
+}
+EOF
+try_compile_error_message "assignment of read-only variable" << EOF
+int main(void) { const int signed x = 1; x = 2; return x; }
+EOF
+try_compile_error_message "duplicate type specifier" << EOF
+char bad[sizeof(char short)];
+int main(void) { return 0; }
+EOF
+try_compile_error_message "int cannot be combined with char" << EOF
+int main(void) { return sizeof(int char); }
+EOF
+try_compile_error_message "long cannot be combined with char" << EOF
+int main(void) { long char c = 0; return c; }
+EOF
+try_compile_error_message "long cannot be combined with short" << EOF
+typedef short long bad;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+typedef int T;
+char bad[sizeof(unsigned T)];
+int main(void) { return 0; }
+EOF
+try_compile_error_message "record type cannot be combined with integer specifiers" << EOF
+struct S { int a; };
+unsigned struct S s;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "enum type cannot be combined with integer specifiers" << EOF
+enum E { A };
+int main(void) { long enum E e = A; return e; }
+EOF
 # sizeof pointers
 expr $PTR_SZ "sizeof(void*)"
 expr $PTR_SZ "sizeof(_Bool*)"
@@ -24601,6 +25151,52 @@ int bad(int count, ...) {
     va_list ap;
     va_start(ap, count);
     va_arg(ap, struct incomplete);
+    return 0;
+}
+EOF
+
+# A va_arg type name reads its specifiers like any other type name: in any
+# order, through a block-scope typedef, and without a floating type, which would
+# enter the integer-only argument ABI however it is spelled.
+try_ 42 << EOF
+#include <stdarg.h>
+int pick(int count, ...) {
+    typedef long long wide;
+    va_list ap;
+    va_start(ap, count);
+    wide first = va_arg(ap, wide);
+    int second = va_arg(ap, int const unsigned);
+    va_end(ap);
+    return (int) first + second;
+}
+int main(void) { return pick(2, (long long) 2, 40); }
+EOF
+try_compile_error_message "Floating point types are not yet supported" << EOF
+#include <stdarg.h>
+int bad(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    va_arg(ap, double);
+    return 0;
+}
+EOF
+try_compile_error_message "Floating point types are not yet supported" << EOF
+#include <stdarg.h>
+typedef float real;
+int bad(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    va_arg(ap, real);
+    return 0;
+}
+EOF
+try_compile_error_message "record type cannot be combined with integer specifiers" << EOF
+#include <stdarg.h>
+struct item { int value; };
+int bad(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    va_arg(ap, signed struct item *);
     return 0;
 }
 EOF

@@ -80,7 +80,8 @@ var_t *compute_field_address(block_t *parent,
  */
 bool is_record_object(const var_t *var)
 {
-    return var && !var->ptr_level && !var->array_size && var->type &&
+    return var && !effective_pointer_depth(var) && !var->array_size &&
+           var->type &&
            (var->type->base_type == TYPE_struct ||
             var->type->base_type == TYPE_union ||
             (var->type->base_type == TYPE_typedef &&
@@ -117,6 +118,22 @@ void emit_record_copy_between(block_t *parent,
     }
 }
 
+/* The address of the bytes of record value @record. A record whose copy was
+ * deferred still has them at the object it was read from, and a copy out of it
+ * reads them there.
+ */
+var_t *record_value_address(block_t *parent, basic_block_t *bb, var_t *record)
+{
+    var_t *address;
+
+    if (record->defers_record_copy)
+        return record->compound_literal_address;
+    address = require_ref_var(parent, record->type, 0);
+    address->var_name = gen_name();
+    add_insn(parent, bb, OP_address_of, address, record, NULL, 0, NULL);
+    return address;
+}
+
 /* Copy a record into an address which is already known, such as a nested record
  * member.
  */
@@ -125,10 +142,8 @@ void emit_record_copy_to_address(block_t *parent,
                                  var_t *dest_addr,
                                  var_t *src)
 {
-    var_t *src_addr = require_ref_var(parent, src->type, 0);
+    var_t *src_addr = record_value_address(parent, *bb, src);
 
-    src_addr->var_name = gen_name();
-    add_insn(parent, *bb, OP_address_of, src_addr, src, NULL, 0, NULL);
     emit_record_copy_between(parent, bb, dest_addr, src_addr, size_var(src));
 }
 
@@ -138,12 +153,11 @@ void emit_record_copy(block_t *parent,
                       var_t *src)
 {
     var_t *dest_addr = require_ref_var(parent, dest->type, 0);
-    var_t *src_addr = require_ref_var(parent, src->type, 0);
+    var_t *src_addr;
 
     dest_addr->var_name = gen_name();
-    src_addr->var_name = gen_name();
     add_insn(parent, *bb, OP_address_of, dest_addr, dest, NULL, 0, NULL);
-    add_insn(parent, *bb, OP_address_of, src_addr, src, NULL, 0, NULL);
+    src_addr = record_value_address(parent, *bb, src);
     emit_record_copy_between(parent, bb, dest_addr, src_addr, size_var(dest));
 }
 
@@ -383,12 +397,21 @@ var_t *read_global_address_designator(block_t *scope,
     return object_addr;
 }
 
+/* The block that names in an initializer lowered into @parent resolve in. A
+ * block-scope static is lowered through GLOBAL_BLOCK, yet its designators and
+ * constants belong to the lexical scope of its declaration.
+ */
+block_t *initializer_name_scope(block_t *parent)
+{
+    if (parent == GLOBAL_BLOCK && global_constant_initializer_scope)
+        return global_constant_initializer_scope;
+    return parent;
+}
+
 var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
 {
     var_t *val = NULL;
-    block_t *scope = global_constant_initializer_scope
-                         ? global_constant_initializer_scope
-                         : parent;
+    block_t *scope = initializer_name_scope(parent);
     bool address_dereference =
         global_function_address_dereference_starts_here();
     token_t *address_dereference_identifier = NULL;
@@ -518,37 +541,6 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
     return val;
 }
 
-/* Skip one static initializer value without lowering it: every token up to the
- * ',' or '}' that ends it, outside the parentheses and brackets it contains.
- * The value is read for real, and diagnosed, when its code is emitted.
- */
-void consume_global_constant_syntax(void)
-{
-    int depth = 0;
-    bool consumed = false;
-
-    while (cur_token->next) {
-        token_kind_t kind = cur_token->next->kind;
-
-        if (kind == T_open_curly ||
-            (!depth &&
-             (kind == T_comma || kind == T_close_curly || kind == T_semicolon)))
-            break;
-        if (kind == T_open_bracket || kind == T_open_square) {
-            depth++;
-        } else if (kind == T_close_bracket || kind == T_close_square) {
-            if (!depth)
-                break;
-            depth--;
-        }
-        lex_next();
-        consumed = true;
-    }
-    if (!consumed)
-        error_at("Global array initialization requires constant values",
-                 next_token_loc());
-}
-
 bool is_record_type(const type_t *type)
 {
     return type &&
@@ -559,28 +551,50 @@ bool is_record_type(const type_t *type)
 void parse_struct_field_init(block_t *parent,
                              basic_block_t **bb,
                              type_t *struct_type,
-                             var_t *target_addr,
-                             bool emit_code);
+                             var_t *target_addr);
 bool parse_struct_field_values(block_t *parent,
                                basic_block_t **bb,
                                type_t *struct_type,
                                var_t *target_addr,
-                               bool emit_code,
                                bool elided,
                                var_t *first_value);
 bool parse_unbraced_record_init(block_t *parent,
                                 basic_block_t **bb,
                                 type_t *record_type,
-                                var_t *addr,
-                                bool emit_code);
+                                var_t *addr);
 bool unbraced_record_starts_here(const var_t *elem);
 bool string_row_starts_here(const var_t *array);
 void parse_string_row_init(block_t *parent,
                            basic_block_t **bb,
                            const var_t *array,
                            var_t *target_addr,
-                           int start,
-                           bool emit_code);
+                           int start);
+
+/* Store @zero, a loaded zero constant, into each of @size bytes at @addr. The
+ * stores are byte-wide so that a record or a wide element needs no store width
+ * a narrow backend cannot encode.
+ */
+void emit_zero_bytes(block_t *parent,
+                     basic_block_t **bb,
+                     var_t *addr,
+                     int size,
+                     var_t *zero)
+{
+    for (int offset = 0; offset < size; offset++) {
+        var_t *byte_addr = compute_element_address(parent, bb, addr, offset, 1);
+        add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1, NULL);
+    }
+}
+
+var_t *emit_zero_constant(block_t *parent, basic_block_t **bb)
+{
+    var_t *zero = require_var(parent);
+
+    zero->var_name = gen_name();
+    zero->init_val = 0;
+    add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
+    return zero;
+}
 
 /* Store zero into every byte of elements [from, to) of the array at @base. */
 void emit_zero_elements(block_t *parent,
@@ -594,34 +608,80 @@ void emit_zero_elements(block_t *parent,
 
     if (from >= to)
         return;
-    zero = require_var(parent);
-    zero->var_name = gen_name();
-    zero->init_val = 0;
-    add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-    for (int i = from; i < to; i++) {
-        var_t *elem_addr =
-            compute_element_address(parent, bb, base, i, elem_size);
-        for (int offset = 0; offset < elem_size; offset++) {
-            var_t *byte_addr =
-                compute_element_address(parent, bb, elem_addr, offset, 1);
-            add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1, NULL);
-        }
+    zero = emit_zero_constant(parent, bb);
+    for (int i = from; i < to; i++)
+        emit_zero_bytes(parent, bb,
+                        compute_element_address(parent, bb, base, i, elem_size),
+                        elem_size, zero);
+}
+
+/* The width of one element of @array: a pointer for an array of pointers or of
+ * function designators, and the element type's size otherwise.
+ */
+int array_element_size(const var_t *array)
+{
+    return (array->ptr_level || array->is_func) ? PTR_SIZE : array->type->size;
+}
+
+/* Read an array designator such as `[1]` or `[1][0]` for @array, if one is
+ * next. Each subscript is checked against its own bound and descends one level,
+ * until a scalar is reached or, when @max_depth is nonzero, that many
+ * subscripts have been read. An @unbounded outer bound is still being inferred
+ * from the initializer and is not checked. The caller consumes whatever
+ * follows.
+ *
+ * Returns the number of subscripts read. When there were any, *@flat is the
+ * row-major element offset of the designated subobject and @slice, if given,
+ * holds the shape of the array it is one element of.
+ */
+int read_array_designator(block_t *scope,
+                          const var_t *array,
+                          int max_depth,
+                          bool unbounded,
+                          int *flat,
+                          var_t *slice)
+{
+    var_t element;
+    int depth = 0;
+    int offset = 0;
+
+    memcpy(&element, array, sizeof(element));
+    while ((!max_depth || depth < max_depth) &&
+           (!depth || element.array_size) && lex_accept(T_open_square)) {
+        int stride = fixed_array_inner_count(&element);
+        int index = read_const_expr(scope);
+
+        lex_expect(T_close_square);
+        if (index < 0 ||
+            ((depth || !unbounded) && index >= element.array_size / stride))
+            error_at("Array designator index is out of bounds",
+                     cur_token_loc());
+        offset += index * stride;
+        if (slice)
+            memcpy(slice, &element, sizeof(element));
+
+        /* An unbounded outer dimension has no extent to drop yet: descend from
+         * a single outer element, whose inner bounds are known.
+         */
+        if (!depth && unbounded)
+            element.array_size = stride;
+        fixed_array_var_drop_outer(&element);
+        depth++;
     }
+    if (depth)
+        *flat = offset;
+    return depth;
 }
 
 /* Read an `[index] =` designator for one of @bound slots, if one is next. */
 bool accept_slot_designator(block_t *scope, int bound, int *slot)
 {
-    int index;
+    var_t slots = {0};
 
-    if (!lex_accept(T_open_square))
+    slots.array_size = bound;
+    if (!read_array_designator(scope, &slots, 1, false, slot, NULL))
         return false;
-    index = read_const_expr(scope);
-    lex_expect(T_close_square);
-    if (index < 0 || index >= bound)
-        error_at("Array designator index is out of bounds", cur_token_loc());
     lex_expect(T_assign);
-    *slot = index;
     return true;
 }
 
@@ -638,14 +698,12 @@ bool parse_array_field_row_values(block_t *parent,
                                   const var_t *field,
                                   var_t *target_addr,
                                   int start,
-                                  bool emit_code,
                                   bool braced)
 {
     int count = 0;
     int filled = 0;
     bool comma_consumed = false;
-    int elem_size =
-        (field->ptr_level || field->is_func) ? PTR_SIZE : field->type->size;
+    int elem_size = array_element_size(field);
 
     if (braced) {
         lex_expect(T_open_curly);
@@ -654,7 +712,7 @@ bool parse_array_field_row_values(block_t *parent,
 
     /* The whole row may be one string literal, optionally in its own braces. */
     if (string_row_starts_here(field)) {
-        parse_string_row_init(parent, bb, field, target_addr, start, emit_code);
+        parse_string_row_init(parent, bb, field, target_addr, start);
         if (braced) {
             lex_accept(T_comma);
             lex_expect(T_close_curly);
@@ -666,42 +724,34 @@ bool parse_array_field_row_values(block_t *parent,
         var_t *elem_addr;
 
         if (braced)
-            accept_slot_designator(field->scope ? field->scope : parent,
+            accept_slot_designator(initializer_name_scope(parent),
                                    field->array_dim2, &count);
         if (count >= field->array_dim2)
             error_at("Too many elements in array initializer",
                      next_token_loc());
-        if (emit_code)
-            emit_zero_elements(parent, bb, target_addr, start + filled,
-                               start + count, elem_size);
+        emit_zero_elements(parent, bb, target_addr, start + filled,
+                           start + count, elem_size);
 
         elem_addr = compute_element_address(parent, bb, target_addr,
                                             start + count, elem_size);
         comma_consumed = false;
         if (lex_peek(T_open_curly, NULL) && is_record_type(field->type)) {
-            type_t *record_type = field->type;
-            if (record_type->base_type == TYPE_typedef &&
-                record_type->base_struct)
-                record_type = record_type->base_struct;
+            type_t *record_type = resolve_record_type(field->type);
             lex_expect(T_open_curly);
-            parse_struct_field_init(parent, bb, record_type, elem_addr,
-                                    emit_code);
+            parse_struct_field_init(parent, bb, record_type, elem_addr);
             lex_expect(T_close_curly);
         } else if (unbraced_record_starts_here(field)) {
-            comma_consumed = parse_unbraced_record_init(parent, bb, field->type,
-                                                        elem_addr, emit_code);
+            comma_consumed =
+                parse_unbraced_record_init(parent, bb, field->type, elem_addr);
         } else if (parent == GLOBAL_BLOCK) {
-            if (emit_code)
-                value = parse_global_constant_value(parent, bb);
-            else
-                consume_global_constant_syntax();
+            value = parse_global_constant_value(parent, bb);
         } else {
             read_expr(parent, bb);
             read_ternary_operation(parent, bb);
             value = opstack_pop();
         }
 
-        if (value && emit_code) {
+        if (value) {
             var_t *stored = value->is_func
                                 ? value
                                 : resize_to(parent, bb, value, field->type,
@@ -732,9 +782,8 @@ bool parse_array_field_row_values(block_t *parent,
         comma_consumed = false;
     }
 
-    if (emit_code)
-        emit_zero_elements(parent, bb, target_addr, start + filled,
-                           start + field->array_dim2, elem_size);
+    emit_zero_elements(parent, bb, target_addr, start + filled,
+                       start + field->array_dim2, elem_size);
     return comma_consumed;
 }
 
@@ -742,11 +791,9 @@ void parse_array_field_row_init(block_t *parent,
                                 basic_block_t **bb,
                                 const var_t *field,
                                 var_t *target_addr,
-                                int start,
-                                bool emit_code)
+                                int start)
 {
-    parse_array_field_row_values(parent, bb, field, target_addr, start,
-                                 emit_code, true);
+    parse_array_field_row_values(parent, bb, field, target_addr, start, true);
 }
 
 /* Parse one braced plane of a three-dimensional array. Rows reuse the
@@ -757,15 +804,13 @@ void parse_array_field_plane_values(block_t *parent,
                                     const var_t *field,
                                     var_t *target_addr,
                                     int start,
-                                    bool emit_code,
                                     bool braced)
 {
     var_t row;
     int rows = 0;
     int filled = 0;
     int row_width = field->array_dim3;
-    int elem_size =
-        (field->ptr_level || field->is_func) ? PTR_SIZE : field->type->size;
+    int elem_size = array_element_size(field);
 
     memcpy(&row, field, sizeof(row));
     row.array_dim2 = row_width;
@@ -775,16 +820,14 @@ void parse_array_field_plane_values(block_t *parent,
         reject_empty_initializer_in_strict_c99();
     }
     while (!lex_peek(T_close_curly, NULL)) {
-        accept_slot_designator(field->scope ? field->scope : parent,
+        accept_slot_designator(initializer_name_scope(parent),
                                field->array_dim2, &rows);
         if (rows >= field->array_dim2)
             error_at("Too many rows in array initializer", next_token_loc());
-        if (emit_code)
-            emit_zero_elements(parent, bb, target_addr,
-                               start + filled * row_width,
-                               start + rows * row_width, elem_size);
+        emit_zero_elements(parent, bb, target_addr, start + filled * row_width,
+                           start + rows * row_width, elem_size);
         bool row_comma = parse_array_field_row_values(
-            parent, bb, &row, target_addr, start + rows * row_width, emit_code,
+            parent, bb, &row, target_addr, start + rows * row_width,
             lex_peek(T_open_curly, NULL));
         rows++;
         if (rows > filled)
@@ -805,20 +848,17 @@ void parse_array_field_plane_values(block_t *parent,
     if (braced)
         lex_expect(T_close_curly);
 
-    if (emit_code)
-        emit_zero_elements(parent, bb, target_addr, start + filled * row_width,
-                           start + field->array_dim2 * row_width, elem_size);
+    emit_zero_elements(parent, bb, target_addr, start + filled * row_width,
+                       start + field->array_dim2 * row_width, elem_size);
 }
 
 void parse_array_field_plane_init(block_t *parent,
                                   basic_block_t **bb,
                                   const var_t *field,
                                   var_t *target_addr,
-                                  int start,
-                                  bool emit_code)
+                                  int start)
 {
-    parse_array_field_plane_values(parent, bb, field, target_addr, start,
-                                   emit_code, true);
+    parse_array_field_plane_values(parent, bb, field, target_addr, start, true);
 }
 
 /* Parse one braced outer slice of a four-dimensional array. Each contained
@@ -829,15 +869,13 @@ void parse_array_field_hyperplane_init(block_t *parent,
                                        basic_block_t **bb,
                                        const var_t *field,
                                        var_t *target_addr,
-                                       int start,
-                                       bool emit_code)
+                                       int start)
 {
     var_t plane;
     int planes = 0;
     int filled = 0;
     int plane_size = field->array_dim3 * field->array_dim4;
-    int elem_size =
-        (field->ptr_level || field->is_func) ? PTR_SIZE : field->type->size;
+    int elem_size = array_element_size(field);
 
     memcpy(&plane, field, sizeof(plane));
     plane.array_size = plane_size;
@@ -847,16 +885,14 @@ void parse_array_field_hyperplane_init(block_t *parent,
     lex_expect(T_open_curly);
     reject_empty_initializer_in_strict_c99();
     while (!lex_peek(T_close_curly, NULL)) {
-        accept_slot_designator(field->scope ? field->scope : parent,
+        accept_slot_designator(initializer_name_scope(parent),
                                field->array_dim2, &planes);
         if (planes >= field->array_dim2)
             error_at("Too many planes in array initializer", next_token_loc());
-        if (emit_code)
-            emit_zero_elements(parent, bb, target_addr,
-                               start + filled * plane_size,
-                               start + planes * plane_size, elem_size);
+        emit_zero_elements(parent, bb, target_addr, start + filled * plane_size,
+                           start + planes * plane_size, elem_size);
         parse_array_field_plane_values(parent, bb, &plane, target_addr,
-                                       start + planes * plane_size, emit_code,
+                                       start + planes * plane_size,
                                        lex_peek(T_open_curly, NULL));
         planes++;
         if (planes > filled)
@@ -866,9 +902,8 @@ void parse_array_field_hyperplane_init(block_t *parent,
     }
     lex_expect(T_close_curly);
 
-    if (emit_code)
-        emit_zero_elements(parent, bb, target_addr, start + filled * plane_size,
-                           start + field->array_dim2 * plane_size, elem_size);
+    emit_zero_elements(parent, bb, target_addr, start + filled * plane_size,
+                       start + field->array_dim2 * plane_size, elem_size);
 }
 
 /* Read a string literal and every adjacent one after it, decoded and joined
@@ -908,8 +943,7 @@ int read_concatenated_string(char *combined)
 void parse_string_field_init(block_t *parent,
                              basic_block_t **bb,
                              const var_t *field,
-                             var_t *target_addr,
-                             bool emit_code)
+                             var_t *target_addr)
 {
     char combined[MAX_STRING_LEN];
     int len;
@@ -921,8 +955,6 @@ void parse_string_field_init(block_t *parent,
     if (len - 1 > field->array_size)
         error_at("String initializer is too long for character array",
                  cur_token_loc());
-    if (!emit_code)
-        return;
 
     for (int i = 0; i < field->array_size; i++) {
         var_t *value = require_var(parent);
@@ -970,8 +1002,7 @@ void validate_string_array_initializer(const var_t *var)
 void parse_wstring_field_init(block_t *parent,
                               basic_block_t **bb,
                               const var_t *field,
-                              var_t *target_addr,
-                              bool emit_code)
+                              var_t *target_addr)
 {
     int values[MAX_STRING_LEN];
     int length;
@@ -980,8 +1011,6 @@ void parse_wstring_field_init(block_t *parent,
     if (length > field->array_size)
         error_at("Wide string initializer is too long for array",
                  cur_token_loc());
-    if (!emit_code)
-        return;
 
     for (int i = 0; i < field->array_size; i++) {
         var_t *value = require_typed_var(parent, field->type);
@@ -1043,12 +1072,11 @@ void parse_string_row_init(block_t *parent,
                            basic_block_t **bb,
                            const var_t *array,
                            var_t *target_addr,
-                           int start,
-                           bool emit_code)
+                           int start)
 {
     var_t row;
-    var_t *row_addr = NULL;
     int width = string_row_width(array);
+    var_t *row_addr;
 
     if (start % width)
         error_at("String literal cannot initialize a single array element",
@@ -1056,20 +1084,18 @@ void parse_string_row_init(block_t *parent,
     memcpy(&row, array, sizeof(row));
     row.array_size = width;
     row.array_dim2 = row.array_dim3 = row.array_dim4 = 0;
-    if (emit_code)
-        row_addr = compute_element_address(parent, bb, target_addr, start,
-                                           array->type->size);
+    row_addr = compute_element_address(parent, bb, target_addr, start,
+                                       array->type->size);
     if (lex_peek(T_wstring, NULL))
-        parse_wstring_field_init(parent, bb, &row, row_addr, emit_code);
+        parse_wstring_field_init(parent, bb, &row, row_addr);
     else
-        parse_string_field_init(parent, bb, &row, row_addr, emit_code);
+        parse_string_field_init(parent, bb, &row, row_addr);
 }
 
 void parse_array_field_init(block_t *parent,
                             basic_block_t **bb,
                             const var_t *field,
-                            var_t *target_addr,
-                            bool emit_code)
+                            var_t *target_addr)
 {
     int count = 0;
 
@@ -1078,8 +1104,7 @@ void parse_array_field_init(block_t *parent,
      * clear rows that an earlier designator already stored.
      */
     int filled = 0;
-    int elem_size =
-        (field->ptr_level || field->is_func) ? PTR_SIZE : field->type->size;
+    int elem_size = array_element_size(field);
 
     lex_expect(T_open_curly);
     reject_empty_initializer_in_strict_c99();
@@ -1095,77 +1120,49 @@ void parse_array_field_init(block_t *parent,
          * the shape the designator names and reordered rows stay valid.
          */
         memcpy(&slice, field, sizeof(slice));
-        if (lex_accept(T_open_square)) {
-            var_t element;
-
-            memcpy(&element, field, sizeof(element));
-            count = 0;
-            do {
-                int stride = fixed_array_inner_count(&element);
-                int index =
-                    read_const_expr(field->scope ? field->scope : parent);
-
-                lex_expect(T_close_square);
-                if (index < 0 || index >= element.array_size / stride)
-                    error_at("Array designator index is out of bounds",
-                             cur_token_loc());
-                count += index * stride;
-                memcpy(&slice, &element, sizeof(slice));
-                fixed_array_var_drop_outer(&element);
-            } while (element.array_size && lex_accept(T_open_square));
+        if (read_array_designator(initializer_name_scope(parent), field, 0,
+                                  false, &count, &slice))
             lex_expect(T_assign);
-        }
 
         if (count >= field->array_size)
             error_at("Too many elements in array initializer",
                      next_token_loc());
-        if (emit_code)
-            emit_zero_elements(parent, bb, target_addr, filled, count,
-                               elem_size);
+        emit_zero_elements(parent, bb, target_addr, filled, count, elem_size);
 
         var_t *elem_addr =
             compute_element_address(parent, bb, target_addr, count, elem_size);
         if (slice.array_dim4 && lex_peek(T_open_curly, NULL)) {
             parse_array_field_hyperplane_init(parent, bb, &slice, target_addr,
-                                              count, emit_code);
+                                              count);
             count += fixed_array_inner_count(&slice);
         } else if (slice.array_dim3 && lex_peek(T_open_curly, NULL)) {
-            parse_array_field_plane_init(parent, bb, &slice, target_addr, count,
-                                         emit_code);
+            parse_array_field_plane_init(parent, bb, &slice, target_addr,
+                                         count);
             count += fixed_array_inner_count(&slice);
         } else if (slice.array_dim2 && lex_peek(T_open_curly, NULL)) {
-            parse_array_field_row_init(parent, bb, &slice, target_addr, count,
-                                       emit_code);
+            parse_array_field_row_init(parent, bb, &slice, target_addr, count);
             count += fixed_array_inner_count(&slice);
         } else if (string_row_starts_here(&slice)) {
-            parse_string_row_init(parent, bb, &slice, target_addr, count,
-                                  emit_code);
+            parse_string_row_init(parent, bb, &slice, target_addr, count);
             count += string_row_width(&slice);
         } else {
             if (lex_peek(T_open_curly, NULL) && is_record_type(field->type)) {
-                type_t *record_type = field->type;
-                if (record_type->base_type == TYPE_typedef &&
-                    record_type->base_struct)
-                    record_type = record_type->base_struct;
+                type_t *record_type = resolve_record_type(field->type);
                 lex_expect(T_open_curly);
-                parse_struct_field_init(parent, bb, record_type, elem_addr,
-                                        emit_code);
+                parse_struct_field_init(parent, bb, record_type, elem_addr);
                 lex_expect(T_close_curly);
             } else if (unbraced_record_starts_here(field)) {
                 comma_consumed = parse_unbraced_record_init(
-                    parent, bb, field->type, elem_addr, emit_code);
+                    parent, bb, field->type, elem_addr);
             } else if (parent == GLOBAL_BLOCK) {
-                if (emit_code)
-                    value = parse_global_constant_value(parent, bb);
-                else
-                    consume_global_constant_syntax();
+                value = parse_global_constant_value(parent, bb);
             } else {
                 read_expr(parent, bb);
                 read_ternary_operation(parent, bb);
                 value = opstack_pop();
             }
 
-            if (value && emit_code) {
+            if (value) {
                 var_t *stored = value->is_func
                                     ? value
                                     : resize_to(parent, bb, value, field->type,
@@ -1183,16 +1180,8 @@ void parse_array_field_init(block_t *parent,
     }
     lex_expect(T_close_curly);
 
-    if (emit_code)
-        emit_zero_elements(parent, bb, target_addr, filled, field->array_size,
-                           elem_size);
-}
-
-type_t *resolve_record_type(type_t *type)
-{
-    if (type->base_type == TYPE_typedef && type->base_struct)
-        return type->base_struct;
-    return type;
+    emit_zero_elements(parent, bb, target_addr, filled, field->array_size,
+                       elem_size);
 }
 
 /* Initialize the record at @addr from @value, an initializer already read that
@@ -1208,18 +1197,16 @@ bool parse_record_from_value(block_t *parent,
                              basic_block_t **bb,
                              type_t *record_type,
                              var_t *addr,
-                             bool emit_code,
                              var_t *value)
 {
     record_type = resolve_record_type(record_type);
     if (is_record_object(value) &&
         resolve_record_type(value->type) == record_type) {
-        if (emit_code)
-            emit_record_copy_to_address(parent, bb, addr, value);
+        emit_record_copy_to_address(parent, bb, addr, value);
         return false;
     }
-    return parse_struct_field_values(parent, bb, record_type, addr, emit_code,
-                                     true, value);
+    return parse_struct_field_values(parent, bb, record_type, addr, true,
+                                     value);
 }
 
 /* A record slot whose initializer does not begin with a brace. Reading a block
@@ -1231,8 +1218,7 @@ bool parse_record_from_value(block_t *parent,
 bool parse_unbraced_record_init(block_t *parent,
                                 basic_block_t **bb,
                                 type_t *record_type,
-                                var_t *addr,
-                                bool emit_code)
+                                var_t *addr)
 {
     var_t *value = NULL;
 
@@ -1242,8 +1228,7 @@ bool parse_unbraced_record_init(block_t *parent,
         read_ternary_operation(parent, bb);
         value = opstack_pop();
     }
-    return parse_record_from_value(parent, bb, record_type, addr, emit_code,
-                                   value);
+    return parse_record_from_value(parent, bb, record_type, addr, value);
 }
 
 /* Whether an initializer starting at the next token for a slot of @elem's type
@@ -1257,14 +1242,41 @@ bool unbraced_record_starts_here(const var_t *elem)
            !lex_peek(T_open_square, NULL);
 }
 
+/* The address an initializer of @member in the record at @record_addr stores
+ * through: @designated when a designator or a brace-elided array already
+ * selected the member or one of its elements, and the member itself otherwise.
+ */
+var_t *member_address(block_t *parent,
+                      basic_block_t **bb,
+                      var_t *record_addr,
+                      const var_t *member,
+                      var_t *designated)
+{
+    if (designated)
+        return designated;
+    return compute_field_address(parent, bb, record_addr, member);
+}
+
+/* The index of the first member of @record from @index on that takes an
+ * initializer. An unnamed bit-field is padding rather than a member: it takes
+ * part in layout but consumes no positional initializer, so the second value of
+ * `{low, high}` reaches the named field after it.
+ */
+int skip_unnamed_bitfields(const type_t *record, int index)
+{
+    while (index < record->num_fields && is_bitfield(&record->fields[index]) &&
+           !record->fields[index].var_name[0])
+        index++;
+    return index;
+}
+
 void parse_struct_field_init(block_t *parent,
                              basic_block_t **bb,
                              type_t *struct_type,
-                             var_t *target_addr,
-                             bool emit_code)
+                             var_t *target_addr)
 {
-    parse_struct_field_values(parent, bb, struct_type, target_addr, emit_code,
-                              false, NULL);
+    parse_struct_field_values(parent, bb, struct_type, target_addr, false,
+                              NULL);
 }
 
 /* Parse the members of the record at @target_addr. A braced list runs to its
@@ -1277,7 +1289,6 @@ bool parse_struct_field_values(block_t *parent,
                                basic_block_t **bb,
                                type_t *struct_type,
                                var_t *target_addr,
-                               bool emit_code,
                                bool elided,
                                var_t *first_value)
 {
@@ -1316,24 +1327,16 @@ bool parse_struct_field_values(block_t *parent,
      * initializers could defer this until the first omitted member, but a
      * designator may skip forward or return to an earlier member.
      */
-    if (emit_code && parent != GLOBAL_BLOCK &&
-        struct_type->base_type != TYPE_union && !struct_type->is_union) {
-        var_t *zero = require_var(parent);
-        zero->var_name = gen_name();
-        zero->init_val = 0;
-        add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
+    if (parent != GLOBAL_BLOCK && !is_union) {
+        var_t *zero = emit_zero_constant(parent, bb);
 
         for (int i = 0; i < struct_type->num_fields; i++) {
             var_t *field = &struct_type->fields[i];
-            var_t *field_addr =
-                compute_field_address(parent, bb, target_addr, field);
-            int field_size = size_var(field);
 
-            for (int offset = 0; offset < field_size; offset++) {
-                var_t *byte_addr =
-                    compute_element_address(parent, bb, field_addr, offset, 1);
-                add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1, NULL);
-            }
+            emit_zero_bytes(
+                parent, bb,
+                compute_field_address(parent, bb, target_addr, field),
+                size_var(field), zero);
         }
     }
 
@@ -1341,7 +1344,7 @@ bool parse_struct_field_values(block_t *parent,
         for (;;) {
             var_t *field_val_raw = NULL;
             var_t *field = NULL;
-            var_t *designated_field_addr = NULL;
+            var_t *field_addr = NULL;
             bool consumed_pending_array_element = false;
             bool nested_comma_consumed = false;
 
@@ -1376,67 +1379,30 @@ bool parse_struct_field_values(block_t *parent,
                         error_at("Unknown field in record initializer",
                                  cur_token_loc());
 
-                    designated_field_addr = compute_field_address(
-                        parent, bb, designator_base, field);
-                    if (lex_accept(T_open_square)) {
-                        int index, element_count, linear_index, stride;
-                        int total_element_count;
-                        int elem_size;
-                        var_t *array_base_addr = designated_field_addr;
+                    field_addr = compute_field_address(parent, bb,
+                                                       designator_base, field);
+                    if (lex_peek(T_open_square, NULL)) {
+                        int linear_index = 0;
+                        int total_element_count = field->array_size;
+                        int elem_size = array_element_size(field);
+                        var_t *array_base_addr = field_addr;
 
                         if (!field->array_size)
                             error_at(
                                 "Array designator requires an array member",
-                                cur_token_loc());
-                        index = read_const_expr(parent);
-                        lex_expect(T_close_square);
-                        total_element_count = field->array_size;
-                        element_count = total_element_count;
-                        stride = 1;
-                        if (field->array_dim2) {
-                            stride = field->array_dim2;
-                            if (field->array_dim3) {
-                                stride *= field->array_dim3;
-                                if (field->array_dim4)
-                                    stride *= field->array_dim4;
-                            }
-                            element_count /= stride;
-                        }
-                        if (index < 0 || index >= element_count)
-                            error_at("Array designator index is out of bounds",
-                                     cur_token_loc());
-                        elem_size = (field->ptr_level || field->is_func)
-                                        ? PTR_SIZE
-                                        : field->type->size;
-                        linear_index = index * stride;
-                        designated_field_addr = compute_element_address(
-                            parent, bb, designated_field_addr, linear_index,
-                            elem_size);
-                        memcpy(&array_element, field, sizeof(var_t));
-                        fixed_array_var_drop_outer(&array_element);
-                        field = &array_element;
+                                next_token_loc());
 
-                        /* Each subscript leaves the remaining inner array in
+                        /* The subscripts leave the remaining inner array in
                          * `field`, so rows, planes, and a final scalar can all
                          * share the same bounds and continuation path.
                          */
-                        while (field->array_size && lex_accept(T_open_square)) {
-                            index = read_const_expr(parent);
-                            lex_expect(T_close_square);
-                            stride = field->array_dim2 ? field->array_dim2 : 1;
-                            if (field->array_dim3)
-                                stride *= field->array_dim3;
-                            element_count = field->array_size / stride;
-                            if (index < 0 || index >= element_count)
-                                error_at(
-                                    "Array designator index is out of bounds",
-                                    cur_token_loc());
-                            designated_field_addr = compute_element_address(
-                                parent, bb, designated_field_addr,
-                                index * stride, elem_size);
-                            linear_index += index * stride;
-                            fixed_array_var_drop_outer(&array_element);
-                        }
+                        read_array_designator(initializer_name_scope(parent),
+                                              field, 0, false, &linear_index,
+                                              &array_element);
+                        fixed_array_var_drop_outer(&array_element);
+                        field = &array_element;
+                        field_addr = compute_element_address(
+                            parent, bb, field_addr, linear_index, elem_size);
                         if (!field->array_size) {
                             memcpy(&pending_array_element, field,
                                    sizeof(var_t));
@@ -1452,37 +1418,25 @@ bool parse_struct_field_values(block_t *parent,
                     if (!is_record_type(field->type))
                         error_at("Nested designator requires a record member",
                                  cur_token_loc());
-                    designator_type = field->type;
-                    if (designator_type->base_type == TYPE_typedef &&
-                        designator_type->base_struct)
-                        designator_type = designator_type->base_struct;
-                    designator_base = designated_field_addr;
+                    designator_type = resolve_record_type(field->type);
+                    designator_base = field_addr;
                     first = false;
                 }
                 lex_expect(T_assign);
             } else if (has_pending_array_element) {
                 field = &pending_array_element;
-                designated_field_addr = compute_element_address(
+                field_addr = compute_element_address(
                     parent, bb, pending_array_base, pending_array_index,
                     pending_array_elem_size);
                 consumed_pending_array_element = true;
             }
 
-            /* An unnamed bit-field is padding, not an aggregate member. It
-             * participates in layout but consumes no positional initializer;
-             * otherwise `{ low, high }` would incorrectly assign `high` to the
-             * padding field and leave the named field zero-initialized.
-             */
             if (!field && !has_pending_array_element)
-                while (field_idx < struct_type->num_fields &&
-                       is_bitfield(&struct_type->fields[field_idx]) &&
-                       !struct_type->fields[field_idx].var_name[0])
-                    field_idx++;
+                field_idx = skip_unnamed_bitfields(struct_type, field_idx);
 
             if (field_idx >= struct_type->num_fields ||
-                ((struct_type->base_type == TYPE_union ||
-                  struct_type->is_union) &&
-                 initializer_count > 0 && !consumed_pending_array_element))
+                (is_union && initializer_count > 0 &&
+                 !consumed_pending_array_element))
                 error_at("Too many elements in record initializer",
                          next_token_loc());
 
@@ -1495,7 +1449,7 @@ bool parse_struct_field_values(block_t *parent,
              * member's aggregate size instead corrupts the elements and gives
              * narrow backends a store width they cannot encode.
              */
-            if (field && !designated_field_addr && !has_pending_array_element &&
+            if (field && !field_addr && !has_pending_array_element &&
                 field->array_size &&
                 (first_value ||
                  (!lex_peek(T_open_curly, NULL) &&
@@ -1505,9 +1459,7 @@ bool parse_struct_field_values(block_t *parent,
                     !lex_peek(T_wstring, NULL)))))) {
                 pending_array_base =
                     compute_field_address(parent, bb, target_addr, field);
-                pending_array_elem_size = (field->ptr_level || field->is_func)
-                                              ? PTR_SIZE
-                                              : field->type->size;
+                pending_array_elem_size = array_element_size(field);
                 pending_array_count = field->array_size;
                 pending_array_index = 0;
                 memcpy(&pending_array_element, field, sizeof(var_t));
@@ -1516,7 +1468,7 @@ bool parse_struct_field_values(block_t *parent,
                 pending_array_element.array_dim3 = 0;
                 pending_array_element.array_dim4 = 0;
                 field = &pending_array_element;
-                designated_field_addr = compute_element_address(
+                field_addr = compute_element_address(
                     parent, bb, pending_array_base, 0, pending_array_elem_size);
                 has_pending_array_element = true;
                 consumed_pending_array_element = true;
@@ -1536,86 +1488,56 @@ bool parse_struct_field_values(block_t *parent,
                  * record. A record member takes it on to that record's own
                  * first member; see parse_record_from_value().
                  */
-                var_t *field_addr =
-                    designated_field_addr
-                        ? designated_field_addr
-                        : compute_field_address(parent, bb, target_addr, field);
-
                 if (!field->ptr_level && is_record_type(field->type))
                     nested_comma_consumed = parse_record_from_value(
-                        parent, bb, field->type, field_addr, emit_code,
+                        parent, bb, field->type,
+                        member_address(parent, bb, target_addr, field,
+                                       field_addr),
                         first_value);
                 else
                     field_val_raw = first_value;
                 first_value = NULL;
             } else if (field && field->array_size && is_char_array(field) &&
                        lex_peek(T_string, NULL)) {
-                var_t *field_addr =
-                    designated_field_addr
-                        ? designated_field_addr
-                        : compute_field_address(parent, bb, target_addr, field);
-                parse_string_field_init(parent, bb, field, field_addr,
-                                        emit_code);
+                parse_string_field_init(
+                    parent, bb, field,
+                    member_address(parent, bb, target_addr, field, field_addr));
             } else if (field && field->array_size && !field->ptr_level &&
                        compatible_decl_type(field->type,
                                             find_type("wchar_t", true)) &&
                        lex_peek(T_wstring, NULL)) {
-                var_t *field_addr =
-                    designated_field_addr
-                        ? designated_field_addr
-                        : compute_field_address(parent, bb, target_addr, field);
-                parse_wstring_field_init(parent, bb, field, field_addr,
-                                         emit_code);
+                parse_wstring_field_init(
+                    parent, bb, field,
+                    member_address(parent, bb, target_addr, field, field_addr));
             } else if (field && lex_peek(T_open_curly, NULL) &&
                        field->array_size) {
-                var_t *field_addr =
-                    designated_field_addr
-                        ? designated_field_addr
-                        : compute_field_address(parent, bb, target_addr, field);
-                parse_array_field_init(parent, bb, field, field_addr,
-                                       emit_code);
+                parse_array_field_init(
+                    parent, bb, field,
+                    member_address(parent, bb, target_addr, field, field_addr));
             } else if (field && lex_peek(T_open_curly, NULL) &&
                        is_record_type(field->type)) {
-                type_t *nested_type = field->type;
-                var_t *field_addr =
-                    designated_field_addr
-                        ? designated_field_addr
-                        : compute_field_address(parent, bb, target_addr, field);
-
-                if (nested_type->base_type == TYPE_typedef &&
-                    nested_type->base_struct)
-                    nested_type = nested_type->base_struct;
+                type_t *nested_type = resolve_record_type(field->type);
                 lex_expect(T_open_curly);
-                parse_struct_field_init(parent, bb, nested_type, field_addr,
-                                        emit_code);
+                parse_struct_field_init(
+                    parent, bb, nested_type,
+                    member_address(parent, bb, target_addr, field, field_addr));
                 lex_expect(T_close_curly);
             } else if (field && !field->array_size &&
                        unbraced_record_starts_here(field)) {
-                var_t *field_addr =
-                    designated_field_addr
-                        ? designated_field_addr
-                        : compute_field_address(parent, bb, target_addr, field);
-
                 nested_comma_consumed = parse_unbraced_record_init(
-                    parent, bb, field->type, field_addr, emit_code);
+                    parent, bb, field->type,
+                    member_address(parent, bb, target_addr, field, field_addr));
             } else if (parent == GLOBAL_BLOCK) {
-                if (emit_code) {
-                    field_val_raw = parse_global_constant_value(parent, bb);
-                } else {
-                    consume_global_constant_syntax();
-                }
+                field_val_raw = parse_global_constant_value(parent, bb);
             } else {
                 read_expr(parent, bb);
                 read_ternary_operation(parent, bb);
                 field_val_raw = opstack_pop();
             }
 
-            if (field_val_raw && field_idx < struct_type->num_fields) {
-                var_t *field_addr =
-                    designated_field_addr
-                        ? designated_field_addr
-                        : compute_field_address(parent, bb, target_addr, field);
-
+            if (field_val_raw) {
+                field_addr =
+                    member_address(parent, bb, target_addr, field, field_addr);
                 if (is_record_type(field->type) &&
                     is_record_object(field_val_raw)) {
                     emit_record_copy_to_address(parent, bb, field_addr,
@@ -1684,10 +1606,7 @@ bool parse_struct_field_values(block_t *parent,
              * that follows to the enclosing list.
              */
             if (elided && !has_pending_array_element) {
-                while (field_idx < struct_type->num_fields &&
-                       is_bitfield(&struct_type->fields[field_idx]) &&
-                       !struct_type->fields[field_idx].var_name[0])
-                    field_idx++;
+                field_idx = skip_unnamed_bitfields(struct_type, field_idx);
                 if (field_idx >= struct_type->num_fields || is_union) {
                     comma_consumed = nested_comma_consumed;
                     break;
@@ -1705,7 +1624,7 @@ bool parse_struct_field_values(block_t *parent,
         }
     }
 
-    if (emit_code && parent == GLOBAL_BLOCK) {
+    if (parent == GLOBAL_BLOCK) {
         for (int i = 0; i < global_bitfield_count; i++) {
             var_t *unit = global_bitfield_unit[i];
             var_t *unit_addr =
@@ -2018,10 +1937,7 @@ static bool string_ends_braced_initializer(const var_t *var, token_t *token)
     return token && token->kind == T_close_curly;
 }
 
-void parse_array_init(var_t *var,
-                      block_t *parent,
-                      basic_block_t **bb,
-                      bool emit_code)
+void parse_array_init(var_t *var, block_t *parent, basic_block_t **bb)
 {
     int count = 0;
     int inferred_size = 0;
@@ -2045,9 +1961,7 @@ void parse_array_init(var_t *var,
      * first got a bogus address. `ptr_level` describes the array element type
      * even when its outer bound is inferred.
      */
-    int elem_size = var->type->size;
-    if (var->ptr_level > 0 || var->is_func)
-        elem_size = PTR_SIZE;
+    int elem_size = array_element_size(var);
 
     /* A character array's string literal may be enclosed in braces (C99
      * 6.7.8p14): `char s[3] = {"ab"}` holds the characters, not the literal's
@@ -2066,29 +1980,16 @@ void parse_array_init(var_t *var,
         return;
     }
 
-    if (emit_code)
-        base_addr = var;
+    base_addr = var;
 
     /* Reordered array designators can leave holes both before and after a
      * written element. Initialize the whole automatic array first, then let
      * explicit elements overwrite their slots. Byte stores also cover record
      * elements without relying on a backend-wide aggregate store.
      */
-    if (parent != GLOBAL_BLOCK && emit_code && !is_implicit) {
-        var_t *zero = require_var(parent);
-        zero->var_name = gen_name();
-        zero->init_val = 0;
-        add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-        for (int i = 0; i < var->array_size; i++) {
-            var_t *elem_addr =
-                compute_element_address(parent, bb, base_addr, i, elem_size);
-            for (int offset = 0; offset < elem_size; offset++) {
-                var_t *byte_addr =
-                    compute_element_address(parent, bb, elem_addr, offset, 1);
-                add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1, NULL);
-            }
-        }
-    }
+    if (parent != GLOBAL_BLOCK && !is_implicit)
+        emit_zero_elements(parent, bb, base_addr, 0, var->array_size,
+                           elem_size);
 
     lex_expect(T_open_curly);
     reject_empty_initializer_in_strict_c99();
@@ -2100,79 +2001,14 @@ void parse_array_init(var_t *var,
             int prior_count = count;
             bool elided_comma = false;
 
-            if (lex_accept(T_open_square)) {
-                int index;
-                int stride = 1;
-                int elements;
-                int remaining_dims = 0;
-
-                index = read_const_expr(initializer_scope);
-                lex_expect(T_close_square);
-                if (var->array_dim2) {
-                    stride = var->array_dim2;
-                    remaining_dims = 1;
-                    if (var->array_dim3) {
-                        stride *= var->array_dim3;
-                        remaining_dims = 2;
-                        if (var->array_dim4) {
-                            stride *= var->array_dim4;
-                            remaining_dims = 3;
-                        }
-                    }
-                }
-                elements = var->array_size / stride;
-                if (index < 0 || (!is_implicit && index >= elements))
-                    error_at("Array designator index is out of bounds",
-                             cur_token_loc());
-                count = index * stride;
-
-                /* A complete multidimensional designator names a scalar
-                 * element. Keep the outer-only form on the existing braced
-                 * slice path, but turn every complete path into the row-major
-                 * flat offset used by the ordinary store path.
-                 */
-                while (remaining_dims && lex_accept(T_open_square)) {
-                    index = read_const_expr(initializer_scope);
-                    lex_expect(T_close_square);
-                    if (remaining_dims == 3) {
-                        elements = var->array_dim2;
-                        stride = var->array_dim3 * var->array_dim4;
-                    } else if (remaining_dims == 2) {
-                        elements = var->array_dim2;
-                        stride = var->array_dim3;
-                        if (var->array_dim4) {
-                            elements = var->array_dim3;
-                            stride = var->array_dim4;
-                        }
-                    } else {
-                        elements = var->array_dim2;
-                        if (var->array_dim3)
-                            elements = var->array_dim3;
-                        if (var->array_dim4)
-                            elements = var->array_dim4;
-                        stride = 1;
-                    }
-                    if (index < 0 || index >= elements)
-                        error_at("Array designator index is out of bounds",
-                                 cur_token_loc());
-                    count += index * stride;
-                    remaining_dims--;
-                }
-                if (remaining_dims == 1 &&
-                    (var->array_dim3 || var->array_dim4)) {
-                    /* A path ending one dimension short of a scalar names a
-                     * row. Present it to the braced-row helper rather than
-                     * asking a scalar initializer to consume `{ ... }`.
-                     */
-                    int row_width =
-                        var->array_dim4 ? var->array_dim4 : var->array_dim3;
-                    memcpy(&designated_array, var, sizeof(designated_array));
-                    designated_array.array_size = row_width;
-                    designated_array.array_dim2 = row_width;
-                    designated_array.array_dim3 = 0;
-                    designated_array.array_dim4 = 0;
-                    initializer_var = &designated_array;
-                }
+            /* A designator such as `[1][0]` moves to the row-major offset of
+             * the subobject it names, and the braced row, plane and string
+             * paths below then see the array that subobject is an element of,
+             * rather than the whole declaration.
+             */
+            if (read_array_designator(initializer_scope, var, 0, is_implicit,
+                                      &count, &designated_array)) {
+                initializer_var = &designated_array;
                 lex_expect(T_assign);
             }
 
@@ -2182,7 +2018,7 @@ void parse_array_init(var_t *var,
 
             if (initializer_var->array_dim4 && lex_peek(T_open_curly, NULL)) {
                 parse_array_field_hyperplane_init(parent, bb, initializer_var,
-                                                  base_addr, count, emit_code);
+                                                  base_addr, count);
                 count += fixed_array_inner_count(initializer_var);
                 if (is_implicit && count > inferred_size)
                     inferred_size = count;
@@ -2192,7 +2028,7 @@ void parse_array_init(var_t *var,
             } else if (initializer_var->array_dim3 &&
                        lex_peek(T_open_curly, NULL)) {
                 parse_array_field_plane_init(parent, bb, initializer_var,
-                                             base_addr, count, emit_code);
+                                             base_addr, count);
                 count += fixed_array_inner_count(initializer_var);
                 if (is_implicit && count > inferred_size)
                     inferred_size = count;
@@ -2202,7 +2038,7 @@ void parse_array_init(var_t *var,
             } else if (initializer_var->array_dim2 &&
                        lex_peek(T_open_curly, NULL)) {
                 parse_array_field_row_init(parent, bb, initializer_var,
-                                           base_addr, count, emit_code);
+                                           base_addr, count);
                 count += fixed_array_inner_count(initializer_var);
                 if (is_implicit && count > inferred_size)
                     inferred_size = count;
@@ -2210,11 +2046,11 @@ void parse_array_init(var_t *var,
                     break;
                 continue;
             } else if (string_row_starts_here(initializer_var)) {
-                if (is_implicit && emit_code && parent != GLOBAL_BLOCK)
+                if (is_implicit && parent != GLOBAL_BLOCK)
                     emit_zero_elements(parent, bb, base_addr, inferred_size,
                                        count, elem_size);
                 parse_string_row_init(parent, bb, initializer_var, base_addr,
-                                      count, emit_code);
+                                      count);
                 count += string_row_width(initializer_var);
                 if (is_implicit && count > inferred_size)
                     inferred_size = count;
@@ -2223,38 +2059,14 @@ void parse_array_init(var_t *var,
                 continue;
             } else if (lex_peek(T_open_curly, NULL) &&
                        is_record_type(var->type)) {
-                type_t *struct_type = var->type;
-                if (struct_type->base_type == TYPE_typedef &&
-                    struct_type->base_struct)
-                    struct_type = struct_type->base_struct;
+                type_t *struct_type = resolve_record_type(var->type);
 
-                if (emit_code) {
-                    var_t *elem_addr = compute_element_address(
-                        parent, bb, base_addr, count, elem_size);
-                    lex_expect(T_open_curly);
-                    parse_struct_field_init(parent, bb, struct_type, elem_addr,
-                                            emit_code);
-                    lex_expect(T_close_curly);
-                    val = NULL;
-                } else {
-                    lex_expect(T_open_curly);
-                    while (!lex_peek(T_close_curly, NULL)) {
-                        if (parent == GLOBAL_BLOCK) {
-                            consume_global_constant_syntax();
-                        } else {
-                            read_expr(parent, bb);
-                            read_ternary_operation(parent, bb);
-                            opstack_pop();
-                        }
-                        if (!lex_accept(T_comma))
-                            break;
-                        if (lex_peek(T_close_curly, NULL))
-                            break;
-                    }
-                    lex_expect(T_close_curly);
-                    val = NULL;
-                }
-            } else if (emit_code && unbraced_record_starts_here(var)) {
+                var_t *elem_addr = compute_element_address(
+                    parent, bb, base_addr, count, elem_size);
+                lex_expect(T_open_curly);
+                parse_struct_field_init(parent, bb, struct_type, elem_addr);
+                lex_expect(T_close_curly);
+            } else if (unbraced_record_starts_here(var)) {
                 /* Without braces a record element takes one initializer per
                  * member, so `struct p a[2] = { 1, 2, 3, 4 }` fills a[0] from 1
                  * and 2 before a[1] starts. The record parser stops after its
@@ -2267,7 +2079,7 @@ void parse_array_init(var_t *var,
                     emit_zero_elements(parent, bb, base_addr, inferred_size,
                                        count, elem_size);
                 elided_comma = parse_unbraced_record_init(parent, bb, var->type,
-                                                          elem_addr, emit_code);
+                                                          elem_addr);
             } else {
                 /* A global initializer is restricted to simple constants, but
                  * it still has to be stored. Consuming the tokens and dropping
@@ -2359,10 +2171,7 @@ void parse_array_init(var_t *var,
                         if (parent == GLOBAL_BLOCK && object_constant &&
                             object_constant->is_global &&
                             object_constant->array_size) {
-                            int stride = (object_constant->ptr_level ||
-                                          object_constant->is_func)
-                                             ? PTR_SIZE
-                                             : object_constant->type->size;
+                            int stride = array_element_size(object_constant);
 
                             /* Array-to-pointer conversion is a permitted
                              * address constant in static aggregate
@@ -2433,7 +2242,7 @@ void parse_array_init(var_t *var,
                         cur_token_loc());
             }
 
-            if (val && emit_code && (is_implicit || count < var->array_size)) {
+            if (val && (is_implicit || count < var->array_size)) {
                 /* Keep a function symbol intact until OP_address_of_func can
                  * emit its deferred relocation. Treating an array-of-callback
                  * element as an `int` conversion loses that provenance.
@@ -2450,24 +2259,9 @@ void parse_array_init(var_t *var,
                  * known bound yet, so zero just the newly skipped elements.
                  * Global storage begins zeroed.
                  */
-                if (is_implicit && parent != GLOBAL_BLOCK &&
-                    count > prior_count) {
-                    var_t *zero = require_var(parent);
-                    zero->var_name = gen_name();
-                    zero->init_val = 0;
-                    add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0,
-                             NULL);
-                    for (int i = prior_count; i < count; i++) {
-                        var_t *gap_addr = compute_element_address(
-                            parent, bb, base_addr, i, elem_size);
-                        for (int offset = 0; offset < elem_size; offset++) {
-                            var_t *byte_addr = compute_element_address(
-                                parent, bb, gap_addr, offset, 1);
-                            add_insn(parent, *bb, OP_write, NULL, byte_addr,
-                                     zero, 1, NULL);
-                        }
-                    }
-                }
+                if (is_implicit && parent != GLOBAL_BLOCK)
+                    emit_zero_elements(parent, bb, base_addr, prior_count,
+                                       count, elem_size);
 
                 var_t *elem_addr = compute_element_address(
                     parent, bb, base_addr, count, elem_size);
@@ -2506,7 +2300,7 @@ void parse_array_init(var_t *var,
         int inner = fixed_array_inner_count(var);
         int whole = (inferred_size + inner - 1) / inner * inner;
 
-        if (emit_code && parent != GLOBAL_BLOCK)
+        if (parent != GLOBAL_BLOCK)
             emit_zero_elements(parent, bb, base_addr, inferred_size, whole,
                                elem_size);
         inferred_size = whole;
@@ -2550,31 +2344,15 @@ void parse_array_compound_literal(var_t *var,
     /* A designated element can leave holes before or after it, so initialize
      * the declared object before parsing any explicit elements.
      */
-    if (declared_size) {
-        var_t *zero = require_var(parent);
-        zero->var_name = gen_name();
-        zero->init_val = 0;
-        add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-        for (int i = 0; i < declared_size; i++) {
-            var_t *elem_addr =
-                compute_element_address(parent, bb, var, i, elem_size);
-            for (int offset = 0; offset < elem_size; offset++) {
-                var_t *byte_addr =
-                    compute_element_address(parent, bb, elem_addr, offset, 1);
-                add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1, NULL);
-            }
-        }
-    }
+    emit_zero_elements(parent, bb, var, 0, declared_size, elem_size);
 
     if (!lex_peek(T_close_curly, NULL)) {
         for (;;) {
             bool elided_comma = false;
 
-            if (lex_accept(T_open_square)) {
-                count = read_const_expr(parent);
-                lex_expect(T_close_square);
+            if (read_array_designator(parent, var, 1, !declared_size, &count,
+                                      NULL))
                 lex_expect(T_assign);
-            }
             if (declared_size && count >= declared_size)
                 error_at("Too many elements in array compound literal",
                          next_token_loc());
@@ -2589,23 +2367,9 @@ void parse_array_compound_literal(var_t *var,
              * later backward designator cannot make a forward gap overwrite an
              * earlier explicit value.
              */
-            if (!declared_size && count > inferred_size) {
-                var_t *zero = require_var(parent);
-                zero->var_name = gen_name();
-                zero->init_val = 0;
-                add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0,
-                         NULL);
-                for (int i = inferred_size; i < count; i++) {
-                    var_t *gap_addr =
-                        compute_element_address(parent, bb, var, i, elem_size);
-                    for (int offset = 0; offset < elem_size; offset++) {
-                        var_t *byte_addr = compute_element_address(
-                            parent, bb, gap_addr, offset, 1);
-                        add_insn(parent, *bb, OP_write, NULL, byte_addr, zero,
-                                 1, NULL);
-                    }
-                }
-            }
+            if (!declared_size)
+                emit_zero_elements(parent, bb, var, inferred_size, count,
+                                   elem_size);
 
             var_t *elem_addr =
                 compute_element_address(parent, bb, var, count, elem_size);
@@ -2616,18 +2380,14 @@ void parse_array_compound_literal(var_t *var,
                  * it as an expression rejected the opening brace and made
                  * (struct S[]){ { ... }, { ... } } unusable.
                  */
-                type_t *record_type = var->type;
-                if (record_type->base_type == TYPE_typedef &&
-                    record_type->base_struct)
-                    record_type = record_type->base_struct;
+                type_t *record_type = resolve_record_type(var->type);
 
                 lex_expect(T_open_curly);
-                parse_struct_field_init(parent, bb, record_type, elem_addr,
-                                        true);
+                parse_struct_field_init(parent, bb, record_type, elem_addr);
                 lex_expect(T_close_curly);
             } else if (unbraced_record_starts_here(var)) {
                 elided_comma = parse_unbraced_record_init(parent, bb, var->type,
-                                                          elem_addr, true);
+                                                          elem_addr);
             } else {
                 read_expr(parent, bb);
                 read_ternary_operation(parent, bb);

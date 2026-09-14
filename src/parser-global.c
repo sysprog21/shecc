@@ -24,7 +24,7 @@ void read_global_init_var(var_t *var, block_t *block)
 
     if (lex_peek(T_open_curly, NULL) &&
         (var->array_size > 0 || var->has_unsized_array || var->ptr_level > 0))
-        parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
+        parse_array_init(var, block, &GLOBAL_FUNC->bbs);
     else if (global_compound_literal_starts_here() &&
              !(var->ptr_level || var->type->ptr_level) &&
              is_record_type(var->type))
@@ -345,7 +345,7 @@ void parse_global_record_init(var_t *var, block_t *block)
         record_type = record_type->base_struct;
 
     lex_expect(T_open_curly);
-    parse_struct_field_init(block, &GLOBAL_FUNC->bbs, record_type, var, true);
+    parse_struct_field_init(block, &GLOBAL_FUNC->bbs, record_type, var);
     lex_expect(T_close_curly);
     global_constant_initializer_scope = saved_initializer_scope;
 }
@@ -507,7 +507,7 @@ void parse_global_compound_array_init(var_t *var, block_t *block)
                      next_token_loc());
         add_insn(GLOBAL_BLOCK, GLOBAL_FUNC->bbs, OP_allocat, array, NULL, NULL,
                  0, NULL);
-        parse_array_init(array, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
+        parse_array_init(array, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
         add_insn(block, GLOBAL_FUNC->bbs, OP_assign, var, array, NULL, 0, NULL);
         return;
     }
@@ -581,7 +581,7 @@ void parse_global_compound_array_init(var_t *var, block_t *block)
 
     add_insn(GLOBAL_BLOCK, GLOBAL_FUNC->bbs, OP_allocat, array, NULL, NULL, 0,
              NULL);
-    parse_array_init(array, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
+    parse_array_init(array, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
     add_insn(block, GLOBAL_FUNC->bbs, OP_assign, var, array, NULL, 0, NULL);
 }
 
@@ -627,7 +627,7 @@ bool read_global_record_declarator(block_t *block,
 
     if (lex_peek(T_open_curly, NULL) &&
         (var->array_size > 0 || var->has_unsized_array || var->ptr_level > 0)) {
-        parse_array_init(var, block, &GLOBAL_FUNC->bbs, true);
+        parse_array_init(var, block, &GLOBAL_FUNC->bbs);
     } else if (global_compound_literal_starts_here() &&
                (var->ptr_level || var->type->ptr_level)) {
         parse_global_compound_array_init(var, block);
@@ -799,124 +799,10 @@ static const type_t *read_global_typedef_base(bool *typedef_const,
                                               bool *typedef_volatile)
 {
     char base_type[MAX_ID_LEN];
-    const type_t *base;
-    bool is_signed = false;
-    bool is_unsigned = false;
-    bool is_long = false;
-    bool is_long_long = false;
-    type_t *leading_scalar_type = NULL;
+    const type_t *base =
+        read_scalar_type_specifiers(typedef_const, typedef_volatile, NULL);
 
-    if (lex_peek(T_identifier, base_type) &&
-        (!strcmp(base_type, "char") || !strcmp(base_type, "short") ||
-         !strcmp(base_type, "int"))) {
-        token_t *after_base = cur_token->next->next;
-
-        while (after_base && after_base->kind == T_const)
-            after_base = after_base->next;
-        if (after_base &&
-            (after_base->kind == T_signed || after_base->kind == T_unsigned)) {
-            lex_expect(T_identifier);
-            leading_scalar_type = find_type(base_type, true);
-        }
-    }
-
-    /* Typedef declarations use the same freely ordered scalar specifier set as
-     * object declarations. Keeping this in a loop admits C99 spellings such as
-     * `long unsigned long` rather than treating the second specifier as the
-     * typedef name.
-     */
-    while (lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
-           lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
-           lex_peek(T_long, NULL)) {
-        if (lex_accept(T_const))
-            *typedef_const = true;
-        else if (lex_accept(T_volatile))
-            *typedef_volatile = true;
-        else if (lex_accept(T_signed)) {
-            if (is_signed)
-                error_at("duplicate signed type specifier", cur_token_loc());
-            is_signed = true;
-        } else if (lex_accept(T_unsigned)) {
-            if (is_unsigned)
-                error_at("duplicate unsigned type specifier", cur_token_loc());
-            is_unsigned = true;
-        } else {
-            lex_expect(T_long);
-            if (is_long_long)
-                error_at("too many long type specifiers", cur_token_loc());
-            if (is_long)
-                is_long_long = true;
-            else
-                is_long = true;
-        }
-    }
-    if (is_signed && is_unsigned)
-        error_at("both signed and unsigned specified", cur_token_loc());
-    if (leading_scalar_type == TY_int && lex_peek(T_identifier, base_type) &&
-        !strcmp(base_type, "char"))
-        error_at("int cannot be combined with char", cur_token_loc());
-
-    bool is_float = lex_accept(T_float);
-    bool is_double = lex_accept(T_double);
-
-    if (is_float) {
-        if (is_signed || is_unsigned || is_long)
-            error_at("invalid float type specifiers", cur_token_loc());
-        base = TY_float;
-    } else if (is_double) {
-        if (is_signed || is_unsigned || is_long_long)
-            error_at("invalid double type specifiers", cur_token_loc());
-        base = is_long ? TY_long_double : TY_double;
-    } else if (is_long) {
-        if (lex_peek(T_identifier, base_type) && !strcmp(base_type, "int"))
-            lex_expect(T_identifier);
-        if (is_long_long)
-            base = is_unsigned ? TY_ulong_long : TY_long_long;
-        else
-            base = is_unsigned ? TY_ulong : TY_long;
-    } else if (is_unsigned) {
-        if (leading_scalar_type == TY_char) {
-            base = TY_uchar;
-        } else if (leading_scalar_type == TY_short) {
-            if (lex_peek(T_identifier, base_type) && !strcmp(base_type, "int"))
-                lex_expect(T_identifier);
-            base = TY_ushort;
-        } else {
-            if (lex_peek(T_identifier, base_type) &&
-                (!strcmp(base_type, "int") || !strcmp(base_type, "char") ||
-                 !strcmp(base_type, "short"))) {
-                lex_expect(T_identifier);
-                if (!strcmp(base_type, "char"))
-                    base = TY_uchar;
-                else if (!strcmp(base_type, "short"))
-                    base = TY_ushort;
-                else
-                    base = TY_uint;
-            } else {
-                base = TY_uint;
-            }
-        }
-    } else if (is_signed && lex_peek(T_identifier, base_type) &&
-               (!strcmp(base_type, "char") || !strcmp(base_type, "short") ||
-                !strcmp(base_type, "int"))) {
-        lex_expect(T_identifier);
-        base = !strcmp(base_type, "char")
-                   ? TY_schar
-                   : (!strcmp(base_type, "short") ? TY_short : TY_int);
-    } else if (is_signed && (leading_scalar_type == TY_char ||
-                             leading_scalar_type == TY_short)) {
-        if (leading_scalar_type == TY_short &&
-            lex_peek(T_identifier, base_type) && !strcmp(base_type, "int"))
-            lex_expect(T_identifier);
-        base = leading_scalar_type == TY_char ? TY_schar : leading_scalar_type;
-    } else if (is_signed &&
-               (!lex_peek(T_identifier, base_type) ||
-                (strcmp(base_type, "int") && strcmp(base_type, "char") &&
-                 strcmp(base_type, "short")))) {
-        base = TY_int;
-    } else if (leading_scalar_type) {
-        base = leading_scalar_type;
-    } else {
+    if (!base) {
         lex_ident(T_identifier, base_type);
         base = find_type(base_type, true);
     }
@@ -1127,19 +1013,15 @@ static void read_global_typedef_declarator(block_t *block,
 }
 
 /* The declarator list of a file-scope typedef whose specifier resolved to
- * @base, with the qualifiers read so far, through its terminating semicolon.
- * The specifier and its qualifiers apply to each declarator.
+ * @base, qualified by @typedef_const and @typedef_volatile, through its
+ * terminating semicolon. The specifier and its qualifiers apply to each
+ * declarator.
  */
 static void read_global_typedef_declarators(block_t *block,
                                             bool typedef_const,
                                             bool typedef_volatile,
                                             const type_t *base)
 {
-    /* `typedef int const ci_t;` and `typedef int volatile vi_t;` qualify the
-     * alias just as the leading spelling does.
-     */
-    read_type_qualifiers(&typedef_const, &typedef_volatile,
-                         base->ptr_level != 0);
     do {
         read_global_typedef_declarator(block, typedef_const, typedef_volatile,
                                        base);
@@ -1148,9 +1030,9 @@ static void read_global_typedef_declarators(block_t *block,
 }
 
 /* The record that a later declarator of a file-scope record typedef derives
- * from: the @first alias when it names the record itself, or else a nameless
- * copy of that alias without its pointer, @size bytes wide and aligned to
- * @alignment.
+ * from: the @first alias when it names the record itself, the record a pointer
+ * alias reaches through base_struct, or else a nameless copy of that alias
+ * without its pointer, @size bytes wide and aligned to @alignment.
  */
 static const type_t *global_record_typedef_base(type_t *first,
                                                 int size,
@@ -1158,6 +1040,8 @@ static const type_t *global_record_typedef_base(type_t *first,
 {
     if (!first->ptr_level)
         return first;
+    if (first->base_struct)
+        return first->base_struct;
 
     type_t *record = add_type();
 
@@ -1170,64 +1054,8 @@ static const type_t *global_record_typedef_base(type_t *first,
     return record;
 }
 
-/* A file-scope enum specifier after its keyword: a reference to a known tag, or
- * a tagged or untagged definition. An enum definition is a declaration in its
- * own right; it need not introduce a typedef. Its enumerators are integer
- * constants and may use the same integer constant expressions accepted for
- * array bounds and case labels.
- *
- * Returns the enum type.
- */
-static type_t *read_global_enum_specifier(block_t *block)
-{
-    char token[MAX_ID_LEN];
-    int val = 0;
-    bool has_tag = false;
-    type_t *type;
-
-    if (lex_peek(T_identifier, token)) {
-        lex_expect(T_identifier);
-        has_tag = true;
-    }
-    if (!lex_peek(T_open_curly, NULL)) {
-        if (!has_tag)
-            error_at("Expected enum tag or definition", cur_token_loc());
-        return reference_enum_tag(token, GLOBAL_BLOCK);
-    }
-
-    /* Only a definition creates an enum tag, so one already declared here would
-     * be defined twice (C99 6.7.2.3p1).
-     */
-    if (has_tag && local_enum_tag(token, GLOBAL_BLOCK))
-        error_at("redefinition of enum tag", cur_token_loc());
-    type = add_type();
-
-    initialize_enum_type(type);
-
-    /* Register the tag at file scope as well, so that a struct or union
-     * specifier reusing the name, in any scope, sees an enum tag.
-     */
-    if (has_tag) {
-        set_type_name(type, token);
-        add_type_tag(GLOBAL_BLOCK, token, type);
-    }
-    lex_expect(T_open_curly);
-    bool first = true;
-    do {
-        lex_ident(T_identifier, token);
-        if (!first && !lex_peek(T_assign, NULL))
-            val = next_enum_value(val);
-        if (lex_accept(T_assign))
-            val = read_enum_constant(block);
-        add_constant(token, val);
-        first = false;
-    } while (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL));
-    lex_expect(T_close_curly);
-    return type;
-}
-
 /* Whether the first declarator of a file-scope record typedef is only stars and
- * a name, which the record branches below complete in place. Any other form,
+ * a name, which the record branch below completes in place. Any other form,
  * such as `typedef struct P rows[2]`, derives from the record through
  * read_global_typedef_declarator() instead.
  */
@@ -1240,21 +1068,6 @@ static bool global_record_typedef_declarator_is_plain(void)
     return token && token->kind == T_identifier && token->next &&
            token->next->kind != T_open_square &&
            token->next->kind != T_open_bracket;
-}
-
-/* Read the declarators of a file-scope record typedef whose first declarator is
- * not plain, deriving each from @record, the completed or referenced record.
- */
-static void read_global_record_typedef_declarators(block_t *block,
-                                                   bool typedef_const,
-                                                   bool typedef_volatile,
-                                                   const type_t *record)
-{
-    do {
-        read_global_typedef_declarator(block, typedef_const, typedef_volatile,
-                                       record);
-    } while (lex_accept(T_comma));
-    lex_expect(T_semicolon);
 }
 
 /* A file-scope typedef, after its keyword: record, enum, callback pointer and
@@ -1271,245 +1084,90 @@ static void read_global_typedef(block_t *block)
      * which every declaration spelled with it then inherits.
      */
     read_type_qualifiers(&typedef_const, &typedef_volatile, false);
-    if (lex_accept(T_enum)) {
-        /* The alias may name an existing tag, define a tagged or untagged enum,
-         * and derive a pointer or array from it like any other base.
+    if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
+        base_type_t kind = accept_record_keyword();
+        bool has_tag = lex_peek(T_identifier, token);
+        type_t *type = add_type();
+        type_t *tag = NULL;
+        type_t *record = NULL;
+
+        if (has_tag)
+            lex_expect(T_identifier);
+
+        /* A member list completes the tag, or an untagged record, which the
+         * first declarator then names; a bare tag may still be incomplete.
          */
-        type_t *type = read_global_enum_specifier(block);
-
-        read_global_typedef_declarators(block, typedef_const, typedef_volatile,
-                                        type);
-    } else if (lex_accept(T_struct)) {
-        int i = 0, size = 0, alignment = 1;
-        bitfield_layout_t bits = {0};
-        bool has_struct_def = false;
-        bool has_flexible_array_member = false;
-        type_t *tag = NULL, *type = add_type();
-
-        /* is struct definition? */
-        if (lex_peek(T_identifier, token)) {
-            lex_expect(T_identifier);
-
-            tag = local_record_tag(token, GLOBAL_BLOCK, TYPE_struct);
-        }
-
-        /* typedef with struct definition */
-        if (lex_accept(T_open_curly)) {
-            has_struct_def = true;
-            if (tag && tag->num_fields)
-                error_at("redefinition of struct or union tag",
-                         cur_token_loc());
-            do {
-                var_t *v = type_add_field(type, &i);
-                var_t *last = v;
-                read_full_var_decl(v, false, false, true);
-                read_bitfield_width(v, block);
-                reject_flexible_array_member_container(v);
-                mark_flexible_array_member(v, false);
-                size = is_bitfield(v)
-                           ? layout_bitfield_field(size, v, &alignment, &bits)
-                           : layout_struct_field(
-                                 flush_bitfield_layout(size, &bits), v,
-                                 &alignment);
-
-                /* Handle multiple variable declarations with same base type */
-                while (lex_accept(T_comma)) {
-                    if (last->is_flexible_array_member)
-                        error_at(
-                            "Flexible array member must be the final "
-                            "struct member",
-                            cur_token_loc());
-                    var_t *nv = type_add_field(type, &i);
-                    initialize_struct_field(nv, v, 0);
-                    read_inner_var_decl(nv, false, false, true);
-                    read_bitfield_width(nv, block);
-                    reject_flexible_array_member_container(nv);
-                    mark_flexible_array_member(nv, false);
-                    last = nv;
-                    size =
-                        is_bitfield(nv)
-                            ? layout_bitfield_field(size, nv, &alignment, &bits)
-                            : layout_struct_field(
-                                  flush_bitfield_layout(size, &bits), nv,
-                                  &alignment);
-                }
-
-                lex_expect(T_semicolon);
-                if (last->is_flexible_array_member) {
-                    if (!lex_peek(T_close_curly, NULL))
-                        error_at(
-                            "Flexible array member must be the final "
-                            "struct member",
-                            cur_token_loc());
-                    if (i == 1)
-                        error_at(
-                            "Struct needs a named member before its "
-                            "flexible array member",
-                            cur_token_loc());
-                    has_flexible_array_member = true;
-                }
-            } while (!lex_accept(T_close_curly));
-        }
+        if (lex_peek(T_open_curly, NULL))
+            record = read_record_body(NULL, kind, has_tag, token);
+        else if (has_tag)
+            tag = local_record_tag(token, GLOBAL_BLOCK, kind);
 
         read_type_qualifiers(&typedef_const, &typedef_volatile, false);
         bool is_plain = global_record_typedef_declarator_is_plain();
-        while (is_plain && lex_accept(T_asterisk)) {
+        while (is_plain && lex_accept(T_asterisk))
             type->ptr_level++;
-            type->size = PTR_SIZE;
-        }
         if (is_plain)
             lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
-        size = flush_bitfield_layout(size, &bits);
+
+        /* A defining alias carries the layout itself; a forward one reaches the
+         * tag through base_struct, which in 'find_type' also sees a later
+         * completion of it.
+         */
+        int size = record ? record->size : 0;
+        int alignment = record ? record->alignment : 1;
+
         type->alignment = type->ptr_level ? PTR_SIZE : alignment;
-        type->size = type->ptr_level ? PTR_SIZE : ALIGN_UP(size, alignment);
-        type->num_fields = i;
-        type->base_type = TYPE_typedef;
-        type->has_flexible_array_member = has_flexible_array_member;
+        type->size = type->ptr_level ? PTR_SIZE : size;
+        if (record) {
+            type->fields = record->fields;
+            type->num_fields = record->num_fields;
+            type->has_flexible_array_member = record->has_flexible_array_member;
+            if (has_tag)
+                tag = record;
 
-        if (tag && has_struct_def == 1) {
-            strcpy(token, tag->type_name);
-            memcpy(tag, type, sizeof(type_t));
-            tag->base_type = TYPE_struct;
-            set_type_name(tag, token);
-        } else {
-            /* If it is a forward declaration, build a connection between
-             * structure tag and alias. In 'find_type', it will retrieve
-             * infomation from base structure for alias.
+            /* A pointer alias also reaches its record through base_struct, as a
+             * forward one does, so that a dereference such as sizeof(*p) yields
+             * the record even when it has no tag to be found by.
              */
+            if (type->ptr_level)
+                type->base_struct = record;
+        } else
             type->base_struct = tag;
-        }
+        type->base_type = TYPE_typedef;
+        type->is_union = kind == TYPE_union;
 
-        /* Only the alias is qualified; the tag copy above must stay plain. */
+        /* Only the alias is qualified; the tag must stay plain. */
         type->is_const_qualified = typedef_const;
         type->is_volatile_qualified = typedef_volatile;
 
         if (!is_plain) {
-            read_global_record_typedef_declarators(
-                block, typedef_const, typedef_volatile, tag ? tag : type);
-            return;
-        }
-
-        /* Later declarators derive from the record as a typedef of it would. */
-        if (lex_accept(T_comma)) {
-            const type_t *record = global_record_typedef_base(
-                type, ALIGN_UP(size, alignment), alignment);
-
-            do {
-                read_global_typedef_declarator(block, typedef_const,
-                                               typedef_volatile, record);
-            } while (lex_accept(T_comma));
-        }
-        lex_expect(T_semicolon);
-    } else if (lex_accept(T_union)) {
-        int i = 0, max_size = 0, alignment = 1;
-        bool has_union_def = false;
-        bool has_flexible_array_member = false;
-        type_t *tag = NULL, *type = add_type();
-
-        /* is union definition? */
-        if (lex_peek(T_identifier, token)) {
-            lex_expect(T_identifier);
-
-            tag = local_record_tag(token, GLOBAL_BLOCK, TYPE_union);
-        }
-
-        /* typedef with union definition */
-        if (lex_accept(T_open_curly)) {
-            has_union_def = true;
-            if (tag && tag->num_fields)
-                error_at("redefinition of struct or union tag",
-                         cur_token_loc());
-            do {
-                var_t *v = type_add_field(type, &i);
-                read_full_var_decl(v, false, false, true);
-                read_bitfield_width(v, block);
-                has_flexible_array_member |=
-                    is_flexible_array_member_container(v);
-                mark_flexible_array_member(v, true);
-                v->offset = 0; /* All union fields start at offset 0 */
-                int field_size = is_bitfield(v)
-                                     ? (v->bit_width ? v->bit_storage_size : 0)
-                                     : size_var(v);
-                if (field_size > max_size)
-                    max_size = field_size;
-                if (alignment_var(v) > alignment)
-                    alignment = alignment_var(v);
-
-                /* Handle multiple variable declarations with same base type */
-                while (lex_accept(T_comma)) {
-                    var_t *nv = type_add_field(type, &i);
-                    /* All union fields start at offset 0 */
-                    initialize_struct_field(nv, v, 0);
-                    read_inner_var_decl(nv, false, false, true);
-                    read_bitfield_width(nv, block);
-                    has_flexible_array_member |=
-                        is_flexible_array_member_container(nv);
-                    mark_flexible_array_member(nv, true);
-                    field_size =
-                        is_bitfield(nv)
-                            ? (nv->bit_width ? nv->bit_storage_size : 0)
-                            : size_var(nv);
-                    if (field_size > max_size)
-                        max_size = field_size;
-                    if (alignment_var(nv) > alignment)
-                        alignment = alignment_var(nv);
-                }
-
-                lex_expect(T_semicolon);
-            } while (!lex_accept(T_close_curly));
-        }
-
-        read_type_qualifiers(&typedef_const, &typedef_volatile, false);
-        bool is_plain = global_record_typedef_declarator_is_plain();
-        while (is_plain && lex_accept(T_asterisk)) {
-            type->ptr_level++;
-            type->size = PTR_SIZE;
-        }
-        if (is_plain)
-            lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
-        type->alignment = type->ptr_level ? PTR_SIZE : alignment;
-        type->size = type->ptr_level ? PTR_SIZE : ALIGN_UP(max_size, alignment);
-        type->num_fields = i;
-        type->base_type = TYPE_typedef;
-        type->is_union = true;
-        type->has_flexible_array_member = has_flexible_array_member;
-
-        if (tag && has_union_def == 1) {
-            strcpy(token, tag->type_name);
-            memcpy(tag, type, sizeof(type_t));
-            tag->base_type = TYPE_union;
-            set_type_name(tag, token);
-        } else {
-            /* If it is a forward declaration, build a connection between union
-             * tag and alias. In 'find_type', it will retrieve information from
-             * base union for alias.
+            read_global_typedef_declarators(block, typedef_const,
+                                            typedef_volatile, tag ? tag : type);
+        } else if (lex_accept(T_comma)) {
+            /* Later declarators derive from the record as a typedef of it
+             * would.
              */
-            type->base_struct = tag;
-        }
-
-        type->is_const_qualified = typedef_const;
-        type->is_volatile_qualified = typedef_volatile;
-
-        if (!is_plain) {
-            read_global_record_typedef_declarators(
-                block, typedef_const, typedef_volatile, tag ? tag : type);
-            return;
-        }
-
-        if (lex_accept(T_comma)) {
-            const type_t *record = global_record_typedef_base(
-                type, ALIGN_UP(max_size, alignment), alignment);
-
-            do {
-                read_global_typedef_declarator(block, typedef_const,
-                                               typedef_volatile, record);
-            } while (lex_accept(T_comma));
-        }
-        lex_expect(T_semicolon);
+            read_global_typedef_declarators(
+                block, typedef_const, typedef_volatile,
+                global_record_typedef_base(type, size, alignment));
+        } else
+            lex_expect(T_semicolon);
     } else {
+        /* An enum alias may name an existing tag, or define a tagged or
+         * untagged enum, and derive a pointer or array from it like any other
+         * base.
+         */
+        bool is_definition;
         const type_t *base =
-            read_global_typedef_base(&typedef_const, &typedef_volatile);
+            lex_peek(T_enum, NULL)
+                ? read_enum_specifier(NULL, &is_definition)
+                : read_global_typedef_base(&typedef_const, &typedef_volatile);
 
+        /* `typedef int const ci_t;` and `typedef int volatile vi_t;` qualify
+         * the alias just as the leading spelling does.
+         */
+        read_type_qualifiers(&typedef_const, &typedef_volatile,
+                             base->ptr_level != 0);
         read_global_typedef_declarators(block, typedef_const, typedef_volatile,
                                         base);
     }
@@ -1614,21 +1272,19 @@ void read_global_statement(void)
         if (!lex_accept(T_semicolon))
             read_global_declarator_list(block, type, is_const, is_static,
                                         is_volatile, is_extern, true);
-    } else if (lex_accept(T_enum)) {
-        bool is_reference = !lex_peek(T_open_curly, NULL) &&
-                            !(cur_token->next && cur_token->next->next &&
-                              cur_token->next->next->kind == T_open_curly);
-        type_t *type = read_global_enum_specifier(block);
+    } else if (lex_peek(T_enum, NULL)) {
+        bool is_definition;
+        type_t *type = read_enum_specifier(NULL, &is_definition);
 
         /* A definition may stand alone; a reference to a tag needs a
          * declarator, since it can neither declare nor complete the tag.
          */
-        if (is_reference && lex_peek(T_semicolon, NULL))
+        if (!is_definition && lex_peek(T_semicolon, NULL))
             error_at(
                 "enum declaration without an enumerator list declares "
                 "nothing",
                 next_token_loc());
-        if (is_reference || !lex_accept(T_semicolon))
+        if (!is_definition || !lex_accept(T_semicolon))
             read_global_declarator_list(block, type, is_const, is_static,
                                         is_volatile, is_extern, false);
     } else if (lex_accept(T_typedef)) {
@@ -1949,106 +1605,12 @@ void parse_internal(void)
                      cur_token_loc());
 }
 
-/* Whether @tk may continue a run of declaration specifiers around a scalar type
- * keyword. `char`, `short` and `int` reach the parser as identifiers.
- */
-static bool is_scalar_specifier_run_token(const token_t *tk)
-{
-    switch (tk->kind) {
-    case T_signed:
-    case T_unsigned:
-    case T_long:
-    case T_const:
-    case T_volatile:
-    case T_restrict:
-    case T_inline:
-    case T_static:
-    case T_extern:
-    case T_register:
-    case T_auto:
-    case T_typedef:
-        return true;
-    case T_identifier:
-        return !strcmp(tk->literal, "int") || !strcmp(tk->literal, "short") ||
-               !strcmp(tk->literal, "char");
-    default:
-        return false;
-    }
-}
-
-/* C99 6.7.2p2 lets the scalar type words appear in any order among the other
- * declaration specifiers, and lets `int` be spelled beside `short` or `long`:
- * `short int`, `int long unsigned` and `long int long` name the same types as
- * `short`, `unsigned long` and `long long`. The declaration readers take a type
- * word only as the base after the modifiers, so normalize every run once,
- * before parsing, rather than teaching each reader every spelling: drop that
- * redundant `int`, and move a `char` or `short` base after the last `signed` or
- * `unsigned`. A run with a second base keeps its words and is still rejected.
- */
-static void normalize_scalar_specifiers(token_t *head)
-{
-    token_t *prev = head;
-
-    while (prev->next) {
-        token_t *before_int = NULL, *before_base = NULL, *last_sign = NULL;
-        int ints = 0, widths = 0, bases = 0;
-        token_t *last = prev;
-
-        while (last->next && is_scalar_specifier_run_token(last->next)) {
-            token_t *tk = last->next;
-
-            if (tk->kind == T_long)
-                widths++;
-            else if (tk->kind == T_signed || tk->kind == T_unsigned)
-                last_sign = tk;
-            else if (tk->kind == T_identifier && tk->literal[0] == 'i') {
-                ints++;
-                before_int = last;
-            } else if (tk->kind == T_identifier) {
-                widths += tk->literal[0] == 's';
-                bases++;
-                before_base = last;
-            }
-            last = tk;
-        }
-        if (last == prev) {
-            prev = prev->next;
-            continue;
-        }
-        if (ints == 1 && widths && bases <= 1) {
-            token_t *int_token = before_int->next;
-
-            before_int->next = int_token->next;
-            if (last == int_token)
-                last = before_int;
-            if (before_base == int_token)
-                before_base = before_int;
-        }
-        if (bases == 1 && ints <= 1 && last_sign) {
-            token_t *base = before_base->next;
-            bool sign_follows = false;
-
-            for (token_t *tk = base->next; tk != last->next; tk = tk->next)
-                sign_follows |= tk == last_sign;
-            if (sign_follows) {
-                before_base->next = base->next;
-                base->next = last_sign->next;
-                last_sign->next = base;
-                if (last == last_sign)
-                    last = base;
-            }
-        }
-        prev = last;
-    }
-}
-
 void parse(token_t *tk)
 {
     token_t head;
     head.kind = T_start;
     head.next = tk;
     cur_token = &head;
-    normalize_scalar_specifiers(&head);
 
     parse_internal();
 }

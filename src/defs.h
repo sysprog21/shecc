@@ -788,6 +788,12 @@ struct var {
     bool is_compound_literal_reference;
     struct var *compound_literal_address;
 
+    /* A record value with no storage of its own: its bytes are those of the
+     * object at compound_literal_address. A member selection or address-of uses
+     * that object, and a record copy reads the bytes from it.
+     */
+    bool defers_record_copy;
+
     /* A non-NULL field means the reference is a bit-field and must use the
      * mask-and-merge store path rather than a byte/word OP_write.
      */
@@ -857,6 +863,7 @@ type_t *find_visible_type(const char *name, block_t *block);
 type_t *find_record_tag(char name[], block_t *block, base_type_t kind);
 type_t *reference_record_tag(char name[], block_t *block, base_type_t kind);
 type_t *local_record_tag(char name[], block_t *block, base_type_t kind);
+void begin_record_definition(type_t *tag);
 type_t *find_enum_tag(char name[], block_t *block);
 type_t *reference_enum_tag(char name[], block_t *block);
 type_t *local_enum_tag(char name[], block_t *block);
@@ -1036,6 +1043,12 @@ struct type {
     bool
         has_flexible_array_member; /* cannot be embedded by value in a record */
     bool is_const_qualified;       /* qualifier carried by a scalar typedef */
+    /* Set on a struct or union tag once its member list opens. num_fields is
+     * written only when the list closes, so it cannot tell a definition nested
+     * in the tag's own member list from the first one.
+     */
+    bool definition_started;
+
     /* Integer representation is distinct from signedness: unsigned char and
      * unsigned int keep the ordinary scalar widths but require zero extension
      * and unsigned arithmetic lowering.

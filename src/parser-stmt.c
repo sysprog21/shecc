@@ -280,21 +280,15 @@ static void reject_ordinary_typedef_collision(block_t *block, var_t *var)
  */
 static void reject_unlinked_scope_name(block_t *block, const char *name)
 {
-    func_t *func = block->func;
+    ordinary_kind_t kind = find_block_ordinary(
+        block, name, ORDINARY_CONSTANT | ORDINARY_PARAMETER, NULL);
 
-    for (constant_t *constant = block->constants; constant;
-         constant = constant->next) {
-        if (!strcmp(constant->alias, name))
-            error_at("identifier redeclared as a different kind of symbol",
-                     cur_token_loc());
-    }
-    if (block->parent || !func)
-        return;
-    for (int i = 0; i < func->num_params; i++) {
-        if (!strcmp(func->param_defs[i].var_name, name))
-            error_at("redeclaration of parameter in the function body",
-                     cur_token_loc());
-    }
+    if (kind == ORDINARY_CONSTANT)
+        error_at("identifier redeclared as a different kind of symbol",
+                 cur_token_loc());
+    if (kind == ORDINARY_PARAMETER)
+        error_at("redeclaration of parameter in the function body",
+                 cur_token_loc());
 }
 
 /* C99 6.7p3 lets an identifier without linkage be declared only once in a
@@ -312,15 +306,15 @@ static void reject_block_redeclaration(block_t *block,
                                        bool has_linkage)
 {
     const char *name = var->var_name;
+    int pos = 0;
 
     if (!name[0])
         return;
-    for (int i = 0; i < block->locals.size; i++) {
-        var_t *prior = block->locals.elements[i];
+    for (var_t *prior = find_block_local(block, name, &pos); prior;
+         prior = find_block_local(block, name, &pos)) {
         bool prior_is_function;
 
-        if (prior == var || prior->var_name[0] != name[0] ||
-            strcmp(prior->var_name, name))
+        if (prior == var)
             continue;
         prior_is_function = prior->is_extern_function_alias;
         if (prior_is_function != is_function)
@@ -693,24 +687,27 @@ int read_enum_constant(block_t *scope)
     return value;
 }
 
-/* The block-scope enum specifier that starts at the next token: a reference to
- * a visible tag, or a tagged or untagged definition. A definition contributes
- * integer constants to the current expression parser just as a file-scope
- * definition does. @is_definition reports whether a body was read.
+/* The enum specifier that starts at the next token, in block @parent or at file
+ * scope when @parent is NULL: a reference to a visible tag, or a tagged or
+ * untagged definition. An enum definition is a declaration in its own right; it
+ * need not introduce a typedef. Its enumerators are integer constants of the
+ * scope that may use the same integer constant expressions accepted for array
+ * bounds and case labels. @is_definition reports whether a body was read.
  *
  * Returns the enum type.
  */
-static type_t *read_block_enum_specifier(block_t *parent, bool *is_definition)
+type_t *read_enum_specifier(block_t *parent, bool *is_definition)
 {
     char token[MAX_ID_LEN];
     int val = 0;
     type_t *type = NULL;
     bool has_tag = false;
+    block_t *scope = parent ? parent : GLOBAL_BLOCK;
 
     lex_expect(T_enum);
     if (lex_peek(T_identifier, token)) {
         lex_expect(T_identifier);
-        type = local_enum_tag(token, parent);
+        type = local_enum_tag(token, scope);
         has_tag = true;
     }
     *is_definition = lex_peek(T_open_curly, NULL);
@@ -721,7 +718,7 @@ static type_t *read_block_enum_specifier(block_t *parent, bool *is_definition)
     }
 
     /* Only a definition creates an enum tag, so one already declared in this
-     * block would be defined twice (C99 6.7.2.3p1).
+     * scope would be defined twice (C99 6.7.2.3p1).
      */
     if (type)
         error_at("redefinition of enum tag", cur_token_loc());
@@ -729,7 +726,7 @@ static type_t *read_block_enum_specifier(block_t *parent, bool *is_definition)
     initialize_enum_type(type);
     if (has_tag) {
         set_type_name(type, token);
-        add_type_tag(parent, token, type);
+        add_type_tag(scope, token, type);
     }
     lex_expect(T_open_curly);
     bool first = true;
@@ -738,7 +735,12 @@ static type_t *read_block_enum_specifier(block_t *parent, bool *is_definition)
         if (!first && !lex_peek(T_assign, NULL))
             val = next_enum_value(val);
         if (lex_accept(T_assign)) {
-            val = read_enum_constant(parent);
+            val = read_enum_constant(scope);
+        }
+        first = false;
+        if (!parent) {
+            add_constant(token, val);
+            continue;
         }
 
         /* An enumeration constant has no linkage, so no other ordinary
@@ -751,7 +753,6 @@ static type_t *read_block_enum_specifier(block_t *parent, bool *is_definition)
         }
         reject_unlinked_scope_name(parent, token);
         add_scoped_constant(parent, token, val);
-        first = false;
     } while (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL));
     lex_expect(T_close_curly);
     return type;
@@ -765,7 +766,7 @@ basic_block_t *handle_enum_statement(block_t *parent,
                                      const block_decl_specifiers_t *spec)
 {
     bool is_definition;
-    type_t *type = read_block_enum_specifier(parent, &is_definition);
+    type_t *type = read_enum_specifier(parent, &is_definition);
 
     if (is_definition && lex_accept(T_semicolon))
         return bb;
@@ -991,7 +992,7 @@ static basic_block_t *read_block_declarators(
                  * brace initializer belongs to the same constant-data lowering
                  * as a file-scope array.
                  */
-                parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
+                parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
             } else if (global_compound_literal_starts_here() &&
                        !(var->ptr_level || var->type->ptr_level) &&
                        is_record_type(var->type)) {
@@ -1016,7 +1017,7 @@ static basic_block_t *read_block_declarators(
                    (var->array_size > 0 || var->has_unsized_array ||
                     var->ptr_level > 0)) {
             /* Emit code for locals in functions */
-            parse_array_init(var, parent, &bb, 1);
+            parse_array_init(var, parent, &bb);
         } else if (lex_peek(T_open_curly, NULL) && is_record_type(var->type)) {
             type_t *struct_type = var->type;
             if (struct_type->base_type == TYPE_typedef &&
@@ -1028,8 +1029,7 @@ static basic_block_t *read_block_declarators(
             add_insn(parent, bb, OP_address_of, struct_addr, var, NULL, 0,
                      NULL);
             lex_expect(T_open_curly);
-            parse_struct_field_init(parent, &bb, struct_type, struct_addr,
-                                    true);
+            parse_struct_field_init(parent, &bb, struct_type, struct_addr);
             lex_expect(T_close_curly);
         } else {
             if (!read_assignment_expression(parent, &bb)) {
@@ -1119,7 +1119,7 @@ static basic_block_t *read_block_declarators(
                 if (lex_peek(T_open_curly, NULL) &&
                     (nv->array_size > 0 || nv->has_unsized_array ||
                      nv->ptr_level > 0)) {
-                    parse_array_init(nv, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
+                    parse_array_init(nv, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
                 } else if (global_compound_literal_starts_here() &&
                            !(nv->ptr_level || nv->type->ptr_level) &&
                            is_record_type(nv->type)) {
@@ -1144,7 +1144,7 @@ static basic_block_t *read_block_declarators(
                        (nv->array_size > 0 || nv->has_unsized_array ||
                         nv->ptr_level > 0)) {
                 /* Emit code for locals */
-                parse_array_init(nv, parent, &bb, 1);
+                parse_array_init(nv, parent, &bb);
             } else if (lex_peek(T_open_curly, NULL) &&
                        is_record_type(nv->type)) {
                 type_t *struct_type = nv->type;
@@ -1157,8 +1157,7 @@ static basic_block_t *read_block_declarators(
                 add_insn(parent, bb, OP_address_of, struct_addr, nv, NULL, 0,
                          NULL);
                 lex_expect(T_open_curly);
-                parse_struct_field_init(parent, &bb, struct_type, struct_addr,
-                                        true);
+                parse_struct_field_init(parent, &bb, struct_type, struct_addr);
                 lex_expect(T_close_curly);
             } else {
                 if (!read_assignment_expression(parent, &bb)) {
@@ -1410,7 +1409,7 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
     if (lex_peek(T_enum, NULL)) {
         bool is_definition;
 
-        decl.type = read_block_enum_specifier(parent, &is_definition);
+        decl.type = read_enum_specifier(parent, &is_definition);
         read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile,
                              false);
         read_inner_var_decl(&decl, false, false, false);

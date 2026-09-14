@@ -485,27 +485,6 @@ static bool sizeof_operand_tail_ends(const token_t *tail, bool parenthesized)
            tail->kind != T_increment && tail->kind != T_decrement;
 }
 
-/* A non-mutating admission check for callers that need to hand a global sizeof
- * operand to the detached local parser. It admits only a member array, so type
- * names and scalar forms remain owned by their existing global constant paths.
- */
-static bool can_scan_sizeof_postfix_extent(block_t *scope,
-                                           token_t *start,
-                                           bool parenthesized,
-                                           bool allow_flexible)
-{
-    token_t *tail = start;
-    var_t object;
-    sizeof_walk_t walk = {0};
-
-    return scan_sizeof_postfix_operand(scope, &tail, &object, &walk,
-                                       parenthesized) &&
-           walk.members && sizeof_operand_tail_ends(tail, parenthesized) &&
-           !walk.designator && !effective_pointer_depth(&object) &&
-           (object.array_size > 0 ||
-            (allow_flexible && object.is_flexible_array_member));
-}
-
 /* Walk a local sizeof operand from @start and say whether this walker owns it:
  * any operand it models that applies an operator, or that still designates an
  * array, possibly incomplete, or a callback object. Without a parenthesis it
@@ -739,136 +718,15 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         }
     }
 
-    /* Check if this is sizeof(type) or sizeof(expression) */
-    bool has_signed_type = false;
-    bool has_unsigned_type = false;
-    int long_type_count = 0;
-    type_t *leading_scalar_type = NULL;
-
-    if (lex_peek(T_identifier, token) &&
-        (!strcmp(token, "char") || !strcmp(token, "short") ||
-         !strcmp(token, "int"))) {
-        token_t *after_base = cur_token->next->next;
-
-        while (after_base && after_base->kind == T_const)
-            after_base = after_base->next;
-        if (after_base &&
-            (after_base->kind == T_signed || after_base->kind == T_unsigned)) {
-            lex_expect(T_identifier);
-            leading_scalar_type = find_type(token, true);
-        }
-    }
-    while (lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
-           lex_peek(T_long, NULL) || lex_peek(T_const, NULL) ||
-           lex_peek(T_volatile, NULL)) {
-        if (lex_accept(T_signed)) {
-            if (has_signed_type)
-                error_at("duplicate signed type specifier", cur_token_loc());
-            has_signed_type = true;
-        } else if (lex_accept(T_unsigned)) {
-            if (has_unsigned_type)
-                error_at("duplicate unsigned type specifier", cur_token_loc());
-            has_unsigned_type = true;
-        } else if (lex_accept(T_long))
-            long_type_count++;
-        else if (lex_accept(T_const))
-            ;
-        else
-            lex_expect(T_volatile);
-    }
-    if (long_type_count > 2)
-        error_at("too many long type specifiers", cur_token_loc());
-    if (has_signed_type && has_unsigned_type)
-        error_at("both signed and unsigned specified", cur_token_loc());
-    if (leading_scalar_type == TY_int && lex_peek(T_identifier, token) &&
-        !strcmp(token, "char"))
-        error_at("int cannot be combined with char", cur_token_loc());
-    bool has_long_type = long_type_count > 0;
-    bool has_enum_type = lex_accept(T_enum);
-    if (has_enum_type &&
-        (has_signed_type || has_unsigned_type || has_long_type))
-        error_at("enum type cannot be combined with integer specifiers",
-                 cur_token_loc());
-    base_type_t record_kind = accept_record_keyword();
-
-    /* `sizeof` only consumes object representation metadata, so it can admit
-     * the C99 floating type names before value arithmetic and ABI lowering
-     * exist. Keep all expression/declaration admission gates intact.
+    /* Check if this is sizeof(type) or sizeof(expression). `sizeof` only
+     * consumes object representation metadata, so it can admit the C99 floating
+     * type names before value arithmetic and ABI lowering exist.
      */
-    if (lex_accept(T_float)) {
-        if (has_signed_type || has_unsigned_type || has_long_type ||
-            has_enum_type || record_kind)
-            error_at("invalid float type specifiers", cur_token_loc());
-        type = TY_float;
-    } else if (lex_accept(T_double)) {
-        if (has_signed_type || has_unsigned_type || has_enum_type ||
-            record_kind || long_type_count > 1)
-            error_at("invalid double type specifiers", cur_token_loc());
-        type = has_long_type ? TY_long_double : TY_double;
-    } else if (has_enum_type) {
-        lex_ident(T_identifier, token);
-        type = reference_enum_tag(token, parent);
-    } else if (has_long_type) {
-        type = has_unsigned_type ? TY_ulong : TY_long;
-        if (long_type_count > 1) {
-            /* sizeof only consumes type metadata. It does not materialize a
-             * long-long value, so 32-bit targets can correctly report the
-             * required eight-byte object size before their paired-register
-             * value ABI is implemented.
-             */
-            if (has_unsigned_type)
-                type = TY_ulong_long;
-            else
-                type = TY_long_long;
-        }
-        lex_accept(T_signed);
-        lex_accept(T_const);
-        if (lex_peek(T_identifier, token) && !strcmp(token, "int"))
-            lex_expect(T_identifier);
-    } else if (has_unsigned_type) {
-        if (leading_scalar_type == TY_char) {
-            type = TY_uchar;
-        } else if (leading_scalar_type == TY_short) {
-            if (lex_peek(T_identifier, token) && !strcmp(token, "int"))
-                lex_expect(T_identifier);
-            type = TY_ushort;
-        } else if (lex_peek(T_identifier, token) &&
-                   (!strcmp(token, "int") || !strcmp(token, "char") ||
-                    !strcmp(token, "short"))) {
-            lex_expect(T_identifier);
-            if (!strcmp(token, "char"))
-                type = TY_uchar;
-            else if (!strcmp(token, "short"))
-                type = TY_ushort;
-            else
-                type = TY_uint;
-        } else
-            type = TY_uint;
-    } else if (has_signed_type) {
-        if (leading_scalar_type == TY_char || leading_scalar_type == TY_short) {
-            if (leading_scalar_type == TY_short &&
-                lex_peek(T_identifier, token) && !strcmp(token, "int"))
-                lex_expect(T_identifier);
-            type =
-                leading_scalar_type == TY_char ? TY_schar : leading_scalar_type;
-        } else if (lex_peek(T_identifier, token) &&
-                   (!strcmp(token, "int") || !strcmp(token, "char") ||
-                    !strcmp(token, "short"))) {
-            lex_expect(T_identifier);
-            type = !strcmp(token, "char") ? TY_schar : find_type(token, true);
-        } else
-            type = TY_int;
-    } else if (leading_scalar_type) {
-        type = leading_scalar_type;
-    } else if (lex_peek(T_identifier, token)) {
-        /* Try to parse as a type first */
-        type = record_kind ? find_record_tag(token, parent, record_kind)
-                           : find_visible_type(token, parent);
-        if (type) {
-            /* sizeof(type) */
-            lex_expect(T_identifier);
-        }
-    }
+    token_t *type_name_start = cur_token;
+
+    type = read_type_name_specifiers(parent);
+    if (!type && cur_token != type_name_start)
+        error_at("Unknown type name in sizeof", cur_token_loc());
 
     /* A type name continues with its abstract declarator; only the derivation
      * it applies last decides the object size.

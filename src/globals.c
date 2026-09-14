@@ -17,6 +17,7 @@
 
 source_location_t *cur_token_loc(void);
 __noreturn void error_at(char *msg, source_location_t *loc);
+__noreturn void limit_error(char *msg);
 
 /* Forward declaration for string interning */
 char *intern_string(char *str);
@@ -639,11 +640,8 @@ type_t *find_type(const char *type_name, int flag)
 
 ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 {
-    if (ph2_ir_idx >= MAX_IR_INSTR) {
-        printf("Error: too many phase-2 IR instructions\n");
-        fflush(stdout); /* see fatal() */
-        abort();
-    }
+    if (ph2_ir_idx >= MAX_IR_INSTR)
+        limit_error("too many phase-2 IR instructions");
     PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
     return ph2_ir;
 }
@@ -1194,11 +1192,11 @@ void type_ensure_fields(type_t *type)
 
 type_t *add_type(void)
 {
-    if (types_idx >= MAX_TYPES) {
-        printf("Error: Maximum number of types (%d) exceeded\n", MAX_TYPES);
-        fflush(stdout); /* see fatal() */
-        abort();
-    }
+    /* Every struct, union and enum specifier with a body, and every typedef,
+     * takes an entry, so a large enough input reaches the end of the table.
+     */
+    if (types_idx >= MAX_TYPES)
+        limit_error("Maximum number of types exceeded");
     type_t *t = &TYPES[types_idx++];
     t->fields = NULL;
     return t;
@@ -1263,47 +1261,136 @@ void add_scoped_constant(block_t *block, char alias[], int value)
     block->constants = constant;
 }
 
+/* The kinds of binding an ordinary identifier can have in one scope. Objects,
+ * functions, typedef names and enumeration constants share C99's ordinary
+ * identifier name space (6.2.3p1), so each scope binds a name to at most one of
+ * them. The values are bits, so a lookup can ask for several kinds at once.
+ */
+typedef enum {
+    ORDINARY_NONE = 0,
+    ORDINARY_CONSTANT = 1,  /* enumeration constant declared in the block */
+    ORDINARY_VARIABLE = 2,  /* local object, or block-scope function alias */
+    ORDINARY_TYPEDEF = 4,   /* typedef name declared in the block */
+    ORDINARY_PARAMETER = 8, /* parameter, seen from the function body's block */
+    ORDINARY_ANY = 15
+} ordinary_kind_t;
+
+/* The first local of @block at or after index *@pos named @name, or NULL, with
+ * *@pos left just past it so that a caller can continue to the next one.
+ *
+ * A block's locals include all of its IR temporaries, and every declaration
+ * scans its block's locals at least twice, so the scan is quadratic in the size
+ * of a block and its compare is what a large one pays for. Settle the first two
+ * bytes before the library call: temporaries differ in the first, and names
+ * sharing a prefix letter, such as a run of generated declarations, usually in
+ * the second. A nonzero first byte that matches means neither name has ended.
+ */
+var_t *find_block_local(block_t *block, const char *name, int *pos)
+{
+    char head = name[0];
+    char second = head ? name[1] : 0;
+
+    for (int i = *pos; i < block->locals.size; i++) {
+        var_t *var = block->locals.elements[i];
+        const char *var_name = var->var_name;
+
+        if (var_name[0] != head || (head && var_name[1] != second))
+            continue;
+        if (!strcmp(var_name, name)) {
+            *pos = i + 1;
+            return var;
+        }
+    }
+    *pos = block->locals.size;
+    return NULL;
+}
+
+/* The binding @name has in @block's own scope among the @kinds asked for, or
+ * ORDINARY_NONE. The outermost block of a function body shares the scope of the
+ * function's parameters (C99 6.2.1p4); a nested block only hides them. When
+ * @binding is not NULL it receives the constant_t, var_t or typedef_binding_t
+ * found. A valid program binds a name once per scope, so the order in which the
+ * kinds are tried only decides what an invalid redeclaration reports.
+ */
+ordinary_kind_t find_block_ordinary(block_t *block,
+                                    const char *name,
+                                    int kinds,
+                                    void **binding)
+{
+    char head = name[0];
+    void *unused;
+
+    if (!binding)
+        binding = &unused;
+    if (kinds & ORDINARY_CONSTANT) {
+        for (constant_t *constant = block->constants; constant;
+             constant = constant->next) {
+            if (!strcmp(constant->alias, name)) {
+                *binding = constant;
+                return ORDINARY_CONSTANT;
+            }
+        }
+    }
+    if (kinds & ORDINARY_VARIABLE) {
+        int pos = 0;
+
+        *binding = find_block_local(block, name, &pos);
+        if (*binding)
+            return ORDINARY_VARIABLE;
+    }
+    if (kinds & ORDINARY_TYPEDEF) {
+        for (typedef_binding_t *td = block->typedefs; td; td = td->next) {
+            if (td->name[0] == head && !strcmp(td->name, name)) {
+                *binding = td;
+                return ORDINARY_TYPEDEF;
+            }
+        }
+    }
+    if ((kinds & ORDINARY_PARAMETER) && !block->parent && block->func) {
+        func_t *func = block->func;
+
+        for (int i = 0; i < func->num_params; i++) {
+            var_t *param = &func->param_defs[i];
+
+            if (param->var_name[0] == head && !strcmp(param->var_name, name)) {
+                *binding = param;
+                return ORDINARY_PARAMETER;
+            }
+        }
+    }
+    return ORDINARY_NONE;
+}
+
 /* The enumeration constant @alias as seen from @block, or NULL when none is
  * visible. Constants share the ordinary identifier name space, so an object,
  * parameter or typedef name declared in a nearer scope hides an outer constant
  * of the same name (C99 6.2.1p4).
+ *
+ * Every identifier operand asks, and nearly all of them name no constant, so
+ * find the constant first, which costs no scan of any block's locals. Only when
+ * there is one are the scopes between the use and the constant's own searched
+ * for a binding that hides it.
  */
 constant_t *find_scoped_constant(char alias[], block_t *block)
 {
-    func_t *func = block ? block->func : NULL;
-    char head = alias[0];
+    block_t *owner;
+    void *constant = NULL;
 
-    for (; block && block != GLOBAL_BLOCK; block = block->parent) {
-        for (constant_t *constant = block->constants; constant;
-             constant = constant->next) {
-            if (!strcmp(constant->alias, alias))
-                return constant;
-        }
-
-        /* A block's locals include its IR temporaries; settle the first byte
-         * before the library call, as find_visible_type() does.
-         */
-        for (int i = 0; i < block->locals.size; i++) {
-            var_t *var = block->locals.elements[i];
-
-            if (var && var->var_name && var->var_name[0] == head &&
-                !strcmp(var->var_name, alias))
-                return NULL;
-        }
-        for (typedef_binding_t *binding = block->typedefs; binding;
-             binding = binding->next)
-            if (binding->name[0] == head && !strcmp(binding->name, alias))
-                return NULL;
+    for (owner = block; owner && owner != GLOBAL_BLOCK; owner = owner->parent)
+        if (find_block_ordinary(owner, alias, ORDINARY_CONSTANT, &constant))
+            break;
+    if (!owner || owner == GLOBAL_BLOCK)
+        constant = find_constant(alias);
+    if (!constant)
+        return NULL;
+    for (; block != owner; block = block->parent) {
+        if (find_block_ordinary(
+                block, alias,
+                ORDINARY_VARIABLE | ORDINARY_TYPEDEF | ORDINARY_PARAMETER,
+                NULL))
+            return NULL;
     }
-    if (func) {
-        for (int i = 0; i < func->num_params; i++) {
-            const char *name = func->param_defs[i].var_name;
-
-            if (name && name[0] == head && !strcmp(name, alias))
-                return NULL;
-        }
-    }
-    return find_constant(alias);
+    return constant;
 }
 
 void add_type_tag(block_t *block, char name[], type_t *type)
@@ -1326,16 +1413,40 @@ type_t *find_local_type_tag(char name[], block_t *block)
     return NULL;
 }
 
-/* C99 6.7.2.3p3: every declaration of a tag names the same kind of type, and
- * struct, union and enum tags share one name space, so a tag found under the
- * other keyword is an error rather than a miss.
+/* An enum type is int based (see initialize_enum_type()), which is also what
+ * tells its tag apart from a struct or union tag.
  */
-static type_t *check_record_tag(type_t *type, base_type_t kind)
+#define ENUM_TAG_KIND TYPE_int
+
+/* C99 6.7.2.3p3: every declaration of a tag names the same kind of type, and
+ * struct, union and enum tags share one name space, so a tag found under
+ * another keyword is an error rather than a miss. @kind is TYPE_struct,
+ * TYPE_union or ENUM_TAG_KIND.
+ */
+static type_t *check_tag_kind(type_t *type, base_type_t kind)
 {
     if (type && type->base_type != kind)
-        error_at("tag was previously declared as a different kind of record",
+        error_at("tag was previously declared as a different kind of tag",
                  cur_token_loc());
     return type;
+}
+
+/* The tag @name of @kind as seen from @block, or NULL when no tag of that name
+ * is visible. Tags are registered with the block that declares them, file-scope
+ * ones with GLOBAL_BLOCK, which a function body's chain does not reach on its
+ * own, so a NULL @block sees file scope only. A tag declared in some other
+ * block is never found. Looking in the tag table, not the type table, also
+ * keeps a typedef name out of it.
+ */
+static type_t *find_visible_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = NULL;
+
+    for (; block && !type; block = block->parent)
+        type = find_local_type_tag(name, block);
+    if (!type)
+        type = find_local_type_tag(name, GLOBAL_BLOCK);
+    return check_tag_kind(type, kind);
 }
 
 /* Create the incomplete struct or union tag @name of @kind in @block. */
@@ -1349,20 +1460,11 @@ static type_t *declare_record_tag(char name[], block_t *block, base_type_t kind)
 }
 
 /* The struct or union tag @name as seen from @block, spelled with the keyword
- * for @kind, or NULL when no such tag is visible. Tags are registered with the
- * block that declares them, file-scope ones with GLOBAL_BLOCK, which a function
- * body's chain does not reach on its own, so a NULL @block sees file scope
- * only. A tag declared in some other block is never found.
+ * for @kind, or NULL when no such tag is visible.
  */
 type_t *find_record_tag(char name[], block_t *block, base_type_t kind)
 {
-    type_t *type = NULL;
-
-    for (; block && !type; block = block->parent)
-        type = find_local_type_tag(name, block);
-    if (!type)
-        type = find_local_type_tag(name, GLOBAL_BLOCK);
-    return check_record_tag(type, kind);
+    return find_visible_tag(name, block, kind);
 }
 
 /* A struct or union specifier with no member list: the visible tag, or else a
@@ -1384,34 +1486,28 @@ type_t *reference_record_tag(char name[], block_t *block, base_type_t kind)
  */
 type_t *local_record_tag(char name[], block_t *block, base_type_t kind)
 {
-    type_t *type = check_record_tag(find_local_type_tag(name, block), kind);
+    type_t *type = check_tag_kind(find_local_type_tag(name, block), kind);
 
     return type ? type : declare_record_tag(name, block, kind);
 }
 
-/* An enum tag shares the struct and union name space, so an existing record tag
- * of the same name is the wrong kind of tag rather than a miss. Looking in the
- * tag table, not the type table, also keeps a typedef name out of it.
+/* Open the member list of the struct or union tag @tag. C99 6.7.2.3p1 lets a
+ * scope define a tag's content only once, and a definition of the same tag
+ * inside that member list is a second one in the same scope, since a member
+ * list opens no scope of its own. The tag is still incomplete there, so mark it
+ * now rather than rely on its field count.
  */
-static type_t *check_enum_tag(type_t *type)
+void begin_record_definition(type_t *tag)
 {
-    if (type &&
-        (type->base_type == TYPE_struct || type->base_type == TYPE_union))
-        error_at("tag was previously declared as a different kind of tag",
-                 cur_token_loc());
-    return type;
+    if (tag->num_fields || tag->definition_started)
+        error_at("redefinition of struct or union tag", cur_token_loc());
+    tag->definition_started = true;
 }
 
 /* The enum tag @name as seen from @block, or NULL when none is visible. */
 type_t *find_enum_tag(char name[], block_t *block)
 {
-    type_t *type = NULL;
-
-    for (; block && !type; block = block->parent)
-        type = find_local_type_tag(name, block);
-    if (!type)
-        type = find_local_type_tag(name, GLOBAL_BLOCK);
-    return check_enum_tag(type);
+    return find_visible_tag(name, block, ENUM_TAG_KIND);
 }
 
 /* The enum tag @name named by a specifier seen from @block. Unlike a record
@@ -1432,44 +1528,21 @@ type_t *reference_enum_tag(char name[], block_t *block)
 /* The enum tag @name that @block itself declares, or NULL. */
 type_t *local_enum_tag(char name[], block_t *block)
 {
-    return check_enum_tag(find_local_type_tag(name, block));
+    return check_tag_kind(find_local_type_tag(name, block), ENUM_TAG_KIND);
 }
 
 bool find_block_typedef(block_t *block, const char *name)
 {
-    for (typedef_binding_t *binding = block->typedefs; binding;
-         binding = binding->next)
-        if (!strcmp(binding->name, name))
-            return true;
-    return false;
+    return find_block_ordinary(block, name, ORDINARY_TYPEDEF, NULL) !=
+           ORDINARY_NONE;
 }
 
-static bool block_has_ordinary_name(block_t *block, const char *name)
-{
-    for (int i = 0; i < block->locals.size; i++) {
-        var_t *var = block->locals.elements[i];
-
-        if (var && var->var_name && !strcmp(var->var_name, name))
-            return true;
-    }
-
-    /* The function body's outermost block shares the parameter namespace. A
-     * nested block may, however, legally shadow a parameter with a typedef.
-     */
-    if (!block->parent && block->func) {
-        for (int i = 0; i < block->func->num_params; i++) {
-            var_t *param = &block->func->param_defs[i];
-
-            if (param->var_name && !strcmp(param->var_name, name))
-                return true;
-        }
-    }
-    return false;
-}
-
+/* A nested block may legally shadow a parameter with a typedef, but the
+ * function body's outermost block shares the parameters' scope.
+ */
 void add_block_typedef(block_t *block, char name[], type_t *type)
 {
-    if (find_block_typedef(block, name) || block_has_ordinary_name(block, name))
+    if (find_block_ordinary(block, name, ORDINARY_ANY, NULL))
         error_at("typedef name conflicts with an ordinary identifier",
                  cur_token_loc());
 
@@ -1488,37 +1561,18 @@ void add_block_typedef(block_t *block, char name[], type_t *type)
  */
 type_t *find_visible_type(const char *name, block_t *block)
 {
-    func_t *func = block ? block->func : NULL;
-    char head = name[0];
-
-    /* Every declaration spelling passes through here, and a block's locals
-     * include all of its IR temporaries, so settle the first byte before the
-     * library call, as find_local_var() does.
+    /* Parameters are tried with the function body's outermost block, so they
+     * too hide a file-scope typedef unless a nearer binding has hidden them.
      */
     for (; block; block = block->parent) {
-        for (int i = block->locals.size - 1; i >= 0; i--) {
-            var_t *var = block->locals.elements[i];
-            if (var && var->var_name && var->var_name[0] == head &&
-                !strcmp(var->var_name, name))
-                return NULL;
-        }
-        for (typedef_binding_t *binding = block->typedefs; binding;
-             binding = binding->next)
-            if (binding->name[0] == head && !strcmp(binding->name, name))
-                return binding->type;
-    }
+        void *binding;
+        ordinary_kind_t kind =
+            find_block_ordinary(block, name, ORDINARY_ANY, &binding);
 
-    /* Parameters remain visible throughout the function body unless an inner
-     * lexical binding above has already hidden them.
-     */
-    if (func) {
-        for (int i = 0; i < func->num_params; i++) {
-            var_t *param = &func->param_defs[i];
-
-            if (param->var_name && param->var_name[0] == head &&
-                !strcmp(param->var_name, name))
-                return NULL;
-        }
+        if (kind == ORDINARY_TYPEDEF)
+            return ((typedef_binding_t *) binding)->type;
+        if (kind != ORDINARY_NONE)
+            return NULL;
     }
     return find_type(name, 1);
 }
@@ -1778,7 +1832,7 @@ void *arena_grow(arena_t *arena,
 {
     int new_cap = *cap ? *cap << 1 : first;
     if (limit && new_cap > limit)
-        fatal(what);
+        limit_error(what);
     void *grown = arena_realloc(arena, ptr, *cap * elem_sz, new_cap * elem_sz);
     *cap = new_cap;
     return grown;
@@ -2395,6 +2449,18 @@ __noreturn void usage_error(const char *msg)
     printf("[Error]: %s\n", msg);
     fflush(NULL);
     exit(1);
+}
+
+/* Reports an input that exceeds one of the compiler's fixed limits, such as the
+ * size of the type table or the predecessors of one basic block. The program
+ * may be valid C, but the limit is not a broken invariant either, so it exits
+ * through error_at() rather than taking fatal()'s core dump. The current token
+ * is quoted while the parser still holds one; a limit reached after the token
+ * arena is released has no line to point at.
+ */
+__noreturn void limit_error(char *msg)
+{
+    error_at(msg, cur_token && TOKEN_ARENA ? cur_token_loc() : NULL);
 }
 
 /* Reports a mistake in the input, quoting the line it sits on. A program the

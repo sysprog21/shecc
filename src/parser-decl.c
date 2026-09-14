@@ -169,85 +169,140 @@ int sizeof_type_name_size(const type_t *type,
     return size * elements;
 }
 
+/* Consume the scalar type specifiers at the next token, together with the
+ * qualifiers mixed in among them, which set @is_const and @is_volatile, and the
+ * inline specifier when @is_inline is not NULL. C99 6.7.2p2 lets these words
+ * appear in any order: "unsigned long int", "long unsigned int" and "int
+ * unsigned long" all name the same type.
+ *
+ * Returns the scalar type named, or NULL when no type word was read, which
+ * leaves a struct, union, enum or typedef name to the caller.
+ */
+type_t *read_scalar_type_specifiers(bool *is_const,
+                                    bool *is_volatile,
+                                    bool *is_inline)
+{
+    char token[MAX_ID_LEN];
+    type_t *type;
+    bool is_signed = false;
+    bool is_unsigned = false;
+    int long_count = 0;
+    bool has_int = false;
+    type_t *base = NULL;
+
+    while (true) {
+        if (lex_accept(T_signed)) {
+            if (is_signed)
+                error_at("duplicate signed type specifier", cur_token_loc());
+            is_signed = true;
+        } else if (lex_accept(T_unsigned)) {
+            if (is_unsigned)
+                error_at("duplicate unsigned type specifier", cur_token_loc());
+            is_unsigned = true;
+        } else if (lex_accept(T_long)) {
+            if (++long_count > 2)
+                error_at("too many long type specifiers", cur_token_loc());
+        } else if (lex_accept(T_const)) {
+            *is_const = true;
+        } else if (lex_accept(T_volatile)) {
+            *is_volatile = true;
+        } else if (is_inline && lex_accept(T_inline)) {
+            if (*is_inline)
+                error_at("duplicate inline function specifier",
+                         cur_token_loc());
+            *is_inline = true;
+        } else if (lex_peek(T_identifier, token) && !strcmp(token, "int")) {
+            /* `char`, `short` and `int` reach the parser as identifiers. `int`
+             * may also accompany `short` or `long`.
+             */
+            if (has_int)
+                error_at("duplicate type specifier", next_token_loc());
+            lex_expect(T_identifier);
+            has_int = true;
+        } else if (lex_peek(T_float, NULL) || lex_peek(T_double, NULL) ||
+                   (lex_peek(T_identifier, token) &&
+                    (!strcmp(token, "char") || !strcmp(token, "short")))) {
+            if (base)
+                error_at("duplicate type specifier", next_token_loc());
+            if (lex_accept(T_float))
+                base = TY_float;
+            else if (lex_accept(T_double))
+                base = TY_double;
+            else {
+                lex_expect(T_identifier);
+                base = token[0] == 'c' ? TY_char : TY_short;
+            }
+        } else
+            break;
+    }
+    if (!base && !has_int && !is_signed && !is_unsigned && !long_count)
+        return NULL;
+    if (is_signed && is_unsigned)
+        error_at("both signed and unsigned specified", cur_token_loc());
+    if (base == TY_float && (is_signed || is_unsigned || long_count || has_int))
+        error_at("invalid float type specifiers", cur_token_loc());
+    if (base == TY_double &&
+        (is_signed || is_unsigned || long_count > 1 || has_int))
+        error_at("invalid double type specifiers", cur_token_loc());
+    if (base == TY_char && has_int)
+        error_at("int cannot be combined with char", cur_token_loc());
+    if (base == TY_char && long_count)
+        error_at("long cannot be combined with char", cur_token_loc());
+    if (base == TY_short && long_count)
+        error_at("long cannot be combined with short", cur_token_loc());
+    if (lex_peek(T_enum, NULL))
+        error_at("enum type cannot be combined with integer specifiers",
+                 next_token_loc());
+    if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL))
+        error_at("record type cannot be combined with integer specifiers",
+                 next_token_loc());
+
+    if (base == TY_float)
+        type = TY_float;
+    else if (base == TY_double)
+        type = long_count ? TY_long_double : TY_double;
+    else if (base == TY_char)
+        type = is_unsigned ? TY_uchar : (is_signed ? TY_schar : TY_char);
+    else if (base == TY_short)
+        type = is_unsigned ? TY_ushort : TY_short;
+    else if (long_count == 2)
+        type = is_unsigned ? TY_ulong_long : TY_long_long;
+    else if (long_count)
+        type = is_unsigned ? TY_ulong : TY_long;
+    else
+        type = is_unsigned ? TY_uint : TY_int;
+    return type;
+}
+
 /* Consume the specifier list of a type name used only for its metadata, and
  * return the type it names, or NULL when none of it names a type.
  */
 type_t *read_type_name_specifiers(block_t *scope)
 {
     char token[MAX_ID_LEN];
-    type_t *type = NULL;
-    bool is_unsigned = false;
-    bool is_signed = false;
-    int long_count = 0;
+    bool is_const = false;
+    bool is_volatile = false;
+    type_t *type = read_scalar_type_specifiers(&is_const, &is_volatile, NULL);
+    base_type_t record_kind;
 
-    base_type_t record_kind = accept_record_keyword();
+    if (type)
+        return type;
+    record_kind = accept_record_keyword();
     if (record_kind) {
         lex_ident(T_identifier, token);
         type = find_record_tag(token, scope, record_kind);
     } else if (lex_accept(T_enum)) {
         lex_ident(T_identifier, token);
         type = reference_enum_tag(token, scope);
-    } else {
-        /* Declaration specifiers may appear in any order: all of "unsigned long
-         * int", "long unsigned int", and "int unsigned" name the same type.
-         */
-        while (true) {
-            if (lex_accept(T_unsigned)) {
-                if (is_unsigned)
-                    error_at("duplicate unsigned type specifier",
-                             cur_token_loc());
-                is_unsigned = true;
-            } else if (lex_accept(T_signed)) {
-                if (is_signed)
-                    error_at("duplicate signed type specifier",
-                             cur_token_loc());
-                is_signed = true;
-            } else if (lex_accept(T_long)) {
-                long_count++;
-            } else if (lex_accept(T_float)) {
-                type = TY_float;
-            } else if (lex_accept(T_double)) {
-                type = TY_double;
-            } else if (lex_accept(T_const) || lex_accept(T_volatile) ||
-                       lex_accept(T_restrict)) {
-                ;
-            } else if (lex_peek(T_identifier, token)) {
-                type_t *candidate = find_visible_type(token, scope);
-
-                if (!candidate)
-                    break;
-                lex_expect(T_identifier);
-                type = candidate;
-            } else {
-                break;
-            }
-        }
-        if (is_unsigned && is_signed)
-            error_at("both signed and unsigned specified", cur_token_loc());
-        if (long_count > 2)
-            error_at("too many long type specifiers", cur_token_loc());
-        if (type == TY_float && (is_unsigned || is_signed || long_count))
-            error_at("invalid float type specifiers", cur_token_loc());
-        if (type == TY_double) {
-            if (is_unsigned || is_signed || long_count > 1)
-                error_at("invalid double type specifiers", cur_token_loc());
-            if (long_count)
-                type = TY_long_double;
-        } else if (long_count) {
-            type = is_unsigned ? TY_ulong : TY_long;
-            if (long_count == 2)
-                type = is_unsigned ? TY_ulong_long : TY_long_long;
-        } else if (is_unsigned) {
-            if (type == TY_char)
-                type = TY_uchar;
-            else if (type == TY_short)
-                type = TY_ushort;
-            else
-                type = TY_uint;
-        } else if (is_signed) {
-            type = type == TY_char ? TY_schar : (type ? type : TY_int);
-        }
+    } else if (lex_peek(T_identifier, token)) {
+        type = find_visible_type(token, scope);
+        if (type)
+            lex_expect(T_identifier);
     }
+    /* A qualifier may follow the record, enum or typedef name as well. */
+    while (lex_accept(T_const) || lex_accept(T_volatile) ||
+           lex_accept(T_restrict))
+        ;
     return type;
 }
 
@@ -1052,9 +1107,9 @@ void read_inner_var_decl(var_t *vd,
  *
  * The scan covers only tokens that can continue the specifiers: qualifiers,
  * inline, scalar keywords, a struct, union or enum specifier with its body, and
- * one type name. "int" may follow another type word, as in "short int", but any
- * other identifier after the type is the declarator, which ends the scan, so
- * "int x static;" stays an error.
+ * one type name. A scalar type word may follow another, as in "int short", but
+ * any other identifier after the type is the declarator, which ends the scan,
+ * so "int x static;" stays an error.
  */
 void hoist_storage_class_specifiers(void)
 {
@@ -1100,7 +1155,11 @@ void hoist_storage_class_specifiers(void)
             continue;
         }
         if (kind == T_identifier) {
-            if (saw_type_name && strcmp(tk->literal, "int"))
+            /* `char`, `short` and `int` are keywords that reach the parser as
+             * identifiers, so they never begin the declarator.
+             */
+            if (saw_type_name && strcmp(tk->literal, "int") &&
+                strcmp(tk->literal, "short") && strcmp(tk->literal, "char"))
                 return;
             saw_type_name = true;
         } else if (kind != T_const && kind != T_volatile &&
@@ -1169,10 +1228,7 @@ type_t *read_record_body(block_t *parent,
 
     if (has_tag) {
         type = local_record_tag(token, scope, kind);
-
-        /* C99 6.7.2.3p1: a scope defines the content of a tag only once. */
-        if (type->num_fields)
-            error_at("redefinition of struct or union tag", cur_token_loc());
+        begin_record_definition(type);
     } else {
         type = add_type();
         type->base_type = kind;
@@ -1186,64 +1242,47 @@ type_t *read_record_body(block_t *parent,
         /* A member's type names tags visible in this scope. */
         v->scope = parent;
         read_full_var_decl(v, false, false, true);
-        read_bitfield_width(v, scope);
 
-        /* C99 6.7.2.1p2 keeps a struct with a flexible array member out of a
-         * struct or array, but a union may hold one and then inherits it.
-         */
-        if (is_union)
-            has_flexible_array_member |= is_flexible_array_member_container(v);
-        else
-            reject_flexible_array_member_container(v);
-        mark_flexible_array_member(v, is_union);
-        if (is_union) {
-            v->offset = 0;
-            int field_size = is_bitfield(v)
-                                 ? (v->bit_width ? v->bit_storage_size : 0)
-                                 : size_var(v);
-            if (field_size > max_size)
-                max_size = field_size;
-            if (alignment_var(v) > alignment)
-                alignment = alignment_var(v);
-        } else {
-            size = is_bitfield(v)
-                       ? layout_bitfield_field(size, v, &alignment, &bits)
-                       : layout_struct_field(flush_bitfield_layout(size, &bits),
-                                             v, &alignment);
-        }
+        /* Each declarator of the member declaration, sharing its specifier. */
+        while (true) {
+            read_bitfield_width(last, scope);
 
-        while (lex_accept(T_comma)) {
+            /* C99 6.7.2.1p2 keeps a struct with a flexible array member out of
+             * a struct or array, but a union may hold one and then inherits it.
+             */
+            if (is_union)
+                has_flexible_array_member |=
+                    is_flexible_array_member_container(last);
+            else
+                reject_flexible_array_member_container(last);
+            mark_flexible_array_member(last, is_union);
+            if (is_union) {
+                last->offset = 0;
+                int field_size =
+                    is_bitfield(last)
+                        ? (last->bit_width ? last->bit_storage_size : 0)
+                        : size_var(last);
+                if (field_size > max_size)
+                    max_size = field_size;
+                if (alignment_var(last) > alignment)
+                    alignment = alignment_var(last);
+            } else {
+                size =
+                    is_bitfield(last)
+                        ? layout_bitfield_field(size, last, &alignment, &bits)
+                        : layout_struct_field(
+                              flush_bitfield_layout(size, &bits), last,
+                              &alignment);
+            }
+            if (!lex_accept(T_comma))
+                break;
             if (!is_union && last->is_flexible_array_member)
                 error_at(
                     "Flexible array member must be the final struct member",
                     cur_token_loc());
-            var_t *nv = type_add_field(type, &i);
-            initialize_struct_field(nv, v, 0);
-            read_inner_var_decl(nv, false, false, true);
-            read_bitfield_width(nv, scope);
-            if (is_union)
-                has_flexible_array_member |=
-                    is_flexible_array_member_container(nv);
-            else
-                reject_flexible_array_member_container(nv);
-            mark_flexible_array_member(nv, is_union);
-            last = nv;
-            if (is_union) {
-                nv->offset = 0;
-                int field_size =
-                    is_bitfield(nv) ? (nv->bit_width ? nv->bit_storage_size : 0)
-                                    : size_var(nv);
-                if (field_size > max_size)
-                    max_size = field_size;
-                if (alignment_var(nv) > alignment)
-                    alignment = alignment_var(nv);
-            } else {
-                size = is_bitfield(nv)
-                           ? layout_bitfield_field(size, nv, &alignment, &bits)
-                           : layout_struct_field(
-                                 flush_bitfield_layout(size, &bits), nv,
-                                 &alignment);
-            }
+            last = type_add_field(type, &i);
+            initialize_struct_field(last, v, 0);
+            read_inner_var_decl(last, false, false, true);
         }
 
         lex_expect(T_semicolon);
@@ -1266,6 +1305,7 @@ type_t *read_record_body(block_t *parent,
                      ? ALIGN_UP(max_size, alignment)
                      : ALIGN_UP(flush_bitfield_layout(size, &bits), alignment);
     type->num_fields = i;
+    type->is_union = is_union;
     type->has_flexible_array_member = has_flexible_array_member;
     return type;
 }
@@ -1286,161 +1326,34 @@ void read_full_var_decl(var_t *vd,
     bool declaration_const = vd->is_const_qualified;
     bool declaration_inline = vd->is_inline;
     bool declaration_volatile = vd->is_volatile;
-    bool is_signed = false;
-    bool is_unsigned = false;
     bool is_const = false;
-    bool is_inline = false;
+    bool is_inline = declaration_inline;
     bool is_volatile = false;
-    bool is_long = false;
-    bool is_long_long = false;
-    type_t *leading_scalar_type = NULL;
+    type_t *type =
+        read_scalar_type_specifiers(&is_const, &is_volatile, &is_inline);
 
-    /* The declaration dispatcher normally leaves the base type for this routine
-     * to consume. C99 also permits the modifier after that base, e.g. `short
-     * unsigned value`; retain the base while consuming its following scalar
-     * modifiers instead of mistaking `unsigned` for the declarator name.
-     */
-    if (lex_peek(T_identifier, type_name) &&
-        (!strcmp(type_name, "char") || !strcmp(type_name, "short") ||
-         !strcmp(type_name, "int"))) {
-        token_t *after_base = cur_token->next->next;
-
-        while (after_base && after_base->kind == T_const)
-            after_base = after_base->next;
-        if (after_base &&
-            (after_base->kind == T_signed || after_base->kind == T_unsigned)) {
-            lex_expect(T_identifier);
-            leading_scalar_type = find_type(type_name, true);
-        }
-    }
-
-    /* C permits these declaration specifiers in either order. Consume the
-     * scalar set as a group so `const unsigned int` and `unsigned const int`
-     * follow the same path.
-     */
-    while (lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
-           lex_peek(T_const, NULL) || lex_peek(T_inline, NULL) ||
-           lex_peek(T_volatile, NULL) || lex_peek(T_long, NULL)) {
-        if (lex_accept(T_signed)) {
-            if (is_signed)
-                error_at("duplicate signed type specifier", cur_token_loc());
-            is_signed = true;
-        } else if (lex_accept(T_unsigned)) {
-            if (is_unsigned)
-                error_at("duplicate unsigned type specifier", cur_token_loc());
-            is_unsigned = true;
-        } else if (lex_accept(T_const))
-            is_const = true;
-        else if (lex_accept(T_volatile))
-            is_volatile = true;
-        else if (lex_accept(T_inline)) {
-            if (is_inline || declaration_inline)
-                error_at("duplicate inline function specifier",
-                         cur_token_loc());
-            is_inline = true;
-        } else {
-            lex_expect(T_long);
-            if (is_long_long)
-                error_at("too many long type specifiers", cur_token_loc());
-            if (is_long)
-                is_long_long = true;
-            else
-                is_long = true;
-        }
-    }
-    if (is_signed && is_unsigned)
-        error_at("both signed and unsigned specified", cur_token_loc());
-    if (leading_scalar_type == TY_int && lex_peek(T_identifier, type_name) &&
-        !strcmp(type_name, "char"))
-        error_at("int cannot be combined with char", cur_token_loc());
-    bool is_enum_type = lex_accept(T_enum);
-    if (is_enum_type && (is_signed || is_unsigned || is_long))
-        error_at("enum type cannot be combined with integer specifiers",
-                 cur_token_loc());
-    base_type_t record_kind = accept_record_keyword();
-    type_t *type;
-
-    /* `signed` has the existing signed scalar semantics. C permits its `int`
-     * spelling to be omitted, while `signed char` and `signed short` retain
-     * their explicit base type.
-     */
-    if (parsing_sizeof_function_signature && lex_accept(T_float)) {
-        if (is_signed || is_unsigned || is_long)
-            error_at("invalid float type specifiers", cur_token_loc());
-        type = TY_float;
-    } else if (parsing_sizeof_function_signature && lex_accept(T_double)) {
-        if (is_signed || is_unsigned || is_long_long)
-            error_at("invalid double type specifiers", cur_token_loc());
-        type = is_long ? TY_long_double : TY_double;
-    } else if (is_enum_type) {
+    if (!type && lex_accept(T_enum)) {
         lex_ident(T_identifier, type_name);
         type = reference_enum_tag(type_name, vd->scope);
-    } else if (is_unsigned) {
-        if (is_long) {
-            if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
-                lex_expect(T_identifier);
-            type = is_long_long ? TY_ulong_long : TY_ulong;
-        } else if (leading_scalar_type == TY_char) {
-            type = TY_uchar;
-        } else if (leading_scalar_type == TY_short) {
-            if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
-                lex_expect(T_identifier);
-            type = TY_ushort;
-        } else if (lex_peek(T_identifier, type_name) &&
-                   (!strcmp(type_name, "char") || !strcmp(type_name, "short") ||
-                    !strcmp(type_name, "int"))) {
-            lex_expect(T_identifier);
-            if (!strcmp(type_name, "char"))
-                type = TY_uchar;
-            else if (!strcmp(type_name, "short"))
-                type = TY_ushort;
-            else
-                type = TY_uint;
-        } else
-            type = TY_uint; /* `unsigned` is `unsigned int` */
-    } else if (is_long) {
-        /* The current ABI gives long the same 32-bit representation as int,
-         * while retaining its distinct C type and rank.
-         */
-        if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
-            lex_expect(T_identifier);
-        type = is_long_long ? TY_long_long : TY_long;
-    } else if (is_signed && leading_scalar_type &&
-               (leading_scalar_type == TY_char ||
-                leading_scalar_type == TY_short)) {
-        if (leading_scalar_type == TY_short &&
-            lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
-            lex_expect(T_identifier);
-        type = leading_scalar_type == TY_char ? TY_schar : leading_scalar_type;
-    } else if (is_signed && lex_peek(T_identifier, type_name) &&
-               (!strcmp(type_name, "char") || !strcmp(type_name, "short") ||
-                !strcmp(type_name, "int"))) {
-        lex_expect(T_identifier);
-        type = !strcmp(type_name, "char")
-                   ? TY_schar
-                   : (!strcmp(type_name, "short") ? TY_short : TY_int);
-    } else if (is_signed && !record_kind &&
-               (!lex_peek(T_identifier, type_name) ||
-                (strcmp(type_name, "int") && strcmp(type_name, "char") &&
-                 strcmp(type_name, "short")))) {
-        type = TY_int;
-    } else if (leading_scalar_type) {
-        type = leading_scalar_type;
-    } else if (record_kind && is_record_member &&
-               (lex_peek(T_open_curly, NULL) ||
-                (lex_peek(T_identifier, type_name) &&
-                 cur_token->next->next->kind == T_open_curly))) {
-        /* A member may define the record it has, tagged or not, as in `struct {
-         * int a; } in;`.
-         */
-        bool has_tag = lex_accept(T_identifier);
+    } else if (!type) {
+        base_type_t record_kind = accept_record_keyword();
 
-        type = read_record_body(vd->scope, record_kind, has_tag, type_name);
-    } else {
-        lex_ident(T_identifier, type_name);
-        type = record_kind
-                   ? reference_record_tag(type_name, vd->scope, record_kind)
-                   : find_visible_type(type_name, vd->scope);
+        if (record_kind && is_record_member &&
+            (lex_peek(T_open_curly, NULL) ||
+             (lex_peek(T_identifier, type_name) &&
+              cur_token->next->next->kind == T_open_curly))) {
+            /* A member may define the record it has, tagged or not, as in
+             * `struct { int a; } in;`.
+             */
+            bool has_tag = lex_accept(T_identifier);
+
+            type = read_record_body(vd->scope, record_kind, has_tag, type_name);
+        } else {
+            lex_ident(T_identifier, type_name);
+            type = record_kind
+                       ? reference_record_tag(type_name, vd->scope, record_kind)
+                       : find_visible_type(type_name, vd->scope);
+        }
     }
 
     if (!type) {
@@ -1497,14 +1410,14 @@ void read_full_var_decl(var_t *vd,
                    type->array_element_pointee_func_signature)))
                 error_at("restrict requires a pointer type", cur_token_loc());
         } else if (lex_accept(T_inline)) {
-            if (is_inline || declaration_inline)
+            if (is_inline)
                 error_at("duplicate inline function specifier",
                          cur_token_loc());
             is_inline = true;
         } else
             break;
     }
-    vd->is_inline = declaration_inline || is_inline;
+    vd->is_inline = is_inline;
     vd->is_volatile =
         declaration_volatile || is_volatile || type->is_volatile_qualified;
     if (is_const || declaration_const) {
