@@ -2944,11 +2944,18 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
         return;
 
     case OP_cast: {
-        /* Equal-width signed-to-unsigned casts still need to discard the source
-         * register's sign extension on LP64.
+        /* A narrow scalar sits in its 64-bit register extended by its own
+         * signedness, and the instructions that read the whole register -- a
+         * right shift or a widening, for instance -- rely on that. An
+         * equal-width cast that changes the signedness must therefore redo the
+         * extension: an int cast from unsigned int 0xffffffff otherwise kept
+         * zeroes above it, and shifting it right arithmetically gave
+         * 0x7fffffff.
          */
         if (ph2_ir->is_unsigned && ph2_ir->size_bytes < PTR_SIZE)
             emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
+        else if (ph2_ir->src0_is_unsigned && ph2_ir->size_bytes < PTR_SIZE)
+            emit_narrow_move(rd, rs1, ph2_ir->size_bytes, true);
         else
             emit_mov_reg(rd, rs1);
     }

@@ -269,13 +269,14 @@ void cfg_flatten(void)
     func_t *func;
 
     if (dynlink) {
-        /* When using dynamic linking, 20 instructions are generated at the
+        /* When using dynamic linking, 24 instructions are generated at the
          * program entry point to perform the following operations:
          * - prepare arguments and call __libc_start_main()
          * - preserve a0 ('argc'), a1 ('argv') and sp.
-         * - allocate a global stack and jump to global init function.
+         * - allocate and clear a global stack, then jump to global init
+         *   function.
          */
-        elf_offset = 80;
+        elf_offset = 96;
     } else {
         /* Under static linking, "__syscall" must be generated to allow the
          * program to invoke system calls.
@@ -1154,6 +1155,20 @@ void code_generate(void)
     emit(__addi(__t0, __t0, rv_lo(ofs)));
     emit(__sub(__sp, __sp, __t0));
     emit(__addi(__gp, __sp, 0)); /* Set up global pointer */
+
+    /* A static image runs first on untouched stack memory, which reads as zero,
+     * but a dynamic one follows the loader and glibc's startup over the same
+     * memory. Clear the global stack so a global with no initializer starts at
+     * zero there too, storing from the top word down; t0 still holds 'ofs', a
+     * nonzero multiple of four. No libc call is involved, so this holds with
+     * --no-libc as well.
+     */
+    if (dynlink) {
+        emit(__addi(__t0, __t0, -4));
+        emit(__add(__t1, __gp, __t0));
+        emit(__sw(__zero, __t1, 0));
+        emit(__bne(__t0, __zero, -12));
+    }
     emit(__jal(__ra, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
 
     if (!dynlink) {

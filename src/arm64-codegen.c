@@ -317,9 +317,9 @@ void cfg_flatten(void)
 
     /* Entry sequence lengths, which the block offsets below start after.
      * Static: 12 instructions of setup, then the 9-instruction __syscall
-     * helper, so 21 in all. Dynamic: 23, having no __syscall helper but saving
+     * helper, so 21 in all. Dynamic: 25, having no __syscall helper but saving
      * the original stack pointer for __libc_start_main's stack_end argument,
-     * spilling argc/argv, and calling memset to clear the frame.
+     * spilling argc/argv, and clearing the frame with an inline loop.
      */
     f = find_func("__syscall");
     if (f && f->bbs) {
@@ -329,7 +329,7 @@ void cfg_flatten(void)
             f->bbs->elf_offset = 12 * 4;
     }
     if (dynlink)
-        elf_offset = 23 * 4;
+        elf_offset = 25 * 4;
     else
         elf_offset = 21 * 4;
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
@@ -693,13 +693,17 @@ void code_generate(void)
     a64_mov_imm(A64_IP0, elf_data_start);
     a64_mem(0, 8, A64_GP, A64_IP0, 0);
     if (dynlink) {
-        func_t *memset_func = find_func("memset");
-        if (!memset_func)
-            fatal("arm64 dynamic startup needs memset");
+        /* Clear the frame inline rather than through libc's memset, which a
+         * --no-libc translation unit never declares. The frame is a multiple of
+         * sixteen bytes and may be empty: count x2 down to zero while x0 walks
+         * up through it.
+         */
         a64_mov(0, A64_GP);
-        a64_mov(1, A64_ZR);
         a64_mov_imm(2, global_frame);
-        a64_bl_addr(dynamic_sections.elf_plt_start + memset_func->plt_offset);
+        emit(a64_cbz_insn(true, 2, 4));
+        emit(a64_mem_post_insn(false, 8, A64_ZR, 0, 8));
+        emit(a64_sub_imm_insn(true, 2, 2, 8));
+        emit(a64_cbnz_insn(true, 2, -2));
     }
     a64_b(GLOBAL_FUNC->bbs->elf_offset);
     /* __syscall(number,arg1,...): AArch64 Linux wants x8,x0..x5. */

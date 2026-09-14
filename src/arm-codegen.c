@@ -11,6 +11,24 @@
 #include "defs.h"
 #include "globals.c"
 
+/* Whether a load or store materializes its frame or data offset with
+ * MOVW/MOVT/ADD because no immediate form reaches it. LDR, LDRB, STR and STRB
+ * take 12 bits, LDRSB, LDRH, LDRSH and STRH eight, and a register pair also
+ * addresses its high word four bytes further up. The size estimator and the
+ * emitter both ask this, so the two cannot disagree.
+ */
+bool arm_offset_needs_movw(const ph2_ir_t *ph2_ir)
+{
+    bool load = ph2_ir->op == OP_load || ph2_ir->op == OP_global_load;
+    int offset = load ? ph2_ir->src0 : ph2_ir->src1;
+    bool eight_bits = ph2_ir->size_bytes == 2 ||
+                      (load && ph2_ir->size_bytes == 1 && !ph2_ir->is_unsigned);
+
+    if ((load ? ph2_ir->dest_hi : ph2_ir->src0_hi) >= 0)
+        return offset > 4091;
+    return offset > (eight_bits ? 255 : 4095);
+}
+
 void update_elf_offset(ph2_ir_t *ph2_ir)
 {
     func_t *func;
@@ -57,12 +75,13 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         return;
     case OP_load:
     case OP_global_load:
-        /* LDR/LDRB use a 12-bit offset, but LDRSB uses eight bits. A larger
-         * signed-byte offset is materialized with MOVW/MOVT/ADD before the
-         * load, exactly as an offset beyond the general load range is.
+        /* LDR/LDRB use a 12-bit offset, but LDRSB and LDRH/LDRSH use eight
+         * bits. A larger signed-byte or halfword offset is materialized with
+         * MOVW/MOVT/ADD before the load, exactly as an offset beyond the
+         * general load range is. A wide pair also loads its high word four
+         * bytes further up.
          */
-        if (ph2_ir->src0 > 4095 || (ph2_ir->size_bytes == 1 &&
-                                    !ph2_ir->is_unsigned && ph2_ir->src0 > 255))
+        if (arm_offset_needs_movw(ph2_ir))
             if (ph2_ir->dest_hi >= 0)
                 elf_offset += 20;
             else
@@ -78,9 +97,10 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_store:
     case OP_global_store:
         /* ARMv7 straight uses 12 bits to encode the offset of store instruction
-         * (no rotation).
+         * (no rotation), but STRH only eight. A wide pair also stores its high
+         * word four bytes further up.
          */
-        if (ph2_ir->src1 > 4095)
+        if (arm_offset_needs_movw(ph2_ir))
             if (ph2_ir->src0_hi >= 0)
                 elf_offset += 20;
             else
@@ -247,8 +267,9 @@ void cfg_flatten(void)
     func_t *func;
 
     if (dynlink)
-        elf_offset =
-            100; /* offset of __libc_start_main + main_wrapper in codegen */
+        elf_offset = 132; /* __libc_start_main call, main_wrapper, and the
+                           * global stack clearing loop in codegen
+                           */
     else {
         func = find_func("__syscall");
         func->bbs->elf_offset = 32; /* offset of start + branch in codegen */
@@ -434,7 +455,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_global_load:
         interm = ph2_ir->op == OP_load ? __sp : __r12;
         if (ph2_ir->dest_hi >= 0) {
-            if (ph2_ir->src0 > 4095) {
+            if (arm_offset_needs_movw(ph2_ir)) {
                 emit(__movw(__AL, __r8, ph2_ir->src0));
                 emit(__movt(__AL, __r8, ph2_ir->src0));
                 emit(__add_r(__AL, __r8, interm, __r8));
@@ -447,12 +468,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             return;
         }
 
-        /* LDRSB's immediate field is only eight bits, unlike LDRB's 12-bit
-         * field. Materialize a larger signed-byte offset before loading.
+        /* LDRSB, LDRH and LDRSH have only eight immediate bits, unlike LDRB's
+         * 12-bit field. Materialize a larger offset before loading.
          */
-        if (ph2_ir->src0 > 4095 ||
-            (ph2_ir->size_bytes == 1 && !ph2_ir->is_unsigned &&
-             ph2_ir->src0 > 255)) {
+        if (arm_offset_needs_movw(ph2_ir)) {
             emit(__movw(__AL, __r8, ph2_ir->src0));
             emit(__movt(__AL, __r8, ph2_ir->src0));
             emit(__add_r(__AL, __r8, interm, __r8));
@@ -478,7 +497,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         interm = ph2_ir->op == OP_store ? __sp : __r12;
         store_offset = ph2_ir->src1;
         if (ph2_ir->src0_hi >= 0) {
-            if (store_offset > 4095) {
+            if (arm_offset_needs_movw(ph2_ir)) {
                 emit(__movw(__AL, __r8, store_offset));
                 emit(__movt(__AL, __r8, store_offset));
                 emit(__add_r(__AL, __r8, interm, __r8));
@@ -494,7 +513,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* STRH has an 8-bit split immediate while STR/STRB accept 12 bits.
          * Materialize larger halfword offsets before selecting the width.
          */
-        if (store_offset > (ph2_ir->size_bytes == 2 ? 255 : 4095)) {
+        if (arm_offset_needs_movw(ph2_ir)) {
             emit(__movw(__AL, __r8, store_offset));
             emit(__movt(__AL, __r8, store_offset));
             emit(__add_r(__AL, __r8, interm, __r8));
@@ -945,7 +964,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_lt:
     case OP_geq:
     case OP_leq:
-        if (ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0) {
+        /* Wide equality compares the low words and, only when they match, the
+         * high words, below. The ordering sequence here would leave a stale
+         * result when the high words differ.
+         */
+        if (ph2_ir->op != OP_eq && ph2_ir->op != OP_neq &&
+            ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0) {
             bool unsigned_cmp =
                 ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
             arm_cond_t true_cond = arm_get_cond(ph2_ir->op, unsigned_cmp);
@@ -1168,6 +1192,26 @@ void code_generate(void)
     emit(__movw(__AL, __r8, elf_data_start));
     emit(__movt(__AL, __r8, elf_data_start));
     emit(__sw(__AL, __r12, __r8, 0));
+
+    /* Clearing the global stack is the dynamic build's job alone. A static
+     * image is the first thing to run, so the stack below the entry SP is
+     * untouched anonymous memory and already reads as zero. A dynamic one has
+     * had the loader and glibc's startup run over that same memory first, so a
+     * global with no initializer would otherwise begin life holding their
+     * leftovers. The loop stores zero from the top word down; 'ofs' is a
+     * nonzero multiple of four here. No libc call is involved, so this holds
+     * with --no-libc as well.
+     */
+    if (dynlink) {
+        emit(__movw(__AL, __r8, ofs));
+        emit(__movt(__AL, __r8, ofs));
+        emit(__mov_i(__AL, __r0, 0));
+        emit(__add_i(__AL, __r8, __r8, -4));
+        emit(__add_r(__AL, __r3, __r12, __r8));
+        emit(__sw(__AL, __r0, __r3, 0));
+        emit(__cmp_i(__AL, __r8, 0));
+        emit(__b(__NE, -16));
+    }
 
     if (!dynlink) {
         /* Jump directly to the main preparation and then execute the main

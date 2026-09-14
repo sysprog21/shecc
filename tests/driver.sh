@@ -665,6 +665,34 @@ try_file 0 'F(10) = 55' "$TESTS_DIR/fib.c"
 try_file 0 $'1\nHello World' "$TESTS_DIR/hello.c"
 try_file 0 '' "$TESTS_DIR/strength-reduce.c"
 
+# The section header table closes an ELF32 image, so e_shoff plus its extent
+# must reach exactly the end of the file, including the page padding a static
+# image inserts before .data. ELF64 output carries no section headers.
+try_ 0 << EOF
+#include <stdio.h>
+int main(int argc, char **argv) {
+    FILE *f = fopen(argv[0], "rb");
+    char header[52];
+    int size = 0;
+    int c;
+    if (!f)
+        return 2;
+    while ((c = fgetc(f)) != -1) {
+        if (size < 52)
+            header[size] = c;
+        size++;
+    }
+    fclose(f);
+    if (size < 52 || header[4] != 1)
+        return 0;
+    int shoff = (header[32] & 255) | ((header[33] & 255) << 8) |
+                ((header[34] & 255) << 16) | ((header[35] & 255) << 24);
+    int shentsize = (header[46] & 255) | ((header[47] & 255) << 8);
+    int shnum = (header[48] & 255) | ((header[49] & 255) << 8);
+    return shoff + shentsize * shnum != size;
+}
+EOF
+
 # Category: Basic Literals and Constants
 begin_category "Literals and Constants" "Testing integer, character, and string literals"
 
@@ -8196,6 +8224,29 @@ int main(void) {
 }
 EOF
 
+# An eight-byte union or anonymous typedef record is still an aggregate on a
+# 32-bit target, not a two-register scalar. Passing it between two scalar
+# arguments must not shift them into different registers.
+try_ 0 << EOF
+union two_words { int a[2]; };
+typedef struct { int x; int y; } anon_pair;
+int take_union(int k, union two_words u, int m) {
+    return k * 100 + u.a[0] * 10 + u.a[1] + m * 1000;
+}
+int take_anon(int k, anon_pair p, int m) {
+    return k * 100 + p.x * 10 + p.y + m * 1000;
+}
+int main(void) {
+    union two_words u;
+    anon_pair p;
+    u.a[0] = 3;
+    u.a[1] = 4;
+    p.x = 5;
+    p.y = 6;
+    return take_union(1, u, 2) != 2134 || take_anon(1, p, 2) != 2156;
+}
+EOF
+
 try_ 55 << EOF
 int sum(int m, int n) {
     int acc;
@@ -11653,6 +11704,32 @@ int main(void) {
 }
 EOF
 
+# LDRH, LDRSH and STRH take an eight-bit offset on Arm. A halfword slot or
+# global field beyond 255 bytes must be addressed through a materialized offset,
+# and the size estimate must match what is emitted.
+try_ 0 << EOF
+void bump_half(short *p) { *p = *p + 1; }
+int main(void) {
+    char big[600];
+    short s = 1000;
+    big[0] = 1;
+    bump_half(&s);
+    s = s + 2;
+    bump_half(&s);
+    return s != 1004 || big[0] != 1;
+}
+EOF
+
+try_ 0 << EOF
+int half_target = 9;
+struct half_record { int pad[100]; short h1; short h2; int *link; };
+struct half_record half_global = { .h1 = 1, .h2 = 2, .link = &half_target };
+int main(void) {
+    return half_global.h1 != 1 || half_global.h2 != 2 ||
+           *half_global.link != 9;
+}
+EOF
+
 # Address constants inside aggregate static initializers accept the same
 # designators as scalar ones: members, constant-expression subscripts, offsets.
 try_ 31 << EOF
@@ -11675,6 +11752,14 @@ EOF
 try_ 4 << EOF
 int table[1500] = {0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1};
 int main(void) { return table[1499] + table[3]; }
+EOF
+
+# A cast between signed and unsigned of the same width changes how the value
+# extends: (int) of an unsigned int with every bit set shifts right as -1.
+try_ 3 << EOF
+int shift_cast(unsigned int value) { return ((int) value >> 1) == -1; }
+int widen_cast(unsigned int value) { int s = (int) value; return (s >> 4) == -1; }
+int main(void) { return shift_cast(0xffffffffU) + 2 * widen_cast(0xfffffff0U); }
 EOF
 
 # Category: Const Qualifiers
@@ -18680,6 +18765,28 @@ int after_trailing_record(int tag, struct trailing_record last, ...) {
 int main(void) {
     struct trailing_record value = {1, 2, 3};
     return after_trailing_record(4, value, 10);
+}
+EOF
+
+# A variadic function returning a record receives the hidden result pointer in
+# the first argument word. Its named parameter and the unnamed arguments that
+# follow must be saved from the words after it.
+try_ 0 << EOF
+#include <stdarg.h>
+struct varargs_result { int count; int first; int second; };
+struct varargs_result collect(int count, ...) {
+    struct varargs_result result;
+    va_list ap;
+    va_start(ap, count);
+    result.count = count;
+    result.first = va_arg(ap, int);
+    result.second = va_arg(ap, int);
+    va_end(ap);
+    return result;
+}
+int main(void) {
+    struct varargs_result r = collect(3, 40, 50);
+    return r.count != 3 || r.first != 40 || r.second != 50;
 }
 EOF
 

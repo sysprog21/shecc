@@ -91,7 +91,7 @@ int var_slot_size(var_t *v)
     /* A direct wide scalar needs both words even when its address never
      * escapes: spilling an SSA temporary is still a memory round trip.
      */
-    if (v->type->base_type != TYPE_struct && v->type->size == 8)
+    if (!is_record_type(v->type) && v->type->size == 8)
         return 8;
     if (!v->address_taken)
         return PTR_SIZE;
@@ -155,8 +155,8 @@ int vreg_get_phys_hi(var_t *var)
 bool var_needs_register_pair(const var_t *var)
 {
     return PTR_SIZE < 8 && var && !var->ptr_level && !var->is_func &&
-           !var->array_size && var->type &&
-           var->type->base_type != TYPE_struct && var->type->size == 8;
+           !var->array_size && var->type && !is_record_type(var->type) &&
+           var->type->size == 8;
 }
 
 /* ABI argument locations are measured in machine words, not source parameters.
@@ -3470,8 +3470,20 @@ void reg_alloc(void)
                     src0 = MAX_ARGS_IN_REG;
                 }
 
-                if (i < args_in_reg) {
-                    var_t *param = var_subscript0(&func->param_defs[i]);
+                /* Slot i saves ABI word i. The parameter homed there is found
+                 * by its ABI position, since a hidden aggregate-return pointer
+                 * takes word 0 and shifts every named parameter up.
+                 */
+                int param_idx = -1;
+                for (int q = 0; q < args_in_reg; q++) {
+                    if (abi_param_start(func, q) == i) {
+                        param_idx = q;
+                        break;
+                    }
+                }
+
+                if (param_idx >= 0) {
+                    var_t *param = var_subscript0(&func->param_defs[param_idx]);
                     param->offset = func->stack_size;
                     param->space_is_allocated = true;
                 }
@@ -3480,10 +3492,10 @@ void reg_alloc(void)
                 ir->src0 = src0;
                 ir->src1 = func->stack_size;
                 func->stack_size += PTR_SIZE;
-                if (i < args_in_reg) {
-                    var_t *param = var_subscript0(&func->param_defs[i]);
+                if (param_idx >= 0) {
+                    var_t *param = var_subscript0(&func->param_defs[param_idx]);
 
-                    if (i + 1 == func->num_params &&
+                    if (param_idx + 1 == func->num_params &&
                         param->is_aggregate_param) {
                         int footprint = ALIGN_UP(param->type->size, PTR_SIZE);
 

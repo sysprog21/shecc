@@ -294,8 +294,13 @@ void elf_generate_header(void)
         phnum = 2;
         shnum = 8;
         shstrndx = 7;
-        shoff = elf_header_len + elf_code->size + elf_data->size +
-                elf_rodata->size + elf_symtab->size + elf_strtab->size +
+
+        /* .data starts the second load segment on a page boundary, and
+         * elf_generate() pads the file up to it; count that padding too.
+         */
+        shoff = ALIGN_UP(elf_header_len + elf_code->size + elf_rodata->size,
+                         PAGESIZE) +
+                elf_data->size + elf_symtab->size + elf_strtab->size +
                 elf_shstrtab->size;
     }
 
