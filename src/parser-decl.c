@@ -364,6 +364,49 @@ static int read_offsetof_array_subscripts(var_t *field, block_t *scope)
     }
 }
 
+/* Whether the next operand is a string literal, with any adjacent ones joined
+ * to it, followed by a subscript, as in `"ab"[1]`.
+ */
+bool subscripted_string_literal_starts_here(void)
+{
+    token_t *token = cur_token->next;
+    token_kind_t kind = token ? token->kind : T_eof;
+
+    if (kind != T_string && kind != T_wstring)
+        return false;
+    while (token->next && token->next->kind == kind)
+        token = token->next;
+    return token->next && token->next->kind == T_open_square;
+}
+
+/* Read a subscripted string literal and its constant index, returning the index
+ * and storing the element's value in @value. A character element takes the
+ * value a character constant would. Without @value only an address is wanted,
+ * which may also point one past the terminating null.
+ */
+int read_string_literal_element(block_t *scope, int *value)
+{
+    char combined[MAX_STRING_LEN];
+    int units[MAX_STRING_LEN];
+    bool wide = lex_peek(T_wstring, NULL);
+    int length = wide ? read_wstring_units(units, MAX_STRING_LEN)
+                      : read_concatenated_string(combined);
+    int index;
+
+    lex_expect(T_open_square);
+    index = read_const_expr(scope);
+    lex_expect(T_close_square);
+    if (index < 0 || index > length + !value)
+        error_at("String literal subscript is out of bounds", cur_token_loc());
+    if (!value)
+        return index;
+    if (index == length)
+        *value = 0;
+    else
+        *value = wide ? units[index] : (signed char) combined[index];
+    return index;
+}
+
 int read_const_expr_operand(block_t *scope)
 {
     char buffer[MAX_TOKEN_LEN];
@@ -2003,4 +2046,126 @@ void read_wstring_param(block_t *parent, basic_block_t *bb)
     vd->is_string_literal = true;
     opstack_push(vd);
     add_insn(parent, bb, OP_load_rodata_address, vd, NULL, NULL, 0, NULL);
+}
+
+/* Whether the static initializer at the next token is a string literal plus or
+ * minus an integer constant, as in `"abc" + 1` or `2 + "abcd"`: an address
+ * constant (C99 6.6p7). The literal must follow a '+' or start the initializer
+ * with an additive operator after it; a subscripted one is an element instead.
+ */
+bool string_address_offset_starts_here(void)
+{
+    token_t *prev = NULL;
+    int bracket_depth = 0;
+
+    for (token_t *token = cur_token->next; token; token = token->next) {
+        if (token->kind == T_open_bracket)
+            bracket_depth++;
+        else if (token->kind == T_close_bracket) {
+            if (bracket_depth == 0)
+                return false;
+            bracket_depth--;
+        } else if (bracket_depth == 0 &&
+                   (token->kind == T_semicolon || token->kind == T_comma ||
+                    token->kind == T_close_curly))
+            return false;
+        else if (bracket_depth == 0 &&
+                 (token->kind == T_string || token->kind == T_wstring)) {
+            token_t *after = token;
+
+            while (after->next && after->next->kind == token->kind)
+                after = after->next;
+            after = after->next;
+            if (after && after->kind == T_open_square)
+                return false;
+            if (!prev)
+                return after &&
+                       (after->kind == T_plus || after->kind == T_minus);
+            return prev->kind == T_plus;
+        }
+        prev = token;
+    }
+    return false;
+}
+
+/* The address constant string_address_offset_starts_here() accepted: the
+ * literal's address advanced by the integer constants added to or subtracted
+ * from it, in element units.
+ */
+var_t *read_string_address_offset(block_t *parent,
+                                  basic_block_t *bb,
+                                  block_t *scope)
+{
+    var_t *literal;
+    var_t *address;
+    int index = 0;
+
+    if (!lex_peek(T_string, NULL) && !lex_peek(T_wstring, NULL)) {
+        token_t *token = cur_token->next;
+        token_t *plus = NULL;
+
+        /* Find the '+' before the literal and end the integer operand there
+         * while it is read, so the constant reader does not meet the literal.
+         */
+        while (token->kind != T_string && token->kind != T_wstring) {
+            plus = token;
+            token = token->next;
+        }
+        plus->kind = T_semicolon;
+        index = read_const_expr(scope);
+        plus->kind = T_plus;
+        lex_expect(T_plus);
+    }
+    if (lex_peek(T_wstring, NULL))
+        read_wstring_param(parent, bb);
+    else
+        read_literal_param(parent, bb);
+    literal = opstack_pop();
+    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL))
+        index += read_global_address_offset(scope, parent, bb);
+    address = compute_element_address(parent, &bb, literal, index,
+                                      literal->type->size);
+    if (address != literal) {
+        address->type = literal->type;
+        address->ptr_level = literal->ptr_level;
+        address->is_const_qualified = true;
+        address->is_string_literal = true;
+    }
+    return address;
+}
+
+/* The address constant `&"ab"[1]` in a static initializer, with the '&' already
+ * consumed: the literal's address advanced by the constant index.
+ */
+var_t *read_string_literal_element_address(block_t *parent,
+                                           basic_block_t *bb,
+                                           block_t *scope)
+{
+    token_t *literal_token = cur_token;
+    var_t *literal;
+    var_t *address;
+    int index;
+
+    /* Check the index against the literal, then read the literal again to emit
+     * its address.
+     */
+    index = read_string_literal_element(scope, NULL);
+    cur_token = literal_token;
+    if (lex_peek(T_wstring, NULL))
+        read_wstring_param(parent, bb);
+    else
+        read_literal_param(parent, bb);
+    literal = opstack_pop();
+    lex_expect(T_open_square);
+    read_const_expr(scope);
+    lex_expect(T_close_square);
+    address = compute_element_address(parent, &bb, literal, index,
+                                      literal->type->size);
+    if (address != literal) {
+        address->type = literal->type;
+        address->ptr_level = literal->ptr_level;
+        address->is_const_qualified = true;
+        address->is_string_literal = true;
+    }
+    return address;
 }

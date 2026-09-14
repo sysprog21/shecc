@@ -257,6 +257,32 @@ bool typed_global_literal_appears_before_initializer_end(token_t *token)
     return initializer_needs_wide_reader(token, NULL, false);
 }
 
+/* Whether a subscripted string literal, as in `"ab"[1]`, appears in the static
+ * initializer that starts at @token. Only the literal expression reader folds
+ * it; integer constant expressions such as enumerators do not admit it.
+ */
+bool string_element_appears_before_initializer_end(token_t *token)
+{
+    int bracket_depth = 0;
+
+    for (; token; token = token->next) {
+        if ((token->kind == T_string || token->kind == T_wstring) &&
+            token->next && token->next->kind == T_open_square)
+            return true;
+        if (token->kind == T_open_bracket)
+            bracket_depth++;
+        else if (token->kind == T_close_bracket) {
+            if (bracket_depth == 0)
+                return false;
+            bracket_depth--;
+        } else if (bracket_depth == 0 &&
+                   (token->kind == T_semicolon || token->kind == T_comma ||
+                    token->kind == T_close_curly))
+            return false;
+    }
+    return false;
+}
+
 var_t *read_wide_global_literal_expression(block_t *parent,
                                            basic_block_t *bb,
                                            block_t *scope);
@@ -710,6 +736,23 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
         return value;
     }
+    if (subscripted_string_literal_starts_here()) {
+        int element;
+
+        /* An element of a narrow literal is an arithmetic constant in an
+         * initializer (C99 6.6p10), as gcc folds it; gcc rejects a wide one.
+         */
+        if (lex_peek(T_wstring, NULL))
+            error_at("Wide string literal element is not a constant",
+                     next_token_loc());
+        read_string_literal_element(scope, &element);
+        value = require_typed_var(parent, TY_int);
+        value->var_name = gen_name();
+        value->init_val = element;
+        value->is_const = true;
+        add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
+        return value;
+    }
     if (lex_peek(T_char, NULL) || lex_peek(T_wchar, NULL)) {
         /* A character constant is an integer constant expression operand like
          * any number. Reuse the expression readers so its value and type match
@@ -919,7 +962,7 @@ bool read_global_assignment_var(var_t *var)
             stride = saved_stride;
         if (!global_address_operand_starts_here(scope)) {
             rs1 = read_global_cast_integer_address(parent, bb, scope, stride);
-            add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+            emit_global_scalar_assignment(parent, bb, var, rs1);
             return true;
         }
         global_pointer_cast_stride = stride;
@@ -1056,21 +1099,85 @@ bool read_global_assignment_var(var_t *var)
                 return true;
             }
         }
+        if (explicit_address && subscripted_string_literal_starts_here()) {
+            rs1 = read_string_literal_element_address(parent, bb, scope);
+            diagnose_const_pointer_conversion(rs1, var);
+            emit_global_scalar_assignment(parent, bb, var, rs1);
+            return true;
+        }
+        if (explicit_address && scope == GLOBAL_BLOCK &&
+            global_compound_literal_starts_here()) {
+            /* A compound literal at file scope has static storage (C99
+             * 6.5.2.5p6), so `&(int){8}` is an address constant. Give the
+             * literal an unnamed global and initialize the pointer with its
+             * address.
+             */
+            type_t *literal_type;
+            var_t *literal;
+            var_t *literal_addr;
+            int literal_ptr_level = 0;
+
+            lex_expect(T_open_bracket);
+            literal_type = read_type_name_specifiers(GLOBAL_BLOCK);
+            while (lex_accept(T_asterisk))
+                literal_ptr_level++;
+            lex_expect(T_close_bracket);
+            if (!literal_type || literal_type->array_size ||
+                literal_type->func_signature || var->array_size ||
+                var->ptr_level != literal_ptr_level + 1 ||
+                !(compatible_decl_type(var->type, literal_type) ||
+                  (var->type == TY_void && !literal_ptr_level)))
+                error_at("Incompatible compound literal address",
+                         cur_token_loc());
+            literal = require_typed_var(GLOBAL_BLOCK, literal_type);
+            literal->var_name = gen_name();
+            literal->is_global = true;
+            literal->ptr_level = literal_ptr_level;
+            add_insn(GLOBAL_BLOCK, bb, OP_allocat, literal, NULL, NULL, 0,
+                     NULL);
+            if (!literal_ptr_level && is_record_type(literal_type)) {
+                parse_global_record_init(literal, GLOBAL_BLOCK);
+            } else {
+                lex_expect(T_open_curly);
+                if (lex_peek(T_close_curly, NULL))
+                    error_at("Scalar compound literal needs an initializer",
+                             next_token_loc());
+                read_global_assignment_var(literal);
+                lex_accept(T_comma);
+                lex_expect(T_close_curly);
+            }
+            literal_addr =
+                require_ref_var(parent, literal->type, literal->ptr_level);
+            literal_addr->var_name = gen_name();
+            literal_addr->is_global_address = true;
+            add_insn(parent, bb, OP_address_of, literal_addr, literal, NULL, 0,
+                     NULL);
+            add_insn(parent, bb, OP_assign, var, literal_addr, NULL, 0, NULL);
+            return true;
+        }
         if (explicit_address)
             error_at("Expected a global object or function after '&'",
                      cur_token_loc());
+        if (string_address_offset_starts_here()) {
+            rs1 = read_string_address_offset(parent, bb, scope);
+            diagnose_const_pointer_conversion(rs1, var);
+            emit_global_scalar_assignment(parent, bb, var, rs1);
+            return true;
+        }
 
         /* The legacy global evaluator stores operands in int. Parse a wide
          * literal-only expression separately so its upper payload survives;
          * lower each reduction into the global setup block instead of trying to
          * narrow the expression through that evaluator.
          */
-        if (initializer_needs_wide_reader(cur_token->next, scope, true)) {
+        if (initializer_needs_wide_reader(cur_token->next, scope, true) ||
+            string_element_appears_before_initializer_end(cur_token->next)) {
             rs1 = read_wide_global_literal_expression(parent, bb, scope);
             add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
             return true;
         }
-        if (lex_peek(T_string, NULL) || lex_peek(T_wstring, NULL)) {
+        if ((lex_peek(T_string, NULL) || lex_peek(T_wstring, NULL)) &&
+            !subscripted_string_literal_starts_here()) {
             /* String literal global initialization: String literals are now
              * stored in .rodata section. TODO: Implement compile-time address
              * resolution for global pointer initialization with rodata

@@ -1377,6 +1377,102 @@ try_compile_error_message "String literal cannot initialize a single array eleme
 int main(void) { char text[2][4] = {1, "abc"}; return 0; }
 EOF
 
+# Braces around a string literal are allowed only when it is the character
+# array's whole initializer; it cannot initialize one element of any array.
+try_compile_error_message "String literal cannot initialize a single array element" << 'EOF'
+char text[3] = {"ab", "c"};
+int main(void) { return text[0]; }
+EOF
+try_compile_error_message "String literal initializer has incompatible array element type" << 'EOF'
+int main(void) { int values[3] = {"ab"}; return values[0]; }
+EOF
+
+# In a static initializer an element of a narrow string literal is an arithmetic
+# constant and &"ab"[1] an address constant, as gcc accepts; an element of a
+# wide literal is not a constant there, nor in an enumerator.
+try_ 0 << 'EOF'
+struct s { char k; const char *s; int v; };
+#define DECLS(S)                                             \
+    S char v1 = "ab"[1];                                      \
+    S int v2 = 1 + "abc"[2];                                  \
+    S char v3[3] = {"xy"[0], "xy"[1], "xy"[2]};               \
+    S const char *v4 = &"hello"[3];                           \
+    S const char *v5 = &"hi"[0];                              \
+    S int v6[2] = { 1 + "ab"[1], "cd"[0] * 2 };               \
+    S const wchar_t *v7 = &L"wide"[1];                        \
+    S struct s v8 = { "pq"[1], &"pq"[1], "a" "b"[1] };        \
+    S const char *v9[2] = { &"uv"[1], &"uv"[2] };               \
+    S int v10[2] = { "\xff"[0], "\x80"[0] + 0 };
+#define CHECKS                                                     \
+    int r = 0;                                                     \
+    if (v1 != 'b' || v2 != 1 + 'c')                                \
+        r |= 1;                                                    \
+    if (v3[0] != 'x' || v3[1] != 'y' || v3[2])                     \
+        r |= 2;                                                    \
+    if (*v4 != 'l' || *v5 != 'h')                                  \
+        r |= 4;                                                    \
+    if (v6[0] != 1 + 'b' || v6[1] != 'c' * 2 || *v7 != 'i')        \
+        r |= 8;                                                    \
+    if (v8.k != 'q' || *v8.s != 'q' || v8.v != 'b')                \
+        r |= 16;                                                   \
+    if (*v9[0] != 'v' || *v9[1])                                   \
+        r |= 32;                                                   \
+    if (v10[0] != -1 || v10[1] != -128)                            \
+        r |= 64;                                                   \
+    return r;
+DECLS(static)
+int check_file(void) { CHECKS }
+int check_block(void) { DECLS(static) CHECKS }
+int main(void) { return check_file() | check_block() << 7; }
+EOF
+try_compile_error_message "Wide string literal element is not a constant" << 'EOF'
+int main(void) { static int w = L"ab"[1]; return w; }
+EOF
+try_compile_error << 'EOF'
+enum { E = "ab"[1] };
+int main(void) { return E; }
+EOF
+
+# A string literal plus or minus an integer constant is an address constant (C99
+# 6.6p7), on either side of the '+', for a pointer, a record member and an array
+# element, in static storage and in automatic storage alike.
+try_ 0 << 'EOF'
+struct s { int k; const char *s; const char *t; };
+enum { TWO = 2 };
+#define DECLS(S)                                                \
+    S const char *v1 = "abc" + 1;                                \
+    S char *v2 = 2 + "abcd";                                     \
+    S const char *v3 = "abcdef" + 4 - 2;                         \
+    S const char *v4 = 1 * 2 + "wxyz" - 1;                       \
+    S const wchar_t *v5 = L"wide" + TWO;                         \
+    S struct s v6 = { 1, "pq" + 1, (1 + 1) + "rst" };            \
+    S const char *v7[3] = { "uv" + 1, 1 + "uv", "ab" "cd" + 3 }; \
+    S const char *v8 = "same" + 0;                               \
+    S char *v9 = &"ab"[1];
+#define CHECKS                                                     \
+    int r = 0;                                                     \
+    if (*v1 != 'b' || *v2 != 'c')                                  \
+        r |= 1;                                                    \
+    if (*v3 != 'c' || *v4 != 'x')                                  \
+        r |= 2;                                                    \
+    if (*v5 != 'd')                                                \
+        r |= 4;                                                    \
+    if (v6.k != 1 || *v6.s != 'q' || *v6.t != 't')                 \
+        r |= 8;                                                    \
+    if (*v7[0] != 'v' || *v7[1] != 'v' || *v7[2] != 'd')           \
+        r |= 16;                                                   \
+    if (*v8 != 's' || *v9 != 'b')                                  \
+        r |= 32;                                                   \
+    return r;
+DECLS(static)
+int check_file(void) { CHECKS }
+int check_block(void) { DECLS(static) CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int main(void) {
+    return check_file() | check_block() << 6 | check_local() << 12;
+}
+EOF
+
 try_ 0 << EOF
 enum { wide_count = sizeof L"ab" / sizeof(wchar_t) };
 wchar_t *global_pointer = L"xy";
@@ -11292,6 +11388,32 @@ int invalid = (int){1, 2};
 int main() { return 0; }
 EOF
 
+# A file-scope compound literal has static storage, so its address is an address
+# constant for a file-scope pointer (C99 6.5.2.5p6).
+try_ 0 << EOF
+struct P { int x, y; };
+typedef struct P PT;
+int *gp = &(int){8};
+long long *gl = &(long long){0x100000002LL};
+char *gc = &(char){'z'};
+unsigned long *gu = &(unsigned long){5};
+struct P *ps = &(struct P){3, 4};
+PT *pt = &(PT){.y = 6};
+int *(*gpp) = &(int *){0};
+void *gv = &(int){9};
+int main(void)
+{
+    *gp += 1;
+    return *gp != 9 || (int) (*gl >> 32) != 1 || (int) *gl != 2 || *gc != 'z' ||
+           *gu != 5 || ps->x != 3 || ps->y != 4 || pt->y != 6 || pt->x != 0 ||
+           *gpp != 0 || *(int *) gv != 9;
+}
+EOF
+try_compile_error << EOF
+int *gp = &(char){8};
+int main(void) { return 0; }
+EOF
+
 # Test: Empty array compound literal (edge case)
 try_ 0 << EOF
 int main() {
@@ -15024,6 +15146,18 @@ static int gd_member_size = sizeof *&gd_member.values[1];
 int main(void) { return gd_member_size; }
 EOF
 
+# A pointer cast that initializes a static _Bool converts to 0 or 1 like any
+# other scalar initializer, rather than storing the pointer's low byte.
+try_ 0 << EOF
+_Bool bool_from_pointer = (char *) 4;
+_Bool bool_from_null = (char *) 0;
+_Bool bool_from_wide = (char *) 256;
+int main(void)
+{
+    return bool_from_pointer != 1 || bool_from_null != 0 || bool_from_wide != 1;
+}
+EOF
+
 # C99 6.6 lets a static initializer convert an integer constant or an address
 # constant with a pointer cast. An offset that follows advances the converted
 # pointer, so its stride is that of the cast type.
@@ -15750,6 +15884,346 @@ struct outer value = {.inner.cells[1][0][1] = 2, 3, 4, .tail = 5};
 int main(void) {
     return value.inner.cells[1][0][1] + value.inner.cells[1][1][0] +
            value.inner.cells[1][1][1] + value.tail;
+}
+EOF
+
+# A designator that selects a row, plane or record row of a member array names
+# an array subobject. An unbraced value fills its first element, and positional
+# values continue through the rest of the member and then past it, while every
+# element no initializer names stays zero.
+try_ 0 << EOF
+struct pt { int x, y; };
+struct m2 { int a[2][2]; int b; int c; };
+struct m3 { int a[2][2][2]; int b; };
+struct m4 { char a[2][2][2][2]; int b; };
+struct rec { struct pt p[2][2]; int b; };
+#define DECLS(S)                                                    \
+    S struct m2 v1 = { .a[1] = 3, 4 };                               \
+    S struct m2 v2 = { .a[1] = 3, 4, 5, 6 };                         \
+    S struct m2 v3 = { .a[1] = {3}, 5 };                             \
+    S struct m3 v4 = { .a[1] = 1, 2, 3, 4, 5 };                      \
+    S struct m3 v5 = { .a[0][1] = 1, 2, 3 };                         \
+    S struct m4 v6 = { .a[1][1] = 1, 2, 3, 4, 5 };                   \
+    S struct rec v7 = { .p[1] = 1, 2, 3, 4, 5 };                     \
+    S int v8[2][2][2] = { [0][1] = 1, 2, 3 };
+#define CHECKS                                                              \
+    int r = 0;                                                              \
+    if (v1.a[0][0] || v1.a[0][1] || v1.a[1][0] != 3 || v1.a[1][1] != 4 ||   \
+        v1.b || v1.c)                                                       \
+        r |= 1;                                                             \
+    if (v2.a[0][0] || v2.a[0][1] || v2.a[1][1] != 4 || v2.b != 5 ||         \
+        v2.c != 6)                                                          \
+        r |= 2;                                                             \
+    if (v3.a[0][1] || v3.a[1][0] != 3 || v3.a[1][1] || v3.b != 5 || v3.c)   \
+        r |= 4;                                                             \
+    if (v4.a[0][1][1] || v4.a[1][0][0] != 1 || v4.a[1][1][1] != 4 ||        \
+        v4.b != 5)                                                          \
+        r |= 8;                                                             \
+    if (v5.a[0][0][1] || v5.a[0][1][0] != 1 || v5.a[1][0][0] != 3 ||        \
+        v5.a[1][0][1] || v5.b)                                              \
+        r |= 16;                                                            \
+    if (v6.a[1][0][1][1] || v6.a[1][1][0][0] != 1 ||                        \
+        v6.a[1][1][1][1] != 4 || v6.b != 5)                                 \
+        r |= 32;                                                            \
+    if (v7.p[0][1].y || v7.p[1][0].x != 1 || v7.p[1][1].y != 4 ||           \
+        v7.b != 5)                                                          \
+        r |= 64;                                                            \
+    if (v8[0][0][1] || v8[0][1][0] != 1 || v8[1][0][0] != 3 || v8[1][0][1]) \
+        r |= 128;                                                           \
+    return r;
+DECLS()
+int check_global(void) { CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int check_static(void) { DECLS(static) CHECKS }
+void dirty(void) {
+    int junk[64];
+    for (int i = 0; i < 64; i++)
+        junk[i] = 99;
+}
+int main(void) {
+    int r = check_global();
+    dirty();
+    r |= check_local();
+    dirty();
+    return r | check_static();
+}
+EOF
+
+# Positional values after a nested designator continue inside the record it
+# entered, then past that record in the enclosing one (C99 6.7.8p17 and p18).
+# Two designators of one bit-field unit in static storage keep both slices.
+try_ 0 << EOF
+struct s { int a[2][2]; int b; };
+struct o { struct s in; int z; };
+struct p { int x, y; };
+struct h { int t; struct p arr[3]; int u; };
+struct d { int k; struct o o; int m; };
+struct b { int t; struct { unsigned lo : 3; unsigned hi : 5; int w; } in; int z; };
+#define DECLS(S)                                                  \
+    S struct o v1 = { .in.a[1][1] = 4, 5, 6 };                     \
+    S struct h v2 = { .arr[1].x = 1, 2, 3, 4, 5 };                 \
+    S struct o v3 = { .in.a[1] = 3, 4, 5, 6 };                     \
+    S struct d v4 = { .o.in.b = 1, 2, 3 };                         \
+    S struct o v5 = { .in.b = 7, .in.a[0][1] = 8, 9 };             \
+    S struct b v6 = { .in.lo = 5, .in.w = 6, 7, .in.hi = 9 };      \
+    S struct b v7 = { 1, .in.w = 2, 3 };
+#define CHECKS                                                              \
+    int r = 0;                                                              \
+    if (v1.in.a[0][0] || v1.in.a[1][0] || v1.in.a[1][1] != 4 ||             \
+        v1.in.b != 5 || v1.z != 6)                                          \
+        r |= 1;                                                             \
+    if (v2.t || v2.arr[0].x || v2.arr[1].x != 1 || v2.arr[1].y != 2 ||      \
+        v2.arr[2].x != 3 || v2.arr[2].y != 4 || v2.u != 5)                  \
+        r |= 2;                                                             \
+    if (v3.in.a[0][1] || v3.in.a[1][0] != 3 || v3.in.a[1][1] != 4 ||        \
+        v3.in.b != 5 || v3.z != 6)                                          \
+        r |= 4;                                                             \
+    if (v4.k || v4.o.in.b != 1 || v4.o.z != 2 || v4.m != 3)                 \
+        r |= 8;                                                             \
+    if (v5.in.b != 7 || v5.in.a[0][0] || v5.in.a[0][1] != 8 ||              \
+        v5.in.a[1][0] != 9 || v5.z)                                         \
+        r |= 16;                                                            \
+    if (v6.t || v6.in.lo != 5 || v6.in.hi != 9 || v6.in.w != 6 ||           \
+        v6.z != 7)                                                          \
+        r |= 32;                                                            \
+    if (v7.t != 1 || v7.in.lo || v7.in.w != 2 || v7.z != 3)                 \
+        r |= 64;                                                            \
+    return r;
+DECLS()
+int check_global(void) { CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int check_static(void) { DECLS(static) CHECKS }
+void dirty(void) {
+    int junk[64];
+    for (int i = 0; i < 64; i++)
+        junk[i] = 99;
+}
+int main(void) {
+    int r = check_global();
+    dirty();
+    r |= check_local();
+    dirty();
+    return r | check_static();
+}
+EOF
+
+# When positional values reach a record through brace elision after a designator
+# already stored some of its members, those members are kept: the elided list
+# initializes only the members it names.
+try_ 0 << EOF
+struct p { int x, y; };
+struct q { int pad; unsigned a : 4, b : 4; };
+struct r { char c; struct q q[3]; int z; };
+#define DECLS(S)                                                        \
+    S struct r v1 = { .q[2].b = 3, .q[2].a = 5, .q[1].a = 1, 2, 7 };     \
+    S struct p v2[2] = { [1].y = 2, [0].x = 1, 3, 4 };
+#define CHECKS                                                              \
+    int r = 0;                                                              \
+    if (v1.c || v1.q[0].a || v1.q[1].pad || v1.q[1].a != 1 ||               \
+        v1.q[1].b != 2 || v1.q[2].pad != 7 || v1.q[2].a != 5 ||             \
+        v1.q[2].b != 3 || v1.z)                                             \
+        r |= 1;                                                             \
+    if (v2[0].x != 1 || v2[0].y != 3 || v2[1].x != 4 || v2[1].y != 2)       \
+        r |= 2;                                                             \
+    return r;
+DECLS()
+int check_global(void) { CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int check_static(void) { DECLS(static) CHECKS }
+void dirty(void) {
+    int junk[64];
+    for (int i = 0; i < 64; i++)
+        junk[i] = 99;
+}
+int main(void) {
+    int r = check_global();
+    dirty();
+    r |= check_local() << 2;
+    dirty();
+    return r | check_static() << 4;
+}
+EOF
+
+# The same holds for an element of an array with an inferred bound, whose
+# skipped elements are zero whatever form the next initializer takes, and for
+# elements and rows of a braced array list.
+try_ 0 << EOF
+struct p { int x, y; };
+struct h { struct p arr[3]; int z; };
+struct h2 { struct p m[2][2]; int z; };
+#define DECLS(S)                                                           \
+    S struct p v1[] = { [1].y = 2, [0].x = 1, 3, 4 };                       \
+    S struct p v2[] = { [2] = {5, 6}, [0].y = 7 };                          \
+    S struct h v3 = { .arr = { [1] = { .y = 2 }, [0] = 1, 2, 3 }, 9 };      \
+    S struct h2 v4 = { .m = { [0][1] = { .y = 2 }, [0][0] = 1, 2, 3 } };    \
+    S struct h2 v5 = { .m = { [1] = { [1] = { .y = 2 }, [0] = 1, 2, 3 } } }; \
+    S struct p v6[2][2] = { [1] = { [1] = { .y = 2 }, [0] = 1, 2, 3 } };
+#define CHECKS                                                                \
+    int r = 0;                                                                \
+    if (sizeof v1 != 2 * sizeof(struct p) || v1[0].x != 1 || v1[0].y != 3 || \
+        v1[1].x != 4 || v1[1].y != 2)                                         \
+        r |= 1;                                                               \
+    if (sizeof v2 != 3 * sizeof(struct p) || v2[0].x || v2[0].y != 7 ||      \
+        v2[1].x || v2[1].y || v2[2].x != 5 || v2[2].y != 6)                   \
+        r |= 2;                                                               \
+    if (v3.arr[0].x != 1 || v3.arr[0].y != 2 || v3.arr[1].x != 3 ||          \
+        v3.arr[1].y != 2 || v3.arr[2].x || v3.z != 9)                         \
+        r |= 4;                                                               \
+    if (v4.m[0][0].x != 1 || v4.m[0][0].y != 2 || v4.m[0][1].x != 3 ||       \
+        v4.m[0][1].y != 2 || v4.m[1][0].x || v4.z)                            \
+        r |= 8;                                                               \
+    if (v5.m[1][0].x != 1 || v5.m[1][0].y != 2 || v5.m[1][1].x != 3 ||       \
+        v5.m[1][1].y != 2 || v5.m[0][0].x || v5.m[0][1].y)                    \
+        r |= 16;                                                              \
+    if (v6[1][0].x != 1 || v6[1][0].y != 2 || v6[1][1].x != 3 ||             \
+        v6[1][1].y != 2 || v6[0][0].x || v6[0][1].y)                          \
+        r |= 32;                                                              \
+    return r;
+DECLS()
+int check_global(void) { CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int check_static(void) { DECLS(static) CHECKS }
+void dirty(void) {
+    int junk[64];
+    for (int i = 0; i < 64; i++)
+        junk[i] = 99;
+}
+int main(void) {
+    int r = check_global();
+    dirty();
+    r |= check_local();
+    dirty();
+    return r | check_static();
+}
+EOF
+try_ 0 << EOF
+struct p { int x, y; };
+int f(void) {
+    struct p v[] = { [3] = {5, 6} };
+    int m[][2] = { [2] = {1, 2} };
+    return v[0].x | v[0].y | v[1].x | v[2].y | m[0][0] | m[1][1];
+}
+void dirty(void) {
+    int junk[64];
+    for (int i = 0; i < 64; i++)
+        junk[i] = 99;
+}
+int main(void) {
+    dirty();
+    return f() != 0;
+}
+EOF
+
+# Each designator in a union initializer names a member again: two designators
+# of one member initialize both of its parts, a later member replaces an earlier
+# one, and a positional value after a scalar member is still excess.
+try_ 0 << EOF
+union u { struct { int x, y; } p; int i; };
+struct w { int t; union u u; };
+#define DECLS(S)                                     \
+    S union u v1 = { .p.x = 1, .p.y = 2 };            \
+    S union u v2 = { .i = 7, .p.y = 3 };              \
+    S union u v3 = { .p.y = 5, .i = 9 };              \
+    S struct w v4 = { .u.p.y = 4, .u.p.x = 6, 8 };
+#define CHECKS                                                         \
+    int r = 0;                                                         \
+    if (v1.p.x != 1 || v1.p.y != 2)                                    \
+        r |= 1;                                                        \
+    if (v2.p.y != 3 || v3.i != 9)                                      \
+        r |= 2;                                                        \
+    if (v4.t || v4.u.p.x != 6 || v4.u.p.y != 8)                        \
+        r |= 4;                                                        \
+    return r;
+DECLS()
+int check_global(void) { CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int check_static(void) { DECLS(static) CHECKS }
+int main(void) {
+    return check_global() | check_local() << 3 | check_static() << 6;
+}
+EOF
+try_compile_error_message "Too many elements in record initializer" << EOF
+union u { struct { int x, y; } p; int i; };
+union u v = { .i = 1, 2 };
+int main(void) { return v.i; }
+EOF
+
+# An automatic union is cleared before its initializer, so the elements of a
+# member array that neither a designator nor a positional value reaches are
+# zero, as C99 requires for the initialized member.
+try_ 0 << EOF
+union u { int a[2][2]; char c; };
+struct w { int t; union u u; };
+int f(void) {
+    union u v = { .a[1] = 7, 8 };
+    return v.a[0][0] || v.a[0][1] || v.a[1][0] != 7 || v.a[1][1] != 8;
+}
+int g(void) {
+    union u v = { 5 };
+    return v.a[0][0] != 5 || v.a[0][1] || v.a[1][1];
+}
+int h(void) {
+    struct w v = { 1, { .a[0][1] = 2 } };
+    return v.t != 1 || v.u.a[0][0] || v.u.a[0][1] != 2 || v.u.a[1][1];
+}
+void dirty(void) {
+    int junk[16];
+    for (int i = 0; i < 16; i++)
+        junk[i] = 99;
+}
+int main(void) {
+    int r;
+    dirty();
+    r = f();
+    dirty();
+    r |= g() << 1;
+    dirty();
+    return r | h() << 2;
+}
+EOF
+
+# An array designator may continue with member designators into one record
+# element. A later designator of the same element keeps the members an earlier
+# one stored, and positional values continue with the element's next member.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+struct ops { int (*fn)(int); int k; };
+struct pt { int x, y; };
+struct box { struct pt inner; int z; };
+struct holder { struct pt arr[3]; };
+#define DECLS(S)                                                 \
+    S struct ops v1[2] = { [1].fn = inc, [1].k = 3 };             \
+    S struct box v2[2] = { [1].inner.x = 2, [1].z = 5 };          \
+    S struct holder v3 = { .arr[2].y = 3 };                       \
+    S struct pt v4[] = { [2].x = 3, 4, [1].y = 2, [1].x = 1 };
+#define CHECKS                                                              \
+    int r = 0;                                                              \
+    if (v1[0].fn || v1[0].k || v1[1].fn(1) != 2 || v1[1].k != 3)            \
+        r |= 1;                                                             \
+    if (v2[0].inner.x || v2[0].z || v2[1].inner.x != 2 || v2[1].inner.y ||  \
+        v2[1].z != 5)                                                       \
+        r |= 2;                                                             \
+    if (v3.arr[0].y || v3.arr[2].x || v3.arr[2].y != 3)                     \
+        r |= 4;                                                             \
+    if (sizeof(v4) != 3 * sizeof(struct pt) || v4[0].x || v4[0].y ||        \
+        v4[1].x != 1 || v4[1].y != 2 || v4[2].x != 3 || v4[2].y != 4)       \
+        r |= 8;                                                             \
+    return r;
+DECLS()
+int check_global(void) { CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int check_static(void) { DECLS(static) CHECKS }
+void dirty(void) {
+    int junk[64];
+    for (int i = 0; i < 64; i++)
+        junk[i] = 99;
+}
+int main(void) {
+    int r = check_global();
+    dirty();
+    r |= check_local() << 4;
+    dirty();
+    return r | check_static() << 8;
 }
 EOF
 
