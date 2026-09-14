@@ -21859,6 +21859,110 @@ int main() {
 }
 EOF
 
+# The printf family follows C99 7.19.6.1 for everything but floating point: the
+# -, +, space, # and 0 flags, width and precision given inline or by *, the hh,
+# h, l, ll, j, z and t length modifiers, and %i, %X, %c, %s, %p, %n and %%. The
+# expected text is glibc's. Only #, 0, width and l forms were accepted before.
+printf_c99_ans=$(
+    cat << 'EOF'
+[42   ][ff   ][ab      ][z  ][    y]
+[+5][-5][ 5][-5][+7]
+[0xff][0XFF][010][0][0]
+[-0042][-42  ][000ab][+0042][ 0042]
+[007][][ -007][0a    ][]
+[010][0][     005][ABCDEF][abcdef]
+[     1][2   ][3   ][004][he][5]
+[ab][       abc][x         ][][]
+[0x1234][        0x10][0x20        ]
+[(nil)][   (nil)]
+[%][%]
+[44][44][4464][4464][1170]
+[-3][3000000000][feed][-9][10]
+[-5000000000][18000000000][123456789a][ABCDEF012][77]
+[-12345678901][12345678901][42][7][-3]
+[-17][4294967295][777][ok]
+abcdef
+xyz|3 6 2 3 3
+1   |+03|  0x11|k     |0
+[                  -1][99                  ][-0000000000000000123][+5][ 6]
+[-0000000042][0][0][0]
+[-2147483648][2147483647]
+    ab    |
+12
+EOF
+)
+try_output 0 "$printf_c99_ans" << EOF
+#include <stdio.h>
+#include <stddef.h>
+#include <stdint.h>
+int main(void)
+{
+    int n1 = 0, n2 = 0;
+    signed char hn = 0;
+    short sn = 0;
+    long long lln = 0;
+    int x = 0;
+    char buf[64] = "abcdefgh";
+    printf("[%-5d][%-5x][%-8s][%-3c][%5c]\n", 42, 255, "ab", 'z', 'y');
+    printf("[%+d][%+d][% d][% d][%+ d]\n", 5, -5, 5, -5, 7);
+    printf("[%#x][%#X][%#o][%#o][%#x]\n", 255, 255, 8, 0, 0);
+    printf("[%05d][%-05d][%05x][%+05d][% 05d]\n", -42, -42, 171, 42, 42);
+    printf("[%.3d][%.0d][%5.3d][%-6.2x][%.0x]\n", 7, 0, -7, 10, 0);
+    printf("[%#.3o][%#.0o][%08.3d][%X][%x]\n", 8, 0, 5, 0xabcdef, 0xABCDEF);
+    printf("[%*d][%-*d][%*d]", 6, 1, 4, 2, -4, 3);
+    printf("[%.*d][%.*s][%.*d]\n", 3, 4, 2, "hello", -1, 5);
+    printf("[%.2s][%10.3s][%-10.1s][%s][%.0s]\n", "abc", "abcdef", "xyz", "", "q");
+    printf("[%p][%12p][%-12p]\n", (void *) 0x1234, (void *) 0x10, (void *) 0x20);
+    printf("[%p][%8p]\n", (void *) 0, (void *) 0);
+    printf("[%%][%5%]\n");
+    printf("[%hhd][%hhu][%hd][%hu][%hx]\n", 300, 300, 70000, 70000, 70000);
+    printf("[%ld][%lu][%lx][%li][%lo]\n", -3L, 3000000000UL, 0xfeedL, -9L, 8L);
+    printf("[%lld][%llu][%llx][%llX][%lli]\n", -5000000000LL, 18000000000ULL,
+           0x123456789aLL, 0xabcdef012LL, 77LL);
+    printf("[%jd][%ju][%zu][%zd][%td]\n", (intmax_t) -12345678901LL,
+           (uintmax_t) 12345678901ULL, (size_t) 42, (size_t) 7, (ptrdiff_t) -3);
+    printf("[%i][%u][%o][%c%c]\n", -17, 4294967295U, 511, 'o', 'k');
+    printf("abc%ndef%n\n", &n1, &n2);
+    printf("xy%hhnz%hn%lln|", &hn, &sn, &lln);
+    printf("%d %d %d %d %d\n", n1, n2, hn, sn, (int) lln);
+    snprintf(buf, sizeof buf, "%-4d|%+.2d|%#6x|%-6s|%x", 1, 3, 17, "k", 0);
+    printf("%s\n", buf);
+    printf("[%20lld][%-20lld][%020lld][%+lld][% lld]\n", -1LL, 99LL, -123LL, 5LL, 6LL);
+    printf("[%.10lld][%#llx][%#llo][%llu]\n", -42LL, 0LL, 0LL, 0ULL);
+    printf("[%d][%d]\n", -2147483647 - 1, 2147483647);
+    x = printf("%5s%-5s|\n", "a", "b");
+    printf("%d\n", x);
+    return 0;
+}
+EOF
+
+# The printf family converts %u, the long forms %ld, %lu and %lx, and the long
+# long forms %lld, %llu, %llx and %llo, whose argument takes two words on a
+# 32-bit target and starts at an even slot.
+try_ 0 << EOF
+int main(void) {
+    long long a = -1234567890123LL, c = 0x1122334455667788LL;
+    unsigned long long b = 18446744073709551615ULL;
+    char buf[160];
+    snprintf(buf, sizeof buf, "%lld %llu %llx|%d %lld", a, b, c, 7, a);
+    if (strcmp(buf, "-1234567890123 18446744073709551615 1122334455667788|"
+                    "7 -1234567890123"))
+        return 1;
+    sprintf(buf, "%ld %lu %u %lx %5u", -5L, 4000000000UL, 4000000000U, 255L, 42U);
+    if (strcmp(buf, "-5 4000000000 4000000000 ff    42"))
+        return 2;
+    sprintf(buf, "%020lld|%18lld|%#llx|%#llo|%llo", a, a, c, 8LL, 0LL);
+    if (strcmp(buf, "-0000001234567890123|    -1234567890123|0x1122334455667788|"
+                    "010|0"))
+        return 3;
+    sprintf(buf, "%lld", -9223372036854775807LL - 1);
+    if (strcmp(buf, "-9223372036854775808"))
+        return 4;
+    sprintf(buf, "%s %lld %s", "x", 5LL, "y");
+    return strcmp(buf, "x 5 y") != 0;
+}
+EOF
+
 try_ 0 << EOF
 int main() {
     return '\0';
@@ -22280,6 +22384,20 @@ int main()
 {
     int v = 4;
     return TAIL(3) + TAIL(1, +2) + sizeof(SPELL(9)) + JOIN(v) + JOIN(v, );
+}
+EOF
+
+# GNU comma elision: ", ## __VA_ARGS__" deletes the comma when the variadic
+# argument is empty and keeps it, without pasting, when it is not.
+try_ 12 << EOF
+#define CALL(f, ...) f(0, ##__VA_ARGS__)
+#define ALL(...) count(9, ##__VA_ARGS__)
+int count(int first, ...) { return first; }
+int sum(int a, ...) { int *p = &a; return a + p[1 * (__SIZEOF_POINTER__ / 4)]; }
+int one(int a) { return a + 1; }
+int main()
+{
+    return CALL(one) + CALL(sum, 2) + ALL() + ALL(1, 2) - 9;
 }
 EOF
 

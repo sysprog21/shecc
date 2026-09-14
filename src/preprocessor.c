@@ -2017,6 +2017,36 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
             if (!lhs_present || !operand)
                 error_at("'##' needs a token on each side", &tk->location);
 
+            /* GNU comma elision: in ", ## __VA_ARGS__" nothing is pasted. The
+             * variadic argument follows the comma as written, and when it has
+             * no tokens the comma is deleted instead.
+             */
+            if (args && tail->kind == T_comma &&
+                operand->kind == T_identifier &&
+                !strcmp(operand->literal, "__VA_ARGS__") &&
+                hashmap_contains(args, operand->literal)) {
+                token_t *comma_prev = tail_prev;
+                bool any = false;
+
+                for (token_t *t = hashmap_get(args, operand->literal); t;
+                     t = t->next) {
+                    if (pp_is_layout(t))
+                        continue;
+                    tail_prev = tail;
+                    tail->next = copy_token(t);
+                    tail = tail->next;
+                    any = true;
+                }
+                if (!any) {
+                    tail = comma_prev;
+                    tail->next = NULL;
+                    lhs_present = tail != &head;
+                }
+                lhs_empty = false;
+                tk = operand;
+                continue;
+            }
+
             /* The right operand joins as written; a parameter contributes its
              * argument rather than its expansion.
              */

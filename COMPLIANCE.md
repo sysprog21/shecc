@@ -113,6 +113,7 @@ This document tracks compliance gaps and non-standard behaviors.
 - Binary literals: `0b101010`
 - Escape sequence: `\e` for ESC character
 - Computed goto
+- Comma elision in variadic macros: `, ## __VA_ARGS__` drops the comma when no variadic argument is given
 
 ### Implementation-Specific
 - Array compound literals in scalar context use first element

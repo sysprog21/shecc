@@ -129,24 +129,50 @@ void write_line(char *src)
     write_str("\");\n");
 }
 
-void load_from(char *file)
+/* Emit @file as the function @name. Each line is a call, and one basic block
+ * holding them all outgrew what shecc's dead code elimination tracks per block
+ * once the library passed about a thousand lines, so the lines go into parts of
+ * LINES_PER_PART, which @name calls in order.
+ */
+#define LINES_PER_PART 512
+
+void load_from(char *file, char *name)
 {
     char buffer[MAX_LINE_LEN];
+    char header[MAX_LINE_LEN];
+    int lines = 0, parts = 0;
     FILE *f = fopen(file, "rb");
+
     for (;;) {
-        if (!fgets(buffer, MAX_LINE_LEN, f)) {
-            fclose(f);
-            return;
-        }
+        if (!fgets(buffer, MAX_LINE_LEN, f))
+            break;
 
         if (!strncmp(buffer, "#pragma once", 12))
             continue;
         if (!strncmp(buffer, "#include \"c.h\"", 14))
             continue;
 
+        if (lines % LINES_PER_PART == 0) {
+            if (lines)
+                write_str("}\n");
+            snprintf(header, sizeof(header), "void %s_%d(void) {\n", name,
+                     parts++);
+            write_str(header);
+        }
         write_line(buffer);
+        lines++;
     }
     fclose(f);
+    if (lines)
+        write_str("}\n");
+
+    snprintf(header, sizeof(header), "void %s(void) {\n", name);
+    write_str(header);
+    for (int i = 0; i < parts; i++) {
+        snprintf(header, sizeof(header), "  %s_%d();\n", name, i);
+        write_str(header);
+    }
+    write_str("}\n");
 }
 
 void save_to(char *file)
@@ -182,13 +208,8 @@ int main(int argc, char *argv[])
     write_str("    strbuf_puts(LIBC_SRC, src);\n");
     write_str("}\n");
 
-    write_str("void libc_impl(void) {\n");
-    load_from(argv[1]);
-    write_str("}\n");
-
-    write_str("void libc_decl(void) {\n");
-    load_from(argv[2]);
-    write_str("}\n");
+    load_from(argv[1], "libc_impl");
+    load_from(argv[2], "libc_decl");
 
     save_to(argv[3]);
     strbuf_free(SOURCE);
