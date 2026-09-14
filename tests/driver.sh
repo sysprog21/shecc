@@ -534,6 +534,49 @@ function try_compile_warning()
     fi
 }
 
+# Count the phase-2 instructions of one function that match an extended regular
+# expression, in the --dump-ir output of an inline program. Some behaviour, such
+# as each access to a volatile object reaching the generated code, cannot be
+# observed by running the program. Usage: try_ir_count <expected count>
+# <function> <pattern> << EOF
+function try_ir_count()
+{
+    local expected="$1"
+    local func="$2"
+    local pattern="$3"
+    local input=$(cat)
+    test_selected || return 0
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    local tmp_ir="$(mktemp)"
+    local tmp_err="$(mktemp)"
+    echo "$input" > "$tmp_in"
+
+    $SHECC $SHECC_CFLAGS --dump-ir -o "$tmp_exe" "$tmp_in" > "$tmp_ir" \
+        2> "$tmp_err"
+    local actual=$?
+    if [ "$actual" -eq 0 ]; then
+
+        # The phase-2 dump follows the phase-1 one; in it a function starts with
+        # its name in the first column and its instructions are indented.
+        actual=$(awk -v fn="$func:" '
+            /<END OF INSN DUMP>/ { ph2 = 1; next }
+            ph2 && /^[^\t]/ { in_fn = ($0 == fn); next }
+            ph2 && in_fn' "$tmp_ir" | grep -cE -- "$pattern")
+    fi
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$actual" != "$expected" ]; then
+        report_test_failure "IR COUNT TEST ($func: $pattern)" "$tmp_in" \
+            "$tmp_exe" "$expected" "$actual" "$(< "$tmp_ir")" "" "$tmp_err"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
 function items()
 {
     local expected="$1"
@@ -1745,6 +1788,304 @@ int main(void) {
            4 * (bump_volatile(&global_slot) == 21) +
            8 * (global_slot == 21) +
            16 * (((volatile int *) &local_slot) == &local_slot);
+}
+EOF
+
+# Accessing a volatile object is a side effect (C99 5.1.2.3p2, 6.7.3p6), so an
+# expression evaluated only for its side effects still reads it: a name used as
+# a statement, the left operand of a comma, a cast to void, a for clause. Each
+# evaluated read reaches the generated code, and no load of the same object
+# stands in for it.
+try_ir_count 5 f 'load %x[0-9]+, -?[0-9]+\(gp\)' << EOF
+volatile int status;
+int f(void)
+{
+    status;
+    status;
+    (void) status;
+    status, 0;
+    for (status;;)
+        break;
+    return 1;
+}
+int main(void) { return f() - 1; }
+EOF
+
+# A volatile local lives in its slot: storing it does not let the next read
+# reuse the stored register.
+try_ir_count 2 f 'load %x[0-9]+, -?[0-9]+\(sp\)' << EOF
+int f(void)
+{
+    volatile int local = 1;
+    local;
+    local;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+
+# Reads through a pointer to volatile, of a member of a volatile record and of
+# an element of a volatile array are kept too, even when nothing uses them.
+try_ir_count 4 f '= \(%x[0-9]+\)' << EOF
+struct S { int a; int b; };
+volatile int *p;
+volatile struct S s;
+volatile int a[4];
+volatile struct S *sp;
+int f(void)
+{
+    *p;
+    s.b;
+    a[2];
+    sp->a;
+    return 7;
+}
+int main(void) { return f() - 7; }
+EOF
+
+# A volatile parameter lives in its slot as a volatile local does: it is stored
+# there on entry, each read reloads it and each assignment stores it, the
+# register the value was just computed in notwithstanding.
+try_ir_count 2 f 'load %x[0-9]+, -?[0-9]+\(sp\)' << EOF
+int f(volatile int x)
+{
+    x;
+    x;
+    return 0;
+}
+int main(void) { return f(1); }
+EOF
+try_ir_count 2 f 'store %x[0-9]+, -?[0-9]+\(sp\)' << EOF
+int f(void)
+{
+    volatile int local = 4;
+    local = local + 1;
+    return local;
+}
+int main(void) { return f() - 5; }
+EOF
+
+# A 32-bit target holds a long long in two registers, and a volatile one is read
+# and written a whole pair at a time.
+if [ "$PTR_SZ" = 4 ]; then
+    LL_REG='%x[0-9]+:%x[0-9]+'
+else
+    LL_REG='%x[0-9]+'
+fi
+try_ir_count 1 f "load $LL_REG, -?[0-9]+\\(gp\\)" << EOF
+volatile long long wide;
+int f(void)
+{
+    wide;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+try_ir_count 3 f "load $LL_REG, -?[0-9]+\\(sp\\)" << EOF
+int f(volatile long long y)
+{
+    y;
+    y = y + 1;
+    return (int) y;
+}
+int main(void) { return f(3) - 4; }
+EOF
+try_ir_count 2 f "store $LL_REG, -?[0-9]+\\(sp\\)" << EOF
+int f(volatile long long y)
+{
+    y;
+    y = y + 1;
+    return (int) y;
+}
+int main(void) { return f(3) - 4; }
+EOF
+try_ 10 << EOF
+volatile long long vw;
+int f1(volatile int x) { x; x; return x; }
+int f2(volatile int x) { x = x + 1; return x; }
+int f3(void) { volatile int lv = 4; lv = lv + 1; return lv; }
+int f4(volatile long long y) { y; y = y + 0x100000000LL; return (int) (y >> 32); }
+int main(void)
+{
+    vw = 0x200000001LL;
+    return f1(1) + f2(2) + f3() + f4(0x100000003LL) - (int) (vw >> 32) + 1;
+}
+EOF
+
+# Every write to a volatile object reaches memory, the same value written again
+# and an object nothing reads by name included.
+try_ir_count 3 f 'store %x[0-9]+, -?[0-9]+\(gp\)' << EOF
+volatile int control;
+int f(void)
+{
+    control = 1;
+    control = 1;
+    control = 1;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+try_ir_count 3 f 'store %x[0-9]+, -?[0-9]+\(sp\)' << EOF
+int f(void)
+{
+    volatile int local;
+    local = 1;
+    local = 1;
+    local = 1;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+try_ir_count 4 f 'store %x[0-9]+, -?[0-9]+\(sp\)' << EOF
+int f(volatile int x)
+{
+    x = 1;
+    x = 1;
+    x = 1;
+    return 0;
+}
+int main(void) { return f(0); }
+EOF
+try_ir_count 5 f '\(%x[0-9]+\) = %x[0-9]+' << EOF
+struct S { int a; int b; };
+volatile int *p;
+volatile struct S s;
+int f(void)
+{
+    *p = 1;
+    *p = 1;
+    *p = 1;
+    s.b = 1;
+    s.b = 1;
+    return 0;
+}
+int main(void)
+{
+    static int backing;
+    p = &backing;
+    return f();
+}
+EOF
+try_ir_count 3 f "store $LL_REG, -?[0-9]+\\(gp\\)" << EOF
+volatile long long wide;
+int f(void)
+{
+    wide = 1;
+    wide = 1;
+    wide = 1;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+try_ir_count 3 f "store $LL_REG, -?[0-9]+\\(sp\\)" << EOF
+int f(void)
+{
+    volatile long long local;
+    local = 1;
+    local = 1;
+    local = 1;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+try_ 7 << EOF
+volatile long long wide;
+void f(void)
+{
+    wide = 0x500000006LL;
+    wide = 0x100000002LL;
+    wide = 0x300000004LL;
+}
+int main(void)
+{
+    f();
+    return (int) (wide >> 32) + (int) wide;
+}
+EOF
+
+# A discarded assignment stores and does not read the object back: C11 6.5.16p3
+# permits the read but does not require it. Storing a bit-field still reads the
+# unit once, for the bits it keeps.
+try_ir_count 0 f 'load %x[0-9]+, -?[0-9]+\((gp|sp)\)' << EOF
+volatile int v;
+int f(void)
+{
+    volatile int local;
+    v = 3;
+    local = 3;
+    v = 4, local = 4;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+try_ir_count 1 f '= \(%x[0-9]+\)' << EOF
+volatile struct S { int a; int b : 3; } s;
+int f(void)
+{
+    s.a = 3;
+    s.b = 1;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+try_ 2 << EOF
+struct S { int a; int b : 3; };
+volatile struct S s;
+int main(void)
+{
+    int x = (s.b = 5);
+    s.a = 7;
+    return (x == -3) + (s.b == -3) - (s.a != 7);
+}
+EOF
+
+# Only evaluated operands are read, each once. The value of "x = v" is not a
+# second read of v, the operand of sizeof is not read at all, and assigning
+# through a pointer to volatile need not read the object back.
+try_ir_count 1 f 'load %x[0-9]+, -?[0-9]+\(gp\)' << EOF
+volatile int v;
+int x;
+int f(void)
+{
+    x = v;
+    sizeof v;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+try_ir_count 0 f '= \(%x[0-9]+\)' << EOF
+volatile int *p;
+int f(void)
+{
+    *p = 1;
+    return 0;
+}
+int main(void) { return f(); }
+EOF
+
+# Reading those objects still yields their values.
+try_ 36 << EOF
+volatile int vg;
+volatile int *vp;
+struct S { int a; int b; };
+volatile struct S vs;
+volatile struct S *vsp;
+volatile char varr[4];
+int f1(void) { vg; return 1; }
+int f2(void) { vg; vg; return 2; }
+int f3(void) { volatile int lv = 3; lv; lv; return lv; }
+int f4(int c) { int x = 0; if (c) x = vg; return x + 4; }
+int f5(void) { vsp->b; varr[1]; (void) vg; return (vg, 5); }
+int f6(void) { for (vg; vg; vg) break; return 6; }
+int main(void)
+{
+    static volatile int backing[2];
+    vp = &backing[1];
+    vsp = &vs;
+    *vp;
+    vg = 7;
+    vs.a = 1;
+    return f1() + f2() + f3() + f4(1) + f5() + f6() + vs.a + vg;
 }
 EOF
 

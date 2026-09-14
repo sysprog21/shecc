@@ -675,6 +675,7 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->is_pointer = false;
     ph2_ir->src0_is_pointer = false;
     ph2_ir->src1_is_pointer = false;
+    ph2_ir->is_volatile = false;
     return add_existed_ph2_ir(ph2_ir);
 }
 
@@ -2000,6 +2001,19 @@ void add_symbol(basic_block_t *bb, var_t *var)
     }
 }
 
+/* Whether @var is a volatile object named by its declaration, as opposed to a
+ * temporary the parser generated. Temporaries are named ".tN".
+ */
+bool var_is_volatile_object(const var_t *var)
+{
+    return var && var->is_volatile && var->var_name[0] != '.';
+}
+
+/* A volatile object a primary expression has named and no instruction has read
+ * yet. See discard_operand().
+ */
+var_t *unread_volatile_object;
+
 void add_insn(block_t *block,
               basic_block_t *bb,
               opcode_t op,
@@ -2034,6 +2048,13 @@ void add_insn(block_t *block,
 
     n->str = str ? intern_string(str) : NULL;
 
+    /* An instruction reading the object discard_operand() watches has given it
+     * the read it is owed.
+     */
+    if (unread_volatile_object &&
+        (rs1 == unread_volatile_object || rs2 == unread_volatile_object))
+        unread_volatile_object = NULL;
+
     /* Mark variables as address-taken to prevent incorrect constant
      * optimization
      */
@@ -2041,6 +2062,14 @@ void add_insn(block_t *block,
         rs1->address_taken = true;
         rs1->is_const = false; /* disable constant optimization */
     }
+
+    /* A volatile object can be read or written behind the program's back, and
+     * every access to it is a side effect (C99 6.7.3p6). Keep a local one in
+     * its slot as though its address had escaped, so that each access by name
+     * reaches memory rather than a register copy.
+     */
+    if (op == OP_allocat && rd && rd->is_volatile && !rd->is_global)
+        rd->address_taken = true;
 
     if (!bb->insn_list.head)
         bb->insn_list.head = n;

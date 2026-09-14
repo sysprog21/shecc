@@ -474,7 +474,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
             for_decl_semicolon_consumed = true;
         } else {
             read_control_expression(blk, &setup);
-            opstack_pop();
+            discard_operand(blk, setup);
             perform_side_effect(blk, setup);
         }
 
@@ -512,7 +512,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     /* increment after each loop */
     if (!lex_accept(T_close_bracket)) {
         read_control_expression(blk, &inc_);
-        opstack_pop();
+        discard_operand(blk, inc_);
         perform_side_effect(blk, inc_);
         lex_expect(T_close_bracket);
     }
@@ -1895,6 +1895,9 @@ void read_func_body(func_t *func)
         func->param_defs[i].is_aggregate_param =
             is_record_type(func->param_defs[i].type) &&
             !func->param_defs[i].ptr_level;
+        /* A volatile parameter lives in its slot, as a volatile local does. */
+        if (func->param_defs[i].is_volatile)
+            func->param_defs[i].address_taken = true;
         add_symbol(func->bbs, &func->param_defs[i]);
         func->param_defs[i].base = &func->param_defs[i];
         var_add_killed_bb(&func->param_defs[i], func->bbs);

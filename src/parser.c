@@ -1212,6 +1212,35 @@ var_t *opstack_pop(void)
     return operand_stack[--operand_stack_idx];
 }
 
+bool is_record_type(const type_t *type);
+
+/* Pop a value whose expression was evaluated only for its side effects: an
+ * expression statement, the left operand of a comma, or a for clause.
+ *
+ * A named object stands on the operand stack for its own value, and nothing
+ * reads it until something uses that value. Reading a volatile object is a side
+ * effect in itself, though (C99 5.1.2.3p2, 6.7.3p6), so "status;" still owes
+ * the object one read. A copy into a temporary is that read.
+ *
+ * Only an object no instruction has read since the expression named it is owed
+ * one: "x = status;" leaves status on the stack as the assignment's value after
+ * the assignment has read it.
+ */
+void discard_operand(block_t *parent, basic_block_t *bb)
+{
+    var_t *var = opstack_pop();
+    bool unread = var && var == unread_volatile_object;
+
+    unread_volatile_object = NULL;
+    if (!unread || var->is_func || var->array_size ||
+        (!var->ptr_level && is_record_type(var->type)))
+        return;
+
+    var_t *copy = require_typed_ptr_var(parent, var->type, var->ptr_level);
+    copy->var_name = gen_name();
+    add_insn(parent, bb, OP_assign, copy, var, NULL, 0, NULL);
+}
+
 /* Declarators with global storage are made available to the constant
  * initializer parser through operand_stack. Scalar initialization consumes that
  * entry itself, while zero and aggregate initialization do not.

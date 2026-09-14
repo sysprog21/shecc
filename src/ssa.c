@@ -31,6 +31,75 @@ bool var_in_memory(const var_t *var)
     return var->is_global || var->address_taken;
 }
 
+/* Whether @insn accesses a volatile object, which C99 6.7.3p6 counts as a side
+ * effect whether or not anything uses the value: it names such an object as an
+ * operand, or reads through an address mark_volatile_addresses() traced to one.
+ * Taking an object's address does not access it.
+ */
+bool insn_reads_volatile(const insn_t *insn)
+{
+    if (insn->opcode == OP_address_of || insn->opcode == OP_allocat)
+        return false;
+    if (insn->opcode == OP_read && insn->rs1 && insn->rs1->is_volatile)
+        return !insn->rd || !insn->rd->is_assignment_reload;
+    return var_is_volatile_object(insn->rs1) ||
+           var_is_volatile_object(insn->rs2) ||
+           var_is_volatile_object(insn->rs3);
+}
+
+/* Whether @var holds an address into a volatile object: a volatile pointer or
+ * array, or a temporary already traced to one.
+ */
+bool var_is_volatile_address(const var_t *var)
+{
+    if (!var || !var->is_volatile)
+        return false;
+    return var->ptr_level || var->array_size ||
+           (var->type && var->type->ptr_level) || var->var_name[0] == '.';
+}
+
+/* Mark every temporary that holds an address into a volatile object.
+ *
+ * A declaration says its object is volatile, but a member or an element of the
+ * object, or whatever a pointer to volatile designates, is read through an
+ * address the parser computed into a temporary, and nothing on the temporary
+ * says what it points into. Follow each address from the object or pointer it
+ * was derived from, so that the read at the end of the chain is recognizable as
+ * the side effect it is. Only addresses are followed: an int computed from a
+ * volatile int is an ordinary value.
+ */
+void mark_volatile_addresses(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            var_t *rd = insn->rd;
+            bool from_volatile = false;
+
+            if (!rd || rd->is_volatile || rd->var_name[0] != '.')
+                continue;
+
+            switch (insn->opcode) {
+            case OP_address_of:
+                from_volatile = insn->rs1 && insn->rs1->is_volatile;
+                break;
+            case OP_add:
+            case OP_sub:
+                from_volatile = var_is_volatile_address(insn->rs1) ||
+                                var_is_volatile_address(insn->rs2);
+                break;
+            case OP_assign:
+            case OP_cast:
+                from_volatile = var_is_volatile_address(insn->rs1);
+                break;
+            default:
+                break;
+            }
+            if (from_volatile)
+                rd->is_volatile = true;
+        }
+    }
+}
+
 void var_list_ensure_capacity(var_list_t *list, int min_capacity)
 {
     if (list->capacity >= min_capacity)
@@ -1278,6 +1347,12 @@ insn_t *new_insn(opcode_t op, var_t *rd, var_t *rs1, var_t *rs2)
  */
 bool insn_is_speculatable(const insn_t *insn)
 {
+    /* Running an arm unconditionally would read a volatile object on a path
+     * that never evaluates it, and that read is a side effect.
+     */
+    if (insn_reads_volatile(insn))
+        return false;
+
     switch (insn->opcode) {
     case OP_add:
     case OP_sub:
@@ -3568,6 +3643,10 @@ bool cse(insn_t *insn, const basic_block_t *bb)
         if (base->is_global || idx->is_global)
             return false;
 
+        /* Each read of a volatile object is an access of its own. */
+        if (insn->rs1->is_volatile)
+            return false;
+
         /* A read is a copy of memory, not a function of its operands: the same
          * address holds something else once anything has written there. So only
          * a repeat further down this block qualifies, and the search stops at
@@ -3987,6 +4066,16 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
         }
         break;
     default:
+        /* So is an access to a volatile object, whether or not anything uses
+         * the value it produces.
+         */
+        if (insn_reads_volatile(insn)) {
+            insn->useful = true;
+            insn->belong_to->useful = true;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn);
+            break;
+        }
+
         if (!insn->rd)
             break;
 
@@ -4150,6 +4239,12 @@ void optimize(void)
     build_rdf();
 
     use_chain_build();
+
+    /* Before anything below decides which reads it can drop or share. */
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (func->bbs)
+            mark_volatile_addresses(func);
+    }
 
     /* Run constant cast optimization for truncation */
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
@@ -4390,7 +4485,8 @@ void optimize(void)
                 /* Multi-instruction analysis and optimization Store-to-load
                  * forwarding
                  */
-                if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
+                if (insn->opcode == OP_load && insn->rs1 && insn->rd &&
+                    !insn->rs1->is_volatile) {
                     insn_t *search = insn->prev;
                     int search_limit = 10; /* Look back up to 10 instructions */
 
@@ -4438,7 +4534,8 @@ void optimize(void)
                 }
 
                 /* Redundant load elimination */
-                if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
+                if (insn->opcode == OP_load && insn->rs1 && insn->rd &&
+                    !insn->rs1->is_volatile) {
                     insn_t *search = bb->insn_list.head;
 
                     while (search && search != insn) {

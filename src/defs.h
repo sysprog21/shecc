@@ -758,7 +758,14 @@ struct var {
     bool is_ternary_ret;
     bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
-    int phys_reg;  /* low physical register (-1 if unassigned) */
+
+    /* The value of an assignment expression, read back from the object the
+     * assignment stored. C11 6.5.16p3 permits that read without requiring it,
+     * even of a volatile object, so it is not an access that must survive when
+     * nothing uses the value.
+     */
+    bool is_assignment_reload;
+    int phys_reg; /* low physical register (-1 if unassigned) */
     /* The high word of a 32-bit-target wide scalar. It remains -1 for the
      * ordinary single-register representation and on LP64 targets.
      */
@@ -940,6 +947,13 @@ struct ph2_ir {
     bool src1_is_pointer;
     bool src0_is_unsigned;
     bool src1_is_unsigned;
+
+    /* The load, read or store accesses a volatile object, which is a side
+     * effect whether or not its value is used (C99 6.7.3p6), so no rewrite may
+     * drop it, replace a load with a copy of a value read earlier, or drop a
+     * store for writing what the object already holds.
+     */
+    bool is_volatile;
 };
 
 typedef struct ph2_ir ph2_ir_t;

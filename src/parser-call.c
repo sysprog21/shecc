@@ -1237,6 +1237,27 @@ var_t *read_bitfield_value(block_t *parent,
     return value;
 }
 
+/* The value of an assignment to a bit-field: the field read back from the unit
+ * just written. C11 6.5.16p3 permits that read without requiring it, so mark it
+ * removable when nothing uses the value; otherwise "s.flag = 1;" on a volatile
+ * record would access the object once more than the program asks.
+ */
+var_t *reload_assigned_bitfield(block_t *parent,
+                                basic_block_t **bb,
+                                var_t *address,
+                                const var_t *field)
+{
+    insn_t *before = (*bb)->insn_list.tail;
+    basic_block_t *start = *bb;
+    var_t *value = read_bitfield_value(parent, bb, address, field);
+
+    /* read_bitfield_value() emits the read first, into the given block. */
+    insn_t *read = before ? before->next : start->insn_list.head;
+    read->rd->is_assignment_reload = true;
+    value->is_bitfield = false;
+    return value;
+}
+
 void write_bitfield_value(block_t *parent,
                           basic_block_t **bb,
                           var_t *address,

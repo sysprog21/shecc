@@ -331,6 +331,7 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->src1_is_pointer = false;
     n->src0_is_unsigned = false;
     n->src1_is_unsigned = false;
+    n->is_volatile = false;
 
     if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;
@@ -517,7 +518,7 @@ void slot_var_track(var_t *var)
 bool slot_is_private(const var_t *var)
 {
     if (var->address_taken || var->array_size || var->has_backing_storage ||
-        var->is_volatile)
+        var_is_volatile_object(var))
         return false;
     if (var->is_global || var->ofs_based_on_stack_top)
         return false;
@@ -850,6 +851,7 @@ void store_var(basic_block_t *bb, var_t *var, int idx)
     ir->is_pointer = is_pointer_like(var);
     ir->is_unsigned = is_unsigned_scalar(var);
     ir->size_bytes = var_slot_size(var);
+    ir->is_volatile = var_is_volatile_object(var);
     REGS[idx].polluted = 0;
 }
 
@@ -891,7 +893,7 @@ bool var_is_pinnable(var_t *var)
 {
     if (!var || var->is_const || !var->base)
         return false;
-    if (var->is_volatile)
+    if (var_is_volatile_object(var))
         return false;
 
     /* slot_is_private() rules out everything reachable other than by name:
@@ -1126,6 +1128,7 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
                             : bb_add_ph2_ir(bb, OP_load);
         ir->src0 = var->offset;
         ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
+        ir->is_volatile = var_is_volatile_object(var);
     }
 
     ir->dest = idx;
@@ -1219,10 +1222,25 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
         return pinned;
     }
 
-    /* Check VReg mapping first for O(1) lookup */
+    /* Check VReg mapping first for O(1) lookup. A register holding a volatile
+     * variable only as its storage last held it is left to the reload below.
+     */
     int phys_reg = vreg_get_phys(var);
-    if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var)
-        return phys_reg;
+    if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var) {
+        if (!var_is_volatile_object(var) || REGS[phys_reg].polluted)
+            return phys_reg;
+
+        /* Reload a volatile variable into the register, or the pair, that
+         * already names it. Loading it into others left two registers naming
+         * the variable, and store_addressed_def(), which finds the first, took
+         * the stale one for the one a later assignment wrote and skipped the
+         * store.
+         */
+        if (phys_reg != operand_0) {
+            load_var(bb, var, phys_reg);
+            return phys_reg;
+        }
+    }
 
     if (var_needs_register_pair(var)) {
         int low, high;
@@ -1242,10 +1260,21 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
      * every register. A parameter still in the register it arrived in is that
      * case, and its slot may not exist yet, so reloading it read whatever sat
      * at offset zero of the frame instead.
+     *
+     * A volatile global is reloaded for the same reason and one more: every
+     * read of it is an access the program has to perform (C99 6.7.3p6), not
+     * just a way to learn its value. A volatile local is address-taken already.
      */
     int i = find_in_regs(var);
-    if (i > -1 && (!var->address_taken || REGS[i].polluted)) {
+    if (i > -1 && (!(var->address_taken || var_is_volatile_object(var)) ||
+                   REGS[i].polluted)) {
         vreg_map_to_phys(var, i);
+        return i;
+    }
+
+    /* As above, when the register lost the mapping but still names it. */
+    if (i > -1 && i != operand_0 && var_is_volatile_object(var)) {
+        load_var(bb, var, i);
         return i;
     }
 
@@ -1749,6 +1778,7 @@ void load_low_word(basic_block_t *bb, var_t *var, int reg)
         ir->src0 = var->offset;
         ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
         ir->size_bytes = 4;
+        ir->is_volatile = var_is_volatile_object(var);
     }
     ir->dest = reg;
 }
@@ -3060,6 +3090,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 ir->src0 = dest;
                 ir->src0_hi = vreg_get_phys_hi(insn->rd);
                 ir->src1 = insn->rd->offset;
+                ir->is_volatile = var_is_volatile_object(insn->rd);
                 REGS[dest].polluted = 0;
             }
 
@@ -3255,11 +3286,25 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             break;
         }
         case OP_assign:
-            if (insn->rd->consumed == -1)
+            /* A copy nothing reads is dropped, unless it copies from or to a
+             * volatile object. Copying from one is the read a discarded
+             * expression such as "status;" asks for, and a write to one is a
+             * side effect however little the program reads it back.
+             */
+            if (insn->rd->consumed == -1 &&
+                !var_is_volatile_object(insn->rs1) &&
+                !var_is_volatile_object(insn->rd))
                 break;
 
             track_var_use(insn->rs1, insn->idx);
             src0 = find_in_regs(insn->rs1);
+
+            /* A volatile object whose register matches its storage is read
+             * again, as prepare_operand() does.
+             */
+            if (src0 > -1 && var_is_volatile_object(insn->rs1) &&
+                !REGS[src0].polluted)
+                src0 = -1;
 
             /* If operand is loaded from stack, clear the original slot after
              * moving.
@@ -3290,6 +3335,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 ir->src1 = insn->rd->offset;
                 ir->is_unsigned = is_unsigned_scalar(insn->rd);
                 ir->size_bytes = var_slot_size(insn->rd);
+                ir->is_volatile = var_is_volatile_object(insn->rd);
                 REGS[dest].polluted = 0;
             }
 
@@ -3312,6 +3358,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src1 = insn->sz;
             ir->dest = dest;
             ir->dest_hi = vreg_get_phys_hi(insn->rd);
+            ir->is_volatile = insn_reads_volatile(insn);
             set_ptr_flags(ir, insn);
             break;
         case OP_write:
@@ -3831,6 +3878,17 @@ void reg_alloc(void)
             }
         }
 
+        /* A volatile parameter lives in its slot, so write it there on entry.
+         * Its register then matches the slot, and every read reloads it.
+         */
+        for (int i = 0; i < args_in_reg; i++) {
+            var_t *param = var_subscript0(&func->param_defs[i]);
+            int word = abi_param_start(func, i);
+
+            if (var_is_volatile_object(param) && REGS[word].var == param)
+                store_var(func->bbs, param, word);
+        }
+
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             reg_alloc_bb(func, bb);
         }
@@ -3856,6 +3914,15 @@ void reg_alloc(void)
         collapse_slot_roundtrip(func);
         dead_store_elim(func);
     }
+}
+
+/* Name the high register of a 32-bit target's register pair after its low one,
+ * as "%x2:%x3", when @reg is one.
+ */
+void dump_pair_high(int reg)
+{
+    if (reg >= 0)
+        printf(":%%x%c", reg + 48);
 }
 
 void dump_ph2_ir(void)
@@ -3911,16 +3978,24 @@ void dump_ph2_ir(void)
                 printf("\tret %%x%c", rs1);
             break;
         case OP_load:
-            printf("\tload %%x%c, %d(sp)", rd, ph2_ir->src0);
+            printf("\tload %%x%c", rd);
+            dump_pair_high(ph2_ir->dest_hi);
+            printf(", %d(sp)", ph2_ir->src0);
             break;
         case OP_store:
-            printf("\tstore %%x%c, %d(sp)", rs1, ph2_ir->src1);
+            printf("\tstore %%x%c", rs1);
+            dump_pair_high(ph2_ir->src0_hi);
+            printf(", %d(sp)", ph2_ir->src1);
             break;
         case OP_global_load:
-            printf("\tload %%x%c, %d(gp)", rd, ph2_ir->src0);
+            printf("\tload %%x%c", rd);
+            dump_pair_high(ph2_ir->dest_hi);
+            printf(", %d(gp)", ph2_ir->src0);
             break;
         case OP_global_store:
-            printf("\tstore %%x%c, %d(gp)", rs1, ph2_ir->src1);
+            printf("\tstore %%x%c", rs1);
+            dump_pair_high(ph2_ir->src0_hi);
+            printf(", %d(gp)", ph2_ir->src1);
             break;
         case OP_read:
             printf("\t%%x%c = (%%x%c)", rd, rs1);

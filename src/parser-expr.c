@@ -579,7 +579,7 @@ static void read_grouped_operand(block_t *parent, basic_block_t **bb)
          * Discard the completed left value after its IR is emitted; the final
          * expression supplies the result, which is not an lvalue.
          */
-        opstack_pop();
+        discard_operand(parent, *bb);
         perform_side_effect(parent, *bb);
         if (!read_assignment_expression(parent, bb)) {
             read_expr(parent, bb);
@@ -1372,6 +1372,19 @@ static void read_cast_operand(block_t *parent,
         if (converted != expr_var)
             converted->type = cast_var->type;
         opstack_push(converted);
+        return;
+    }
+
+    /* A cast to void only discards its operand, so a volatile object gets the
+     * read an expression statement would give it, and no conversion. The
+     * zero-width truncation a void cast otherwise emits is dead code, but one
+     * of a volatile object would be kept, and no backend has such a thing.
+     */
+    if (cast_var->type->base_type == TYPE_void && !cast_var->ptr_level &&
+        var_is_volatile_object(expr_var)) {
+        opstack_push(expr_var);
+        discard_operand(parent, *bb);
+        opstack_push(cast_var);
         return;
     }
 
@@ -3327,6 +3340,8 @@ void read_lvalue(lvalue_t *lvalue,
     lvalue->pointer_const_mask = var->pointer_const_mask;
 
     opstack_push(var);
+    if (var->is_volatile)
+        unread_volatile_object = var;
 
     if (lex_peek(T_open_square, NULL) || lex_peek(T_arrow, NULL) ||
         lex_peek(T_dot, NULL))
@@ -3934,7 +3949,7 @@ void read_control_expression(block_t *parent, basic_block_t **bb)
     }
 
     while (lex_accept(T_comma)) {
-        opstack_pop();
+        discard_operand(parent, *bb);
         perform_side_effect(parent, *bb);
         if (!read_assignment_expression(parent, bb)) {
             read_expr(parent, bb);
@@ -3960,7 +3975,7 @@ basic_block_t *read_full_expression_statement(block_t *parent,
                                               basic_block_t *bb)
 {
     read_control_expression(parent, &bb);
-    opstack_pop();
+    discard_operand(parent, bb);
     perform_side_effect(parent, bb);
     lex_expect(T_semicolon);
     return bb;
@@ -4099,7 +4114,7 @@ void read_conditional_true_expression(block_t *parent, basic_block_t **bb)
     }
 
     while (lex_accept(T_comma)) {
-        opstack_pop();
+        discard_operand(parent, *bb);
         perform_side_effect(parent, *bb);
         if (!read_assignment_expression(parent, bb)) {
             read_expr(parent, bb);
@@ -4450,14 +4465,14 @@ bool read_body_assignment(var_t *var,
                     if (!lvalue.is_reference) {
                         assignment_result[0] = vd;
                     } else if (is_bitfield(lvalue.decl)) {
-                        var_t *stored =
-                            read_bitfield_value(parent, bb, t, lvalue.decl);
-                        stored->is_bitfield = false;
+                        var_t *stored = reload_assigned_bitfield(parent, bb, t,
+                                                                 lvalue.decl);
                         assignment_result[0] = stored;
                     } else {
                         var_t *stored = require_typed_var(parent, lvalue.type);
                         stored->ptr_level = lvalue.value_ptr_level;
                         stored->var_name = gen_name();
+                        stored->is_assignment_reload = true;
                         add_insn(parent, *bb, OP_read, stored, t, NULL,
                                  lvalue.size, NULL);
                         assignment_result[0] = stored;
@@ -4570,9 +4585,8 @@ bool read_body_assignment(var_t *var,
                      * reloaded just like an ordinary bit-field assignment.
                      */
                     if (is_bitfield(lvalue.decl)) {
-                        var_t *stored =
-                            read_bitfield_value(parent, bb, t, lvalue.decl);
-                        stored->is_bitfield = false;
+                        var_t *stored = reload_assigned_bitfield(parent, bb, t,
+                                                                 lvalue.decl);
                         assignment_result[0] = stored;
                     } else {
                         assignment_result[0] = vd;
@@ -4672,14 +4686,14 @@ bool read_body_assignment(var_t *var,
                      * leaking the unconverted right operand.
                      */
                     if (is_bitfield(lvalue.decl)) {
-                        var_t *stored =
-                            read_bitfield_value(parent, bb, rs1, lvalue.decl);
-                        stored->is_bitfield = false;
+                        var_t *stored = reload_assigned_bitfield(
+                            parent, bb, rs1, lvalue.decl);
                         assignment_result[0] = stored;
                     } else {
                         var_t *stored = require_typed_var(parent, lvalue.type);
                         stored->ptr_level = lvalue.value_ptr_level;
                         stored->var_name = gen_name();
+                        stored->is_assignment_reload = true;
                         add_insn(parent, *bb, OP_read, stored, rs1, NULL, size,
                                  NULL);
                         assignment_result[0] = stored;
@@ -4924,9 +4938,8 @@ static void read_grouped_postfix_assignment(block_t *parent, basic_block_t **bb)
     if (target->compound_literal_bitfield) {
         write_bitfield_value(parent, bb, address, value,
                              target->compound_literal_bitfield);
-        result = read_bitfield_value(parent, bb, address,
-                                     target->compound_literal_bitfield);
-        result->is_bitfield = false;
+        result = reload_assigned_bitfield(parent, bb, address,
+                                          target->compound_literal_bitfield);
         opstack_push(result);
         return;
     }
@@ -5167,12 +5180,12 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
          * object representation, including narrow integer conversion.
          */
         if (field && is_bitfield(field)) {
-            result = read_bitfield_value(parent, bb, address, field);
-            result->is_bitfield = false;
+            result = reload_assigned_bitfield(parent, bb, address, field);
         } else {
             result = require_typed_var(parent, value_type);
             result->ptr_level = value_ptr_level;
             result->var_name = gen_name();
+            result->is_assignment_reload = true;
             add_insn(parent, *bb, OP_read, result, address, NULL, store_size,
                      NULL);
         }

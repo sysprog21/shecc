@@ -1703,7 +1703,7 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
         read_ternary_operation(parent, &bb);
     }
     while (lex_accept(T_comma)) {
-        opstack_pop();
+        discard_operand(parent, bb);
         perform_side_effect(parent, bb);
         if (!read_assignment_expression(parent, &bb)) {
             read_expr(parent, &bb);

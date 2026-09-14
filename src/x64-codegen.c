@@ -2918,8 +2918,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     if (!op_keeps_frame_mirrors(ph2_ir->op)) {
         frame_mirror_reset();
     } else {
-        if (ph2_ir->op == OP_load && ph2_ir->dest >= 0 &&
-            ph2_ir->dest < REG_CNT) {
+        /* A volatile slot is read however recently a register mirrored it: the
+         * read is an access the program performs.
+         */
+        if (ph2_ir->op == OP_load && !ph2_ir->is_volatile &&
+            ph2_ir->dest >= 0 && ph2_ir->dest < REG_CNT) {
             int want = load_width(ph2_ir);
             if (reg_mirror_valid[ph2_ir->dest] &&
                 reg_mirror_slot[ph2_ir->dest] == ph2_ir->src0 &&
@@ -2988,7 +2991,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
              * the same store.
              */
             if (ph2_ir->src0 >= 0 && ph2_ir->src0 < REG_CNT &&
-                reg_mirror_valid[ph2_ir->src0] &&
+                !ph2_ir->is_volatile && reg_mirror_valid[ph2_ir->src0] &&
                 reg_mirror_slot[ph2_ir->src0] == ph2_ir->src1) {
                 int keep = ph2_ir->size_bytes;
                 if (ph2_ir->is_pointer && keep != PTR_SIZE)

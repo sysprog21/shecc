@@ -542,10 +542,13 @@ bool redundant_move_elim(basic_block_t *bb, ph2_ir_t *ph2_ir)
     if (!next)
         return false;
 
+    /* A volatile load is an access the program performs, not only a value it
+     * computes, so it stays even when its register is overwritten unread.
+     */
     if (!is_plain_register_def(ph2_ir) || !is_plain_register_def(next) ||
-        ph2_ir->dest != next->dest ||
+        ph2_ir->is_volatile || ph2_ir->dest != next->dest ||
         (ph2_ir->dest_hi >= 0 && ph2_ir->dest_hi != next->dest_hi) ||
-        (next->op == OP_assign && next->src0 == ph2_ir->dest))
+        ir_reads_reg(next, ph2_ir->dest) || ir_reads_reg(next, ph2_ir->dest_hi))
         return false;
 
     memcpy(ph2_ir, next, sizeof(ph2_ir_t));
@@ -579,6 +582,7 @@ bool eliminate_load_store_pairs(basic_block_t *bb, ph2_ir_t *ph2_ir)
          * first put there, so dropping the first loses them.
          */
         if (ph2_ir->src1 == next->src1 && ph2_ir->src1 >= 0 &&
+            !ph2_ir->is_volatile && !next->is_volatile &&
             ph2_ir->size_bytes == next->size_bytes &&
             ph2_ir->is_pointer == next->is_pointer &&
             ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
@@ -589,6 +593,12 @@ bool eliminate_load_store_pairs(basic_block_t *bb, ph2_ir_t *ph2_ir)
             return true;
         }
     }
+
+    /* None of the rewrites below may turn a volatile load into a copy: the
+     * second access is as much a side effect as the first.
+     */
+    if (next->is_volatile)
+        return false;
 
     /* Pattern 2: Redundant consecutive loads from same local location {load
      * rd1, [addr]; load rd2, [addr]} → {load rd1, [addr]; mov rd2, rd1} Second
@@ -834,7 +844,7 @@ bool triple_pattern_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
      * store val2, addr} The middle load is pointless if not used elsewhere
      */
     if (ph2_ir->op == OP_store && second->op == OP_load &&
-        third->op == OP_store &&
+        !second->is_volatile && third->op == OP_store &&
         ph2_ir->src1 == second->src0 && /* same address */
         ph2_ir->dest == second->src1 && /* same offset */
         second->src0 == third->src1 &&  /* same address */
@@ -853,7 +863,8 @@ bool triple_pattern_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
      * addr; store v3, addr} Only the last store matters
      */
     if (ph2_ir->op == OP_store && second->op == OP_store &&
-        third->op == OP_store && ph2_ir->src1 == second->src1 &&
+        third->op == OP_store && !ph2_ir->is_volatile && !second->is_volatile &&
+        !third->is_volatile && ph2_ir->src1 == second->src1 &&
         ph2_ir->dest == second->dest && second->src1 == third->src1 &&
         second->dest == third->dest) {
         /* All three stores go to the same location Only the last one matters,
