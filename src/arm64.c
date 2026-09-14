@@ -208,44 +208,53 @@ int a64_cset_insn(bool sf, int rd, a64_cond_t cond)
     return a64_sf(sf) | 0x1a9f07e0 | ((cond ^ 1) << 12) | rd;
 }
 
-/* Base opcode of the unscaled load/store of @size bytes. Size lives in bits
- * 31:30 and the operation in 23:22, where a load picks the sign-extending form
- * for every width narrower than a doubleword -- values sit sign-extended in
- * their X register, so a narrow load must widen the same way whichever
- * addressing form carries it. The scaled form is this plus bit 24, which is why
- * one table serves both and they can no longer disagree. @size must be 1, 2, 4
- * or 8.
+/* What a memory access does, the first argument of the helpers below. A load
+ * narrower than a doubleword widens into its X register: A64_LOAD sign-extends,
+ * which is where a signed value sits, and A64_LOAD_ZEXT zero-extends, as an
+ * unsigned one must, or an unsigned char holding 200 reads back as -56.
  */
-int a64_mem_op(bool load, int size)
+#define A64_STORE 0
+#define A64_LOAD 1
+#define A64_LOAD_ZEXT 2
+
+/* Base opcode of the unscaled @access of @size bytes. Size lives in bits 31:30
+ * and the operation in 23:22, where a narrow A64_LOAD picks the sign-extending
+ * form and every other load the zero-extending one, whichever addressing form
+ * carries it. The scaled form is this plus bit 24, which is why one table
+ * serves both and they can no longer disagree. @size must be 1, 2, 4 or 8.
+ */
+int a64_mem_op(int access, int size)
 {
     /* Unsigned, so a doubleword's size field shifted into bits 31:30 does not
      * overflow a signed int.
      */
     unsigned int sz = size == 8 ? 3 : size == 4 ? 2 : size == 2 ? 1 : 0;
 
-    if (!load)
+    if (access == A64_STORE)
         return 0x38000000 | (sz << 30);
-    return 0x38000000 | (sz << 30) | ((size == 8 ? 1 : 2) << 22);
+    if (access == A64_LOAD && size != 8)
+        return 0x38000000 | (sz << 30) | (2 << 22);
+    return 0x38000000 | (sz << 30) | (1 << 22);
 }
 
 /* LDUR/STUR: a signed 9-bit byte offset. */
-int a64_mem_unscaled_insn(bool load, int size, int rt, int rn, int ofs)
+int a64_mem_unscaled_insn(int access, int size, int rt, int rn, int ofs)
 {
-    return a64_mem_op(load, size) | ((ofs & 0x1ff) << 12) | (rn << 5) | rt;
+    return a64_mem_op(access, size) | ((ofs & 0x1ff) << 12) | (rn << 5) | rt;
 }
 
 /* LDR/STR with an unsigned 12-bit offset scaled by the access width. */
-int a64_mem_scaled_insn(bool load, int size, int rt, int rn, int ofs)
+int a64_mem_scaled_insn(int access, int size, int rt, int rn, int ofs)
 {
-    return a64_mem_op(load, size) | (1 << 24) | ((ofs / size) << 10) |
+    return a64_mem_op(access, size) | (1 << 24) | ((ofs / size) << 10) |
            (rn << 5) | rt;
 }
 
 /* LDR/STR post-indexed: access [Rn], then add the signed 9-bit @ofs to Rn. */
-int a64_mem_post_insn(bool load, int size, int rt, int rn, int ofs)
+int a64_mem_post_insn(int access, int size, int rt, int rn, int ofs)
 {
-    return a64_mem_op(load, size) | 0x400 | ((ofs & 0x1ff) << 12) | (rn << 5) |
-           rt;
+    return a64_mem_op(access, size) | 0x400 | ((ofs & 0x1ff) << 12) |
+           (rn << 5) | rt;
 }
 
 /* How many instructions a64_mem() in the code generator spends on an access of

@@ -247,11 +247,15 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         /* Decode source size from upper 16 bits */
         int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
         if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi < 0) {
+            /* Mirror the emitter: a zero-extended byte is one ANDI, a
+             * sign-extended byte and either halfword take a shift pair, and a
+             * word is one move; the high word adds one more instruction. The
+             * byte cases were swapped, so a (long long) cast of an unsigned
+             * char moved every later branch target by four bytes.
+             */
+            bool zero_ext = ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer;
             elf_offset +=
-                (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer) &&
-                        (source_size == 1 || source_size == 2)
-                    ? 12
-                    : 8;
+                source_size == 2 || (source_size == 1 && !zero_ext) ? 12 : 8;
             return;
         }
         if (source_size == 2)

@@ -151,18 +151,27 @@ void a64_extend(int d, int n, int size, bool is_unsigned)
         a64_mov(d, n);
 }
 
+/* Which load reads @p's value. A narrow unsigned one has to arrive
+ * zero-extended: its register feeds 64-bit address arithmetic as it stands, and
+ * there a sign-extended unsigned char of 200 indexes table[-56].
+ */
+int a64_load_access(ph2_ir_t *p)
+{
+    return p->is_unsigned ? A64_LOAD_ZEXT : A64_LOAD;
+}
+
 /* AArch64's ordinary LDR/STR immediate is scaled by the access width. The
  * compiler deliberately supports packed C layouts, so structure members are
  * often not naturally aligned (func_t.bbs, for example). Such offsets must use
  * the byte-addressed LDUR/STUR form; rounding them down corrupts adjacent
  * fields during self-hosting.
  */
-void a64_mem(int load, int size, int rt, int rn, int ofs)
+void a64_mem(int access, int size, int rt, int rn, int ofs)
 {
     if (size != 1 && size != 2 && size != 4 && size != 8)
         fatal("unsupported arm64 access width");
     if (ofs >= -256 && ofs <= 255 && (ofs < 0 || ofs % size)) {
-        emit(a64_mem_unscaled_insn(load, size, rt, rn, ofs));
+        emit(a64_mem_unscaled_insn(access, size, rt, rn, ofs));
         return;
     }
     if (ofs < 0 || ofs > 4095 * size || ofs % size) {
@@ -171,7 +180,7 @@ void a64_mem(int load, int size, int rt, int rn, int ofs)
         rn = A64_IP0;
         ofs = 0;
     }
-    emit(a64_mem_scaled_insn(load, size, rt, rn, ofs));
+    emit(a64_mem_scaled_insn(access, size, rt, rn, ofs));
 }
 
 /* Masking an out-of-range displacement silently branches somewhere else. The
@@ -413,14 +422,14 @@ void emit_ph2_ir(ph2_ir_t *p)
 
         /* Reload x19 rather than trust what called us: glibc enters at main,
          * and AAPCS64 lets everything in between clobber a callee-saved
-         * register it has saved. The leading 1 is a64_mem()'s load selector, so
-         * this reads the base back from the word parked at elf_data_start. The
-         * frame itself is allocated once in code_generate(), which is also
-         * where the question of clearing it is settled.
+         * register it has saved. A64_LOAD is a64_mem()'s load selector, so this
+         * reads the base back from the word parked at elf_data_start. The frame
+         * itself is allocated once in code_generate(), which is also where the
+         * question of clearing it is settled.
          */
         if (reload_global_base) {
             a64_mov_imm(A64_IP0, elf_data_start);
-            a64_mem(1, 8, A64_GP, A64_IP0, 0);
+            a64_mem(A64_LOAD, 8, A64_GP, A64_IP0, 0);
         }
         return;
     }
@@ -445,22 +454,22 @@ void emit_ph2_ir(ph2_ir_t *p)
         a64_add(d, A64_GP, A64_IP0);
         return;
     case OP_load:
-        a64_mem(1, p->size_bytes, d, A64_SP, p->src0);
+        a64_mem(a64_load_access(p), p->size_bytes, d, A64_SP, p->src0);
         return;
     case OP_global_load:
-        a64_mem(1, p->size_bytes, d, A64_GP, p->src0);
+        a64_mem(a64_load_access(p), p->size_bytes, d, A64_GP, p->src0);
         return;
     case OP_store:
-        a64_mem(0, p->size_bytes, n, A64_SP, p->src1);
+        a64_mem(A64_STORE, p->size_bytes, n, A64_SP, p->src1);
         return;
     case OP_global_store:
-        a64_mem(0, p->size_bytes, n, A64_GP, p->src1);
+        a64_mem(A64_STORE, p->size_bytes, n, A64_GP, p->src1);
         return;
     case OP_read:
-        a64_mem(1, p->src1, d, n, 0);
+        a64_mem(a64_load_access(p), p->src1, d, n, 0);
         return;
     case OP_write:
-        a64_mem(0, p->dest, m, n, 0);
+        a64_mem(A64_STORE, p->dest, m, n, 0);
         return;
     case OP_add:
         /* Index expressions are int-valued, so the index has to widen before it
@@ -610,7 +619,7 @@ void emit_ph2_ir(ph2_ir_t *p)
         } else
             target = elf_code_start + f->bbs->elf_offset;
         a64_mov_imm(A64_IP0, target);
-        a64_mem(0, 8, A64_IP0, n, 0);
+        a64_mem(A64_STORE, 8, A64_IP0, n, 0);
         return;
     }
     case OP_load_func:
@@ -651,7 +660,7 @@ void plt_generate(void)
         elf_write_int(dynamic_sections.elf_plt,
                       a64_add_imm_insn(true, A64_IP0, A64_IP0, got & 0xfff));
         elf_write_int(dynamic_sections.elf_plt,
-                      a64_mem_scaled_insn(true, 8, A64_IP1, A64_IP0, 0));
+                      a64_mem_scaled_insn(A64_LOAD, 8, A64_IP1, A64_IP0, 0));
         elf_write_int(dynamic_sections.elf_plt, a64_br_insn(A64_IP1));
     }
 }
@@ -667,15 +676,15 @@ void code_generate(void)
      */
     if (dynlink)
         a64_mov_sp(25);
-    a64_mem(1, 8, 20, A64_SP, 0);
+    a64_mem(A64_LOAD, 8, 20, A64_SP, 0);
     emit(a64_add_imm_insn(true, 21, A64_SP, 8));
     a64_mov(23, 20);
     a64_mov(24, 21);
     if (dynlink) {
         a64_mov_imm(A64_IP0, A64_STACK_ALIGN);
         a64_sub(A64_SP, A64_SP, A64_IP0);
-        a64_mem(0, 8, 23, A64_SP, 0);
-        a64_mem(0, 8, 24, A64_SP, 8);
+        a64_mem(A64_STORE, 8, 23, A64_SP, 0);
+        a64_mem(A64_STORE, 8, 24, A64_SP, 8);
     }
 
     /* The synthetic global frame is carved out of the runtime stack, and x19
@@ -692,7 +701,7 @@ void code_generate(void)
     a64_sub(A64_SP, A64_SP, A64_IP0);
     a64_mov_sp(A64_GP);
     a64_mov_imm(A64_IP0, elf_data_start);
-    a64_mem(0, 8, A64_GP, A64_IP0, 0);
+    a64_mem(A64_STORE, 8, A64_GP, A64_IP0, 0);
     if (dynlink) {
         /* Clear the frame inline rather than through libc's memset, which a
          * --no-libc translation unit never declares. The frame is a multiple of
@@ -702,7 +711,7 @@ void code_generate(void)
         a64_mov(0, A64_GP);
         a64_mov_imm(2, global_frame);
         emit(a64_cbz_insn(true, 2, 4));
-        emit(a64_mem_post_insn(false, 8, A64_ZR, 0, 8));
+        emit(a64_mem_post_insn(A64_STORE, 8, A64_ZR, 0, 8));
         emit(a64_sub_imm_insn(true, 2, 2, 8));
         emit(a64_cbnz_insn(true, 2, -2));
     }
@@ -723,8 +732,8 @@ void code_generate(void)
         emit_ph2_ir(p);
     if (MAIN_BB) {
         if (dynlink) {
-            a64_mem(1, 8, 23, A64_SP, global_frame);
-            a64_mem(1, 8, 24, A64_SP, global_frame + 8);
+            a64_mem(A64_LOAD, 8, 23, A64_SP, global_frame);
+            a64_mem(A64_LOAD, 8, 24, A64_SP, global_frame + 8);
             a64_mov_imm(0, elf_code_start + MAIN_BB->elf_offset);
             a64_mov(1, 23);
             a64_mov(2, 24);

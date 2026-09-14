@@ -1261,12 +1261,24 @@ static void read_cast_operand(block_t *parent,
      * compared unequal to 44, even though assigning the same value to a char
      * produced 44. get_size() decides that the same way the rest of the parser
      * does, including for pointers, arrays and typedefs.
+     *
+     * Widening an integer to long long is, for the same reason, the extension
+     * an assignment performs. A move kept whatever a 32-bit instruction left in
+     * the upper half, so a negative int product cast to long long came out
+     * positive on AArch64, and an unsigned char came out sign-extended.
      */
     opcode_t cast_op = OP_cast;
-    if (get_size(cast_var) < get_size(expr_var))
+    int cast_size = get_size(cast_var);
+    if (cast_size < get_size(expr_var))
         cast_op = OP_trunc;
-    add_insn(parent, *bb, cast_op, cast_var, expr_var, NULL, get_size(cast_var),
-             NULL);
+    else if (cast_size > TY_int->size && get_size(expr_var) <= TY_int->size &&
+             !cast_var->ptr_level && !is_pointer_like_value(expr_var) &&
+             !expr_var->is_func && !is_record_type(expr_var->type) &&
+             !is_record_type(cast_var->type)) {
+        cast_op = OP_sign_ext;
+        cast_size |= get_size(expr_var) << 16;
+    }
+    add_insn(parent, *bb, cast_op, cast_var, expr_var, NULL, cast_size, NULL);
 
     /* Push the cast result */
     opstack_push(cast_var);

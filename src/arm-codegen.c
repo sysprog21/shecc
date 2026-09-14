@@ -737,11 +737,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_mul:
         if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
             ph2_ir->src1_hi >= 0) {
-            emit(__umull(__AL, rd, ph2_ir->dest_hi, rn, rm));
+            /* Sum the cross terms before UMULL writes the result pair, so the
+             * product stays right even if that pair shares a register with an
+             * operand. The allocator does not hand out such a pair today, and
+             * this order costs nothing over the other.
+             */
             emit(__mul(__AL, __r8, rn, ph2_ir->src1_hi));
             emit(__mul(__AL, __r9, ph2_ir->src0_hi, rm));
+            emit(__add_r(__AL, __r8, __r8, __r9));
+            emit(__umull(__AL, rd, ph2_ir->dest_hi, rn, rm));
             emit(__add_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r8));
-            emit(__add_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r9));
         } else
             emit(__mul(__AL, rd, rn, rm));
         return;

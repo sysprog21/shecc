@@ -2387,6 +2387,38 @@ int main(void) {
            ((unsigned int) shifted == 0U);
 }
 EOF
+
+# A cast to long long extends by the source signedness, even when the source is
+# the result of 32-bit arithmetic whose register holds no extension.
+try_output 0 "ffffffff.fffffffb;0.ee6b2800;ffffffff.fffffffd;0.c8;0.ea60;ffffffff.fffffffb;ffffffff.f4143e00;ffffffff.ffffec78;0.7fb;ffffffff.fffffffa;" << EOF
+void show(long long value)
+{
+    printf("%x.%x;", (unsigned) (value >> 32), (unsigned) value);
+}
+int main(void)
+{
+    int negative = -5;
+    unsigned int large = 4000000000U;
+    short half = -3;
+    unsigned char byte = 200;
+    unsigned short word = 60000;
+    int product = -1000000;
+    show((long long) negative);
+    show((long long) large);
+    show((long long) half);
+    show((long long) byte);
+    show((long long) word);
+    show((unsigned long long) negative);
+    product *= byte;
+    show((long long) product);
+    product = -1000000;
+    product /= byte;
+    show((long long) product);
+    show((long long) (negative & 0x7ff));
+    show((long long) (negative ^ 1));
+    return 0;
+}
+EOF
 try_ 2 << EOF
 long long bump(long long value) { return value + 1LL; }
 unsigned long long twice(unsigned long long value) { return value * 2ULL; }
@@ -2810,6 +2842,22 @@ int main(void) {
 }
 EOF
 
+# A wide product needs all four words of its operands, including when the result
+# replaces one of them or squares it in a loop.
+try_ 0 << EOF
+long long cell = 0x100000003LL;
+int main(void) {
+    long long x = 0x100000003LL, y = 0x200000005LL, z = -0x123456789LL;
+    for (int i = 0; i < 3; i++) {
+        x = x * y;
+        z *= z;
+        cell = cell * y;
+    }
+    return x != 0x23f00000177LL || z != 0xaabea71870b3341LL ||
+           cell != 0x23f00000177LL;
+}
+EOF
+
 # A branch threaded on a constant condition tests the whole constant:
 # 0x227044f500000000ULL has a zero low word but is true.
 try_ 0 << EOF
@@ -3106,6 +3154,23 @@ struct unsigned_members { unsigned char byte; unsigned short half; };
 int main(void) {
     struct unsigned_members value = {255, 65535};
     return (value.byte / 2 == 127) + (value.half / 2 == 32767);
+}
+EOF
+
+# A narrow unsigned value loaded from memory must not arrive sign-extended: on
+# an LP64 target an index of 200 read from a member or an element went into the
+# address as -56.
+try_ 0 << EOF
+struct unsigned_members { unsigned char byte; unsigned short half; };
+char table[60000];
+int main(void) {
+    struct unsigned_members value = {200, 50000};
+    struct unsigned_members *p = &value;
+    unsigned char bytes[1] = {200};
+    table[200] = 7;
+    table[50000] = 9;
+    return table[p->byte] != 7 || table[p->half] != 9 ||
+           table[bytes[0]] != 7 || *(table + p->byte) != 7;
 }
 EOF
 try_ 6 << EOF
@@ -13864,6 +13929,28 @@ int main(void) {
     int quotient = negative;
     negative %= divisor;
     return (quotient == 2147483647U) + (negative == 1U);
+}
+EOF
+
+# A move eliminated by the peephole pass must not keep the narrowing flags of
+# the unsigned constant load it replaced, or the member address is truncated.
+try_output 0 "0.ffffff28;0.ffffff28;" << EOF
+void show(long long value)
+{
+    printf("%x.%x;", (unsigned) (value >> 32), (unsigned) value);
+}
+struct record {
+    unsigned int word;
+};
+int main(void)
+{
+    struct record r;
+    unsigned char c = 200;
+    r.word = 0xfffffff0U;
+    show(r.word -= c);
+    r.word = 0xfffffff0U;
+    show(r.word -= c);
+    return 0;
 }
 EOF
 try_ 1 << EOF
