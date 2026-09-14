@@ -2873,6 +2873,156 @@ int value = 1 % 0;
 int main() { return value; }
 EOF
 
+# A value named twice is computed once and copied, then read through both names.
+# Folding the copy into the operation must not leave the first name unwritten
+# while something still reads it.
+try_ 12 << EOF
+int f(int a, int b)
+{
+    int r = a * b;
+    int s = a * b;
+    return r + s;
+}
+
+int main()
+{
+    return f(2, 3);
+}
+EOF
+
+try_ 0 << EOF
+int fold_add(int a, int b) { int r = a + b; int s = a + b; return r + s; }
+int fold_sub(int a, int b) { int r = a - b; int s = a - b; return r + s; }
+int fold_mul(int a, int b) { int r = a * b; int s = a * b; return r + s; }
+int fold_div(int a, int b) { int r = a / b; int s = a / b; return r + s; }
+int fold_mod(int a, int b) { int r = a % b; int s = a % b; return r + s; }
+int fold_and(int a, int b) { int r = a & b; int s = a & b; return r + s; }
+int fold_or(int a, int b) { int r = a | b; int s = a | b; return r + s; }
+int fold_xor(int a, int b) { int r = a ^ b; int s = a ^ b; return r + s; }
+int fold_shl(int a, int b) { int r = a << b; int s = a << b; return r + s; }
+int fold_shr(int a, int b) { int r = a >> b; int s = a >> b; return r + s; }
+int main()
+{
+    int bad = 0;
+    if (fold_add(29, 3) != 64)
+        bad |= 1;
+    if (fold_sub(29, 3) != 52)
+        bad |= 2;
+    if (fold_mul(29, 3) != 174)
+        bad |= 4;
+    if (fold_div(29, 3) != 18)
+        bad |= 8;
+    if (fold_mod(29, 3) != 4)
+        bad |= 16;
+    if (fold_and(29, 3) != 2)
+        bad |= 32;
+    if (fold_or(29, 3) != 62)
+        bad |= 64;
+    if (fold_xor(29, 3) != 60)
+        bad |= 128;
+    if (fold_shl(29, 3) != 464)
+        bad |= 256;
+    if (fold_shr(29, 3) != 6)
+        bad |= 512;
+    return bad != 0;
+}
+EOF
+
+try_ 38 << EOF
+int f(int a, int b)
+{
+    int r = a * b;
+    int s = a * b;
+    while (b-- > 0)
+        a += r + s;
+    return a;
+}
+
+int main()
+{
+    return f(2, 3);
+}
+EOF
+
+# Folding a constant load into the operation after it, as in 0 + b, leaves the
+# constant's register without it, which is wrong while something else still
+# reads that register. The third argument is unused, so the register holds 64.
+try_ 0 << EOF
+int fold_add(int a, int b, int c)
+{
+    int k = 0;
+    int r = k + b;
+    return r + (k >> a);
+}
+
+int fold_neg(int a, int b, int c)
+{
+    int k = 0;
+    int r = k - b;
+    return r + (k >> a);
+}
+
+int fold_zero(int a, int b, int c)
+{
+    int k = 0;
+    int r = k * b;
+    return r + (k >> a);
+}
+
+int fold_one(int a, int b, int c)
+{
+    int k = 1;
+    int r = k * b;
+    return r + (k >> a);
+}
+
+int main()
+{
+    int bad = 0;
+    if (fold_add(1, 5, 64) != 5)
+        bad |= 1;
+    if (fold_neg(1, 5, 64) != -5)
+        bad |= 2;
+    if (fold_zero(1, 5, 64) != 0)
+        bad |= 4;
+    if (fold_one(1, 5, 64) != 5)
+        bad |= 8;
+    return bad;
+}
+EOF
+
+# Strength reduction loads the shift count 2 over the constant 4 it replaces, so
+# the constant has to be unread afterwards.
+try_ 22 << EOF
+int f(int a, int b, int c)
+{
+    int k = 4;
+    int r = k * b;
+    return r + (k >> a);
+}
+
+int main()
+{
+    return f(1, 5, 64);
+}
+EOF
+
+# x & 0 becomes a load of zero into the result. The constant's register loses
+# the zero, and the operation it replaces must not simply disappear.
+try_ 0 << EOF
+int f(int a, int b, int c)
+{
+    int k = 0;
+    int r = k & b;
+    return r + (k >> a);
+}
+
+int main()
+{
+    return f(1, 5, 64);
+}
+EOF
+
 # Category: Overflow Behavior
 begin_category "Overflow Behavior" "Testing integer overflow handling"
 
@@ -8705,6 +8855,197 @@ items 42 "int x; x = 10; int *p; p = &x; p[0] = 42; exit(x);"
 items 10 "int val; val = 5; int *ptr; ptr = &val; ptr[0] = 10; exit(val);"
 items 7 "int a; a = 3; int *b; b = &a; b[0] = 7; exit(a);"
 
+# A parameter whose address is taken later in the function is still in the
+# register it arrived in when read before that. Reloading it from its slot read
+# a slot nothing had written yet.
+try_ 4 << EOF
+int first_param(int a, int b)
+{
+    int x = a + b;
+    int *p = &a;
+    return x + *p;
+}
+int main(void)
+{
+    return first_param(1, 2);
+}
+EOF
+
+try_ 51 << EOF
+int second_param(int a, int b)
+{
+    int x = a - b;
+    int *p = &b;
+    *p = 1;
+    return x * 10 + b;
+}
+int main(void)
+{
+    return second_param(7, 2);
+}
+EOF
+
+try_ 3 << EOF
+int sum_before_write(int a, int b)
+{
+    int x = a + b;
+    int *p = &a;
+    *p = 99;
+    return x;
+}
+int main(void)
+{
+    return sum_before_write(1, 2);
+}
+EOF
+
+# A write through a pointer can land in a global as readily as in a local. The
+# global's value must not be taken from a register loaded before the write.
+try_ 57 << EOF
+int g;
+int main(void)
+{
+    int *q = &g;
+    g = 4;
+    int x = g + 1;
+    *q = 6;
+    int y = g + 1;
+    return x * 10 + y;
+}
+EOF
+
+try_ 18 << EOF
+int g;
+int main(void)
+{
+    int a = 3;
+    int *p = &a;
+    int *q = &g;
+    g = 4;
+    int x = a * g;
+    *p = 5;
+    *q = 6;
+    int y = a * g;
+    return y - x;
+}
+EOF
+
+# Assigning an address-taken variable by name and reading it through a pointer
+# are two ways of reaching the same storage, in either order, on any path.
+try_ 2 << EOF
+int main(void)
+{
+    int a = 1;
+    int *p = &a;
+    a = 2;
+    return *p;
+}
+EOF
+
+try_ 10 << EOF
+int main(void)
+{
+    int a = 3;
+    int *p = &a;
+    a = 9;
+    *p = a + 1;
+    return a;
+}
+EOF
+
+try_ 5 << EOF
+int pick(int a)
+{
+    int *p = &a;
+    if (a > 2)
+        a = 5;
+    else
+        a = 6;
+    return *p;
+}
+int main(void)
+{
+    return pick(3);
+}
+EOF
+
+try_ 41 << EOF
+int main(void)
+{
+    int x = 7;
+    int *p = &x;
+    int y = x;
+    if (y > 3)
+        x = 1;
+    else
+        x = 2;
+    int z = *p;
+    *p = z + 40;
+    return x;
+}
+EOF
+
+try_ 10 << EOF
+int main(void)
+{
+    int a = 0;
+    int *p = &a;
+    for (int k = 0; k < 5; k++) {
+        *p = *p + 1;
+        a = a + 1;
+    }
+    return a;
+}
+EOF
+
+try_ 10 << EOF
+int main(void)
+{
+    int i;
+    int *p = &i;
+    int s = 0;
+    for (i = 0; i < 5; i++)
+        s += *p;
+    return s;
+}
+EOF
+
+try_ 47 << EOF
+int main(void)
+{
+    int a = 4, b = 7;
+    int *ptr;
+    int **pp = &ptr;
+    ptr = &a;
+    int x = *ptr;
+    *pp = &b;
+    int y = *ptr;
+    return x * 10 + y;
+}
+EOF
+
+try_ 120 << EOF
+int main(void)
+{
+    int a[64];
+    int i;
+    int sum = 0;
+    int *pi = &i;
+    for (int k = 0; k < 64; k++)
+        a[k] = k;
+    i = 0;
+loop:
+    sum = sum + a[i * 4];
+    *pi = *pi + 1;
+    i = i + 1;
+    if (i >= 12)
+        goto done;
+    goto loop;
+done:
+    return sum;
+}
+EOF
+
 # asterisk dereference for reading after declaration
 items 42 "int x; x = 42; int *p; p = &x; int y; y = *p; exit(y);"
 items 15 "int val; val = 15; int *ptr; ptr = &val; exit(*ptr);"
@@ -9431,6 +9772,283 @@ int main() {
     short *start = data + 1;
     short *end = data + 3;
     return end - start;
+}
+EOF
+
+# Taking a parameter's address must not disturb a read of that parameter made
+# before the address exists. A parameter passed in a register has no stack slot
+# until something needs one, and a read that went to the slot rather than the
+# register picked up whatever the frame held there.
+try_ 3 << EOF
+int f(int a, int b)
+{
+    int x = a - b;
+    int *p = &b;
+    return x;
+}
+int main() { return f(5, 2); }
+EOF
+
+try_ 7 << EOF
+int f(int a, int b)
+{
+    int x = a + b;
+    int *p = &a;
+    return x;
+}
+int main() { return f(5, 2); }
+EOF
+
+try_ 3 << EOF
+int f(char a, short b)
+{
+    int x = a - b;
+    short *p = &b;
+    return x;
+}
+int main() { return f(5, 2); }
+EOF
+
+try_ 3 << EOF
+int f(long a, long b)
+{
+    long x = a - b;
+    long *p = &b;
+    return (int) x;
+}
+int main() { return f(5, 2); }
+EOF
+
+# A later parameter, and one the 32-bit Arm and x86-64 conventions pass on the
+# stack, written through the pointer and read back by name.
+try_ 45 << EOF
+int f(int a, int b, int c, int d, int e, int g, int h, int i)
+{
+    int x = d - c;
+    int y = i - h;
+    int *p = &d;
+    int *q = &i;
+    *q = 1;
+    return x * 10 + y + i + a + b + e + g + *p - 7;
+}
+int main() { return f(0, 0, 3, 7, 0, 0, 2, 6); }
+EOF
+
+# The address taken in a branch and in a loop, after the parameter was read.
+try_ 13 << EOF
+int f(int a, int b)
+{
+    int x = a - b;
+    if (a > 0) {
+        int *p = &b;
+        *p = 10;
+    }
+    return x + b;
+}
+int main() { return f(5, 2); }
+EOF
+
+try_ 11 << EOF
+int f(int a, int b)
+{
+    int x = a - b;
+    for (int i = 0; i < 3; i++) {
+        int *p = &b;
+        *p += x;
+    }
+    return b;
+}
+int main() { return f(5, 2); }
+EOF
+
+# The address handed to a callee that writes through it, and a function whose
+# hidden aggregate-return pointer moves the parameters up one register.
+try_ 12 << EOF
+void set(int *p) { *p = 9; }
+int f(int a, int b)
+{
+    int x = a - b;
+    set(&b);
+    return x + b;
+}
+int main() { return f(5, 2); }
+EOF
+
+try_ 32 << EOF
+typedef struct { int a; int b; int c; int d; int e; } S;
+S f(int a, int b)
+{
+    S s;
+    int x = a - b;
+    int *p = &b;
+    s.a = x;
+    s.b = *p;
+    s.c = 0;
+    s.d = 0;
+    s.e = 0;
+    return s;
+}
+int main()
+{
+    S s = f(5, 2);
+    return s.a * 10 + s.b;
+}
+EOF
+
+# Assigning to a variable by name after its address was taken must reach the
+# object the pointer names. Each assignment makes a new SSA version, and every
+# version has to live in the one slot the pointer holds and be written there
+# before anything reads through the pointer.
+try_ 5 << EOF
+int main()
+{
+    int b = 1;
+    int *p = &b;
+    b = 5;
+    return *p;
+}
+EOF
+
+try_ 6 << EOF
+int main()
+{
+    int b = 1;
+    int *p = &b;
+    b = 5;
+    *p = *p + 1;
+    return b;
+}
+EOF
+
+try_ 7 << EOF
+int main()
+{
+    int b = 1;
+    int *p = &b;
+    for (int i = 0; i < 3; i++)
+        b = b + 2;
+    return *p;
+}
+EOF
+
+try_ 55 << EOF
+int f(int c)
+{
+    int b = 1;
+    int *p = &b;
+    if (c)
+        b = 2;
+    else
+        *p = 3;
+    return b * 10 + *p;
+}
+int main() { return f(1) + f(0); }
+EOF
+
+try_ 7 << EOF
+int main()
+{
+    int b = 1;
+    int *p = &b;
+    int i = 0;
+again:
+    b = b + i;
+    i++;
+    if (i < 4)
+        goto again;
+    return *p;
+}
+EOF
+
+# The same for parameters, passed in a register or on the stack.
+try_ 6 << EOF
+int f(int a, int b)
+{
+    int *p = &b;
+    b = a + 5;
+    return *p;
+}
+int main() { return f(1, 2); }
+EOF
+
+try_ 67 << EOF
+int f(int a, int b, int c, int d, int e, int g, int h, int i)
+{
+    int *p = &i;
+    int *r = &b;
+    i = 5 + a;
+    b = i + 1;
+    return *p * 10 + *r + c + d + e + g + h;
+}
+int main() { return f(1, 0, 0, 0, 0, 0, 0, 9); }
+EOF
+
+try_ 10 << EOF
+int f(int n)
+{
+    int *p = &n;
+    int s = 0;
+    while (n > 0) {
+        s += *p;
+        n--;
+    }
+    return s;
+}
+int main() { return f(4); }
+EOF
+
+# Narrow, unsigned, long and pointer variables, and a value read back after a
+# library call.
+try_ 3 << EOF
+int main()
+{
+    char c = 'a';
+    char *p = &c;
+    c = 'b';
+    int r = *p;
+    *p = 'c';
+    return r + c - 'a' - 'a';
+}
+EOF
+
+try_ 15 << EOF
+int main()
+{
+    unsigned short u = 65535;
+    unsigned short *p = &u;
+    long v = 3;
+    long *q = &v;
+    u = u + 2;
+    v = v + 4;
+    return *p + *q * 2;
+}
+EOF
+
+try_ 21 << EOF
+int main()
+{
+    int x = 1, y = 2;
+    int *q = &x;
+    int **pp = &q;
+    q = &y;
+    int r = **pp;
+    *pp = &x;
+    return r * 10 + *q;
+}
+EOF
+
+try_ 41 << EOF
+#include <stdio.h>
+#include <string.h>
+int main()
+{
+    char buf[16];
+    int n = 0;
+    int *pn = &n;
+    n = 3;
+    sprintf(buf, "%d", *pn);
+    n = strlen(buf) + 40;
+    return *pn;
 }
 EOF
 
@@ -15016,6 +15634,228 @@ int main()
 }
 EOF
 
+# An operand whose address is taken can change between two identical operations
+# without any instruction naming it: a store through the pointer, or by a callee
+# handed the address, in the same function, a loop, or through a pointer kept in
+# a record. The second operation must be computed again.
+try_ 101 << EOF
+int f(int a, int b)
+{
+    int x = a + b;
+    int *p = &a;
+    *p = 99;
+    int y = a + b;
+    return y;
+}
+int main(void)
+{
+    return f(1, 2);
+}
+EOF
+
+try_ 34 << EOF
+void inc(int *p)
+{
+    *p = *p + 1;
+}
+int f(int a, int b)
+{
+    int x = a + b;
+    inc(&a);
+    int y = a + b;
+    return x * 10 + y;
+}
+int main(void)
+{
+    return f(1, 2);
+}
+EOF
+
+try_ 56 << EOF
+int f(int a, int b)
+{
+    int *p = &b;
+    int x = a * b;
+    *p = 5;
+    int y = a * b;
+    return x + y;
+}
+int main(void)
+{
+    return f(7, 3);
+}
+EOF
+
+try_ 10 << EOF
+int f(int a, int b)
+{
+    int x = a < b;
+    int *p = &a;
+    *p = 10;
+    int y = a < b;
+    return x * 10 + y;
+}
+int main(void)
+{
+    return f(1, 2);
+}
+EOF
+
+try_ 84 << EOF
+struct holder {
+    int *q;
+};
+int main(void)
+{
+    int a = 3, b = 4;
+    struct holder h;
+    h.q = &a;
+    int x = a + b;
+    *h.q = 10;
+    int y = a + b;
+    return x * 10 + y;
+}
+EOF
+
+try_ 3 << EOF
+int main(void)
+{
+    int a = 3, b = 4, s = 0;
+    int *p = &a;
+    for (int k = 0; k < 3; k++) {
+        int x = a + b;
+        *p = *p + 1;
+        int y = a + b;
+        s += y - x;
+    }
+    return s;
+}
+EOF
+
+# Reading the same element twice is a repeat only while nothing can have written
+# memory in between: a store to that element, one through another pointer, a
+# callee, a store on one path to the second read, or an assignment by name to
+# the variable the pointer reaches. A compound assignment to the element must
+# also keep the address its store goes to.
+try_ 57 << EOF
+int main(void)
+{
+    char buf[4];
+    int i = 1;
+    buf[1] = 5;
+    int x = buf[i];
+    buf[i] = 7;
+    int y = buf[i];
+    return x * 10 + y;
+}
+EOF
+
+try_ 57 << EOF
+int main(void)
+{
+    char buf[4];
+    char *s = buf, *t = buf;
+    int i = 1;
+    s[1] = 5;
+    int x = s[i];
+    t[i] = 7;
+    int y = s[i];
+    return x * 10 + y;
+}
+EOF
+
+try_ 19 << EOF
+void put(char *s, int i)
+{
+    s[i] = 9;
+}
+int main(void)
+{
+    char buf[4];
+    int i = 2;
+    buf[2] = 1;
+    int x = buf[i];
+    put(buf, i);
+    int y = buf[i];
+    return x * 10 + y;
+}
+EOF
+
+try_ 59 << EOF
+int f(char *s, int i, int k)
+{
+    int x = s[i];
+    if (k)
+        s[i] = 9;
+    int y = s[i];
+    return x * 10 + y;
+}
+int main(void)
+{
+    char buf[4] = {0, 5, 0, 0};
+    return f(buf, 1, 1);
+}
+EOF
+
+try_ 57 << EOF
+int main(void)
+{
+    char buf[4];
+    char *s = buf;
+    int i = 1;
+    s[1] = 5;
+    int x = s[i];
+    s[i] += 2;
+    return x * 10 + buf[1];
+}
+EOF
+
+try_ 56 << EOF
+int main(void)
+{
+    char buf[4];
+    char *s = buf;
+    int i = 1;
+    s[1] = 5;
+    int x = s[i];
+    s[i]++;
+    return x * 10 + buf[1];
+}
+EOF
+
+try_ 15 << EOF
+int f(int i)
+{
+    char c = 1;
+    char *s = &c;
+    int x = s[i];
+    c = 5;
+    int y = s[i];
+    return x * 10 + y;
+}
+int main(void)
+{
+    return f(0);
+}
+EOF
+
+try_ 15 << EOF
+char g;
+int f(int i)
+{
+    char *s = &g;
+    g = 1;
+    int x = s[i];
+    g = 5;
+    int y = s[i];
+    return x * 10 + y;
+}
+int main(void)
+{
+    return f(0);
+}
+EOF
+
 # constant folding
 try_ 20 << EOF
 int main()
@@ -19406,6 +20246,71 @@ int main(void) {
     int first = 3, second = 8;
     row value = { &first, &second };
     return typedef_pointer_element_array(1, &value);
+}
+EOF
+
+# The element a pointer-to-array va_arg type selects is a pointer to int, and
+# dereferencing it reads an int. A typedef carrying the element's star had it
+# counted twice, so the dereference read a pointer's width; on an LP64 target
+# that took in the neighbouring int as well.
+try_ 0 << EOF
+#include <stdarg.h>
+typedef int *pointer;
+typedef pointer row[2];
+int typedef_pointer_element_width(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return *va_arg(ap, row *)[0][1] != 8;
+}
+int main(void) {
+    int pair[2] = { 8, 5 };
+    row value = { &pair[1], &pair[0] };
+    return typedef_pointer_element_width(1, &value);
+}
+EOF
+
+# An element whose pointer comes from a typedef points at the typedef's scalar,
+# so dereferencing it reads that scalar's width rather than a whole pointer.
+try_ 0 << EOF
+#include <stdarg.h>
+typedef char *text;
+typedef text words[2];
+int typedef_char_pointer_element(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return *va_arg(ap, words *)[0][1] != 'c';
+}
+int main(void) {
+    words value = { "ab", "cd" };
+    return typedef_char_pointer_element(1, &value);
+}
+EOF
+
+try_ 0 << EOF
+#include <stdarg.h>
+typedef int *pointer;
+int parenthesized_pointer_element_width(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return *va_arg(ap, pointer (*)[2])[0][1] != 8;
+}
+int main(void) {
+    int pair[2] = { 8, 5 };
+    pointer value[2] = { &pair[1], &pair[0] };
+    return parenthesized_pointer_element_width(1, &value);
+}
+EOF
+try_ 0 << EOF
+#include <stdarg.h>
+typedef char *text;
+int typedef_pointer_declarator_element(int count, ...) {
+    va_list ap;
+    va_start(ap, count);
+    return *va_arg(ap, text (*)[2])[0][1] != 'c';
+}
+int main(void) {
+    text value[2] = { "ab", "cd" };
+    return typedef_pointer_declarator_element(1, &value);
 }
 EOF
 

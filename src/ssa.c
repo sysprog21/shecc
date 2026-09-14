@@ -22,6 +22,15 @@
 /* Dead store elimination window size */
 #define OVERWRITE_WINDOW 3
 
+/* Whether @var lives in memory that other code can reach without naming it: a
+ * global, or a variable whose address is taken. SSA gives such a variable one
+ * name, and a write to it is observable however unused it looks.
+ */
+bool var_in_memory(const var_t *var)
+{
+    return var->is_global || var->address_taken;
+}
+
 void var_list_ensure_capacity(var_list_t *list, int min_capacity)
 {
     if (list->capacity >= min_capacity)
@@ -803,7 +812,10 @@ void solve_phi_insertion(void)
                     if (df == func->exit)
                         continue;
 
-                    if (var->is_global)
+                    /* Neither a global nor an address-taken variable is
+                     * renamed, so there is no version for a phi to choose.
+                     */
+                    if (var_in_memory(var))
                         continue;
 
                     if (insert_phi_insn(df, var)) {
@@ -877,6 +889,22 @@ void rename_stack_push(var_t *base, int sub)
     r->stack[r->stack_idx++] = sub;
 }
 
+/* The one name an address-taken variable keeps for its whole life.
+ *
+ * A store through a pointer changes such a variable without any instruction
+ * naming it, and a read through one sees whatever its last assignment by name
+ * wrote. Separate SSA versions would give each assignment a place of its own,
+ * so neither kind of access would reach the other. Like a global, it keeps one
+ * var_t for every definition and use: the entry version for a parameter, under
+ * which the allocator finds its incoming register, and the declaration itself
+ * for anything else.
+ */
+var_t *addressed_name(var_t *v)
+{
+    var_t *entry = var_subscript0(v->base);
+    return entry ? entry : v->base;
+}
+
 void new_name(block_t *block, var_t **var)
 {
     var_t *v = *var;
@@ -884,6 +912,10 @@ void new_name(block_t *block, var_t **var)
         v->base = v;
     if (v->is_global)
         return;
+    if (v->address_taken) {
+        var[0] = addressed_name(v);
+        return;
+    }
 
     rename_t *r = var_rename(v->base);
     int i = r->counter++;
@@ -926,13 +958,17 @@ void rename_var(var_t **var)
         v->base = v;
     if (v->is_global)
         return;
+    if (v->address_taken) {
+        var[0] = addressed_name(v);
+        return;
+    }
 
     var[0] = get_stack_top_subscript_var(*var);
 }
 
 void pop_name(var_t *var)
 {
-    if (var->is_global)
+    if (var_in_memory(var))
         return;
 
     /* Pop unconditionally, creating the state if the variable has none: the
@@ -1308,7 +1344,7 @@ basic_block_t *if_arm_chain(basic_block_t *arm,
              * store is a side effect however plain the arithmetic producing it
              * looks.
              */
-            if (insn->rd && (insn->rd->is_global || insn->rd->address_taken))
+            if (insn->rd && var_in_memory(insn->rd))
                 return NULL;
             *count = *count + 1;
         }
@@ -1403,7 +1439,7 @@ bool if_convert_bb(func_t *func, basic_block_t *bb)
     insn_t *e_phi = if_chain_phi(e_chain, e_len);
     if (!t_phi || !e_phi || t_phi->rd != e_phi->rd)
         return false;
-    if (t_phi->rd->is_global || t_phi->rd->address_taken)
+    if (var_in_memory(t_phi->rd))
         return false;
     /* Both arms handing over the same value makes the select pointless. */
     if (t_phi->rs1 == e_phi->rs1)
@@ -1823,7 +1859,7 @@ bool func_is_inlinable(func_t *func)
              */
             if (!insn_is_speculatable(insn))
                 return false;
-            if (insn->rd && (insn->rd->is_global || insn->rd->address_taken))
+            if (insn->rd && var_in_memory(insn->rd))
                 return false;
 
             /* Writing a parameter would mean the copy assigns to the caller's
@@ -2341,7 +2377,7 @@ bool sr_collect_chain(func_t *func, var_t *var, insn_t **chain, int *len)
 
     if (!base || base->def_cnt != 1)
         return false;
-    if (base->is_global || base->address_taken)
+    if (var_in_memory(base))
         return false;
 
     chain[*len] = def;
@@ -2514,7 +2550,7 @@ void sr_sweep_dead_consts(func_t *func)
             next = insn->next;
             if (insn->opcode != OP_load_constant || !insn->rd)
                 continue;
-            if (insn->rd->is_global || insn->rd->address_taken)
+            if (var_in_memory(insn->rd))
                 continue;
             if (var_read_by(func, insn->rd, NULL, 0, true))
                 continue;
@@ -3313,44 +3349,36 @@ bool cse(insn_t *insn, const basic_block_t *bb)
         if (base->is_global || idx->is_global)
             return false;
 
-        /* Look for identical add+read patterns */
-        for (use_chain_t *user = base->users_head; user; user = user->next) {
-            insn_t *i = user->insn;
-            if (i == prev)
-                continue;
-            if (i->opcode != OP_add)
-                continue;
-            if (!i->next)
-                continue;
-            if (i->next->opcode != OP_read)
-                continue;
-            if (i->rs1 != base || i->rs2 != idx)
+        /* A read is a copy of memory, not a function of its operands: the same
+         * address holds something else once anything has written there. So only
+         * a repeat further down this block qualifies, and the search stops at
+         * the first instruction that could have changed memory -- a write
+         * through a pointer, a call, or an assignment to a variable that lives
+         * in memory -- since nothing says where that write landed.
+         *
+         * The repeat's own addition is left in place. Its result can have other
+         * users, such as the write "p[i] += 1" performs to the same element,
+         * and removing it left that write with no address at all. Dead code
+         * elimination takes it once nothing needs it.
+         */
+        for (insn_t *i = insn->next; i; i = i->next) {
+            if (i->opcode == OP_write || i->opcode == OP_call ||
+                i->opcode == OP_indirect)
+                break;
+            if (i->rd && var_in_memory(i->rd))
+                break;
+            if (i->opcode != OP_add || i->rs1 != base || i->rs2 != idx)
                 continue;
 
-            /* Check dominance */
-            basic_block_t *i_bb = i->belong_to;
-            bool check_dom = false;
-            for (;; i_bb = i_bb->idom) {
-                if (i_bb == bb) {
-                    check_dom = true;
-                    break;
-                }
-                if (i_bb == i_bb->idom)
-                    break;
-            }
-            if (!check_dom)
+            insn_t *read = i->next;
+            if (!read || read->opcode != OP_read || read->rs1 != i->rd ||
+                read->sz != insn->sz)
                 continue;
 
             /* Replace with assignment */
-            i->next->opcode = OP_assign;
-            i->next->rs1 = def;
-            if (i->prev) {
-                i->prev->next = i->next;
-                i->next->prev = i->prev;
-            } else {
-                i->belong_to->insn_list.head = i->next;
-                i->next->prev = NULL;
-            }
+            read->opcode = OP_assign;
+            read->rs1 = def;
+            read->rs2 = NULL;
         }
         return true;
     }
@@ -3364,6 +3392,14 @@ bool cse(insn_t *insn, const basic_block_t *bb)
 
     /* Don't CSE operations with global variables */
     if (insn->rs1->is_global || insn->rs2->is_global)
+        return false;
+
+    /* Nor with an address-taken one. It is named by one var_t for every value
+     * it takes, so matching operands say nothing about matching values: a store
+     * through a pointer, or by a callee handed the address, can change it
+     * between the two instructions without any instruction naming it.
+     */
+    if (insn->rs1->address_taken || insn->rs2->address_taken)
         return false;
 
     /* Look for identical binary operations */
@@ -3711,8 +3747,11 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
     default:
         if (!insn->rd)
             break;
-        /* if the instruction affects a global value, set "useful" */
-        if (insn->rd->is_global && !insn->useful) {
+
+        /* A global, or a variable a pointer can read, is observable whether or
+         * not a later instruction names it.
+         */
+        if (var_in_memory(insn->rd) && !insn->useful) {
             insn->useful = true;
             insn->belong_to->useful = true;
             dce_init_push(work_list, work_list_idx, &mark_num, insn);

@@ -808,6 +808,18 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
             int depth = 0;
             var_t *base = opstack_pop();
 
+            /* An element's pointer depth is counted in full by
+             * pointee_element_ptr_level. A typedef such as "typedef int
+             * *pointer; typedef pointer row[2];" leaves that same depth on the
+             * row's type_t as well, and building the element on top of it
+             * counted the star twice: dereferencing the element then read a
+             * pointer's width where an int was stored.
+             */
+            type_t *element_type =
+                requested.pointee_element_ptr_level
+                    ? pointee_type_from_pointer_typedef(requested.type)
+                    : requested.type;
+
             while (lex_accept(T_open_square)) {
                 var_t *index;
                 var_t *address;
@@ -848,7 +860,7 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
                     index = scaled;
                 }
                 address = require_typed_ptr_var(
-                    parent, requested.type,
+                    parent, element_type,
                     requested.pointee_element_ptr_level + 1);
                 address->var_name = gen_name();
                 add_insn(parent, *bb, OP_add, address, base, index, 0, NULL);
@@ -869,7 +881,7 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
                     base = value;
                 } else if (depth == dimension_count + 1) {
                     var_t *value = require_typed_ptr_var(
-                        parent, requested.type,
+                        parent, element_type,
                         requested.pointee_element_ptr_level);
                     value->var_name = gen_name();
                     add_insn(parent, *bb, OP_read, value, address, NULL,

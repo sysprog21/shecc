@@ -1164,9 +1164,17 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
         return low;
     }
 
-    /* Force reload for address-taken variables (may be modified via pointer) */
+    /* Force reload for address-taken variables (may be modified via pointer).
+     *
+     * Not when the register holds a value the slot never received, though. No
+     * pointer can have reached the slot since: taking the address stores the
+     * register first, and a write through a pointer or a call spills or drops
+     * every register. A parameter still in the register it arrived in is that
+     * case, and its slot may not exist yet, so reloading it read whatever sat
+     * at offset zero of the frame instead.
+     */
     int i = find_in_regs(var);
-    if (i > -1 && !var->address_taken) {
+    if (i > -1 && (!var->address_taken || REGS[i].polluted)) {
         vreg_map_to_phys(var, i);
         return i;
     }
@@ -1483,13 +1491,16 @@ int prepare_dest(basic_block_t *bb,
 
 void spill_alive(basic_block_t *bb, const insn_t *insn)
 {
-    /* Spill all locals on pointer writes (conservative aliasing handling) */
+    /* Spill every variable on pointer writes (conservative aliasing handling).
+     * A global is no exception: the pointer can hold its address, and a copy
+     * left in a register is what the next read of it would use.
+     */
     if (insn && insn->opcode == OP_write) {
         for (int i = 0; i < REG_CNT; i++) {
             /* A pinned variable has no address, so no write through a pointer
              * can reach it.
              */
-            if (REGS[i].var && !REGS[i].var->is_global && !pinned_base[i])
+            if (REGS[i].var && !pinned_base[i])
                 spill_var(bb, REGS[i].var, i);
         }
         return;
@@ -2691,6 +2702,34 @@ void reg_alloc_global(insn_t *global_insn)
     }
 }
 
+/* Write the value @insn just gave an address-taken scalar to its slot.
+ *
+ * A pointer to the variable reads the slot, never the register, and nothing the
+ * allocator tracks says when that happens: the variable need not be named again
+ * for a read through the pointer, or a callee handed it, to want this value. A
+ * global is stored straight after its assignment for the same reason. Records
+ * and arrays are left alone, since their name holds an address and what a
+ * pointer reaches is the storage behind it.
+ */
+void store_addressed_def(basic_block_t *bb, const insn_t *insn)
+{
+    var_t *var = insn->rd;
+
+    if (!var || !var->address_taken || var->is_global)
+        return;
+    if (insn->opcode == OP_allocat)
+        return;
+    if (var->array_size || var->has_backing_storage)
+        return;
+    if (!var->ptr_level && (!var->type || is_record_type(var->type)))
+        return;
+
+    int reg = find_in_regs(var);
+    if (reg < 0 || !REGS[reg].polluted)
+        return;
+    store_var(bb, var, reg);
+}
+
 /* Assign registers across one basic block, and emit the phase-2 IR that carries
  * the assignment.
  */
@@ -3348,6 +3387,8 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             fflush(stdout); /* see fatal() */
             abort();
         }
+
+        store_addressed_def(bb, insn);
     }
 
     if (bb->next) {

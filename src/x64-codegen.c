@@ -90,12 +90,6 @@ bool folds_off;
 /* Callee-saved registers the function being emitted preserves. */
 int cur_saved_regs;
 
-/* Registers the allocator is holding a variable in for the whole of the
- * function being emitted, one bit each. Such a register is live everywhere, so
- * nothing that writes it may be dropped as dead.
- */
-int cur_pinned_regs;
-
 int x64_incoming_arg_base(int stack_size, int saved)
 {
     /* Past the frame, the saved registers, RBP and the return address. */
@@ -554,116 +548,6 @@ int cmp_mem_slot;
 bool cmp_imm_known;
 int cmp_imm_val;
 
-/* Opcodes whose "dest" names a register they write. Only opcodes that certainly
- * do are listed, so a live register is never mistaken for dead.
- */
-bool op_writes_dest(opcode_t op)
-{
-    switch (op) {
-    case OP_cmov:
-    case OP_load:
-    case OP_load_constant:
-    case OP_global_load:
-    case OP_assign:
-    case OP_add:
-    case OP_sub:
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-    case OP_lshift:
-    case OP_rshift:
-    case OP_bit_and:
-    case OP_bit_or:
-    case OP_bit_xor:
-    case OP_bit_not:
-    case OP_negate:
-    case OP_log_not:
-    case OP_eq:
-    case OP_neq:
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-    case OP_read:
-    case OP_address_of:
-    case OP_global_address_of:
-    case OP_trunc:
-    case OP_sign_ext:
-        return true;
-    default:
-        return false;
-    }
-}
-
-/* Opcodes whose src0 holds something other than a register number. Anything not
- * listed is assumed to read src0, which only costs a missed rewrite.
- */
-bool op_src0_is_reg(opcode_t op)
-{
-    switch (op) {
-    case OP_load:
-    case OP_load_constant:
-    case OP_global_load:
-    case OP_address_of:
-    case OP_global_address_of:
-    case OP_load_data_address:
-    case OP_load_rodata_address:
-    case OP_define:
-    case OP_label:
-    case OP_jump:
-        return false;
-    default:
-        return true;
-    }
-}
-
-/* Opcodes whose src1 is a register rather than a width, slot or immediate. */
-bool op_src1_is_reg(opcode_t op)
-{
-    switch (op) {
-    case OP_add:
-    case OP_sub:
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-    case OP_lshift:
-    case OP_rshift:
-    case OP_bit_and:
-    case OP_bit_or:
-    case OP_bit_xor:
-    case OP_eq:
-    case OP_neq:
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-    case OP_write:
-    case OP_cmov:
-        return true;
-    default:
-        return false;
-    }
-}
-
-/* Whether src2 names a register. Only a select does: it is the value kept when
- * the condition does not hold, and a scan that missed it would take that value
- * for dead and drop whatever computed it.
- */
-bool op_src2_is_reg(opcode_t op)
-{
-    return op == OP_cmov;
-}
-
-/* Whether @ir reads @reg as an operand. */
-bool ir_reads_reg(ph2_ir_t *ir, int reg)
-{
-    if (op_src2_is_reg(ir->op) && ir->src2 == reg)
-        return true;
-    if (op_src0_is_reg(ir->op) && ir->src0 == reg)
-        return true;
-    return op_src1_is_reg(ir->op) && ir->src1 == reg;
-}
-
 /* How far the forward scans below look. They answer "is this register dead from
  * here?", and a definite answer is only useful near the instruction being
  * emitted; scanning whole blocks made these quadratic in block size and cost
@@ -706,38 +590,6 @@ int func_saved_regs(func_t *func)
     if (top > REG_CNT - 1)
         top = REG_CNT - 1;
     return top - (X64_FIRST_CALLEE_SAVED - 1);
-}
-
-/* True when @reg still holds a live value past the end of @bb.
- *
- * reg_alloc() hands its register file to a successor that this block is the
- * only way into (bb_export_regs()), so a register can outlive the block that
- * filled it. Both scans below stop at the block boundary, and what they may
- * conclude there depends on this: with nothing carried, every register dies at
- * the end of a block and an unread value is dead.
- */
-bool reg_live_out_of_bb(basic_block_t *bb, int reg)
-{
-    basic_block_t *succs[3];
-
-    if (!bb || reg < 0 || reg >= REG_CNT)
-        return false;
-
-    /* A register the allocator pinned holds its variable on every path, so it
-     * is live out of every block regardless of what the successors record.
-     */
-    if ((cur_pinned_regs >> reg) & 1)
-        return true;
-
-    succs[0] = bb->next;
-    succs[1] = bb->then_;
-    succs[2] = bb->else_;
-
-    for (int i = 0; i < 3; i++) {
-        if (succs[i] && succs[i]->entry_regs && succs[i]->entry_regs[reg])
-            return true;
-    }
-    return false;
 }
 
 /* True when @reg is overwritten before any later read in its block, and is not
@@ -3799,7 +3651,6 @@ void code_generate(void)
         if (ph2_ir->op == OP_define) {
             emit_func = find_func(ph2_ir->func_name);
             cur_saved_regs = emit_func ? emit_func->saved_regs : 1;
-            cur_pinned_regs = emit_func ? emit_func->pinned_regs : 0;
             if (emit_func && emit_func->bbs) {
                 emit_bb = emit_func->bbs;
 
