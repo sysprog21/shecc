@@ -239,6 +239,7 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
 void perform_side_effect(block_t *parent, basic_block_t *bb);
 bool read_assignment_expression(block_t *parent, basic_block_t **bb);
 bool is_null_pointer_constant(var_t *value);
+bool is_record_type(const type_t *type);
 void read_control_expression(block_t *parent, basic_block_t **bb);
 basic_block_t *read_full_expression_statement(block_t *parent,
                                               basic_block_t *bb);
@@ -366,7 +367,9 @@ bool global_compound_literal_starts_here(void)
     next = cur_token->next->next;
     if (!next ||
         !((next->kind == T_identifier && find_type(next->literal, true)) ||
-          next->kind == T_struct || next->kind == T_union))
+          next->kind == T_struct || next->kind == T_union ||
+          next->kind == T_signed || next->kind == T_unsigned ||
+          next->kind == T_long))
         return false;
 
     /* Only a brace after the type name makes a compound literal; otherwise the
@@ -1646,6 +1649,106 @@ void diagnose_const_pointer_conversion(const var_t *from, const var_t *to)
     error_at("discarding const qualifier", cur_token_loc());
 }
 
+/* C99 6.5.16.1p1 lets an integer become a pointer without a cast only when it
+ * is a null pointer constant. @to is the pointer object, parameter or return
+ * type receiving @from; with @array_is_pointer an array declarator there is the
+ * pointer that a parameter declared as an array is adjusted to.
+ */
+void diagnose_integer_to_pointer_conversion(var_t *from,
+                                            const var_t *to,
+                                            bool array_is_pointer)
+{
+    if (!from || !to || !from->type || !to->type)
+        return;
+    if (!effective_pointer_depth(to) &&
+        !(array_is_pointer && (to->array_size || to->has_unsized_array)))
+        return;
+    if (!array_is_pointer && (to->array_size || to->has_unsized_array))
+        return;
+    if (effective_pointer_depth(from) || from->array_size ||
+        from->has_unsized_array || from->is_func || from->func_signature ||
+        from->pointee_func_signature || from->is_string_literal ||
+        from->type == TY_void || is_record_type(from->type) ||
+        is_null_pointer_constant(from))
+        return;
+    error_at("integer converted to pointer without a cast", cur_token_loc());
+}
+
+/* The function type @var points to, when @var is a function pointer object or
+ * value or a function designator; NULL otherwise. Callback arrays and slots,
+ * pointers to function pointers, are not function pointers here.
+ */
+static const func_t *pointed_function_type(const var_t *var)
+{
+    if (!var || !var->type || var->pointee_func_signature || var->array_size ||
+        var->has_unsized_array)
+        return NULL;
+    if (var->func_signature)
+        return var->func_signature;
+    if (var->type->func_signature && !var->type->is_direct_function_type &&
+        !var->ptr_level)
+        return var->type->func_signature;
+    if (var->is_func && var->var_name)
+        return find_func(var->var_name);
+    return NULL;
+}
+
+/* C99 6.5.16.1p1 converts between function pointers only when the functions
+ * have compatible types. A function without a prototype is compatible with a
+ * prototype that has no ellipsis and no parameter the default argument
+ * promotions change (6.7.5.3p15).
+ */
+static bool compatible_function_conversion(const func_t *from, const func_t *to)
+{
+    const func_t *prototyped = from->has_prototype ? from : to;
+
+    if (!compatible_function_signature(from, to))
+        return false;
+    if (from->has_prototype == to->has_prototype)
+        return true;
+    if (prototyped->va_args)
+        return false;
+    for (int i = 0; i < prototyped->num_params; i++)
+        if (parameter_changes_under_default_promotion(
+                &prototyped->param_defs[i]))
+            return false;
+    return true;
+}
+
+/* Diagnose a conversion of @from to the function pointer @to, or of a function
+ * pointer @from to the object pointer @to, in an initializer, assignment,
+ * argument or return. Only a null pointer constant converts to a function
+ * pointer from anything but a compatible function pointer or designator.
+ */
+void diagnose_function_pointer_conversion(var_t *from, const var_t *to)
+{
+    const func_t *from_function = pointed_function_type(from);
+    const func_t *to_function = pointed_function_type(to);
+
+    if (!from || !to || !from->type || !to->type ||
+        from->pointee_func_signature || to->pointee_func_signature)
+        return;
+    if (to_function && from_function) {
+        if (!compatible_function_conversion(from_function, to_function))
+            error_at("incompatible function pointer types", cur_token_loc());
+        return;
+    }
+    if (to_function) {
+        if (is_null_pointer_constant(from) || from->is_void_null_pointer ||
+            from->array_size || from->has_unsized_array)
+            return;
+        if (effective_pointer_depth(from))
+            error_at("incompatible function pointer types", cur_token_loc());
+        if (!is_record_type(from->type) && from->type != TY_void)
+            error_at("integer converted to pointer without a cast",
+                     cur_token_loc());
+        return;
+    }
+    if (from_function && effective_pointer_depth(to) && !to->array_size &&
+        !to->has_unsized_array)
+        error_at("incompatible function pointer types", cur_token_loc());
+}
+
 /* Plain, signed, and unsigned char are distinct C types despite sharing a byte
  * representation. Preserve that identity for implicit pointer conversions
  * without changing the legacy non-character pointer extensions.
@@ -1690,7 +1793,12 @@ bool incompatible_pointee_callback_conversion(const var_t *from,
     if (!to_signature && to->func_signature &&
         (to->array_size || to->has_unsized_array))
         to_signature = to->func_signature;
-    if (!from_signature && effective_pointer_depth(from) > 0 && from->type &&
+
+    /* A value cast to a callback typedef, `(callback_t) f`, carries its own
+     * signature: it is the callback, not a pointer to a callback slot.
+     */
+    if (!from_signature && !from->func_signature &&
+        effective_pointer_depth(from) > 0 && from->type &&
         from->type->func_signature && !from->type->is_direct_function_type)
         from_signature = from->type->func_signature;
     if (!to_signature && effective_pointer_depth(to) > 0 && to->type &&

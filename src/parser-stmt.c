@@ -744,13 +744,12 @@ type_t *read_enum_specifier(block_t *parent, bool *is_definition)
         }
 
         /* An enumeration constant has no linkage, so no other ordinary
-         * identifier of this block may share its name.
+         * identifier of this block, object or typedef name, may share its name.
          */
-        for (int i = 0; i < parent->locals.size; i++) {
-            if (!strcmp(parent->locals.elements[i]->var_name, token))
-                error_at("identifier redeclared as a different kind of symbol",
-                         cur_token_loc());
-        }
+        if (find_block_ordinary(parent, token,
+                                ORDINARY_VARIABLE | ORDINARY_TYPEDEF, NULL))
+            error_at("identifier redeclared as a different kind of symbol",
+                     cur_token_loc());
         reject_unlinked_scope_name(parent, token);
         add_scoped_constant(parent, token, val);
     } while (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL));
@@ -846,6 +845,11 @@ static basic_block_t *read_block_declarators(
 {
     block_decl_specifiers_t qualified;
     var_t *var;
+
+    /* The flag below covers only the first declarator; keep whether this list
+     * is a for initializer for the ones after a comma.
+     */
+    bool for_declaration = parsing_for_initializer_declaration;
 
     /* A record or enum specifier has been consumed, and qualifiers may follow
      * it before the first declarator. They qualify every declarator in the
@@ -1077,6 +1081,8 @@ static basic_block_t *read_block_declarators(
                 error_at("incompatible callback slot types in initializer",
                          cur_token_loc());
             diagnose_const_pointer_conversion(expr_result, var);
+            diagnose_integer_to_pointer_conversion(expr_result, var, false);
+            diagnose_function_pointer_conversion(expr_result, var);
             emit_object_assignment(parent, &bb, var, expr_result);
         }
     }
@@ -1096,6 +1102,10 @@ static basic_block_t *read_block_declarators(
         nv->is_const_qualified = var->is_const_qualified;
         nv->is_volatile = var->is_volatile;
         read_partial_var_decl(nv, var); /* partial */
+        if (strict_c99 && for_declaration &&
+            (nv->is_func || lex_peek(T_open_bracket, NULL)))
+            error_at("C99 for initializer cannot declare a function",
+                     cur_token_loc());
         reject_ordinary_typedef_collision(parent, nv);
         if (lex_peek(T_open_bracket, NULL)) {
             if (spec->is_static || spec->is_register || spec->is_auto)
@@ -1444,10 +1454,9 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
         bool inherited_pointee_array = base->pointee_array_size != 0;
         bool direct_function_alias =
             decl.is_direct_function_declarator && decl.is_func &&
-            decl.func_signature && !decl.ptr_level && !decl.array_size &&
+            decl.func_signature && !decl.array_size &&
             !decl.pointee_array_size && !base->ptr_level &&
             !is_record_type(base) && !base->is_floating &&
-            !direct_function_signature->va_args &&
             !direct_function_signature->returns_aggregate;
         bool callback_pointer_alias =
             decl.is_func && decl.func_signature &&
@@ -1637,6 +1646,11 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
         alias->is_volatile_qualified =
             decl.is_volatile || base->is_volatile_qualified;
         if (direct_function_alias) {
+            /* The stars of `char *name_t(void)` belong to the return type,
+             * which the signature already records.
+             */
+            alias->ptr_level = base->ptr_level;
+            alias->pointer_const_mask = base->pointer_const_mask;
             alias->func_signature = decl.func_signature;
             alias->is_direct_function_type = true;
         }

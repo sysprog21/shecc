@@ -812,6 +812,11 @@ struct var {
      */
     bool is_string_literal;
 
+    /* The null pointer constant `(void *) 0` (C99 6.3.2.3p3), which unlike any
+     * other void pointer converts to a function pointer.
+     */
+    bool is_void_null_pointer;
+
     /* `&__func__` is a pointer to the compiler's static character array. Its
      * address has the same machine representation as the decayed char pointer,
      * but one unary dereference must restore that pointer without loading the

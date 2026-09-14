@@ -555,11 +555,65 @@ int read_const_expr(block_t *scope)
     return val_stack[0];
 }
 
+/* Whether the declarator ahead is a parenthesized name, `int (x)` or `int
+ * (a)[3]`, which C99 6.7.5p6 declares exactly as the name alone. In a parameter
+ * a typedef name in parentheses is instead an abstract function declarator.
+ */
+static bool grouped_declarator_name_follows(block_t *scope, bool is_param)
+{
+    token_t *open = cur_token->next;
+    token_t *name = open ? open->next : NULL;
+
+    return open && open->kind == T_open_bracket && name &&
+           name->kind == T_identifier && name->next &&
+           name->next->kind == T_close_bracket &&
+           !(is_param && find_visible_type(name->literal, scope));
+}
+
+/* Whether a parameter's declarator ahead is an abstract function declarator: a
+ * parenthesis opening a parameter list, which starts with a type name or is
+ * empty, rather than a nested declarator.
+ */
+static bool abstract_function_parameter_follows(block_t *scope)
+{
+    token_t *open = cur_token->next;
+    token_t *first = open ? open->next : NULL;
+
+    if (!open || open->kind != T_open_bracket || !first)
+        return false;
+    if (first->kind == T_identifier)
+        return find_visible_type(first->literal, scope);
+    return first->kind == T_close_bracket || first->kind == T_struct ||
+           first->kind == T_union || first->kind == T_enum ||
+           first->kind == T_signed || first->kind == T_unsigned ||
+           first->kind == T_long || first->kind == T_const ||
+           first->kind == T_volatile;
+}
+
+/* Read the parameter list of a parameter declared with a function type, which
+ * C99 6.7.5.3p8 adjusts to a pointer to that function, into @vd with the
+ * representation of `int (*fn)(int)`.
+ */
+static void read_adjusted_function_parameter(var_t *vd)
+{
+    func_t *func = arena_alloc_func();
+
+    memcpy(&func->return_def, vd, sizeof(var_t));
+    func->returns_aggregate = is_record_type(func->return_def.type) &&
+                              !has_effective_pointer(&func->return_def);
+    read_parameter_list_decl(func, true);
+    vd->func_signature = func;
+    vd->is_func = true;
+    vd->parenthesized_function_pointer_level = 1;
+}
+
 void read_inner_var_decl(var_t *vd,
                          bool anon,
                          bool is_param,
                          bool is_record_member)
 {
+    bool grouped_name;
+
     /* Preserve typedef pointer level - don't reset if already inherited */
     vd->init_val = 0;
     vd->has_direct_array_declarator = false;
@@ -613,8 +667,19 @@ void read_inner_var_decl(var_t *vd,
         fixed_array_shape_to_var(vd, &empty_shape);
     }
 
+    grouped_name = (!anon || is_param) &&
+                   grouped_declarator_name_follows(vd->scope, is_param);
+
+    /* In a parameter, `int (T)` for a typedef name T and `int (void)` are
+     * abstract function declarators, adjusted to pointers like `int fn(T)`.
+     */
+    if (is_param && abstract_function_parameter_follows(vd->scope)) {
+        read_adjusted_function_parameter(vd);
+        return;
+    }
+
     /* is it function pointer declaration? */
-    if (lex_accept(T_open_bracket)) {
+    if (!grouped_name && lex_accept(T_open_bracket)) {
         func_t *func = arena_alloc_func();
         char temp_name[MAX_VAR_LEN];
         int nested_ptr_level = 0;
@@ -878,11 +943,15 @@ void read_inner_var_decl(var_t *vd,
          * permit it to be omitted. Other anonymous type-name paths retain their
          * original no-identifier grammar.
          */
+        if (grouped_name)
+            lex_expect(T_open_bracket);
         if ((!anon || (is_param && lex_peek(T_identifier, NULL))) &&
             !lex_peek(T_colon, NULL)) {
             char temp_name[MAX_VAR_LEN];
             lex_ident(T_identifier, temp_name);
             vd->var_name = intern_string(temp_name);
+            if (grouped_name)
+                lex_expect(T_close_bracket);
             if (!lex_peek(T_open_bracket, NULL) && !is_param) {
                 if (vd->is_global) {
                     opstack_push(vd);
@@ -1070,6 +1139,15 @@ void read_inner_var_decl(var_t *vd,
                 "element",
                 cur_token_loc());
 
+        /* A parameter declared as a function, `int fn(int)`, is adjusted to a
+         * pointer to it (C99 6.7.5.3p8): read it as `int (*fn)(int)`.
+         */
+        if (is_param && lex_peek(T_open_bracket, NULL) && !vd->array_size &&
+            !vd->has_unsized_array) {
+            read_adjusted_function_parameter(vd);
+            return;
+        }
+
         /* The ordinary declarator spelling `result name(parameters)` is a
          * function type just as the parenthesized pointer form above is. Keep
          * this syntax-only signature on the declaration; block typedefs can
@@ -1111,6 +1189,34 @@ void read_inner_var_decl(var_t *vd,
              * indirect-call lowering needs its prototype.
              */
             vd->func_signature = vd->type->func_signature;
+            vd->is_func = false;
+        } else if (vd->ptr_level == 1 &&
+                   (vd->array_size || vd->has_unsized_array) &&
+                   !vd->array_dim2 && vd->type->is_direct_function_type &&
+                   vd->type->func_signature) {
+            /* `unary_t *table[2]` is `int (*table[2])(int)`: an array of
+             * callbacks, which takes that declarator's representation, typed by
+             * the return type and carrying the prototype.
+             */
+            func_t *signature = vd->type->func_signature;
+
+            vd->type = signature->return_def.type;
+            vd->ptr_level = signature->return_def.ptr_level;
+            vd->func_signature = signature;
+            vd->is_func = true;
+        } else if (vd->ptr_level == 2 && !vd->array_size &&
+                   !vd->has_unsized_array &&
+                   vd->type->is_direct_function_type &&
+                   vd->type->func_signature) {
+            /* `unary_t **slot` is `int (**slot)(int)`, a pointer to a callback
+             * slot such as an element of the array above.
+             */
+            func_t *signature = vd->type->func_signature;
+
+            vd->type = signature->return_def.type;
+            vd->ptr_level = signature->return_def.ptr_level + 1;
+            vd->pointee_func_signature = signature;
+            vd->func_signature = NULL;
             vd->is_func = false;
         } else if (vd->ptr_level || vd->type->ptr_level || vd->array_size) {
             /* A derived declarator is not itself a callable callback object.

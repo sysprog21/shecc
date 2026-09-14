@@ -303,8 +303,7 @@ test_long_long_after_int()
 typedef int (*call_t)(int, long long);
 int words(int a, int low, int high, int unused) { return low == 3 && high == 2; }
 int main() {
-    void *raw = words;
-    call_t call = raw;
+    call_t call = (call_t) words;
     if (call(1, 0x200000003LL)) {
         printf("PASS\n");
         return 0;
@@ -323,8 +322,7 @@ test_variadic_long_long()
 typedef int (*call_t)(int, ...);
 int words(int a, int skipped, int low, int high) { return low == 3 && high == 2; }
 int main() {
-    void *raw = words;
-    call_t call = raw;
+    call_t call = (call_t) words;
     if (call(1, 0x200000003LL)) {
         printf("PASS\n");
         return 0;
@@ -352,8 +350,7 @@ int words(int a, int b, int c, int d, int e, int f, int g, int low, ...) {
     return low == 3 && high == 2;
 }
 int main() {
-    void *raw = words;
-    call_t call = raw;
+    call_t call = (call_t) words;
     if (call(1, 2, 3, 4, 5, 6, 7, 0x200000003LL)) {
         printf("PASS\n");
         return 0;

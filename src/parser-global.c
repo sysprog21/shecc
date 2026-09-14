@@ -196,6 +196,9 @@ bool read_global_function_declarator(block_t *block,
         if (!allow_definition)
             error_at("function definition must be the only declarator",
                      next_token_loc());
+        if (inherited_direct_function_type)
+            error_at("function definition cannot take its type from a typedef",
+                     next_token_loc());
         if (check_decl && func_tmp.bbs)
             error_at("redefinition of function", next_token_loc());
         if (is_incomplete_record_object(&func->return_def))
@@ -312,7 +315,8 @@ bool read_global_declarator(block_t *block,
     nv->is_volatile = is_volatile;
     read_inner_var_decl(nv, false, false, false);
     nv->is_extern = is_extern && !lex_peek(T_assign, NULL);
-    if (lex_peek(T_open_bracket, NULL))
+    if (lex_peek(T_open_bracket, NULL) ||
+        (nv->is_func && nv->type->is_direct_function_type))
         return read_global_function_declarator(block, nv, is_static,
                                                allow_definition);
     bool is_definition = !nv->is_extern;
@@ -389,14 +393,14 @@ void parse_global_compound_record_init(var_t *var, block_t *block)
  */
 void parse_global_compound_scalar_init(var_t *var, block_t *block)
 {
-    char type_name[MAX_ID_LEN];
     type_t *compound_type;
 
     UNUSED(block);
 
+    /* The type name may be spelled with keywords, as in `(unsigned long)`. */
     lex_expect(T_open_bracket);
-    lex_ident(T_identifier, type_name);
-    compound_type = find_type(type_name, true);
+    compound_type =
+        read_type_name_specifiers(var->scope ? var->scope : GLOBAL_BLOCK);
     lex_expect(T_close_bracket);
 
     if (!compound_type || is_record_type(compound_type) || var->ptr_level ||
@@ -605,7 +609,8 @@ bool read_global_record_declarator(block_t *block,
     var->is_volatile = is_volatile;
     read_inner_var_decl(var, false, false, false);
     var->is_extern = is_extern && !lex_peek(T_assign, NULL);
-    if (lex_peek(T_open_bracket, NULL))
+    if (lex_peek(T_open_bracket, NULL) ||
+        (var->is_func && var->type->is_direct_function_type))
         return read_global_function_declarator(block, var, is_static,
                                                allow_definition);
     bool is_definition = !var->is_extern;
@@ -695,7 +700,9 @@ void read_global_decl(block_t *block,
     read_full_var_decl(var, false, false, false);
     var->is_extern = is_extern && !lex_peek(T_assign, NULL);
 
-    if (lex_peek(T_open_bracket, NULL)) {
+    /* `unary_t f;` with a function typedef declares the function f. */
+    if (lex_peek(T_open_bracket, NULL) ||
+        (var->is_func && var->type->is_direct_function_type)) {
         if (read_global_function_declarator(block, var, is_static, true))
             return;
     } else {
@@ -932,6 +939,32 @@ static void read_global_typedef_declarator(block_t *block,
                 type->is_volatile_qualified = true;
             return;
         }
+
+        /* `typedef int (*row_ptr)[2]` points to a whole row. As a block-scope
+         * alias does, keep the pointer-sized descriptor and carry the row
+         * bounds and element separately.
+         */
+        if (!declarator.is_func &&
+            declarator.has_direct_pointee_array_declarator &&
+            !declarator.array_size && !base->ptr_level && !base->array_size &&
+            !base->func_signature &&
+            declarator.ptr_level ==
+                declarator.pointee_array_element_ptr_level + 1 &&
+            declarator.pointee_array_element_ptr_level <= 1) {
+            strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
+            type->type_name[MAX_TYPE_LEN - 1] = '\0';
+            type->ptr_level = declarator.ptr_level;
+            type->size = PTR_SIZE;
+            type->pointer_const_mask |= declarator.pointer_const_mask;
+            type->pointee_array_size = declarator.pointee_array_size;
+            type->pointee_array_dim2 = declarator.pointee_array_dim2;
+            type->pointee_array_dim3 = declarator.pointee_array_dim3;
+            type->pointee_array_dim4 = declarator.pointee_array_dim4;
+            type->pointee_array_element_ptr_level =
+                declarator.pointee_array_element_ptr_level;
+            type->pointee_array_element_type = (type_t *) base;
+            return;
+        }
         if (!declarator.is_func)
             error_at(
                 "Typedef parenthesized declarator must be a function "
@@ -966,6 +999,30 @@ static void read_global_typedef_declarator(block_t *block,
     }
 
     lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
+
+    /* `typedef int unary_t(int)` names a function type. Mirror the block-scope
+     * direct function alias: its scalar or void base is only the return type,
+     * and the prototype stays on the descriptor.
+     */
+    if (lex_peek(T_open_bracket, NULL) && !base->ptr_level &&
+        !base->array_size && !base->func_signature && !is_record_type(base) &&
+        !base->is_floating) {
+        func_t *func = arena_alloc_func();
+
+        /* The stars of `char *name_t(void)` belong to the return type. */
+        func->return_def.type = (type_t *) base;
+        func->return_def.ptr_level = type->ptr_level;
+        func->return_def.pointer_const_mask = type->pointer_const_mask;
+        func->return_def.scope = block;
+        type->ptr_level = 0;
+        type->pointer_const_mask = 0;
+        type->size = base->size;
+        read_parameter_list_decl(func, true);
+        type->base_type = TYPE_typedef;
+        type->func_signature = func;
+        type->is_direct_function_type = true;
+        return;
+    }
 
     /* A typedef declarator may wrap an existing array typedef: `typedef row
      * matrix[2]`. Gather its leading bounds first, then prepend them to the

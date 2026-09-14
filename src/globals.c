@@ -607,23 +607,25 @@ type_t *find_type(const char *type_name, int flag)
                 continue;
             if (!strcmp(TYPES[i].type_name, type_name)) {
                 /* If it is a forwardly declared alias of a structure, return
-                 * the base structure type.
+                 * the base structure type. A function type alias with a void
+                 * return is no such alias despite its zero size.
                  */
                 type_t *alias = &TYPES[i];
                 type_t *base = alias->base_struct;
 
                 if (alias->base_type != TYPE_typedef || alias->size ||
-                    alias->ptr_level)
+                    alias->ptr_level || alias->is_direct_function_type)
                     return alias;
 
                 /* The base would drop the qualifiers of `typedef const struct S
                  * cs_t;`, so a qualified alias keeps its own descriptor and
                  * takes the layout once the tag has been completed.
                  */
-                if (!base || !base->size ||
-                    (!alias->is_const_qualified &&
-                     !alias->is_volatile_qualified))
+                if (!base || (!alias->is_const_qualified &&
+                              !alias->is_volatile_qualified))
                     return base;
+                if (!base->size)
+                    return alias;
                 alias->size = base->size;
                 alias->alignment = base->alignment;
                 alias->fields = base->fields;

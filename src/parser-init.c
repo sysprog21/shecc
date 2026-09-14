@@ -322,6 +322,9 @@ var_t *read_global_cast_integer_address(block_t *parent,
     address->var_name = gen_name();
     address->init_val = value;
     address->is_const = true;
+
+    /* The cast's result is a pointer, not the integer it was spelled with. */
+    address->ptr_level = 1;
     add_insn(parent, bb, OP_load_constant, address, NULL, NULL, 0, NULL);
     return address;
 }
@@ -1634,6 +1637,7 @@ bool parse_struct_field_values(block_t *parent,
             if (field_val_raw) {
                 field_addr =
                     member_address(parent, bb, target_addr, field, field_addr);
+                diagnose_function_pointer_conversion(field_val_raw, field);
                 if (is_record_type(field->type) &&
                     is_record_object(field_val_raw)) {
                     emit_record_copy_to_address(parent, bb, field_addr,
@@ -1848,6 +1852,7 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
      * not only callback-pointer returns.
      */
     rs1 = materialize_function_designator(parent, &bb, rs1);
+    diagnose_function_pointer_conversion(rs1, &parent->func->return_def);
     if (parent->func->return_def.type->func_signature) {
         rs1->func_signature = parent->func->return_def.type->func_signature;
     }
@@ -1867,6 +1872,8 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
      * return value must become 0 or 1 before it crosses the ABI boundary,
      * rather than leaving an address in the low return byte.
      */
+    diagnose_integer_to_pointer_conversion(rs1, &parent->func->return_def,
+                                           false);
     if (!parent->func->return_def.type->func_signature)
         rs1 = resize_to(parent, &bb, rs1, parent->func->return_def.type,
                         parent->func->return_def.ptr_level);

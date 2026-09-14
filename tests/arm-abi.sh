@@ -370,8 +370,7 @@ test_long_long_after_int()
 typedef int (*call_t)(int, long long);
 int words(int a, int skipped, int low, int high) { return low == 3 && high == 2; }
 int main() {
-    void *raw = words;
-    call_t call = raw;
+    call_t call = (call_t) words;
     if (call(1, 0x200000003LL)) {
         printf("PASS\n");
         return 0;
@@ -393,8 +392,7 @@ int words(int a, int b, int c, int skipped, int low, int high, int e) {
     return low == 3 && high == 2 && e == 9;
 }
 int main() {
-    void *raw = words;
-    call_t call = raw;
+    call_t call = (call_t) words;
     if (call(1, 2, 3, 0x200000003LL, 9)) {
         printf("PASS\n");
         return 0;

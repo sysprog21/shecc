@@ -151,10 +151,11 @@ static bool sizeof_walk_indirect(var_t *object,
     }
     if (depth <= 0)
         error_at(message, &op->location);
-    if (object->pointee_array_size > 0 &&
-        depth == object->pointee_array_element_ptr_level + 1) {
+    if (is_pointee_array_pointer(object)) {
         /* A pointer to an array designates the complete array, so the
-         * dereference restores its bounds rather than decaying them.
+         * dereference restores its bounds rather than decaying them. The
+         * element depth excludes pointers hidden in the base typedef, as in
+         * `str (*p)[3]` for a char pointer typedef str.
          */
         fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(object);
 
@@ -342,6 +343,25 @@ static bool scan_sizeof_postfix_operand(block_t *scope,
                     "internal-linkage object",
                     &token->location);
             memcpy(object, root, sizeof(*object));
+
+            /* C99 6.7.5.3p7 adjusts a parameter declared as an array to a
+             * pointer to its element, so `sizeof a` of `int a[4]` is a
+             * pointer's size. The walk owns the adjusted operand like one with
+             * an operator applied.
+             */
+            if (root->array_size > 0 && is_function_parameter(root, scope)) {
+                fixed_array_shape_t shape = fixed_array_shape_from_var(root);
+                fixed_array_shape_t scalar = {0};
+
+                fixed_array_shape_drop_outer(&shape);
+                fixed_array_shape_to_var(object, &scalar);
+                if (shape.rank) {
+                    fixed_array_shape_to_pointee_var(object, &shape);
+                    object->pointee_array_element_ptr_level = root->ptr_level;
+                }
+                object->ptr_level++;
+                walk->operators++;
+            }
         } else if (target) {
             if (external_inline && target->is_static)
                 error_at(
@@ -601,6 +621,18 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         string_groups = sizeof_grouped_literal_depth(cur_token->next, T_string);
         wstring_groups =
             sizeof_grouped_literal_depth(cur_token->next, T_wstring);
+    } else {
+        /* A subscript binds tighter than sizeof: `sizeof "ab"[1]` measures one
+         * element, which the expression path below reads.
+         */
+        token_t *after = cur_token->next;
+
+        while (after && (after->kind == T_string || after->kind == T_wstring))
+            after = after->next;
+        if (after && after->kind == T_open_square) {
+            string_groups = -1;
+            wstring_groups = -1;
+        }
     }
     if ((lex_peek(T_string, NULL) || string_groups > 0) && string_groups >= 0) {
         int size;

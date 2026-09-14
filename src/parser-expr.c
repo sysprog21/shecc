@@ -1016,6 +1016,8 @@ static void read_compound_literal_operand(block_t *parent,
             if (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL))
                 error_at("Too many elements in scalar compound literal",
                          cur_token_loc());
+            diagnose_integer_to_pointer_conversion(initializer, compound_var,
+                                                   false);
         } else {
             /* Empty pointer compound literal: (int*){} */
             initializer = require_typed_var(parent, tn->type);
@@ -1053,7 +1055,9 @@ static void read_compound_literal_operand(block_t *parent,
         opstack_push(compound_var);
     } else if (tn->type->base_type == TYPE_int ||
                tn->type->base_type == TYPE_short ||
-               tn->type->base_type == TYPE_char) {
+               tn->type->base_type == TYPE_char ||
+               tn->type->base_type == TYPE_long ||
+               tn->type->base_type == TYPE_long_long) {
         /* Handle empty compound literals */
         if (lex_peek(T_close_curly, NULL)) {
             /* Empty compound literal: (int){} */
@@ -1068,9 +1072,8 @@ static void read_compound_literal_operand(block_t *parent,
             emit_object_assignment(parent, bb, compound_var, zero);
             opstack_push(compound_var);
             compound_object = compound_var;
-        } else if (lex_peek(T_numeric, NULL) || lex_peek(T_identifier, NULL) ||
-                   lex_peek(T_char, NULL)) {
-            /* Parse first element */
+        } else {
+            /* Parse first element, any assignment expression */
             read_expr(parent, bb);
             read_ternary_operation(parent, bb);
 
@@ -1161,6 +1164,8 @@ static void read_compound_literal_operand(block_t *parent,
             } else {
                 /* Single value: (int){42} - scalar compound literal */
                 var_t *initializer = opstack_pop();
+                diagnose_integer_to_pointer_conversion(initializer,
+                                                       compound_var, false);
                 add_insn(parent, *bb, OP_allocat, compound_var, NULL, NULL, 0,
                          NULL);
                 emit_object_assignment(parent, bb, compound_var, initializer);
@@ -1362,6 +1367,9 @@ static void read_cast_operand(block_t *parent,
      */
     if (incompatible_const_pointer_conversion(expr_var, cast_var))
         printf("Warning: discarding const qualifier in cast\n");
+    cast_var->is_void_null_pointer = tn->ptr_level == 1 &&
+                                     tn->type == TY_void &&
+                                     is_null_pointer_constant(expr_var);
 
     /* Conversion to _Bool compares against zero (C99 6.3.1.2) rather than
      * truncating: (_Bool) 0x100 is 1, as is a nonzero high word or pointer.
@@ -1799,11 +1807,18 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
         is_neg = true;
     }
 
-    if (lex_peek(T_string, NULL))
-        read_literal_param(parent, *bb);
-    else if (lex_peek(T_wstring, NULL))
-        read_wstring_param(parent, *bb);
-    else if (lex_peek(T_char, NULL))
+    if (lex_peek(T_string, NULL) || lex_peek(T_wstring, NULL)) {
+        if (lex_peek(T_string, NULL))
+            read_literal_param(parent, *bb);
+        else
+            read_wstring_param(parent, *bb);
+
+        /* A string literal is an array lvalue, so it takes a subscript like any
+         * other array operand (C99 6.5.2.1): `"ab"[1]` is 'b'.
+         */
+        if (lex_peek(T_open_square, NULL))
+            lower_postfix_operators(parent, bb);
+    } else if (lex_peek(T_char, NULL))
         read_char_param(parent, *bb);
     else if (lex_peek(T_wchar, NULL))
         read_wchar_param(parent, *bb);
@@ -2994,6 +3009,13 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
         if (pointer_row_element_type)
             t->is_const_qualified = lvalue->type->is_const_qualified;
 
+        /* A loaded pointer-to-array member, as in `*s.rows`, still points to a
+         * whole row.
+         */
+        if (!lvalue->subscript_depth && lvalue->decl &&
+            lvalue->decl->pointee_array_size && !lvalue->pointee_func_signature)
+            copy_pointee_array_shape(t, lvalue->decl);
+
         /* Retain a callback prototype even through a selected slot. A direct
          * loaded callback is callable, while unary `*` restores this marker
          * after consuming an extra object-pointer level.
@@ -3435,10 +3457,19 @@ void read_lvalue(lvalue_t *lvalue,
                                     !!is_array_declarator(var);
             indexes_fixed_array_pointer_slot =
                 !subscript_depth && is_direct_fixed_array_pointer_slot(var);
+
+            /* In `str (*p)[3]` for a char pointer typedef str, the element
+             * pointer is hidden in the base type rather than counted in the
+             * element depth.
+             */
             indexes_direct_pointee_array =
                 !subscript_depth && var->pointee_array_size > 0 &&
-                var->pointee_array_element_ptr_level > 0 &&
-                indexed_ptr_level == var->pointee_array_element_ptr_level + 1;
+                ((var->pointee_array_element_ptr_level > 0 &&
+                  indexed_ptr_level ==
+                      var->pointee_array_element_ptr_level + 1) ||
+                 (!var->pointee_array_element_ptr_level &&
+                  !var->type->pointee_array_size && var->type->ptr_level &&
+                  var->ptr_level == 1 && !is_array_declarator(var)));
 
             /* `int (*p)[N]` selects an array row on its first subscript even
              * though that row's scalar elements have no pointer depth. Keep
@@ -4291,6 +4322,15 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
         vd->type = integer_binary_result_type(OP_add, true_val, false_val);
         true_val = resize_to(parent, &then_, true_val, vd->type, 0);
         false_val = resize_to(parent, &else_, false_val, vd->type, 0);
+    } else if (!true_array && !false_array) {
+        /* With a pointer operand the result has that pointer's type, whether
+         * the other operand is a pointer or a null pointer constant (C99
+         * 6.5.15p6). An array operand converts to a pointer to its element.
+         */
+        var_t *pointer_value = true_ptr_like ? true_val : false_val;
+
+        vd->type = pointer_value->type;
+        vd->ptr_level = pointer_value->ptr_level + !!pointer_value->array_size;
     }
     add_insn(parent, then_, OP_assign, vd, true_val, NULL, 0, NULL);
     add_insn(parent, else_, OP_assign, vd, false_val, NULL, 0, NULL);
@@ -4602,6 +4642,8 @@ bool read_body_assignment(var_t *var,
             if (lvalue.is_func) {
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
+                if (!lvalue.subscript_depth)
+                    diagnose_function_pointer_conversion(rs2, lvalue.decl);
 
                 /* is_func labels both function symbols and function-pointer
                  * variables. A variable on the RHS must contribute its stored
@@ -4637,6 +4679,8 @@ bool read_body_assignment(var_t *var,
             } else if (lvalue.is_reference) {
                 rs2 = opstack_pop();
                 rs1 = opstack_pop();
+                if (!lvalue.subscript_depth)
+                    diagnose_function_pointer_conversion(rs2, lvalue.decl);
                 if (lvalue.pointee_func_signature) {
                     /* `slots[index]` denotes a callback slot whose descriptor
                      * is carried by the array, not by its scalar base type.
@@ -4727,6 +4771,8 @@ bool read_body_assignment(var_t *var,
                 } else if (incompatible_const_pointer_conversion(rs1, vd)) {
                     diagnose_const_pointer_conversion(rs1, vd);
                 } else {
+                    diagnose_integer_to_pointer_conversion(rs1, vd, false);
+                    diagnose_function_pointer_conversion(rs1, vd);
                     rs1 = resize_var(parent, bb, rs1, vd);
                     mark_var_mutated(vd);
                     add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);

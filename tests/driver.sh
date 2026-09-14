@@ -1387,6 +1387,29 @@ try_compile_error_message "String literal initializer has incompatible array ele
 int main(void) { int values[3] = {"ab"}; return values[0]; }
 EOF
 
+# A string literal is an array lvalue and takes a subscript directly; sizeof
+# then measures the element and & yields its address.
+try_ 0 << 'EOF'
+int id(int x) { return x; }
+int main(void) {
+    char c = "ab"[1];
+    char s[3] = {"ab"[1], 'c'};
+    const char *p = &"xyz"[1];
+    int i = 2;
+    if (c != 'b' || s[0] != 'b' || s[1] != 'c' || s[2])
+        return 1;
+    if (p[0] != 'y' || p[1] != 'z' || "hello"[i] != 'l')
+        return 2;
+    if (sizeof "ab"[1] != 1 || sizeof("abc"[0]) != 1 ||
+        sizeof L"ab"[0] != sizeof(wchar_t))
+        return 3;
+    if (L"hi"[1] != 'i' || -"\x05"[0] != -5 || id("xyz"[2]) != 'z' ||
+        "ab" "cd"[3] != 'd')
+        return 4;
+    return 0;
+}
+EOF
+
 # In a static initializer an element of a narrow string literal is an arithmetic
 # constant and &"ab"[1] an address constant, as gcc accepts; an element of a
 # wide literal is not a constant there, nor in an enumerator.
@@ -4525,6 +4548,91 @@ int main(void) {
     return p[1][0];
 }
 EOF
+# The same pointer-to-array aliases declared at file scope.
+try_ 0 << EOF
+typedef int (*row_pointer)[2];
+typedef int (*plane_pointer)[2][3];
+typedef char *(*string_row_pointer)[3];
+int row[2] = {3, 4};
+int plane[2][3] = {{1, 2, 3}, {4, 5, 6}};
+char *strings[3] = {"ab", "cd", "ef"};
+row_pointer global_row = &row;
+int first(row_pointer p) { return (*p)[1] + p[0][0]; }
+int main(void) {
+    plane_pointer q = &plane;
+    string_row_pointer r = &strings;
+    return first(&row) != 7 || (*global_row)[1] != 4 || (*q)[1][2] != 6 ||
+           r[0][1][1] != 'd' || sizeof(row_pointer) != sizeof(int *) ||
+           sizeof(*global_row) != 2 * sizeof(int) ||
+           sizeof(*q) != 6 * sizeof(int) || sizeof(*r) != 3 * sizeof(char *);
+}
+EOF
+
+# A pointer to a pointer to an array still points to the array after one
+# dereference, and a pointer typedef as the element type stays pointer-sized.
+try_ 0 << EOF
+typedef int row[3];
+typedef int (*row_pointer)[3];
+typedef int *(*slot_row_pointer)[3];
+typedef char *str;
+int x = 9;
+row r = {4, 5, 6};
+int *slots[3] = {&x, 0, 0};
+str strings[3] = {"ab", "cd", "ef"};
+int main(void) {
+    row *g2 = &r;
+    row_pointer t = &r;
+    row_pointer *tt = &t;
+    int (**direct)[3] = &t;
+    slot_row_pointer u = &slots;
+    slot_row_pointer *uu = &u;
+    str (*p)[3] = &strings;
+    p[0][2] = "gh";
+    return (*g2)[2] != 6 || (*tt)[0][1] != 5 || (*direct)[0][2] != 6 ||
+           sizeof(**tt) != 3 * sizeof(int) || **uu != slots ||
+           ***uu != &x || ****uu != 9 || sizeof(*p) != 3 * sizeof(str) ||
+           sizeof(p[0][1]) != sizeof(str) || p[0][1][1] != 'd' ||
+           strings[2][1] != 'h';
+}
+EOF
+# A pointer-to-array member keeps its row once loaded: `*s.rows` is the row.
+try_ 0 << EOF
+typedef int (*row_pointer)[3];
+int row[3] = {1, 2, 3};
+int plane[2][3] = {{1, 2, 3}, {4, 5, 6}};
+char *strings[2] = {"ab", "cd"};
+struct S {
+    int (*row)[3];
+    row_pointer alias;
+    int (*plane)[2][3];
+    char *(*strings)[2];
+    int (**slot)[3];
+};
+int main(void) {
+    struct S s;
+    struct S *ps = &s;
+    int *first;
+    s.row = &row;
+    s.alias = &row;
+    s.plane = &plane;
+    s.strings = &strings;
+    s.slot = &s.row;
+    first = *s.row;
+    (*s.row)[0] = 7;
+    return (*s.row)[1] != 2 || (*ps->row)[2] != 3 || first[1] != 2 ||
+           (*s.alias)[0] != 7 || (*ps->plane)[1][2] != 6 ||
+           (*s.strings)[1][1] != 'd' || sizeof(*s.row) != 3 * sizeof(int) ||
+           (**s.slot)[2] != 3 || row[0] != 7;
+}
+EOF
+try_compile_error << EOF
+typedef const int (*plane_pointer)[2][3];
+int planes[1][2][3];
+int main(void) {
+    plane_pointer p = &planes[0];
+    return ((*p)[1][2] = 15);
+}
+EOF
 try_ 7 << EOF
 struct typedef_pair { int left; int right; };
 typedef struct typedef_pair *pair_pointer;
@@ -7456,6 +7564,31 @@ int main(void) {
 }
 EOF
 
+# A file-scope function typedef names the same function type: pointers to it,
+# parameters, and a declarator that declares a function. A definition cannot
+# take its type from the typedef.
+try_ 0 << EOF
+typedef int unary_t(int), count_t;
+typedef void setter_t(int *);
+int plus1(int value) { return value + 1; }
+void set3(int *p) { *p = 3; }
+unary_t plus2, *global_callback = plus1;
+static unary_t times2;
+count_t three = 3;
+int apply(unary_t *callback, int value) { return callback(value); }
+int main(void) {
+    unary_t *callback = plus1;
+    setter_t *setter = set3;
+    int x = 0;
+    setter(&x);
+    return callback(7) != 8 || global_callback(1) != 2 || plus2(1) != 3 ||
+           times2(4) != 8 || apply(plus1, 2) != 3 || x != three ||
+           sizeof(unary_t *) != sizeof(void *);
+}
+int plus2(int value) { return value + 2; }
+static int times2(int value) { return value * 2; }
+EOF
+
 # A record's first member survives a spill of the register that held the
 # record's allocation address, here forced by an indirect call.
 try_ 0 << EOF
@@ -7471,6 +7604,78 @@ int main(void) {
     local.callback = five;
     return global_thunk() + h.callback() + local.callback() != 15;
 }
+EOF
+
+# Function typedefs may be variadic or return a pointer, at both scopes.
+try_ 0 << EOF
+typedef int count_t(int, ...);
+typedef char *name_t(void);
+int count(int n, ...) { return n; }
+char *name(void) { return "abc"; }
+count_t *global_count = count;
+name_t *global_name = name;
+count_t count2;
+name_t name2;
+int call_count(count_t *f) { return f(2, 5, 6); }
+int main(void) {
+    typedef int local_count_t(int, ...);
+    typedef char *local_name_t(void);
+    local_count_t *lc = count;
+    local_name_t *ln = name2;
+    name_t *nn = name;
+    return lc(3, 1, 2, 3) != 3 || ln()[0] != 'x' || global_count(1, 4) != 1 ||
+           global_name()[2] != 'c' || count2(7) != 7 || name2()[1] != 'y' ||
+           call_count(count) != 2 || nn()[1] != 'b' ||
+           sizeof(name_t *) != sizeof(void *);
+}
+int count2(int n, ...) { return n; }
+char *name2(void) { return "xyz"; }
+EOF
+
+# Arrays of pointers to a function typedef, and pointers to one such pointer, at
+# both scopes.
+try_ 0 << EOF
+typedef int thunk_t(void);
+typedef int unary_t(int);
+typedef void setter_t(int *);
+int one(void) { return 1; }
+int two(void) { return 2; }
+int twice(int x) { return 2 * x; }
+int inc(int x) { return x + 1; }
+void set4(int *p) { *p = 4; }
+thunk_t *global_table[2] = {one, two};
+unary_t *global_ops[] = {twice, inc};
+thunk_t *global_one = one;
+thunk_t **global_slot = &global_one;
+int call_slot(thunk_t **slot) { return (*slot)(); }
+int main(void) {
+    typedef int local_t(void);
+    local_t *local_table[2] = {two, one};
+    unary_t *ops[2];
+    setter_t *setters[1] = {set4};
+    thunk_t *first = one;
+    thunk_t **slot = &first;
+    int x = 0;
+    ops[0] = inc;
+    ops[1] = twice;
+    setters[0](&x);
+    return global_table[0]() + global_table[1]() + local_table[0]() +
+           global_ops[0](3) + global_ops[1](3) + ops[0](1) + ops[1](5) + x +
+           (*slot)() + (*global_slot)() + call_slot(&first) != 34 ||
+           sizeof(local_table) != 2 * sizeof(local_t *) ||
+           sizeof(global_ops) != 2 * sizeof(unary_t *);
+}
+EOF
+try_compile_error << EOF
+typedef int unary_t(int);
+unary_t plus1 { return 1; }
+int main(void) { return plus1(0); }
+EOF
+try_compile_error << EOF
+typedef int unary_t(int);
+unary_t plus1;
+int plus1(void) { return 1; }
+int main(void) { return plus1(); }
 EOF
 try_ 8 << EOF
 int plus1(int value) { return value + 1; }
@@ -8446,10 +8651,13 @@ int main(void) {
     return 0;
 }
 EOF
-try_compile_error << EOF
+try_ 3 << EOF
+int count(int n, ...) { return n; }
 int main(void) {
     typedef int scalar_t, variadic_t(int, ...);
-    return 0;
+    variadic_t *callback = count;
+    scalar_t value = callback(3, 1, 2);
+    return value;
 }
 EOF
 try_compile_error << EOF
@@ -10742,6 +10950,61 @@ int main(void) {
            (sizeof(arr) == 2 * sizeof(int *)) + (sizeof(*rp) == sizeof(rows));
 }
 EOF
+
+# A parameter declared as a function is adjusted to a pointer to it (C99
+# 6.7.5.3p8), and in a parameter a typedef name or void in parentheses is an
+# abstract function declarator (6.7.5.3p11).
+try_ 0 << EOF
+typedef int T;
+int twice(int x) { return 2 * x; }
+int seven(void) { return 7; }
+int x9(T v) { return v + 9; }
+char *name(void) { return "ab"; }
+int apply(int fn(int), int v) { return fn(v); }
+int apply2(int (fn)(int), int (v)) { return fn(v); }
+int call0(int thunk(void)) { return thunk(); }
+int k(int (T));
+int k(int f(T)) { return f(1); }
+int k2(int (void), int *(int));
+int k2(int f(void), int *g(int)) { return f(); }
+int strcall(char *s(void)) { return s()[1]; }
+int main(void)
+{
+    return apply(twice, 3) + apply2(twice, 4) + call0(seven) + k(x9) +
+           k2(seven, 0) + strcall(name) != 6 + 8 + 7 + 10 + 7 + 'b';
+}
+EOF
+try_compile_error << EOF
+typedef int T;
+int k(int (T));
+int k(int f(void)) { return f(); }
+int main(void) { return 0; }
+EOF
+# A parenthesized name without a star declares the name itself (C99 6.7.5p6).
+try_ 0 << EOF
+typedef int T;
+int (g) = 3;
+int (ga)[2] = {1, 2};
+int *(gp) = &g;
+int (a1), (b1) = 2;
+struct S { int (m); char (name)[4]; };
+int (f)(void) { return 1; }
+int h(int (*), int (y));
+int h(int *p, int y) { return *p + y; }
+int main(void) {
+    static int (s2) = 4;
+    int (s) = 5;
+    int (a)[3] = {1, 2, 3};
+    T (t) = 6;
+    struct S r;
+    int sum = 0;
+    r.m = 5;
+    for (int (i) = 0; i < 3; i++)
+        sum += a[i];
+    return g + ga[1] + *gp + b1 + r.m + f() + h(&g, 1) + s2 + s + sum + t +
+           sizeof(r.name) != 45;
+}
+EOF
 try_compile_error_message "assignment of read-only variable" << EOF
 int main(void) { int x = 3; int (*const q) = &x; q = 0; return 0; }
 EOF
@@ -11414,6 +11677,26 @@ int *gp = &(char){8};
 int main(void) { return 0; }
 EOF
 
+# Compound literals of long types, spelled with keywords, at both scopes. The
+# sole initializer is any assignment expression, not just a single token.
+try_ 43 << EOF
+long g = (long){7};
+unsigned long h = (unsigned long){8};
+long int i = (long int){9};
+long long ll = (long long){-2};
+int main()
+{
+    static long s = (long){3};
+    long a = (long){7};
+    unsigned long b = (unsigned long){7};
+    long int c = (long int){-7};
+    long long d = (long long){5} + (unsigned long long){1};
+    long *p = &(long){4};
+    *p += 1;
+    return g + h + i + ll + s + a + b + c + d + *p;
+}
+EOF
+
 # Test: Empty array compound literal (edge case)
 try_ 0 << EOF
 int main() {
@@ -11584,6 +11867,9 @@ EOF
 # typedef of its block and hides an outer one.
 try_compile_error_message "typedef name conflicts with an ordinary identifier" << EOF
 int main(void) { enum { A }; typedef int A; return 0; }
+EOF
+try_compile_error_message "identifier redeclared as a different kind of symbol" << EOF
+int main(void) { typedef int T; enum { T = 3 }; return 0; }
 EOF
 try_ 4 << EOF
 typedef int T;
@@ -14428,6 +14714,26 @@ int main(void) {
 }
 EOF
 
+# sizeof on a parameter declared as an array measures the adjusted pointer (C99
+# 6.7.5.3p7), while its element keeps its full extent.
+try_ 0 << EOF
+typedef int row[3];
+struct P { int x, y; };
+int f(int a[4]) { return sizeof a == sizeof(int *) && sizeof(a) == sizeof(int *) && sizeof a[0] == sizeof(int) && sizeof *a == sizeof(int); }
+int g(char b[]) { return sizeof(b) == sizeof(char *); }
+int h(int m[3][4]) { return sizeof m == sizeof(int *) && sizeof(m[0]) == 4 * sizeof(int) && sizeof *m == 4 * sizeof(int) && sizeof m[1][2] == sizeof(int); }
+int k(row r) { return sizeof r == sizeof(int *) && sizeof(r[1]) == sizeof(int); }
+int l(struct P ps[2], char *names[5]) { return sizeof(ps) == sizeof(void *) && sizeof ps[0] == sizeof(struct P) && sizeof names == sizeof(char **) && sizeof(names[0]) == sizeof(char *); }
+int n(int u[][4]) { return sizeof u == sizeof(int *) && sizeof u[0] == 4 * sizeof(int); }
+int main(void) {
+    int x[4], y[3][4], z[3];
+    struct P ps[2];
+    char *names[5];
+    { int a[7]; if (sizeof a != 7 * sizeof(int)) return 9; }
+    return !f(x) + !g(0) * 2 + !h(y) * 4 + !k(z) * 8 + !l(ps, names) * 16 + !n(y) * 32;
+}
+EOF
+
 # A pointer typedef as the array element only deepens the base type, while a
 # pointer-to-array typedef carries its own element depth: one more star on the
 # object makes a pointer to the typedef, stepping by a pointer.
@@ -15144,6 +15450,29 @@ struct gd_member_record { int values[2]; };
 static struct gd_member_record gd_member;
 static int gd_member_size = sizeof *&gd_member.values[1];
 int main(void) { return gd_member_size; }
+EOF
+
+# A qualified typedef of a record that is still incomplete keeps its qualifier:
+# objects declared through it before the definition stay read-only after it.
+try_compile_error_message "assignment of read-only location" << EOF
+struct S;
+typedef const struct S S_const;
+S_const *gp;
+struct S { int a; };
+int main(void) { struct S s = {1}; gp = &s; gp->a = 2; return 0; }
+EOF
+try_ 0 << EOF
+struct S;
+typedef const struct S S_const;
+S_const *gp;
+struct S { int a; int b; };
+int read_it(S_const *p) { return p->a + p->b; }
+int main(void)
+{
+    struct S s = {1, 2};
+    gp = &s;
+    return read_it(gp) != 3 || sizeof(*gp) != sizeof(struct S);
+}
 EOF
 
 # A pointer cast that initializes a static _Bool converts to 0 or 1 like any
@@ -17307,6 +17636,224 @@ try_ 3 << EOF
 int shift_cast(unsigned int value) { return ((int) value >> 1) == -1; }
 int widen_cast(unsigned int value) { int s = (int) value; return (s >> 4) == -1; }
 int main(void) { return shift_cast(0xffffffffU) + 2 * widen_cast(0xfffffff0U); }
+EOF
+
+# A function cast to a callback typedef is that callback, even when the
+# prototypes differ, not a pointer to a callback slot.
+try_ 0 << EOF
+typedef int (*call_t)(int, long long);
+typedef int (*thunk_t)(void);
+int words(int a, int skipped, int low, int high) { return low + high; }
+int one(int x) { return x; }
+int main(void) {
+    call_t call = (call_t) words;
+    int (*thunk)(void) = (thunk_t) one;
+    thunk_t again = (thunk_t) one;
+    return call != (call_t) words || thunk != again;
+}
+EOF
+
+# Function pointers convert implicitly only between compatible function types
+# (C99 6.5.16.1p1); an unprototyped type is compatible with a prototype without
+# an ellipsis or promoted parameters (6.7.5.3p15). A void pointer converts to
+# none but the null pointer constant.
+try_ 0 << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+typedef int unary_t(int);
+typedef int (*unary_ptr)(int);
+typedef void (*handler_t)(int);
+int unprototyped();
+int unprototyped(int x) { return x; }
+int old_style() { return 3; }
+int apply(int (*fn)(int), int v) { return fn(v); }
+int apply_typedef(unary_t *fn, int v) { return fn(v); }
+void handler(int s) {}
+handler_t install(handler_t f) { return f; }
+int (*global_fp)(int) = one;
+unary_ptr global_addr = &one;
+unary_t *global_null = 0;
+int (*global_void_null)(int) = (void *) 0;
+struct ops { int (*f)(int); handler_t g; } table = {one, handler};
+unary_ptr get(void) { return one; }
+int main(void) {
+    int (*fp)(int) = one;
+    int (*np)(int) = (void *) 0;
+    int (*up)() = one;
+    int (*up_void)() = zero;
+    int (*from_unprototyped)(int) = unprototyped;
+    unary_ptr u = fp;
+    unary_t *deref = *one;
+    struct ops local = {one, handler};
+    handler_t old = install(handler);
+    old = install(0);
+    local.f = u;
+    fp = 0;
+    fp = up;
+    fp = global_fp;
+    fp = get();
+    np = deref;
+    up = old_style;
+    return apply(one, 1) + apply_typedef(fp, 1) + apply(u, 1) +
+           apply(0 ? one : fp, 1) + local.f(1) + get()(1) + global_addr(1) +
+           from_unprototyped(1) + up(0) + table.f(1) + (np == 0) +
+           (global_null != 0) + (global_void_null != 0) + (old != 0) !=
+           12;
+}
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+int apply(int (*fn)(int), int v) { return fn(v); }
+int main(void) { return apply(zero, 2); }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+typedef int unary_t(int);
+int apply(unary_t *fn, int v) { return fn(v); }
+int main(void) { int (*z)(void) = zero; return apply(z, 2); }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+typedef int (*unary_ptr)(int);
+unary_ptr get(void) { return zero; }
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+int main(void) { int (*fp)(void) = name; return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+int (*global_fp)(int) = zero;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+struct ops { int (*f)(void); } table = {one};
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+int main(void) { int (*fp)(int); fp = count; return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+struct S { int (*cb)(int); };
+int main(void) { struct S s; s.cb = zero; return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+int main(void) { void *p = 0; int (*fp)(int) = p; return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+int main(void) { void *p = one; return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int zero(void) { return 0; }
+int one(int x) { return x; }
+char *name(void) { return "a"; }
+int count(int n, ...) { return n; }
+int take_char(char c) { return c; }
+int main(void) { int (*fp)() = take_char; return 0; }
+EOF
+
+# An integer becomes a pointer without a cast only as a null pointer constant
+# (C99 6.5.16.1p1), in initializers, assignments, arguments and returns alike. A
+# conditional with a pointer operand has that pointer type (6.5.15p6).
+try_ 0 << EOF
+#define NULL_ALT 0
+enum { ZERO };
+int *g1 = 0, *g2 = (void *) 0, *g3 = 1 - 1, *g4 = NULL_ALT;
+char *g5 = ZERO;
+int *ret0(void) { return 0; }
+void take(int *p, char *q) {}
+int main(void) {
+    int x = 3;
+    int *p = 0, *q = (int *) 7, *r = &x, *s = (void *) 0, *t = ZERO;
+    char *u = '\0';
+    int arr[2] = {5, 6};
+    int *ap = x ? arr : 0;
+    p = 0;
+    p = 2 - 2;
+    q = x ? &x : (void *) 0;
+    if (*(x ? ap : arr) != 5 || *((x ? ap : arr) + 1) != 6)
+        return 99;
+    take(0, 0);
+    take((int *) 0, (char *) 0);
+    int *(cl) = (int *){0};
+    return (ret0() != 0) + (p != 0) + (*q != 3) + (*r != 3) + (s != 0) +
+           (t != 0) + (u != 0) + (g1 != 0) + (g2 != 0) + (g3 != 0) +
+           (g4 != 0) + (g5 != 0) + (cl != 0);
+}
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+int main(void) { int *p = 7; return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+int main(void) { int *p; int x = 3; p = x; return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+void f(int *p) {}
+int main(void) { f(1); return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+void g(int q[3]) {}
+int main(void) { g(1); return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+int *f(int x) { return x; }
+int main(void) { return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+int *p = 3 + 4;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+long long *p = 0x100000000LL;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+typedef int *P;
+int main(void) { P v = (P){7}; return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+int main(void) { static int *p = 5; return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+int main(void) { int x = 1; int *p = x ? 1 : 2; return 0; }
 EOF
 
 # Category: Const Qualifiers
@@ -22004,10 +22551,9 @@ EOF
     # and most of the functions such as fputc(), fgetc(), fclose() and fgets()
     # directly treat the "stream" parameter (of type FILE *) as a file
     # descriptor for performing input/output operations, the following test
-    # cases define "stdout" as 1, which is the file descriptor for the standard
-    # output.
+    # cases define "stdout" as descriptor 1 cast to FILE *, the standard output.
     try_output 0 "awritten = a" << EOF
-#define stdout 1
+#define stdout ((FILE *) 1)
 int main()
 {
 	int c = fputc('a', stdout);
@@ -22017,7 +22563,7 @@ int main()
 EOF
 
     try_output 1 "" << EOF
-#define stdout 1
+#define stdout ((FILE *) 1)
 int main()
 {
 	__syscall(__syscall_close, 1);
@@ -25314,6 +25860,9 @@ int main(void) { for (extern int hidden(void); 0; ) return 0; }
 EOF
 try_compile_error_flag --std=c99 << EOF
 int main(void) { for (int hidden(void); 0; ) return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { for (int i = 0, hidden(void); i < 1; i++) ; return 0; }
 EOF
 try_ 1 << EOF
 int main(void) { for (auto int value = 1; value; value--) return value; return 0; }

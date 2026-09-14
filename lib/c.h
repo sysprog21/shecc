@@ -110,9 +110,9 @@ int isblank(int c);
 typedef int FILE;
 
 /* Standard streams, as raw file descriptors */
-#define stdin 0
-#define stdout 1
-#define stderr 2
+#define stdin ((FILE *) 0)
+#define stdout ((FILE *) 1)
+#define stderr ((FILE *) 2)
 
 FILE *fopen(const char *filename, const char *mode);
 int fclose(FILE *stream);

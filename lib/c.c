@@ -696,7 +696,7 @@ FILE *fopen(const char *filename, const char *mode)
      */
     if (fd < 0)
         return NULL;
-    return fd;
+    return (FILE *) fd;
 }
 
 int fclose(FILE *stream)
@@ -827,9 +827,9 @@ void *malloc(int size)
     size = ALIGN_UP(size, MIN_ALIGNMENT);
 
     if (!__alloc_head) {
-        chunk_t *tmp =
-            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t)), prot,
-                      flags, -1, 0);
+        chunk_t *tmp = (chunk_t *) __syscall(__syscall_mmap2, NULL,
+                                             __align_up(sizeof(chunk_t)), prot,
+                                             flags, -1, 0);
         if (tmp == (void *) -1)
             return NULL;
         __alloc_head = tmp;
@@ -840,9 +840,9 @@ void *malloc(int size)
     }
 
     if (!__freelist_head) {
-        chunk_t *tmp =
-            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t)), prot,
-                      flags, -1, 0);
+        chunk_t *tmp = (chunk_t *) __syscall(__syscall_mmap2, NULL,
+                                             __align_up(sizeof(chunk_t)), prot,
+                                             flags, -1, 0);
         if (tmp == (void *) -1)
             return NULL;
         __freelist_head = tmp;
@@ -882,9 +882,9 @@ void *malloc(int size)
     }
 
     if (!allocated) {
-        allocated =
-            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t) + size),
-                      prot, flags, -1, 0);
+        allocated = (chunk_t *) __syscall(__syscall_mmap2, NULL,
+                                          __align_up(sizeof(chunk_t) + size),
+                                          prot, flags, -1, 0);
         if (allocated == (void *) -1)
             return NULL;
         allocated->size = __align_up(sizeof(chunk_t) + size);

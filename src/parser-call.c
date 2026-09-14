@@ -57,6 +57,8 @@ void read_func_parameters_with_sret(func_t *func,
                     "argument",
                     cur_token_loc());
             diagnose_const_pointer_conversion(param, target);
+            diagnose_integer_to_pointer_conversion(param, target, true);
+            diagnose_function_pointer_conversion(param, target);
             if (is_record_type(target->type) && !target->is_func &&
                 !has_effective_pointer(target) && !target->array_size) {
                 /* A record parameter is a by-value object. Keep that promise
@@ -1329,6 +1331,16 @@ static void copy_pointee_array_shape(var_t *destination, const var_t *source)
         source->pointee_array_element_ptr_level;
 }
 
+/* A dereference of a pointer to a pointer to an array, `*pp` for an int
+ * (**pp)[3], still points to that array. Keep its shape on the result @vd.
+ */
+static void keep_pointee_array_shape(var_t *vd, const var_t *source)
+{
+    if (source->pointee_array_size &&
+        effective_pointer_depth(vd) > source->pointee_array_element_ptr_level)
+        copy_pointee_array_shape(vd, source);
+}
+
 /* The address of an operand that does not start with an identifier: `&*p`,
  * `&(*q).member`, `&2[arr]` or `&(int){1}`.
  */
@@ -1770,6 +1782,7 @@ void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1)
         vd->ptr_level = 1;
         sz = PTR_SIZE;
     }
+    keep_pointee_array_shape(vd, rs1);
     push_object_at(parent, bb, vd, rs1, sz);
 }
 
@@ -1897,6 +1910,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             vd->ptr_level = 1;
             sz = PTR_SIZE;
         }
+        keep_pointee_array_shape(vd, rs1);
         push_object_at(parent, bb, vd, rs1, sz);
     }
 }
@@ -1939,6 +1953,8 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                 push_dereference(parent, bb, rs1);
                 continue;
             }
+            if (lower_pointee_array_dereference(rs1, parent, bb))
+                continue;
 
             /* A member lvalue has already been read into rs1. Each unary
              * asterisk must consume that evaluated pointer, not re-derive its
@@ -1974,6 +1990,7 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                 vd->ptr_level = 1;
                 sz = PTR_SIZE;
             }
+            keep_pointee_array_shape(vd, rs1);
             push_object_at(parent, bb, vd, rs1, sz);
         }
     }

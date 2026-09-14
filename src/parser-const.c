@@ -174,11 +174,24 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
 
 bool read_global_assignment_var(var_t *var);
 
+/* The integer evaluators below yield constants only, so a nonzero value for a
+ * pointer object is an integer converted without a cast.
+ */
+static void reject_global_integer_pointer(const var_t *dest, const var_t *src)
+{
+    if (effective_pointer_depth(dest) && !dest->array_size &&
+        !is_pointer_like_value((var_t *) src) && !src->is_func &&
+        !src->is_string_literal && (src->init_val || src->init_val_hi))
+        error_at("integer converted to pointer without a cast",
+                 cur_token_loc());
+}
+
 void emit_global_scalar_assignment(block_t *parent,
                                    basic_block_t *bb,
                                    var_t *dest,
                                    var_t *src)
 {
+    reject_global_integer_pointer(dest, src);
     if (is_bool_scalar(dest->type, dest->ptr_level))
         src->init_val = src->init_val != 0;
     add_insn(parent, bb, OP_assign, dest, src, NULL, 0, NULL);
@@ -1002,6 +1015,7 @@ bool read_global_assignment_var(var_t *var)
             symbol->is_func = true;
             symbol->var_name =
                 intern_string(address_dereference_identifier->literal);
+            diagnose_function_pointer_conversion(symbol, var);
             add_insn(parent, bb, OP_address_of, addr, var, NULL, 0, NULL);
             add_insn(parent, bb, OP_write, NULL, addr, symbol, PTR_SIZE, NULL);
             return true;
@@ -1026,6 +1040,7 @@ bool read_global_assignment_var(var_t *var)
                 addr->var_name = gen_name();
                 symbol->is_func = true;
                 symbol->var_name = intern_string(token);
+                diagnose_function_pointer_conversion(symbol, var);
                 lex_expect(T_identifier);
                 if (grouped_function_designator)
                     lex_expect(T_close_bracket);
@@ -1173,6 +1188,7 @@ bool read_global_assignment_var(var_t *var)
         if (initializer_needs_wide_reader(cur_token->next, scope, true) ||
             string_element_appears_before_initializer_end(cur_token->next)) {
             rs1 = read_wide_global_literal_expression(parent, bb, scope);
+            reject_global_integer_pointer(var, rs1);
             add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
             return true;
         }
@@ -1227,6 +1243,7 @@ bool read_global_assignment_var(var_t *var)
             add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
             rs1 = vd;
+            reject_global_integer_pointer(var, rs1);
             add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
             return true;
         }
