@@ -722,8 +722,12 @@ bool reg_low32_sufficient(int idx, int reg, int depth)
             } else if (ir->op == OP_lshift || ir->op == OP_rshift) {
                 /* Also narrows, unless it is the one case that deliberately
                  * does not: a shift feeding a pointer add straight away keeps
-                 * its full width, and then the bits going into it do matter.
+                 * its full width, and then the bits going into it do matter. A
+                 * right shift moves the bits above 31 of the value it shifts
+                 * into the result, and SAR copies bit 63 into it.
                  */
+                if (ir->op == OP_rshift && ir->src0 == reg)
+                    return false;
                 if (reg_feeds_address_only(j + 1, ir->dest))
                     return false;
             } else if (ir->op == OP_add || ir->op == OP_sub ||
@@ -1640,9 +1644,10 @@ void emit_arith(ph2_ir_t *ph2_ir,
 
         /* A 32-bit unsigned operation must use EDX:EAX, not its 64-bit
          * counterpart. For example, C requires -1 / 2U to be 2147483647,
-         * whereas a 64-bit DIV sees 2^64 - 1.
+         * whereas a 64-bit DIV sees 2^64 - 1. The save of RAX is always 64-bit:
+         * RAX may hold a live long long beside an int division.
          */
-        emit_rex(wide, 0, 10); /* MOV r10{d}, rax{d}  (save) */
+        emit_rex(1, 0, 10); /* MOV r10, rax  (save) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 0, 2));
         emit_push_reg(2);        /* PUSH rdx  (save) */
@@ -1672,7 +1677,7 @@ void emit_arith(ph2_ir_t *ph2_ir,
         /* MOV r11{d}, rax{d} | rdx{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, ph2_ir->op == OP_div ? 0 : 2, 3));
-        emit_rex(wide, 10, 0); /* MOV rax{d}, r10{d}  (restore) */
+        emit_rex(1, 10, 0); /* MOV rax, r10  (restore) */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 2, 0));
         emit_pop_reg(2);        /* POP rdx  (restore) */
@@ -1879,7 +1884,13 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
         emit_byte(REX_W | REX_B); /* MOV r10, rcx */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 1, 2));
-        emit_rex(1, rs1, 11); /* MOV r11, rs1 */
+
+        /* As in the literal-count form above, an unsigned int is zero-extended
+         * first: an unsigned int subtraction leaves a borrow in the upper half,
+         * which SHR would bring down into the result.
+         */
+        emit_rex(!(ph2_ir->src0_is_unsigned && ph2_ir->size_bytes <= 4), rs1,
+                 11); /* MOV r11{d}, rs1{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
         emit_rex(1, rs2, -1); /* MOV rcx, rs2 */

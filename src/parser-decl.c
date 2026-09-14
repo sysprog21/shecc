@@ -1945,6 +1945,10 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
     if (is_neg) {
         value = 0 - value;
         value_hi = ~value_hi + (value == 0);
+
+        /* An unsigned int wraps within its own width: -9U has no high word. */
+        if (vd->type && vd->type->is_unsigned && vd->type->size == 4)
+            value_hi = 0;
     }
     vd->init_val = value;
     vd->init_val_hi = value_hi;

@@ -1673,6 +1673,11 @@ static void negate_operand(block_t *parent, basic_block_t **bb)
         vd->is_const = true;
         vd->init_val = -rs1->init_val;
         vd->init_val_hi = ~rs1->init_val_hi + (vd->init_val == 0);
+
+        /* The high word of an int result follows its type, as for a cast: "-9U"
+         * is 0xfffffff7 with a zero high word.
+         */
+        fold_integer_constant_cast(vd, vd->init_val, vd->init_val_hi);
         add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
     } else
         add_insn(parent, *bb, OP_negate, vd, rs1, NULL, 0, NULL);
@@ -1852,6 +1857,10 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
             vd->is_const = true;
             vd->init_val = ~rs1->init_val;
             vd->init_val_hi = ~rs1->init_val_hi;
+
+            /* "(unsigned long long) ~4294967294U" is 1, not 0xffffffff00000001.
+             */
+            fold_integer_constant_cast(vd, vd->init_val, vd->init_val_hi);
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
         } else {

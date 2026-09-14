@@ -1076,10 +1076,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
         return;
     case OP_sign_ext: {
-        /* Decode size information: Lower 16 bits: target size Upper 16 bits:
-         * source size
-         */
-        int target_size = ph2_ir->src1 & 0xFFFF;
+        /* The upper 16 bits of src1 hold the source size. */
         int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
 
         if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi < 0) {
@@ -1104,8 +1101,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             return;
         }
 
-        /* Calculate shift amount based on target and source sizes */
-        int shift_amount = (target_size - source_size) * 8;
+        /* The shifts act on the whole 32-bit register, so the source's top bit
+         * has to reach bit 31 whatever the target width: "unsigned short x = c"
+         * with c a negative signed char shifted by only 8, leaving 0x94 for
+         * -108.
+         */
+        int shift_amount = (4 - source_size) * 8;
 
         if (source_size == 2) {
             /* Sign extend from short to word (16-bit shift) For 16-bit sign

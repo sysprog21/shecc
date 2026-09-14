@@ -297,6 +297,17 @@ bool pair_insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
         return false;
     if (ir_reads_reg(ph2_ir, next->dest) || ir_reads_reg(ph2_ir, next->dest_hi))
         return false;
+
+    /* The fused operation no longer writes its own pair, so that pair must be
+     * dead after the move. Common subexpression elimination leaves exactly the
+     * copy that is not: "(a & b) ^ (b & a)" became "x = a & b; y = x; x ^ y",
+     * and fusing the move left the XOR reading a stale x.
+     */
+    if ((ph2_ir->dest != next->dest &&
+         reg_read_after(bb, next, ph2_ir->dest)) ||
+        (ph2_ir->dest_hi != next->dest_hi &&
+         reg_read_after(bb, next, ph2_ir->dest_hi)))
+        return false;
     ph2_ir->dest = next->dest;
     ph2_ir->dest_hi = next->dest_hi;
     ph2_ir_drop_after(bb, ph2_ir, next);

@@ -93,7 +93,12 @@ int var_slot_size(var_t *v)
      */
     if (!is_record_type(v->type) && v->type->size == 8)
         return 8;
-    if (!v->address_taken)
+
+    /* A global is memory another function reads, and its data slot is only as
+     * wide as its type: "unsigned int a, b;" places b four bytes after a on
+     * LP64, so a full-width store to a overwrites b.
+     */
+    if (!v->address_taken && !v->is_global)
         return PTR_SIZE;
 
     /* Classify by the stored width rather than by type identity: an enum is a
@@ -407,12 +412,22 @@ var_t *pinned_base[REG_CNT];
  */
 int reg_locked;
 
-/* Whether @reg holds an operand of the instruction being lowered. */
+/* ABI argument registers already staged for the call being lowered. A staged
+ * register can lose its REGS[] owner while the call still needs its value: a
+ * variable passed twice as a pair, as in "f(g, g, ...)", is moved to its second
+ * argument pair, which released the first, and the next argument was loaded
+ * straight over it.
+ */
+int abi_args_staged;
+
+/* Whether @reg holds an operand of the instruction being lowered, or an
+ * argument of the call being staged.
+ */
 bool reg_is_locked(int reg)
 {
     if (reg < 0 || reg >= REG_CNT)
         return false;
-    return (reg_locked >> reg) & 1;
+    return ((reg_locked | abi_args_staged) >> reg) & 1;
 }
 
 /* The register @var's base is pinned to, or -1. */
@@ -855,7 +870,8 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
  */
 bool reg_is_free(int i)
 {
-    return !REGS[i].var && !pinned_base[i] && !pair_high_owner[i];
+    return !REGS[i].var && !pinned_base[i] && !pair_high_owner[i] &&
+           !((abi_args_staged >> i) & 1);
 }
 
 /* Return the index of register for given variable. Otherwise, return -1. */
@@ -2453,6 +2469,73 @@ void coalesce_phi_slots(func_t *func)
     }
 }
 
+/* Fill a lowered binary operation from its SSA instruction. Function bodies and
+ * global setup share it, so a wide initializer such as the element of "long
+ * long a[] = {1LL << 40}" names the high registers of its operands.
+ */
+void fill_binary_ph2_ir(ph2_ir_t *ir,
+                        insn_t *insn,
+                        int src0,
+                        int src1,
+                        int dest)
+{
+    ir->src0 = src0;
+    ir->src0_hi = vreg_get_phys_hi(insn->rs1);
+    ir->src1 = src1;
+    ir->src1_hi = vreg_get_phys_hi(insn->rs2);
+    ir->dest = dest;
+    ir->dest_hi = vreg_get_phys_hi(insn->rd);
+
+    /* Record whether the result is an address, and which operand it came from.
+     * On LP64 an int-typed result has to wrap at 32 bits, while a pointer must
+     * keep all 64, and pointer arithmetic has to widen the int index beside the
+     * address.
+     */
+    set_ptr_flags(ir, insn);
+    ir->size_bytes = insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+
+    /* SSA temporaries normally retain their result type, but width is a
+     * property of the operation as well: a wide operand must not be narrowed
+     * merely because an intermediate lost its annotation. This includes
+     * comparisons: their result is int, while CMP must inspect the common
+     * operand width rather than stale high halves of 32-bit register values.
+     */
+    int left_size = insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
+    int right_size = insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
+    if (left_size > ir->size_bytes)
+        ir->size_bytes = left_size;
+
+    /* A shift is the exception: its type is that of the promoted left operand
+     * alone, so "(x ^ y) >> (n & 31)" with a long long n is an int shift, and a
+     * 64-bit shift of that int register brought zeros in as its sign.
+     */
+    if (right_size > ir->size_bytes && insn->opcode != OP_lshift &&
+        insn->opcode != OP_rshift)
+        ir->size_bytes = right_size;
+}
+
+/* The unary counterpart of fill_binary_ph2_ir(). */
+void fill_unary_ph2_ir(ph2_ir_t *ir, insn_t *insn, int src0, int dest)
+{
+    ir->src0 = src0;
+    ir->src0_hi = vreg_get_phys_hi(insn->rs1);
+    ir->dest = dest;
+    ir->dest_hi = vreg_get_phys_hi(insn->rd);
+
+    /* As for OP_branch: the width of the test follows the operand, not the
+     * result.
+     */
+    ir->src0_is_pointer = is_address_like(insn->rs1);
+    ir->is_unsigned = is_unsigned_scalar(insn->rd);
+    ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+    ir->size_bytes = insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+
+    /* !x yields an int, but it tests all of a long long operand. */
+    if (insn->opcode == OP_log_not && !insn->rs1->ptr_level &&
+        insn->rs1->type->size > ir->size_bytes)
+        ir->size_bytes = insn->rs1->type->size;
+}
+
 /* Place one global initializer, which has no basic block of its own. */
 void reg_alloc_global(insn_t *global_insn)
 {
@@ -2619,6 +2702,7 @@ void reg_alloc_global(insn_t *global_insn)
         /* Fall through to the ordinary scalar binary lowering below. */
         goto lower_global_binary;
     }
+    case OP_negate:
     case OP_bit_not:
     case OP_log_not: {
         /* Unary wide global constant expressions use the normal phase-2
@@ -2628,9 +2712,7 @@ void reg_alloc_global(insn_t *global_insn)
         src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
         dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
-        ir->src0 = src0;
-        ir->dest = dest;
-        set_ptr_flags(ir, global_insn);
+        fill_unary_ph2_ir(ir, global_insn, src0, dest);
         break;
     }
     case OP_sub:
@@ -2660,10 +2742,7 @@ void reg_alloc_global(insn_t *global_insn)
         dest =
             prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, src1);
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
-        ir->src0 = src0;
-        ir->src1 = src1;
-        ir->dest = dest;
-        set_ptr_flags(ir, global_insn);
+        fill_binary_ph2_ir(ir, global_insn, src0, src1, dest);
         break;
     }
     case OP_write: {
@@ -2832,6 +2911,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
     bool riscv_indirect_target_staged = false;
 
     is_pushing_args = false;
+    abi_args_staged = 0;
     int args = 0;
 
     bb->visited++;
@@ -2945,11 +3025,16 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             /* For arrays, store the base address just like global arrays do */
             if (insn->rd->array_size)
                 spill_var(bb, insn->rd, dest);
-            else if (insn->rd->is_func) {
+            else if (insn->rd->is_func ||
+                     (!insn->rd->ptr_level && !insn->rd->type->ptr_level &&
+                      is_record_type(insn->rd->type) &&
+                      !insn->rd->has_backing_storage)) {
                 /* OP_allocat's result is the backing address for a callback
                  * object, not the pointer value stored in that object. Keeping
                  * it mapped as the object lets a later conservative spill
-                 * overwrite an initialized callback with its own address.
+                 * overwrite an initialized callback with its own address. A
+                 * record is reached through &record, which names the slot
+                 * itself, so the same spill would overwrite its first member.
                  */
                 REGS[dest].var = NULL;
                 REGS[dest].polluted = 0;
@@ -3334,10 +3419,12 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                      * takes the low word without being claimed.
                      */
                     load_low_word(bb, insn->rs1, args);
+                    abi_args_staged |= 1 << args;
                     args += 2;
                     break;
                 }
                 prepare_pair_argument(bb, insn->rs1, args);
+                abi_args_staged |= 3 << args;
                 args += 2;
                 break;
             }
@@ -3350,6 +3437,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             REGS[ir->dest].var = insn->rs1;
             REGS[ir->dest].polluted = 0;
+            abi_args_staged |= 1 << args;
             args++;
             break;
         case OP_call:
@@ -3365,6 +3453,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->func_name = insn->str;
 
             is_pushing_args = false;
+            abi_args_staged = 0;
             args = 0;
             handle_abi = false;
 
@@ -3385,6 +3474,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             bb_add_ph2_ir(bb, OP_indirect);
 
             is_pushing_args = false;
+            abi_args_staged = 0;
             args = 0;
             handle_abi = false;
             riscv_indirect_target_staged = false;
@@ -3439,37 +3529,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             src1 = prepare_operand(bb, insn->rs2, src0);
             dest = prepare_dest(bb, insn, insn->rd, src0, src1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
-            ir->src0 = src0;
-            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
-            ir->src1 = src1;
-            ir->src1_hi = vreg_get_phys_hi(insn->rs2);
-            ir->dest = dest;
-            ir->dest_hi = vreg_get_phys_hi(insn->rd);
-
-            /* Record whether the result is an address, and which operand it
-             * came from. On LP64 an int-typed result has to wrap at 32 bits,
-             * while a pointer must keep all 64, and pointer arithmetic has to
-             * widen the int index beside the address.
-             */
-            set_ptr_flags(ir, insn);
-            ir->size_bytes =
-                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
-
-            /* SSA temporaries normally retain their result type, but width is a
-             * property of the operation as well: a wide operand must not be
-             * narrowed merely because an intermediate lost its annotation. This
-             * includes comparisons: their result is int, while CMP must inspect
-             * the common operand width rather than stale high halves of 32-bit
-             * register values.
-             */
-            int left_size =
-                insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
-            int right_size =
-                insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
-            if (left_size > ir->size_bytes)
-                ir->size_bytes = left_size;
-            if (right_size > ir->size_bytes)
-                ir->size_bytes = right_size;
+            fill_binary_ph2_ir(ir, insn, src0, src1, dest);
             break;
         case OP_negate:
         case OP_bit_not:
@@ -3477,24 +3537,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             src0 = prepare_operand(bb, insn->rs1, -1);
             dest = prepare_dest(bb, insn, insn->rd, src0, -1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
-            ir->src0 = src0;
-            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
-            ir->dest = dest;
-            ir->dest_hi = vreg_get_phys_hi(insn->rd);
-
-            /* As for OP_branch: the width of the test follows the operand, not
-             * the result.
-             */
-            ir->src0_is_pointer = is_address_like(insn->rs1);
-            ir->is_unsigned = is_unsigned_scalar(insn->rd);
-            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
-            ir->size_bytes =
-                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
-
-            /* !x yields an int, but it tests all of a long long operand. */
-            if (insn->opcode == OP_log_not && !insn->rs1->ptr_level &&
-                insn->rs1->type->size > ir->size_bytes)
-                ir->size_bytes = insn->rs1->type->size;
+            fill_unary_ph2_ir(ir, insn, src0, dest);
             break;
         case OP_trunc:
         case OP_sign_ext:

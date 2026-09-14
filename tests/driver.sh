@@ -2190,6 +2190,95 @@ int main(void) {
     return (byte == 0U) + (half == 0U);
 }
 EOF
+# A folded ~ or unary minus of an unsigned int constant has a zero high word.
+try_ 0 << EOF
+int main(void) {
+    unsigned long long flipped = (unsigned long long) (~4294967294U);
+    unsigned long long negated = (unsigned long long) (-9U);
+    unsigned long long grouped = (unsigned long long) -(9U);
+    long long signed_flip = (long long) (~5);
+    return flipped != 1 || negated != 0xfffffff7ULL ||
+           grouped != 0xfffffff7ULL || signed_flip != -6;
+}
+EOF
+# A constant narrowed to an unsigned type folds zero-extended, not to -2.
+try_ 0 << EOF
+int main(void) {
+    unsigned short half = 0xfffe;
+    unsigned short wide = 0xfffffffeULL;
+    unsigned char byte = 0xfe;
+    return (int) half != 65534 || (int) wide != 65534 || (int) byte != 254;
+}
+EOF
+
+# A shift takes the type of its left operand alone; a long long count does not
+# make an int shift 64 bits wide.
+try_ 0 << EOF
+int shift_not(unsigned char x, long long n) { return (~x) >> (n & 31); }
+int shift_xor(int x, int y, unsigned long long n) { return (x ^ y) >> (n & 31); }
+unsigned int shift_out(unsigned int x, unsigned int y, long long n) {
+    return (x | y) << n;
+}
+int main(void) {
+    return shift_not(0, 15) != -1 || shift_xor(-8, 0, 2) != -2 ||
+           shift_out(0x80000000U, 1, 1) != 2;
+}
+EOF
+
+# An unsigned int shifted right by a variable count ignores the borrow a 64-bit
+# register can hold above an unsigned int subtraction.
+try_ 0 << EOF
+unsigned int borrow_shift(unsigned int a, unsigned int b, unsigned long long n) {
+    return (a - b) >> (n & 15);
+}
+int main(void) {
+    return borrow_shift(466218516U, 1243335322U, 3) != 0x1a35c46fU;
+}
+EOF
+
+# An int division saves and restores the registers it borrows at full width, so
+# a long long living in one of them keeps its high word.
+try_ 0 << EOF
+unsigned long long mix(unsigned long long a, unsigned long long b,
+                       unsigned long long c, unsigned long long d,
+                       unsigned long long e, unsigned long long f, int n) {
+    unsigned long long w0 = a % 0x7fffffffffffffffULL;
+    unsigned long long w1 = b % 0x7fffffffffffffffULL;
+    unsigned long long w2 = c % 0x7fffffffffffffffULL;
+    unsigned long long w3 = d % 0x7fffffffffffffffULL;
+    unsigned long long w4 = e % 0x7fffffffffffffffULL;
+    unsigned long long w5 = f % 0x7fffffffffffffffULL;
+    unsigned long long w6 = a % 0x7ffffffffffffffeULL;
+    int q = 10 % (n | 1);
+    return w0 + w1 + w2 + w3 + w4 + w5 + w6 + q;
+}
+int main(void) {
+    unsigned long long k = 0x100000000ULL;
+    return mix(k, k, k, k, k, k, 112) != 0x700000000ULL + 10;
+}
+EOF
+
+# A wide constant narrowed to an int argument keeps the sign of its low word,
+# even though a 64-bit target loads the argument at full width.
+try_ 0 << EOF
+int top_two(int x) { return x >> 30; }
+unsigned int top_two_unsigned(unsigned int x) { return x >> 30; }
+int main(void) {
+    return top_two(0xe231fffab478ULL) != -1 ||
+           top_two_unsigned(0xe231fffab478ULL) != 3;
+}
+EOF
+
+# A right shift reads the whole register of the value it shifts, so a negative
+# int quotient or remainder must reach it sign-extended.
+try_ 0 << EOF
+int half_remainder(int x, int d) { return (x % d) >> 1; }
+int shifted_quotient(int x, int d) { return (x / d) >> 1; }
+int main(void) {
+    return half_remainder(-24122, 9) != -1 ||
+           shifted_quotient(-24122, 9) != -1340;
+}
+EOF
 try_ 3 << EOF
 long long identity(long long value) { return value; }
 unsigned long long uidentity(unsigned long long value) { return value; }
@@ -3413,6 +3502,47 @@ int test_ll(int a, int b, int c, int d, long long e) {
 int main(void) { return !test_ll(1, 2, 3, 4, 1000); }
 EOF
 
+# A negative signed char widened to a short keeps its sign, whether the short is
+# a local or a parameter the call converts it to.
+try_ 0 << EOF
+int to_ushort(signed char c) { unsigned short s = c; return s; }
+int high_word(short s) { unsigned long long x = 8; x |= s; return x >> 32; }
+int main(void) {
+    signed char c = -3;
+    return to_ushort(-108) != 65428 || high_word(c) != -1;
+}
+EOF
+
+# A repeated wide subexpression becomes a copy of the first result, and fusing
+# that copy into the operation must not leave the first result unwritten.
+try_ 0 << EOF
+void sink(unsigned long long v) {}
+unsigned long long r;
+void same_twice(unsigned long long a0, long long a1, unsigned long long a2,
+                unsigned long long a3) {
+    unsigned long long l0 = 6942535506704294056ULL;
+    long long l4 = a0;
+    l0 /= l4;
+    sink(l0);
+    r = 1 ? ((a0 & l0) ^ (l0 & a0)) : 7;
+}
+int main(void) {
+    same_twice(18, 0x7fffffff, 0xf3a9221e0ce272ccULL, 4);
+    return r != 0;
+}
+EOF
+
+# One long long passed twice keeps both copies: staging the second pair must not
+# release the first argument's registers to the constants loaded after it.
+try_ 0 << EOF
+long long g = 0x123456789LL;
+int f(long long a0, long long a1, unsigned int a2, long long a3) {
+    return a0 != 0x123456789LL || a1 != 0x123456789LL || a2 != 0x89f20000U ||
+           a3 != 0x25085689f936b9a0LL;
+}
+int main(void) { return f(g, g, 0x89f20000U, 0x25085689f936b9a0LL); }
+EOF
+
 # Post-allocation rewrites of a register pair keep its high word: the move after
 # a pair operation and the load of a slot written just before it.
 try_ 0 << EOF
@@ -3534,6 +3664,19 @@ int main(void) {
 }
 EOF
 
+# A file-scope array element computed by a wide operator is lowered in global
+# setup, which must name the high registers of the operands and the result.
+try_ 0 << EOF
+long long wide_ops[] = {1LL << 40, -2, (1LL << 40) | 3, ~(1LL << 40),
+                        -(1LL << 40), (1LL << 40) / 3, 0x100000000LL - 1};
+int main(void) {
+    return wide_ops[0] != 0x10000000000LL || wide_ops[1] != -2 ||
+           wide_ops[2] != 0x10000000003LL || wide_ops[3] != -0x10000000001LL ||
+           wide_ops[4] != -0x10000000000LL || wide_ops[5] != 0x5555555555LL ||
+           wide_ops[6] != 0xffffffffLL;
+}
+EOF
+
 # ++ and -- on a long long carry into and borrow from the high word, whether the
 # object is a variable, an array element or a member reached through a pointer.
 try_ 0 << EOF
@@ -3553,6 +3696,38 @@ int main(void) {
            s != 0xffffffffLL || before != 0xffffffffLL ||
            cells[0] != 0x100000000LL || cells[1] != 0xffffffffLL ||
            counter.count != 0x100000000LL;
+}
+EOF
+
+# A narrow global is loaded and stored at its own width. Its data slot is no
+# wider than its type on LP64, so a full-width store to a clobbered b and e.
+try_ 0 << EOF
+unsigned int a = 1;
+unsigned int b = 2;
+signed char c = 3;
+unsigned short d = 4;
+int e = 7;
+unsigned long long wide = 0x678d2f31;
+void set(unsigned int v) { a = v; c = -1; d = 65535; }
+int main(void) {
+    set(0xffffffff);
+    return b != 2 || e != 7 || c != -1 || d != 65535 || a != 0xffffffff ||
+           (b >> (wide & 31)) != 0 || (a >> (wide & 31)) != 0x7fff;
+}
+EOF
+
+# A global is not renamed, so "g = g" is dropped as redundant; a later read of g
+# must still see the store before it rather than the dropped assignment.
+try_ 0 << EOF
+int g = 1;
+int read_g(void) { return g; }
+int main(void) {
+    g = g;
+    if (g != 1)
+        return 1;
+    g = 5;
+    g = g;
+    return g != 5 || read_g() != 5;
 }
 EOF
 
@@ -6841,6 +7016,23 @@ int main(void) {
     typedef int unary_t(int);
     unary_t *callback = plus1;
     return callback(7);
+}
+EOF
+
+# A record's first member survives a spill of the register that held the
+# record's allocation address, here forced by an indirect call.
+try_ 0 << EOF
+typedef int thunk_t(void);
+int five(void) { return 5; }
+int (*global_thunk)(void) = five;
+struct holder { thunk_t *callback; };
+int main(void) {
+    typedef int local_thunk_t(void);
+    struct local_holder { local_thunk_t *callback; } local;
+    struct holder h;
+    h.callback = five;
+    local.callback = five;
+    return global_thunk() + h.callback() + local.callback() != 15;
 }
 EOF
 try_ 8 << EOF

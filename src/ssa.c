@@ -4171,6 +4171,7 @@ void optimize(void)
             /* instruction level optimizations */
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
                 /* record the instruction assigned value to rd */
+                insn_t *prior_assign = insn->rd ? insn->rd->last_assign : NULL;
                 if (insn->rd)
                     insn->rd->last_assign = insn;
 
@@ -4183,7 +4184,12 @@ void optimize(void)
                 /* Eliminate redundant assignments: x = x */
                 if (insn->opcode == OP_assign && insn->rd && insn->rs1 &&
                     insn->rd == insn->rs1) {
-                    /* Convert to no-op that DCE will remove */
+                    /* Convert to no-op that DCE will remove. A global is not
+                     * renamed, so "g = g" names one variable twice; a later
+                     * read of g must depend on the store before this one, or
+                     * DCE keeps an assignment with no operands.
+                     */
+                    insn->rd->last_assign = prior_assign;
                     insn->rd = NULL;
                     insn->rs1 = NULL;
                     continue;
