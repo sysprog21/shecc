@@ -123,9 +123,16 @@ void read_func_parameters_with_sret(func_t *func,
         }
 
         params[param_num++] = param;
-        if (lex_accept(T_comma) && strict_c99 &&
-            lex_peek(T_close_bracket, NULL))
-            error_at("trailing comma in function call is not permitted in C99",
+
+        /* A comma separates two arguments (C99 6.5.2p1): it cannot end the
+         * list, and two arguments cannot go without one. Neither is an
+         * extension any compiler offers, so no mode accepts them.
+         */
+        if (lex_accept(T_close_bracket))
+            break;
+        lex_expect(T_comma);
+        if (lex_peek(T_close_bracket, NULL))
+            error_at("Expected an argument after ',' in function call",
                      cur_token_loc());
     }
 
@@ -527,7 +534,7 @@ void read_builtin_va_arg_type(block_t *parent, va_arg_type_t *result)
             error_at("enum type cannot have integer specifiers",
                      cur_token_loc());
         lex_ident(T_identifier, name);
-        type = find_type_tag(name, parent);
+        type = find_enum_tag(name, parent);
     } else {
         if (!saw_base && !is_signed && !is_unsigned && !long_count &&
             !is_short) {

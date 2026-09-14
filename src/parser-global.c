@@ -44,7 +44,10 @@ void read_global_init_var(var_t *var, block_t *block)
  * completion independent of how that type was spelled lets enum, record, and
  * ordinary scalar declarations share linkage and redeclaration checks.
  */
-void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
+bool read_global_function_declarator(block_t *block,
+                                     var_t *var,
+                                     bool is_static,
+                                     bool allow_definition)
 {
     /* Functions and objects share C's ordinary identifier namespace at file
      * scope. `var` is the provisional declarator for this function, so a
@@ -184,6 +187,15 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
     }
 
     if (lex_peek(T_open_curly, NULL)) {
+        /* C99 6.9.1 admits function definitions only as external declarations.
+         * Lowering one here would nest its body inside the enclosing function.
+         */
+        if (var->is_block_scope_function_declaration)
+            error_at("function definition is not allowed at block scope",
+                     next_token_loc());
+        if (!allow_definition)
+            error_at("function definition must be the only declarator",
+                     next_token_loc());
         if (check_decl && func_tmp.bbs)
             error_at("redefinition of function", next_token_loc());
         if (is_incomplete_record_object(&func->return_def))
@@ -200,12 +212,17 @@ void read_global_function_declarator(block_t *block, var_t *var, bool is_static)
                 error_at("Incomplete struct/union type cannot define an object",
                          next_token_loc());
         read_func_body(func);
-        return;
+        return true;
     }
-    if (inherited_direct_function_type && lex_peek(T_comma, NULL))
-        return;
+
+    /* A prototype may be followed by further declarators of either kind, as in
+     * "int f(void), g(int), value;". Leave the comma to the list reader.
+     */
+    if (lex_peek(T_comma, NULL))
+        return false;
     if (!lex_accept(T_semicolon))
         error_at("Syntax error in global declaration", next_token_loc());
+    return true;
 }
 
 /* A compatible repeated file-scope declaration names the same object. The
@@ -257,7 +274,8 @@ var_t *resolve_global_declarator(block_t *block,
         previous->pointee_array_dim2 != var->pointee_array_dim2 ||
         previous->pointee_array_dim3 != var->pointee_array_dim3 ||
         previous->pointee_array_dim4 != var->pointee_array_dim4 ||
-        previous->is_const_qualified != var->is_const_qualified)
+        previous->is_const_qualified != var->is_const_qualified ||
+        previous->is_volatile != var->is_volatile)
         error_at("conflicting types for global declaration", next_token_loc());
     if (!previous->is_static && is_static)
         error_at("static declaration follows non-static declaration",
@@ -283,7 +301,8 @@ bool read_global_declarator(block_t *block,
                             bool is_const,
                             bool is_static,
                             bool is_volatile,
-                            bool is_extern)
+                            bool is_extern,
+                            bool allow_definition)
 {
     bool is_redeclaration;
     var_t *nv = require_typed_var(block, decl_type);
@@ -293,10 +312,9 @@ bool read_global_declarator(block_t *block,
     nv->is_volatile = is_volatile;
     read_inner_var_decl(nv, false, false, false);
     nv->is_extern = is_extern && !lex_peek(T_assign, NULL);
-    if (lex_peek(T_open_bracket, NULL)) {
-        read_global_function_declarator(block, nv, is_static);
-        return true;
-    }
+    if (lex_peek(T_open_bracket, NULL))
+        return read_global_function_declarator(block, nv, is_static,
+                                               allow_definition);
     bool is_definition = !nv->is_extern;
     if (is_definition && is_incomplete_record_object(nv))
         error_at("Incomplete struct/union type cannot define an object",
@@ -575,19 +593,21 @@ bool read_global_record_declarator(block_t *block,
                                    type_t *decl_type,
                                    bool is_const,
                                    bool is_static,
-                                   bool is_extern)
+                                   bool is_volatile,
+                                   bool is_extern,
+                                   bool allow_definition)
 {
     bool is_redeclaration;
     var_t *var = require_typed_var(block, decl_type);
     var->is_global = true;
     var->is_static = is_static;
     var->is_const_qualified = is_const;
+    var->is_volatile = is_volatile;
     read_inner_var_decl(var, false, false, false);
     var->is_extern = is_extern && !lex_peek(T_assign, NULL);
-    if (lex_peek(T_open_bracket, NULL)) {
-        read_global_function_declarator(block, var, is_static);
-        return true;
-    }
+    if (lex_peek(T_open_bracket, NULL))
+        return read_global_function_declarator(block, var, is_static,
+                                               allow_definition);
     bool is_definition = !var->is_extern;
     if (is_definition && is_incomplete_record_object(var))
         error_at("Incomplete struct/union type cannot define an object",
@@ -622,6 +642,40 @@ bool read_global_record_declarator(block_t *block,
     return false;
 }
 
+/* Read the declarators of a file-scope declaration through its terminating
+ * semicolon, or through the body of a function definition. Every declarator
+ * shares the base type, and object and function declarators may be mixed, as in
+ * "int f(void), g(int), value;"; a definition must stand alone. The caller has
+ * consumed a record or enum specifier, which qualifiers may still follow, as in
+ * "struct S volatile s;".
+ */
+void read_global_declarator_list(block_t *block,
+                                 type_t *decl_type,
+                                 bool is_const,
+                                 bool is_static,
+                                 bool is_volatile,
+                                 bool is_extern,
+                                 bool is_record)
+{
+    bool first = true;
+
+    read_type_qualifiers(&is_const, &is_volatile, false);
+    do {
+        bool ended =
+            is_record
+                ? read_global_record_declarator(block, decl_type, is_const,
+                                                is_static, is_volatile,
+                                                is_extern, first)
+                : read_global_declarator(block, decl_type, is_const, is_static,
+                                         is_volatile, is_extern, first);
+
+        if (ended)
+            return;
+        first = false;
+    } while (lex_accept(T_comma));
+    lex_expect(T_semicolon);
+}
+
 void read_global_decl(block_t *block,
                       bool is_const,
                       bool is_static,
@@ -642,8 +696,8 @@ void read_global_decl(block_t *block,
     var->is_extern = is_extern && !lex_peek(T_assign, NULL);
 
     if (lex_peek(T_open_bracket, NULL)) {
-        read_global_function_declarator(block, var, is_static);
-        return;
+        if (read_global_function_declarator(block, var, is_static, true))
+            return;
     } else {
         bool is_definition = !var->is_extern;
         if (var->is_inline)
@@ -659,27 +713,28 @@ void read_global_decl(block_t *block,
             add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0,
                      NULL);
         }
+
+        /* is a variable */
+        if (lex_peek(T_assign, NULL)) {
+            read_global_init_var(var, block);
+        } else if (lex_peek(T_semicolon, NULL)) {
+        } else if (!lex_peek(T_comma, NULL)) {
+            error_at("Syntax error in global declaration", next_token_loc());
+        }
+        discard_global_declarator_operand(var);
     }
 
-    /* is a variable */
-    if (lex_peek(T_assign, NULL)) {
-        read_global_init_var(var, block);
-    } else if (lex_peek(T_semicolon, NULL)) {
-    } else if (!lex_peek(T_comma, NULL)) {
-        error_at("Syntax error in global declaration", next_token_loc());
-    }
-    discard_global_declarator_operand(var);
-
-    /* Continuation: "int a = 1, b, c = 3;". Every declarator after the first
-     * shares this declaration's base type and is handled exactly like the
-     * first, mirroring what the struct-tagged global path already does.
+    /* Continuation: "int a = 1, b, c = 3;" or "int f(void), g(int);". Every
+     * declarator after the first shares this declaration's base type and is
+     * handled exactly like the first, mirroring the struct-tagged global path.
      */
     while (lex_accept(T_comma))
-        read_global_declarator(block, var->type, var->is_const_qualified,
-                               is_static, var->is_volatile, is_extern);
+        if (read_global_declarator(block, var->type, var->is_const_qualified,
+                                   is_static, var->is_volatile, is_extern,
+                                   false))
+            return;
 
     lex_expect(T_semicolon);
-    return;
 }
 
 void consume_global_compound_literal(void)
@@ -737,12 +792,13 @@ void initialize_struct_field(var_t *nv, var_t *v, int offset)
 /* The declarators of a file-scope typedef whose base type is not a record or
  * enum definition: scalar, pointer, array and function aliases.
  */
-static void read_global_typedef_declarators(block_t *block)
+static void read_global_typedef_declarators(block_t *block,
+                                            bool typedef_const,
+                                            bool typedef_volatile)
 {
     char base_type[MAX_ID_LEN];
     const type_t *base;
     type_t *type = add_type();
-    bool typedef_const = false;
     bool is_signed = false;
     bool is_unsigned = false;
     bool is_long = false;
@@ -768,10 +824,13 @@ static void read_global_typedef_declarators(block_t *block)
      * `long unsigned long` rather than treating the second specifier as the
      * typedef name.
      */
-    while (lex_peek(T_const, NULL) || lex_peek(T_signed, NULL) ||
-           lex_peek(T_unsigned, NULL) || lex_peek(T_long, NULL)) {
+    while (lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
+           lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
+           lex_peek(T_long, NULL)) {
         if (lex_accept(T_const))
             typedef_const = true;
+        else if (lex_accept(T_volatile))
+            typedef_volatile = true;
         else if (lex_accept(T_signed)) {
             if (is_signed)
                 error_at("duplicate signed type specifier", cur_token_loc());
@@ -862,6 +921,12 @@ static void read_global_typedef_declarators(block_t *block)
     }
     if (!base)
         error_at("Unable to find base type", cur_token_loc());
+
+    /* `typedef int const ci_t;` and `typedef int volatile vi_t;` qualify the
+     * alias just as the leading spelling does.
+     */
+    read_type_qualifiers(&typedef_const, &typedef_volatile,
+                         base->ptr_level != 0);
     type->base_type = base->base_type;
     type->size = base->size;
 
@@ -882,6 +947,8 @@ static void read_global_typedef_declarators(block_t *block)
     type->ptr_level = base->ptr_level;
     type->pointer_const_mask = base->pointer_const_mask;
     type->is_const_qualified = typedef_const || base->is_const_qualified;
+    type->is_volatile_qualified =
+        typedef_volatile || base->is_volatile_qualified;
     type->is_unsigned = base->is_unsigned;
     type->is_floating = base->is_floating;
     type->is_signed_char = base->is_signed_char;
@@ -902,7 +969,12 @@ static void read_global_typedef_declarators(block_t *block)
             if (lex_accept(T_const)) {
                 if (type->ptr_level <= 32)
                     type->pointer_const_mask |= 1U << (type->ptr_level - 1);
-            } else if (lex_accept(T_volatile) || lex_accept(T_restrict)) {
+            } else if (lex_accept(T_volatile)) {
+                /* As for an object declarator, a volatile pointer marks the
+                 * whole declaration volatile.
+                 */
+                type->is_volatile_qualified = true;
+            } else if (lex_accept(T_restrict)) {
                 ;
             } else
                 break;
@@ -1015,7 +1087,14 @@ static void read_global_typedef_declarators(block_t *block)
 static void read_global_typedef(block_t *block)
 {
     char token[MAX_ID_LEN];
+    bool typedef_const = false;
+    bool typedef_volatile = false;
 
+    /* Qualifiers may lead the type specifier or follow it. Each branch reads
+     * the trailing ones after its specifier and records both on the alias,
+     * which every declaration spelled with it then inherits.
+     */
+    read_type_qualifiers(&typedef_const, &typedef_volatile, false);
     if (lex_accept(T_enum)) {
         int val = 0;
         type_t *type = add_type();
@@ -1033,6 +1112,9 @@ static void read_global_typedef(block_t *block)
             first = false;
         } while (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL));
         lex_expect(T_close_curly);
+        read_type_qualifiers(&typedef_const, &typedef_volatile, false);
+        type->is_const_qualified = typedef_const;
+        type->is_volatile_qualified = typedef_volatile;
         lex_ident(T_identifier, token);
         set_type_name(type, token);
         lex_expect(T_semicolon);
@@ -1105,6 +1187,7 @@ static void read_global_typedef(block_t *block)
             } while (!lex_accept(T_close_curly));
         }
 
+        read_type_qualifiers(&typedef_const, &typedef_volatile, false);
         while (lex_accept(T_asterisk)) {
             type->ptr_level++;
             type->size = PTR_SIZE;
@@ -1129,6 +1212,10 @@ static void read_global_typedef(block_t *block)
              */
             type->base_struct = tag;
         }
+
+        /* Only the alias is qualified; the tag copy above must stay plain. */
+        type->is_const_qualified = typedef_const;
+        type->is_volatile_qualified = typedef_volatile;
 
         lex_expect(T_semicolon);
     } else if (lex_accept(T_union)) {
@@ -1187,6 +1274,7 @@ static void read_global_typedef(block_t *block)
             } while (!lex_accept(T_close_curly));
         }
 
+        read_type_qualifiers(&typedef_const, &typedef_volatile, false);
         while (lex_accept(T_asterisk)) {
             type->ptr_level++;
             type->size = PTR_SIZE;
@@ -1212,9 +1300,12 @@ static void read_global_typedef(block_t *block)
             type->base_struct = tag;
         }
 
+        type->is_const_qualified = typedef_const;
+        type->is_volatile_qualified = typedef_volatile;
+
         lex_expect(T_semicolon);
     } else {
-        read_global_typedef_declarators(block);
+        read_global_typedef_declarators(block, typedef_const, typedef_volatile);
     }
 }
 
@@ -1289,13 +1380,8 @@ void read_global_statement(void)
             if (lex_accept(T_semicolon))
                 return;
 
-            if (read_global_record_declarator(block, type, is_const, is_static,
-                                              is_extern))
-                return;
-            while (lex_accept(T_comma))
-                read_global_record_declarator(block, type, is_const, is_static,
-                                              is_extern);
-            lex_expect(T_semicolon);
+            read_global_declarator_list(block, type, is_const, is_static,
+                                        is_volatile, is_extern, true);
             return;
         }
 
@@ -1356,15 +1442,9 @@ void read_global_statement(void)
         /* A record definition may be followed by its declarators, as in "struct
          * pair { int x, y; } first, *second;".
          */
-        if (!lex_peek(T_semicolon, NULL)) {
-            if (read_global_record_declarator(block, type, is_const, is_static,
-                                              is_extern))
-                return;
-            while (lex_accept(T_comma))
-                read_global_record_declarator(block, type, is_const, is_static,
-                                              is_extern);
-        }
-        lex_expect(T_semicolon);
+        if (!lex_accept(T_semicolon))
+            read_global_declarator_list(block, type, is_const, is_static,
+                                        is_volatile, is_extern, true);
     } else if (lex_accept(T_union)) {
         int i = 0, max_size = 0, alignment = 1;
         bool has_flexible_array_member = false;
@@ -1381,13 +1461,8 @@ void read_global_statement(void)
             if (lex_accept(T_semicolon))
                 return;
 
-            if (read_global_record_declarator(block, type, is_const, is_static,
-                                              is_extern))
-                return;
-            while (lex_accept(T_comma))
-                read_global_record_declarator(block, type, is_const, is_static,
-                                              is_extern);
-            lex_expect(T_semicolon);
+            read_global_declarator_list(block, type, is_const, is_static,
+                                        is_volatile, is_extern, true);
             return;
         }
 
@@ -1434,15 +1509,9 @@ void read_global_statement(void)
         type->num_fields = i;
         type->has_flexible_array_member = has_flexible_array_member;
 
-        if (!lex_peek(T_semicolon, NULL)) {
-            if (read_global_record_declarator(block, type, is_const, is_static,
-                                              is_extern))
-                return;
-            while (lex_accept(T_comma))
-                read_global_record_declarator(block, type, is_const, is_static,
-                                              is_extern);
-        }
-        lex_expect(T_semicolon);
+        if (!lex_accept(T_semicolon))
+            read_global_declarator_list(block, type, is_const, is_static,
+                                        is_volatile, is_extern, true);
     } else if (lex_accept(T_enum)) {
         /* An enum definition is a declaration in its own right; it need not
          * introduce a typedef. Its enumerators are integer constants and may
@@ -1460,19 +1529,14 @@ void read_global_statement(void)
         if (!lex_peek(T_open_curly, NULL)) {
             if (!has_tag)
                 error_at("Expected enum tag or definition", cur_token_loc());
-            type = find_type(token, true);
+            type = find_enum_tag(token, GLOBAL_BLOCK);
             if (!type)
                 error_at("Unknown enum type", cur_token_loc());
-            if (read_global_declarator(block, type, is_const, is_static,
-                                       is_volatile, is_extern))
-                return;
-            while (lex_accept(T_comma))
-                read_global_declarator(block, type, is_const, is_static,
-                                       is_volatile, is_extern);
-            lex_expect(T_semicolon);
+            read_global_declarator_list(block, type, is_const, is_static,
+                                        is_volatile, is_extern, false);
             return;
         }
-        type = has_tag ? find_type(token, true) : NULL;
+        type = has_tag ? local_enum_tag(token, GLOBAL_BLOCK) : NULL;
         if (!type)
             type = add_type();
 
@@ -1498,15 +1562,9 @@ void read_global_statement(void)
             first = false;
         } while (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL));
         lex_expect(T_close_curly);
-        if (!lex_peek(T_semicolon, NULL)) {
-            if (read_global_declarator(block, type, is_const, is_static,
-                                       is_volatile, is_extern))
-                return;
-            while (lex_accept(T_comma))
-                read_global_declarator(block, type, is_const, is_static,
-                                       is_volatile, is_extern);
-        }
-        lex_expect(T_semicolon);
+        if (!lex_accept(T_semicolon))
+            read_global_declarator_list(block, type, is_const, is_static,
+                                        is_volatile, is_extern, false);
     } else if (lex_accept(T_typedef)) {
         read_global_typedef(block);
     } else if (lex_peek(T_identifier, NULL) || lex_peek(T_signed, NULL) ||

@@ -19,9 +19,10 @@ var_t *resolve_global_declarator(block_t *block,
                                  var_t *var,
                                  bool is_static,
                                  bool *is_redeclaration);
-void read_global_function_declarator(block_t *block,
+bool read_global_function_declarator(block_t *block,
                                      var_t *var,
-                                     bool is_static);
+                                     bool is_static,
+                                     bool allow_definition);
 var_t *bind_block_extern_object(block_t *parent, var_t *var);
 int read_const_expr(block_t *scope);
 var_t *read_wide_global_literal_expression(block_t *parent,
@@ -392,8 +393,72 @@ void parse_struct_field_init(block_t *parent,
                              type_t *struct_type,
                              var_t *target_addr,
                              bool emit_code);
+bool parse_struct_field_values(block_t *parent,
+                               basic_block_t **bb,
+                               type_t *struct_type,
+                               var_t *target_addr,
+                               bool emit_code,
+                               bool elided,
+                               var_t *first_value);
+bool parse_unbraced_record_init(block_t *parent,
+                                basic_block_t **bb,
+                                type_t *record_type,
+                                var_t *addr,
+                                bool emit_code);
+bool unbraced_record_starts_here(const var_t *elem);
 
-void parse_array_field_row_values(block_t *parent,
+/* Store zero into every byte of elements [from, to) of the array at @base. */
+void emit_zero_elements(block_t *parent,
+                        basic_block_t **bb,
+                        var_t *base,
+                        int from,
+                        int to,
+                        int elem_size)
+{
+    var_t *zero;
+
+    if (from >= to)
+        return;
+    zero = require_var(parent);
+    zero->var_name = gen_name();
+    zero->init_val = 0;
+    add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
+    for (int i = from; i < to; i++) {
+        var_t *elem_addr =
+            compute_element_address(parent, bb, base, i, elem_size);
+        for (int offset = 0; offset < elem_size; offset++) {
+            var_t *byte_addr =
+                compute_element_address(parent, bb, elem_addr, offset, 1);
+            add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1, NULL);
+        }
+    }
+}
+
+/* Read an `[index] =` designator for one of @bound slots, if one is next. */
+bool accept_slot_designator(block_t *scope, int bound, int *slot)
+{
+    int index;
+
+    if (!lex_accept(T_open_square))
+        return false;
+    index = read_const_expr(scope);
+    lex_expect(T_close_square);
+    if (index < 0 || index >= bound)
+        error_at("Array designator index is out of bounds", cur_token_loc());
+    lex_expect(T_assign);
+    *slot = index;
+    return true;
+}
+
+/* Parse one row of a two-dimensional array. An unbraced row returns true when a
+ * brace-elided record element consumed the comma after the row's last
+ * initializer, so the enclosing list must not expect it again. Only a braced
+ * row owns designators; in an unbraced one they belong to the enclosing list.
+ * As in the plane and hyperplane helpers below, `filled` is one past the
+ * highest slot written, so after designators in any order the zero fill covers
+ * exactly the slots nothing wrote.
+ */
+bool parse_array_field_row_values(block_t *parent,
                                   basic_block_t **bb,
                                   const var_t *field,
                                   var_t *target_addr,
@@ -402,6 +467,8 @@ void parse_array_field_row_values(block_t *parent,
                                   bool braced)
 {
     int count = 0;
+    int filled = 0;
+    bool comma_consumed = false;
     int elem_size =
         (field->ptr_level || field->is_func) ? PTR_SIZE : field->type->size;
 
@@ -413,12 +480,19 @@ void parse_array_field_row_values(block_t *parent,
         var_t *value = NULL;
         var_t *elem_addr;
 
+        if (braced)
+            accept_slot_designator(field->scope ? field->scope : parent,
+                                   field->array_dim2, &count);
         if (count >= field->array_dim2)
             error_at("Too many elements in array initializer",
                      next_token_loc());
+        if (emit_code)
+            emit_zero_elements(parent, bb, target_addr, start + filled,
+                               start + count, elem_size);
 
         elem_addr = compute_element_address(parent, bb, target_addr,
                                             start + count, elem_size);
+        comma_consumed = false;
         if (lex_peek(T_open_curly, NULL) && is_record_type(field->type)) {
             type_t *record_type = field->type;
             if (record_type->base_type == TYPE_typedef &&
@@ -428,6 +502,9 @@ void parse_array_field_row_values(block_t *parent,
             parse_struct_field_init(parent, bb, record_type, elem_addr,
                                     emit_code);
             lex_expect(T_close_curly);
+        } else if (unbraced_record_starts_here(field)) {
+            comma_consumed = parse_unbraced_record_init(parent, bb, field->type,
+                                                        elem_addr, emit_code);
         } else if (parent == GLOBAL_BLOCK) {
             if (emit_code)
                 value = parse_global_constant_value(parent, bb);
@@ -449,33 +526,31 @@ void parse_array_field_row_values(block_t *parent,
         }
 
         count++;
+        if (count > filled)
+            filled = count;
         if (count == field->array_dim2) {
-            if (braced && lex_accept(T_comma) && !lex_peek(T_close_curly, NULL))
+            if (braced && (comma_consumed || lex_accept(T_comma)) &&
+                !lex_peek(T_close_curly, NULL)) {
+                if (lex_peek(T_open_square, NULL))
+                    continue;
                 error_at("Too many elements in array initializer",
                          next_token_loc());
-            break;
-        }
-        if (!lex_accept(T_comma))
-            break;
-    }
-    if (braced)
-        lex_expect(T_close_curly);
-
-    if (emit_code) {
-        var_t *zero = require_var(parent);
-        zero->var_name = gen_name();
-        zero->init_val = 0;
-        add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-        for (; count < field->array_dim2; count++) {
-            var_t *elem_addr = compute_element_address(
-                parent, bb, target_addr, start + count, elem_size);
-            for (int offset = 0; offset < elem_size; offset++) {
-                var_t *byte_addr =
-                    compute_element_address(parent, bb, elem_addr, offset, 1);
-                add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1, NULL);
             }
+            break;
         }
+        if (!comma_consumed && !lex_accept(T_comma))
+            break;
+        comma_consumed = true;
     }
+    if (braced) {
+        lex_expect(T_close_curly);
+        comma_consumed = false;
+    }
+
+    if (emit_code)
+        emit_zero_elements(parent, bb, target_addr, start + filled,
+                           start + field->array_dim2, elem_size);
+    return comma_consumed;
 }
 
 void parse_array_field_row_init(block_t *parent,
@@ -502,6 +577,7 @@ void parse_array_field_plane_values(block_t *parent,
 {
     var_t row;
     int rows = 0;
+    int filled = 0;
     int row_width = field->array_dim3;
     int elem_size =
         (field->ptr_level || field->is_func) ? PTR_SIZE : field->type->size;
@@ -514,53 +590,39 @@ void parse_array_field_plane_values(block_t *parent,
         reject_empty_initializer_in_strict_c99();
     }
     while (!lex_peek(T_close_curly, NULL)) {
-        if (lex_accept(T_open_square)) {
-            int index = read_const_expr(field->scope ? field->scope : parent);
-
-            lex_expect(T_close_square);
-            if (index < 0 || index >= field->array_dim2)
-                error_at("Array designator index is out of bounds",
-                         cur_token_loc());
-            rows = index;
-            lex_expect(T_assign);
-        }
+        accept_slot_designator(field->scope ? field->scope : parent,
+                               field->array_dim2, &rows);
         if (rows >= field->array_dim2)
             error_at("Too many rows in array initializer", next_token_loc());
-        parse_array_field_row_values(parent, bb, &row, target_addr,
-                                     start + rows * row_width, emit_code,
-                                     lex_peek(T_open_curly, NULL));
+        if (emit_code)
+            emit_zero_elements(parent, bb, target_addr,
+                               start + filled * row_width,
+                               start + rows * row_width, elem_size);
+        bool row_comma = parse_array_field_row_values(
+            parent, bb, &row, target_addr, start + rows * row_width, emit_code,
+            lex_peek(T_open_curly, NULL));
         rows++;
+        if (rows > filled)
+            filled = rows;
         if (rows == field->array_dim2) {
-            if (braced && lex_accept(T_comma) && !lex_peek(T_close_curly, NULL))
+            if (braced && (row_comma || lex_accept(T_comma)) &&
+                !lex_peek(T_close_curly, NULL)) {
+                if (lex_peek(T_open_square, NULL))
+                    continue;
                 error_at("Too many rows in array initializer",
                          next_token_loc());
+            }
             break;
         }
-        if (!lex_accept(T_comma))
+        if (!row_comma && !lex_accept(T_comma))
             break;
     }
     if (braced)
         lex_expect(T_close_curly);
 
-    if (emit_code) {
-        var_t *zero = require_var(parent);
-        zero->var_name = gen_name();
-        zero->init_val = 0;
-        add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-        for (; rows < field->array_dim2; rows++) {
-            for (int col = 0; col < row_width; col++) {
-                var_t *addr = compute_element_address(
-                    parent, bb, target_addr, start + rows * row_width + col,
-                    elem_size);
-                for (int byte = 0; byte < elem_size; byte++) {
-                    var_t *byte_addr =
-                        compute_element_address(parent, bb, addr, byte, 1);
-                    add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1,
-                             NULL);
-                }
-            }
-        }
-    }
+    if (emit_code)
+        emit_zero_elements(parent, bb, target_addr, start + filled * row_width,
+                           start + field->array_dim2 * row_width, elem_size);
 }
 
 void parse_array_field_plane_init(block_t *parent,
@@ -587,6 +649,7 @@ void parse_array_field_hyperplane_init(block_t *parent,
 {
     var_t plane;
     int planes = 0;
+    int filled = 0;
     int plane_size = field->array_dim3 * field->array_dim4;
     int elem_size =
         (field->ptr_level || field->is_func) ? PTR_SIZE : field->type->size;
@@ -599,46 +662,28 @@ void parse_array_field_hyperplane_init(block_t *parent,
     lex_expect(T_open_curly);
     reject_empty_initializer_in_strict_c99();
     while (!lex_peek(T_close_curly, NULL)) {
-        if (lex_accept(T_open_square)) {
-            int index = read_const_expr(field->scope ? field->scope : parent);
-
-            lex_expect(T_close_square);
-            if (index < 0 || index >= field->array_dim2)
-                error_at("Array designator index is out of bounds",
-                         cur_token_loc());
-            planes = index;
-            lex_expect(T_assign);
-        }
+        accept_slot_designator(field->scope ? field->scope : parent,
+                               field->array_dim2, &planes);
         if (planes >= field->array_dim2)
             error_at("Too many planes in array initializer", next_token_loc());
+        if (emit_code)
+            emit_zero_elements(parent, bb, target_addr,
+                               start + filled * plane_size,
+                               start + planes * plane_size, elem_size);
         parse_array_field_plane_values(parent, bb, &plane, target_addr,
                                        start + planes * plane_size, emit_code,
                                        lex_peek(T_open_curly, NULL));
         planes++;
+        if (planes > filled)
+            filled = planes;
         if (!lex_accept(T_comma))
             break;
     }
     lex_expect(T_close_curly);
 
-    if (emit_code) {
-        var_t *zero = require_var(parent);
-        zero->var_name = gen_name();
-        zero->init_val = 0;
-        add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-        for (; planes < field->array_dim2; planes++) {
-            for (int element = 0; element < plane_size; element++) {
-                var_t *addr = compute_element_address(
-                    parent, bb, target_addr,
-                    start + planes * plane_size + element, elem_size);
-                for (int byte = 0; byte < elem_size; byte++) {
-                    var_t *byte_addr =
-                        compute_element_address(parent, bb, addr, byte, 1);
-                    add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1,
-                             NULL);
-                }
-            }
-        }
-    }
+    if (emit_code)
+        emit_zero_elements(parent, bb, target_addr, start + filled * plane_size,
+                           start + field->array_dim2 * plane_size, elem_size);
 }
 
 /* Read a string literal and every adjacent one after it, decoded and joined
@@ -774,6 +819,12 @@ void parse_array_field_init(block_t *parent,
                             bool emit_code)
 {
     int count = 0;
+
+    /* One past the highest element written so far. A designator can move
+     * backwards, so zero fill starts here rather than at `count`, which would
+     * clear rows that an earlier designator already stored.
+     */
+    int filled = 0;
     int elem_size =
         (field->ptr_level || field->is_func) ? PTR_SIZE : field->type->size;
 
@@ -781,86 +832,172 @@ void parse_array_field_init(block_t *parent,
     reject_empty_initializer_in_strict_c99();
     while (!lex_peek(T_close_curly, NULL)) {
         var_t *value = NULL;
+        var_t slice;
+        bool comma_consumed = false;
+
+        /* `slice` is the array whose one element the next initializer fills.
+         * Without a designator that is the member itself. Each subscript of a
+         * designator such as `[1] = { ... }` or `[1][0] = 3` descends one
+         * level, so the braced row, plane and scalar paths below see exactly
+         * the shape the designator names and reordered rows stay valid.
+         */
+        memcpy(&slice, field, sizeof(slice));
+        if (lex_accept(T_open_square)) {
+            var_t element;
+
+            memcpy(&element, field, sizeof(element));
+            count = 0;
+            do {
+                int stride = fixed_array_inner_count(&element);
+                int index =
+                    read_const_expr(field->scope ? field->scope : parent);
+
+                lex_expect(T_close_square);
+                if (index < 0 || index >= element.array_size / stride)
+                    error_at("Array designator index is out of bounds",
+                             cur_token_loc());
+                count += index * stride;
+                memcpy(&slice, &element, sizeof(slice));
+                fixed_array_var_drop_outer(&element);
+            } while (element.array_size && lex_accept(T_open_square));
+            lex_expect(T_assign);
+        }
 
         if (count >= field->array_size)
             error_at("Too many elements in array initializer",
                      next_token_loc());
+        if (emit_code)
+            emit_zero_elements(parent, bb, target_addr, filled, count,
+                               elem_size);
 
         var_t *elem_addr =
             compute_element_address(parent, bb, target_addr, count, elem_size);
-        if (field->array_dim4 && lex_peek(T_open_curly, NULL)) {
-            parse_array_field_hyperplane_init(parent, bb, field, target_addr,
+        if (slice.array_dim4 && lex_peek(T_open_curly, NULL)) {
+            parse_array_field_hyperplane_init(parent, bb, &slice, target_addr,
                                               count, emit_code);
-            count += fixed_array_inner_count(field);
-            if (!lex_accept(T_comma))
-                break;
-            continue;
-        } else if (field->array_dim3 && lex_peek(T_open_curly, NULL)) {
-            parse_array_field_plane_init(parent, bb, field, target_addr, count,
+            count += fixed_array_inner_count(&slice);
+        } else if (slice.array_dim3 && lex_peek(T_open_curly, NULL)) {
+            parse_array_field_plane_init(parent, bb, &slice, target_addr, count,
                                          emit_code);
-            count += fixed_array_inner_count(field);
-            if (!lex_accept(T_comma))
-                break;
-            continue;
-        } else if (field->array_dim2 && lex_peek(T_open_curly, NULL)) {
-            parse_array_field_row_init(parent, bb, field, target_addr, count,
+            count += fixed_array_inner_count(&slice);
+        } else if (slice.array_dim2 && lex_peek(T_open_curly, NULL)) {
+            parse_array_field_row_init(parent, bb, &slice, target_addr, count,
                                        emit_code);
-            count += fixed_array_inner_count(field);
-            if (!lex_accept(T_comma))
-                break;
-            continue;
-        } else if (lex_peek(T_open_curly, NULL) &&
-                   is_record_type(field->type)) {
-            type_t *record_type = field->type;
-            if (record_type->base_type == TYPE_typedef &&
-                record_type->base_struct)
-                record_type = record_type->base_struct;
-            lex_expect(T_open_curly);
-            parse_struct_field_init(parent, bb, record_type, elem_addr,
-                                    emit_code);
-            lex_expect(T_close_curly);
-        } else if (parent == GLOBAL_BLOCK) {
-            if (emit_code)
-                value = parse_global_constant_value(parent, bb);
-            else
-                consume_global_constant_syntax();
+            count += fixed_array_inner_count(&slice);
         } else {
-            read_expr(parent, bb);
-            read_ternary_operation(parent, bb);
-            value = opstack_pop();
+            if (lex_peek(T_open_curly, NULL) && is_record_type(field->type)) {
+                type_t *record_type = field->type;
+                if (record_type->base_type == TYPE_typedef &&
+                    record_type->base_struct)
+                    record_type = record_type->base_struct;
+                lex_expect(T_open_curly);
+                parse_struct_field_init(parent, bb, record_type, elem_addr,
+                                        emit_code);
+                lex_expect(T_close_curly);
+            } else if (unbraced_record_starts_here(field)) {
+                comma_consumed = parse_unbraced_record_init(
+                    parent, bb, field->type, elem_addr, emit_code);
+            } else if (parent == GLOBAL_BLOCK) {
+                if (emit_code)
+                    value = parse_global_constant_value(parent, bb);
+                else
+                    consume_global_constant_syntax();
+            } else {
+                read_expr(parent, bb);
+                read_ternary_operation(parent, bb);
+                value = opstack_pop();
+            }
+
+            if (value && emit_code) {
+                var_t *stored = value->is_func
+                                    ? value
+                                    : resize_to(parent, bb, value, field->type,
+                                                field->ptr_level);
+                add_insn(parent, *bb, OP_write, NULL, elem_addr, stored,
+                         elem_size, NULL);
+            }
+            count++;
         }
 
-        if (value && emit_code) {
-            var_t *stored = value->is_func
-                                ? value
-                                : resize_to(parent, bb, value, field->type,
-                                            field->ptr_level);
-            add_insn(parent, *bb, OP_write, NULL, elem_addr, stored, elem_size,
-                     NULL);
-        }
-
-        count++;
-        if (!lex_accept(T_comma))
+        if (count > filled)
+            filled = count;
+        if (!comma_consumed && !lex_accept(T_comma))
             break;
     }
     lex_expect(T_close_curly);
 
-    if (emit_code) {
-        var_t *zero = require_var(parent);
-        zero->var_name = gen_name();
-        zero->init_val = 0;
-        add_insn(parent, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
+    if (emit_code)
+        emit_zero_elements(parent, bb, target_addr, filled, field->array_size,
+                           elem_size);
+}
 
-        for (; count < field->array_size; count++) {
-            var_t *elem_addr = compute_element_address(parent, bb, target_addr,
-                                                       count, elem_size);
-            for (int offset = 0; offset < elem_size; offset++) {
-                var_t *byte_addr =
-                    compute_element_address(parent, bb, elem_addr, offset, 1);
-                add_insn(parent, *bb, OP_write, NULL, byte_addr, zero, 1, NULL);
-            }
-        }
+type_t *resolve_record_type(type_t *type)
+{
+    if (type->base_type == TYPE_typedef && type->base_struct)
+        return type->base_struct;
+    return type;
+}
+
+/* Initialize the record at @addr from @value, an initializer already read that
+ * does not begin with a brace. An expression of the record's own type
+ * initializes the whole record. Anything else, or no value at all, starts a
+ * brace-elided list that takes one initializer per member from the enclosing
+ * list (C99 6.7.8p13 and p20).
+ *
+ * Returns true when that list consumed the comma after its last initializer,
+ * which the enclosing loop must then not expect.
+ */
+bool parse_record_from_value(block_t *parent,
+                             basic_block_t **bb,
+                             type_t *record_type,
+                             var_t *addr,
+                             bool emit_code,
+                             var_t *value)
+{
+    record_type = resolve_record_type(record_type);
+    if (is_record_object(value) &&
+        resolve_record_type(value->type) == record_type) {
+        if (emit_code)
+            emit_record_copy_to_address(parent, bb, addr, value);
+        return false;
     }
+    return parse_struct_field_values(parent, bb, record_type, addr, emit_code,
+                                     true, value);
+}
+
+/* A record slot whose initializer does not begin with a brace. Reading a block
+ * scope expression first is the only way to tell a record value from the first
+ * scalar of an elided list. Static storage takes constants only, which are
+ * never records, and a string always belongs to a member, so neither is read
+ * ahead: the elided list then parses it in the member's own context.
+ */
+bool parse_unbraced_record_init(block_t *parent,
+                                basic_block_t **bb,
+                                type_t *record_type,
+                                var_t *addr,
+                                bool emit_code)
+{
+    var_t *value = NULL;
+
+    if (parent != GLOBAL_BLOCK && !lex_peek(T_string, NULL) &&
+        !lex_peek(T_wstring, NULL)) {
+        read_expr(parent, bb);
+        read_ternary_operation(parent, bb);
+        value = opstack_pop();
+    }
+    return parse_record_from_value(parent, bb, record_type, addr, emit_code,
+                                   value);
+}
+
+/* Whether an initializer starting at the next token for a slot of @elem's type
+ * is a brace-elided record, rather than a braced one or a designator that
+ * belongs to the enclosing list.
+ */
+bool unbraced_record_starts_here(const var_t *elem)
+{
+    return !elem->ptr_level && !elem->is_func && is_record_type(elem->type) &&
+           !lex_peek(T_open_curly, NULL) && !lex_peek(T_dot, NULL) &&
+           !lex_peek(T_open_square, NULL);
 }
 
 void parse_struct_field_init(block_t *parent,
@@ -869,10 +1006,32 @@ void parse_struct_field_init(block_t *parent,
                              var_t *target_addr,
                              bool emit_code)
 {
+    parse_struct_field_values(parent, bb, struct_type, target_addr, emit_code,
+                              false, NULL);
+}
+
+/* Parse the members of the record at @target_addr. A braced list runs to its
+ * closing brace, which the caller consumes. An @elided list has no braces of
+ * its own: it stops once every member has an initializer, or at a closing brace
+ * or designator that belongs to the enclosing list, and @first_value is an
+ * initializer the caller already read for the first scalar member.
+ */
+bool parse_struct_field_values(block_t *parent,
+                               basic_block_t **bb,
+                               type_t *struct_type,
+                               var_t *target_addr,
+                               bool emit_code,
+                               bool elided,
+                               var_t *first_value)
+{
     int field_idx = 0;
     int initializer_count = 0;
+    bool comma_consumed = false;
+    bool is_union =
+        struct_type->base_type == TYPE_union || struct_type->is_union;
 
-    reject_empty_initializer_in_strict_c99();
+    if (!elided)
+        reject_empty_initializer_in_strict_c99();
 
     /* Both of these back a "field" pointer that outlives the designator block
      * they are filled in from, so they have to live as long as the loop that
@@ -921,18 +1080,26 @@ void parse_struct_field_init(block_t *parent,
         }
     }
 
-    if (!lex_peek(T_close_curly, NULL)) {
+    if (first_value || !lex_peek(T_close_curly, NULL)) {
         for (;;) {
             var_t *field_val_raw = NULL;
             var_t *field = NULL;
             var_t *designated_field_addr = NULL;
             bool consumed_pending_array_element = false;
+            bool nested_comma_consumed = false;
 
-            if (lex_accept(T_dot)) {
+            if (!first_value && lex_accept(T_dot)) {
                 char field_name[MAX_ID_LEN];
                 type_t *designator_type = struct_type;
                 var_t *designator_base = target_addr;
                 bool first = true;
+
+                /* A new member designator ends any array element sequence
+                 * started by an earlier `.a[i] =`, so the positional
+                 * initializers after it follow the newly named member instead
+                 * of resuming the stale array slots.
+                 */
+                has_pending_array_element = false;
 
                 for (;;) {
                     bool found = false;
@@ -1073,9 +1240,11 @@ void parse_struct_field_init(block_t *parent,
              */
             if (field && !designated_field_addr && !has_pending_array_element &&
                 field->array_size &&
-                (field->ptr_level || !is_record_type(field->type)) &&
-                !lex_peek(T_open_curly, NULL) && !lex_peek(T_string, NULL) &&
-                !lex_peek(T_wstring, NULL)) {
+                (first_value ||
+                 (!lex_peek(T_open_curly, NULL) &&
+                  ((!field->ptr_level && is_record_type(field->type)) ||
+                   (!lex_peek(T_string, NULL) &&
+                    !lex_peek(T_wstring, NULL)))))) {
                 pending_array_base =
                     compute_field_address(parent, bb, target_addr, field);
                 pending_array_elem_size = (field->ptr_level || field->is_func)
@@ -1095,7 +1264,8 @@ void parse_struct_field_init(block_t *parent,
                 consumed_pending_array_element = true;
             }
 
-            if (field && field->array_size && !field->ptr_level &&
+            if (!first_value && field && field->array_size &&
+                !field->ptr_level &&
                 (lex_peek(T_string, NULL) || lex_peek(T_wstring, NULL)) &&
                 ((lex_peek(T_string, NULL) && !is_char_array(field)) ||
                  (lex_peek(T_wstring, NULL) && !is_wchar_array(field))))
@@ -1103,8 +1273,25 @@ void parse_struct_field_init(block_t *parent,
                     "String literal initializer has incompatible array element "
                     "type",
                     cur_token_loc());
-            if (field && field->array_size && is_char_array(field) &&
-                lex_peek(T_string, NULL)) {
+            if (first_value) {
+                /* The caller read this value for the first scalar of an elided
+                 * record. A record member takes it on to that record's own
+                 * first member; see parse_record_from_value().
+                 */
+                var_t *field_addr =
+                    designated_field_addr
+                        ? designated_field_addr
+                        : compute_field_address(parent, bb, target_addr, field);
+
+                if (!field->ptr_level && is_record_type(field->type))
+                    nested_comma_consumed = parse_record_from_value(
+                        parent, bb, field->type, field_addr, emit_code,
+                        first_value);
+                else
+                    field_val_raw = first_value;
+                first_value = NULL;
+            } else if (field && field->array_size && is_char_array(field) &&
+                       lex_peek(T_string, NULL)) {
                 var_t *field_addr =
                     designated_field_addr
                         ? designated_field_addr
@@ -1144,6 +1331,15 @@ void parse_struct_field_init(block_t *parent,
                 parse_struct_field_init(parent, bb, nested_type, field_addr,
                                         emit_code);
                 lex_expect(T_close_curly);
+            } else if (field && !field->array_size &&
+                       unbraced_record_starts_here(field)) {
+                var_t *field_addr =
+                    designated_field_addr
+                        ? designated_field_addr
+                        : compute_field_address(parent, bb, target_addr, field);
+
+                nested_comma_consumed = parse_unbraced_record_init(
+                    parent, bb, field->type, field_addr, emit_code);
             } else if (parent == GLOBAL_BLOCK) {
                 if (emit_code) {
                     field_val_raw = parse_global_constant_value(parent, bb);
@@ -1222,10 +1418,29 @@ void parse_struct_field_init(block_t *parent,
                 field_idx++;
             }
             initializer_count++;
-            if (!lex_accept(T_comma))
+
+            /* An elided record ends with its last member and leaves the comma
+             * that follows to the enclosing list.
+             */
+            if (elided && !has_pending_array_element) {
+                while (field_idx < struct_type->num_fields &&
+                       is_bitfield(&struct_type->fields[field_idx]) &&
+                       !struct_type->fields[field_idx].var_name[0])
+                    field_idx++;
+                if (field_idx >= struct_type->num_fields || is_union) {
+                    comma_consumed = nested_comma_consumed;
+                    break;
+                }
+            }
+            if (!nested_comma_consumed && !lex_accept(T_comma))
                 break;
+            comma_consumed = true;
             if (lex_peek(T_close_curly, NULL))
                 break;
+            if (elided &&
+                (lex_peek(T_dot, NULL) || lex_peek(T_open_square, NULL)))
+                break;
+            comma_consumed = false;
         }
     }
 
@@ -1240,6 +1455,7 @@ void parse_struct_field_init(block_t *parent,
                      unit->bit_storage_size, NULL);
         }
     }
+    return comma_consumed;
 }
 
 void parse_array_literal_expr(block_t *parent, basic_block_t **bb)
@@ -1581,6 +1797,7 @@ void parse_array_init(var_t *var,
             var_t designated_array;
             var_t *initializer_var = var;
             int prior_count = count;
+            bool elided_comma = false;
 
             if (lex_accept(T_open_square)) {
                 int index;
@@ -1724,6 +1941,20 @@ void parse_array_init(var_t *var,
                     lex_expect(T_close_curly);
                     val = NULL;
                 }
+            } else if (emit_code && unbraced_record_starts_here(var)) {
+                /* Without braces a record element takes one initializer per
+                 * member, so `struct p a[2] = { 1, 2, 3, 4 }` fills a[0] from 1
+                 * and 2 before a[1] starts. The record parser stops after its
+                 * last member and leaves the comma to this loop.
+                 */
+                var_t *elem_addr = compute_element_address(
+                    parent, bb, base_addr, count, elem_size);
+
+                if (is_implicit && parent != GLOBAL_BLOCK)
+                    emit_zero_elements(parent, bb, base_addr, inferred_size,
+                                       count, elem_size);
+                elided_comma = parse_unbraced_record_init(parent, bb, var->type,
+                                                          elem_addr, emit_code);
             } else {
                 /* A global initializer is restricted to simple constants, but
                  * it still has to be stored. Consuming the tokens and dropping
@@ -1924,7 +2155,7 @@ void parse_array_init(var_t *var,
             count++;
             if (is_implicit && count > inferred_size)
                 inferred_size = count;
-            if (!lex_accept(T_comma))
+            if (!elided_comma && !lex_accept(T_comma))
                 break;
             if (lex_peek(T_close_curly, NULL))
                 break;
@@ -1934,6 +2165,18 @@ void parse_array_init(var_t *var,
     lex_expect(T_close_curly);
 
     if (is_implicit) {
+        /* `count` walks scalars, so a brace-elided list that stops inside a
+         * row, as in `int m[][2] = { 1, 2, 3 }`, leaves inferred_size short of
+         * a whole outer element. The bound counts outer elements, so round up
+         * and zero the rest of that last element in automatic storage.
+         */
+        int inner = fixed_array_inner_count(var);
+        int whole = (inferred_size + inner - 1) / inner * inner;
+
+        if (emit_code && parent != GLOBAL_BLOCK)
+            emit_zero_elements(parent, bb, base_addr, inferred_size, whole,
+                               elem_size);
+        inferred_size = whole;
         var->array_size = inferred_size;
         var->has_unsized_array = false;
     }
@@ -1981,6 +2224,8 @@ void parse_array_compound_literal(var_t *var,
 
     if (!lex_peek(T_close_curly, NULL)) {
         for (;;) {
+            bool elided_comma = false;
+
             if (lex_accept(T_open_square)) {
                 count = read_const_expr(parent);
                 lex_expect(T_close_square);
@@ -2036,6 +2281,9 @@ void parse_array_compound_literal(var_t *var,
                 parse_struct_field_init(parent, bb, record_type, elem_addr,
                                         true);
                 lex_expect(T_close_curly);
+            } else if (unbraced_record_starts_here(var)) {
+                elided_comma = parse_unbraced_record_init(parent, bb, var->type,
+                                                          elem_addr, true);
             } else {
                 read_expr(parent, bb);
                 read_ternary_operation(parent, bb);
@@ -2053,7 +2301,7 @@ void parse_array_compound_literal(var_t *var,
                     inferred_size = count + 1;
             }
             count++;
-            if (!lex_accept(T_comma))
+            if (!elided_comma && !lex_accept(T_comma))
                 break;
             if (lex_peek(T_close_curly, NULL))
                 break;

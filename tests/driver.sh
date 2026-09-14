@@ -940,6 +940,54 @@ int main(void) {
 }
 EOF
 
+# Pointers of a declarator level apply before its array suffix, and a grouped
+# inner declarator applies after the suffix that follows it. A typedef array
+# keeps its own bounds when an abstract declarator adds more.
+try_ 0 << EOF
+typedef int abstract_triple[3];
+int global_pointer_array_size = sizeof(int *[2]);
+int global_array_of_array_pointers_size = sizeof(int (*[2])[3]);
+int global_typedef_array_size = sizeof(abstract_triple[2]);
+int pointer_array_bound[sizeof(char *const[3])];
+enum { array_of_array_pointers_size = sizeof(int (*[4])[3]) };
+int main(void)
+{
+    int local_bound[sizeof(int *[2][2])];
+    switch (2 * sizeof(int *)) {
+    case sizeof(int *[2]):
+        break;
+    default:
+        return 1;
+    }
+    return global_pointer_array_size != 2 * sizeof(int *) ||
+           global_array_of_array_pointers_size != 2 * sizeof(int *) ||
+           global_typedef_array_size != 6 * sizeof(int) ||
+           sizeof(pointer_array_bound) != 3 * sizeof(char *) * sizeof(int) ||
+           array_of_array_pointers_size != 4 * sizeof(int *) ||
+           sizeof(local_bound) != 4 * sizeof(int *) * sizeof(int) ||
+           sizeof(int *[2]) != 2 * sizeof(int *) ||
+           sizeof(int (*[2])[3]) != 2 * sizeof(int *) ||
+           sizeof(char ([2])[3]) != 6 ||
+           sizeof(abstract_triple[2]) != 6 * sizeof(int);
+}
+EOF
+
+try_compile_error << EOF
+struct incomplete_sizeof_record;
+int main(void) { return sizeof(struct incomplete_sizeof_record); }
+EOF
+try_compile_error << EOF
+union incomplete_sizeof_union;
+int main(void) { return sizeof(union incomplete_sizeof_union); }
+EOF
+try_compile_error << EOF
+int main(void) { return sizeof(int (*)(int)[2]); }
+EOF
+try_compile_error << EOF
+enum { invalid_callback_array = sizeof(int [2](int)) };
+int main(void) { return invalid_callback_array; }
+EOF
+
 try_ 0 << EOF
 int global_nested_designated[2][2][2] = { [0] = { [1] = { 2 } }, 3, 4, 5 };
 int nested_designated(void) {
@@ -1416,6 +1464,166 @@ int main(void) {
            8 * (global_slot == 21) +
            16 * (((volatile int *) &local_slot) == &local_slot);
 }
+EOF
+
+# A file-scope record keeps its volatile qualifier like a scalar does, so every
+# redeclaration of either must repeat it.
+try_ 8 << EOF
+struct S { int a; };
+union U { int a; char c; };
+extern volatile struct S s;
+volatile struct S s = { 3 };
+extern volatile union U u;
+volatile union U u, u2;
+volatile struct R { int a; } r1, r2;
+extern volatile struct R r2;
+volatile int *p, q;
+extern volatile int *p;
+extern volatile int q;
+int main(void) {
+    s.a++;
+    u.a = 4;
+    r2.a = s.a;
+    return r2.a + u.a;
+}
+EOF
+try_compile_error << EOF
+struct S { int a; };
+volatile struct S s;
+extern struct S s;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+volatile union U { int a; } u;
+extern union U u;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+volatile int value;
+extern int value;
+int main(void) { return 0; }
+EOF
+
+# Qualifiers may also follow the type specifier, in typedefs and at both scopes,
+# and a typedef passes them to every object it declares. The redeclarations
+# below only match when each spelling recorded the volatile qualifier.
+try_ 60 << EOF
+struct S { int a; };
+enum E { E2 = 2 };
+typedef volatile int VI;
+typedef int volatile VI2;
+typedef const volatile int CVI;
+typedef VI VI3;
+typedef struct S volatile VS;
+typedef volatile struct S VS2;
+typedef struct { int a; } const CR;
+typedef struct T { int a; } volatile VT;
+typedef enum { E4 = 4 } volatile VE;
+typedef int *P;
+typedef P restrict RP;
+struct S volatile vs;
+extern volatile struct S vs;
+union U { int a; } volatile vu;
+extern volatile union U vu;
+enum E volatile ve = E2;
+extern volatile enum E ve;
+int volatile vi = 1;
+extern VI vi;
+VI2 vi2 = 2;
+extern volatile int vi2;
+VI3 vi3 = 3;
+extern volatile int vi3;
+VS vrec;
+extern struct S volatile vrec;
+VS2 vrec2;
+extern VS vrec2;
+struct S const cs = {5};
+int main(void)
+{
+    extern struct S volatile vrec;
+    struct S volatile ls, *lp = &ls;
+    struct R { int a; } volatile const lr = {6};
+    enum E const le = E2;
+    CR cr = {7};
+    struct T t = {1};
+    VT vt = {8};
+    VE e = E4;
+    CVI cv = 9;
+    int x = 3;
+    RP rp = &x;
+    typedef struct S const LCS;
+    LCS lcs = {2};
+    t.a = 2;
+    vs.a = 1;
+    vu.a = 2;
+    vrec.a = 3;
+    vrec2.a = 4;
+    ls.a = 1;
+    return vs.a + vu.a + ve + vi + vi2 + vi3 + vrec.a + vrec2.a + cs.a +
+           lp->a + lr.a + le + cr.a + t.a + vt.a + e + cv + *rp + lcs.a - 7;
+}
+EOF
+try_compile_error << EOF
+struct S { int a; };
+struct S volatile s;
+extern struct S s;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+enum E { E1 };
+enum E volatile e;
+extern enum E e;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+typedef int volatile VI;
+VI value;
+extern int value;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct S { int a; };
+typedef struct S volatile VS;
+VS value;
+extern struct S value;
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+struct S { int a; };
+struct S value;
+int main(void) { extern struct S volatile value; return 0; }
+EOF
+try_compile_error << EOF
+typedef int const CI;
+int main(void) { CI value = 1; value = 2; return value; }
+EOF
+try_compile_error << EOF
+struct S { int a; };
+typedef struct S const CS;
+int main(void) { CS value = {1}; value.a = 2; return value.a; }
+EOF
+try_compile_error << EOF
+struct S { int a; };
+struct S const value = {1};
+int main(void) { value.a = 2; return value.a; }
+EOF
+try_compile_error << EOF
+enum E { E1 };
+int main(void) { enum E const value = E1; value = E1; return value; }
+EOF
+try_compile_error_message "restrict requires a pointer type" << EOF
+struct S { int a; };
+struct S restrict value;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "restrict requires a pointer type" << EOF
+typedef int restrict R;
+int main(void) { return 0; }
+EOF
+try_ 3 << EOF
+struct S { int a; };
+struct S g = {3};
+int main(void) { typedef struct S ST; extern ST g; return g.a; }
 EOF
 
 # restrict is a C99 pointer qualifier. These are non-aliasing calls by contract;
@@ -1915,6 +2123,35 @@ long long global_min = -9223372036854775808LL;
 int main(void) {
     return (global_min < 0LL) + ((global_min >> 63) == -1LL);
 }
+EOF
+
+# An integer cast inside a scalar file-scope initializer converts its constant
+# operand, including a grouped wide operand, and the result keeps its high word.
+try_ 0 << EOF
+typedef long long cast_wide_t;
+typedef unsigned char cast_byte_t;
+enum { cast_negative = -1 };
+long long cast_sum = (long long)0x100000000LL + 1;
+unsigned long long cast_shift = (unsigned long long)1LL << 40;
+long long cast_grouped = (long long)(0x100000000LL + 1);
+cast_wide_t cast_typedef_shift = (cast_wide_t)1 << 40;
+long long cast_sign_extended = (long long)(int)0xffffffffU;
+_Bool cast_bool = (_Bool)0x100000000LL;
+cast_byte_t cast_byte = (cast_byte_t)cast_negative;
+int cast_leading = (int)3 + (char)300;
+int main(void)
+{
+    return cast_sum != 0x100000001LL || cast_shift != 0x10000000000ULL ||
+           cast_grouped != 0x100000001LL ||
+           cast_typedef_shift != 0x10000000000LL ||
+           cast_sign_extended != -1LL || cast_bool != 1 ||
+           cast_byte != 255 || cast_leading != 47;
+}
+EOF
+try_compile_error << EOF
+int cast_object;
+long long cast_non_constant = (long long)cast_object + 1;
+int main(void) { return 0; }
 EOF
 try_ 2 << EOF
 unsigned long long global_sum = 0x100000000ULL + 7ULL;
@@ -3915,6 +4152,63 @@ EOF
 try_compile_error_message "tag was previously declared as a different kind of record" << EOF
 struct offsetof_kind { int a; };
 int main(void) { return __builtin_offsetof(union offsetof_kind, a); }
+EOF
+# An enum tag is checked against record tags in the same name space too.
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
+struct enum_reuse { int a; };
+enum enum_reuse { ENUM_REUSE };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
+union enum_use { int a; };
+enum enum_use object;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
+int main(void) { struct block_enum { int a; }; enum block_enum { BLOCK_ENUM }; return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
+struct outer_enum_use { int a; };
+int main(void) { enum outer_enum_use value; return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
+struct param_enum_use { int a; };
+int use(enum param_enum_use value) { return 0; }
+int main(void) { return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of tag" << EOF
+union cast_enum_use { int a; };
+int main(void) { return (enum cast_enum_use) 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+int main(void) { enum block_record { BLOCK_RECORD }; struct block_record { int a; }; return 0; }
+EOF
+
+# An inner scope may reuse the name for another kind of tag, and an enum tag
+# never names, or redefines, an ordinary typedef of the same spelling.
+try_ 0 << EOF
+typedef char enum_typedef;
+enum enum_typedef { ENUM_TYPEDEF = 1 };
+union outer_union { int a; };
+enum_typedef c;
+int main(void) {
+    struct shadowed { char x; };
+    {
+        enum shadowed { SHADOWED = 2 };
+        enum shadowed s = SHADOWED;
+        enum enum_typedef t = ENUM_TYPEDEF;
+        if (sizeof(s) != sizeof(int) || sizeof(t) != sizeof(int))
+            return 1;
+    }
+    {
+        enum outer_union { OUTER_UNION = 3 };
+        if (OUTER_UNION != 3)
+            return 2;
+    }
+    if (sizeof(struct shadowed) != 1)
+        return 3;
+    return sizeof(enum_typedef) + sizeof(c) - 2;
+}
 EOF
 
 # A tag defined in one function is not visible from another: naming it there
@@ -7289,6 +7583,89 @@ int main(void) {
            (local_rows.slots[0] == &second_row) + global_rows.tail - 1;
 }
 EOF
+
+# A record element or member without braces takes one initializer per member
+# from the enclosing list, so { 1, 2, 3, 4 } fills two points. The elided record
+# stops at its last member, at a designator of the enclosing list, or at a
+# braced element, and a block scope record value still initializes the whole
+# element. Checked at file scope, block scope and for block statics.
+try_ 0 << EOF
+typedef struct p { int x, y; } P;
+struct q { struct p a; int z; };
+struct r { char s[4]; int n; };
+struct u { struct p a[2]; int z; };
+struct b { unsigned lo : 3; unsigned : 2; unsigned hi : 3; int t; };
+union n { int i; char c[4]; };
+struct w { char c; long long v; };
+#define DECLS(S)                                      \
+    S P v1[3] = { 1, 2, [2] = 5, 6 };                 \
+    S struct q v2 = { 1, .z = 3 };                    \
+    S struct r v3[2] = { "abc", 1, "de", 2, };        \
+    S struct u v4 = { 1, 2, {3, 4}, 5 };              \
+    S struct b v5[2] = { 1, 7, 2, 3, 6, 4 };          \
+    S union n v6[2] = { 5, 6 };                       \
+    S struct w v7[] = { 'a', 11, 'b', 22 };           \
+    S struct p v8[2][2] = { 1, 2, 3, 4, 5, 6, 7, 8 }; \
+    S struct q v9[] = { 1, 2, 3, {4, 5}, 6 };         \
+    S struct u v10 = { { 1, 2, 3, 4 }, 5 };           \
+    S struct p v11[] = { 1, [2] = 3, 4, [0] = 5 };
+#define CHECKS                                                                 \
+    int r = 0;                                                                 \
+    if (v1[0].x != 1 || v1[0].y != 2 || v1[1].x || v1[1].y || v1[2].x != 5 || \
+        v1[2].y != 6)                                                          \
+        r |= 1;                                                                \
+    if (v2.a.x != 1 || v2.a.y || v2.z != 3)                                    \
+        r |= 2;                                                                \
+    if (v3[0].s[2] != 'c' || v3[0].n != 1 || v3[1].s[1] != 'e' ||              \
+        v3[1].n != 2)                                                          \
+        r |= 4;                                                                \
+    if (v4.a[0].y != 2 || v4.a[1].x != 3 || v4.a[1].y != 4 || v4.z != 5)       \
+        r |= 8;                                                                \
+    if (v5[0].lo != 1 || v5[0].hi != 7 || v5[0].t != 2 || v5[1].lo != 3 ||     \
+        v5[1].hi != 6 || v5[1].t != 4)                                         \
+        r |= 16;                                                               \
+    if (v6[0].i != 5 || v6[1].i != 6)                                          \
+        r |= 32;                                                               \
+    if (sizeof(v7) / sizeof(v7[0]) != 2 || v7[0].c != 'a' || v7[0].v != 11 ||  \
+        v7[1].c != 'b' || v7[1].v != 22)                                       \
+        r |= 64;                                                               \
+    if (v8[0][0].x != 1 || v8[0][1].y != 4 || v8[1][0].x != 5 ||               \
+        v8[1][1].y != 8)                                                       \
+        r |= 128;                                                              \
+    if (sizeof(v9) / sizeof(v9[0]) != 3 || v9[0].z != 3 || v9[1].a.x != 4 ||   \
+        v9[1].a.y != 5 || v9[1].z || v9[2].a.x != 6 || v9[2].z)                \
+        r |= 256;                                                              \
+    if (v10.a[0].y != 2 || v10.a[1].x != 3 || v10.a[1].y != 4 || v10.z != 5)   \
+        r |= 512;                                                              \
+    if (sizeof(v11) / sizeof(v11[0]) != 3 || v11[0].x != 5 || v11[0].y ||      \
+        v11[1].x || v11[1].y || v11[2].x != 3 || v11[2].y != 4)                \
+        r |= 1024;                                                             \
+    return r;
+DECLS()
+int check_global(void) { CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int check_static(void) { DECLS(static) CHECKS }
+void dirty(void) {
+    int junk[64];
+    for (int i = 0; i < 64; i++)
+        junk[i] = 99;
+}
+int values(void) {
+    struct p s1 = {1, 2}, s2 = {3, 4};
+    struct p pair[2] = { s1, s2 };
+    struct q outer[2] = { s2, 9, s1, 8 };
+    struct p *lit = (struct p[]){ 7, 8, 9 };
+    return pair[0].y != 2 || pair[1].x != 3 || outer[0].a.y != 4 ||
+           outer[0].z != 9 || outer[1].a.x != 1 || outer[1].z != 8 ||
+           lit[1].x != 9 || lit[1].y;
+}
+int main(void) {
+    int r = check_global() != 0;
+    dirty();
+    return r | (check_local() != 0) << 1 | (check_static() != 0) << 2 |
+           values() << 3;
+}
+EOF
 # A tag is an identifier, so it may be as long as any other identifier.
 try_ 4 << EOF
 struct a_record_tag_name_longer_than_thirty_two_bytes { int value; };
@@ -8698,6 +9075,61 @@ items 10 "{ int a; a = 5; { a = 5 + a; } return a; }"
 items 20 "int a; a = 10; if (1) { a = 20; } else { a = 10; } return a;"
 items 30 "int a; a = 10; if (a) { if (a - 10) { a = a + 1; } else { a = a + 20; } a = a - 10; } else { a = a + 5; } return a + 10;"
 
+# Block-scope struct, union and enum objects take the same storage classes and
+# qualifiers as scalar ones, and an untagged definition may declare objects.
+try_ 12 << EOF
+struct S { int a; };
+struct S s = { 5 };
+union U { int a; char c; };
+union U u = { 7 };
+enum E { E1 = 1, E2 };
+enum E ge = E2;
+int main(void)
+{
+    extern struct S s;
+    register struct S r;
+    register union U ru = u;
+    extern union U u, *up;
+    register enum E re = E1;
+    extern enum E ge;
+    r.a = s.a + ru.a - re - ge + 3;
+    return r.a;
+}
+union U *up = &u;
+EOF
+try_ 4 << EOF
+struct S { int a; };
+struct S make(int v) { struct S s; s.a = v; return s; }
+int main(void)
+{
+    const struct S cs = { 3 }, *cp = &cs;
+    static struct S ss = { 4 }, *sp = &ss;
+    struct S a = make(5), b = a, arr[2] = { { 1 }, { 2 } };
+    volatile enum { V1 = 2 } ve = V1, *vp = &ve;
+    struct { struct S inner; int k; } nest = { { 8 }, 9 }, *np = &nest;
+    union { int i; char c; } un = { 0 };
+    static struct { int z; } st = { 1 };
+    sp->a++;
+    np->k += st.z;
+    return cp->a + ss.a + a.a + b.a + arr[1].a + *vp + nest.inner.a + nest.k +
+           un.i - 36 + sizeof(nest) / sizeof(int) - 2;
+}
+EOF
+try_compile_error_message "ordinary identifier conflicts with typedef name" << EOF
+struct S { int a; };
+int main(void) { typedef int T; struct S T; return 0; }
+EOF
+try_compile_error_message "ordinary identifier conflicts with typedef name" << EOF
+int main(void) { typedef int T; struct S { int a; } x, T; return 0; }
+EOF
+try_compile_error_message "ordinary identifier conflicts with typedef name" << EOF
+enum E { A };
+int main(void) { typedef int T; enum E T; return 0; }
+EOF
+try_compile_error_message "ordinary identifier conflicts with typedef name" << EOF
+int main(void) { typedef int T; union { int a; } T; return 0; }
+EOF
+
 # Category: Loop Constructs
 begin_category "Loop Constructs" "Testing while, do-while, and for loops"
 
@@ -8712,6 +9144,27 @@ items 2 "int x; x=0; while(x < 2){x++; continue; abort();} return x;"
 items 7 "int i; i=0; int j; for (j = 0; j < 10; j++) { if (j < 3) continue; i = i + 1; } return i;"
 items 10 "while(0); return 10;"
 items 10 "while(1) break; return 10;"
+
+# A for initializer declaration is an ordinary declaration: its initializers are
+# assignment expressions and each declarator keeps the resolved base type.
+try_ 23 << EOF
+struct P { int x, y; };
+int main(void)
+{
+    int j, k, n = 0;
+    for (int i = j = 2; i < 4; i++)
+        n += i + j;
+    for (int a = 1, b = k = 3, c = a ? b : 0; a < 2; a++)
+        n += a + b + c + k;
+    for (unsigned u = 0, v = 0; u < 1; u++)
+        v = -1, n += v > 0;
+    for (struct P p = { 1, 2 }, q = p; p.x < 2; p.x++)
+        n += q.y;
+    for (int m = 0, *pm = &m; m < 1; m++)
+        n += *pm + 1;
+    return n;
+}
+EOF
 items 10 "for(;;) break; return 10;"
 items 0 "int x; for(x = 10; x > 0; x--); return x;"
 items 30 "int i; int acc; i = 0; acc = 0; do { i = i + 1; if (i - 1 < 5) continue; acc = acc + i; if (i == 9) break; } while (i < 10); return acc;"
@@ -11207,6 +11660,37 @@ int main(void) {
            static_values();
 }
 EOF
+
+# A brace-elided list that stops inside a row still counts that whole row in the
+# inferred outer bound, and the rest of the row is zero.
+try_ 0 << EOF
+#define CHECK(v, c)                                                   \
+    (sizeof(v) / sizeof(v[0]) != 2 || v[1][0] != 3 || v[1][1] != 0 || \
+     sizeof(c) / sizeof(c[0]) != 2 || c[1][0][0] != 5 || c[1][0][1] || \
+     c[1][1][0] || c[1][1][1])
+int global_values[][2] = {1, 2, 3};
+int global_cube[][2][2] = {1, 2, 3, 4, 5};
+void dirty(void) {
+    int junk[16];
+    for (int i = 0; i < 16; i++)
+        junk[i] = 99;
+}
+int local_values(void) {
+    int values[][2] = {1, 2, 3};
+    int cube[][2][2] = {1, 2, 3, 4, 5};
+    return CHECK(values, cube);
+}
+int static_values(void) {
+    static int values[][2] = {1, 2, 3};
+    static int cube[][2][2] = {1, 2, 3, 4, 5};
+    return CHECK(values, cube);
+}
+int main(void) {
+    dirty();
+    return CHECK(global_values, global_cube) | local_values() << 1 |
+           static_values() << 2;
+}
+EOF
 try_ 13 << EOF
 struct grid { int values[2][2][2]; };
 int main(void) {
@@ -12076,6 +12560,95 @@ int main(void) {
 }
 EOF
 
+# Designators inside a braced array member may reorder rows, and a complete
+# subscript path names a scalar that later positional values follow. Zero fill
+# must not clear a row an earlier designator stored, including in a union, whose
+# automatic storage is not cleared up front.
+try_ 0 << EOF
+struct rows { int m[2][2]; int k; };
+union urows { int m[2][3]; char c; };
+struct flat { int a[4]; int b; };
+struct rows g1 = { .m = { [1] = {3, 4}, [0] = {1, 2} } };
+struct rows g2 = { .m = { [1][0] = 3, 4 }, 9 };
+union urows g3 = { .m = { [1] = {4, 5}, [0] = {1} } };
+struct flat g4 = { .a = { [2] = 5, [0] = 1, 2 }, 7 };
+int check(struct rows *r1, struct rows *r2, union urows *u, struct flat *f) {
+    int r = 0;
+    if (r1->m[0][0] != 1 || r1->m[0][1] != 2 || r1->m[1][0] != 3 ||
+        r1->m[1][1] != 4)
+        r |= 1;
+    if (r2->m[0][0] || r2->m[0][1] || r2->m[1][0] != 3 || r2->m[1][1] != 4 ||
+        r2->k != 9)
+        r |= 2;
+    if (u->m[0][0] != 1 || u->m[0][1] || u->m[0][2] || u->m[1][0] != 4 ||
+        u->m[1][1] != 5 || u->m[1][2])
+        r |= 4;
+    if (f->a[0] != 1 || f->a[1] != 2 || f->a[2] != 5 || f->a[3] || f->b != 7)
+        r |= 8;
+    return r;
+}
+int main(void) {
+    struct rows l1 = { .m = { [1] = {3, 4}, [0] = {1, 2} } };
+    struct rows l2 = { .m = { [1][0] = 3, 4 }, 9 };
+    union urows l3 = { .m = { [1] = {4, 5}, [0] = {1} } };
+    struct flat l4 = { .a = { [2] = 5, [0] = 1, 2 }, 7 };
+    static struct rows s1 = { .m = { [1] = {3, 4}, [0] = {1, 2} } };
+    static struct rows s2 = { .m = { [1][0] = 3, 4 }, 9 };
+    static union urows s3 = { .m = { [1] = {4, 5}, [0] = {1} } };
+    static struct flat s4 = { .a = { [2] = 5, [0] = 1, 2 }, 7 };
+    return check(&g1, &g2, &g3, &g4) | check(&l1, &l2, &l3, &l4) << 4 |
+           check(&s1, &s2, &s3, &s4);
+}
+EOF
+
+# The same holds one level down: a braced plane or row may name its rows or
+# elements in any order, and zero fill leaves the ones already written alone.
+try_ 0 << EOF
+struct c { int m[2][2][2]; };
+#define DECLS(S)                                                     \
+    S int v1[2][2][2] = { { [1] = {3, 4}, [0] = {1, 2} } };          \
+    S struct c v2 = { .m = { { [1] = {3, 4}, [0] = {1, 2} } } };     \
+    S int v3[2][3] = { { [2] = 7, [0] = 1 }, { 4, [2] = 6, [1] = 5 } }; \
+    S int v4[2][2][2][2] = { { [1] = { [1] = {7, 8} }, [0] = { {1, 2} } } };
+#define CHECKS                                                              \
+    int r = 0;                                                              \
+    if (v1[0][0][0] != 1 || v1[0][0][1] != 2 || v1[0][1][0] != 3 ||         \
+        v1[0][1][1] != 4 || v1[1][1][1])                                    \
+        r |= 1;                                                             \
+    if (v2.m[0][0][0] != 1 || v2.m[0][0][1] != 2 || v2.m[0][1][0] != 3 ||   \
+        v2.m[0][1][1] != 4 || v2.m[1][1][1])                                \
+        r |= 2;                                                             \
+    if (v3[0][0] != 1 || v3[0][1] || v3[0][2] != 7 || v3[1][0] != 4 ||      \
+        v3[1][1] != 5 || v3[1][2] != 6)                                     \
+        r |= 4;                                                             \
+    if (v4[0][0][0][0] != 1 || v4[0][0][0][1] != 2 || v4[0][0][1][0] ||     \
+        v4[0][1][0][0] || v4[0][1][1][0] != 7 || v4[0][1][1][1] != 8 ||     \
+        v4[1][1][1][1])                                                     \
+        r |= 8;                                                             \
+    return r;
+DECLS()
+int check_global(void) { CHECKS }
+int check_local(void) { DECLS() CHECKS }
+int check_static(void) { DECLS(static) CHECKS }
+void dirty(void) {
+    int junk[64];
+    for (int i = 0; i < 64; i++)
+        junk[i] = 99;
+}
+int main(void) {
+    int r = check_global();
+    dirty();
+    return r | check_local() << 4 | check_static();
+}
+EOF
+try_compile_error_message "Array designator index is out of bounds" << EOF
+struct rows { int m[2][2]; };
+int main(void) {
+    struct rows r = { .m = { [2] = {1, 2} } };
+    return r.m[0][0];
+}
+EOF
+
 # Following positional initializers continue from a one-dimensional designated
 # array element before advancing to the next record member.
 try_ 30 << EOF
@@ -12087,6 +12660,22 @@ int main(void) {
            global_continue.items[2] + global_continue.items[3] +
            global_continue.tail + local_continue.items[2] +
            local_continue.items[3] + local_continue.tail;
+}
+EOF
+
+# A later member designator ends that element sequence: the positional value
+# after `.b = 6` initializes c, not the array slot after items[1].
+try_ 75 << EOF
+struct resumed { int items[3]; int b; int c; };
+struct resumed global_resumed = {.items[1] = 5, .b = 6, 7};
+int score(struct resumed *v) {
+    return v->items[1] + v->b + v->c * 2 + v->items[2] * 3 + v->items[0] * 5;
+}
+int main(void) {
+    struct resumed local_resumed = {.items[1] = 5, .b = 6, 7};
+    static struct resumed static_resumed = {.items[1] = 5, .b = 6, 7};
+    return score(&global_resumed) + score(&local_resumed) +
+           score(&static_resumed);
 }
 EOF
 
@@ -14506,6 +15095,68 @@ int main(void) {
 }
 EOF
 
+# Grouping around a literal does not decay it inside sizeof in a function body
+# either; an operator after the group still makes an ordinary expression.
+try_ 6 << EOF
+int main(void) {
+    return (sizeof(("abc")) == 4) + (sizeof((("a" "b"))) == 3) +
+           (sizeof((L"ab")) == 3 * sizeof(L"")) +
+           (sizeof(((L"a" L"b"))) == 3 * sizeof(L"")) +
+           (sizeof(("abc") + 1) == sizeof(char *)) +
+           (sizeof ("a" "bc") == 4);
+}
+EOF
+
+# Every integer constant expression evaluates sizeof alike: a string literal
+# keeps its array size, a dereference takes the pointee type, and a typed
+# literal such as 1LL takes the size its suffix selects.
+try_ 0 << EOF
+short *constant_short_pointer;
+int global_dereference_size = sizeof *constant_short_pointer;
+int global_dereference_sum = sizeof *constant_short_pointer + 1;
+int global_long_long_size = sizeof(1LL) + sizeof 2LL;
+int string_bound[sizeof "abc"];
+int grouped_string_bound[sizeof(("a" "bc"))];
+int dereference_bound[sizeof *constant_short_pointer];
+enum {
+    string_enum = sizeof "abcd",
+    grouped_string_enum = sizeof((("ab"))),
+    dereference_enum = sizeof(*constant_short_pointer),
+    long_long_enum = sizeof 1LL + sizeof('a')
+};
+int main(void)
+{
+    char *local_pointer = 0;
+    int local_string_bound[sizeof "ab" "c"];
+    int local_long_long_bound[sizeof 1LL];
+    int local_dereference_bound[sizeof *local_pointer];
+    switch (sizeof(long long)) {
+    case sizeof "abcdef" + sizeof *local_pointer:
+        break;
+    default:
+        return 1;
+    }
+    switch (sizeof(long long)) {
+    case sizeof 1LL:
+        break;
+    default:
+        return 2;
+    }
+    return global_dereference_size != sizeof(short) ||
+           global_dereference_sum != sizeof(short) + 1 ||
+           global_long_long_size != 2 * sizeof(long long) ||
+           sizeof(string_bound) != 4 * sizeof(int) ||
+           sizeof(grouped_string_bound) != 4 * sizeof(int) ||
+           sizeof(dereference_bound) != sizeof(short) * sizeof(int) ||
+           string_enum != 5 || grouped_string_enum != 3 ||
+           dereference_enum != sizeof(short) ||
+           long_long_enum != sizeof(long long) + sizeof(int) ||
+           sizeof(local_string_bound) != 4 * sizeof(int) ||
+           sizeof(local_long_long_bound) != sizeof(long long) * sizeof(int) ||
+           sizeof(local_dereference_bound) != sizeof(int);
+}
+EOF
+
 # Category: Switch Statements
 begin_category "Switch Statements" "Testing switch-case control flow"
 
@@ -14532,6 +15183,36 @@ try_ 2 << EOF
 int main(void) {
     unsigned char byte = 1;
     switch (byte) { case 1: return 2; default: return 0; }
+}
+EOF
+
+# A case constant converts to the promoted controlling type: a long long switch
+# keeps every word of a wide or unsigned label, an int switch folds it.
+try_ 0 << EOF
+int wide(long long x) {
+    switch (x) {
+    case -2: return 1;
+    case 1 ? 0x200000000LL : 3: return 2;
+    case (0x100000000LL << 1) + 1: return 3;
+    case 0xffffffffU: return 4;
+    case -0x7fffffffffffffffLL - 1: return 6;
+    default: return 5;
+    }
+}
+int narrow(unsigned x) {
+    switch (x) {
+    case 0x100000002LL: return 1;
+    default: return 2;
+    }
+}
+int main(void) {
+    if (wide(-2) != 1 || wide(0x200000000LL) != 2 || wide(0x200000001LL) != 3)
+        return 1;
+    if (wide(0xffffffffLL) != 4 || wide(-1) != 5 || wide(1) != 5)
+        return 2;
+    if (wide(-0x7fffffffffffffffLL - 1) != 6 || wide(0x100000002LL) != 5)
+        return 3;
+    return narrow(2) != 1 || narrow(0x100000002LL) != 1;
 }
 EOF
 
@@ -14638,6 +15319,32 @@ enum typed_shift_count_out_of_range { value = 1U << 32 };
 EOF
 try_compile_error << EOF
 enum typed_signed_shift_out_of_range { value = (1LL << 63) >> 63 };
+EOF
+
+# A shift count outside the int width has no value in any integer constant
+# expression, so the compiler must reject it rather than fold it on the host.
+try_compile_error << EOF
+int shifted_global = 1 << 32;
+int main(void) { return shifted_global; }
+EOF
+try_compile_error << EOF
+int main(void) { int values[-1 >> 40]; return sizeof(values); }
+EOF
+try_compile_error << EOF
+int main(void) { switch (1) { case 1 << -1: return 1; } return 0; }
+EOF
+try_ 12 << EOF
+enum { shift_base = 1 << 30 };
+int shift_bound[(shift_base >> 29) + (3 >> 1)];
+int shift_global = -8 >> 1;
+int main(void)
+{
+    switch (4) {
+    case 16 >> 2:
+        return sizeof(shift_bound) / sizeof(int) + shift_global + 13;
+    }
+    return 0;
+}
 EOF
 
 # Block-scope enum definitions supply integer constants to expressions and
@@ -19618,6 +20325,130 @@ EOF
 
 begin_category "Function parsing" "Forward declaration and implementation"
 
+# One declaration may list several prototypes, mixed with object declarators, at
+# file scope and in a block extern declaration. A definition stands alone.
+try_ 0 << EOF
+int f(void), g(int);
+int h(int), value = 4, *ptr, k(void);
+struct S { int a; };
+struct S make(int), other;
+union U { int a; } umake(void), uobj;
+enum E { E1 = 1 } emake(void), eobj = E1;
+static int sf(int), sg(void);
+int f(void) { return 1; }
+int g(int x) { return x + 1; }
+int h(int x) { return x * 2; }
+int k(void) { return value; }
+struct S make(int v) { struct S s; s.a = v; return s; }
+union U umake(void) { union U u; u.a = 6; return u; }
+enum E emake(void) { return E1; }
+static int sf(int x) { return x - 1; }
+static int sg(void) { return 3; }
+int main(void)
+{
+    extern int y, late(void), z;
+    struct S m = make(5);
+    union U u = umake();
+    ptr = &value;
+    other.a = 2;
+    return f() + g(2) + h(3) + k() + *ptr + m.a + other.a + sf(1) + sg() +
+           u.a + emake() + eobj + late() + y + z - 46;
+}
+int y = 2, z = 3;
+int late(void) { return 5; }
+EOF
+try_compile_error_message "function definition must be the only declarator" << EOF
+int value, defined(void) { return 0; }
+int main(void) { return 0; }
+EOF
+try_compile_error_message "function definition must be the only declarator" << EOF
+int declared(void), defined(void) { return 0; }
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int clash(void), clash;
+int main(void) { return 0; }
+EOF
+
+# A block-scope function declaration has external linkage without extern (C99
+# 6.2.2p5), so plain prototypes may appear alone, several per declaration, mixed
+# with objects, and with record, pointer or typedef return types. The name stays
+# visible only in its block and hides an outer object there.
+try_ 41 << EOF
+struct S { int a; };
+typedef int T;
+typedef char *str_t;
+int outer(void) { int twice(int); return twice(3); }
+int main(void)
+{
+    int f = 1;
+    struct S make(int);
+    char *text(void);
+    T add(int), value = 3;
+    str_t name(void);
+    unsigned count(void), *slot(void);
+    int x = 2, *ptr(void), y = 4;
+    struct S v = {1}, other(void);
+    {
+        int f(void);
+        if (f() != 7)
+            return 1;
+    }
+    struct S m = make(5);
+    struct S o = other();
+    char *t = text();
+    unsigned *k = slot();
+    str_t n = name();
+    int *p = ptr();
+    return m.a + o.a + *t + add(1) + value + count() + *k + n[0] + x + *p + y +
+           v.a + f + outer();
+}
+int f(void) { return 7; }
+int twice(int v) { return v * 2; }
+struct S make(int v) { struct S s; s.a = v; return s; }
+struct S other(void) { struct S s; s.a = 2; return s; }
+char *text(void) { return "\001"; }
+T add(int v) { return v; }
+str_t name(void) { return "\002"; }
+unsigned count(void) { return 2; }
+unsigned *slot(void) { static unsigned k = 7; return &k; }
+int *ptr(void) { static int k = 4; return &k; }
+EOF
+try_ 9 << EOF
+int main(void) { int f(void), g = f(); return g; }
+int f(void) { return 9; }
+EOF
+try_compile_error << EOF
+int main(void) { { int hidden(void); } return hidden(); }
+int hidden(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { int f(void); return f(); }
+char f(void) { return 1; }
+EOF
+try_compile_error_message "invalid storage class for block function declaration" << EOF
+int main(void) { static int f(void); return 0; }
+EOF
+try_compile_error_message "invalid storage class for block function declaration" << EOF
+int main(void) { register int x, f(void); return 0; }
+EOF
+
+# C99 admits a function definition only at file scope. A nested one is rejected
+# however its declaration is spelled, rather than lowered inside its caller.
+try_compile_error_message "function definition is not allowed at block scope" << EOF
+int main(void) { extern int f(void) { return 1; } return f(); }
+EOF
+try_compile_error_message "function definition is not allowed at block scope" << EOF
+int main(void) { int f(void) { return 1; } return f(); }
+EOF
+try_compile_error_message "function definition is not allowed at block scope" << EOF
+struct S { int a; };
+int main(void) { int x; struct S make(void) { struct S s; return s; } return x; }
+EOF
+try_compile_error_message "function definition is not allowed at block scope" << EOF
+int main(void) { typedef int F(void); F f { return 1; } return 0; }
+EOF
+
 # C99 functions may return object or void types, but never an array or another
 # function. Keep declaration-only forms covered because no function body is
 # needed for the constraint to apply.
@@ -20438,6 +21269,19 @@ int main(void) {
 EOF
 try_compile_error_flag --std=c99 << EOF
 int main(void) {
+    switch (0) { case 0x100000000LL: return 1; case 0: return 2; }
+    return 0;
+}
+EOF
+try_compile_flag --std=c99 << EOF
+int main(void) {
+    long long x = 0;
+    switch (x) { case 0x100000000LL: return 1; case 0: return 2; }
+    return 0;
+}
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) {
     switch (1) { case 1: int value = 1; return value; }
     return 0;
 }
@@ -20665,9 +21509,17 @@ try_ 0 << EOF
 int variadic(...) { return 0; }
 int main(void) { return variadic(); }
 EOF
-try_ 1 << EOF
+try_compile_error_message "Expected an argument after ','" << EOF
 int identity(int value) { return value; }
 int main(void) { return identity(1,); }
+EOF
+try_compile_error << EOF
+int identity(int value) { return value; }
+int main(void) { int (*callback)(int) = identity; return callback(1,); }
+EOF
+try_compile_error << EOF
+int add(int left, int right) { return left + right; }
+int main(void) { return add(1 2); }
 EOF
 
 begin_category "C99 assert.h" "Testing freestanding assertion semantics"

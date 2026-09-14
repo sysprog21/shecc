@@ -1423,14 +1423,12 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
 
     /* Parser-side enum evaluation shares this token walker, but unlike #if it
      * admits C's sizeof integer constant expressions. Reuse the parser's
-     * unevaluated type reader and leave both cursors at the consumed operand.
+     * unevaluated sizeof reader and leave both cursors at the consumed operand.
      */
     if (pp_integer_constant_scope && pp_lex_peek_token(tk, T_sizeof, true)) {
         cur_token = tk;
         lex_expect(T_sizeof);
-        val->lo = lex_peek(T_wstring, NULL)
-                      ? read_const_wstring_size()
-                      : read_const_sizeof_type(pp_integer_constant_scope);
+        val->lo = read_sizeof_constant(pp_integer_constant_scope);
         val->hi = 0;
         val->is_unsigned = false;
         val->enum_width = 32;

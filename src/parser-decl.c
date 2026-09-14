@@ -37,87 +37,136 @@ void read_sizeof_function_prototype(void)
     parsing_sizeof_function_signature = saved_sizeof_signature;
 }
 
-/* Consume a nested direct-abstract-declarator in forms such as `int
- * (*(*)(int))[2]` and `int (*(*(*)(int))(int))(int)`. The surrounding
- * declarator already consumed its leading `(` and pointer chain. Each recursive
- * invocation consumes its own parenthesized pointer declarator and function
- * suffix, then the enclosing `)` and that declarator's suffix. The complete
- * type remains pointer-sized, but its bounds and prototypes must still obey C99
- * syntax and the project's fixed-array-only policy.
+/* The outermost derivation a sizeof abstract declarator applies. It alone
+ * decides the object size: a pointer hides the type it points to, an array only
+ * multiplies its element, and a function type has no object size at all.
  */
-int read_sizeof_nested_function_pointer_suffix(block_t *scope,
-                                               int *outer_array_size)
-{
-    int inner_ptr_count = 0;
+typedef enum {
+    SIZEOF_DERIVED_NONE,
+    SIZEOF_DERIVED_POINTER,
+    SIZEOF_DERIVED_FUNCTION
+} sizeof_derivation_t;
 
-    lex_expect(T_open_bracket);
+/* Consume one array bound of a sizeof type name after its '[' and return the
+ * element count scaled by it. VLA is outside shecc's C99 scope.
+ */
+static int read_sizeof_array_bound(block_t *scope, int elements)
+{
+    int bound = read_const_expr(scope);
+
+    lex_expect(T_close_square);
+    if (bound <= 0)
+        error_at("sizeof array type needs a positive constant bound",
+                 cur_token_loc());
+    if (elements > INT_MAX / bound)
+        error_at("sizeof array type is too large", cur_token_loc());
+    return elements * bound;
+}
+
+/* Consume the abstract declarator of a sizeof type name, such as the "*[2]" of
+ * `int *[2]` or the "(*(*[2])(int))[3]" of `int (*(*[2])(int))[3]`, and return
+ * its outermost derivation. *elements receives the element count of the arrays
+ * that derivation builds, or 1.
+ *
+ * A declarator reads inside out: the pointers of one level apply first, then
+ * that level's suffixes, and a parenthesized inner declarator applies last. An
+ * inner pointer or function derivation therefore decides the whole type, while
+ * an inner declarator with neither only adds array bounds.
+ */
+sizeof_derivation_t read_sizeof_abstract_declarator(block_t *scope,
+                                                    int *elements)
+{
+    sizeof_derivation_t derivation = SIZEOF_DERIVED_NONE;
+    sizeof_derivation_t inner = SIZEOF_DERIVED_NONE;
+    int inner_elements = 1;
+    int count = 1;
+    bool nested = false;
+    bool has_array = false;
+
     while (lex_accept(T_asterisk)) {
-        inner_ptr_count++;
+        derivation = SIZEOF_DERIVED_POINTER;
         while (lex_accept(T_const) || lex_accept(T_volatile) ||
                lex_accept(T_restrict))
             ;
     }
-    if (!inner_ptr_count)
-        error_at("sizeof nested abstract declarator needs a pointer",
-                 cur_token_loc());
 
-    if (lex_peek(T_open_bracket, NULL))
-        inner_ptr_count +=
-            read_sizeof_nested_function_pointer_suffix(scope, outer_array_size);
-    else {
-        int direct_array_size = 0;
-
-        while (lex_accept(T_open_square)) {
-            int bound = read_const_expr(scope);
-
-            lex_expect(T_close_square);
-            if (bound <= 0)
-                error_at("sizeof array type needs a positive constant bound",
-                         cur_token_loc());
-            if (bound > 0 && direct_array_size &&
-                direct_array_size > INT_MAX / bound)
-                error_at("sizeof array type is too large", cur_token_loc());
-            if (bound > 0)
-                direct_array_size =
-                    direct_array_size ? direct_array_size * bound : bound;
-        }
-        if (direct_array_size && outer_array_size)
-            *outer_array_size = direct_array_size;
+    /* A parenthesis opens an inner declarator only where one can begin;
+     * otherwise it is the parameter list of a function suffix.
+     */
+    if (lex_peek(T_open_bracket, NULL) && cur_token->next->next &&
+        (cur_token->next->next->kind == T_asterisk ||
+         cur_token->next->next->kind == T_open_bracket ||
+         cur_token->next->next->kind == T_open_square)) {
+        lex_expect(T_open_bracket);
+        inner = read_sizeof_abstract_declarator(scope, &inner_elements);
         lex_expect(T_close_bracket);
-        if (lex_peek(T_open_bracket, NULL)) {
-            read_sizeof_function_prototype();
-        } else if (lex_peek(T_open_square, NULL)) {
-            do {
-                int bound;
+        nested = true;
+    }
 
-                lex_expect(T_open_square);
-                bound = read_const_expr(scope);
-                lex_expect(T_close_square);
-                if (bound <= 0)
-                    error_at(
-                        "sizeof array type needs a positive constant bound",
-                        cur_token_loc());
-            } while (lex_peek(T_open_square, NULL));
-        } else {
-            error_at(
-                "sizeof nested abstract declarator needs a function or "
-                "array suffix",
-                cur_token_loc());
+    while (true) {
+        if (lex_accept(T_open_square)) {
+            if (derivation == SIZEOF_DERIVED_FUNCTION)
+                error_at("function cannot return an array", cur_token_loc());
+            count = read_sizeof_array_bound(scope, count);
+            has_array = true;
+        } else if (lex_peek(T_open_bracket, NULL)) {
+            if (derivation == SIZEOF_DERIVED_FUNCTION)
+                error_at("function cannot return a function", cur_token_loc());
+            if (has_array)
+                error_at("array of functions is invalid", cur_token_loc());
+            read_sizeof_function_prototype();
+            derivation = SIZEOF_DERIVED_FUNCTION;
+        } else
+            break;
+    }
+
+    if (nested && inner != SIZEOF_DERIVED_NONE) {
+        *elements = inner_elements;
+        return inner;
+    }
+    if (count > INT_MAX / inner_elements)
+        error_at("sizeof array type is too large", cur_token_loc());
+    *elements = count * inner_elements;
+    return derivation;
+}
+
+/* Return the size of a sizeof type name: its specifier type with the derivation
+ * read by read_sizeof_abstract_declarator() applied.
+ */
+int sizeof_type_name_size(const type_t *type,
+                          sizeof_derivation_t derivation,
+                          int elements)
+{
+    int size;
+
+    if (derivation == SIZEOF_DERIVED_FUNCTION)
+        error_at("sizeof(function) is invalid", cur_token_loc());
+    if (derivation == SIZEOF_DERIVED_POINTER) {
+        size = PTR_SIZE;
+    } else {
+        if (type == TY_void)
+            error_at("sizeof(void) is invalid", cur_token_loc());
+        if (type->is_direct_function_type)
+            error_at("sizeof(function) is invalid", cur_token_loc());
+
+        /* A typedef names a record through base_struct; an incomplete record
+         * has no size to report.
+         */
+        size = type->size;
+        if (!size && type->base_struct)
+            size = type->base_struct->size;
+        if (!size)
+            error_at("sizeof cannot be applied to an incomplete type",
+                     cur_token_loc());
+        if (type->array_size) {
+            if (size > INT_MAX / type->array_size)
+                error_at("sizeof array type is too large", cur_token_loc());
+            size *= type->array_size;
         }
     }
-
-    lex_expect(T_close_bracket);
-    while (lex_peek(T_open_bracket, NULL))
-        read_sizeof_function_prototype();
-    while (lex_accept(T_open_square)) {
-        int bound = read_const_expr(scope);
-
-        lex_expect(T_close_square);
-        if (bound <= 0)
-            error_at("sizeof array type needs a positive constant bound",
-                     cur_token_loc());
-    }
-    return inner_ptr_count;
+    if (size > INT_MAX / elements)
+        error_at("sizeof array type is too large", cur_token_loc());
+    return size * elements;
 }
 
 /* Integer constant expressions may contain sizeof(type-name). This parser only
@@ -129,9 +178,8 @@ int read_const_sizeof_type(block_t *scope)
 {
     char token[MAX_ID_LEN];
     type_t *type = NULL;
-    int ptr_level = 0;
-    int array_size = 0;
-    int array_element_size = 0;
+    sizeof_derivation_t derivation;
+    int elements;
     bool is_unsigned = false;
     bool is_signed = false;
     int long_count = 0;
@@ -143,7 +191,7 @@ int read_const_sizeof_type(block_t *scope)
         type = find_record_tag(token, scope, record_kind);
     } else if (lex_accept(T_enum)) {
         lex_ident(T_identifier, token);
-        type = find_type_tag(token, scope);
+        type = find_enum_tag(token, scope);
     } else {
         /* Declaration specifiers may appear in any order: all of "unsigned long
          * int", "long unsigned int", and "int unsigned" name the same type.
@@ -209,119 +257,9 @@ int read_const_sizeof_type(block_t *scope)
         error_at(
             "sizeof in an integer constant expression requires a type name",
             cur_token_loc());
-    while (lex_accept(T_asterisk)) {
-        ptr_level++;
-        while (lex_accept(T_const) || lex_accept(T_volatile) ||
-               lex_accept(T_restrict))
-            ;
-    }
-    while (ptr_level == 0 && lex_accept(T_open_square)) {
-        int bound = read_const_expr(scope);
-
-        lex_expect(T_close_square);
-        if (bound <= 0)
-            error_at("sizeof array type needs a positive constant bound",
-                     cur_token_loc());
-        if (bound > 0 && array_size && array_size > INT_MAX / bound)
-            error_at("sizeof array type is too large", cur_token_loc());
-        if (bound > 0)
-            array_size = array_size ? array_size * bound : bound;
-    }
-    if (lex_accept(T_open_bracket)) {
-        int nested_array_size = 0;
-        int nested_ptr_count = 0;
-        int nested_function_ptr_count = 0;
-        int nested_outer_array_size = 0;
-
-        while (lex_accept(T_asterisk)) {
-            nested_ptr_count++;
-            while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                   lex_accept(T_restrict))
-                ;
-        }
-        if (!nested_ptr_count)
-            error_at("sizeof abstract declarator needs a pointer",
-                     cur_token_loc());
-        if (lex_peek(T_open_bracket, NULL)) {
-            nested_function_ptr_count =
-                read_sizeof_nested_function_pointer_suffix(
-                    scope, &nested_outer_array_size);
-            if (nested_outer_array_size) {
-                array_size = nested_outer_array_size;
-                array_element_size = PTR_SIZE;
-            } else
-                ptr_level += nested_ptr_count + nested_function_ptr_count;
-        } else
-            while (lex_accept(T_open_square)) {
-                int bound = read_const_expr(scope);
-
-                lex_expect(T_close_square);
-                if (bound <= 0)
-                    error_at(
-                        "sizeof array type needs a positive constant bound",
-                        cur_token_loc());
-                if (bound > 0 && nested_array_size &&
-                    nested_array_size > INT_MAX / bound)
-                    error_at("sizeof array type is too large", cur_token_loc());
-                if (bound > 0)
-                    nested_array_size =
-                        nested_array_size ? nested_array_size * bound : bound;
-            }
-        if (!nested_function_ptr_count) {
-            lex_expect(T_close_bracket);
-            if (nested_array_size) {
-                array_size = nested_array_size;
-                array_element_size = PTR_SIZE;
-
-                /* `int (*[2][3])(int)` is an array of function pointers: the
-                 * parenthesized declarator owns the array bounds, while the
-                 * following parameter list belongs to each pointed-to function.
-                 * Consume that suffix before the enclosing sizeof parenthesis.
-                 */
-                if (lex_peek(T_open_bracket, NULL))
-                    read_sizeof_function_prototype();
-            } else {
-                ptr_level += nested_ptr_count;
-                while (lex_accept(T_open_square)) {
-                    int bound = read_const_expr(scope);
-
-                    lex_expect(T_close_square);
-                    if (bound <= 0)
-                        error_at(
-                            "sizeof array type needs a positive constant bound",
-                            cur_token_loc());
-                }
-
-                /* A pointer declarator followed by a parameter list names a
-                 * function pointer. Its function type has no object
-                 * representation, but the pointer itself is an object and
-                 * sizeof is pointer-sized. Reuse the declaration parser for
-                 * complete prototype syntax, then discard the otherwise-unused
-                 * signature.
-                 */
-                if (lex_peek(T_open_bracket, NULL))
-                    read_sizeof_function_prototype();
-            }
-        }
-    }
+    derivation = read_sizeof_abstract_declarator(scope, &elements);
     lex_expect(T_close_bracket);
-    if (ptr_level)
-        return PTR_SIZE;
-    if (type == TY_void)
-        error_at("sizeof cannot be applied to void", cur_token_loc());
-    if (type->is_direct_function_type)
-        error_at("sizeof(function) is invalid", cur_token_loc());
-    if (!type->size && (!type->base_struct || !type->base_struct->size))
-        error_at("sizeof cannot be applied to an incomplete type",
-                 cur_token_loc());
-    if (!array_size && !ptr_level && type->array_size)
-        array_size = type->array_size;
-    if (array_size)
-        return array_size *
-               (array_element_size ? array_element_size : type->size);
-    if (type->size)
-        return type->size;
-    return type->base_struct->size;
+    return sizeof_type_name_size(type, derivation, elements);
 }
 
 /* Return the row-major offset contributed by a fixed terminal array member in
@@ -377,11 +315,8 @@ int read_const_expr_operand(block_t *scope)
         return ~read_const_expr_operand(scope);
     if (lex_accept(T_log_not))
         return !read_const_expr_operand(scope);
-    if (lex_accept(T_sizeof)) {
-        if (lex_peek(T_wstring, NULL))
-            return read_const_wstring_size();
-        return read_const_sizeof_type(scope);
-    }
+    if (lex_accept(T_sizeof))
+        return read_sizeof_constant(scope);
 
     if (lex_accept(T_open_bracket)) {
         int res = read_const_expr(scope);
@@ -1009,6 +944,31 @@ void read_inner_var_decl(var_t *vd,
         error_at("void type cannot define an object", cur_token_loc());
 }
 
+/* C99 6.7 lets declaration specifiers appear in any order, so a type qualifier
+ * may follow a struct, union, enum or typedef name as well as precede it:
+ * `struct S volatile s` qualifies s exactly as `volatile struct S s` does.
+ * Callers that read such a specifier themselves use this to collect the
+ * qualifiers after it, leaving the declarator's stars and their own qualifiers
+ * to read_inner_var_decl(). restrict qualifies only a pointer, so it is valid
+ * here only when @base_is_pointer says the specifier names one.
+ */
+void read_type_qualifiers(bool *is_const,
+                          bool *is_volatile,
+                          bool base_is_pointer)
+{
+    for (;;) {
+        if (lex_accept(T_const))
+            *is_const = true;
+        else if (lex_accept(T_volatile))
+            *is_volatile = true;
+        else if (lex_accept(T_restrict)) {
+            if (!base_is_pointer)
+                error_at("restrict requires a pointer type", cur_token_loc());
+        } else
+            return;
+    }
+}
+
 /* starting next_token, need to check the type */
 void read_full_var_decl(var_t *vd,
                         bool anon,
@@ -1113,7 +1073,7 @@ void read_full_var_decl(var_t *vd,
         type = is_long ? TY_long_double : TY_double;
     } else if (is_enum_type) {
         lex_ident(T_identifier, type_name);
-        type = find_type_tag(type_name, vd->scope);
+        type = find_enum_tag(type_name, vd->scope);
     } else if (is_unsigned) {
         if (is_long) {
             if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))

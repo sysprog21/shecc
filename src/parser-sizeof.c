@@ -40,6 +40,33 @@ int read_sizeof_string_literal(void)
     return size;
 }
 
+/* Starting at the first token inside the parenthesis of "sizeof (", count the
+ * grouping parentheses around an adjacent sequence of string literals of the
+ * given kind.
+ *
+ * Return -1 unless the operand is exactly such a grouped literal sequence
+ * closed by its groups and by sizeof's own parenthesis.
+ */
+int sizeof_grouped_literal_depth(token_t *token, token_kind_t kind)
+{
+    int depth = 0;
+
+    while (token && token->kind == T_open_bracket) {
+        depth++;
+        token = token->next;
+    }
+    if (!token || token->kind != kind)
+        return -1;
+    while (token && token->kind == kind)
+        token = token->next;
+    for (int i = 0; i <= depth; i++) {
+        if (!token || token->kind != T_close_bracket)
+            return -1;
+        token = token->next;
+    }
+    return depth;
+}
+
 /* Push the value of a sizeof expression. VLA is intentionally outside shecc's
  * C99 scope, so every admitted sizeof result is an integer constant expression;
  * mark it so constant folding and the null pointer constant test treat every
@@ -360,7 +387,6 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     char token[MAX_ID_LEN];
     int ptr_cnt = 0;
     int array_size = 0;
-    int array_element_size = 0;
     token_t *sizeof_tk = cur_token;
     type_t *type = NULL;
     bool is_function = false;
@@ -369,31 +395,40 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
     /* A string literal is an array, not a pointer, before the array-to-pointer
      * conversion that ordinary expression lowering applies. Parenthesized
-     * sizeof may take the fast path only when the literal sequence is the
-     * complete operand.
+     * sizeof may take the fast path only when the literal sequence, possibly
+     * grouped again, is the complete operand: neither sizeof's own parenthesis
+     * nor any grouping inside it is part of the array's extent.
      */
-    token_t *after_string = cur_token->next;
-    while (after_string && after_string->kind == T_string)
-        after_string = after_string->next;
-    if (lex_peek(T_string, NULL) &&
-        (!parenthesized ||
-         (after_string && after_string->kind == T_close_bracket))) {
-        int size = read_sizeof_string_literal();
+    int string_groups = 0;
+    int wstring_groups = 0;
 
+    if (parenthesized) {
+        string_groups = sizeof_grouped_literal_depth(cur_token->next, T_string);
+        wstring_groups =
+            sizeof_grouped_literal_depth(cur_token->next, T_wstring);
+    }
+    if ((lex_peek(T_string, NULL) || string_groups > 0) && string_groups >= 0) {
+        int size;
+
+        for (int i = 0; i < string_groups; i++)
+            lex_expect(T_open_bracket);
+        size = read_sizeof_string_literal();
+        for (int i = 0; i < string_groups; i++)
+            lex_expect(T_close_bracket);
         if (parenthesized)
             lex_expect(T_close_bracket);
         push_sizeof_result(parent, *bb, size);
         return;
     }
+    if ((lex_peek(T_wstring, NULL) || wstring_groups > 0) &&
+        wstring_groups >= 0) {
+        int size;
 
-    token_t *after_wstring = cur_token->next;
-    while (after_wstring && after_wstring->kind == T_wstring)
-        after_wstring = after_wstring->next;
-    if (lex_peek(T_wstring, NULL) &&
-        (!parenthesized ||
-         (after_wstring && after_wstring->kind == T_close_bracket))) {
-        int size = read_const_wstring_size();
-
+        for (int i = 0; i < wstring_groups; i++)
+            lex_expect(T_open_bracket);
+        size = read_const_wstring_size();
+        for (int i = 0; i < wstring_groups; i++)
+            lex_expect(T_close_bracket);
         if (parenthesized)
             lex_expect(T_close_bracket);
         push_sizeof_result(parent, *bb, size);
@@ -554,15 +589,9 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         type = has_long_type ? TY_long_double : TY_double;
     } else if (has_enum_type) {
         lex_ident(T_identifier, token);
-        type = find_type_tag(token, parent);
+        type = find_enum_tag(token, parent);
         if (!type)
             error_at("Unknown enum type", cur_token_loc());
-        while (lex_accept(T_asterisk)) {
-            ptr_cnt++;
-            while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                   lex_accept(T_restrict))
-                ;
-        }
     } else if (has_long_type) {
         type = has_unsigned_type ? TY_ulong : TY_long;
         if (long_type_count > 1) {
@@ -580,12 +609,6 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         lex_accept(T_const);
         if (lex_peek(T_identifier, token) && !strcmp(token, "int"))
             lex_expect(T_identifier);
-        while (lex_accept(T_asterisk)) {
-            ptr_cnt++;
-            while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                   lex_accept(T_restrict))
-                ;
-        }
     } else if (has_unsigned_type) {
         if (leading_scalar_type == TY_char) {
             type = TY_uchar;
@@ -605,12 +628,6 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
                 type = TY_uint;
         } else
             type = TY_uint;
-        while (lex_accept(T_asterisk)) {
-            ptr_cnt++;
-            while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                   lex_accept(T_restrict))
-                ;
-        }
     } else if (has_signed_type) {
         if (leading_scalar_type == TY_char || leading_scalar_type == TY_short) {
             if (leading_scalar_type == TY_short &&
@@ -625,20 +642,8 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
             type = !strcmp(token, "char") ? TY_schar : find_type(token, true);
         } else
             type = TY_int;
-        while (lex_accept(T_asterisk)) {
-            ptr_cnt++;
-            while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                   lex_accept(T_restrict))
-                ;
-        }
     } else if (leading_scalar_type) {
         type = leading_scalar_type;
-        while (lex_accept(T_asterisk)) {
-            ptr_cnt++;
-            while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                   lex_accept(T_restrict))
-                ;
-        }
     } else if (lex_peek(T_identifier, token)) {
         /* Try to parse as a type first */
         type = record_kind ? find_record_tag(token, parent, record_kind)
@@ -646,143 +651,44 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         if (type) {
             /* sizeof(type) */
             lex_expect(T_identifier);
-            while (lex_accept(T_asterisk)) {
-                ptr_cnt++;
-                while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                       lex_accept(T_restrict))
-                    ;
-            }
         }
     }
 
-    /* The integer branches above consume their own abstract pointer declarators
-     * for historical reasons. Float/double type names select a type before that
-     * legacy code, so finish the common suffix here.
+    /* A type name continues with its abstract declarator; only the derivation
+     * it applies last decides the object size.
      */
-    while (type && lex_accept(T_asterisk)) {
-        ptr_cnt++;
-        while (lex_accept(T_const) || lex_accept(T_volatile) ||
-               lex_accept(T_restrict))
-            ;
+    if (type) {
+        int elements;
+        sizeof_derivation_t derivation =
+            read_sizeof_abstract_declarator(parent, &elements);
+        int size = sizeof_type_name_size(type, derivation, elements);
+
+        lex_expect(T_close_bracket);
+        push_sizeof_result(parent, *bb, size);
+        return;
     }
 
-    /* VLA support is intentionally outside this compiler's C99 scope, but a
-     * type name in sizeof may still carry fixed abstract array bounds. Keep the
-     * simple direct form here rather than treating '[' as an expression token
-     * after the scalar type name.
-     */
-    while (type && ptr_cnt == 0 && lex_accept(T_open_square)) {
-        int bound = read_const_expr(parent);
-
-        lex_expect(T_close_square);
-        if (bound <= 0)
-            error_at("sizeof array type needs a positive constant bound",
-                     cur_token_loc());
-        if (bound > 0 && array_size && array_size > INT_MAX / bound)
-            error_at("sizeof array type is too large", cur_token_loc());
-        if (bound > 0)
-            array_size = array_size ? array_size * bound : bound;
+    /* sizeof(expression) - parse the expression and get its type */
+    basic_block_t *unevaluated_bb = bb_create(parent);
+    int saved_side_effects = se_idx;
+    unevaluated_expression_depth++;
+    if (!read_assignment_expression(parent, &unevaluated_bb)) {
+        read_expr(parent, &unevaluated_bb);
+        read_ternary_operation(parent, &unevaluated_bb);
     }
-
-    if (type && lex_accept(T_open_bracket)) {
-        int nested_array_size = 0;
-        int nested_ptr_count = 0;
-        int nested_function_ptr_count = 0;
-        int nested_outer_array_size = 0;
-
-        while (lex_accept(T_asterisk)) {
-            nested_ptr_count++;
-            while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                   lex_accept(T_restrict))
-                ;
-        }
-        if (!nested_ptr_count)
-            error_at("sizeof abstract declarator needs a pointer",
-                     cur_token_loc());
-        if (lex_peek(T_open_bracket, NULL)) {
-            nested_function_ptr_count =
-                read_sizeof_nested_function_pointer_suffix(
-                    parent, &nested_outer_array_size);
-            if (nested_outer_array_size) {
-                array_size = nested_outer_array_size;
-                array_element_size = PTR_SIZE;
-            } else
-                ptr_cnt += nested_ptr_count + nested_function_ptr_count;
-        } else
-            while (lex_accept(T_open_square)) {
-                int bound = read_const_expr(parent);
-
-                lex_expect(T_close_square);
-                if (bound <= 0)
-                    error_at(
-                        "sizeof array type needs a positive constant bound",
-                        cur_token_loc());
-                if (bound > 0 && nested_array_size &&
-                    nested_array_size > INT_MAX / bound)
-                    error_at("sizeof array type is too large", cur_token_loc());
-                if (bound > 0)
-                    nested_array_size =
-                        nested_array_size ? nested_array_size * bound : bound;
-            }
-        if (!nested_function_ptr_count) {
-            lex_expect(T_close_bracket);
-            if (nested_array_size) {
-                array_size = nested_array_size;
-                array_element_size = PTR_SIZE;
-
-                /* The grouped array declarator in `int (*[2][3])(int)` leaves
-                 * its pointed-to function suffix outside the group. sizeof only
-                 * needs pointer-sized elements, but still must parse that valid
-                 * C99 prototype completely.
-                 */
-                if (lex_peek(T_open_bracket, NULL))
-                    read_sizeof_function_prototype();
-            } else {
-                ptr_cnt += nested_ptr_count;
-                while (lex_accept(T_open_square)) {
-                    int bound = read_const_expr(parent);
-
-                    lex_expect(T_close_square);
-                    if (bound <= 0)
-                        error_at(
-                            "sizeof array type needs a positive constant bound",
-                            cur_token_loc());
-                }
-
-                /* A pointer declarator followed by a parameter list names a
-                 * function pointer. sizeof observes the pointer object, not the
-                 * function type, so no expression lowering or function ABI is
-                 * needed. Reuse the declaration parser for prototype syntax.
-                 */
-                if (lex_peek(T_open_bracket, NULL))
-                    read_sizeof_function_prototype();
-            }
-        }
-    }
-
-    if (!type) {
-        /* sizeof(expression) - parse the expression and get its type */
-        basic_block_t *unevaluated_bb = bb_create(parent);
-        int saved_side_effects = se_idx;
-        unevaluated_expression_depth++;
-        if (!read_assignment_expression(parent, &unevaluated_bb)) {
-            read_expr(parent, &unevaluated_bb);
-            read_ternary_operation(parent, &unevaluated_bb);
-        }
-        unevaluated_expression_depth--;
-        se_idx = saved_side_effects;
-        var_t *expr_var = opstack_pop();
-        if (is_bitfield(expr_var))
-            error_at("sizeof cannot be applied to a bit-field",
-                     &sizeof_tk->location);
-        type = expr_var->type;
-        ptr_cnt = expr_var->ptr_level;
-        array_size = expr_var->array_size;
-        is_function = expr_var->is_func;
-        if (is_incomplete_record_object(expr_var))
-            error_at("sizeof cannot be applied to an incomplete record type",
-                     &sizeof_tk->location);
-    }
+    unevaluated_expression_depth--;
+    se_idx = saved_side_effects;
+    var_t *expr_var = opstack_pop();
+    if (is_bitfield(expr_var))
+        error_at("sizeof cannot be applied to a bit-field",
+                 &sizeof_tk->location);
+    type = expr_var->type;
+    ptr_cnt = expr_var->ptr_level;
+    array_size = expr_var->array_size;
+    is_function = expr_var->is_func;
+    if (is_incomplete_record_object(expr_var))
+        error_at("sizeof cannot be applied to an incomplete record type",
+                 &sizeof_tk->location);
 
     if (!type)
         error_at("Unable to determine type in sizeof", &sizeof_tk->location);
@@ -796,8 +702,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     int size = type->size;
 
     if (array_size > 0)
-        size =
-            array_size * (array_element_size ? array_element_size : type->size);
+        size = array_size * type->size;
     if (ptr_cnt)
         size = PTR_SIZE;
     lex_expect(T_close_bracket);

@@ -340,9 +340,21 @@ bool global_compound_literal_starts_here(void)
     if (!lex_peek(T_open_bracket, NULL))
         return false;
     next = cur_token->next->next;
-    return next &&
-           ((next->kind == T_identifier && find_type(next->literal, true)) ||
-            next->kind == T_struct || next->kind == T_union);
+    if (!next ||
+        !((next->kind == T_identifier && find_type(next->literal, true)) ||
+          next->kind == T_struct || next->kind == T_union))
+        return false;
+
+    /* Only a brace after the type name makes a compound literal; otherwise the
+     * parenthesized type name is a cast.
+     */
+    for (int depth = 1; next; next = next->next) {
+        if (next->kind == T_open_bracket)
+            depth++;
+        else if (next->kind == T_close_bracket && --depth == 0)
+            return next->next && next->next->kind == T_open_curly;
+    }
+    return false;
 }
 
 /* A grouped function designator remains a C99 address constant in a global
@@ -712,8 +724,25 @@ static int callback_pointer_indirection(const var_t *var)
     return 0;
 }
 
+/* A typedef naming a struct or union type with no derived declarator of its
+ * own, as in "typedef volatile struct S vs_t;".
+ */
+static bool is_plain_record_alias(const type_t *type)
+{
+    return type && type->base_type == TYPE_typedef && type->base_struct &&
+           !type->ptr_level && !type->array_size && !type->pointee_array_size &&
+           !type->func_signature && !type->pointee_func_signature;
+}
+
 bool compatible_decl_type(const type_t *left, const type_t *right)
 {
+    /* A typedef of a struct or union tag denotes the tag's type. Its own
+     * qualifiers were copied into each declarator, which the callers compare.
+     */
+    while (is_plain_record_alias(left))
+        left = left->base_struct;
+    while (is_plain_record_alias(right))
+        right = right->base_struct;
     if (left == right)
         return true;
 
@@ -953,7 +982,8 @@ typedef struct {
  * translation unit merely to check duplicate converted values.
  */
 typedef struct switch_case_value {
-    int value;
+    unsigned int value;
+    unsigned int value_hi;
     struct switch_case_value *next;
 } switch_case_value_t;
 

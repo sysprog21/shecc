@@ -608,10 +608,29 @@ type_t *find_type(const char *type_name, int flag)
                 /* If it is a forwardly declared alias of a structure, return
                  * the base structure type.
                  */
-                if (TYPES[i].base_type == TYPE_typedef && TYPES[i].size == 0 &&
-                    TYPES[i].ptr_level == 0)
-                    return TYPES[i].base_struct;
-                return &TYPES[i];
+                type_t *alias = &TYPES[i];
+                type_t *base = alias->base_struct;
+
+                if (alias->base_type != TYPE_typedef || alias->size ||
+                    alias->ptr_level)
+                    return alias;
+
+                /* The base would drop the qualifiers of `typedef const struct S
+                 * cs_t;`, so a qualified alias keeps its own descriptor and
+                 * takes the layout once the tag has been completed.
+                 */
+                if (!base || !base->size ||
+                    (!alias->is_const_qualified &&
+                     !alias->is_volatile_qualified))
+                    return base;
+                alias->size = base->size;
+                alias->alignment = base->alignment;
+                alias->fields = base->fields;
+                alias->num_fields = base->num_fields;
+                alias->is_union = base->is_union;
+                alias->has_flexible_array_member =
+                    base->has_flexible_array_member;
+                return alias;
             }
         }
     }
@@ -1268,16 +1287,6 @@ void add_type_tag(block_t *block, char name[], type_t *type)
     block->type_tags = tag;
 }
 
-type_t *find_type_tag(char name[], block_t *block)
-{
-    for (; block; block = block->parent) {
-        for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
-            if (!strcmp(tag->name, name))
-                return tag->type;
-    }
-    return find_type(name, 1);
-}
-
 type_t *find_local_type_tag(char name[], block_t *block)
 {
     for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
@@ -1347,6 +1356,37 @@ type_t *local_record_tag(char name[], block_t *block, base_type_t kind)
     type_t *type = check_record_tag(find_local_type_tag(name, block), kind);
 
     return type ? type : declare_record_tag(name, block, kind);
+}
+
+/* An enum tag shares the struct and union name space, so an existing record tag
+ * of the same name is the wrong kind of tag rather than a miss. Looking in the
+ * tag table, not the type table, also keeps a typedef name out of it.
+ */
+static type_t *check_enum_tag(type_t *type)
+{
+    if (type &&
+        (type->base_type == TYPE_struct || type->base_type == TYPE_union))
+        error_at("tag was previously declared as a different kind of tag",
+                 cur_token_loc());
+    return type;
+}
+
+/* The enum tag @name as seen from @block, or NULL when none is visible. */
+type_t *find_enum_tag(char name[], block_t *block)
+{
+    type_t *type = NULL;
+
+    for (; block && !type; block = block->parent)
+        type = find_local_type_tag(name, block);
+    if (!type)
+        type = find_local_type_tag(name, GLOBAL_BLOCK);
+    return check_enum_tag(type);
+}
+
+/* The enum tag @name that @block itself declares, or NULL. */
+type_t *local_enum_tag(char name[], block_t *block)
+{
+    return check_enum_tag(find_local_type_tag(name, block));
 }
 
 bool find_block_typedef(block_t *block, const char *name)

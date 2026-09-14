@@ -129,31 +129,333 @@ int read_const_wstring_size(void)
     return (read_wstring_units(values, MAX_STRING_LEN) + 1) * wide_type->size;
 }
 
-/* Starting at the first token inside the parenthesis of "sizeof (", count the
- * grouping parentheses around an adjacent sequence of string literals of the
- * given kind.
- *
- * Return -1 unless the operand is exactly such a grouped literal sequence
- * closed by its groups and by sizeof's own parenthesis.
+/* Evaluate a sizeof operator, already consumed, in an integer constant
+ * expression: a file-scope or static initializer, an array bound, a case label
+ * or an enumerator. Declared objects keep their extents through a type-only
+ * walk and type names use the declaration-only evaluator; every other operand
+ * goes through the ordinary sizeof parser in a detached block, so its size
+ * follows from its real type.
  */
-static int sizeof_grouped_literal_depth(token_t *token, token_kind_t kind)
+int read_sizeof_constant(block_t *scope)
 {
-    int depth = 0;
+    /* The buffer holds only a copied identifier, at most MAX_TOKEN_LEN. */
+    char buffer[MAX_TOKEN_LEN];
+    int res;
 
-    while (token && token->kind == T_open_bracket) {
-        depth++;
-        token = token->next;
+    /* The detached expression parser needs a block to hold its values. */
+    if (!scope)
+        scope = GLOBAL_BLOCK;
+
+    token_t *inside =
+        lex_peek(T_open_bracket, NULL) ? cur_token->next->next : NULL;
+    var_t *nested_array = NULL;
+    token_t *nested_root = NULL;
+    token_t *nested_after = NULL;
+    int nested_groups = 0;
+    int string_groups = sizeof_grouped_literal_depth(inside, T_string);
+    int wstring_groups = sizeof_grouped_literal_depth(inside, T_wstring);
+
+    if (inside && inside->kind == T_open_bracket) {
+        token_t *token = inside;
+
+        while (token && token->kind == T_open_bracket) {
+            nested_groups++;
+            token = token->next;
+        }
+        nested_root = token;
+        if (token && token->kind == T_identifier)
+            nested_array = find_var(token->literal, scope);
+        nested_after = token ? token->next : NULL;
+        for (int i = 0; i < nested_groups && nested_after &&
+                        nested_after->kind == T_close_bracket;
+             i++)
+            nested_after = nested_after->next;
     }
-    if (!token || token->kind != kind)
-        return -1;
-    while (token && token->kind == kind)
-        token = token->next;
-    for (int i = 0; i <= depth; i++) {
-        if (!token || token->kind != T_close_bracket)
-            return -1;
-        token = token->next;
+    if (can_scan_sizeof_postfix_extent(scope,
+                                       lex_peek(T_open_bracket, NULL)
+                                           ? cur_token->next->next
+                                           : cur_token->next,
+                                       lex_peek(T_open_bracket, NULL), false)) {
+        /* The shared postfix walker has already proved this is an
+         * identifier-rooted fixed array extent, so the detached parser can
+         * preserve it without a global-prefix spelling table.
+         */
+        res = read_global_sizeof_expression(scope);
+    } else if (string_groups >= 0 || wstring_groups >= 0) {
+        /* sizeof's own parenthesis and any grouping inside it enclose the
+         * literal array; none of them is part of its extent.
+         */
+        int groups = string_groups >= 0 ? string_groups : wstring_groups;
+
+        lex_expect(T_open_bracket);
+        for (int i = 0; i < groups; i++)
+            lex_expect(T_open_bracket);
+        if (string_groups >= 0)
+            res = read_sizeof_string_literal();
+        else
+            res = read_const_wstring_size();
+        for (int i = 0; i < groups; i++)
+            lex_expect(T_close_bracket);
+        lex_expect(T_close_bracket);
+    } else if (nested_array && nested_array->array_size > 0 &&
+               nested_groups > 0 && nested_after &&
+               nested_after->kind == T_close_bracket) {
+        lex_expect(T_open_bracket);
+        for (int i = 0; i < nested_groups; i++)
+            lex_expect(T_open_bracket);
+        lex_expect(T_identifier);
+        for (int i = 0; i < nested_groups; i++)
+            lex_expect(T_close_bracket);
+        lex_expect(T_close_bracket);
+        res = size_var(nested_array);
+    } else if (nested_array && nested_groups > 0 && nested_root &&
+               nested_root->next &&
+               (nested_root->next->kind == T_dot ||
+                nested_root->next->kind == T_arrow)) {
+        /* The local sizeof helper preserves a member-array lvalue through
+         * arbitrary grouping before a postfix subscript. Reuse it in a detached
+         * block for a global constant instead of duplicating that type-only
+         * traversal here.
+         */
+        res = read_global_sizeof_expression(scope);
+    } else if (inside && inside->kind == T_open_bracket && inside->next &&
+               inside->next->kind == T_open_bracket && inside->next->next &&
+               inside->next->next->kind == T_identifier) {
+        var_t *grouped_object = find_var(inside->next->next->literal, scope);
+
+        if (grouped_object && !grouped_object->array_size &&
+            !grouped_object->has_unsized_array)
+            res = read_global_sizeof_expression(scope);
+        else
+            res = read_const_sizeof_type(scope);
+    } else if (inside &&
+               (inside->kind == T_increment || inside->kind == T_decrement ||
+                inside->kind == T_plus || inside->kind == T_minus ||
+                inside->kind == T_bit_not || inside->kind == T_log_not)) {
+        res = read_global_sizeof_expression(scope);
+    } else if (inside && inside->kind == T_open_bracket && inside->next &&
+               ((inside->next->kind == T_identifier &&
+                 find_type(inside->next->literal, true)) ||
+                inside->next->kind == T_signed ||
+                inside->next->kind == T_unsigned ||
+                inside->next->kind == T_long || inside->next->kind == T_const ||
+                inside->next->kind == T_volatile ||
+                inside->next->kind == T_struct ||
+                inside->next->kind == T_union ||
+                inside->next->kind == T_enum)) {
+        /* A cast begins with an extra parenthesis and cannot be evaluated as an
+         * integer constant when its operand is a declared object.
+         */
+        res = read_global_sizeof_expression(scope);
+    } else if (inside && inside->kind == T_identifier &&
+               (find_var(inside->literal, scope) ||
+                find_func(inside->literal)) &&
+               inside->next && inside->next->kind != T_close_bracket &&
+               inside->next->kind != T_dot && inside->next->kind != T_arrow &&
+               inside->next->kind != T_open_square) {
+        /* Parenthesized non-postfix operands need type derivation rather than
+         * constant evaluation: sizeof(global + 1), sizeof(global = 1), and
+         * calls are all unevaluated but need their expression type. Reuse the
+         * detached expression path used for local sizeof.
+         */
+        res = read_global_sizeof_expression(scope);
+    } else if (inside && inside->kind == T_open_bracket && inside->next &&
+               inside->next->kind == T_asterisk && inside->next->next &&
+               inside->next->next->kind == T_identifier &&
+               find_var(inside->next->next->literal, scope)) {
+        var_t *pointer = find_var(inside->next->next->literal, scope);
+        var_t dereferenced;
+        var_t *object;
+        int subscript_depth = 0;
+
+        if (effective_pointer_depth(pointer) != 1)
+            error_at("Cannot dereference non-pointer in sizeof",
+                     cur_token_loc());
+
+        /* This is compile-time descriptor manipulation, not a source aggregate
+         * expression. A direct `dereferenced = *pointer` becomes one wide
+         * OP_read while self-hosting; ARM's scalar load backend correctly
+         * admits only 1/2/4-byte reads. Copy through libc instead, which keeps
+         * the generated compiler IR word-sized and preserves every descriptor
+         * field.
+         */
+        memcpy(&dereferenced, pointer, sizeof(dereferenced));
+        dereferenced.type = pointee_type_from_pointer_typedef(pointer->type);
+        dereferenced.ptr_level = 0;
+        object = &dereferenced;
+
+        lex_expect(T_open_bracket);
+        lex_expect(T_open_bracket);
+        lex_expect(T_asterisk);
+        lex_expect(T_identifier);
+        lex_expect(T_close_bracket);
+        object = read_const_object_members(object);
+        while (lex_accept(T_open_square)) {
+            if (!object->array_size && !object->has_unsized_array)
+                error_at("Cannot apply square operator to non-array",
+                         cur_token_loc());
+            read_const_expr(scope);
+            lex_expect(T_close_square);
+            subscript_depth++;
+        }
+        lex_expect(T_close_bracket);
+        validate_global_sizeof_object(object);
+        res = sizeof_subscripted_array(object, subscript_depth);
+    } else if (inside && inside->kind == T_asterisk && inside->next &&
+               inside->next->kind == T_identifier && inside->next->next &&
+               inside->next->next->kind == T_open_square &&
+               is_direct_fixed_array_pointer_slot(
+                   find_var(inside->next->literal, scope))) {
+        /* The shared direct-pointer helper also owns the supported global
+         * pointer-array slot form.
+         */
+        res = read_global_sizeof_expression(scope);
+    } else if (inside && inside->kind == T_asterisk && inside->next &&
+               inside->next->kind == T_ampersand) {
+        var_t *object;
+        int subscript_depth;
+
+        lex_expect(T_open_bracket);
+        lex_expect(T_asterisk);
+        object = read_const_addressed_object(scope, &subscript_depth);
+        lex_expect(T_close_bracket);
+        res = sizeof_subscripted_array(object, subscript_depth);
+    } else if (inside && inside->kind == T_asterisk) {
+        /* Only "*&object" keeps a declared extent through the address walk; any
+         * other dereference, such as *pointer, needs the pointee type.
+         */
+        res = read_global_sizeof_expression(scope);
+    } else if (inside && inside->kind == T_ampersand) {
+        lex_expect(T_open_bracket);
+        read_const_addressed_object(scope, NULL);
+        lex_expect(T_close_bracket);
+        res = PTR_SIZE;
+    } else if (inside && inside->kind == T_open_bracket && inside->next &&
+               inside->next->kind == T_identifier &&
+               find_var(inside->next->literal, scope) && inside->next->next &&
+               inside->next->next->kind != T_close_bracket &&
+               inside->next->next->kind != T_dot &&
+               inside->next->next->kind != T_arrow &&
+               inside->next->next->kind != T_open_square) {
+        /* A grouped object followed by an operator is an ordinary parenthesized
+         * expression, not the array/member postfix form handled below.
+         */
+        res = read_global_sizeof_expression(scope);
+    } else if (inside && inside->kind == T_open_bracket && inside->next &&
+               inside->next->kind == T_identifier &&
+               find_var(inside->next->literal, scope)) {
+        /* Preserve the array object type through an explicitly grouped object
+         * expression, e.g. sizeof((record.items)[0]).
+         */
+        var_t *object = find_var(inside->next->literal, scope);
+        int subscript_depth = 0;
+
+        lex_expect(T_open_bracket);
+        lex_expect(T_open_bracket);
+        lex_expect(T_identifier);
+        object = read_const_object_members(object);
+        lex_expect(T_close_bracket);
+        while (lex_accept(T_open_square)) {
+            if (!object->array_size && !object->has_unsized_array)
+                error_at("Cannot apply square operator to non-array",
+                         cur_token_loc());
+            read_const_expr(scope);
+            lex_expect(T_close_square);
+            subscript_depth++;
+        }
+        lex_expect(T_close_bracket);
+        validate_global_sizeof_object(object);
+        res = sizeof_subscripted_array(object, subscript_depth);
+    } else if (inside &&
+               (inside->kind == T_open_bracket || inside->kind == T_numeric ||
+                inside->kind == T_char || inside->kind == T_wchar)) {
+        /* A literal has the type its suffix and value select, such as long long
+         * for 1LL, so only the ordinary expression parser knows its size.
+         */
+        res = read_global_sizeof_expression(scope);
+    } else if (inside && inside->kind == T_identifier) {
+        var_t *object = find_var(inside->literal, scope);
+        constant_t *constant = find_scoped_constant(inside->literal, scope);
+
+        if (object || constant) {
+            lex_expect(T_open_bracket);
+            lex_expect(T_identifier);
+            if (object) {
+                int subscript_depth = 0;
+
+                object = read_const_object_members(object);
+                while (lex_accept(T_open_square)) {
+                    if (!object->array_size && !object->has_unsized_array)
+                        error_at("Cannot apply square operator to non-array",
+                                 cur_token_loc());
+                    read_const_expr(scope);
+                    lex_expect(T_close_square);
+                    subscript_depth++;
+                }
+                lex_expect(T_close_bracket);
+                validate_global_sizeof_object(object);
+                res = sizeof_subscripted_array(object, subscript_depth);
+            } else {
+                lex_expect(T_close_bracket);
+                res = TY_int->size;
+            }
+        } else {
+            res = read_const_sizeof_type(scope);
+        }
+    } else if (lex_peek(T_numeric, NULL) || lex_peek(T_char, NULL) ||
+               lex_peek(T_wchar, NULL)) {
+        res = read_global_sizeof_expression(scope);
+    } else if (lex_peek(T_string, NULL)) {
+        res = read_sizeof_string_literal();
+    } else if (lex_peek(T_wstring, NULL)) {
+        res = read_const_wstring_size();
+    } else if (lex_peek(T_ampersand, NULL)) {
+        read_const_addressed_object(scope, NULL);
+        res = PTR_SIZE;
+    } else if (lex_peek(T_asterisk, NULL) && cur_token->next->next &&
+               cur_token->next->next->kind == T_ampersand) {
+        var_t *object;
+        int subscript_depth;
+
+        lex_expect(T_asterisk);
+        object = read_const_addressed_object(scope, &subscript_depth);
+        res = sizeof_subscripted_array(object, subscript_depth);
+    } else if (lex_peek(T_asterisk, NULL)) {
+        /* As above, a dereference other than "*&object" needs its type. */
+        res = read_global_sizeof_expression(scope);
+    } else if (lex_peek(T_minus, NULL) || lex_peek(T_plus, NULL) ||
+               lex_peek(T_bit_not, NULL) || lex_peek(T_log_not, NULL)) {
+        res = read_global_sizeof_expression(scope);
+    } else if (lex_peek(T_identifier, buffer)) {
+        var_t *object = find_var(buffer, scope);
+        constant_t *constant = find_scoped_constant(buffer, scope);
+
+        lex_expect(T_identifier);
+        if (object) {
+            int subscript_depth = 0;
+
+            object = read_const_object_members(object);
+            while (lex_accept(T_open_square)) {
+                if (!object->array_size && !object->has_unsized_array)
+                    error_at("Cannot apply square operator to non-array",
+                             cur_token_loc());
+                read_const_expr(scope);
+                lex_expect(T_close_square);
+                subscript_depth++;
+            }
+            validate_global_sizeof_object(object);
+            res = sizeof_subscripted_array(object, subscript_depth);
+        } else if (constant) {
+            res = TY_int->size;
+        } else {
+            error_at("sizeof requires a type or declared object",
+                     cur_token_loc());
+            res = 0;
+        }
+    } else {
+        res = read_const_sizeof_type(scope);
     }
-    return depth;
+    return res;
 }
 
 int read_primary_constant(block_t *scope)
@@ -170,323 +472,7 @@ int read_primary_constant(block_t *scope)
     if (lex_accept(T_minus))
         isneg = 1;
     if (lex_accept(T_sizeof)) {
-        /* The common scalar expression form needs no IR in a global constant:
-         * integer and character literals have type int. Type names continue
-         * through the declaration-only evaluator below.
-         */
-        token_t *inside =
-            lex_peek(T_open_bracket, NULL) ? cur_token->next->next : NULL;
-        var_t *nested_array = NULL;
-        token_t *nested_root = NULL;
-        token_t *nested_after = NULL;
-        int nested_groups = 0;
-        int string_groups = sizeof_grouped_literal_depth(inside, T_string);
-        int wstring_groups = sizeof_grouped_literal_depth(inside, T_wstring);
-
-        if (inside && inside->kind == T_open_bracket) {
-            token_t *token = inside;
-
-            while (token && token->kind == T_open_bracket) {
-                nested_groups++;
-                token = token->next;
-            }
-            nested_root = token;
-            if (token && token->kind == T_identifier)
-                nested_array = find_var(token->literal, scope);
-            nested_after = token ? token->next : NULL;
-            for (int i = 0; i < nested_groups && nested_after &&
-                            nested_after->kind == T_close_bracket;
-                 i++)
-                nested_after = nested_after->next;
-        }
-        if (can_scan_sizeof_postfix_extent(
-                scope,
-                lex_peek(T_open_bracket, NULL) ? cur_token->next->next
-                                               : cur_token->next,
-                lex_peek(T_open_bracket, NULL), false)) {
-            /* The shared postfix walker has already proved this is an
-             * identifier-rooted fixed array extent, so the detached parser can
-             * preserve it without a global-prefix spelling table.
-             */
-            res = read_global_sizeof_expression(scope);
-        } else if (string_groups >= 0 || wstring_groups >= 0) {
-            /* sizeof's own parenthesis and any grouping inside it enclose the
-             * literal array; none of them is part of its extent.
-             */
-            int groups = string_groups >= 0 ? string_groups : wstring_groups;
-
-            lex_expect(T_open_bracket);
-            for (int i = 0; i < groups; i++)
-                lex_expect(T_open_bracket);
-            if (string_groups >= 0)
-                res = read_sizeof_string_literal();
-            else
-                res = read_const_wstring_size();
-            for (int i = 0; i < groups; i++)
-                lex_expect(T_close_bracket);
-            lex_expect(T_close_bracket);
-        } else if (nested_array && nested_array->array_size > 0 &&
-                   nested_groups > 0 && nested_after &&
-                   nested_after->kind == T_close_bracket) {
-            lex_expect(T_open_bracket);
-            for (int i = 0; i < nested_groups; i++)
-                lex_expect(T_open_bracket);
-            lex_expect(T_identifier);
-            for (int i = 0; i < nested_groups; i++)
-                lex_expect(T_close_bracket);
-            lex_expect(T_close_bracket);
-            res = size_var(nested_array);
-        } else if (nested_array && nested_groups > 0 && nested_root &&
-                   nested_root->next &&
-                   (nested_root->next->kind == T_dot ||
-                    nested_root->next->kind == T_arrow)) {
-            /* The local sizeof helper preserves a member-array lvalue through
-             * arbitrary grouping before a postfix subscript. Reuse it in a
-             * detached block for a global constant instead of duplicating that
-             * type-only traversal here.
-             */
-            res = read_global_sizeof_expression(scope);
-        } else if (inside && inside->kind == T_open_bracket && inside->next &&
-                   inside->next->kind == T_open_bracket && inside->next->next &&
-                   inside->next->next->kind == T_identifier) {
-            var_t *grouped_object =
-                find_var(inside->next->next->literal, scope);
-
-            if (grouped_object && !grouped_object->array_size &&
-                !grouped_object->has_unsized_array)
-                res = read_global_sizeof_expression(scope);
-            else
-                res = read_const_sizeof_type(scope);
-        } else if (inside &&
-                   (inside->kind == T_increment ||
-                    inside->kind == T_decrement || inside->kind == T_plus ||
-                    inside->kind == T_minus || inside->kind == T_bit_not ||
-                    inside->kind == T_log_not)) {
-            res = read_global_sizeof_expression(scope);
-        } else if (inside && inside->kind == T_open_bracket && inside->next &&
-                   ((inside->next->kind == T_identifier &&
-                     find_type(inside->next->literal, true)) ||
-                    inside->next->kind == T_signed ||
-                    inside->next->kind == T_unsigned ||
-                    inside->next->kind == T_long ||
-                    inside->next->kind == T_const ||
-                    inside->next->kind == T_volatile ||
-                    inside->next->kind == T_struct ||
-                    inside->next->kind == T_union ||
-                    inside->next->kind == T_enum)) {
-            /* A cast begins with an extra parenthesis and cannot be evaluated
-             * as an integer constant when its operand is a declared object.
-             */
-            res = read_global_sizeof_expression(scope);
-        } else if (inside && inside->kind == T_identifier &&
-                   (find_var(inside->literal, scope) ||
-                    find_func(inside->literal)) &&
-                   inside->next && inside->next->kind != T_close_bracket &&
-                   inside->next->kind != T_dot &&
-                   inside->next->kind != T_arrow &&
-                   inside->next->kind != T_open_square) {
-            /* Parenthesized non-postfix operands need type derivation rather
-             * than constant evaluation: sizeof(global + 1), sizeof(global = 1),
-             * and calls are all unevaluated but need their expression type.
-             * Reuse the detached expression path used for local sizeof.
-             */
-            res = read_global_sizeof_expression(scope);
-        } else if (inside && inside->kind == T_open_bracket && inside->next &&
-                   inside->next->kind == T_asterisk && inside->next->next &&
-                   inside->next->next->kind == T_identifier &&
-                   find_var(inside->next->next->literal, scope)) {
-            var_t *pointer = find_var(inside->next->next->literal, scope);
-            var_t dereferenced;
-            var_t *object;
-            int subscript_depth = 0;
-
-            if (effective_pointer_depth(pointer) != 1)
-                error_at("Cannot dereference non-pointer in sizeof",
-                         cur_token_loc());
-
-            /* This is compile-time descriptor manipulation, not a source
-             * aggregate expression. A direct `dereferenced = *pointer` becomes
-             * one wide OP_read while self-hosting; ARM's scalar load backend
-             * correctly admits only 1/2/4-byte reads. Copy through libc
-             * instead, which keeps the generated compiler IR word-sized and
-             * preserves every descriptor field.
-             */
-            memcpy(&dereferenced, pointer, sizeof(dereferenced));
-            dereferenced.type =
-                pointee_type_from_pointer_typedef(pointer->type);
-            dereferenced.ptr_level = 0;
-            object = &dereferenced;
-
-            lex_expect(T_open_bracket);
-            lex_expect(T_open_bracket);
-            lex_expect(T_asterisk);
-            lex_expect(T_identifier);
-            lex_expect(T_close_bracket);
-            object = read_const_object_members(object);
-            while (lex_accept(T_open_square)) {
-                if (!object->array_size && !object->has_unsized_array)
-                    error_at("Cannot apply square operator to non-array",
-                             cur_token_loc());
-                read_const_expr(scope);
-                lex_expect(T_close_square);
-                subscript_depth++;
-            }
-            lex_expect(T_close_bracket);
-            validate_global_sizeof_object(object);
-            res = sizeof_subscripted_array(object, subscript_depth);
-        } else if (inside && inside->kind == T_asterisk && inside->next &&
-                   inside->next->kind == T_identifier && inside->next->next &&
-                   inside->next->next->kind == T_open_square &&
-                   is_direct_fixed_array_pointer_slot(
-                       find_var(inside->next->literal, scope))) {
-            /* The shared direct-pointer helper also owns the supported global
-             * pointer-array slot form.
-             */
-            res = read_global_sizeof_expression(scope);
-        } else if (inside && inside->kind == T_asterisk && inside->next &&
-                   inside->next->kind == T_ampersand) {
-            var_t *object;
-            int subscript_depth;
-
-            lex_expect(T_open_bracket);
-            lex_expect(T_asterisk);
-            object = read_const_addressed_object(scope, &subscript_depth);
-            lex_expect(T_close_bracket);
-            res = sizeof_subscripted_array(object, subscript_depth);
-        } else if (inside && inside->kind == T_ampersand) {
-            lex_expect(T_open_bracket);
-            read_const_addressed_object(scope, NULL);
-            lex_expect(T_close_bracket);
-            res = PTR_SIZE;
-        } else if (inside && inside->kind == T_open_bracket && inside->next &&
-                   inside->next->kind == T_identifier &&
-                   find_var(inside->next->literal, scope) &&
-                   inside->next->next &&
-                   inside->next->next->kind != T_close_bracket &&
-                   inside->next->next->kind != T_dot &&
-                   inside->next->next->kind != T_arrow &&
-                   inside->next->next->kind != T_open_square) {
-            /* A grouped object followed by an operator is an ordinary
-             * parenthesized expression, not the array/member postfix form
-             * handled below.
-             */
-            res = read_global_sizeof_expression(scope);
-        } else if (inside && inside->kind == T_open_bracket && inside->next &&
-                   inside->next->kind == T_identifier &&
-                   find_var(inside->next->literal, scope)) {
-            /* Preserve the array object type through an explicitly grouped
-             * object expression, e.g. sizeof((record.items)[0]).
-             */
-            var_t *object = find_var(inside->next->literal, scope);
-            int subscript_depth = 0;
-
-            lex_expect(T_open_bracket);
-            lex_expect(T_open_bracket);
-            lex_expect(T_identifier);
-            object = read_const_object_members(object);
-            lex_expect(T_close_bracket);
-            while (lex_accept(T_open_square)) {
-                if (!object->array_size && !object->has_unsized_array)
-                    error_at("Cannot apply square operator to non-array",
-                             cur_token_loc());
-                read_const_expr(scope);
-                lex_expect(T_close_square);
-                subscript_depth++;
-            }
-            lex_expect(T_close_bracket);
-            validate_global_sizeof_object(object);
-            res = sizeof_subscripted_array(object, subscript_depth);
-        } else if (inside && inside->kind == T_open_bracket) {
-            lex_expect(T_open_bracket);
-            read_const_expr(scope);
-            lex_expect(T_close_bracket);
-            res = TY_int->size;
-        } else if (inside &&
-                   (inside->kind == T_numeric || inside->kind == T_char ||
-                    inside->kind == T_wchar)) {
-            lex_expect(T_open_bracket);
-            read_const_expr(scope);
-            lex_expect(T_close_bracket);
-            res = TY_int->size;
-        } else if (inside && inside->kind == T_identifier) {
-            var_t *object = find_var(inside->literal, scope);
-            constant_t *constant = find_scoped_constant(inside->literal, scope);
-
-            if (object || constant) {
-                lex_expect(T_open_bracket);
-                lex_expect(T_identifier);
-                if (object) {
-                    int subscript_depth = 0;
-
-                    object = read_const_object_members(object);
-                    while (lex_accept(T_open_square)) {
-                        if (!object->array_size && !object->has_unsized_array)
-                            error_at(
-                                "Cannot apply square operator to non-array",
-                                cur_token_loc());
-                        read_const_expr(scope);
-                        lex_expect(T_close_square);
-                        subscript_depth++;
-                    }
-                    lex_expect(T_close_bracket);
-                    validate_global_sizeof_object(object);
-                    res = sizeof_subscripted_array(object, subscript_depth);
-                } else {
-                    lex_expect(T_close_bracket);
-                    res = TY_int->size;
-                }
-            } else {
-                res = read_const_sizeof_type(scope);
-            }
-        } else if (lex_peek(T_numeric, buffer) || lex_peek(T_char, buffer) ||
-                   lex_peek(T_wchar, buffer)) {
-            read_primary_constant(scope);
-            res = TY_int->size;
-        } else if (lex_peek(T_string, NULL)) {
-            res = read_sizeof_string_literal();
-        } else if (lex_peek(T_wstring, NULL)) {
-            res = read_const_wstring_size();
-        } else if (lex_peek(T_ampersand, NULL)) {
-            read_const_addressed_object(scope, NULL);
-            res = PTR_SIZE;
-        } else if (lex_accept(T_asterisk)) {
-            var_t *object;
-            int subscript_depth;
-
-            object = read_const_addressed_object(scope, &subscript_depth);
-            res = sizeof_subscripted_array(object, subscript_depth);
-        } else if (lex_peek(T_minus, NULL) || lex_peek(T_plus, NULL) ||
-                   lex_peek(T_bit_not, NULL) || lex_peek(T_log_not, NULL)) {
-            res = read_global_sizeof_expression(scope);
-        } else if (lex_peek(T_identifier, buffer)) {
-            var_t *object = find_var(buffer, scope);
-            constant_t *constant = find_scoped_constant(buffer, scope);
-
-            lex_expect(T_identifier);
-            if (object) {
-                int subscript_depth = 0;
-
-                object = read_const_object_members(object);
-                while (lex_accept(T_open_square)) {
-                    if (!object->array_size && !object->has_unsized_array)
-                        error_at("Cannot apply square operator to non-array",
-                                 cur_token_loc());
-                    read_const_expr(scope);
-                    lex_expect(T_close_square);
-                    subscript_depth++;
-                }
-                validate_global_sizeof_object(object);
-                res = sizeof_subscripted_array(object, subscript_depth);
-            } else if (constant) {
-                res = TY_int->size;
-            } else {
-                error_at("sizeof requires a type or declared object",
-                         cur_token_loc());
-                res = 0;
-            }
-        } else {
-            res = read_const_sizeof_type(scope);
-        }
+        res = read_sizeof_constant(scope);
     } else if (lex_accept(T_open_bracket)) {
         res = read_primary_constant(scope);
         lex_expect(T_close_bracket);
@@ -584,9 +570,20 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
         if (checking_enum_constant &&
             (op2 < 0 || op2 >= 32 || op1 < 0 || op1 > (INT_MAX >> op2)))
             error_at("Enumerator value exceeds int range", cur_token_loc());
-        res = op1 << op2;
+
+        /* A count outside the int width has no defined result, and the host
+         * compiler must not be asked to produce one. Shift the unsigned bit
+         * pattern so a set sign bit is not host undefined behavior either.
+         */
+        if (op2 < 0 || op2 >= 32)
+            error_at("Shift count out of range in constant expression",
+                     cur_token_loc());
+        res = (int) ((unsigned int) op1 << op2);
         break;
     case OP_rshift:
+        if (op2 < 0 || op2 >= 32)
+            error_at("Shift count out of range in constant expression",
+                     cur_token_loc());
         res = op1 >> op2;
         break;
     case OP_log_and:
@@ -664,6 +661,61 @@ bool typed_global_literal_appears_before_initializer_end(token_t *token)
                  (numeric_literal_needs_wide_path(token->literal) ||
                   numeric_literal_needs_typed_global_path(token->literal)))
             return true;
+    }
+    return false;
+}
+
+/* Return whether token, an opening parenthesis, begins a cast to an integer
+ * type: nothing but integer type specifiers and qualifiers before its closing
+ * parenthesis.
+ */
+static bool global_integer_cast_starts_at(token_t *token, block_t *scope)
+{
+    bool has_type = false;
+
+    if (!token || token->kind != T_open_bracket)
+        return false;
+    for (token = token->next; token && token->kind != T_close_bracket;
+         token = token->next) {
+        if (token->kind == T_signed || token->kind == T_unsigned ||
+            token->kind == T_long) {
+            has_type = true;
+        } else if (token->kind == T_identifier) {
+            type_t *type = find_visible_type(token->literal, scope);
+
+            if (!type || type->ptr_level || type->array_size ||
+                type->is_floating || type->func_signature ||
+                type->is_direct_function_type || is_record_type(type) ||
+                type == TY_void)
+                return false;
+            has_type = true;
+        } else if (token->kind != T_const && token->kind != T_volatile) {
+            return false;
+        }
+    }
+    return token && has_type;
+}
+
+/* A scalar initializer containing an integer cast needs the two-word reader
+ * too: the word-sized evaluator has no notion of a type name.
+ */
+static bool global_integer_cast_appears_before_initializer_end(token_t *token,
+                                                               block_t *scope)
+{
+    int bracket_depth = 0;
+
+    for (; token; token = token->next) {
+        if (global_integer_cast_starts_at(token, scope))
+            return true;
+        if (token->kind == T_open_bracket)
+            bracket_depth++;
+        else if (token->kind == T_close_bracket) {
+            if (bracket_depth == 0)
+                return false;
+            bracket_depth--;
+        } else if (bracket_depth == 0 &&
+                   (token->kind == T_semicolon || token->kind == T_comma))
+            return false;
     }
     return false;
 }
@@ -1123,8 +1175,43 @@ var_t *read_wide_global_literal_primary(block_t *parent,
                    find_func(sizeof_name)) {
             value->init_val = read_global_sizeof_expression(scope);
         } else
-            value->init_val = read_const_sizeof_type(scope);
+            value->init_val = read_sizeof_constant(scope);
         value->init_val_hi = 0;
+        value->is_const = true;
+        add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
+        return value;
+    }
+    if (global_integer_cast_starts_at(cur_token->next, scope)) {
+        basic_block_t *unevaluated_bb = bb_create(parent);
+        int saved_side_effects = se_idx;
+        token_t *cast_start = cur_token;
+        var_t *operand;
+        type_t *type;
+        unsigned int hi;
+
+        /* A cast of a constant operand is still an integer constant expression.
+         * The ordinary operand parser owns type-name syntax, so let it name the
+         * target type in a detached block. Then return to the operand and read
+         * it as a wide primary, so a grouped operand keeps its high word.
+         */
+        read_expr_operand(parent, &unevaluated_bb);
+        se_idx = saved_side_effects;
+        operand = opstack_pop();
+        type = operand->type;
+        cur_token = cast_start;
+        lex_expect(T_open_bracket);
+        while (!lex_peek(T_close_bracket, NULL))
+            cur_token = cur_token->next;
+        lex_expect(T_close_bracket);
+
+        operand = read_wide_global_literal_primary(parent, bb, scope);
+        hi = (unsigned int) operand->init_val_hi;
+        if (operand->type->size <= TY_int->size)
+            hi = wide_global_narrow_high(operand->init_val,
+                                         operand->type->is_unsigned);
+        value = require_typed_var(parent, type);
+        value->var_name = gen_name();
+        fold_integer_constant_cast(value, (unsigned int) operand->init_val, hi);
         value->is_const = true;
         add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
         return value;
@@ -1480,7 +1567,9 @@ bool read_global_assignment_var(var_t *var)
          * narrow the expression through that evaluator.
          */
         if (typed_global_literal_appears_before_initializer_end(
-                cur_token->next)) {
+                cur_token->next) ||
+            global_integer_cast_appears_before_initializer_end(cur_token->next,
+                                                               scope)) {
             rs1 = read_wide_global_literal_expression(parent, bb, scope);
             add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
             return true;

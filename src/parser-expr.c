@@ -1172,6 +1172,41 @@ static void read_compound_literal_operand(block_t *parent,
     }
 }
 
+/* Store in result, whose integer type is the target of a cast, the payload of
+ * the integer constant lo:hi converted to that type.
+ *
+ * Mirror the scalar cast's stored representation instead of merely copying its
+ * source payload: `(unsigned char)256`, `(short)65536`, and a 64-to-32 cast all
+ * become the integer constant zero and may therefore serve as null pointers.
+ */
+void fold_integer_constant_cast(var_t *result, unsigned int lo, unsigned int hi)
+{
+    if (result->type->is_bool) {
+        /* `_Bool` conversion is boolean, not truncation: any nonzero source
+         * becomes one, including a high 64-bit word that a 32-bit truncation
+         * would otherwise lose.
+         */
+        result->init_val = lo || hi;
+        result->init_val_hi = 0;
+    } else if (result->type->size < TY_int->size) {
+        unsigned int bits = result->type->size * 8;
+        unsigned int mask = (1U << bits) - 1;
+
+        lo &= mask;
+        if (!result->type->is_unsigned && (lo & (1U << (bits - 1))))
+            lo |= ~mask;
+        result->init_val = (int) lo;
+        result->init_val_hi = result->init_val < 0 ? -1 : 0;
+    } else if (result->type->size == TY_int->size) {
+        result->init_val = (int) lo;
+        result->init_val_hi =
+            result->type->is_unsigned ? 0 : (result->init_val < 0 ? -1 : 0);
+    } else {
+        result->init_val = (int) lo;
+        result->init_val_hi = (int) hi;
+    }
+}
+
 /* A cast whose type name read_parenthesized_operand() has just parsed: read the
  * operand and convert it.
  */
@@ -1212,41 +1247,9 @@ static void read_cast_operand(block_t *parent,
     if (!tn->ptr_level && expr_var->is_const &&
         !is_pointer_like_value(expr_var) && !expr_var->is_func &&
         cast_var->type->base_type != TYPE_void) {
-        unsigned int lo = (unsigned int) expr_var->init_val;
-        unsigned int hi = (unsigned int) expr_var->init_val_hi;
-
         cast_var->is_const = true;
-
-        /* Mirror the scalar cast's stored representation instead of merely
-         * copying its source payload: `(unsigned char)256`, `(short)65536`, and
-         * a 64-to-32 cast all become the integer constant zero and may
-         * therefore serve as null pointers.
-         */
-        if (cast_var->type->is_bool) {
-            /* `_Bool` conversion is boolean, not truncation: any nonzero source
-             * becomes one, including a high 64-bit word that a 32-bit
-             * truncation would otherwise lose.
-             */
-            cast_var->init_val = lo || hi;
-            cast_var->init_val_hi = 0;
-        } else if (cast_var->type->size < TY_int->size) {
-            unsigned int bits = cast_var->type->size * 8;
-            unsigned int mask = (1U << bits) - 1;
-
-            lo &= mask;
-            if (!cast_var->type->is_unsigned && (lo & (1U << (bits - 1))))
-                lo |= ~mask;
-            cast_var->init_val = (int) lo;
-            cast_var->init_val_hi = cast_var->init_val < 0 ? -1 : 0;
-        } else if (cast_var->type->size == TY_int->size) {
-            cast_var->init_val = (int) lo;
-            cast_var->init_val_hi = cast_var->type->is_unsigned
-                                        ? 0
-                                        : (cast_var->init_val < 0 ? -1 : 0);
-        } else {
-            cast_var->init_val = (int) lo;
-            cast_var->init_val_hi = (int) hi;
-        }
+        fold_integer_constant_cast(cast_var, (unsigned int) expr_var->init_val,
+                                   (unsigned int) expr_var->init_val_hi);
     }
 
     /* An explicit C cast is permitted to remove qualifiers, but it is almost
@@ -1369,7 +1372,7 @@ static void read_parenthesized_operand(block_t *parent, basic_block_t **bb)
         type_t *type;
         if (has_enum_type) {
             lex_ident(T_identifier, lookahead_token);
-            type = find_type_tag(lookahead_token, parent);
+            type = find_enum_tag(lookahead_token, parent);
         } else if (has_unsigned_type && !is_record) {
             if (has_long_type) {
                 type = TY_ulong;

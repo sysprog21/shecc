@@ -62,6 +62,40 @@ void reject_label_followed_by_declaration_in_strict_c99(void)
                  cur_token_loc());
 }
 
+/* The word-sized constant evaluator narrows a case expression to int. Select
+ * the typed two-word evaluator when a literal needing a wider or unsigned type
+ * appears before the label's colon; a colon closing a nested '?' is not it.
+ */
+bool case_label_needs_typed_value(token_t *token)
+{
+    int bracket_depth = 0;
+    int pending_ternaries = 0;
+
+    for (; token; token = token->next) {
+        if (token->kind == T_open_bracket)
+            bracket_depth++;
+        else if (token->kind == T_close_bracket) {
+            if (bracket_depth == 0)
+                return false;
+            bracket_depth--;
+        } else if (token->kind == T_question)
+            pending_ternaries++;
+        else if (token->kind == T_colon) {
+            if (bracket_depth == 0 && pending_ternaries == 0)
+                return false;
+            if (pending_ternaries)
+                pending_ternaries--;
+        } else if (token->kind == T_semicolon || token->kind == T_open_curly ||
+                   token->kind == T_close_curly)
+            return false;
+        else if (token->kind == T_numeric &&
+                 (numeric_literal_needs_wide_path(token->literal) ||
+                  numeric_literal_needs_typed_global_path(token->literal)))
+            return true;
+    }
+    return false;
+}
+
 basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
 {
     switch_label_context_t *context;
@@ -80,29 +114,57 @@ basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
         context->has_default = true;
         context->default_body = label_body;
     } else {
-        int case_val;
+        unsigned int case_lo;
+        unsigned int case_hi;
         var_t *constant;
         var_t *comparison;
         basic_block_t *next_dispatch;
 
         lex_expect(T_case);
-        case_val = read_const_expr(parent);
+        if (case_label_needs_typed_value(cur_token->next)) {
+            pp_integer_t typed_value;
+            block_t *saved_scope = pp_integer_constant_scope;
+
+            pp_integer_constant_scope = parent;
+            cur_token =
+                pp_read_constant_infix_expr(0, cur_token, &typed_value, true);
+            pp_integer_constant_scope = saved_scope;
+            pp_enum_normalize(&typed_value);
+            case_lo = typed_value.lo;
+            case_hi = typed_value.hi;
+        } else {
+            case_lo = read_const_expr(parent);
+            case_hi = case_lo & 0x80000000U ? ~0U : 0;
+        }
+
+        /* C99 6.8.4.2p5 converts each case constant to the promoted type of the
+         * controlling expression. Compare and check duplicates at that width,
+         * so an int switch folds a wide label to its low word.
+         */
+        if (context->control->type->size <= TY_int->size)
+            case_hi =
+                context->control->type->is_unsigned || !(case_lo & 0x80000000U)
+                    ? 0
+                    : ~0U;
         if (strict_c99) {
             switch_case_value_t *seen;
 
             for (seen = context->seen_cases; seen; seen = seen->next)
-                if (seen->value == case_val)
+                if (seen->value == case_lo && seen->value_hi == case_hi)
                     error_at("duplicate case value in C99 switch",
                              cur_token_loc());
             seen = arena_alloc(GENERAL_ARENA, sizeof(*seen));
-            seen->value = case_val;
+            seen->value = case_lo;
+            seen->value_hi = case_hi;
             seen->next = context->seen_cases;
             context->seen_cases = seen;
         }
 
-        constant = require_var(context->dispatch_parent);
+        constant =
+            require_typed_var(context->dispatch_parent, context->control->type);
         constant->var_name = gen_name();
-        constant->init_val = case_val;
+        constant->init_val = case_lo;
+        constant->init_val_hi = case_hi;
         add_insn(context->dispatch_parent, context->dispatch_tail,
                  OP_load_constant, constant, NULL, NULL, 0, NULL);
 
@@ -200,14 +262,38 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
     return switch_end;
 }
 
+static void reject_ordinary_typedef_collision(block_t *block, var_t *var)
+{
+    if (find_block_typedef(block, var->var_name))
+        error_at("ordinary identifier conflicts with typedef name",
+                 cur_token_loc());
+}
+
+/* The storage-class specifiers and qualifiers that lead a block-scope
+ * declaration.
+ */
+typedef struct {
+    bool is_const;
+    bool is_static;
+    bool is_extern;
+    bool is_register;
+    bool is_auto;
+    bool is_volatile;
+} block_decl_specifiers_t;
+
+static basic_block_t *read_block_declarators(
+    block_t *parent,
+    basic_block_t *bb,
+    type_t *type,
+    const block_decl_specifiers_t *spec,
+    bool has_base_type);
+
 /* A for loop: setup, condition, body and increment. */
 basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
 {
     char token[MAX_ID_LEN];
     type_t *type;
     var_t *vd;
-    var_t *rs1;
-    var_t *var;
     bool is_const = false;
     bool is_static = false;
     bool is_extern = false;
@@ -299,6 +385,8 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
         if (!type && saw_decl_specifier)
             error_at("declaration specifier requires a type", cur_token_loc());
         if (type) {
+            block_decl_specifiers_t spec = {0};
+
             /* C99 6.8.5.3 admits only automatic or register object declarations
              * here. The default mode retains its historical block-scope
              * static/extern extension.
@@ -307,148 +395,19 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
                 error_at(
                     "C99 for initializer permits only auto or register objects",
                     cur_token_loc());
-            var = require_typed_var(blk, type);
-            var->is_static = is_static;
-            var->is_register = is_register;
-            var->is_global = is_static;
-            var->is_const_qualified = is_const;
-            var->is_volatile = is_volatile;
+            spec.is_const = is_const;
+            spec.is_static = is_static;
+            spec.is_extern = is_extern;
+            spec.is_register = is_register;
+            spec.is_auto = is_auto;
+            spec.is_volatile = is_volatile;
+
+            /* The loop scope takes the ordinary block declaration lowering,
+             * which also consumes the terminating semicolon.
+             */
             parsing_for_initializer_declaration = true;
-            read_full_var_decl(var, false, false, false);
-            parsing_for_initializer_declaration = false;
-            if (strict_c99 && var->is_func)
-                error_at("C99 for initializer cannot declare a function",
-                         cur_token_loc());
-            if (is_extern) {
-                if (var->is_func || lex_peek(T_open_bracket, NULL)) {
-                    /* This helper consumes the declaration's semicolon. */
-                    blk->locals.size--;
-                    var->is_block_scope_function_declaration = true;
-                    GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] =
-                        var;
-                    read_global_function_declarator(GLOBAL_BLOCK, var, false);
-                    var_t *alias = require_var(blk);
-                    alias->var_name = var->var_name;
-                    alias->is_extern_function_alias = true;
-                    for_decl_semicolon_consumed = true;
-                } else {
-                    for (;;) {
-                        var = bind_block_extern_object(blk, var);
-                        if (lex_peek(T_assign, NULL))
-                            error_at(
-                                "extern declaration cannot have an initializer",
-                                next_token_loc());
-                        if (!lex_accept(T_comma))
-                            break;
-                        var = require_typed_var(blk, type);
-                        var->is_const_qualified = is_const;
-                        var->is_volatile = is_volatile;
-                        read_partial_var_decl(var, NULL);
-                    }
-                }
-            } else {
-                if (is_incomplete_record_object(var))
-                    error_at(
-                        "Incomplete struct/union type cannot define an object",
-                        cur_token_loc());
-                add_insn(is_static ? GLOBAL_BLOCK : blk,
-                         is_static ? GLOBAL_FUNC->bbs : setup, OP_allocat, var,
-                         NULL, NULL, 0, NULL);
-                add_symbol(setup, var);
-                if (lex_accept(T_assign)) {
-                    validate_string_array_initializer(var);
-                    if (is_static) {
-                        if (lex_peek(T_open_curly, NULL) &&
-                            (var->array_size > 0 || var->has_unsized_array ||
-                             var->ptr_level > 0))
-                            parse_array_init(var, GLOBAL_BLOCK,
-                                             &GLOBAL_FUNC->bbs, true);
-                        else if (lex_peek(T_open_curly, NULL))
-                            parse_global_record_init(var, GLOBAL_BLOCK);
-                        else
-                            read_global_assignment_var(var);
-                    } else if ((var->has_unsized_array ||
-                                var->array_size > 0) &&
-                               is_char_array(var) && lex_peek(T_string, NULL)) {
-                        parse_string_array_init(var, blk, &setup);
-                    } else if ((var->has_unsized_array ||
-                                var->array_size > 0) &&
-                               is_wchar_array(var) &&
-                               lex_peek(T_wstring, NULL)) {
-                        parse_wstring_array_init(var, blk, &setup);
-                    } else if (lex_peek(T_open_curly, NULL) &&
-                               (var->array_size > 0 || var->has_unsized_array ||
-                                var->ptr_level > 0)) {
-                        parse_array_init(var, blk, &setup, true);
-                    } else {
-                        read_expr(blk, &setup);
-                        read_ternary_operation(blk, &setup);
-
-                        rs1 = resize_var(parent, &bb, opstack_pop(), var);
-                        add_insn(blk, setup, OP_assign, var, rs1, NULL, 0,
-                                 NULL);
-                    }
-                }
-                while (lex_accept(T_comma)) {
-                    var_t *nv;
-
-                    /* add sequence point at T_comma */
-                    perform_side_effect(blk, setup);
-
-                    /* multiple (partial) declarations */
-                    nv = require_typed_var(blk, type);
-                    nv->is_static = is_static;
-                    nv->is_register = is_register;
-                    nv->is_global = is_static;
-                    nv->is_const_qualified = is_const;
-                    nv->is_volatile = is_volatile;
-                    read_partial_var_decl(nv, var); /* partial */
-                    if (is_incomplete_record_object(nv))
-                        error_at(
-                            "Incomplete struct/union type cannot define an "
-                            "object",
-                            cur_token_loc());
-                    add_insn(is_static ? GLOBAL_BLOCK : blk,
-                             is_static ? GLOBAL_FUNC->bbs : setup, OP_allocat,
-                             nv, NULL, NULL, 0, NULL);
-                    add_symbol(setup, nv);
-                    if (lex_accept(T_assign)) {
-                        validate_string_array_initializer(nv);
-                        if (is_static) {
-                            if (lex_peek(T_open_curly, NULL) &&
-                                (nv->array_size > 0 || nv->has_unsized_array ||
-                                 nv->ptr_level > 0))
-                                parse_array_init(nv, GLOBAL_BLOCK,
-                                                 &GLOBAL_FUNC->bbs, true);
-                            else if (lex_peek(T_open_curly, NULL))
-                                parse_global_record_init(nv, GLOBAL_BLOCK);
-                            else
-                                read_global_assignment_var(nv);
-                        } else if ((nv->has_unsized_array ||
-                                    nv->array_size > 0) &&
-                                   is_char_array(nv) &&
-                                   lex_peek(T_string, NULL)) {
-                            parse_string_array_init(nv, blk, &setup);
-                        } else if ((nv->has_unsized_array ||
-                                    nv->array_size > 0) &&
-                                   is_wchar_array(nv) &&
-                                   lex_peek(T_wstring, NULL)) {
-                            parse_wstring_array_init(nv, blk, &setup);
-                        } else if (lex_peek(T_open_curly, NULL) &&
-                                   (nv->array_size > 0 ||
-                                    nv->has_unsized_array ||
-                                    nv->ptr_level > 0)) {
-                            parse_array_init(nv, blk, &setup, true);
-                        } else {
-                            read_expr(blk, &setup);
-
-                            rs1 = resize_var(parent, &bb, opstack_pop(), nv);
-                            add_insn(blk, setup, OP_assign, nv, rs1, NULL, 0,
-                                     NULL);
-                        }
-                    }
-                }
-            }
+            setup = read_block_declarators(blk, setup, type, &spec, false);
+            for_decl_semicolon_consumed = true;
         } else {
             read_control_expression(blk, &setup);
             opstack_pop();
@@ -576,17 +535,21 @@ basic_block_t *handle_do_statement(block_t *parent, basic_block_t *bb)
 /* A local struct or union declaration. */
 basic_block_t *handle_record_statement(block_t *parent,
                                        basic_block_t *bb,
-                                       bool is_const,
-                                       bool is_static)
+                                       const block_decl_specifiers_t *spec)
 {
     char token[MAX_ID_LEN];
     type_t *type = NULL;
-    var_t *var;
 
-    /* Both callers have seen struct or union ahead. */
+    /* The caller has seen struct or union ahead. */
     base_type_t kind = accept_record_keyword();
     bool is_union = kind == TYPE_union;
-    lex_ident(T_identifier, token);
+    bool has_tag = lex_peek(T_identifier, token);
+
+    if (has_tag)
+        lex_expect(T_identifier);
+    else if (!lex_peek(T_open_curly, NULL))
+        error_at("Expected struct or union tag or definition",
+                 next_token_loc());
     if (lex_peek(T_open_curly, NULL)) {
         int i = 0;
         int size = 0;
@@ -595,7 +558,15 @@ basic_block_t *handle_record_statement(block_t *parent,
         bitfield_layout_t bits = {0};
         bool has_flexible_array_member = false;
 
-        type = local_record_tag(token, parent, kind);
+        /* An untagged definition names a type no other declaration can reach,
+         * so it needs no tag table entry.
+         */
+        if (has_tag)
+            type = local_record_tag(token, parent, kind);
+        else {
+            type = add_type();
+            type->base_type = kind;
+        }
 
         lex_expect(T_open_curly);
         do {
@@ -695,184 +666,11 @@ basic_block_t *handle_record_statement(block_t *parent,
     }
     if (!type)
         type = reference_record_tag(token, parent, kind);
-    var = require_typed_var(parent, type);
-    var->is_const_qualified = is_const;
-    var->is_static = is_static;
-    var->is_global = is_static;
-    read_partial_var_decl(var, NULL);
-    if (is_incomplete_record_object(var))
-        error_at("Incomplete struct/union type cannot define an object",
-                 cur_token_loc());
-    add_insn(is_static ? GLOBAL_BLOCK : parent,
-             is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, var, NULL, NULL, 0,
-             NULL);
-    add_symbol(bb, var);
-    if (lex_accept(T_assign)) {
-        validate_string_array_initializer(var);
-        if (is_static && lex_peek(T_open_curly, NULL) &&
-            (var->array_size > 0 || var->has_unsized_array ||
-             var->ptr_level > 0)) {
-            parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
-        } else if (is_static && lex_peek(T_open_curly, NULL)) {
-            parse_global_record_init(var, GLOBAL_BLOCK);
-        } else if (lex_peek(T_open_curly, NULL) &&
-                   (var->array_size > 0 || var->has_unsized_array ||
-                    var->ptr_level > 0)) {
-            parse_array_init(var, parent, &bb, 1); /* Always emit code */
-        } else if (lex_peek(T_open_curly, NULL) &&
-                   (var->type->base_type == TYPE_struct ||
-                    var->type->base_type == TYPE_union ||
-                    var->type->base_type == TYPE_typedef)) {
-            type_t *struct_type = var->type;
-            if (struct_type->base_type == TYPE_typedef &&
-                struct_type->base_struct)
-                struct_type = struct_type->base_struct;
 
-            var_t *struct_addr = require_var(parent);
-            struct_addr->var_name = gen_name();
-            add_insn(parent, bb, OP_address_of, struct_addr, var, NULL, 0,
-                     NULL);
-            lex_expect(T_open_curly);
-            parse_struct_field_init(parent, &bb, struct_type, struct_addr,
-                                    true);
-            lex_expect(T_close_curly);
-        } else {
-            if (!read_assignment_expression(parent, &bb)) {
-                read_expr(parent, &bb);
-                read_ternary_operation(parent, &bb);
-            }
-
-            var_t *rhs = opstack_pop();
-            rhs = scalarize_array_literal_if_needed(
-                parent, &bb, rhs, var->type,
-                !has_effective_pointer(var) && var->array_size == 0);
-
-            emit_object_assignment(parent, &bb, var, rhs);
-        }
-    }
-    while (lex_accept(T_comma)) {
-        var_t *nv;
-
-        /* add sequence point at T_comma */
-        perform_side_effect(parent, bb);
-
-        /* multiple (partial) declarations */
-        nv = require_typed_var(parent, type);
-        nv->is_static = is_static;
-        nv->is_global = is_static;
-        nv->is_const_qualified = is_const;
-        read_inner_var_decl(nv, false, false, false);
-        if (is_incomplete_record_object(nv))
-            error_at("Incomplete struct/union type cannot define an object",
-                     cur_token_loc());
-        add_insn(is_static ? GLOBAL_BLOCK : parent,
-                 is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, nv, NULL, NULL,
-                 0, NULL);
-        add_symbol(bb, nv);
-        if (lex_accept(T_assign)) {
-            validate_string_array_initializer(nv);
-            if (is_static && lex_peek(T_open_curly, NULL) &&
-                (nv->array_size > 0 || nv->has_unsized_array ||
-                 nv->ptr_level > 0)) {
-                parse_array_init(nv, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
-            } else if (is_static && lex_peek(T_open_curly, NULL)) {
-                parse_global_record_init(nv, GLOBAL_BLOCK);
-            } else if (lex_peek(T_open_curly, NULL) &&
-                       (nv->array_size > 0 || nv->has_unsized_array ||
-                        nv->ptr_level > 0)) {
-                parse_array_init(nv, parent, &bb, true);
-            } else if (lex_peek(T_open_curly, NULL) &&
-                       (nv->type->base_type == TYPE_struct ||
-                        nv->type->base_type == TYPE_union ||
-                        nv->type->base_type == TYPE_typedef)) {
-                type_t *struct_type = nv->type;
-                if (struct_type->base_type == TYPE_typedef &&
-                    struct_type->base_struct)
-                    struct_type = struct_type->base_struct;
-
-                var_t *struct_addr = require_var(parent);
-                struct_addr->var_name = gen_name();
-                add_insn(parent, bb, OP_address_of, struct_addr, nv, NULL, 0,
-                         NULL);
-                lex_expect(T_open_curly);
-                parse_struct_field_init(parent, &bb, struct_type, struct_addr,
-                                        true);
-                lex_expect(T_close_curly);
-            } else {
-                read_expr(parent, &bb);
-                read_ternary_operation(parent, &bb);
-                var_t *rhs = opstack_pop();
-                rhs = scalarize_array_literal_if_needed(
-                    parent, &bb, rhs, nv->type,
-                    !has_effective_pointer(nv) && nv->array_size == 0);
-
-                emit_object_assignment(parent, &bb, nv, rhs);
-            }
-        }
-    }
-    lex_expect(T_semicolon);
-    return bb;
-}
-
-basic_block_t *handle_enum_declarators(block_t *parent,
-                                       basic_block_t *bb,
-                                       type_t *type,
-                                       bool is_const,
-                                       bool is_static)
-{
-    for (;;) {
-        var_t *var = require_typed_var(parent, type);
-
-        var->is_const_qualified = is_const;
-        var->is_static = is_static;
-        var->is_global = is_static;
-        read_partial_var_decl(var, NULL);
-        add_insn(is_static ? GLOBAL_BLOCK : parent,
-                 is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, var, NULL, NULL,
-                 0, NULL);
-        add_symbol(bb, var);
-
-        if (lex_accept(T_assign)) {
-            validate_string_array_initializer(var);
-            if (is_static) {
-                if (lex_peek(T_open_curly, NULL) &&
-                    (var->array_size > 0 || var->has_unsized_array ||
-                     var->ptr_level > 0)) {
-                    parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs,
-                                     true);
-                } else {
-                    read_global_assignment_var(var);
-                }
-            } else if ((var->has_unsized_array || var->array_size > 0) &&
-                       is_char_array(var) && lex_peek(T_string, NULL)) {
-                parse_string_array_init(var, parent, &bb);
-            } else if ((var->has_unsized_array || var->array_size > 0) &&
-                       is_wchar_array(var) && lex_peek(T_wstring, NULL)) {
-                parse_wstring_array_init(var, parent, &bb);
-            } else if (lex_peek(T_open_curly, NULL) &&
-                       (var->array_size > 0 || var->has_unsized_array ||
-                        var->ptr_level > 0)) {
-                parse_array_init(var, parent, &bb, true);
-            } else {
-                read_expr(parent, &bb);
-                read_ternary_operation(parent, &bb);
-
-                var_t *rhs = opstack_pop();
-                rhs = scalarize_array_literal_if_needed(
-                    parent, &bb, rhs, var->type,
-                    !has_effective_pointer(var) && var->array_size == 0);
-                emit_object_assignment(parent, &bb, var, rhs);
-            }
-        }
-        if (is_static)
-            discard_global_declarator_operand(var);
-
-        if (!lex_accept(T_comma))
-            break;
-        perform_side_effect(parent, bb);
-    }
-    lex_expect(T_semicolon);
-    return bb;
+    /* The declarators share the ordinary block-scope lowering, which owns
+     * storage classes, qualifiers and typedef name collisions.
+     */
+    return read_block_declarators(parent, bb, type, spec, true);
 }
 
 /* C99 6.7.2.2 constrains every enumerator value to int range, while leaving the
@@ -930,8 +728,7 @@ int read_enum_constant(block_t *scope)
  */
 basic_block_t *handle_enum_statement(block_t *parent,
                                      basic_block_t *bb,
-                                     bool is_const,
-                                     bool is_static)
+                                     const block_decl_specifiers_t *spec)
 {
     char token[MAX_ID_LEN];
     int val = 0;
@@ -941,17 +738,17 @@ basic_block_t *handle_enum_statement(block_t *parent,
     lex_expect(T_enum);
     if (lex_peek(T_identifier, token)) {
         lex_expect(T_identifier);
-        type = find_local_type_tag(token, parent);
+        type = local_enum_tag(token, parent);
         has_tag = true;
     }
     if (!lex_peek(T_open_curly, NULL)) {
         if (!has_tag)
             error_at("Unknown enum type", next_token_loc());
         if (!type)
-            type = find_type_tag(token, parent);
+            type = find_enum_tag(token, parent);
         if (!type)
             error_at("Unknown enum type", next_token_loc());
-        return handle_enum_declarators(parent, bb, type, is_const, is_static);
+        return read_block_declarators(parent, bb, type, spec, true);
     }
     if (!type)
         type = add_type();
@@ -977,7 +774,7 @@ basic_block_t *handle_enum_statement(block_t *parent,
 
     if (lex_accept(T_semicolon))
         return bb;
-    return handle_enum_declarators(parent, bb, type, is_const, is_static);
+    return read_block_declarators(parent, bb, type, spec, true);
 }
 
 /* Bind a block-scope extern declaration to the file-scope declaration table.
@@ -1007,27 +804,35 @@ var_t *bind_block_extern_object(block_t *parent, var_t *var)
     return var;
 }
 
-static void reject_ordinary_typedef_collision(block_t *block, var_t *var)
+/* Bind a block-scope function declarator whose parameter list comes next. C99
+ * 6.2.2p5 gives it external linkage whether or not it is spelled extern, so
+ * both spellings share this path. The global helper owns redeclaration checks
+ * and parameter parsing and keeps the translation-unit entry for a later
+ * definition, while the lexical alias left in @parent limits the name to this
+ * block and hides an outer automatic object of the same name.
+ *
+ * Returns true when the declaration ended at its semicolon, false when a comma
+ * leaves further declarators to the caller.
+ */
+static bool read_block_function_declarator(block_t *parent, var_t *var)
 {
-    if (find_block_typedef(block, var->var_name))
-        error_at("ordinary identifier conflicts with typedef name",
-                 cur_token_loc());
+    bool ended;
+    var_t *alias;
+
+    parent->locals.size--;
+    var->is_block_scope_function_declaration = true;
+    GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] = var;
+    ended = read_global_function_declarator(GLOBAL_BLOCK, var, false, false);
+    alias = require_var(parent);
+    alias->var_name = var->var_name;
+    alias->is_extern_function_alias = true;
+    return ended;
 }
 
-/* The storage-class specifiers and qualifiers that lead a block-scope
- * declaration.
- */
-typedef struct {
-    bool is_const;
-    bool is_static;
-    bool is_extern;
-    bool is_register;
-    bool is_auto;
-    bool is_volatile;
-} block_decl_specifiers_t;
-
 /* A block-scope declaration whose type handle_declaration() has resolved: every
- * declarator, its initializer, and its storage.
+ * declarator, its initializer, and its storage. @has_base_type says a struct,
+ * union or enum specifier has already consumed the base type, so only the
+ * declarators remain.
  *
  * Returns the block that follows.
  */
@@ -1035,9 +840,22 @@ static basic_block_t *read_block_declarators(
     block_t *parent,
     basic_block_t *bb,
     type_t *type,
-    const block_decl_specifiers_t *spec)
+    const block_decl_specifiers_t *spec,
+    bool has_base_type)
 {
+    block_decl_specifiers_t qualified;
     var_t *var;
+
+    /* A record or enum specifier has been consumed, and qualifiers may follow
+     * it before the first declarator. They qualify every declarator in the
+     * list, like the leading ones in @spec.
+     */
+    if (has_base_type) {
+        memcpy(&qualified, spec, sizeof(qualified));
+        read_type_qualifiers(&qualified.is_const, &qualified.is_volatile,
+                             false);
+        spec = &qualified;
+    }
 
     var = require_typed_var(parent, type);
     var->is_static = spec->is_static;
@@ -1045,7 +863,21 @@ static basic_block_t *read_block_declarators(
     var->is_global = spec->is_static;
     var->is_const_qualified = spec->is_const;
     var->is_volatile = spec->is_volatile;
-    read_full_var_decl(var, false, false, false);
+    if (has_base_type)
+        read_partial_var_decl(var, NULL);
+    else
+        read_full_var_decl(var, false, false, false);
+
+    /* A for initializer sets this for its first declarator only, so strict C99
+     * can parse a function declarator there and reject it. A prototype leaves
+     * its parameter list unread, so the open parenthesis also marks one.
+     */
+    if (parsing_for_initializer_declaration) {
+        parsing_for_initializer_declaration = false;
+        if (strict_c99 && (var->is_func || lex_peek(T_open_bracket, NULL)))
+            error_at("C99 for initializer cannot declare a function",
+                     cur_token_loc());
+    }
     reject_ordinary_typedef_collision(parent, var);
 
     /* A declaration spelled with signed, unsigned or long arrives with int as a
@@ -1070,16 +902,9 @@ static basic_block_t *read_block_declarators(
             if (spec->is_const || spec->is_volatile ||
                 var->is_const_qualified || var->is_volatile)
                 error_at("function type cannot be qualified", cur_token_loc());
-            parent->locals.size--;
-            var->is_block_scope_function_declaration = true;
-            GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] = var;
-            read_global_function_declarator(GLOBAL_BLOCK, var, false);
-            var_t *alias = require_var(parent);
-
-            alias->var_name = var->var_name;
-            alias->is_extern_function_alias = true;
-            if (!lex_accept(T_comma))
+            if (read_block_function_declarator(parent, var))
                 return bb;
+            lex_expect(T_comma);
 
             var = require_typed_var(parent, type);
             var->is_const_qualified = spec->is_const;
@@ -1111,39 +936,42 @@ static basic_block_t *read_block_declarators(
         !var->is_const_pointer)
         error_at("external inline definition cannot define static object",
                  cur_token_loc());
-    if (spec->is_extern) {
-        if (var->is_func || lex_peek(T_open_bracket, NULL)) {
-            /* The global helper owns function redeclaration compatibility and
-             * parameter parsing. Unlike an object declaration it consumes the
-             * trailing semicolon itself.
-             */
-            parent->locals.size--;
-            var->is_block_scope_function_declaration = true;
-            GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] = var;
-            read_global_function_declarator(GLOBAL_BLOCK, var, false);
 
-            /* Keep a lexical marker so this declaration hides an outer
-             * automatic object of the same name.
-             */
-            var_t *alias = require_var(parent);
-            alias->var_name = var->var_name;
-            alias->is_extern_function_alias = true;
-            return bb;
-        }
+    /* Function declarators, and every declarator of an extern declaration, own
+     * no automatic storage. Read them here until the declaration ends or an
+     * ordinary object declarator follows, as in "int f(void), value = 1;",
+     * which then takes the object lowering below with the rest of the list.
+     */
+    if (spec->is_extern || lex_peek(T_open_bracket, NULL)) {
         for (;;) {
-            var = bind_block_extern_object(parent, var);
-            if (lex_peek(T_assign, NULL))
-                error_at("extern declaration cannot have an initializer",
-                         next_token_loc());
-            if (!lex_accept(T_comma))
+            if (lex_peek(T_open_bracket, NULL) ||
+                (spec->is_extern && var->is_func)) {
+                if (spec->is_static || spec->is_register || spec->is_auto)
+                    error_at(
+                        "invalid storage class for block function declaration",
+                        cur_token_loc());
+                if (read_block_function_declarator(parent, var))
+                    return bb;
+            } else if (spec->is_extern) {
+                var = bind_block_extern_object(parent, var);
+                if (lex_peek(T_assign, NULL))
+                    error_at("extern declaration cannot have an initializer",
+                             next_token_loc());
+            } else
                 break;
+            if (!lex_accept(T_comma)) {
+                lex_expect(T_semicolon);
+                return bb;
+            }
             var = require_typed_var(parent, type);
+            var->is_static = spec->is_static;
+            var->is_register = spec->is_register;
+            var->is_global = spec->is_static;
             var->is_const_qualified = spec->is_const;
             var->is_volatile = spec->is_volatile;
             read_partial_var_decl(var, NULL);
+            reject_ordinary_typedef_collision(parent, var);
         }
-        lex_expect(T_semicolon);
-        return bb;
     }
     if (is_incomplete_record_object(var))
         error_at("Incomplete struct/union type cannot define an object",
@@ -1268,6 +1096,14 @@ static basic_block_t *read_block_declarators(
         nv->is_volatile = var->is_volatile;
         read_partial_var_decl(nv, var); /* partial */
         reject_ordinary_typedef_collision(parent, nv);
+        if (lex_peek(T_open_bracket, NULL)) {
+            if (spec->is_static || spec->is_register || spec->is_auto)
+                error_at("invalid storage class for block function declaration",
+                         cur_token_loc());
+            if (read_block_function_declarator(parent, nv))
+                return bb;
+            continue;
+        }
         if (is_incomplete_record_object(nv))
             error_at("Incomplete struct/union type cannot define an object",
                      cur_token_loc());
@@ -1388,15 +1224,10 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
         error_at("Floating point types are not yet supported", cur_token_loc());
 
     if (lex_peek(T_enum, NULL))
-        return handle_enum_statement(parent, bb, spec.is_const, spec.is_static);
+        return handle_enum_statement(parent, bb, &spec);
 
-    if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
-        if (spec.is_extern || spec.is_register)
-            error_at("Unsupported storage class on record definition",
-                     next_token_loc());
-        return handle_record_statement(parent, bb, spec.is_const,
-                                       spec.is_static);
-    }
+    if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL))
+        return handle_record_statement(parent, bb, &spec);
 
     /* must be an identifier or asterisk (for pointer dereference) */
     bool has_asterisk = lex_peek(T_asterisk, NULL);
@@ -1456,7 +1287,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
                  next_token_loc());
 
     if (type)
-        return read_block_declarators(parent, bb, type, &spec);
+        return read_block_declarators(parent, bb, type, &spec, false);
 
     /* Keep the long-standing direct-call lowering only for a truly standalone
      * `function(...);` statement. An identifier-led call that is followed by an
@@ -1898,14 +1729,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         lex_peek(T_bit_not, NULL))
         return read_full_expression_statement(parent, bb);
 
-    /* struct/union variable declaration */
-    if (lex_peek(T_struct, NULL) || lex_peek(T_union, NULL))
-        return handle_record_statement(parent, bb, false, false);
-
-    if (lex_peek(T_enum, NULL))
-        return handle_enum_statement(parent, bb, false, false);
-
-    /* Handle const qualifier for local variable declarations */
+    /* Declarations, including struct, union and enum ones */
     return handle_declaration(parent, bb);
 }
 
