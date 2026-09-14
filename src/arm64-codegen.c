@@ -2,17 +2,14 @@
  * AArch64 Linux code generator. The allocator's virtual registers map to
  * x0..x7, x20..x22; x16/x17 are reserved scratch and x19 is the global base.
  */
+#include "arm64.c"
 #include "defs.h"
 #include "globals.c"
 
-#define A64_SP 31
-#define A64_ZR 31
-
-/* IP0, the linker's own scratch register: free for a code generator to use
- * between instructions, and never allocated to a value.
+/* IP0, the linker's own scratch register, is free for a code generator to use
+ * between instructions and never allocated to a value. x19 is the base of the
+ * synthetic global frame, held for the life of the program.
  */
-#define A64_IP0 16
-/* Base of the synthetic global frame, held for the life of the program. */
 #define A64_GP 19
 
 /* AAPCS64 keeps SP 16-byte aligned, and the prologue saves five registers in
@@ -31,7 +28,7 @@ void emit(int insn)
 }
 void a64_mov(int d, int n)
 {
-    emit(0xaa0003e0 | (n << 16) | d);
+    emit(a64_mov_insn(true, d, n));
 }
 
 /* SP is not a general register in logical instructions: ORR would read ZR. ADD
@@ -39,7 +36,7 @@ void a64_mov(int d, int n)
  */
 void a64_mov_sp(int d)
 {
-    emit(0x910003e0 | (A64_SP << 5) | d);
+    emit(a64_add_imm_insn(true, d, A64_SP, 0));
 }
 void a64_mov_imm(int d, int v)
 {
@@ -49,10 +46,10 @@ void a64_mov_imm(int d, int v)
      * supplies the upper one bits while MOVK fills the second halfword.
      */
     if (v < 0)
-        emit(0x92800000 | (((~v) & 0xffff) << 5) | d);
+        emit(a64_movn_insn(true, d, ~v, 0));
     else
-        emit(0xd2800000 | ((v & 0xffff) << 5) | d);
-    emit(0xf2800000 | (((v >> 16) & 0xffff) << 5) | d | (1 << 21));
+        emit(a64_movz_insn(true, d, v, 0));
+    emit(a64_movk_insn(true, d, v >> 16, 1));
 }
 
 /* A 32-bit unsigned constant has zeroes above bit 31 when it later widens to an
@@ -63,8 +60,8 @@ void a64_mov_imm_unsigned(int d, int v)
 {
     unsigned int value = v;
 
-    emit(0xd2800000 | ((value & 0xffff) << 5) | d);
-    emit(0xf2800000 | (((value >> 16) & 0xffff) << 5) | d | (1 << 21));
+    emit(a64_movz_insn(true, d, value, 0));
+    emit(a64_movk_insn(true, d, value >> 16, 1));
 }
 
 /* Phase-2 constants retain their upper word in src1. Materialise all four
@@ -75,48 +72,52 @@ void a64_mov_imm_wide(int d, int lo, int hi)
 {
     unsigned int low = lo, high = hi;
 
-    emit(0xd2800000 | ((low & 0xffff) << 5) | d);
-    emit(0xf2800000 | (((low >> 16) & 0xffff) << 5) | d | (1 << 21));
-    emit(0xf2800000 | ((high & 0xffff) << 5) | d | (2 << 21));
-    emit(0xf2800000 | (((high >> 16) & 0xffff) << 5) | d | (3 << 21));
+    emit(a64_movz_insn(true, d, low, 0));
+    emit(a64_movk_insn(true, d, low >> 16, 1));
+    emit(a64_movk_insn(true, d, high, 2));
+    emit(a64_movk_insn(true, d, high >> 16, 3));
 }
 
-int a64_div_opcode(ph2_ir_t *p)
+/* Rd = Rn / Rm, unsigned when either operand is. */
+int a64_div_insn(ph2_ir_t *p, int d, int n, int m)
 {
-    if (p->size_bytes == 8) {
-        if (p->src0_is_unsigned || p->src1_is_unsigned)
-            return 0x9ac00800; /* UDIV Xd, Xn, Xm */
-        return 0x9ac00c00;     /* SDIV Xd, Xn, Xm */
-    }
+    bool sf = p->size_bytes == 8;
+
     if (p->src0_is_unsigned || p->src1_is_unsigned)
-        return 0x1ac00800; /* UDIV Wd, Wn, Wm */
-    return 0x1ac00c00;     /* SDIV Wd, Wn, Wm */
+        return a64_udiv_insn(sf, d, n, m);
+    return a64_sdiv_insn(sf, d, n, m);
 }
 
-int a64_rshift_opcode(ph2_ir_t *p)
+/* Rd = Rn >> Rm, logical for an unsigned left operand. */
+int a64_rshift_insn(ph2_ir_t *p, int d, int n, int m)
 {
-    if (p->size_bytes == 8) {
-        if (p->src0_is_unsigned)
-            return 0x9ac02400; /* LSRV Xd, Xn, Xm */
-        return 0x9ac02800;     /* ASRV Xd, Xn, Xm */
-    }
+    bool sf = p->size_bytes == 8;
+
     if (p->src0_is_unsigned)
-        return 0x1ac02400; /* LSRV Wd, Wn, Wm */
-    return 0x1ac02800;     /* ASRV Wd, Wn, Wm */
+        return a64_lsrv_insn(sf, d, n, m);
+    return a64_asrv_insn(sf, d, n, m);
 }
+
+/* SP cannot be an operand of the shifted-register form, so an addition or
+ * subtraction involving it takes the extended-register form instead.
+ */
 void a64_add(int d, int n, int m)
 {
-    int op = (d == A64_SP || n == A64_SP) ? 0x8b206000 : 0x8b000000;
-    emit(op | (m << 16) | (n << 5) | d);
+    if (d == A64_SP || n == A64_SP)
+        emit(a64_add_ext_insn(d, n, m, A64_EXT_UXTX));
+    else
+        emit(a64_add_reg_insn(true, d, n, m));
 }
 void a64_sub(int d, int n, int m)
 {
-    int op = (d == A64_SP || n == A64_SP) ? 0xcb206000 : 0xcb000000;
-    emit(op | (m << 16) | (n << 5) | d);
+    if (d == A64_SP || n == A64_SP)
+        emit(a64_sub_ext_insn(d, n, m, A64_EXT_UXTX));
+    else
+        emit(a64_sub_reg_insn(true, d, n, m));
 }
 void a64_sxtw(int d, int n)
 {
-    emit(0x93407c00 | (n << 5) | d);
+    emit(a64_sext_insn(d, n, 32));
 }
 
 /* Xd = Xn +/- sign_extend(Wm). The extended-register forms fold the widening of
@@ -125,11 +126,11 @@ void a64_sxtw(int d, int n)
  */
 void a64_add_sxtw(int d, int n, int m)
 {
-    emit(0x8b20c000 | (m << 16) | (n << 5) | d);
+    emit(a64_add_ext_insn(d, n, m, A64_EXT_SXTW));
 }
 void a64_sub_sxtw(int d, int n, int m)
 {
-    emit(0xcb20c000 | (m << 16) | (n << 5) | d);
+    emit(a64_sub_ext_insn(d, n, m, A64_EXT_SXTW));
 }
 
 /* Sign-extend the low @size bytes of Xn into Xd. Always one instruction, so
@@ -138,12 +139,12 @@ void a64_sub_sxtw(int d, int n, int m)
 void a64_extend(int d, int n, int size, bool is_unsigned)
 {
     if (size == 1)
-        emit((is_unsigned ? 0xd3401c00 : 0x93401c00) | (n << 5) | d);
+        emit(is_unsigned ? a64_zext_insn(d, n, 8) : a64_sext_insn(d, n, 8));
     else if (size == 2)
-        emit((is_unsigned ? 0xd3403c00 : 0x93403c00) | (n << 5) | d);
+        emit(is_unsigned ? a64_zext_insn(d, n, 16) : a64_sext_insn(d, n, 16));
     else if (size == 4) {
         if (is_unsigned)
-            emit(0xd3407c00 | (n << 5) | d);
+            emit(a64_zext_insn(d, n, 32));
         else
             a64_sxtw(d, n);
     } else
@@ -156,46 +157,12 @@ void a64_extend(int d, int n, int size, bool is_unsigned)
  * the byte-addressed LDUR/STUR form; rounding them down corrupts adjacent
  * fields during self-hosting.
  */
-int a64_mem_count(int size, int ofs)
-{
-    if (ofs >= 0 && ofs <= 4095 * size && !(ofs % size))
-        return 1;
-    if (ofs >= -256 && ofs <= 255)
-        return 1;
-    return 4; /* MOVZ/MOVK + ADD + [base] access */
-}
-
-/* Base opcode of the unscaled load/store of @size bytes. Size lives in bits
- * 31:30 and the operation in 23:22, where a load picks the sign-extending form
- * for every width narrower than a doubleword -- values sit sign-extended in
- * their X register, so a narrow load must widen the same way whichever
- * addressing form carries it. The scaled form is this plus bit 24, which is why
- * one table serves both and they can no longer disagree.
- */
-int a64_mem_op(int load, int size)
-{
-    int sf;
-    if (size == 8)
-        sf = 3;
-    else if (size == 4)
-        sf = 2;
-    else if (size == 2)
-        sf = 1;
-    else if (size == 1)
-        sf = 0;
-    else {
-        fatal("unsupported arm64 access width");
-        return 0;
-    }
-    if (!load)
-        return 0x38000000 | (sf << 30);
-    return 0x38000000 | (sf << 30) | ((size == 8 ? 1 : 2) << 22);
-}
 void a64_mem(int load, int size, int rt, int rn, int ofs)
 {
-    int op = a64_mem_op(load, size);
+    if (size != 1 && size != 2 && size != 4 && size != 8)
+        fatal("unsupported arm64 access width");
     if (ofs >= -256 && ofs <= 255 && (ofs < 0 || ofs % size)) {
-        emit(op | ((ofs & 0x1ff) << 12) | (rn << 5) | rt); /* LDUR/STUR */
+        emit(a64_mem_unscaled_insn(load, size, rt, rn, ofs));
         return;
     }
     if (ofs < 0 || ofs > 4095 * size || ofs % size) {
@@ -204,7 +171,7 @@ void a64_mem(int load, int size, int rt, int rn, int ofs)
         rn = A64_IP0;
         ofs = 0;
     }
-    emit(op | (1 << 24) | ((ofs / size) << 10) | (rn << 5) | rt);
+    emit(a64_mem_scaled_insn(load, size, rt, rn, ofs));
 }
 
 /* Masking an out-of-range displacement silently branches somewhere else. The
@@ -227,26 +194,25 @@ void a64_cbnz(bool wide, int rt, int target)
 {
     int disp = (target - elf_code->size) / 4;
     a64_check_disp(disp, 19, "arm64 conditional branch out of range");
-    emit((wide ? 0xb5000000 : 0x35000000) | ((disp & 0x7ffff) << 5) | rt);
+    emit(a64_cbnz_insn(wide, rt, disp));
 }
 void a64_b(int target)
 {
     int d = (target - elf_code->size) / 4;
     a64_check_disp(d, 26, "arm64 branch out of range");
-    emit(0x14000000 | (d & 0x3ffffff));
+    emit(a64_b_insn(d));
 }
 void a64_bl_addr(int target)
 {
     int d = (target - (elf_code_start + elf_code->size)) / 4;
     a64_check_disp(d, 26, "arm64 call out of range");
-    emit(0x94000000 | (d & 0x3ffffff));
+    emit(a64_bl_insn(d));
 }
 int a64_adrp_insn(int d, int pc, int target)
 {
     int pages = (target >> 12) - (pc >> 12);
     a64_check_disp(pages, 21, "arm64 ADRP target out of range");
-    return 0x90000000 | ((pages & 3) << 29) | (((pages >> 2) & 0x7ffff) << 5) |
-           d;
+    return a64_adrp_pages_insn(d, pages);
 }
 
 /* Which operand of an address expression is the int index that must widen: 0
@@ -270,21 +236,21 @@ bool a64_cmp_wide(ph2_ir_t *p)
     return p->size_bytes == 8 || p->src0_is_pointer || p->src1_is_pointer;
 }
 
-int a64_cond(opcode_t op, bool is_unsigned)
+a64_cond_t a64_cond(opcode_t op, bool is_unsigned)
 {
     switch (op) {
     case OP_eq:
-        return 0;
+        return A64_EQ;
     case OP_neq:
-        return 1;
+        return A64_NE;
     case OP_geq:
-        return is_unsigned ? 2 : 10; /* HS / GE */
+        return is_unsigned ? A64_HS : A64_GE;
     case OP_lt:
-        return is_unsigned ? 3 : 11; /* LO / LT */
+        return is_unsigned ? A64_LO : A64_LT;
     case OP_gt:
-        return is_unsigned ? 8 : 12; /* HI / GT */
+        return is_unsigned ? A64_HI : A64_GT;
     default:
-        return is_unsigned ? 9 : 13; /* LS / LE */
+        return is_unsigned ? A64_LS : A64_LE;
     }
 }
 
@@ -433,14 +399,15 @@ void emit_ph2_ir(ph2_ir_t *p)
         bool reload_global_base = dynlink && !strcmp(p->func_name, "main");
 
         fatal_function_context = p->func_name;
-        emit(0xa9bf7bfd); /* stp x29, x30, [sp, #-16]! */
-        emit(0x910003fd); /* mov x29, sp                */
-        emit(0xa9bf57f4); /* stp x20, x21, [sp, #-16]!  */
+        emit(a64_stp_pre_insn(A64_FP, A64_LR, A64_SP, -16));
+        emit(a64_add_imm_insn(true, A64_FP, A64_SP, 0));
+        emit(a64_stp_pre_insn(20, 21, A64_SP, -16));
+
         /* x19 holds the synthetic global-frame base, but AAPCS64 makes it
          * callee-saved and glibc calls into this code at main. Saving it
          * alongside x22 costs nothing: the slot was half empty anyway.
          */
-        emit(0xa9bf4ff6); /* stp x22, x19, [sp, #-16]!  */
+        emit(a64_stp_pre_insn(22, A64_GP, A64_SP, -16));
         a64_mov_imm(A64_IP0, ALIGN_UP(p->src0, A64_STACK_ALIGN));
         a64_sub(A64_SP, A64_SP, A64_IP0);
 
@@ -523,44 +490,38 @@ void emit_ph2_ir(ph2_ir_t *p)
             a64_sub(d, n, m);
         return;
     case OP_mul:
-        emit((p->size_bytes == 8 ? 0x9b007c00 : 0x1b007c00) | (m << 16) |
-             (n << 5) | d);
+        emit(a64_mul_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_div:
-        emit(a64_div_opcode(p) | (m << 16) | (n << 5) | d);
+        emit(a64_div_insn(p, d, n, m));
         return;
     case OP_mod:
         /* d = n % m. Do not put the quotient in d: register coalescing may make
          * d alias n, losing the minuend before MSUB reads it.
          */
-        emit(a64_div_opcode(p) | (m << 16) | (n << 5) | A64_IP0);
-        emit((p->size_bytes == 8 ? 0x9b008000 : 0x1b008000) | (m << 16) |
-             (n << 10) | (A64_IP0 << 5) | d);
+        emit(a64_div_insn(p, A64_IP0, n, m));
+        emit(a64_msub_insn(p->size_bytes == 8, d, A64_IP0, m, n));
         return;
     case OP_lshift:
-        emit((p->size_bytes == 8 ? 0x9ac02000 : 0x1ac02000) | (m << 16) |
-             (n << 5) | d);
+        emit(a64_lslv_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_rshift:
-        emit(a64_rshift_opcode(p) | (m << 16) | (n << 5) | d);
+        emit(a64_rshift_insn(p, d, n, m));
         return;
     case OP_bit_and:
-        emit((p->size_bytes == 8 ? 0x8a000000 : 0x0a000000) | (m << 16) |
-             (n << 5) | d);
+        emit(a64_and_reg_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_bit_or:
-        emit((p->size_bytes == 8 ? 0xaa000000 : 0x2a000000) | (m << 16) |
-             (n << 5) | d);
+        emit(a64_orr_reg_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_bit_xor:
-        emit((p->size_bytes == 8 ? 0xca000000 : 0x4a000000) | (m << 16) |
-             (n << 5) | d);
+        emit(a64_eor_reg_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_negate:
-        emit((p->size_bytes == 8 ? 0xcb0003e0 : 0x4b0003e0) | (n << 16) | d);
+        emit(a64_neg_insn(p->size_bytes == 8, d, n));
         return;
     case OP_bit_not:
-        emit((p->size_bytes == 8 ? 0xaa2003e0 : 0x2a2003e0) | (n << 16) | d);
+        emit(a64_mvn_insn(p->size_bytes == 8, d, n));
         return;
     case OP_eq:
     case OP_neq:
@@ -568,12 +529,10 @@ void emit_ph2_ir(ph2_ir_t *p)
     case OP_lt:
     case OP_geq:
     case OP_leq:
-        emit((a64_cmp_wide(p) ? 0xeb00001f : 0x6b00001f) | (m << 16) |
-             (n << 5));
-        emit((a64_cmp_wide(p) ? 0x9a9f07e0 : 0x1a9f07e0) |
-             ((a64_cond(p->op, p->src0_is_unsigned || p->src1_is_unsigned) ^ 1)
-              << 12) |
-             d);
+        emit(a64_cmp_reg_insn(a64_cmp_wide(p), n, m));
+        emit(a64_cset_insn(
+            a64_cmp_wide(p), d,
+            a64_cond(p->op, p->src0_is_unsigned || p->src1_is_unsigned)));
         return;
 
     /* Width follows the operand, exactly as the comparisons above do. A pointer
@@ -583,8 +542,8 @@ void emit_ph2_ir(ph2_ir_t *p)
      * than sign-extended, so only the low word is the value.
      */
     case OP_log_not:
-        emit((p->src0_is_pointer ? 0xf100001f : 0x7100001f) | (n << 5));
-        emit(0x1a9f07e0 | (1 << 12) | d);
+        emit(a64_cmp_imm_insn(p->src0_is_pointer, n, 0));
+        emit(a64_cset_insn(false, d, A64_EQ));
         return;
 
     /* OP_trunc's src1 is the target width; OP_sign_ext's packs the source width
@@ -625,8 +584,7 @@ void emit_ph2_ir(ph2_ir_t *p)
                 fatal("arm64 external call requires --dynlink");
             a64_bl_addr(dynamic_sections.elf_plt_start + f->plt_offset);
         } else
-            emit(0x94000000 |
-                 (((f->bbs->elf_offset - elf_code->size) / 4) & 0x3ffffff));
+            emit(a64_bl_insn((f->bbs->elf_offset - elf_code->size) / 4));
         return;
     }
     case OP_load_data_address:
@@ -658,17 +616,17 @@ void emit_ph2_ir(ph2_ir_t *p)
         a64_mov(A64_IP0, n);
         return;
     case OP_indirect:
-        emit(0xd63f0200);
+        emit(a64_blr_insn(A64_IP0));
         return;
     case OP_return:
         if (p->src0 >= 0 && n != 0)
             a64_mov(0, n);
         a64_mov_imm(A64_IP0, ALIGN_UP(p->src1, A64_STACK_ALIGN));
         a64_add(A64_SP, A64_SP, A64_IP0);
-        emit(0xa8c14ff6); /* ldp x22, x19, [sp], #16 */
-        emit(0xa8c157f4); /* ldp x20, x21, [sp], #16 */
-        emit(0xa8c17bfd); /* ldp x29, x30, [sp], #16 */
-        emit(0xd65f03c0); /* ret                     */
+        emit(a64_ldp_post_insn(22, A64_GP, A64_SP, 16));
+        emit(a64_ldp_post_insn(20, 21, A64_SP, 16));
+        emit(a64_ldp_post_insn(A64_FP, A64_LR, A64_SP, 16));
+        emit(a64_ret_insn());
         return;
     default:
         fatal("unknown arm64 opcode");
@@ -690,10 +648,10 @@ void plt_generate(void)
         elf_write_int(dynamic_sections.elf_plt,
                       a64_adrp_insn(A64_IP0, ent, got));
         elf_write_int(dynamic_sections.elf_plt,
-                      0x91000210 | ((got & 0xfff) << 10)); /* add x16, x16, # */
+                      a64_add_imm_insn(true, A64_IP0, A64_IP0, got & 0xfff));
         elf_write_int(dynamic_sections.elf_plt,
-                      0xf9400211); /* ldr x17, [x16] */
-        elf_write_int(dynamic_sections.elf_plt, 0xd61f0220); /* br x17 */
+                      a64_mem_scaled_insn(true, 8, A64_IP1, A64_IP0, 0));
+        elf_write_int(dynamic_sections.elf_plt, a64_br_insn(A64_IP1));
     }
 }
 
@@ -709,7 +667,7 @@ void code_generate(void)
     if (dynlink)
         a64_mov_sp(25);
     a64_mem(1, 8, 20, A64_SP, 0);
-    emit(0x910023f5);
+    emit(a64_add_imm_insn(true, 21, A64_SP, 8));
     a64_mov(23, 20);
     a64_mov(24, 21);
     if (dynlink) {
@@ -753,8 +711,8 @@ void code_generate(void)
         a64_mov(3, 4);
         a64_mov(4, 5);
         a64_mov(5, 6);
-        emit(0xd4000001);
-        emit(0xd65f03c0);
+        emit(a64_svc_insn(0));
+        emit(a64_ret_insn());
     }
     for (ph2_ir_t *p = GLOBAL_FUNC->bbs->ph2_ir_list.head; p; p = p->next)
         emit_ph2_ir(p);
@@ -770,14 +728,13 @@ void code_generate(void)
             a64_mov(5, A64_ZR);
             a64_mov(6, 25);
             a64_bl_addr(dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE);
-            emit(0xd4200000); /* __libc_start_main does not return */
+            emit(a64_brk_insn(0)); /* __libc_start_main does not return */
         } else {
             a64_mov(0, 23);
             a64_mov(1, 24);
-            emit(0x94000000 |
-                 (((MAIN_BB->elf_offset - elf_code->size) / 4) & 0x3ffffff));
+            emit(a64_bl_insn((MAIN_BB->elf_offset - elf_code->size) / 4));
             a64_mov_imm(8, 93);
-            emit(0xd4000001);
+            emit(a64_svc_insn(0));
         }
     }
     for (int i = 0; i < ph2_ir_idx; i++)
