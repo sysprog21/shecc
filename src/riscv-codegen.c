@@ -107,6 +107,10 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
             ph2_ir->dest_hi != ph2_ir->src0_hi)
             elf_offset += 4;
+        /* Exchanging the two registers of a pair takes a third move. */
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->dest == ph2_ir->src0_hi &&
+            ph2_ir->dest_hi == ph2_ir->src0)
+            elf_offset += 4;
         return;
     case OP_load:
     case OP_global_load:
@@ -133,7 +137,11 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             elf_offset += 4;
         return;
     case OP_read:
+        elf_offset += ph2_ir->dest_hi >= 0 ? 8 : 4;
+        return;
     case OP_write:
+        elf_offset += ph2_ir->src1_hi >= 0 ? 8 : 4;
+        return;
     case OP_jump:
     case OP_call:
     case OP_load_func:
@@ -209,7 +217,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 32 : 8;
         return;
     case OP_log_not:
-        elf_offset += 8;
+        elf_offset += ph2_ir->src0_hi >= 0 ? 12 : 8;
         return;
     case OP_address_of_func:
         elf_offset += 12;
@@ -221,7 +229,7 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 16 : 8;
         return;
     case OP_branch:
-        elf_offset += 20;
+        elf_offset += ph2_ir->src0_hi >= 0 ? 24 : 20;
         return;
     case OP_return:
         elf_offset += 24;
@@ -421,6 +429,22 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__addi(rd, interm, ph2_ir->src0));
         return;
     case OP_assign:
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 && rd == rs1_hi) {
+            /* A pair moved one register over, as a slot round trip collapsed
+             * into a move can leave it: the low destination is the high source,
+             * so move the high word first, through t0 when the two registers
+             * trade places.
+             */
+            if (rd_hi == rs1) {
+                emit(__addi(__t0, rs1, 0));
+                emit(__addi(rd, rs1_hi, 0));
+                emit(__addi(rd_hi, __t0, 0));
+            } else {
+                emit(__addi(rd_hi, rs1_hi, 0));
+                emit(__addi(rd, rs1, 0));
+            }
+            return;
+        }
         emit(__addi(rd, rs1, 0));
         if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
             ph2_ir->dest_hi != ph2_ir->src0_hi)
@@ -497,6 +521,22 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__sw(rs1, interm, ph2_ir->src1));
         return;
     case OP_read:
+        if (ph2_ir->dest_hi >= 0) {
+            /* A pair read through a pointer. When the low destination is the
+             * address register itself, fetch the high word first so the address
+             * survives until both words are loaded.
+             */
+            if (ph2_ir->src1 != 8)
+                fatal("unsupported RISC-V pair load width");
+            if (rd == rs1) {
+                emit(__lw(rd_hi, rs1, 4));
+                emit(__lw(rd, rs1, 0));
+            } else {
+                emit(__lw(rd, rs1, 0));
+                emit(__lw(rd_hi, rs1, 4));
+            }
+            return;
+        }
         if (ph2_ir->src1 == 1)
             emit(ph2_ir->is_unsigned ? __lbu(rd, rs1, 0) : __lb(rd, rs1, 0));
         else if (ph2_ir->src1 == 2)
@@ -507,6 +547,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             fatal("unsupported RISC-V load width");
         return;
     case OP_write:
+        if (ph2_ir->src1_hi >= 0) {
+            if (ph2_ir->dest != 8)
+                fatal("unsupported RISC-V pair store width");
+            emit(__sw(rs2, rs1, 0));
+            emit(__sw(rs2_hi, rs1, 4));
+            return;
+        }
         if (ph2_ir->dest == 1)
             emit(__sb(rs2, rs1, 0));
         else if (ph2_ir->dest == 2)
@@ -520,6 +567,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         ofs = elf_code_start + ph2_ir->then_bb->elf_offset;
         emit(__lui(__t0, rv_hi(ofs)));
         emit(__addi(__t0, __t0, rv_lo(ofs)));
+
+        /* A pair is true when either word is nonzero. */
+        if (ph2_ir->src0_hi >= 0) {
+            emit(__or(__t1, rs1, rs1_hi));
+            rs1 = __t1;
+        }
         emit(__beq(rs1, __zero, 8));
         emit(__jalr(__zero, __t0, 0));
         emit(__jal(__zero, ph2_ir->else_bb->elf_offset - elf_code->size));
@@ -851,8 +904,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__sll(rd_hi, rs1, __t1));
             emit(__addi(rd, __zero, 0));
             emit(__jal(__zero, 32));
-            emit(__addi(__t1, __zero, 32));
-            emit(__addi(__t2, rs1, 0));
+
+            /* The bits crossing into the high word are the low word shifted
+             * right by 32 - n. RV32 takes a shift amount modulo 32, so a shift
+             * by zero did not shift at all and ORed the whole low word in.
+             * Shift by 1 and then by 31 - n, which stays in range.
+             */
+            emit(__addi(__t1, __zero, 31));
+            emit(__srli(__t2, rs1, 1));
             emit(__sll(rd, rs1, rs2));
             emit(__sll(rd_hi, rs1_hi, rs2));
             emit(__sub(__t1, __t1, rs2));
@@ -874,9 +933,17 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(is_unsigned ? __addi(rd_hi, __zero, 0)
                              : __srai(rd_hi, rs1_hi, 31));
             emit(__jal(__zero, 32));
-            emit(__addi(__t1, __zero, 32));
-            emit(__addi(__t2, rs1_hi, 0));
-            emit(is_unsigned ? __srl(rd, rs1, rs2) : __sra(rd, rs1, rs2));
+
+            /* As for a left shift, bring the high word's bits across with two
+             * in-range shifts, by 1 and by 31 - n.
+             */
+            emit(__addi(__t1, __zero, 31));
+            emit(__slli(__t2, rs1_hi, 1));
+
+            /* The low word takes the high word's bits in, never its own sign:
+             * the sign lives in the high word.
+             */
+            emit(__srl(rd, rs1, rs2));
             emit(__sub(__t1, __t1, rs2));
             emit(__sll(__t2, __t2, __t1));
             emit(__or(rd, rd, __t2));
@@ -978,6 +1045,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__xor(rd_hi, rs1_hi, rs2_hi));
         return;
     case OP_log_not:
+        if (ph2_ir->src0_hi >= 0) {
+            emit(__or(__t0, rs1, rs1_hi));
+            rs1 = __t0;
+        }
         emit(__sltu(rd, __zero, rs1));
         emit(__xori(rd, rd, 1));
         return;

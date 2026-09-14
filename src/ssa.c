@@ -1400,6 +1400,16 @@ bool if_arm_reads_other(basic_block_t **a,
     return false;
 }
 
+/* Whether @var is an integer scalar a 32-bit target keeps in a register pair.
+ * The widening pass below, the allocator and the backends all ask this.
+ */
+bool var_needs_register_pair(const var_t *var)
+{
+    return PTR_SIZE < 8 && var && !var->ptr_level && !var->is_func &&
+           !var->array_size && var->type && var->type->size == 8 &&
+           !is_record_type(var->type);
+}
+
 /* Flatten "if (c) x = A; else x = B;" into both computations and a select.
  *
  * A branch the hardware cannot predict costs far more than the arm it skips:
@@ -1642,8 +1652,12 @@ bool thread_const_branch(func_t *func, basic_block_t *join)
                 break;
             }
 
-            basic_block_t *target =
-                def->rs1->init_val ? join->then_ : join->else_;
+            /* A wide constant with a zero low word, such as 1ULL << 32, is
+             * still true.
+             */
+            basic_block_t *target = def->rs1->init_val || def->rs1->init_val_hi
+                                        ? join->then_
+                                        : join->else_;
 
             bb_remove_insn(pred, def);
             bb_disconnect(pred, join);
@@ -1743,6 +1757,7 @@ var_t *inline_lookup(var_t *var, block_t *scope)
     copy->ptr_level = var->ptr_level;
     copy->is_const = var->is_const;
     copy->init_val = var->init_val;
+    copy->init_val_hi = var->init_val_hi;
     inline_from[inline_map_n] = var;
     inline_to[inline_map_n] = copy;
     inline_map_n++;
@@ -2663,6 +2678,194 @@ void sr_loop(func_t *func, basic_block_t *header, basic_block_t *latch)
         sr_sweep_dead_consts(func);
 }
 
+/* Whether @var is an integer scalar narrower than a register pair. */
+bool ssa_is_narrow_scalar(const var_t *var)
+{
+    return var && !var->ptr_level && !var->is_func && !var->array_size &&
+           var->type && var->type->size < 8 && !var->type->ptr_level &&
+           !is_record_type(var->type);
+}
+
+/* The int type of @var's signedness, which a narrow operand converts to. */
+type_t *int_type_of(const var_t *var)
+{
+    return var->type->is_unsigned ? TY_uint : TY_int;
+}
+
+/* Insert before @at a copy of the narrow @var widened to @type, sign- or
+ * zero-extended by @var's own signedness as the usual arithmetic conversions
+ * require, and return it.
+ */
+var_t *widen_before(basic_block_t *bb, insn_t *at, var_t *var, type_t *type)
+{
+    var_t *wide = require_var(bb->scope);
+    insn_t *ext;
+
+    wide->var_name = gen_name();
+    wide->type = type;
+    ext = new_insn(OP_sign_ext, wide, var, NULL);
+    ext->sz = (var->type->size << 16) | 8;
+    bb_insert_after(bb, at->prev, ext);
+    return wide;
+}
+
+/* Make @insn define a new variable of @type and convert that into its original
+ * destination straight after, with @conv (an extension or a truncation).
+ */
+void convert_result_after(basic_block_t *bb,
+                          insn_t *insn,
+                          type_t *type,
+                          opcode_t conv)
+{
+    var_t *result = insn->rd;
+    var_t *inner = require_var(bb->scope);
+    insn_t *copy;
+
+    inner->var_name = gen_name();
+    inner->type = type;
+    insn->rd = inner;
+    copy = new_insn(conv, result, inner, NULL);
+    copy->sz = conv == OP_trunc ? result->type->size : (4 << 16) | 8;
+    bb_insert_after(bb, insn, copy);
+}
+
+/* Give every register-pair operation operands of its own width.
+ *
+ * The 32-bit backends lower a wide operation only when all of its values are
+ * pairs; with a narrow operand they fall back to the one-word form, which keeps
+ * no high word. The parser does not convert every operand it builds, and an
+ * LP64 target never noticed, since its registers are already wide: a long long
+ * compared with an int temporary, or stored from one, lost the high word on Arm
+ * and RISC-V. Convert those operands here, after the optimizer, so that the
+ * allocator and the backends see one width per operation. Where the low word of
+ * a narrow result is exact -- addition, subtraction, multiplication, bitwise
+ * operations and left shifts -- a narrow destination is left as it is.
+ */
+void widen_pair_operands(void)
+{
+    if (PTR_SIZE >= 8)
+        return;
+
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+                var_t *rd = insn->rd;
+                bool wide1 = var_needs_register_pair(insn->rs1);
+                bool wide2 = var_needs_register_pair(insn->rs2);
+
+                switch (insn->opcode) {
+                case OP_eq:
+                case OP_neq:
+                case OP_lt:
+                case OP_leq:
+                case OP_gt:
+                case OP_geq:
+                    if (wide1 && ssa_is_narrow_scalar(insn->rs2))
+                        insn->rs2 =
+                            widen_before(bb, insn, insn->rs2, insn->rs1->type);
+                    else if (wide2 && ssa_is_narrow_scalar(insn->rs1))
+                        insn->rs1 =
+                            widen_before(bb, insn, insn->rs1, insn->rs2->type);
+                    break;
+                case OP_add:
+                case OP_sub:
+                case OP_mul:
+                case OP_div:
+                case OP_mod:
+                case OP_bit_and:
+                case OP_bit_or:
+                case OP_bit_xor:
+                    if (var_needs_register_pair(rd)) {
+                        if (!wide1 && !wide2) {
+                            /* Both operands narrow: the operation is an int one
+                             * whose result is then converted.
+                             */
+                            if (ssa_is_narrow_scalar(insn->rs1) &&
+                                ssa_is_narrow_scalar(insn->rs2))
+                                convert_result_after(
+                                    bb, insn,
+                                    insn->rs1->type->is_unsigned ||
+                                            insn->rs2->type->is_unsigned
+                                        ? TY_uint
+                                        : TY_int,
+                                    OP_sign_ext);
+                            break;
+                        }
+                        if (!wide1 && ssa_is_narrow_scalar(insn->rs1))
+                            insn->rs1 =
+                                widen_before(bb, insn, insn->rs1, rd->type);
+                        if (!wide2 && ssa_is_narrow_scalar(insn->rs2))
+                            insn->rs2 =
+                                widen_before(bb, insn, insn->rs2, rd->type);
+                        break;
+                    }
+
+                    /* A quotient's low word depends on the high words. */
+                    if ((insn->opcode == OP_div || insn->opcode == OP_mod) &&
+                        ssa_is_narrow_scalar(rd) && (wide1 || wide2)) {
+                        type_t *type =
+                            wide1 ? insn->rs1->type : insn->rs2->type;
+
+                        if (!wide1 && ssa_is_narrow_scalar(insn->rs1))
+                            insn->rs1 = widen_before(bb, insn, insn->rs1, type);
+                        if (!wide2 && ssa_is_narrow_scalar(insn->rs2))
+                            insn->rs2 = widen_before(bb, insn, insn->rs2, type);
+                        convert_result_after(bb, insn, type, OP_trunc);
+                    }
+                    break;
+                case OP_lshift:
+                case OP_rshift:
+                    /* The result has the left operand's type. */
+                    if (var_needs_register_pair(rd) &&
+                        ssa_is_narrow_scalar(insn->rs1))
+                        convert_result_after(bb, insn, int_type_of(insn->rs1),
+                                             OP_sign_ext);
+                    else if (insn->opcode == OP_rshift && wide1 &&
+                             ssa_is_narrow_scalar(rd))
+                        convert_result_after(bb, insn, insn->rs1->type,
+                                             OP_trunc);
+                    break;
+                case OP_negate:
+                case OP_bit_not:
+                    if (var_needs_register_pair(rd) &&
+                        ssa_is_narrow_scalar(insn->rs1))
+                        convert_result_after(bb, insn, int_type_of(insn->rs1),
+                                             OP_sign_ext);
+                    break;
+                case OP_assign:
+                case OP_unwound_phi:
+                    if (var_needs_register_pair(rd) &&
+                        ssa_is_narrow_scalar(insn->rs1))
+                        insn->rs1 = widen_before(bb, insn, insn->rs1, rd->type);
+                    break;
+                case OP_read:
+                    if (var_needs_register_pair(rd) && insn->sz == 4)
+                        convert_result_after(bb, insn, int_type_of(rd),
+                                             OP_sign_ext);
+                    break;
+                case OP_write:
+                    if (insn->sz == 8 && ssa_is_narrow_scalar(insn->rs2))
+                        insn->rs2 = widen_before(bb, insn, insn->rs2,
+                                                 insn->rs2->type->is_unsigned
+                                                     ? TY_ulong_long
+                                                     : TY_long_long);
+                    break;
+                case OP_return:
+                    if (var_needs_register_pair(&func->return_def) &&
+                        ssa_is_narrow_scalar(insn->rs1))
+                        insn->rs1 = widen_before(bb, insn, insn->rs1,
+                                                 func->return_def.type);
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+    }
+}
+
 void strength_reduce(void)
 {
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
@@ -3493,6 +3696,21 @@ bool ssa_is_unsigned_scalar(const var_t *var)
     return var && !var->ptr_level && var->type && var->type->is_unsigned;
 }
 
+/* Whether @insn computes a scalar wider than int, a long long on any target. */
+bool ssa_is_wide_operation(const insn_t *insn)
+{
+    var_t *ops[2];
+
+    ops[0] = insn->rd;
+    ops[1] = insn->rs1;
+    for (int i = 0; i < 2; i++) {
+        if (ops[i] && !ops[i]->ptr_level && ops[i]->type &&
+            !ops[i]->type->ptr_level && ops[i]->type->size > TY_int->size)
+            return true;
+    }
+    return false;
+}
+
 bool eval_const_arithmetic(insn_t *insn)
 {
     if (!insn->rs1)
@@ -4064,6 +4282,18 @@ void optimize(void)
                     !insn->rs2->init_val_hi && insn->rd) {
                     int val = insn->rs2->init_val;
 
+                    /* init_val holds only the low word. In an operation wider
+                     * than int, a low word of -1 is all ones only when the
+                     * constant is a signed narrow one that the usual
+                     * conversions sign-extend: 0xffffffffULL has a zero high
+                     * word, so "x & 0xffffffffULL" is not x.
+                     */
+                    bool all_ones =
+                        val == -1 && !(ssa_is_wide_operation(insn) &&
+                                       (!insn->rs2->type ||
+                                        insn->rs2->type->size > TY_int->size ||
+                                        insn->rs2->type->is_unsigned));
+
                     /* x + 0 = x, x - 0 = x, x | 0 = x, x ^ 0 = x */
                     if (val == 0) {
                         if (insn->opcode == OP_add || insn->opcode == OP_sub ||
@@ -4104,7 +4334,7 @@ void optimize(void)
                         }
                     }
                     /* x & -1 = x (all bits set) */
-                    else if (val == -1) {
+                    else if (all_ones) {
                         if (insn->opcode == OP_bit_and) {
                             insn->opcode = OP_assign;
                             insn->rs2 = NULL;
@@ -4114,6 +4344,8 @@ void optimize(void)
                             insn->opcode = OP_load_constant;
                             insn->rd->is_const = true;
                             insn->rd->init_val = -1;
+                            insn->rd->init_val_hi =
+                                ssa_is_wide_operation(insn) ? -1 : 0;
                             insn->rs1 = NULL;
                             insn->rs2 = NULL;
                         }
@@ -4225,9 +4457,12 @@ void optimize(void)
                  * var_t, and that var_t is what its defining OP_load_constant
                  * materialises, so rewriting init_val in place changes the
                  * value every other use sees: "int k = 8; return a*k + b*k;"
-                 * returned 2 << 3 + 3 * 3.
+                 * returned 2 << 3 + 3 * 3. A wide constant with a high word,
+                 * such as 0x100000004ULL, is not the power of two its low word
+                 * is.
                  */
-                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                if (insn->rs2 && insn->rs2->is_const &&
+                    !insn->rs2->init_val_hi && insn->rd) {
                     int val = insn->rs2->init_val;
                     int shift = exact_log2(val);
                     opcode_t reduced = OP_generic;

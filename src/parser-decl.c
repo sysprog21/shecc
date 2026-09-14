@@ -1257,17 +1257,6 @@ void read_full_var_decl(var_t *vd,
      */
     if (vd->type && vd->type->is_floating && !parsing_sizeof_function_signature)
         error_at("Floating point types are not yet supported", cur_token_loc());
-
-    /* A 32-bit target can carry a pointer to an eight-byte object without a
-     * paired-value register representation. Keep direct wide objects, arrays,
-     * parameters, returns, and function-pointer returns rejected until that
-     * lowering exists, but admit declarations such as `long long *p` and
-     * typedef aliases used exclusively behind a pointer.
-     */
-    if (PTR_SIZE < 8 && vd->type && vd->type->base_type == TYPE_long_long &&
-        (!(vd->ptr_level || vd->type->ptr_level) || vd->is_func))
-        error_at("long long value needs 64-bit target lowering",
-                 cur_token_loc());
 }
 
 /* starting next_token, need to check the type */
@@ -1544,9 +1533,6 @@ void force_wide_global_literal_type(var_t *value, const char *token)
         return;
     if (value->type->size >= 8)
         return;
-    if (PTR_SIZE < 8)
-        error_at("long long literal needs 64-bit target lowering",
-                 cur_token_loc());
     value->type = numeric_has_unsigned_suffix(token) ||
                           (unsigned int) value->init_val_hi > 0x7fffffffU
                       ? TY_ulong_long
@@ -1737,9 +1723,6 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
                (is_decimal && !has_unsigned_suffix &&
                 numeric_literal_needs_wide_path(token)) ||
                (is_decimal && !has_unsigned_suffix && value > 0x80000000U)) {
-        if (PTR_SIZE < 8)
-            error_at("long long literal needs 64-bit target lowering",
-                     cur_token_loc());
         if (has_unsigned_suffix || (!is_decimal && value_hi > 0x7fffffffU))
             vd->type = TY_ulong_long;
         else

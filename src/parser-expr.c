@@ -1462,11 +1462,6 @@ static void read_parenthesized_operand(block_t *parent, basic_block_t **bb)
                 }
             }
 
-            if (PTR_SIZE < 8 && type->base_type == TYPE_long_long &&
-                !(ptr_level || type->ptr_level))
-                error_at("long long value needs 64-bit target lowering",
-                         cur_token_loc());
-
             bool is_array = false;
 
             /* A parenthesized abstract declarator, such as `(int
@@ -2824,6 +2819,20 @@ void read_expr(block_t *parent, basic_block_t **bb)
 }
 
 
+/* Whether @lvalue designates an integer object wider than int. The step and
+ * result of ++ and -- on it must have its type: an int temporary kept only the
+ * low word, which a 32-bit target stores back without a high word.
+ */
+static bool lvalue_is_wide_integer(const lvalue_t *lvalue)
+{
+    int level =
+        lvalue->is_reference ? lvalue->value_ptr_level : lvalue->ptr_level;
+
+    return !level && !lvalue->is_func && lvalue->type &&
+           !lvalue->type->ptr_level && !is_record_type(lvalue->type) &&
+           lvalue->type->size > TY_int->size;
+}
+
 /* What follows a completed lvalue: pointer arithmetic on it, or an update or
  * read of the object it names. read_lvalue() finishes with this.
  */
@@ -2996,6 +3005,8 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
                 vd->init_val = get_pointer_element_size(var);
             else
                 vd->init_val = 1;
+            if (lvalue_is_wide_integer(lvalue))
+                vd->type = lvalue->type;
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
@@ -3006,6 +3017,8 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
                 rs1 = operand_stack[operand_stack_idx - 1];
             vd = require_var(parent);
             vd->var_name = gen_name();
+            if (lvalue_is_wide_integer(lvalue))
+                vd->type = lvalue->type;
             add_insn(parent, *bb, prefix_op, vd, rs1, rs2, 0, NULL);
 
             if (lvalue->is_reference) {
@@ -3094,6 +3107,8 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
                 }
             }
             vd->init_val = increment_size;
+            if (lvalue_is_wide_integer(lvalue))
+                vd->type = lvalue->type;
 
             side_effect[se_idx].rd = vd;
             side_effect[se_idx].rs1 = NULL;
@@ -3123,7 +3138,8 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
                 vd->type = lvalue->type;
                 vd->ptr_level = var->ptr_level;
                 copy_pointee_array_shape(vd, var);
-            }
+            } else if (lvalue_is_wide_integer(lvalue))
+                vd->type = lvalue->type;
             side_effect[se_idx].rd = vd;
             se_idx++;
 

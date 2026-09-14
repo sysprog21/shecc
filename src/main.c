@@ -263,6 +263,9 @@ int main(int argc, char *argv[])
     /* Compact arenas after SSA optimization to free temporary SSA structures */
     compact_all_arenas();
 
+    /* Give each register-pair operation operands of its width. */
+    widen_pair_operands();
+
     /* SSA-based liveness analyses */
     liveness_analysis();
 

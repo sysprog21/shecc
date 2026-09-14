@@ -1782,38 +1782,27 @@ int main(void) {
 }
 EOF
 fi
-if [ "$PTR_SZ" -lt 8 ]; then
-    try_compile_error << EOF
-int main(void) { return 4294967296U; }
-EOF
-else
+if [ "$PTR_SZ" -ge 8 ]; then
     try_ 1 << EOF
 int main(void) { return 4294967296U >> 32; }
 EOF
 fi
-if [ "$PTR_SZ" -lt 8 ]; then
-    try_compile_error << EOF
-int main(void) { return 1LL; }
+
+# A 32-bit target admits long long literals, objects, returns and callbacks as
+# well as sizeof and pointers.
+try_ 1 << EOF
+long long wide_value;
+long long wide_return(void) { return 1LL; }
+long long (*wide_callback)(void) = wide_return;
+int main(void) { return (int)wide_callback() + (int)wide_value; }
 EOF
-    try_compile_error << EOF
-long long unsupported_value;
-int main(void) { return 0; }
-EOF
-    try_compile_error << EOF
-long long unsupported_return(void) { return 0; }
-int main(void) { return 0; }
-EOF
-    try_compile_error << EOF
-long long (*unsupported_callback)(void);
-int main(void) { return 0; }
-EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 int main(void) {
     return (sizeof(long long) == 8) +
            (sizeof(unsigned long long) == 8);
 }
 EOF
-    try_ 1 << EOF
+try_ 1 << EOF
 typedef long long *wide_pointer;
 long long *identity_wide_pointer(long long *value) { return value; }
 int main(void) {
@@ -1822,7 +1811,7 @@ int main(void) {
     return identity_wide_pointer(alias) == alias;
 }
 EOF
-else
+if [ "$PTR_SZ" -ge 8 ]; then
     try_ 3 << EOF
 int main(void) {
     return (sizeof(1LL) == 8) + ((1LL << 32) != 0) +
@@ -2468,6 +2457,323 @@ int main(void) {
 }
 EOF
 fi
+
+# A constant copied into its caller by inlining keeps its high word: ~0ULL
+# returned from a helper is not 0xffffffff.
+try_ 0 << EOF
+unsigned long long all_ones(void) { return ~0ULL; }
+long long high_only(void) { return 0x100000000LL; }
+int main(void) {
+    return all_ones() != 0xffffffffffffffffULL || high_only() != 0x100000000LL;
+}
+EOF
+
+# A post-allocation all-ones rewrite needs the constant's high word as well: an
+# eight-byte OR or AND with 0xffffffffULL is no identity.
+try_ 0 << EOF
+int main(void) {
+    unsigned long long low = 0xffffffffULL;
+    unsigned long long high = 0x100000000ULL;
+    low |= ~0;
+    high &= 0xffffffffULL;
+    return low != 0xffffffffffffffffULL || high != 0;
+}
+EOF
+
+# A long long read or written through a pointer moves both words: array elements
+# and a member of a record reached through a pointer.
+try_ 0 << EOF
+struct wide_member { char c; long long v; int i; };
+int main(void) {
+    long long a[4];
+    long long sum = 0;
+    struct wide_member s;
+    struct wide_member *p = &s;
+    for (int i = 0; i < 4; i++)
+        a[i] = (long long)i << 33;
+    for (int i = 0; i < 4; i++)
+        sum += a[i];
+    p->v = -3LL << 40;
+    p->i = 7;
+    return sum != (6LL << 33) || s.v != (-3LL << 40) || s.i != 7;
+}
+EOF
+# Taking the address of a long long held in registers stores both words first.
+try_ 0 << EOF
+void bump(long long *p) { *p += 1; }
+int main(void) {
+    long long v = 0x1122334455667788LL;
+    long long *p = &v;
+    *p += 1;
+    bump(&v);
+    return v != 0x112233445566778aLL;
+}
+EOF
+
+# A long long carried round a loop in a register pair keeps its high word when
+# the phi copy stores it back to the variable's slot.
+try_ 0 << EOF
+long long countdown(long long a) {
+    int r = 0;
+    while (r < 3) {
+        a = a - 0x80000000LL;
+        r++;
+    }
+    return a;
+}
+int main(void) { return countdown(0x100000000LL) != -0x80000000LL; }
+EOF
+
+# A long long whose low word is zero is still true in a condition, a logical
+# operator and a loop test.
+try_ 61 << EOF
+int is_set(long long a) { if (a) return 1; return 0; }
+int is_clear(long long a) { return !a; }
+int both(long long a) { return a && 1; }
+int either(long long a, long long b) { return b || a; }
+int drain(long long a) {
+    int r = 0;
+    while (a && r < 9) {
+        a = a - 0x80000000LL;
+        r++;
+    }
+    return r;
+}
+int choose(long long a) { return a ? 1 : 0; }
+int main(void) {
+    long long a = 0x100000000LL;
+    return is_set(a) + 2 * is_clear(a) + 4 * both(a) + 8 * either(a, 0) +
+           16 * (drain(a) == 2) + 32 * choose(a);
+}
+EOF
+
+# Ordering two long longs compares their low words unsigned whatever the type,
+# and the high words by the type's signedness.
+try_ 0 << EOF
+int order(long long a, long long b) {
+    return (a < b) + 2 * (a <= b) + 4 * (a > b) + 8 * (a >= b) +
+           16 * (a == b) + 32 * (a != b);
+}
+int uorder(unsigned long long a, unsigned long long b) {
+    return (a < b) + 2 * (a <= b) + 4 * (a > b) + 8 * (a >= b) +
+           16 * (a == b) + 32 * (a != b);
+}
+int main(void) {
+    return order(0, 0x80000000LL) != 35 || order(0x80000000LL, 0) != 44 ||
+           order(-1, 0) != 35 || order(0x100000000LL, 0xffffffffLL) != 44 ||
+           order(-0x80000000LL, 1) != 35 || order(7, 7) != 26 ||
+           uorder(0, 0x80000000ULL) != 35 || uorder(~0ULL, 1) != 44 ||
+           uorder(0x100000000ULL, 0xffffffffULL) != 44;
+}
+EOF
+
+# A signed right shift of a long long takes the sign from the high word; the low
+# word's own top bit is data and must not be replicated.
+try_ 0 << EOF
+long long sar(long long v, int n) { return v >> n; }
+int main(void) {
+    return sar(0x80000000LL, 1) != 0x40000000LL ||
+           sar(0x1ffffffffLL, 4) != 0x1fffffffLL ||
+           sar(-0x100000000LL, 33) != -1 ||
+           sar(-0x80000000LL, 4) != -0x8000000LL;
+}
+EOF
+# Shifting a long long by a run-time amount of zero leaves it unchanged.
+try_ 0 << EOF
+int amounts[2] = {0, 63};
+long long shl(long long v, int n) { return v << n; }
+unsigned long long shr(unsigned long long v, int n) { return v >> n; }
+long long sar(long long v, int n) { return v >> n; }
+int main(void) {
+    int zero = amounts[0];
+    return shl(0x80000001LL, zero) != 0x80000001LL ||
+           shr(0xffffffffULL, zero) != 0xffffffffULL ||
+           sar(-0x80000000LL, zero) != -0x80000000LL ||
+           shl(1, amounts[1]) != (long long)0x8000000000000000ULL;
+}
+EOF
+
+# Issue 312: a long long argument after four ints is found where the caller put
+# it, with both of its words.
+try_ 0 << EOF
+int test_ll(int a, int b, int c, int d, long long e) {
+    return e == 1000LL && a == 1 && b == 2 && c == 3 && d == 4;
+}
+int main(void) { return !test_ll(1, 2, 3, 4, 1000); }
+EOF
+
+# Post-allocation rewrites of a register pair keep its high word: the move after
+# a pair operation and the load of a slot written just before it.
+try_ 0 << EOF
+long long total(long long a, long long b, long long c) {
+    long long s = 0;
+    for (int i = 0; i < 3; i++) {
+        long long v = (i == 0 ? a : i == 1 ? b : c) * 1;
+        s = s + v;
+    }
+    return s;
+}
+int main(void) { return total(0, 0x100000000LL, -1) != 0xffffffffLL; }
+EOF
+
+# Moving a register pair one register over writes the high word before the low
+# register that holds it is overwritten.
+try_ 0 << EOF
+long long mix(long long a, int b, long long c, int d, int e, long long f) {
+    return a * 1 + b * 10 + c * 100 + d * 1000 + e * 10000 + f * 100000;
+}
+int main(void) {
+    return mix(1, 2, 3, 4, 5, 6) != 654321 ||
+           mix(-1LL << 40, 2, 3, 4, 5, 6) != (-1LL << 40) + 654320;
+}
+EOF
+
+# Spilling a register pair to free one register for a word stores both of its
+# words.
+try_ 0 << EOF
+#include <stdio.h>
+int main(void) {
+    long long vals[3];
+    int r = 0;
+    vals[0] = 0LL;
+    vals[1] = -1LL;
+    vals[2] = 5LL;
+    for (int j = 0; j < 3; j++) {
+        long long a = vals[0], b = vals[j];
+        int sum = (a < b);
+        sum = sum * 5 + (a > b);
+        r = r * 10 + sum;
+        printf("%d", sum);
+    }
+    printf("\n");
+    return r != 15;
+}
+EOF
+
+# A long long global keeps both words when a function stores a constant in it
+# and when its initializer has an int-sized type.
+try_ 0 << EOF
+unsigned long long wide_scalar;
+unsigned long long wide_narrow_init = 1 ? 7U : 1U;
+long long wide_negative_init = 1 ? -7 : 1;
+void set(void) { wide_scalar = 0x100000001ULL; }
+int main(void) {
+    set();
+    return wide_scalar != 0x100000001ULL || wide_narrow_init != 7 ||
+           wide_negative_init != -7;
+}
+EOF
+
+# A long long operation extends an int-sized operand the parser left narrow,
+# including through a pointer store and a narrow quotient of a wide dividend.
+try_ 0 << EOF
+int main(void) {
+    int i = -1;
+    unsigned u = 1;
+    long long l = -2;
+    long long cell = 5;
+    long long *p = &cell;
+    unsigned long long q = 0x300000000ULL;
+    int small;
+    *p = i;
+    small = (int)(q / 3);
+    return !(l < u) || (l + u) != -1 || cell != -1 ||
+           small != 0 || (u << 31) != 0x80000000U;
+}
+EOF
+
+# Pair division in a loop holds two operand pairs and a result pair at once, and
+# must still find registers beside the ones kept for the loop counters.
+try_ 92 << EOF
+int main(void) {
+    long long v[5], d[4];
+    unsigned r = 0;
+    v[0] = 7LL; v[1] = -7LL; v[2] = 0x123456789LL; v[3] = -0x123456789LL;
+    v[4] = 0x7fffffffffffffffLL;
+    d[0] = 3LL; d[1] = -3LL; d[2] = 0x10000LL; d[3] = -0x100000001LL;
+    for (int i = 0; i < 5; i++)
+        for (int j = 0; j < 4; j++) {
+            long long q = v[i] / d[j], m = v[i] % d[j];
+            unsigned long long uq = (unsigned long long)v[i] / (unsigned long long)d[j];
+            unsigned long long um = (unsigned long long)v[i] % (unsigned long long)d[j];
+            r = r * 33 + (unsigned)q + (unsigned)(q >> 32);
+            r = r * 33 + (unsigned)m + (unsigned)(m >> 32);
+            r = r * 33 + (unsigned)uq + (unsigned)(uq >> 32);
+            r = r * 33 + (unsigned)um + (unsigned)(um >> 32);
+        }
+    return r % 251;
+}
+EOF
+
+# Aggregate initializers keep the high word of a long long member or element: a
+# file-scope record, a nested array member and a block-scope static array.
+try_ 0 << EOF
+struct wide_record { int a; long long b; int c; unsigned long long d[2]; };
+struct wide_record wide_global = {1, 0x1122334455667788LL, 3,
+                                  {0x100000000ULL, 9}};
+long long wide_static(int i) {
+    static long long table[3] = {0x100000001LL, -0x200000000LL, 5};
+    return table[i];
+}
+int main(void) {
+    return wide_global.a != 1 || wide_global.b != 0x1122334455667788LL ||
+           wide_global.c != 3 || wide_global.d[0] != 0x100000000ULL ||
+           wide_global.d[1] != 9 || wide_static(0) != 0x100000001LL ||
+           wide_static(1) != -0x200000000LL || wide_static(2) != 5;
+}
+EOF
+
+# ++ and -- on a long long carry into and borrow from the high word, whether the
+# object is a variable, an array element or a member reached through a pointer.
+try_ 0 << EOF
+struct wide_counter { long long count; };
+int main(void) {
+    unsigned long long u = 0xffffffffULL;
+    long long s = 0x100000000LL;
+    long long cells[2] = {0xffffffffLL, 0x100000000LL};
+    struct wide_counter counter = {0xffffffffLL};
+    struct wide_counter *p = &counter;
+    unsigned long long old = u++;
+    long long before = --s;
+    cells[0]++;
+    --cells[1];
+    p->count++;
+    return u != 0x100000000ULL || old != 0xffffffffULL ||
+           s != 0xffffffffLL || before != 0xffffffffLL ||
+           cells[0] != 0x100000000LL || cells[1] != 0xffffffffLL ||
+           counter.count != 0x100000000LL;
+}
+EOF
+
+# Algebraic and strength-reduction folds read a constant's low word only.
+# 0xffffffffULL is no all-ones mask for a long long, and 0x100000004ULL is not
+# the power of two its low word is.
+try_ 0 << EOF
+unsigned long long mask(unsigned long long x) { return x & 0xffffffffULL; }
+unsigned long long fill(unsigned long long x) { return x | 0xffffffffULL; }
+long long times(long long x) { return x * 0xffffffffLL; }
+unsigned long long scale(unsigned long long x) { return x * 0x100000004ULL; }
+unsigned long long part(unsigned long long x) { return x / 0x100000004ULL; }
+long long all_ones(long long x) { return x | -1; }
+int main(void) {
+    return mask(0x123456789ULL) != 0x23456789ULL ||
+           fill(0x123456789ULL) != 0x1ffffffffULL ||
+           times(2) != 0x1fffffffeLL || scale(3) != 0x30000000cULL ||
+           part(0x300000010ULL) != 3 || all_ones(5) != -1LL;
+}
+EOF
+
+# A branch threaded on a constant condition tests the whole constant:
+# 0x227044f500000000ULL has a zero low word but is true.
+try_ 0 << EOF
+int main(void) {
+    long long flag = 0xafc6260dLL;
+    unsigned long long other = 0xffffffffULL;
+    unsigned long long picked =
+        ((unsigned long long)flag ? 0x227044f500000000ULL : 0) ? 0 : other;
+    return picked != 0;
+}
+EOF
 try_ 1 << EOF
 unsigned int identity(unsigned int value) { return value; }
 int main(void) { return identity(4294967295U) >> 31; }
@@ -7064,13 +7370,6 @@ int main(void) {
            (sizeof(long const) == sizeof(int));
 }
 EOF
-
-if [ "$PTR_SZ" -lt 8 ]; then
-    try_compile_error << EOF
-long long value;
-int main(void) { return 0; }
-EOF
-fi
 
 # Compound literal support - C90/C99 compliant implementation Basic struct
 # compound literals (verified working)

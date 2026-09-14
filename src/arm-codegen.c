@@ -72,6 +72,10 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
             ph2_ir->dest_hi != ph2_ir->src0_hi)
             elf_offset += 4;
+        /* Exchanging the two registers of a pair takes a third move. */
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->dest == ph2_ir->src0_hi &&
+            ph2_ir->dest_hi == ph2_ir->src0)
+            elf_offset += 4;
         return;
     case OP_load:
     case OP_global_load:
@@ -114,7 +118,11 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             abort();
         return;
     case OP_read:
+        elf_offset += ph2_ir->dest_hi >= 0 ? 8 : 4;
+        return;
     case OP_write:
+        elf_offset += ph2_ir->src1_hi >= 0 ? 8 : 4;
+        return;
     case OP_jump:
     case OP_load_func:
     case OP_indirect:
@@ -202,16 +210,16 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += 8;
         return;
     case OP_address_of_func:
-    case OP_log_not:
         elf_offset += 12;
+        return;
+    case OP_log_not:
+        elf_offset += ph2_ir->src0_hi >= 0 ? 16 : 12;
         return;
     case OP_gt:
     case OP_lt:
-        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 24 : 12;
-        return;
     case OP_geq:
     case OP_leq:
-        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 28 : 12;
+        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 16 : 12;
         return;
     case OP_eq:
     case OP_neq:
@@ -222,6 +230,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
             elf_offset += 12;
         else
             elf_offset += 8;
+        if (ph2_ir->src0_hi >= 0)
+            elf_offset += 4;
         return;
     case OP_return:
         elf_offset += 24;
@@ -445,6 +455,23 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * emitting one here would push every later address out by four bytes
          * and leave the data segment's p_offset and p_vaddr incongruent.
          */
+        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
+            rd == ph2_ir->src0_hi) {
+            /* A pair moved one register over, as a slot round trip collapsed
+             * into a move can leave it: the low destination is the high source,
+             * so move the high word first, through r8 when the two registers
+             * trade places.
+             */
+            if (ph2_ir->dest_hi == rn) {
+                emit(__mov_r(__AL, __r8, rn));
+                emit(__mov_r(__AL, rd, ph2_ir->src0_hi));
+                emit(__mov_r(__AL, ph2_ir->dest_hi, __r8));
+            } else {
+                emit(__mov_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
+                emit(__mov_r(__AL, rd, rn));
+            }
+            return;
+        }
         if (rd != rn)
             emit(__mov_r(__AL, rd, rn));
         if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
@@ -534,6 +561,22 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__sw(__AL, rn, interm, store_offset));
         return;
     case OP_read:
+        if (ph2_ir->dest_hi >= 0) {
+            /* A pair read through a pointer. When the low destination is the
+             * address register itself, fetch the high word first so the address
+             * survives until both words are loaded.
+             */
+            if (ph2_ir->src1 != 8)
+                fatal("unsupported Arm pair load width");
+            if (rd == rn) {
+                emit(__lw(__AL, ph2_ir->dest_hi, rn, 4));
+                emit(__lw(__AL, rd, rn, 0));
+            } else {
+                emit(__lw(__AL, rd, rn, 0));
+                emit(__lw(__AL, ph2_ir->dest_hi, rn, 4));
+            }
+            return;
+        }
         if (ph2_ir->src1 == 1)
             emit(ph2_ir->is_unsigned ? __lb(__AL, rd, rn, 0)
                                      : __lsb(__AL, rd, rn, 0));
@@ -546,6 +589,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             fatal("unsupported Arm load width");
         return;
     case OP_write:
+        if (ph2_ir->src1_hi >= 0) {
+            if (ph2_ir->dest != 8)
+                fatal("unsupported Arm pair store width");
+            emit(__sw(__AL, rm, rn, 0));
+            emit(__sw(__AL, ph2_ir->src1_hi, rn, 4));
+            return;
+        }
         if (ph2_ir->dest == 1)
             emit(__sb(__AL, rm, rn, 0));
         else if (ph2_ir->dest == 2)
@@ -556,7 +606,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             fatal("unsupported Arm store width");
         return;
     case OP_branch:
-        emit(__teq(rn));
+        /* A pair is true when either word is nonzero. */
+        if (ph2_ir->src0_hi >= 0) {
+            emit(__or_r(__AL, __r8, rn, ph2_ir->src0_hi));
+            emit(__teq(__r8));
+        } else
+            emit(__teq(rn));
         if (ph2_ir->is_branch_detached) {
             /* The else block does not follow, and nothing says the then block
              * does either: a loop's back edge lands behind this one. Jump to
@@ -935,8 +990,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__cmp_i(__AL, rm, 32));
             emit(__b(__CS, 32));
             emit(__mov_r(__AL, __r8, ph2_ir->src0_hi));
-            emit(shift_kind == logic_rs ? __srl(__AL, rd, rn, rm)
-                                        : __sra(__AL, rd, rn, rm));
+
+            /* The sign lives in the high word. The low word's vacated top bits
+             * are the high word's low bits, ORed in below, so shifting in the
+             * low word's own bit 31 would set bits the OR cannot clear.
+             */
+            emit(__srl(__AL, rd, rn, rm));
             emit(__rsb_i(__AL, __r9, 32, rm));
             emit(__sll(__AL, __r8, __r8, __r9));
             emit(__or_r(__AL, rd, rd, __r8));
@@ -964,42 +1023,29 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_lt:
     case OP_geq:
     case OP_leq:
-        /* Wide equality compares the low words and, only when they match, the
-         * high words, below. The ordering sequence here would leave a stale
-         * result when the high words differ.
+        /* Wide ordering subtracts the pairs, the low words with CMP and the
+         * high words with SBCS, so the flags describe the whole 64-bit
+         * difference: N and V order signed operands and C unsigned ones. The
+         * low words are unsigned whatever the type, which a signed test of them
+         * got wrong. Swapping the operands turns > and <= into < and >=. The
+         * result register is written only once the flags are set, so it may be
+         * any operand register. Equality is left to the word-by-word sequence
+         * below, since Z is not valid after SBCS.
          */
         if (ph2_ir->op != OP_eq && ph2_ir->op != OP_neq &&
             ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0) {
             bool unsigned_cmp =
                 ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
-            arm_cond_t true_cond = arm_get_cond(ph2_ir->op, unsigned_cmp);
-            arm_cond_t false_cond;
+            bool swap = ph2_ir->op == OP_gt || ph2_ir->op == OP_leq;
+            bool below = ph2_ir->op == OP_lt || ph2_ir->op == OP_gt;
+            arm_cond_t cond = below ? (unsigned_cmp ? __CC : __LT)
+                                    : (unsigned_cmp ? __CS : __GE);
 
-            switch (ph2_ir->op) {
-            case OP_lt:
-                false_cond = unsigned_cmp ? __CS : __GE;
-                emit(__zero(rd));
-                break;
-            case OP_gt:
-                false_cond = unsigned_cmp ? __LS : __LE;
-                emit(__zero(rd));
-                break;
-            case OP_geq:
-                false_cond = unsigned_cmp ? __CC : __LT;
-                emit(__mov_i(__AL, rd, 1));
-                break;
-            default: /* OP_leq */
-                false_cond = unsigned_cmp ? __HI : __GT;
-                emit(__mov_i(__AL, rd, 1));
-                break;
-            }
-            emit(__cmp_r(__AL, ph2_ir->src0_hi, ph2_ir->src1_hi));
-            emit(__mov_i(true_cond, rd, 1));
-            emit(__mov_i(false_cond, rd, 0));
-            emit(__cmp_r(__EQ, rn, rm));
-            if (ph2_ir->op == OP_geq || ph2_ir->op == OP_leq)
-                emit(__mov_i(__EQ, rd, 0));
-            emit(__mov_i(true_cond, rd, 1));
+            emit(__cmp_r(__AL, swap ? rm : rn, swap ? rn : rm));
+            emit(__sbcs_r(__AL, __r8, swap ? ph2_ir->src1_hi : ph2_ir->src0_hi,
+                          swap ? ph2_ir->src0_hi : ph2_ir->src1_hi));
+            emit(__zero(rd));
+            emit(__mov_i(cond, rd, 1));
             return;
         }
         emit(__cmp_r(__AL, rn, rm));
@@ -1045,7 +1091,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                          ph2_ir->src1_hi));
         return;
     case OP_log_not:
-        emit(__cmp_i(__AL, rn, 0));
+        if (ph2_ir->src0_hi >= 0) {
+            emit(__or_r(__AL, __r8, rn, ph2_ir->src0_hi));
+            emit(__cmp_i(__AL, __r8, 0));
+        } else
+            emit(__cmp_i(__AL, rn, 0));
         emit(__mov_i(__NE, rd, 0));
         emit(__mov_i(__EQ, rd, 1));
         return;

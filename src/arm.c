@@ -292,6 +292,11 @@ int __sbc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
     return __mov(cond, 0, arm_sbc, 0, rs, rd, ro);
 }
 
+int __sbcs_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_sbc, 1, rs, rd, ro);
+}
+
 int __rsbs_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
 {
     return __mov(cond, 1, arm_rsb, 1, rn, rd, imm);

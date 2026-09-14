@@ -24,6 +24,9 @@ void read_global_function_declarator(block_t *block,
                                      bool is_static);
 var_t *bind_block_extern_object(block_t *parent, var_t *var);
 int read_const_expr(block_t *scope);
+var_t *read_wide_global_literal_expression(block_t *parent,
+                                           basic_block_t *bb,
+                                           block_t *scope);
 
 /* Forward declaration for ternary handling used by initializers */
 void read_ternary_operation(block_t *parent, basic_block_t **bb);
@@ -312,6 +315,14 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
                      cur_token_loc());
         error_at("Global aggregate initializer requires a constant value",
                  cur_token_loc());
+    } else if (typed_global_literal_appears_before_initializer_end(
+                   cur_token->next)) {
+        /* The word-sized reader below parses a literal into an int, so a member
+         * initialized with 0x100000000LL kept only its low word. Take the
+         * two-word reader a scalar global initializer uses whenever the value
+         * has a wide or unsigned literal in it.
+         */
+        val = read_wide_global_literal_expression(parent, *bb, scope);
     } else if (lex_peek(T_numeric, NULL) || lex_peek(T_minus, NULL)) {
         bool is_neg = false;
         if (lex_accept(T_minus))
@@ -1747,12 +1758,21 @@ void parse_array_init(var_t *var,
                          * enumerators before emitting the global setup-store
                          * value.
                          */
-                        val = require_var(GLOBAL_BLOCK);
-                        val->var_name = gen_name();
-                        val->init_val = read_const_expr(var->scope);
-                        val->is_const = true;
-                        add_insn(GLOBAL_BLOCK, *bb, OP_load_constant, val, NULL,
-                                 NULL, 0, NULL);
+                        if (typed_global_literal_appears_before_initializer_end(
+                                cur_token->next)) {
+                            /* read_const_expr() evaluates in an int, which
+                             * drops the high word of a wide element.
+                             */
+                            val = read_wide_global_literal_expression(
+                                GLOBAL_BLOCK, *bb, var->scope);
+                        } else {
+                            val = require_var(GLOBAL_BLOCK);
+                            val->var_name = gen_name();
+                            val->init_val = read_const_expr(var->scope);
+                            val->is_const = true;
+                            add_insn(GLOBAL_BLOCK, *bb, OP_load_constant, val,
+                                     NULL, NULL, 0, NULL);
+                        }
                     } else {
                         if (parent == GLOBAL_BLOCK) {
                             char token[MAX_ID_LEN];
@@ -1888,7 +1908,12 @@ void parse_array_init(var_t *var,
                 var_t *elem_addr = compute_element_address(
                     parent, bb, base_addr, count, elem_size);
 
-                if (elem_size <= PTR_SIZE) {
+                /* A direct long long element is wider than a pointer on a
+                 * 32-bit target, where it is written as a register pair.
+                 */
+                if (elem_size <= PTR_SIZE ||
+                    (elem_size == 8 && !var->ptr_level && !var->is_func &&
+                     !is_record_type(var->type))) {
                     add_insn(parent, *bb, OP_write, NULL, elem_addr, v,
                              elem_size, NULL);
                 } else {

@@ -253,28 +253,54 @@ bool reg_read_after(basic_block_t *bb, ph2_ir_t *ir, int reg)
 /* Whether folding @ir into @last loses a value that is still wanted. The folded
  * instruction writes only what @last writes, so a register @ir wrote and @last
  * does not keeps whatever it held before, and nothing may read it afterwards.
+ * peephole() hands every window with a register pair to pair_insn_fusion(), so
+ * both are single registers here.
  */
 bool fold_loses_dest(basic_block_t *bb, ph2_ir_t *ir, ph2_ir_t *last)
 {
-    if (ir->dest != last->dest && ir->dest != last->dest_hi &&
-        reg_read_after(bb, last, ir->dest))
-        return true;
-    return ir->dest_hi != last->dest && ir->dest_hi != last->dest_hi &&
-           reg_read_after(bb, last, ir->dest_hi);
+    return ir->dest != last->dest && reg_read_after(bb, last, ir->dest);
 }
 
 /* Whether {li t, K; op rd, a, b}, with t one of the operands, may become a
  * single instruction on rd. Every such rewrite leaves t without the constant,
  * which is dropped, moved to rd or replaced by another one. So t has to be dead
  * after the operation, and it cannot be both operands, since the rewrite still
- * reads the other one. None of the rewrites carries a high half, so both
- * instructions have to be single registers.
+ * reads the other one.
  */
 bool const_fold_ok(basic_block_t *bb, ph2_ir_t *li, ph2_ir_t *op)
 {
-    if (li->dest_hi >= 0 || op->dest_hi >= 0 || op->src0 == op->src1)
+    return op->src0 != op->src1 && !fold_loses_dest(bb, li, op);
+}
+
+/* Whether @ir names a 32-bit target's register pair. */
+bool ph2_ir_has_pair(const ph2_ir_t *ir)
+{
+    return ir && (ir->dest_hi >= 0 || ir->src0_hi >= 0 || ir->src1_hi >= 0);
+}
+
+/* The rewrites in this file match registers by their low halves and build their
+ * results without high halves, so none of them is sound on a register pair.
+ * Only the plain move fusion is kept, when the move copies the whole pair and
+ * its destination is disjoint from every register the operation reads: the
+ * backends emit a pair operation expecting the allocator's guarantee that its
+ * result does not overlap an operand, and a low result written first would
+ * otherwise clobber a high operand still to be read.
+ */
+bool pair_insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
+{
+    ph2_ir_t *next = ph2_ir->next;
+
+    if (!next || next->op != OP_assign || !is_fusible_insn(ph2_ir))
         return false;
-    return !fold_loses_dest(bb, li, op);
+    if (ph2_ir->dest_hi < 0 || ph2_ir->dest != next->src0 ||
+        ph2_ir->dest_hi != next->src0_hi || next->dest_hi < 0)
+        return false;
+    if (ir_reads_reg(ph2_ir, next->dest) || ir_reads_reg(ph2_ir, next->dest_hi))
+        return false;
+    ph2_ir->dest = next->dest;
+    ph2_ir->dest_hi = next->dest_hi;
+    ph2_ir_drop_after(bb, ph2_ir, next);
+    return true;
 }
 
 bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
@@ -298,7 +324,6 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
              * instruction no longer writes it.
              */
             ph2_ir->dest = next->dest;
-            ph2_ir->dest_hi = next->dest_hi;
             ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
         }
@@ -382,10 +407,13 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
         }
     }
 
-    /* Bitwise identity operations */
+    /* Bitwise identity operations. src1 is the constant's high word, which an
+     * eight-byte operation includes: 0xffffffffULL is no identity for it.
+     */
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == -1 &&
-        ph2_ir->src1 == 0 && next->op == OP_bit_and &&
-        ph2_ir->dest == next->src1 && const_fold_ok(bb, ph2_ir, next)) {
+        ph2_ir->src1 == (next->size_bytes > 4 ? -1 : 0) &&
+        next->op == OP_bit_and && ph2_ir->dest == next->src1 &&
+        const_fold_ok(bb, ph2_ir, next)) {
         /* Pattern: {li -1; and x, -1} → {mov x} (x & 0xFFFFFFFF = x) Example:
          * {li t1, -1; and result, var, t1} → {mov result, var} Eliminates
          * bitwise AND with all-ones mask
@@ -743,8 +771,10 @@ bool strength_reduction(basic_block_t *bb, ph2_ir_t *ph2_ir)
 
     int value = ph2_ir->src0;
 
-    /* Check if value is a power of 2 */
-    if (value <= 0 || (value & (value - 1)) != 0)
+    /* Check if value is a power of 2. src1 is the high word of an eight-byte
+     * constant, and 0x100000004ULL is no power of two.
+     */
+    if (ph2_ir->src1 || value <= 0 || (value & (value - 1)) != 0)
         return false;
     if (!const_fold_ok(bb, ph2_ir, next))
         return false;
@@ -815,8 +845,7 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
      * no longer writes its register, so nothing else may read it.
      */
     if (ph2_ir->op == OP_bit_not && next->op == OP_bit_not &&
-        next->src0 == ph2_ir->dest && ph2_ir->dest_hi < 0 &&
-        next->dest_hi < 0 && !fold_loses_dest(bb, ph2_ir, next)) {
+        next->src0 == ph2_ir->dest && !fold_loses_dest(bb, ph2_ir, next)) {
         /* Replace with simple assignment */
         ph2_ir->op = OP_assign;
         ph2_ir->dest = next->dest;
@@ -826,12 +855,15 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
 
     /* Pattern 2: AND with zero → zero x & 0 = 0, and OR with all-ones →
      * all-ones x | 0xFFFFFFFF = 0xFFFFFFFF. The constant load is retargeted to
-     * the result and the operation goes. The identities x & -1, x | 0, x ^ 0
-     * and x << 0 belong to insn_fusion(), which tries them first.
+     * the result and the operation goes. An eight-byte OR needs the high word,
+     * src1, all ones as well. The identities x & -1, x | 0, x ^ 0 and x << 0
+     * belong to insn_fusion(), which tries them first.
      */
-    if (ph2_ir->op == OP_load_constant && ph2_ir->src1 == 0 &&
-        ((ph2_ir->src0 == 0 && next->op == OP_bit_and) ||
-         (ph2_ir->src0 == -1 && next->op == OP_bit_or)) &&
+    if (ph2_ir->op == OP_load_constant &&
+        ((ph2_ir->src0 == 0 && ph2_ir->src1 == 0 && next->op == OP_bit_and) ||
+         (ph2_ir->src0 == -1 &&
+          ph2_ir->src1 == (next->size_bytes > 4 ? -1 : 0) &&
+          next->op == OP_bit_or)) &&
         (next->src0 == ph2_ir->dest || next->src1 == ph2_ir->dest) &&
         const_fold_ok(bb, ph2_ir, next)) {
         ph2_ir->dest = next->dest;
@@ -866,8 +898,7 @@ bool triple_pattern_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
         /* Only when nothing reads the loaded value, the third store included:
          * without the load the register keeps what it held before.
          */
-        if (!reg_read_after(bb, second, second->dest) &&
-            !reg_read_after(bb, second, second->dest_hi)) {
+        if (!reg_read_after(bb, second, second->dest)) {
             /* The load result is not used, can eliminate it */
             ph2_ir->next = third;
             return true;
@@ -968,6 +999,13 @@ void peephole(void)
                 if (ir->dest >= 0 && ir->dest < REG_CNT &&
                     ((func->pinned_regs >> ir->dest) & 1))
                     continue;
+
+                if (PTR_SIZE < 8 &&
+                    (ph2_ir_has_pair(ir) || ph2_ir_has_pair(next) ||
+                     ph2_ir_has_pair(next->next))) {
+                    pair_insn_fusion(bb, ir);
+                    continue;
+                }
 
                 /* Try triple pattern optimization first (3-instruction
                  * sequences)

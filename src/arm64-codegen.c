@@ -536,13 +536,13 @@ void emit_ph2_ir(ph2_ir_t *p)
         return;
 
     /* Width follows the operand, exactly as the comparisons above do. A pointer
-     * must be tested whole, or one whose low word happens to be zero reads as
-     * null. An int must not be: multiply, divide, shift and the bitwise
-     * operations all use the W forms, which leave the upper half zeroed rather
-     * than sign-extended, so only the low word is the value.
+     * or a long long must be tested whole, or one whose low word happens to be
+     * zero reads as zero. An int must not be: multiply, divide, shift and the
+     * bitwise operations all use the W forms, which leave the upper half zeroed
+     * rather than sign-extended, so only the low word is the value.
      */
     case OP_log_not:
-        emit(a64_cmp_imm_insn(p->src0_is_pointer, n, 0));
+        emit(a64_cmp_imm_insn(p->src0_is_pointer || p->size_bytes == 8, n, 0));
         emit(a64_cset_insn(false, d, A64_EQ));
         return;
 
@@ -569,7 +569,8 @@ void emit_ph2_ir(ph2_ir_t *p)
         a64_mov(d, n);
         return;
     case OP_branch:
-        a64_cbnz(p->src0_is_pointer, n, p->then_bb->elf_offset);
+        a64_cbnz(p->src0_is_pointer || p->size_bytes == 8, n,
+                 p->then_bb->elf_offset);
         a64_b(p->else_bb->elf_offset);
         return;
     case OP_jump:

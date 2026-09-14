@@ -152,13 +152,6 @@ int vreg_get_phys_hi(var_t *var)
     return -1;
 }
 
-bool var_needs_register_pair(const var_t *var)
-{
-    return PTR_SIZE < 8 && var && !var->ptr_level && !var->is_func &&
-           !var->array_size && var->type && !is_record_type(var->type) &&
-           var->type->size == 8;
-}
-
 /* ABI argument locations are measured in machine words, not source parameters.
  * Keeping that calculation in one place matters once a direct 64-bit scalar
  * occupies two words on a 32-bit target: its first word must be even-aligned,
@@ -636,8 +629,16 @@ bool ph2_writes_reg(const ph2_ir_t *ir, int reg)
     case OP_indirect:
         return true; /* the call clobbers the caller-saved registers */
     default:
-        return ir->dest == reg;
+        /* A pair result writes its high register too. */
+        return ir->dest == reg || (reg >= 0 && ir->dest_hi == reg);
     }
+}
+
+/* Whether @ir clobbers either register of the value stored from @store. */
+bool ph2_writes_stored_value(const ph2_ir_t *ir, const ph2_ir_t *store)
+{
+    return ph2_writes_reg(ir, store->src0) ||
+           (store->src0_hi >= 0 && ph2_writes_reg(ir, store->src0_hi));
 }
 
 /* Collapse a value that goes out to a stack slot and comes straight back.
@@ -699,7 +700,7 @@ void collapse_slot_roundtrip(func_t *func)
                     ok = true;
                     break;
                 }
-                if (ph2_writes_reg(ir, store->src0))
+                if (ph2_writes_stored_value(ir, store))
                     break;
                 prev = ir;
             }
@@ -724,16 +725,21 @@ void collapse_slot_roundtrip(func_t *func)
                         break;
                     }
                 }
-                if (store && ph2_writes_reg(ir, store->src0))
+                if (store && ph2_writes_stored_value(ir, store))
                     break;
                 prev = ir;
             }
         }
-        if (!ok)
+
+        /* A pair is moved as a pair: forwarding only the low register turned
+         * the load into a move that left the high register unwritten.
+         */
+        if (!ok || (store->src0_hi >= 0) != (load->dest_hi >= 0))
             continue;
 
         load->op = OP_assign;
         load->src0 = store->src0;
+        load->src0_hi = store->src0_hi;
 
         /* Removing the store first would leave prev_load stale when the store
          * is the load's predecessor, so drop the later one first.
@@ -875,6 +881,7 @@ void pin_registers(func_t *func)
 {
     int limit = REG_CNT / 2;
     bool calls = false;
+    bool pairs = false;
 
     for (int i = 0; i < REG_CNT; i++)
         pinned_base[i] = NULL;
@@ -887,11 +894,22 @@ void pin_registers(func_t *func)
             if (insn->opcode == OP_call || insn->opcode == OP_indirect ||
                 insn->opcode == OP_push)
                 calls = true;
+            if (!pairs && (var_needs_register_pair(insn->rd) ||
+                           var_needs_register_pair(insn->rs1) ||
+                           var_needs_register_pair(insn->rs2)))
+                pairs = true;
             /* Taking an address makes the frame reachable by other means. */
             if (insn->opcode == OP_address_of)
                 return;
         }
     }
+
+    /* A binary operation on register pairs holds two operand pairs and a
+     * destination pair at once. Pinning half the file left a 32-bit target with
+     * too few registers to lower one, so keep six of them unpinned.
+     */
+    if (pairs && limit > REG_CNT - 6)
+        limit = REG_CNT - 6;
 
     /* Across a call only the registers the callee preserves will still hold
      * their value. Those sit at the top of the file, which is the end the loop
@@ -1095,6 +1113,63 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
     vreg_map_to_phys(var, idx);
 }
 
+/* The two lowest free registers, in *@low and *@high. */
+bool find_free_pair(int *low, int *high)
+{
+    *low = -1;
+    *high = -1;
+    for (int r = 0; r < REG_CNT; r++) {
+        if (!reg_is_free(r))
+            continue;
+        if (*low < 0) {
+            *low = r;
+        } else {
+            *high = r;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Two free registers for a register pair, in *@low and *@high, spilling to make
+ * room when the file is full. The ordinary chooser frees one register, which
+ * cannot help a pair, so spill whole pairs through their slots first, which
+ * keeps both words, and then one-word values, whether live or dead. Neither
+ * @operand_0 nor @operand_1 is touched, nor a pinned register, and a one-word
+ * spill also leaves reserved high halves and locked inputs alone. Once OP_push
+ * has installed ABI arguments, those registers are live until the call, so
+ * nothing is spilled then.
+ */
+bool claim_free_pair(basic_block_t *bb,
+                     int operand_0,
+                     int operand_1,
+                     int *low,
+                     int *high)
+{
+    if (find_free_pair(low, high) || is_pushing_args)
+        return *high >= 0;
+
+    for (int scalars = 0; scalars < 2; scalars++) {
+        for (int r = 0; r < REG_CNT; r++) {
+            var_t *owner = REGS[r].var;
+
+            if (!owner || r == operand_0 || r == operand_1 || pinned_base[r])
+                continue;
+            if (scalars) {
+                if (var_needs_register_pair(owner) || pair_high_owner[r] ||
+                    reg_is_locked(r))
+                    continue;
+            } else if (!var_needs_register_pair(owner)) {
+                continue;
+            }
+            spill_var(bb, owner, r);
+            if (find_free_pair(low, high))
+                return true;
+        }
+    }
+    return false;
+}
+
 int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
 {
     /* A pinned variable is already where it always is -- unless this version of
@@ -1116,48 +1191,9 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
         return phys_reg;
 
     if (var_needs_register_pair(var)) {
-        int low = -1, high = -1;
-        for (int r = 0; r < REG_CNT; r++) {
-            if (!reg_is_free(r))
-                continue;
-            if (low < 0)
-                low = r;
-            else {
-                high = r;
-                break;
-            }
-        }
+        int low, high;
 
-        /* Loading a spilled pair needs the same two-register recovery as
-         * producing one. Without this, several live wide locals could be stored
-         * safely in stack slots yet a later reload aborted before the ordinary
-         * spill chooser got a chance to free a complete pair.
-         */
-        if (high < 0 && !is_pushing_args) {
-            for (int r = 0; r < REG_CNT; r++) {
-                var_t *owner = REGS[r].var;
-
-                if (!owner || r == operand_0 || pinned_base[r] ||
-                    !var_needs_register_pair(owner))
-                    continue;
-                spill_var(bb, owner, r);
-                low = -1;
-                high = -1;
-                for (int q = 0; q < REG_CNT; q++) {
-                    if (!reg_is_free(q))
-                        continue;
-                    if (low < 0)
-                        low = q;
-                    else {
-                        high = q;
-                        break;
-                    }
-                }
-                if (high >= 0)
-                    break;
-            }
-        }
-        if (high < 0)
+        if (!claim_free_pair(bb, operand_0, -1, &low, &high))
             fatal("Wide operand needs two free registers");
         vreg_map_pair_to_phys(var, low, high);
         load_var(bb, var, low);
@@ -1203,9 +1239,9 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
         }
     }
 
-    if (REGS[spilled].var)
-        vreg_clear_phys(REGS[spilled].var);
-
+    /* spill_var() forgets the mapping once it has stored the value. Clearing it
+     * first dropped a pair's high register, so only the low word was stored.
+     */
     spill_var(bb, REGS[spilled].var, spilled);
     load_var(bb, var, spilled);
     vreg_map_to_phys(var, spilled);
@@ -1330,81 +1366,9 @@ int prepare_dest(basic_block_t *bb,
             REGS[mapped_low].polluted = 1;
             return mapped_low;
         }
-        int low = -1, high = -1;
-        for (int r = 0; r < REG_CNT; r++) {
-            if (!reg_is_free(r))
-                continue;
-            if (low < 0)
-                low = r;
-            else {
-                high = r;
-                break;
-            }
-        }
+        int low, high;
 
-        /* Unlike a word destination, a pair cannot use the ordinary single
-         * register spill chooser. Before argument staging begins, spill whole
-         * non-source pairs and retry; their slot preserves both words. Once
-         * OP_push has installed ABI arguments, those registers are live until
-         * the call and must never be reclaimed here.
-         */
-        if (high < 0 && !is_pushing_args) {
-            for (int r = 0; r < REG_CNT; r++) {
-                var_t *owner = REGS[r].var;
-
-                if (!owner || r == operand_0 || r == operand_1 ||
-                    pinned_base[r] || !var_needs_register_pair(owner))
-                    continue;
-                spill_var(bb, owner, r);
-                low = -1;
-                high = -1;
-                for (int q = 0; q < REG_CNT; q++) {
-                    if (!reg_is_free(q))
-                        continue;
-                    if (low < 0)
-                        low = q;
-                    else {
-                        high = q;
-                        break;
-                    }
-                }
-                if (high >= 0)
-                    break;
-            }
-        }
-
-        /* A pair result may need two registers while otherwise-dead scalar
-         * values still occupy the file. Whole-pair spilling above cannot help
-         * in that case, but scalar values already have an ordinary stack-backed
-         * spill path. Do not touch either source, pinned state, or a reserved
-         * high half.
-         */
-        if (high < 0 && !is_pushing_args) {
-            for (int r = 0; r < REG_CNT; r++) {
-                var_t *owner = REGS[r].var;
-
-                if (!owner || r == operand_0 || r == operand_1 ||
-                    pinned_base[r] || pair_high_owner[r] || reg_is_locked(r) ||
-                    var_needs_register_pair(owner))
-                    continue;
-                spill_var(bb, owner, r);
-                low = -1;
-                high = -1;
-                for (int q = 0; q < REG_CNT; q++) {
-                    if (!reg_is_free(q))
-                        continue;
-                    if (low < 0)
-                        low = q;
-                    else {
-                        high = q;
-                        break;
-                    }
-                }
-                if (high >= 0)
-                    break;
-            }
-        }
-        if (high < 0)
+        if (!claim_free_pair(bb, operand_0, operand_1, &low, &high))
             fatal("Wide destination needs two free registers");
         REGS[low].var = var;
         REGS[low].polluted = 1;
@@ -1478,9 +1442,9 @@ int prepare_dest(basic_block_t *bb,
     if (spilled < 0)
         return -1;
 
-    if (REGS[spilled].var)
-        vreg_clear_phys(REGS[spilled].var);
-
+    /* As in prepare_operand(), spill before forgetting the mapping, or a pair's
+     * high word is not stored.
+     */
     spill_var(bb, REGS[spilled].var, spilled);
     REGS[spilled].var = var;
     REGS[spilled].polluted = 1;
@@ -2464,9 +2428,20 @@ void reg_alloc_global(insn_t *global_insn)
         } else
             src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
         dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
-        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_assign);
+
+        /* An initializer such as "unsigned long long g = c ? 7U : 1U" has an
+         * int-sized value; a move would leave the high register unwritten, so
+         * extend it by its own signedness instead.
+         */
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs,
+                           var_needs_register_pair(global_insn->rd) &&
+                                   !var_needs_register_pair(global_insn->rs1)
+                               ? OP_cast
+                               : OP_assign);
         ir->src0 = src0;
         ir->src0_hi = vreg_get_phys_hi(global_insn->rs1);
+        ir->src0_is_unsigned = is_unsigned_scalar(global_insn->rs1);
+        ir->src0_is_pointer = is_address_like(global_insn->rs1);
         ir->dest = dest;
         ir->dest_hi = vreg_get_phys_hi(global_insn->rd);
         spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
@@ -2640,6 +2615,7 @@ void reg_alloc_global(insn_t *global_insn)
                 vreg = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_store);
             ir->src0 = vreg;
+            ir->src0_hi = vreg_get_phys_hi(global_insn->rs2);
 
             /* For array variables used as base, store to the backing region's
              * base offset (cached in init_val).
@@ -2677,6 +2653,7 @@ void reg_alloc_global(insn_t *global_insn)
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_write);
         ir->src0 = src0;
         ir->src1 = src1;
+        ir->src1_hi = vreg_get_phys_hi(global_insn->rs2);
         ir->dest = global_insn->sz;
         set_ptr_flags(ir, global_insn);
         break;
@@ -2694,6 +2671,15 @@ void reg_alloc_global(insn_t *global_insn)
         ir->src0 = src0;
         ir->src1 = global_insn->sz;
         ir->dest = dest;
+
+        /* Widening "long long g[] = {1}" extends into a register pair, and the
+         * backends select that form and the extension's sign from these fields
+         * exactly as they do inside a function.
+         */
+        ir->src0_hi = vreg_get_phys_hi(global_insn->rs1);
+        ir->dest_hi = vreg_get_phys_hi(global_insn->rd);
+        ir->is_unsigned = is_unsigned_scalar(global_insn->rd);
+        ir->src0_is_unsigned = is_unsigned_scalar(global_insn->rs1);
         break;
     default:
         printf("Unsupported global operation: %d\n", global_insn->opcode);
@@ -2805,6 +2791,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             src0 = prepare_operand(bb, insn->rs1, -1);
             ir = bb_add_ph2_ir(bb, OP_store);
             ir->src0 = src0;
+
+            /* The phi's slot is eight bytes for a pair; a store of the low
+             * register alone left the high word of the previous iteration.
+             */
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->src1 = insn->rd->offset;
             ir->ofs_based_on_stack_top = insn->rd->ofs_based_on_stack_top;
             ir->is_pointer = is_pointer_like(insn->rd);
@@ -2875,6 +2866,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             if (insn->rd->is_global) {
                 ir = bb_add_ph2_ir(bb, OP_global_store);
                 ir->src0 = dest;
+                ir->src0_hi = vreg_get_phys_hi(insn->rd);
                 ir->src1 = insn->rd->offset;
                 REGS[dest].polluted = 0;
             }
@@ -2982,11 +2974,17 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                     if (REGS[i].var == insn->rs1 && !pinned_base[i]) {
                         ir = bb_add_ph2_ir(bb, OP_store);
                         ir->src0 = i;
+
+                        /* A pair spills both words: the slot is about to be
+                         * read through the address, not from this register.
+                         */
+                        ir->src0_hi = vreg_get_phys_hi(insn->rs1);
                         ir->src1 = insn->rs1->offset;
                         ir->ofs_based_on_stack_top =
                             insn->rs1->ofs_based_on_stack_top;
                         /* Clear stale register tracking */
                         REGS[i].var = NULL;
+                        vreg_clear_phys(insn->rs1);
                     }
             }
 
@@ -3121,6 +3119,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0 = src0;
             ir->src1 = insn->sz;
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
             set_ptr_flags(ir, insn);
             break;
         case OP_write:
@@ -3145,12 +3144,18 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 ir = bb_add_ph2_ir(bb, OP_write);
                 ir->src0 = src0;
                 ir->src1 = src1;
+                ir->src1_hi = vreg_get_phys_hi(insn->rs2);
                 ir->dest = insn->sz;
                 set_ptr_flags(ir, insn);
             }
             break;
         case OP_branch:
             src0 = prepare_operand(bb, insn->rs1, -1);
+
+            /* Read the high register now: spill_live_out_keep() below forgets
+             * the mapping of a condition that does not outlive the block.
+             */
+            src1 = vreg_get_phys_hi(insn->rs1);
 
             /* REGS[src0].var had been set to NULL, but the actual content is
              * still holded in the register.
@@ -3164,12 +3169,19 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
 
             ir = bb_add_ph2_ir(bb, OP_branch);
             ir->src0 = src0;
+            ir->src0_hi = src1;
 
             /* An LP64 backend tests an address over its full width and an int
              * over its low word only.
              */
             ir->src0_is_pointer = is_address_like(insn->rs1);
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+
+            /* A long long is tested whole too, which AArch64 selects by the
+             * width recorded here.
+             */
+            ir->size_bytes =
+                insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
             ir->then_bb = bb->then_;
             ir->else_bb = bb->else_;
             break;
@@ -3365,6 +3377,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             ir->size_bytes =
                 insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+
+            /* !x yields an int, but it tests all of a long long operand. */
+            if (insn->opcode == OP_log_not && !insn->rs1->ptr_level &&
+                insn->rs1->type->size > ir->size_bytes)
+                ir->size_bytes = insn->rs1->type->size;
             break;
         case OP_trunc:
         case OP_sign_ext:
