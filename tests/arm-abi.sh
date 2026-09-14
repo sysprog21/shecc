@@ -360,6 +360,51 @@ int main(void) {
 ' "PASS"
 }
 
+# A long long starts at an even core register, so after one int it takes r2 and
+# r3. The callee reads the words as ints through a pointer of the caller's
+# function type.
+test_long_long_after_int()
+{
+    run_abi_test "Long long after one int (r2, r3)" "Parameter Passing" '
+#include <stdio.h>
+typedef int (*call_t)(int, long long);
+int words(int a, int skipped, int low, int high) { return low == 3 && high == 2; }
+int main() {
+    void *raw = words;
+    call_t call = raw;
+    if (call(1, 0x200000003LL)) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: long long not in r2 and r3\n");
+    return 1;
+}
+' "PASS"
+}
+
+# A long long that does not fit in the core registers goes to the stack whole,
+# leaving r3 unused, and the next argument follows it on the stack.
+test_long_long_on_stack()
+{
+    run_abi_test "Long long after three ints on the stack" "Parameter Passing" '
+#include <stdio.h>
+typedef int (*call_t)(int, int, int, long long, int);
+int words(int a, int b, int c, int skipped, int low, int high, int e) {
+    return low == 3 && high == 2 && e == 9;
+}
+int main() {
+    void *raw = words;
+    call_t call = raw;
+    if (call(1, 2, 3, 0x200000003LL, 9)) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: long long not at the bottom of the stack\n");
+    return 1;
+}
+' "PASS"
+}
+
 # Stack Alignment Tests
 
 test_stack_alignment_basic()
@@ -669,6 +714,8 @@ test_eight_args
 test_long_args_and_return
 test_narrow_unsigned_args
 test_mixed_narrow_args
+test_long_long_after_int
+test_long_long_on_stack
 
 echo ""
 echo -e "${CYAN}Running Stack Alignment Tests...${NC}"

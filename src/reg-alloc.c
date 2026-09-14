@@ -162,16 +162,34 @@ int abi_arg_words(const var_t *var)
     return var_needs_register_pair(var) ? 2 : 1;
 }
 
-int abi_arg_start(int cursor, const var_t *var)
+/* Where an argument starts, given the next free ABI word.
+ *
+ * AAPCS32 starts every long long at an even word, in registers and on the stack
+ * alike. The RV32 calling convention does so only for a variadic argument and
+ * on the stack, whose slots are eight-byte aligned; a named one takes the next
+ * two words, and when only a7 is left its low word goes there and its high word
+ * to the first stack slot.
+ */
+int abi_arg_start(int cursor, const var_t *var, bool variadic)
 {
-    if (abi_arg_words(var) == 2)
+    if (abi_arg_words(var) == 2 &&
+        (ELF_MACHINE != 0xf3 || variadic || cursor >= MAX_ARGS_IN_REG))
         cursor = ALIGN_UP(cursor, 2);
     return cursor;
 }
 
-int abi_arg_next(int cursor, const var_t *var)
+int abi_arg_next(int cursor, const var_t *var, bool variadic)
 {
-    return abi_arg_start(cursor, var) + abi_arg_words(var);
+    return abi_arg_start(cursor, var, variadic) + abi_arg_words(var);
+}
+
+/* Whether an argument starting at @word is split between the last argument
+ * register and the stack, which only a named RV32 long long can be.
+ */
+bool abi_arg_is_split(int word, const var_t *var)
+{
+    return word < MAX_ARGS_IN_REG &&
+           word + abi_arg_words(var) > MAX_ARGS_IN_REG;
 }
 
 int abi_param_start(const func_t *func, int param_idx)
@@ -179,8 +197,8 @@ int abi_param_start(const func_t *func, int param_idx)
     int cursor = func->returns_aggregate ? 1 : 0;
 
     for (int i = 0; i < param_idx; i++)
-        cursor = abi_arg_next(cursor, &func->param_defs[i]);
-    return abi_arg_start(cursor, &func->param_defs[param_idx]);
+        cursor = abi_arg_next(cursor, &func->param_defs[i], false);
+    return abi_arg_start(cursor, &func->param_defs[param_idx], false);
 }
 
 void vreg_clear_phys(var_t *var)
@@ -1053,7 +1071,7 @@ void pin_registers(func_t *func)
 
             if (word + abi_arg_words(&func->param_defs[i]) > MAX_ARGS_IN_REG)
                 break;
-            arg_words_in_reg = abi_arg_next(word, &func->param_defs[i]);
+            arg_words_in_reg = abi_arg_next(word, &func->param_defs[i], false);
         }
 
         if (reg < arg_words_in_reg)
@@ -1662,6 +1680,63 @@ void prepare_pair_argument(basic_block_t *bb, var_t *var, int low)
     load_var(bb, var, low);
 }
 
+/* Reserve the outgoing stack-argument area @func's calls need.
+ *
+ * add_func() reserves one pointer-sized word for each source parameter that
+ * cannot go in a register, which is enough only while every argument takes one
+ * ABI word. A long long takes two on a 32-bit target, and may be preceded by a
+ * padding word, so a call can reach well past that reservation: RISC-V, which
+ * passes MAX_PARAMS arguments in registers, reserves nothing at all. The words
+ * abi_lower_call_args() stores above the reservation then overwrote the first
+ * locals of the caller's frame. Nothing is placed in the frame before register
+ * allocation, so growing the reservation here moves every slot above it.
+ */
+void reserve_outgoing_args(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        int cursor = 0;
+
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            if (insn->opcode != OP_push) {
+                cursor = 0;
+                continue;
+            }
+            /* Aligning every argument bounds both placement rules. */
+            cursor = abi_arg_next(cursor, insn->rs1, true);
+            if ((cursor - MAX_ARGS_IN_REG) * PTR_SIZE > func->stack_size)
+                func->stack_size = (cursor - MAX_ARGS_IN_REG) * PTR_SIZE;
+        }
+    }
+}
+
+/* The first ABI word of each argument of the call being staged, in push order,
+ * and the next one OP_push takes. abi_lower_call_args() fills them in once per
+ * call, since only it sees the callee and so which arguments are variadic.
+ */
+int call_arg_starts[MAX_PARAMS + 1];
+int call_arg_next;
+
+/* Load only the low word of the register pair @var into @reg. */
+void load_low_word(basic_block_t *bb, var_t *var, int reg)
+{
+    int held = vreg_get_phys(var);
+    ph2_ir_t *ir;
+
+    if (held >= 0 && held < REG_CNT && REGS[held].var == var) {
+        ir = bb_add_ph2_ir(bb, OP_assign);
+        ir->src0 = held;
+    } else if (var->is_const) {
+        ir = bb_add_ph2_ir(bb, OP_load_constant);
+        ir->src0 = var->init_val;
+    } else {
+        ir = bb_add_ph2_ir(bb, var->is_global ? OP_global_load : OP_load);
+        ir->src0 = var->offset;
+        ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
+        ir->size_bytes = 4;
+    }
+    ir->dest = reg;
+}
+
 /* Return whether extra arguments are pushed onto stack. */
 bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
 {
@@ -1669,16 +1744,33 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
      * MAX_PARAMS source arguments.
      */
     insn_t *pushes[MAX_PARAMS + 1];
-    int starts[MAX_PARAMS + 1];
+    int *starts = call_arg_starts;
     int num_of_args = 0;
     int cursor = 0;
+    insn_t *call = insn;
+    func_t *callee = NULL;
+    int first_param = 0;
 
+    while (call && call->opcode == OP_push)
+        call = call->next;
+    if (call && call->opcode == OP_call)
+        callee = find_func(call->str);
+    else if (call && call->opcode == OP_indirect)
+        callee = get_func_signature(call->rs1);
+    if (callee && callee->returns_aggregate)
+        first_param = 1;
+
+    call_arg_next = 0;
     while (insn && insn->opcode == OP_push) {
+        bool variadic;
+
         if (num_of_args >= MAX_PARAMS + 1)
             fatal("Too many call arguments");
-        starts[num_of_args] = abi_arg_start(cursor, insn->rs1);
+        variadic = callee && callee->va_args &&
+                   num_of_args - first_param >= callee->num_params;
+        starts[num_of_args] = abi_arg_start(cursor, insn->rs1, variadic);
         pushes[num_of_args++] = insn;
-        cursor = abi_arg_next(cursor, insn->rs1);
+        cursor = abi_arg_next(cursor, insn->rs1, variadic);
         insn = insn->next;
     }
 
@@ -1687,6 +1779,21 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
 
     for (int i = num_of_args - 1; i >= 0; i--) {
         insn = pushes[i];
+
+        /* A split long long leaves its high word in the first stack slot. Its
+         * low word is placed with the register arguments.
+         */
+        if (abi_arg_is_split(starts[i], insn->rs1)) {
+            int scratch = MAX_ARGS_IN_REG - 2;
+
+            prepare_pair_argument(bb, insn->rs1, scratch);
+            ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
+            ir->src0 = scratch + 1;
+            ir->src1 = 0;
+            ir->size_bytes = 4;
+            spill_var(bb, insn->rs1, scratch);
+            continue;
+        }
 
         if (starts[i] < MAX_ARGS_IN_REG)
             continue;
@@ -3215,17 +3322,23 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 handle_abi = true;
             }
 
-            args = abi_arg_start(args, insn->rs1);
+            args = call_arg_starts[call_arg_next++];
             if (args_on_stack && args >= MAX_ARGS_IN_REG) {
-                args = abi_arg_next(args, insn->rs1);
+                args += abi_arg_words(insn->rs1);
                 break;
             }
 
             if (abi_arg_words(insn->rs1) == 2) {
-                if (args + 2 > MAX_ARGS_IN_REG)
-                    fatal("Wide argument crosses ABI register boundary");
+                if (abi_arg_is_split(args, insn->rs1)) {
+                    /* Nothing is placed after it in a register, so the last one
+                     * takes the low word without being claimed.
+                     */
+                    load_low_word(bb, insn->rs1, args);
+                    args += 2;
+                    break;
+                }
                 prepare_pair_argument(bb, insn->rs1, args);
-                args = abi_arg_next(args, insn->rs1);
+                args += 2;
                 break;
             }
 
@@ -3237,7 +3350,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             REGS[ir->dest].var = insn->rs1;
             REGS[ir->dest].polluted = 0;
-            args = abi_arg_next(args, insn->rs1);
+            args++;
             break;
         case OP_call:
             callee_func = find_func(insn->str);
@@ -3462,6 +3575,7 @@ void reg_alloc(void)
         }
 
         slot_var_count = 0;
+        reserve_outgoing_args(func);
         coalesce_phi_slots(func);
         pin_registers(func);
 
@@ -3512,8 +3626,27 @@ void reg_alloc(void)
             /* When encountering a variadic function, allocate space for all
              * arguments on the local stack to ensure their addresses are
              * contiguous.
+             *
+             * On a 32-bit target a long long argument takes two words, after a
+             * padding word when it would start at an odd one, so a call can
+             * pass twice as many words as it has arguments: save that many.
+             * va_arg rounds its cursor to an even word by rounding the address
+             * to eight bytes, so the first word must sit at an address that is
+             * a multiple of eight too.
              */
-            for (int i = 0; i < MAX_PARAMS; i++) {
+            int va_words = PTR_SIZE < 8 ? 2 * MAX_PARAMS : MAX_PARAMS;
+
+            /* A stack word is fetched through the register after the argument
+             * registers. RISC-V passes as many words in registers as the file
+             * holds, so it borrows the last argument register instead, which
+             * has been saved by then.
+             */
+            int scratch =
+                MAX_ARGS_IN_REG < REG_CNT ? MAX_ARGS_IN_REG : REG_CNT - 1;
+
+            if (PTR_SIZE < 8)
+                func->stack_size = ALIGN_UP(func->stack_size, 8);
+            for (int i = 0; i < va_words; i++) {
                 ph2_ir_t *ir;
                 int src0 = i;
 
@@ -3522,10 +3655,10 @@ void reg_alloc(void)
                      * arguments.
                      */
                     ir = bb_add_ph2_ir(func->bbs, OP_load);
-                    ir->dest = MAX_ARGS_IN_REG;
+                    ir->dest = scratch;
                     ir->src0 = (i - MAX_ARGS_IN_REG) * PTR_SIZE;
                     ir->ofs_based_on_stack_top = true;
-                    src0 = MAX_ARGS_IN_REG;
+                    src0 = scratch;
                 }
 
                 /* Slot i saves ABI word i. The parameter homed there is found
@@ -3533,7 +3666,7 @@ void reg_alloc(void)
                  * takes word 0 and shifts every named parameter up.
                  */
                 int param_idx = -1;
-                for (int q = 0; q < args_in_reg; q++) {
+                for (int q = 0; q < func->num_params; q++) {
                     if (abi_param_start(func, q) == i) {
                         param_idx = q;
                         break;
@@ -3562,6 +3695,27 @@ void reg_alloc(void)
                          */
                         func->stack_size += footprint - PTR_SIZE;
                     }
+                }
+            }
+
+            /* A parameter that arrived in the borrowed register now lives only
+             * in its save slot.
+             */
+            if (va_words > MAX_ARGS_IN_REG && scratch < MAX_ARGS_IN_REG) {
+                var_t *owner = pair_high_owner[scratch];
+
+                if (owner) {
+                    int low = vreg_get_phys(owner);
+
+                    if (low >= 0 && low < REG_CNT && REGS[low].var == owner) {
+                        REGS[low].var = NULL;
+                        REGS[low].polluted = 0;
+                    }
+                    vreg_clear_phys(owner);
+                } else if (REGS[scratch].var) {
+                    vreg_clear_phys(REGS[scratch].var);
+                    REGS[scratch].var = NULL;
+                    REGS[scratch].polluted = 0;
                 }
             }
         } else {
@@ -3602,6 +3756,30 @@ void reg_alloc(void)
                 var_t *param = var_subscript0(&func->param_defs[i]);
                 int word = abi_param_start(func, i);
 
+                if (abi_arg_is_split(word, param)) {
+                    /* A long long split between a7 and the first stack slot
+                     * gets a slot of its own: store the low word, then fetch
+                     * the high word through a7, which holds nothing else.
+                     */
+                    ph2_ir_t *ir;
+
+                    if (!param->space_is_allocated)
+                        alloc_var_slot(func, param);
+                    ir = bb_add_ph2_ir(func->bbs, OP_store);
+                    ir->src0 = word;
+                    ir->src1 = param->offset;
+                    ir->size_bytes = 4;
+                    ir = bb_add_ph2_ir(func->bbs, OP_load);
+                    ir->dest = word;
+                    ir->src0 = 0;
+                    ir->ofs_based_on_stack_top = true;
+                    ir->size_bytes = 4;
+                    ir = bb_add_ph2_ir(func->bbs, OP_store);
+                    ir->src0 = word;
+                    ir->src1 = param->offset + 4;
+                    ir->size_bytes = 4;
+                    continue;
+                }
                 if (word < MAX_ARGS_IN_REG)
                     continue;
                 param->offset = (word - MAX_ARGS_IN_REG) * PTR_SIZE;

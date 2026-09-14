@@ -813,15 +813,10 @@ int main(void) {
 }
 EOF
 
-# A U-suffixed value above the one-word range selects unsigned long long. Keep
-# that capability-specific assertion apart from the one-word unsigned tests
-# above: Armv7 and RV32 deliberately reject direct wide values until
-# paired-value parser admission is complete.
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 0 << EOF
+# A U-suffixed value above the one-word range selects unsigned long long.
+try_ 0 << EOF
 int main(void) { return sizeof(4294967296U) != 8; }
 EOF
-fi
 
 try_ 0 << EOF
 enum { global_unsigned_shift_count = 1 };
@@ -1548,8 +1543,7 @@ int main(void) {
     return (byte == 0U) + (half == 0U);
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 3 << EOF
+try_ 3 << EOF
 long long identity(long long value) { return value; }
 unsigned long long uidentity(unsigned long long value) { return value; }
 int main(void) {
@@ -1560,7 +1554,7 @@ int main(void) {
            (uidentity(unsigned_value) == 2000U);
 }
 EOF
-    try_ 4 << EOF
+try_ 4 << EOF
 long int identity_long_int(long int value) { return value; }
 signed long long int identity_signed_wide(signed long long int value) {
     return value;
@@ -1578,7 +1572,7 @@ int main(void) {
            (sizeof(unsigned long long int) == 8);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 typedef long long signed_wide;
 typedef unsigned long long unsigned_wide;
 int main(void) {
@@ -1587,7 +1581,7 @@ int main(void) {
     return (signed_value < 0LL) + ((unsigned_value >> 32) == 1ULL);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 typedef long unsigned long reordered_unsigned_wide;
 typedef const long long signed_wide_const;
 int main(void) {
@@ -1596,7 +1590,6 @@ int main(void) {
     return ((value >> 32) == 1ULL) + (negative < 0LL);
 }
 EOF
-fi
 try_compile_error << EOF
 unsigned unsigned int invalid;
 int main(void) { return invalid; }
@@ -1723,13 +1716,10 @@ int main(void) {
            (sizeof(typedef_half) == 2 && typedef_half == 65535U);
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 1 << EOF
+try_ 1 << EOF
 int main(void) { return (unsigned long long) 1 == 1ULL; }
 EOF
-fi
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 4 << EOF
+try_ 4 << EOF
 int main(void) {
     long long decimal = 4294967296;
     long long hexadecimal = 0x100000000;
@@ -1740,13 +1730,13 @@ int main(void) {
            (all_bits > 0ULL);
 }
 EOF
-    try_ 1 << EOF
+try_ 1 << EOF
 int main(void) {
     unsigned long long maximum = 0xffffffffffffffffULL;
     return maximum + 1ULL == 0ULL;
 }
 EOF
-    try_ 4 << EOF
+try_ 4 << EOF
 int main(void) {
     return (sizeof(2147483647) == 4) +
            (sizeof(2147483648) == 8) +
@@ -1754,13 +1744,16 @@ int main(void) {
            (sizeof(0x100000000) == 8);
 }
 EOF
-    try_ 2 << EOF
+
+# A 32-bit target deliberately types -2147483648 as int, so that INT_MIN spelled
+# that way stays usable; with an L suffix it is still a long long.
+try_ "$((PTR_SZ >= 8 ? 2 : 1))" << EOF
 int main(void) {
     return (sizeof(-2147483648) == 8) +
            (sizeof(-2147483648L) == 8);
 }
 EOF
-    try_flags 6 "--no-libc" << EOF
+try_flags 6 "--no-libc" << EOF
 #include <limits.h>
 #include <stdint.h>
 int main(void) {
@@ -1769,7 +1762,7 @@ int main(void) {
            (sizeof(LLONG_MIN) == 8) + (sizeof(INTMAX_MIN) == 8);
 }
 EOF
-    try_ 6 << EOF
+try_ 6 << EOF
 int main(void) {
     /* C99 chooses candidates from the suffix-specific list: the current
      * ABI has 32-bit long, so overflow moves to the 64-bit long-long tier. */
@@ -1781,12 +1774,9 @@ int main(void) {
            (sizeof(4294967296U) == 8);
 }
 EOF
-fi
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 1 << EOF
+try_ 1 << EOF
 int main(void) { return 4294967296U >> 32; }
 EOF
-fi
 
 # A 32-bit target admits long long literals, objects, returns and callbacks as
 # well as sizeof and pointers.
@@ -1811,14 +1801,13 @@ int main(void) {
     return identity_wide_pointer(alias) == alias;
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 3 << EOF
+try_ 3 << EOF
 int main(void) {
     return (sizeof(1LL) == 8) + ((1LL << 32) != 0) +
            (((1ULL << 32) >> 32) == 1U);
 }
 EOF
-    try_ 3 << EOF
+try_ 3 << EOF
 int main(void) {
     unsigned long long value = 0x100000000ULL;
     unsigned long long pattern = 0x123456789abcdef0ULL;
@@ -1827,7 +1816,7 @@ int main(void) {
            ((value + 7ULL) == 0x100000007ULL);
 }
 EOF
-    try_ 3 << EOF
+try_ 3 << EOF
 int main(void) {
     unsigned long long value = 4294967296ULL;
     unsigned long long pattern = 1311768467463790320ULL;
@@ -1836,7 +1825,7 @@ int main(void) {
            ((value + 7ULL) == 4294967303ULL);
 }
 EOF
-    try_ 3 << EOF
+try_ 3 << EOF
 int main(void) {
     unsigned long long octal = 040000000000ULL;
     unsigned long long binary = 0b100000000000000000000000000000000ULL;
@@ -1845,7 +1834,7 @@ int main(void) {
            ((octal + binary) == 0x200000000ULL);
 }
 EOF
-    try_ 4 << EOF
+try_ 4 << EOF
 int main(void) {
     unsigned long long all = 18446744073709551615ULL;
     long long min = -9223372036854775808LL;
@@ -1855,27 +1844,27 @@ int main(void) {
            ((min >> 63) == -1LL);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_value = 0x123456789abcdef0ULL;
 int main(void) {
     return ((global_value >> 32) == 0x12345678ULL) +
            (((global_value + 1ULL) >> 32) == 0x12345678ULL);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 long long global_min = -9223372036854775808LL;
 int main(void) {
     return (global_min < 0LL) + ((global_min >> 63) == -1LL);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_sum = 0x100000000ULL + 7ULL;
 int main(void) {
     return ((global_sum >> 32) == 1ULL) +
            ((global_sum - 7ULL) == 0x100000000ULL);
 }
 EOF
-    try_ 8 << EOF
+try_ 8 << EOF
 unsigned long long ternary_wide_true = 1 ? 0x100000000ULL : 1U;
 unsigned long long ternary_wide_false = 0 ? 0x100000000ULL : 1U;
 unsigned long long ternary_signed_rank =
@@ -1897,7 +1886,7 @@ int main(void) {
            ((ternary_signed_word >> 32) == 1ULL);
 }
 EOF
-    try_ 8 << EOF
+try_ 8 << EOF
 unsigned long long logical_and_true =
     0x100000000ULL && 1 ? 0x100000000ULL : 1U;
 unsigned long long logical_and_false =
@@ -1925,7 +1914,7 @@ int main(void) {
            (logical_nested == 0x100000000ULL);
 }
 EOF
-    try_ 7 << EOF
+try_ 7 << EOF
 unsigned long long logical_protected_and =
     0 && (1 / 0) ? 0x100000000ULL : 1U;
 unsigned long long logical_protected_or =
@@ -1950,7 +1939,7 @@ int main(void) {
            (logical_nested_protected_or == 0x100000000ULL);
 }
 EOF
-    try_ 4 << EOF
+try_ 4 << EOF
 unsigned long long ternary_protected_true =
     0 ? 1 / 0 : 1U;
 unsigned long long ternary_protected_false =
@@ -1966,24 +1955,24 @@ int main(void) {
            (ternary_protected_logical_condition == 0x100000000ULL);
 }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 unsigned long long invalid_wide_active_ternary_true =
     1 ? 1 / 0 : 0x100000000ULL;
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 unsigned long long invalid_wide_active_ternary_false =
     0 ? 0x100000000ULL : 1 / 0;
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 unsigned long long invalid_wide_ternary_condition =
     1 / 0 ? 0x100000000ULL : 1U;
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int invalid_wide_discarded_ternary_object;
 unsigned long long invalid_wide_discarded_ternary =
     0 ? invalid_wide_discarded_ternary_object : 1U;
 EOF
-    try_ 18 << EOF
+try_ 18 << EOF
 unsigned long long global_ternary_true =
     (1 ? 0x100000000ULL : 0ULL) + 1ULL;
 unsigned long long global_ternary_false =
@@ -2043,7 +2032,7 @@ int main(void) {
            (global_ternary_sizeof_array == 7ULL);
 }
 EOF
-    try_ 6 << EOF
+try_ 6 << EOF
 int postfix_object;
 typedef char cast_byte;
 struct wide_inc_rec;
@@ -2067,63 +2056,63 @@ int main(void) {
            (incomplete_typedef_pointer == 1ULL);
 }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int invalid_wide_sizeof_function(void) { return 0; }
 unsigned long long invalid_wide_sizeof_function_value =
     sizeof invalid_wide_sizeof_function ? 0x100000000ULL : 1U;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int invalid_wide_logical_operand;
 unsigned long long invalid_wide_logical_value =
     0 && invalid_wide_logical_operand ? 0x100000000ULL : 1U;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 unsigned long long invalid_wide_active_and =
     1 && (1 / 0) ? 0x100000000ULL : 1U;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 unsigned long long invalid_wide_active_or =
     0 || (1 / 0) ? 0x100000000ULL : 1U;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int invalid_wide_sizeof_grouped_function(void) { return 0; }
 unsigned long long invalid_wide_sizeof_grouped_function_value =
     sizeof(invalid_wide_sizeof_grouped_function) ? 0x100000000ULL : 1U;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 unsigned long long invalid_wide_sizeof_void = sizeof(void) ? 1ULL : 0ULL;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 struct invalid_wide_sizeof_record;
 unsigned long long invalid_wide_sizeof_record_value =
     sizeof(struct invalid_wide_sizeof_record) ? 1ULL : 0ULL;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 struct invalid_wide_sizeof_record_array;
 unsigned long long invalid_wide_sizeof_record_array_value =
     sizeof(struct invalid_wide_sizeof_record_array[2]) ? 1ULL : 0ULL;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 unsigned long long invalid_wide_sizeof_void_expression =
     sizeof((void)1) ? 1ULL : 0ULL;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 struct bad_expr_rec;
 struct bad_expr_rec *bad_expr_ptr;
 unsigned long long invalid_wide_sizeof_expression_record_value =
     sizeof((*bad_expr_ptr)) ? 1ULL : 0ULL;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 struct bad_expr_trec;
 typedef struct bad_expr_trec bad_expr_t;
 bad_expr_t *bad_expr_tptr;
@@ -2131,13 +2120,13 @@ unsigned long long invalid_wide_sizeof_expression_typedef_value =
     sizeof((*bad_expr_tptr)) ? 1ULL : 0ULL;
 int main(void) { return 0; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int invalid_wide_sizeof_trailing_object;
 unsigned long long invalid_wide_sizeof_trailing_value =
     sizeof (char)invalid_wide_sizeof_trailing_object ? 0x100000000ULL : 1U;
 int main(void) { return 0; }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_parenthesized = (0x100000000ULL + 7ULL);
 int main(void) {
     return ((global_parenthesized >> 32) == 1ULL) +
@@ -2145,7 +2134,7 @@ int main(void) {
 }
 EOF
 
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_nested_parenthesized = ((0x100000000ULL + 7ULL));
 int main(void) {
     return ((global_nested_parenthesized >> 32) == 1ULL) +
@@ -2153,7 +2142,7 @@ int main(void) {
 }
 EOF
 
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_grouped_outer = (0x100000000ULL + 7ULL) * 2ULL;
 int main(void) {
     return ((global_grouped_outer >> 32) == 2ULL) +
@@ -2161,7 +2150,7 @@ int main(void) {
 }
 EOF
 
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_wide_late = (3 + 0x100000000ULL) * 2ULL;
 int main(void) {
     return ((global_wide_late >> 32) == 2ULL) +
@@ -2169,7 +2158,7 @@ int main(void) {
 }
 EOF
 
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_nested_grouped =
     (0x100000000ULL + (3ULL * 4ULL)) - 5ULL;
 int main(void) {
@@ -2178,7 +2167,7 @@ int main(void) {
 }
 EOF
 
-    try_ 2 << EOF
+try_ 2 << EOF
 long long global_negated_grouped = -(0x100000000LL + 7LL);
 int main(void) {
     return ((global_negated_grouped >> 32) == -2LL) +
@@ -2186,7 +2175,7 @@ int main(void) {
 }
 EOF
 
-    try_ 4 << EOF
+try_ 4 << EOF
 unsigned long long global_wide_complement = ~0ULL;
 long long global_wide_double_negation = -(~0LL);
 unsigned long long global_wide_unary_plus = +0x100000000ULL;
@@ -2199,14 +2188,14 @@ int main(void) {
 }
 EOF
 
-    try_ 2 << EOF
+try_ 2 << EOF
 int main(void) {
     unsigned int all = 0xffffffffU;
     return (all == 0xffffffffU) + (all > 1U);
 }
 EOF
 
-    try_ 2 << EOF
+try_ 2 << EOF
 long long global_negative_wide = -0x100000000LL;
 int main(void) {
     return ((global_negative_wide >> 32) == -1LL) +
@@ -2214,14 +2203,14 @@ int main(void) {
 }
 EOF
 
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_unsigned_negative_wide = -0x100000000LL;
 int main(void) {
     return ((global_unsigned_negative_wide >> 32) == 0xffffffffULL) +
            ((unsigned int)global_unsigned_negative_wide == 0U);
 }
 EOF
-    try_ 3 << EOF
+try_ 3 << EOF
 unsigned long long global_unsuffixed = 0x100000000;
 unsigned long long global_all_bits = 0xffffffffffffffff;
 long long global_decimal = 2147483648;
@@ -2231,7 +2220,7 @@ int main(void) {
            (global_decimal == 2147483648LL);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned int global_octal_max = 037777777777;
 unsigned long long global_octal_wide = 040000000000;
 int main(void) {
@@ -2239,7 +2228,7 @@ int main(void) {
            ((global_octal_wide >> 32) == 1ULL);
 }
 EOF
-    try_ 3 << EOF
+try_ 3 << EOF
 unsigned long long global_quotient =
     0x123456789abcdef0ULL / 0x100000000ULL;
 unsigned long long global_remainder =
@@ -2250,7 +2239,7 @@ int main(void) {
            ((global_quotient << 32) == 0x1234567800000000ULL);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long global_precedence =
     0x100000000ULL + 3ULL * 4ULL - 5ULL;
 int main(void) {
@@ -2258,7 +2247,7 @@ int main(void) {
            ((unsigned int)global_precedence == 7U);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 unsigned long long identity_wide(unsigned long long value) { return value; }
 int main(void) {
     unsigned long long value = identity_wide(0x123456789abcdef0ULL);
@@ -2266,7 +2255,7 @@ int main(void) {
            ((value - 0x1234567800000000ULL) == 0x9abcdef0ULL);
 }
 EOF
-    try_ 3 << EOF
+try_ 3 << EOF
 int main(void) {
     unsigned long long high = 0x100000000ULL;
     unsigned long long mask = 0xffffffffffffffffULL;
@@ -2275,7 +2264,7 @@ int main(void) {
            ((high ^ high) == 0ULL);
 }
 EOF
-    try_ 3 << EOF
+try_ 3 << EOF
 int main(void) {
     unsigned long long value = 0x123456789abcdef0ULL;
     return ((value / 0x100000000ULL) == 0x12345678ULL) +
@@ -2283,50 +2272,50 @@ int main(void) {
            ((0x100000000ULL / 3ULL) == 1431655765ULL);
 }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int main(void) { return 18446744073709551616ULL != 0ULL; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int main(void) { return 9223372036854775808LL != 0LL; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int main(void) { return 9223372036854775808 != 0LL; }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 int main(void) {
     unsigned long long first = 0x100000000lLu;
     unsigned long long second = 0x100000000Ull;
     return ((first >> 32) == 1ULL) + ((second >> 32) == 1ULL);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 int main(void) {
     unsigned long long all_bits = ~0ULL;
     return ((all_bits >> 63) == 1ULL) +
            (!0x100000000ULL == 0);
 }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int main(void) { return 1UU; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int main(void) { return 1LLL; }
 EOF
-    try_compile_error << EOF
+try_compile_error << EOF
 int main(void) { return 1LUL; }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 int main(void) {
     int value = -6;
     return (value / 4 == -1) + (value % 4 == -2);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 int main(void) {
     return (sizeof(long long) == 8) + (sizeof(unsigned long long) == 8);
 }
 EOF
-    try_ 5 << EOF
+try_ 5 << EOF
 int main(void) {
     unsigned int high = 0xffffffffU;
     unsigned long long widened_unsigned = (unsigned long long) high;
@@ -2339,7 +2328,7 @@ int main(void) {
            ((unsigned int) shifted == 0U);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 long long bump(long long value) { return value + 1LL; }
 unsigned long long twice(unsigned long long value) { return value * 2ULL; }
 int main(void) {
@@ -2349,7 +2338,7 @@ int main(void) {
            ((twice(unsigned_value) >> 33) == 1ULL);
 }
 EOF
-    try_ 4 << EOF
+try_ 4 << EOF
 int main(void) {
     long long signed_value = 1LL << 33;
     unsigned long long unsigned_value = 1ULL << 33;
@@ -2359,7 +2348,7 @@ int main(void) {
            ((unsigned_value % 3ULL) == 2ULL);
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 long long eighth(long long a, long long b, long long c, long long d,
                  long long e, long long f, long long g, long long h) {
     return h;
@@ -2377,14 +2366,14 @@ int main(void) {
            ((ueighth(1ULL, 2ULL, 3ULL, 4ULL, 5ULL, 6ULL, 7ULL, unsigned_value) >> 32) == 1ULL);
 }
 EOF
-    try_ 1 << EOF
+try_ 1 << EOF
 int main(void) {
     unsigned long long value = 0xffffffffU;
     value = value * 16 + 0;
     return (value >> 32) == 15ULL;
 }
 EOF
-    try_ 1 << EOF
+try_ 1 << EOF
 unsigned long long scale(unsigned long long value, int factor) {
     unsigned long long product = value * factor;
     return product;
@@ -2394,7 +2383,7 @@ int main(void) {
     return (scale(value, 16) >> 32) == 15ULL;
 }
 EOF
-    try_ 4 << EOF
+try_ 4 << EOF
 int main(void) {
     unsigned int high = 0xffffffffU;
     long long one = 1LL;
@@ -2405,10 +2394,10 @@ int main(void) {
 }
 EOF
 
-    # A wide global reduction must rebuild the high word of every int-sized
-    # operand from its type: an enumeration constant never stores one, and an
-    # int-sized intermediate such as 2U - 3U must not keep its borrow.
-    try_ 8 << EOF
+# A wide global reduction must rebuild the high word of every int-sized operand
+# from its type: an enumeration constant never stores one, and an int-sized
+# intermediate such as 2U - 3U must not keep its borrow.
+try_ 8 << EOF
 enum { NEGATIVE_ONE = -1 };
 long long wide_enum_sum = 0x100000000LL + NEGATIVE_ONE;
 long long wide_enum_product = 1LL * NEGATIVE_ONE;
@@ -2428,9 +2417,9 @@ int main(void) {
 }
 EOF
 
-    # A signed long long divided by an unsigned int keeps the signed long long
-    # common type, so the quotient and remainder follow signed rules.
-    try_ 4 << EOF
+# A signed long long divided by an unsigned int keeps the signed long long
+# common type, so the quotient and remainder follow signed rules.
+try_ 4 << EOF
 long long wide_signed_quotient = -2LL / 2U;
 long long wide_signed_truncation = -7LL / 2U;
 long long wide_signed_remainder = -7LL % 2U;
@@ -2443,9 +2432,9 @@ int main(void) {
 }
 EOF
 
-    # Character constants are integer constant expression operands, so a wide
-    # global initializer accepts them next to a long long literal.
-    try_ 4 << EOF
+# Character constants are integer constant expression operands, so a wide global
+# initializer accepts them next to a long long literal.
+try_ 4 << EOF
 long long wide_char_sum = 0x100000000LL + 'a';
 long long wide_char_first = 'a' + 1LL;
 long long wide_wchar_product = L'b' * 0x100000000LL;
@@ -2456,7 +2445,6 @@ int main(void) {
            (wide_char_condition == 0x100000000LL);
 }
 EOF
-fi
 
 # A constant copied into its caller by inlining keeps its high word: ~0ULL
 # returned from a helper is not 0xffffffff.
@@ -2772,6 +2760,113 @@ int main(void) {
     unsigned long long picked =
         ((unsigned long long)flag ? 0x227044f500000000ULL : 0) ? 0 : other;
     return picked != 0;
+}
+EOF
+
+# Stack arguments of long longs go past the outgoing area a frame reserves for
+# one word per argument, and on RISC-V, which passes eight arguments in
+# registers, that area is empty. The caller's locals must survive the call.
+try_ 0 << EOF
+long long pick(long long a, long long b, long long c, long long d, long long e,
+               long long f, long long g, int h) {
+    long long r = a + b + c + d + e + f;
+    for (int i = 0; i < h; i++)
+        r += g;
+    return r;
+}
+int main(void) {
+    int keep = 77;
+    int *p = &keep;
+    long long r = pick(1, 2, 3, 4, 5, 6, 0x100000000LL, 2);
+    return r != 0x200000015LL || *p != 77;
+}
+EOF
+
+# A variadic function saves its named parameters from the argument words,
+# including those passed on the stack, before va_start walks past them.
+try_ 0 << EOF
+#include <stdarg.h>
+int named(int a, int b, int c, int d, int e, int f, int g, ...) {
+    va_list ap;
+    int x;
+    va_start(ap, g);
+    x = va_arg(ap, int);
+    va_end(ap);
+    return a + b + c + d + e + f * g + x;
+}
+int main(void) { return named(1, 2, 3, 4, 5, 6, 7, 100) != 157; }
+EOF
+
+# va_arg reads a long long from the pair of argument words that holds it, which
+# starts at an even word on a 32-bit target, and a variadic function saves
+# enough words for arguments of two words each.
+try_ 0 << EOF
+#include <stdarg.h>
+long long sum(int n, ...) {
+    va_list ap;
+    long long s = 0;
+    va_start(ap, n);
+    for (int i = 0; i < n; i++) {
+        if (i % 2)
+            s = s * 3 + va_arg(ap, int);
+        else
+            s = s * 3 + va_arg(ap, long long);
+    }
+    va_end(ap);
+    return s;
+}
+/* Eight named words fill the RISC-V argument registers, so saving the words
+ * passed on the stack goes through a7 after h has been saved from it.
+ */
+int eighth(int a, int b, int c, int d, int e, int f, int g, int h, ...) {
+    va_list ap;
+    int cells[1];
+    va_start(ap, h);
+    cells[0] = h;
+    va_end(ap);
+    return cells[0];
+}
+int main(void) {
+    return eighth(1, 2, 3, 4, 5, 6, 7, 8) != 8 ||
+           sum(4, 0x100000000LL, 2, 0x300000000LL, 4) !=
+               ((0x100000000LL * 3 + 2) * 3 + 0x300000000LL) * 3 + 4 ||
+           sum(7, 1LL, 2, -3LL, 4, 0x500000000LL, 6, 7LL) !=
+               (((((1LL * 3 + 2) * 3 - 3) * 3 + 4) * 3 + 0x500000000LL) * 3 + 6) * 3 + 7;
+}
+EOF
+
+# RV32 passes a named long long in the next two argument words, splitting it
+# between a7 and the stack, and aligns only a variadic one; AAPCS32 aligns every
+# one. Either way the callee must find what the caller placed.
+try_ 0 << EOF
+#include <stdarg.h>
+long long split(int a, int b, int c, int d, int e, int f, int g, long long h) {
+    return (a + b + c + d + e + f + g) * 1000 + h * 10;
+}
+long long after(long long a, int b, int c, int d, int e, int f, long long g,
+                int h) {
+    return a * 3 + (b + c + d + e + f) * 1000 + g * 10 + h;
+}
+long long odd(int a, long long b, int c) { return a * 100 + b * 10 + c; }
+long long unnamed(int a, int b, int c, int d, int e, int f, int g, ...) {
+    va_list ap;
+    long long x;
+    va_start(ap, g);
+    x = va_arg(ap, long long);
+    va_end(ap);
+    return (a + b + c + d + e + f + g) + x * 5;
+}
+typedef long long (*after_t)(long long, int, int, int, int, int, long long, int);
+int main(void) {
+    after_t callback = after;
+    return split(1, 2, 3, 4, 5, 6, 7, 0x800000009LL) !=
+               28000 + 0x800000009LL * 10 ||
+           after(0x100000000LL, 1, 2, 3, 4, 5, -0x800000009LL, 11) !=
+               0x300000000LL + 15000 - 0x800000009LL * 10 + 11 ||
+           callback(0x100000000LL, 1, 2, 3, 4, 5, -0x800000009LL, 11) !=
+               0x300000000LL + 15000 - 0x800000009LL * 10 + 11 ||
+           odd(1, 0x100000000LL, 2) != 100 + 0xa00000000LL + 2 ||
+           unnamed(1, 2, 3, 4, 5, 6, 7, -0x300000000LL) != 28 - 0xf00000000LL;
 }
 EOF
 try_ 1 << EOF
@@ -8814,14 +8909,12 @@ int main(void) {
     return (1 ? narrow_nullable_increment : (unsigned char)256)(4);
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 5 << EOF
+try_ 5 << EOF
 int wide_nullable_increment(int value) { return value + 1; }
 int main(void) {
     return (1 ? wide_nullable_increment : (int)4294967296LL)(4);
 }
 EOF
-fi
 try_compile_error << EOF
 int void_cast_increment(int value) { return value + 1; }
 int main(void) { return (1 ? void_cast_increment : (void)0)(4); }
@@ -10771,11 +10864,9 @@ int main(void)
 }
 EOF
 
-# The LP64 ABIs return an eight-byte callback result in the normal integer
-# return register pair/value. Keep this separate from the still-gated 32-bit
-# long-long ABI work.
-if [ "$PTR_SZ" -eq 8 ]; then
-    try_ 42 << EOF
+# An eight-byte callback result comes back in the integer return register, or in
+# the r0/r1 or a0/a1 pair on a 32-bit target.
+try_ 42 << EOF
 unsigned long long add_wide(unsigned long long left,
                             unsigned long long right)
 {
@@ -10790,7 +10881,6 @@ int main(void)
                : 1;
 }
 EOF
-fi
 
 # C99 permits neither addition nor subtraction on function pointers: only
 # pointers to complete object types have elements to scale or subtract.
@@ -12821,11 +12911,9 @@ int main(void) {
 }
 EOF
 
-# This evaluates a direct unsigned long long global expression. Keep the
-# address-offset lowering check on targets that currently admit wide values; the
-# surrounding one-word enum-offset regression remains portable.
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 0 << EOF
+# This evaluates a direct unsigned long long global expression in an address
+# offset.
+try_ 0 << EOF
 int global_wide_offset_values[] = {17, 23};
 int *global_wide_offset =
     &global_wide_offset_values[0] + (0x100000000ULL >> 32);
@@ -12843,7 +12931,6 @@ int main(void) {
            *aggregate_value != 23;
 }
 EOF
-fi
 try_ 0 << EOF
 struct pointer_member_holder { int *value; };
 typedef char *pointer_member_char_ptr;
@@ -13720,15 +13807,14 @@ int main(void) {
     return (quotient == 2147483647U) + (negative == 1U);
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 1 << EOF
+try_ 1 << EOF
 int main(void) {
     unsigned long long value = 0ULL;
     value += -1;
     return value == 0xffffffffffffffffULL;
 }
 EOF
-    try_ 2 << EOF
+try_ 2 << EOF
 int main(void) {
     unsigned long long quotient = 0x100000000ULL;
     unsigned long long remainder = 0x100000001ULL;
@@ -13738,7 +13824,6 @@ int main(void) {
     return (quotient == 0x80000000ULL) + (remainder == 2ULL);
 }
 EOF
-fi
 
 # Category: Sizeof Operator
 begin_category "Sizeof Operator" "Testing sizeof operator on various types"
@@ -14676,12 +14761,10 @@ int main(void) {
            (LONG_MIN < 0) + (ULONG_MAX > LONG_MAX);
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_flags 2 "--no-libc" << EOF
+try_flags 2 "--no-libc" << EOF
 #include <limits.h>
 int main(void) { return (LLONG_MIN < 0) + (ULLONG_MAX > LLONG_MAX); }
 EOF
-fi
 try_flags "$((8 + 2 * PTR_SZ))" "--no-libc" << EOF
 #include <stddef.h>
 #include <stddef.h>
@@ -14803,8 +14886,8 @@ int main(void) {
            (INT32_MIN < 0) + (INT32_MAX > 0) + (UINT32_MAX > INT32_MAX);
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_flags 9 "--no-libc" << EOF
+# INTPTR_MAX exceeds INT32_MAX only where pointers are eight bytes.
+try_flags "$((PTR_SZ >= 8 ? 9 : 8))" "--no-libc" << EOF
 #include <stdint.h>
 int main(void) {
     return (INT64_MIN < 0) + (INT64_MAX > 0) + (UINT64_MAX > INT64_MAX) +
@@ -14812,7 +14895,6 @@ int main(void) {
            (INTPTR_MIN < 0) + (INTPTR_MAX > INT32_MAX) + (UINTPTR_MAX > INTPTR_MAX);
 }
 EOF
-fi
 try_flags 10 "--no-libc" << EOF
 #include <stdint.h>
 #include <signal.h>
@@ -14839,15 +14921,13 @@ int main(void) {
            (INT_FAST32_MIN < 0) + (UINT_FAST32_MAX > INT_FAST32_MAX);
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_flags 4 "--no-libc" << EOF
+try_flags 4 "--no-libc" << EOF
 #include <stdint.h>
 int main(void) {
     return (INT_LEAST64_MIN < 0) + (UINT_LEAST64_MAX > INT_LEAST64_MAX) +
            (INT_FAST64_MIN < 0) + (UINT_FAST64_MAX > INT_FAST64_MAX);
 }
 EOF
-fi
 try_flags 12 "--no-libc" << EOF
 #include <stdint.h>
 int main(void) {
@@ -14859,8 +14939,7 @@ int main(void) {
            (sizeof(INT32_C(12)) == 4) + (sizeof(UINT32_C(12)) == 4);
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_flags 8 "--no-libc" << EOF
+try_flags 8 "--no-libc" << EOF
 #include <stdint.h>
 int main(void) {
     return (INT64_C(12) == 12LL) + (UINT64_C(12) == 12ULL) +
@@ -14869,7 +14948,6 @@ int main(void) {
            (sizeof(INTMAX_C(12)) == 8) + (sizeof(UINTMAX_C(12)) == 8);
 }
 EOF
-fi
 try_compile_error_message "Angle header not found in -I search paths" << EOF
 #include <missing-shecc-header.h>
 EOF
@@ -20310,8 +20388,7 @@ int main(void) {
     return after_char(0, 2) != 2 || after_pointer(&value, 3) != 3;
 }
 EOF
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 0 << EOF
+try_ 0 << EOF
 #include <stdarg.h>
 int after_wide(long long last, ...) {
     va_list ap;
@@ -20320,7 +20397,6 @@ int after_wide(long long last, ...) {
 }
 int main(void) { return after_wide(0, 4) != 4; }
 EOF
-fi
 
 try_ 0 << EOF
 #include <stdarg.h>
@@ -20389,8 +20465,7 @@ int main(void) {
 }
 EOF
 
-if [ "$PTR_SZ" -ge 8 ]; then
-    try_ 0 << EOF
+try_ 0 << EOF
 #include <stdarg.h>
 long long wide_argument(int count, ...) {
     va_list ap;
@@ -20399,7 +20474,6 @@ long long wide_argument(int count, ...) {
 }
 int main(void) { return wide_argument(1, 1234567890123LL) != 1234567890123LL; }
 EOF
-fi
 
 try_ 0 << EOF
 #include <stdarg.h>

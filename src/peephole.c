@@ -185,7 +185,7 @@ int call_arg_regs(ph2_ir_t *ir)
 
     int words = callee->returns_aggregate ? 1 : 0;
     for (int i = 0; i < callee->num_params && words < MAX_ARGS_IN_REG; i++)
-        words = abi_arg_next(words, &callee->param_defs[i]);
+        words = abi_arg_next(words, &callee->param_defs[i], false);
     return words < MAX_ARGS_IN_REG ? words : MAX_ARGS_IN_REG;
 }
 

@@ -102,8 +102,13 @@ void read_func_parameters_with_sret(func_t *func,
                 param->var_name = gen_name();
                 add_insn(parent, *bb, OP_address_of, param, copy, NULL, 0,
                          NULL);
-            } else if (!is_pointer_like_value(param))
+            } else if (!is_pointer_like_value(param) &&
+                       param->type->size <= TY_int->size) {
+                /* A long long is not promoted, and promote() warns about a
+                 * value wider than its int target.
+                 */
                 param = promote(parent, bb, param, TY_int, 0);
+            }
         } else if (func && param_num < func->num_params) {
             /* Only a declared parameter has a type to convert towards. Beyond
              * num_params the param_defs[] entry was never filled in, so its
@@ -761,10 +766,40 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
     step = require_typed_var(parent, TY_int);
     step->var_name = gen_name();
 
+    /* A long long on a 32-bit target takes two ABI words starting at an even
+     * one, both for AAPCS32 and for a variadic argument on RV32, and the callee
+     * saves its argument words from an eight-byte aligned slot. Round the
+     * cursor up to the pair's first word and step over both.
+     */
+    if (PTR_SIZE < 8 && !requested.ptr_level &&
+        !is_record_type(requested.type) && requested.type->size == 8) {
+        var_t *mask = require_typed_var(parent, TY_int);
+        var_t *aligned = require_typed_ptr_var(parent, TY_int, 1);
+
+        step->init_val = 7;
+        step->is_const = true;
+        add_insn(parent, *bb, OP_load_constant, step, NULL, NULL, 0, NULL);
+        aligned->var_name = gen_name();
+        add_insn(parent, *bb, OP_add, aligned, old, step, 0, NULL);
+        mask->var_name = gen_name();
+        mask->init_val = -8;
+        mask->is_const = true;
+        add_insn(parent, *bb, OP_load_constant, mask, NULL, NULL, 0, NULL);
+        old = require_typed_ptr_var(parent, TY_int, 1);
+        old->var_name = gen_name();
+        add_insn(parent, *bb, OP_bit_and, old, aligned, mask, 0, NULL);
+        step = require_typed_var(parent, TY_int);
+        step->var_name = gen_name();
+    }
+
     /* This direct IR add is byte-addressed; unlike parsed pointer arithmetic it
      * does not apply the pointee-size scale itself.
      */
-    step->init_val = PTR_SIZE;
+    step->init_val = PTR_SIZE < 8 && !requested.ptr_level &&
+                             !is_record_type(requested.type) &&
+                             requested.type->size == 8
+                         ? 8
+                         : PTR_SIZE;
     step->is_const = true;
     add_insn(parent, *bb, OP_load_constant, step, NULL, NULL, 0, NULL);
     next = require_typed_ptr_var(parent, TY_int, 1);

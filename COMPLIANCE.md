@@ -65,7 +65,7 @@ This document tracks compliance gaps and non-standard behaviors.
 | Feature | Status | Notes |
 |---------|--------|-------|
 | `long` | Partial | Distinct rank with the current 32-bit representation. |
-| `long long` | Partial | Eight-byte values work on x64/AArch64; 32-bit target admission remains gated. |
+| `long long` | Partial | Eight-byte values work on every target: 32-bit Arm and RISC-V keep them in register pairs and pass them as AAPCS32 and the RV32 calling convention require. Randomized testing still finds wide expressions the x64 and AArch64 backends miscompile. |
 | `unsigned` | Supported | Unsigned char/short/int/long families, arithmetic, conversions, and ABI paths are implemented. |
 | `signed` | Supported | Signed scalar spellings, including signed char, are distinct and parsed. |
 | `float` | Missing | No floating-point support |
@@ -77,7 +77,7 @@ This document tracks compliance gaps and non-standard behaviors.
 
 | Feature | Status | Current Behavior |
 |---------|--------|-----------------|
-| Integer suffixes (`u`, `l`, `ll`) | Partial | Common suffix spellings and x64 wide literals are parsed; full candidate-type selection remains incomplete. |
+| Integer suffixes (`u`, `l`, `ll`) | Partial | Common suffix spellings and wide literals are parsed on every target; full candidate-type selection remains incomplete. |
 | Wide characters (`L'c'`) | Supported | Lowered as the implementation's `int`-sized execution-wide-character representation. |
 | Wide strings (`L"..."`) | Supported | Lowered as NUL-terminated `wchar_t` rodata; supported in expressions, `sizeof`, pointers, and compatible array initialization. |
 | Multi-character constants | Supported | Implementation-defined left-to-right packing of up to four bytes. |
