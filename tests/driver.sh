@@ -1214,6 +1214,24 @@ int main(void) {
 }
 EOF
 
+# A narrow string literal keeps every byte after an embedded null character,
+# including across adjacent literals, in array, member and pointer uses.
+try_ 10 << EOF
+struct holder { char text[6]; int tag; };
+struct holder global_member = { "a\0" "bc", 7 };
+char global_array[] = "a\0bc";
+int main(void) {
+    struct holder local_member = { "a\0bc", 9 };
+    char local_array[6] = "x\0" "yz";
+    char *pointer = "p\0q";
+    return (global_member.text[2] == 'b') + (global_member.text[3] == 'c') +
+           (global_member.tag == 7) + (sizeof(global_array) == 5) +
+           (global_array[3] == 'c') + (local_member.text[3] == 'c') +
+           (local_member.tag == 9) + (local_array[2] == 'y') +
+           (local_array[3] == 'z') + (pointer[2] == 'q');
+}
+EOF
+
 # C99 _Bool conversions store the truth value, not a truncated source byte.
 try_ 4 << EOF
 _Bool echo_bool(_Bool value) { return value; }
@@ -2337,6 +2355,58 @@ int main(void) {
            ((high * one) == 4294967295LL) +
            ((-1 + 1ULL) == 0ULL) +
            ((-1 > 1ULL) == 1);
+}
+EOF
+
+    # A wide global reduction must rebuild the high word of every int-sized
+    # operand from its type: an enumeration constant never stores one, and an
+    # int-sized intermediate such as 2U - 3U must not keep its borrow.
+    try_ 8 << EOF
+enum { NEGATIVE_ONE = -1 };
+long long wide_enum_sum = 0x100000000LL + NEGATIVE_ONE;
+long long wide_enum_product = 1LL * NEGATIVE_ONE;
+long long wide_unsigned_borrow = 0LL + (2U - 3U);
+long long wide_unsigned_carry = 0LL + (0x7fffffffU + 1U) * 2U;
+long long wide_mixed_quotient = 0LL + (-2) / 2U;
+long long wide_narrow_divisor = 0x100000000LL / (2U - 3U);
+long long wide_narrow_truth = 0LL + !(0x80000000U + 0x80000000U);
+long long wide_enum_shift = (0LL + NEGATIVE_ONE) >> 1;
+int main(void) {
+    return (wide_enum_sum == 0xffffffffLL) + (wide_enum_product == -1LL) +
+           (wide_unsigned_borrow == 0xffffffffLL) +
+           (wide_unsigned_carry == 0LL) +
+           (wide_mixed_quotient == 0x7fffffffLL) +
+           (wide_narrow_divisor == 1LL) + (wide_narrow_truth == 1LL) +
+           (wide_enum_shift == -1LL);
+}
+EOF
+
+    # A signed long long divided by an unsigned int keeps the signed long long
+    # common type, so the quotient and remainder follow signed rules.
+    try_ 4 << EOF
+long long wide_signed_quotient = -2LL / 2U;
+long long wide_signed_truncation = -7LL / 2U;
+long long wide_signed_remainder = -7LL % 2U;
+unsigned long long wide_unsigned_quotient = -2LL / 2ULL;
+int main(void) {
+    return (wide_signed_quotient == -1LL) +
+           (wide_signed_truncation == -3LL) +
+           (wide_signed_remainder == -1LL) +
+           (wide_unsigned_quotient == 0x7fffffffffffffffULL);
+}
+EOF
+
+    # Character constants are integer constant expression operands, so a wide
+    # global initializer accepts them next to a long long literal.
+    try_ 4 << EOF
+long long wide_char_sum = 0x100000000LL + 'a';
+long long wide_char_first = 'a' + 1LL;
+long long wide_wchar_product = L'b' * 0x100000000LL;
+long long wide_char_condition = '\0' ? 1LL : 0x100000000LL;
+int main(void) {
+    return (wide_char_sum == 0x100000061LL) + (wide_char_first == 98LL) +
+           (wide_wchar_product == 0x6200000000LL) +
+           (wide_char_condition == 0x100000000LL);
 }
 EOF
 fi
@@ -8353,6 +8423,20 @@ try_compile_error << EOF
 int main(void, int i) {}
 EOF
 
+# Only the keyword itself starts a void parameter list. A type name that merely
+# begins with those letters is an ordinary parameter type, and an unknown one
+# must be diagnosed rather than read as an empty prototype.
+try_ 7 << EOF
+typedef int voidptr;
+int add(voidptr a, int b) { return a + b; }
+int main(void) { return add(3, 4); }
+EOF
+
+try_compile_error << EOF
+int unknown_parameter_type(voidx);
+int main(void) { return 0; }
+EOF
+
 # Unreachable declaration should not cause prog segmentation fault (prog should
 # leave normally with exit code 0)
 try_ 0 << EOF
@@ -10974,6 +11058,24 @@ int writable_static_string(void)
 int main(void) { return writable_static_string(); }
 EOF
 
+# A shorter string initializer zeroes the rest of an automatic array, each time
+# the declaration is reached, even after the slot was overwritten.
+try_ 0 << EOF
+int main(void)
+{
+    int dirty = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        char text[12] = "ab";
+        for (int i = 2; i < 12; i++) {
+            if (text[i] != 0)
+                dirty++;
+            text[i] = 'Q';
+        }
+    }
+    return dirty;
+}
+EOF
+
 try_ 1 << EOF
 static char inferred_file_scope_string[] = "map";
 
@@ -11752,6 +11854,17 @@ EOF
 try_ 4 << EOF
 int table[1500] = {0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1,2,3,4,5,6,0,1};
 int main(void) { return table[1499] + table[3]; }
+EOF
+
+# Every declarator in a block-scope list shares the resolved base type, not only
+# the first: b and d below are unsigned and long like a and c.
+try_ 7 << EOF
+int main(void) {
+    unsigned int a = 0, b = 0x80000000U;
+    long c = 0, d = 0;
+    unsigned e = 1, f = 0xffffffffU;
+    return (b >> 31) + 2 * (sizeof(d) == sizeof(long)) + 4 * (f > e);
+}
 EOF
 
 # A cast between signed and unsigned of the same width changes how the value
@@ -12999,6 +13112,46 @@ int main(void) {
     return (sizeof rows[0] == 3 * sizeof(int *)) +
            2 * (sizeof(rows[1]) == 3 * sizeof(int *)) +
            4 * (sizeof rows[1][2] == sizeof(int *));
+}
+EOF
+
+# The extent of a string literal operand counts the bytes after an embedded null
+# character, in each adjacent literal.
+try_ 3 << EOF
+int main(void) {
+    int grouped = sizeof("a\0bc");
+    int adjacent = sizeof "a\0" "b\0c";
+    return (grouped == 5) + 2 * (adjacent == 6);
+}
+EOF
+
+# Every sizeof result is an integer constant expression, so a zero-valued
+# expression built from sizeof of an object or string literal is a null pointer
+# constant next to a function pointer.
+try_ 15 << EOF
+int three(void) { return 3; }
+int main(void) {
+    int values[4];
+    int (*callback)(void) = three;
+    return (callback != !sizeof values) +
+           2 * (callback != sizeof(values) - sizeof(values)) +
+           4 * ((1 ? callback : !sizeof "ab")() == 3) +
+           8 * ((0 ? !sizeof(values[0]) : callback)() == 3);
+}
+EOF
+
+# A global initializer takes sizeof of a parenthesized narrow or wide string
+# literal, with or without extra grouping, as the size of the literal array.
+try_ 5 << EOF
+int global_sizeof_string = sizeof("abc");
+int global_sizeof_grouped_string = (sizeof(("a" "bc")));
+int global_sizeof_string_sum = 1 + sizeof("a\0b");
+int global_sizeof_wstring = sizeof(L"ab") / sizeof(L"");
+int global_sizeof_grouped_wstring = sizeof(((L"a" L"b"))) / sizeof(L"");
+int main(void) {
+    return (global_sizeof_string == 4) + (global_sizeof_grouped_string == 4) +
+           (global_sizeof_string_sum == 5) + (global_sizeof_wstring == 3) +
+           (global_sizeof_grouped_wstring == 3);
 }
 EOF
 

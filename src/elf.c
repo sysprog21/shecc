@@ -68,13 +68,12 @@ void elf_write_quad(strbuf_t *elf_array, int val)
     elf_write_int(elf_array, 0);
 }
 
-void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
+void elf_write_blk(strbuf_t *elf_array, const void *blk, int sz)
 {
-    if (!elf_array || !blk || sz <= 0)
+    if (!elf_array || !blk || sz <= 0 || !strbuf_extend(elf_array, sz))
         return;
-    const char *ptr = blk;
-    for (int i = 0; i < sz; i++)
-        strbuf_putc(elf_array, ptr[i]);
+    memcpy(elf_array->elements + elf_array->size, blk, sz);
+    elf_array->size += sz;
 }
 
 /* The dynamic-linking tables differ only in width between the two ELF classes,

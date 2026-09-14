@@ -1056,6 +1056,15 @@ static basic_block_t *read_block_declarators(
     read_full_var_decl(var, false, false, false);
     reject_ordinary_typedef_collision(parent, var);
 
+    /* A declaration spelled with signed, unsigned or long arrives with int as a
+     * placeholder, and only the first declarator's specifiers resolve it. Every
+     * later declarator in the list shares that resolved base type, as at file
+     * scope; created from the placeholder, "unsigned int a, b;" gave b the type
+     * int.
+     */
+    if (type == TY_int)
+        type = var->type;
+
     /* A direct function typedef used without a star declares a function, not an
      * automatic object. Bind it through the file-scope function table and leave
      * a lexical function alias so it also hides an outer local object of the
@@ -1345,7 +1354,6 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     char token[MAX_ID_LEN];
     func_t *func;
     type_t *type;
-    opcode_t prefix_op = OP_generic;
     block_decl_specifiers_t spec = {0};
 
     while (lex_peek(T_static, NULL) || lex_peek(T_extern, NULL) ||
@@ -1522,99 +1530,6 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
         return n;
     }
     return read_full_expression_statement(parent, bb);
-
-    /* handle pointer dereference expressions like *ptr = value */
-    if (lex_peek(T_asterisk, NULL)) {
-        if (stmt_starts_assignment()) {
-            /* Consume exactly one asterisk and evaluate what follows as an
-             * ordinary expression. That expression is the address to store to:
-             * for "*p" it is p, for "**pp" it is the value of *pp, and for "*(p
-             * + 1)" it is p + 1. Letting read_expr() consume the leading
-             * asterisk too would dereference once more than the assignment asks
-             * for, and the store then went to whatever the pointee happened to
-             * hold.
-             */
-            lex_expect(T_asterisk);
-            read_expr(parent, &bb);
-            read_ternary_operation(parent, &bb);
-            var_t *addr = opstack_pop();
-
-            int addr_depth = effective_pointer_depth(addr);
-            unsigned int addr_mask = effective_pointer_const_mask(addr);
-            if (addr->is_const_qualified ||
-                (addr_depth > 1 && addr_depth <= 32 &&
-                 (addr_mask & (1U << (addr_depth - 2)))))
-                error_at("assignment of read-only location", next_token_loc());
-
-            /* The width of the store is the pointee's, not the address's. */
-            int store_sz = get_pointer_element_size(addr);
-
-            opcode_t compound_op = OP_generic;
-            if (!lex_accept(T_assign) &&
-                !accept_compound_assign_op(&compound_op))
-                error_at("Expected assignment after pointer dereference",
-                         next_token_loc());
-
-            read_expr(parent, &bb);
-            read_ternary_operation(parent, &bb);
-            var_t *rvalue = opstack_pop();
-
-            if (compound_op != OP_generic) {
-                /* "*p op= v" reads the pointee, combines, and writes back. */
-                var_t *cur = require_var(parent);
-                cur->var_name = gen_name();
-                add_insn(parent, bb, OP_read, cur, addr, NULL, store_sz, NULL);
-
-                var_t *combined = require_var(parent);
-                combined->var_name = gen_name();
-                add_insn(parent, bb, compound_op, combined, cur, rvalue, 0,
-                         NULL);
-                rvalue = combined;
-            }
-
-            add_insn(parent, bb, OP_write, NULL, addr, rvalue, store_sz, NULL);
-        } else {
-            /* Not a store: an ordinary expression statement. */
-            read_expr(parent, &bb);
-            read_ternary_operation(parent, &bb);
-            perform_side_effect(parent, bb);
-        }
-        lex_expect(T_semicolon);
-        return bb;
-    }
-
-    /* is an assignment? */
-    if (read_body_assignment(token, parent, prefix_op, &bb, NULL, 0)) {
-        perform_side_effect(parent, bb);
-        while (lex_accept(T_comma)) {
-            prefix_op = OP_generic;
-            lex_peek(T_identifier, token);
-            if (!read_body_assignment(token, parent, prefix_op, &bb, NULL, 0))
-                error_at("Expected assignment after comma", next_token_loc());
-            perform_side_effect(parent, bb);
-        }
-        lex_expect(T_semicolon);
-        return bb;
-    }
-
-    if (lex_peek(T_identifier, token)) {
-        lex_accept(T_identifier);
-        token_t *id_tk = cur_token;
-        if (lex_accept(T_colon)) {
-            const label_t *l = find_label(token);
-            if (l)
-                error_at("label redefinition", &id_tk->location);
-
-            basic_block_t *n = bb_create(parent);
-            bb_connect(bb, n, NEXT);
-            add_label(token, n);
-            add_insn(parent, n, OP_label, NULL, NULL, NULL, 0, token);
-            return n;
-        }
-    }
-
-    error_at("Unrecognized statement token", next_token_loc());
-    return NULL;
 }
 
 /* Lexical typedef aliases are declaration-only bindings on the current block,

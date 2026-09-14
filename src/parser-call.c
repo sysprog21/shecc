@@ -1638,55 +1638,6 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
     }
 }
 
-/* Scan ahead for an assignment operator at the top level of the statement that
- * starts at the current token, stopping at its terminating semicolon.
- *
- * A statement beginning with '*' is either a store through a pointer or a plain
- * expression, and the two need opposite treatment of the leading asterisk.
- * Deciding by looking at tokens keeps the choice free of side effects: by the
- * time an expression has been parsed, its instructions have already been
- * emitted and there is no way back.
- */
-bool stmt_starts_assignment(void)
-{
-    int depth = 0;
-
-    for (token_t *t = cur_token->next; t; t = t->next) {
-        switch (t->kind) {
-        case T_open_bracket:
-        case T_open_square:
-            depth++;
-            break;
-        case T_close_bracket:
-        case T_close_square:
-            depth--;
-            break;
-        case T_semicolon:
-        case T_open_curly:
-        case T_close_curly:
-        case T_eof:
-            return false;
-        case T_assign:
-        case T_pluseq:
-        case T_minuseq:
-        case T_asteriskeq:
-        case T_divideeq:
-        case T_modeq:
-        case T_lshifteq:
-        case T_rshifteq:
-        case T_andeq:
-        case T_oreq:
-        case T_xoreq:
-            if (depth == 0)
-                return true;
-            break;
-        default:
-            break;
-        }
-    }
-    return false;
-}
-
 void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1;

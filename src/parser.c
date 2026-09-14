@@ -1134,13 +1134,22 @@ void discard_global_declarator_operand(var_t *var)
 
 void read_expr(block_t *parent, basic_block_t **bb);
 
-int write_symbol(const char *data)
+/* Write a decoded string literal of @length bytes, which may include an
+ * embedded null character, followed by its terminating null character.
+ */
+int write_string_symbol(const char *data, int length)
 {
-    /* Write string literals to .rodata section */
     const int start_len = elf_rodata->size;
-    elf_write_str(elf_rodata, data);
+
+    elf_write_blk(elf_rodata, data, length);
     elf_write_byte(elf_rodata, 0);
     return start_len;
+}
+
+/* Write the null-terminated string @data to .rodata. */
+int write_symbol(const char *data)
+{
+    return write_string_symbol(data, strlen(data));
 }
 
 int write_wide_symbol(const int *data, int length)

@@ -1013,8 +1013,10 @@ static void read_global_typedef_declarators(block_t *block)
     lex_expect(T_semicolon);
 }
 
-/* A file-scope typedef, after its keyword: record, enum, function and scalar
- * aliases, with every comma-separated declarator.
+/* A file-scope typedef, after its keyword: record, untagged enum, callback
+ * pointer and scalar aliases. Each form reads a single declarator; a
+ * comma-separated declarator list is only parsed by the block-scope typedef
+ * reader.
  */
 static void read_global_typedef(block_t *block)
 {

@@ -25,19 +25,35 @@ int read_sizeof_string_literal(void)
     int size = 1;
 
     do {
+        int length;
+
+        /* Count the decoded bytes the decoder reports: strlen() of the buffer
+         * would stop at an embedded null character that is part of the array.
+         */
         lex_ident(T_string, literal);
-        unescape_string(literal, unescaped, MAX_STRING_LEN);
-        size += strlen(unescaped);
+        length = unescape_string(literal, unescaped, MAX_STRING_LEN);
+        if (length < 0)
+            error_at("Invalid escape sequence", cur_token_loc());
+        size += length;
     } while (lex_peek(T_string, NULL));
 
     return size;
 }
 
-int read_sizeof_wstring_literal(void)
+/* Push the value of a sizeof expression. VLA is intentionally outside shecc's
+ * C99 scope, so every admitted sizeof result is an integer constant expression;
+ * mark it so constant folding and the null pointer constant test treat every
+ * operand form alike.
+ */
+static void push_sizeof_result(block_t *parent, basic_block_t *bb, int size)
 {
-    int values[MAX_STRING_LEN];
-    type_t *wide_type = find_type("wchar_t", true);
-    return (read_wstring_units(values, MAX_STRING_LEN) + 1) * wide_type->size;
+    var_t *result = require_var(parent);
+
+    result->init_val = size;
+    result->is_const = true;
+    result->var_name = gen_name();
+    opstack_push(result);
+    add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
 }
 
 int sizeof_array_object(const var_t *array)
@@ -297,7 +313,6 @@ static bool read_sizeof_postfix_operand(block_t *parent,
 {
     bool open_consumed = false;
     var_t object;
-    var_t *result;
     int size;
 
     if (!walk_local_sizeof_operand(parent, cur_token->next, parenthesized,
@@ -326,11 +341,7 @@ static bool read_sizeof_postfix_operand(block_t *parent,
         size = PTR_SIZE;
     else
         size = object.type->size;
-    result = require_var(parent);
-    result->init_val = size;
-    result->var_name = gen_name();
-    opstack_push(result);
-    add_insn(parent, *bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+    push_sizeof_result(parent, *bb, size);
     return true;
 }
 
@@ -353,7 +364,6 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     token_t *sizeof_tk = cur_token;
     type_t *type = NULL;
     bool is_function = false;
-    var_t *vd;
 
     bool parenthesized = lex_accept(T_open_bracket);
 
@@ -368,13 +378,11 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     if (lex_peek(T_string, NULL) &&
         (!parenthesized ||
          (after_string && after_string->kind == T_close_bracket))) {
-        vd = require_var(parent);
-        vd->init_val = read_sizeof_string_literal();
-        vd->var_name = gen_name();
+        int size = read_sizeof_string_literal();
+
         if (parenthesized)
             lex_expect(T_close_bracket);
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        push_sizeof_result(parent, *bb, size);
         return;
     }
 
@@ -384,13 +392,11 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     if (lex_peek(T_wstring, NULL) &&
         (!parenthesized ||
          (after_wstring && after_wstring->kind == T_close_bracket))) {
-        vd = require_var(parent);
-        vd->init_val = read_sizeof_wstring_literal();
-        vd->var_name = gen_name();
+        int size = read_const_wstring_size();
+
         if (parenthesized)
             lex_expect(T_close_bracket);
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        push_sizeof_result(parent, *bb, size);
         return;
     }
 
@@ -405,11 +411,8 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         if (parent->func && lex_peek(T_identifier, token) &&
             !strcmp(token, "__func__")) {
             lex_expect(T_identifier);
-            vd = require_var(parent);
-            vd->init_val = strlen(parent->func->return_def.var_name) + 1;
-            vd->var_name = gen_name();
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+            push_sizeof_result(parent, *bb,
+                               strlen(parent->func->return_def.var_name) + 1);
             return;
         }
 
@@ -418,12 +421,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
             if (array && array->array_size > 0) {
                 lex_expect(T_identifier);
-                vd = require_var(parent);
-                vd->init_val = sizeof_array_object(array);
-                vd->var_name = gen_name();
-                opstack_push(vd);
-                add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
-                         NULL);
+                push_sizeof_result(parent, *bb, sizeof_array_object(array));
                 return;
             }
         }
@@ -445,15 +443,13 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         if (is_function && ptr_cnt == 0)
             error_at("sizeof(function) is invalid", &sizeof_tk->location);
 
-        vd = require_var(parent);
-        vd->init_val = type->size;
+        int size = type->size;
+
         if (array_size > 0)
-            vd->init_val = array_size * type->size;
+            size = array_size * type->size;
         if (ptr_cnt)
-            vd->init_val = PTR_SIZE;
-        vd->var_name = gen_name();
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+            size = PTR_SIZE;
+        push_sizeof_result(parent, *bb, size);
         return;
     }
 
@@ -468,11 +464,8 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         cur_token->next->next->kind == T_close_bracket) {
         lex_expect(T_identifier);
         lex_expect(T_close_bracket);
-        vd = require_var(parent);
-        vd->init_val = strlen(parent->func->return_def.var_name) + 1;
-        vd->var_name = gen_name();
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        push_sizeof_result(parent, *bb,
+                           strlen(parent->func->return_def.var_name) + 1);
         return;
     }
 
@@ -487,12 +480,8 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
         if (array && array->array_size > 0) {
             lex_expect(T_identifier);
-            vd = require_var(parent);
-            vd->init_val = sizeof_array_object(array);
-            vd->var_name = gen_name();
-            opstack_push(vd);
             lex_expect(T_close_bracket);
-            add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+            push_sizeof_result(parent, *bb, sizeof_array_object(array));
             return;
         }
     }
@@ -806,20 +795,13 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
     if (!array_size && !ptr_cnt && type->array_size)
         array_size = type->array_size;
-    vd = require_var(parent);
-    vd->init_val = type->size;
+    int size = type->size;
+
     if (array_size > 0)
-        vd->init_val =
+        size =
             array_size * (array_element_size ? array_element_size : type->size);
     if (ptr_cnt)
-        vd->init_val = PTR_SIZE;
-
-    /* VLA is intentionally outside shecc's C99 scope, so every admitted sizeof
-     * result is an integer constant expression.
-     */
-    vd->is_const = true;
-    vd->var_name = gen_name();
-    opstack_push(vd);
+        size = PTR_SIZE;
     lex_expect(T_close_bracket);
-    add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+    push_sizeof_result(parent, *bb, size);
 }

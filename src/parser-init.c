@@ -634,7 +634,8 @@ void parse_array_field_hyperplane_init(block_t *parent,
  * into @combined, which holds MAX_STRING_LEN bytes (C99 translation phase 6).
  * Each piece is decoded in place at the end of what came before, so the
  * capacity handed to the decoder and the buffer it writes are the same object.
- * Returns the joined length.
+ * Returns the joined length in bytes as reported by the decoder, which counts
+ * an embedded null character; strlen() of @combined would stop at it.
  */
 int read_concatenated_string(char *combined)
 {
@@ -642,15 +643,16 @@ int read_concatenated_string(char *combined)
     int used;
 
     lex_ident(T_string, literal);
-    unescape_string(literal, combined, MAX_STRING_LEN);
-    used = strlen(combined);
+    used = unescape_string(literal, combined, MAX_STRING_LEN);
+    if (used < 0)
+        error_at("Concatenated string literal too long", cur_token_loc());
     while (lex_peek(T_string, NULL)) {
         int added;
 
         lex_ident(T_string, literal);
-        unescape_string(literal, combined + used, MAX_STRING_LEN - used);
-        added = strlen(combined + used);
-        if (used + added >= MAX_STRING_LEN - 1)
+        added =
+            unescape_string(literal, combined + used, MAX_STRING_LEN - used);
+        if (added < 0 || used + added >= MAX_STRING_LEN - 1)
             error_at("Concatenated string literal too long", cur_token_loc());
         used += added;
     }
@@ -671,9 +673,7 @@ void parse_string_field_init(block_t *parent,
     char combined[MAX_STRING_LEN];
     int len;
 
-    read_concatenated_string(combined);
-
-    len = strlen(combined) + 1;
+    len = read_concatenated_string(combined) + 1;
     if (len > field->array_size)
         error_at("String initializer is too long for character array",
                  cur_token_loc());

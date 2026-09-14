@@ -1295,7 +1295,7 @@ void read_parameter_list_decl(func_t *func, bool anon)
     /* C99's empty parameter list is deliberately not a prototype. */
     if (lex_accept(T_close_bracket))
         return;
-    if (lex_peek(T_identifier, token) && !strncmp(token, "void", 4)) {
+    if (lex_peek(T_identifier, token) && !strcmp(token, "void")) {
         lex_next();
         if (lex_accept(T_close_bracket)) {
             func->has_prototype = true;
@@ -1368,10 +1368,8 @@ void read_parameter_list_decl(func_t *func, bool anon)
 void read_literal_param(block_t *parent, basic_block_t *bb)
 {
     char combined[MAX_STRING_LEN];
-
-    read_concatenated_string(combined);
-
-    const int index = write_symbol(combined);
+    int length = read_concatenated_string(combined);
+    const int index = write_string_symbol(combined, length);
 
     var_t *vd = require_typed_ptr_var(parent, TY_char, true);
     vd->var_name = gen_name();
@@ -1392,10 +1390,9 @@ void parse_string_array_init(var_t *var, block_t *parent, basic_block_t **bb)
 {
     char combined[MAX_STRING_LEN];
     int len;
+    int count;
 
-    read_concatenated_string(combined);
-
-    len = strlen(combined) + 1;
+    len = read_concatenated_string(combined) + 1;
     if (var->has_unsized_array) {
         var->array_size = len;
         var->has_unsized_array = false;
@@ -1403,12 +1400,17 @@ void parse_string_array_init(var_t *var, block_t *parent, basic_block_t **bb)
         error_at("String initializer is too long for character array",
                  cur_token_loc());
 
-    for (int i = 0; i < len; i++) {
+    /* Elements past the string are zero. Static storage already starts out
+     * zeroed, but an automatic array is reinitialized on every entry to its
+     * declaration and must clear whatever the slot held before.
+     */
+    count = parent == GLOBAL_BLOCK ? len : var->array_size;
+    for (int i = 0; i < count; i++) {
         var_t *value = require_var(parent);
         var_t *addr;
 
         value->var_name = gen_name();
-        value->init_val = (unsigned char) combined[i];
+        value->init_val = i < len ? (unsigned char) combined[i] : 0;
         value->is_const = true;
         add_insn(parent, *bb, OP_load_constant, value, NULL, NULL, 0, NULL);
         addr = compute_element_address(parent, bb, var, i, 1);

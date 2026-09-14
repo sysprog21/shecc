@@ -122,29 +122,38 @@ static int read_global_sizeof_expression(block_t *scope)
     return result->init_val;
 }
 
-static int read_const_string_size(void)
-{
-    char buffer[MAX_STRING_LEN];
-    char unescaped[MAX_STRING_LEN];
-    int res = 0;
-
-    do {
-        int length;
-
-        lex_ident(T_string, buffer);
-        length = unescape_string(buffer, unescaped, sizeof(unescaped));
-        if (length < 0)
-            error_at("Invalid escape sequence", cur_token_loc());
-        res += length;
-    } while (lex_peek(T_string, buffer));
-    return res + 1;
-}
-
 int read_const_wstring_size(void)
 {
     int values[MAX_STRING_LEN];
     type_t *wide_type = find_type("wchar_t", true);
     return (read_wstring_units(values, MAX_STRING_LEN) + 1) * wide_type->size;
+}
+
+/* Starting at the first token inside the parenthesis of "sizeof (", count the
+ * grouping parentheses around an adjacent sequence of string literals of the
+ * given kind.
+ *
+ * Return -1 unless the operand is exactly such a grouped literal sequence
+ * closed by its groups and by sizeof's own parenthesis.
+ */
+static int sizeof_grouped_literal_depth(token_t *token, token_kind_t kind)
+{
+    int depth = 0;
+
+    while (token && token->kind == T_open_bracket) {
+        depth++;
+        token = token->next;
+    }
+    if (!token || token->kind != kind)
+        return -1;
+    while (token && token->kind == kind)
+        token = token->next;
+    for (int i = 0; i <= depth; i++) {
+        if (!token || token->kind != T_close_bracket)
+            return -1;
+        token = token->next;
+    }
+    return depth;
 }
 
 int read_primary_constant(block_t *scope)
@@ -171,6 +180,8 @@ int read_primary_constant(block_t *scope)
         token_t *nested_root = NULL;
         token_t *nested_after = NULL;
         int nested_groups = 0;
+        int string_groups = sizeof_grouped_literal_depth(inside, T_string);
+        int wstring_groups = sizeof_grouped_literal_depth(inside, T_wstring);
 
         if (inside && inside->kind == T_open_bracket) {
             token_t *token = inside;
@@ -198,15 +209,22 @@ int read_primary_constant(block_t *scope)
              * preserve it without a global-prefix spelling table.
              */
             res = read_global_sizeof_expression(scope);
-        } else if (inside && inside->kind == T_open_bracket && inside->next &&
-                   inside->next->kind == T_string) {
+        } else if (string_groups >= 0 || wstring_groups >= 0) {
+            /* sizeof's own parenthesis and any grouping inside it enclose the
+             * literal array; none of them is part of its extent.
+             */
+            int groups = string_groups >= 0 ? string_groups : wstring_groups;
+
             lex_expect(T_open_bracket);
-            lex_expect(T_open_bracket);
-            res = read_const_string_size();
+            for (int i = 0; i < groups; i++)
+                lex_expect(T_open_bracket);
+            if (string_groups >= 0)
+                res = read_sizeof_string_literal();
+            else
+                res = read_const_wstring_size();
+            for (int i = 0; i < groups; i++)
+                lex_expect(T_close_bracket);
             lex_expect(T_close_bracket);
-            lex_expect(T_close_bracket);
-        } else if (inside && inside->kind == T_wstring) {
-            res = read_const_wstring_size();
         } else if (nested_array && nested_array->array_size > 0 &&
                    nested_groups > 0 && nested_after &&
                    nested_after->kind == T_close_bracket) {
@@ -425,7 +443,7 @@ int read_primary_constant(block_t *scope)
             read_primary_constant(scope);
             res = TY_int->size;
         } else if (lex_peek(T_string, NULL)) {
-            res = read_const_string_size();
+            res = read_sizeof_string_literal();
         } else if (lex_peek(T_wstring, NULL)) {
             res = read_const_wstring_size();
         } else if (lex_peek(T_ampersand, NULL)) {
@@ -697,6 +715,32 @@ int read_global_address_offset(block_t *scope,
 
 static int wide_global_unevaluated_depth;
 
+/* The high word an int-sized value of this type has once it is widened: a
+ * signed source sign-extends and an unsigned source zero-extends.
+ */
+static unsigned int wide_global_narrow_high(unsigned int lo, bool is_unsigned)
+{
+    return is_unsigned || !(lo & 0x80000000U) ? 0 : 0xffffffffU;
+}
+
+/* Record a folded result. An int-sized result keeps only its low word, so a
+ * carry, borrow or product overflow computed in the high word cannot leak into
+ * a later wide reduction or a truth test of this value.
+ */
+static void store_wide_global_word_result(block_t *parent,
+                                          basic_block_t *bb,
+                                          var_t *result,
+                                          unsigned int lo,
+                                          unsigned int hi)
+{
+    if (result->type && result->type->size <= TY_int->size)
+        hi = wide_global_narrow_high(lo, result->type->is_unsigned);
+    result->init_val = lo;
+    result->init_val_hi = hi;
+    result->is_const = true;
+    add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+}
+
 /* Fold the operations that only need word arithmetic before emitting global
  * setup code. That setup block is deliberately conservative about constants,
  * and previously allowed a paired add/subtract to lose its high half.
@@ -721,6 +765,28 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
         return true;
     }
 
+    /* Materialize the usual arithmetic conversion in word form before any
+     * operation reads a high word, rather than trusting the operand's stored
+     * one: an enumeration constant never sets it. When the common type is
+     * int-sized the operands convert to that type, so an int meeting an
+     * unsigned int zero-extends; otherwise each narrow operand extends by its
+     * own signedness. A shift converts only its left operand, by promotion.
+     */
+    if (right && op != OP_lshift && op != OP_rshift) {
+        type_t *common = integer_common_type(left, right);
+        bool narrow_unsigned =
+            common->size <= TY_int->size && common->is_unsigned;
+
+        if (right->type->size <= TY_int->size)
+            rhs_hi = wide_global_narrow_high(
+                rhs_lo, right->type->is_unsigned || narrow_unsigned);
+        if (left->type->size <= TY_int->size)
+            hi = wide_global_narrow_high(
+                lo, left->type->is_unsigned || narrow_unsigned);
+    } else if (left->type->size <= TY_int->size) {
+        hi = wide_global_narrow_high(lo, left->type->is_unsigned);
+    }
+
     /* The restricted global evaluator selects a conditional arm while parsing,
      * so comparison results must carry their constant payload rather than exist
      * only as setup-block IR. Keep this in the compiler's existing two-word
@@ -733,18 +799,6 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
         bool equal;
         bool less;
         bool comparison;
-
-        /* Materialize the usual arithmetic conversion in word form. A narrow
-         * signed source sign-extends to either signed long long or unsigned
-         * long long; a narrow unsigned source zero-extends in both cases.
-         */
-        if (left->type->size <= TY_int->size)
-            hi = left->type->is_unsigned || !(lo & 0x80000000U) ? 0
-                                                                : 0xffffffffU;
-        if (right->type->size <= TY_int->size)
-            rhs_hi = right->type->is_unsigned || !(rhs_lo & 0x80000000U)
-                         ? 0
-                         : 0xffffffffU;
 
         if (common->size <= TY_int->size) {
             equal = lo == rhs_lo;
@@ -784,10 +838,7 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
             comparison = !less;
             break;
         }
-        result->init_val = comparison;
-        result->init_val_hi = 0;
-        result->is_const = true;
-        add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+        store_wide_global_word_result(parent, bb, result, comparison, 0);
         return true;
     }
 
@@ -795,17 +846,22 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
         bool left_true = lo || hi;
         bool right_true = rhs_lo || rhs_hi;
 
-        result->init_val = op == OP_log_and ? left_true && right_true
-                                            : left_true || right_true;
-        result->init_val_hi = 0;
-        result->is_const = true;
-        add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+        store_wide_global_word_result(parent, bb, result,
+                                      op == OP_log_and
+                                          ? left_true && right_true
+                                          : left_true || right_true,
+                                      0);
         return true;
     }
 
     if (op == OP_div || op == OP_mod) {
         unsigned int rem_lo = 0, rem_hi = 0, quo_lo = 0, quo_hi = 0;
-        bool is_unsigned = left->type->is_unsigned || right->type->is_unsigned;
+
+        /* The usual arithmetic conversions choose the signedness: a signed long
+         * long divided by an unsigned int stays signed long long.
+         */
+        type_t *common = integer_common_type(left, right);
+        bool is_unsigned = common->is_unsigned;
         bool neg_left = !is_unsigned && (hi >> 31);
         bool neg_right = !is_unsigned && (rhs_hi >> 31);
 
@@ -852,10 +908,7 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
                 out_hi = ~out_hi + (out_lo == 0);
             }
         }
-        result->init_val = out_lo;
-        result->init_val_hi = out_hi;
-        result->is_const = true;
-        add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+        store_wide_global_word_result(parent, bb, result, out_lo, out_hi);
         return true;
     }
 
@@ -933,10 +986,7 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
     default:
         return false;
     }
-    result->init_val = out_lo;
-    result->init_val_hi = out_hi;
-    result->is_const = true;
-    add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
+    store_wide_global_word_result(parent, bb, result, out_lo, out_hi);
     return true;
 }
 
@@ -1014,7 +1064,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         value = require_typed_var(parent, find_type("size_t", true));
         value->var_name = gen_name();
         if (lex_peek(T_string, NULL))
-            value->init_val = read_const_string_size();
+            value->init_val = read_sizeof_string_literal();
         else if (lex_peek(T_wstring, NULL))
             value->init_val = read_const_wstring_size();
         else if (lex_peek(T_numeric, NULL))
@@ -1023,7 +1073,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
                  cur_token->next->next &&
                  cur_token->next->next->kind == T_string) {
             lex_expect(T_open_bracket);
-            value->init_val = read_const_string_size();
+            value->init_val = read_sizeof_string_literal();
             lex_expect(T_close_bracket);
         } else if (lex_peek(T_open_bracket, NULL) && cur_token->next &&
                    cur_token->next->next &&
@@ -1096,6 +1146,19 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         value->init_val = constant->value;
         value->is_const = true;
         add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
+        return value;
+    }
+    if (lex_peek(T_char, NULL) || lex_peek(T_wchar, NULL)) {
+        /* A character constant is an integer constant expression operand like
+         * any number. Reuse the expression readers so its value and type match
+         * an ordinary expression; the high word is its sign extension.
+         */
+        if (lex_peek(T_wchar, NULL))
+            read_wchar_param(parent, bb);
+        else
+            read_char_param(parent, bb);
+        value = opstack_pop();
+        value->init_val_hi = wide_global_narrow_high(value->init_val, false);
         return value;
     }
     if (!lex_peek(T_numeric, literal))
