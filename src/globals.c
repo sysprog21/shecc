@@ -1139,26 +1139,75 @@ type_t *find_type_tag(char name[], block_t *block)
     return find_type(name, 1);
 }
 
-/* Struct and union tags use a namespace distinct from ordinary typedef names.
- * Keep this narrower lookup separate from find_type_tag(), which also serves
- * enum-tag parsing.
- */
-type_t *find_record_tag(char name[], block_t *block)
-{
-    for (; block; block = block->parent) {
-        for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
-            if (!strcmp(tag->name, name))
-                return tag->type;
-    }
-    return find_type(name, 2);
-}
-
 type_t *find_local_type_tag(char name[], block_t *block)
 {
     for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
         if (!strcmp(tag->name, name))
             return tag->type;
     return NULL;
+}
+
+/* C99 6.7.2.3p3: every declaration of a tag names the same kind of type, and
+ * struct, union and enum tags share one name space, so a tag found under the
+ * other keyword is an error rather than a miss.
+ */
+static type_t *check_record_tag(type_t *type, base_type_t kind)
+{
+    if (type && type->base_type != kind)
+        error_at("tag was previously declared as a different kind of record",
+                 cur_token_loc());
+    return type;
+}
+
+/* Create the incomplete struct or union tag @name of @kind in @block. */
+static type_t *declare_record_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = add_named_type(name);
+
+    type->base_type = kind;
+    add_type_tag(block, name, type);
+    return type;
+}
+
+/* The struct or union tag @name as seen from @block, spelled with the keyword
+ * for @kind, or NULL when no such tag is visible. Tags are registered with the
+ * block that declares them, file-scope ones with GLOBAL_BLOCK, which a function
+ * body's chain does not reach on its own, so a NULL @block sees file scope
+ * only. A tag declared in some other block is never found.
+ */
+type_t *find_record_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = NULL;
+
+    for (; block && !type; block = block->parent)
+        type = find_local_type_tag(name, block);
+    if (!type)
+        type = find_local_type_tag(name, GLOBAL_BLOCK);
+    return check_record_tag(type, kind);
+}
+
+/* A struct or union specifier with no member list: the visible tag, or else a
+ * new incomplete one in the current scope (C99 6.7.2.3p8), file scope when
+ * @block is NULL. An object of that type is rejected once its declarator is
+ * read.
+ */
+type_t *reference_record_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = find_record_tag(name, block, kind);
+
+    return type ? type
+                : declare_record_tag(name, block ? block : GLOBAL_BLOCK, kind);
+}
+
+/* The tag @name that @block itself declares, created incomplete when it has
+ * none yet. A member list or a bare "struct tag;" declares the tag in the
+ * current scope, shadowing any outer one (C99 6.7.2.3p5 and p7).
+ */
+type_t *local_record_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = check_record_tag(find_local_type_tag(name, block), kind);
+
+    return type ? type : declare_record_tag(name, block, kind);
 }
 
 bool find_block_typedef(block_t *block, const char *name)

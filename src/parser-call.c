@@ -391,9 +391,10 @@ void read_builtin_offsetof(block_t *parent, basic_block_t **bb)
 
     lex_expect(T_identifier);
     lex_expect(T_open_bracket);
-    if (lex_accept(T_struct) || lex_accept(T_union)) {
+    base_type_t record_kind = accept_record_keyword();
+    if (record_kind) {
         lex_ident(T_identifier, name);
-        record = find_type(name, 2);
+        record = find_record_tag(name, parent, record_kind);
     } else {
         lex_ident(T_identifier, name);
         record = find_type(name, true);
@@ -509,12 +510,13 @@ void read_builtin_va_arg_type(block_t *parent, va_arg_type_t *result)
     if (long_count > 2 || (is_short && long_count))
         error_at("invalid va_arg integer type", cur_token_loc());
 
-    if (lex_accept(T_struct) || lex_accept(T_union)) {
+    base_type_t record_kind = accept_record_keyword();
+    if (record_kind) {
         if (is_signed || is_unsigned || long_count || is_short)
             error_at("record type cannot have integer specifiers",
                      cur_token_loc());
         lex_ident(T_identifier, name);
-        type = find_type(name, 2);
+        type = find_record_tag(name, parent, record_kind);
     } else if (lex_accept(T_enum)) {
         if (is_signed || is_unsigned || long_count || is_short || saw_base)
             error_at("enum type cannot have integer specifiers",

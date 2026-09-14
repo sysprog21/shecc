@@ -1349,9 +1349,8 @@ static void read_parenthesized_operand(block_t *parent, basic_block_t **bb)
         lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) {
         /* Check if it's a basic type or typedef */
         token_t *saved_token = type_start;
-        bool is_record = lex_accept(T_struct);
-        if (!is_record)
-            is_record = lex_accept(T_union);
+        base_type_t record_kind = accept_record_keyword();
+        bool is_record = record_kind != TYPE_void;
         if (is_record)
             lex_ident(T_identifier, lookahead_token);
 
@@ -1421,7 +1420,9 @@ static void read_parenthesized_operand(block_t *parent, basic_block_t **bb)
         } else if (leading_scalar_type) {
             type = leading_scalar_type;
         } else {
-            type = find_type(lookahead_token, is_record ? 2 : true);
+            type = is_record
+                       ? find_record_tag(lookahead_token, parent, record_kind)
+                       : find_type(lookahead_token, true);
         }
 
         if (type) {

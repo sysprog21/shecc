@@ -3121,8 +3121,22 @@ int main(void) {
     return 0;
 }
 EOF
-try_compile_error << EOF
-int main(void) { typedef struct missing_tag missing_alias; return 0; }
+
+# A typedef naming an undeclared tag declares that tag incomplete: the alias
+# serves for pointers, completes with the later definition, and still cannot
+# define an object before then.
+try_compile_error_message "Incomplete struct/union type cannot define an object" << EOF
+int main(void) { typedef struct missing_tag missing_alias; missing_alias object; return 0; }
+EOF
+try_ 4 << EOF
+int main(void) {
+    typedef struct missing_tag missing_alias;
+    missing_alias *p = 0;
+    struct missing_tag { int v; } o;
+    o.v = 4;
+    p = &o;
+    return p->v;
+}
 EOF
 try_compile_error << EOF
 union kind_check { int value; };
@@ -3134,6 +3148,134 @@ int main(void) {
     typedef struct forward_record *forward_pointer;
     forward_pointer pointer = 0;
     return pointer == 0 ? 4 : 0;
+}
+EOF
+
+# A file-scope tag declaration without declarators may repeat a tag that is
+# already forward declared or complete; it refers to the same type.
+try_ 12 << EOF
+struct redeclared_record;
+struct redeclared_record;
+struct redeclared_record { int value; };
+struct redeclared_record;
+union redeclared_union { int value; };
+union redeclared_union;
+union redeclared_union;
+int main(void)
+{
+    struct redeclared_record record;
+    union redeclared_union alias;
+    record.value = 5;
+    alias.value = 7;
+    return record.value + alias.value;
+}
+EOF
+
+# A record tag declared inside a function belongs to that block: it neither
+# clashes with a later file-scope tag of the other kind nor hides one from
+# another function, and a local definition shadows the file-scope one.
+try_ 14 << EOF
+void block_union_owner(void) { union scoped_tag { int value; } u; u.value = 1; }
+struct scoped_tag { int field; };
+struct shadowed_tag { int a; int b; };
+int shadowing_function(void) {
+    struct shadowed_tag { char c; } local;
+    local.c = 5;
+    return local.c + sizeof(local);
+}
+int main(void) {
+    struct scoped_tag s;
+    struct shadowed_tag t;
+    s.field = 3;
+    t.b = 2;
+    block_union_owner();
+    return s.field + shadowing_function() + t.b - 3 + sizeof(t) - 2;
+}
+EOF
+
+# sizeof, casts and other lookups that name a tag also see the innermost one,
+# and two functions may each declare their own record under one tag.
+try_ 18 << EOF
+struct outer_shadow { int a, b; };
+int local_sizeof(void) {
+    struct outer_shadow { char c; } l;
+    l.c = 0;
+    return sizeof(struct outer_shadow) + l.c;
+}
+int first_owner(void) { struct own_tag { int a, b; } x; x.a = 0; return sizeof(struct own_tag) + x.a; }
+int second_owner(void) { struct own_tag { char c; } y; y.c = 0; return sizeof(struct own_tag) + y.c; }
+int main(void) { return local_sizeof() + first_owner() + second_owner() + 8; }
+EOF
+# Every declaration of a tag names the same kind of record.
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+union mismatched_tag { int value; };
+struct mismatched_tag;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+struct mismatched_definition;
+union mismatched_definition { int value; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+union mismatched_use { int value; };
+struct mismatched_use object;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+union mismatched_alias { int value; };
+typedef struct mismatched_alias mismatched_alias_t;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+enum mismatched_enum { MISMATCHED_ENUM };
+int main(void) { struct mismatched_enum *p = 0; return p != 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+int main(void) { struct block_kind; union block_kind u; return 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+int main(void) { struct implicit_kind *p = 0; union implicit_kind *q = 0; return p != 0; }
+EOF
+try_compile_error_message "tag was previously declared as a different kind of record" << EOF
+struct offsetof_kind { int a; };
+int main(void) { return __builtin_offsetof(union offsetof_kind, a); }
+EOF
+
+# A tag defined in one function is not visible from another: naming it there
+# declares a new incomplete tag, so a pointer is fine and an object is not.
+try_compile_error_message "Incomplete struct/union type cannot define an object" << EOF
+int owner(void) { struct foreign_tag { int a; } x; x.a = 1; return x.a; }
+int main(void) { struct foreign_tag y; return 0; }
+EOF
+
+# A specifier naming an undeclared tag declares it incomplete in the current
+# scope, and members of a block-scope record see the block's own tags.
+try_ 21 << EOF
+struct file_later *file_ptr;
+struct file_later { int v; };
+int owner(void) { struct foreign_ptr { int a, b; } x; x.a = 1; x.b = 2; return x.a + x.b; }
+int user(void) { struct foreign_ptr *p = 0; return p == 0; }
+int members(void) {
+    struct inner { int x; };
+    struct outer { struct inner in; struct unseen *link; int y; } o;
+    o.in.x = 3;
+    o.link = 0;
+    o.y = 4;
+    return o.in.x + o.y;
+}
+int late(void) {
+    struct late_tag *lp;
+    struct late_tag { int q; } l;
+    l.q = 6;
+    lp = &l;
+    return lp->q;
+}
+int main(void) {
+    struct file_later f;
+    f.v = 7;
+    file_ptr = &f;
+    return owner() + user() + members() + late() + file_ptr->v - 3;
 }
 EOF
 try_compile_error << EOF

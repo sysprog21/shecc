@@ -137,9 +137,10 @@ int read_const_sizeof_type(block_t *scope)
     int long_count = 0;
 
     lex_expect(T_open_bracket);
-    if (lex_accept(T_struct) || lex_accept(T_union)) {
+    base_type_t record_kind = accept_record_keyword();
+    if (record_kind) {
         lex_ident(T_identifier, token);
-        type = find_type(token, 2);
+        type = find_record_tag(token, scope, record_kind);
     } else if (lex_accept(T_enum)) {
         lex_ident(T_identifier, token);
         type = find_type_tag(token, scope);
@@ -411,9 +412,10 @@ int read_const_expr_operand(block_t *scope)
 
             lex_expect(T_identifier);
             lex_expect(T_open_bracket);
-            if (lex_accept(T_struct) || lex_accept(T_union)) {
+            base_type_t record_kind = accept_record_keyword();
+            if (record_kind) {
                 lex_ident(T_identifier, type_name);
-                record = find_type(type_name, 2);
+                record = find_record_tag(type_name, scope, record_kind);
             } else {
                 lex_ident(T_identifier, type_name);
                 record = find_type(type_name, true);
@@ -1094,11 +1096,7 @@ void read_full_var_decl(var_t *vd,
     if (is_enum_type && (is_signed || is_unsigned || is_long))
         error_at("enum type cannot be combined with integer specifiers",
                  cur_token_loc());
-    bool is_record_type = lex_peek(T_struct, NULL) || lex_peek(T_union, NULL);
-    bool is_union_type = lex_accept(T_union);
-    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-    if (is_union_type)
-        find_type_flag = 2;
+    base_type_t record_kind = accept_record_keyword();
     type_t *type;
 
     /* `signed` has the existing signed scalar semantics. C permits its `int`
@@ -1160,7 +1158,7 @@ void read_full_var_decl(var_t *vd,
         type = !strcmp(type_name, "char")
                    ? TY_schar
                    : (!strcmp(type_name, "short") ? TY_short : TY_int);
-    } else if (is_signed && find_type_flag == 1 &&
+    } else if (is_signed && !record_kind &&
                (!lex_peek(T_identifier, type_name) ||
                 (strcmp(type_name, "int") && strcmp(type_name, "char") &&
                  strcmp(type_name, "short")))) {
@@ -1169,22 +1167,15 @@ void read_full_var_decl(var_t *vd,
         type = leading_scalar_type;
     } else {
         lex_ident(T_identifier, type_name);
-        type = find_type_flag == 2 ? find_record_tag(type_name, vd->scope)
-                                   : find_visible_type(type_name, vd->scope);
-        if (!type && find_type_flag == 2)
-            type = find_type(type_name, 2);
-        if (find_type_flag == 2 &&
-            (!type || !is_record_type ||
-             (is_union_type ? type->base_type != TYPE_union
-                            : type->base_type != TYPE_struct)))
-            error_at("Unknown struct/union type", cur_token_loc());
+        type = record_kind
+                   ? reference_record_tag(type_name, vd->scope, record_kind)
+                   : find_visible_type(type_name, vd->scope);
     }
 
     if (!type) {
         char message[MAX_LINE_LEN];
 
-        snprintf(message, MAX_LINE_LEN, "Could not find type %s%s",
-                 find_type_flag == 2 ? "struct/union " : "", type_name);
+        snprintf(message, MAX_LINE_LEN, "Could not find type %s", type_name);
         error_at(message, cur_token_loc());
     }
 

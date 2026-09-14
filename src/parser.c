@@ -305,6 +305,18 @@ bool floating_type_starts_here(void)
             cur_token->next->next->kind == T_double);
 }
 
+/* Accept a struct or union keyword.
+ *
+ * Return the kind of record it names, or TYPE_void, which is zero, when neither
+ * keyword comes next.
+ */
+base_type_t accept_record_keyword(void)
+{
+    if (lex_accept(T_struct))
+        return TYPE_struct;
+    return lex_accept(T_union) ? TYPE_union : TYPE_void;
+}
+
 bool function_signature_has_floating(const func_t *signature)
 {
     if (!signature)

@@ -580,17 +580,13 @@ basic_block_t *handle_record_statement(block_t *parent,
                                        bool is_static)
 {
     char token[MAX_ID_LEN];
-    type_t *type;
+    type_t *type = NULL;
     var_t *var;
 
-    bool is_union = false;
-    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-    if (find_type_flag == 1 && lex_accept(T_union)) {
-        find_type_flag = 2;
-        is_union = true;
-    }
+    /* Both callers have seen struct or union ahead. */
+    base_type_t kind = accept_record_keyword();
+    bool is_union = kind == TYPE_union;
     lex_ident(T_identifier, token);
-    type = find_type(token, find_type_flag);
     if (lex_peek(T_open_curly, NULL)) {
         int i = 0;
         int size = 0;
@@ -599,16 +595,15 @@ basic_block_t *handle_record_statement(block_t *parent,
         bitfield_layout_t bits = {0};
         bool has_flexible_array_member = false;
 
-        if (!type)
-            type = add_type();
-        set_type_name(type, token);
-        type->base_type = is_union ? TYPE_union : TYPE_struct;
+        type = local_record_tag(token, parent, kind);
 
         lex_expect(T_open_curly);
         do {
             var_t *v = type_add_field(type, &i);
             var_t *last = v;
 
+            /* A member's type names tags visible in this block. */
+            v->scope = parent;
             read_full_var_decl(v, false, false, true);
             read_bitfield_width(v, parent);
             reject_flexible_array_member_container(v);
@@ -689,137 +684,134 @@ basic_block_t *handle_record_statement(block_t *parent,
             return bb;
         }
     }
-    if (!type && lex_peek(T_semicolon, NULL)) {
+    if (!type && lex_accept(T_semicolon)) {
         /* A block-scope `struct tag;` or `union tag;` introduces an incomplete
-         * tag. Its pointer declarators become valid immediately; the later
-         * complete definition reuses this type record.
+         * tag in this block, or repeats one it declared. Its pointer
+         * declarators become valid immediately; the later complete definition
+         * reuses this type record.
          */
-        type = add_type();
-        type->base_type = is_union ? TYPE_union : TYPE_struct;
-        set_type_name(type, token);
-        lex_expect(T_semicolon);
+        local_record_tag(token, parent, kind);
         return bb;
     }
-    if (type) {
-        var = require_typed_var(parent, type);
-        var->is_const_qualified = is_const;
-        var->is_static = is_static;
-        var->is_global = is_static;
-        read_partial_var_decl(var, NULL);
-        if (is_incomplete_record_object(var))
+    if (!type)
+        type = reference_record_tag(token, parent, kind);
+    var = require_typed_var(parent, type);
+    var->is_const_qualified = is_const;
+    var->is_static = is_static;
+    var->is_global = is_static;
+    read_partial_var_decl(var, NULL);
+    if (is_incomplete_record_object(var))
+        error_at("Incomplete struct/union type cannot define an object",
+                 cur_token_loc());
+    add_insn(is_static ? GLOBAL_BLOCK : parent,
+             is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, var, NULL, NULL, 0,
+             NULL);
+    add_symbol(bb, var);
+    if (lex_accept(T_assign)) {
+        validate_string_array_initializer(var);
+        if (is_static && lex_peek(T_open_curly, NULL) &&
+            (var->array_size > 0 || var->has_unsized_array ||
+             var->ptr_level > 0)) {
+            parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
+        } else if (is_static && lex_peek(T_open_curly, NULL)) {
+            parse_global_record_init(var, GLOBAL_BLOCK);
+        } else if (lex_peek(T_open_curly, NULL) &&
+                   (var->array_size > 0 || var->has_unsized_array ||
+                    var->ptr_level > 0)) {
+            parse_array_init(var, parent, &bb, 1); /* Always emit code */
+        } else if (lex_peek(T_open_curly, NULL) &&
+                   (var->type->base_type == TYPE_struct ||
+                    var->type->base_type == TYPE_union ||
+                    var->type->base_type == TYPE_typedef)) {
+            type_t *struct_type = var->type;
+            if (struct_type->base_type == TYPE_typedef &&
+                struct_type->base_struct)
+                struct_type = struct_type->base_struct;
+
+            var_t *struct_addr = require_var(parent);
+            struct_addr->var_name = gen_name();
+            add_insn(parent, bb, OP_address_of, struct_addr, var, NULL, 0,
+                     NULL);
+            lex_expect(T_open_curly);
+            parse_struct_field_init(parent, &bb, struct_type, struct_addr,
+                                    true);
+            lex_expect(T_close_curly);
+        } else {
+            if (!read_assignment_expression(parent, &bb)) {
+                read_expr(parent, &bb);
+                read_ternary_operation(parent, &bb);
+            }
+
+            var_t *rhs = opstack_pop();
+            rhs = scalarize_array_literal_if_needed(
+                parent, &bb, rhs, var->type,
+                !has_effective_pointer(var) && var->array_size == 0);
+
+            emit_object_assignment(parent, &bb, var, rhs);
+        }
+    }
+    while (lex_accept(T_comma)) {
+        var_t *nv;
+
+        /* add sequence point at T_comma */
+        perform_side_effect(parent, bb);
+
+        /* multiple (partial) declarations */
+        nv = require_typed_var(parent, type);
+        nv->is_static = is_static;
+        nv->is_global = is_static;
+        nv->is_const_qualified = is_const;
+        read_inner_var_decl(nv, false, false, false);
+        if (is_incomplete_record_object(nv))
             error_at("Incomplete struct/union type cannot define an object",
                      cur_token_loc());
         add_insn(is_static ? GLOBAL_BLOCK : parent,
-                 is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, var, NULL, NULL,
+                 is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, nv, NULL, NULL,
                  0, NULL);
-        add_symbol(bb, var);
+        add_symbol(bb, nv);
         if (lex_accept(T_assign)) {
-            validate_string_array_initializer(var);
+            validate_string_array_initializer(nv);
             if (is_static && lex_peek(T_open_curly, NULL) &&
-                (var->array_size > 0 || var->has_unsized_array ||
-                 var->ptr_level > 0)) {
-                parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
+                (nv->array_size > 0 || nv->has_unsized_array ||
+                 nv->ptr_level > 0)) {
+                parse_array_init(nv, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
             } else if (is_static && lex_peek(T_open_curly, NULL)) {
-                parse_global_record_init(var, GLOBAL_BLOCK);
+                parse_global_record_init(nv, GLOBAL_BLOCK);
             } else if (lex_peek(T_open_curly, NULL) &&
-                       (var->array_size > 0 || var->has_unsized_array ||
-                        var->ptr_level > 0)) {
-                parse_array_init(var, parent, &bb, 1); /* Always emit code */
+                       (nv->array_size > 0 || nv->has_unsized_array ||
+                        nv->ptr_level > 0)) {
+                parse_array_init(nv, parent, &bb, true);
             } else if (lex_peek(T_open_curly, NULL) &&
-                       (var->type->base_type == TYPE_struct ||
-                        var->type->base_type == TYPE_union ||
-                        var->type->base_type == TYPE_typedef)) {
-                type_t *struct_type = var->type;
+                       (nv->type->base_type == TYPE_struct ||
+                        nv->type->base_type == TYPE_union ||
+                        nv->type->base_type == TYPE_typedef)) {
+                type_t *struct_type = nv->type;
                 if (struct_type->base_type == TYPE_typedef &&
                     struct_type->base_struct)
                     struct_type = struct_type->base_struct;
 
                 var_t *struct_addr = require_var(parent);
                 struct_addr->var_name = gen_name();
-                add_insn(parent, bb, OP_address_of, struct_addr, var, NULL, 0,
+                add_insn(parent, bb, OP_address_of, struct_addr, nv, NULL, 0,
                          NULL);
                 lex_expect(T_open_curly);
                 parse_struct_field_init(parent, &bb, struct_type, struct_addr,
                                         true);
                 lex_expect(T_close_curly);
             } else {
-                if (!read_assignment_expression(parent, &bb)) {
-                    read_expr(parent, &bb);
-                    read_ternary_operation(parent, &bb);
-                }
-
+                read_expr(parent, &bb);
+                read_ternary_operation(parent, &bb);
                 var_t *rhs = opstack_pop();
                 rhs = scalarize_array_literal_if_needed(
-                    parent, &bb, rhs, var->type,
-                    !has_effective_pointer(var) && var->array_size == 0);
+                    parent, &bb, rhs, nv->type,
+                    !has_effective_pointer(nv) && nv->array_size == 0);
 
-                emit_object_assignment(parent, &bb, var, rhs);
+                emit_object_assignment(parent, &bb, nv, rhs);
             }
         }
-        while (lex_accept(T_comma)) {
-            var_t *nv;
-
-            /* add sequence point at T_comma */
-            perform_side_effect(parent, bb);
-
-            /* multiple (partial) declarations */
-            nv = require_typed_var(parent, type);
-            nv->is_static = is_static;
-            nv->is_global = is_static;
-            nv->is_const_qualified = is_const;
-            read_inner_var_decl(nv, false, false, false);
-            if (is_incomplete_record_object(nv))
-                error_at("Incomplete struct/union type cannot define an object",
-                         cur_token_loc());
-            add_insn(is_static ? GLOBAL_BLOCK : parent,
-                     is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, nv, NULL,
-                     NULL, 0, NULL);
-            add_symbol(bb, nv);
-            if (lex_accept(T_assign)) {
-                validate_string_array_initializer(nv);
-                if (is_static && lex_peek(T_open_curly, NULL) &&
-                    (nv->array_size > 0 || nv->has_unsized_array ||
-                     nv->ptr_level > 0)) {
-                    parse_array_init(nv, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs, true);
-                } else if (is_static && lex_peek(T_open_curly, NULL)) {
-                    parse_global_record_init(nv, GLOBAL_BLOCK);
-                } else if (lex_peek(T_open_curly, NULL) &&
-                           (nv->array_size > 0 || nv->has_unsized_array ||
-                            nv->ptr_level > 0)) {
-                    parse_array_init(nv, parent, &bb, true);
-                } else if (lex_peek(T_open_curly, NULL) &&
-                           (nv->type->base_type == TYPE_struct ||
-                            nv->type->base_type == TYPE_union ||
-                            nv->type->base_type == TYPE_typedef)) {
-                    type_t *struct_type = nv->type;
-                    if (struct_type->base_type == TYPE_typedef &&
-                        struct_type->base_struct)
-                        struct_type = struct_type->base_struct;
-
-                    var_t *struct_addr = require_var(parent);
-                    struct_addr->var_name = gen_name();
-                    add_insn(parent, bb, OP_address_of, struct_addr, nv, NULL,
-                             0, NULL);
-                    lex_expect(T_open_curly);
-                    parse_struct_field_init(parent, &bb, struct_type,
-                                            struct_addr, true);
-                    lex_expect(T_close_curly);
-                } else {
-                    read_expr(parent, &bb);
-                    read_ternary_operation(parent, &bb);
-                    var_t *rhs = opstack_pop();
-                    rhs = scalarize_array_literal_if_needed(
-                        parent, &bb, rhs, nv->type,
-                        !has_effective_pointer(nv) && nv->array_size == 0);
-
-                    emit_object_assignment(parent, &bb, nv, rhs);
-                }
-            }
-        }
-        lex_expect(T_semicolon);
-        return bb;
     }
-    error_at("Unknown struct/union type", next_token_loc());
+    lex_expect(T_semicolon);
+    return bb;
 }
 
 basic_block_t *handle_enum_declarators(block_t *parent,
@@ -1448,20 +1440,14 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             type = NULL;
     } else {
         /* Normal type checking without asterisk */
-        token_t *type_token = cur_token;
         if (lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
             lex_peek(T_long, NULL)) {
             type = TY_int;
         } else {
-            int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-            if (find_type_flag == 1 && lex_accept(T_union))
-                find_type_flag = 2;
-            if (find_type_flag == 2)
-                lex_peek(T_identifier, token);
-            type = find_type_flag == 2 ? find_type(token, find_type_flag)
-                                       : find_visible_type(token, parent);
-            if (find_type_flag == 2)
-                cur_token = type_token;
+            /* struct and union declarations were handed to
+             * handle_record_statement() above.
+             */
+            type = find_visible_type(token, parent);
         }
     }
 

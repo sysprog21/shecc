@@ -536,9 +536,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         (has_signed_type || has_unsigned_type || has_long_type))
         error_at("enum type cannot be combined with integer specifiers",
                  cur_token_loc());
-    int find_type_flag = lex_accept(T_struct) ? 2 : 1;
-    if (find_type_flag == 1 && lex_accept(T_union))
-        find_type_flag = 2;
+    base_type_t record_kind = accept_record_keyword();
 
     /* `sizeof` only consumes object representation metadata, so it can admit
      * the C99 floating type names before value arithmetic and ABI lowering
@@ -546,12 +544,12 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
      */
     if (lex_accept(T_float)) {
         if (has_signed_type || has_unsigned_type || has_long_type ||
-            has_enum_type || find_type_flag != 1)
+            has_enum_type || record_kind)
             error_at("invalid float type specifiers", cur_token_loc());
         type = TY_float;
     } else if (lex_accept(T_double)) {
         if (has_signed_type || has_unsigned_type || has_enum_type ||
-            find_type_flag != 1 || long_type_count > 1)
+            record_kind || long_type_count > 1)
             error_at("invalid double type specifiers", cur_token_loc());
         type = has_long_type ? TY_long_double : TY_double;
     } else if (has_enum_type) {
@@ -643,8 +641,8 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         }
     } else if (lex_peek(T_identifier, token)) {
         /* Try to parse as a type first */
-        type = find_type_flag == 2 ? find_type(token, find_type_flag)
-                                   : find_visible_type(token, parent);
+        type = record_kind ? find_record_tag(token, parent, record_kind)
+                           : find_visible_type(token, parent);
         if (type) {
             /* sizeof(type) */
             lex_expect(T_identifier);

@@ -860,7 +860,9 @@ int read_const_wstring_size(void);
 void add_block_typedef(block_t *block, char name[], type_t *type);
 bool find_block_typedef(block_t *block, const char *name);
 type_t *find_visible_type(const char *name, block_t *block);
-type_t *find_record_tag(char name[], block_t *block);
+type_t *find_record_tag(char name[], block_t *block, base_type_t kind);
+type_t *reference_record_tag(char name[], block_t *block, base_type_t kind);
+type_t *local_record_tag(char name[], block_t *block, base_type_t kind);
 typedef struct basic_block basic_block_t;
 
 /* Definition of a growable buffer for a mutable null-terminated string

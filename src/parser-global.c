@@ -339,19 +339,16 @@ void parse_global_record_init(var_t *var, block_t *block)
 void parse_global_compound_record_init(var_t *var, block_t *block)
 {
     char type_name[MAX_ID_LEN];
-    int find_type_flag = 1;
     type_t *compound_type, *target_type;
 
     lex_expect(T_open_bracket);
-    if (lex_accept(T_struct) || lex_accept(T_union)) {
-        find_type_flag = 2;
-        lex_ident(T_identifier, type_name);
-    } else {
-        lex_ident(T_identifier, type_name);
-    }
+    base_type_t record_kind = accept_record_keyword();
+    lex_ident(T_identifier, type_name);
     lex_expect(T_close_bracket);
 
-    compound_type = find_type(type_name, find_type_flag);
+    compound_type = record_kind
+                        ? find_record_tag(type_name, var->scope, record_kind)
+                        : find_type(type_name, 1);
     target_type = var->type;
     if (target_type->base_type == TYPE_typedef && target_type->base_struct)
         target_type = target_type->base_struct;
@@ -408,17 +405,14 @@ void parse_global_compound_array_init(var_t *var, block_t *block)
     char type_name[MAX_ID_LEN];
     type_t *element_type;
     var_t *array;
-    int find_type_flag = 1;
     int element_ptr_level = 0;
 
     lex_expect(T_open_bracket);
-    if (lex_accept(T_struct) || lex_accept(T_union)) {
-        find_type_flag = 2;
-        lex_ident(T_identifier, type_name);
-    } else {
-        lex_ident(T_identifier, type_name);
-    }
-    element_type = find_type(type_name, find_type_flag);
+    base_type_t record_kind = accept_record_keyword();
+    lex_ident(T_identifier, type_name);
+    element_type = record_kind
+                       ? find_record_tag(type_name, var->scope, record_kind)
+                       : find_type(type_name, 1);
     while (lex_accept(T_asterisk)) {
         element_ptr_level++;
         while (lex_accept(T_const) || lex_accept(T_volatile) ||
@@ -1053,13 +1047,7 @@ static void read_global_typedef(block_t *block)
         if (lex_peek(T_identifier, token)) {
             lex_expect(T_identifier);
 
-            /* is existent? */
-            tag = find_type(token, 2);
-            if (!tag) {
-                tag = add_type();
-                tag->base_type = TYPE_struct;
-                set_type_name(tag, token);
-            }
+            tag = local_record_tag(token, GLOBAL_BLOCK, TYPE_struct);
         }
 
         /* typedef with struct definition */
@@ -1153,13 +1141,7 @@ static void read_global_typedef(block_t *block)
         if (lex_peek(T_identifier, token)) {
             lex_expect(T_identifier);
 
-            /* is existent? */
-            tag = find_type(token, 2);
-            if (!tag) {
-                tag = add_type();
-                tag->base_type = TYPE_union;
-                set_type_name(tag, token);
-            }
+            tag = local_record_tag(token, GLOBAL_BLOCK, TYPE_union);
         }
 
         /* typedef with union definition */
@@ -1296,38 +1278,26 @@ void read_global_statement(void)
         bool has_flexible_array_member = false;
 
         lex_ident(T_identifier, token);
-        token_t *id_tk = cur_token;
+        type_t *type = local_record_tag(token, GLOBAL_BLOCK, TYPE_struct);
 
         /* variable declaration using existing struct tag? */
         if (!lex_peek(T_open_curly, NULL)) {
-            type_t *decl_type = find_type(token, 2);
-            if (!decl_type && lex_peek(T_semicolon, NULL)) {
-                decl_type = add_type();
-                decl_type->base_type = TYPE_struct;
-                set_type_name(decl_type, token);
-                lex_expect(T_semicolon);
+            /* A declaration with no declarator only declares the tag. At file
+             * scope a repeated one names the same type, so it is valid whether
+             * the tag is new, forward declared, or already complete.
+             */
+            if (lex_accept(T_semicolon))
                 return;
-            }
-            if (!decl_type)
-                error_at("Unknown struct type", &id_tk->location);
 
-            if (read_global_record_declarator(block, decl_type, is_const,
-                                              is_static, is_extern))
+            if (read_global_record_declarator(block, type, is_const, is_static,
+                                              is_extern))
                 return;
             while (lex_accept(T_comma))
-                read_global_record_declarator(block, decl_type, is_const,
-                                              is_static, is_extern);
+                read_global_record_declarator(block, type, is_const, is_static,
+                                              is_extern);
             lex_expect(T_semicolon);
             return;
         }
-
-        /* struct definition has forward declaration? */
-        type_t *type = find_type(token, 2);
-        if (!type)
-            type = add_type();
-
-        set_type_name(type, token);
-        type->base_type = TYPE_struct;
 
         lex_expect(T_open_curly);
         do {
@@ -1400,41 +1370,26 @@ void read_global_statement(void)
         bool has_flexible_array_member = false;
 
         lex_ident(T_identifier, token);
-        token_t *id_tk = cur_token;
+        type_t *type = local_record_tag(token, GLOBAL_BLOCK, TYPE_union);
 
         /* A tagged union declaration may name an already-complete tag, just
          * like `struct tag object;`. Do not require a second definition body
          * before routing its declarators through the shared record path.
          */
         if (!lex_peek(T_open_curly, NULL)) {
-            type_t *decl_type = find_type(token, 2);
-            if (!decl_type && lex_peek(T_semicolon, NULL)) {
-                decl_type = add_type();
-                decl_type->base_type = TYPE_union;
-                set_type_name(decl_type, token);
-                lex_expect(T_semicolon);
+            /* As for struct, a bare tag declaration may repeat a known tag. */
+            if (lex_accept(T_semicolon))
                 return;
-            }
-            if (!decl_type)
-                error_at("Unknown union type", &id_tk->location);
 
-            if (read_global_record_declarator(block, decl_type, is_const,
-                                              is_static, is_extern))
+            if (read_global_record_declarator(block, type, is_const, is_static,
+                                              is_extern))
                 return;
             while (lex_accept(T_comma))
-                read_global_record_declarator(block, decl_type, is_const,
-                                              is_static, is_extern);
+                read_global_record_declarator(block, type, is_const, is_static,
+                                              is_extern);
             lex_expect(T_semicolon);
             return;
         }
-
-        /* has forward declaration? */
-        type_t *type = find_type(token, 2);
-        if (!type)
-            type = add_type();
-
-        set_type_name(type, token);
-        type->base_type = TYPE_union;
 
         lex_expect(T_open_curly);
         do {
@@ -1522,8 +1477,15 @@ void read_global_statement(void)
             type = add_type();
 
         initialize_enum_type(type);
-        if (has_tag)
+
+        /* Register the tag at file scope as well, so that a struct or union
+         * specifier reusing the name, in any scope, sees an enum tag.
+         */
+        if (has_tag) {
             set_type_name(type, token);
+            if (!find_local_type_tag(token, GLOBAL_BLOCK))
+                add_type_tag(GLOBAL_BLOCK, token, type);
+        }
         lex_expect(T_open_curly);
         bool first = true;
         do {
