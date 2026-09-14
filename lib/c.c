@@ -644,9 +644,16 @@ void abort(void)
     exit(-1);
 }
 
-void __assert_fail(const char *expr, const char *file, int line)
+/* C99 7.2.1.1 has the message name the expression, the source file, the line
+ * and the enclosing function.
+ */
+void __assert_fail(const char *expr,
+                   const char *file,
+                   unsigned int line,
+                   const char *function)
 {
-    printf("Assertion failed: %s, file %s, line %d\n", expr, file, line);
+    printf("Assertion failed: %s, function %s, file %s, line %d\n", expr,
+           function, file, line);
     abort();
 }
 

@@ -18549,6 +18549,18 @@ EOF
 
 begin_category "C99 assert.h" "Testing freestanding assertion semantics"
 
+# A failed assertion in main names its expression and the function, in the words
+# of whichever libc reports it: shecc's own for a static build, and glibc's for
+# a dynamic one.
+function assertion_message()
+{
+    if [ "$LINK_MODE" = "dynamic" ]; then
+        echo "main: Assertion \`$1' failed"
+    else
+        echo "Assertion failed: $1, function main"
+    fi
+}
+
 try_ 0 << EOF
 #include <assert.h>
 int main(void) { int calls = 0; assert(++calls == 1); return calls - 1; }
@@ -18563,7 +18575,7 @@ try_ 0 << EOF
 #include <assert.h>
 int main(void) { int calls = 0; (assert(++calls), calls); return calls; }
 EOF
-try_failure_output "Assertion failed: 0" << EOF
+try_failure_output "$(assertion_message "0")" << EOF
 #define NDEBUG
 #include <assert.h>
 #undef NDEBUG
@@ -18576,11 +18588,11 @@ try_ 0 << EOF
 #include <assert.h>
 int main(void) { int calls = 0; assert(++calls); return calls; }
 EOF
-try_failure_output "Assertion failed: 2 + 2 == 5" << EOF
+try_failure_output "$(assertion_message "2 + 2 == 5")" << EOF
 #include <assert.h>
 int main(void) { assert(2 + 2 == 5); return 0; }
 EOF
-try_failure_output "Assertion failed: SUM(1, 1) == 3" << EOF
+try_failure_output "$(assertion_message "SUM(1, 1) == 3")" << EOF
 #include <assert.h>
 #define SUM(a, b) a + b
 int main(void) { assert(SUM(1, 1) == 3); return 0; }

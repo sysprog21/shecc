@@ -126,7 +126,7 @@ int fputc(int c, FILE *stream);
  * through '__syscall' instead.
  */
 int fread(char *ptr, int size, int nmemb, FILE *stream);
-int fwrite(char *ptr, int size, int nmemb, FILE *stream);
+int fwrite(const char *ptr, int size, int nmemb, FILE *stream);
 int fseek(FILE *stream, int offset, int whence);
 int ftell(FILE *stream);
 
@@ -153,7 +153,14 @@ int fflush(FILE *stream);
 /* Terminating program */
 void exit(int exit_code);
 void abort(void);
-void __assert_fail(const char *expr, const char *file, int line);
+
+/* glibc's signature, so a dynamically linked program reaches the host's handler
+ * with every argument it reads.
+ */
+void __assert_fail(const char *expr,
+                   const char *file,
+                   unsigned int line,
+                   const char *function);
 
 /* Dynamic memory allocation/deallocation functions */
 void *malloc(int size);

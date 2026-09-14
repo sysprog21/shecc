@@ -471,6 +471,9 @@ void install_assert_header(void)
         append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
         append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
                                    "__LINE__");
+        append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
+        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
+                                   "__func__");
         append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
                                    ")");
         append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
@@ -3056,6 +3059,26 @@ char *token_to_string(token_t *tk, char *dest)
         return "goto";
     case T_const:
         return "const";
+    case T_volatile:
+        return "volatile";
+    case T_static:
+        return "static";
+    case T_extern:
+        return "extern";
+    case T_register:
+        return "register";
+    case T_auto:
+        return "auto";
+    case T_restrict:
+        return "restrict";
+    case T_inline:
+        return "inline";
+    case T_signed:
+        return "signed";
+    case T_unsigned:
+        return "unsigned";
+    case T_long:
+        return "long";
     case T_float:
         return "float";
     case T_double:
