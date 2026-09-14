@@ -573,6 +573,22 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
     return NULL;
 }
 
+/* Append @ch to the numeric literal spelled so far in @token_buffer, reporting
+ * a literal too long for the buffer.
+ */
+static int number_append(char token_buffer[],
+                         int sz,
+                         char ch,
+                         source_location_t *loc)
+{
+    if (sz >= MAX_TOKEN_LEN - 1) {
+        loc->len = sz;
+        error_at("Token too long", loc);
+    }
+    token_buffer[sz] = ch;
+    return sz + 1;
+}
+
 /* Integer literals, in every base the language accepts.
  *
  * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
@@ -593,11 +609,7 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
             token_buffer[sz++] = ch;
             ch = read_char(buf);
             while (isdigit(ch)) {
-                if (sz >= MAX_TOKEN_LEN - 1) {
-                    loc->len = sz;
-                    error_at("Token too long", loc);
-                }
-                token_buffer[sz++] = ch;
+                sz = number_append(token_buffer, sz, ch, loc);
                 ch = read_char(buf);
             }
         } else {
@@ -608,11 +620,7 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
         if (!is_floating && token_buffer[0] == '0' && ((ch | 32) == 'x')) {
             /* Hexadecimal: starts with 0x or 0X */
             is_hex = true;
-            if (sz >= MAX_TOKEN_LEN - 1) {
-                loc->len = sz;
-                error_at("Token too long", loc);
-            }
-            token_buffer[sz++] = ch;
+            sz = number_append(token_buffer, sz, ch, loc);
 
             ch = read_char(buf);
 
@@ -621,11 +629,7 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
              * until the floating spelling has been recognized.
              */
             while (isxdigit(ch)) {
-                if (sz >= MAX_TOKEN_LEN - 1) {
-                    loc->len = sz;
-                    error_at("Token too long", loc);
-                }
-                token_buffer[sz++] = ch;
+                sz = number_append(token_buffer, sz, ch, loc);
                 has_hex_significand = true;
                 ch = read_char(buf);
             }
@@ -635,11 +639,7 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
             /* Binary literal: 0b or 0B */
             if (strict_c99)
                 error_at("binary literals are a GNU extension in C99", loc);
-            if (sz >= MAX_TOKEN_LEN - 1) {
-                loc->len = sz;
-                error_at("Token too long", loc);
-            }
-            token_buffer[sz++] = ch;
+            sz = number_append(token_buffer, sz, ch, loc);
 
             ch = read_char(buf);
             if (ch != '0' && ch != '1') {
@@ -648,33 +648,21 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
             }
 
             do {
-                if (sz >= MAX_TOKEN_LEN - 1) {
-                    loc->len = sz;
-                    error_at("Token too long", loc);
-                }
-                token_buffer[sz++] = ch;
+                sz = number_append(token_buffer, sz, ch, loc);
                 ch = read_char(buf);
             } while (ch == '0' || ch == '1');
 
         } else if (!is_floating && token_buffer[0] == '0') {
             /* Octal: starts with 0 but not followed by 'x' or 'b' */
             while (isdigit(ch)) {
-                if (sz >= MAX_TOKEN_LEN - 1) {
-                    loc->len = sz;
-                    error_at("Token too long", loc);
-                }
-                token_buffer[sz++] = ch;
+                sz = number_append(token_buffer, sz, ch, loc);
                 ch = read_char(buf);
             }
 
         } else if (!is_floating) {
             /* Decimal */
             while (isdigit(ch)) {
-                if (sz >= MAX_TOKEN_LEN - 1) {
-                    loc->len = sz;
-                    error_at("Token too long", loc);
-                }
-                token_buffer[sz++] = ch;
+                sz = number_append(token_buffer, sz, ch, loc);
                 ch = read_char(buf);
             }
         }
@@ -685,25 +673,17 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
          */
         if (ch == '.') {
             is_floating = true;
-            token_buffer[sz++] = ch;
+            sz = number_append(token_buffer, sz, ch, loc);
             ch = read_char(buf);
             if (is_hex) {
                 while (isxdigit(ch)) {
-                    if (sz >= MAX_TOKEN_LEN - 1) {
-                        loc->len = sz;
-                        error_at("Token too long", loc);
-                    }
-                    token_buffer[sz++] = ch;
+                    sz = number_append(token_buffer, sz, ch, loc);
                     has_hex_significand = true;
                     ch = read_char(buf);
                 }
             } else {
                 while (isdigit(ch)) {
-                    if (sz >= MAX_TOKEN_LEN - 1) {
-                        loc->len = sz;
-                        error_at("Token too long", loc);
-                    }
-                    token_buffer[sz++] = ch;
+                    sz = number_append(token_buffer, sz, ch, loc);
                     ch = read_char(buf);
                 }
             }
@@ -712,20 +692,16 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
             is_floating = true;
             if (is_hex)
                 has_hex_exponent = true;
-            token_buffer[sz++] = ch;
+            sz = number_append(token_buffer, sz, ch, loc);
             ch = read_char(buf);
             if (ch == '+' || ch == '-') {
-                token_buffer[sz++] = ch;
+                sz = number_append(token_buffer, sz, ch, loc);
                 ch = read_char(buf);
             }
             if (!isdigit(ch))
                 error_at("Floating literal needs an exponent", loc);
             do {
-                if (sz >= MAX_TOKEN_LEN - 1) {
-                    loc->len = sz;
-                    error_at("Token too long", loc);
-                }
-                token_buffer[sz++] = ch;
+                sz = number_append(token_buffer, sz, ch, loc);
                 ch = read_char(buf);
             } while (isdigit(ch));
         }
@@ -737,7 +713,7 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
                 error_at("Hexadecimal floating literal needs a significand",
                          loc);
             if ((ch | 32) == 'f' || (ch | 32) == 'l') {
-                token_buffer[sz++] = ch;
+                sz = number_append(token_buffer, sz, ch, loc);
                 ch = read_char(buf);
             }
             token_buffer[sz] = '\0';
@@ -745,6 +721,14 @@ token_t *lex_number(strbuf_t *buf, source_location_t *loc, char ch)
             token->literal = intern_string(token_buffer);
             loc->column += sz;
             return token;
+        }
+
+        /* The floating path above admits a significand digit after the point,
+         * so only an integer spelling can still lack one here.
+         */
+        if (is_hex && !has_hex_significand) {
+            loc->len = sz;
+            error_at("Invalid hex literal: expected hex digit after 0x", loc);
         }
         if (!is_hex && token_buffer[0] == '0') {
             for (int i = 1; i < sz; i++) {
@@ -823,10 +807,11 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
             }
             token_buffer[sz++] = ch;
 
-            if (ch == '\\')
-                special = true;
-            else
-                special = false;
+            /* A backslash escapes the character after it, and an escaped
+             * backslash escapes nothing further, so "\\" still ends at its
+             * closing quote.
+             */
+            special = ch == '\\' && !special;
 
             ch = read_char(buf);
         }
@@ -881,6 +866,10 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
         if (ch != '\'') {
             loc->len = 2;
             error_at("Unenclosed character literal", loc);
+        }
+        if (!sz) {
+            loc->len = 2;
+            error_at("Empty character constant", loc);
         }
 
         char unescaped[MAX_TOKEN_LEN];
@@ -1545,7 +1534,7 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
     if (ch == 'L' && peek_char(buf, 1) == '"') {
         /* Keep the prefix in the source span. The parser owns the execution
          * wide-character representation, but the lexer must preserve this as a
-         * distinct phase-6 literal so it cannot concatenate with bytes.
+         * distinct literal so phase 6 can make a join with it wide.
          */
         read_char(buf);
         token = lex_literal(buf, loc, '"');
@@ -1555,8 +1544,15 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
         RETURN_LEX_TOKEN(token);
     }
     token = lex_literal(buf, loc, ch);
-    if (token)
+    if (token) {
+        /* A narrow string literal is checked once phase 6 has joined it, since
+         * a wide neighbour makes the joined literal wide.
+         */
+        if (token->kind == T_char && hex_escape_exceeds_byte(token->literal))
+            error_at("Hexadecimal escape sequence out of range",
+                     &token->location);
         RETURN_LEX_TOKEN(token);
+    }
     token = lex_punct(buf, loc, ch);
     if (token)
         RETURN_LEX_TOKEN(token);

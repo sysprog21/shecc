@@ -82,7 +82,7 @@ This document tracks compliance gaps and non-standard behaviors.
 | Wide strings (`L"..."`) | Supported | Lowered as NUL-terminated `wchar_t` rodata; supported in expressions, `sizeof`, pointers, and compatible array initialization. |
 | Multi-character constants | Supported | Implementation-defined left-to-right packing of up to four bytes. |
 | Universal characters (`\u`, `\U`) | Partial | Narrow literals, identifiers, and wide character constants use the implementation's UTF-8 decoding; wide string literals decode to execution-wide-character units. |
-| Hex escapes (`\x...`) | Supported | The full following hexadecimal run is consumed before narrowing. |
+| Hex escapes (`\x...`) | Supported | The full following hexadecimal run is consumed; a value that does not fit an `unsigned char` is rejected in narrow literals. |
 
 ### Preprocessor Gaps
 

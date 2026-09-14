@@ -756,6 +756,33 @@ static int append_utf8(char *output, int out, int limit, unsigned int value)
     return out;
 }
 
+/* C99 6.4.4.4 requires the value of a hexadecimal escape in a character
+ * constant or narrow string literal to fit an unsigned char. Report whether a
+ * literal's spelling holds one that does not. Wide literals accept larger
+ * values, so only narrow callers ask.
+ */
+bool hex_escape_exceeds_byte(const char *text)
+{
+    for (int i = 0; text[i]; i++) {
+        if (text[i] != '\\')
+            continue;
+        i++;
+        if (!text[i])
+            break;
+        if (text[i] != 'x')
+            continue;
+
+        unsigned int value = 0;
+        while (isxdigit((unsigned char) text[i + 1])) {
+            i++;
+            value = (value << 4) + hex_digit_value(text[i]);
+            if (value > 0xff)
+                return true;
+        }
+    }
+    return false;
+}
+
 int unescape_string(const char *input, char *output, int output_size)
 {
     if (!input || !output || output_size == 0)
@@ -839,9 +866,14 @@ int unescape_string(const char *input, char *output, int output_size)
                 return -1;
             }
 
-            int value = 0;
+            /* Only the low byte reaches the output, so keep only that much
+             * rather than shift a long digit run out of range. A narrow literal
+             * whose value does not fit has already been diagnosed by
+             * hex_escape_exceeds_byte().
+             */
+            unsigned int value = 0;
             while (isxdigit(input[i])) {
-                value = (value << 4) + hex_digit_value(input[i]);
+                value = ((value << 4) + hex_digit_value(input[i])) & 0xff;
                 i++;
             }
 

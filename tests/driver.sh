@@ -723,6 +723,31 @@ EOF
 try_compile_error << EOF
 int main(void) { return 0x.p1; }
 EOF
+
+# A hexadecimal integer needs at least one digit after its prefix, including
+# where a constant expression would otherwise read the bare prefix as zero.
+try_compile_error_message "expected hex digit after 0x" << EOF
+enum { E = 0x };
+int main(void) { return E; }
+EOF
+try_compile_error_message "expected hex digit after 0x" << EOF
+int global = 0X;
+int main(void) { return global; }
+EOF
+try_compile_error_message "expected hex digit after 0x" << EOF
+#if 0x == 0
+#endif
+int main(void) { return 0; }
+EOF
+try_compile_error_message "expected hex digit after 0x" << EOF
+int main(void) { return 0xg; }
+EOF
+
+# A floating literal whose digits fill the token buffer must be diagnosed before
+# its point and suffix are appended, not written past the buffer.
+try_compile_error_message "Token too long" << EOF
+int main(void) { return sizeof($(printf '1%.0s' {1..255}).f); }
+EOF
 try_compile_error << EOF
 int main(void) { return 08.5; }
 EOF
@@ -1075,6 +1100,19 @@ EOF
 # just a number
 expr 0 0
 
+# C99 6.4.4.4 requires at least one character between the quotes.
+try_compile_error_message "Empty character constant" << EOF
+int main(void) { return ''; }
+EOF
+try_compile_error_message "Empty character constant" << EOF
+int main(void) { return L''; }
+EOF
+try_compile_error_message "Empty character constant" << EOF
+#if '' == 0
+#endif
+int main(void) { return 0; }
+EOF
+
 # The current execution wide-character representation is int. Wide character
 # constants therefore share ordinary scalar expression and ICE lowering.
 try_ 3 << EOF
@@ -1165,6 +1203,26 @@ try_ 0 << EOF
 int main(void) {
     wchar_t values[] = LEFT RIGHT;
     return sizeof(LEFT RIGHT) != 3 * sizeof(wchar_t) || values[1] != 'b';
+}
+EOF
+
+# A narrow literal next to a wide one joins it, and the result is wide.
+try_ 0 << 'EOF'
+#define NARROW "n"
+wchar_t global_values[] = "g" L"h";
+int main(void) {
+    wchar_t left[] = L"a" "b";
+    wchar_t right[] = "c" L"d" "e";
+    wchar_t *macro = NARROW L"w";
+    wchar_t *escape = "\x1" L"2";
+    return (sizeof left != 3 * sizeof(wchar_t) || left[1] != 'b') +
+           (sizeof right != 4 * sizeof(wchar_t) || right[0] != 'c' ||
+            right[2] != 'e' || right[3] != 0) *
+               2 +
+           (sizeof("x" L"y") != 3 * sizeof(wchar_t)) * 4 +
+           (macro[0] != 'n' || macro[1] != 'w') * 8 +
+           (escape[0] != 1 || escape[1] != '2') * 16 +
+           (global_values[0] != 'g' || global_values[1] != 'h') * 32;
 }
 EOF
 
@@ -2568,7 +2626,10 @@ int main(void) {
 }
 EOF
 try_ 1 << EOF
-int main(void) { return '\x123' == 0x23; }
+int main(void) { return '\x0041' == 'A'; }
+EOF
+try_compile_error_message "Hexadecimal escape sequence out of range" << EOF
+int main(void) { return '\x123'; }
 EOF
 try_ 3 << EOF
 #if __STDC__ != 1
@@ -13490,6 +13551,20 @@ try_ 7 << EOF
 int main(void) { return QUOTED_INCLUDE_BASE; }
 EOF
 
+# A function-like macro name without an argument list is not expanded, so it
+# cannot supply a header name, either directly or at the end of an alias chain.
+try_compile_error_message "#include macro must expand to a header name" << EOF
+#define BASE_HEADER() "include-base.h"
+#include BASE_HEADER
+int main(void) { return QUOTED_INCLUDE_BASE; }
+EOF
+try_compile_error_message "#include macro must expand to a header name" << EOF
+#define BASE_HEADER() "include-base.h"
+#define BASE_ALIAS BASE_HEADER
+#include BASE_ALIAS
+int main(void) { return QUOTED_INCLUDE_BASE; }
+EOF
+
 # A header's #pragma once identity is its normalized relative path, not the
 # spelling used by an includer. The outer header reaches the same header again
 # through ./ and ../ components after its canonical spelling; a duplicate
@@ -13739,6 +13814,17 @@ fi
 try_compile_error_message "Angle header not found in -I search paths" << EOF
 #include <missing-shecc-header.h>
 EOF
+
+# An -I directory and header name that together exceed the path buffer must not
+# be truncated: the truncated lookup missed this stdbool.h and silently used the
+# built-in header instead. Diagnosing the length and reading the file both fail.
+LONG_INCLUDE_DIR="$TEST_TMPDIR/$(printf 'd%.0s' {1..120})/$(printf 'e%.0s' {1..120})"
+mkdir -p "$LONG_INCLUDE_DIR"
+echo '#error the long include directory was searched' > "$LONG_INCLUDE_DIR/stdbool.h"
+try_compile_error_flag "-I$LONG_INCLUDE_DIR" << EOF
+#include <stdbool.h>
+int main(void) { return 0; }
+EOF
 try_compile_error << EOF
 #define FIRST_HEADER SECOND_HEADER
 #define SECOND_HEADER FIRST_HEADER
@@ -13972,8 +14058,14 @@ try_ 14 << EOF
 int main(void) { return CHARACTER_RESULT; }
 EOF
 
-try_ 1 << EOF
+try_compile_error_message "Hexadecimal escape sequence out of range" << EOF
 #if '\\x123' == 0x23
+#endif
+int main(void) { return 0; }
+EOF
+
+try_ 1 << EOF
+#if '\\x0041' == 65
 #define HEX_ESCAPE_RESULT 1
 #else
 #define HEX_ESCAPE_RESULT 0
@@ -15869,12 +15961,27 @@ int main() {
 }
 EOF
 
-# C99 hexadecimal escapes consume every following hex digit; assigning to a char
-# produces the low byte.
+# C99 hexadecimal escapes consume every following hex digit, and in a narrow
+# literal the value must fit an unsigned char. A narrow literal joined to a wide
+# one is wide, so its escape may exceed a byte.
 try_ 1 << EOF
 int main() {
-    char *s = "\\x123";
-    return s[0] == 0x23;
+    char *s = "\\x0041";
+    return s[0] == 'A' && s[1] == 0;
+}
+EOF
+try_compile_error_message "Hexadecimal escape sequence out of range" << 'EOF'
+int main(void) { char *s = "\x100"; return s[0]; }
+EOF
+try_compile_error_message "Hexadecimal escape sequence out of range" << 'EOF'
+char joined[] = "a" "\x123" "b";
+int main(void) { return joined[0]; }
+EOF
+try_ 0 << 'EOF'
+int main(void) {
+    wchar_t *joined = "\x100" L"b";
+    wchar_t *wide = L"\x1234";
+    return joined[0] != 0x100 || joined[1] != 'b' || wide[0] != 0x1234;
 }
 EOF
 
@@ -15961,6 +16068,47 @@ char joined_array[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 int main(void) {
     const char *joined = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     return (sizeof(joined_array) == 601) + (strlen(joined) == 600);
+}
+EOF
+
+# An escaped backslash does not escape the quote that follows it.
+try_ 0 << 'EOF'
+char trailing[] = "\\";
+int main(void) {
+    char *pair = "a\\\\" "b\\";
+    const char *quote = "\\\"";
+    return (sizeof trailing != 2 || trailing[0] != '\\') +
+           (pair[1] != '\\' || pair[2] != '\\' || pair[3] != 'b' ||
+            pair[4] != '\\' || pair[5] != 0) *
+               2 +
+           (quote[0] != '\\' || quote[1] != '"' || quote[2] != 0) * 4;
+}
+EOF
+
+# Escapes end with their own literal: a digit that starts the next literal is a
+# character of its own, not a further digit of a hexadecimal or short octal
+# escape that ended the previous one.
+try_ 0 << 'EOF'
+char hex[] = "\x1" "2";
+char oct[] = "\1" "2";
+char oct2[] = "\12" "3";
+char full[] = "\123" "4";
+char escaped[] = "\\x1" "2";
+char chain[] = "\x1" "2" "3";
+int main(void) {
+    wchar_t *wide = L"\x1" L"f";
+    char *mixed = "\7" "7" "\x2" "A";
+    return (sizeof hex != 3 || hex[0] != 1 || hex[1] != '2') +
+           (sizeof oct != 3 || oct[0] != 1 || oct[1] != '2') * 2 +
+           (sizeof oct2 != 3 || oct2[0] != 10 || oct2[1] != '3') * 4 +
+           (sizeof full != 3 || full[0] != 0123 || full[1] != '4') * 8 +
+           (sizeof escaped != 5 || escaped[1] != 'x' || escaped[3] != '2') *
+               16 +
+           (sizeof chain != 4 || chain[0] != 1 || chain[2] != '3') * 32 +
+           (wide[0] != 1 || wide[1] != 'f' || wide[2] != 0) * 64 +
+           (mixed[0] != 7 || mixed[1] != '7' || mixed[2] != 2 ||
+            mixed[3] != 'A') *
+               128;
 }
 EOF
 

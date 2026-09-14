@@ -52,8 +52,16 @@ BUILTIN_LIBC_HEADER := c.h
 # 1, and 2, which keeps bootstrap byte-for-byte reproducible. Rebuilders can
 # supply SOURCE_DATE_EPOCH for a stable timestamp across separate invocations.
 SOURCE_DATE_EPOCH ?= $(shell date -u +%s)
-TRANSLATION_DATE := $(shell LC_ALL=C TZ=UTC date -u -d "@$(SOURCE_DATE_EPOCH)" '+%b %e %Y')
-TRANSLATION_TIME := $(shell LC_ALL=C TZ=UTC date -u -d "@$(SOURCE_DATE_EPOCH)" '+%H:%M:%S')
+# GNU date converts an epoch given as -d @SECONDS, which BSD and macOS date do
+# not accept; they take the seconds as -r SECONDS instead. Ask for the Unix
+# epoch itself to learn which spelling this date understands.
+ifeq ($(shell date -u -d @0 +%s 2>/dev/null),0)
+EPOCH_DATE = LC_ALL=C TZ=UTC date -u -d "@$(SOURCE_DATE_EPOCH)"
+else
+EPOCH_DATE = LC_ALL=C TZ=UTC date -u -r "$(SOURCE_DATE_EPOCH)"
+endif
+TRANSLATION_DATE := $(shell $(EPOCH_DATE) '+%b %e %Y')
+TRANSLATION_TIME := $(shell $(EPOCH_DATE) '+%H:%M:%S')
 ifeq ($(strip $(TRANSLATION_DATE)$(TRANSLATION_TIME)),)
 $(error SOURCE_DATE_EPOCH must be a Unix epoch accepted by date)
 endif

@@ -632,7 +632,13 @@ bool resolve_angle_include(token_t *open,
 
     for (int i = 0; i < include_dirs_idx; i++) {
         FILE *file;
-        snprintf(resolved, resolved_size, "%s/%s", include_dirs[i], name);
+
+        /* A truncated path would name some other file, or none, and let a
+         * built-in header silently stand in for the one in this directory.
+         */
+        if (snprintf(resolved, resolved_size, "%s/%s", include_dirs[i], name) >=
+            resolved_size)
+            error_at("#include path is too long", &open->location);
         file = fopen(resolved, "rb");
         if (file) {
             fclose(file);
@@ -2426,8 +2432,9 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
 
                 tk = pp_lex_next_token(tk, true);
                 macro = hashmap_get(MACROS, tk->literal);
-                while (macro && !macro->is_disabled && !macro->param_num &&
-                       macro->replacement && !macro->replacement->next &&
+                while (macro && !macro->is_disabled &&
+                       !macro->is_function_like && macro->replacement &&
+                       !macro->replacement->next &&
                        macro->replacement->kind == T_identifier) {
                     for (int i = 0; i < alias_count; i++)
                         if (aliases[i] == macro)
@@ -2439,7 +2446,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                     aliases[alias_count++] = macro;
                     macro = hashmap_get(MACROS, macro->replacement->literal);
                 }
-                if (!macro || macro->is_disabled || macro->param_num ||
+                if (!macro || macro->is_disabled || macro->is_function_like ||
                     !macro->replacement)
                     error_at("#include macro must expand to a header name",
                              &tk->location);
@@ -2758,6 +2765,49 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
     return head.next;
 }
 
+/* Report whether a string literal payload ends inside a numeric escape that a
+ * following digit would extend: a hexadecimal escape, whose digit run has no
+ * limit, or an octal escape of fewer than three digits.
+ *
+ * Returns 16 or 8 for those, and 0 when the payload ends in anything else.
+ */
+int pp_string_open_escape_base(const char *text)
+{
+    for (int i = 0; text[i]; i++) {
+        if (text[i] != '\\')
+            continue;
+        i++;
+        if (text[i] == 'x') {
+            while (isxdigit((unsigned char) text[i + 1]))
+                i++;
+            if (!text[i + 1])
+                return 16;
+        } else if (text[i] >= '0' && text[i] <= '7') {
+            int digits = 1;
+
+            while (digits < 3 && text[i + 1] >= '0' && text[i + 1] <= '7') {
+                i++;
+                digits++;
+            }
+            if (!text[i + 1] && digits < 3)
+                return 8;
+        } else if (!text[i]) {
+            break;
+        }
+    }
+    return 0;
+}
+
+/* Diagnose a finished narrow string literal whose hexadecimal escape does not
+ * fit a byte. Called only for a T_string token, once no further literal can
+ * join it.
+ */
+void pp_check_narrow_string(token_t *tk)
+{
+    if (hex_escape_exceeds_byte(tk->literal))
+        error_at("Hexadecimal escape sequence out of range", &tk->location);
+}
+
 /* Drop the whitespace, tab and newline tokens from a fully preprocessed stream,
  * on the way into the parser.
  *
@@ -2783,30 +2833,53 @@ token_t *pp_strip_layout(token_t *tk)
         /* C99 translation phase 6 concatenates adjacent string literal tokens
          * after macro expansion. Do it at the parser boundary: whitespace is
          * already irrelevant there, and this covers both source-adjacent and
-         * macro-produced strings without changing -E's token spelling.
+         * macro-produced strings without changing -E's token spelling. When
+         * either literal is wide, C99 6.4.5 makes the joined literal wide.
          */
-        if (cur != &head &&
-            ((cur->kind == T_string && tk->kind == T_string) ||
-             (cur->kind == T_wstring && tk->kind == T_wstring))) {
+        if (cur != &head && (cur->kind == T_string || cur->kind == T_wstring) &&
+            (tk->kind == T_string || tk->kind == T_wstring)) {
             char combined[MAX_STRING_LEN];
             int left_len = strlen(cur->literal);
             int right_len = strlen(tk->literal);
+            int base = pp_string_open_escape_base(cur->literal);
+            char first = tk->literal[0];
+            int respell = 0;
 
-            if (left_len + right_len >= MAX_STRING_LEN)
+            /* Each literal's escapes end with that literal, but the payloads
+             * are joined as spelled and decoded later. When the left payload
+             * ends in an escape the right one's first digit would extend, spell
+             * that digit as a complete three-digit octal escape, which nothing
+             * can extend and which decodes to the same character.
+             */
+            if ((base == 16 && isxdigit((unsigned char) first)) ||
+                (base == 8 && first >= '0' && first <= '7'))
+                respell = 3;
+            if (left_len + right_len + respell >= MAX_STRING_LEN)
                 error_at("Concatenated string literal too long", &tk->location);
+            const char *rest = tk->literal;
+
             memcpy(combined, cur->literal, left_len);
-            memcpy(combined + left_len, tk->literal, right_len + 1);
+            if (respell) {
+                combined[left_len++] = '\\';
+                combined[left_len++] = '0' + ((first >> 6) & 7);
+                combined[left_len++] = '0' + ((first >> 3) & 7);
+                combined[left_len++] = '0' + (first & 7);
+                rest++;
+            }
+            strcpy(combined + left_len, rest);
             cur->literal = intern_string(combined);
             cur->location.len += tk->location.len;
+            if (tk->kind == T_wstring)
+                cur->kind = T_wstring;
             continue;
         }
-        if (cur != &head && ((cur->kind == T_string && tk->kind == T_wstring) ||
-                             (cur->kind == T_wstring && tk->kind == T_string)))
-            error_at("Cannot concatenate narrow and wide string literals",
-                     &tk->location);
+        if (cur != &head && cur->kind == T_string)
+            pp_check_narrow_string(cur);
         cur->next = tk;
         cur = tk;
     }
+    if (cur != &head && cur->kind == T_string)
+        pp_check_narrow_string(cur);
     cur->next = NULL;
     return head.next;
 }
