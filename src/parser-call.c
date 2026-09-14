@@ -57,8 +57,8 @@ void read_func_parameters_with_sret(func_t *func,
                     "argument",
                     cur_token_loc());
             diagnose_const_pointer_conversion(param, target);
-            if (is_record_type(target->type) &&
-                !has_effective_pointer(target)) {
+            if (is_record_type(target->type) && !target->is_func &&
+                !has_effective_pointer(target) && !target->array_size) {
                 /* A record parameter is a by-value object. Keep that promise
                  * without teaching every backend its native aggregate ABI: give
                  * the callee an addressable caller-side copy in one
@@ -261,7 +261,13 @@ void lower_call_result_array_postfix(var_t **value,
         bool assignment;
 
         element->ptr_level = base->pointee_array_element_ptr_level;
-        element->func_signature = base->type->func_signature;
+
+        /* A call returning a pointer to an array of callbacks carries their
+         * prototype on the result rather than on its scalar base type.
+         */
+        element->func_signature = base->type->func_signature
+                                      ? base->type->func_signature
+                                      : base->func_signature;
         element->is_const_qualified =
             base->is_const_qualified || base->type->is_const_qualified;
         element->var_name = gen_name();
@@ -357,36 +363,10 @@ void lower_call_result_prefix_update(var_t **value,
                                      block_t *parent,
                                      basic_block_t **bb)
 {
-    var_t *object;
-    var_t *one;
-    var_t *updated;
-
     if (op == OP_generic)
         return;
-    object = opstack_pop();
-    if (!object->is_compound_literal_reference)
-        error_at("Prefix update requires a scalar modifiable lvalue",
-                 cur_token_loc());
-    if (object->is_const_qualified)
-        error_at("assignment of read-only location", cur_token_loc());
-    one = require_typed_var(parent, TY_int);
-    one->var_name = gen_name();
-    one->init_val = 1;
-    add_insn(parent, *bb, OP_load_constant, one, NULL, NULL, 0, NULL);
-    if (is_pointer_operation(op, object, one)) {
-        handle_pointer_arithmetic(parent, bb, op, object, one);
-        updated = opstack_pop();
-    } else {
-        updated = require_var(parent);
-        updated->var_name = gen_name();
-        updated->type = integer_binary_result_type(op, object, one);
-        add_insn(parent, *bb, op, updated, object, one, 0, NULL);
-    }
-    updated = resize_var(parent, bb, updated, object);
-    add_insn(parent, *bb, OP_write, NULL, object->compound_literal_address,
-             updated, object->ptr_level ? PTR_SIZE : object->type->size, NULL);
-    *value = updated;
-    opstack_push(updated);
+    *value = lower_reference_update(opstack_pop(), op, parent, bb);
+    opstack_push(*value);
 }
 
 /* The freestanding <stddef.h> maps offsetof(type, member-designator) here. Keep
@@ -534,7 +514,7 @@ void read_builtin_va_arg_type(block_t *parent, va_arg_type_t *result)
             error_at("enum type cannot have integer specifiers",
                      cur_token_loc());
         lex_ident(T_identifier, name);
-        type = find_enum_tag(name, parent);
+        type = reference_enum_tag(name, parent);
     } else {
         if (!saw_base && !is_signed && !is_unsigned && !long_count &&
             !is_short) {
@@ -735,6 +715,105 @@ void emit_record_copy_from_address(block_t *parent,
     dest_addr->var_name = gen_name();
     add_insn(parent, *bb, OP_address_of, dest_addr, dest, NULL, 0, NULL);
     emit_record_copy_between(parent, bb, dest_addr, src_addr, size_var(dest));
+}
+
+/* Reject a record operand where C99 requires an arithmetic or scalar one: the
+ * operators of 6.5.3.3 and 6.5.5 to 6.5.15, and a controlling expression. A
+ * record reaching integer lowering has no register representation, which a
+ * narrow backend reported by aborting.
+ */
+void reject_record_operand(const var_t *var)
+{
+    if (is_record_object(var))
+        error_at("Operand of record type requires a scalar value",
+                 cur_token_loc());
+}
+
+/* Whether @var is a declared object rather than a generated temporary. */
+bool is_named_object(var_t *var, block_t *parent)
+{
+    return var->var_name[0] != '.' && find_var(var->var_name, parent) == var;
+}
+
+/* Record on @value, just loaded from @address, that it designates the object
+ * stored there, so a following ++, -- or member selection reaches that object
+ * rather than the temporary. @bitfield is the field of a bit-field object.
+ */
+void mark_value_reference(var_t *value, var_t *address, var_t *bitfield)
+{
+    value->is_compound_literal_reference = true;
+    value->compound_literal_address = address;
+    value->compound_literal_bitfield = bitfield;
+}
+
+/* Load the object of @value's type stored at @address into @value and push it.
+ * A record is not a register value: one OP_read of its whole size loaded only a
+ * word of it, so it is copied into @value's own storage instead.
+ */
+void push_object_at(block_t *parent,
+                    basic_block_t **bb,
+                    var_t *value,
+                    var_t *address,
+                    int size)
+{
+    if (is_record_object(value) && !value->func_signature &&
+        !is_incomplete_record_object(value)) {
+        add_insn(parent, *bb, OP_allocat, value, NULL, NULL, 0, NULL);
+        emit_record_copy_from_address(parent, bb, value, address);
+    } else
+        add_insn(parent, *bb, OP_read, value, address, NULL, size, NULL);
+    mark_value_reference(value, address, NULL);
+    opstack_push(value);
+}
+
+/* Apply ++ or -- (@op is OP_add or OP_sub) to @object, a value that records the
+ * address it was loaded from, and store the result there.
+ *
+ * Returns the value the object then holds.
+ */
+var_t *lower_reference_update(var_t *object,
+                              opcode_t op,
+                              block_t *parent,
+                              basic_block_t **bb)
+{
+    var_t *one;
+    var_t *updated;
+
+    if (!object->is_compound_literal_reference || is_record_object(object) ||
+        object->array_size || object->is_func || object->func_signature)
+        error_at("Increment or decrement requires a scalar modifiable lvalue",
+                 cur_token_loc());
+    if (object->is_const_qualified)
+        error_at("assignment of read-only location", cur_token_loc());
+    one = require_typed_var(parent, TY_int);
+    one->var_name = gen_name();
+    one->init_val = 1;
+    add_insn(parent, *bb, OP_load_constant, one, NULL, NULL, 0, NULL);
+    if (is_pointer_operation(op, object, one)) {
+        handle_pointer_arithmetic(parent, bb, op, object, one);
+        updated = opstack_pop();
+    } else {
+        updated = require_var(parent);
+        updated->var_name = gen_name();
+        updated->type = integer_binary_result_type(op, object, one);
+        add_insn(parent, *bb, op, updated, object, one, 0, NULL);
+    }
+    updated = resize_var(parent, bb, updated, object);
+    if (object->compound_literal_bitfield) {
+        write_bitfield_value(parent, bb, object->compound_literal_address,
+                             updated, object->compound_literal_bitfield);
+        updated =
+            read_bitfield_value(parent, bb, object->compound_literal_address,
+                                object->compound_literal_bitfield);
+        updated->is_bitfield = false;
+    } else
+        add_insn(parent, *bb, OP_write, NULL, object->compound_literal_address,
+                 updated,
+                 object->ptr_level || object->type->ptr_level
+                     ? PTR_SIZE
+                     : object->type->size,
+                 NULL);
+    return updated;
 }
 
 void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
@@ -992,8 +1071,6 @@ var_t *load_function_pointer_object(block_t *parent,
     add_insn(parent, *bb, OP_address_of, address, object, NULL, 0, NULL);
     target->var_name = gen_name();
     target->func_signature = object->func_signature;
-    target->func_target = object->func_target;
-    target->func_target_invalid = object->func_target_invalid;
     add_insn(parent, *bb, OP_read, target, address, NULL, PTR_SIZE, NULL);
     return target;
 }
@@ -1025,7 +1102,6 @@ var_t *materialize_function_designator(block_t *parent,
     object->var_name = gen_name();
     object->is_func = true;
     object->func_signature = func;
-    object->func_target = func;
     add_insn(parent, *bb, OP_allocat, object, NULL, NULL, 0, NULL);
     emit_object_assignment(parent, bb, object, value);
     return load_function_pointer_object(parent, bb, object);
@@ -1126,14 +1202,14 @@ var_t *emit_indirect_call_result(var_t *callee,
 
     if (signature && signature->returns_aggregate) {
         var_t *sret;
-        func_t *target = callee ? callee->func_target : NULL;
 
-        if (callee->func_target_invalid || !target || !target->bbs ||
-            !target->returns_aggregate)
-            error_at(
-                "aggregate-return indirect call requires a shecc-defined "
-                "target",
-                cur_token_loc());
+        /* The destination-pointer convention is shecc's own, so the callee must
+         * be a shecc-defined function. That cannot be proven per pointer
+         * object: a file-scope pointer, record member or array element can be
+         * assigned anywhere. prune_unused_funcs() instead rejects taking the
+         * address of any aggregate-returning function without a body, which
+         * leaves every such pointer value naming a shecc-defined target.
+         */
         result = prepare_aggregate_call_result(parent, bb, signature, &sret);
         read_indirect_call_with_sret(callee, signature, sret, parent, bb);
     } else {
@@ -1274,6 +1350,111 @@ void read_lvalue(lvalue_t *lvalue,
                  opcode_t op,
                  bool allow_ptr_arith);
 
+static bool is_function_parameter(const var_t *var, block_t *parent);
+
+/* A pointer to a whole array: `int (*)[N]`, or `char *(*)[N]` whose elements
+ * are themselves pointers. Arithmetic on it steps over complete arrays.
+ *
+ * Where the pointer is spelled directly, its own stars are the element's plus
+ * one, and a pointer typedef element as in `ip (*p)[N]` only deepens the base.
+ * Where a typedef such as `int *(*T)[N]` carries the whole declarator, its
+ * element depth is relative to the typedef's stars, and any star on the object
+ * makes it a pointer to T instead.
+ */
+static bool is_pointee_array_pointer(const var_t *var)
+{
+    int element_depth;
+
+    if (!var || !var->type || var->pointee_array_size <= 0)
+        return false;
+    element_depth = var->pointee_array_element_ptr_level;
+    if (var->type->pointee_array_size)
+        return !var->ptr_level && var->type->ptr_level == element_depth + 1;
+    return var->ptr_level == element_depth + 1;
+}
+
+static void copy_pointee_array_shape(var_t *destination, const var_t *source)
+{
+    fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
+
+    fixed_array_shape_to_pointee_var(destination, &shape);
+    destination->pointee_array_element_ptr_level =
+        source->pointee_array_element_ptr_level;
+}
+
+/* The address of an operand that does not start with an identifier: `&*p`,
+ * `&(*q).member`, `&2[arr]` or `&(int){1}`.
+ */
+static void take_expression_address(block_t *parent, basic_block_t **bb)
+{
+    var_t *operand;
+    var_t *address;
+    var_t *result;
+
+    if (lex_accept(T_asterisk)) {
+        /* &*E is E, except that it is not an lvalue; neither operator is
+         * evaluated (C99 6.5.3.2p3).
+         */
+        reading_unary_operand = true;
+        read_expr_operand(parent, bb);
+        operand = opstack_pop();
+        if (operand->is_func) {
+            opstack_push(operand);
+            return;
+        }
+        if (!effective_pointer_depth(operand) && !operand->array_size)
+            error_at("Cannot dereference from non-pointer typed variable",
+                     cur_token_loc());
+        result = require_typed_ptr_var(
+            parent, operand->type, operand->ptr_level + !!operand->array_size);
+        result->var_name = gen_name();
+        result->is_const_qualified = operand->is_const_qualified;
+        result->pointer_const_mask = operand->pointer_const_mask;
+        result->func_signature = operand->func_signature;
+        result->pointee_func_signature = operand->pointee_func_signature;
+        result->pointee_array_size = operand->pointee_array_size;
+        result->pointee_array_dim2 = operand->pointee_array_dim2;
+        result->pointee_array_dim3 = operand->pointee_array_dim3;
+        result->pointee_array_dim4 = operand->pointee_array_dim4;
+        result->pointee_array_element_ptr_level =
+            operand->pointee_array_element_ptr_level;
+        add_insn(parent, *bb, OP_assign, result, operand, NULL, 0, NULL);
+        opstack_push(result);
+        return;
+    }
+
+    read_expr_operand(parent, bb);
+    operand = opstack_pop();
+    if (operand->is_func) {
+        /* A function designator, possibly parenthesized, is its address. */
+        opstack_push(operand);
+        return;
+    }
+    if (operand->compound_literal_bitfield || operand->is_bitfield)
+        error_at("cannot take address of bit-field", cur_token_loc());
+    if (operand->is_compound_literal_reference) {
+        address = operand->compound_literal_address;
+    } else if (is_named_object(operand, parent) ||
+               operand->is_compound_literal) {
+        if (operand->is_register)
+            error_at("cannot take address of register object", cur_token_loc());
+        address = operand;
+    } else {
+        error_at("Address-of requires an lvalue operand", cur_token_loc());
+    }
+    result =
+        require_typed_ptr_var(parent, operand->type, operand->ptr_level + 1);
+    result->var_name = gen_name();
+    result->is_const_qualified = operand->is_const_qualified;
+    if (operand->func_signature)
+        result->pointee_func_signature = operand->func_signature;
+    add_insn(
+        parent, *bb,
+        address == operand && !operand->array_size ? OP_address_of : OP_assign,
+        result, address, NULL, 0, NULL);
+    opstack_push(result);
+}
+
 /* Maintain a stack of expression values and operators, depending on next
  * operators' priority. Either apply it or operator on stack first.
  */
@@ -1283,8 +1464,12 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
     lvalue_t lvalue;
     var_t *vd, *rs1;
 
-    if (!lex_peek(T_identifier, token))
-        error_at("Expected an identifier", next_token_loc());
+    if (!lex_peek(T_identifier, token) ||
+        (find_var(token, parent) &&
+         is_swapped_subscript_base(find_var(token, parent)))) {
+        take_expression_address(parent, bb);
+        return;
+    }
     if (!strcmp(token, "__func__")) {
         if (!parent->func || !parent->func->return_def.var_name[0])
             error_at("__func__ is only defined inside a function",
@@ -1328,6 +1513,33 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
     if (is_bitfield(lvalue.decl))
         error_at("cannot take address of bit-field", next_token_loc());
 
+    if (lvalue.subscript_depth && is_pointee_array_pointer(lvalue.decl)) {
+        /* p[i] of a pointer to an array designates the array at that index, and
+         * p[i][j] one of its rows unless the subscripts reach an element. The
+         * subscripts have already computed that address; give it the designated
+         * array as its pointee rather than taking the address of the temporary
+         * holding it.
+         */
+        fixed_array_shape_t shape =
+            fixed_array_shape_from_pointee_var(lvalue.decl);
+
+        for (int i = 1; i < lvalue.subscript_depth; i++)
+            fixed_array_shape_drop_outer(&shape);
+        if (shape.rank) {
+            rs1 = opstack_pop();
+            vd = require_var(parent);
+            vd->var_name = gen_name();
+            vd->type = lvalue.decl->type;
+            vd->ptr_level = lvalue.decl->ptr_level;
+            vd->is_const_qualified = lvalue.decl->is_const_qualified;
+            copy_pointee_array_shape(vd, lvalue.decl);
+            fixed_array_shape_to_pointee_var(vd, &shape);
+            add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
+            opstack_push(vd);
+            return;
+        }
+    }
+
     if (!lvalue.is_reference) {
         rs1 = opstack_pop();
         vd = require_ref_var(parent, lvalue.type, lvalue.ptr_level);
@@ -1345,34 +1557,71 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
                                : lvalue.decl->func_signature)
                         : NULL;
         opstack_push(vd);
-        if (lvalue.decl && is_array_declarator(lvalue.decl)) {
+
+        /* A parameter declared as an array is a pointer object (C99 6.7.5.3p7),
+         * so its address is that of its own slot, one level above the element
+         * pointer it holds.
+         */
+        bool array_parameter = lvalue.decl && !lvalue.subscript_depth &&
+                               is_array_declarator(lvalue.decl) &&
+                               is_function_parameter(lvalue.decl, parent);
+
+        if (lvalue.decl && is_array_declarator(lvalue.decl) &&
+            !array_parameter) {
             /* An array expression already denotes its backing address in the
              * IR. Taking OP_address_of of its variable would instead point at
              * the compiler's local array-base slot, so `&row` passed a pointer
              * to that slot rather than a pointer to row. Keep the same runtime
              * address while adding the source-level pointer indirection
              * required by the address-of operator.
+             *
+             * The result points to the whole array (C99 6.5.3.2p3), so it
+             * carries the array's bounds as its pointee shape, the form a
+             * declared `int (*p)[N]` has. Typed as a pointer to the first
+             * element instead, `&arr + 1` advanced by a single element.
              */
+            if (!lvalue.decl->is_flexible_array_member &&
+                !lvalue.decl->pointee_array_size && !lvalue.decl->is_func) {
+                fixed_array_shape_t shape =
+                    fixed_array_shape_from_var(lvalue.decl);
+
+                for (int i = 0; i < lvalue.subscript_depth; i++)
+                    fixed_array_shape_drop_outer(&shape);
+                fixed_array_shape_to_pointee_var(vd, &shape);
+                vd->pointee_array_element_ptr_level = lvalue.decl->ptr_level;
+            }
             add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
-        } else
+        } else {
+            if (array_parameter)
+                vd->ptr_level++;
             add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0, NULL);
+        }
+    } else if (!operand_stack[operand_stack_idx - 1]->ptr_level) {
+        /* A subscript types the address it computes, but a member selection
+         * leaves a plain int temporary, since the lvalue is normally loaded
+         * next. As the operand of '&' that address is the result: without the
+         * member's pointer type, "&s.a + 1" advanced by one byte and "sizeof
+         * &s.a" measured an int.
+         */
+        vd = operand_stack[operand_stack_idx - 1];
+        vd->type = lvalue.type;
+        vd->ptr_level = lvalue.ptr_level + 1;
     }
 }
 
-/* A scalar pointer-to-array dereference designates the addressed row; it does
- * not load a scalar object. Retain that row as an array descriptor so a
- * following grouped postfix subscript can use the ordinary array path.
+/* A pointer-to-array dereference designates the addressed row; it does not load
+ * an object. Retain that row as an array descriptor so a following grouped
+ * postfix subscript can use the ordinary array path. The row may hold pointers,
+ * as `*p` does for `int *(*p)[2]`.
  */
-static bool lower_scalar_pointee_array_dereference(var_t *source,
-                                                   block_t *parent,
-                                                   basic_block_t **bb)
+static bool lower_pointee_array_dereference(var_t *source,
+                                            block_t *parent,
+                                            basic_block_t **bb)
 {
     type_t *element_type;
     var_t *row;
 
-    if (!source || !source->type || !source->pointee_array_size ||
-        source->pointee_array_element_ptr_level ||
-        effective_pointer_depth(source) != 1)
+    if (!is_pointee_array_pointer(source))
         return false;
 
     element_type = source->type->pointee_array_element_type
@@ -1383,6 +1632,7 @@ static bool lower_scalar_pointee_array_dereference(var_t *source,
     fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
 
     fixed_array_shape_to_var(row, &shape);
+    row->ptr_level = source->pointee_array_element_ptr_level;
     row->is_const_qualified =
         source->is_const_qualified || element_type->is_const_qualified;
     row->var_name = gen_name();
@@ -1391,28 +1641,14 @@ static bool lower_scalar_pointee_array_dereference(var_t *source,
     return true;
 }
 
-static void copy_pointee_array_shape(var_t *destination, const var_t *source)
-{
-    fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
-
-    fixed_array_shape_to_pointee_var(destination, &shape);
-    destination->pointee_array_element_ptr_level =
-        source->pointee_array_element_ptr_level;
-}
-
-static bool is_scalar_pointee_array_pointer(const var_t *var)
-{
-    return var && var->type && var->pointee_array_size > 0 &&
-           !var->pointee_array_element_ptr_level &&
-           effective_pointer_depth(var) == 1;
-}
-
-static int scalar_pointee_array_row_stride(const var_t *var)
+static int pointee_array_row_stride(const var_t *var)
 {
     type_t *element_type = var->type->pointee_array_element_type
                                ? var->type->pointee_array_element_type
                                : var->type;
 
+    if (var->pointee_array_element_ptr_level)
+        return var->pointee_array_size * PTR_SIZE;
     return var->pointee_array_size * element_type->size;
 }
 
@@ -1465,14 +1701,13 @@ static int fixed_array_decay_stride(const var_t *var)
     return fixed_array_subscript_stride(var, 0, var->type->size);
 }
 
-static bool scalar_pointee_array_shapes_compatible(const var_t *left,
-                                                   const var_t *right)
+static bool pointee_array_shapes_compatible(const var_t *left,
+                                            const var_t *right)
 {
     type_t *left_element;
     type_t *right_element;
 
-    if (!is_scalar_pointee_array_pointer(left) ||
-        !is_scalar_pointee_array_pointer(right))
+    if (!is_pointee_array_pointer(left) || !is_pointee_array_pointer(right))
         return false;
     left_element = left->type->pointee_array_element_type
                        ? left->type->pointee_array_element_type
@@ -1489,101 +1724,80 @@ static bool scalar_pointee_array_shapes_compatible(const var_t *left,
            compatible_decl_type(left_element, right_element);
 }
 
+/* Dereference the pointer value @rs1 and push the object it designates. */
+void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1)
+{
+    var_t *vd;
+    int sz;
+
+    if (rs1->is_func_name_array_address) {
+        /* The address of an array has the same runtime value as its first
+         * element. Dereferencing it restores the array, which immediately
+         * decays back to char * in this expression context.
+         */
+        vd = require_typed_ptr_var(parent, TY_char, 1);
+        vd->var_name = gen_name();
+        vd->is_string_literal = true;
+        opstack_push(vd);
+        add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
+        return;
+    }
+
+    if (lower_pointee_array_dereference(rs1, parent, bb))
+        return;
+
+    /* For pointer dereference, we need to determine the target type and size.
+     * Since we do not have full type tracking in expressions, use defaults
+     */
+    type_t *deref_type = rs1->type ? rs1->type : TY_int;
+    int deref_ptr = rs1->ptr_level + deref_type->ptr_level - 1;
+
+    /* require_deref_var() takes the *source* pointer level and returns a
+     * variable one level shallower. Passing the already-decremented value
+     * dropped two levels per dereference, so "**(q + 0)" on an int** ended up
+     * reading an int-sized word where a pointer was stored. The sizes coincide
+     * on the 32-bit targets, which is why it only surfaces here.
+     */
+    vd = require_deref_var(parent, deref_type, rs1->ptr_level);
+    sz = deref_ptr > 0
+             ? PTR_SIZE
+             : pointer_typedef_pointee_size(
+                   deref_type, pointee_type_from_pointer_typedef(deref_type));
+    vd->var_name = gen_name();
+    vd->is_const_qualified = rs1->is_const_qualified;
+    vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
+    vd->is_const_pointer =
+        vd->ptr_level > 0 && vd->ptr_level <= 32 &&
+        (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
+
+    /* Pointer arithmetic can produce a pointer to a callback typedef. The
+     * actual dereference consumes that object-pointer level and yields the
+     * pointer-valued callback result for a following postfix call.
+     */
+    if (deref_type && deref_type->func_signature &&
+        effective_pointer_depth(rs1) == 1) {
+        vd->func_signature = deref_type->func_signature;
+        vd->ptr_level = 1;
+        sz = PTR_SIZE;
+    }
+    push_object_at(parent, bb, vd, rs1, sz);
+}
+
 void handle_single_dereference(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1;
     int sz;
 
-    if (lex_peek(T_open_bracket, NULL)) {
-        /* Handle general expression dereference: *(expr) */
-        lex_expect(T_open_bracket);
-        read_expr(parent, bb);
-        lex_expect(T_close_bracket);
-
-        rs1 = opstack_pop();
-
-        if (rs1->is_func_name_array_address) {
-            /* The address of an array has the same runtime value as its first
-             * element. Dereferencing it restores the array, which immediately
-             * decays back to char * in this expression context.
-             */
-            vd = require_typed_ptr_var(parent, TY_char, 1);
-            vd->var_name = gen_name();
-            vd->is_string_literal = true;
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
-            return;
-        }
-
-        if (lower_scalar_pointee_array_dereference(rs1, parent, bb))
-            return;
-
-        /* For pointer dereference, we need to determine the target type and
-         * size. Since we do not have full type tracking in expressions, use
-         * defaults
-         */
-        type_t *deref_type = rs1->type ? rs1->type : TY_int;
-        int deref_ptr = rs1->ptr_level + deref_type->ptr_level - 1;
-
-        /* require_deref_var() takes the *source* pointer level and returns a
-         * variable one level shallower. Passing the already-decremented value
-         * dropped two levels per dereference, so "**(q + 0)" on an int** ended
-         * up reading an int-sized word where a pointer was stored. The sizes
-         * coincide on the 32-bit targets, which is why it only surfaces here.
-         */
-        vd = require_deref_var(parent, deref_type, rs1->ptr_level);
-        if (deref_ptr > 0)
-            sz = PTR_SIZE;
-        else
-            sz = deref_type->size;
-        vd->var_name = gen_name();
-        vd->is_const_qualified = rs1->is_const_qualified;
-        vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
-        vd->is_const_pointer =
-            vd->ptr_level > 0 && vd->ptr_level <= 32 &&
-            (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
-
-        /* Pointer arithmetic can produce a pointer to a callback typedef. The
-         * actual dereference consumes that object-pointer level and yields the
-         * pointer-valued callback result for a following postfix call.
-         */
-        if (deref_type && deref_type->func_signature &&
-            effective_pointer_depth(rs1) == 1) {
-            vd->func_signature = deref_type->func_signature;
-            vd->ptr_level = 1;
-            sz = PTR_SIZE;
-        }
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
-    } else if (lex_peek(T_increment, NULL) || lex_peek(T_decrement, NULL)) {
-        /* A prefix update is itself a unary expression, so `*++pointer` and
-         * `*--pointer` dereference its updated pointer result just like
-         * `*(pointer + 1)` dereferences a parenthesized operand.
+    if (lex_peek(T_open_bracket, NULL) || lex_peek(T_increment, NULL) ||
+        lex_peek(T_decrement, NULL) || lex_peek(T_ampersand, NULL)) {
+        /* Handle general expression dereference: *(expr), and a prefix update,
+         * which is itself a unary expression: `*++pointer` dereferences its
+         * updated result. The group is a whole unary operand, so postfix
+         * operators after it apply before the dereference: `*(*q).p` loads
+         * through the member.
          */
         read_expr_operand(parent, bb);
-        rs1 = opstack_pop();
-        type_t *deref_type = rs1->type ? rs1->type : TY_int;
-        int deref_ptr = rs1->ptr_level + deref_type->ptr_level - 1;
-
-        vd = require_deref_var(parent, deref_type, rs1->ptr_level);
-        sz = deref_ptr > 0 ? PTR_SIZE
-                           : pointer_typedef_pointee_size(
-                                 deref_type,
-                                 pointee_type_from_pointer_typedef(deref_type));
-        vd->var_name = gen_name();
-        vd->is_const_qualified = rs1->is_const_qualified;
-        vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
-        vd->is_const_pointer =
-            vd->ptr_level > 0 && vd->ptr_level <= 32 &&
-            (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
-        if (deref_type && deref_type->func_signature &&
-            effective_pointer_depth(rs1) == 1) {
-            vd->func_signature = deref_type->func_signature;
-            vd->ptr_level = 1;
-            sz = PTR_SIZE;
-        }
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+        push_dereference(parent, bb, opstack_pop());
     } else {
         /* Handle simple identifier dereference: *var */
         char token[MAX_VAR_LEN];
@@ -1613,8 +1827,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             vd->is_const_pointer =
                 vd->ptr_level > 0 && vd->ptr_level <= 32 &&
                 (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+            push_object_at(parent, bb, vd, rs1, sz);
             return;
         }
         var_t *var = find_var(token, parent);
@@ -1643,7 +1856,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             opstack_push(load_function_pointer_object(parent, bb, rs1));
             return;
         }
-        if (lower_scalar_pointee_array_dereference(rs1, parent, bb))
+        if (lower_pointee_array_dereference(rs1, parent, bb))
             return;
 
         /* A member function-pointer typedef was already loaded by
@@ -1689,8 +1902,7 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             vd->ptr_level = 1;
             sz = PTR_SIZE;
         }
-        opstack_push(vd);
-        add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+        push_object_at(parent, bb, vd, rs1, sz);
     }
 }
 
@@ -1707,44 +1919,13 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
         deref_count++;
 
     /* Check if we have a parenthesized expression or simple identifier */
-    if (lex_peek(T_open_bracket, NULL)) {
-        /* Handle ***(expr) case */
-        lex_expect(T_open_bracket);
-        read_expr(parent, bb);
-        lex_expect(T_close_bracket);
+    if (lex_peek(T_open_bracket, NULL) || lex_peek(T_ampersand, NULL)) {
+        /* Handle ***(expr) case, with any postfix operators after the group */
+        read_expr_operand(parent, bb);
 
         /* Apply dereferences one by one */
-        for (int i = 0; i < deref_count; i++) {
-            rs1 = opstack_pop();
-            /* For expression dereference, use default type info */
-            type_t *deref_type = rs1->type ? rs1->type : TY_int;
-            int deref_ptr = rs1->ptr_level > 0 ? rs1->ptr_level - 1 : 0;
-
-            vd = require_deref_var(parent, deref_type, rs1->ptr_level);
-            if (deref_ptr > 0)
-                sz = PTR_SIZE;
-            else
-                sz = deref_type->size;
-            vd->var_name = gen_name();
-            vd->is_const_qualified = rs1->is_const_qualified;
-            vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
-            vd->is_const_pointer =
-                vd->ptr_level > 0 && vd->ptr_level <= 32 &&
-                (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
-
-            /* A parenthesized pointer-arithmetic result can designate a
-             * callback object just like `*slot`. Restore its prototype only
-             * after consuming exactly that final object-pointer indirection.
-             */
-            if (deref_type && deref_type->func_signature &&
-                effective_pointer_depth(rs1) == 1) {
-                vd->func_signature = deref_type->func_signature;
-                vd->ptr_level = 1;
-                sz = PTR_SIZE;
-            }
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
-        }
+        for (int i = 0; i < deref_count; i++)
+            push_dereference(parent, bb, opstack_pop());
     } else {
         /* Handle **pp, ***ppp case with simple identifier */
         char token[MAX_VAR_LEN];
@@ -1793,8 +1974,183 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                 vd->ptr_level = 1;
                 sz = PTR_SIZE;
             }
-            opstack_push(vd);
-            add_insn(parent, *bb, OP_read, vd, rs1, NULL, sz, NULL);
+            push_object_at(parent, bb, vd, rs1, sz);
         }
     }
+}
+
+/* Lower a postfix member chain from the record at @address, of @record_type,
+ * and return the selected value on the operand stack. The chain starts with
+ * `->` when @arrow_first, @address then being the pointer operand, and with `.`
+ * otherwise. @is_lvalue says the record designates an object; a chain that
+ * follows a pointer member reaches an object in any case. An array member left
+ * with dimensions unconsumed decays to a pointer, and a record member is copied
+ * out whole, as a record element is.
+ */
+var_t *lower_member_postfix(var_t *address,
+                            type_t *record_type,
+                            bool arrow_first,
+                            bool is_lvalue,
+                            block_t *parent,
+                            basic_block_t **bb)
+{
+    var_t *field = NULL;
+    var_t *result;
+    fixed_array_shape_t shape = {0};
+    int depth = 0;
+
+    while (lex_peek(T_dot, NULL) || lex_peek(T_arrow, NULL) ||
+           (field && depth < shape.rank && lex_peek(T_open_square, NULL))) {
+        char name[MAX_ID_LEN];
+
+        if (lex_accept(T_open_square)) {
+            int element_size = field->ptr_level || field->is_func
+                                   ? PTR_SIZE
+                                   : field->type->size;
+            int stride = fixed_array_shape_stride(&shape, depth, element_size);
+            var_t *index;
+
+            if (!read_assignment_expression(parent, bb)) {
+                read_expr(parent, bb);
+                read_ternary_operation(parent, bb);
+            }
+            index = opstack_pop();
+            lex_expect(T_close_square);
+            if (stride != 1) {
+                var_t *scale = require_var(parent);
+                var_t *scaled = require_var(parent);
+
+                scale->var_name = gen_name();
+                scale->init_val = stride;
+                add_insn(parent, *bb, OP_load_constant, scale, NULL, NULL, 0,
+                         NULL);
+                scaled->var_name = gen_name();
+                add_insn(parent, *bb, OP_mul, scaled, index, scale, 0, NULL);
+                index = scaled;
+            }
+            var_t *indexed = require_typed_ptr_var(parent, field->type, 1);
+            indexed->var_name = gen_name();
+            add_insn(parent, *bb, OP_add, indexed, address, index, 0, NULL);
+            address = indexed;
+            depth++;
+            if (depth == shape.rank && is_record_type(field->type) &&
+                !field->ptr_level)
+                record_type = field->type;
+            continue;
+        }
+
+        if (!field) {
+            /* The first selection applies to the operand itself. */
+            if (!lex_accept(arrow_first ? T_arrow : T_dot))
+                error_at(arrow_first ? "Cannot apply dot operator to pointer"
+                                     : "Cannot apply arrow operator to record",
+                         next_token_loc());
+            if (arrow_first)
+                is_lvalue = true;
+        } else if (lex_accept(T_arrow)) {
+            /* Only a selected pointer-to-record member can be followed. */
+            if (depth < shape.rank || field->ptr_level != 1 ||
+                field->type->ptr_level || field->is_func ||
+                !is_record_type(field->type))
+                error_at("Invalid record member access", cur_token_loc());
+            var_t *pointer = require_typed_ptr_var(parent, field->type, 1);
+
+            pointer->var_name = gen_name();
+            add_insn(parent, *bb, OP_read, pointer, address, NULL, PTR_SIZE,
+                     NULL);
+            address = pointer;
+            record_type = field->type;
+            is_lvalue = true;
+        } else {
+            lex_expect(T_dot);
+        }
+        if (!record_type)
+            error_at("Member access requires a record", cur_token_loc());
+        lex_ident(T_identifier, name);
+        field = find_member(name, record_type);
+        if (!field)
+            error_at("Unknown struct or union member", cur_token_loc());
+        address = compute_field_address(parent, bb, address, field);
+        shape = fixed_array_shape_from_var(field);
+        depth = 0;
+        record_type = is_record_type(field->type) && !field->ptr_level &&
+                              !field->array_size
+                          ? field->type
+                          : NULL;
+    }
+
+    if (depth < shape.rank && unevaluated_expression_depth) {
+        /* sizeof observes the array itself, before any decay. */
+        for (int i = 0; i < depth; i++)
+            fixed_array_shape_drop_outer(&shape);
+        result = require_typed_ptr_var(parent, field->type, field->ptr_level);
+        fixed_array_shape_to_var(result, &shape);
+        result->var_name = gen_name();
+        opstack_push(result);
+    } else if (depth < shape.rank) {
+        for (int i = 0; i <= depth; i++)
+            fixed_array_shape_drop_outer(&shape);
+        result =
+            require_typed_ptr_var(parent, field->type, field->ptr_level + 1);
+        fixed_array_shape_to_pointee_var(result, &shape);
+        result->pointee_array_element_ptr_level = field->ptr_level;
+        result->var_name = gen_name();
+        add_insn(parent, *bb, OP_assign, result, address, NULL, 0, NULL);
+        opstack_push(result);
+    } else if (is_bitfield(field)) {
+        result = read_bitfield_value(parent, bb, address, field);
+        opstack_push(result);
+        if (is_lvalue)
+            mark_value_reference(result, address, field);
+    } else {
+        result = require_typed_ptr_var(parent, field->type, field->ptr_level);
+        result->var_name = gen_name();
+        result->func_signature = field->func_signature;
+
+        /* A function-pointer member is loaded as the pointer value a call
+         * consumes, not as an object to be loaded again.
+         */
+        if (field->func_signature && !result->ptr_level)
+            result->ptr_level = 1;
+        push_object_at(
+            parent, bb, result, address,
+            field->ptr_level || field->type->ptr_level || field->is_func
+                ? PTR_SIZE
+                : field->type->size);
+        if (!is_lvalue)
+            result->is_compound_literal_reference = false;
+    }
+    result->is_const_qualified =
+        field->is_const_qualified || field->type->is_const_qualified;
+    if (!is_lvalue &&
+        (lex_peek(T_assign, NULL) || lex_peek(T_increment, NULL) ||
+         lex_peek(T_decrement, NULL)))
+        error_at("member of a function call result is not assignable",
+                 next_token_loc());
+    return result;
+}
+
+/* A record returned by value is an rvalue, yet C99 6.5.2.3 still lets a postfix
+ * member chain select from it: `make().inner.value`, `make().items[1]` or
+ * `make().next->value`. Aggregate calls already write their result to
+ * caller-owned storage, so each member is lowered from that storage's address.
+ */
+void lower_call_result_member_postfix(var_t **value,
+                                      block_t *parent,
+                                      basic_block_t **bb)
+{
+    var_t *base;
+    var_t *address;
+
+    if (!value || !(base = *value) || !lex_peek(T_dot, NULL) ||
+        !is_record_type(base->type) || effective_pointer_depth(base) ||
+        base->array_size)
+        return;
+
+    opstack_pop();
+    address = require_ref_var(parent, base->type, 0);
+    address->var_name = gen_name();
+    add_insn(parent, *bb, OP_address_of, address, base, NULL, 0, NULL);
+    *value =
+        lower_member_postfix(address, base->type, false, false, parent, bb);
 }

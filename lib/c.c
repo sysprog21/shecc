@@ -791,8 +791,8 @@ int ftell(FILE *stream)
 #define CHUNK_GET_SIZE(size) (size & CHUNK_SIZE_SZ_MASK)
 #define IS_CHUNK_GET_FREED(size) (size & CHUNK_SIZE_FREED_MASK)
 
-typedef struct chunk {
-    struct chunk *next, *prev;
+typedef struct __chunk {
+    struct __chunk *next, *prev;
     int size;
 } chunk_t;
 

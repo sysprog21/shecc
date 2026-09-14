@@ -458,54 +458,6 @@ int read_sizeof_constant(block_t *scope)
     return res;
 }
 
-int read_primary_constant(block_t *scope)
-{
-    /* return signed constant */
-    int isneg = 0, res;
-
-    /* This recurses once per nesting level of a constant expression, so the
-     * buffer holds only what is copied into it: a number, a character constant
-     * or an identifier, each at most MAX_TOKEN_LEN. A string is only tested for
-     * and never copied.
-     */
-    char buffer[MAX_TOKEN_LEN];
-    if (lex_accept(T_minus))
-        isneg = 1;
-    if (lex_accept(T_sizeof)) {
-        res = read_sizeof_constant(scope);
-    } else if (lex_accept(T_open_bracket)) {
-        res = read_primary_constant(scope);
-        lex_expect(T_close_bracket);
-    } else if (lex_peek(T_numeric, buffer)) {
-        res = parse_numeric_constant(buffer);
-        lex_expect(T_numeric);
-    } else if (lex_peek(T_char, buffer) || lex_peek(T_wchar, buffer)) {
-        char unescaped[MAX_TOKEN_LEN];
-        unescape_string(buffer, unescaped, MAX_TOKEN_LEN);
-        res = lex_peek(T_wchar, NULL) ? parse_wide_character_constant(buffer)
-                                      : parse_character_constant(buffer);
-        lex_expect(lex_peek(T_wchar, NULL) ? T_wchar : T_char);
-    } else if (lex_peek(T_identifier, buffer)) {
-        constant_t *con;
-
-        if (!strcmp(buffer, "__builtin_offsetof")) {
-            res = read_const_expr_operand(scope);
-            if (isneg)
-                return (-1) * res;
-            return res;
-        }
-        lex_expect(T_identifier);
-        con = find_scoped_constant(buffer, scope);
-        if (!con)
-            error_at("Identifier is not an integer constant", next_token_loc());
-        res = con->value;
-    } else
-        error_at("Invalid value after assignment", next_token_loc());
-    if (isneg)
-        return (-1) * res;
-    return res;
-}
-
 int eval_expression_imm(opcode_t op, int op1, int op2)
 {
     /* return immediate result */
@@ -632,7 +584,7 @@ void emit_global_scalar_assignment(block_t *parent,
                                    var_t *dest,
                                    var_t *src)
 {
-    if (!dest->ptr_level && dest->type == TY_bool)
+    if (is_bool_scalar(dest->type, dest->ptr_level))
         src->init_val = src->init_val != 0;
     add_insn(parent, bb, OP_assign, dest, src, NULL, 0, NULL);
 }
@@ -1435,6 +1387,23 @@ bool read_global_assignment_var(var_t *var)
     }
 
     /* global initialization must be constant */
+    if (global_pointer_cast_starts_here(scope)) {
+        int saved_stride = global_pointer_cast_stride;
+        int stride = read_global_pointer_cast(scope);
+
+        /* In a chain of casts the outermost one decides the stride. */
+        if (saved_stride)
+            stride = saved_stride;
+        if (!global_address_operand_starts_here(scope)) {
+            rs1 = read_global_cast_integer_address(parent, bb, scope, stride);
+            add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
+            return true;
+        }
+        global_pointer_cast_stride = stride;
+        read_global_assignment_var(var);
+        global_pointer_cast_stride = saved_stride;
+        return true;
+    }
     {
         /* A function designator is a valid address constant. Keep it as the
          * function symbol until lowering: OP_address_of_func has the deferred
@@ -1526,8 +1495,13 @@ bool read_global_assignment_var(var_t *var)
                 lex_expect(T_identifier);
                 add_insn(parent, bb, OP_address_of, object_addr, object, NULL,
                          0, NULL);
-                if (!explicit_address && object->array_size &&
-                    (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL))) {
+                if (!explicit_address && object->array_dim2 &&
+                    lex_peek(T_open_square, NULL)) {
+                    object_addr = read_global_address_designator(
+                        scope, parent, &bb, &object, object_addr, true);
+                } else if (!explicit_address && object->array_size &&
+                           (lex_peek(T_plus, NULL) ||
+                            lex_peek(T_minus, NULL))) {
                     int index = read_global_address_offset(scope, parent, bb);
                     int stride =
                         object->ptr_level ? PTR_SIZE : object->type->size;
@@ -1535,7 +1509,9 @@ bool read_global_assignment_var(var_t *var)
                     var_t *offset_addr = require_ref_var(parent, object->type,
                                                          object->ptr_level);
 
-                    stride = fixed_array_shape_stride(&shape, 0, stride);
+                    stride = global_pointer_cast_stride
+                                 ? global_pointer_cast_stride
+                                 : fixed_array_shape_stride(&shape, 0, stride);
                     byte_offset->var_name = gen_name();
                     byte_offset->init_val = index * stride;
                     add_insn(parent, bb, OP_load_constant, byte_offset, NULL,
@@ -1548,7 +1524,7 @@ bool read_global_assignment_var(var_t *var)
                 }
                 if (explicit_address)
                     object_addr = read_global_address_designator(
-                        scope, parent, &bb, &object, object_addr);
+                        scope, parent, &bb, &object, object_addr, false);
                 if (incompatible_pointee_callback_conversion(object_addr, var))
                     error_at("incompatible callback slot types in initializer",
                              cur_token_loc());
@@ -1596,7 +1572,7 @@ bool read_global_assignment_var(var_t *var)
         int val_stack[MAX_OPERATOR_STACK_SIZE];
         int op_stack_index = 0, val_stack_index = 0;
         int operand1, operand2;
-        operand1 = read_primary_constant(scope);
+        operand1 = read_const_expr_operand(scope);
         op = get_operator();
         /* only one value after assignment */
         if (op == OP_generic) {
@@ -1614,7 +1590,7 @@ bool read_global_assignment_var(var_t *var)
             eval_ternary_imm(operand1, var);
             return true;
         }
-        operand2 = read_primary_constant(scope);
+        operand2 = read_const_expr_operand(scope);
         next_op = get_operator();
         if (next_op == OP_generic) {
             /* only two operands, apply and return */
@@ -1661,7 +1637,7 @@ bool read_global_assignment_var(var_t *var)
             if (val_stack_index >= MAX_OPERATOR_STACK_SIZE ||
                 op_stack_index >= MAX_OPERATOR_STACK_SIZE)
                 fatal("Constant expression too complex");
-            val_stack[val_stack_index++] = read_primary_constant(scope);
+            val_stack[val_stack_index++] = read_const_expr_operand(scope);
             /* push operator on stack */
             op_stack[op_stack_index++] = op;
             op = get_operator();

@@ -779,9 +779,11 @@ struct var {
      */
     bool is_compound_literal;
 
-    /* A scalar value read from a compound-literal aggregate. This points at its
-     * element/member address so a following prefix update can write back
-     * through the automatic aggregate rather than assign the temporary.
+    /* A value loaded from an object that has no declaration of its own: an
+     * element or member of a compound literal, or an object reached through a
+     * dereference, subscript or member selection. This points at the object's
+     * address so a following update, store or member selection reaches the
+     * object rather than the temporary.
      */
     bool is_compound_literal_reference;
     struct var *compound_literal_address;
@@ -812,16 +814,6 @@ struct var {
      * while reading var_t itself. parser.c owns the cast back to func_t.
      */
     void *func_signature;
-
-    /* When a function pointer was initialized from a visible function
-     * designator, retain that concrete target for internal-ABI validation.
-     */
-    void *func_target;
-
-    /* Once an assignment may have supplied an unknown/external target, parser
-     * order cannot prove provenance across later control-flow joins.
-     */
-    bool func_target_invalid;
 
     /* C ABI lowering passes record parameters as pointers to caller-owned
      * copies. The source-level declaration remains a record so field access and
@@ -866,6 +858,7 @@ type_t *find_record_tag(char name[], block_t *block, base_type_t kind);
 type_t *reference_record_tag(char name[], block_t *block, base_type_t kind);
 type_t *local_record_tag(char name[], block_t *block, base_type_t kind);
 type_t *find_enum_tag(char name[], block_t *block);
+type_t *reference_enum_tag(char name[], block_t *block);
 type_t *local_enum_tag(char name[], block_t *block);
 typedef struct basic_block basic_block_t;
 
@@ -1079,6 +1072,16 @@ typedef struct {
     bool is_func;
     bool is_reference;
     bool is_const_qualified;
+
+    /* The lvalue designates an array, which C99 6.5.16 does not let an
+     * assignment, ++ or -- modify.
+     */
+    bool is_array;
+
+    /* Subscripts applied to the declaration in lvalue_t.decl. A designated
+     * array keeps the bounds after the first this many.
+     */
+    int subscript_depth;
     unsigned int pointer_const_mask;
     type_t *type;
 

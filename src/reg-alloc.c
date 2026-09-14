@@ -2497,7 +2497,7 @@ void reg_alloc_global(insn_t *global_insn)
         } else {
             global_insn->rd->offset = GLOBAL_FUNC->stack_size;
             global_insn->rd->space_is_allocated = true;
-            if (global_insn->rd->ptr_level)
+            if (global_insn->rd->ptr_level || global_insn->rd->is_func)
                 GLOBAL_FUNC->stack_size += PTR_SIZE;
             else if (global_insn->rd->type != TY_int &&
                      global_insn->rd->type != TY_short &&

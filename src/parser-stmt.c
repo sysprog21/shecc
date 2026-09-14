@@ -227,13 +227,18 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
     /* Statements before the first label are legal but are not an entry point of
      * the switch. A following label supplies the source-order fallthrough edge
      * without making those statements reachable from dispatch.
+     *
+     * The braces open a block like any compound statement, so a declaration
+     * inside them hides an outer one of the same name instead of redeclaring
+     * it.
      */
-    body = bb_create(parent);
+    block_t *blk = add_block(parent, parent->func);
+    body = bb_create(blk);
 
     lex_expect(T_open_curly);
     while (!lex_accept(T_close_curly)) {
-        body = read_body_statement(parent, body);
-        perform_side_effect(parent, body);
+        body = read_body_statement(blk, body);
+        perform_side_effect(blk, body);
     }
 
     /* Complete the deferred no-match dispatch after every case comparison is
@@ -267,6 +272,70 @@ static void reject_ordinary_typedef_collision(block_t *block, var_t *var)
     if (find_block_typedef(block, var->var_name))
         error_at("ordinary identifier conflicts with typedef name",
                  cur_token_loc());
+}
+
+/* Reject @name when an enumeration constant or, in the outermost block of a
+ * function body, a parameter already declares it in @block's scope (6.2.1p4).
+ * Neither has linkage, so no second declaration may follow.
+ */
+static void reject_unlinked_scope_name(block_t *block, const char *name)
+{
+    func_t *func = block->func;
+
+    for (constant_t *constant = block->constants; constant;
+         constant = constant->next) {
+        if (!strcmp(constant->alias, name))
+            error_at("identifier redeclared as a different kind of symbol",
+                     cur_token_loc());
+    }
+    if (block->parent || !func)
+        return;
+    for (int i = 0; i < func->num_params; i++) {
+        if (!strcmp(func->param_defs[i].var_name, name))
+            error_at("redeclaration of parameter in the function body",
+                     cur_token_loc());
+    }
+}
+
+/* C99 6.7p3 lets an identifier without linkage be declared only once in a
+ * scope. A block-scope extern object or function declaration has linkage
+ * (6.2.2p4-5), so it may repeat an earlier one of the same kind, and the file
+ * scope helpers then check the types agree. Any other pair in @block conflicts:
+ * an object and a function never denote the same entity.
+ *
+ * @var is the declarator being bound, still listed in @block's locals when it
+ * declares an object. @is_function and @has_linkage describe its binding.
+ */
+static void reject_block_redeclaration(block_t *block,
+                                       var_t *var,
+                                       bool is_function,
+                                       bool has_linkage)
+{
+    const char *name = var->var_name;
+
+    if (!name[0])
+        return;
+    for (int i = 0; i < block->locals.size; i++) {
+        var_t *prior = block->locals.elements[i];
+        bool prior_is_function;
+
+        if (prior == var || prior->var_name[0] != name[0] ||
+            strcmp(prior->var_name, name))
+            continue;
+        prior_is_function = prior->is_extern_function_alias;
+        if (prior_is_function != is_function)
+            error_at("identifier redeclared as a different kind of symbol",
+                     cur_token_loc());
+
+        /* A prior extern object is the file-scope entry itself; a local static
+         * object shares its name but is a different record.
+         */
+        if (!has_linkage ||
+            !(prior_is_function || find_global_var(prior->var_name) == prior))
+            error_at("redeclaration of identifier with no linkage",
+                     cur_token_loc());
+    }
+    reject_unlinked_scope_name(block, name);
 }
 
 /* The storage-class specifiers and qualifiers that lead a block-scope
@@ -312,6 +381,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     basic_block_t *setup = bb_create(blk);
     bb_connect(bb, setup, NEXT);
 
+    hoist_storage_class_specifiers();
     if (lex_peek(T_typedef, NULL)) {
         if (strict_c99)
             error_at("C99 for initializer cannot declare a typedef",
@@ -439,6 +509,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     bb_connect(cond_, for_end, ELSE);
 
     vd = opstack_pop();
+    reject_record_operand(vd);
     add_insn(blk, cond_, OP_branch, NULL, vd, NULL, 0, NULL);
 
     basic_block_t *inc_ = bb_create(blk);
@@ -514,6 +585,7 @@ basic_block_t *handle_do_statement(block_t *parent, basic_block_t *bb)
     lex_expect(T_close_bracket);
 
     vd = opstack_pop();
+    reject_record_operand(vd);
     add_insn(parent, cond_, OP_branch, NULL, vd, NULL, 0, NULL);
 
     lex_expect(T_semicolon);
@@ -542,7 +614,6 @@ basic_block_t *handle_record_statement(block_t *parent,
 
     /* The caller has seen struct or union ahead. */
     base_type_t kind = accept_record_keyword();
-    bool is_union = kind == TYPE_union;
     bool has_tag = lex_peek(T_identifier, token);
 
     if (has_tag)
@@ -551,109 +622,9 @@ basic_block_t *handle_record_statement(block_t *parent,
         error_at("Expected struct or union tag or definition",
                  next_token_loc());
     if (lex_peek(T_open_curly, NULL)) {
-        int i = 0;
-        int size = 0;
-        int alignment = 1;
-        int max_size = 0;
-        bitfield_layout_t bits = {0};
-        bool has_flexible_array_member = false;
-
-        /* An untagged definition names a type no other declaration can reach,
-         * so it needs no tag table entry.
-         */
-        if (has_tag)
-            type = local_record_tag(token, parent, kind);
-        else {
-            type = add_type();
-            type->base_type = kind;
-        }
-
-        lex_expect(T_open_curly);
-        do {
-            var_t *v = type_add_field(type, &i);
-            var_t *last = v;
-
-            /* A member's type names tags visible in this block. */
-            v->scope = parent;
-            read_full_var_decl(v, false, false, true);
-            read_bitfield_width(v, parent);
-            reject_flexible_array_member_container(v);
-            mark_flexible_array_member(v, is_union);
-            if (is_union) {
-                v->offset = 0;
-                int field_size = is_bitfield(v)
-                                     ? (v->bit_width ? v->bit_storage_size : 0)
-                                     : size_var(v);
-                if (field_size > max_size)
-                    max_size = field_size;
-                if (alignment_var(v) > alignment)
-                    alignment = alignment_var(v);
-            } else {
-                size = is_bitfield(v)
-                           ? layout_bitfield_field(size, v, &alignment, &bits)
-                           : layout_struct_field(
-                                 flush_bitfield_layout(size, &bits), v,
-                                 &alignment);
-            }
-
-            while (lex_accept(T_comma)) {
-                if (!is_union && last->is_flexible_array_member)
-                    error_at(
-                        "Flexible array member must be the final struct member",
-                        cur_token_loc());
-                var_t *nv = type_add_field(type, &i);
-                initialize_struct_field(nv, v, 0);
-                read_inner_var_decl(nv, false, false, true);
-                read_bitfield_width(nv, parent);
-                reject_flexible_array_member_container(nv);
-                mark_flexible_array_member(nv, is_union);
-                last = nv;
-                if (is_union) {
-                    nv->offset = 0;
-                    int field_size =
-                        is_bitfield(nv)
-                            ? (nv->bit_width ? nv->bit_storage_size : 0)
-                            : size_var(nv);
-                    if (field_size > max_size)
-                        max_size = field_size;
-                    if (alignment_var(nv) > alignment)
-                        alignment = alignment_var(nv);
-                } else {
-                    size =
-                        is_bitfield(nv)
-                            ? layout_bitfield_field(size, nv, &alignment, &bits)
-                            : layout_struct_field(
-                                  flush_bitfield_layout(size, &bits), nv,
-                                  &alignment);
-                }
-            }
-
-            lex_expect(T_semicolon);
-            if (!is_union && last->is_flexible_array_member) {
-                if (!lex_peek(T_close_curly, NULL))
-                    error_at(
-                        "Flexible array member must be the final struct member",
-                        cur_token_loc());
-                if (i == 1)
-                    error_at(
-                        "Struct needs a named member before its flexible array "
-                        "member",
-                        cur_token_loc());
-                has_flexible_array_member = true;
-            }
-        } while (!lex_accept(T_close_curly));
-
-        type->alignment = alignment;
-        type->size =
-            is_union ? ALIGN_UP(max_size, alignment)
-                     : ALIGN_UP(flush_bitfield_layout(size, &bits), alignment);
-        type->num_fields = i;
-        type->has_flexible_array_member = has_flexible_array_member;
-
-        if (lex_peek(T_semicolon, NULL)) {
-            lex_expect(T_semicolon);
+        type = read_record_body(parent, kind, has_tag, token);
+        if (lex_accept(T_semicolon))
             return bb;
-        }
     }
     if (!type && lex_accept(T_semicolon)) {
         /* A block-scope `struct tag;` or `union tag;` introduces an incomplete
@@ -722,13 +693,14 @@ int read_enum_constant(block_t *scope)
     return value;
 }
 
-/* A block-scope enum definition contributes integer constants to the current
- * expression parser just as a file-scope definition does. Like a record
- * definition, it may introduce declarators after the closing brace.
+/* The block-scope enum specifier that starts at the next token: a reference to
+ * a visible tag, or a tagged or untagged definition. A definition contributes
+ * integer constants to the current expression parser just as a file-scope
+ * definition does. @is_definition reports whether a body was read.
+ *
+ * Returns the enum type.
  */
-basic_block_t *handle_enum_statement(block_t *parent,
-                                     basic_block_t *bb,
-                                     const block_decl_specifiers_t *spec)
+static type_t *read_block_enum_specifier(block_t *parent, bool *is_definition)
 {
     char token[MAX_ID_LEN];
     int val = 0;
@@ -741,22 +713,23 @@ basic_block_t *handle_enum_statement(block_t *parent,
         type = local_enum_tag(token, parent);
         has_tag = true;
     }
-    if (!lex_peek(T_open_curly, NULL)) {
+    *is_definition = lex_peek(T_open_curly, NULL);
+    if (!*is_definition) {
         if (!has_tag)
             error_at("Unknown enum type", next_token_loc());
-        if (!type)
-            type = find_enum_tag(token, parent);
-        if (!type)
-            error_at("Unknown enum type", next_token_loc());
-        return read_block_declarators(parent, bb, type, spec, true);
+        return type ? type : reference_enum_tag(token, parent);
     }
-    if (!type)
-        type = add_type();
+
+    /* Only a definition creates an enum tag, so one already declared in this
+     * block would be defined twice (C99 6.7.2.3p1).
+     */
+    if (type)
+        error_at("redefinition of enum tag", cur_token_loc());
+    type = add_type();
     initialize_enum_type(type);
     if (has_tag) {
         set_type_name(type, token);
-        if (!find_local_type_tag(token, parent))
-            add_type_tag(parent, token, type);
+        add_type_tag(parent, token, type);
     }
     lex_expect(T_open_curly);
     bool first = true;
@@ -767,13 +740,38 @@ basic_block_t *handle_enum_statement(block_t *parent,
         if (lex_accept(T_assign)) {
             val = read_enum_constant(parent);
         }
+
+        /* An enumeration constant has no linkage, so no other ordinary
+         * identifier of this block may share its name.
+         */
+        for (int i = 0; i < parent->locals.size; i++) {
+            if (!strcmp(parent->locals.elements[i]->var_name, token))
+                error_at("identifier redeclared as a different kind of symbol",
+                         cur_token_loc());
+        }
+        reject_unlinked_scope_name(parent, token);
         add_scoped_constant(parent, token, val);
         first = false;
     } while (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL));
     lex_expect(T_close_curly);
+    return type;
+}
 
-    if (lex_accept(T_semicolon))
+/* A block-scope enum declaration. Like a record definition, an enum definition
+ * may stand alone or introduce declarators after the closing brace.
+ */
+basic_block_t *handle_enum_statement(block_t *parent,
+                                     basic_block_t *bb,
+                                     const block_decl_specifiers_t *spec)
+{
+    bool is_definition;
+    type_t *type = read_block_enum_specifier(parent, &is_definition);
+
+    if (is_definition && lex_accept(T_semicolon))
         return bb;
+    if (lex_peek(T_semicolon, NULL))
+        error_at("enum declaration without an enumerator list declares nothing",
+                 next_token_loc());
     return read_block_declarators(parent, bb, type, spec, true);
 }
 
@@ -790,6 +788,7 @@ var_t *bind_block_extern_object(block_t *parent, var_t *var)
 {
     bool is_redeclaration;
 
+    reject_block_redeclaration(parent, var, false, true);
     parent->locals.size--;
     var->is_global = true;
     var->is_static = false;
@@ -819,6 +818,7 @@ static bool read_block_function_declarator(block_t *parent, var_t *var)
     bool ended;
     var_t *alias;
 
+    reject_block_redeclaration(parent, var, true, true);
     parent->locals.size--;
     var->is_block_scope_function_declaration = true;
     GLOBAL_BLOCK->locals.elements[GLOBAL_BLOCK->locals.size++] = var;
@@ -851,7 +851,7 @@ static basic_block_t *read_block_declarators(
      * list, like the leading ones in @spec.
      */
     if (has_base_type) {
-        memcpy(&qualified, spec, sizeof(qualified));
+        qualified = *spec;
         read_type_qualifiers(&qualified.is_const, &qualified.is_volatile,
                              false);
         spec = &qualified;
@@ -976,6 +976,7 @@ static basic_block_t *read_block_declarators(
     if (is_incomplete_record_object(var))
         error_at("Incomplete struct/union type cannot define an object",
                  cur_token_loc());
+    reject_block_redeclaration(parent, var, false, false);
     add_insn(spec->is_static ? GLOBAL_BLOCK : parent,
              spec->is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, var, NULL,
              NULL, 0, NULL);
@@ -1107,6 +1108,7 @@ static basic_block_t *read_block_declarators(
         if (is_incomplete_record_object(nv))
             error_at("Incomplete struct/union type cannot define an object",
                      cur_token_loc());
+        reject_block_redeclaration(parent, nv, false, false);
         add_insn(spec->is_static ? GLOBAL_BLOCK : parent,
                  spec->is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, nv, NULL,
                  NULL, 0, NULL);
@@ -1349,6 +1351,40 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     return read_full_expression_statement(parent, bb);
 }
 
+/* Whether the declaration specifiers starting at the next token include const
+ * and volatile, which set @is_const and @is_volatile. The scan skips a record
+ * or enum body and stops at the first declarator token, so a qualifier after a
+ * star, which belongs to one declarator, is not seen.
+ */
+static void peek_specifier_qualifiers(bool *is_const, bool *is_volatile)
+{
+    bool saw_type_name = false;
+    int depth = 0;
+
+    for (token_t *tk = cur_token->next; tk; tk = tk->next) {
+        token_kind_t kind = tk->kind;
+
+        if (depth) {
+            depth += (kind == T_open_curly) - (kind == T_close_curly);
+            continue;
+        }
+        if (kind == T_open_curly)
+            depth = 1;
+        else if (kind == T_const)
+            *is_const = true;
+        else if (kind == T_volatile)
+            *is_volatile = true;
+        else if (kind == T_identifier) {
+            if (saw_type_name)
+                return;
+            saw_type_name = true;
+        } else if (kind != T_struct && kind != T_union && kind != T_enum &&
+                   kind != T_signed && kind != T_unsigned && kind != T_long &&
+                   kind != T_float && kind != T_double && kind != T_restrict)
+            return;
+    }
+}
+
 /* Lexical typedef aliases are declaration-only bindings on the current block,
  * never ordinary objects or global type names. This bounded parser admits
  * selected direct-function, callback-pointer, and fixed callback-array forms;
@@ -1358,11 +1394,45 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
                                               basic_block_t *bb)
 {
     var_t decl = {0};
+    bool specifier_const = false;
+    bool specifier_volatile = false;
 
     lex_expect(T_typedef);
     decl.scope = parent;
+    peek_specifier_qualifiers(&specifier_const, &specifier_volatile);
     parsing_block_typedef_declarator = true;
-    read_full_var_decl(&decl, false, false, false);
+
+    /* The shared specifier reader resolves an enum tag but cannot define one,
+     * so read an enum specifier here, then its trailing qualifiers and the
+     * declarators. A leading qualifier is still ahead of the enum keyword.
+     */
+    read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile, false);
+    if (lex_peek(T_enum, NULL)) {
+        bool is_definition;
+
+        decl.type = read_block_enum_specifier(parent, &is_definition);
+        read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile,
+                             false);
+        read_inner_var_decl(&decl, false, false, false);
+    } else if ((lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) &&
+               (cur_token->next->next->kind == T_open_curly ||
+                (cur_token->next->next->kind == T_identifier &&
+                 cur_token->next->next->next->kind == T_open_curly))) {
+        /* A record body defines its type, and its tag in this block, before the
+         * declarators; the shared specifier reader only names a tag.
+         */
+        char tag[MAX_ID_LEN];
+        base_type_t kind = accept_record_keyword();
+        bool has_tag = lex_peek(T_identifier, tag);
+
+        if (has_tag)
+            lex_expect(T_identifier);
+        decl.type = read_record_body(parent, kind, has_tag, tag);
+        read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile,
+                             false);
+        read_inner_var_decl(&decl, false, false, false);
+    } else
+        read_full_var_decl(&decl, false, false, false);
     parsing_block_typedef_declarator = false;
     do {
         type_t *base = decl.type;
@@ -1518,12 +1588,45 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
             error_at("typedef declaration cannot have an initializer",
                      next_token_loc());
         memcpy(alias, base, sizeof(*alias));
-        alias->base_type = TYPE_typedef;
-        alias->base_struct = is_record_type(base) ? base : base->base_struct;
+
+        /* A record alias takes the typedef descriptor, which reaches the layout
+         * through base_struct, and so does a function alias, whose void or
+         * scalar base is only its return type. A data alias keeps its base's
+         * type, as a file-scope one does: with no base_struct to follow,
+         * dereferencing a pointer alias would otherwise yield the pointer type
+         * itself.
+         */
+        bool is_function_alias = decl.is_func || decl.func_signature ||
+                                 decl.pointee_func_signature ||
+                                 base->func_signature ||
+                                 base->pointee_func_signature ||
+                                 base->array_element_pointee_func_signature;
+
+        if (is_function_alias)
+            alias->base_type = TYPE_typedef;
+        if (is_record_type(base) && !base->ptr_level) {
+            alias->base_type = TYPE_typedef;
+            alias->base_struct = base;
+
+            /* A pointer to the record is no record itself: like `typedef struct
+             * S *SP` at file scope it finds the members on its base.
+             */
+            if (decl.ptr_level) {
+                alias->fields = NULL;
+                alias->num_fields = 0;
+            }
+        }
         alias->ptr_level = base->ptr_level + decl.ptr_level;
         alias->pointer_const_mask =
             base->pointer_const_mask |
             (decl.pointer_const_mask << base->ptr_level);
+
+        /* `const ptr_t` qualifies the pointer that the base typedef hides, not
+         * its pointee, for every declarator of the list.
+         */
+        if (specifier_const && base->ptr_level && base->ptr_level <= 32 &&
+            !is_function_alias)
+            alias->pointer_const_mask |= 1U << (base->ptr_level - 1);
         alias->is_const_qualified = decl.is_const_qualified;
         if (callback_pointer_realias && decl.is_const_qualified) {
             /* A callback alias itself is a pointer type, even though its
@@ -1639,6 +1742,16 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
         decl.scope = parent;
         decl.type = base;
 
+        /* The specifiers, and so their qualifiers, are shared by every
+         * declarator: `typedef const int ci_t, *cp_t;` points to const int. As
+         * read_full_var_decl() does, const on a pointer base qualifies that
+         * pointer instead.
+         */
+        decl.is_const_qualified =
+            base->is_const_qualified || (specifier_const && !base->ptr_level);
+        decl.is_const_pointer = specifier_const && base->ptr_level;
+        decl.is_volatile = specifier_volatile || base->is_volatile_qualified;
+
         /* A comma continuation may itself be the bounded direct function
          * typedef form, e.g. `typedef int *p_t, unary_t(int);`.
          */
@@ -1706,6 +1819,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (lex_accept(T_goto))
         return handle_goto_statement(parent, bb);
 
+    hoist_storage_class_specifiers();
     if (lex_peek(T_typedef, NULL))
         return handle_block_typedef_statement(parent, bb);
 
@@ -1713,7 +1827,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (lex_accept(T_semicolon))
         return bb;
 
-    if (grouped_scalar_pointee_row_store_starts())
+    if (grouped_scalar_pointee_row_store_starts(parent))
         return handle_grouped_scalar_pointee_row_store(parent, bb);
 
     /* These cannot begin a declaration, so they are unambiguously expression

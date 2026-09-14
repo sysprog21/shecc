@@ -152,8 +152,6 @@ void emit_object_assignment(block_t *parent,
                             var_t *dest,
                             var_t *src)
 {
-    func_t *target = src->func_target;
-
     if (is_record_object(dest) && is_record_object(src)) {
         emit_record_copy(parent, bb, dest, src);
     } else if (dest->is_func && src->is_func &&
@@ -167,13 +165,142 @@ void emit_object_assignment(block_t *parent,
         dest_addr->var_name = gen_name();
         add_insn(parent, *bb, OP_address_of, dest_addr, dest, NULL, 0, NULL);
         add_insn(parent, *bb, OP_write, NULL, dest_addr, src, PTR_SIZE, NULL);
-        dest->func_target = src->func_target;
-        dest->func_target_invalid =
-            src->func_target_invalid || !target || !target->bbs;
     } else {
         src = resize_var(parent, bb, src, dest);
         add_insn(parent, *bb, OP_assign, dest, src, NULL, 0, NULL);
     }
+}
+
+type_t *read_type_name_specifiers(block_t *scope);
+int read_const_expr_operand(block_t *scope);
+int read_global_address_offset(block_t *scope,
+                               block_t *parent,
+                               basic_block_t *bb);
+
+/* While the operand of a pointer cast in a static initializer is read, the size
+ * of what the cast pointer points to, and 0 otherwise. An offset that follows
+ * the operand advances the converted pointer, so "(char *) array + 1" is one
+ * byte past the array whatever its element type.
+ */
+int global_pointer_cast_stride = 0;
+
+/* Say whether cur_token->next opens a cast to an object pointer type in a
+ * static initializer. C99 6.6 lets an address constant and an integer constant
+ * be converted by such a cast.
+ */
+bool global_pointer_cast_starts_here(block_t *scope)
+{
+    token_t *token = cur_token->next;
+    token_kind_t previous = T_open_bracket;
+    bool has_type = false;
+    bool is_pointer = false;
+
+    if (!token || token->kind != T_open_bracket)
+        return false;
+    for (token = token->next; token && token->kind != T_close_bracket;
+         token = token->next) {
+        if (token->kind == T_asterisk) {
+            if (!has_type)
+                return false;
+            is_pointer = true;
+        } else if (token->kind == T_identifier) {
+            bool is_tag = previous == T_struct || previous == T_union ||
+                          previous == T_enum;
+            type_t *type =
+                is_tag ? NULL : find_visible_type(token->literal, scope);
+
+            if (!is_tag && !type)
+                return false;
+            if (type && (type->func_signature || type->is_direct_function_type))
+                return false;
+            if (type && type->ptr_level)
+                is_pointer = true;
+            has_type = true;
+        } else if (token->kind == T_struct || token->kind == T_union ||
+                   token->kind == T_enum || token->kind == T_signed ||
+                   token->kind == T_unsigned || token->kind == T_long ||
+                   token->kind == T_float || token->kind == T_double) {
+            has_type = true;
+        } else if (token->kind != T_const && token->kind != T_volatile &&
+                   token->kind != T_restrict)
+            return false;
+        previous = token->kind;
+    }
+    return token && has_type && is_pointer;
+}
+
+/* Consume a cast that global_pointer_cast_starts_here() recognized and return
+ * the size of what its pointer type points to.
+ */
+int read_global_pointer_cast(block_t *scope)
+{
+    type_t *type;
+    int depth = 0;
+    int size;
+
+    lex_expect(T_open_bracket);
+    type = read_type_name_specifiers(scope);
+    while (lex_accept(T_asterisk)) {
+        depth++;
+        while (lex_accept(T_const) || lex_accept(T_volatile) ||
+               lex_accept(T_restrict))
+            ;
+    }
+    lex_expect(T_close_bracket);
+    if (!type)
+        error_at("Unknown type in pointer cast", cur_token_loc());
+    if (depth + type->ptr_level > 1)
+        return PTR_SIZE;
+    type = pointee_type_from_pointer_typedef(type);
+    if (type == TY_void)
+        return 1;
+    size = type->size;
+    if (!size && type->base_struct)
+        size = type->base_struct->size;
+    if (type->array_size)
+        size *= type->array_size;
+    return size;
+}
+
+/* Say whether the operand of a pointer cast in a static initializer is itself
+ * an address constant, rather than an integer constant converted to a pointer.
+ */
+bool global_address_operand_starts_here(block_t *scope)
+{
+    char name[MAX_ID_LEN];
+
+    if (lex_peek(T_ampersand, NULL) || lex_peek(T_string, NULL) ||
+        global_pointer_cast_starts_here(scope) ||
+        grouped_global_function_designator_starts_here(false) ||
+        global_function_address_dereference_starts_here())
+        return true;
+    if (lex_peek(T_identifier, name)) {
+        var_t *object = find_var(name, scope);
+
+        return find_visible_func(name, scope) ||
+               (object && object->is_global && object->array_size);
+    }
+    return false;
+}
+
+/* Read an integer constant operand of a pointer cast with @stride, and any
+ * offset that follows it, as the address constant the cast produces.
+ */
+var_t *read_global_cast_integer_address(block_t *parent,
+                                        basic_block_t *bb,
+                                        block_t *scope,
+                                        int stride)
+{
+    var_t *address = require_var(parent);
+    int value = read_const_expr_operand(scope);
+
+    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL))
+        value += read_global_address_offset(scope, parent, bb) * stride;
+    address->var_name = gen_name();
+    address->init_val = value;
+    address->is_const = true;
+    add_insn(parent, bb, OP_load_constant, address, NULL, NULL, 0, NULL);
+    return address;
 }
 
 /* Lower the designator that follows "&object" in a static initializer: member
@@ -182,12 +309,17 @@ void emit_object_assignment(block_t *parent,
  * subobject is returned and that subobject is left in @object. The scalar and
  * the aggregate initializer readers both come through here, so the forms they
  * accept, the scope names resolve in, and the diagnostics cannot drift apart.
+ *
+ * With @decays there is no '&': the designator must name an array row, such as
+ * `matrix[1]`, whose conversion to a pointer to its first element is the
+ * address constant, and an offset then steps over that row's elements.
  */
 var_t *read_global_address_designator(block_t *scope,
                                       block_t *parent,
                                       basic_block_t **bb,
                                       var_t **object,
-                                      var_t *object_addr)
+                                      var_t *object_addr,
+                                      bool decays)
 {
     var_t *target = *object;
     fixed_array_shape_t shape = fixed_array_shape_from_var(target);
@@ -231,13 +363,19 @@ var_t *read_global_address_designator(block_t *scope,
      * by its scalar leaf. read_global_address_offset() takes the sign as part
      * of the constant expression.
      */
+    if (decays && (!target->array_size || subscripts >= shape.rank))
+        error_at("Global initializer requires a constant address",
+                 cur_token_loc());
     if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL)) {
         int element_size = target->ptr_level ? PTR_SIZE : target->type->size;
         int index = read_global_address_offset(scope, parent, *bb);
+        int stride = global_pointer_cast_stride
+                         ? global_pointer_cast_stride
+                         : fixed_array_shape_stride(
+                               &shape, subscripts - !decays, element_size);
 
-        object_addr = compute_element_address(
-            parent, bb, object_addr, index,
-            fixed_array_shape_stride(&shape, subscripts - 1, element_size));
+        object_addr =
+            compute_element_address(parent, bb, object_addr, index, stride);
         object_addr->ptr_level = target->ptr_level + 1;
         object_addr->is_global_address = true;
     }
@@ -268,6 +406,20 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         val->is_func = true;
         return val;
     }
+    if (global_pointer_cast_starts_here(scope)) {
+        int saved_stride = global_pointer_cast_stride;
+        int stride = read_global_pointer_cast(scope);
+
+        /* In a chain of casts the outermost one decides the stride. */
+        if (saved_stride)
+            stride = saved_stride;
+        if (!global_address_operand_starts_here(scope))
+            return read_global_cast_integer_address(parent, *bb, scope, stride);
+        global_pointer_cast_stride = stride;
+        val = parse_global_constant_value(parent, bb);
+        global_pointer_cast_stride = saved_stride;
+        return val;
+    }
     explicit_address = lex_accept(T_ampersand);
 
     if (grouped_global_function_designator_starts_here(false)) {
@@ -275,8 +427,22 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         grouped_function_designator = true;
     }
 
-    if (explicit_address || grouped_function_designator ||
-        lex_peek(T_identifier, NULL)) {
+    char constant_name[MAX_ID_LEN];
+
+    if (!explicit_address && !grouped_function_designator &&
+        (lex_peek(T_numeric, NULL) || lex_peek(T_minus, NULL) ||
+         lex_peek(T_plus, NULL) || lex_peek(T_bit_not, NULL) ||
+         lex_peek(T_log_not, NULL) || lex_peek(T_open_bracket, NULL) ||
+         lex_peek(T_sizeof, NULL) || lex_peek(T_char, NULL) ||
+         lex_peek(T_wchar, NULL) ||
+         (lex_peek(T_identifier, constant_name) &&
+          find_scoped_constant(constant_name, scope)))) {
+        /* Any integer constant expression, including casts, sizeof and grouped
+         * subexpressions. The two-word reader keeps a wide value's high word.
+         */
+        val = read_wide_global_literal_expression(parent, *bb, scope);
+    } else if (explicit_address || grouped_function_designator ||
+               lex_peek(T_identifier, NULL)) {
         char name[MAX_ID_LEN];
 
         if (lex_peek(T_identifier, name)) {
@@ -307,7 +473,28 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
                     add_insn(parent, *bb, OP_address_of, val, object, NULL, 0,
                              NULL);
                     return read_global_address_designator(scope, parent, bb,
-                                                          &object, val);
+                                                          &object, val, false);
+                }
+            } else {
+                var_t *object = find_var(name, scope);
+                bool subscripted = cur_token->next->next &&
+                                   cur_token->next->next->kind == T_open_square;
+
+                /* A static array decays to an address constant (C99 6.6p7),
+                 * optionally offset by an integer constant, and a subscripted
+                 * row of one decays just as the whole array does.
+                 */
+                if (object && object->is_global &&
+                    (subscripted ? object->array_dim2 : object->array_size)) {
+                    lex_expect(T_identifier);
+                    val = require_ref_var(parent, object->type,
+                                          object->ptr_level);
+                    val->var_name = gen_name();
+                    val->is_global_address = true;
+                    add_insn(parent, *bb, OP_address_of, val, object, NULL, 0,
+                             NULL);
+                    return read_global_address_designator(scope, parent, bb,
+                                                          &object, val, true);
                 }
             }
         }
@@ -316,39 +503,6 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
                      cur_token_loc());
         error_at("Global aggregate initializer requires a constant value",
                  cur_token_loc());
-    } else if (typed_global_literal_appears_before_initializer_end(
-                   cur_token->next)) {
-        /* The word-sized reader below parses a literal into an int, so a member
-         * initialized with 0x100000000LL kept only its low word. Take the
-         * two-word reader a scalar global initializer uses whenever the value
-         * has a wide or unsigned literal in it.
-         */
-        val = read_wide_global_literal_expression(parent, *bb, scope);
-    } else if (lex_peek(T_numeric, NULL) || lex_peek(T_minus, NULL)) {
-        bool is_neg = false;
-        if (lex_accept(T_minus))
-            is_neg = true;
-        char numtok[MAX_TOKEN_LEN];
-        lex_ident_n(T_numeric, numtok, MAX_TOKEN_LEN);
-        int num_val = parse_numeric_constant(numtok);
-        if (is_neg)
-            num_val = -num_val;
-
-        val = require_var(parent);
-        val->var_name = gen_name();
-        val->init_val = num_val;
-        add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
-    } else if (lex_peek(T_char, NULL) || lex_peek(T_wchar, NULL)) {
-        char chtok[MAX_TOKEN_LEN], unescaped[MAX_TOKEN_LEN];
-        token_kind_t kind = lex_peek(T_wchar, NULL) ? T_wchar : T_char;
-        lex_ident(kind, chtok);
-        unescape_string(chtok, unescaped, MAX_TOKEN_LEN);
-
-        val = require_typed_var(parent, TY_int);
-        val->var_name = gen_name();
-        val->init_val = kind == T_wchar ? parse_wide_character_constant(chtok)
-                                        : parse_character_constant(chtok);
-        add_insn(parent, *bb, OP_load_constant, val, NULL, NULL, 0, NULL);
     } else if (lex_peek(T_string, NULL)) {
         /* A character-pointer member has the same constant-expression form as a
          * standalone global pointer: retain the rodata address, including
@@ -364,21 +518,35 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
     return val;
 }
 
+/* Skip one static initializer value without lowering it: every token up to the
+ * ',' or '}' that ends it, outside the parentheses and brackets it contains.
+ * The value is read for real, and diagnosed, when its code is emitted.
+ */
 void consume_global_constant_syntax(void)
 {
-    if (lex_peek(T_numeric, NULL)) {
-        lex_accept(T_numeric);
-    } else if (lex_peek(T_minus, NULL)) {
-        lex_accept(T_minus);
-        lex_accept(T_numeric);
-    } else if (lex_peek(T_string, NULL)) {
-        lex_accept(T_string);
-    } else if (lex_peek(T_char, NULL) || lex_peek(T_wchar, NULL)) {
+    int depth = 0;
+    bool consumed = false;
+
+    while (cur_token->next) {
+        token_kind_t kind = cur_token->next->kind;
+
+        if (kind == T_open_curly ||
+            (!depth &&
+             (kind == T_comma || kind == T_close_curly || kind == T_semicolon)))
+            break;
+        if (kind == T_open_bracket || kind == T_open_square) {
+            depth++;
+        } else if (kind == T_close_bracket || kind == T_close_square) {
+            if (!depth)
+                break;
+            depth--;
+        }
         lex_next();
-    } else {
+        consumed = true;
+    }
+    if (!consumed)
         error_at("Global array initialization requires constant values",
                  next_token_loc());
-    }
 }
 
 bool is_record_type(const type_t *type)
@@ -406,6 +574,13 @@ bool parse_unbraced_record_init(block_t *parent,
                                 var_t *addr,
                                 bool emit_code);
 bool unbraced_record_starts_here(const var_t *elem);
+bool string_row_starts_here(const var_t *array);
+void parse_string_row_init(block_t *parent,
+                           basic_block_t **bb,
+                           const var_t *array,
+                           var_t *target_addr,
+                           int start,
+                           bool emit_code);
 
 /* Store zero into every byte of elements [from, to) of the array at @base. */
 void emit_zero_elements(block_t *parent,
@@ -475,6 +650,16 @@ bool parse_array_field_row_values(block_t *parent,
     if (braced) {
         lex_expect(T_open_curly);
         reject_empty_initializer_in_strict_c99();
+    }
+
+    /* The whole row may be one string literal, optionally in its own braces. */
+    if (string_row_starts_here(field)) {
+        parse_string_row_init(parent, bb, field, target_addr, start, emit_code);
+        if (braced) {
+            lex_accept(T_comma);
+            lex_expect(T_close_curly);
+        }
+        return false;
     }
     while (!lex_peek(T_close_curly, NULL)) {
         var_t *value = NULL;
@@ -729,8 +914,11 @@ void parse_string_field_init(block_t *parent,
     char combined[MAX_STRING_LEN];
     int len;
 
+    /* The terminating null is dropped when only the characters fit (C99
+     * 6.7.8p14).
+     */
     len = read_concatenated_string(combined) + 1;
-    if (len > field->array_size)
+    if (len - 1 > field->array_size)
         error_at("String initializer is too long for character array",
                  cur_token_loc());
     if (!emit_code)
@@ -787,12 +975,9 @@ void parse_wstring_field_init(block_t *parent,
 {
     int values[MAX_STRING_LEN];
     int length;
-    int units;
 
     length = read_wstring_units(values, MAX_STRING_LEN);
-
-    units = length + 1;
-    if (units > field->array_size)
+    if (length > field->array_size)
         error_at("Wide string initializer is too long for array",
                  cur_token_loc());
     if (!emit_code)
@@ -810,6 +995,74 @@ void parse_wstring_field_init(block_t *parent,
         add_insn(parent, *bb, OP_write, NULL, addr, value, field->type->size,
                  NULL);
     }
+}
+
+/* A string literal also initializes one innermost row of a multidimensional
+ * character array: `char names[2][4] = { "ab", "cd" }` fills each row of four
+ * bytes, zero-padded, rather than storing the literal's address into a char.
+ * Return whether the next initializer is such a string for @array. A literal
+ * that only begins a larger expression, as in `"ab"[0]`, remains a scalar.
+ */
+bool string_row_starts_here(const var_t *array)
+{
+    token_t *after = cur_token->next;
+    token_kind_t kind = after ? after->kind : T_eof;
+
+    if (!array || has_effective_pointer(array) || array->is_func ||
+        !array->array_dim2 || is_record_type(array->type) ||
+        (kind != T_string && kind != T_wstring))
+        return false;
+    while (after->next && after->next->kind == kind)
+        after = after->next;
+    if (!after->next ||
+        (after->next->kind != T_comma && after->next->kind != T_close_curly))
+        return false;
+    if ((kind == T_string &&
+         !compatible_decl_type(array->type, find_type("char", true))) ||
+        (kind == T_wstring &&
+         !compatible_decl_type(array->type, find_type("wchar_t", true))))
+        error_at(
+            "String literal initializer has incompatible array element type",
+            next_token_loc());
+    return true;
+}
+
+/* Elements in the innermost row of a multidimensional @array. */
+int string_row_width(const var_t *array)
+{
+    if (array->array_dim4)
+        return array->array_dim4;
+    return array->array_dim3 ? array->array_dim3 : array->array_dim2;
+}
+
+/* Initialize the innermost row of @array that starts at flat element @start
+ * from the string literal string_row_starts_here() accepted. The row must begin
+ * on a row boundary; a string cannot initialize a single element.
+ */
+void parse_string_row_init(block_t *parent,
+                           basic_block_t **bb,
+                           const var_t *array,
+                           var_t *target_addr,
+                           int start,
+                           bool emit_code)
+{
+    var_t row;
+    var_t *row_addr = NULL;
+    int width = string_row_width(array);
+
+    if (start % width)
+        error_at("String literal cannot initialize a single array element",
+                 next_token_loc());
+    memcpy(&row, array, sizeof(row));
+    row.array_size = width;
+    row.array_dim2 = row.array_dim3 = row.array_dim4 = 0;
+    if (emit_code)
+        row_addr = compute_element_address(parent, bb, target_addr, start,
+                                           array->type->size);
+    if (lex_peek(T_wstring, NULL))
+        parse_wstring_field_init(parent, bb, &row, row_addr, emit_code);
+    else
+        parse_string_field_init(parent, bb, &row, row_addr, emit_code);
 }
 
 void parse_array_field_init(block_t *parent,
@@ -884,6 +1137,10 @@ void parse_array_field_init(block_t *parent,
             parse_array_field_row_init(parent, bb, &slice, target_addr, count,
                                        emit_code);
             count += fixed_array_inner_count(&slice);
+        } else if (string_row_starts_here(&slice)) {
+            parse_string_row_init(parent, bb, &slice, target_addr, count,
+                                  emit_code);
+            count += string_row_width(&slice);
         } else {
             if (lex_peek(T_open_curly, NULL) && is_record_type(field->type)) {
                 type_t *record_type = field->type;
@@ -1243,6 +1500,7 @@ bool parse_struct_field_values(block_t *parent,
                 (first_value ||
                  (!lex_peek(T_open_curly, NULL) &&
                   ((!field->ptr_level && is_record_type(field->type)) ||
+                   has_effective_pointer(field) ||
                    (!lex_peek(T_string, NULL) &&
                     !lex_peek(T_wstring, NULL)))))) {
                 pending_array_base =
@@ -1265,7 +1523,7 @@ bool parse_struct_field_values(block_t *parent,
             }
 
             if (!first_value && field && field->array_size &&
-                !field->ptr_level &&
+                !has_effective_pointer(field) &&
                 (lex_peek(T_string, NULL) || lex_peek(T_wstring, NULL)) &&
                 ((lex_peek(T_string, NULL) && !is_char_array(field)) ||
                  (lex_peek(T_wstring, NULL) && !is_wchar_array(field))))
@@ -1362,10 +1620,13 @@ bool parse_struct_field_values(block_t *parent,
                     is_record_object(field_val_raw)) {
                     emit_record_copy_to_address(parent, bb, field_addr,
                                                 field_val_raw);
-                } else if (parent == GLOBAL_BLOCK && field_val_raw->is_func) {
+                } else if (field_val_raw->is_func) {
                     /* Keep a function designator intact until global lowering
                      * can patch its final code address. Converting it through a
-                     * scalar temporary loses that relocation provenance.
+                     * scalar temporary loses that relocation provenance, and at
+                     * block scope resize_to() sees neither the designator nor a
+                     * function pointer member as pointer-sized, so on LP64 it
+                     * truncated the code address to an int.
                      */
                     add_insn(parent, *bb, OP_write, NULL, field_addr,
                              field_val_raw, PTR_SIZE, NULL);
@@ -1610,6 +1871,7 @@ basic_block_t *handle_if_statement(block_t *parent, basic_block_t *bb)
     lex_expect(T_close_bracket);
 
     var_t *vd = opstack_pop();
+    reject_record_operand(vd);
     add_insn(parent, bb, OP_branch, NULL, vd, NULL, 0, NULL);
 
     basic_block_t *then_ = bb_create(parent);
@@ -1663,6 +1925,7 @@ basic_block_t *handle_while_statement(block_t *parent, basic_block_t *bb)
     lex_expect(T_close_bracket);
 
     var_t *vd = opstack_pop();
+    reject_record_operand(vd);
     add_insn(parent, bb, OP_branch, NULL, vd, NULL, 0, NULL);
 
     basic_block_t *then_ = bb_create(parent);
@@ -1734,6 +1997,27 @@ basic_block_t *handle_goto_statement(block_t *parent, basic_block_t *bb)
 
 int read_const_expr(block_t *scope);
 
+/* Whether @token starts a string literal that is the whole brace-enclosed
+ * initializer of the character array @var: `"ab"}` or `"ab",}`.
+ */
+static bool string_ends_braced_initializer(const var_t *var, token_t *token)
+{
+    token_kind_t kind;
+
+    if (!token)
+        return false;
+    kind = token->kind;
+    if (!((kind == T_string && is_char_array(var)) ||
+          (kind == T_wstring && is_wchar_array(var))))
+        return false;
+    while (token->next && token->next->kind == kind)
+        token = token->next;
+    token = token->next;
+    if (token && token->kind == T_comma)
+        token = token->next;
+    return token && token->kind == T_close_curly;
+}
+
 void parse_array_init(var_t *var,
                       block_t *parent,
                       basic_block_t **bb,
@@ -1764,6 +2048,23 @@ void parse_array_init(var_t *var,
     int elem_size = var->type->size;
     if (var->ptr_level > 0 || var->is_func)
         elem_size = PTR_SIZE;
+
+    /* A character array's string literal may be enclosed in braces (C99
+     * 6.7.8p14): `char s[3] = {"ab"}` holds the characters, not the literal's
+     * address converted to a char.
+     */
+    if (lex_peek(T_open_curly, NULL) &&
+        string_ends_braced_initializer(var, cur_token->next->next)) {
+        lex_expect(T_open_curly);
+        if (lex_peek(T_wstring, NULL))
+            parse_wstring_array_init(var, parent, bb);
+        else
+            parse_string_array_init(var, parent, bb);
+        lex_accept(T_comma);
+        lex_expect(T_close_curly);
+        global_constant_initializer_scope = saved_initializer_scope;
+        return;
+    }
 
     if (emit_code)
         base_addr = var;
@@ -1908,6 +2209,18 @@ void parse_array_init(var_t *var,
                 if (!lex_accept(T_comma))
                     break;
                 continue;
+            } else if (string_row_starts_here(initializer_var)) {
+                if (is_implicit && emit_code && parent != GLOBAL_BLOCK)
+                    emit_zero_elements(parent, bb, base_addr, inferred_size,
+                                       count, elem_size);
+                parse_string_row_init(parent, bb, initializer_var, base_addr,
+                                      count, emit_code);
+                count += string_row_width(initializer_var);
+                if (is_implicit && count > inferred_size)
+                    inferred_size = count;
+                if (!lex_accept(T_comma) || lex_peek(T_close_curly, NULL))
+                    break;
+                continue;
             } else if (lex_peek(T_open_curly, NULL) &&
                        is_record_type(var->type)) {
                 type_t *struct_type = var->type;
@@ -1964,7 +2277,13 @@ void parse_array_init(var_t *var,
                 if (parent == GLOBAL_BLOCK &&
                     (lex_peek(T_ampersand, NULL) ||
                      grouped_global_function_designator_starts_here(true) ||
-                     global_function_address_dereference_starts_here())) {
+                     global_function_address_dereference_starts_here() ||
+                     lex_peek(T_open_bracket, NULL) ||
+                     lex_peek(T_sizeof, NULL) || lex_peek(T_plus, NULL) ||
+                     lex_peek(T_bit_not, NULL) || lex_peek(T_log_not, NULL))) {
+                    /* Addresses, casts, sizeof and grouped or unary constant
+                     * expressions share the reader of aggregate members.
+                     */
                     val = parse_global_constant_value(parent, bb);
                 } else {
                     char initializer_name[MAX_ID_LEN];
@@ -1979,10 +2298,16 @@ void parse_array_init(var_t *var,
                         object_constant =
                             find_var(global_token, initializer_scope);
 
+                    /* A static array named by a block-scope static's element is
+                     * an address constant (C99 6.6p7), not an integer one, and
+                     * takes the array-to-pointer path below.
+                     */
                     if (parent == GLOBAL_BLOCK &&
                         initializer_scope != GLOBAL_BLOCK &&
                         !lex_peek(T_string, NULL) && !function_initializer &&
-                        !lex_peek(T_ampersand, NULL)) {
+                        !lex_peek(T_ampersand, NULL) &&
+                        !(object_constant && object_constant->is_global &&
+                          object_constant->array_size)) {
                         /* Storage for a block-scope static lives globally,
                          * while its initializer is an integer constant
                          * expression in the surrounding block. Resolve local
@@ -2057,7 +2382,15 @@ void parse_array_init(var_t *var,
                                 stride *= object_constant->array_dim3;
                             if (object_constant->array_dim4)
                                 stride *= object_constant->array_dim4;
-                            if (lex_accept(T_plus)) {
+                            if (object_constant->array_dim2 &&
+                                lex_peek(T_open_square, NULL)) {
+                                var_t *row = object_constant;
+
+                                val->is_global_address = true;
+                                val = read_global_address_designator(
+                                    initializer_scope, parent, bb, &row, val,
+                                    true);
+                            } else if (lex_accept(T_plus)) {
                                 int index = read_const_expr(initializer_scope);
 
                                 val = compute_element_address(parent, bb, val,
@@ -2202,6 +2535,17 @@ void parse_array_compound_literal(var_t *var,
     int declared_size = var->array_size;
     int inferred_size = 0;
     var->init_val = 0;
+
+    /* The opening brace is already consumed. See parse_array_init(). */
+    if (string_ends_braced_initializer(var, cur_token->next)) {
+        if (lex_peek(T_wstring, NULL))
+            parse_wstring_array_init(var, parent, bb);
+        else
+            parse_string_array_init(var, parent, bb);
+        lex_accept(T_comma);
+        lex_expect(T_close_curly);
+        return;
+    }
 
     /* A designated element can leave holes before or after it, so initialize
      * the declared object before parsing any explicit elements.

@@ -1263,13 +1263,44 @@ void add_scoped_constant(block_t *block, char alias[], int value)
     block->constants = constant;
 }
 
+/* The enumeration constant @alias as seen from @block, or NULL when none is
+ * visible. Constants share the ordinary identifier name space, so an object,
+ * parameter or typedef name declared in a nearer scope hides an outer constant
+ * of the same name (C99 6.2.1p4).
+ */
 constant_t *find_scoped_constant(char alias[], block_t *block)
 {
-    for (; block; block = block->parent) {
+    func_t *func = block ? block->func : NULL;
+    char head = alias[0];
+
+    for (; block && block != GLOBAL_BLOCK; block = block->parent) {
         for (constant_t *constant = block->constants; constant;
              constant = constant->next) {
             if (!strcmp(constant->alias, alias))
                 return constant;
+        }
+
+        /* A block's locals include its IR temporaries; settle the first byte
+         * before the library call, as find_visible_type() does.
+         */
+        for (int i = 0; i < block->locals.size; i++) {
+            var_t *var = block->locals.elements[i];
+
+            if (var && var->var_name && var->var_name[0] == head &&
+                !strcmp(var->var_name, alias))
+                return NULL;
+        }
+        for (typedef_binding_t *binding = block->typedefs; binding;
+             binding = binding->next)
+            if (binding->name[0] == head && !strcmp(binding->name, alias))
+                return NULL;
+    }
+    if (func) {
+        for (int i = 0; i < func->num_params; i++) {
+            const char *name = func->param_defs[i].var_name;
+
+            if (name && name[0] == head && !strcmp(name, alias))
+                return NULL;
         }
     }
     return find_constant(alias);
@@ -1383,6 +1414,21 @@ type_t *find_enum_tag(char name[], block_t *block)
     return check_enum_tag(type);
 }
 
+/* The enum tag @name named by a specifier seen from @block. Unlike a record
+ * tag, an enum tag is never incomplete (C99 6.7.2.3p2 requires an enumerator
+ * list before the type is used), so a name with no visible definition is an
+ * error.
+ */
+type_t *reference_enum_tag(char name[], block_t *block)
+{
+    type_t *type = find_enum_tag(name, block);
+
+    if (!type)
+        error_at("Unknown enum type: C99 forbids forward references to enums",
+                 cur_token_loc());
+    return type;
+}
+
 /* The enum tag @name that @block itself declares, or NULL. */
 type_t *local_enum_tag(char name[], block_t *block)
 {
@@ -1479,11 +1525,12 @@ type_t *find_visible_type(const char *name, block_t *block)
 
 var_t *find_member(const char token[], type_t *type)
 {
-    /* If it is a forwardly declared alias of a structure, switch to the base
-     * structure type. A scalar -- or "void", whose size is also 0 -- has no
-     * base to switch to, and following the NULL was a SIGSEGV.
+    /* An alias that names a structure tag instead of defining the members,
+     * whether forward declared or as a pointer as in "typedef struct S *SP",
+     * finds them on the tag. A scalar -- or "void" -- has no base to switch to,
+     * and following the NULL was a SIGSEGV.
      */
-    if (type->size == 0)
+    if (!type->num_fields)
         type = type->base_struct;
     if (!type)
         return NULL;

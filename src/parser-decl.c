@@ -169,29 +169,24 @@ int sizeof_type_name_size(const type_t *type,
     return size * elements;
 }
 
-/* Integer constant expressions may contain sizeof(type-name). This parser only
- * needs type metadata, so keep it separate from expression lowering and avoid
- * emitting the otherwise unevaluated sizeof IR into an array bound or
- * enumerator declaration.
+/* Consume the specifier list of a type name used only for its metadata, and
+ * return the type it names, or NULL when none of it names a type.
  */
-int read_const_sizeof_type(block_t *scope)
+type_t *read_type_name_specifiers(block_t *scope)
 {
     char token[MAX_ID_LEN];
     type_t *type = NULL;
-    sizeof_derivation_t derivation;
-    int elements;
     bool is_unsigned = false;
     bool is_signed = false;
     int long_count = 0;
 
-    lex_expect(T_open_bracket);
     base_type_t record_kind = accept_record_keyword();
     if (record_kind) {
         lex_ident(T_identifier, token);
         type = find_record_tag(token, scope, record_kind);
     } else if (lex_accept(T_enum)) {
         lex_ident(T_identifier, token);
-        type = find_enum_tag(token, scope);
+        type = reference_enum_tag(token, scope);
     } else {
         /* Declaration specifiers may appear in any order: all of "unsigned long
          * int", "long unsigned int", and "int unsigned" name the same type.
@@ -253,6 +248,22 @@ int read_const_sizeof_type(block_t *scope)
             type = type == TY_char ? TY_schar : (type ? type : TY_int);
         }
     }
+    return type;
+}
+
+/* Integer constant expressions may contain sizeof(type-name). This parser only
+ * needs type metadata, so keep it separate from expression lowering and avoid
+ * emitting the otherwise unevaluated sizeof IR into an array bound or
+ * enumerator declaration.
+ */
+int read_const_sizeof_type(block_t *scope)
+{
+    type_t *type;
+    sizeof_derivation_t derivation;
+    int elements;
+
+    lex_expect(T_open_bracket);
+    type = read_type_name_specifiers(scope);
     if (!type)
         error_at(
             "sizeof in an integer constant expression requires a type name",
@@ -509,6 +520,7 @@ void read_inner_var_decl(var_t *vd,
         func_t *func = arena_alloc_func();
         char temp_name[MAX_VAR_LEN];
         int nested_ptr_level = 0;
+        bool inner_array = false;
 
         do {
             lex_expect(T_asterisk);
@@ -561,6 +573,7 @@ void read_inner_var_decl(var_t *vd,
             bool parameter_static_bound = false;
             bool parameter_const_bound = false;
 
+            inner_array = true;
             if (dim >= 4)
                 error_at("Array declarators support at most four dimensions",
                          cur_token_loc());
@@ -670,6 +683,56 @@ void read_inner_var_decl(var_t *vd,
             return;
         }
 
+        /* With neither a parameter list nor an array suffix after it, the
+         * parentheses only group the declarator: `int (*p)` is `int *p`, and
+         * `int (*a[2])` is `int *a[2]`.
+         */
+        if (!lex_peek(T_open_bracket, NULL)) {
+            if (vd->type->array_size && !vd->ptr_level) {
+                fixed_array_shape_t shape =
+                    fixed_array_shape_from_type(vd->type);
+                fixed_array_shape_t empty_shape = {0};
+
+                /* A pointer to an array typedef, as after the plain stars. */
+                if (inner_array)
+                    error_at(
+                        "array of pointers to an array typedef is not yet "
+                        "supported",
+                        cur_token_loc());
+                fixed_array_shape_to_pointee_var(vd, &shape);
+                fixed_array_shape_to_var(vd, &empty_shape);
+            }
+            vd->ptr_level += nested_ptr_level;
+            vd->parenthesized_function_pointer_const = false;
+            vd->parenthesized_function_pointer_restrict = false;
+            vd->parenthesized_function_pointer_outer_const = false;
+            vd->parenthesized_function_pointer_outer_volatile = false;
+            vd->parenthesized_function_pointer_outer_restrict = false;
+            vd->parenthesized_function_pointer_inner_qualified = false;
+            if (vd->ptr_level == 1 && !vd->array_size &&
+                vd->type->is_direct_function_type && vd->type->func_signature)
+                vd->func_signature = vd->type->func_signature;
+            else
+                vd->func_signature = NULL;
+            vd->is_func = false;
+            if (vd->array_size > 0 && !vd->ptr_level && !vd->type->ptr_level &&
+                type_has_flexible_array_member(vd->type))
+                error_at(
+                    "A struct with a flexible array member cannot be an "
+                    "array element",
+                    cur_token_loc());
+
+            /* As for an unparenthesized name, the global initializer parser
+             * finds a file-scope object on the operand stack.
+             */
+            if (vd->is_global && vd->var_name && !is_param)
+                opstack_push(vd);
+            if (vd->ptr_level > 0 && vd->ptr_level <= 32)
+                vd->is_const_pointer =
+                    vd->pointer_const_mask & (1U << (vd->ptr_level - 1));
+            return;
+        }
+
         /* The return declaration was parsed before the parenthesized
          * declarator. Copy it into the syntax-only signature before the
          * function-pointer marker is set on vd.
@@ -734,6 +797,26 @@ void read_inner_var_decl(var_t *vd,
             vd->array_dim2 = 0;
             vd->array_dim3 = 0;
             vd->array_dim4 = 0;
+        }
+
+        /* An object whose type is an array typedef is an array of that
+         * typedef's rows: `typedef int row[2]; row m[3]` is `int m[3][2]`. Only
+         * the first declarator had row's bounds copied in by
+         * read_full_var_decl(), so restate them for `row a, b` too. A direct
+         * suffix is read on its own and the row bounds appended to it after the
+         * loop below. Block typedefs compose their own aliases in
+         * compose_block_typedef_array().
+         */
+        fixed_array_shape_t element_shape = {0};
+        if (vd->type && vd->type->array_size && !vd->ptr_level &&
+            !parsing_block_typedef_declarator) {
+            element_shape = fixed_array_shape_from_type(vd->type);
+            fixed_array_shape_to_var(vd, &element_shape);
+            if (lex_peek(T_open_square, NULL)) {
+                vd->array_size = 0;
+                vd->array_dim2 = vd->array_dim3 = vd->array_dim4 = 0;
+            } else
+                element_shape.rank = 0;
         }
 
         /* Every dimension multiplies into array_size, so "int matrix[3][4]"
@@ -834,6 +917,22 @@ void read_inner_var_decl(var_t *vd,
             }
             lex_expect(T_close_square);
             dims++;
+        }
+        if (element_shape.rank) {
+            fixed_array_shape_t decl_shape = fixed_array_shape_from_var(vd);
+            fixed_array_shape_t shape;
+
+            /* An omitted outer bound counts as one row, which is how an unsized
+             * `int t[][2]` records its inner extent as well.
+             */
+            if (first_dim_empty) {
+                if (!decl_shape.rank)
+                    decl_shape.rank = 1;
+                decl_shape.bounds[0] = 1;
+            }
+            shape = fixed_array_shape_prepend(&decl_shape, &element_shape);
+            fixed_array_shape_to_var(vd, &shape);
+            dims += element_shape.rank;
         }
         if (first_dim_empty && is_record_member) {
             /* A record's omitted outer bound is its flexible array member.
@@ -944,6 +1043,76 @@ void read_inner_var_decl(var_t *vd,
         error_at("void type cannot define an object", cur_token_loc());
 }
 
+/* C99 6.7p2 lets the storage-class specifiers appear anywhere among the
+ * declaration specifiers: "int static x;" is "static int x;" and "unsigned
+ * register int z;" is "register unsigned int z;". The order carries no meaning,
+ * and every declaration reader looks for storage classes before the type, so
+ * move each one that follows another specifier to the front of the declaration,
+ * right after the current token.
+ *
+ * The scan covers only tokens that can continue the specifiers: qualifiers,
+ * inline, scalar keywords, a struct, union or enum specifier with its body, and
+ * one type name. "int" may follow another type word, as in "short int", but any
+ * other identifier after the type is the declarator, which ends the scan, so
+ * "int x static;" stays an error.
+ */
+void hoist_storage_class_specifiers(void)
+{
+    token_t *insert = cur_token;
+    token_t *prev = cur_token;
+    bool saw_specifier = false;
+    bool saw_type_name = false;
+
+    while (prev->next) {
+        token_t *tk = prev->next;
+        token_kind_t kind = tk->kind;
+
+        if (kind == T_static || kind == T_extern || kind == T_register ||
+            kind == T_auto || kind == T_typedef) {
+            if (saw_specifier) {
+                prev->next = tk->next;
+                tk->next = insert->next;
+                insert->next = tk;
+            } else
+                prev = tk;
+            insert = tk;
+            continue;
+        }
+        if (kind == T_struct || kind == T_union || kind == T_enum) {
+            prev = tk;
+            if (prev->next && prev->next->kind == T_identifier)
+                prev = prev->next;
+            if (prev->next && prev->next->kind == T_open_curly) {
+                int depth = 0;
+
+                do {
+                    prev = prev->next;
+                    if (!prev)
+                        return;
+                    if (prev->kind == T_open_curly)
+                        depth++;
+                    else if (prev->kind == T_close_curly)
+                        depth--;
+                } while (depth);
+            }
+            saw_specifier = true;
+            saw_type_name = true;
+            continue;
+        }
+        if (kind == T_identifier) {
+            if (saw_type_name && strcmp(tk->literal, "int"))
+                return;
+            saw_type_name = true;
+        } else if (kind != T_const && kind != T_volatile &&
+                   kind != T_restrict && kind != T_inline && kind != T_signed &&
+                   kind != T_unsigned && kind != T_long && kind != T_float &&
+                   kind != T_double)
+            return;
+        saw_specifier = true;
+        prev = tk;
+    }
+}
+
 /* C99 6.7 lets declaration specifiers appear in any order, so a type qualifier
  * may follow a struct, union, enum or typedef name as well as precede it:
  * `struct S volatile s` qualifies s exactly as `volatile struct S s` does.
@@ -967,6 +1136,138 @@ void read_type_qualifiers(bool *is_const,
         } else
             return;
     }
+}
+
+void read_full_var_decl(var_t *vd,
+                        bool anon,
+                        bool is_param,
+                        bool is_record_member);
+
+/* The member list of a struct or union of @kind, starting at its opening brace,
+ * declared in block @parent or at file scope when @parent is NULL. A tagged
+ * definition completes the tag @token of that scope; an untagged one names a
+ * type no other declaration can reach, so it needs no tag table entry. A member
+ * may itself define a record, whose tag then belongs to the same scope, since a
+ * member list opens no scope of its own.
+ *
+ * Returns the completed record type.
+ */
+type_t *read_record_body(block_t *parent,
+                         base_type_t kind,
+                         bool has_tag,
+                         char token[])
+{
+    type_t *type;
+    bool is_union = kind == TYPE_union;
+    int i = 0;
+    int size = 0;
+    int alignment = 1;
+    int max_size = 0;
+    bitfield_layout_t bits = {0};
+    bool has_flexible_array_member = false;
+    block_t *scope = parent ? parent : GLOBAL_BLOCK;
+
+    if (has_tag) {
+        type = local_record_tag(token, scope, kind);
+
+        /* C99 6.7.2.3p1: a scope defines the content of a tag only once. */
+        if (type->num_fields)
+            error_at("redefinition of struct or union tag", cur_token_loc());
+    } else {
+        type = add_type();
+        type->base_type = kind;
+    }
+
+    lex_expect(T_open_curly);
+    do {
+        var_t *v = type_add_field(type, &i);
+        var_t *last = v;
+
+        /* A member's type names tags visible in this scope. */
+        v->scope = parent;
+        read_full_var_decl(v, false, false, true);
+        read_bitfield_width(v, scope);
+
+        /* C99 6.7.2.1p2 keeps a struct with a flexible array member out of a
+         * struct or array, but a union may hold one and then inherits it.
+         */
+        if (is_union)
+            has_flexible_array_member |= is_flexible_array_member_container(v);
+        else
+            reject_flexible_array_member_container(v);
+        mark_flexible_array_member(v, is_union);
+        if (is_union) {
+            v->offset = 0;
+            int field_size = is_bitfield(v)
+                                 ? (v->bit_width ? v->bit_storage_size : 0)
+                                 : size_var(v);
+            if (field_size > max_size)
+                max_size = field_size;
+            if (alignment_var(v) > alignment)
+                alignment = alignment_var(v);
+        } else {
+            size = is_bitfield(v)
+                       ? layout_bitfield_field(size, v, &alignment, &bits)
+                       : layout_struct_field(flush_bitfield_layout(size, &bits),
+                                             v, &alignment);
+        }
+
+        while (lex_accept(T_comma)) {
+            if (!is_union && last->is_flexible_array_member)
+                error_at(
+                    "Flexible array member must be the final struct member",
+                    cur_token_loc());
+            var_t *nv = type_add_field(type, &i);
+            initialize_struct_field(nv, v, 0);
+            read_inner_var_decl(nv, false, false, true);
+            read_bitfield_width(nv, scope);
+            if (is_union)
+                has_flexible_array_member |=
+                    is_flexible_array_member_container(nv);
+            else
+                reject_flexible_array_member_container(nv);
+            mark_flexible_array_member(nv, is_union);
+            last = nv;
+            if (is_union) {
+                nv->offset = 0;
+                int field_size =
+                    is_bitfield(nv) ? (nv->bit_width ? nv->bit_storage_size : 0)
+                                    : size_var(nv);
+                if (field_size > max_size)
+                    max_size = field_size;
+                if (alignment_var(nv) > alignment)
+                    alignment = alignment_var(nv);
+            } else {
+                size = is_bitfield(nv)
+                           ? layout_bitfield_field(size, nv, &alignment, &bits)
+                           : layout_struct_field(
+                                 flush_bitfield_layout(size, &bits), nv,
+                                 &alignment);
+            }
+        }
+
+        lex_expect(T_semicolon);
+        if (!is_union && last->is_flexible_array_member) {
+            if (!lex_peek(T_close_curly, NULL))
+                error_at(
+                    "Flexible array member must be the final struct member",
+                    cur_token_loc());
+            if (i == 1)
+                error_at(
+                    "Struct needs a named member before its flexible array "
+                    "member",
+                    cur_token_loc());
+            has_flexible_array_member = true;
+        }
+    } while (!lex_accept(T_close_curly));
+
+    type->alignment = alignment;
+    type->size = is_union
+                     ? ALIGN_UP(max_size, alignment)
+                     : ALIGN_UP(flush_bitfield_layout(size, &bits), alignment);
+    type->num_fields = i;
+    type->has_flexible_array_member = has_flexible_array_member;
+    return type;
 }
 
 /* starting next_token, need to check the type */
@@ -1073,7 +1374,7 @@ void read_full_var_decl(var_t *vd,
         type = is_long ? TY_long_double : TY_double;
     } else if (is_enum_type) {
         lex_ident(T_identifier, type_name);
-        type = find_enum_tag(type_name, vd->scope);
+        type = reference_enum_tag(type_name, vd->scope);
     } else if (is_unsigned) {
         if (is_long) {
             if (lex_peek(T_identifier, type_name) && !strcmp(type_name, "int"))
@@ -1125,6 +1426,16 @@ void read_full_var_decl(var_t *vd,
         type = TY_int;
     } else if (leading_scalar_type) {
         type = leading_scalar_type;
+    } else if (record_kind && is_record_member &&
+               (lex_peek(T_open_curly, NULL) ||
+                (lex_peek(T_identifier, type_name) &&
+                 cur_token->next->next->kind == T_open_curly))) {
+        /* A member may define the record it has, tagged or not, as in `struct {
+         * int a; } in;`.
+         */
+        bool has_tag = lex_accept(T_identifier);
+
+        type = read_record_body(vd->scope, record_kind, has_tag, type_name);
     } else {
         lex_ident(T_identifier, type_name);
         type = record_kind
@@ -1226,9 +1537,25 @@ void read_partial_var_decl(var_t *vd, var_t *template)
     read_inner_var_decl(vd, false, false, false);
 }
 
+/* Consume what follows one parameter declaration. Parameters are separated by
+ * commas, and a comma must introduce another parameter or the ellipsis: C99
+ * 6.7.5 has no trailing comma in a parameter list, in any dialect gcc accepts.
+ *
+ * Returns true when a comma was read, so another parameter or '...' follows.
+ */
+static bool read_parameter_separator(void)
+{
+    if (!lex_accept(T_comma))
+        return false;
+    if (lex_peek(T_close_bracket, NULL))
+        error_at("trailing comma in parameter list", cur_token_loc());
+    return true;
+}
+
 void read_parameter_list_decl(func_t *func, bool anon)
 {
     int vn = 0;
+    bool expect_parameter = false;
     lex_expect(T_open_bracket);
 
     char token[MAX_ID_LEN];
@@ -1249,25 +1576,24 @@ void read_parameter_list_decl(func_t *func, bool anon)
             error_at("'void' must be the only parameter and unnamed",
                      cur_token_loc());
         vn++;
-        if (lex_accept(T_comma) && strict_c99 &&
-            lex_peek(T_close_bracket, NULL))
-            error_at("trailing comma in parameter list is not permitted in C99",
-                     cur_token_loc());
+        expect_parameter = read_parameter_separator();
     }
 
     if (floating_type_starts_here() && !parsing_sizeof_function_signature)
         error_at("Floating point types are not yet supported", cur_token_loc());
 
-    while ((parsing_sizeof_function_signature &&
-            (lex_peek(T_float, NULL) || lex_peek(T_double, NULL))) ||
-           lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL) ||
-           lex_peek(T_volatile, NULL) || lex_peek(T_register, NULL) ||
-           lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
-           lex_peek(T_long, NULL) || lex_peek(T_struct, NULL) ||
-           lex_peek(T_union, NULL) || lex_peek(T_enum, NULL)) {
+    while ((vn == 0 || expect_parameter) &&
+           ((parsing_sizeof_function_signature &&
+             (lex_peek(T_float, NULL) || lex_peek(T_double, NULL))) ||
+            lex_peek(T_identifier, NULL) || lex_peek(T_const, NULL) ||
+            lex_peek(T_volatile, NULL) || lex_peek(T_register, NULL) ||
+            lex_peek(T_signed, NULL) || lex_peek(T_unsigned, NULL) ||
+            lex_peek(T_long, NULL) || lex_peek(T_struct, NULL) ||
+            lex_peek(T_union, NULL) || lex_peek(T_enum, NULL))) {
         /* Check for const qualifier */
         bool is_const = false;
         bool is_register = false;
+        hoist_storage_class_specifiers();
         if (lex_accept(T_const))
             is_const = true;
         if (lex_accept(T_register))
@@ -1286,15 +1612,14 @@ void read_parameter_list_decl(func_t *func, bool anon)
             is_record_type(func->param_defs[vn].type) &&
             !func->param_defs[vn].ptr_level;
         vn++;
-        if (lex_accept(T_comma) && strict_c99 &&
-            lex_peek(T_close_bracket, NULL))
-            error_at("trailing comma in parameter list is not permitted in C99",
-                     cur_token_loc());
+        expect_parameter = read_parameter_separator();
     }
     func->num_params = vn;
 
-    /* Up to 'MAX_PARAMS' parameters are accepted for the variadic function. */
-    if (lex_accept(T_elipsis)) {
+    /* Up to 'MAX_PARAMS' parameters are accepted for the variadic function.
+     * After a named parameter the ellipsis needs its own comma.
+     */
+    if ((vn == 0 || expect_parameter) && lex_accept(T_elipsis)) {
         if (strict_c99 && vn == 0)
             error_at("ellipsis requires at least one named parameter in C99",
                      cur_token_loc());
@@ -1336,9 +1661,15 @@ void parse_string_array_init(var_t *var, block_t *parent, basic_block_t **bb)
     if (var->has_unsized_array) {
         var->array_size = len;
         var->has_unsized_array = false;
-    } else if (len > var->array_size)
+    } else if (len - 1 > var->array_size)
         error_at("String initializer is too long for character array",
                  cur_token_loc());
+
+    /* The terminating null is dropped when the array has room only for the
+     * characters (C99 6.7.8p14), so never store past the array.
+     */
+    if (len > var->array_size)
+        len = var->array_size;
 
     /* Elements past the string are zero. Static storage already starts out
      * zeroed, but an automatic array is reinitialized on every entry to its
@@ -1366,11 +1697,13 @@ void parse_wstring_array_init(var_t *var, block_t *parent, basic_block_t **bb)
 
     length = read_wstring_units(values, MAX_STRING_LEN);
 
+    /* As for a char array, the terminating null may be dropped (C99 6.7.8p15).
+     */
     units = length + 1;
     if (var->has_unsized_array) {
         var->array_size = units;
         var->has_unsized_array = false;
-    } else if (units > var->array_size)
+    } else if (length > var->array_size)
         error_at("Wide string initializer is too long for array",
                  cur_token_loc());
 

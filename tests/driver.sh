@@ -1219,6 +1219,98 @@ int main(void) {
 }
 EOF
 
+# A string literal initializes a whole innermost row of a multidimensional
+# character array, zero-padded, and never stores its address into a char. The
+# block-scope case dirties the stack first so that the padding is observable.
+try_ 0 << 'EOF'
+struct names { int id; char name[2][8]; };
+typedef char label[4];
+char g_s[2][4] = {"ab", "cd"};
+char g_t[][3] = {"ab", "c"};
+char g_u[2][4] = {[1] = "xy"};
+struct names g_n = {7, {"alpha", "beta"}};
+wchar_t g_w[2][3] = {L"a", L"bc"};
+char g_p[2][2][3] = {{"ab", "c"}, {{"d"}}};
+label g_l[2] = {"ab", {"cd"}};
+static const char want_s[8] = {'a', 'b', 0, 0, 'c', 'd', 0, 0};
+static const char want_t[6] = {'a', 'b', 0, 'c', 0, 0};
+static const char want_u[8] = {0, 0, 0, 0, 'x', 'y', 0, 0};
+static const char want_n[16] = {'a', 'l', 'p', 'h', 'a', 0, 0, 0,
+                                'b', 'e', 't', 'a', 0,   0, 0, 0};
+static const char want_p[12] = {'a', 'b', 0, 'c', 0, 0, 'd', 0, 0, 0, 0, 0};
+int same(const char *p, const char *want, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (p[i] != want[i])
+            return 0;
+    return 1;
+}
+int check(const char *s, const char *t, int tsize, const char *u,
+          const struct names *n, const wchar_t *w, const char *p)
+{
+    if (tsize != 6 || !same(s, want_s, 8) || !same(t, want_t, 6))
+        return 1;
+    if (!same(u, want_u, 8))
+        return 2;
+    if (n->id != 7 || !same(n->name[0], want_n, 16))
+        return 3;
+    if (w[0] != 'a' || w[1] || w[2] || w[3] != 'b' || w[4] != 'c' || w[5])
+        return 4;
+    if (!same(p, want_p, 12))
+        return 5;
+    return 0;
+}
+void dirty(void)
+{
+    char junk[256];
+    for (int i = 0; i < 256; i++)
+        junk[i] = 'Z';
+}
+int block(void)
+{
+    char s[2][4] = {"ab", "cd"};
+    char t[][3] = {"ab", "c"};
+    char u[2][4] = {[1] = "xy"};
+    struct names n = {7, {"alpha", "beta"}};
+    wchar_t w[2][3] = {L"a", L"bc"};
+    char p[2][2][3] = {{"ab", "c"}, {{"d"}}};
+    label l[2] = {"ab", {"cd"}};
+    if (!same(l[0], want_s, 8))
+        return 6;
+    return check(s[0], t[0], sizeof t, u[0], &n, w[0], p[0][0]);
+}
+int block_static(void)
+{
+    static char s[2][4] = {"ab", "cd"};
+    static char t[][3] = {"ab", "c"};
+    static char u[2][4] = {[1] = "xy"};
+    static struct names n = {7, {"alpha", "beta"}};
+    static wchar_t w[2][3] = {L"a", L"bc"};
+    static char p[2][2][3] = {{"ab", "c"}, {{"d"}}};
+    return check(s[0], t[0], sizeof t, u[0], &n, w[0], p[0][0]);
+}
+int main(void)
+{
+    int rc = check(g_s[0], g_t[0], sizeof g_t, g_u[0], &g_n, g_w[0],
+                   g_p[0][0]);
+    if (rc || !same(g_l[0], want_s, 8))
+        return rc + 6;
+    dirty();
+    rc = block();
+    if (rc)
+        return rc + 10;
+    rc = block_static();
+    return rc ? rc + 20 : 0;
+}
+EOF
+try_compile_error_message "String literal initializer has incompatible array element type" << 'EOF'
+int values[2][3] = {"ab"};
+int main(void) { return 0; }
+EOF
+try_compile_error_message "String literal cannot initialize a single array element" << 'EOF'
+int main(void) { char text[2][4] = {1, "abc"}; return 0; }
+EOF
+
 try_ 0 << EOF
 enum { wide_count = sizeof L"ab" / sizeof(wchar_t) };
 wchar_t *global_pointer = L"xy";
@@ -1392,6 +1484,84 @@ int main(void) {
 }
 EOF
 
+# An array with room for the characters of its string literal but not the
+# terminating null takes the characters alone (C99 6.7.8p14), for arrays, record
+# members and rows at every storage duration. The literal may also be enclosed
+# in braces, including in a compound literal. The neighbour must stay intact,
+# and a literal with more characters than elements is still an error.
+try_ 0 << EOF
+struct R { char n[2]; int k; };
+char gs[2] = "ab";
+char guard = 'q';
+static char gss[2] = {"cd"};
+char grows[2][2] = {"ef", "g"};
+struct R gr = {"hi", 5};
+wchar_t gw[2] = L"jk";
+int main(void) {
+    char s[3] = "lm", t[2] = "no";
+    static char ss[2] = "pq";
+    struct R r = {"rs", 7}, rw[2] = {"tu", 1, "vw", 2};
+    char rows[][2] = {"xy", "z"};
+    wchar_t w[2] = {L"AB"};
+    char *cl = (char[2]){"CD"};
+    if (gs[0] != 'a' || gs[1] != 'b' || guard != 'q' || gss[1] != 'd' ||
+        grows[0][1] != 'f' || grows[1][0] != 'g' || grows[1][1] ||
+        gr.n[1] != 'i' || gr.k != 5 || gw[0] != 'j' || gw[1] != 'k')
+        return 1;
+    if (t[0] != 'n' || t[1] != 'o' || s[1] != 'm' || s[2] || ss[1] != 'q' ||
+        r.n[0] != 'r' || r.n[1] != 's' || r.k != 7 || rw[1].n[1] != 'w' ||
+        rw[1].k != 2)
+        return 2;
+    return sizeof rows != 4 || rows[0][1] != 'y' || rows[1][1] ||
+           w[1] != 'B' || cl[0] != 'C' || cl[1] != 'D';
+}
+EOF
+try_compile_error << EOF
+char s[1] = "ab";
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { char s[1] = {"ab"}; return s[0]; }
+EOF
+try_compile_error << EOF
+int main(void) { static char s[1] = "ab"; return s[0]; }
+EOF
+try_compile_error << EOF
+struct R { char n[1]; } r = {"ab"};
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { char r[2][1] = {"a", "cd"}; return r[0][0]; }
+EOF
+try_compile_error << EOF
+int main(void) { wchar_t w[1] = L"ab"; return w[0]; }
+EOF
+
+# Without braces, string literals meeting a record member that is an array of
+# pointers initialize its elements in turn. They are values for the pointers,
+# not the contents of a character array, so the list continues to the next
+# member instead of reporting too many initializers or an element type error.
+try_ 0 << EOF
+typedef char *str;
+struct T { char *n[2]; int k; } gt = {"s", "t", 4};
+struct T2 { str n[2]; int k; };
+struct M { str n[2][2]; int k; } gm = {"a", "b", "c", "d", 3};
+struct T2 gt2 = {"u", "v", 5}, gta[2] = {"a", "b", 1, "c", "d", 2};
+int main(void) {
+    struct T t = {"s", "t", 4};
+    static struct T2 st2 = {"y", "z", 6};
+    struct T2 ta[2] = {"a", "b", 1, "c", "d", 2};
+    struct M m = {"e", "f", "g", "h", 7};
+    if (*gt.n[1] != 't' || gt.k != 4 || *gt2.n[1] != 'v' || gt2.k != 5 ||
+        *gta[1].n[0] != 'c' || gta[1].k != 2 || *gm.n[1][0] != 'c' ||
+        gm.k != 3)
+        return 1;
+    return *t.n[0] != 's' || t.k != 4 || *st2.n[1] != 'z' || st2.k != 6 ||
+           *ta[1].n[1] != 'd' || ta[1].k != 2 || *m.n[1][1] != 'h' ||
+           m.k != 7;
+}
+EOF
+
 # C99 _Bool conversions store the truth value, not a truncated source byte.
 try_ 4 << EOF
 _Bool echo_bool(_Bool value) { return value; }
@@ -1425,6 +1595,79 @@ int main(void) {
     return direct + 2 * passed + 4 * (!null_result) +
            8 * (bool_identity(&bool_pointer_object) == 1) +
            16 * (bool_identity(null_value) == 0);
+}
+EOF
+
+# A cast to _Bool compares with zero rather than truncating, for narrow, long
+# long and pointer operands alike, as do _Bool arguments and returns.
+try_output 0 "1 1 1 1 1 0 0 2 1 1 1 1 1 1 1 1" << EOF
+_Bool take(_Bool value) { return value; }
+_Bool from_int(int value) { return value & 0x100; }
+_Bool from_wide(long long value) { return value; }
+_Bool from_pointer(char *value) { return value; }
+_Bool (*callback)(_Bool) = take;
+int main(void)
+{
+    int x = 0x1c1;
+    short half = 0x100;
+    long long wide = 0x100000000LL;
+    unsigned long long top = 0x8000000000000000ULL;
+    char *pointer = (char *) &x, *null = 0;
+    printf("%d %d %d %d %d %d %d ", (_Bool) (x & 0x100), (_Bool) half,
+           (_Bool) wide, (_Bool) top, (_Bool) pointer, (_Bool) null,
+           (_Bool) (x & 0x200));
+    printf("%d %d ", (_Bool) wide + (_Bool) 256, (_Bool) 0x100000000LL);
+    printf("%d %d %d %d ", take(x & 0x100), take(wide), take(pointer),
+           callback(wide));
+    printf("%d %d %d", from_int(x), from_wide(wide), from_pointer(pointer));
+    return 0;
+}
+EOF
+
+# Stores into _Bool objects reached through subscripts, pointers and members,
+# and objects declared through a _Bool typedef, keep only the truth value.
+try_output 0 "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1" << EOF
+typedef _Bool flag;
+struct holder {
+    int pad;
+    _Bool plain;
+    flag alias;
+};
+struct holder global_holder = {1, 256, 512};
+flag global_flag = 256;
+int main(void)
+{
+    int x = 0x1c1;
+    long long wide = 0x100000000LL;
+    char *pointer = (char *) &x;
+    _Bool values[3] = {0, 0, 0}, *p = values, grid[2][2];
+    _Bool (*row)[3] = &values;
+    struct holder h = {1, x & 0x100, wide}, *hp = &h;
+    flag local = x & 0x100;
+    printf("%d %d %d %d %d ", global_holder.alias, global_flag, h.plain,
+           h.alias, local);
+    local = wide;
+    printf("%d %d %d ", local, (flag) (x & 0x100), (flag) pointer);
+    values[1] = x & 0x100;
+    printf("%d ", values[1]);
+    p[2] = wide;
+    printf("%d ", values[2]);
+    values[2] = 0;
+    *(p + 2) = x & 0x100;
+    printf("%d ", values[2]);
+    grid[1][1] = x & 0x100;
+    printf("%d ", grid[1][1]);
+    (*row)[0] = x & 0x100;
+    printf("%d ", values[0]);
+    h.plain = 0;
+    hp->alias = pointer;
+    printf("%d %d ", hp->alias, (h.plain = wide));
+    h.plain = x & 0x100 ? x & 0x100 : 0;
+    printf("%d ", h.plain);
+    values[0] = 0;
+    *p++ = x & 0x100;
+    printf("%d", values[0]);
+    return 0;
 }
 EOF
 
@@ -1626,6 +1869,54 @@ struct S g = {3};
 int main(void) { typedef struct S ST; extern ST g; return g.a; }
 EOF
 
+# A storage class, typedef included, may follow the type as well (C99 6.7p2;
+# obsolescent per 6.11.5 but valid), at file scope, in a block, in a for
+# initializer and on a parameter. It still admits no second storage class, and
+# an identifier after the type is the declarator, not a specifier.
+try_ 16 << EOF
+struct S { int a; };
+struct S static gs = { 2 };
+int typedef T;
+T const static k = 1;
+long extern y;
+long y = 1;
+int static f(void) { return 3; }
+int g(int register a, const register int b) { return a + b; }
+int main(void) {
+    T typedef U;
+    U u = 1;
+    struct S register rs = gs;
+    long unsigned static int q = 4;
+    long extern int y;
+    for (int register i = 0; i < 1; i++)
+        u += i;
+    struct Q { int b; } static r = {5};
+    return u + k + f() + rs.a + q + r.b + g(1, -1) - y + 1;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) { int x static; return 0; }
+EOF
+
+try_compile_error_message "duplicate static storage class specifier" << EOF
+int main(void) { int static static x; return x; }
+EOF
+
+try_compile_error_message "incompatible storage class specifiers" << EOF
+int main(void) { unsigned static extern x; return 0; }
+EOF
+
+try_compile_error_message "typedef cannot be combined" << EOF
+extern int typedef T;
+int main(void) { return 0; }
+EOF
+
+try_compile_error << EOF
+int f(int static a) { return a; }
+int main(void) { return f(1); }
+EOF
+
 # restrict is a C99 pointer qualifier. These are non-aliasing calls by contract;
 # the test covers parser/type-name acceptance and ordinary accesses without
 # requiring an alias-sensitive optimization.
@@ -1707,6 +1998,23 @@ EOF
 
 # Category: Arithmetic Operations
 begin_category "Arithmetic Operations" "Testing +, -, *, /, % operators"
+
+# Unary minus negates a grouped or cast operand, not only a name or a literal.
+try_ 0 << EOF
+int negate_argument(int value) { return value; }
+int main(void)
+{
+    int x = 5;
+    char c = 2;
+
+    if (-(x) != -5) return 1;
+    if (-(x + 1) != -6) return 2;
+    if (negate_argument(-(x)) != -5) return 3;
+    if (-(int) c != -2) return 4;
+    if (1 + -(x) != -4) return 5;
+    return 0;
+}
+EOF
 
 # C99 integer promotions and signed/unsigned common-type selection must retain
 # the promoted arithmetic result across character, short, int, and long ranks.
@@ -1983,6 +2291,53 @@ int main(void) {
            (sizeof(typedef_half) == 2 && typedef_half == 65535U);
 }
 EOF
+
+# The int spelling may accompany short and long in any specifier order, in every
+# context that reads a type (C99 6.7.2p2).
+try_ 12 << EOF
+short int file_short = 3;
+static int short file_static = 1;
+typedef unsigned short int file_ushort;
+short int keep_short(int long value) { return value; }
+struct mixed { short int s; int short unsigned u; long int l; };
+int main(void) {
+    short int y = 1;
+    int short w = -2;
+    signed short int s = -1;
+    short int signed t = -1;
+    unsigned short int u = 65535;
+    int long unsigned lu = 5;
+    long long int ll = 1;
+    long int long il = 2;
+    int long long li = 3;
+    short volatile unsigned int vu = 65535;
+    const int short cs = 4;
+    typedef short int block_short;
+    block_short b = 7;
+    struct mixed m;
+    short int pair, *pp = &pair;
+    *pp = 1;
+    m.u = 65535;
+    for (short int i = 0; i < 2; i++)
+        y += i;
+    return (sizeof(y) == 2) + (w == -2 && s == -1 && t == -1) +
+           (u == 65535 && vu == 65535 && m.u == 65535) +
+           (sizeof(file_ushort) == 2) + (sizeof(short int) == 2) +
+           (sizeof(int long long) == 8) + ((short int) 65539 == 3) +
+           (keep_short(file_short + file_static) == 4) +
+           (ll + il + li == 6 && lu == 5) + (cs == 4 && b == 7) +
+           (sizeof(b) == 2 && sizeof(m.s) == 2) + (y == 2 && pair == 1);
+}
+EOF
+try_compile_error << EOF
+int main(void) { short int int value = 1; return value; }
+EOF
+try_compile_error << EOF
+int main(void) { long char int value = 1; return value; }
+EOF
+try_compile_error << EOF
+int main(void) { short long int value = 1; return value; }
+EOF
 try_ 1 << EOF
 int main(void) { return (unsigned long long) 1 == 1ULL; }
 EOF
@@ -2152,6 +2507,25 @@ try_compile_error << EOF
 int cast_object;
 long long cast_non_constant = (long long)cast_object + 1;
 int main(void) { return 0; }
+EOF
+
+# A cast, !, ~ and unary + bind tighter than a following binary operator. The
+# operand of each is only the pointer, so `(char *) p + 1` advances by one byte
+# rather than being read as the int pointer arithmetic p + 1, and `!p + 1` is 1.
+try_ 0 << EOF
+int id(int value) { return value; }
+int main(void) {
+    int arr[4] = {1, 2, 3, 4}, *p = arr, *q = arr, x = 3;
+    char c = 100, *cp = (char *) p + 1;
+    if (cp - (char *) p != 1 || (char *) p + 1 - (char *) p != 1) return 1;
+    if (id((char *) arr + 3 - (char *) arr) != 3) return 2;
+    if ((char *) (int *) p + 2 != (char *) arr + 2) return 3;
+    if ((int) (char *) p + 1 - (int) (char *) p != 1) return 4;
+    if (!p + 1 != 1 || ~x + 5 != 1 || +x + 1 != 4) return 5;
+    if ((long) x * 2 != 6 || ((unsigned char) c << 1) != 200) return 6;
+    if ((int *) (p + 2) - q != 2 || (int) arr[1] + 2 != 4) return 7;
+    return *(char *) p + 1 != 2;
+}
 EOF
 try_ 2 << EOF
 unsigned long long global_sum = 0x100000000ULL + 7ULL;
@@ -3874,6 +4248,22 @@ declare -a bitwise_tests=(
 )
 
 run_expr_tests bitwise_tests
+
+# A shift count outside the width of int has no defined result. The compiler
+# must not fold one with the host's shift, which on x86 reduced "1 << 40" to 256
+# while a count known only at run time gave the target's result; leaving the
+# shift to the target makes both spellings agree.
+try_ 1 << EOF
+int shift_count(int count) { return count; }
+int main(void)
+{
+    int wide = shift_count(40);
+    int negative = shift_count(-1);
+
+    return (1 << 40) == (1 << wide) && (8 >> 33) == (8 >> (wide - 7)) &&
+           (1 << -1) == (1 << negative) && (-1 << 3) == -8;
+}
+EOF
 try_output 0 "128 59926 -6 -4 -500283" << EOF
 int main() {
   printf("%d %d %d %d %d", 32768 >> 8, 245458999 >> 12, -11 >> 1, -16 >> 2, -1000565 >> 1);
@@ -3921,6 +4311,97 @@ int main(void) {
     return *pointer;
 }
 EOF
+
+# A block pointer typedef names the same type as a file-scope one: its
+# dereference is the pointee, not the pointer, so arithmetic on it must not
+# scale, and a subscript through a hidden pointer-to-pointer steps by slots.
+try_ 8 << EOF
+int main(void) { int e = 7; typedef int *EP; EP q = &e; return *q + 1; }
+EOF
+try_ 65 << EOF
+int main(void) {
+    int a[3] = {5, 6, 7};
+    typedef int *EP;
+    EP q = a;
+    return q[0] + *(q + 1) * 10 + (q + 2)[0] * 100 - 700;
+}
+EOF
+try_ 13 << EOF
+int main(void) {
+    char c[2] = {3, 9};
+    typedef char *CP;
+    CP q = c;
+    return *q + *(q + 1) + 1;
+}
+EOF
+try_output 0 "4 6 5 10 30 20 10 20 2 1 250 3 12 2 8 1 2 2 3 4 3" << EOF
+struct S { int m; char c; int n; };
+int main(void) {
+    struct S s[2] = {{1, 2, 3}, {4, 5, 6}};
+    typedef struct S *SP;
+    SP p = s;
+    SP p1 = p + 1;
+    short sh[3] = {10, 20, 30};
+    typedef short *SHP;
+    SHP h = sh;
+    typedef SHP *SHPP;
+    SHPP hh = &h;
+    long long ll[2] = {100, 200};
+    typedef long long *LLP;
+    LLP l = ll;
+    typedef unsigned char *UCP;
+    unsigned char uc[2] = {250, 3};
+    UCP u = uc;
+    typedef int *IP;
+    typedef IP IP2;
+    int arr[4] = {1, 2, 3, 4};
+    IP2 ip = arr;
+    printf("%d %d %d ", p[1].m, p1->n, p1[0].c);
+    printf("%d %d %d %d %d ", *h, h[2], *(h + 1), **hh, hh[0][1]);
+    printf("%d %d ", (int) (l[1] / 100), (int) (*l / 100));
+    printf("%d %d ", *u, u[1]);
+    printf("%d %d %d %d %d ", (int) sizeof(*p), (int) sizeof(*h),
+           (int) sizeof(*l), (int) sizeof(*u), (int) sizeof(**hh));
+    ip++;
+    printf("%d %d %d %d", *ip, ip[1], *(ip + 2), (int) ((arr + 4) - ip));
+    return 0;
+}
+EOF
+try_ 61 << EOF
+typedef int **GPP;
+typedef int *GP;
+struct T { GP p; GPP gp; };
+int main(void) {
+    int ia[3] = {10, 20, 30};
+    int *ip = ia;
+    typedef int **PP;
+    typedef int *IP;
+    PP pp = &ip;
+    GPP gp = &ip;
+    IP rows[2] = {ia, ia + 1};
+    struct T t;
+    struct T *tp = &t;
+    t.p = ia;
+    t.gp = &ip;
+    /* 20 + 10 + 10 + 1 + 20 = 61 */
+    return pp[0][1] + *gp[0] + (rows[1][1] - rows[0][1]) +
+           (t.gp[0][2] == 30) + tp->p[1];
+}
+EOF
+try_ 11 << EOF
+struct S { int m; int n; };
+int main(void) {
+    typedef struct S *SP;
+    typedef struct S **SPP;
+    struct S s[2] = {{1, 2}, {3, 4}};
+    SP sp = s;
+    SP sps[2] = {s + 1, s};
+    SPP spp = &sp;
+    SPP spp2 = sps;
+    /* 4 + 3 + 2 + 2 = 11 */
+    return spp2[1][1].n + spp2[0]->m + spp[0]->n + sps[1]->n;
+}
+EOF
 try_ 9 << EOF
 typedef int outer_type;
 int main(void) {
@@ -3961,6 +4442,141 @@ int main(void) {
     int first = 3, second = 7;
     global_pointer_row values = { &first, &second };
     return *values[1] + 1;
+}
+EOF
+
+# A file-scope typedef reads a declarator list too, and its specifier with its
+# qualifiers applies to each declarator.
+try_compile_error_message "assignment of read-only location" << EOF
+typedef const int CI, *CP;
+int main(void) { int x = 1; CP p = &x; *p = 2; return 0; }
+EOF
+try_compile_error_message "assignment of read-only variable" << EOF
+typedef int *IP;
+typedef const IP CP, CQ[2];
+int main(void) { IP x = 0; CP p = 0; p = x; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+typedef const struct { int x, y; } CR, *CRP;
+int main(void) { CR c = {1, 2}; CRP q = &c; q->x = 2; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+typedef const enum { A1, B1 } CE, *CEP;
+int main(void) { CE e = A1; CEP p = &e; *p = B1; return 0; }
+EOF
+try_ 42 << EOF
+typedef struct { int m; int n; } S, *SP, SA[2];
+typedef struct tagged { int v; } T, *TP;
+typedef struct later L, *LP;
+typedef union { int i; char c; } U, *UP;
+typedef int I, *IP, IA[3], (*FP)(int);
+typedef enum { E0, E1, E2 } E, *EP;
+typedef const int *CIP;
+typedef IP const CP;
+struct later { int w; };
+int twice(int v) { return 2 * v; }
+int main(void) {
+    int x = 3;
+    S s[2] = {{1, 2}, {3, 4}};
+    SP sp = s + 1;
+    SA sa;
+    T t = {5};
+    TP tp = &t;
+    struct tagged *raw = tp;
+    L l;
+    LP lp = &l;
+    U u;
+    UP up = &u;
+    IA ia = {1, 2, 3};
+    IP ip = ia;
+    FP fp = twice;
+    E e = E2;
+    EP ep = &e;
+    CIP cip = &x;
+    CP cp = &x;
+    lp->w = 6;
+    up->i = 7;
+    sa[1] = s[0];
+    *cp += 1;
+    /* 4 + 5 + 6 + 7 + 3 + 2 + 2 + 4 + 1 + 8 */
+    return sp->n + raw->v + l.w + u.i + ip[2] + *ep + sa[1].n + *cip +
+           (sizeof(sa) == 2 * sizeof(S)) + fp(4);
+}
+EOF
+
+# A record typedef may derive an array at file scope as in a block, whether it
+# names a tag or defines the record, and an array parameter of it is a pointer.
+try_ 64 << EOF
+struct P { int a, b; };
+typedef struct P pair_row[2];
+typedef struct { int a; } untagged_row[3], untagged_one;
+typedef union { int i; char c; } union_row[2], *union_ptr;
+typedef struct Q { int x; } q_grid[2][3], q_one;
+typedef struct P *pair_ptr_row[2];
+typedef struct P pair_alias;
+typedef pair_alias alias_row[2];
+pair_row global_pairs;
+int second_b(pair_row row) { return row[1].b; }
+int third_a(untagged_row row) { return row[2].a; }
+int main(void) {
+    typedef struct P local_row[4];
+    typedef struct { char c; } local_untagged[5];
+    pair_row pairs;
+    untagged_row ur;
+    untagged_one one;
+    union_row un;
+    union_ptr up = un;
+    q_grid grid;
+    q_one q;
+    struct Q *qp = &grid[1][2];
+    pair_ptr_row ptrs;
+    alias_row aliases;
+    local_row lr;
+    local_untagged lu;
+    pairs[1].b = 1;
+    ur[2].a = 2;
+    one.a = 3;
+    up[1].c = 4;
+    grid[1][2].x = 5;
+    q.x = 6;
+    ptrs[1] = &pairs[1];
+    aliases[0].a = 7;
+    global_pairs[1].a = 8;
+    lr[3].b = 9;
+    lu[4].c = 10;
+    return second_b(pairs) + third_a(ur) + one.a + un[1].c + qp->x + q.x +
+           ptrs[1]->b + aliases[0].a + global_pairs[1].a + lr[3].b + lu[4].c +
+           (sizeof(pair_row) == 2 * sizeof(struct P)) +
+           (sizeof(untagged_row) == 3 * sizeof(int)) +
+           (sizeof(union_row) == 2 * sizeof(int)) +
+           (sizeof(q_grid) == 6 * sizeof(int)) +
+           (sizeof(pair_ptr_row) == 2 * sizeof(struct P *)) +
+           (sizeof(local_row) == 4 * sizeof(struct P)) +
+           (sizeof(local_untagged) == 5) + (sizeof(global_pairs) == 16);
+}
+EOF
+try_compile_error_message "Typedef array element has incomplete record type" << EOF
+struct incomplete;
+typedef struct incomplete incomplete_row[2];
+int main(void) { return 0; }
+EOF
+try_ 14 << EOF
+typedef struct { int a; int b; } *AP, A;
+typedef union { int i; char c[8]; } *UP, U;
+typedef struct later *LP, L;
+struct later { int w; int z; };
+int main(void) {
+    A a = {1, 2};
+    AP ap = &a;
+    U u;
+    UP up = &u;
+    L l;
+    LP lp = &l;
+    lp->z = 3;
+    up->i = 4;
+    /* 2 + 4 + 3 + 1 + 1 + 1 + 2 */
+    return ap->b + u.i + l.z + (sizeof(A) == 8) +
+           (sizeof(U) == 8) + (sizeof(L) == 8) + ap[0].a * 2;
 }
 EOF
 try_compile_error << EOF
@@ -4015,6 +4631,129 @@ int main(void) {
     union_alias value;
     value.value = 9;
     return value.value;
+}
+EOF
+
+# A block typedef may define the record or enum it names, tagged or not, and
+# give it several declarators; the tag belongs to the block.
+try_ 7 << EOF
+int main(void) {
+    typedef struct Q { int b; } R;
+    R r;
+    struct Q q2;
+    r.b = 3;
+    q2.b = 4;
+    return r.b + q2.b;
+}
+EOF
+try_ 56 << EOF
+struct Q { char outer[8]; };
+int bump(void *p);
+int main(void) {
+    typedef struct { int b; } R, *RP;
+    typedef struct node { struct node *next; int v; } node_t, *node_ptr;
+    typedef union { int x; char c[8]; } U;
+    typedef enum { AA = 5, BB } E;
+    R r = {2};
+    RP p = &r;
+    node_t n1, n2;
+    node_ptr np = &n1;
+    U u;
+    E e = BB;
+    n1.next = &n2;
+    n2.v = 9;
+    p->b += 1;
+    u.x = 2;
+    {
+        typedef struct Q { short s; } R;
+        R inner;
+        struct Q tagged;
+        inner.s = 4;
+        tagged.s = 5;
+        if (sizeof(R) != 2 || sizeof(struct Q) != 2)
+            return 1;
+        r.b += inner.s + tagged.s;
+    }
+    /* 12 + 8 + 6 + 9 + 1 + 4 + 16 = 56 */
+    return r.b + sizeof(U) + e + np->next->v +
+           (sizeof(node_t) == 2 * sizeof(node_ptr)) + sizeof(R) +
+           (sizeof(struct Q) == 8) * 16;
+}
+EOF
+try_ 12 << EOF
+int main(void) {
+    typedef struct { int a; } I;
+    typedef struct { I in; int b; } N;
+    typedef struct { int x, y; } const CP, *CPP;
+    typedef const union { int x; } CU;
+    N n = {{5}, 7};
+    CP c = {1, 2};
+    CPP q = &c;
+    CU cu = {9};
+    return n.in.a + n.b + (q->y == 2) + (cu.x == 9) - 2;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    typedef const struct { int x; } CR;
+    CR c = {1};
+    c.x = 2;
+    return c.x;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    typedef struct { int x; } const CR;
+    CR c = {1};
+    c.x = 2;
+    return c.x;
+}
+EOF
+try_compile_error << EOF
+int main(void) {
+    { typedef struct scoped { int x; } S; }
+    struct scoped s;
+    s.x = 1;
+    return s.x;
+}
+EOF
+
+# The specifiers of a typedef, with their qualifiers, belong to every declarator
+# of its list; const on a pointer typedef qualifies that pointer.
+try_compile_error_message "assignment of read-only location" << EOF
+int main(void) { int x = 1; typedef const int CI, *CP; CP p = &x; *p = 2; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int main(void) { int x = 1; typedef int const CI, *CP; CP p = &x; p[0] = 2; return 0; }
+EOF
+try_compile_error_message "assignment of read-only variable" << EOF
+int main(void) { typedef int *IP; IP x = 0; typedef const IP CP, CQ; CQ p = 0; p = x; return 0; }
+EOF
+try_compile_error_message "assignment of read-only variable" << EOF
+int main(void) { typedef int *IP; IP x = 0; typedef IP const CP; CP p = 0; p = x; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct S { int x; };
+int main(void) { typedef const struct S CR, *CRP; struct S s; CRP q = &s; q->x = 2; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int main(void) { typedef const enum { A1, B1 } CE, *CEP; CE e = A1; CEP p = &e; *p = B1; return 0; }
+EOF
+try_ 3 << EOF
+int main(void) {
+    int x = 1;
+    typedef int *IP, **IPP;
+    typedef int *const CPP, *NP;
+    typedef const IP CIP, *PCIP;
+    IP p = &x;
+    IPP q = &p;
+    NP n = &x;
+    CIP c = &x;
+    PCIP pc = &c;
+    **q = 2;
+    n = p;
+    *c += 1;
+    return **pc;
 }
 EOF
 try_compile_error << EOF
@@ -4184,6 +4923,72 @@ try_compile_error_message "tag was previously declared as a different kind of re
 int main(void) { enum block_record { BLOCK_RECORD }; struct block_record { int a; }; return 0; }
 EOF
 
+# A scope defines the content of a tag only once (C99 6.7.2.3p1). Forward
+# declarations and an inner block's own definition remain valid.
+try_ 9 << EOF
+struct T;
+struct T;
+typedef struct T T_alias;
+struct T { int a; };
+struct T;
+union U { int a; };
+enum E { E_OUTER = 3 };
+int main(void) {
+    struct T;
+    struct T { char c; } t;
+    struct T;
+    t.c = 1;
+    {
+        struct T { int x, y; };
+        union U { char z; };
+        enum E { E_INNER = 4 };
+        T_alias outer;
+        outer.a = 5;
+        return sizeof(struct T) + sizeof(union U) + t.c + E_OUTER + E_INNER +
+               outer.a - 13;
+    }
+}
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+struct twice { int a; };
+struct twice { int b; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+union twice { int a; };
+union twice { int b; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+struct twice { int a; };
+typedef struct twice { int b; } twice_t;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+typedef union twice { int a; } twice_t;
+union twice { int b; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+struct outer { struct nested { int a; } in; };
+struct nested { int b; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+int main(void) { struct twice { int a; }; struct twice { int b; }; return 0; }
+EOF
+try_compile_error_message "redefinition of struct or union tag" << EOF
+int main(void) { union twice { int a; } u; typedef union twice { int b; } t; return 0; }
+EOF
+try_compile_error_message "redefinition of enum tag" << EOF
+enum twice { TWICE_A };
+enum twice { TWICE_B };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "redefinition of enum tag" << EOF
+int main(void) { enum twice { TWICE_A }; enum twice { TWICE_B }; return 0; }
+EOF
+
 # An inner scope may reuse the name for another kind of tag, and an enum tag
 # never names, or redefines, an ordinary typedef of the same spelling.
 try_ 0 << EOF
@@ -4270,6 +5075,82 @@ int main(void) {
     int (*q)[2] = src + 1;
     return q[0][0];
 }
+EOF
+
+# A row of a multidimensional array decays to a pointer to its first element
+# instead of being loaded as though it were a scalar element.
+try_ 0 << EOF
+int global_rows[3][2] = { { 1, 2 }, { 3, 4 }, { 5, 6 } };
+int global_planes[2][2][3] = { { { 1, 2, 3 }, { 4, 5, 6 } },
+                               { { 7, 8, 9 }, { 10, 11, 12 } } };
+int second(int *row) { return row[1]; }
+int main(void) {
+    int v[2][2] = { { 1, 2 }, { 3, 0 } };
+    int *p;
+    p = v[1];
+    int *q = v[0];
+    int *g = global_rows[2];
+    int *r = global_planes[1][0];
+    int (*plane)[3] = global_planes[1];
+    int (*next)[3];
+    next = global_planes[0] + 1;
+    int i = 1;
+    return p[0] != 3 || q[1] != 2 || g[0] != 5 || r[2] != 9 ||
+           plane[1][1] != 11 || next[0][2] != 6 || second(v[1]) != 0 ||
+           *(v[1] + 1) != 0 || *v[0] != 1 || *(global_rows[i] + 1) != 4 ||
+           v[1] - v[0] != 2 || global_rows[2] - global_rows[0] != 4 ||
+           sizeof(v[1]) != 2 * sizeof(int) || !v[1] ||
+           sizeof(*global_planes[1]) != 3 * sizeof(int);
+}
+EOF
+try_ 0 << EOF
+struct point { int x, y; };
+struct grid { int tag; int cells[2][3]; struct point points[2][2]; };
+struct grid global_grid = { 7, { { 1, 2, 3 }, { 4, 5, 6 } },
+                            { { { 1, 2 }, { 3, 4 } }, { { 5, 6 }, { 7, 8 } } } };
+int third(const int *row) { return row[2]; }
+int main(void) {
+    struct grid local = global_grid;
+    struct grid *pointer = &local;
+    int *cells = local.cells[1];
+    struct point *points = pointer->points[1];
+    struct point matrix[2][2] = { { { 1, 2 }, { 3, 4 } }, { { 5, 6 }, { 7, 8 } } };
+    struct point *row = matrix[1];
+    struct point *second = matrix[0] + 1;
+    return cells[0] != 4 || third(pointer->cells[0]) != 3 ||
+           *(global_grid.cells[1] + 2) != 6 || points[1].x != 7 ||
+           pointer->points[1]->y != 6 || row[1].y != 8 || matrix[1]->x != 5 ||
+           second->x != 3;
+}
+EOF
+try_ 7 << EOF
+int x = 5, y = 7;
+int *slots[2][2];
+int main(void) {
+    slots[1][0] = &x;
+    slots[1][1] = &y;
+    int **row = slots[1];
+    return *row[1] == *slots[1][1] && row + 1 == slots[1] + 1 ? *slots[1][1] : 0;
+}
+EOF
+try_ 0 << EOF
+int rows[2][2] = { { 1, 2 }, { 3, 4 } };
+int planes[2][2][3] = { { { 1, 2, 3 }, { 4, 5, 6 } },
+                        { { 7, 8, 9 }, { 10, 11, 12 } } };
+int *row = rows[1];
+int *after = rows[0] + 1;
+int (*plane_row)[3] = planes[1] + 1;
+int *slots[3] = { rows[1], rows[0] + 1, planes[1][1] + 2 };
+int main(void) {
+    static int *local = rows[1] + 1;
+    return row[1] != 4 || *after != 2 || plane_row[0][0] != 10 ||
+           *slots[0] != 3 || *slots[1] != 2 || *slots[2] != 12 || *local != 4;
+}
+EOF
+try_compile_error_message "Global initializer requires a constant address" << EOF
+int rows[2][2];
+int *element = rows[1][0];
+int main(void) { return 0; }
 EOF
 try_ 3 << EOF
 int main(void) {
@@ -6882,6 +7763,104 @@ int main(void) {
     return rows[0][0];
 }
 EOF
+
+# C99 defines ++ and -- as += 1 and -= 1, so on _Bool the result converts back
+# to 0 or 1: b++ on 1 leaves 1, --b on 0 leaves 1 and b-- on 1 leaves 0. The
+# same holds for members, elements, pointers and compound assignment.
+try_output 0 "1 1 1 1 0 | 1 1 1 1 0 1 1 1 1 0 | 1 1 1 | 1 1 1 0 1 | 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1 1" << EOF
+typedef _Bool flag;
+struct holder {
+    int pad;
+    _Bool plain;
+    flag alias;
+};
+_Bool global_flag;
+int main(void)
+{
+    _Bool b, values[3] = {0, 0, 0}, *p = values;
+    flag alias;
+    struct holder h, *hp = &h;
+    int v;
+    b = 1;
+    b++;
+    printf("%d ", b);
+    b = 1;
+    ++b;
+    printf("%d ", b);
+    b = 0;
+    b--;
+    printf("%d ", b);
+    b = 0;
+    --b;
+    printf("%d ", b);
+    b = 1;
+    --b;
+    printf("%d | ", b);
+    b = 1;
+    v = b++;
+    printf("%d %d ", v, b);
+    b = 1;
+    v = ++b;
+    printf("%d %d ", v, b);
+    b = 0;
+    v = b--;
+    printf("%d %d ", v, b);
+    b = 0;
+    v = --b;
+    printf("%d %d ", v, b);
+    b = 1;
+    v = b--;
+    printf("%d %d | ", v, b);
+    alias = 1;
+    alias++;
+    global_flag = 0;
+    v = --global_flag;
+    printf("%d %d %d | ", alias, v, global_flag);
+    h.plain = 1;
+    h.plain++;
+    hp->alias = 0;
+    v = --hp->alias;
+    printf("%d %d %d ", h.plain, v, h.alias);
+    h.plain = 0;
+    v = h.plain--;
+    printf("%d %d | ", v, h.plain);
+    values[1] = 1;
+    values[1]++;
+    values[2] = 0;
+    v = --values[2];
+    printf("%d %d %d ", values[1], v, values[2]);
+    p[0] = 0;
+    p[0]--;
+    p[1] = 1;
+    v = ++p[1];
+    printf("%d %d %d | ", values[0], v, values[1]);
+    b = 0;
+    b += 5;
+    printf("%d ", b);
+    b = 0;
+    b -= 1;
+    printf("%d ", b);
+    b = 1;
+    b <<= 8;
+    printf("%d ", b);
+    b = 0;
+    v = (b += 2);
+    printf("%d %d ", v, b);
+    h.plain = 0;
+    h.plain += 5;
+    values[1] = 0;
+    values[1] += 256;
+    printf("%d %d ", h.plain, values[1]);
+    *p = 0;
+    v = (*p += 2);
+    printf("%d %d ", v, values[0]);
+    b = 0;
+    for (v = 0; v < 3; v++)
+        b++;
+    printf("%d", b);
+    return 0;
+}
+EOF
 try_ 8 << EOF
 int main(void) {
     int rows[1][2] = { { 4, 9 } };
@@ -7815,6 +8794,92 @@ int main(void) {
     return value[1][1][1] + value[0][0][0] * 3;
 }
 EOF
+
+# An object declared as an array of an array typedef, `row m[2]`, is an array of
+# rows; its size and subscript strides include the typedef's own bound. Checked
+# at file scope, block scope and for block-scope statics, through parameters and
+# record members, and for a later declarator of the same declaration.
+try_ 0 << 'EOF'
+typedef int row[2];
+typedef row plane[2];
+struct rows { char tag; row r[3]; };
+row g_m[2] = {{1, 2}, {3, 4}};
+row g_t[] = {{1, 2}, {3, 4}, {5, 6}};
+row g_e[2] = {1, 2, 3, 4};
+plane g_c[2] = {{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}};
+struct rows g_r = {9, {{1, 2}, {3, 4}, {5, 6}}};
+row *g_pr = &g_m[1];
+row g_a, g_b;
+int sum_rows(row r[], int n)
+{
+    int s = 0;
+    for (int i = 0; i < n; i++)
+        s += r[i][0] * 10 + r[i][1];
+    return s;
+}
+int last(row r[3]) { return r[2][1]; }
+int cube_at(plane p[], int i, int j, int k) { return p[i][j][k]; }
+#define SIZES(m, t, c, b) (sizeof m * 1000000 + sizeof t * 10000 + \
+                          sizeof c * 100 + sizeof b)
+int check(row *m, row *t, row *e, plane *c, struct rows *r, row *pr, int sizes)
+{
+    if (sizes != 16243208)
+        return 1;
+    if ((char *) &m[1][1] - (char *) m != 12)
+        return 2;
+    if (m[1][0] != 3 || t[2][1] != 6 || e[1][1] != 4 || e[0][1] != 2)
+        return 3;
+    if ((char *) &c[1][1][1] - (char *) c != 28 || c[1][0][1] != 6)
+        return 4;
+    if (sizeof(struct rows) != 28 || r->r[2][1] != 6 ||
+        (char *) &r->r[1][0] - (char *) r != 12)
+        return 5;
+    if ((char *) pr - (char *) m != 8 || (*pr)[1] != 4 || pr[0][0] != 3)
+        return 6;
+    if (sum_rows(t, 3) != 102 || last(t) != 6 || cube_at(c, 1, 1, 1) != 8)
+        return 7;
+    return 0;
+}
+int block(void)
+{
+    row m[2] = {{1, 2}, {3, 4}};
+    row t[] = {{1, 2}, {3, 4}, {5, 6}};
+    row e[2] = {1, 2, 3, 4};
+    plane c[2] = {{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}};
+    struct rows r = {9, {{1, 2}, {3, 4}, {5, 6}}};
+    row *pr = &m[1];
+    row a, b;
+    b[1] = 7;
+    a[1] = 8;
+    c[0][1][1] = 41;
+    if (b[1] != 7 || c[0][1][1] != 41 || c[1][0][0] != 5)
+        return 8;
+    c[0][1][1] = 4;
+    return check(m, t, e, c, &r, pr, SIZES(m, t, c, b));
+}
+int block_static(void)
+{
+    static row m[2] = {{1, 2}, {3, 4}};
+    static row t[] = {{1, 2}, {3, 4}, {5, 6}};
+    static row e[2] = {1, 2, 3, 4};
+    static plane c[2] = {{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}};
+    static struct rows r = {9, {{1, 2}, {3, 4}, {5, 6}}};
+    static row *pr = &m[1];
+    static row a, b;
+    return check(m, t, e, c, &r, pr, SIZES(m, t, c, b));
+}
+int main(void)
+{
+    int rc = check(g_m, g_t, g_e, g_c, &g_r, g_pr, SIZES(g_m, g_t, g_c, g_b));
+    if (rc)
+        return rc;
+    rc = block();
+    if (rc)
+        return rc + 10;
+    rc = block_static();
+    return rc ? rc + 20 : 0;
+}
+EOF
 try_ 11 << EOF
 int main(void) {
     return (int[2][2]){{1, 2}, {3, 4}}[1][0] += 8;
@@ -7948,6 +9013,185 @@ int main(void) {
     struct flags flags = {1};
     struct flags *pointer = &flags;
     return (*pointer).value += 6;
+}
+EOF
+
+# ++ and -- apply to any modifiable lvalue, not only to an identifier: a
+# dereference, a subscript of one, or a member reached through either. Each
+# steps by the object's own type, so a pointer advances by its element size, a
+# long long carries into its upper half and a _Bool stays 0 or 1.
+try_ 0 << EOF
+struct rec { int x; char c; long long w; int *p; _Bool b; int m; };
+struct holder { struct rec *slots[2]; };
+int main(void) {
+    int x = 5, arr[4] = {10, 20, 30, 40};
+    int *p = &x, *ap = arr, **pp = &ap;
+    char ch = 'a', *cp = &ch;
+    long long wide = 0xFFFFFFFFLL, *lp = &wide;
+    _Bool flag = 1, *bp = &flag;
+    struct rec r = {1, 'b', 0x1FFFFFFFFLL, arr, 0, 7};
+    struct rec *rp = &r, *slots[2] = {&r, &r}, **rpp = slots;
+    struct holder h;
+    int v;
+
+    ++*p;
+    --*p;
+    (*p)++;
+    (*p)--;
+    if (x != 5) return 1;
+    if (++*p != 6 || (*p)++ != 6 || x != 7 || --*p != 6 || (*p)-- != 6 ||
+        x != 5)
+        return 2;
+    ++*cp;
+    if (ch != 'b' || (*cp)++ != 'b' || ch != 'c') return 3;
+    ++*lp;
+    if (wide != 0x100000000LL || (*lp)-- != 0x100000000LL ||
+        wide != 0xFFFFFFFFLL || --*lp != 0xFFFFFFFELL)
+        return 4;
+    ++*pp;
+    (*pp)++;
+    if (*ap != 30 || ap != arr + 2) return 5;
+    --*pp;
+    (*pp)[1]++;
+    if (arr[2] != 31) return 6;
+    ap = arr;
+    v = ++*ap++;
+    if (v != 11 || arr[0] != 11 || ap != arr + 1) return 7;
+    ++*bp;
+    if (flag != 1) return 8;
+    (*bp)--;
+    if (flag != 0) return 9;
+    --*bp;
+    if (flag != 1) return 10;
+    ++rp->x;
+    ++(*rp).m;
+    (*rp).w++;
+    (*rp).p++;
+    if (r.x != 2 || r.m != 8 || r.w != 0x200000000LL || *r.p != 20) return 11;
+    ++(*rp).b;
+    (*rp).b++;
+    if (r.b != 1) return 12;
+    (*rpp)->x++;
+    ++(*rpp)->c;
+    if (r.x != 3 || r.c != 'c') return 13;
+    h.slots[1] = &r;
+    (h.slots[1])->m--;
+    ++(h.slots[1])->m;
+    (h.slots[1])->m++;
+    return r.m != 9 ? 14 : 0;
+}
+EOF
+try_compile_error << EOF
+int main(void) { int x = 1, *p = &x; ++(*p + 1); return x; }
+EOF
+try_compile_error << EOF
+int main(void) { int x = 1, *p = &x; (0, *p)++; return x; }
+EOF
+try_compile_error << EOF
+int main(void) { const int x = 1; const int *p = &x; (*p)++; return x; }
+EOF
+
+# Any postfix expression can follow a parenthesized primary (C99 6.5.2): a
+# subscript, a member selection or a call applies to the grouped value, and a
+# record loaded through a pointer is a whole object rather than one word of it.
+# Reads, stores and compound assignments of every member width through (*q).m
+# must agree with q->m, and a record stores into a member or an element whole.
+try_ 0 << EOF
+struct inner { char c; long long w; short s; };
+struct rec {
+    int pad; char c; short s; int i; long long m; int *p;
+    struct inner in; int arr[3];
+};
+struct point { int x; int m; };
+struct holder { struct point *slots[2]; int *ip; };
+struct point *identity(struct point *p) { return p; }
+int main(void) {
+    int x = 7;
+    struct rec v, rows[2], *q = &v, *rp = rows, **rpp = &rp;
+    struct inner t;
+    struct point pts[2], *pp = pts, **ppp = &pp;
+    struct holder h;
+
+    v.pad = 1; v.c = 2; v.s = 3; v.i = 4; v.m = 0x100000005LL; v.p = &x;
+    v.in.c = 6; v.in.w = 0x200000007LL; v.in.s = -3;
+    v.arr[0] = 8; v.arr[1] = 9; v.arr[2] = 10;
+    rows[1] = v;
+    if (rows[1].m != 0x100000005LL || rows[1].in.w != 0x200000007LL) return 1;
+    if ((*q).c != 2 || (*q).s != 3 || (*q).i != 4) return 2;
+    if ((*q).m != 0x100000005LL || (*q).m != q->m) return 3;
+    if (*(*q).p != 7 || (*q).in.c != 6 || (*q).in.s != -3) return 4;
+    if ((*q).in.w != 0x200000007LL || (*q).arr[2] != 10) return 5;
+    if ((*rpp)[1].m != 0x100000005LL || (rp)[1].in.w != 0x200000007LL) return 6;
+    if ((*rpp)[1].arr[1] != 9 || (rp + 1)->i != 4) return 7;
+
+    (*q).c = 12; (*q).s = 13; (*q).i = 14; (*q).m = 0x300000015LL;
+    (*q).in.w = 0x400000017LL; (*q).arr[1] = 19; (*q).in.s = 21;
+    if (v.c != 12 || v.s != 13 || v.i != 14 || v.m != 0x300000015LL) return 8;
+    if (v.in.w != 0x400000017LL || v.arr[1] != 19 || v.in.s != 21) return 9;
+    (*rpp)[1].m = 0x500000001LL;
+    (*rpp)[1].in.w = 0x600000001LL;
+    if (rows[1].m != 0x500000001LL || rows[1].in.w != 0x600000001LL) return 10;
+
+    (*q).c += 1; (*q).s -= 1; (*q).i *= 2; (*q).m += 0x100000000LL;
+    (*q).in.w -= 1; (*q).arr[1] <<= 1; (*q).p += 1;
+    if (v.c != 13 || v.s != 12 || v.i != 28 || v.m != 0x400000015LL) return 11;
+    if (v.in.w != 0x400000016LL || v.arr[1] != 38 || v.p != &x + 1) return 12;
+    (*rpp)[1].m |= 2;
+    if (rows[1].m != 0x500000003LL) return 13;
+
+    t = (*q).in;
+    if (t.w != 0x400000016LL) return 14;
+    t.w = 1;
+    (*q).in = t;
+    if (v.in.w != 1) return 15;
+    q->in.w = 2;
+    t = q->in;
+    rows[0].in = t;
+    *rp = v;
+    if (t.w != 2 || rows[0].in.w != 2 || rp->m != v.m) return 16;
+
+    pts[1].x = 5;
+    pts[1].m = 6;
+    h.slots[1] = &pts[1];
+    h.ip = &x;
+    if ((h.slots[1])->x != 5 || (pts[1]).m != 6) return 17;
+    if ((identity(&pts[1]))->x != 5 || (pp + 1)->x != 5) return 18;
+    if ((*ppp)->x != pts[0].x || (h.ip)[0] != 7 || (v.arr)[2] != 10) return 19;
+    (h.slots[1])->x = 15;
+    (pp + 1)->m += 4;
+    (*ppp)[1].x++;
+    return pts[1].x != 16 || pts[1].m != 10 ? 20 : 0;
+}
+EOF
+
+# A record is neither arithmetic nor scalar: it cannot be the operand of an
+# arithmetic, bitwise, relational, logical or unary operator, a cast, a
+# controlling expression or a scalar assignment. Each is a diagnostic rather
+# than a record reaching integer lowering, which aborted on 32-bit targets.
+for expr in "x = 4 & s" "x = s + 1" "x = s == s" "x = s < x" "x = -s" "x = ~s" \
+    "x = !s" "x = +s" "x = s && x" "x = x || s" "x = s ? 1 : 0" "x += s" \
+    "x = (int) s" "x = s" "s = x" "p->a = s" "*p = x" "s++" "--s" "++*p" \
+    "if (s) x = 1" "while (s) x = 1" "for (; s;) x = 1" "do x = 1; while (s)" \
+    "x = *p + 1" "x -= *p" "x = s << 1"; do
+    try_compile_error << EOF
+struct S { int a; int b; int c; char d; };
+int main(void) {
+    struct S s = {1, 2, 3, 4}, *p = &s;
+    int x = 4;
+    $expr;
+    return x;
+}
+EOF
+done
+try_ 7 << EOF
+struct S { int a; int b; int c; char d; };
+int main(void) {
+    struct S s = {1, 2, 3, 4}, t, *p = &s;
+    int x = 1;
+    (void) s;
+    t = x ? s : *p;
+    x = (t = *p).b;
+    return x + (x ? s.a : 0) + t.d;
 }
 EOF
 
@@ -8248,6 +9492,68 @@ int main(void) {
 }
 EOF
 
+# A record reached through a pointer, a subscript or a member is a whole object
+# too, as a source and as a destination: every one of these used to move one
+# register's worth of it, and a 32-bit backend could not encode the load of a
+# record of odd size at all.
+try_ 11 << EOF
+typedef struct { _Bool a, b, c, d, e, f; } flags_t;
+int count(const flags_t *spec) {
+    flags_t copy;
+    copy = *spec;
+    return copy.a + copy.b * 2 + copy.f * 4;
+}
+int main(void) {
+    flags_t flags = {1, 0, 0, 0, 0, 1};
+    flags_t again = flags;
+    return count(&flags) + count(&again) + (sizeof(flags_t) == 6);
+}
+EOF
+
+try_ 44 << EOF
+struct odd { char a; short b; char c; int d; char e; };
+struct wrap { char tag; struct odd in; };
+struct odd global;
+struct odd id(struct odd value) { return value; }
+struct odd pick(struct wrap *w, int i) { return i ? w->in : w[0].in; }
+int main(void) {
+    struct wrap w = {1, {2, 3, 4, 5, 6}};
+    struct wrap *pw = &w;
+    struct odd arr[2];
+    struct odd *p = arr;
+    arr[0] = pw->in;
+    p[1] = id(*p);
+    global = p[1];
+    global.e = 9;
+    w.in = global;
+    struct odd t = 1 ? pw->in : *p;
+    static struct odd s;
+    s = pick(pw, 1);
+    struct odd u = pick(&w, 0);
+    return global.a + global.b + global.c + global.d + w.in.e + arr[1].d +
+           s.e + t.b + u.c;
+}
+EOF
+
+try_ 22 << EOF
+struct values { int a; int b; int c; int d; int e; };
+struct values source = {1, 2, 3, 4, 5};
+struct values read_through(const struct values *p) { return *p; }
+int main(void) {
+    struct values arr[2] = {{0}};
+    struct values *p = arr;
+    struct values q = {6, 7, 8, 9, 10};
+    struct values r;
+    int first;
+    *p = source;
+    *(p + 1) = q;
+    r = q = *p;
+    first = (*p).e + p[1].a;
+    r = read_through(&arr[1]);
+    return first + r.e - q.a - p->c + source.e;
+}
+EOF
+
 # Record arguments are passed by value: the callee receives every byte, but a
 # write to its parameter cannot modify the caller's object.
 try_ 250 << EOF
@@ -8377,6 +9683,46 @@ int main(void) {
     int *(*p)[2] = data;
     return *p[1][0] != 5 || *p[0][1] != 3;
 }
+EOF
+
+# Parentheses around a pointer declarator only group it, in objects, members,
+# parameters and typedefs; `*p` on a pointer to a row of pointers is that row.
+try_ 78 << EOF
+struct M { int v; };
+struct M m0 = {7};
+struct M *mp = &m0;
+struct M *(*gmpp) = &mp;
+int gx = 5;
+int (*gp) = &gx, (**gppp) = &gp;
+int *const (*gcp) = &gp;
+typedef int (*int_ptr), *(**int_ptr_ptr);
+struct holder { int (*m); int (**mm); struct M *(*self); };
+int sum(int (*q), int (**qq), int *(*rows)[2]) { return *q + **qq + *(*rows)[1]; }
+int main(void) {
+    int x = 3, y = 4;
+    int (*p) = &x, (*q) = &y;
+    int (**pp) = &p;
+    int (*arr[2]) = {&x, &y};
+    int *rows[2] = {&y, &x};
+    int *(*rp)[2] = &rows;
+    int_ptr ip = &y;
+    int_ptr_ptr ipp = &pp;
+    struct M *(*mpp) = &mp;
+    struct holder h;
+    h.m = &x;
+    h.mm = &p;
+    h.self = &mp;
+    return *p + *q + **pp + *arr[1] + *(*rp)[0] + *(*rp)[1] + (*mpp)->v +
+           (*gmpp)->v + *gp + **gppp + **gcp + *h.m + **h.mm +
+           (*h.self)->v + sum(ip, pp, rp) + ***ipp +
+           (sizeof(arr) == 2 * sizeof(int *)) + (sizeof(*rp) == sizeof(rows));
+}
+EOF
+try_compile_error_message "assignment of read-only variable" << EOF
+int main(void) { int x = 3; int (*const q) = &x; q = 0; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int main(void) { int x = 3, *p = &x; int *const (*cp) = &p; *cp = 0; return 0; }
 EOF
 try_ 1 << EOF
 int main(void) {
@@ -9115,6 +10461,60 @@ int main(void)
            un.i - 36 + sizeof(nest) / sizeof(int) - 2;
 }
 EOF
+
+# A member may define the record it has, tagged or untagged, at any scope; a
+# nested tag belongs to the scope of the outer record. A union may hold a struct
+# with a flexible array member.
+try_ 80 << EOF
+struct outer {
+    struct inner { int a; char c; } in;
+    union { short s; struct { char x, y, z; } t; } u;
+    struct { int x; } pts[3], *first;
+    int b;
+} file_outer;
+struct { struct { int a; } in; int b; } untagged_file;
+union { struct { int lo, hi; } pair; int raw[2]; } file_union;
+typedef struct { struct { int x, y; } p[2]; union { int i; char c[5]; } u; } nested_t;
+int main(void) {
+    struct inner reused;
+    nested_t t;
+    struct { struct { int a; } in; int b; } n;
+    struct block_outer { struct block_inner { char q; } arr[4]; } bo;
+    struct block_inner bi;
+    typedef struct { union { int v; } u[2]; } block_t;
+    block_t bt;
+    file_outer.in.a = 1;
+    file_outer.u.t.z = 2;
+    file_outer.pts[2].x = 3;
+    file_outer.first = file_outer.pts;
+    reused.c = 4;
+    untagged_file.in.a = 5;
+    file_union.pair.hi = 6;
+    t.p[1].y = 7;
+    t.u.c[4] = 8;
+    n.in.a = 9;
+    bo.arr[3].q = 10;
+    bi.q = 11;
+    bt.u[1].v = 12;
+    return file_outer.in.a + file_outer.u.t.z + file_outer.first[2].x +
+           reused.c + untagged_file.in.a + file_union.raw[1] + t.p[1].y +
+           t.u.c[4] + n.in.a + bo.arr[3].q + bi.q + bt.u[1].v +
+           (sizeof(nested_t) == 4 * sizeof(int) + 8) + (sizeof(bo) == 4);
+}
+EOF
+try_ 3 << EOF
+struct flexible_row { int count; int values[]; };
+union flexible_holder { struct flexible_row row; int count; };
+int main(void) {
+    union { struct flexible_row row; char tag; } local;
+    local.row.count = 3;
+    return local.row.count + sizeof(union flexible_holder) - sizeof(int);
+}
+EOF
+try_compile_error << EOF
+struct { struct { int a; }; int b; } anonymous_member;
+int main(void) { return 0; }
+EOF
 try_compile_error_message "ordinary identifier conflicts with typedef name" << EOF
 struct S { int a; };
 int main(void) { typedef int T; struct S T; return 0; }
@@ -9604,6 +11004,91 @@ int main(void) {
 }
 EOF
 
+# A member reached through a pointer to a const record is not a modifiable
+# lvalue (C99 6.5.16p2), whatever the pointer itself is: plain, parameter,
+# global, typedef, const or subscripted. Assignment, compound assignment and
+# increment are all rejected, including members of nested records and elements
+# of array members.
+try_compile_error_message "read-only location" << EOF
+struct S { int a; };
+int main(void) { struct S s; const struct S *p = &s; p->a = 1; return 0; }
+EOF
+
+try_compile_error_message "read-only location" << EOF
+struct S { int a; };
+int bump(const struct S *p) { return p->a += 2; }
+int main(void) { return 0; }
+EOF
+
+try_compile_error_message "read-only location" << EOF
+struct S { int a; };
+const struct S *global;
+int main(void) { global->a++; return 0; }
+EOF
+
+try_compile_error_message "read-only location" << EOF
+struct S { int a; };
+int main(void) { struct S s; const struct S *p = &s; --p->a; return 0; }
+EOF
+
+try_compile_error_message "read-only location" << EOF
+struct S { int a; };
+typedef const struct S *const_s_ptr;
+int main(void) { struct S s; const_s_ptr p = &s; p->a = 1; return 0; }
+EOF
+
+try_compile_error_message "read-only location" << EOF
+struct I { int b; };
+struct S { struct I in; int arr[2]; };
+int main(void) { struct S s; const struct S *const p = &s; p->in.b = 1; return 0; }
+EOF
+
+try_compile_error_message "read-only location" << EOF
+struct S { int arr[2]; };
+int main(void) { struct S s; const struct S *p = &s; p->arr[1] = 1; return 0; }
+EOF
+
+try_compile_error_message "read-only location" << EOF
+struct S { int arr[2]; };
+int main(void) { const struct S cs = {{0}}; cs.arr[1] = 1; return 0; }
+EOF
+
+try_compile_error_message "read-only location" << EOF
+struct S { int *ptr; struct S *next; };
+int main(void) { struct S s; const struct S *p = &s; p->next = 0; return 0; }
+EOF
+
+# Reads stay valid, and so do writes through a non-const pointer, through a
+# const pointer to a non-const record, and to objects a pointer member of a
+# const record reaches. A pointer member to const is itself assignable, and a
+# pointer typedef naming a record tag finds the tag's members.
+try_ 19 << EOF
+struct I { int b; };
+struct S { int a; struct I in; int arr[2]; int *ptr; const int *view; struct S *next; };
+typedef struct S *s_ptr;
+int read_back(const struct S *p) { return p->a + p->next->in.b; }
+int main(void) {
+    struct S s = {0};
+    struct S *p = &s;
+    struct S *const fixed = &s;
+    const struct S *cp = &s;
+    s_ptr alias = &s;
+    s.next = &s;
+    s.ptr = &s.arr[1];
+    p->a = 1;
+    p->in.b += 2;
+    ++p->a;
+    fixed->arr[0] = 3;
+    fixed->a++;
+    cp->next->in.b++;
+    cp->next->arr[1] = 4;
+    *cp->ptr += 1;
+    p->view = &s.a;
+    alias->a += 1;
+    return read_back(cp) + *cp->view + alias->arr[0] + cp->arr[1];
+}
+EOF
+
 # Named struct/union specifiers are valid parameter declaration specifiers.
 try_ 10 << EOF
 struct value { int first; };
@@ -9745,6 +11230,51 @@ try_compile_error << EOF
 int main(void, int i) {}
 EOF
 
+# A parameter list has no trailing comma in any dialect, and a comma must
+# separate each parameter, including the ellipsis, from the one before it.
+try_compile_error_message "trailing comma in parameter list" << EOF
+int g(int a,) { return a; }
+int main(void) { return g(1); }
+EOF
+
+try_compile_error_message "trailing comma in parameter list" << EOF
+int g(int a, char *b,);
+int main(void) { return 0; }
+EOF
+
+try_compile_error_message "trailing comma in parameter list" << EOF
+int main(void) { int (*fp)(int,); return 0; }
+EOF
+
+try_compile_error_message "trailing comma in parameter list" << EOF
+int apply(int (*cb)(int,), int b) { return b; }
+int main(void) { return 0; }
+EOF
+
+try_compile_error_message "trailing comma in parameter list" << EOF
+int main(void) { return sizeof(int (*)(int,)); }
+EOF
+
+try_compile_error << EOF
+int g(void,) { return 0; }
+int main(void) { return g(); }
+EOF
+
+try_compile_error << EOF
+int g(int a int b) { return a + b; }
+int main(void) { return g(1, 2); }
+EOF
+
+try_compile_error << EOF
+int g(int a ...) { return a; }
+int main(void) { return g(1, 2); }
+EOF
+
+try_ 3 << EOF
+int g(int a, int (*cb)(int, char), ...) { return a; }
+int main(void) { int (*fp)(int, ...) = 0; return g(3, 0) + (fp != 0); }
+EOF
+
 # Only the keyword itself starts a void parameter list. A type name that merely
 # begins with those letters is an ordinary parameter type, and an unknown one
 # must be diagnosed rather than read as an empty prototype.
@@ -9823,6 +11353,25 @@ items 2 "short x; short *y; short z; z = 2; y = &z; x = *y; return x;"
 items 42 "int x; x = 10; int *p; p = &x; p[0] = 42; exit(x);"
 items 10 "int val; val = 5; int *ptr; ptr = &val; ptr[0] = 10; exit(val);"
 items 7 "int a; a = 3; int *b; b = &a; b[0] = 7; exit(a);"
+
+# The address of a member has the member's pointer type, so arithmetic on it
+# advances by whole members.
+try_ 0 << EOF
+struct member_address_inner { int first; char second; };
+struct member_address_outer { char tag; int value; struct member_address_inner inner; };
+int main(void)
+{
+    struct member_address_outer object;
+    struct member_address_outer *pointer = &object;
+
+    if ((char *) (&object.value + 1) - (char *) &object.value != sizeof(int))
+        return 1;
+    if ((char *) (&pointer->inner + 1) - (char *) &pointer->inner !=
+        sizeof(struct member_address_inner))
+        return 2;
+    return 0;
+}
+EOF
 
 # A parameter whose address is taken later in the function is still in the
 # register it arrived in when read before that. Reloading it from its slot read
@@ -10312,6 +11861,24 @@ int main() {
     p++;        /* Move to values[3] = 20 */
     p = p + 3;  /* Move to values[6] = 35 */
     return *p;
+}
+EOF
+
+try_ 0 << EOF
+/* An array operand of a pointer difference decays to a pointer to its first
+ * element, a row for a deeper array. The difference is a complete operand of
+ * a following + or -, so end - start + 1 counts both ends.
+ */
+int main(void) {
+    char buf[4], *bp = buf + 2, *start = buf;
+    int values[5], *ip = values + 3, *first = values;
+    int m[3][2], k[2][3][4], (*row)[2] = m + 1;
+    if (bp - buf != 2 || buf - bp != -2 || &buf[3] - buf != 3) return 1;
+    if (ip - values != 3 || values - ip + 5 != 2 || buf + 3 - buf != 3) return 2;
+    if (m[2] - m[0] != 4 || (m + 2) - m != 2 || row - m != 1) return 3;
+    if ((k + 1) - k != 1 || &m[2][1] - m[0] != 5) return 4;
+    if (bp - start + 1 != 3 || ip - first + 1 + 2 != 6) return 5;
+    return 10 - (ip - first) + 1 != 8;
 }
 EOF
 
@@ -11351,6 +12918,28 @@ int main() {
 }
 EOF
 
+# A function designator in a record initializer is a code address. At block
+# scope it was converted as an int and truncated, so the call crashed on LP64.
+# Cover automatic, static, file scope, arrays of records, designators, and an
+# explicit address-of.
+try_ 44 << EOF
+struct ops { int (*fn)(int); int k; };
+int twice(int x) { return 2 * x; }
+int thrice(int x) { return 3 * x; }
+struct ops go = {twice, 1};
+struct ops garr[2] = {{twice, 1}, {thrice, 2}};
+int main(void) {
+    struct ops o = {twice, 1};
+    static struct ops so = {thrice, 1};
+    struct ops oa[2] = {{twice, 1}, thrice, 2};
+    struct ops od = {.k = 3, .fn = twice};
+    struct ops oe = {&thrice, 3};
+    return o.fn(1) + so.fn(1) + oa[1].fn(1) + od.fn(1) + oe.fn(1) +
+           go.fn(1) + garr[1].fn(1) + garr[0].fn(1) + o.k + oa[1].k +
+           od.k + 18;
+}
+EOF
+
 # Parenthesized declarators may place an array suffix on the callback pointer.
 # Exercise automatic, static-local, and file-scope storage separately: each
 # requires pointer-sized element allocation and indexed indirect-call lowering.
@@ -11594,6 +13183,200 @@ EOF
 
 # Category: Arrays
 begin_category "Arrays" "Testing array declarations, indexing, and operations"
+
+# An array is not a modifiable lvalue (C99 6.3.2.1), so it cannot be assigned,
+# compound-assigned, incremented or decremented, whether it is an object, a
+# member or a row. A parameter declared as an array is a pointer and can be.
+for expr in "a = b" "a += 1" "a++" "--a" "(a) = b" "(a)++" "++(a)" "m[1] = n[1]" \
+    "m = n" "s.arr = t.arr" "p->arr = t.arr" "(*p).arr = b" "s.arr++" \
+    "--p->arr" "p->m[1] = b" "int *q = (a = b)"; do
+    try_compile_error_message "assignment to expression with array type" << EOF
+struct S { int arr[2]; int m[2][2]; };
+int main(void) {
+    int a[2], b[2], m[2][2], n[2][2];
+    struct S s, t, *p = &s;
+    $expr;
+    return 0;
+}
+EOF
+done
+try_ 5 << EOF
+int values[2] = {5, 6};
+int first(int a[2]) { a = values; return *a; }
+struct S { int arr[2]; };
+int main(void) {
+    int v[2] = {1, 2}, *ip;
+    struct S s;
+    s.arr[1] = 3;
+    ip = (s.arr);
+    ip = v;
+    return first(v) + ip[0] - 1;
+}
+EOF
+
+# E1[E2] is (*((E1)+(E2))) (C99 6.5.2.1), so the integer may be written first:
+# 2[arr] reads, stores and updates the same element as arr[2].
+try_ 0 << EOF
+struct P { int x; int m; };
+int main(void) {
+    int arr[4] = {1, 2, 3, 4}, i = 2, *p = arr, v;
+    struct P ps[2] = {{1, 2}, {3, 4}};
+    char *s = "hello";
+    if (2[arr] != 3 || i[arr] != 3 || 1[p] + 3[p] != 6) return 1;
+    if (-2[arr] + 5 != 2 || (i)[arr] + (1)[p] != 5 || 1[ps].m != 4) return 2;
+    if (1["hello"] != 'e' || 4[s] != 'o') return 3;
+    2[arr] = 9;
+    i[p] += 5;
+    if (arr[2] != 14) return 4;
+    v = (3[arr] = 7);
+    if (v + arr[3] != 14 || 2[arr]++ != 14 || ++1[arr] != 3) return 5;
+    1[ps].m = 8;
+    return arr[2] != 15 || ps[1].m != 8;
+}
+EOF
+try_compile_error << EOF
+int main(void) { int i = 1; return i[i]; }
+EOF
+
+# The operand of unary & need not start with an identifier. &*E is E without
+# evaluating either operator (C99 6.5.3.2p3), and any other lvalue expression,
+# such as a grouped member, a subscript written integer first or a compound
+# literal, yields the address of its object. Unary * accepts such an address.
+try_ 0 << EOF
+struct P { int x; int m; };
+int *id(int *p) { return p; }
+int main(void) {
+    int arr[4] = {1, 2, 3, 4}, i = 2, *p = arr, **pp = &p, *q;
+    struct P pt = {5, 6}, *sp = &pt, *r;
+    if (&*p != p || &*arr != arr || *&*id(p + 1) != 2 || (&*p)[3] != 4)
+        return 1;
+    if (*(&*p + 1) != 2 || &*arr + 1 != arr + 1 || **&*pp != 1) return 2;
+    q = &2[arr];
+    if (*q != 3 || *&2[arr] != 3 || &i[arr] != arr + 2) return 3;
+    q = &(arr[1]);
+    if (*q != 2 || &(i) != &i || *&i != 2) return 4;
+    q = &(*sp).m;
+    r = &(*sp);
+    if (*q != 6 || &(sp)->m != q || r != sp || *&pt.m + (*&pt).x != 11)
+        return 5;
+    *&i = 5;
+    return i != 5 || *(int *) &(int){7} != 7;
+}
+EOF
+
+# &array points to the whole array, not to its first element (C99 6.5.3.2p3): it
+# steps over sizeof array bytes and dereferences back to the array. This holds
+# for rows of a matrix, array members, arrays of pointers and a typedef array. A
+# parameter declared as an array is a pointer object instead, whose address is
+# that of its own slot.
+try_ 0 << EOF
+typedef int row[3];
+struct S { int x; int arr[5]; int mm[2][3]; };
+int arr[4];
+int (*gp)[4] = &arr;
+char *sa[3] = {"a", "b", "c"};
+#define STEP(p) ((char *) ((p) + 1) - (char *) (p))
+int take(int (*p)[4]) { return (*p)[3]; }
+int param(int a[4]) { int **pp = &a; return *pp == a && STEP(&a) == sizeof(int *); }
+int main(void) {
+    static int sl[6];
+    int la[4] = {1, 2, 3, 4}, m[3][2], m3[2][3][4];
+    row r = {7, 8, 9};
+    struct S st[2], *sp = &st[1];
+    int (*q)[4] = &arr, (*pm)[2] = &m[1];
+    char *(*ps)[3] = &sa;
+    arr[3] = 11;
+    arr[1] = 5;
+    if (take(&arr) != 11 || (&arr)[0][1] != 5 || (*&arr)[1] != 5 ||
+        (*gp)[3] != 11 || sizeof(*&arr) != sizeof arr)
+        return 1;
+    if (STEP(&arr) != sizeof arr || STEP(&sl) != sizeof sl ||
+        STEP(&la) != sizeof la || (*&la)[2] != 3 || &arr + 1 <= &arr)
+        return 2;
+    if (STEP(&r) != sizeof r || (*&r)[2] != 9 || STEP(&m) != sizeof m ||
+        STEP(&m[1]) != sizeof m[1] || STEP(&m3[1]) != sizeof m3[1] ||
+        STEP(&m3[1][2]) != sizeof m3[1][2])
+        return 3;
+    if (STEP(&sp->arr) != sizeof sp->arr || STEP(&st[0].mm) != sizeof st[0].mm ||
+        STEP(&sp->mm[1]) != sizeof sp->mm[1])
+        return 4;
+    if (STEP(&sa) != sizeof sa || STEP(ps) != sizeof sa || *(*&sa)[1] != 'b' ||
+        *(*ps)[2] != 'c' || *(&sa)[0][2] != 'c')
+        return 5;
+    m[1][1] = 6;
+    if ((*pm)[1] != 6 || (*&m[1])[1] != 6 || !param(la))
+        return 6;
+    q++;
+    if (q - &arr != 1 || STEP(q - 1) != sizeof arr)
+        return 7;
+    q -= 1;
+    return q != &arr;
+}
+EOF
+
+# A pointer typedef as the array element only deepens the base type, while a
+# pointer-to-array typedef carries its own element depth: one more star on the
+# object makes a pointer to the typedef, stepping by a pointer.
+try_ 0 << EOF
+typedef int *ip;
+int a = 1, b = 2, c = 3, d = 4;
+#define STEP(p) ((char *) ((p) + 1) - (char *) (p))
+int main(void) {
+    typedef int (*T)[3];
+    typedef int *(*U)[3];
+    int *rows[3] = {&a, &b, &c};
+    ip irows[3] = {&c, &d, 0};
+    ip (*tp)[3] = &irows;
+    int m[2][3] = {{1, 2, 0}, {3, 4, 0}};
+    T t = &m[1], *tt = &t;
+    U u = &rows, *uu = &u;
+    if (*(*tp)[1] != 4 || STEP(tp) != sizeof irows || STEP(&irows) != sizeof irows ||
+        *(*&irows)[0] != 3)
+        return 1;
+    if ((*t)[1] != 4 || STEP(t) != sizeof m[1] || STEP(tt) != sizeof(T))
+        return 2;
+    if (*(*u)[2] != 3 || STEP(u) != sizeof rows || STEP(uu) != sizeof(U))
+        return 3;
+    tt++;
+    uu += 1;
+    return tt - &t != 1 || uu - 1 != &u;
+}
+EOF
+
+# A subscript of a pointer to an array designates an array too: &p[i] must be
+# the address the subscript computed, not that of a temporary holding it, and it
+# keeps the designated array as its pointee. sizeof p[0] measures the row.
+try_ 0 << EOF
+typedef int row[2];
+int m[3][2], m3[4][2][3];
+#define OFF(p, base) ((char *) (p) - (char *) (base))
+int main(void) {
+    row *p = &m[0];
+    int (*q)[2][3] = &m3[0];
+    int i = 1;
+    p[1][1] = 5;
+    if (OFF(&p[1], m) != sizeof(row) || OFF(&p[i], m) != sizeof(row) ||
+        OFF(&p[i] + 1, m) != 2 * sizeof(row) || (*&p[i])[1] != 5)
+        return 1;
+    if (sizeof(p[0]) != sizeof(row) || sizeof(*p) != sizeof(row) ||
+        sizeof p[0][1] != sizeof(int) || OFF(p + 1, p) != sizeof(row))
+        return 2;
+    if (OFF(&q[i], m3) != sizeof m3[0] || OFF(&q[1][1], m3) != 36 ||
+        OFF(&q[i][1] + 1, m3) != 48 || OFF(&q[1][1][2], m3) != 44)
+        return 3;
+    return 0;
+}
+EOF
+try_compile_error << EOF
+int main(void) { int k = 0; return &*k == 0; }
+EOF
+try_compile_error << EOF
+int main(void) { int k = 0; return &(k + 1) == 0; }
+EOF
+try_compile_error << EOF
+struct B { unsigned f : 3; };
+int main(void) { struct B b, *p = &b; return &(*p).f == 0; }
+EOF
 
 # Nested braced rows use the same flattened backing storage as indexing. Check
 # local and static storage, including omitted elements at the end of each row.
@@ -12248,6 +14031,106 @@ static struct gd_member_record gd_member;
 static int gd_member_size = sizeof *&gd_member.values[1];
 int main(void) { return gd_member_size; }
 EOF
+
+# C99 6.6 lets a static initializer convert an integer constant or an address
+# constant with a pointer cast. An offset that follows advances the converted
+# pointer, so its stride is that of the cast type.
+try_ 0 << EOF
+int pointer_cast_objects[4];
+int *pointer_cast_null = (int *) 0;
+void *pointer_cast_void = (void *) 0;
+char *pointer_cast_chain = (char *) (void *) (1 - 1);
+char *pointer_cast_string = (char *) "abc";
+char *pointer_cast_bytes = (char *) pointer_cast_objects + 1;
+int *pointer_cast_element = (int *) &pointer_cast_objects[1];
+int *pointer_cast_outer = (int *) (char *) pointer_cast_objects + 1;
+int *pointer_cast_integer = (int *) 0 + 2;
+struct pointer_cast_record { char *text; int *element; };
+struct pointer_cast_record pointer_cast_record = {
+    (char *) "xy", (int *) &pointer_cast_objects[0] + 3
+};
+int main(void)
+{
+    char *base = (char *) pointer_cast_objects;
+    char *null = (char *) 0;
+
+    if (pointer_cast_null || pointer_cast_void || pointer_cast_chain)
+        return 1;
+    if (pointer_cast_string[1] != 'b')
+        return 2;
+    if (pointer_cast_bytes - base != 1)
+        return 3;
+    if (pointer_cast_element != &pointer_cast_objects[1])
+        return 4;
+    if (pointer_cast_outer != &pointer_cast_objects[1])
+        return 5;
+    if ((char *) pointer_cast_integer - null != 2 * sizeof(int))
+        return 6;
+    if (pointer_cast_record.text[1] != 'y' ||
+        pointer_cast_record.element != &pointer_cast_objects[3])
+        return 7;
+    return 0;
+}
+EOF
+
+# A static initializer is an arithmetic constant expression, so grouped and
+# unary subexpressions are as valid as bare literals.
+try_ 0 << EOF
+int grouped_shift = (-8 >> 1) + 12;
+int grouped_product = (1 + 2) * (3 + 4);
+int grouped_negation = -(1 + 2);
+int grouped_logic = !(1 - 1) + ~(0);
+static int grouped_nested = ((-8) >> 1) * (2 - (3 - 2));
+int main(void)
+{
+    if (grouped_shift != 8)
+        return 1;
+    if (grouped_product != 21)
+        return 2;
+    if (grouped_negation != -3)
+        return 3;
+    if (grouped_logic != 0)
+        return 4;
+    if (grouped_nested != -4)
+        return 5;
+    return 0;
+}
+EOF
+
+# Elements and members of static aggregates take the same constant expressions,
+# sizeof and casts included.
+try_ 0 << EOF
+struct sized_record { int size; char *text; short bytes[2]; };
+int sized_elements[] = { sizeof(int), (1 + 2), (char) 300, -(3), ~0, !(0) };
+struct sized_record sized_record = {
+    sizeof(struct sized_record), (char *) 0, { sizeof(short), (short) (1 << 3) }
+};
+struct sized_record sized_records[] = { { sizeof(char) }, { (2 + 3) } };
+int sized_designated[3] = { [1] = sizeof(int) };
+int main(void)
+{
+    enum { local_bound = 5 };
+    static int local_elements[] = { sizeof(short), (local_bound + 1) };
+
+    if (sizeof sized_elements != 6 * sizeof(int))
+        return 1;
+    if (sized_elements[0] != sizeof(int) || sized_elements[1] != 3 ||
+        sized_elements[2] != 44 || sized_elements[3] != -3 ||
+        sized_elements[4] != -1 || sized_elements[5] != 1)
+        return 2;
+    if (sized_record.size != sizeof(struct sized_record) || sized_record.text ||
+        sized_record.bytes[0] != sizeof(short) || sized_record.bytes[1] != 8)
+        return 3;
+    if (sizeof sized_records != 2 * sizeof(struct sized_record) ||
+        sized_records[0].size != 1 || sized_records[1].size != 5)
+        return 4;
+    if (sized_designated[1] != sizeof(int))
+        return 5;
+    if (local_elements[0] != sizeof(short) || local_elements[1] != 6)
+        return 6;
+    return 0;
+}
+EOF
 try_ 12 << EOF
 static int global_items[3];
 static int global_array_size = sizeof global_items;
@@ -12480,6 +14363,123 @@ int main(void) {
         return hidden_function();
     }
 }
+EOF
+
+# C99 6.7p3: an identifier without linkage is declared at most once in a scope.
+# Only repeated extern object or function declarations, which have linkage, may
+# share a block; an object and a function never may.
+try_compile_error_message "redeclaration of identifier with no linkage" << EOF
+int main(void) { int x; int x; return 0; }
+EOF
+
+try_compile_error_message "redeclaration of identifier with no linkage" << EOF
+int main(void) { int x = 1, x = 2; return x; }
+EOF
+
+try_compile_error_message "redeclaration of identifier with no linkage" << EOF
+int main(void) { static int x; extern int x; return x; }
+int x;
+EOF
+
+try_compile_error_message "redeclaration of identifier with no linkage" << EOF
+int x;
+int main(void) { extern int x; struct { int a; } x; return 0; }
+EOF
+
+try_compile_error_message "different kind of symbol" << EOF
+int main(void) { int f(void); int f; return 0; }
+EOF
+
+try_compile_error_message "different kind of symbol" << EOF
+int main(void) { int f; extern int f(void); return 0; }
+EOF
+
+try_compile_error_message "different kind of symbol" << EOF
+int main(void) { enum { A }; int A; return 0; }
+EOF
+
+try_compile_error_message "different kind of symbol" << EOF
+int main(void) { int A; enum { A }; return 0; }
+EOF
+
+# An enumeration constant shares the ordinary identifier name space: a nearer
+# object, parameter or typedef name hides it, and a nearer constant hides an
+# outer object (C99 6.2.1p4).
+try_ 5 << EOF
+enum { V = 1 };
+int main(void) { int V = 5; return V; }
+EOF
+try_ 60 << EOF
+enum { V = 1, P = 2 };
+int param_hides(int P) { return P; }
+int main(void) {
+    int r = param_hides(9);                 /* 9 */
+    {
+        enum { W = 2 };
+        { int W = 3; r += W; }              /* 12 */
+        r += W;                             /* 14 */
+    }
+    {
+        int V = 4;
+        { enum { V = 6 }; r += V; }         /* 20 */
+        r += V;                             /* 24 */
+        { static int V = 7; r += V; }       /* 31 */
+        { extern int ext; r += ext; }       /* 34 */
+    }
+    for (int V = 10; V < 11; V++)
+        r += V;                             /* 44 */
+    {
+        typedef int V;
+        V value = 15;
+        r += value + sizeof(V) - 4;         /* 59 */
+    }
+    switch (r) {
+    case V + 58:
+        return r + V;                       /* 60 */
+    }
+    return 0;
+}
+int ext = 3;
+EOF
+
+try_compile_error_message "redeclaration of parameter" << EOF
+int f(int a) { int a = 2; return a; }
+int main(void) { return f(1); }
+EOF
+
+try_ 22 << EOF
+int y = 2;
+int twice(int);
+int main(void) {
+    y = 3;
+    int y = 4;
+    {
+        extern int y;
+        extern int y;
+        if (y != 3)
+            return 1;
+    }
+    extern int twice(int);
+    int twice(int), twice(int);
+    for (int i = 0; i < 1; i++) {
+        int i = 9;
+        if (i != 9)
+            return 2;
+    }
+    {
+        int y = 5;
+        if (y != 5)
+            return 3;
+    }
+    switch (y) {
+        int y;
+    case 4:
+        y = 7;
+        return twice(y) + 8 + (y - 7);
+    }
+    return 0;
+}
+int twice(int a) { return a * 2; }
 EOF
 
 # C99 permits a string literal to initialize a character-array member without an
@@ -14521,6 +16521,158 @@ int main(void) {
 }
 EOF
 
+# Compound assignment promotes an unsigned char or unsigned short right operand
+# before the usual arithmetic conversions, so it is zero-extended into a long
+# long left operand exactly as in sum = sum + c.
+try_output 0 "0.c8;0.c8;ffffffff.fff0bcf8;ffffffff.f4143e00;ffffffff.fffffff0;ffffffff.fffffffb;0.a840;ffffffff.fff0bdc8;ffffffff.119b95c0;ffffffff.118595c0;ffffffff.fffe17b8;100.b8;ff.ffff1658;1.47ae134f;1.a9c53b4f;" << EOF
+void show(long long value)
+{
+    printf("%x.%x;", (unsigned) (value >> 32), (unsigned) value);
+}
+int main(void)
+{
+    unsigned char c = 200;
+    unsigned short s = 60000;
+    unsigned int u = 4000000000U;
+    long long sum = 0;
+    unsigned long long total = 0xfffffffff0ULL;
+    sum += c;
+    show(sum);
+    sum = 0;
+    sum = sum + c;
+    show(sum);
+    sum = -1000000;
+    sum -= c;
+    show(sum);
+    sum = -1000000;
+    sum *= c;
+    show(sum);
+    sum = -1000000;
+    sum /= s;
+    show(sum);
+    sum = -5;
+    sum %= c;
+    show(sum);
+    sum = -1000000;
+    sum &= s;
+    show(sum);
+    sum = -1000000;
+    sum |= c;
+    show(sum);
+    sum = -1000000;
+    sum ^= u;
+    show(sum);
+    sum = -1000000;
+    sum -= u;
+    show(sum);
+    sum = -1000000;
+    sum >>= c - 197;
+    show(sum);
+    total += c;
+    show(total);
+    total -= s;
+    show(total);
+    total /= c;
+    show(total);
+    total ^= u;
+    show(total);
+    return 0;
+}
+EOF
+
+# The result converts back to the left operand's type, including a change of
+# signedness: int += unsigned int stores a negative int, and a signed int
+# division result widens by sign extension.
+try_output 0 "ffffffff.fff0be88;0.7b8a800;ffffffff.ffffec78;ffffffff.fffffffb;ffffffff.fff057a0;ffffffff.ee7a6a40;0.11a41a40;0.b8;0.0;0.fffffffb;" << EOF
+void show(long long value)
+{
+    printf("%x.%x;", (unsigned) (value >> 32), (unsigned) value);
+}
+int main(void)
+{
+    unsigned char c = 200;
+    unsigned short s = 60000;
+    unsigned int u = 4000000000U;
+    int i = -1000000;
+    unsigned int w = 0xfffffff0U;
+    i += c;
+    show(i);
+    i = -1000000;
+    i *= s;
+    show(i);
+    i = -1000000;
+    i /= c;
+    show(i);
+    i = -5;
+    i %= c;
+    show(i);
+    i = -1000000;
+    i ^= s;
+    show(i);
+    i = 1000000;
+    i += u;
+    show(i);
+    i = 1000000;
+    show(i -= u);
+    w += c;
+    show(w);
+    w = 7;
+    w /= c;
+    show(w);
+    w = 7;
+    show(w += -12);
+    return 0;
+}
+EOF
+
+# The same conversions through members, subscripts, pointers and globals, where
+# the assignment expression's value is the converted result.
+try_output 0 "ffffffff.fff0be88;ffffffff.f4143e00;ffffffff.fffffffb;ffffffff.fff0bcf8;ffffffff.ffffec78;ffffffff.ee7a6a40;0.11a41a40;0.ffffff28;0.ffffff28;" << EOF
+void show(long long value)
+{
+    printf("%x.%x;", (unsigned) (value >> 32), (unsigned) value);
+}
+struct record {
+    long long wide;
+    int narrow;
+    unsigned int word;
+};
+long long global_sum;
+int main(void)
+{
+    unsigned char c = 200;
+    unsigned int u = 4000000000U;
+    struct record r, *p = &r;
+    long long sums[2];
+    int narrow[2];
+    long long *q = &sums[1];
+    r.wide = -1000000;
+    r.wide += c;
+    show(r.wide);
+    p->wide = -1000000;
+    show(p->wide *= c);
+    sums[1] = -5;
+    sums[1] %= c;
+    show(sums[1]);
+    *q = -1000000;
+    *q -= c;
+    show(sums[1]);
+    global_sum = -1000000;
+    global_sum /= c;
+    show(global_sum);
+    r.narrow = 1000000;
+    show(r.narrow += u);
+    narrow[1] = 1000000;
+    narrow[1] -= u;
+    show(narrow[1]);
+    r.word = 0xfffffff0U;
+    show(r.word -= c);
+    r.word = 0xfffffff0U;
+    show(r.word -= c);
+    return 0;
+}
+EOF
+
 # A move eliminated by the peephole pass must not keep the narrowing flags of
 # the unsigned constant load it replaced, or the member address is truncated.
 try_output 0 "0.ffffff28;0.ffffff28;" << EOF
@@ -14677,6 +16829,94 @@ items 12 "struct inner { int values[2][3]; }; struct holder { struct inner rows[
 items 12 "struct inner { int values[2][3]; }; struct holder { struct inner rows[2]; }; struct holder value; int index = 0; return sizeof(value.rows[index++].values[index++]) + index;"
 items 12 "struct inner { int values[2][3]; }; struct holder { struct inner *rows[2]; }; struct holder value; return sizeof(value.rows[1]->values[1]);"
 items 12 "struct inner { int values[2][3]; }; struct holder { struct inner *rows[2]; }; struct holder value; int index = 0; return sizeof(value.rows[index++]->values[index++]) + index;"
+
+# A sizeof operand made of '&', '*', casts, member selections and subscripts has
+# the type those operators build, in any order. Each check returns its own code
+# so a failure names the form.
+try_ 0 << EOF
+struct walk_record { int value; char tag; int values[5]; };
+int main(void)
+{
+    struct walk_record object, *pointer = &object, records[3];
+    int values[4], *cursor = values, matrix[2][3], *slots[7], (*row)[6] = 0;
+    char byte;
+
+    if (sizeof &object.value != sizeof(int *)) return 1;
+    if (sizeof(&pointer->tag) != sizeof(char *)) return 2;
+    if (sizeof &records[1].value != sizeof(int *)) return 3;
+    if (sizeof *&values[1] != sizeof(int)) return 4;
+    if (sizeof(&*cursor) != sizeof(int *)) return 5;
+    if (sizeof *&byte != 1) return 6;
+    if (sizeof(*&object) != sizeof(struct walk_record)) return 7;
+    if (sizeof (&object)->tag != 1) return 8;
+    if (sizeof records->values != 5 * sizeof(int)) return 9;
+    if (sizeof records[2].tag != 1) return 10;
+    if (sizeof *slots != sizeof(int *)) return 11;
+    if (sizeof *matrix != 3 * sizeof(int)) return 12;
+    if (sizeof row[0] != 6 * sizeof(int)) return 13;
+    if (sizeof (*row)[1] != sizeof(int)) return 14;
+    if (sizeof &(*row)[1] != sizeof(int *)) return 15;
+    if (sizeof(*(char *) cursor) != 1) return 16;
+    if (sizeof((struct walk_record *) 0)->values != 5 * sizeof(int)) return 17;
+    if (sizeof(&*matrix) != sizeof(int *)) return 18;
+    if (sizeof((char) object.value) != 1) return 19;
+    if (sizeof(*&pointer->values) != 5 * sizeof(int)) return 20;
+    return 0;
+}
+EOF
+try_ 0 << EOF
+int sizeof_walk_callee(int value) { return value; }
+int main(void)
+{
+    int (*callback)(int) = sizeof_walk_callee;
+    int (*callbacks[3])(int);
+
+    if (sizeof callback != sizeof(int (*)(int))) return 1;
+    if (sizeof(&sizeof_walk_callee) != sizeof(int (*)(int))) return 2;
+    if (sizeof &*callback != sizeof(int (*)(int))) return 3;
+    if (sizeof callbacks[1] != sizeof(int (*)(int))) return 4;
+    return 0;
+}
+EOF
+
+try_compile_error_message "Member reference through '->' requires a pointer" << EOF
+struct walk_arrow { int value; };
+int main(void) { struct walk_arrow object; return sizeof object->value; }
+EOF
+try_compile_error_message "Member reference base is not a struct or union" << EOF
+struct walk_dot { int value; };
+int main(void) { struct walk_dot *pointer = 0; return sizeof pointer.value; }
+EOF
+try_compile_error_message "Cannot dereference non-pointer in sizeof" << EOF
+int main(void) { char byte = 0; return sizeof *byte; }
+EOF
+try_compile_error_message "Cannot apply square operator to non-pointer" << EOF
+int main(void) { int scalar = 0; return sizeof scalar[0]; }
+EOF
+try_compile_error_message "sizeof(function) is invalid" << EOF
+int walk_function(void) { return 0; }
+int main(void) { int (*callback)(void) = walk_function; return sizeof *callback; }
+EOF
+try_compile_error_message "lvalue required as unary '&' operand" << EOF
+int main(void) { char byte = 0; return sizeof &(char) byte; }
+EOF
+
+# The operand of an unparenthesized sizeof ends at its identifier; a following
+# "+ 1" adds to the size rather than stepping the pointer being measured.
+try_ 0 << EOF
+int main(void)
+{
+    int values[4];
+    int *cursor = values;
+    char byte = 0;
+
+    if (sizeof cursor + 1 != sizeof(int *) + 1) return 1;
+    if (sizeof values + 1 != 4 * sizeof(int) + 1) return 2;
+    if (sizeof byte + 1 != 2) return 3;
+    if (sizeof (cursor) + 1 != sizeof(int *) + 1) return 4;
+    return 0;
+}
+EOF
 try_ 12 << EOF
 typedef struct { int values[2][3]; } sizeof_pointer_alias_inner;
 typedef sizeof_pointer_alias_inner *sizeof_pointer_alias;
@@ -15223,6 +17463,106 @@ begin_category "Enumerations" "Testing enum declarations and usage"
 try_ 6 << EOF
 typedef enum { enum1 = 5, enum2 } enum_t;
 int main() { enum_t v = enum2; return v; }
+EOF
+
+# A typedef may name an existing enum tag, define a tagged enum, qualify it or
+# derive a pointer or array from it, at file scope and in a block.
+try_ 20 << EOF
+enum E { A, B = 5 };
+typedef enum E EE;
+typedef enum E *EP;
+typedef enum E const CE;
+typedef enum { C = 3 } CA[2];
+typedef enum F { D = 1 } volatile VF;
+EE e = B;
+CE ce = A;
+CA arr = { C, D };
+int main(void) {
+    EP p = &e;
+    VF v = D;
+    enum F w = v;
+    typedef enum E LE;
+    LE le = B;
+    return *p + ce + arr[0] + sizeof(CA) / sizeof(int) + w + le + (int) sizeof(EE);
+}
+EOF
+
+try_ 13 << EOF
+int main(void) {
+    typedef enum E { A, B = 7 } EE;
+    EE e = B;
+    typedef enum { C = 2 } const CE;
+    CE c = C;
+    typedef volatile enum E VE;
+    VE v = A;
+    typedef enum E *EP;
+    EP q = &e;
+    int got = *q;
+    enum E again = got;
+    return again + c + v + sizeof(EE);
+}
+EOF
+
+try_compile_error << EOF
+enum E { A };
+typedef enum E const CE;
+CE value = A;
+int main(void) { value = A; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(void) { enum E { A }; typedef const enum E CE; CE c = A; c = A; return c; }
+EOF
+
+try_compile_error_message "Unknown enum type" << EOF
+int main(void) { typedef enum missing M; return 0; }
+EOF
+
+# C99 has no incomplete enum types (6.7.2.3p2 needs the list first), so an enum
+# tag without a visible definition is diagnosed wherever it is named, and a bare
+# reference to a complete one declares nothing (6.7p2).
+try_compile_error_message "C99 forbids forward references to enums" << EOF
+enum forward_only;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "C99 forbids forward references to enums" << EOF
+int main(void) { enum forward_only; return 0; }
+EOF
+try_compile_error_message "C99 forbids forward references to enums" << EOF
+int takes_forward(enum forward_only *p);
+int main(void) { return 0; }
+EOF
+try_compile_error_message "C99 forbids forward references to enums" << EOF
+struct holds_forward { enum forward_only *p; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "C99 forbids forward references to enums" << EOF
+int forward_bound[sizeof(enum forward_only)];
+int main(void) { return 0; }
+EOF
+try_compile_error_message "C99 forbids forward references to enums" << EOF
+int main(void) { return sizeof(enum forward_only); }
+EOF
+try_compile_error_message "C99 forbids forward references to enums" << EOF
+int main(void) { return (enum forward_only) 0; }
+EOF
+try_compile_error_message "enum declaration without an enumerator list declares nothing" << EOF
+enum complete_first { complete_a, complete_b };
+enum complete_first;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "enum declaration without an enumerator list declares nothing" << EOF
+enum complete_first { complete_a, complete_b };
+int main(void) { enum complete_first; return 0; }
+EOF
+try_ 3 << EOF
+enum complete_later { later_a, later_b };
+enum complete_later file_value = later_b;
+int main(void) {
+    enum complete_later local = later_b;
+    enum complete_later *p = &local;
+    return file_value + *p + (sizeof(enum complete_later) == sizeof(int));
+}
 EOF
 try_ 2 << EOF
 enum trailing_values { trailing_first = 2, };
@@ -20546,6 +22886,167 @@ int main(void) {
     return indirect.value + take_number(make_number(23));
 }
 EOF
+
+# Record-returning calls also go through file-scope pointers, record members,
+# array elements and parameters. Every function whose address is taken must be
+# defined, so each such pointer names a target using the internal return
+# convention. A pointer object is pointer-sized whatever it returns: `tag_fn`
+# once took one byte's slot and overlapped the array after it.
+try_ 0 << 'EOF'
+struct triple { int a; int b; int c; };
+struct tag { char x; };
+struct triple make(void) { struct triple s = {1, 2, 3}; return s; }
+struct triple scaled(int k);
+struct tag make_tag(void) { struct tag t = {'q'}; return t; }
+unsigned char small(void) { return 200; }
+struct triple (*g_make)(void) = make;
+struct triple (*g_scaled)(int);
+struct tag (*tag_fn)(void) = make_tag;
+struct triple (*g_table[2])(int) = {scaled, scaled};
+unsigned char (*small_fn)(void) = small;
+int after[2] = {11, 22};
+struct holder {
+    int id;
+    struct triple (*fn)(int);
+    struct tag (*tags[2])(void);
+};
+struct holder g_holder = {9, scaled, {make_tag, make_tag}};
+static struct triple (*s_make)(void) = make;
+struct triple apply(struct triple (*f)(int), int k) { return f(k); }
+int block_static(void)
+{
+    static struct triple (*fn)(int) = scaled;
+    static struct tag (*tags[2])(void) = {make_tag, make_tag};
+    struct triple (*local)(int) = g_scaled;
+    return fn(2).c != 6 || tags[1]().x != 'q' || local(1).b != 2;
+}
+int main(void)
+{
+    struct holder *h = &g_holder;
+    struct triple v = g_make();
+    g_scaled = scaled;
+    struct triple w = g_scaled(4);
+    struct tag t = tag_fn();
+    if (v.a != 1 || v.b != 2 || v.c != 3 || w.a != 4 || w.c != 12)
+        return 1;
+    if (t.x != 'q' || after[0] != 11 || after[1] != 22 || small_fn() != 200)
+        return 2;
+    if (g_holder.fn(5).c != 15 || h->fn(7).b != 14 || h->tags[1]().x != 'q')
+        return 3;
+    if (g_table[1](6).b != 12 || s_make().c != 3 || (*g_make)().a != 1)
+        return 4;
+    if (apply(scaled, 3).c != 9 || apply(g_table[0], 2).a != 2)
+        return 5;
+    h->tags[0] = make_tag;
+    g_table[0] = g_scaled;
+    if (g_table[0](8).a != 8 || h->tags[0]().x != 'q')
+        return 6;
+    return block_static() ? 7 : 0;
+}
+struct triple scaled(int k)
+{
+    struct triple s = {k, k * 2, k * 3};
+    return s;
+}
+EOF
+try_compile_error << 'EOF'
+struct pair { int value; };
+extern struct pair foreign_pair(void);
+struct pair (*callback)(void) = foreign_pair;
+int main(void) { return callback().value; }
+EOF
+
+# A record returned by value is an rvalue whose members can still be selected
+# (C99 6.5.2.3), whether the record is small or large.
+try_ 0 << EOF
+struct inner { char tag; int b; };
+struct small { int a; int c; };
+struct point { int x, y; };
+struct node { int value; struct node *next; };
+struct big {
+    int a;
+    struct inner inner;
+    int arr[3];
+    int grid[2][3];
+    struct point pts[2];
+    unsigned flags : 3;
+    unsigned more : 5;
+    struct node *next;
+    long long wide;
+    char name[8];
+};
+typedef union { int value; char bytes[4]; } number_t;
+static struct node tail = { 42, 0 };
+struct small make_small(int x) { struct small s = { x, x * 2 }; return s; }
+number_t make_number(int value) { number_t n; n.value = value; return n; }
+struct big make_big(int x) {
+    struct big b = { 0 };
+    b.a = x;
+    b.inner.tag = 'q';
+    b.inner.b = x + 1;
+    b.arr[0] = 1; b.arr[1] = x * 3; b.arr[2] = 5;
+    b.grid[1][0] = 10; b.grid[1][2] = 12;
+    b.pts[1].x = 7; b.pts[1].y = 8;
+    b.flags = 5; b.more = 17;
+    b.next = &tail;
+    b.wide = 0x100000003LL;
+    b.name[0] = 'h'; b.name[1] = 'i';
+    return b;
+}
+int sum(int a, int b) { return a + b; }
+int main(void) {
+    int x;
+    struct big (*maker)(int) = make_big;
+    x = make_small(4).c;
+    struct inner in = make_big(9).inner;
+    struct point pt = make_big(0).pts[1];
+    return x != 8 || make_big(3).a != 3 || make_big(4).inner.b != 5 ||
+           make_big(4).inner.tag != 'q' ||
+           make_big(2).arr[1] * 10 + make_small(1).a != 61 ||
+           make_big(1).grid[1][2] != 12 || *(make_big(1).grid[1] + 2) != 12 ||
+           in.b != 10 || in.tag != 'q' || pt.x != 7 || pt.y != 8 ||
+           make_big(0).pts[1].y != 8 || make_big(0).flags != 5 ||
+           make_big(0).more != 17 || make_big(0).next->value != 42 ||
+           make_big(0).wide != 0x100000003LL ||
+           sum(make_small(2).a, make_big(5).arr[1]) != 17 ||
+           maker(6).arr[1] != 18 || (*maker)(6).inner.b != 7 ||
+           -make_small(5).a != -5 || !make_small(0).a != 1 ||
+           make_big(0).name[1] != 'i' || *(make_big(0).arr + 2) != 5 ||
+           (make_small(3).a ? make_big(2).inner.b : 0) != 3 ||
+           (make_number(0x01020304).value & 0xff) != 4 ||
+           sizeof(make_big(0).arr) != 3 * sizeof(int) ||
+           sizeof make_big(0).grid[1] != 3 * sizeof(int) ||
+           sizeof make_small(0).a != sizeof(int);
+}
+EOF
+try_compile_error_message "member of a function call result is not assignable" << EOF
+struct pair { int left; int right; };
+struct pair make_pair(void) { struct pair value = {1, 2}; return value; }
+int main(void) { make_pair().left = 3; return 0; }
+EOF
+
+# A function-pointer member of a call result, or of a record reached through a
+# dereference, is called like any other function pointer.
+try_ 17 << EOF
+struct ops { int (*apply)(int); int bias; };
+int twice(int value) { return value * 2; }
+struct ops make_ops(void) {
+    struct ops ops = {0, 1};
+    ops.apply = twice;
+    return ops;
+}
+int main(void) {
+    struct ops ops = make_ops();
+    struct ops *q = &ops;
+    return make_ops().apply(3) + (*q).apply(4) + (make_ops()).apply(1) +
+           make_ops().bias;
+}
+EOF
+try_compile_error_message "Unknown struct or union member" << EOF
+struct pair { int left; int right; };
+struct pair make_pair(void) { struct pair value = {1, 2}; return value; }
+int main(void) { return make_pair().middle; }
+EOF
 try_compile_error << EOF
 struct pair { int value; };
 extern struct pair foreign_pair(void);
@@ -20618,6 +23119,57 @@ row *invalid_pointers(void) {
     return &value;
 }
 int main(void) { return 0; }
+EOF
+
+# A static array named in an aggregate initializer decays to an address constant
+# (C99 6.6p7), optionally offset, in array and record initializers at file scope
+# and in block-scope statics. An automatic array is not a constant.
+try_ 0 << 'EOF'
+static int g[2] = {5, 6};
+int m[2][3] = {{1, 2, 3}, {4, 5, 6}};
+struct refs { int *p; int *q; char *n; };
+struct refs g_s = {g, g + 1, "gs"};
+int *g_a[] = {g + 1, m[1]};
+int main(void)
+{
+    static int ls[3] = {7, 8, 9};
+    static int *a[] = {g, g + 1, ls, ls + 2};
+    static int *rows[] = {m[0], m[1] + 1};
+    static char *names[] = {"a", "b" "c"};
+    static struct refs s = {g + 1, ls, "nm"};
+    static struct refs sa[2] = {{g, 0, "x"}, {ls + 1, g, "y"}};
+    struct refs ds = {g, ls + 1, "z"};
+    if (sizeof a != 4 * sizeof(int *) || sizeof names != 2 * sizeof(char *))
+        return 1;
+    if (*a[0] != 5 || *a[1] != 6 || *a[2] != 7 || *a[3] != 9)
+        return 2;
+    if (rows[0][2] != 3 || *rows[1] != 5 || names[1][1] != 'c')
+        return 3;
+    if (*s.p != 6 || *s.q != 7 || s.n[1] != 'm')
+        return 4;
+    if (*sa[1].p != 8 || sa[1].q != g || sa[0].n[0] != 'x' || *ds.q != 8)
+        return 5;
+    if (g_s.p != g || *g_s.q != 6 || g_s.n[1] != 's' || *g_a[0] != 6 ||
+        g_a[1][2] != 6)
+        return 6;
+    return 0;
+}
+EOF
+try_compile_error << 'EOF'
+int main(void)
+{
+    int local[2];
+    static int *slots[] = {local};
+    return 0;
+}
+EOF
+try_compile_error << 'EOF'
+int main(void)
+{
+    int local[2];
+    static struct { int *p; } s = {local};
+    return 0;
+}
 EOF
 
 # Subscripts and offsets of an aggregate address constant resolve in the
@@ -20837,6 +23389,59 @@ int main(void) { int (*callback)(int) = plus1; return legacy(callback); }
 EOF
 
 begin_category "Bit-fields"
+
+# Prefix ++ and -- update a bit-field inside its allocation unit and yield the
+# stored value; postfix -- parses. A _Bool bit-field keeps only 0 or 1.
+try_output 0 "7 1 15 7 1 15 1 7 1 15 1 1 0 1 7 1 15 | 2 7 2 15 3 7 3 15 7 1 15" << EOF
+struct bits {
+    unsigned int low : 3;
+    _Bool flag : 1;
+    unsigned int high : 4;
+};
+struct counters {
+    unsigned int low : 3;
+    unsigned int mid : 2;
+    unsigned int high : 4;
+};
+int main(void)
+{
+    struct bits b;
+    struct counters c;
+    int v;
+    b.low = 7;
+    b.high = 15;
+    b.flag = 1;
+    b.flag++;
+    printf("%d %d %d ", b.low, b.flag, b.high);
+    b.flag = 0;
+    b.flag--;
+    printf("%d %d %d ", b.low, b.flag, b.high);
+    b.flag = 1;
+    v = ++b.flag;
+    printf("%d %d %d %d ", v, b.low, b.flag, b.high);
+    b.flag = 0;
+    v = --b.flag;
+    printf("%d %d ", v, b.flag);
+    b.flag = 0;
+    v = b.flag--;
+    printf("%d %d ", v, b.flag);
+    b.flag = 0;
+    b.flag += 2;
+    printf("%d %d %d | ", b.low, b.flag, b.high);
+    c.low = 7;
+    c.high = 15;
+    c.mid = 1;
+    v = ++c.mid;
+    printf("%d %d %d %d ", v, c.low, c.mid, c.high);
+    c.mid = 0;
+    v = --c.mid;
+    printf("%d %d %d %d ", v, c.low, c.mid, c.high);
+    c.mid = 2;
+    c.mid--;
+    printf("%d %d %d", c.low, c.mid, c.high);
+    return 0;
+}
+EOF
 try_ 0 << EOF
 typedef _Bool bool_alias;
 struct flags { bool_alias value : 1; };

@@ -1679,6 +1679,15 @@ void emit_arith(ph2_ir_t *ph2_ir,
         emit_rex(wide, 11, rd); /* MOV rd{d}, r11{d} */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 3, reg_low3(rd)));
+
+        /* The 32-bit move above zero-extends, but a signed int result must sit
+         * in its register sign-extended like every other narrow scalar: a later
+         * widening to long long reads the whole register, and -5000 was seen as
+         * 4294962296.
+         */
+        if (!wide && !is_unsigned &&
+            !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+            wrap_to_int(rd, false);
         return;
     }
     default:

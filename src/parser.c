@@ -41,6 +41,15 @@ int operand_stack_idx = 0;
  */
 int unevaluated_expression_depth = 0;
 
+/* Set before reading an operand that a following `+` must not extend.
+ * read_lvalue() normally takes `+ n` after a pointer as part of the operand.
+ * That is wrong for the operand of a unary operator, which binds tighter: a
+ * cast in `(char *) p + 1` applies to p alone, and the sum advances by one byte
+ * rather than by an int. It is equally wrong for the right operand of a binary
+ * operator binding at least as tightly as `+`, as in `end - start + 1`.
+ */
+bool reading_unary_operand = false;
+
 /* A function prototype nested in a sizeof type-name describes only a pointer
  * pointee. It never introduces a floating value into IR or an ABI boundary.
  */
@@ -267,6 +276,8 @@ void parse_array_init(var_t *var,
                       block_t *parent,
                       basic_block_t **bb,
                       bool emit_code);
+void parse_string_array_init(var_t *var, block_t *parent, basic_block_t **bb);
+void parse_wstring_array_init(var_t *var, block_t *parent, basic_block_t **bb);
 void parse_global_record_init(var_t *var, block_t *block);
 void parse_global_compound_record_init(var_t *var, block_t *block);
 void parse_global_compound_scalar_init(var_t *var, block_t *block);
@@ -279,10 +290,38 @@ void copy_call_result_array_shape(var_t *result, const var_t *return_def);
 void lower_call_result_array_postfix(var_t **value,
                                      block_t *parent,
                                      basic_block_t **bb);
+void lower_call_result_member_postfix(var_t **value,
+                                      block_t *parent,
+                                      basic_block_t **bb);
 void lower_call_result_prefix_update(var_t **value,
                                      opcode_t op,
                                      block_t *parent,
                                      basic_block_t **bb);
+var_t *read_bitfield_value(block_t *parent,
+                           basic_block_t **bb,
+                           var_t *address,
+                           const var_t *field);
+void mark_value_reference(var_t *value, var_t *address, var_t *bitfield);
+void push_object_at(block_t *parent,
+                    basic_block_t **bb,
+                    var_t *value,
+                    var_t *address,
+                    int size);
+var_t *lower_reference_update(var_t *object,
+                              opcode_t op,
+                              block_t *parent,
+                              basic_block_t **bb);
+var_t *lower_member_postfix(var_t *address,
+                            type_t *record_type,
+                            bool arrow_first,
+                            bool is_lvalue,
+                            block_t *parent,
+                            basic_block_t **bb);
+void lower_postfix_operators(block_t *parent, basic_block_t **bb);
+void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1);
+bool is_swapped_subscript_base(const var_t *var);
+void reject_record_operand(const var_t *var);
+void mark_var_mutated(var_t *var);
 
 /* Pointer declarators can be carried by a typedef's type object rather than the
  * variable's direct ptr_level. Scalarization decisions need that full effective
@@ -1014,6 +1053,15 @@ bool is_bool_type(const type_t *type)
     return type && type->is_bool;
 }
 
+/* A _Bool object, reached directly or through a typedef. A typedef of a pointer
+ * to _Bool or of a _Bool array keeps is_bool but is not itself boolean.
+ */
+bool is_bool_scalar(const type_t *type, int ptr_level)
+{
+    return is_bool_type(type) && !ptr_level && !type->ptr_level &&
+           !type->array_size;
+}
+
 /* Empty initializer lists are a useful permissive-mode extension, but C99's
  * initializer-list grammar requires at least one initializer. Call this
  * immediately after consuming an opening initializer brace.
@@ -1383,12 +1431,12 @@ var_t *normalize_bool(block_t *block, basic_block_t **bb, var_t *var)
     var_t *zero;
     var_t *rd;
 
-    if (var->type == TY_bool && !var->ptr_level)
+    if (is_bool_scalar(var->type, var->ptr_level))
         return var;
     if (var->is_const && !var->ptr_level) {
         rd = require_typed_var(block, TY_bool);
         rd->var_name = gen_name();
-        rd->init_val = var->init_val != 0;
+        rd->init_val = var->init_val || var->init_val_hi;
         rd->is_const = true;
         add_insn(block, *bb, OP_load_constant, rd, NULL, NULL, 0, NULL);
         return rd;
@@ -1406,6 +1454,23 @@ var_t *normalize_bool(block_t *block, basic_block_t **bb, var_t *var)
     return rd;
 }
 
+/* The value an OP_write of a scalar object of @type should store. A store
+ * narrows to the object width by itself, which is the conversion C wants for
+ * every integer type except _Bool: 0x100 has to become 1, not its low byte 0.
+ * Paths that write a plain assignment through an address share this rather than
+ * each resizing their value.
+ */
+var_t *convert_stored_value(block_t *block,
+                            basic_block_t **bb,
+                            var_t *value,
+                            type_t *type,
+                            int ptr_level)
+{
+    if (!is_bool_scalar(type, ptr_level))
+        return value;
+    return normalize_bool(block, bb, value);
+}
+
 var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
 {
     bool is_from_ptr = from->ptr_level || from->array_size,
@@ -1415,7 +1480,7 @@ var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
     if (is_from_ptr && is_to_ptr)
         return from;
 
-    if (!is_to_ptr && to->type == TY_bool)
+    if (!is_to_ptr && is_bool_scalar(to->type, 0))
         return normalize_bool(block, bb, from);
 
     int from_size = get_size(from), to_size = get_size(to);
@@ -1447,9 +1512,17 @@ var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
      * 64-bit register can leave carry bits above an unsigned int's object
      * width; a later equality comparison would then see 2^32 + 1 instead of the
      * stored value 1.
+     *
+     * A change of signedness needs the conversion on every target, because the
+     * result is also the value of an assignment expression. Returning the
+     * source unchanged kept its type: `(long long)(i = u)` zero-extended a
+     * negative int, and `(long long)(u = -5)` sign-extended an unsigned one. On
+     * a 32-bit target the same-width truncation is a plain move.
      */
-    if (!is_from_ptr && !is_to_ptr && to->type && to->type->is_unsigned &&
-        to_size < PTR_SIZE)
+    if (!is_from_ptr && !is_to_ptr && to->type &&
+        ((to->type->is_unsigned && to_size < PTR_SIZE) ||
+         (from->type && to_size <= TY_int->size &&
+          to->type->is_unsigned != from->type->is_unsigned)))
         return truncate_unchecked(block, bb, from, to->type, to->ptr_level);
 
     return from;

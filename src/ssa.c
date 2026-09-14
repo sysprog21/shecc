@@ -3469,6 +3469,22 @@ void prune_unused_funcs(void)
             error_at(message, NULL);
         }
 
+        /* The dynamic linker path leaves a bodiless function reachable, but one
+         * returning a record would be called through a function pointer with
+         * shecc's destination-pointer convention rather than the platform's.
+         * Direct calls are rejected when parsing ends; a reachable one here has
+         * had its address taken.
+         */
+        if (func->is_used && !func->bbs && func->returns_aggregate) {
+            char message[MAX_LINE_LEN];
+
+            snprintf(message, MAX_LINE_LEN,
+                     "aggregate-return function '%s' has its address taken "
+                     "but is not defined",
+                     func->return_def.var_name);
+            error_at(message, NULL);
+        }
+
         func->next = NULL;
         if (func->bbs && !func->is_used) {
             func = next;
@@ -3760,10 +3776,18 @@ bool eval_const_arithmetic(insn_t *insn)
             return false; /* avoid modulo by zero */
         res = l % r;
         break;
+
+    /* As in the parser's folder, an out-of-range count keeps the shift for the
+     * target rather than asking the host for an undefined result.
+     */
     case OP_lshift:
-        res = l << r;
+        if (r < 0 || r >= 32)
+            return false;
+        res = (int) ((unsigned int) l << r);
         break;
     case OP_rshift:
+        if (r < 0 || r >= 32)
+            return false;
         res = l >> r;
         break;
     case OP_bit_and:
