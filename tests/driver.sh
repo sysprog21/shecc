@@ -1108,6 +1108,31 @@ try_compile_error_message "Empty character constant" << EOF
 int main(void) { return 0; }
 EOF
 
+# A newline cannot appear in a character constant or a string literal (C99
+# 6.4.4.4, 6.4.5); only a backslash-newline, which phase 2 removes first, may
+# continue one onto the next line.
+try_compile_error_message "Unenclosed character literal" << EOF
+int main(void) { return 'a
+'; }
+EOF
+try_compile_error_message "Unenclosed character literal" << EOF
+int main(void) { return L'
+'; }
+EOF
+try_compile_error_message "Unenclosed string literal" << EOF
+int main(void) { return sizeof("a
+b"); }
+EOF
+try_compile_error_message "Unenclosed string literal" << EOF
+int main(void) { return sizeof(L"a
+b"); }
+EOF
+try_ 3 << 'EOF'
+int main(void) { return sizeof("a\
+b") + 'c\
+' - 'c'; }
+EOF
+
 # The current execution wide-character representation is int. Wide character
 # constants therefore share ordinary scalar expression and ICE lowering.
 try_ 3 << EOF
@@ -1169,6 +1194,40 @@ EOF
 try_flags 0 "--no-libc" << EOF
 #if L'\u00e9' != 0xe9
 #error wide UCN preprocessing value is incorrect
+#endif
+int main(void) { return 0; }
+EOF
+
+# A hexadecimal or octal escape in a wide constant keeps its whole value, which
+# only a narrow constant must fit in a byte, on every path that evaluates one.
+try_ 0 << 'EOF'
+#if L'\x1234' != 0x1234 || L'\777' != 0777
+#error wide escape preprocessing value is incorrect
+#endif
+enum { wide_hex = L'\x1234' };
+int global_hex = L'\x12345678';
+int global_units[] = {L'\777', L'\x7fffffff'};
+int main(void)
+{
+    int local = L'\x1234';
+    int units[] = L"\x1234\777";
+
+    switch (local) {
+    case L'\x1234':
+        break;
+    default:
+        return 1;
+    }
+    return wide_hex != 0x1234 || global_hex != 0x12345678 ||
+           global_units[0] != 0777 || global_units[1] != 0x7fffffff ||
+           units[0] != L'\x1234' || units[1] != L'\777';
+}
+EOF
+try_compile_error_message "Invalid wide character escape sequence" << 'EOF'
+int main(void) { return L'\x100000000'; }
+EOF
+try_compile_error_message "Invalid wide character escape sequence" << 'EOF'
+#if L'\x100000000'
 #endif
 int main(void) { return 0; }
 EOF
@@ -14709,6 +14768,21 @@ try_compile_error_message "#include macro must expand to a header name" << EOF
 int main(void) { return QUOTED_INCLUDE_BASE; }
 EOF
 
+# White space before a trailing comment ends no replacement list, so it does not
+# keep a macro from naming a header, directly or through an alias.
+try_ 7 << EOF
+#define BASE_HEADER "include-base.h" /* quoted */
+#define BASE_ALIAS BASE_HEADER /* alias */
+#include BASE_HEADER
+#include BASE_ALIAS
+int main(void) { return QUOTED_INCLUDE_BASE; }
+EOF
+try_flags 24 "-I$TESTS_DIR" << EOF
+#define ANGLE_HEADER <include-angle.h> /* angle */
+#include ANGLE_HEADER
+int main(void) { return ANGLE_INCLUDE_BASE + ANGLE_INCLUDE_CHILD; }
+EOF
+
 # A header's #pragma once identity is its normalized relative path, not the
 # spelling used by an includer. The outer header reaches the same header again
 # through ./ and ../ components after its canonical spelling; a duplicate
@@ -14716,6 +14790,21 @@ EOF
 try_ 19 << EOF
 #include "include-nested/outer.h"
 int main(void) { return NESTED_ONCE_VALUE + nested_once_object; }
+EOF
+
+# _Pragma("once") guards its header as #pragma once does, and one produced by a
+# macro from another header guards the header that invoked the macro.
+printf '#define PRAGMA_OP(x) _Pragma(#x)\n' > "$TEST_TMPDIR/pragma-op-macro.h"
+printf '_Pragma("once")\nint pragma_op_direct = 3;\n' \
+    > "$TEST_TMPDIR/pragma-op-direct.h"
+printf '#include "pragma-op-macro.h"\nPRAGMA_OP(once)\nint pragma_op_via = 4;\n' \
+    > "$TEST_TMPDIR/pragma-op-via.h"
+try_ 7 << EOF
+#include "pragma-op-direct.h"
+#include "pragma-op-via.h"
+#include "pragma-op-direct.h"
+#include "pragma-op-via.h"
+int main(void) { return pragma_op_direct + pragma_op_via; }
 EOF
 try_flags 24 "-I$TESTS_DIR" << EOF
 #include <include-angle.h>
@@ -15183,6 +15272,157 @@ EOF
 try_compile_error << EOF
 #if 1 % 0
 #endif
+EOF
+
+# A conditional nested inside a skipped group is skipped whole: its #elif, #else
+# and #endif belong to it rather than to the group that encloses it.
+try_ 0 << EOF
+#if 0
+#if 1
+#endif
+#endif
+int main(void) { return 0; }
+EOF
+try_ 5 << EOF
+#if 0
+#ifdef __STDC__
+#elif 1
+#else
+#endif
+#elif 1
+#define RESULT 5
+#else
+#define RESULT 0
+#endif
+int main(void) { return RESULT; }
+EOF
+try_ 7 << EOF
+#ifndef __STDC__
+#if 1
+#ifdef __STDC__
+#else
+#ifndef UNKNOWN
+#endif
+#endif
+#elif 0
+#endif
+#define RESULT 0
+#else
+#define RESULT 7
+#endif
+int main(void) { return RESULT; }
+EOF
+
+# Skipped groups several levels deep inside active ones, and an active group
+# after a skipped #if and #elif chain at the same depth.
+try_ 21 << EOF
+#if 1
+#define A 1
+#if 0
+#if 1
+#if 1
+#endif
+#else
+#endif
+#define A 99
+#elif 1
+#ifdef UNKNOWN
+#if 1
+#endif
+#elif 1
+#define B 4
+#endif
+#else
+#define B 99
+#endif
+#ifndef __STDC__
+#if 0
+#endif
+#else
+#define C 16
+#endif
+#endif
+int main(void) { return A + B + C; }
+EOF
+try_compile_error_message "Unterminated conditional directive" << EOF
+#if 0
+#if 1
+#endif
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Stray #endif" << EOF
+#if 0
+#if 1
+#endif
+#endif
+#endif
+int main(void) { return 0; }
+EOF
+
+# White space, comments included, may separate '#' from the directive name, and
+# a line holding only '#' is the null directive (C99 6.10p2, 6.10.7).
+try_ 9 << 'EOF'
+#
+#  define SIX 6
+#	define THREE 3
+ # /* comment */ ifdef SIX
+%:  define NINE (SIX + THREE)
+#	 endif
+#	
+# // a null directive with a comment
+#/* a comment
+   across lines */
+int main(void) { return NINE; }
+#
+EOF
+try_ 3 << 'EOF'
+#  if 0
+#  if 1
+#
+#  else
+#  endif
+#  define RESULT 0
+#  elif 1
+#	define RESULT 3
+#  endif
+int main(void) { return RESULT; }
+EOF
+
+# A skipped group may hold lines that are no directive shecc knows, while the
+# same line in an active group is still rejected.
+try_ 2 << 'EOF'
+#if 0
+#warning not a C99 directive
+# unknown
+#!
+#endif
+int main(void) { return 2; }
+EOF
+try_compile_error_message "Unsupported directive" << 'EOF'
+# unknown
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Unsupported directive" << 'EOF'
+#if 1
+#else
+#else_if
+#endif
+#  unknown_directive
+int main(void) { return 0; }
+EOF
+
+# The '#' and '##' operators in replacement lists are not directives, spaced or
+# not.
+try_output 0 "[ab] 12 [c d]" << 'EOF'
+#define STR(x) # x
+#define CAT(a, b) a ## b
+#define PAIR(x, y) %: x, %:y
+int main(void)
+{
+    char *pair[2] = {PAIR(c, d)};
+    printf("[%s] %d [%s %s]\n", STR(ab), CAT(1, 2), pair[0], pair[1]);
+    return 0;
+}
 EOF
 
 # Character constants are integer constants in a C99 #if expression.
@@ -15722,6 +15962,17 @@ int main(void)
 }
 EOF
 
+# Reached through another macro's name, each still spells its own value.
+try_ 1 << EOF
+#define DATE_ALIAS __DATE__
+#define TIME_ALIAS() __TIME__
+int main(void)
+{
+    return sizeof(DATE_ALIAS) == 12 && sizeof(TIME_ALIAS()) == 9 &&
+           !strcmp(DATE_ALIAS, __DATE__) && !strcmp(TIME_ALIAS(), __TIME__);
+}
+EOF
+
 # Category: Function-like Macros
 begin_category "Function-like Macros" "Testing function-like macros and variadic macros"
 
@@ -15776,6 +16027,24 @@ try_output 0 "[]" << EOF
 int main()
 {
     printf("[%s]\n", STR());
+    return 0;
+}
+EOF
+
+# A '#' that a backslash-newline carries to column 1 is still inside the logical
+# line before it, so it stringifies rather than opening a directive, while white
+# space alone before a '#' leaves it a directive.
+try_output 0 "[ab] 7" << 'EOF'
+#define STR(x) \
+#x
+  \
+#define SEVEN 7
+	#ifndef SEVEN
+	#error SEVEN
+	#endif
+int main()
+{
+    printf("[%s] %d\n", STR(ab), SEVEN);
     return 0;
 }
 EOF
@@ -15903,6 +16172,19 @@ int main()
     int x = 0;
     M(0, 1, 2);
     return x;
+}
+EOF
+
+# A call that stops after the named parameters binds __VA_ARGS__ to nothing,
+# which substitutes, stringifies and pastes as the empty list.
+try_ 15 << EOF
+#define TAIL(a, ...) (a + 0 __VA_ARGS__)
+#define SPELL(a, ...) #__VA_ARGS__
+#define JOIN(a, ...) a ## __VA_ARGS__
+int main()
+{
+    int v = 4;
+    return TAIL(3) + TAIL(1, +2) + sizeof(SPELL(9)) + JOIN(v) + JOIN(v, );
 }
 EOF
 
@@ -17077,6 +17359,15 @@ int main()
     int b = a;
     printf("%d %d\n", a, b);
     return 0;
+}
+EOF
+
+# memcmp() orders bytes as unsigned char, so 0x80 sorts above 0x01.
+try_ 0 << EOF
+int main(void)
+{
+    char high[1] = {(char) 0x80}, low[1] = {1};
+    return !(memcmp(high, low, 1) > 0 && memcmp(low, high, 1) < 0);
 }
 EOF
 
@@ -20342,6 +20633,20 @@ try_failure_output "$(assertion_message "SUM(1, 1) == 3")" << EOF
 #define SUM(a, b) a + b
 int main(void) { assert(SUM(1, 1) == 3); return 0; }
 EOF
+
+# The diagnostic goes to standard error, leaving standard output to the program:
+# a static build prints only abort()'s own line there, a dynamic one nothing.
+if [ "$LINK_MODE" = "dynamic" ]; then
+    try_output 134 "" << EOF
+#include <assert.h>
+int main(void) { assert(0); return 0; }
+EOF
+else
+    try_output 255 "Abnormal program termination" << EOF
+#include <assert.h>
+int main(void) { assert(0); return 0; }
+EOF
+fi
 
 begin_category "C99 stdarg.h" "Testing variadic argument macros"
 

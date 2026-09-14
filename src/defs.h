@@ -395,6 +395,7 @@ typedef enum {
     T_cppd_ifndef,
     T_cppd_pragma,
     T_cppd_line,
+    T_cppd_unknown, /* a directive name shecc does not support */
 
     /* C pre-processor specific, these kinds will be removed after
      * pre-processing is done.

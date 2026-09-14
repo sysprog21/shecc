@@ -869,7 +869,8 @@ int unescape_string(const char *input, char *output, int output_size)
             /* Only the low byte reaches the output, so keep only that much
              * rather than shift a long digit run out of range. A narrow literal
              * whose value does not fit has already been diagnosed by
-             * hex_escape_exceeds_byte().
+             * hex_escape_exceeds_byte(); a wide one takes its value from
+             * decode_wstring_units() instead.
              */
             unsigned int value = 0;
             while (isxdigit(input[i])) {
@@ -962,6 +963,144 @@ int parse_character_constant(const char *literal)
     for (int i = 0; i < length && i < 4; i++)
         value = (value << 8) | (unsigned char) unescaped[i];
     return (int) value;
+}
+
+/* The narrow decoder translates UCNs to UTF-8, which is correct for char
+ * strings but not for a wide literal: one UCN is one wchar_t element. This
+ * execution-wide-character policy stores each source byte/escape value as an
+ * int unit and preserves UCN scalar values directly.
+ */
+int decode_wstring_units(const char *text, int *units, int capacity)
+{
+    int in = 0;
+    int out = 0;
+
+    while (text[in]) {
+        unsigned int value;
+
+        if (out >= capacity)
+            return -1;
+        if (text[in] != '\\') {
+            units[out++] = (unsigned char) text[in++];
+            continue;
+        }
+        in++;
+        switch (text[in]) {
+        case 'a':
+            value = '\a';
+            in++;
+            break;
+        case 'b':
+            value = '\b';
+            in++;
+            break;
+        case 'f':
+            value = '\f';
+            in++;
+            break;
+        case 'n':
+            value = '\n';
+            in++;
+            break;
+        case 'r':
+            value = '\r';
+            in++;
+            break;
+        case 't':
+            value = '\t';
+            in++;
+            break;
+        case 'v':
+            value = '\v';
+            in++;
+            break;
+        case '\\':
+            value = '\\';
+            in++;
+            break;
+        case '\'':
+            value = '\'';
+            in++;
+            break;
+        case '"':
+            value = '"';
+            in++;
+            break;
+        case '?':
+            value = '?';
+            in++;
+            break;
+        case 'e':
+            if (strict_c99)
+                return -1;
+            value = 27;
+            in++;
+            break;
+        case 'x':
+            in++;
+            if (!isxdigit(text[in]))
+                return -1;
+            value = 0;
+            while (isxdigit(text[in])) {
+                if (value > 0x07ffffffU)
+                    return -1;
+                value = (value << 4) + hex_digit_value(text[in++]);
+            }
+            if (value > 0x7fffffffU)
+                return -1;
+            break;
+        case 'u':
+        case 'U': {
+            int digits = text[in] == 'u' ? 4 : 8;
+
+            value = 0;
+            in++;
+            for (int i = 0; i < digits; i++) {
+                if (!isxdigit(text[in]))
+                    return -1;
+                if (value > 0x07ffffffU)
+                    return -1;
+                value = (value << 4) + hex_digit_value(text[in++]);
+            }
+            if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) ||
+                (value < 0xa0 && value != '$' && value != '@' && value != '`'))
+                return -1;
+            break;
+        }
+        default:
+            if (text[in] < '0' || text[in] > '7')
+                value = (unsigned char) text[in++];
+            else {
+                value = 0;
+                for (int i = 0; i < 3 && text[in] >= '0' && text[in] <= '7';
+                     i++)
+                    value = value * 8 + (text[in++] - '0');
+            }
+            break;
+        }
+        units[out++] = (int) value;
+    }
+    return out;
+}
+
+/* A wide character constant that holds one execution-wide unit has the value of
+ * that unit. Its hexadecimal and octal escapes are therefore not cut to the
+ * byte a narrow constant keeps, and a UCN is not spread over UTF-8 bytes. A
+ * constant of several units keeps the implementation-defined packing of
+ * parse_character_constant().
+ *
+ * Returns false when an escape does not fit a unit.
+ */
+bool wide_character_constant(const char *literal, int *value)
+{
+    int units[MAX_TOKEN_LEN];
+    int length = decode_wstring_units(literal, units, MAX_TOKEN_LEN);
+
+    *value = 0;
+    if (length < 0)
+        return false;
+    *value = length == 1 ? units[0] : parse_character_constant(literal);
+    return true;
 }
 
 int parse_numeric_constant(const char *buffer)

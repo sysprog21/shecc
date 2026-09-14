@@ -188,7 +188,8 @@ char *memcpy(char *dest, const char *src, int count)
 
 int memcmp(const void *s1, const void *s2, int n)
 {
-    const char *p1 = s1, *p2 = s2;
+    /* C99 7.21.4 compares the bytes as unsigned char. */
+    const unsigned char *p1 = s1, *p2 = s2;
 
     for (int i = 0; i < n; i++) {
         if (p1[i] < p2[i])
@@ -652,8 +653,8 @@ void __assert_fail(const char *expr,
                    unsigned int line,
                    const char *function)
 {
-    printf("Assertion failed: %s, function %s, file %s, line %d\n", expr,
-           function, file, line);
+    fprintf(stderr, "Assertion failed: %s, function %s, file %s, line %d\n",
+            expr, function, file, line);
     abort();
 }
 

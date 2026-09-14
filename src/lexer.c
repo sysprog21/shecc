@@ -371,6 +371,13 @@ token_t *new_token(token_kind_t kind, const source_location_t *loc, int len)
     return token;
 }
 
+/* A '#' opens a directive only when nothing but white space precedes it on its
+ * logical line. The physical column cannot tell: a backslash-newline puts a '#'
+ * at column 1 of the next physical line while phase 2 has already joined it to
+ * the text before. So every token lex_token() returns updates this instead.
+ */
+bool lex_at_line_start = true;
+
 /* Skipping a comment or a run of whitespace resumes the scan, and lex_layout()
  * below does that by starting a fresh token here.
  */
@@ -381,24 +388,28 @@ char read_layout_char(strbuf_t *buf, source_location_t *loc);
  * source bytes. The source span is finalized at each lex_token() exit; readers
  * which cross a newline update the logical cursor themselves.
  */
-#define RETURN_LEX_TOKEN(tk)                             \
-    do {                                                 \
-        int pos, line, column;                           \
-        tk->location.len = buf->size - tk->location.pos; \
-        pos = tk->location.pos;                          \
-        line = tk->location.line;                        \
-        column = tk->location.column;                    \
-        while (pos < buf->size) {                        \
-            if (buf->elements[pos] == '\n') {            \
-                line++;                                  \
-                column = 1;                              \
-            } else                                       \
-                column++;                                \
-            pos++;                                       \
-        }                                                \
-        loc->line = line;                                \
-        loc->column = column;                            \
-        return tk;                                       \
+#define RETURN_LEX_TOKEN(tk)                                    \
+    do {                                                        \
+        int pos, line, column;                                  \
+        tk->location.len = buf->size - tk->location.pos;        \
+        pos = tk->location.pos;                                 \
+        line = tk->location.line;                               \
+        column = tk->location.column;                           \
+        while (pos < buf->size) {                               \
+            if (buf->elements[pos] == '\n') {                   \
+                line++;                                         \
+                column = 1;                                     \
+            } else                                              \
+                column++;                                       \
+            pos++;                                              \
+        }                                                       \
+        loc->line = line;                                       \
+        loc->column = column;                                   \
+        if (tk->kind == T_newline)                              \
+            lex_at_line_start = true;                           \
+        else if (tk->kind != T_whitespace && tk->kind != T_tab) \
+            lex_at_line_start = false;                          \
+        return tk;                                              \
     } while (0)
 
 /* Preprocessor directives, comments, and the whitespace between tokens.
@@ -434,7 +445,7 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
             return token;
         }
 
-        if (loc->column != 1) {
+        if (!lex_at_line_start) {
             int hash_chars = is_digraph_hash ? 2 : 1;
 
             for (int i = 0; i < hash_chars; i++)
@@ -451,6 +462,36 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
         for (int i = 0; i < hash_chars; i++)
             ch = read_char(buf);
 
+        /* White space may separate '#' from the directive name (C99 6.10p2),
+         * and a comment is white space by then. RETURN_LEX_TOKEN recounts the
+         * span from the source, so a comment across lines needs no care here.
+         */
+        for (;;) {
+            if (ch == ' ' || ch == '\t') {
+                ch = read_char(buf);
+                continue;
+            }
+            if (ch == '/' && peek_char(buf, 1) == '*') {
+                read_char(buf);
+                ch = read_char(buf);
+                while (ch && !(ch == '*' && peek_char(buf, 1) == '/'))
+                    ch = read_char(buf);
+                if (!ch)
+                    error_at("Unenclosed C-style comment", loc);
+                read_char(buf);
+                ch = read_char(buf);
+                continue;
+            }
+            break;
+        }
+
+        /* The null directive, a '#' alone on its line (C99 6.10.7), does
+         * nothing. What remains of the line is layout, and a line comment is
+         * left to be lexed as one.
+         */
+        if (ch == '\n' || ch == '\0' || (ch == '/' && peek_char(buf, 1) == '/'))
+            return new_token(T_whitespace, loc, 1);
+
         while (isalnum(ch) || ch == '_') {
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz;
@@ -462,11 +503,13 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
         }
         token_buffer[sz] = '\0';
 
+        /* Whether a name shecc does not know is an error depends on the group
+         * it sits in: a skipped group may hold any line that starts with '#'.
+         * The preprocessor decides once it knows which group that is.
+         */
         token_kind_t directive_kind = lookup_directive(token_buffer);
-        if (directive_kind == T_identifier) {
-            loc->len = sz;
-            error_at("Unsupported directive", loc);
-        }
+        if (directive_kind == T_identifier)
+            directive_kind = T_cppd_unknown;
 
         token = new_token(directive_kind, loc, source_len);
         loc->column += source_len;
@@ -791,15 +834,15 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
         int sz = 0;
         bool special = false;
 
+        /* read_char() has already removed every backslash-newline, so a newline
+         * still here ends the line inside the literal, which neither an s-char
+         * nor an escape may do (C99 6.4.5).
+         */
         ch = read_char(buf);
         while (ch != '"' || special) {
-            if (ch == '\\' && peek_char(buf, 1) == '\n') {
-                read_char(buf);
-                ch = read_char(buf);
-                loc->line++;
-                loc->column = 1;
-                special = false;
-                continue;
+            if (ch == '\n' || !ch) {
+                loc->len = 1;
+                error_at("Unenclosed string literal", loc);
             }
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz + 1;
@@ -835,15 +878,9 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
     if (ch == '\'') {
         int sz = 0;
 
+        /* As in a string literal, a newline is never part of the constant. */
         ch = read_char(buf);
-        while (ch && ch != '\'') {
-            if (ch == '\\' && peek_char(buf, 1) == '\n') {
-                read_char(buf);
-                ch = read_char(buf);
-                loc->line++;
-                loc->column = 1;
-                continue;
-            }
+        while (ch && ch != '\'' && ch != '\n') {
             if (sz >= MAX_TOKEN_LEN - 1) {
                 loc->len = sz + 1;
                 error_at("Character literal too long", loc);
@@ -851,7 +888,7 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
             token_buffer[sz++] = ch;
             if (ch == '\\') {
                 ch = read_char(buf);
-                if (!ch)
+                if (!ch || ch == '\n')
                     break;
                 if (sz >= MAX_TOKEN_LEN - 1) {
                     loc->len = sz + 1;
@@ -1676,6 +1713,7 @@ token_stream_t *gen_file_token_stream(char *filename)
 
     /* Borrows strbuf_t#size to use as source index */
     buf->size = 0;
+    lex_at_line_start = true;
 
     while (buf->size < buf->capacity) {
         cur->next = lex_token(buf, &loc);
@@ -1736,6 +1774,7 @@ token_stream_t *gen_libc_token_stream(void)
 
     /* Borrows strbuf_t#size to use as source index */
     buf->size = 0;
+    lex_at_line_start = true;
 
     while (buf->size < buf->capacity) {
         tk = lex_token(buf, &loc);

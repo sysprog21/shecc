@@ -64,28 +64,6 @@ token_t *pp_lex_expect_token(token_t *tk, token_kind_t kind, bool skip_space)
     return tk;
 }
 
-/* A single wide UCN character constant represents its execution-wide unit in a
- * preprocessing integer constant expression.
- */
-int pp_parse_wide_character_constant(const char *literal)
-{
-    unsigned int value = 0;
-    int digits;
-
-    if (literal[0] != '\\' || (literal[1] != 'u' && literal[1] != 'U'))
-        return parse_character_constant(literal);
-    digits = literal[1] == 'u' ? 4 : 8;
-    for (int i = 0; i < digits; i++) {
-        if (!isxdigit(literal[i + 2]))
-            return parse_character_constant(literal);
-        value = (value << 4) + hex_digit_value(literal[i + 2]);
-    }
-    if (literal[digits + 2] || value > 0x10ffff ||
-        (value >= 0xd800 && value <= 0xdfff))
-        return parse_character_constant(literal);
-    return (int) value;
-}
-
 /* Copies and isolate the given copied token */
 token_t *copy_token(const token_t *tk)
 {
@@ -709,16 +687,29 @@ token_t *line_macro_handler(token_t *tk)
 /* C99 6.10.8 requires these strings to describe the translation time. The
  * generated configuration supplies that time once for all bootstrap stages;
  * consulting a clock while compiling would make stage 1 and stage 2 differ.
+ *
+ * A handler receives the outermost invocation, which is the name of whatever
+ * macro led here rather than __DATE__ or __TIME__ itself, so each gets its own
+ * handler instead of one that looks at the name.
  */
-token_t *translation_timestamp_macro_handler(token_t *tk)
+token_t *translation_timestamp_token(token_t *tk, char *literal)
 {
     token_t *new_tk = copy_token(tk);
 
     new_tk->kind = T_string;
-    new_tk->literal = !strcmp(tk->literal, "__DATE__") ? SHECC_TRANSLATION_DATE
-                                                       : SHECC_TRANSLATION_TIME;
+    new_tk->literal = literal;
     memcpy(&new_tk->location, &tk->location, sizeof(source_location_t));
     return new_tk;
+}
+
+token_t *date_macro_handler(token_t *tk)
+{
+    return translation_timestamp_token(tk, SHECC_TRANSLATION_DATE);
+}
+
+token_t *time_macro_handler(token_t *tk)
+{
+    return translation_timestamp_token(tk, SHECC_TRANSLATION_TIME);
 }
 
 /* Remap the remaining physical tokens from one source stream for #line.
@@ -1459,9 +1450,12 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
         tk = pp_lex_next_token(tk, true);
         if (unescape_string(tk->literal, unescaped, MAX_TOKEN_LEN) < 0)
             error_at("Invalid escape sequence", &tk->location);
-        int character = tk->kind == T_wchar
-                            ? pp_parse_wide_character_constant(tk->literal)
-                            : parse_character_constant(tk->literal);
+        int character;
+
+        if (tk->kind != T_wchar)
+            character = parse_character_constant(tk->literal);
+        else if (!wide_character_constant(tk->literal, &character))
+            error_at("Invalid wide character escape sequence", &tk->location);
 
         val->lo = character;
         val->hi = character < 0 ? ~0U : 0;
@@ -1784,52 +1778,32 @@ token_t *pp_read_constant_expr(token_t *tk, pp_integer_t *val)
     return tk;
 }
 
-token_t *pp_skip_inner_cond_incl(token_t *tk)
+/* Skip a group whose condition failed, returning the #elif, #else or #endif
+ * that ends it. A conditional nested inside the group is skipped whole: its own
+ * #elif and #else belong to it, and only its #endif brings the count back.
+ */
+token_t *pp_skip_cond_incl(token_t *tk)
 {
-    token_kind_t kind;
+    int depth = 0;
 
-    while (tk->kind != T_eof) {
-        kind = tk->kind;
+    for (; tk->kind != T_eof; tk = tk->next) {
+        token_kind_t kind = tk->kind;
 
         if (kind == T_cppd_if || kind == T_cppd_ifdef ||
             kind == T_cppd_ifndef) {
-            if (!tk->next || !tk->next->next)
-                error_at("Unexpected error when skipping conditional inclusion",
-                         &tk->location);
-
-            tk = pp_skip_inner_cond_incl(tk->next->next);
+            depth++;
             continue;
         }
 
         if (kind == T_cppd_endif) {
-            if (!tk->next || !tk->next->next)
-                error_at("Unexpected error when skipping conditional inclusion",
-                         &tk->location);
-            return tk->next->next;
-        }
-
-        tk = tk->next;
-    }
-    return tk;
-}
-
-token_t *pp_skip_cond_incl(token_t *tk)
-{
-    token_kind_t kind;
-
-    while (tk->kind != T_eof) {
-        kind = tk->kind;
-
-        if (kind == T_cppd_if || kind == T_cppd_ifdef ||
-            kind == T_cppd_ifndef) {
-            tk = pp_skip_inner_cond_incl(tk);
+            if (!depth)
+                break;
+            depth--;
             continue;
         }
 
-        if (kind == T_cppd_elif || kind == T_cppd_else || kind == T_cppd_endif)
+        if ((kind == T_cppd_elif || kind == T_cppd_else) && !depth)
             break;
-
-        tk = tk->next;
     }
     return tk;
 }
@@ -1921,13 +1895,30 @@ __noreturn void pp_error_directive(token_t *directive)
 
 /* C99's _Pragma operator is processed after macro replacement. The compiler has
  * no standard pragma semantics, so its destringized directive is ignored just
- * like an unknown #pragma; consume the operator syntax so no tokens reach the
- * parser.
+ * like an unknown #pragma, except for "once", which #pragma honours as well;
+ * consume the operator syntax so no tokens reach the parser. @owner is the
+ * token in the source file, which for an operator that came out of a macro is
+ * the invocation rather than the macro's definition.
  */
-token_t *pp_ignore_pragma_operator(token_t *tk)
+token_t *pp_pragma_operator(token_t *tk, token_t *owner)
 {
     tk = pp_lex_expect_token(tk, T_open_bracket, true);
     tk = pp_lex_expect_token(tk, T_string, true);
+
+    /* Destringizing only removes a backslash before '"' or '\\', neither of
+     * which can spell "once", so the literal as stored is compared directly.
+     */
+    const char *p = tk->literal;
+    int len;
+
+    while (*p == ' ' || *p == '\t')
+        p++;
+    len = strlen(p);
+    while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t'))
+        len--;
+    if (len == 4 && !strncmp(p, "once", 4))
+        hashmap_put(PRAGMA_ONCE, owner->location.physical_filename, NULL);
+
     return pp_lex_expect_token(tk, T_close_bracket, true);
 }
 
@@ -1964,6 +1955,8 @@ token_t *pp_paste_tokens(token_t *lhs, token_t *rhs, source_location_t *loc)
 
     source_location_t scan_loc;
     memcpy(&scan_loc, loc, sizeof(source_location_t));
+    /* A pasted '#' is never a directive, whatever column it came from. */
+    lex_at_line_start = false;
     token_t *pasted = lex_token(buf, &scan_loc);
     bool whole = buf->size == len;
     strbuf_free(buf);
@@ -2186,7 +2179,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             }
 
             if (!strcmp(tk->literal, "_Pragma")) {
-                tk = pp_ignore_pragma_operator(tk);
+                tk = pp_pragma_operator(tk, expansion_ctx.expanded_from);
                 tk = pp_lex_next_token(tk, false);
                 continue;
             }
@@ -2366,6 +2359,17 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                     error_at("Too few arguments supplied to macro invocation",
                              &macro_tk->location);
 
+                /* F(1) for F(a, ...) supplies nothing past the named
+                 * parameters. C99 wants at least one more argument, but gcc
+                 * accepts the call, and __VA_ARGS__ has to be bound to the
+                 * empty list for it rather than be left an ordinary name.
+                 */
+                if (macro->is_variadic &&
+                    !hashmap_contains(expansion_ctx.macro_args,
+                                      macro->variadic_tk->literal))
+                    hashmap_put(expansion_ctx.macro_args,
+                                macro->variadic_tk->literal, NULL);
+
                 /* Expand macro body with collected arguments Replace parameter
                  * references with supplied argument tokens
                  */
@@ -2543,6 +2547,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
         }
         case T_cppd_define: {
             token_t *r_head = NULL, *r_tail = NULL, *r_cur;
+            token_t *r_last = NULL; /* last token that is not white space */
 
             tk = pp_lex_expect_token(tk, T_identifier, true);
             macro = hashmap_get(MACROS, tk->literal);
@@ -2612,7 +2617,18 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                     r_tail->next = r_cur;
                     r_tail = r_cur;
                 }
+                if (r_cur->kind != T_whitespace && r_cur->kind != T_tab)
+                    r_last = r_cur;
             }
+
+            /* White space after the replacement list is not part of it (C99
+             * 6.10.3p7), and a list that kept it would no longer be the single
+             * string that #include H looks for.
+             */
+            if (r_last)
+                r_last->next = NULL;
+            else
+                r_head = NULL;
 
             tk = pp_lex_expect_token(tk, T_newline, false);
             tk = pp_lex_next_token(tk, false);
@@ -2730,6 +2746,9 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
         case T_cppd_error: {
             pp_error_directive(tk);
         }
+        case T_cppd_unknown:
+            error_at("Unsupported directive", &tk->location);
+            break;
         case T_backslash: {
             /* This branch is designed to be failed since backslash should be
              * consumed by #define, and upon later expansion, it should not be
@@ -2914,12 +2933,12 @@ token_t *preprocess(token_t *tk)
 
     macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = "__DATE__";
-    macro->handler = translation_timestamp_macro_handler;
+    macro->handler = date_macro_handler;
     hashmap_put(MACROS, "__DATE__", macro);
 
     macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
     macro->name = "__TIME__";
-    macro->handler = translation_timestamp_macro_handler;
+    macro->handler = time_macro_handler;
     hashmap_put(MACROS, "__TIME__", macro);
 
     /* C99-required implementation macros. shecc supplies its own small runtime
@@ -3192,6 +3211,7 @@ char *token_to_string(token_t *tk, char *dest)
     case T_cppd_ifndef:
     case T_cppd_pragma:
     case T_cppd_line:
+    case T_cppd_unknown:
         error_at(
             "Internal error, preprocessor directives should be ommited "
             "after preprocessing",

@@ -57,7 +57,7 @@ This document tracks compliance gaps and non-standard behaviors.
 | `auto` | Supported | Block-scope declarations and C99 `for` initializers use ordinary automatic storage. |
 | `const` | Supported | Enforced for direct and indirect lvalues; pointer-level conversions are checked. |
 | `volatile` | Partial | Preserved through declarations and prevents key optimizations; exhaustive optimizer audit remains. |
-| `restrict` | Partial | Parsed and retained as an aliasing qualifier; does not yet drive optimization. |
+| `restrict` | Partial | Accepted wherever C99 allows it and then ignored: the qualifier is not retained, so it drives no aliasing optimization. |
 | `inline` | Partial | File-scope declarations/definitions are accepted; C99 linkage constraints remain incomplete. |
 
 ### Type System

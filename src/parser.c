@@ -1174,148 +1174,16 @@ int write_wide_symbol(const int *data, int length)
     return start_len;
 }
 
-/* The narrow decoder translates UCNs to UTF-8, which is correct for char
- * strings but not for a wide literal: one UCN is one wchar_t element. This
- * execution-wide-character policy stores each source byte/escape value as an
- * int unit and preserves UCN scalar values directly.
- */
-int decode_wstring_units(const char *text, int *units, int capacity)
-{
-    int in = 0;
-    int out = 0;
-
-    while (text[in]) {
-        unsigned int value;
-
-        if (out >= capacity)
-            return -1;
-        if (text[in] != '\\') {
-            units[out++] = (unsigned char) text[in++];
-            continue;
-        }
-        in++;
-        switch (text[in]) {
-        case 'a':
-            value = '\a';
-            in++;
-            break;
-        case 'b':
-            value = '\b';
-            in++;
-            break;
-        case 'f':
-            value = '\f';
-            in++;
-            break;
-        case 'n':
-            value = '\n';
-            in++;
-            break;
-        case 'r':
-            value = '\r';
-            in++;
-            break;
-        case 't':
-            value = '\t';
-            in++;
-            break;
-        case 'v':
-            value = '\v';
-            in++;
-            break;
-        case '\\':
-            value = '\\';
-            in++;
-            break;
-        case '\'':
-            value = '\'';
-            in++;
-            break;
-        case '"':
-            value = '"';
-            in++;
-            break;
-        case '?':
-            value = '?';
-            in++;
-            break;
-        case 'e':
-            if (strict_c99)
-                return -1;
-            value = 27;
-            in++;
-            break;
-        case 'x':
-            in++;
-            if (!isxdigit(text[in]))
-                return -1;
-            value = 0;
-            while (isxdigit(text[in])) {
-                if (value > 0x07ffffffU)
-                    return -1;
-                value = (value << 4) + hex_digit_value(text[in++]);
-            }
-            if (value > 0x7fffffffU)
-                return -1;
-            break;
-        case 'u':
-        case 'U': {
-            int digits = text[in] == 'u' ? 4 : 8;
-
-            value = 0;
-            in++;
-            for (int i = 0; i < digits; i++) {
-                if (!isxdigit(text[in]))
-                    return -1;
-                if (value > 0x07ffffffU)
-                    return -1;
-                value = (value << 4) + hex_digit_value(text[in++]);
-            }
-            if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) ||
-                (value < 0xa0 && value != '$' && value != '@' && value != '`'))
-                return -1;
-            break;
-        }
-        default:
-            if (text[in] < '0' || text[in] > '7')
-                value = (unsigned char) text[in++];
-            else {
-                value = 0;
-                for (int i = 0; i < 3 && text[in] >= '0' && text[in] <= '7';
-                     i++)
-                    value = value * 8 + (text[in++] - '0');
-            }
-            break;
-        }
-        units[out++] = (int) value;
-    }
-    return out;
-}
-
-/* A single wide character constant denotes one execution-wide unit. Keep the
- * existing implementation-defined packing for multi-character constants, but do
- * not route a UCN such as L'\u00e9' through the narrow UTF-8 decoder.
+/* The value of a wide character constant comes from wide_character_constant();
+ * report one whose escape does not fit an execution-wide unit.
  */
 int parse_wide_character_constant(const char *literal)
 {
-    int units[MAX_TOKEN_LEN];
-    int length;
+    int value;
 
-    bool has_ucn = false;
-    for (int i = 0; literal[i]; i++)
-        if (literal[i] == '\\' &&
-            (literal[i + 1] == 'u' || literal[i + 1] == 'U')) {
-            has_ucn = true;
-            break;
-        }
-    if (!has_ucn)
-        return parse_character_constant(literal);
-    length = decode_wstring_units(literal, units, MAX_TOKEN_LEN);
-    if (length < 0)
+    if (!wide_character_constant(literal, &value))
         error_at("Invalid wide character escape sequence", cur_token_loc());
-    if (length == 1)
-        return units[0];
-    return parse_character_constant(literal);
+    return value;
 }
 
 int read_wstring_units(int *units, int capacity)

@@ -126,7 +126,7 @@ int fputc(int c, FILE *stream);
  * through '__syscall' instead.
  */
 int fread(char *ptr, int size, int nmemb, FILE *stream);
-int fwrite(const char *ptr, int size, int nmemb, FILE *stream);
+int fwrite(const void *ptr, int size, int nmemb, FILE *stream);
 int fseek(FILE *stream, int offset, int whence);
 int ftell(FILE *stream);
 
