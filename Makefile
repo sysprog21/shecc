@@ -184,11 +184,11 @@ uninstall-hooks:
 
 check-stage0: $(OUT)/$(STAGE0) tests/driver.sh
 	$(VECHO) "  TEST STAGE 0\n"
-	tests/driver.sh 0 $(DYNLINK)
+	tests/driver.sh 0 $(DYNLINK) $(BINDING)
 
 check-stage2: $(OUT)/$(STAGE2) tests/driver.sh
 	$(VECHO) "  TEST STAGE 2\n"
-	tests/driver.sh 2 $(DYNLINK)
+	tests/driver.sh 2 $(DYNLINK) $(BINDING)
 
 check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh
 	$(VECHO) "  TEST STAGE 0 (with sanitizers)\n"
@@ -197,10 +197,10 @@ check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh
 	$(Q)rm $(OUT)/shecc
 
 check-abi-stage0: $(OUT)/$(STAGE0)
-	tests/$(ARCH)-abi.sh 0 $(DYNLINK);
+	tests/$(ARCH)-abi.sh 0 $(DYNLINK) $(BINDING);
 
 check-abi-stage2: $(OUT)/$(STAGE2)
-	tests/$(ARCH)-abi.sh 2 $(DYNLINK);
+	tests/$(ARCH)-abi.sh 2 $(DYNLINK) $(BINDING);
 
 # Both prerequisites are order-only, and both exist because "make -j" would
 # otherwise let a compile start beside the thing it reads. Selecting a target
