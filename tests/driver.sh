@@ -72,9 +72,10 @@ PROGRESS_COUNT=0
 # Command Line Arguments
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <stage> [<dynlink>]"
+    echo "Usage: $0 <stage> [<dynlink>] [<binding>]"
     echo "  stage: 0 (host compiler), 1 (stage1), or 2 (stage2)"
     echo "  dynlink: 0 (static linking), 1 (dynamic linking)"
+    echo "  binding: lazy, now"
     echo ""
     echo "Environment Variables:"
     echo "  VERBOSE=1         Enable verbose output"
@@ -106,7 +107,7 @@ case "$1" in
 esac
 
 if [ $# -ge 2 ] && [ "$2" = "1" ]; then
-    readonly SHECC_CFLAGS="--dynlink"
+    readonly SHECC_CFLAGS="--dynlink -z ${3:-lazy}"
     readonly LINK_MODE="dynamic"
 else
     readonly SHECC_CFLAGS=""

@@ -42,9 +42,10 @@ fi
 
 # Command Line Arguments
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <stage> [<dynlink>]"
+    echo "Usage: $0 <stage> [<dynlink> [<binding>]]"
     echo "  stage: 0 (host compiler), 1 (stage1), or 2 (stage2)"
     echo "  dynlink: 0 (static linking), 1 (dynamic linking)"
+    echo "  binding: lazy, now"
     echo ""
     echo "Environment Variables:"
     echo "  VERBOSE=1         Enable verbose output"
@@ -74,6 +75,7 @@ case "$1" in
 esac
 
 DYNLINK="${2:-0}"
+BINDING="${3:-lazy}"
 
 # Banner
 echo -e "${BLUE}${BOLD}========================================${NC}"
@@ -149,7 +151,7 @@ run_abi_test()
     # Compile
     local compile_cmd="$SHECC"
     if [[ "$DYNLINK" == "1" ]]; then
-        compile_cmd="$compile_cmd --dynlink"
+        compile_cmd="$compile_cmd --dynlink -z $BINDING"
     fi
     compile_cmd="$compile_cmd -o /tmp/shecc_abi_test_$$.elf $test_file"
 
