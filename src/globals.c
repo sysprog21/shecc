@@ -101,6 +101,7 @@ dynamic_sections_t dynamic_sections;
 
 /* Command line compilation flags */
 bool dynlink = false;
+bool imm_binding = false;
 bool libc = true;
 bool expand_only = false;
 bool dump_ir = false;

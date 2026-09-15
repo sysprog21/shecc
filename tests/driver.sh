@@ -106,7 +106,7 @@ case "$1" in
 esac
 
 if [ $# -ge 2 ] && [ "$2" = "1" ]; then
-    readonly SHECC_CFLAGS="--dynlink"
+    readonly SHECC_CFLAGS="--dynlink ${3:-lazy}"
     readonly LINK_MODE="dynamic"
 else
     readonly SHECC_CFLAGS=""

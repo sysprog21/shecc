@@ -16,7 +16,6 @@ ARCH_DEFS = \
     \#define RESERVED_GOT_NUM 3\n$\
     \#define R_ARCH_JUMP_SLOT 7 /* R_X86_64_JUMP_SLOT */\n$\
     \#define REG_CNT 11 /* rdi rsi rdx rcx r8 r9 rax rbx r14 r12 r13 */\n$\
-    \#define DYN_BIND_NOW 1 /* this PLT has no lazy-resolution path */\n$\
     \#define HAVE_COND_MOVE 1 /* CMOVcc */\n$\
     \#define CALLEE_SAVED_REGS 4 /* the file ends rbx r14 r12 r13 */\n$\
     "

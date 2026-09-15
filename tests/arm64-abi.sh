@@ -4,7 +4,7 @@
 set -eu
 
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <stage> [<dynlink>]" >&2
+    echo "Usage: $0 <stage> [<dynlink> [<binding>]]" >&2
     exit 2
 fi
 
@@ -23,7 +23,7 @@ case "$1" in
 esac
 
 if [ "${2:-0}" = 1 ]; then
-    shecc+=(--dynlink)
+    shecc+=(--dynlink -z "${3:-lazy}")
     link_mode=dynamic
 else
     link_mode=static
