@@ -686,7 +686,8 @@ static bool function_pointer_return_follows(void)
     if (!open || open->kind != T_open_bracket || !(token = open->next) ||
         token->kind != T_asterisk)
         return false;
-    while (token && token->kind == T_asterisk)
+    while (token && (token->kind == T_asterisk || token->kind == T_const ||
+                     token->kind == T_volatile || token->kind == T_restrict))
         token = token->next;
     if (!token || !(token->kind == T_open_bracket ||
                     (token->kind == T_identifier && token->next &&
@@ -797,6 +798,17 @@ void read_inner_var_decl(var_t *vd,
          * pointer level to zero.
          */
         vd->ptr_level = 0;
+    }
+
+    /* `typedef int (*const cfn_t)(int)` makes a cfn_t object read-only, but
+     * `cfn_t *p` only points to such a callback: its qualifier stays on the
+     * type rather than on p's own pointer level.
+     */
+    if (lex_peek(T_asterisk, NULL) && vd->type && vd->type->func_signature &&
+        !vd->type->is_direct_function_type && !vd->type->ptr_level &&
+        !vd->ptr_level && (vd->type->pointer_const_mask & 1U)) {
+        vd->pointer_const_mask &= ~1U;
+        vd->is_const_pointer = false;
     }
 
     while (lex_accept(T_asterisk)) {
@@ -999,6 +1011,13 @@ void read_inner_var_decl(var_t *vd,
             vd->pointee_array_element_ptr_level =
                 vd->ptr_level - nested_ptr_level;
             vd->has_direct_pointee_array_declarator = true;
+
+            /* A const element, `int *const (*r)[2]`, leaves r modifiable: only
+             * the outermost level's bit qualifies the object.
+             */
+            vd->is_const_pointer =
+                vd->ptr_level <= 32 &&
+                (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
             while (lex_accept(T_open_square)) {
                 int bound;
 
@@ -1089,6 +1108,11 @@ void read_inner_var_decl(var_t *vd,
         func->returns_aggregate = is_record_type(func->return_def.type) &&
                                   !has_effective_pointer(&func->return_def);
         read_parameter_list_decl(func, true);
+
+        /* A slot typedef return type, `slot_t (*get)(void)`, keeps its slot
+         * prototype on the signature's return, not on the callback pointer.
+         */
+        vd->pointee_func_signature = NULL;
         vd->func_signature = func;
         vd->is_func = true;
         vd->parenthesized_function_pointer_level = nested_ptr_level;

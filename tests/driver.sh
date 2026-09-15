@@ -4701,6 +4701,470 @@ int main(void) {
     return p[1][0];
 }
 EOF
+
+# An array member of a const record decays to a pointer to const elements,
+# through arithmetic too, as any pointer to const does; a function pointer
+# member of it is read-only.
+try_ 0 << EOF
+struct S { int arr[2]; }; struct S s = {{3, 4}}; int main(void) { const struct S *p = &s; const int *q = p->arr; struct S *m = &s; *(m->arr) = 5; *((*m).arr + 1) = 6; return *q + *(p->arr + 1) + (*p).arr[1] - 17; }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } struct S { int (*cb)(int); }; struct S s = {inc}; int main(void) { const struct S *p = &s; return p->cb(1) + (*p).cb(1) - 4; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct S { int arr[2]; }; struct S s; int main(void) { const struct S *p = &s; *(p->arr) = 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct S { int arr[2]; }; struct S s; int main(void) { const struct S *p = &s; *((*p).arr + 1) = 2; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct S { int arr[2]; }; const struct S cs; int main(void) { *(cs.arr) = 1; return 0; }
+EOF
+try_compile_error_message "discarding const qualifier" << EOF
+struct S { int arr[2]; }; struct S s; int main(void) { const struct S *p = &s; int *q = p->arr; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct S { int arr[2]; }; struct S s; int main(void) { const struct S *p = &s; *(p->arr + 1) += 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a[2];
+int main(void) { const int *q = a; *(q + 1) = 2; return 0; }
+EOF
+try_compile_error_message "discarding const qualifier" << EOF
+struct S { int arr[2]; }; struct S s; int main(void) { const struct S *p = &s; int *q = (*p).arr + 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } struct S { int (*cb)(int); int n; }; struct S s = {inc, 0}; int main(void) { const struct S *p = &s; p->cb = dec; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } struct S { int (*cb)(int); int n; }; struct S s = {inc, 0}; int main(void) { const struct S *p = &s; (*p).cb = dec; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } struct S { int (*cb)(int); }; struct S a[1] = {{inc}}; int main(void) { const struct S *p = a; p[0].cb = dec; return 0; }
+EOF
+
+# A member reached through an explicit dereference of a pointer to a const
+# record is not a modifiable lvalue, whatever the grouping or update, while its
+# pointee and the members of a modifiable record stay writable.
+try_ 0 << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; struct S *m = &s; (*m).a = 5; (*m).p++; (m[0]).arr[1] += 1; (*m).in.x = 7; ++(*m).a; *(*ps).p = 9; return (*ps).a + (*ps).arr[1] + (*ps).in.x + (ps[0]).arr[0] + *(*ps).p + (int) ((*ps).p - v) - (6 + 4 + 7 + 2 + 9 + 1); }
+EOF
+try_ 0 << EOF
+struct In { int x; };
+struct S { struct In *q; const struct In *cq; int a; struct In in; };
+struct In i1 = {1}, i2 = {2};
+struct S s = {&i1, &i2, 3, {4}};
+int take(struct In in) { return in.x; }
+int main(void)
+{
+    const struct S *ps = &s;
+    struct S *m = &s;
+    (*ps).q->x = 5;
+    ps[0].q->x += 1;
+    (*m).cq = &i1;
+    (*m).in.x = 8;
+    return i1.x != 6 || (*ps).cq->x != 6 || take((*ps).in) != 8 ||
+           (ps[0]).a != 3;
+}
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; (*ps).p++; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; (*ps).a = 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; (*ps).arr[0] = 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; (ps[0]).a += 2; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; (*ps).in.x = 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; ++(*ps).a; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; (*ps).a--; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { cs_t *ps = &s; (*ps).a = 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; (*ps).in = s.in; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; }; struct S { int *p; int a; int arr[2]; struct In in; }; int v[2]; struct S s = {v, 1, {2, 3}, {4}}; typedef const struct S cs_t; int main(void) { const struct S *ps = &s; (*(ps)).arr[1]++; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; };
+struct S { const struct In *cq; };
+struct In i1 = {1};
+struct S s = {&i1};
+int main(void)
+{
+    struct S *m = &s;
+    (*m).cq->x = 2;
+    return 0;
+}
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; };
+struct S { const struct In cin; int *const cp; };
+int v;
+struct S s = {{1}, &v};
+int main(void)
+{
+    struct S *m = &s;
+    (*m).cin.x = 2;
+    return 0;
+}
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+struct In { int x; };
+struct S { const struct In cin; int *const cp; };
+int v, w;
+struct S s = {{1}, &v};
+int main(void)
+{
+    struct S *m = &s;
+    (*m).cp = &w;
+    return 0;
+}
+EOF
+
+# A const pointer element of a row pointer is read-only through every store,
+# while the row pointer itself and non-const elements stay modifiable.
+try_ 0 << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { int *const (*r)[2] = &arr; *(*r)[0] = 9; *r[0][1] = 8; crow_t t = &arr; *(*t)[0] += 1; int (*q)[2] = &c; (*q)[0] = 7; q[0][1] += 1; (*q)[1]++; ++q[0][0]; int *(*m)[2]; int *mm[2] = {&a, &b}; m = &mm; (*m)[0] = &b; m[0][1] = &a; return a + b + (*r)[1][0] + c[0] + c[1] - (11 + 8 + 8 + 8 + 5); }
+EOF
+try_ 0 << EOF
+int a = 1, b = 2;
+const int ca = 3, cb = 4;
+int *const arr[2] = {&a, &b};
+int *const arr2[2] = {&b, &a};
+const int *carr[2] = {&ca, &cb};
+typedef int *const cip;
+typedef cip (*crow_t)[2];
+int main(void)
+{
+    int *const (*r)[2] = &arr;
+    crow_t t = &arr;
+    const int *(*q)[2] = &carr;
+    r = &arr2;
+    t = &arr2;
+    (*q)[0] = &cb;
+    q[0][1] = &ca;
+    (*q)[1]++;
+    q[0][1]--;
+    *(*r)[0] = 5;
+    *t[0][1] += 1;
+    return b != 5 || a != 2 || *(*q)[0] != 4 || *q[0][1] != 3 ||
+           *(*t)[0] != 5;
+}
+EOF
+try_ 0 << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int *const arr2[2] = {&b, &a}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { int *const (*r)[2] = &arr; r = &arr2; return 0; }
+EOF
+try_ 0 << EOF
+int a[2];
+const int *p = a;
+const int **pp = &p;
+struct S { int *p; };
+struct S s = {a};
+int main(void)
+{
+    struct S *ps = &s;
+    (*pp)++;
+    (*ps).p++;
+    return p != a + 1 || s.p != a + 1;
+}
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { int *const (*r)[2] = &arr; (*r)[0] = &b; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { int *const (*r)[2] = &arr; r[0][1] = &b; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { crow_t r = &arr; (*r)[0] = &b; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { crow_t r = &arr; r[0][1] = &a; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { int *const (*r)[2] = &arr; (*r)[0] += 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { int *const (*r)[2] = &arr; (*r)[1]++; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { int *const (*r)[2] = &arr; ++r[0][1]; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a = 1, b = 2; int *const arr[2] = {&a, &b}; int c[2] = {3, 4}; const int d[2] = {5, 6}; typedef int *const cip; typedef cip (*crow_t)[2]; int main(void) { int *const (*r)[2] = &arr; --(*r)[1]; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+const int ca = 3, cb = 4;
+const int *carr[2] = {&ca, &cb};
+int main(void) { const int *(*q)[2] = &carr; *(*q)[0] = 1; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int a[2];
+int *const cp = a;
+int *const *pcp = &cp;
+int main(void)
+{
+    (*pcp)++;
+    return 0;
+}
+EOF
+
+# A typedef of a pointer to an array typedef of callbacks points to the whole
+# row, whose elements are called and stored as through fn_t (*rows_t)[2].
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+typedef int (*fn_t)(int);
+typedef fn_t arr_t[2];
+typedef arr_t *rows_t;
+fn_t fa[2] = {inc, dec};
+rows_t g = &fa;
+int main(void)
+{
+    rows_t r = &fa;
+    arr_t *q = &fa;
+    (*r)[0] = dec;
+    int v = fa[0](1);
+    (*r)[0] = inc;
+    return (*r)[0](1) - 2 + (*g)[1](1) + r[0][1](3) - 2 + (*q)[1](5) - 4 + v +
+           (sizeof(*r) != 2 * sizeof(fn_t)) + (**q)(7) - 8;
+}
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+typedef int (*fn_t)(int);
+typedef fn_t arr_t[2];
+typedef arr_t *rows_t;
+fn_t fa[2] = {inc, dec};
+arr_t *gq = &fa;
+int main(void)
+{
+    arr_t *q = &fa;
+    rows_t r = &fa;
+    int a = (*q)[1](5);
+    int b = (*gq)[1](5);
+    int c = q[0][0](1);
+    int d = r[0][0](1);
+    int e = (*r)[0](1);
+    return a + b + c + d + e - 14;
+}
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+typedef int (*const cfn_t)(int);
+typedef cfn_t carr_t[2];
+typedef carr_t *crows_t;
+const cfn_t fa[2] = {inc, inc};
+int main(void) { crows_t r = &fa; return 0; }
+EOF
+try_compile_error_message "assignment of read-only variable" << EOF
+int inc(int x) { return x + 1; }
+typedef int (*fn_t)(int);
+typedef fn_t arr_t[2];
+typedef arr_t *const crows_t;
+fn_t fa[2] = {inc, inc};
+fn_t fb[2] = {inc, inc};
+int main(void) { crows_t r = &fa; (*r)[0] = inc; r = &fb; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; }
+typedef int (*const cfn_t)(int);
+typedef cfn_t carr_t[2];
+typedef carr_t *crows_t;
+const cfn_t fa[2] = {inc, inc};
+int main(void) { crows_t r = &fa; (*r)[0] = inc; return 0; }
+EOF
+
+# A const specifier on the callback typedef, not only on the callback's own
+# pointer, makes the row const. Such a pointer was taken for a pointer to
+# modifiable callbacks and could not point to a const array of them.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+typedef int (*fn_t)(int);
+typedef const fn_t (*crows_t)[2];
+const fn_t fa[2] = {inc, inc};
+int main(void) { crows_t c = &fa; return (*c)[1](5) - 6 + c[0][0](1) - 2; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; }
+typedef int (*fn_t)(int);
+typedef const fn_t (*crows_t)[2];
+const fn_t fa[2] = {inc, inc};
+int main(void) { crows_t c = &fa; (*c)[0] = inc; return 0; }
+EOF
+
+# The same pointers to rows of callbacks may be block-scope typedefs, and a row
+# of const callbacks takes the address of a const array of them.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+typedef int (*fn_t)(int);
+fn_t fa[2] = {inc, dec};
+int main(void)
+{
+    typedef fn_t (*rows_t)[2];
+    typedef int (*(*spelled_t)[2])(int);
+    rows_t r = &fa;
+    spelled_t s = &fa;
+    (*r)[0] = dec;
+    int v = fa[0](1);
+    r[0][0] = inc;
+    return v + (*r)[0](1) - 2 + (*s)[1](3) - 2 + r[0][1](5) - 4 + s[0][0](0) - 1 +
+           (sizeof(*r) != 2 * sizeof(fn_t)) + (sizeof(rows_t) != sizeof(void *));
+}
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+typedef int (*const cfn_t)(int);
+typedef int (*fn_t)(int);
+const cfn_t cfa[2] = {inc, dec};
+fn_t fa[2] = {inc, dec};
+int main(void)
+{
+    typedef cfn_t (*crows_t)[2];
+    typedef fn_t (*rows_t)[2], (*other_t)[2];
+    crows_t c = &cfa;
+    rows_t r = &fa;
+    other_t o = r;
+    o[0][0] = dec;
+    return (*c)[1](3) - 2 + c[0][0](1) - 2 + fa[0](1);
+}
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+typedef int (*const cfn_t)(int);
+typedef cfn_t (*crows_t)[2];
+const cfn_t cfa[2] = {inc, dec};
+int main(void)
+{
+    crows_t c = &cfa;
+    return (*c)[1](3) - 2 + c[0][0](1) - 2;
+}
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; }
+typedef int (*fn_t)(int);
+const fn_t fa[2] = {inc, inc};
+int main(void) { typedef const fn_t (*crows_t)[2]; crows_t c = &fa; (*c)[0] = inc; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; }
+typedef int (*const cfn_t)(int);
+const cfn_t cfa[2] = {inc, inc};
+int main(void) { typedef cfn_t (*crows_t)[2]; crows_t c = &cfa; c[0][1] = inc; return 0; }
+EOF
+
+# So may a pointer to a block-scope array typedef of callbacks, as at file
+# scope; its row was taken for a callback and no element could be called.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+typedef int (*fn_t)(int);
+typedef fn_t garr_t[2];
+int main(void)
+{
+    typedef fn_t arr_t[2];
+    typedef arr_t *rows_t;
+    typedef garr_t *grows_t;
+    fn_t fa[2] = {inc, dec};
+    rows_t r = &fa;
+    grows_t g = &fa;
+    r[0][0] = dec;
+    return (*r)[1](5) - 4 + r[0][1](5) - 4 + (*g)[0](1) + g[0][1](3) - 2 +
+           (sizeof(*r) != 2 * sizeof(fn_t));
+}
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; }
+typedef int (*const cfn_t)(int);
+const cfn_t fa[2] = {inc, inc};
+int main(void) { typedef cfn_t carr_t[2]; typedef carr_t *crows_t; crows_t r = &fa; r[0][1] = inc; return 0; }
+EOF
+
+# A pointer to a row of callbacks, through a callback typedef or spelled out,
+# calls and stores each element, and keeps a const callback read-only.
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } typedef int (*fn_t)(int); typedef fn_t (*rows_t)[2]; fn_t fa[2] = {inc, dec}; rows_t g = &fa; int main(void) { rows_t r = &fa; return (*r)[0](1) - 2 + (*g)[1](1) + r[0][1](3) - 2 + (sizeof(*r) != 2 * sizeof(fn_t)); }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } typedef int (*(*rows_t)[2])(int); int (*fa[2])(int) = {inc, dec}; rows_t g = &fa; int main(void) { rows_t r = &fa; return (*r)[0](1) - 2 + (*g)[1](1) + r[0][1](3) - 2; }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int (*fa[2])(int) = {inc, dec}; int main(void) { int (*(*r)[2])(int) = &fa; return (*r)[0](1) - 2 + r[0][1](3) - 2; }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } typedef int (*fn_t)(int); typedef fn_t (*rows_t)[2]; fn_t fa[2] = {inc, dec}; int main(void) { rows_t r = &fa; (*r)[0] = dec; return fa[0](1); }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } typedef int (*const cfn_t)(int); typedef cfn_t (*crows_t)[2]; cfn_t cfa[2] = {inc, dec}; int main(void) { crows_t r = &cfa; return (*r)[1](3) - 2 + r[0][0](1) - 2; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } typedef int (*const cfn_t)(int); typedef cfn_t (*crows_t)[2]; cfn_t cfa[2] = {inc, dec}; int main(void) { crows_t r = &cfa; (*r)[0] = dec; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } typedef int (*const cfn_t)(int); typedef cfn_t (*crows_t)[2]; cfn_t cfa[2] = {inc, dec}; int main(void) { crows_t r = &cfa; r[0][1] = inc; return 0; }
+EOF
+
+# A file-scope pointer-to-array typedef may take a pointer typedef as its base,
+# which only makes the row's element a pointer.
+try_ 0 << EOF
+typedef int *ip;
+typedef ip (*rows_t)[2];
+typedef ip (*grid_t)[2][3];
+typedef int *(*direct_t)[2];
+int a = 1, b = 2;
+int *arr[2] = {&a, &b};
+int *grid[2][3] = {{&a, &b, &a}, {&b, &a, &b}};
+rows_t global_rows = &arr;
+int main(void)
+{
+    rows_t r = &arr;
+    grid_t g = &grid;
+    direct_t d = &arr;
+    (*r)[0] = &b;
+    return *(*r)[1] != 2 || *r[0][0] != 2 || *(*global_rows)[0] != 2 ||
+           *(*g)[1][2] != 2 || *(*d)[1] != 2 || sizeof(*r) != 2 * sizeof(ip) ||
+           sizeof(*g) != 6 * sizeof(ip) || sizeof(rows_t) != sizeof(void *);
+}
+EOF
+try_ 0 << EOF
+struct P { int x; };
+typedef struct P *pp;
+typedef pp (*prow_t)[2];
+struct P p1 = {5}, p2 = {6};
+struct P *parr[2] = {&p1, &p2};
+int main(void)
+{
+    prow_t r = &parr;
+    return (*r)[1]->x != 6 || r[0][0]->x != 5 || sizeof(*r) != 2 * sizeof(pp);
+}
+EOF
+try_ 0 << EOF
+typedef int *const cip;
+typedef cip (*crow_t)[2];
+int a = 1, b = 2;
+cip arr[2] = {&a, &b};
+int main(void)
+{
+    crow_t r = &arr;
+    return 0;
+}
+EOF
 # The same pointer-to-array aliases declared at file scope.
 try_ 0 << EOF
 typedef int (*row_pointer)[2];
@@ -18104,6 +18568,33 @@ int main(void)
 }
 EOF
 
+# In an expression too, a cast to a pointer to a callback typedef is an object
+# pointer, so it compares with a pointer of that type, with an array of the
+# callbacks and with null; it was taken for a callable function pointer and the
+# comparison rejected. A cast naming the function pointer itself still is one.
+try_ 0 << EOF
+typedef int (*callback_t)(void);
+typedef int function_t(void);
+int one(void) { return 1; }
+int main(void)
+{
+    callback_t table[2] = { one, one };
+    callback_t *p = table, *n = 0;
+    int (**q)(void) = table;
+    callback_t c = (callback_t) one;
+    function_t *g = (function_t *) one;
+    if (p == (callback_t *) 16 || p != (callback_t *) table) return 1;
+    if (q != (int (**)(void)) table || p != q || n != (callback_t *) 0) return 2;
+    if ((*(callback_t *) table)() != 1 || c() != 1 || g() != 1) return 3;
+    return c != one || g != (callback_t) one;
+}
+EOF
+try_compile_error_message "Function pointer comparison requires compatible pointers or null" << EOF
+typedef int (*callback_t)(void);
+int one(void) { return 1; }
+int main(void) { callback_t *p = 0; return p == one; }
+EOF
+
 # A cast to a pointer to function pointers, spelled out or through a callback
 # typedef, is an object pointer cast in a static initializer: it converts an
 # integer or an address for a scalar, a member or an element, and keeps the
@@ -18145,6 +18636,38 @@ EOF
 try_compile_error_message "incompatible callback slot types in array initializer" << EOF
 int (**t[1])(void) = { (int (**)(int)) 4 };
 int main(void) { return 0; }
+EOF
+
+# So is a cast to a function typedef with two stars, which points to function
+# pointers as a callback typedef with one does. A single star still names the
+# function pointer itself. It was rejected as a non-constant.
+try_ 0 << EOF
+typedef int fnty(void);
+struct holder { int (**slots)(void); };
+int one(void) { return 1; }
+int (**s)(void) = (fnty **) 4;
+fnty **p = (fnty **) 16;
+struct holder g = { (fnty **) 12 };
+int (**t[2])(void) = { (fnty **) 8, 0 };
+int (*f)(void) = (fnty *) one;
+int (*z)(void) = (fnty *) 0;
+int main(void)
+{
+    static int (**ls)(void) = (fnty **) 8;
+    if (s != (int (**)(void)) 4 || p != (int (**)(void)) 16) return 1;
+    if (g.slots != (int (**)(void)) 12 || t[0] != (fnty **) 8 || t[1]) return 2;
+    if (ls != (int (**)(void)) 8 || f() != 1 || z) return 3;
+    return 0;
+}
+EOF
+try_compile_error_message "incompatible callback slot types in initializer" << EOF
+typedef int fnty(int);
+int (**s)(void) = (fnty **) 4;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible callback slot types in initializer" << EOF
+typedef int fnty(int);
+int main(void) { static int (**s)(void) = (fnty **) 4; return 0; }
 EOF
 
 # An integer explicitly cast to a function pointer type initializes a member or
@@ -18272,6 +18795,27 @@ int main(void)
     *gp = dec;
     return r || (*gp)(3) != 2;
 }
+EOF
+
+# A pointer to a const callback typedef object keeps the callback read-only,
+# while the pointer itself stays modifiable.
+try_ 0 << EOF
+typedef int (*const cfn_t)(int); typedef int (*fn_t)(int); int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } cfn_t g = dec; int main(void) { cfn_t f = inc; cfn_t *p = &f; cfn_t **pp = &p; fn_t h = inc; fn_t *q = &h; *q = dec; p = &g; *pp = &g; return (*p)(5) != 4 || (**pp)(3) != 2 || h(1) != 0; }
+EOF
+try_ 0 << EOF
+typedef int (*const cfn_t)(int); typedef int (*fn_t)(int); int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } cfn_t g = dec; int main(void) { cfn_t f = inc; cfn_t *p = &f; cfn_t **pp = &p; *pp = &g; return (**pp)(3) - 2; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+typedef int (*const cfn_t)(int); int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { cfn_t f = inc; cfn_t *p = &f; *p = dec; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+typedef int (*const cfn_t)(int); typedef int (*fn_t)(int); int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { cfn_t f = inc; cfn_t *p = &f; p[0] = dec; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+typedef int (*const cfn_t)(int); typedef int (*fn_t)(int); int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { cfn_t f = inc; cfn_t *p = &f; cfn_t **pp = &p; **pp = dec; return 0; }
+EOF
+try_compile_error_message "incompatible callback slot types" << EOF
+typedef int (*const cfn_t)(int); typedef int (*fn_t)(int); int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { cfn_t f = inc; fn_t *p = &f; return 0; }
 EOF
 
 # Any pointer level of a callback slot may be qualified, the callback pointer
@@ -18451,6 +18995,36 @@ int (** const *t)(int) = &s;
 int main(void) { *t = s; return 0; }
 EOF
 
+# A call returning a callback slot typedef, or a pointer to one, keeps the slot
+# on its value, directly or through a function pointer of that return type.
+try_ 0 << EOF
+typedef int (**slot_t)(int); int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int (*cb)(int) = inc; slot_t get(void) { return &cb; } int main(void) { slot_t s = get(); return (*get())(2) - 3 + (*s)(1) - 2; }
+EOF
+try_ 0 << EOF
+typedef int (**slot_t)(int); int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int (*cb)(int) = inc; slot_t *get(void) { static slot_t s = &cb; return &s; } int main(void) { slot_t *s = get(); return (**get())(2) - 3 + (**s)(1) - 2; }
+EOF
+try_ 0 << EOF
+typedef int (**slot_t)(int);
+typedef int (*callback_t)(int);
+int inc(int x) { return x + 1; }
+int (*cb)(int) = inc;
+slot_t get(void) { return &cb; }
+slot_t *get_deeper(void) { static slot_t s = &cb; return &s; }
+callback_t *get_typedef(void) { return &cb; }
+int main(void)
+{
+    typedef int (**local_slot_t)(int);
+    local_slot_t (*pg)(void) = get;
+    slot_t s = get();
+    slot_t *ss = get_deeper();
+    callback_t *ts = get_typedef();
+    local_slot_t ls = pg();
+    return (*get())(2) != 3 || (*s)(1) != 2 || (**get_deeper())(3) != 4 ||
+           (**ss)(4) != 5 || (*pg())(5) != 6 || (*ls)(6) != 7 ||
+           (*get_typedef())(7) != 8 || (*ts)(8) != 9;
+}
+EOF
+
 # A function may return a pointer to a callback slot, spelled out or through a
 # typedef, and a call's result then dereferences to the callback.
 try_ 0 << EOF
@@ -18475,6 +19049,35 @@ int main(void)
     UP *s = get();
     return (*s)(1) != 2 || (*get())(2) != 3 || (*pg())(3) != 4;
 }
+EOF
+
+# The returned function pointer may be qualified, and a typedef may name the
+# type of a function returning a function pointer, at either scope.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+typedef int (*get_t(void))(int);
+typedef int (*pick_t(int which))(int);
+get_t get;
+pick_t pick;
+int (*const cget(void))(int);
+get_t *pointer_to_get = get;
+int main(void)
+{
+    typedef int (*local_t(void))(int);
+    local_t *local = get;
+    return get()(1) != 2 || pick(0)(5) != 4 || cget()(2) != 3 ||
+           pointer_to_get()(3) != 4 || local()(4) != 5;
+}
+int (*get(void))(int) { return inc; }
+int (*pick(int which))(int) { return which ? inc : dec; }
+int (*const cget(void))(int) { return inc; }
+EOF
+try_compile_error_message "function definition cannot take its type from a typedef" << EOF
+int inc(int x) { return x + 1; }
+typedef int (*get_t(void))(int);
+get_t get { return inc; }
+int main(void) { return 0; }
 EOF
 
 # A function may return a spelled function pointer, `int (*get(void))(int)`, and
@@ -18754,6 +19357,16 @@ int main(void) { int *t = ONE; return t != 0; }
 EOF
 try_compile_error_message "integer converted to pointer without a cast" << EOF
 int main(void) { int *p = 7; return 0; }
+EOF
+
+# A character read out of a string literal is an integer, and only its address
+# points into the literal.
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+void sink(int *p) {}
+int main(void) { sink(*("x")); return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+int main(void) { int *p = "xy"[1]; return p != 0; }
 EOF
 try_compile_error_message "integer converted to pointer without a cast" << EOF
 int main(void) { int *p; int x = 3; p = x; return 0; }

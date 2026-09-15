@@ -273,6 +273,8 @@ bool global_pointer_cast_starts_here(block_t *scope)
     token_kind_t previous = T_open_bracket;
     bool has_type = false;
     bool is_pointer = false;
+    bool function_type = false;
+    int depth = 0;
 
     if (!token || token->kind != T_open_bracket)
         return false;
@@ -282,6 +284,7 @@ bool global_pointer_cast_starts_here(block_t *scope)
             if (!has_type)
                 return false;
             is_pointer = true;
+            depth++;
         } else if (token->kind == T_open_bracket && has_type) {
             /* A pointer to function pointers, `(int (**)(void))`, points to
              * pointer objects: two or more stars, then a parameter list.
@@ -310,7 +313,7 @@ bool global_pointer_cast_starts_here(block_t *scope)
             if (!is_tag && !type)
                 return false;
             if (type && type->is_direct_function_type)
-                return false;
+                function_type = true;
 
             /* A callback typedef takes a star to point to a pointer object. */
             if (type && type->ptr_level && !type->func_signature)
@@ -328,9 +331,10 @@ bool global_pointer_cast_starts_here(block_t *scope)
     }
 
     /* Without a star, a callback typedef is the function pointer cast that
-     * read_global_function_pointer_cast() reads.
+     * read_global_function_pointer_cast() reads, and so is a function typedef
+     * with one; a second star, `(fnty **)`, points to a pointer object.
      */
-    return token && has_type && is_pointer;
+    return token && has_type && is_pointer && (!function_type || depth > 1);
 }
 
 /* Consume a cast that global_pointer_cast_starts_here() recognized and return
@@ -370,8 +374,9 @@ int read_global_pointer_cast(block_t *scope, func_t **slot_signature)
         return PTR_SIZE;
     }
     lex_expect(T_close_bracket);
-    if (type->func_signature && !type->is_direct_function_type &&
-        !type->ptr_level && depth == 1)
+    if (type->func_signature &&
+        (type->is_direct_function_type ? depth == 2
+                                       : !type->ptr_level && depth == 1))
         *slot_signature = type->func_signature;
     if (depth + type->ptr_level > 1 || type->func_signature)
         return PTR_SIZE;

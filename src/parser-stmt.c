@@ -1386,6 +1386,14 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
         func_t *callback_slot_signature = decl.pointee_func_signature;
         bool direct_array = decl.has_direct_array_declarator;
         bool direct_pointee_array = decl.has_direct_pointee_array_declarator;
+
+        /* `fn_t (*rows_t)[2]`, or the spelled `int (*(*rows_t)[2])(int)`,
+         * points to a row of callbacks: the callback typedef is the element.
+         */
+        bool callback_row_alias =
+            direct_pointee_array && base->func_signature &&
+            !base->is_direct_function_type && !base->pointee_func_signature &&
+            !decl.array_size && !decl.pointee_array_element_ptr_level;
         bool inherited_pointee_array = base->pointee_array_size != 0;
         bool direct_function_alias =
             decl.is_direct_function_declarator && decl.is_func &&
@@ -1508,10 +1516,11 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
          */
         if (decl.has_unsized_array ||
             ((decl.is_func || decl.func_signature) && !direct_function_alias &&
-             !callback_pointer_alias && !callback_pointer_realias &&
-             !callback_array_alias && !callback_array_realias &&
-             !callback_slot_alias && !callback_slot_realias &&
-             !callback_slot_array_alias && !callback_slot_array_realias) ||
+             !callback_row_alias && !callback_pointer_alias &&
+             !callback_pointer_realias && !callback_array_alias &&
+             !callback_array_realias && !callback_slot_alias &&
+             !callback_slot_realias && !callback_slot_array_alias &&
+             !callback_slot_array_realias) ||
             (base->pointee_func_signature && !callback_slot_realias) ||
             (base->array_element_pointee_func_signature &&
              !callback_slot_array_realias) ||
@@ -1671,6 +1680,14 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
                         : base;
             }
         }
+        if (callback_row_alias)
+            alias_callback_row_pointer(alias, base, decl.pointer_const_mask);
+
+        /* As at file scope, `typedef arr_t *rows_t` points to a row of the
+         * callbacks in the array typedef arr_t.
+         */
+        if (decl.ptr_level == 1 && !direct_array && !direct_pointee_array)
+            alias_callback_array_pointer(alias, base, decl.pointer_const_mask);
         if (direct_pointee_array) {
             alias->pointee_array_size = decl.pointee_array_size;
             alias->pointee_array_dim2 = decl.pointee_array_dim2;

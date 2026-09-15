@@ -979,13 +979,17 @@ static void read_global_typedef_declarator(block_t *block,
     }
 
     /* Handle pointer types in typedef: typedef char *string; */
+    unsigned int star_const_mask = 0;
+
     while (lex_accept(T_asterisk)) {
         type->ptr_level++;
         type->size = PTR_SIZE;
         while (true) {
             if (lex_accept(T_const)) {
-                if (type->ptr_level <= 32)
+                if (type->ptr_level <= 32) {
                     type->pointer_const_mask |= 1U << (type->ptr_level - 1);
+                    star_const_mask |= 1U << (type->ptr_level - 1);
+                }
             } else if (lex_accept(T_volatile)) {
                 /* As for an object declarator, a volatile pointer marks the
                  * whole declaration volatile.
@@ -997,6 +1001,9 @@ static void read_global_typedef_declarator(block_t *block,
                 break;
         }
     }
+
+    if (type->ptr_level == 1)
+        alias_callback_array_pointer(type, base, star_const_mask);
 
     /* A parenthesized declarator is the function-pointer form: `typedef int
      * (*callback_t)(int)`. Parse it through the normal declarator reader so its
@@ -1041,17 +1048,36 @@ static void read_global_typedef_declarator(block_t *block,
 
         /* `typedef int (*row_ptr)[2]` points to a whole row. As a block-scope
          * alias does, keep the pointer-sized descriptor and carry the row
-         * bounds and element separately.
+         * bounds and element separately. The spelled `int (*(*rows_t)[2])(int)`
+         * reads its row against the unnamed callback type, which the declarator
+         * then carries.
          */
+        if (declarator.type && declarator.type->func_signature &&
+            !declarator.type->is_direct_function_type)
+            base = declarator.type;
         if (!declarator.is_func &&
             declarator.has_direct_pointee_array_declarator &&
-            !declarator.array_size && !base->ptr_level && !base->array_size &&
-            !base->func_signature &&
+            !declarator.array_size && !base->array_size &&
+            (!base->func_signature ||
+             (!base->is_direct_function_type && !base->ptr_level)) &&
+            !base->pointee_func_signature &&
             declarator.ptr_level ==
                 declarator.pointee_array_element_ptr_level + 1 &&
             declarator.pointee_array_element_ptr_level <= 1) {
             strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
             type->type_name[MAX_TYPE_LEN - 1] = '\0';
+
+            /* A callback typedef base, `fn_t (*rows_t)[2]`, is the row's
+             * element with its prototype and qualifiers; the row pointer itself
+             * is no callback.
+             */
+            if (base->func_signature)
+                alias_callback_row_pointer(type, base, 0);
+
+            /* A pointer typedef base, `ptr_t (*rows_t)[2]`, is spelled out as
+             * `int *(*rows_t)[2]`: the declarator already counts its stars on
+             * the row's element, which then points to the base's pointee.
+             */
             type->ptr_level = declarator.ptr_level;
             type->size = PTR_SIZE;
             type->pointer_const_mask |= declarator.pointer_const_mask;
@@ -1061,7 +1087,10 @@ static void read_global_typedef_declarator(block_t *block,
             type->pointee_array_dim4 = declarator.pointee_array_dim4;
             type->pointee_array_element_ptr_level =
                 declarator.pointee_array_element_ptr_level;
-            type->pointee_array_element_type = (type_t *) base;
+            type->pointee_array_element_type =
+                base->ptr_level
+                    ? pointee_type_from_pointer_typedef((type_t *) base)
+                    : (type_t *) base;
             return;
         }
         if (!declarator.is_func)
@@ -1069,6 +1098,16 @@ static void read_global_typedef_declarator(block_t *block,
                 "Typedef parenthesized declarator must be a function "
                 "pointer",
                 cur_token_loc());
+
+        /* `typedef int (*get_t(void))(int)` names a function type whose return
+         * is a callback, which the declarator reader already built.
+         */
+        if (declarator.is_direct_function_declarator) {
+            memcpy(type, declarator.type, sizeof(type_t));
+            strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
+            type->type_name[MAX_TYPE_LEN - 1] = '\0';
+            return;
+        }
         strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
         type->type_name[MAX_TYPE_LEN - 1] = '\0';
         type->size = PTR_SIZE;

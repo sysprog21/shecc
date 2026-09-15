@@ -712,7 +712,12 @@ var_t *lower_reference_update(var_t *object,
         object->array_size || object->is_func || object->func_signature)
         error_at("Increment or decrement requires a scalar modifiable lvalue",
                  cur_token_loc());
-    if (object->is_const_qualified)
+
+    /* As for an assignment through a reference, a pointer object is read-only
+     * through its own qualifier, not its pointee's.
+     */
+    if (effective_pointer_depth(object) ? object->is_const_pointer
+                                        : object->is_const_qualified)
         error_at("assignment of read-only location", cur_token_loc());
     one = require_typed_var(parent, TY_int);
     one->var_name = gen_name();
@@ -1099,8 +1104,21 @@ static var_t *callback_slot_call_result(block_t *parent,
                                         const var_t *return_def)
 {
     func_t *callback = return_def->type->func_signature;
+    func_t *slot = return_def->pointee_func_signature
+                       ? return_def->pointee_func_signature
+                       : return_def->type->pointee_func_signature;
     var_t *result;
 
+    /* A slot typedef, `slot_t` for int (**)(int), or a pointer to one already
+     * carries the slot's prototype; keep it on the returned value.
+     */
+    if (slot && !return_def->type->array_size && !return_def->array_size) {
+        result = require_typed_ptr_var(parent, return_def->type,
+                                       return_def->ptr_level);
+        result->var_name = gen_name();
+        result->pointee_func_signature = slot;
+        return result;
+    }
     if (!callback || return_def->type->is_direct_function_type ||
         return_def->type->array_size || return_def->ptr_level < 1)
         return NULL;
@@ -1460,6 +1478,7 @@ static void take_expression_address(block_t *parent, basic_block_t **bb)
         require_typed_ptr_var(parent, operand->type, operand->ptr_level + 1);
     result->var_name = gen_name();
     result->is_const_qualified = operand->is_const_qualified;
+    result->is_string_literal = operand->is_string_literal;
     if (operand->func_signature)
         result->pointee_func_signature = operand->func_signature;
     else if (operand->pointee_func_signature)
@@ -1667,6 +1686,22 @@ static bool lower_pointee_array_dereference(var_t *source,
     row->ptr_level = source->pointee_array_element_ptr_level;
     row->is_const_qualified =
         source->is_const_qualified || element_type->is_const_qualified;
+
+    /* A row of const callbacks, `cfn_t (*rows)[2]`, stores none of them. */
+    if (!row->ptr_level && element_type->func_signature &&
+        !element_type->is_direct_function_type &&
+        (element_type->pointer_const_mask & 1U))
+        row->is_const_qualified = true;
+
+    /* A pointer element keeps its own qualifiers, `int *const (*r)[2]`: the
+     * lower levels of the pointer-to-array's mask belong to the element.
+     */
+    if (row->ptr_level > 0 && row->ptr_level < 32) {
+        row->pointer_const_mask =
+            effective_pointer_const_mask(source) & ((1U << row->ptr_level) - 1);
+        row->is_const_pointer =
+            row->pointer_const_mask & (1U << (row->ptr_level - 1));
+    }
     row->var_name = gen_name();
     add_insn(parent, *bb, OP_assign, row, source, NULL, 0, NULL);
     opstack_push(row);
@@ -1852,6 +1887,7 @@ void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1)
                    deref_type, pointee_type_from_pointer_typedef(deref_type));
     vd->var_name = gen_name();
     vd->is_const_qualified = rs1->is_const_qualified;
+    vd->is_string_literal = rs1->is_string_literal;
     vd->pointer_const_mask = dereferenced_pointer_const_mask(rs1);
     vd->is_const_pointer =
         vd->ptr_level > 0 && vd->ptr_level <= 32 &&
@@ -2177,6 +2213,12 @@ void lower_member_postfix(var_t *address,
     fixed_array_shape_t shape = {0};
     int depth = 0;
 
+    /* A member of a const record is not a modifiable lvalue (C99 6.3.2.1p1).
+     * The operand's address points to that record, and each further record
+     * member or pointee it selects may add the qualifier.
+     */
+    bool record_const = address->is_const_qualified;
+
     while (lex_peek(T_dot, NULL) || lex_peek(T_arrow, NULL) ||
            (field && depth < shape.rank && lex_peek(T_open_square, NULL))) {
         char name[MAX_ID_LEN];
@@ -2237,8 +2279,13 @@ void lower_member_postfix(var_t *address,
             address = pointer;
             record_type = field->type;
             is_lvalue = true;
+            record_const =
+                field->is_const_qualified || field->type->is_const_qualified;
         } else {
             lex_expect(T_dot);
+            if (field)
+                record_const = record_const || field->is_const_qualified ||
+                               field->type->is_const_qualified;
         }
         if (!record_type)
             error_at("Member access requires a record", cur_token_loc());
@@ -2255,7 +2302,9 @@ void lower_member_postfix(var_t *address,
                           : NULL;
     }
 
-    if (depth < shape.rank && unevaluated_expression_depth) {
+    bool decayed = depth < shape.rank;
+
+    if (decayed && unevaluated_expression_depth) {
         /* sizeof observes the array itself, before any decay. */
         for (int i = 0; i < depth; i++)
             fixed_array_shape_drop_outer(&shape);
@@ -2263,7 +2312,7 @@ void lower_member_postfix(var_t *address,
         fixed_array_shape_to_var(result, &shape);
         result->var_name = gen_name();
         opstack_push(result);
-    } else if (depth < shape.rank) {
+    } else if (decayed) {
         for (int i = 0; i <= depth; i++)
             fixed_array_shape_drop_outer(&shape);
         result =
@@ -2298,6 +2347,19 @@ void lower_member_postfix(var_t *address,
     }
     result->is_const_qualified =
         field->is_const_qualified || field->type->is_const_qualified;
+    if (record_const && effective_pointer_depth(result) && !field->is_func &&
+        !field->func_signature && !decayed) {
+        /* A pointer member keeps its pointee's qualifier; the record's const
+         * makes the pointer object itself read-only. An array member that
+         * decays instead yields a pointer to the record's const elements, which
+         * the else branch qualifies.
+         */
+        result->is_const_pointer = true;
+        if (result->ptr_level > 0 && result->ptr_level <= 32)
+            result->pointer_const_mask |= 1U << (result->ptr_level - 1);
+    } else if (record_const) {
+        result->is_const_qualified = true;
+    }
     if (!is_lvalue &&
         (lex_peek(T_assign, NULL) || lex_peek(T_increment, NULL) ||
          lex_peek(T_decrement, NULL)))

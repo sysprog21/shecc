@@ -332,7 +332,20 @@ static void lower_value_subscript(block_t *parent, basic_block_t **bb)
         int subscript_depth = 0;
         int array_dims =
             1 + !!base->array_dim2 + !!base->array_dim3 + !!base->array_dim4;
-        int element_size = base->ptr_level ? PTR_SIZE : base->type->size;
+        func_t *element_signature = NULL;
+
+        /* A row of callbacks, `(*rows)[i]` for a pointer to `fn_t[2]`, holds
+         * pointer-sized callback values that a following call consumes.
+         */
+        if (!base->ptr_level && !base->pointee_func_signature) {
+            if (base->func_signature)
+                element_signature = base->func_signature;
+            else if (base->type->func_signature &&
+                     !base->type->is_direct_function_type)
+                element_signature = base->type->func_signature;
+        }
+        int element_size =
+            base->ptr_level || element_signature ? PTR_SIZE : base->type->size;
 
         /* A grouping around an array, such as an array compound literal,
          * preserves its array type. Lower each following index against the
@@ -389,6 +402,16 @@ static void lower_value_subscript(block_t *parent, basic_block_t **bb)
             vd = require_typed_ptr_var(parent, base->type, base->ptr_level);
             vd->var_name = gen_name();
             vd->is_const_qualified = base->is_const_qualified;
+            vd->pointer_const_mask = base->pointer_const_mask;
+            vd->is_const_pointer = base->is_const_pointer;
+            if (element_signature) {
+                vd->func_signature = element_signature;
+                vd->ptr_level = 1;
+                if (base->type->pointer_const_mask & 1U) {
+                    vd->pointer_const_mask |= 1U;
+                    vd->is_const_pointer = true;
+                }
+            }
             push_object_at(parent, bb, vd, address, element_size);
         }
         return;
@@ -454,10 +477,13 @@ static void lower_value_member(block_t *parent, basic_block_t **bb)
     record_type = base->type;
     if (base->is_compound_literal_reference || base->defers_record_copy) {
         /* A record loaded from an object: select from the object itself. It is
-         * no lvalue when the record was not, as a call result's member is.
+         * no lvalue when the record was not, as a call result's member is. The
+         * address points to a const record when the record is const.
          */
         is_lvalue = base->is_compound_literal_reference;
         address = base->compound_literal_address;
+        if (base->is_const_qualified)
+            address->is_const_qualified = true;
     } else {
         /* A named record or a compound literal is an lvalue; a temporary, such
          * as a call or assignment result, is not.
@@ -465,6 +491,7 @@ static void lower_value_member(block_t *parent, basic_block_t **bb)
         is_lvalue = base->is_compound_literal || is_named_object(base, parent);
         address = require_ref_var(parent, base->type, 0);
         address->var_name = gen_name();
+        address->is_const_qualified = base->is_const_qualified;
         add_insn(parent, *bb, OP_address_of, address, base, NULL, 0, NULL);
     }
     lower_member_postfix(address, record_type, false, is_lvalue, parent, bb);
@@ -1402,7 +1429,13 @@ static void read_cast_operand(block_t *parent,
     cast_var->is_const_pointer = tn->const_pointer;
     cast_var->pointer_const_mask = tn->pointer_const_mask;
     cast_var->is_volatile = tn->volatile_qualified;
-    if (tn->type->func_signature) {
+
+    /* A callback typedef names a function pointer, and a function typedef takes
+     * one star to name one; a further star, as in `(callback_t *)`, points to a
+     * pointer object and stays an object pointer.
+     */
+    if (tn->type->func_signature &&
+        tn->ptr_level == (tn->type->is_direct_function_type ? 1 : 0)) {
         cast_var->ptr_level = 1;
         cast_var->func_signature = tn->type->func_signature;
     }
@@ -2535,6 +2568,14 @@ void handle_pointer_arithmetic(block_t *parent,
         vd->ptr_level = ptr_var->ptr_level + !!ptr_var->array_size;
         vd->pointee_func_signature = ptr_var->pointee_func_signature;
 
+        /* A pointer to const objects, `const int *` or a const record's decayed
+         * array member, still points to const objects after arithmetic.
+         */
+        if (vd->ptr_level == 1 && !vd->type->ptr_level) {
+            vd->is_const_qualified = ptr_var->is_const_qualified;
+            vd->is_string_literal = ptr_var->is_string_literal;
+        }
+
         /* A pointer to such pointers, or an array of them, steps by a pointer
          * and keeps the row shape one level further in.
          */
@@ -3194,6 +3235,13 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
         if (pointer_row_element_type)
             t->is_const_qualified = lvalue->type->is_const_qualified;
 
+        /* A record read through a pointer to const, `ps[0]`, stays const for a
+         * member selection that follows a grouping.
+         */
+        if (!t->ptr_level && is_record_type(t->type) &&
+            lvalue->is_const_qualified)
+            t->is_const_qualified = true;
+
         /* A loaded pointer-to-array member, as in `*s.rows`, still points to a
          * whole row, and so does an element of an array of such pointers or of
          * a pointer to one, as in `*pas[0]` or `*pp[1]`.
@@ -3430,6 +3478,27 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
             opstack_push(t);
         }
     }
+}
+
+/* Whether @subscripts on the pointer-to-array @var, as in `r[0][1]` for an `int
+ * *(*r)[2]`, reach an element that is itself a pointer.
+ */
+static bool pointee_row_pointer_element(const var_t *var, int subscripts)
+{
+    int element = var->pointee_array_element_ptr_level;
+
+    return var->pointee_array_size && element > 0 && element <= 32 &&
+           !is_array_declarator(var) &&
+           subscripts == 1 + fixed_array_shape_from_pointee_var(var).rank;
+}
+
+/* Whether that pointer element is const, as for `int *const (*r)[2]`. */
+static bool const_pointee_row_element(const var_t *var, int subscripts)
+{
+    if (!pointee_row_pointer_element(var, subscripts))
+        return false;
+    return effective_pointer_const_mask(var) &
+           (1U << (var->pointee_array_element_ptr_level - 1));
 }
 
 /* Whether @var is a parameter of the function being parsed. A parameter
@@ -3847,15 +3916,20 @@ void read_lvalue(lvalue_t *lvalue,
             }
 
             /* A subscript designates the pointee, whose qualification is the
-             * declaration's base qualification rather than `* const`.
+             * declaration's base qualification rather than `* const`. A pointer
+             * element of a row selects the pointer object, which is const only
+             * through its own qualifier, not its pointee's.
              */
-            lvalue->is_const_qualified =
-                var->is_const_qualified ||
-                (lvalue->pointee_func_signature &&
-                 var->type->array_element_is_const_pointer) ||
-                (record_is_const && is_array_declarator(var)) ||
-                (var->callback_is_const && subscript_depth == 1 &&
-                 callback_slot_depth(var) == 1);
+            if (pointee_row_pointer_element(var, subscript_depth))
+                lvalue->is_const_qualified =
+                    const_pointee_row_element(var, subscript_depth);
+            else
+                lvalue->is_const_qualified =
+                    var->is_const_qualified ||
+                    (lvalue->pointee_func_signature &&
+                     var->type->array_element_is_const_pointer) ||
+                    (record_is_const && is_array_declarator(var)) ||
+                    (subscript_depth == 1 && points_to_const_callback(var));
         } else {
             char token[MAX_ID_LEN];
 
@@ -3939,13 +4013,21 @@ void read_lvalue(lvalue_t *lvalue,
             vd = require_var(parent);
             vd->var_name = gen_name();
 
-            /* A one-dimensional array member designates its first element's
-             * address. Type it as that pointer, so the value can still be
-             * subscripted after a grouping: `(record.items)[1]`.
-             */
-            if (is_array_declarator(var) && !var->array_dim2) {
-                vd->type = var->type;
-                vd->ptr_level = var->ptr_level + 1;
+            if (is_array_declarator(var)) {
+                /* A one-dimensional array member designates its first element's
+                 * address. Type it as that pointer, so the value can still be
+                 * subscripted after a grouping: `(record.items)[1]`.
+                 */
+                if (!var->array_dim2) {
+                    vd->type = var->type;
+                    vd->ptr_level = var->ptr_level + 1;
+                }
+
+                /* The decayed address points to the member's elements, which a
+                 * const record makes const as well (C99 6.3.2.1p1).
+                 */
+                vd->is_const_qualified =
+                    record_is_const || var->is_const_qualified;
             }
             opstack_push(vd);
             add_insn(parent, *bb, OP_add, vd, rs1, rs2, 0, NULL);
@@ -5288,6 +5370,8 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
          * postfixes: `(*pointer).member = value`. Resolve their address before
          * selecting the shared scalar/bit-field store path.
          */
+        bool enclosing_const = false;
+
         if (lex_accept(T_dot)) {
             type_t *record_type = value_type;
             char field_name[MAX_ID_LEN];
@@ -5303,6 +5387,9 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
                     field->array_size)
                     error_at("Member access requires a record",
                              cur_token_loc());
+                enclosing_const = enclosing_const ||
+                                  field->is_const_qualified ||
+                                  field->type->is_const_qualified;
                 record_type = field->type;
             } while (true);
             value_type = field->type;
@@ -5317,12 +5404,20 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
         int address_depth = effective_pointer_depth(object_address);
         unsigned int address_mask =
             effective_pointer_const_mask(object_address);
-        if ((field && field->is_const_qualified) ||
+
+        /* The member is read-only through its own qualifier, a pointer member's
+         * being on the pointer, or through a const record that encloses it (C99
+         * 6.3.2.1p1).
+         */
+        if ((field && (field->ptr_level || field->type->ptr_level
+                           ? field->is_const_pointer
+                           : field->is_const_qualified)) ||
+            (field &&
+             (object_address->is_const_qualified || enclosing_const)) ||
             address->is_const_qualified ||
             (address_depth > 1 && address_depth <= 32 &&
              (address_mask & (1U << (address_depth - 2)))) ||
-            (!field && object_address->callback_is_const &&
-             callback_slot_depth(object_address) == 1))
+            (!field && points_to_const_callback(object_address)))
             error_at("assignment of read-only location", cur_token_loc());
         if (!lex_accept(T_assign) && !accept_compound_assign_op(&compound_op))
             error_at("Expected assignment after pointer dereference",

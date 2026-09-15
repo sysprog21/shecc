@@ -230,6 +230,48 @@ static void compose_block_typedef_array(type_t *alias,
     alias->array_element_type = base;
 }
 
+/* Make @alias a pointer to a row of the callbacks @element, as `fn_t
+ * (*rows_t)[2]` is. The pointer itself carries no prototype and only the
+ * qualifiers in @pointer_const_mask; const callbacks, `cfn_t`, make the row it
+ * points to const.
+ */
+static void alias_callback_row_pointer(type_t *alias,
+                                       const type_t *element,
+                                       unsigned int pointer_const_mask)
+{
+    alias->func_signature = NULL;
+    alias->pointer_const_mask = pointer_const_mask;
+    if (element->pointer_const_mask & 1U)
+        alias->is_const_qualified = true;
+}
+
+/* `typedef arr_t *rows_t` for `typedef fn_t arr_t[2]` points to a whole row of
+ * callbacks, as `fn_t (*rows_t)[2]` does. If @base is such an array typedef,
+ * make @alias, which has one star on it, carry the row as the pointee with the
+ * callback typedef as its element.
+ */
+static void alias_callback_array_pointer(type_t *alias,
+                                         const type_t *base,
+                                         unsigned int pointer_const_mask)
+{
+    type_t *element = base->array_element_type;
+
+    if (base->ptr_level || !base->array_size || !element ||
+        !element->func_signature || element->is_direct_function_type ||
+        base->array_element_ptr_level)
+        return;
+    alias->pointee_array_size = base->array_size;
+    alias->pointee_array_dim2 = base->array_dim2;
+    alias->pointee_array_dim3 = base->array_dim3;
+    alias->pointee_array_dim4 = base->array_dim4;
+    alias->pointee_array_element_ptr_level = 0;
+    alias->pointee_array_element_type = element;
+    alias->array_size = 0;
+    alias->array_dim2 = alias->array_dim3 = alias->array_dim4 = 0;
+    alias->array_element_type = NULL;
+    alias_callback_row_pointer(alias, element, pointer_const_mask);
+}
+
 basic_block_t *handle_block_typedef_statement(block_t *parent,
                                               basic_block_t *bb);
 bool read_assignment_expression(block_t *parent, basic_block_t **bb);
@@ -311,6 +353,23 @@ void mark_var_mutated(var_t *var);
 bool has_effective_pointer(const var_t *var)
 {
     return var && (var->ptr_level || (var->type && var->type->ptr_level));
+}
+
+int callback_slot_depth(const var_t *var);
+
+/* Whether the callback pointer that the pointer @var designates is const, for a
+ * slot declared `int (*const *p)(int)` or a pointer to a const callback typedef
+ * such as `typedef int (*const cfn_t)(int); cfn_t *p`.
+ */
+bool points_to_const_callback(const var_t *var)
+{
+    if (!var || !var->type)
+        return false;
+    if (var->pointee_func_signature)
+        return var->callback_is_const && callback_slot_depth(var) == 1;
+    return var->ptr_level == 1 && var->type->func_signature &&
+           !var->type->is_direct_function_type && !var->type->ptr_level &&
+           (var->type->pointer_const_mask & 1U);
 }
 
 /* The object pointer levels from the callback slot value @var to the callback
@@ -680,6 +739,14 @@ unsigned int effective_pointer_const_mask(const var_t *var)
         return 0;
     if (var->type->ptr_level >= 32)
         return var->type->pointer_const_mask;
+
+    /* The const of a callback typedef, `typedef int (*const cfn_t)(int)`,
+     * belongs to the callback, which a `cfn_t *` counts as no pointer level of
+     * its own; points_to_const_callback() reports it instead.
+     */
+    if (var->ptr_level && var->type->func_signature &&
+        !var->type->is_direct_function_type && !var->type->ptr_level)
+        return var->pointer_const_mask;
     return var->type->pointer_const_mask |
            (var->pointer_const_mask << var->type->ptr_level);
 }
@@ -819,6 +886,16 @@ bool compatible_decl_type(const type_t *left, const type_t *right)
                left->is_volatile_qualified == right->is_volatile_qualified &&
                compatible_function_signature(left->func_signature,
                                              right->func_signature);
+
+    /* So may a callback slot typedef, `int (**slot_t)(int)`. */
+    if (left && right && left->pointee_func_signature &&
+        right->pointee_func_signature)
+        return left->ptr_level == right->ptr_level &&
+               left->pointer_const_mask == right->pointer_const_mask &&
+               left->is_const_qualified == right->is_const_qualified &&
+               left->is_volatile_qualified == right->is_volatile_qualified &&
+               compatible_function_signature(left->pointee_func_signature,
+                                             right->pointee_func_signature);
     if (!left || !right || left->base_type != right->base_type ||
         left->size != right->size || left->ptr_level != right->ptr_level ||
         left->is_unsigned != right->is_unsigned ||
@@ -1688,11 +1765,15 @@ void diagnose_integer_to_pointer_conversion(var_t *from,
         return;
     if (!array_is_pointer && (to->array_size || to->has_unsized_array))
         return;
+
+    /* A string literal is already a pointer here. A character read out of one,
+     * `*"ab"`, keeps is_string_literal only so that taking its address again
+     * points into the literal; the character itself is an integer.
+     */
     if (effective_pointer_depth(from) || from->array_size ||
         from->has_unsized_array || from->is_func || from->func_signature ||
-        from->pointee_func_signature || from->is_string_literal ||
-        from->type == TY_void || is_record_type(from->type) ||
-        is_null_pointer_constant(from))
+        from->pointee_func_signature || from->type == TY_void ||
+        is_record_type(from->type) || is_null_pointer_constant(from))
         return;
     error_at("integer converted to pointer without a cast", cur_token_loc());
 }
@@ -1820,8 +1901,26 @@ bool incompatible_pointee_callback_conversion(const var_t *from,
     if ((from->pointee_func_signature && is_plain_void_pointer(to)) ||
         (to->pointee_func_signature && is_plain_void_pointer(from)))
         return false;
+
+    /* A pointer to a row of callbacks, `fn_t (*rows_t)[2]`, points to the whole
+     * row, which `&row` for such an array is too: no slot is involved.
+     */
+    if (to->type && to->type->pointee_array_size &&
+        to->type->pointee_array_element_type &&
+        to->type->pointee_array_element_type->func_signature)
+        return false;
     from_signature = from->pointee_func_signature;
     to_signature = to->pointee_func_signature;
+
+    /* A pointer to a const callback, `&f` for a const one or a `cfn_t *`, may
+     * not become a pointer to a modifiable one.
+     */
+    if ((from->callback_is_const || points_to_const_callback(from)) &&
+        !to->callback_is_const && !points_to_const_callback(to) &&
+        (to->pointee_func_signature ||
+         (to->ptr_level == 1 && to->type && to->type->func_signature &&
+          !to->type->is_direct_function_type && !to->type->ptr_level)))
+        return true;
 
     /* A slot may add, but not discard, qualifiers of the callback it reaches.
      * Deeper slots must agree exactly, as C99 6.5.16.1 requires below the top.
