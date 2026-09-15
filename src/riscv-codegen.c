@@ -142,8 +142,11 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_write:
         elf_offset += ph2_ir->src1_hi >= 0 ? 8 : 4;
         return;
-    case OP_jump:
     case OP_call:
+        /* A call through the PLT may be farther than a JAL reaches. */
+        elf_offset += dynlink && !find_func(ph2_ir->func_name)->bbs ? 8 : 4;
+        return;
+    case OP_jump:
     case OP_load_func:
     case OP_indirect:
     case OP_lshift:
@@ -281,14 +284,14 @@ void cfg_flatten(void)
     func_t *func;
 
     if (dynlink) {
-        /* When using dynamic linking, 24 instructions are generated at the
+        /* When using dynamic linking, 25 instructions are generated at the
          * program entry point to perform the following operations:
          * - prepare arguments and call __libc_start_main()
          * - preserve a0 ('argc'), a1 ('argv') and sp.
          * - allocate and clear a global stack, then jump to global init
          *   function.
          */
-        elf_offset = 96;
+        elf_offset = 100;
     } else {
         /* Under static linking, "__syscall" must be generated to allow the
          * program to invoke system calls.
@@ -589,8 +592,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         if (func->bbs)
             ofs = func->bbs->elf_offset - elf_code->size;
         else if (dynlink) {
+            /* The PLT follows the code and read-only data, so a large image
+             * puts it beyond the 1 MiB a JAL reaches. Call it PC-relative
+             * through AUIPC and JALR, which reach anywhere.
+             */
             ofs = (dynamic_sections.elf_plt_start + func->plt_offset) -
                   (elf_code_start + elf_code->size);
+            emit(__auipc(__ra, rv_hi(ofs)));
+            emit(__jalr(__ra, __ra, rv_lo(ofs)));
+            return;
         } else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
             fflush(stdout); /* see fatal() */
@@ -1182,8 +1192,8 @@ void code_generate(void)
          * __libc_start_main(main_wrapper, argc, argv, NULL,
          *                      NULL, NULL, stack_end)
          */
-        emit(__lui(__a0, rv_hi(elf_code_start + 36)));
-        emit(__addi(__a0, __a0, rv_lo(elf_code_start + 36)));
+        emit(__lui(__a0, rv_hi(elf_code_start + 40)));
+        emit(__addi(__a0, __a0, rv_lo(elf_code_start + 40)));
         emit(__lw(__a1, __sp, 0));
         emit(__addi(__a2, __sp, 4));
         emit(__addi(__a3, __zero, 0));
@@ -1191,10 +1201,13 @@ void code_generate(void)
         emit(__addi(__a5, __zero, 0));
         emit(__addi(__a6, __sp, 0));
 
-        /* Call __libc_start_main() via PLT[1] */
+        /* Call __libc_start_main() via PLT[1], PC-relative through AUIPC and
+         * JALR: the PLT may lie beyond the 1 MiB a JAL reaches.
+         */
         ofs = (dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE) -
               (elf_code_start + elf_code->size);
-        emit(__jal(__ra, ofs));
+        emit(__auipc(__ra, rv_hi(ofs)));
+        emit(__jalr(__ra, __ra, rv_lo(ofs)));
 
         /* The main wrapper is located here under the dynamic linking mode
          *
