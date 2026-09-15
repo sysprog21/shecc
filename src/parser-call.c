@@ -1018,7 +1018,11 @@ var_t *materialize_function_designator(block_t *parent,
     func_t *func;
     var_t *object;
 
-    if (!value || !value->is_func)
+    /* An array of function pointers is no designator: it decays to the address
+     * of its first element, not to the pointer stored there.
+     */
+    if (!value || !value->is_func || value->array_size ||
+        value->has_unsized_array)
         return value;
     if (find_var(value->var_name, parent) == value)
         return load_function_pointer_object(parent, bb, value);
@@ -1086,6 +1090,28 @@ var_t *prepare_aggregate_call_result(block_t *parent,
     return result;
 }
 
+/* The value of a call returning @return_def, when that is a pointer to a
+ * callback typedef such as `callback_t *` or `int (**)(int)`, at any depth: a
+ * callback slot, which the declarator of that type would also be. NULL for any
+ * other return.
+ */
+static var_t *callback_slot_call_result(block_t *parent,
+                                        const var_t *return_def)
+{
+    func_t *callback = return_def->type->func_signature;
+    var_t *result;
+
+    if (!callback || return_def->type->is_direct_function_type ||
+        return_def->type->array_size || return_def->ptr_level < 1)
+        return NULL;
+    result = require_typed_ptr_var(
+        parent, callback->return_def.type,
+        callback->return_def.ptr_level + return_def->ptr_level);
+    result->var_name = gen_name();
+    result->pointee_func_signature = callback;
+    return result;
+}
+
 /* Keep the ABI-only aggregate destination coupled to call emission. Call sites
  * that merely discard an aggregate result still must provide it.
  */
@@ -1104,7 +1130,11 @@ var_t *emit_direct_call_result(func_t *func,
         read_func_call_with_sret(func, sret, parent, bb);
     } else {
         read_func_call(func, parent, bb);
-        if (want_value) {
+        if (want_value)
+            result = callback_slot_call_result(parent, &func->return_def);
+        if (result) {
+            add_insn(parent, *bb, OP_func_ret, result, NULL, NULL, 0, NULL);
+        } else if (want_value) {
             result = require_typed_ptr_var(
                 parent,
                 returned_signature ? returned_signature->return_def.type
@@ -1143,7 +1173,11 @@ var_t *emit_indirect_call_result(var_t *callee,
         read_indirect_call_with_sret(callee, signature, sret, parent, bb);
     } else {
         read_indirect_call(callee, parent, bb);
-        if (want_value && signature) {
+        if (want_value && signature)
+            result = callback_slot_call_result(parent, &signature->return_def);
+        if (result) {
+            add_insn(parent, *bb, OP_func_ret, result, NULL, NULL, 0, NULL);
+        } else if (want_value && signature) {
             result = require_typed_ptr_var(parent, signature->return_def.type,
                                            signature->return_def.ptr_level);
             result->var_name = gen_name();
@@ -1341,6 +1375,26 @@ static void keep_pointee_array_shape(var_t *vd, const var_t *source)
         copy_pointee_array_shape(vd, source);
 }
 
+/* A dereference of a deeper callback slot, `*slot` for an int (***slot)(int),
+ * is still a callback slot, one level shallower. Keep its prototype on @vd.
+ */
+static void keep_callback_slot(var_t *vd, const var_t *source)
+{
+    if (callback_slot_depth(source) > 1) {
+        vd->pointee_func_signature = source->pointee_func_signature;
+        vd->callback_is_const = source->callback_is_const;
+        vd->callback_is_volatile = source->callback_is_volatile;
+    } else if (source->pointee_func_signature && vd->func_signature) {
+        /* The last dereference reaches the callback pointer object. */
+        if (source->callback_is_const) {
+            vd->pointer_const_mask |= 1U;
+            vd->is_const_pointer = true;
+        }
+        if (source->callback_is_volatile)
+            vd->is_volatile = true;
+    }
+}
+
 /* The address of an operand that does not start with an identifier: `&*p`,
  * `&(*q).member`, `&2[arr]` or `&(int){1}`.
  */
@@ -1383,8 +1437,10 @@ static void take_expression_address(block_t *parent, basic_block_t **bb)
 
     read_expr_operand(parent, bb);
     operand = opstack_pop();
-    if (operand->is_func) {
-        /* A function designator, possibly parenthesized, is its address. */
+    if (operand->is_func && !operand->is_compound_literal) {
+        /* A function designator, possibly parenthesized, is its address. A
+         * function pointer compound literal is an object instead.
+         */
         opstack_push(operand);
         return;
     }
@@ -1406,6 +1462,8 @@ static void take_expression_address(block_t *parent, basic_block_t **bb)
     result->is_const_qualified = operand->is_const_qualified;
     if (operand->func_signature)
         result->pointee_func_signature = operand->func_signature;
+    else if (operand->pointee_func_signature)
+        result->pointee_func_signature = operand->pointee_func_signature;
     add_insn(
         parent, *bb,
         address == operand && !operand->array_size ? OP_address_of : OP_assign,
@@ -1512,6 +1570,13 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
                                ? lvalue.decl->pointee_func_signature
                                : lvalue.decl->func_signature)
                         : NULL;
+        if (lvalue.decl && lvalue.decl->pointee_func_signature) {
+            vd->callback_is_const = lvalue.decl->callback_is_const;
+            vd->callback_is_volatile = lvalue.decl->callback_is_volatile;
+        } else if (lvalue.decl && lvalue.decl->func_signature) {
+            vd->callback_is_const = lvalue.decl->is_const_pointer;
+            vd->callback_is_volatile = lvalue.decl->is_volatile;
+        }
         opstack_push(vd);
 
         /* A parameter declared as an array is a pointer object (C99 6.7.5.3p7),
@@ -1562,6 +1627,17 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
         vd = operand_stack[operand_stack_idx - 1];
         vd->type = lvalue.type;
         vd->ptr_level = lvalue.ptr_level + 1;
+    }
+
+    /* The address of a function-pointer element or member, `&fps[i]` or
+     * `&s.fp`, points to a callback slot.
+     */
+    if (lvalue.is_reference && lvalue.decl && lvalue.decl->is_func &&
+        lvalue.decl->func_signature && !lvalue.decl->array_dim2 &&
+        lvalue.subscript_depth == (lvalue.decl->array_size ? 1 : 0)) {
+        vd = operand_stack[operand_stack_idx - 1];
+        vd->ptr_level = 1;
+        vd->pointee_func_signature = lvalue.decl->func_signature;
     }
 }
 
@@ -1748,6 +1824,15 @@ void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1)
     if (lower_pointee_array_dereference(rs1, parent, bb))
         return;
 
+    /* A loaded function pointer, as `(fps[1])` yields, designates its function
+     * (C99 6.5.3.2p4): `*(fps[1])` calls through the same pointer value.
+     */
+    if (rs1->func_signature && !rs1->is_func && rs1->ptr_level == 1 &&
+        rs1->type && !rs1->type->ptr_level && !rs1->type->func_signature) {
+        opstack_push(rs1);
+        return;
+    }
+
     /* For pointer dereference, we need to determine the target type and size.
      * Since we do not have full type tracking in expressions, use defaults
      */
@@ -1776,14 +1861,76 @@ void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1)
      * actual dereference consumes that object-pointer level and yields the
      * pointer-valued callback result for a following postfix call.
      */
-    if (deref_type && deref_type->func_signature &&
-        effective_pointer_depth(rs1) == 1) {
-        vd->func_signature = deref_type->func_signature;
+    if (rs1->pointee_func_signature
+            ? callback_slot_depth(rs1) == 1
+            : (deref_type && deref_type->func_signature &&
+               effective_pointer_depth(rs1) == 1)) {
+        vd->func_signature = rs1->pointee_func_signature
+                                 ? rs1->pointee_func_signature
+                                 : deref_type->func_signature;
+        vd->ptr_level = 1;
+        sz = PTR_SIZE;
+    } else if (rs1->pointee_func_signature &&
+               effective_pointer_depth(rs1) == 1) {
+        /* So does a pointer to function pointers, as `fps + 1` yields. */
+        vd->func_signature = rs1->pointee_func_signature;
         vd->ptr_level = 1;
         sz = PTR_SIZE;
     }
+    keep_callback_slot(vd, rs1);
     keep_pointee_array_shape(vd, rs1);
     push_object_at(parent, bb, vd, rs1, sz);
+}
+
+/* Push the result of unary `*` on the function pointer read by read_lvalue()
+ * into @rs1 from @var, and return true; return false if it is no function
+ * pointer. C99 6.3.2.1 and 6.5.3.2p4 make the result a function designator,
+ * which is called through the pointer value: a function-pointer object needs
+ * one load, not a dereference of its return type. An element or member, as in
+ * `*fps[i]` or `*s.fp`, was already loaded, and a load through it would read
+ * the code as data; the call path takes its prototype the same way.
+ */
+static bool push_dereferenced_function(block_t *parent,
+                                       basic_block_t **bb,
+                                       lvalue_t *lvalue,
+                                       var_t *var,
+                                       var_t *rs1)
+{
+    if (lvalue->is_reference && !lvalue->value_ptr_level &&
+        !lvalue->pointee_func_signature && !rs1->pointee_func_signature) {
+        func_t *signature = get_func_signature(lvalue->decl);
+
+        if (!signature && lvalue->type)
+            signature = lvalue->type->func_signature;
+        if (!signature)
+            signature = rs1->func_signature;
+        if (signature) {
+            rs1->func_signature = signature;
+            rs1->ptr_level = 1;
+            opstack_push(rs1);
+            return true;
+        }
+    }
+    if (var->is_func && !lvalue->is_reference && rs1->array_size) {
+        /* An array of function pointers decays to the address of its first
+         * element, from which `*fps` reads the pointer, as fps[0] does.
+         */
+        var_t *address = require_typed_ptr_var(parent, rs1->type, 1);
+        var_t *target = require_typed_ptr_var(parent, rs1->type, 1);
+
+        address->var_name = gen_name();
+        add_insn(parent, *bb, OP_assign, address, rs1, NULL, 0, NULL);
+        target->var_name = gen_name();
+        target->func_signature = rs1->func_signature;
+        add_insn(parent, *bb, OP_read, target, address, NULL, PTR_SIZE, NULL);
+        opstack_push(target);
+        return true;
+    }
+    if (var->is_func) {
+        opstack_push(load_function_pointer_object(parent, bb, rs1));
+        return true;
+    }
+    return false;
 }
 
 void handle_single_dereference(block_t *parent, basic_block_t **bb)
@@ -1856,14 +2003,8 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
             push_dereference(parent, bb, rs1);
             return;
         }
-        if (var->is_func) {
-            /* C99 6.3.2.1 makes a function-pointer dereference a function
-             * designator. The pointer object itself therefore needs one load,
-             * not a dereference of its return type.
-             */
-            opstack_push(load_function_pointer_object(parent, bb, rs1));
+        if (push_dereferenced_function(parent, bb, &lvalue, var, rs1))
             return;
-        }
         if (lower_pointee_array_dereference(rs1, parent, bb))
             return;
 
@@ -1899,17 +2040,20 @@ void handle_single_dereference(block_t *parent, basic_block_t **bb)
          * cleared to prevent the invalid `slot(...)` form, so restore the
          * element signature only after the real dereference has occurred.
          */
-        if ((rs1->func_signature || rs1->pointee_func_signature ||
-             (deref_type && deref_type->func_signature)) &&
-            effective_pointer_depth(rs1) == 1) {
-            vd->func_signature = rs1->func_signature
-                                     ? rs1->func_signature
-                                     : (rs1->pointee_func_signature
-                                            ? rs1->pointee_func_signature
-                                            : deref_type->func_signature);
+        if (rs1->pointee_func_signature
+                ? callback_slot_depth(rs1) == 1
+                : ((rs1->func_signature ||
+                    (deref_type && deref_type->func_signature)) &&
+                   effective_pointer_depth(rs1) == 1)) {
+            vd->func_signature =
+                rs1->pointee_func_signature
+                    ? rs1->pointee_func_signature
+                    : (rs1->func_signature ? rs1->func_signature
+                                           : deref_type->func_signature);
             vd->ptr_level = 1;
             sz = PTR_SIZE;
         }
+        keep_callback_slot(vd, rs1);
         keep_pointee_array_shape(vd, rs1);
         push_object_at(parent, bb, vd, rs1, sz);
     }
@@ -1946,9 +2090,21 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
         var_t *var = find_var(token, parent);
         read_lvalue(&lvalue, var, parent, bb, true, OP_generic);
 
-        /* Apply dereferences one by one */
+        /* Apply dereferences one by one. Once they reach a function, the
+         * remaining ones are no-ops: `**fp` designates the function `*fp` does.
+         */
+        bool designator = false;
         for (int i = 0; i < deref_count; i++) {
             rs1 = opstack_pop();
+            if (designator) {
+                opstack_push(rs1);
+                continue;
+            }
+            if (i == 0 && !decays_when_dereferenced(rs1) &&
+                push_dereferenced_function(parent, bb, &lvalue, var, rs1)) {
+                designator = true;
+                continue;
+            }
             if (decays_when_dereferenced(rs1)) {
                 push_dereference(parent, bb, rs1);
                 continue;
@@ -1976,20 +2132,25 @@ void handle_multiple_dereference(block_t *parent, basic_block_t **bb)
                 vd->ptr_level > 0 && vd->ptr_level <= 32 &&
                 (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
 
-            /* Only the final dereference of `**slots` (or deeper spelling)
-             * reaches the callback object. Earlier reads still produce a
-             * pointer-to-callback and must not be callable.
+            /* Only the dereference of a pointer to a callback, the last read of
+             * `**slots` or `**fpp`, reaches the callback object. Earlier reads
+             * still produce a pointer-to-callback and must not be callable.
              */
-            if (i + 1 == deref_count &&
-                (rs1->func_signature ||
-                 (deref_type && deref_type->func_signature)) &&
-                effective_pointer_depth(rs1) == 1) {
-                vd->func_signature = rs1->func_signature
-                                         ? rs1->func_signature
-                                         : deref_type->func_signature;
+            if (rs1->pointee_func_signature
+                    ? callback_slot_depth(rs1) == 1
+                    : ((rs1->func_signature ||
+                        (deref_type && deref_type->func_signature)) &&
+                       effective_pointer_depth(rs1) == 1)) {
+                vd->func_signature =
+                    rs1->pointee_func_signature
+                        ? rs1->pointee_func_signature
+                        : (rs1->func_signature ? rs1->func_signature
+                                               : deref_type->func_signature);
                 vd->ptr_level = 1;
                 sz = PTR_SIZE;
+                designator = true;
             }
+            keep_callback_slot(vd, rs1);
             keep_pointee_array_shape(vd, rs1);
             push_object_at(parent, bb, vd, rs1, sz);
         }

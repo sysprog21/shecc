@@ -207,6 +207,60 @@ int read_global_address_offset(block_t *scope,
  */
 int global_pointer_cast_stride = 0;
 
+/* While the operand of a cast to a function pointer type in a static
+ * initializer is read, the prototype that cast names, and NULL otherwise. The
+ * cast, not the designated function, is converted to the initialized object.
+ */
+func_t *global_function_cast_signature = NULL;
+
+bool abstract_function_pointer_follows(void);
+func_t *read_abstract_function_pointer(type_t *type,
+                                       int ptr_level,
+                                       int *pointer_level);
+
+/* If a cast to a function pointer type, `(int (*)(int))` or `(callback_t)`,
+ * starts at the next token of a static initializer, consume it and return the
+ * prototype it names. Otherwise consume nothing and return NULL.
+ */
+func_t *read_global_function_pointer_cast(block_t *scope)
+{
+    token_t *start = cur_token;
+    func_t *signature = NULL;
+    type_t *type;
+    int stars = 0;
+    int pointer_level = 0;
+
+    if (!lex_accept(T_open_bracket))
+        return NULL;
+    type = read_type_name_specifiers(scope);
+    if (type) {
+        while (lex_accept(T_const) || lex_accept(T_volatile))
+            ;
+        while (lex_accept(T_asterisk)) {
+            stars++;
+            while (lex_accept(T_const) || lex_accept(T_volatile) ||
+                   lex_accept(T_restrict))
+                ;
+        }
+        if (abstract_function_pointer_follows()) {
+            signature =
+                read_abstract_function_pointer(type, stars, &pointer_level);
+            if (pointer_level != 1)
+                signature = NULL;
+        } else if (type->func_signature && !type->is_direct_function_type &&
+                   !stars) {
+            signature = type->func_signature;
+        } else if (type->is_direct_function_type && stars == 1) {
+            signature = type->func_signature;
+        }
+    }
+    if (!signature || !lex_accept(T_close_bracket)) {
+        cur_token = start;
+        return NULL;
+    }
+    return signature;
+}
+
 /* Say whether cur_token->next opens a cast to an object pointer type in a
  * static initializer. C99 6.6 lets an address constant and an integer constant
  * be converted by such a cast.
@@ -430,6 +484,18 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
     bool explicit_address;
     bool grouped_function_designator = false;
 
+    /* A cast to a function pointer type converts the function designator or
+     * null pointer constant after it, which then carries the cast's prototype.
+     */
+    func_t *cast_signature = read_global_function_pointer_cast(scope);
+
+    if (cast_signature) {
+        val = parse_global_constant_value(parent, bb);
+        if (val && val->is_func)
+            val->func_signature = cast_signature;
+        return val;
+    }
+
     if (address_dereference) {
         address_dereference_identifier =
             consume_global_function_address_dereference();
@@ -559,9 +625,19 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
 
 bool is_record_type(const type_t *type)
 {
+    /* A callback typedef whose function returns a record keeps that record's
+     * members for its prototype, but names a pointer, not a record.
+     */
+    if (type && type->func_signature && !type->is_direct_function_type)
+        return false;
+
+    /* A pointer typedef that defines its record, `typedef struct r {...} *rp`,
+     * copies the record's fields but names a pointer, not a record.
+     */
     return type &&
            (type->base_type == TYPE_struct || type->base_type == TYPE_union ||
-            (type->base_type == TYPE_typedef && type->num_fields > 0));
+            (type->base_type == TYPE_typedef && type->num_fields > 0 &&
+             !type->ptr_level));
 }
 
 void parse_struct_field_init(block_t *parent,
@@ -1805,7 +1881,6 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
     }
     while (lex_accept(T_comma)) {
         discard_operand(parent, bb);
-        perform_side_effect(parent, bb);
         if (!read_assignment_expression(parent, &bb)) {
             read_expr(parent, &bb);
             read_ternary_operation(parent, &bb);
@@ -1831,21 +1906,6 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
         add_insn(parent, bb, OP_load_constant, val, NULL, NULL, 0, NULL);
         rs1 = val;
     }
-
-    /* "return i++" yields the value i held before the increment, yet the
-     * increment still has to happen before the function leaves. Applying the
-     * pending side effects before the value was read returned the modified
-     * variable instead, so take a copy first and return that.
-     */
-    if (se_idx > 0 && rs1) {
-        var_t *snapshot = require_var(parent);
-        snapshot->type = rs1->type;
-        snapshot->ptr_level = rs1->ptr_level;
-        snapshot->var_name = gen_name();
-        add_insn(parent, bb, OP_assign, snapshot, rs1, NULL, 0, NULL);
-        rs1 = snapshot;
-    }
-    perform_side_effect(parent, bb);
 
     /* Every ordinary use of a function designator converts it to a pointer.
      * This includes scalar conversions such as `_Bool f(void) { return cb; }`,
@@ -2397,6 +2457,23 @@ void parse_array_init(var_t *var, block_t *parent, basic_block_t **bb)
             if (is_implicit && count >= MAX_IMPLICIT_ARRAY)
                 error_at("Too many elements in array initializer",
                          next_token_loc());
+
+            /* An element of an array of callbacks is a callback object. */
+            if (val && !var->type->array_element_pointee_func_signature &&
+                !var->pointee_func_signature &&
+                (var->func_signature ||
+                 (var->type->func_signature &&
+                  !var->type->is_direct_function_type && !var->ptr_level))) {
+                var_t element = {0};
+
+                element.type = var->type;
+                element.ptr_level = var->func_signature ? var->ptr_level : 0;
+                element.is_func = true;
+                element.func_signature = var->func_signature
+                                             ? var->func_signature
+                                             : var->type->func_signature;
+                diagnose_function_pointer_conversion(val, &element);
+            }
 
             if (val && var->type->array_element_pointee_func_signature) {
                 /* The array descriptor is not an element descriptor. Build the

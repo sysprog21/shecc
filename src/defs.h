@@ -76,8 +76,6 @@
 #define MAX_FIELDS 96
 #define MAX_TYPES 256
 #define MAX_LABELS 256
-/* Pending postfix ++/-- effects in one statement; each one appends 3. */
-#define MAX_SIDE_EFFECT 64
 /* Elements captured from an implicitly sized array initializer. */
 #define MAX_IMPLICIT_ARRAY 256
 /* A self-compile emits ~101k ph2_ir; one pointer per slot in PH2_IR_FLATTEN. */
@@ -816,6 +814,12 @@ struct var {
      * other void pointer converts to a function pointer.
      */
     bool is_void_null_pointer;
+
+    /* For a callback slot, whether the callback pointer it finally reaches is
+     * itself const or volatile: `int (*const *slot)(int)`.
+     */
+    bool callback_is_const;
+    bool callback_is_volatile;
 
     /* `&__func__` is a pointer to the compiler's static character array. Its
      * address has the same machine representation as the decayed char pointer,

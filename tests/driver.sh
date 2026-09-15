@@ -1930,6 +1930,18 @@ int f(void)
 int main(void) { return f() - 1; }
 EOF
 
+# A postfix update of a volatile object reads it once, where it is evaluated.
+try_ir_count 2 f 'load %x[0-9]+, -?[0-9]+\(gp\)' << EOF
+volatile int status;
+int f(void)
+{
+    status++;
+    status--, 0;
+    return 1;
+}
+int main(void) { return f() - 1; }
+EOF
+
 # A volatile local lives in its slot: storing it does not let the next read
 # reuse the stored register.
 try_ir_count 2 f 'load %x[0-9]+, -?[0-9]+\(sp\)' << EOF
@@ -2539,6 +2551,147 @@ int main(void) {
     r += (-arr[1] == -2 && -x-- == -6) * 8192;
     r += (x == 5) * 16384;
     return r == 32767;
+}
+EOF
+
+# A postfix update is complete at the next sequence point (C99 6.5.2.4, 6.5.15,
+# 6.5.13, 6.5.14, 6.5.2.2p10), and happens only when its operand is evaluated:
+# deferring it to the end of the statement ran skipped updates and let the
+# second operand of && see the old value.
+try_ 0 << EOF
+int g;
+int seen(int v) { return g * 10 + v; }
+int main(void) {
+    int x = 7, y = 0, z = 3, w;
+    if (!((x-- == 7 && x == 6) ? 1 : 0)) return 1;
+    0 && y++;
+    1 || y++;
+    w = y ? y++ : 5;
+    if (y != 0 || w != 5) return 2;
+    if ((z++ || z) != 1 || (z++ ? z : 0) != 5) return 3;
+    g = 1;
+    if (seen(g++) != 21) return 4;
+    return 0;
+}
+EOF
+
+# ++ and -- on a selected element or member step by the pointee of the value it
+# holds: a pointer member or element stepped by one byte in postfix form, and an
+# int element of a pointer, ++p[0], stepped by sizeof(int) in prefix form.
+try_ 0 << EOF
+struct rec { char c; int v; };
+struct holder { int *ip; struct rec *rp; char **cpp; };
+int main(void) {
+    int arr[4] = {1, 2, 3, 4};
+    struct rec recs[2];
+    char *strs[2] = {"a", "b"};
+    struct holder h = {arr, recs, strs}, *hp = &h;
+    int *ips[2] = {arr, arr};
+    int *old = ips[0]++;
+    h.ip++;
+    hp->rp++;
+    h.cpp++;
+    int *p = arr;
+    ++p[0];
+    p[1]--;
+    ++h.ip;
+    if (old != arr || ips[0] != arr + 1 || *h.ip != 3) return 1;
+    if (arr[0] != 2 || arr[1] != 1) return 2;
+    return h.rp != recs + 1 || hp->cpp != strs + 1;
+}
+EOF
+
+# An element of an array of pointers to arrays, or of a pointer to such
+# pointers, still points to a whole row, so *pas[0] designates the row; and
+# arithmetic on the array or pointer steps over pointers. The dereference was
+# rejected, and pas + 1 stepped by a row.
+try_ 0 << EOF
+struct holder { int (*row)[3]; };
+int m[2][3] = {{1, 2, 3}, {4, 5, 6}};
+int (*gpas[2])[3] = {m, m + 1};
+int main(void)
+{
+    int (*pas[2])[3] = {m, m + 1};
+    int (**pr)[3] = pas;
+    int (**q)[3] = pas + 1;
+    struct holder h = {m + 1}, *hp = &h;
+    int *e = *pas[1];
+    if ((*pas[0])[2] != 3 || (*pas[1])[0] != 4 || pas[1][0][1] != 5) return 1;
+    if ((*gpas[1])[2] != 6 || (*hp->row)[1] != 5 || (*h.row)[0] != 4) return 2;
+    (*pas[1])[2] = 9;
+    if (m[1][2] != 9 || sizeof(*pas[0]) != 3 * sizeof(int)) return 3;
+    if ((*pr[1])[1] != 5 || (**pr)[2] != 3 || e[2] != 9) return 4;
+    if ((**(pas + 1))[1] != 5 || (**q)[0] != 4 || q - pas != 1) return 5;
+    if ((**(pr + 1))[2] != 9 || *(*pas[0] + 1) != 2) return 6;
+    return 0;
+}
+EOF
+
+# Compound assignment scales a pointer operand as ++ and -- step it, also when
+# the pointer is selected by a member or subscript; there it was not scaled.
+try_ 0 << EOF
+struct h { int *ip; char **cpp; int (*row)[3]; };
+int main(void)
+{
+    int arr[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    int m[3][3];
+    char *strs[4];
+    int *ps[2] = {arr, arr};
+    int (*pas[1])[3] = {m};
+    struct h s = {arr, strs, m}, *sp = &s;
+    int *p = arr;
+    s.ip += 2;
+    sp->cpp += 3;
+    ps[1] -= -3;
+    s.row += 1;
+    pas[0] += 2;
+    p += 5;
+    p[0] += 10;
+    ps[0][1] -= 1;
+    if (s.ip != arr + 2 || s.cpp != strs + 3 || ps[1] != arr + 3) return 1;
+    if (s.row != m + 1 || pas[0] != m + 2 || p != arr + 5) return 2;
+    return arr[5] != 15 || arr[1] != 0;
+}
+EOF
+
+# The element or member step also covers a typedef'd pointer, which steps by its
+# pointee, and a pointer to an array, which steps by a whole row; the latter
+# stepped by one element.
+try_ 0 << EOF
+typedef int *iptr;
+typedef struct rec { char c; int v; } *rptr;
+typedef iptr *ipptr;
+struct rows { int (*row)[3]; iptr ip; };
+int main(void)
+{
+    int arr[4] = {1, 2, 3, 4};
+    struct rec recs[2];
+    int m[2][3] = {{1, 2, 3}, {4, 5, 6}};
+    iptr ips[2] = {arr, arr};
+    rptr rps[2];
+    rps[0] = recs;
+    rps[1] = recs;
+    ipptr ipps[1] = {ips};
+    int (*pas[2])[3] = {m, m};
+    struct rows r = {m, arr}, *rp = &r;
+    iptr *old = ipps[0]++;
+    ips[0]++;
+    ++ips[1];
+    ips[1]--;
+    rps[1]++;
+    pas[0]++;
+    --pas[1];
+    ++pas[1];
+    int (*prev)[3] = pas[1]++;
+    r.row++;
+    rp->ip++;
+    ++r.ip;
+    if (ips[0] != arr + 1 || ips[1] != arr || *ips[0] != 2) return 1;
+    if (rps[1] != recs + 1 || ipps[0] != ips + 1 || old != ips) return 2;
+    if (pas[0] != m + 1 || prev != m || pas[1] != m + 1)
+        return 3;
+    if (r.row != m + 1 || (*r.row)[0] != 4 || r.ip != arr + 2) return 4;
+    return 0;
 }
 EOF
 try_compile_error << EOF
@@ -4781,6 +4934,33 @@ int main(void) {
     int values[4] = {1, 2, 3, 4};
     anonymous_pair_pointer pointer = (anonymous_pair_pointer)values;
     return pointer[1].left + pointer[1].right;
+}
+EOF
+
+# Such a typedef names a pointer, not the record it defines: an array or record
+# of them is initialized with pointers, at file and block scope. The elements
+# were initialized as records, storing garbage.
+try_ 0 << EOF
+typedef struct rec { char c; int v; } *rptr;
+struct rec grecs[2];
+rptr grps[2] = {grecs, grecs + 1};
+rptr gp = grecs + 1;
+struct holder { rptr p; int n; } gh = {grecs, 5};
+int main(void)
+{
+    struct rec recs[2];
+    rptr rps[2] = {recs, recs + 1};
+    rptr p = recs;
+    struct holder h = {recs + 1, 7};
+    rptr one[] = {0, recs};
+    p->v = 3;
+    rps[1]->v = 4;
+    if (grps[0] != grecs || grps[1] != grecs + 1 || gp != grecs + 1) return 1;
+    if (rps[0] != recs || rps[1] != recs + 1) return 2;
+    if (gh.p != grecs || gh.n != 5 || h.p != recs + 1 || h.n != 7) return 3;
+    if (sizeof one != 2 * sizeof(rptr) || one[1] != recs) return 4;
+    if (sizeof(*p) != sizeof(struct rec) || recs[0].v != 3) return 5;
+    return h.p->v != 4;
 }
 EOF
 
@@ -7140,6 +7320,174 @@ int main(void) { typedef int *unsupported[]; return 0; }
 EOF
 try_compile_error << EOF
 int main(void) { typedef int *unsupported[2][2]; return 0; }
+EOF
+
+# An element of a pointer to function pointers is a function pointer: it is
+# loaded as a whole pointer, compares with a function, and is callable with or
+# without a unary *. It was read as an int and could not be called.
+try_ 0 << EOF
+int plus1(int v) { return v + 1; }
+int twice(int v) { return v * 2; }
+int (*fps[2])(int) = {plus1, twice};
+int (**fpp)(int) = fps;
+struct holder { int (**slots)(int); } h = {fps};
+int call_at(int (**cb)(int), int i, int v) { return cb[i](v) + (*cb[i])(v); }
+int main(void)
+{
+    int (*one)(int) = fpp[1];
+    if (fpp[1] == 0) return 1;
+    if (fpp[1] != twice) return 2;
+    if (fpp[0] != plus1) return 3;
+    if (fpp[0](1) != 2 || (*fpp[1])(6) != 12 || one(4) != 8) return 4;
+    if (h.slots[1](2) != 4 || (*h.slots[0])(2) != 3) return 5;
+    return call_at(fpp, 1, 3) != 12;
+}
+EOF
+
+# A function pointer loaded from an element or member keeps its prototype as a
+# value, so a parenthesized selection is still callable, with or without a unary
+# *, and compares with a function. These were rejected.
+try_ 0 << EOF
+int plus1(int v) { return v + 1; }
+int twice(int v) { return v * 2; }
+int (*fps[2])(int) = {plus1, twice};
+int (**fpp)(int) = fps;
+struct holder { int (*fp)(int); } s = {twice};
+int main(void)
+{
+    int (*local[2])(int) = {twice, plus1};
+    if ((fps[1])(4) != 8) return 1;
+    if ((*(fps[1]))(4) != 8) return 2;
+    if (fps[1] != twice) return 3;
+    if ((*(fpp[0]))(1) != 2) return 4;
+    if ((*(s.fp))(2) != 4 || (s.fp)(3) != 6) return 5;
+    if ((local[1])(1) != 2 || (*(local[0]))(1) != 2) return 6;
+    if ((*(*fpp))(1) != 2) return 7;
+    return 0;
+}
+EOF
+
+# A parameter declared as an array of function pointers is adjusted to a pointer
+# to function pointers (C99 6.7.5.3p7): it can be subscripted, called through,
+# measured, assigned and passed on. Unsized, it could not be subscripted, and a
+# dereference of it crashed.
+try_ 0 << EOF
+int plus1(int v) { return v + 1; }
+int twice(int v) { return v * 2; }
+int (*fps[2])(int) = {plus1, twice};
+int inner(int (**cb)(int), int v) { return cb[1](v); }
+int unsized(int (*cb[])(int), int v);
+int unsized(int (**cb)(int), int v) { return (*cb[1])(v) + (**cb)(v); }
+int sized(int (*cb[2])(int), int v)
+{
+    int (*first)(int) = cb[0];
+    if (sizeof cb != sizeof(void *) || cb[0] != plus1) return 100;
+    cb = fps;
+    return first(v) + cb[1](v) + inner(cb, v);
+}
+int main(void)
+{
+    if (unsized(fps, 5) != 16) return 1;
+    return sized(fps, 3) != 16;
+}
+EOF
+
+# A pointer to function pointers points to objects, so it takes pointer
+# arithmetic and relational comparison (C99 6.5.6, 6.5.8), and so does the array
+# of function pointers that decays to one, at file and block scope. The array
+# was rejected, and the pointer stepped by an int on LP64.
+try_ 0 << EOF
+int plus1(int v) { return v + 1; }
+int twice(int v) { return v * 2; }
+int (*fps[3])(int) = {plus1, twice, plus1};
+int (**gend)(int) = fps + 3;
+int (**gmid)(int) = fps + 1;
+struct box { int (**slots)(int); } gbox = {fps};
+int main(void)
+{
+    int (*local[2])(int) = {twice, plus1};
+    int (**p)(int) = fps + 1;
+    int (**q)(int) = 1 + fps;
+    int (**r)(int) = local + 1;
+    int (**e)(int) = fps;
+    int n = 0;
+    if ((**p)(3) != 6 || (*q)(1) != 2 || gmid != p) return 1;
+    if (gend - fps != 3 || p - fps != 1 || fps + 2 - p != 1) return 2;
+    p = p + 1;
+    p -= 2;
+    ++p;
+    p++;
+    gbox.slots += 2;
+    if (p != fps + 2 || gbox.slots != gend - 1) return 3;
+    if ((*(fps + 2))(4) != 5 || (*(r - 1))(1) != 2) return 4;
+    if (*(fps + 1) != twice || p[-1] != twice || !(p > fps)) return 5;
+    while (e != gend)
+        n += (*e++)(1);
+    return n != 6;
+}
+EOF
+
+# An array of function pointers converts to a pointer to function pointers, and
+# so does the address of one of its elements, in an initializer, an assignment
+# and an argument. Both were rejected, and the array was loaded as if it named a
+# single function pointer.
+try_ 0 << EOF
+int plus1(int v) { return v + 1; }
+int twice(int v) { return v * 2; }
+int (*fps[2])(int) = {plus1, twice};
+int apply(int (**cb)(int), int v) { return (**cb)(v) + (*cb)(v); }
+int main(void)
+{
+    int (*local[2])(int) = {twice, plus1};
+    int (**pp)(int) = fps;
+    int (**qq)(int) = &fps[1];
+    int (**rr)(int);
+    rr = local;
+    if ((**pp)(1) != 2 || pp[1](3) != 6) return 1;
+    if ((**qq)(3) != 6 || qq != &fps[1]) return 2;
+    if (apply(fps, 2) != 6 || apply(local, 2) != 8) return 3;
+    if (apply(&fps[1], 1) != 4) return 4;
+    if ((*rr)(1) != 2 || rr[1](1) != 2) return 5;
+    return 0;
+}
+EOF
+
+# Equality with a function designator reduced before a following operator of
+# lower precedence, as in a != twice || b != plus1, compared the raw symbol and
+# the pointer object's slot instead of the two addresses.
+try_ 0 << EOF
+int plus1(int v) { return v + 1; }
+int twice(int v) { return v * 2; }
+int main(void)
+{
+    int (*a)(int) = twice, (*b)(int) = plus1;
+    if (a != twice || b != plus1) return 1;
+    if (!(a == twice && plus1 == b)) return 2;
+    if ((a == plus1 | b == twice) != 0) return 3;
+    return a == twice ? 0 : 4;
+}
+EOF
+
+# Unary * on a function pointer selected by a subscript or member, or reached
+# through a pointer to function pointers, designates the function (C99
+# 6.5.3.2p4), and further asterisks change nothing. These calls were rejected,
+# and (*fps)(4) and *s.fp read the code as a pointer.
+try_ 0 << EOF
+int plus1(int value) { return value + 1; }
+int twice(int value) { return value * 2; }
+int (*fps[2])(int) = {plus1, twice};
+int (**fpp)(int) = fps;
+struct holder { int (*fp)(int); } s = {twice};
+int main(void) {
+    struct holder *sp = &s;
+    int (*local[2])(int) = {twice, plus1};
+    int (*copy)(int) = *s.fp;
+    if ((*fps[1])(4) != 8 || (**fpp)(4) != 5 || (*s.fp)(4) != 8) return 1;
+    if ((*fps)(4) != 5 || (**fps)(4) != 5 || (*sp->fp)(1) != 2) return 2;
+    if ((*local[1])(1) != 2 || (**local)(3) != 6 || copy(5) != 10) return 3;
+    if ((***fpp)(2) != 3) return 4;
+    return 0;
+}
 EOF
 try_ 8 << EOF
 int plus1(int value) { return value + 1; }
@@ -12700,6 +13048,20 @@ items 42 "int x; x = 10; int *p; p = &x; p[0] = 42; exit(x);"
 items 10 "int val; val = 5; int *ptr; ptr = &val; ptr[0] = 10; exit(val);"
 items 7 "int a; a = 3; int *b; b = &a; b[0] = 7; exit(a);"
 
+# Pointers are ordered as unsigned addresses (C99 6.5.8), also on a 32-bit
+# target for an address above 0x80000000; they were compared as signed.
+try_ 1 << EOF
+int lt(int *a, int *b) { return a < b; }
+int main(void) {
+    int *high = (int *) -4, *low = (int *) 16;
+    int *mid = (int *) (unsigned long) 0x90000000UL;
+    int r = ((int *) -1 < (int *) 0) + (high <= low) + lt(high, low);
+    if (high < low || !(mid > low))
+        r++;
+    return r == 0 && high > low && mid >= low && low < mid;
+}
+EOF
+
 # Pointer arithmetic follows operator precedence. A pointer operand used to take
 # a following "+ n" as part of itself, so p + a * b became (p + a) * b and read
 # past the array, and so did p + sizeof(int) * 2.
@@ -17638,6 +18000,478 @@ int widen_cast(unsigned int value) { int s = (int) value; return (s >> 4) == -1;
 int main(void) { return shift_cast(0xffffffffU) + 2 * widen_cast(0xfffffff0U); }
 EOF
 
+# An old-style definition types its identifier list in a declaration list (C99
+# 6.9.1p6), called with and without a prototype in scope. A prototype must agree
+# with the promoted parameter types (6.7.5.3p15), and C99 has no implicit int
+# for an undeclared parameter.
+try_ 0 << EOF
+int add(x, y) int x; int y; { return x + y; }
+int proto(int a, char *s);
+int proto(n, str) int n; char *str; { return n + str[1]; }
+int later();
+int narrow(c, s) char c; short s; { return c + s; }
+int arr(a, n) int a[]; int n; { return a[n - 1]; }
+int fn(f, v) int f(int); int v; { return f(v); }
+int twice(int v) { return 2 * v; }
+long long wide(ll, i) long long ll; register int i; { return ll + i; }
+int multi(a, b, c) int a, *b; char c; { return a + *b + c; }
+int main(void)
+{
+    int v[3] = {4, 5, 6};
+    int seven = 7;
+    int (*fp)() = add;
+    return add(1, 2) != 3 || proto(1, "ab") != 'b' + 1 || later(5) != 6 ||
+           narrow('a', 1) != 'a' + 1 || arr(v, 3) != 6 || fn(twice, 4) != 8 ||
+           wide(0x100000000LL, 1) != 0x100000001LL || multi(1, &seven, 2) != 10 ||
+           fp(3, 4) != 7;
+}
+int later(x) int x; { return x + 1; }
+EOF
+try_ 0 << EOF
+int f(int);
+int f(c) char c; { return c; }
+int main(void) { return f(65) - 65; }
+EOF
+try_compile_error_message "parameter type defaults to int" << EOF
+int f(x) { return x; }
+int main(void) { return f(1) - 1; }
+EOF
+try_compile_error_message "parameter type defaults to int" << EOF
+int f(x, y) int x; { return x + y; }
+int main(void) { return 0; }
+EOF
+try_compile_error_message "declaration of a name not in the identifier list" << EOF
+int f(x) int x; int z; { return x; }
+int main(void) { return 0; }
+EOF
+try_compile_error_message "conflicting types for function declaration" << EOF
+int f(char);
+int f(c) char c; { return c; }
+int main(void) { return 0; }
+EOF
+try_compile_error_message "identifier list requires a function definition" << EOF
+int f(x);
+int main(void) { return 0; }
+EOF
+try_compile_error_message "conflicting types for function declaration" << EOF
+int f(x) int x; { return x; }
+int f(char);
+int main(void) { return 0; }
+EOF
+try_compile_error_message "conflicting types for function declaration" << EOF
+int f(x, y) int x, y; { return x; }
+int f(int);
+int main(void) { return 0; }
+EOF
+
+# Brace initializers take casts to function pointer types, and each element of
+# an array of callbacks converts like any other callback object.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int a(void) { return 7; }
+struct ops { int (*f)(int); int (*g)(void); };
+struct ops o = { (int (*)(int)) inc, (int (*)(void)) a };
+int (*t[2])(void) = { (int (*)(void)) a, 0 };
+int main(void)
+{
+    struct ops lo = { (int (*)(int)) inc, (int (*)(void)) 0 };
+    int (*lt[2])(void) = { (int (*)(void)) a, 0 };
+    return o.f(1) != 2 || o.g() != 7 || t[0]() != 7 || t[1] != 0 || lo.f(2) != 3 || lo.g != 0 || lt[0]() != 7;
+}
+EOF
+try_ 0 << EOF
+typedef int (*thunk_t)(void);
+int inc(int x) { return x + 1; }
+int a(void) { return 7; }
+struct ops { int (*f)(int); int (*g)(void); thunk_t h; };
+struct ops o = { .g = (int (*)(void)) a, .f = (int (*)(int)) &inc, .h = (thunk_t) a };
+struct ops list[2] = { { (int (*)(int)) inc, 0, 0 }, { 0, (int (*)(void)) 0, (thunk_t) 0 } };
+static int (*t[3])(void) = { (int (*)(void)) a, 0, (thunk_t) a };
+int main(void)
+{
+    static struct ops so = { (int (*)(int)) inc };
+    return o.f(1) != 2 || o.g() != 7 || o.h() != 7 || list[0].f(5) != 6 ||
+           list[1].g != 0 || t[2]() != 7 || so.f(0) != 1;
+}
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int inc(int x) { return x + 1; }
+struct ops { int (*f)(int); };
+struct ops o = { (int (*)(void)) inc };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int inc(int x) { return x + 1; }
+int (*t[1])(void) = { (int (*)(int)) inc };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int inc(int x) { return x + 1; }
+int (*t[1])(void) = { inc };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int inc(int x) { return x + 1; }
+int main(void) { int (*t[1])(void) = { inc }; return 0; }
+EOF
+
+# A callback may return a record, through the hidden result pointer, whether it
+# is declared, named by a typedef or returned by a function.
+try_ 0 << EOF
+struct S { int a, b, c, d; };
+typedef struct S (*maker_t)(int);
+struct S make(int x) { struct S s = {x, x + 1, x + 2, x + 3}; return s; }
+struct S (*cb)(int) = make;
+maker_t tcb = make;
+maker_t get_t(void) { return make; }
+int main(void)
+{
+    struct S (*local)(int) = make;
+    struct S r1 = cb(1);
+    struct S r3 = local(20);
+    struct S r4 = tcb(30);
+    struct S r5 = get_t()(40);
+    return r1.d != 4 || r3.c != 22 || r4.b != 31 || r5.d != 43;
+}
+EOF
+try_ 0 << EOF
+struct S { int a, b, c, d; };
+union U { int i; char c[8]; };
+struct S make(int x) { struct S s = {x, x + 1, x + 2, x + 3}; return s; }
+union U make_u(int x) { union U u; u.i = x; return u; }
+struct S (*get(void))(int) { return make; }
+union U (*get_u(void))(int) { return make_u; }
+struct S (*(*pg)(void))(int) = get;
+struct S apply(struct S (*f)(int), int v) { return f(v); }
+int main(void)
+{
+    struct S (*cb)(int) = get();
+    struct S r1 = get()(10);
+    struct S r2 = pg()(20);
+    struct S r3 = apply(get(), 30);
+    union U u = get_u()(7);
+    return r1.a != 10 || r1.d != 13 || r2.c != 22 || r3.b != 31 ||
+           cb(1).d != 4 || u.i != 7;
+}
+EOF
+
+# A compound literal may have a function pointer type, spelled out or through a
+# typedef; at file scope its address is an address constant.
+try_ 0 << EOF
+typedef int (*unary_t)(int);
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+char *name(void) { return "ab"; }
+int main(void)
+{
+    int (*f)(int) = (int (*)(int)){inc};
+    int (**p)(int) = &(int (*)(int)){inc};
+    int (*z)(int) = (int (*)(int)){0};
+    char *(*n)(void) = (char *(*)(void)){name};
+    unary_t t = (unary_t){dec};
+    int (**q)(int) = (int (**)(int)){p};
+    *p = dec;
+    return f(1) != 2 || (*p)(2) != 1 || z != 0 || n()[1] != 'b' || t(5) != 4 ||
+           (*q)(9) != 8 || (int (*)(int)){inc}(4) != 5;
+}
+EOF
+try_ 0 << EOF
+typedef int (*unary_t)(int);
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+int (**gp)(int) = &(int (*)(int)){inc};
+unary_t *gt = &(unary_t){dec};
+int (**gn)(int) = &(int (*)(int)){0};
+int main(void)
+{
+    int r = (*gp)(3) != 4 || (*gt)(3) != 2 || *gn != 0;
+    *gp = dec;
+    return r || (*gp)(3) != 2;
+}
+EOF
+
+# Any pointer level of a callback slot may be qualified, the callback pointer
+# itself included, and a store through a const level is rejected; restrict may
+# not qualify the callback pointer (C99 6.7.3p2).
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+int (*f)(int) = inc;
+int (*const cf)(int) = dec;
+int main(void)
+{
+    int (*g)(int) = dec;
+    int (*const *p)(int) = &f;
+    int (*const **pp)(int) = &p;
+    int (**const *q)(int);
+    int (**m)(int) = &g;
+    int (* volatile *vp)(int) = &g;
+    int r = (*p)(1) != 2 || (**pp)(2) != 3;
+    p = &cf;
+    r |= (*p)(5) != 4 || (**pp)(5) != 4;
+    q = &m;
+    **q = inc;
+    r |= g(1) != 2;
+    *vp = dec;
+    r |= g(1) != 0 || (*vp)(3) != 2;
+    return r;
+}
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { int (*const f)(int) = inc; int (*const *p)(int) = &f; return (*p)(1) - 2; }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { int (*f)(int) = inc; int (**const q)(int) = &f; int (**const *p)(int) = &q; **p = dec; return f(1); }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { int (*volatile f)(int) = inc; int (*volatile *p)(int) = &f; *p = dec; return f(3) - 2; }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } typedef int (**restrict *slot_t)(int); int (*f)(int) = inc; int (**s)(int) = &f; int main(void) { slot_t t = &s; return (**t)(1) - 2; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { int (*const f)(int) = inc; int (*const *p)(int) = &f; *p = dec; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { int (*const f)(int) = inc; int (*const *p)(int) = &f; int (*const **pp)(int) = &p; **pp = dec; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { int (*f)(int) = inc; int (**const q)(int) = &f; int (**const *p)(int) = &q; *p = 0; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; }
+int (*const cf)(int) = inc;
+int main(void) { int (*const *p)(int) = &cf; p[0] = inc; return 0; }
+EOF
+try_compile_error_message "incompatible callback slot types" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } int main(void) { int (*const f)(int) = inc; int (*const *p)(int) = &f; int (*const **pp)(int) = &p; int (**bad)(int) = p; return 0; }
+EOF
+try_compile_error_message "incompatible callback slot types" << EOF
+int inc(int x) { return x + 1; }
+int (*const cf)(int) = inc;
+int main(void) { int (**p)(int) = &cf; return 0; }
+EOF
+try_compile_error_message "incompatible callback slot types" << EOF
+int inc(int x) { return x + 1; }
+int (*f)(int) = inc;
+int (**s)(int) = &f;
+int main(void) { int (*const **pp)(int) = &s; return 0; }
+EOF
+try_compile_error_message "restrict requires a pointer to an object type" << EOF
+int inc(int x) { return x + 1; } int dec(int x) { return x - 1; } typedef int (*restrict *slot_t)(int); int main(void) { return 0; }
+EOF
+
+# A callback slot may be any number of pointers deep: declared, as a typedef at
+# either scope, cast, as a compound literal, returned, or through void *.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+char *name(void) { return "ab"; }
+int (*f)(int) = inc;
+int (**s)(int) = &f;
+int (***t)(int) = &s;
+char *(*nf)(void) = name;
+char *(**ns)(void) = &nf;
+char *(***nt)(void) = &ns;
+int call3(int (***p)(int), int v) { return (**p)(v); }
+int (***get3(void))(int) { return t; }
+int main(void)
+{
+    int (*g)(int) = dec;
+    int (**gs)(int) = &g;
+    int (***lt)(int) = &s;
+    int (****u)(int) = &lt;
+    int r = 0;
+    r |= (**t)(1) != 2;
+    r |= (***u)(3) != 4;
+    r |= (*nf)()[1] != 'b' || (*ns)()[0] != 'a' || (**nt)()[1] != 'b';
+    r |= call3(t, 5) != 6;
+    r |= (**get3())(6) != 7;
+    *lt = gs;
+    r |= (**lt)(5) != 4;
+    **lt = inc;
+    r |= g(1) != 2;
+    ***u = dec;
+    r |= g(1) != 0;
+    r |= **t != dec;
+    return r;
+}
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int (*f)(int) = inc;
+int (**s)(int) = &f;
+int (***t)(int) = &s;
+void *erased = &t;
+int size3 = sizeof(int (***)(int));
+int main(void)
+{
+    int (****u)(int) = (int (****)(int)) erased;
+    int (***v)(int) = (int (***)(int)){&s};
+    int (****w)(int) = &(int (***)(int)){t};
+    char *(***x)(void) = (char *(***)(void)) 0;
+    return (***u)(1) != 2 || (**v)(2) != 3 || (***w)(3) != 4 || x != 0 ||
+           size3 != sizeof(void *) ||
+           sizeof((int (****)(int)) erased) != sizeof(void *);
+}
+EOF
+try_ 0 << EOF
+typedef int (**slot_t)(int);
+typedef int (***slot3_t)(int);
+int inc(int x) { return x + 1; }
+int (*f)(int) = inc;
+slot_t s = &f;
+slot3_t t = &s;
+int main(void)
+{
+    typedef int (***local3_t)(int);
+    local3_t lt = &s;
+    slot3_t *pt = &t;
+    return (**t)(1) != 2 || (**lt)(2) != 3 || (***pt)(3) != 4 ||
+           sizeof(slot3_t) != sizeof(void *);
+}
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; } int (*f)(int) = inc; int (**s)(int) = &f; int main(void) { typedef int (***l3)(int); l3 q = &s; int (**r)(int) = *q; return (*r)(3) - 4; }
+EOF
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int (*f)(int) = inc;
+int (**s)(int) = &f;
+int (** const *t)(int) = &s;
+int main(void)
+{
+    int (** const cs)(int) = &f;
+    int (*** const ct)(int) = &s;
+    return (**t)(1) != 2 || (*cs)(2) != 3 || (**ct)(3) != 4;
+}
+EOF
+try_compile_error_message "incompatible callback slot types" << EOF
+int inc(int x) { return x + 1; }
+int (*f)(int) = inc;
+int (**s)(int) = &f;
+int main(void) { int (***t)(int) = s; return 0; }
+EOF
+try_compile_error_message "incompatible callback slot types" << EOF
+int inc(int x) { return x + 1; }
+int (*f)(int) = inc;
+int (**s)(int) = &f;
+int (***t)(int) = &s;
+int main(void) { int (**q)(int) = t; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << EOF
+int inc(int x) { return x + 1; }
+int (*f)(int) = inc;
+int (**s)(int) = &f;
+int (** const *t)(int) = &s;
+int main(void) { *t = s; return 0; }
+EOF
+
+# A function may return a pointer to a callback slot, spelled out or through a
+# typedef, and a call's result then dereferences to the callback.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int (*slot)(int) = inc;
+int (**get(void))(int) { return &slot; }
+int (**(*pg)(void))(int) = get;
+int main(void)
+{
+    int (**s)(int) = get();
+    return (*s)(1) != 2 || (*get())(2) != 3 || (*pg())(3) != 4;
+}
+EOF
+try_ 0 << EOF
+typedef int (*UP)(int);
+int inc(int x) { return x + 1; }
+UP slot = inc;
+UP *get(void) { return &slot; }
+UP *(*pg)(void) = get;
+int main(void)
+{
+    UP *s = get();
+    return (*s)(1) != 2 || (*get())(2) != 3 || (*pg())(3) != 4;
+}
+EOF
+
+# A function may return a spelled function pointer, `int (*get(void))(int)`, and
+# a pointer may point to such a function.
+try_ 0 << EOF
+int inc(int x) { return x + 1; }
+int dec(int x) { return x - 1; }
+char *hello(void) { return "hi"; }
+int (*get(void))(int);
+int (*get(void))(int) { return inc; }
+int (*pick(int which))(int) { return which ? inc : dec; }
+char *(*greeter(void))(void) { return hello; }
+int (*(*gpg)(void))(int) = get;
+int (*(*table[2])(int))(int) = {pick, pick};
+int use(int (*(*g)(int))(int)) { return g(0)(10); }
+int main(void)
+{
+    int (*local(void))(int);
+    int (*(*pg)(void))(int) = get;
+    int (*(*pp)(int))(int) = &pick;
+    int (*cb)(int) = get();
+    return get()(3) != 4 || pick(1)(5) != 6 || pick(0)(5) != 4 ||
+           greeter()()[1] != 'i' || pg()(1) != 2 || gpg()(2) != 3 ||
+           pp(0)(9) != 8 || cb(0) != 1 || use(pick) != 9 ||
+           local()(7) != 8 || table[1](1)(1) != 2;
+}
+int (*local(void))(int) { return inc; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+char *hello(void) { return "hi"; }
+int (*get2(void))(int) { return hello; }
+int main(void) { return 0; }
+EOF
+try_compile_error_message "conflicting types for function declaration" << EOF
+int inc(int x) { return x + 1; }
+int (*get(void))(void);
+int (*get(void))(int) { return inc; }
+int main(void) { return 0; }
+EOF
+
+# A cast may spell a function pointer type out, in expressions, sizeof and
+# static initializers alike.
+try_ 0 << EOF
+typedef int (*thunk_t)(void);
+int one(int x) { return x + 1; }
+void set(int v) {}
+char *name(void) { return "ab"; }
+int (*global_cast)(void) = (int (*)(void)) one;
+int (*global_null)(int) = (int (*)(int)) 0;
+thunk_t global_typedef = (thunk_t) one;
+int size_one = sizeof(int (*)(void));
+int size_two = sizeof(char *(**)(int, ...));
+int main(void) {
+    static int (*from_address)(int) = (int (*)(int)) &one;
+    int (*f)(void) = (int (*)(void)) one;
+    int (*back)(int) = (int (*)(int)) f;
+    void (*g)(int, ...) = (void (*)(int, ...)) set;
+    int (*fp)(int) = one;
+    int (**pp)(int) = &fp;
+    int (**qq)(int) = (int (**)(int)) pp;
+    char *(*nf)(void) = (char *(*)(void)) 0;
+    char *(*nm)(void) = (char *(*)(void)) name;
+    g(1, 2);
+    return back(2) != 3 || (*qq)(3) != 4 || ((int (*)(int)) f)(4) != 5 ||
+           nf != 0 || nm()[1] != 'b' || global_null != 0 ||
+           ((int (*)(int)) global_cast)(1) != 2 ||
+           ((int (*)(int)) global_typedef)(2) != 3 || from_address(5) != 6 ||
+           size_one + size_two != 2 * sizeof(void *) ||
+           sizeof((int (*)(void)) one) != sizeof(void *);
+}
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int one(int x) { return x + 1; }
+int (*g)(int) = (int (*)(void)) one;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int one(int x) { return x + 1; }
+int main(void) { int (*fp)(int) = (int (*)(void)) one; return 0; }
+EOF
+
 # A function cast to a callback typedef is that callback, even when the
 # prototypes differ, not a pointer to a callback slot.
 try_ 0 << EOF
@@ -17887,6 +18721,29 @@ try_compile_warning "Warning: string literal is read-only" "--warn-string-litera
 int first(char *text) { return text[0]; }
 int main(void) {
     return first("argument");
+}
+EOF
+
+# Assigning a string literal to a char pointer stores it; with the warning
+# enabled it warns as well. The assignment was dropped, and as an expression it
+# was rejected as yielding no value.
+try_ 0 << EOF
+char *g;
+int main(void) {
+    char *s = "a";
+    char *t;
+    s = "xy";
+    t = g = "pq";
+    for (s = "zz"; 0;)
+        ;
+    return s[1] != 'z' || g[1] != 'q' || t[0] != 'p';
+}
+EOF
+try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+int main(void) {
+    char *text;
+    text = "hello";
+    return text[0] != 'h';
 }
 EOF
 

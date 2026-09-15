@@ -309,6 +309,12 @@ typedef struct {
     bool const_pointer;
     unsigned int pointer_const_mask;
     bool volatile_qualified;
+
+    /* A function pointer type name, `(int (*)(int))`: its prototype and the
+     * stars inside the parentheses.
+     */
+    func_t *func_signature;
+    int func_pointer_level;
 } paren_type_name_t;
 
 /* A subscript applied to the value on top of the operand stack, which has no
@@ -580,7 +586,6 @@ static void read_grouped_operand(block_t *parent, basic_block_t **bb)
          * expression supplies the result, which is not an lvalue.
          */
         discard_operand(parent, *bb);
-        perform_side_effect(parent, *bb);
         if (!read_assignment_expression(parent, bb)) {
             read_expr(parent, bb);
             read_ternary_operation(parent, bb);
@@ -957,6 +962,13 @@ static void read_compound_literal_operand(block_t *parent,
     compound_var->is_const_pointer = tn->const_pointer;
     compound_var->pointer_const_mask = tn->pointer_const_mask;
 
+    /* `(callback_t){f}` is a function pointer compound literal as well. */
+    if (!tn->func_signature && !tn->ptr_level && tn->type->func_signature &&
+        !tn->type->is_direct_function_type && !tn->type->array_size) {
+        tn->func_signature = tn->type->func_signature;
+        tn->func_pointer_level = 1;
+    }
+
     /* Check if this is an array compound literal (int[]){...} */
     bool is_array_literal = (tn->ptr_level == -1);
     if (is_array_literal)
@@ -997,6 +1009,48 @@ static void read_compound_literal_operand(block_t *parent,
         }
         opstack_push(compound_var);
         consumed_close_brace = true;
+    } else if (tn->func_signature) {
+        /* `(int (*)(int)){f}` is an unnamed object of a function pointer type,
+         * represented as a declared callback, or with two stars a declared
+         * callback slot, of that type would be.
+         */
+        var_t *initializer;
+
+        if (tn->func_pointer_level == 1) {
+            compound_var->ptr_level =
+                tn->type->func_signature
+                    ? 0
+                    : tn->func_signature->return_def.ptr_level;
+            compound_var->is_func = true;
+            compound_var->func_signature = tn->func_signature;
+            compound_var->parenthesized_function_pointer_level = 1;
+        } else {
+            compound_var->ptr_level = tn->func_signature->return_def.ptr_level +
+                                      tn->func_pointer_level - 1;
+            compound_var->pointee_func_signature = tn->func_signature;
+        }
+        if (lex_peek(T_close_curly, NULL)) {
+            initializer = require_var(parent);
+            initializer->var_name = gen_name();
+            initializer->is_const = true;
+            add_insn(parent, *bb, OP_load_constant, initializer, NULL, NULL, 0,
+                     NULL);
+        } else {
+            read_expr(parent, bb);
+            read_ternary_operation(parent, bb);
+            initializer = opstack_pop();
+            if (lex_accept(T_comma) && !lex_peek(T_close_curly, NULL))
+                error_at("Too many elements in scalar compound literal",
+                         cur_token_loc());
+        }
+        diagnose_function_pointer_conversion(initializer, compound_var);
+        if (incompatible_pointee_callback_conversion(initializer, compound_var))
+            error_at("incompatible callback slot types in compound literal",
+                     cur_token_loc());
+        add_insn(parent, *bb, OP_allocat, compound_var, NULL, NULL, 0, NULL);
+        emit_object_assignment(parent, bb, compound_var, initializer);
+        compound_object = compound_var;
+        opstack_push(compound_var);
     } else if (tn->ptr_level > 0) {
         /* Pointer compound literal: (int*){&x} */
         var_t *initializer;
@@ -1195,6 +1249,11 @@ static void read_compound_literal_operand(block_t *parent,
         lower_record_literal_members(parent, bb, tn, compound_object);
     }
 
+    /* A function pointer compound literal may be called directly. */
+    if (tn->func_signature && tn->func_pointer_level == 1 &&
+        lex_peek(T_open_bracket, NULL))
+        lower_postfix_operators(parent, bb);
+
     /* A non-const scalar or record compound literal is a block-lived object in
      * C99, hence a modifiable lvalue. The ordinary parser previously collapsed
      * scalar literals to their initializer value, losing that property before
@@ -1333,7 +1392,7 @@ static void read_cast_operand(block_t *parent,
      * have no local defining IR, so materialize the code address before OP_cast
      * treats it as an ordinary operand.
      */
-    if (tn->type->func_signature)
+    if (tn->type->func_signature || tn->func_signature)
         expr_var = materialize_function_designator(parent, bb, expr_var);
 
     /* Create variable for cast result */
@@ -1346,6 +1405,19 @@ static void read_cast_operand(block_t *parent,
     if (tn->type->func_signature) {
         cast_var->ptr_level = 1;
         cast_var->func_signature = tn->type->func_signature;
+    }
+
+    /* A spelled function pointer type takes the representation of a declarator
+     * of that type: `int (*)(int)` a callback value, `int (**)(int)` a pointer
+     * to a callback slot, and each further star one more pointer.
+     */
+    if (tn->func_signature && tn->func_pointer_level == 1) {
+        cast_var->ptr_level = 1;
+        cast_var->func_signature = tn->func_signature;
+    } else if (tn->func_signature) {
+        cast_var->ptr_level = tn->func_signature->return_def.ptr_level +
+                              tn->func_pointer_level - 1;
+        cast_var->pointee_func_signature = tn->func_signature;
     }
 
     /* A cast of an integer constant expression remains an integer constant
@@ -1518,6 +1590,12 @@ static void read_parenthesized_operand(block_t *parent, basic_block_t **bb)
         }
 
         bool is_array = false;
+
+        if (abstract_function_pointer_follows()) {
+            tn.func_signature = read_abstract_function_pointer(
+                type, ptr_level, &tn.func_pointer_level);
+            ptr_level = 0;
+        }
 
         /* A parenthesized abstract declarator, such as `(int (*[])[2]){...}`,
          * is an array whose elements are pointers to rows. Keep the outer array
@@ -2005,6 +2083,13 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
                     !lvalue.value_ptr_level)
                     signature = lvalue.type->func_signature;
 
+                /* An element of a pointer to function pointers was loaded with
+                 * the pointee's prototype.
+                 */
+                if (!signature && lvalue.is_reference &&
+                    !lvalue.value_ptr_level)
+                    signature = callee->func_signature;
+
                 if (!signature)
                     error_at("Called object is not a function pointer",
                              cur_token_loc());
@@ -2143,6 +2228,11 @@ int get_pointer_element_size(var_t *ptr_var)
 
     pointer_depth = effective_pointer_depth(ptr_var);
 
+    /* A pointer to function pointers steps over pointer objects. */
+    if (ptr_var->pointee_func_signature && pointer_depth == 1 &&
+        !ptr_var->array_size && !ptr_var->has_unsized_array)
+        return PTR_SIZE;
+
     /* An array of pointers decays to a pointer-to-pointer. The declaration
      * records its element's indirection level, which may be held in a typedef.
      * Account for the decay before deriving the pointed-to object size.
@@ -2232,6 +2322,26 @@ static bool decay_fixed_array_rows(var_t *decayed, const var_t *var)
     return true;
 }
 
+/* The pointer to its first element that an array of function pointers @var
+ * decays to, or @var itself for any other operand. That pointer points to
+ * pointer objects, so arithmetic on it is valid.
+ */
+static var_t *decay_function_pointer_array(block_t *parent,
+                                           basic_block_t **bb,
+                                           var_t *var)
+{
+    var_t *pointer;
+
+    if (!var || !var->is_func || !var->func_signature || var->array_dim2 ||
+        !(var->array_size || var->has_unsized_array))
+        return var;
+    pointer = require_typed_ptr_var(parent, var->type, 1);
+    pointer->var_name = gen_name();
+    pointer->pointee_func_signature = var->func_signature;
+    add_insn(parent, *bb, OP_assign, pointer, var, NULL, 0, NULL);
+    return pointer;
+}
+
 /* Helper function to handle pointer arithmetic (add/sub with scaling) */
 void handle_pointer_arithmetic(block_t *parent,
                                basic_block_t **bb,
@@ -2242,6 +2352,9 @@ void handle_pointer_arithmetic(block_t *parent,
     var_t *ptr_var = NULL;
     var_t *int_var = NULL;
     int element_size = 0;
+
+    rs1 = decay_function_pointer_array(parent, bb, rs1);
+    rs2 = decay_function_pointer_array(parent, bb, rs2);
 
     /* Functions are not objects, so no form of C99 pointer arithmetic may use a
      * function pointer. Keep this before the add/sub split below: only the
@@ -2314,8 +2427,10 @@ void handle_pointer_arithmetic(block_t *parent,
                              !!is_array_declarator(orig_rs1);
             int right_depth = orig_rs2->ptr_level + orig_rs2->type->ptr_level +
                               !!is_array_declarator(orig_rs2);
-            bool left_row = is_pointee_array_pointer(orig_rs1);
-            bool right_row = is_pointee_array_pointer(orig_rs2);
+            bool left_row = is_pointee_array_pointer(orig_rs1) &&
+                            !is_array_declarator(orig_rs1);
+            bool right_row = is_pointee_array_pointer(orig_rs2) &&
+                             !is_array_declarator(orig_rs2);
 
             if ((left_row || right_row) &&
                 !pointee_array_shapes_compatible(orig_rs1, orig_rs2))
@@ -2362,7 +2477,7 @@ void handle_pointer_arithmetic(block_t *parent,
         ptr_var = rs1;
         int_var = rs2;
         element_size =
-            is_pointee_array_pointer(rs1)
+            is_pointee_array_pointer(rs1) && !is_array_declarator(rs1)
                 ? pointee_array_row_stride(rs1)
                 : (is_array_declarator(rs1) && rs1->array_dim2 &&
                            !has_effective_pointer(rs1) && !rs1->is_func
@@ -2374,7 +2489,7 @@ void handle_pointer_arithmetic(block_t *parent,
             ptr_var = rs2;
             int_var = rs1;
             element_size =
-                is_pointee_array_pointer(rs2)
+                is_pointee_array_pointer(rs2) && !is_array_declarator(rs2)
                     ? pointee_array_row_stride(rs2)
                     : (is_array_declarator(rs2) && rs2->array_dim2 &&
                                !has_effective_pointer(rs2) && !rs2->is_func
@@ -2414,7 +2529,12 @@ void handle_pointer_arithmetic(block_t *parent,
          * typedefs cannot be mistaken for a direct callback value.
          */
         vd->ptr_level = ptr_var->ptr_level + !!ptr_var->array_size;
-        if (is_pointee_array_pointer(ptr_var))
+        vd->pointee_func_signature = ptr_var->pointee_func_signature;
+
+        /* A pointer to such pointers, or an array of them, steps by a pointer
+         * and keeps the row shape one level further in.
+         */
+        if (ptr_var->pointee_array_size)
             copy_pointee_array_shape(vd, ptr_var);
         else if (is_array_declarator(ptr_var) && ptr_var->array_dim2 &&
                  !has_effective_pointer(ptr_var) && !ptr_var->is_func) {
@@ -2609,6 +2729,16 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
                     reject_record_operand(rs1);
                     reject_record_operand(rs2);
 
+                    /* As in the final reduction below, equality compares a
+                     * function designator as its pointer. Reduced here, before
+                     * a following operator such as ||, a raw symbol compared
+                     * as garbage.
+                     */
+                    if (top_op == OP_eq || top_op == OP_neq) {
+                        rs1 = materialize_function_designator(parent, bb, rs1);
+                        rs2 = materialize_function_designator(parent, bb, rs2);
+                    }
+
                     /* Handle pointer arithmetic for addition and subtraction */
                     if (is_pointer_operation(top_op, rs1, rs2)) {
                         /* handle_pointer_arithmetic handles both pointer
@@ -2753,10 +2883,13 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
             rs2 = materialize_function_designator(parent, bb, rs2);
         }
 
+        /* An array of function pointers decays to an object pointer. */
         if ((top_op == OP_lt || top_op == OP_leq || top_op == OP_gt ||
              top_op == OP_geq) &&
-            ((rs1 && (rs1->is_func || get_func_signature(rs1))) ||
-             (rs2 && (rs2->is_func || get_func_signature(rs2)))))
+            ((rs1 && !is_array_declarator(rs1) &&
+              (rs1->is_func || get_func_signature(rs1))) ||
+             (rs2 && !is_array_declarator(rs2) &&
+              (rs2->is_func || get_func_signature(rs2)))))
             error_at("Relational comparison requires object pointers",
                      cur_token_loc());
 
@@ -2977,6 +3110,54 @@ static bool lvalue_is_bool(const lvalue_t *lvalue)
     return !lvalue->is_func && is_bool_scalar(lvalue->type, level);
 }
 
+/* The step of ++ and -- on @lvalue, read from @var: the pointee size for a
+ * pointer and 1 otherwise (C99 6.5.2.4, 6.5.3.1). A selected element or member
+ * has the pointer depth of its value, not of the declaration: p[0] of an int *p
+ * steps by 1, and h.p of an int *member by sizeof(int). Using the declaration's
+ * depth for both made one of them step by the wrong size.
+ */
+static int lvalue_step_size(const lvalue_t *lvalue, var_t *var)
+{
+    if (lvalue->is_reference) {
+        if (lvalue->value_ptr_level > 1)
+            return PTR_SIZE;
+        if (!lvalue->value_ptr_level || !lvalue->type)
+            return 1;
+
+        /* A member pointing to function pointers steps over pointer objects. */
+        if (lvalue->decl && lvalue->decl->pointee_func_signature &&
+            !lvalue->subscript_depth && !is_array_declarator(lvalue->decl))
+            return PTR_SIZE;
+
+        /* An element or member pointing to an array, as in `int (*rows[2])[3]`,
+         * steps by a whole row.
+         */
+        if (lvalue->decl && lvalue->decl->pointee_array_size &&
+            !lvalue->pointee_func_signature &&
+            lvalue->subscript_depth ==
+                (is_array_declarator(lvalue->decl) ? 1 : 0))
+            return pointee_array_row_stride(lvalue->decl);
+        if (lvalue->type->ptr_level)
+            return pointer_typedef_pointee_size(
+                lvalue->type, pointee_type_from_pointer_typedef(lvalue->type));
+        return lvalue->type->size;
+    }
+    if (is_pointee_array_pointer(var))
+        return pointee_array_row_stride(var);
+    if (lvalue->ptr_level > 1 ||
+        (lvalue->ptr_level == 1 && var->pointee_func_signature))
+        return PTR_SIZE;
+    if (lvalue->ptr_level)
+        return lvalue->type->size;
+
+    /* A typedef pointer steps by its pointee: the alias's own size is a
+     * pointer's, whether it points at a record or at another pointer.
+     */
+    if (lvalue->type && lvalue->type->ptr_level)
+        return get_pointer_element_size(var);
+    return 1;
+}
+
 /* What follows a completed lvalue: an update or read of the object it names.
  * read_lvalue() finishes with this.
  */
@@ -3010,10 +3191,15 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
             t->is_const_qualified = lvalue->type->is_const_qualified;
 
         /* A loaded pointer-to-array member, as in `*s.rows`, still points to a
-         * whole row.
+         * whole row, and so does an element of an array of such pointers or of
+         * a pointer to one, as in `*pas[0]` or `*pp[1]`.
          */
-        if (!lvalue->subscript_depth && lvalue->decl &&
-            lvalue->decl->pointee_array_size && !lvalue->pointee_func_signature)
+        if (lvalue->decl && lvalue->decl->pointee_array_size &&
+            !lvalue->pointee_func_signature &&
+            (is_array_declarator(lvalue->decl)
+                 ? lvalue->decl->ptr_level == 1 && lvalue->subscript_depth == 1
+                 : !lvalue->subscript_depth ||
+                       lvalue->subscript_depth == lvalue->decl->ptr_level - 1))
             copy_pointee_array_shape(t, lvalue->decl);
 
         /* Retain a callback prototype even through a selected slot. A direct
@@ -3021,6 +3207,24 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
          * after consuming an extra object-pointer level.
          */
         t->func_signature = lvalue->type->func_signature;
+
+        /* `fpp[i]` of an `int (**fpp)(int)` loads a callable function pointer,
+         * and so do `fps[i]` of an `int (*fps[N])(int)` and a member `s.fp`.
+         */
+        if (!t->ptr_level && lvalue->subscript_depth == 1 && lvalue->decl &&
+            lvalue->decl->pointee_func_signature &&
+            lvalue->decl->ptr_level == 1 && !lvalue->decl->array_size &&
+            !lvalue->pointee_func_signature) {
+            t->ptr_level = 1;
+            t->func_signature = lvalue->decl->pointee_func_signature;
+        } else if (!t->ptr_level && lvalue->is_func && lvalue->decl &&
+                   lvalue->decl->is_func && lvalue->decl->func_signature &&
+                   !lvalue->decl->array_dim2 &&
+                   lvalue->subscript_depth ==
+                       (lvalue->decl->array_size ? 1 : 0)) {
+            t->ptr_level = 1;
+            t->func_signature = lvalue->decl->func_signature;
+        }
         if (lvalue->pointee_func_signature) {
             /* `slots[i]` loads a callback slot, not a callable callback.
              * Preserve the element's prototype until one unary `*` consumes
@@ -3061,17 +3265,7 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
         vd = require_var(parent);
         vd->var_name = gen_name();
 
-        /* For pointer arithmetic, increment by the size of pointed-to type */
-        if (!lvalue->is_reference && is_pointee_array_pointer(var))
-            vd->init_val = pointee_array_row_stride(var);
-        else if (lvalue->ptr_level > 1)
-            vd->init_val = PTR_SIZE;
-        else if (lvalue->ptr_level)
-            vd->init_val = lvalue->type->size;
-        else if (lvalue->type && lvalue->type->ptr_level)
-            vd->init_val = get_pointer_element_size(var);
-        else
-            vd->init_val = 1;
+        vd->init_val = lvalue_step_size(lvalue, var);
         if (lvalue_is_wide_integer(lvalue))
             vd->type = lvalue->type;
         opstack_push(vd);
@@ -3151,41 +3345,20 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
             return;
         }
 
-        /* This arm appends up to five entries, so check for room once before
-         * writing any of them.
+        /* Lower the update where the operand is read. C99 6.5.2.4 only requires
+         * it before the next sequence point, and that point may lie inside the
+         * full expression: after the first operand of &&, || and ?:, at a comma
+         * operator, and before a call (C99 6.5.2.2p10). Deferring it to the end
+         * of the statement also ran updates in a skipped operand.
          */
-        if (se_idx + 5 > MAX_SIDE_EFFECT)
-            error_at("Too many postfix operators in one statement",
-                     next_token_loc());
-
-        side_effect[se_idx].opcode = OP_load_constant;
         vd = require_var(parent);
         vd->var_name = gen_name();
 
-        /* Calculate increment size based on pointer type */
-        int increment_size = 1;
-        if (!lvalue->is_reference && is_pointee_array_pointer(var)) {
-            increment_size = pointee_array_row_stride(var);
-        } else if (lvalue->ptr_level > 1 && !lvalue->is_reference) {
-            increment_size = PTR_SIZE;
-        } else if (lvalue->ptr_level && !lvalue->is_reference) {
-            increment_size = lvalue->type->size;
-        } else if (!lvalue->is_reference && lvalue->type &&
-                   lvalue->type->ptr_level > 0) {
-            /* A typedef pointer steps by its pointee, as the prefix form does:
-             * the alias's own size is a pointer's, whether it points at a
-             * record or at another pointer.
-             */
-            increment_size = get_pointer_element_size(var);
-        }
-        vd->init_val = increment_size;
+        vd->init_val = lvalue_step_size(lvalue, var);
         if (lvalue_is_wide_integer(lvalue))
             vd->type = lvalue->type;
-
-        side_effect[se_idx].rd = vd;
-        side_effect[se_idx].rs1 = NULL;
-        side_effect[se_idx].rs2 = NULL;
-        se_idx++;
+        add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        rs2 = vd;
 
         /* Consume whichever operator is actually there. Testing only for '++'
          * picks the right opcode but leaves a '--' in the stream, so postfix
@@ -3197,12 +3370,27 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
             postfix_op = OP_add;
         else
             lex_expect(T_decrement);
-        side_effect[se_idx].opcode = postfix_op;
-        side_effect[se_idx].rs2 = vd;
-        if (lvalue->is_reference)
-            side_effect[se_idx].rs1 = opstack_pop();
-        else
-            side_effect[se_idx].rs1 = operand_stack[operand_stack_idx - 1];
+
+        /* The expression has the value the object held before the update. A
+         * reference was already loaded into a temporary; a variable is itself
+         * the operand, so copy it before it is assigned, and step the copy: a
+         * volatile object is then read once.
+         */
+        if (lvalue->is_reference) {
+            rs1 = opstack_pop();
+        } else {
+            rs1 = operand_stack[operand_stack_idx - 1];
+            t = require_var(parent);
+            t->var_name = gen_name();
+            t->type = rs1->type;
+            t->ptr_level = rs1->ptr_level;
+            t->func_signature = rs1->func_signature;
+            t->pointee_func_signature = rs1->pointee_func_signature;
+            t->pointer_const_mask = rs1->pointer_const_mask;
+            if (is_pointee_array_pointer(rs1))
+                copy_pointee_array_shape(t, rs1);
+            add_insn(parent, *bb, OP_assign, t, rs1, NULL, 0, NULL);
+        }
         vd = require_var(parent);
         vd->var_name = gen_name();
         if (!lvalue->is_reference && is_pointee_array_pointer(var)) {
@@ -3211,51 +3399,25 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
             copy_pointee_array_shape(vd, var);
         } else if (lvalue_is_wide_integer(lvalue))
             vd->type = lvalue->type;
-        side_effect[se_idx].rd = vd;
-        se_idx++;
+        add_insn(parent, *bb, postfix_op, vd, lvalue->is_reference ? rs1 : t,
+                 rs2, 0, NULL);
 
         /* The update converts back to the operand type, which for _Bool is a
          * comparison with zero: b++ leaves 1 and b-- on 0 leaves 1 (C99
-         * 6.5.2.4). The deferred entries are raw instructions, so spell out the
-         * comparison normalize_bool() would emit.
+         * 6.5.2.4).
          */
-        if (lvalue_is_bool(lvalue)) {
-            var_t *zero = require_typed_var(parent, TY_int);
-            var_t *truth = require_typed_var(parent, TY_bool);
-
-            zero->var_name = gen_name();
-            zero->init_val = 0;
-            zero->is_const = true;
-            side_effect[se_idx].opcode = OP_load_constant;
-            side_effect[se_idx].rd = zero;
-            side_effect[se_idx].rs1 = NULL;
-            side_effect[se_idx].rs2 = NULL;
-            se_idx++;
-
-            truth->var_name = gen_name();
-            side_effect[se_idx].opcode = OP_neq;
-            side_effect[se_idx].rd = truth;
-            side_effect[se_idx].rs1 = vd;
-            side_effect[se_idx].rs2 = zero;
-            se_idx++;
-            vd = truth;
-        }
+        if (lvalue_is_bool(lvalue))
+            vd = normalize_bool(parent, bb, vd);
 
         if (lvalue->is_reference) {
-            side_effect[se_idx].opcode = OP_write;
-            side_effect[se_idx].rs2 = vd;
-            side_effect[se_idx].rs1 = opstack_pop();
-            side_effect[se_idx].sz = lvalue->size;
-            side_effect[se_idx].rd = NULL;
-            opstack_push(t);
-            se_idx++;
+            add_insn(parent, *bb, OP_write, NULL, opstack_pop(), vd,
+                     lvalue->size, NULL);
         } else {
-            side_effect[se_idx].opcode = OP_assign;
-            side_effect[se_idx].rs1 = vd;
-            side_effect[se_idx].rd = operand_stack[operand_stack_idx - 1];
-            side_effect[se_idx].rs2 = NULL;
-            se_idx++;
+            mark_var_mutated(rs1);
+            add_insn(parent, *bb, OP_assign, rs1, vd, NULL, 0, NULL);
+            opstack_pop();
         }
+        opstack_push(t);
     } else {
         if (lvalue->is_reference) {
             /* pop the address and keep the read value */
@@ -3547,9 +3709,12 @@ void read_lvalue(lvalue_t *lvalue,
 
                 /* The pointee type above has every typedef star stripped. When
                  * the selected element is itself a pointer, as for `typedef int
-                 * **ipp_t`, it still occupies a pointer slot.
+                 * **ipp_t`, it still occupies a pointer slot, and so does the
+                 * function pointer an `int (**fpp)(int)` selects.
                  */
-                if (lvalue->value_ptr_level > 0)
+                if (lvalue->value_ptr_level > 0 ||
+                    (var->pointee_func_signature && !subscript_depth &&
+                     var->ptr_level == 1))
                     lvalue->size = PTR_SIZE;
             }
 
@@ -3684,7 +3849,9 @@ void read_lvalue(lvalue_t *lvalue,
                 var->is_const_qualified ||
                 (lvalue->pointee_func_signature &&
                  var->type->array_element_is_const_pointer) ||
-                (record_is_const && is_array_declarator(var));
+                (record_is_const && is_array_declarator(var)) ||
+                (var->callback_is_const && subscript_depth == 1 &&
+                 callback_slot_depth(var) == 1);
         } else {
             char token[MAX_ID_LEN];
 
@@ -3981,7 +4148,6 @@ void read_control_expression(block_t *parent, basic_block_t **bb)
 
     while (lex_accept(T_comma)) {
         discard_operand(parent, *bb);
-        perform_side_effect(parent, *bb);
         if (!read_assignment_expression(parent, bb)) {
             read_expr(parent, bb);
             read_ternary_operation(parent, bb);
@@ -4007,7 +4173,6 @@ basic_block_t *read_full_expression_statement(block_t *parent,
 {
     read_control_expression(parent, &bb);
     discard_operand(parent, bb);
-    perform_side_effect(parent, bb);
     lex_expect(T_semicolon);
     return bb;
 }
@@ -4146,7 +4311,6 @@ void read_conditional_true_expression(block_t *parent, basic_block_t **bb)
 
     while (lex_accept(T_comma)) {
         discard_operand(parent, *bb);
-        perform_side_effect(parent, *bb);
         if (!read_assignment_expression(parent, bb)) {
             read_expr(parent, bb);
             read_ternary_operation(parent, bb);
@@ -4432,25 +4596,11 @@ bool read_body_assignment(var_t *var,
                 error_at("Pointer arithmetic on void* is invalid",
                          cur_token_loc());
 
-            /* if we have a pointer, shift it by element size But not if we are
-             * operating on a dereferenced value (array indexing)
+            /* A pointer is shifted by its element size, as ++ and -- step it,
+             * including a pointer selected by a subscript or member.
              */
-            if (!one && (op == OP_add || op == OP_sub) &&
-                !lvalue.is_reference && is_pointee_array_pointer(var))
-                increment_size = pointee_array_row_stride(var);
-            else if (lvalue.ptr_level > 1 && !lvalue.is_reference)
-                increment_size = PTR_SIZE;
-            else if (lvalue.ptr_level && !lvalue.is_reference)
-                increment_size = lvalue.type->size;
-            /* Also check for typedef pointers which have is_ptr == 0 */
-            else if (!lvalue.is_reference && lvalue.type &&
-                     lvalue.type->ptr_level > 0) {
-                /* Keep typedef-hidden depth: a void ** alias advances over
-                 * pointer objects, whereas a direct void * was rejected above
-                 * and never reaches this scaling path.
-                 */
-                increment_size = get_pointer_element_size(var);
-            }
+            if (op == OP_add || op == OP_sub)
+                increment_size = lvalue_step_size(&lvalue, var);
 
             /* If operand is a reference, read the value and push to stack for
              * the incoming addition/subtraction. Otherwise, use the top element
@@ -4768,9 +4918,11 @@ bool read_body_assignment(var_t *var,
                 } else if (incompatible_pointee_callback_conversion(rs1, vd)) {
                     error_at("incompatible callback slot types in assignment",
                              cur_token_loc());
-                } else if (incompatible_const_pointer_conversion(rs1, vd)) {
-                    diagnose_const_pointer_conversion(rs1, vd);
                 } else {
+                    /* A string literal only warns here, and its assignment
+                     * still takes place.
+                     */
+                    diagnose_const_pointer_conversion(rs1, vd);
                     diagnose_integer_to_pointer_conversion(rs1, vd, false);
                     diagnose_function_pointer_conversion(rs1, vd);
                     rs1 = resize_var(parent, bb, rs1, vd);
@@ -5164,7 +5316,9 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
         if ((field && field->is_const_qualified) ||
             address->is_const_qualified ||
             (address_depth > 1 && address_depth <= 32 &&
-             (address_mask & (1U << (address_depth - 2)))))
+             (address_mask & (1U << (address_depth - 2)))) ||
+            (!field && object_address->callback_is_const &&
+             callback_slot_depth(object_address) == 1))
             error_at("assignment of read-only location", cur_token_loc());
         if (!lex_accept(T_assign) && !accept_compound_assign_op(&compound_op))
             error_at("Expected assignment after pointer dereference",

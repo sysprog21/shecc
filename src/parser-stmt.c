@@ -12,16 +12,6 @@
  * definition that precedes it there and cannot be compiled on its own.
  */
 
-void perform_side_effect(block_t *parent, basic_block_t *bb)
-{
-    for (int i = 0; i < se_idx; i++) {
-        insn_t *insn = &side_effect[i];
-        add_insn(parent, bb, insn->opcode, insn->rd, insn->rs1, insn->rs2,
-                 insn->sz, insn->str);
-    }
-    se_idx = 0;
-}
-
 basic_block_t *read_code_block(func_t *func,
                                block_t *parent,
                                basic_block_t *bb);
@@ -238,7 +228,6 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
     lex_expect(T_open_curly);
     while (!lex_accept(T_close_curly)) {
         body = read_body_statement(blk, body);
-        perform_side_effect(blk, body);
     }
 
     /* Complete the deferred no-match dispatch after every case comparison is
@@ -475,7 +464,6 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
         } else {
             read_control_expression(blk, &setup);
             discard_operand(blk, setup);
-            perform_side_effect(blk, setup);
         }
 
         if (!for_decl_semicolon_consumed)
@@ -513,7 +501,6 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     if (!lex_accept(T_close_bracket)) {
         read_control_expression(blk, &inc_);
         discard_operand(blk, inc_);
-        perform_side_effect(blk, inc_);
         lex_expect(T_close_bracket);
     }
 
@@ -1091,9 +1078,6 @@ static basic_block_t *read_block_declarators(
     while (lex_accept(T_comma)) {
         var_t *nv;
 
-        /* add sequence point at T_comma */
-        perform_side_effect(parent, bb);
-
         /* multiple (partial) declarations */
         nv = require_typed_var(parent, type);
         nv->is_static = spec->is_static;
@@ -1330,7 +1314,6 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
             if (func) {
                 lex_expect(T_identifier);
                 emit_direct_call_result(func, false, parent, &bb);
-                perform_side_effect(parent, bb);
                 lex_expect(T_semicolon);
                 return bb;
             }
@@ -1475,14 +1458,14 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
          * callback pointer. The shared declarator parser has already normalized
          * the extra star into decl.ptr_level and retained the prototype as
          * pointee metadata. Keep this first exact typedef form equally narrow:
-         * scalar/void, no arrays or qualifiers, and no deeper pointer
-         * composition.
+         * scalar/void, no arrays or qualifiers; each further star, as in `int
+         * (***slot_t)(int)`, is one more object pointer.
          */
         bool callback_slot_alias =
             callback_slot_signature &&
-            decl.parenthesized_function_pointer_level == 2 &&
-            decl.ptr_level == 1 && !decl.array_size &&
-            !decl.pointee_array_size && !base->ptr_level &&
+            decl.parenthesized_function_pointer_level >= 2 &&
+            decl.ptr_level == decl.parenthesized_function_pointer_level - 1 &&
+            !decl.array_size && !decl.pointee_array_size && !base->ptr_level &&
             !is_record_type(base) && !base->is_floating &&
             !decl.is_const_qualified &&
             !decl.parenthesized_function_pointer_inner_qualified &&
@@ -1492,7 +1475,7 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
             decl.pointee_func_signature &&
             !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
             !decl.array_size && !decl.pointee_array_size &&
-            base->ptr_level == 1 && base->pointee_func_signature &&
+            base->ptr_level >= 1 && base->pointee_func_signature &&
             !decl.is_const_qualified &&
             !decl.parenthesized_function_pointer_inner_qualified &&
             !decl.parenthesized_function_pointer_restrict;
@@ -1880,7 +1863,6 @@ basic_block_t *read_code_block(func_t *func, block_t *parent, basic_block_t *bb)
 
     while (!lex_accept(T_close_curly)) {
         bb = read_body_statement(blk, bb);
-        perform_side_effect(blk, bb);
     }
 
     block_depth--;

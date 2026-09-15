@@ -474,15 +474,12 @@ static void consume_sizeof_postfix_operand(block_t *parent,
             lex_expect(T_identifier);
         else {
             basic_block_t *unevaluated_bb;
-            int saved_side_effects;
 
             lex_expect(T_open_square);
             unevaluated_bb = bb_create(parent);
-            saved_side_effects = se_idx;
             read_expr(parent, &unevaluated_bb);
             read_ternary_operation(parent, &unevaluated_bb);
             opstack_pop();
-            se_idx = saved_side_effects;
             lex_expect(T_close_square);
         }
     }
@@ -689,11 +686,9 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         }
 
         basic_block_t *unevaluated_bb = bb_create(parent);
-        int saved_side_effects = se_idx;
         unevaluated_expression_depth++;
         read_expr_operand(parent, &unevaluated_bb);
         unevaluated_expression_depth--;
-        se_idx = saved_side_effects;
         var_t *expr_var = opstack_pop();
         if (is_bitfield(expr_var))
             error_at("sizeof cannot be applied to a bit-field",
@@ -776,14 +771,12 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
     /* sizeof(expression) - parse the expression and get its type */
     basic_block_t *unevaluated_bb = bb_create(parent);
-    int saved_side_effects = se_idx;
     unevaluated_expression_depth++;
     if (!read_assignment_expression(parent, &unevaluated_bb)) {
         read_expr(parent, &unevaluated_bb);
         read_ternary_operation(parent, &unevaluated_bb);
     }
     unevaluated_expression_depth--;
-    se_idx = saved_side_effects;
     var_t *expr_var = opstack_pop();
     if (is_bitfield(expr_var))
         error_at("sizeof cannot be applied to a bit-field",

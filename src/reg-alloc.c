@@ -61,6 +61,14 @@ void set_ptr_flags(ph2_ir_t *ir, insn_t *insn)
                       is_unsigned_scalar(insn->rs2);
     ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
     ir->src1_is_unsigned = is_unsigned_scalar(insn->rs2);
+
+    /* Addresses are ordered as unsigned values (C99 6.5.8): one above the
+     * signed range still compares greater than one below it.
+     */
+    if ((insn->opcode == OP_lt || insn->opcode == OP_leq ||
+         insn->opcode == OP_gt || insn->opcode == OP_geq) &&
+        (ir->src0_is_pointer || ir->src1_is_pointer))
+        ir->src0_is_unsigned = true;
 }
 
 /* Width of the value a local's frame slot actually holds.

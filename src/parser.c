@@ -16,10 +16,6 @@
 /* C language syntactic analyzer */
 int global_var_idx = 0;
 
-/* Side effect instructions cache */
-insn_t side_effect[MAX_SIDE_EFFECT];
-int se_idx = 0;
-
 /* Control flow utilities */
 basic_block_t *break_bb[MAX_NESTING];
 int break_exit_idx = 0;
@@ -236,7 +232,6 @@ static void compose_block_typedef_array(type_t *alias,
 
 basic_block_t *handle_block_typedef_statement(block_t *parent,
                                               basic_block_t *bb);
-void perform_side_effect(block_t *parent, basic_block_t *bb);
 bool read_assignment_expression(block_t *parent, basic_block_t **bb);
 bool is_null_pointer_constant(var_t *value);
 bool is_record_type(const type_t *type);
@@ -316,6 +311,28 @@ void mark_var_mutated(var_t *var);
 bool has_effective_pointer(const var_t *var)
 {
     return var && (var->ptr_level || (var->type && var->type->ptr_level));
+}
+
+/* The object pointer levels from the callback slot value @var to the callback
+ * it finally reaches: 1 for `int (**)(int)`, 2 for `int (***)(int)`, whatever
+ * pointers the callback's own return type has. 0 for anything else.
+ */
+int callback_slot_depth(const var_t *var)
+{
+    const var_t *returned;
+
+    if (!var || !var->pointee_func_signature)
+        return 0;
+    returned = &((func_t *) var->pointee_func_signature)->return_def;
+
+    /* A pointer to a function typedef, `thunk_t *`, is itself the callback, and
+     * an array descriptor keeps its element's stars apart.
+     */
+    return var->ptr_level +
+           (var->type && !var->type->array_size ? var->type->ptr_level : 0) -
+           (var->type && var->type->is_direct_function_type ? 1 : 0) -
+           returned->ptr_level -
+           (returned->type ? returned->type->ptr_level : 0);
 }
 
 /* Float, double, and long double are reserved C99 type spellings. Their
@@ -691,6 +708,12 @@ type_t *pointee_type_from_pointer_typedef(type_t *type)
 
     if (type->base_type == TYPE_typedef && type->base_struct)
         return type->base_struct;
+
+    /* A block callback slot alias, `typedef int (***slot_t)(int)`, reaches its
+     * scalar through the callback's return type.
+     */
+    if (type->base_type == TYPE_typedef && type->pointee_func_signature)
+        return ((func_t *) type->pointee_func_signature)->return_def.type;
 
     switch (type->base_type) {
     case TYPE_void:
@@ -1769,6 +1792,14 @@ bool incompatible_character_pointer_conversion(const var_t *from,
            !compatible_decl_type(from_pointee, to_pointee);
 }
 
+/* Whether @var is a `void *` with no function type behind it. */
+static bool is_plain_void_pointer(const var_t *var)
+{
+    return var->type && var->type == TY_void && var->ptr_level == 1 &&
+           !var->func_signature && !var->pointee_func_signature &&
+           !var->is_func && !var->array_size;
+}
+
 bool incompatible_pointee_callback_conversion(const var_t *from,
                                               const var_t *to)
 {
@@ -1782,8 +1813,35 @@ bool incompatible_pointee_callback_conversion(const var_t *from,
          !(from->ptr_level || from->type->ptr_level) && !from->is_func &&
          !from->init_val && !from->init_val_hi))
         return false;
+
+    /* A callback slot is an object pointer, which converts to and from void *
+     * at any depth.
+     */
+    if ((from->pointee_func_signature && is_plain_void_pointer(to)) ||
+        (to->pointee_func_signature && is_plain_void_pointer(from)))
+        return false;
     from_signature = from->pointee_func_signature;
     to_signature = to->pointee_func_signature;
+
+    /* A slot may add, but not discard, qualifiers of the callback it reaches.
+     * Deeper slots must agree exactly, as C99 6.5.16.1 requires below the top.
+     */
+    if (from_signature && to_signature &&
+        ((from->callback_is_const && !to->callback_is_const) ||
+         (from->callback_is_volatile && !to->callback_is_volatile) ||
+         (callback_slot_depth(to) > 1 &&
+          (from->callback_is_const != to->callback_is_const ||
+           from->callback_is_volatile != to->callback_is_volatile))))
+        return true;
+
+    /* Slots at different depths point to different types. An element of a
+     * callback slot array keeps its depth on the array descriptor instead.
+     */
+    if (from_signature && to_signature &&
+        !(from->type && from->type->array_element_pointee_func_signature) &&
+        !(to->type && to->type->array_element_pointee_func_signature) &&
+        callback_slot_depth(from) != callback_slot_depth(to))
+        return true;
 
     /* An array parameter of callbacks is adjusted to a callback slot. The
      * parser keeps its element callback signature in `func_signature` while
@@ -1793,6 +1851,11 @@ bool incompatible_pointee_callback_conversion(const var_t *from,
     if (!to_signature && to->func_signature &&
         (to->array_size || to->has_unsized_array))
         to_signature = to->func_signature;
+
+    /* An array of callbacks, as its own operand, decays to a slot pointer. */
+    if (!from_signature && from->is_func && from->func_signature &&
+        (from->array_size || from->has_unsized_array))
+        from_signature = from->func_signature;
 
     /* A value cast to a callback typedef, `(callback_t) f`, carries its own
      * signature: it is the callback, not a pointer to a callback slot.

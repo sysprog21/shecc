@@ -570,6 +570,52 @@ static bool grouped_declarator_name_follows(block_t *scope, bool is_param)
            !(is_param && find_visible_type(name->literal, scope));
 }
 
+/* Whether the abstract declarator of a function pointer type name, such as
+ * `(*)(int)` in `(int (*)(int))` or `(**)(void)`, starts at the next token.
+ */
+bool abstract_function_pointer_follows(void)
+{
+    token_t *token = cur_token->next;
+
+    if (!token || token->kind != T_open_bracket || !(token = token->next) ||
+        token->kind != T_asterisk)
+        return false;
+    while (token && (token->kind == T_asterisk || token->kind == T_const ||
+                     token->kind == T_volatile || token->kind == T_restrict))
+        token = token->next;
+    return token && token->kind == T_close_bracket && token->next &&
+           token->next->kind == T_open_bracket;
+}
+
+/* Read that abstract declarator for a type name whose specifiers and leading
+ * stars named @type and @ptr_level, the return type.
+ *
+ * Return the prototype and set @pointer_level to the stars inside the
+ * parentheses.
+ */
+func_t *read_abstract_function_pointer(type_t *type,
+                                       int ptr_level,
+                                       int *pointer_level)
+{
+    func_t *func = arena_alloc_func();
+
+    *pointer_level = 0;
+    lex_expect(T_open_bracket);
+    while (lex_accept(T_asterisk)) {
+        (*pointer_level)++;
+        while (lex_accept(T_const) || lex_accept(T_volatile) ||
+               lex_accept(T_restrict))
+            ;
+    }
+    lex_expect(T_close_bracket);
+    func->return_def.type = type;
+    func->return_def.ptr_level = ptr_level;
+    func->returns_aggregate =
+        is_record_type(type) && !ptr_level && !type->ptr_level;
+    read_parameter_list_decl(func, true);
+    return func;
+}
+
 /* Whether a parameter's declarator ahead is an abstract function declarator: a
  * parenthesis opening a parameter list, which starts with a type name or is
  * empty, rather than a nested declarator.
@@ -605,6 +651,127 @@ static void read_adjusted_function_parameter(var_t *vd)
     vd->func_signature = func;
     vd->is_func = true;
     vd->parenthesized_function_pointer_level = 1;
+}
+
+void read_inner_var_decl(var_t *vd,
+                         bool anon,
+                         bool is_param,
+                         bool is_record_member);
+
+/* The closing parenthesis matching the opening one at @open. */
+static token_t *matching_close_bracket(token_t *open)
+{
+    int depth = 0;
+
+    for (; open; open = open->next) {
+        if (open->kind == T_open_bracket)
+            depth++;
+        else if (open->kind == T_close_bracket && !--depth)
+            return open;
+    }
+    return NULL;
+}
+
+/* Whether the declarator ahead declares a function returning a function
+ * pointer, `(*get(void))(int)`, or a pointer to one, `(*(*pg)(void))(int)`: a
+ * star inside a parenthesis followed by a parameter list, and another parameter
+ * list after that parenthesis.
+ */
+static bool function_pointer_return_follows(void)
+{
+    token_t *open = cur_token->next;
+    token_t *token;
+    token_t *close;
+
+    if (!open || open->kind != T_open_bracket || !(token = open->next) ||
+        token->kind != T_asterisk)
+        return false;
+    while (token && token->kind == T_asterisk)
+        token = token->next;
+    if (!token || !(token->kind == T_open_bracket ||
+                    (token->kind == T_identifier && token->next &&
+                     token->next->kind == T_open_bracket)))
+        return false;
+    close = matching_close_bracket(open);
+    return close && close->next && close->next->kind == T_open_bracket;
+}
+
+/* Read the declarator that function_pointer_return_follows() recognized. The
+ * type it derives from @vd's base is that of a callback typedef: read the
+ * trailing parameter list into an unnamed callback type, then read the
+ * parenthesized rest of the declarator against that type, just as for
+ * `callback_t get(void)` or `callback_t (*pg)(void)`.
+ */
+static void read_function_pointer_return_declarator(var_t *vd,
+                                                    bool anon,
+                                                    bool is_param,
+                                                    bool is_record_member)
+{
+    token_t *start = cur_token;
+    token_t *close = matching_close_bracket(cur_token->next);
+    token_t *end;
+    func_t *callback = arena_alloc_func();
+    type_t *callback_type = add_type();
+    int stars = 0;
+
+    cur_token = close;
+    memcpy(&callback->return_def, vd, sizeof(var_t));
+    callback->return_def.var_name = NULL;
+    callback->returns_aggregate = is_record_type(vd->type) &&
+                                  !has_effective_pointer(&callback->return_def);
+    read_parameter_list_decl(callback, true);
+    end = cur_token;
+    cur_token = start;
+
+    memcpy(callback_type, vd->type, sizeof(type_t));
+    if (vd->type->base_type == TYPE_struct || vd->type->base_type == TYPE_union)
+        callback_type->base_type = TYPE_typedef;
+    callback_type->type_name[0] = '\0';
+    callback_type->ptr_level = 0;
+    callback_type->pointer_const_mask = 0;
+    callback_type->size = PTR_SIZE;
+    callback_type->alignment = PTR_SIZE;
+    callback_type->func_signature = callback;
+    callback_type->is_direct_function_type = false;
+    callback_type->pointee_func_signature = NULL;
+
+    lex_expect(T_open_bracket);
+    while (lex_accept(T_asterisk)) {
+        stars++;
+        while (lex_accept(T_const) || lex_accept(T_volatile) ||
+               lex_accept(T_restrict))
+            ;
+    }
+
+    /* `(**get(void))(int)` returns a pointer to such a callback, and each
+     * further star one more pointer.
+     */
+    vd->type = callback_type;
+    vd->ptr_level = stars - 1;
+    vd->pointer_const_mask = 0;
+    vd->is_const_pointer = false;
+    read_inner_var_decl(vd, anon, is_param, is_record_member);
+
+    /* `get(void)`: a function returning the callback. */
+    if (!vd->is_func && lex_peek(T_open_bracket, NULL)) {
+        func_t *func = arena_alloc_func();
+        type_t *function_type = add_type();
+
+        memcpy(&func->return_def, vd, sizeof(var_t));
+        read_parameter_list_decl(func, true);
+        function_type->base_type = TYPE_typedef;
+        function_type->size = PTR_SIZE;
+        function_type->func_signature = func;
+        function_type->is_direct_function_type = true;
+        vd->type = function_type;
+        vd->func_signature = func;
+        vd->is_func = true;
+        vd->is_direct_function_declarator = true;
+    }
+    lex_expect(T_close_bracket);
+    if (cur_token != close)
+        error_at("Unexpected token in function declarator", cur_token_loc());
+    cur_token = end;
 }
 
 void read_inner_var_decl(var_t *vd,
@@ -670,6 +837,12 @@ void read_inner_var_decl(var_t *vd,
     grouped_name = (!anon || is_param) &&
                    grouped_declarator_name_follows(vd->scope, is_param);
 
+    if (function_pointer_return_follows()) {
+        read_function_pointer_return_declarator(vd, anon, is_param,
+                                                is_record_member);
+        return;
+    }
+
     /* In a parameter, `int (T)` for a typedef name T and `int (void)` are
      * abstract function declarators, adjusted to pointers like `int fn(T)`.
      */
@@ -684,14 +857,26 @@ void read_inner_var_decl(var_t *vd,
         char temp_name[MAX_VAR_LEN];
         int nested_ptr_level = 0;
         bool inner_array = false;
+        bool callback_const = false;
+        bool callback_volatile = false;
+        bool callback_restrict = false;
 
         do {
             lex_expect(T_asterisk);
             nested_ptr_level++;
             while (true) {
+                /* The first star is the callback pointer itself. */
+                if (nested_ptr_level == 1) {
+                    if (lex_peek(T_const, NULL))
+                        callback_const = true;
+                    else if (lex_peek(T_volatile, NULL))
+                        callback_volatile = true;
+                    else if (lex_peek(T_restrict, NULL))
+                        callback_restrict = true;
+                }
                 if (lex_accept(T_const)) {
                     vd->parenthesized_function_pointer_const = true;
-                    if (nested_ptr_level == 2)
+                    if (nested_ptr_level >= 2)
                         vd->parenthesized_function_pointer_outer_const = true;
                     else
                         vd->parenthesized_function_pointer_inner_qualified =
@@ -701,7 +886,7 @@ void read_inner_var_decl(var_t *vd,
                         vd->pointer_const_mask |=
                             1U << (vd->ptr_level + nested_ptr_level - 1);
                 } else if (lex_accept(T_volatile)) {
-                    if (nested_ptr_level == 2)
+                    if (nested_ptr_level >= 2)
                         vd->parenthesized_function_pointer_outer_volatile =
                             true;
                     else
@@ -710,7 +895,7 @@ void read_inner_var_decl(var_t *vd,
                     vd->is_volatile = true;
                 } else if (lex_accept(T_restrict)) {
                     vd->parenthesized_function_pointer_restrict = true;
-                    if (nested_ptr_level == 2)
+                    if (nested_ptr_level >= 2)
                         vd->parenthesized_function_pointer_outer_restrict =
                             true;
                     else
@@ -907,32 +1092,45 @@ void read_inner_var_decl(var_t *vd,
         vd->func_signature = func;
         vd->is_func = true;
         vd->parenthesized_function_pointer_level = nested_ptr_level;
-        if (nested_ptr_level == 2) {
+        if (nested_ptr_level >= 2) {
             /* `int (**slot)(int)` is an ordinary pointer object whose pointee
              * is the compact one-pointer callback representation. Keep that
              * outer object pointer in var_t; the final unary dereference
-             * restores the callback signature before a call.
+             * restores the callback signature before a call. Each further star,
+             * as in `int (***slot)(int)`, adds one more object pointer.
              */
-            if (vd->parenthesized_function_pointer_inner_qualified)
-                error_at(
-                    "inner callback-slot pointer qualifiers are not yet "
-                    "supported",
-                    cur_token_loc());
-            if (vd->parenthesized_function_pointer_restrict &&
-                !vd->parenthesized_function_pointer_outer_restrict)
-                error_at("callback-slot restrict typedef is not yet supported",
+            int return_depth = vd->ptr_level;
+
+            /* A qualifier on the callback pointer itself, `(*const **slot)`,
+             * belongs to the callback the slot finally reaches. restrict may
+             * qualify only a pointer to an object type (C99 6.7.3p2).
+             */
+            if (callback_restrict)
+                error_at("restrict requires a pointer to an object type",
                          cur_token_loc());
+            vd->callback_is_const = callback_const;
+            vd->callback_is_volatile = callback_volatile;
+            if (callback_volatile &&
+                !vd->parenthesized_function_pointer_outer_volatile)
+                vd->is_volatile = false;
 
             /* The second star is the outer slot pointer. After collapsing the
              * compact callback representation to one retained pointer level,
-             * move that star's const bit from level two to level one.
+             * move each slot star's const bit one level down, dropping the
+             * callback pointer's own.
              */
-            if (vd->parenthesized_function_pointer_outer_const) {
-                vd->pointer_const_mask &= ~2U;
-                vd->pointer_const_mask |= 1U;
-                vd->is_const_pointer = true;
+            if (return_depth < 32) {
+                unsigned int return_mask = (1U << return_depth) - 1;
+                unsigned int slot_mask = vd->pointer_const_mask >> return_depth;
+
+                vd->pointer_const_mask =
+                    (vd->pointer_const_mask & return_mask) |
+                    ((slot_mask >> 1) << return_depth);
             }
             vd->ptr_level += nested_ptr_level - 1;
+            vd->is_const_pointer =
+                vd->ptr_level <= 32 &&
+                (vd->pointer_const_mask & (1U << (vd->ptr_level - 1)));
             vd->pointee_func_signature = vd->func_signature;
             vd->func_signature = NULL;
             vd->is_func = false;
@@ -1624,6 +1822,31 @@ void read_parameter_list_decl(func_t *func, bool anon)
     /* C99's empty parameter list is deliberately not a prototype. */
     if (lex_accept(T_close_bracket))
         return;
+
+    /* An identifier list, `f(x, y)`, names the parameters of an old-style
+     * definition, whose declaration list gives their types (C99 6.9.1p6). It is
+     * no prototype either.
+     */
+    if (lex_peek(T_identifier, token) && strcmp(token, "void") &&
+        !find_visible_type(token, func->return_def.scope) &&
+        cur_token->next->next &&
+        (cur_token->next->next->kind == T_comma ||
+         cur_token->next->next->kind == T_close_bracket)) {
+        do {
+            if (vn >= MAX_PARAMS)
+                error_at("Too many parameters", cur_token_loc());
+            lex_ident(T_identifier, token);
+            for (int i = 0; i < vn; i++)
+                if (!strcmp(func->param_defs[i].var_name, token))
+                    error_at("duplicate parameter name", cur_token_loc());
+            func->param_defs[vn].var_name = intern_string(token);
+            func->param_defs[vn].scope = func->return_def.scope;
+            vn++;
+        } while (lex_accept(T_comma));
+        func->num_params = vn;
+        lex_expect(T_close_bracket);
+        return;
+    }
     if (lex_peek(T_identifier, token) && !strcmp(token, "void")) {
         lex_next();
         if (lex_accept(T_close_bracket)) {
@@ -1665,6 +1888,21 @@ void read_parameter_list_decl(func_t *func, bool anon)
             error_at("Too many parameters", cur_token_loc());
         func->param_defs[vn].scope = func->return_def.scope;
         read_full_var_decl(&func->param_defs[vn], anon, true, false);
+
+        /* An array of function pointers is adjusted to a pointer to function
+         * pointers (C99 6.7.5.3p7), which int (**cb)(int) spells directly.
+         */
+        var_t *param = &func->param_defs[vn];
+        if (param->is_func && param->func_signature && !param->ptr_level &&
+            !param->array_dim2 &&
+            (param->array_size || param->has_unsized_array)) {
+            param->pointee_func_signature = param->func_signature;
+            param->func_signature = NULL;
+            param->is_func = false;
+            param->ptr_level = 1;
+            param->array_size = 0;
+            param->has_unsized_array = false;
+        }
         if (func->param_defs[vn].is_inline)
             error_at("inline specifier requires a function declarator",
                      cur_token_loc());

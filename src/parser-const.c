@@ -19,12 +19,10 @@
 static int read_global_sizeof_expression(block_t *scope)
 {
     basic_block_t *unevaluated_bb = bb_create(scope);
-    int saved_side_effects = se_idx;
     var_t *result;
 
     handle_sizeof_operator(scope, &unevaluated_bb);
     result = opstack_pop();
-    se_idx = saved_side_effects;
     return result->init_val;
 }
 
@@ -173,6 +171,23 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
 }
 
 bool read_global_assignment_var(var_t *var);
+
+/* Diagnose the conversion of the function designator @symbol to @var, or of the
+ * enclosing cast to a function pointer type when there is one.
+ */
+static void diagnose_global_function_conversion(var_t *symbol, var_t *var)
+{
+    var_t cast = {0};
+
+    if (!global_function_cast_signature) {
+        diagnose_function_pointer_conversion(symbol, var);
+        return;
+    }
+    cast.type = global_function_cast_signature->return_def.type;
+    cast.ptr_level = 1;
+    cast.func_signature = global_function_cast_signature;
+    diagnose_function_pointer_conversion(&cast, var);
+}
 
 /* The integer evaluators below yield constants only, so a nonzero value for a
  * pointer object is an integer converted without a cast.
@@ -697,7 +712,6 @@ var_t *read_wide_global_literal_primary(block_t *parent,
     }
     if (global_integer_cast_starts_at(cur_token->next, scope)) {
         basic_block_t *unevaluated_bb = bb_create(parent);
-        int saved_side_effects = se_idx;
         token_t *cast_start = cur_token;
         var_t *operand;
         type_t *type;
@@ -709,7 +723,6 @@ var_t *read_wide_global_literal_primary(block_t *parent,
          * it as a wide primary, so a grouped operand keeps its high word.
          */
         read_expr_operand(parent, &unevaluated_bb);
-        se_idx = saved_side_effects;
         operand = opstack_pop();
         type = operand->type;
         cur_token = cast_start;
@@ -965,6 +978,22 @@ bool read_global_assignment_var(var_t *var)
         return true;
     }
 
+    /* A cast to a function pointer type converts the function designator or
+     * null pointer constant it applies to.
+     */
+    {
+        func_t *cast_signature = read_global_function_pointer_cast(scope);
+
+        if (cast_signature) {
+            func_t *saved_signature = global_function_cast_signature;
+
+            global_function_cast_signature = cast_signature;
+            read_global_assignment_var(var);
+            global_function_cast_signature = saved_signature;
+            return true;
+        }
+    }
+
     /* global initialization must be constant */
     if (global_pointer_cast_starts_here(scope)) {
         int saved_stride = global_pointer_cast_stride;
@@ -1015,7 +1044,7 @@ bool read_global_assignment_var(var_t *var)
             symbol->is_func = true;
             symbol->var_name =
                 intern_string(address_dereference_identifier->literal);
-            diagnose_function_pointer_conversion(symbol, var);
+            diagnose_global_function_conversion(symbol, var);
             add_insn(parent, bb, OP_address_of, addr, var, NULL, 0, NULL);
             add_insn(parent, bb, OP_write, NULL, addr, symbol, PTR_SIZE, NULL);
             return true;
@@ -1040,7 +1069,7 @@ bool read_global_assignment_var(var_t *var)
                 addr->var_name = gen_name();
                 symbol->is_func = true;
                 symbol->var_name = intern_string(token);
-                diagnose_function_pointer_conversion(symbol, var);
+                diagnose_global_function_conversion(symbol, var);
                 lex_expect(T_identifier);
                 if (grouped_function_designator)
                     lex_expect(T_close_bracket);
@@ -1084,8 +1113,9 @@ bool read_global_assignment_var(var_t *var)
                            (lex_peek(T_plus, NULL) ||
                             lex_peek(T_minus, NULL))) {
                     int index = read_global_address_offset(scope, parent, bb);
-                    int stride =
-                        object->ptr_level ? PTR_SIZE : object->type->size;
+                    int stride = object->ptr_level || object->is_func
+                                     ? PTR_SIZE
+                                     : object->type->size;
                     var_t *byte_offset = require_var(parent);
                     var_t *offset_addr = require_ref_var(parent, object->type,
                                                          object->ptr_level);
@@ -1099,6 +1129,8 @@ bool read_global_assignment_var(var_t *var)
                              NULL, 0, NULL);
                     offset_addr->var_name = gen_name();
                     offset_addr->is_global_address = true;
+                    offset_addr->pointee_func_signature =
+                        object_addr->pointee_func_signature;
                     add_insn(parent, bb, OP_add, offset_addr, object_addr,
                              byte_offset, 0, NULL);
                     object_addr = offset_addr;
@@ -1131,12 +1163,67 @@ bool read_global_assignment_var(var_t *var)
             var_t *literal;
             var_t *literal_addr;
             int literal_ptr_level = 0;
+            func_t *callback = NULL;
 
             lex_expect(T_open_bracket);
             literal_type = read_type_name_specifiers(GLOBAL_BLOCK);
             while (lex_accept(T_asterisk))
                 literal_ptr_level++;
+
+            /* `&(int (*)(int)){f}` and `&(callback_t){f}` address a callback
+             * object; the pointer they initialize is a callback slot.
+             */
+            if (literal_type && abstract_function_pointer_follows()) {
+                int callback_level;
+
+                callback = read_abstract_function_pointer(
+                    literal_type, literal_ptr_level, &callback_level);
+                if (callback_level != 1)
+                    error_at("Incompatible compound literal address",
+                             cur_token_loc());
+            } else if (literal_type && literal_type->func_signature &&
+                       !literal_type->is_direct_function_type &&
+                       !literal_type->array_size && !literal_ptr_level) {
+                callback = literal_type->func_signature;
+            }
             lex_expect(T_close_bracket);
+            if (callback) {
+                func_t *slot = var->pointee_func_signature;
+
+                if (!slot && var->ptr_level == 1 && var->type->func_signature &&
+                    !var->type->is_direct_function_type)
+                    slot = var->type->func_signature;
+                if (!slot || var->array_size ||
+                    !compatible_function_signature(slot, callback))
+                    error_at("Incompatible compound literal address",
+                             cur_token_loc());
+                literal = require_typed_var(GLOBAL_BLOCK, literal_type);
+                literal->var_name = gen_name();
+                literal->is_global = true;
+                literal->ptr_level =
+                    literal_type->func_signature ? 0 : literal_ptr_level;
+                literal->is_func = true;
+                literal->func_signature = callback;
+                add_insn(GLOBAL_BLOCK, bb, OP_allocat, literal, NULL, NULL, 0,
+                         NULL);
+                lex_expect(T_open_curly);
+                if (lex_peek(T_close_curly, NULL))
+                    error_at("Scalar compound literal needs an initializer",
+                             next_token_loc());
+                read_global_assignment_var(literal);
+                lex_accept(T_comma);
+                lex_expect(T_close_curly);
+                literal_addr =
+                    require_ref_var(parent, literal->type, literal->ptr_level);
+                literal_addr->var_name = gen_name();
+                literal_addr->is_global_address = true;
+                literal_addr->pointee_func_signature = callback;
+                add_insn(parent, bb, OP_address_of, literal_addr, literal, NULL,
+                         0, NULL);
+                add_insn(parent, bb, OP_assign, var, literal_addr, NULL, 0,
+                         NULL);
+                return true;
+            }
             if (!literal_type || literal_type->array_size ||
                 literal_type->func_signature || var->array_size ||
                 var->ptr_level != literal_ptr_level + 1 ||

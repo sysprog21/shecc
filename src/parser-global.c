@@ -40,6 +40,72 @@ void read_global_init_var(var_t *var, block_t *block)
         read_global_assignment_var(var);
 }
 
+/* The declaration list of an old-style definition, `int f(x, y) int x; char *y;
+ * {`, which gives each identifier of the list its type (C99 6.9.1p6). Only
+ * register may be named as storage class, and C99 has no implicit int for a
+ * parameter the list leaves undeclared.
+ */
+static void read_identifier_list_declarations(func_t *func)
+{
+    if (!lex_peek(T_open_curly, NULL) && !lex_peek(T_identifier, NULL) &&
+        !lex_peek(T_register, NULL) && !lex_peek(T_const, NULL) &&
+        !lex_peek(T_volatile, NULL) && !lex_peek(T_signed, NULL) &&
+        !lex_peek(T_unsigned, NULL) && !lex_peek(T_long, NULL) &&
+        !lex_peek(T_struct, NULL) && !lex_peek(T_union, NULL) &&
+        !lex_peek(T_enum, NULL))
+        error_at("identifier list requires a function definition",
+                 next_token_loc());
+
+    while (!lex_peek(T_open_curly, NULL)) {
+        var_t base = {0};
+        bool is_register = lex_accept(T_register);
+
+        base.scope = func->return_def.scope;
+        read_full_var_decl(&base, false, true, false);
+        for (var_t *decl = &base;;) {
+            var_t *param = NULL;
+
+            for (int i = 0; i < func->num_params; i++)
+                if (!strcmp(func->param_defs[i].var_name, decl->var_name))
+                    param = &func->param_defs[i];
+            if (!param)
+                error_at("declaration of a name not in the identifier list",
+                         cur_token_loc());
+            if (param->type)
+                error_at("duplicate parameter declaration", cur_token_loc());
+            memcpy(param, decl, sizeof(var_t));
+            param->is_register = is_register;
+            param->is_aggregate_param =
+                is_record_type(param->type) && !param->ptr_level;
+            if (!lex_accept(T_comma))
+                break;
+            decl = &base;
+            memset(decl, 0, sizeof(var_t));
+            decl->scope = func->return_def.scope;
+            decl->type = param->type;
+            read_inner_var_decl(decl, false, true, false);
+        }
+        lex_expect(T_semicolon);
+    }
+    for (int i = 0; i < func->num_params; i++)
+        if (!func->param_defs[i].type)
+            error_at("parameter type defaults to int, which C99 removed",
+                     next_token_loc());
+}
+
+/* Whether the old-style parameter @defined agrees with the prototype parameter
+ * @declared: the prototype has the type the default argument promotions give
+ * the old-style one (C99 6.7.5.3p15).
+ */
+static bool identifier_list_param_matches(const var_t *defined,
+                                          const var_t *declared)
+{
+    if (parameter_changes_under_default_promotion(defined))
+        return !declared->ptr_level && !declared->type->ptr_level &&
+               !declared->is_func && declared->type == TY_int;
+    return compatible_function_param_decl(defined, declared);
+}
+
 /* A declarator's base type is already known when this runs. Keeping function
  * completion independent of how that type was spelled lets enum, record, and
  * ordinary scalar declarations share linkage and redeclaration checks.
@@ -127,6 +193,8 @@ bool read_global_function_declarator(block_t *block,
          * for them below before body lowering makes parameter symbols visible.
          */
         read_parameter_list_decl(func, true);
+        if (!func->has_prototype && func->num_params)
+            read_identifier_list_declarations(func);
     }
 
     if (check_decl) {
@@ -149,6 +217,19 @@ bool read_global_function_declarator(block_t *block,
                     error_at("conflicting types for function declaration",
                              next_token_loc());
             }
+        } else if (func->has_prototype && !func_tmp.has_prototype &&
+                   func_tmp.num_params) {
+            /* A prototype after an old-style definition agrees with its
+             * promoted parameter types.
+             */
+            if (func->num_params != func_tmp.num_params || func->va_args)
+                error_at("conflicting types for function declaration",
+                         next_token_loc());
+            for (int i = 0; i < func->num_params; i++)
+                if (!identifier_list_param_matches(&func_tmp.param_defs[i],
+                                                   &func->param_defs[i]))
+                    error_at("conflicting types for function declaration",
+                             next_token_loc());
         } else if (strict_c99 && func->has_prototype &&
                    !func_tmp.has_prototype) {
             /* A variadic prototype and parameters promoted from char, short, or
@@ -164,6 +245,20 @@ bool read_global_function_declarator(block_t *block,
                         &func->param_defs[i]))
                     error_at("conflicting types for function declaration",
                              next_token_loc());
+        } else if (!func->has_prototype && func->num_params &&
+                   func_tmp.has_prototype) {
+            /* An old-style definition of a function declared with a prototype
+             * keeps its own parameter names and that prototype.
+             */
+            if (func->num_params != func_tmp.num_params || func_tmp.va_args)
+                error_at("conflicting types for function declaration",
+                         next_token_loc());
+            for (int i = 0; i < func->num_params; i++)
+                if (!identifier_list_param_matches(&func->param_defs[i],
+                                                   &func_tmp.param_defs[i]))
+                    error_at("conflicting types for function declaration",
+                             next_token_loc());
+            func->has_prototype = true;
         } else if (!func->has_prototype && func_tmp.has_prototype) {
             /* An empty-list definition has no named parameters. It cannot
              * define a function previously declared with fixed parameters or an
@@ -196,7 +291,8 @@ bool read_global_function_declarator(block_t *block,
         if (!allow_definition)
             error_at("function definition must be the only declarator",
                      next_token_loc());
-        if (inherited_direct_function_type)
+        if (inherited_direct_function_type &&
+            !var->is_direct_function_declarator)
             error_at("function definition cannot take its type from a typedef",
                      next_token_loc());
         if (check_decl && func_tmp.bbs)
@@ -937,6 +1033,9 @@ static void read_global_typedef_declarator(block_t *block,
             type->pointer_const_mask |= declarator.pointer_const_mask;
             if (declarator.is_volatile)
                 type->is_volatile_qualified = true;
+
+            /* `typedef int (**slot_t)(int)` names a callback slot. */
+            type->pointee_func_signature = declarator.pointee_func_signature;
             return;
         }
 
