@@ -2047,8 +2047,12 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
                 add_insn(parent, *bb, OP_read, vd, address, NULL, 1, NULL);
             }
         } else if (con) {
+            /* An enumeration constant is an integer constant, so one that is
+             * zero is a null pointer constant (C99 6.3.2.3p3).
+             */
             vd = require_var(parent);
             vd->init_val = con->value;
+            vd->is_const = true;
             vd->var_name = gen_name();
             opstack_push(vd);
             lex_expect(T_identifier);

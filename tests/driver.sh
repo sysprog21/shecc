@@ -11818,6 +11818,15 @@ int main() {
 }
 EOF
 
+# Every declarator of a declaration takes that first element, not only the first
+# declarator; a later one stored the literal's address.
+try_ 105 << EOF
+int main() {
+    int a = 1, b = (int[]){100, 200}, c = (int[]){4};
+    return a + b + c;
+}
+EOF
+
 # Test: Array compound literal assigned to scalar short (non-standard)
 try_ 100 << EOF
 int main() {
@@ -18094,6 +18103,81 @@ int main(void)
            list[1].g != 0 || t[2]() != 7 || so.f(0) != 1;
 }
 EOF
+
+# A cast to a pointer to function pointers, spelled out or through a callback
+# typedef, is an object pointer cast in a static initializer: it converts an
+# integer or an address for a scalar, a member or an element, and keeps the
+# prototype it points to for the slot check. It was rejected as a non-constant.
+try_ 0 << EOF
+typedef int (*callback_t)(void);
+struct holder { int (**slots)(void); int n; };
+int five(void) { return 5; }
+int (*fs[2])(void) = { five, five };
+int (**s)(void) = (int (**)(void)) 4;
+int (***r)(void) = (int (***)(void)) 20;
+int (**q)(void) = (int (**)(void)) fs;
+callback_t *p = (callback_t *) 16;
+callback_t *pa = (int (**)(void)) 24;
+struct holder g = { (int (**)(void)) 12, 3 };
+int (**t[2])(void) = { (int (**)(void)) 4, 0 };
+int main(void)
+{
+    static int (**ls)(void) = (int (**)(void)) 8;
+    static struct holder lg = { (int (**)(void)) 28, 1 };
+    if (s != (int (**)(void)) 4 || r != (int (***)(void)) 20) return 1;
+    if ((*q[1])() != 5 || (void *) p != (void *) 16 || (void *) pa != (void *) 24)
+        return 2;
+    if (g.slots != (int (**)(void)) 12 || g.n != 3) return 3;
+    if (t[0] != (int (**)(void)) 4 || t[1] != 0) return 4;
+    if (ls != (int (**)(void)) 8 || lg.slots != (int (**)(void)) 28) return 5;
+    return 0;
+}
+EOF
+try_compile_error_message "incompatible callback slot types in initializer" << EOF
+int (**s)(void) = (int (**)(int)) 4;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible callback slot types in initializer" << EOF
+struct holder { int (**slots)(void); };
+struct holder g = { (int (**)(int)) 12 };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible callback slot types in array initializer" << EOF
+int (**t[1])(void) = { (int (**)(int)) 4 };
+int main(void) { return 0; }
+EOF
+
+# An integer explicitly cast to a function pointer type initializes a member or
+# element of a static aggregate; it was rejected as an implicit conversion.
+try_ 0 << EOF
+typedef int (*callback_t)(void);
+struct ops { callback_t cb; int (*d)(int); };
+int (*f)(void) = (int (*)(void)) 1;
+callback_t c = (callback_t) 4;
+int (*z)(void) = (int (*)(void)) 0;
+struct ops o = { (callback_t) 1, (int (*)(int)) 8 };
+struct ops arr[2] = { { (callback_t) 3 }, [1].cb = (callback_t) 4 };
+int (*t[2])(void) = { (int (*)(void)) 2, (callback_t) 0 };
+int main(void)
+{
+    static int (*sf)(void) = (int (*)(void)) 3;
+    static int (*st[1])(void) = { (int (*)(void)) 5 };
+    static struct ops so = { (callback_t) 6 };
+    if (f != (callback_t) 1 || c != (callback_t) 4 || z != 0) return 1;
+    if (o.cb != (callback_t) 1 || o.d != (int (*)(int)) 8) return 2;
+    if (arr[0].cb != (callback_t) 3 || arr[1].cb != (callback_t) 4) return 3;
+    if (t[0] != (callback_t) 2 || t[1] != 0) return 4;
+    if (sf != (callback_t) 3 || st[0] != (callback_t) 5 || so.cb != (callback_t) 6)
+        return 5;
+    return 0;
+}
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+typedef int (*callback_t)(void);
+struct ops { callback_t cb; };
+struct ops o = { (int (*)(int)) 1 };
+int main(void) { return 0; }
+EOF
 try_compile_error_message "incompatible function pointer types" << EOF
 int inc(int x) { return x + 1; }
 struct ops { int (*f)(int); };
@@ -18653,6 +18737,21 @@ int main(void) {
            (g4 != 0) + (g5 != 0) + (cl != 0);
 }
 EOF
+try_ 0 << EOF
+enum { ZERO, ONE };
+int take(int *p) { return p == 0; }
+int *ret(void) { return ZERO; }
+int main(void) {
+    int *t = ZERO;
+    char *u;
+    u = ZERO;
+    return !take(ZERO) || t || u || ret() || ONE + ONE != 2;
+}
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+enum { ZERO, ONE };
+int main(void) { int *t = ONE; return t != 0; }
+EOF
 try_compile_error_message "integer converted to pointer without a cast" << EOF
 int main(void) { int *p = 7; return 0; }
 EOF
@@ -18687,7 +18786,77 @@ try_compile_error_message "integer converted to pointer without a cast" << EOF
 int main(void) { static int *p = 5; return 0; }
 EOF
 try_compile_error_message "integer converted to pointer without a cast" << EOF
+int (*f)(void) = 1;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+typedef int (*callback_t)(void);
+int main(void) { static callback_t c = 4; return c != 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int (*f)(void) = (int (*)(int)) 2;
+int main(void) { return 0; }
+EOF
+
+# A function pointer, even one an explicit cast produced, does not convert to an
+# object pointer in a static initializer, for a scalar, a member or an element.
+try_compile_error_message "incompatible function pointer types" << EOF
+int *p = (int (*)(void)) 1;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int main(void) { static void *v = (int (*)(void)) 0; return v != 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int *t[1] = { (int (*)(void)) 1 };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int f(void) { return 0; }
+int main(void) { int (*g)(void) = f; int *t[1] = { g }; return t[0] != 0; }
+EOF
+try_ 0 << EOF
+int x;
+int f(void) { return 1; }
+int *t[2] = { &x, (int *) 4 };
+void *u[2] = { 0, &x };
+int *p = (int *) 8;
+int (*fs[2])(void) = { f, (int (*)(void)) 0 };
+int main(void)
+{
+    return t[0] != &x || t[1] != (int *) 4 || u[1] != &x || p != (int *) 8 ||
+           fs[0]() != 1 || fs[1] != 0;
+}
+EOF
+try_ 0 << EOF
+typedef int (*callback_t)(void);
+int (*f)(void) = (int (*)(void)) 1;
+callback_t c = (callback_t) 4, n = 0;
+int main(void) { return f != (callback_t) 1 || c != (callback_t) 4 || n; }
+EOF
+try_compile_error_message "integer converted to pointer without a cast" << EOF
 int main(void) { int x = 1; int *p = x ? 1 : 2; return 0; }
+EOF
+
+# Every declarator of a block declaration has its initializer converted and
+# diagnosed, not just the first one.
+try_compile_error_message "integer converted to pointer without a cast" << EOF
+int main(void) { int *a = 0, *b = 7; return a != b; }
+EOF
+try_compile_error_message "incompatible function pointer types" << EOF
+int g(void) { return 0; }
+int main(void) { int (*f)(void) = g, (*h)(int) = g; return f != 0 && h != 0; }
+EOF
+try_compile_error_message "discarding const qualifier" << EOF
+int main(void) { const int c = 1; int *a = 0, *b = &c; return a != b; }
+EOF
+try_ 0 << EOF
+int g(void) { return 3; }
+int main(void) {
+    int x = 1, (*h)(void) = g, (*k)(void) = &g, *p = 0, *q = &x;
+    char *e = 0, *s = "x";
+    return h() + k() + x != 7 || p || *q != 1 || e || s[0] != 'x';
+}
 EOF
 
 # Category: Const Qualifiers
@@ -26825,6 +26994,9 @@ begin_category "C99 Conformance Mode" "Testing --std=c99 extension diagnostics"
 
 try_compile_error_flag --std=c99 << EOF
 int main(void) { for (typedef int local_t; ; ) return 0; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) { int a = 1, b = (int[]){2, 3}; return a + b; }
 EOF
 try_compile_error_flag --std=c99 << EOF
 int main(void) { for (static int value = 0; value; ) return value; }

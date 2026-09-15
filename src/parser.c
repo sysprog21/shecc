@@ -1873,6 +1873,16 @@ bool incompatible_pointee_callback_conversion(const var_t *from,
            !compatible_function_signature(from_signature, to_signature);
 }
 
+/* Diagnose an initializer whose value @from converts to @to between
+ * incompatible callback slot types.
+ */
+void diagnose_callback_slot_initializer(const var_t *from, const var_t *to)
+{
+    if (incompatible_pointee_callback_conversion(from, to))
+        error_at("incompatible callback slot types in initializer",
+                 cur_token_loc());
+}
+
 /* The rest of the parser, in the order it was written. Each file depends on
  * what the ones before it define, so the order below is load-bearing and must
  * not be sorted.

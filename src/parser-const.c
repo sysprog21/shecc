@@ -190,15 +190,20 @@ static void diagnose_global_function_conversion(var_t *symbol, var_t *var)
 }
 
 /* The integer evaluators below yield constants only, so a nonzero value for a
- * pointer object is an integer converted without a cast.
+ * pointer object, a function pointer among them, is an integer converted
+ * without a cast. Under a cast to a function pointer type, the conversion is
+ * the explicit one the cast performs.
  */
 static void reject_global_integer_pointer(const var_t *dest, const var_t *src)
 {
-    if (effective_pointer_depth(dest) && !dest->array_size &&
-        !is_pointer_like_value((var_t *) src) && !src->is_func &&
-        !src->is_string_literal && (src->init_val || src->init_val_hi))
-        error_at("integer converted to pointer without a cast",
-                 cur_token_loc());
+    if ((effective_pointer_depth(dest) || dest->is_func) && !dest->array_size) {
+        if (global_function_cast_signature)
+            diagnose_global_function_conversion((var_t *) src, (var_t *) dest);
+        else if (!is_pointer_like_value((var_t *) src) && !src->is_func &&
+                 !src->is_string_literal && (src->init_val || src->init_val_hi))
+            error_at("integer converted to pointer without a cast",
+                     cur_token_loc());
+    }
 }
 
 void emit_global_scalar_assignment(block_t *parent,
@@ -997,13 +1002,17 @@ bool read_global_assignment_var(var_t *var)
     /* global initialization must be constant */
     if (global_pointer_cast_starts_here(scope)) {
         int saved_stride = global_pointer_cast_stride;
-        int stride = read_global_pointer_cast(scope);
+        func_t *slot_signature;
+        int stride = read_global_pointer_cast(scope, &slot_signature);
 
         /* In a chain of casts the outermost one decides the stride. */
         if (saved_stride)
             stride = saved_stride;
         if (!global_address_operand_starts_here(scope)) {
-            rs1 = read_global_cast_integer_address(parent, bb, scope, stride);
+            rs1 = read_global_cast_integer_address(parent, bb, scope, stride,
+                                                   slot_signature);
+            if (rs1->pointee_func_signature)
+                diagnose_callback_slot_initializer(rs1, var);
             emit_global_scalar_assignment(parent, bb, var, rs1);
             return true;
         }
@@ -1138,9 +1147,7 @@ bool read_global_assignment_var(var_t *var)
                 if (explicit_address)
                     object_addr = read_global_address_designator(
                         scope, parent, &bb, &object, object_addr, false);
-                if (incompatible_pointee_callback_conversion(object_addr, var))
-                    error_at("incompatible callback slot types in initializer",
-                             cur_token_loc());
+                diagnose_callback_slot_initializer(object_addr, var);
                 add_insn(parent, bb, OP_assign, var, object_addr, NULL, 0,
                          NULL);
                 return true;

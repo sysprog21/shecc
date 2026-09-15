@@ -816,6 +816,131 @@ static bool read_block_function_declarator(block_t *parent, var_t *var)
     return ended;
 }
 
+/* Convert the value @expr_result of a block declarator's scalar initializer to
+ * @var and store it, with the diagnostics every declarator of a declaration
+ * shares.
+ */
+static void emit_scalar_initializer(block_t *parent,
+                                    basic_block_t **bb,
+                                    var_t *var,
+                                    var_t *expr_result)
+{
+    /* Keep direct function-pointer initializers on their relocation path, but
+     * every other initializer consumes a function designator as its converted
+     * pointer value.
+     */
+    if (!var->is_func)
+        expr_result = materialize_function_designator(parent, bb, expr_result);
+
+    if (strict_c99 && is_array_literal_placeholder(expr_result) &&
+        !has_effective_pointer(var) && var->array_size == 0)
+        error_at("array compound literal cannot be used as a scalar in C99",
+                 cur_token_loc());
+
+    /* Handle array compound literal to scalar assignment */
+    if (expr_result && expr_result->array_size > 0 && !var->ptr_level &&
+        var->array_size == 0 && var->type &&
+        (var->type->base_type == TYPE_int ||
+         var->type->base_type == TYPE_short) &&
+        expr_result->var_name[0] == '.') {
+        /* Extract first element from compound literal array */
+        var_t *first_elem = require_var(parent);
+        first_elem->type = var->type;
+        first_elem->var_name = gen_name();
+
+        /* Read first element from array at offset 0 expr_result is the array
+         * itself, so we can read directly from it
+         */
+        add_insn(parent, *bb, OP_read, first_elem, expr_result, NULL,
+                 var->type->size, NULL);
+        expr_result = first_elem;
+    }
+
+    diagnose_callback_slot_initializer(expr_result, var);
+    diagnose_const_pointer_conversion(expr_result, var);
+    diagnose_integer_to_pointer_conversion(expr_result, var, false);
+    diagnose_function_pointer_conversion(expr_result, var);
+    emit_object_assignment(parent, bb, var, expr_result);
+}
+
+/* Define the object that the block declarator @var declares, as @spec says, and
+ * lower its initializer. Every declarator of a declaration shares this.
+ */
+static void read_block_declarator_storage(block_t *parent,
+                                          basic_block_t **bb,
+                                          const block_decl_specifiers_t *spec,
+                                          var_t *var)
+{
+    if (is_incomplete_record_object(var))
+        error_at("Incomplete struct/union type cannot define an object",
+                 cur_token_loc());
+    reject_block_redeclaration(parent, var, false, false);
+    add_insn(spec->is_static ? GLOBAL_BLOCK : parent,
+             spec->is_static ? GLOBAL_FUNC->bbs : *bb, OP_allocat, var, NULL,
+             NULL, 0, NULL);
+    add_symbol(*bb, var);
+    if (lex_accept(T_assign)) {
+        validate_string_array_initializer(var);
+        if (spec->is_static) {
+            if (lex_peek(T_open_curly, NULL) &&
+                (var->array_size > 0 || var->has_unsized_array ||
+                 var->ptr_level > 0)) {
+                /* A block-scope static has global storage duration, so its
+                 * brace initializer belongs to the same constant-data lowering
+                 * as a file-scope array.
+                 */
+                parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
+            } else if (global_compound_literal_starts_here() &&
+                       !(var->ptr_level || var->type->ptr_level) &&
+                       is_record_type(var->type)) {
+                parse_global_compound_record_init(var, GLOBAL_BLOCK);
+            } else if (global_compound_literal_starts_here() &&
+                       (var->ptr_level || var->type->ptr_level)) {
+                parse_global_compound_array_init(var, GLOBAL_BLOCK);
+            } else if (global_compound_literal_starts_here()) {
+                parse_global_compound_scalar_init(var, GLOBAL_BLOCK);
+            } else if (lex_peek(T_open_curly, NULL)) {
+                parse_global_record_init(var, GLOBAL_BLOCK);
+            } else {
+                read_global_assignment_var(var);
+            }
+        } else if ((var->has_unsized_array || var->array_size > 0) &&
+                   is_char_array(var) && lex_peek(T_string, NULL)) {
+            parse_string_array_init(var, parent, bb);
+        } else if ((var->has_unsized_array || var->array_size > 0) &&
+                   is_wchar_array(var) && lex_peek(T_wstring, NULL)) {
+            parse_wstring_array_init(var, parent, bb);
+        } else if (lex_peek(T_open_curly, NULL) &&
+                   (var->array_size > 0 || var->has_unsized_array ||
+                    var->ptr_level > 0)) {
+            /* Emit code for locals in functions */
+            parse_array_init(var, parent, bb);
+        } else if (lex_peek(T_open_curly, NULL) && is_record_type(var->type)) {
+            type_t *struct_type = var->type;
+            if (struct_type->base_type == TYPE_typedef &&
+                struct_type->base_struct)
+                struct_type = struct_type->base_struct;
+
+            var_t *struct_addr = require_var(parent);
+            struct_addr->var_name = gen_name();
+            add_insn(parent, *bb, OP_address_of, struct_addr, var, NULL, 0,
+                     NULL);
+            lex_expect(T_open_curly);
+            parse_struct_field_init(parent, bb, struct_type, struct_addr);
+            lex_expect(T_close_curly);
+        } else {
+            if (!read_assignment_expression(parent, bb)) {
+                read_expr(parent, bb);
+                read_ternary_operation(parent, bb);
+            }
+
+            emit_scalar_initializer(parent, bb, var, opstack_pop());
+        }
+    }
+    if (spec->is_static)
+        discard_global_declarator_operand(var);
+}
+
 /* A block-scope declaration whose type handle_declaration() has resolved: every
  * declarator, its initializer, and its storage. @has_base_type says a struct,
  * union or enum specifier has already consumed the base type, so only the
@@ -965,116 +1090,7 @@ static basic_block_t *read_block_declarators(
             reject_ordinary_typedef_collision(parent, var);
         }
     }
-    if (is_incomplete_record_object(var))
-        error_at("Incomplete struct/union type cannot define an object",
-                 cur_token_loc());
-    reject_block_redeclaration(parent, var, false, false);
-    add_insn(spec->is_static ? GLOBAL_BLOCK : parent,
-             spec->is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, var, NULL,
-             NULL, 0, NULL);
-    add_symbol(bb, var);
-    if (lex_accept(T_assign)) {
-        validate_string_array_initializer(var);
-        if (spec->is_static) {
-            if (lex_peek(T_open_curly, NULL) &&
-                (var->array_size > 0 || var->has_unsized_array ||
-                 var->ptr_level > 0)) {
-                /* A block-scope static has global storage duration, so its
-                 * brace initializer belongs to the same constant-data lowering
-                 * as a file-scope array.
-                 */
-                parse_array_init(var, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
-            } else if (global_compound_literal_starts_here() &&
-                       !(var->ptr_level || var->type->ptr_level) &&
-                       is_record_type(var->type)) {
-                parse_global_compound_record_init(var, GLOBAL_BLOCK);
-            } else if (global_compound_literal_starts_here() &&
-                       (var->ptr_level || var->type->ptr_level)) {
-                parse_global_compound_array_init(var, GLOBAL_BLOCK);
-            } else if (global_compound_literal_starts_here()) {
-                parse_global_compound_scalar_init(var, GLOBAL_BLOCK);
-            } else if (lex_peek(T_open_curly, NULL)) {
-                parse_global_record_init(var, GLOBAL_BLOCK);
-            } else {
-                read_global_assignment_var(var);
-            }
-        } else if ((var->has_unsized_array || var->array_size > 0) &&
-                   is_char_array(var) && lex_peek(T_string, NULL)) {
-            parse_string_array_init(var, parent, &bb);
-        } else if ((var->has_unsized_array || var->array_size > 0) &&
-                   is_wchar_array(var) && lex_peek(T_wstring, NULL)) {
-            parse_wstring_array_init(var, parent, &bb);
-        } else if (lex_peek(T_open_curly, NULL) &&
-                   (var->array_size > 0 || var->has_unsized_array ||
-                    var->ptr_level > 0)) {
-            /* Emit code for locals in functions */
-            parse_array_init(var, parent, &bb);
-        } else if (lex_peek(T_open_curly, NULL) && is_record_type(var->type)) {
-            type_t *struct_type = var->type;
-            if (struct_type->base_type == TYPE_typedef &&
-                struct_type->base_struct)
-                struct_type = struct_type->base_struct;
-
-            var_t *struct_addr = require_var(parent);
-            struct_addr->var_name = gen_name();
-            add_insn(parent, bb, OP_address_of, struct_addr, var, NULL, 0,
-                     NULL);
-            lex_expect(T_open_curly);
-            parse_struct_field_init(parent, &bb, struct_type, struct_addr);
-            lex_expect(T_close_curly);
-        } else {
-            if (!read_assignment_expression(parent, &bb)) {
-                read_expr(parent, &bb);
-                read_ternary_operation(parent, &bb);
-            }
-
-            var_t *expr_result = opstack_pop();
-
-            /* Keep direct function-pointer initializers on their relocation
-             * path, but every other initializer consumes a function designator
-             * as its converted pointer value.
-             */
-            if (!var->is_func)
-                expr_result =
-                    materialize_function_designator(parent, &bb, expr_result);
-
-            if (strict_c99 && is_array_literal_placeholder(expr_result) &&
-                !has_effective_pointer(var) && var->array_size == 0)
-                error_at(
-                    "array compound literal cannot be used as a scalar in "
-                    "C99",
-                    cur_token_loc());
-
-            /* Handle array compound literal to scalar assignment */
-            if (expr_result && expr_result->array_size > 0 && !var->ptr_level &&
-                var->array_size == 0 && var->type &&
-                (var->type->base_type == TYPE_int ||
-                 var->type->base_type == TYPE_short) &&
-                expr_result->var_name[0] == '.') {
-                /* Extract first element from compound literal array */
-                var_t *first_elem = require_var(parent);
-                first_elem->type = var->type;
-                first_elem->var_name = gen_name();
-
-                /* Read first element from array at offset 0 expr_result is the
-                 * array itself, so we can read directly from it
-                 */
-                add_insn(parent, bb, OP_read, first_elem, expr_result, NULL,
-                         var->type->size, NULL);
-                expr_result = first_elem;
-            }
-
-            if (incompatible_pointee_callback_conversion(expr_result, var))
-                error_at("incompatible callback slot types in initializer",
-                         cur_token_loc());
-            diagnose_const_pointer_conversion(expr_result, var);
-            diagnose_integer_to_pointer_conversion(expr_result, var, false);
-            diagnose_function_pointer_conversion(expr_result, var);
-            emit_object_assignment(parent, &bb, var, expr_result);
-        }
-    }
-    if (spec->is_static)
-        discard_global_declarator_operand(var);
+    read_block_declarator_storage(parent, &bb, spec, var);
     while (lex_accept(T_comma)) {
         var_t *nv;
 
@@ -1099,71 +1115,7 @@ static basic_block_t *read_block_declarators(
                 return bb;
             continue;
         }
-        if (is_incomplete_record_object(nv))
-            error_at("Incomplete struct/union type cannot define an object",
-                     cur_token_loc());
-        reject_block_redeclaration(parent, nv, false, false);
-        add_insn(spec->is_static ? GLOBAL_BLOCK : parent,
-                 spec->is_static ? GLOBAL_FUNC->bbs : bb, OP_allocat, nv, NULL,
-                 NULL, 0, NULL);
-        add_symbol(bb, nv);
-        if (lex_accept(T_assign)) {
-            validate_string_array_initializer(nv);
-            if (spec->is_static) {
-                if (lex_peek(T_open_curly, NULL) &&
-                    (nv->array_size > 0 || nv->has_unsized_array ||
-                     nv->ptr_level > 0)) {
-                    parse_array_init(nv, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
-                } else if (global_compound_literal_starts_here() &&
-                           !(nv->ptr_level || nv->type->ptr_level) &&
-                           is_record_type(nv->type)) {
-                    parse_global_compound_record_init(nv, GLOBAL_BLOCK);
-                } else if (global_compound_literal_starts_here() &&
-                           (nv->ptr_level || nv->type->ptr_level)) {
-                    parse_global_compound_array_init(nv, GLOBAL_BLOCK);
-                } else if (global_compound_literal_starts_here()) {
-                    parse_global_compound_scalar_init(nv, GLOBAL_BLOCK);
-                } else if (lex_peek(T_open_curly, NULL)) {
-                    parse_global_record_init(nv, GLOBAL_BLOCK);
-                } else {
-                    read_global_assignment_var(nv);
-                }
-            } else if ((nv->has_unsized_array || nv->array_size > 0) &&
-                       is_char_array(nv) && lex_peek(T_string, NULL)) {
-                parse_string_array_init(nv, parent, &bb);
-            } else if ((nv->has_unsized_array || nv->array_size > 0) &&
-                       is_wchar_array(nv) && lex_peek(T_wstring, NULL)) {
-                parse_wstring_array_init(nv, parent, &bb);
-            } else if (lex_peek(T_open_curly, NULL) &&
-                       (nv->array_size > 0 || nv->has_unsized_array ||
-                        nv->ptr_level > 0)) {
-                /* Emit code for locals */
-                parse_array_init(nv, parent, &bb);
-            } else if (lex_peek(T_open_curly, NULL) &&
-                       is_record_type(nv->type)) {
-                type_t *struct_type = nv->type;
-                if (struct_type->base_type == TYPE_typedef &&
-                    struct_type->base_struct)
-                    struct_type = struct_type->base_struct;
-
-                var_t *struct_addr = require_var(parent);
-                struct_addr->var_name = gen_name();
-                add_insn(parent, bb, OP_address_of, struct_addr, nv, NULL, 0,
-                         NULL);
-                lex_expect(T_open_curly);
-                parse_struct_field_init(parent, &bb, struct_type, struct_addr);
-                lex_expect(T_close_curly);
-            } else {
-                if (!read_assignment_expression(parent, &bb)) {
-                    read_expr(parent, &bb);
-                    read_ternary_operation(parent, &bb);
-                }
-
-                emit_object_assignment(parent, &bb, nv, opstack_pop());
-            }
-        }
-        if (spec->is_static)
-            discard_global_declarator_operand(nv);
+        read_block_declarator_storage(parent, &bb, spec, nv);
     }
     lex_expect(T_semicolon);
     return bb;

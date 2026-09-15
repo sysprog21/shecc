@@ -261,6 +261,8 @@ func_t *read_global_function_pointer_cast(block_t *scope)
     return signature;
 }
 
+static token_t *matching_close_bracket(token_t *open);
+
 /* Say whether cur_token->next opens a cast to an object pointer type in a
  * static initializer. C99 6.6 lets an address constant and an integer constant
  * be converted by such a cast.
@@ -280,6 +282,25 @@ bool global_pointer_cast_starts_here(block_t *scope)
             if (!has_type)
                 return false;
             is_pointer = true;
+        } else if (token->kind == T_open_bracket && has_type) {
+            /* A pointer to function pointers, `(int (**)(void))`, points to
+             * pointer objects: two or more stars, then a parameter list.
+             */
+            int stars = 0;
+
+            for (token = token->next;
+                 token &&
+                 (token->kind == T_asterisk || token->kind == T_const ||
+                  token->kind == T_volatile || token->kind == T_restrict);
+                 token = token->next)
+                stars += token->kind == T_asterisk;
+            if (stars < 2 || !token || token->kind != T_close_bracket ||
+                !(token = token->next) || token->kind != T_open_bracket)
+                return false;
+            token = matching_close_bracket(token);
+            if (!token || !(token = token->next))
+                return false;
+            return token->kind == T_close_bracket;
         } else if (token->kind == T_identifier) {
             bool is_tag = previous == T_struct || previous == T_union ||
                           previous == T_enum;
@@ -288,9 +309,11 @@ bool global_pointer_cast_starts_here(block_t *scope)
 
             if (!is_tag && !type)
                 return false;
-            if (type && (type->func_signature || type->is_direct_function_type))
+            if (type && type->is_direct_function_type)
                 return false;
-            if (type && type->ptr_level)
+
+            /* A callback typedef takes a star to point to a pointer object. */
+            if (type && type->ptr_level && !type->func_signature)
                 is_pointer = true;
             has_type = true;
         } else if (token->kind == T_struct || token->kind == T_union ||
@@ -303,18 +326,25 @@ bool global_pointer_cast_starts_here(block_t *scope)
             return false;
         previous = token->kind;
     }
+
+    /* Without a star, a callback typedef is the function pointer cast that
+     * read_global_function_pointer_cast() reads.
+     */
     return token && has_type && is_pointer;
 }
 
 /* Consume a cast that global_pointer_cast_starts_here() recognized and return
- * the size of what its pointer type points to.
+ * the size of what its pointer type points to. @slot_signature receives the
+ * prototype of the function pointers that type points to, as `(int (**)(void))`
+ * or `(callback_t *)` do, and NULL for any other pointer.
  */
-int read_global_pointer_cast(block_t *scope)
+int read_global_pointer_cast(block_t *scope, func_t **slot_signature)
 {
     type_t *type;
     int depth = 0;
     int size;
 
+    *slot_signature = NULL;
     lex_expect(T_open_bracket);
     type = read_type_name_specifiers(scope);
     while (lex_accept(T_asterisk)) {
@@ -323,10 +353,27 @@ int read_global_pointer_cast(block_t *scope)
                lex_accept(T_restrict))
             ;
     }
-    lex_expect(T_close_bracket);
     if (!type)
         error_at("Unknown type in pointer cast", cur_token_loc());
-    if (depth + type->ptr_level > 1)
+
+    /* A pointer to function pointers, spelled out or through a callback
+     * typedef, steps over pointer objects.
+     */
+    if (abstract_function_pointer_follows()) {
+        int pointer_level;
+        func_t *signature =
+            read_abstract_function_pointer(type, depth, &pointer_level);
+
+        lex_expect(T_close_bracket);
+        if (pointer_level == 2)
+            *slot_signature = signature;
+        return PTR_SIZE;
+    }
+    lex_expect(T_close_bracket);
+    if (type->func_signature && !type->is_direct_function_type &&
+        !type->ptr_level && depth == 1)
+        *slot_signature = type->func_signature;
+    if (depth + type->ptr_level > 1 || type->func_signature)
         return PTR_SIZE;
     type = pointee_type_from_pointer_typedef(type);
     if (type == TY_void)
@@ -360,13 +407,15 @@ bool global_address_operand_starts_here(block_t *scope)
     return false;
 }
 
-/* Read an integer constant operand of a pointer cast with @stride, and any
- * offset that follows it, as the address constant the cast produces.
+/* Read an integer constant operand of a pointer cast with @stride and
+ * @slot_signature, and any offset that follows it, as the address constant the
+ * cast produces.
  */
 var_t *read_global_cast_integer_address(block_t *parent,
                                         basic_block_t *bb,
                                         block_t *scope,
-                                        int stride)
+                                        int stride,
+                                        func_t *slot_signature)
 {
     var_t *address = require_var(parent);
     int value = read_const_expr_operand(scope);
@@ -377,8 +426,11 @@ var_t *read_global_cast_integer_address(block_t *parent,
     address->init_val = value;
     address->is_const = true;
 
-    /* The cast's result is a pointer, not the integer it was spelled with. */
+    /* The cast's result is a pointer, not the integer it was spelled with, and
+     * a pointer to function pointers keeps their prototype.
+     */
     address->ptr_level = 1;
+    address->pointee_func_signature = slot_signature;
     add_insn(parent, bb, OP_load_constant, address, NULL, NULL, 0, NULL);
     return address;
 }
@@ -493,6 +545,14 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         val = parse_global_constant_value(parent, bb);
         if (val && val->is_func)
             val->func_signature = cast_signature;
+        else if (val && !effective_pointer_depth(val)) {
+            /* An integer cast to a function pointer type is an explicit
+             * conversion: keep the cast's type on the value, so the element
+             * store does not take it for an implicit one.
+             */
+            val->ptr_level = 1;
+            val->func_signature = cast_signature;
+        }
         return val;
     }
 
@@ -509,13 +569,15 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
     }
     if (global_pointer_cast_starts_here(scope)) {
         int saved_stride = global_pointer_cast_stride;
-        int stride = read_global_pointer_cast(scope);
+        func_t *slot_signature;
+        int stride = read_global_pointer_cast(scope, &slot_signature);
 
         /* In a chain of casts the outermost one decides the stride. */
         if (saved_stride)
             stride = saved_stride;
         if (!global_address_operand_starts_here(scope))
-            return read_global_cast_integer_address(parent, *bb, scope, stride);
+            return read_global_cast_integer_address(parent, *bb, scope, stride,
+                                                    slot_signature);
         global_pointer_cast_stride = stride;
         val = parse_global_constant_value(parent, bb);
         global_pointer_cast_stride = saved_stride;
@@ -1714,6 +1776,8 @@ bool parse_struct_field_values(block_t *parent,
                 field_addr =
                     member_address(parent, bb, target_addr, field, field_addr);
                 diagnose_function_pointer_conversion(field_val_raw, field);
+                if (field_val_raw->pointee_func_signature)
+                    diagnose_callback_slot_initializer(field_val_raw, field);
                 if (is_record_type(field->type) &&
                     is_record_object(field_val_raw)) {
                     emit_record_copy_to_address(parent, bb, field_addr,
@@ -2473,9 +2537,31 @@ void parse_array_init(var_t *var, block_t *parent, basic_block_t **bb)
                                              ? var->func_signature
                                              : var->type->func_signature;
                 diagnose_function_pointer_conversion(val, &element);
+            } else if (val &&
+                       (val->is_func || val->func_signature ||
+                        (val->type && val->type->func_signature)) &&
+                       effective_pointer_depth(var) && !var->is_func &&
+                       !var->func_signature && !var->pointee_func_signature &&
+                       !var->type->func_signature &&
+                       !var->type->array_element_pointee_func_signature) {
+                /* An element of an array of object pointers takes no function
+                 * pointer, not even one an explicit cast produced.
+                 */
+                var_t element = {0};
+
+                element.type = var->type;
+                element.ptr_level = var->ptr_level;
+                diagnose_function_pointer_conversion(val, &element);
             }
 
-            if (val && var->type->array_element_pointee_func_signature) {
+            /* A pointer to function pointers keeps its prototype through a
+             * cast, as `(int (**)(void)) 4` does, and an element compares it.
+             */
+            func_t *element_slot =
+                var->type->array_element_pointee_func_signature;
+
+            if (val && (element_slot || (val->pointee_func_signature &&
+                                         var->pointee_func_signature))) {
                 /* The array descriptor is not an element descriptor. Build the
                  * slot type that this scalar initializer is about to store so
                  * callback prototype validation remains elementwise.
@@ -2483,9 +2569,11 @@ void parse_array_init(var_t *var, block_t *parent, basic_block_t **bb)
                 var_t element_target = {0};
 
                 element_target.type = var->type;
-                element_target.ptr_level = var->type->array_element_ptr_level;
+                element_target.ptr_level =
+                    element_slot ? var->type->array_element_ptr_level
+                                 : var->ptr_level;
                 element_target.pointee_func_signature =
-                    var->type->array_element_pointee_func_signature;
+                    element_slot ? element_slot : var->pointee_func_signature;
                 if (incompatible_pointee_callback_conversion(val,
                                                              &element_target))
                     error_at(
