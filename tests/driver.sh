@@ -25046,6 +25046,20 @@ else
     echo "Skip test cases because of using dynamic linking mode"
 fi # "LINK_MODE" = "static"
 
+# The standard streams from lib/c.h, in both link modes. Under dynamic linking
+# the host libc dereferences them, so a descriptor number would fault there.
+try_output 0 "a1b" << EOF
+int main()
+{
+    fputc('a', stdout);
+    fprintf(stdout, "%d", 1);
+    printf("b");
+    fflush(stdout);
+    fprintf(stderr, "");
+    return fflush(stderr) != 0 || stdin == stdout || stdout == stderr;
+}
+EOF
+
 # tests integer type conversion excerpted and modified from issue #166
 try_output 0 "a = -127, b = -78, c = -93, d = -44" << EOF
 int main()
@@ -25107,6 +25121,60 @@ int main(void)
     print_array(ptr, sz);
 
     free(ptr);
+    return 0;
+}
+EOF
+
+# memcpy() takes and returns void *, as memset() does, so a matching
+# redeclaration and a void * function pointer both agree with the library.
+try_ 0 << EOF
+void *memcpy(void *dest, const void *src, int count);
+struct pair {
+    int a, b;
+};
+int main(void)
+{
+    struct pair x = {3, 4}, y;
+    int src[2] = {5, 6}, dst[2];
+    void *(*copy)(void *, const void *, int) = memcpy;
+    if (memcpy(&y, &x, sizeof(x)) != &y || y.b != 4)
+        return 1;
+    if (copy(dst, src, sizeof(src)) != dst || dst[1] != 6)
+        return 2;
+    return 0;
+}
+EOF
+
+# The address of a library function, which under dynamic linking is its PLT
+# entry: equal wherever it is taken, and callable from a local, a file-scope
+# initializer and a struct or array member. The global read after each call
+# needs the global base intact once the library returns.
+try_ 0 << EOF
+int (*global_len)(const char *) = strlen;
+struct ops {
+    int (*len)(const char *);
+    void *(*set)(void *, int, int);
+};
+struct ops global_ops = {strlen, memset};
+int (*global_table[2])(const char *) = {strlen, &strlen};
+int counter = 40;
+int main(void)
+{
+    int (*local_len)(const char *) = &strlen;
+    struct ops local_ops = {strlen, memset};
+    int word = 0;
+
+    if (!local_len || &memset != &memset || local_len != global_len)
+        return 1;
+    if (global_ops.len != global_table[1] || local_ops.set != global_ops.set)
+        return 2;
+    if (local_len("abc") + counter != 43 || global_len("ab") + counter != 42)
+        return 3;
+    if (global_table[0]("abcd") != 4 || local_ops.len("a") + counter != 41)
+        return 4;
+    global_ops.set(&word, 1, 1);
+    if (word != 1 || counter != 40)
+        return 5;
     return 0;
 }
 EOF

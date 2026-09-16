@@ -928,6 +928,7 @@ void elf_generate_dynamic_sections(void)
      * .plt section is generated at the code generation phase.
      */
     int dymsym_idx = 1, func_plt_ofs, st_name = 0;
+    int libdl_name = 0;
     int rel_offset;
 
     /* .interp section */
@@ -950,6 +951,20 @@ void elf_generate_dynamic_sections(void)
     elf_write_str(dynamic_sections.elf_dynstr, LIBC_SO);
     elf_write_byte(dynamic_sections.elf_dynstr, 0);
     st_name += strlen(LIBC_SO) + 1;
+
+    /* lib/c.h reaches the host's stream objects through dlsym(), which glibc
+     * moved into libc.so.6 only in 2.34. Earlier releases keep it in
+     * libdl.so.2, and later ones still ship that name as an empty stub, so a
+     * program that calls it depends on both.
+     */
+    func_t *dlsym_func = find_func("dlsym");
+
+    if (dlsym_func && dlsym_func->is_used && !dlsym_func->bbs) {
+        libdl_name = st_name;
+        elf_write_str(dynamic_sections.elf_dynstr, LIBDL_SO);
+        elf_write_byte(dynamic_sections.elf_dynstr, 0);
+        st_name += strlen(LIBDL_SO) + 1;
+    }
 
     /* Perform the following steps for each external function.
      * - Add a new PLT relocation entry to .relplt section.
@@ -1095,6 +1110,8 @@ void elf_generate_dynamic_sections(void)
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x3,
                   dynamic_sections.elf_got_start);
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, 0x1);
+    if (libdl_name)
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, libdl_name);
 #if DYN_BIND_NOW == 1
     /* Resolve every PLT entry at load time. This target's PLT[0] does not
      * arrange the GOT[1]/GOT[2] hand-off the lazy resolver needs, so the loader

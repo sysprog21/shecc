@@ -14,6 +14,7 @@ ARCH_DEFS = \
     \#define ELF_FLAGS 0x5000400\n$\
     \#define DYN_LINKER \"/lib/ld-linux-armhf.so.3\"\n$\
     \#define LIBC_SO \"libc.so.6\"\n$\
+    \#define LIBDL_SO \"libdl.so.2\"\n$\
     \#define PLT_FIXUP_SIZE 20\n$\
     \#define PLT_ENT_SIZE 12\n$\
     \#define RESERVED_GOT_NUM 3\n$\

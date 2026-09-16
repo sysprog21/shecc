@@ -109,10 +109,24 @@ int isblank(int c);
 /* File I/O */
 typedef int FILE;
 
+#ifdef __SHECC_DYNLINK__
+/* The host libc's own stream objects. Its stdio functions dereference the
+ * stream pointer they are given, so a descriptor number would fault there. The
+ * output cannot import a data symbol, only functions through the PLT, so each
+ * use asks the dynamic linker for the address of the host's variable. A null
+ * handle is RTLD_DEFAULT. Before glibc 2.34 dlsym() lived in libdl.so.2, so a
+ * program that calls it names that library as well.
+ */
+void *dlsym(void *handle, const char *name);
+#define stdin (*(FILE **) dlsym((void *) 0, "stdin"))
+#define stdout (*(FILE **) dlsym((void *) 0, "stdout"))
+#define stderr (*(FILE **) dlsym((void *) 0, "stderr"))
+#else
 /* Standard streams, as raw file descriptors */
 #define stdin ((FILE *) 0)
 #define stdout ((FILE *) 1)
 #define stderr ((FILE *) 2)
+#endif
 
 FILE *fopen(const char *filename, const char *mode);
 int fclose(FILE *stream);
@@ -139,7 +153,7 @@ char *strncpy(char *dest, const char *src, int len);
 char *strcat(char *dest, const char *src);
 char *strncat(char *dest, const char *src, int len);
 char *strchr(char *str, int ch);
-char *memcpy(char *dest, const char *src, int count);
+void *memcpy(void *dest, const void *src, int count);
 int memcmp(const void *s1, const void *s2, int n);
 void *memset(void *s, int c, int n);
 

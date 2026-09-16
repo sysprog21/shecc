@@ -51,7 +51,7 @@ This document tracks compliance gaps and non-standard behaviors.
 
 | Feature | Status | Impact |
 |---------|--------|--------|
-| `static` | Partial | File-scope internal linkage and persistent block-scope objects work, including C99 `for` initializers; cross-translation-unit linkage remains incomplete. |
+| `static` | Partial | File-scope internal linkage and persistent block-scope objects work; cross-translation-unit linkage remains incomplete. A `static` object in a `for` initializer is an extension: C99 6.8.5p3 allows only `auto` and `register` there, so `--std=c99` rejects it. |
 | `extern` | Partial | File- and block-scope object declarations plus function prototypes bind to global declarations; remaining C99 forms need coverage. |
 | `register` | Partial | Block-scope declarations and parameters lower as automatic objects and reject address-taking; no allocation hint is implemented. |
 | `auto` | Supported | Block-scope declarations and C99 `for` initializers use ordinary automatic storage. |

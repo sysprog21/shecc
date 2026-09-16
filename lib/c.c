@@ -164,23 +164,25 @@ char *strncpy(char *dest, const char *src, int len)
     return dest;
 }
 
-char *memcpy(char *dest, const char *src, int count)
+void *memcpy(void *dest, const void *src, int count)
 {
+    char *d = dest;
+    const char *s = src;
     int i = 0;
 
     /* Continues as long as there are at least 4 bytes remaining to copy. */
     for (; i + 4 <= count; i += 4) {
-        dest[i] = src[i];
-        dest[i + 1] = src[i + 1];
-        dest[i + 2] = src[i + 2];
-        dest[i + 3] = src[i + 3];
+        d[i] = s[i];
+        d[i + 1] = s[i + 1];
+        d[i + 2] = s[i + 2];
+        d[i + 3] = s[i + 3];
     }
 
     /* Ensure all @count bytes are copied, even if @count is not a multiple of
      * 4, or if @count was less than 4 initially.
      */
     for (; i < count; i++)
-        dest[i] = src[i];
+        d[i] = s[i];
 
     return dest;
 }

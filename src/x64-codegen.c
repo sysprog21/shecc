@@ -155,11 +155,14 @@ int rodata_ref_count = 0;
 
 /* Pending function-address relocations, for OP_address_of_func. A function's
  * address is elf_code_start + its entry block offset, which is only final once
- * every function has been emitted.
+ * every function has been emitted. A function the dynamic linker supplies has
+ * no entry block; its address is its PLT entry, placed only once the code size
+ * is final.
  */
 typedef struct funcaddr_ref {
     int patch_location;
     basic_block_t *target_bb;
+    int plt_offset;
 } funcaddr_ref_t;
 
 #define FUNCADDR_REF_MAX 4096
@@ -2547,12 +2550,14 @@ void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
             func_t *target = find_func(ph2_ir->func_name);
             emit_byte(REX_W | REX_B);
             emit_byte(0xB8 + 3); /* MOVABS r11, imm64 */
-            if (target && target->bbs) {
+            if (target && (target->bbs || dynlink)) {
                 if (funcaddr_ref_count >= FUNCADDR_REF_MAX)
                     fatal("x64: too many function-address relocations");
                 funcaddr_refs[funcaddr_ref_count].patch_location =
                     elf_code->size;
                 funcaddr_refs[funcaddr_ref_count].target_bb = target->bbs;
+                funcaddr_refs[funcaddr_ref_count].plt_offset =
+                    target->plt_offset;
                 funcaddr_ref_count++;
             }
             emit_dword(0);
@@ -4121,7 +4126,11 @@ void code_generate(void)
      */
     for (int i = 0; i < funcaddr_ref_count; i++) {
         int at = funcaddr_refs[i].patch_location;
-        int addr = elf_code_start + funcaddr_refs[i].target_bb->elf_offset;
+        int addr;
+        if (funcaddr_refs[i].target_bb)
+            addr = elf_code_start + funcaddr_refs[i].target_bb->elf_offset;
+        else
+            addr = dynamic_sections.elf_plt_start + funcaddr_refs[i].plt_offset;
         patch_qword(at, addr);
     }
 

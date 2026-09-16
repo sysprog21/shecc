@@ -12,6 +12,7 @@ ARCH_DEFS = \
     \#define ELF_FLAGS 0x4\n$\
     \#define DYN_LINKER \"/lib/ld-linux-riscv32-ilp32d.so.1\"\n$\
     \#define LIBC_SO \"libc.so.6\"\n$\
+    \#define LIBDL_SO \"libdl.so.2\"\n$\
     \#define PLT_FIXUP_SIZE 32\n$\
     \#define PLT_ENT_SIZE 16\n$\
     \#define RESERVED_GOT_NUM 2\n$\

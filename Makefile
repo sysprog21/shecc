@@ -56,6 +56,14 @@ BUILTIN_LIBC_HEADER := c.h
 ifeq ($(origin SOURCE_DATE_EPOCH),undefined)
 SOURCE_DATE_EPOCH := $(shell date -u +%s)
 endif
+# The epoch is spliced into the date command below, so anything but decimal
+# digits would be run by the shell there. $(value) keeps make from expanding a
+# supplied $(...) before it is checked.
+EPOCH_NONDIGITS := $(value SOURCE_DATE_EPOCH)
+$(foreach d,0 1 2 3 4 5 6 7 8 9,$(eval EPOCH_NONDIGITS := $$(subst $(d),,$$(EPOCH_NONDIGITS))))
+ifneq ($(if $(strip $(value SOURCE_DATE_EPOCH)),$(EPOCH_NONDIGITS),empty),)
+$(error SOURCE_DATE_EPOCH must be a Unix epoch in decimal seconds)
+endif
 # GNU date converts an epoch given as -d @SECONDS, which BSD and macOS date do
 # not accept; they take the seconds as -r SECONDS instead. Ask for the Unix
 # epoch itself to learn which spelling this date understands.

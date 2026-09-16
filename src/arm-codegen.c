@@ -123,9 +123,12 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
     case OP_write:
         elf_offset += ph2_ir->src1_hi >= 0 ? 8 : 4;
         return;
+    case OP_indirect:
+        /* blx, then under dynamic linking the r12 reload that OP_call adds. */
+        elf_offset += dynlink ? 16 : 4;
+        return;
     case OP_jump:
     case OP_load_func:
-    case OP_indirect:
     case OP_lshift:
     case OP_rshift:
         elf_offset += ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 ? 48 : 4;
@@ -691,6 +694,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_indirect:
         emit(__blx(__AL, __r8));
+
+        /* The pointer may name a libc function, reached through its PLT entry,
+         * which loads the GOT slot through r12. Restore the global stack
+         * pointer as OP_call does after an external call.
+         */
+        if (dynlink) {
+            emit(__movw(__AL, __r8, elf_data_start));
+            emit(__movt(__AL, __r8, elf_data_start));
+            emit(__lw(__AL, __r12, __r8, 0));
+        }
         return;
     case OP_return:
         if (ph2_ir->src0 == -1)

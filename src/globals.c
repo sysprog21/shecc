@@ -2466,11 +2466,11 @@ __noreturn void fatal(const char *msg)
      * compiler appears to die silently.
      *
      * The stream is NULL rather than stdout because a dynamically linked build
-     * resolves fflush through the PLT to the host libc, for which lib/c.h's
-     * 'stdout' -- the plain file descriptor 1 -- is not a FILE *. NULL means
-     * "every stream" there and is ignored by the unbuffered embedded libc, so
-     * it is right for both. That build needs the flush most, being the only one
-     * whose stdio actually buffers.
+     * resolves fflush through the PLT to the host libc, where error output may
+     * sit in any of its buffered streams. NULL means "every stream" there and
+     * is ignored by the unbuffered embedded libc, so it is right for both. That
+     * build needs the flush most, being the only one whose stdio actually
+     * buffers.
      */
     fflush(NULL);
     abort();
