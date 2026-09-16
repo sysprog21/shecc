@@ -28,6 +28,9 @@ int read_const_expr(block_t *scope);
 var_t *read_wide_global_literal_expression(block_t *parent,
                                            basic_block_t *bb,
                                            block_t *scope);
+var_t *read_wide_global_literal_primary(block_t *parent,
+                                        basic_block_t *bb,
+                                        block_t *scope);
 bool subscripted_string_literal_starts_here(void);
 bool string_element_appears_before_initializer_end(token_t *token);
 var_t *read_string_literal_element_address(block_t *parent,
@@ -423,12 +426,36 @@ var_t *read_global_cast_integer_address(block_t *parent,
                                         func_t *slot_signature)
 {
     var_t *address = require_var(parent);
-    int value = read_const_expr_operand(scope);
+    char name[MAX_ID_LEN];
+    unsigned int lo;
+    unsigned int hi;
 
-    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL))
-        value += read_global_address_offset(scope, parent, bb) * stride;
+    /* A pointer is as wide as the target's: read the operand in two words so a
+     * 64-bit target keeps its high half, as (char *) 0x100000000 needs. Only an
+     * identifier other than an enumerator, such as offsetof, takes the
+     * word-sized reader.
+     */
+    if (lex_peek(T_identifier, name) && !find_scoped_constant(name, scope)) {
+        lo = read_const_expr_operand(scope);
+        hi = lo & 0x80000000U ? ~0U : 0;
+    } else {
+        var_t *operand = read_wide_global_literal_primary(parent, bb, scope);
+
+        lo = operand->init_val;
+        hi = operand->init_val_hi;
+        if (operand->type->size <= TY_int->size)
+            hi = operand->type->is_unsigned || !(lo & 0x80000000U) ? 0 : ~0U;
+    }
+    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL)) {
+        int offset = read_global_address_offset(scope, parent, bb) * stride;
+        unsigned int sum = lo + offset;
+
+        hi += (offset < 0 ? ~0U : 0) + (sum < lo);
+        lo = sum;
+    }
     address->var_name = gen_name();
-    address->init_val = value;
+    address->init_val = lo;
+    address->init_val_hi = PTR_SIZE == 8 ? hi : 0;
     address->is_const = true;
 
     /* The cast's result is a pointer, not the integer it was spelled with, and
@@ -503,19 +530,21 @@ var_t *read_global_address_designator(block_t *scope,
     if (decays && (!target->array_size || subscripts >= shape.rank))
         error_at("Global initializer requires a constant address",
                  cur_token_loc());
+    int element_size = target->ptr_level ? PTR_SIZE : target->type->size;
+    int stride = global_pointer_cast_stride
+                     ? global_pointer_cast_stride
+                     : fixed_array_shape_stride(&shape, subscripts - !decays,
+                                                element_size);
+
     if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL)) {
-        int element_size = target->ptr_level ? PTR_SIZE : target->type->size;
         int index = read_global_address_offset(scope, parent, *bb);
-        int stride = global_pointer_cast_stride
-                         ? global_pointer_cast_stride
-                         : fixed_array_shape_stride(
-                               &shape, subscripts - !decays, element_size);
 
         object_addr =
             compute_element_address(parent, bb, object_addr, index, stride);
         object_addr->ptr_level = target->ptr_level + 1;
         object_addr->is_global_address = true;
     }
+    object_addr->address_stride = stride;
     *object = target;
     return object_addr;
 }
@@ -529,6 +558,32 @@ block_t *initializer_name_scope(block_t *parent)
     if (parent == GLOBAL_BLOCK && global_constant_initializer_scope)
         return global_constant_initializer_scope;
     return parent;
+}
+
+/* Nonzero while the constant expression reader has this function read one
+ * address operand of the expression it is already reading.
+ */
+int global_tested_operand_depth;
+
+/* Whether the element ahead is an address constant that an operator only
+ * tests, as in `"a" && 1`, `1 ? "a" : "b"` or `array || 0`. Such an element is
+ * a constant expression, not the address itself, so the whole expression
+ * belongs to the constant expression reader.
+ */
+static bool global_tested_operand_starts_here(block_t *scope)
+{
+    char name[MAX_ID_LEN];
+    token_t *after;
+
+    if (global_tested_operand_depth || !cur_token->next)
+        return false;
+    if (!lex_peek(T_string, NULL) &&
+        !(lex_peek(T_identifier, name) &&
+          (find_visible_func(name, scope) || find_var(name, scope))))
+        return false;
+    after = cur_token->next->next;
+    return after && (after->kind == T_log_and || after->kind == T_log_or ||
+                     after->kind == T_question);
 }
 
 var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
@@ -607,6 +662,7 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
          lex_peek(T_log_not, NULL) || lex_peek(T_open_bracket, NULL) ||
          lex_peek(T_sizeof, NULL) || lex_peek(T_char, NULL) ||
          lex_peek(T_wchar, NULL) || subscripted_string_literal_starts_here() ||
+         global_tested_operand_starts_here(scope) ||
          (lex_peek(T_identifier, constant_name) &&
           find_scoped_constant(constant_name, scope)))) {
         /* Any integer constant expression, including casts, sizeof and grouped
@@ -2385,8 +2441,20 @@ void parse_array_init(var_t *var, block_t *parent, basic_block_t **bb)
                  * initializer on a local worked.
                  */
                 reject_string_element_initializer(var);
+                char leading_name[MAX_ID_LEN];
+
+                /* An arithmetic element, such as 1 ? 2 : 3 or 1 && 2, is folded
+                 * as a constant. The runtime expression reader would branch,
+                 * moving the global setup entry block to the branch's join and
+                 * dropping every store emitted before it.
+                 */
                 if (parent == GLOBAL_BLOCK &&
-                    (lex_peek(T_ampersand, NULL) ||
+                    (lex_peek(T_numeric, NULL) || lex_peek(T_minus, NULL) ||
+                     global_tested_operand_starts_here(initializer_scope) ||
+                     lex_peek(T_char, NULL) || lex_peek(T_wchar, NULL) ||
+                     (lex_peek(T_identifier, leading_name) &&
+                      find_scoped_constant(leading_name, initializer_scope)) ||
+                     lex_peek(T_ampersand, NULL) ||
                      grouped_global_function_designator_starts_here(true) ||
                      global_function_address_dereference_starts_here() ||
                      lex_peek(T_open_bracket, NULL) ||

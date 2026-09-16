@@ -1473,6 +1473,18 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
 
         tk = pp_lex_next_token(tk, true);
 
+        /* offsetof is an integer constant as well. The parser's reader owns its
+         * type and member syntax, so hand it the operand as for sizeof.
+         */
+        if (pp_integer_constant_scope &&
+            !strcmp(tk->literal, "__builtin_offsetof")) {
+            cur_token = before_identifier;
+            val->lo = read_const_expr_operand(pp_integer_constant_scope);
+            val->hi = 0;
+            val->is_unsigned = false;
+            val->enum_width = 32;
+            return cur_token;
+        }
         if (pp_integer_constant_scope) {
             constant_t *constant =
                 find_scoped_constant(tk->literal, pp_integer_constant_scope);

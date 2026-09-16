@@ -56,19 +56,22 @@ void reject_label_followed_by_declaration_in_strict_c99(block_t *parent)
                  cur_token_loc());
 }
 
-/* The word-sized constant evaluator narrows a case expression to int. Select
- * the typed two-word evaluator when a literal needing a wider or unsigned type
- * appears before the label's colon; a colon closing a nested '?' is not it.
+/* The word-sized constant evaluator narrows a constant expression to int.
+ * Select the typed two-word evaluator when a literal needing a wider or
+ * unsigned type appears in the expression that starts at @token: before the
+ * ',', ';' or brace ending it, the ')' or ']' closing an enclosing bracket, or
+ * a case label's colon. A colon closing a nested '?' is not the end.
  */
-bool case_label_needs_typed_value(token_t *token)
+bool constant_expression_needs_typed_value(token_t *token)
 {
     int bracket_depth = 0;
     int pending_ternaries = 0;
 
     for (; token; token = token->next) {
-        if (token->kind == T_open_bracket)
+        if (token->kind == T_open_bracket || token->kind == T_open_square)
             bracket_depth++;
-        else if (token->kind == T_close_bracket) {
+        else if (token->kind == T_close_bracket ||
+                 token->kind == T_close_square) {
             if (bracket_depth == 0)
                 return false;
             bracket_depth--;
@@ -80,7 +83,8 @@ bool case_label_needs_typed_value(token_t *token)
             if (pending_ternaries)
                 pending_ternaries--;
         } else if (token->kind == T_semicolon || token->kind == T_open_curly ||
-                   token->kind == T_close_curly)
+                   token->kind == T_close_curly ||
+                   (bracket_depth == 0 && token->kind == T_comma))
             return false;
         else if (token->kind == T_numeric &&
                  (numeric_literal_needs_wide_path(token->literal) ||
@@ -115,7 +119,7 @@ basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
         basic_block_t *next_dispatch;
 
         lex_expect(T_case);
-        if (case_label_needs_typed_value(cur_token->next)) {
+        if (constant_expression_needs_typed_value(cur_token->next)) {
             pp_integer_t typed_value;
             block_t *saved_scope = pp_integer_constant_scope;
 

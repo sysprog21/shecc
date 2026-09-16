@@ -1724,9 +1724,10 @@ static void read_parenthesized_operand(block_t *parent, basic_block_t **bb)
                 error_at("Array declarators support at most four dimensions",
                          cur_token_loc());
             if (lex_peek(T_numeric, NULL)) {
-                char bound_token[MAX_TOKEN_LEN];
-                lex_ident_n(T_numeric, bound_token, MAX_TOKEN_LEN);
-                bound = parse_numeric_constant(bound_token);
+                /* The constant expression reader keeps a literal too wide for
+                 * an int from wrapping into a small bound.
+                 */
+                bound = read_const_expr(parent);
                 if (bound <= 0)
                     error_at("Array compound literal needs a positive bound",
                              next_token_loc());

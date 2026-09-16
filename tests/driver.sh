@@ -3620,10 +3620,195 @@ try_compile_error << EOF
 unsigned long long invalid_wide_ternary_condition =
     1 / 0 ? 0x100000000ULL : 1U;
 EOF
+
+# The signed minimum divided by -1 overflows its common type, as INT_MIN / -1
+# does in the word-sized evaluator; the unsigned and discarded forms are valid.
+try_compile_error << EOF
+long long invalid_wide_min_quotient = (-9223372036854775807LL - 1) / -1;
+EOF
+try_compile_error << EOF
+long long invalid_wide_min_remainder = (-9223372036854775807LL - 1) % -1;
+EOF
+try_compile_error << EOF
+long long invalid_int_min_quotient_wide = (-2147483647 - 1) / -1 + 0LL;
+EOF
+try_ 3 << EOF
+unsigned long long wide_unsigned_min_quotient = 0x8000000000000000ULL / -1;
+long long wide_protected_min_quotient =
+    0 ? (-9223372036854775807LL - 1) / -1 : 1LL;
+long long wide_min_quotient_by_uint = (-9223372036854775807LL - 1) / -1U;
+int main(void) {
+    return (wide_unsigned_min_quotient == 0ULL) +
+           (wide_protected_min_quotient == 1LL) +
+           (wide_min_quotient_by_uint == -2147483648LL);
+}
+EOF
 try_compile_error << EOF
 int invalid_wide_discarded_ternary_object;
 unsigned long long invalid_wide_discarded_ternary =
     0 ? invalid_wide_discarded_ternary_object : 1U;
+EOF
+
+# The word-sized evaluator skips a discarded arm up to its matching ':', or to
+# the end of the declarator, past grouped and nested conditionals inside it.
+try_ 8 << EOF
+int int_ternary_grouped_true_arm = 0 ? (1 ? 2 : 3) : 4;
+int int_ternary_nested_true_arm = 0 ? 1 ? 2 : 3 : 4;
+int int_ternary_nested_false_arm = 1 ? 5 : 0 ? 6 : 7;
+int int_ternary_nested_selected = 1 ? 1 ? 19 : 20 : 21;
+int int_ternary_list = 1 ? 22 : 23, int_ternary_list_next = 24;
+int int_ternary_deep = 0 ? 1 ? 2 : 3 ? 4 : 5 : 1 ? 25 : 26;
+int main(void) {
+    static int grouped_static = 0 ? (1 ? 2 : 3) : 18;
+    static int nested_static = 1 ? 1 ? 19 : 20 : 21;
+    return (int_ternary_grouped_true_arm == 4) +
+           (int_ternary_nested_true_arm == 4) +
+           (int_ternary_nested_false_arm == 5) +
+           (int_ternary_nested_selected == 19) +
+           (int_ternary_list == 22 && int_ternary_list_next == 24) +
+           (int_ternary_deep == 25) + (grouped_static == 18) +
+           (nested_static == 19);
+}
+EOF
+
+# A conditional or logical element of a static brace initializer is folded as a
+# constant. Lowered as a runtime branch, it replaced the global setup entry and
+# every earlier global store read back as zero.
+try_ 0 << EOF
+enum { brace_constant = 3 };
+int brace_before = 7;
+int brace_array[] = {1 ? 2 : 3, 4};
+int brace_logical[3] = {0 ? 5 : 6, 1 && 2, 0 || brace_constant};
+int brace_operands[] = {sizeof(int) == 4 ? 8 : 9, -1 ? 10 : 11,
+                        'a' ? 12 : 13, brace_constant ? 14 : 15};
+int brace_nested[2][2] = {{1 ? 16 : 17, 18}, {0 ? 19 : 20, 21 && 0}};
+struct brace_pair { int x, y; } brace_record = {1 ? 22 : 23, 0 && 1};
+struct brace_pair brace_records[] = {{1 ? 24 : 25, 26}, {27, 0 ? 28 : 29}};
+long long brace_wide[] = {1 ? 0x100000000LL : 0, 0 || -1};
+int brace_after = 30;
+int main(void) {
+    static int brace_static[] = {1 ? 31 : 32, 1 && 1};
+    return (brace_before != 7) + (brace_array[0] != 2) +
+           (brace_array[1] != 4) + (sizeof(brace_array) != 2 * sizeof(int)) +
+           (brace_logical[0] != 6) + (brace_logical[1] != 1) +
+           (brace_logical[2] != 1) + (brace_operands[0] != 8) +
+           (brace_operands[1] != 10) + (brace_operands[2] != 12) +
+           (brace_operands[3] != 14) + (brace_nested[0][0] != 16) +
+           (brace_nested[0][1] != 18) + (brace_nested[1][0] != 20) +
+           (brace_nested[1][1] != 0) + (brace_record.x != 22) +
+           (brace_record.y != 0) + (brace_records[0].x != 24) +
+           (brace_records[1].y != 29) + (brace_wide[0] != 0x100000000LL) +
+           (brace_wide[1] != 1) + (brace_after != 30) +
+           (brace_static[0] != 31) + (brace_static[1] != 1);
+}
+EOF
+try_compile_error << EOF
+int brace_object;
+int brace_logical_object[] = {1 && brace_object};
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int brace_comma[] = {(1, 2)};
+int main(void) { return 0; }
+EOF
+
+# An address constant is a valid operand of a conditional or a logical operator
+# in a static initializer: the conditional selects it, and the logical operators
+# only test it, since it is never null.
+try_ 0 << EOF
+int selected_objects[3] = {4, 5, 6};
+int selected_function(void) { return 9; }
+char *selected_true_arm[] = {1 ? "ab" : "cd", "ef"};
+char *selected_false_arm[] = {0 ? "ab" : "cd"};
+char *selected_scalar = 0 ? "ab" : "cd";
+struct selected_holder { int tag; char *text; int *element; };
+struct selected_holder selected_record = {1, 0 ? "ab" : "cd",
+                                          1 ? selected_objects : 0};
+int *selected_addresses[] = {0 ? selected_objects : 0,
+                             1 ? &selected_objects[2] : 0};
+int (*selected_callbacks[])(void) = {1 ? selected_function : 0};
+char *selected_nested[] = {0 ? "ab" : 1 ? "gh" : "ij"};
+char *selected_null[] = {1 ? (char *) 0 : "ab"};
+int selected_truth[] = {"ab" && 1, selected_objects || 0,
+                        selected_function ? 3 : 4, !"ab"};
+int selected_scalar_truth = "ab" && 2;
+int main(void)
+{
+    static char *selected_static[] = {0 ? "ab" : "kl"};
+    static char *selected_static_scalar = 1 ? "mn" : "op";
+
+    return (selected_true_arm[0][0] != 'a') + (selected_true_arm[1][0] != 'e') +
+           (selected_false_arm[0][0] != 'c') + (selected_scalar[0] != 'c') +
+           (selected_record.tag != 1) + (selected_record.text[0] != 'c') +
+           (selected_record.element != selected_objects) +
+           (selected_addresses[0] != 0) +
+           (selected_addresses[1] != &selected_objects[2]) +
+           (selected_callbacks[0]() != 9) + (selected_nested[0][0] != 'g') +
+           (selected_null[0] != 0) + (selected_truth[0] != 1) +
+           (selected_truth[1] != 1) + (selected_truth[2] != 3) +
+           (selected_truth[3] != 0) + (selected_scalar_truth != 1) +
+           (selected_static[0][0] != 'k') + (selected_static_scalar[0] != 'm');
+}
+EOF
+try_compile_error << EOF
+int selected_object;
+char *selected_non_constant[] = {selected_object ? "ab" : "cd"};
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int selected_object;
+char *selected_non_constant_arm[] = {1 ? "ab" : selected_object};
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+char *selected_comma[] = {1 ? ("ab", "cd") : "ef"};
+int main(void) { return 0; }
+EOF
+
+# An address constant offset by an integer is still one inside a conditional or
+# a logical operator, with the integer on either side of the sum; the step is
+# the element the address points to, a whole row for a decayed matrix. A tested
+# address is true, so the right operand of || is never evaluated.
+try_ 0 << EOF
+enum { offset_back_one = -1 };
+char offset_text[] = "abc";
+int offset_values[4] = {1, 2, 3, 4};
+int offset_rows[3][2] = {{1, 2}, {3, 4}, {5, 6}};
+char *offset_first[] = {"x" ? 1 + offset_text : 0, "x" ? 2 + "xyz" : 0};
+char *offset_grouped = offset_text ? (offset_text) + 2 : 0;
+int *offset_both = offset_values ? 3 + offset_values - 2 : 0;
+int *offset_back = "x" ? -1 + (offset_values + 3) : 0;
+int *offset_enum = "x" ? offset_back_one + (offset_values + 2) : 0;
+int *offset_wide = "x" ? 1LL + offset_values : 0;
+int (*offset_row)[2] = "x" ? 2 + offset_rows : 0;
+int offset_truth = "x" && 1 + offset_text;
+int offset_skipped = offset_values || 1 / 0;
+int main(void)
+{
+    return (*offset_first[0] != 'b') + (*offset_first[1] != 'z') +
+           (*offset_grouped != 'c') + (*offset_both != 2) +
+           (*offset_back != 3) + (*offset_enum != 2) + (*offset_wide != 2) +
+           ((*offset_row)[1] != 6) +
+           (offset_truth != 1) + (offset_skipped != 1);
+}
+EOF
+try_compile_error << EOF
+int offset_values[4];
+int *offset_negated = "x" ? 1 - offset_values : 0;
+int main(void) { return 0; }
+EOF
+
+# An offset the word-sized address relocation cannot hold is refused rather than
+# losing its high word or overflowing once scaled.
+try_compile_error_message "Global address offset exceeds supported integer range" << EOF
+int offset_values[4];
+int *offset_high = "x" ? 0x100000000LL + offset_values : 0;
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Global address offset exceeds supported integer range" << EOF
+int offset_values[4];
+int *offset_scaled = "x" ? 0x40000000 + offset_values : 0;
+int main(void) { return 0; }
 EOF
 try_ 18 << EOF
 unsigned long long global_ternary_true =
@@ -3838,6 +4023,24 @@ int main(void) {
            (global_wide_double_negation == 1LL) +
            (global_wide_unary_plus == 0x100000000ULL) +
            (global_wide_logical_not == 1ULL);
+}
+EOF
+
+# A narrow operand of a unary operator or a shift is promoted to int first, so
+# the folded result extends as an int rather than as the cast type.
+try_ 6 << EOF
+long long global_promoted_complement = ~(unsigned char) 0;
+long long global_promoted_negation = -(unsigned short) 5;
+long long global_promoted_shift = ~((unsigned char) 1 << 1);
+long long global_promoted_shift_neg = -((unsigned short) 1 << 1);
+int main(void) {
+    static long long promoted_static = ~(unsigned char) 0;
+    static long long promoted_static_shift = ~(unsigned short) 0 >> 1;
+    return (global_promoted_complement == -1LL) +
+           (global_promoted_negation == -5LL) +
+           (global_promoted_shift == -3LL) +
+           (global_promoted_shift_neg == -2LL) +
+           (promoted_static == -1LL) + (promoted_static_shift == -1LL);
 }
 EOF
 
@@ -16719,6 +16922,52 @@ int main(void)
 }
 EOF
 
+# An integer converted to a pointer in a static initializer keeps every pointer
+# bit on a 64-bit target and truncates to the pointer width on a 32-bit one.
+try_ 0 << EOF
+#include <stddef.h>
+struct wide_address_holder { int tag; char *where; };
+enum { wide_address_negative = -8 };
+int *wide_address_scalar = (int *) 0x100000010;
+char *wide_address_all_ones = (char *) 0xFFFFFFFFFFFFFFFFULL;
+char *wide_address_minus_one = (char *) -1;
+char *wide_address_enum = (char *) wide_address_negative;
+int *wide_address_offset = (int *) 0x100000010 + 2;
+char *wide_address_grouped = (char *) (0x100000000ULL + 5);
+char *wide_address_cast = (char *) (unsigned long long) 0x200000003ULL;
+int *wide_address_array[] = {(int *) 0x300000004, 0, (int *) 8};
+struct wide_address_holder wide_address_record = {1, (char *) 0x400000005};
+struct wide_address_holder wide_address_offsetof = {
+    2, (char *) offsetof(struct wide_address_holder, where)};
+char *wide_address_from(unsigned long long value)
+{
+    return (char *) value;
+}
+int main(void)
+{
+    static char *wide_address_static = (char *) 0x500000006;
+    return ((char *) wide_address_scalar !=
+            wide_address_from(0x100000010ULL)) +
+           (((unsigned long long) wide_address_scalar >> 32) !=
+            (sizeof(char *) == 8)) +
+           (wide_address_all_ones != wide_address_from(0xFFFFFFFFFFFFFFFFULL)) +
+           (wide_address_minus_one != wide_address_from(-1LL)) +
+           (wide_address_enum != wide_address_from(-8LL)) +
+           ((char *) wide_address_offset !=
+            wide_address_from(0x100000010ULL + 2 * sizeof(int))) +
+           (wide_address_grouped != wide_address_from(0x100000005ULL)) +
+           (wide_address_cast != wide_address_from(0x200000003ULL)) +
+           ((char *) wide_address_array[0] !=
+            wide_address_from(0x300000004ULL)) +
+           (wide_address_array[1] != 0) +
+           ((char *) wide_address_array[2] != wide_address_from(8)) +
+           (wide_address_record.where != wide_address_from(0x400000005ULL)) +
+           (wide_address_offsetof.where !=
+            wide_address_from(offsetof(struct wide_address_holder, where))) +
+           (wide_address_static != wide_address_from(0x500000006ULL));
+}
+EOF
+
 # A static initializer is an arithmetic constant expression, so grouped and
 # unary subexpressions are as valid as bare literals.
 try_ 0 << EOF
@@ -21494,6 +21743,46 @@ int main(void)
            sizeof(local_long_long_bound) != sizeof(long long) * sizeof(int) ||
            sizeof(local_dereference_bound) != sizeof(int);
 }
+EOF
+
+# A literal too wide for an int, or unsigned beyond INT_MAX, keeps its value and
+# type in every integer constant expression: an array bound, a designator, a
+# bit-field width, a pointer-to-array bound or a compound literal bound. A
+# result an int cannot hold is diagnosed rather than wrapped.
+try_ 9 << EOF
+#include <stddef.h>
+struct wide_bound_record { int a; int b; };
+int wide_bound_quotient[3000000000U / 1000000000U];
+int wide_bound_difference[0x100000003ULL - 0x100000000ULL];
+int wide_bound_signed[2147483648 / 1073741824];
+int wide_bound_designated[5] = {[4294967299 - 4294967296] = 7};
+char wide_bound_offset[16U - offsetof(struct wide_bound_record, b)];
+struct wide_bound_bits { unsigned field : 4294967299 - 4294967296; } wide_bound_bits;
+int main(void) {
+    int local[3000000000U / 1500000000U];
+    int (*rows)[0x100000004ULL - 0x100000000ULL] = 0;
+    int *literal = (int[2U]){5, 6};
+    wide_bound_bits.field = 7;
+    return (sizeof(wide_bound_quotient) == 3 * sizeof(int)) +
+           (sizeof(wide_bound_difference) == 3 * sizeof(int)) +
+           (sizeof(wide_bound_signed) == 2 * sizeof(int)) +
+           (wide_bound_designated[3] == 7) +
+           (sizeof(wide_bound_offset) == 12) +
+           (wide_bound_bits.field == 7) +
+           (sizeof(local) == 2 * sizeof(int)) +
+           (sizeof(*rows) == 4 * sizeof(int)) + (literal[1] == 6);
+}
+EOF
+try_compile_error << EOF
+int wide_bound_wrapped[4294967297];
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int main(void) { int *p = (int[4294967298]){1, 2}; return p[1]; }
+EOF
+try_compile_error << EOF
+struct wide_width { unsigned field : 4294967297; };
+int main(void) { return 0; }
 EOF
 
 # Category: Switch Statements

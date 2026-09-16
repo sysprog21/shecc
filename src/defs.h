@@ -70,10 +70,11 @@
 #define MAX_LOCALS 3200
 
 /* var_t itself is parsed as a record by every bootstrap stage. Leave room for
- * compiler metadata as well as user records with many declarators. Field tables
- * are allocated lazily, so this does not inflate scalar type storage.
+ * compiler metadata as well as user records with many declarators; C99 5.2.4.1
+ * asks for 127 members in one structure. Field tables are allocated lazily, so
+ * this does not inflate scalar type storage.
  */
-#define MAX_FIELDS 96
+#define MAX_FIELDS 128
 #define MAX_TYPES 256
 #define MAX_LABELS 256
 /* Elements captured from an implicitly sized array initializer. */
@@ -810,6 +811,12 @@ struct var {
      */
     bool is_string_literal;
 
+    /* For the address of a static object in a constant initializer, the bytes
+     * one integer step moves it by, so `1 + array` advances as `array + 1`
+     * does; 0 where no such step is known.
+     */
+    int address_stride;
+
     /* The null pointer constant `(void *) 0` (C99 6.3.2.3p3), which unlike any
      * other void pointer converts to a function pointer.
      */
@@ -873,6 +880,7 @@ typedef struct block block_t;
 int read_const_sizeof_type(block_t *scope);
 int read_const_wstring_size(void);
 int read_sizeof_constant(block_t *scope);
+int read_const_expr_operand(block_t *scope);
 void add_block_typedef(block_t *block, char name[], type_t *type);
 bool find_block_typedef(block_t *block, const char *name);
 type_t *find_visible_type(const char *name, block_t *block);

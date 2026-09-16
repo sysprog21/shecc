@@ -371,6 +371,22 @@ static unsigned int wide_global_narrow_high(unsigned int lo, bool is_unsigned)
     return is_unsigned || !(lo & 0x80000000U) ? 0 : 0xffffffffU;
 }
 
+/* Whether @value is an address constant: a string literal, the address of a
+ * global object or a function designator. Such a value is never null, so the
+ * operators that only test it know its truth without its address.
+ */
+static bool wide_global_address_operand(const var_t *value)
+{
+    return value->is_string_literal || value->is_global_address ||
+           value->is_func;
+}
+
+static bool wide_global_operand_is_true(const var_t *value)
+{
+    return wide_global_address_operand(value) ||
+           (value->init_val || value->init_val_hi);
+}
+
 /* Record a folded result. An int-sized result keeps only its low word, so a
  * carry, borrow or product overflow computed in the high word cannot leak into
  * a later wide reduction or a truth test of this value.
@@ -412,6 +428,51 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
         result->is_const = true;
         return true;
     }
+
+    /* An address constant plus or minus an integer constant is itself an
+     * address constant (C99 6.6p7), with the integer first in a sum as well.
+     */
+    if ((op == OP_add || op == OP_sub) && right) {
+        var_t *address = wide_global_address_operand(left) ? left
+                         : op == OP_add                    ? right
+                                                           : NULL;
+        var_t *index = address == left ? right : left;
+        int stride = !address || address->is_func ? 0
+                     : address->is_string_literal ? address->type->size
+                                                  : address->address_stride;
+
+        if (stride && wide_global_address_operand(address) &&
+            !wide_global_address_operand(index)) {
+            var_t *offset = require_var(parent);
+            int step = narrow_wide_global_address_offset(index);
+
+            if (step > INT_MAX / stride || step < -(INT_MAX / stride))
+                error_at(
+                    "Global address offset exceeds supported integer range",
+                    cur_token_loc());
+            offset->var_name = gen_name();
+            offset->init_val = step * (op == OP_sub ? -stride : stride);
+            add_insn(parent, bb, OP_load_constant, offset, NULL, NULL, 0, NULL);
+            result->type = address->type;
+            result->ptr_level = address->ptr_level;
+            result->is_global_address = address->is_global_address;
+            result->is_string_literal = address->is_string_literal;
+            result->is_const_qualified = address->is_const_qualified;
+            result->pointee_func_signature = address->pointee_func_signature;
+            result->address_stride = address->address_stride;
+            add_insn(parent, bb, OP_add, result, address, offset, 0, NULL);
+            return true;
+        }
+    }
+
+    /* An address constant is otherwise an operand only of the operators that
+     * test it. Other arithmetic on one is not a constant expression here.
+     */
+    if ((wide_global_address_operand(left) ||
+         (right && wide_global_address_operand(right))) &&
+        op != OP_log_and && op != OP_log_or)
+        error_at("Global initializer requires a constant value",
+                 cur_token_loc());
 
     /* Materialize the usual arithmetic conversion in word form before any
      * operation reads a high word, rather than trusting the operand's stored
@@ -491,8 +552,8 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
     }
 
     if (op == OP_log_and || op == OP_log_or) {
-        bool left_true = lo || hi;
-        bool right_true = rhs_lo || rhs_hi;
+        bool left_true = wide_global_operand_is_true(left);
+        bool right_true = right && wide_global_operand_is_true(right);
 
         store_wide_global_word_result(parent, bb, result,
                                       op == OP_log_and
@@ -516,6 +577,15 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
         if (rhs_lo == 0 && rhs_hi == 0)
             error_at("division by zero in global constant expression",
                      cur_token_loc());
+
+        /* The minimum of the signed common type divided by -1 has no
+         * representable quotient, and its remainder is undefined as well.
+         * Diagnose it as the word-sized evaluator does INT_MIN / -1.
+         */
+        if (!is_unsigned && rhs_lo == 0xffffffffU && rhs_hi == 0xffffffffU &&
+            (common->size <= TY_int->size ? lo == 0x80000000U
+                                          : hi == 0x80000000U && lo == 0))
+            error_at("Overflow in constant expression", cur_token_loc());
         if (neg_left) {
             lo = ~lo + 1;
             hi = ~hi + (lo == 0);
@@ -638,6 +708,34 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
     return true;
 }
 
+/* Apply the integer promotions to @value, an operand of a unary arithmetic
+ * operator or of a shift or other binary operator. A value narrower than int
+ * already holds its converted bit pattern in the low word; retyping it as int
+ * lets the negation, complement or shift that follows extend its result as an
+ * int rather than as the unsigned char or short the cast named.
+ */
+static var_t *promote_wide_global_operand(block_t *parent,
+                                          basic_block_t *bb,
+                                          var_t *value)
+{
+    var_t *promoted;
+
+    /* An address constant has no integer promotion to make: its type names the
+     * pointee, so a char pointer must not be retyped as the int its target
+     * width would suggest.
+     */
+    if (value->ptr_level || wide_global_address_operand(value) ||
+        value->type->size >= TY_int->size)
+        return value;
+    promoted = require_typed_var(parent, TY_int);
+    promoted->var_name = gen_name();
+    promoted->init_val = value->init_val;
+    promoted->init_val_hi = wide_global_narrow_high(value->init_val, false);
+    promoted->is_const = true;
+    add_insn(parent, bb, OP_load_constant, promoted, NULL, NULL, 0, NULL);
+    return promoted;
+}
+
 /* A grouped primary is lowered into the same global setup block as its parent.
  * The caller owns the closing parenthesis, so get_operator() naturally stops an
  * inner precedence stack without consuming its delimiter.
@@ -670,7 +768,8 @@ var_t *read_wide_global_literal_primary(block_t *parent,
             force_wide_global_literal_type(value, literal);
             return value;
         }
-        value = read_wide_global_literal_primary(parent, bb, scope);
+        value = promote_wide_global_operand(
+            parent, bb, read_wide_global_literal_primary(parent, bb, scope));
         zero->var_name = gen_name();
         zero->type = value->type;
         zero->init_val = 0;
@@ -685,7 +784,8 @@ var_t *read_wide_global_literal_primary(block_t *parent,
     if (lex_accept(T_bit_not)) {
         var_t *result;
 
-        value = read_wide_global_literal_primary(parent, bb, scope);
+        value = promote_wide_global_operand(
+            parent, bb, read_wide_global_literal_primary(parent, bb, scope));
         result = require_var(parent);
         result->var_name = gen_name();
         result->type = value->type;
@@ -699,12 +799,30 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         value = read_wide_global_literal_primary(parent, bb, scope);
         result = require_typed_var(parent, TY_int);
         result->var_name = gen_name();
-        result->init_val = !(value->init_val || value->init_val_hi);
+        result->init_val = !wide_global_operand_is_true(value);
         result->init_val_hi = 0;
         result->is_const = true;
         if (!wide_global_unevaluated_depth)
             add_insn(parent, bb, OP_log_not, result, value, NULL, 0, NULL);
         return result;
+    }
+
+    /* An address constant may be an operand here, as the arms of `1 ? "a" :
+     * "b"` are. Every address form belongs to the aggregate constant reader,
+     * which reads this one operand rather than the whole expression it is part
+     * of. A subscripted literal such as `"ab"[1]` is an integer and was read
+     * above.
+     */
+    if (!subscripted_string_literal_starts_here() &&
+        (lex_peek(T_string, NULL) ||
+         global_address_operand_starts_here(scope))) {
+        basic_block_t *address_bb = bb;
+        var_t *address;
+
+        global_tested_operand_depth++;
+        address = parse_global_constant_value(parent, &address_bb);
+        global_tested_operand_depth--;
+        return address;
     }
     if (lex_accept(T_sizeof)) {
         value = require_typed_var(parent, find_type("size_t", true));
@@ -762,7 +880,12 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         lex_expect(T_identifier);
         value = require_typed_var(parent, TY_int);
         value->var_name = gen_name();
+
+        /* Every operand this reader returns carries its high word, the
+         * extension of an int-sized value, so no consumer rebuilds it.
+         */
         value->init_val = constant->value;
+        value->init_val_hi = wide_global_narrow_high(constant->value, false);
         value->is_const = true;
         add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
         return value;
@@ -780,6 +903,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         value = require_typed_var(parent, TY_int);
         value->var_name = gen_name();
         value->init_val = element;
+        value->init_val_hi = wide_global_narrow_high(element, false);
         value->is_const = true;
         add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
         return value;
@@ -820,8 +944,8 @@ var_t *read_wide_global_literal_expression(block_t *parent,
     int op_stack_index = 0, val_stack_index = 0;
     opcode_t op;
 
-    val_stack[val_stack_index++] =
-        read_wide_global_literal_primary(parent, bb, scope);
+    val_stack[val_stack_index++] = promote_wide_global_operand(
+        parent, bb, read_wide_global_literal_primary(parent, bb, scope));
     op = get_operator();
     while (op != OP_generic) {
         if (op == OP_ternary) {
@@ -854,7 +978,7 @@ var_t *read_wide_global_literal_expression(block_t *parent,
                 val_stack[val_stack_index++] = result;
             }
             condition = val_stack[--val_stack_index];
-            condition_true = condition->init_val || condition->init_val_hi;
+            condition_true = wide_global_operand_is_true(condition);
 
             /* A global conditional expression is still an integer constant
              * expression, but both arms undergo the usual arithmetic
@@ -874,6 +998,13 @@ var_t *read_wide_global_literal_expression(block_t *parent,
             when_false = read_wide_global_literal_expression(parent, bb, scope);
             if (condition_true)
                 wide_global_unevaluated_depth--;
+
+            /* An address constant has no arithmetic conversion to make with the
+             * other arm; the selected one is the value.
+             */
+            if (wide_global_address_operand(when_true) ||
+                wide_global_address_operand(when_false))
+                return condition_true ? when_true : when_false;
             common = integer_common_type(when_true, when_false);
             normalize_integer_binary_operands(parent, &bb, OP_add, &when_true,
                                               &when_false);
@@ -905,20 +1036,21 @@ var_t *read_wide_global_literal_expression(block_t *parent,
         if (op_stack_index >= MAX_OPERATOR_STACK_SIZE ||
             val_stack_index >= MAX_OPERATOR_STACK_SIZE)
             fatal("Wide global initializer is too complex");
+
+        /* An address constant is true without a value of its own, so `array
+         * || 1 / 0` never evaluates its right operand either.
+         */
+        bool lhs_true =
+            wide_global_operand_is_true(val_stack[val_stack_index - 1]);
+
         protected_rhs[op_stack_index] =
-            is_logical(op) &&
-            ((op == OP_log_and &&
-              !(val_stack[val_stack_index - 1]->init_val ||
-                val_stack[val_stack_index - 1]->init_val_hi)) ||
-             (op == OP_log_or &&
-              (val_stack[val_stack_index - 1]->init_val ||
-               val_stack[val_stack_index - 1]->init_val_hi)));
+            op == OP_log_and ? !lhs_true : op == OP_log_or && lhs_true;
         op_stack[op_stack_index++] = op;
         if (protected_rhs[op_stack_index - 1]) {
             wide_global_unevaluated_depth++;
         }
-        val_stack[val_stack_index++] =
-            read_wide_global_literal_primary(parent, bb, scope);
+        val_stack[val_stack_index++] = promote_wide_global_operand(
+            parent, bb, read_wide_global_literal_primary(parent, bb, scope));
         op = get_operator();
     }
     while (op_stack_index > 0) {
@@ -941,20 +1073,56 @@ var_t *read_wide_global_literal_expression(block_t *parent,
     return val_stack[0];
 }
 
+/* Skip the arm of a conditional expression that its constant condition
+ * discards. The arm may itself hold grouped or nested conditionals, so count
+ * the brackets and the '?' still waiting for their ':' rather than stopping at
+ * the first ':'. A second operand ends at its matching ':'; a third ends at the
+ * ',' or ';' ending the declarator, the ':' of an enclosing conditional or the
+ * bracket closing an enclosing initializer.
+ */
+static void skip_discarded_conditional_arm(bool second_operand)
+{
+    int depth = 0;
+    int pending = 0;
+
+    for (;;) {
+        token_t *next = cur_token->next;
+
+        if (!next || next->kind == T_eof)
+            return;
+        if (next->kind == T_open_bracket || next->kind == T_open_square ||
+            next->kind == T_open_curly) {
+            depth++;
+        } else if (next->kind == T_close_bracket ||
+                   next->kind == T_close_square ||
+                   next->kind == T_close_curly) {
+            if (depth == 0)
+                return;
+            depth--;
+        } else if (depth == 0 && next->kind == T_question) {
+            pending++;
+        } else if (depth == 0 && next->kind == T_colon) {
+            if (pending == 0)
+                return;
+            pending--;
+        } else if (depth == 0 && !second_operand &&
+                   (next->kind == T_comma || next->kind == T_semicolon)) {
+            return;
+        }
+        lex_next();
+    }
+}
+
 void eval_ternary_imm(int cond, var_t *var)
 {
     if (cond == 0) {
-        while (!lex_peek(T_colon, NULL)) {
-            lex_next();
-        }
-        lex_accept(T_colon);
+        skip_discarded_conditional_arm(true);
+        lex_expect(T_colon);
         read_global_assignment_var(var);
     } else {
         read_global_assignment_var(var);
         lex_expect(T_colon);
-        while (!lex_peek(T_semicolon, NULL)) {
-            lex_next();
-        }
+        skip_discarded_conditional_arm(false);
     }
 }
 
@@ -980,6 +1148,17 @@ bool read_global_assignment_var(var_t *var)
     if ((var->array_size > 0 || var->has_unsized_array) &&
         is_wchar_array(var) && lex_peek(T_wstring, NULL)) {
         parse_wstring_array_init(var, parent, &bb);
+        return true;
+    }
+
+    /* An address constant that an operator only tests, as in `"a" && 1`, is the
+     * operand of a constant expression rather than this object's value.
+     */
+    if (global_tested_operand_starts_here(scope)) {
+        var_t *tested = read_wide_global_literal_expression(parent, bb, scope);
+
+        reject_global_integer_pointer(var, tested);
+        add_insn(parent, bb, OP_assign, var, tested, NULL, 0, NULL);
         return true;
     }
 

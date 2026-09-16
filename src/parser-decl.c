@@ -495,11 +495,36 @@ int read_const_expr_operand(block_t *scope)
     return 0;
 }
 
+bool constant_expression_needs_typed_value(token_t *token);
+
 int read_const_expr(block_t *scope)
 {
     opcode_t op_stack[MAX_CONST_EXPR_OPS];
     int val_stack[MAX_CONST_EXPR_OPS];
     int op_n = 0, val_n = 0;
+
+    /* An int cannot hold a literal such as 4294967296 or give 3000000000U its
+     * unsigned rank. Fold an expression holding one in the typed two-word
+     * evaluator, and accept its value only if the int result keeps it.
+     */
+    if (constant_expression_needs_typed_value(cur_token->next)) {
+        pp_integer_t typed_value;
+        block_t *saved_scope = pp_integer_constant_scope;
+        unsigned int extension;
+
+        pp_integer_constant_scope = scope ? scope : GLOBAL_BLOCK;
+        cur_token =
+            pp_read_constant_infix_expr(0, cur_token, &typed_value, true);
+        pp_integer_constant_scope = saved_scope;
+        pp_enum_normalize(&typed_value);
+        extension = typed_value.is_unsigned || !(typed_value.lo & 0x80000000U)
+                        ? 0
+                        : ~0U;
+        if (typed_value.hi != extension)
+            error_at("Integer constant expression exceeds int range",
+                     cur_token_loc());
+        return typed_value.lo;
+    }
 
     val_stack[val_n++] = read_const_expr_operand(scope);
 

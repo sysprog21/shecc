@@ -1123,10 +1123,15 @@ bool wide_character_constant(const char *literal, int *value)
     return true;
 }
 
+/* The value of an integer literal in one word. A literal past that word keeps
+ * its low bits; the accumulator is unsigned so that is a wrap, never the host
+ * compiler's signed overflow. Constant expressions that can hold such a literal
+ * fold it through the two-word evaluator instead.
+ */
 int parse_numeric_constant(const char *buffer)
 {
     int i = 0;
-    int value = 0;
+    unsigned int value = 0;
     while (buffer[i]) {
         /* The lexer keeps C99 integer suffixes in the token. Their type is
          * selected by the parser; they are not digits of the value.
