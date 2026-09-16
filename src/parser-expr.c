@@ -2732,6 +2732,74 @@ void normalize_integer_binary_operands(block_t *parent,
         right[0] = resize_to(parent, bb, right[0], common, 0);
 }
 
+bool emit_wide_global_word_arithmetic(block_t *parent,
+                                      basic_block_t *bb,
+                                      var_t *result,
+                                      opcode_t op,
+                                      var_t *left,
+                                      var_t *right);
+
+/* The int folder in read_expr_body() leaves unsigned and long long operands
+ * alone. Fold those in two-word form before the usual arithmetic conversions
+ * emit IR that hides the constants, so an unsigned expression such as sizeof(x)
+ * - sizeof(x) stays an integer constant expression and, when zero, a null
+ * pointer constant. Division by zero and a shift outside the operand width are
+ * left to the target, as the int folder leaves them.
+ */
+static bool fold_wide_constant_binary(block_t *parent,
+                                      basic_block_t **bb,
+                                      opcode_t op,
+                                      var_t *rs1,
+                                      var_t *rs2)
+{
+    var_t *vd;
+
+    if (!rs1 || !rs2 || !rs1->is_const || !rs2->is_const || rs1->is_global ||
+        rs2->is_global || !rs1->type || !rs2->type ||
+        is_pointer_like_value(rs1) || is_pointer_like_value(rs2) ||
+        rs1->is_func || rs2->is_func)
+        return false;
+    if (!unsigned_int_operand(rs1) && !unsigned_int_operand(rs2) &&
+        rs1->type->size <= TY_int->size && rs2->type->size <= TY_int->size)
+        return false;
+
+    switch (op) {
+    case OP_div:
+    case OP_mod:
+        if (!rs2->init_val &&
+            (rs2->type->size <= TY_int->size || !rs2->init_val_hi))
+            return false;
+        break;
+    case OP_lshift:
+    case OP_rshift:
+        if ((rs2->type->size > TY_int->size && rs2->init_val_hi) ||
+            rs2->init_val < 0 || rs2->init_val >= rs1->type->size * 8)
+            return false;
+        break;
+    case OP_add:
+    case OP_sub:
+    case OP_mul:
+    case OP_bit_and:
+    case OP_bit_or:
+    case OP_bit_xor:
+    case OP_eq:
+    case OP_neq:
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+        break;
+    default:
+        return false;
+    }
+
+    vd = require_typed_var(parent, integer_binary_result_type(op, rs1, rs2));
+    vd->var_name = gen_name();
+    emit_wide_global_word_arithmetic(parent, *bb, vd, op, rs1, rs2);
+    opstack_push(vd);
+    return true;
+}
+
 void read_expr_body(block_t *parent, basic_block_t **bb)
 {
     var_t *vd, *rs1, *rs2;
@@ -2999,6 +3067,8 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
         }
         rs1 = integer_promote_operand(parent, bb, rs1);
         rs2 = integer_promote_operand(parent, bb, rs2);
+        if (fold_wide_constant_binary(parent, bb, top_op, rs1, rs2))
+            continue;
         normalize_integer_binary_operands(parent, bb, top_op, &rs1, &rs2);
         type_t *result_type = integer_binary_result_type(top_op, rs1, rs2);
         /* Constant folding for binary operations */

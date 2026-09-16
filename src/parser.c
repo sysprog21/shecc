@@ -444,8 +444,9 @@ bool global_compound_literal_starts_here(void)
     if (!next ||
         !((next->kind == T_identifier && find_type(next->literal, true)) ||
           next->kind == T_struct || next->kind == T_union ||
-          next->kind == T_signed || next->kind == T_unsigned ||
-          next->kind == T_long))
+          next->kind == T_enum || next->kind == T_const ||
+          next->kind == T_volatile || next->kind == T_signed ||
+          next->kind == T_unsigned || next->kind == T_long))
         return false;
 
     /* Only a brace after the type name makes a compound literal; otherwise the

@@ -359,13 +359,24 @@ var_t *resolve_global_declarator(block_t *block,
 
     *is_redeclaration = true;
 
+    /* An array whose outer bound is omitted is compatible with any bound on the
+     * same element type (C99 6.7.5.2p6). Inner bounds must still agree; the
+     * outer product then follows from them, so compare it only when both
+     * declarations spell it.
+     */
+    bool previous_is_array =
+        previous->array_size > 0 || previous->has_unsized_array;
+    bool var_is_array = var->array_size > 0 || var->has_unsized_array;
+    bool either_unsized = previous->has_unsized_array || var->has_unsized_array;
+
     if (!compatible_decl_type(previous->type, var->type) ||
         (!!previous->pointee_func_signature != !!var->pointee_func_signature) ||
         (previous->pointee_func_signature &&
          !compatible_function_signature(previous->pointee_func_signature,
                                         var->pointee_func_signature)) ||
         previous->ptr_level != var->ptr_level ||
-        previous->array_size != var->array_size ||
+        previous_is_array != var_is_array ||
+        (!either_unsized && previous->array_size != var->array_size) ||
         previous->array_dim2 != var->array_dim2 ||
         previous->array_dim3 != var->array_dim3 ||
         previous->array_dim4 != var->array_dim4 ||
@@ -381,6 +392,12 @@ var_t *resolve_global_declarator(block_t *block,
                  next_token_loc());
     if (lex_peek(T_assign, NULL) && previous->has_initializer)
         error_at("redefinition of global variable", next_token_loc());
+
+    /* A later bound completes the shared object's type. */
+    if (previous->has_unsized_array && !var->has_unsized_array) {
+        previous->array_size = var->array_size;
+        previous->has_unsized_array = false;
+    }
 
     /* Scalar declarators were placed on the operand stack by
      * read_inner_var_decl(). Its later initializer lowering pops that entry, so
@@ -520,17 +537,16 @@ void parse_global_compound_scalar_init(var_t *var, block_t *block)
  */
 void parse_global_compound_array_init(var_t *var, block_t *block)
 {
-    char type_name[MAX_ID_LEN];
     type_t *element_type;
     var_t *array;
     int element_ptr_level = 0;
 
+    /* The element type may be qualified or spelled with several keywords, as in
+     * `(const unsigned char[])`.
+     */
     lex_expect(T_open_bracket);
-    base_type_t record_kind = accept_record_keyword();
-    lex_ident(T_identifier, type_name);
-    element_type = record_kind
-                       ? find_record_tag(type_name, var->scope, record_kind)
-                       : find_type(type_name, 1);
+    element_type =
+        read_type_name_specifiers(var->scope ? var->scope : GLOBAL_BLOCK);
     while (lex_accept(T_asterisk)) {
         element_ptr_level++;
         while (lex_accept(T_const) || lex_accept(T_volatile) ||

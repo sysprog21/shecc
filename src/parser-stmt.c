@@ -32,7 +32,11 @@ typedef struct switch_label_context {
 switch_label_context_t switch_label_contexts[MAX_NESTING];
 int switch_label_context_idx = 0;
 
-void reject_label_followed_by_declaration_in_strict_c99(void)
+/* A label must precede a statement in C99. Resolve an identifier against the
+ * scope the label appears in, so a block typedef starts a declaration and an
+ * object that hides a file-scope typedef starts an expression statement.
+ */
+void reject_label_followed_by_declaration_in_strict_c99(block_t *parent)
 {
     char name[MAX_ID_LEN];
 
@@ -47,7 +51,7 @@ void reject_label_followed_by_declaration_in_strict_c99(void)
         lex_peek(T_unsigned, NULL) || lex_peek(T_long, NULL) ||
         lex_peek(T_struct, NULL) || lex_peek(T_union, NULL) ||
         lex_peek(T_enum, NULL) ||
-        (lex_peek(T_identifier, name) && find_type(name, true)))
+        (lex_peek(T_identifier, name) && find_visible_type(name, parent)))
         error_at("a C99 label must precede a statement, not a declaration",
                  cur_token_loc());
 }
@@ -170,7 +174,7 @@ basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
         context->dispatch_tail = next_dispatch;
     }
     lex_expect(T_colon);
-    reject_label_followed_by_declaration_in_strict_c99();
+    reject_label_followed_by_declaration_in_strict_c99(parent);
     return label_body;
 }
 
@@ -431,9 +435,10 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
             /* read_full_var_decl() owns consuming and resolving the tag. */
             type = TY_int;
         } else {
-            type = has_builtin_type                    ? TY_int
-                   : has_identifier || has_record_type ? find_type(token, 1)
-                                                       : NULL;
+            type = has_builtin_type ? TY_int
+                   : has_identifier || has_record_type
+                       ? find_visible_type(token, blk)
+                       : NULL;
         }
         if (!type && saw_decl_specifier)
             error_at("declaration specifier requires a type", cur_token_loc());
@@ -1285,7 +1290,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
         const label_t *l = find_label(token);
         if (l)
             error_at("label redefinition", &id_tk->location);
-        reject_label_followed_by_declaration_in_strict_c99();
+        reject_label_followed_by_declaration_in_strict_c99(parent);
         basic_block_t *n = bb_create(parent);
         bb_connect(bb, n, NEXT);
         add_label(token, n);

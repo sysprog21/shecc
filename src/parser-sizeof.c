@@ -70,11 +70,12 @@ int sizeof_grouped_literal_depth(token_t *token, token_kind_t kind)
 /* Push the value of a sizeof expression. VLA is intentionally outside shecc's
  * C99 scope, so every admitted sizeof result is an integer constant expression;
  * mark it so constant folding and the null pointer constant test treat every
- * operand form alike.
+ * operand form alike. Its type is size_t, so arithmetic and comparisons on the
+ * result follow the unsigned conversions, as the file-scope constant path does.
  */
 static void push_sizeof_result(block_t *parent, basic_block_t *bb, int size)
 {
-    var_t *result = require_var(parent);
+    var_t *result = require_typed_var(parent, find_type("size_t", true));
 
     result->init_val = size;
     result->is_const = true;

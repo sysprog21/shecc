@@ -898,6 +898,39 @@ int main(void) {
 }
 EOF
 
+# A sizeof result has type size_t in every scope, so it converts a signed
+# operand to unsigned just as the file-scope constant does.
+try_ 0 << EOF
+int global_sizeof_wraps = (sizeof(int) - 5) > 0;
+int main(void) {
+    int x = 3;
+    int arr[4];
+    int n = -1;
+    long long wide = (long long) (sizeof(int) - 5);
+    return !((sizeof(int) - 5) > 0) || -1 < sizeof(int) ||
+           !((sizeof x - 5) / 2 > 100) ||
+           n < sizeof(arr) / sizeof(arr[0]) || !global_sizeof_wraps ||
+           wide != (sizeof(size_t) == 8 ? -1LL : 4294967295LL);
+}
+EOF
+
+# Unsigned and long long constant operands fold with their own conversions, so a
+# zero-valued unsigned constant expression is still a null pointer constant.
+try_ 0 << EOF
+int three(void) { return 3; }
+int main(void) {
+    int (*callback)(void) = three;
+    int zero = 0;
+    return (callback != (0UL - 0UL)) + (callback != (0ULL - 0ULL)) +
+               ((1 ? callback : sizeof(int) - sizeof(int))() == 3) !=
+               3 ||
+           (4000000000U / 3U) != 1333333333U || (0x80000000U >> 31) != 1U ||
+           (-1 < 0U) || (-1LL < 0U) != 1 || (-7LL / 2LL) != -3LL ||
+           (0xFFFFFFFFFFFFFFFFULL / 3ULL) != 0x5555555555555555ULL ||
+           (zero && 1U / (sizeof(int) - sizeof(int)));
+}
+EOF
+
 try_ 0 << EOF
 int global_abstract_array_size = sizeof(int[2][3]);
 int main(void) { return global_abstract_array_size != 6 * sizeof(int); }
@@ -2255,6 +2288,49 @@ EOF
 try_compile_error << EOF
 volatile int value;
 extern int value;
+int main(void) { return 0; }
+EOF
+
+# An omitted outer array bound is compatible with any bound on the same element
+# type, in either order, and the bound completes the shared object.
+try_ 0 << EOF
+extern int a[];
+int a[3] = {1, 2, 3};
+int b[];
+int guard_b = 5;
+int b[4];
+int c[3] = {7, 8, 9};
+extern int c[];
+int guard_c = 6;
+extern int m[][2];
+int m[3][2] = {{1, 2}, {3, 4}, {5, 6}};
+int main(void) {
+    for (int i = 0; i < 4; i++)
+        b[i] = 11;
+    return sizeof(a) != 3 * sizeof(int) || a[2] != 3 ||
+           sizeof(b) != 4 * sizeof(int) || guard_b != 5 || b[3] != 11 ||
+           sizeof(c) != 3 * sizeof(int) || c[2] != 9 || guard_c != 6 ||
+           sizeof(m) != 6 * sizeof(int) || m[2][1] != 6;
+}
+EOF
+try_compile_error << EOF
+int d[3];
+int d[4];
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+extern int m[][2];
+int m[3][3];
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+int e;
+extern int e[];
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+extern int f[];
+int *f;
 int main(void) { return 0; }
 EOF
 
@@ -7722,6 +7798,43 @@ int main(void) {
     }
 }
 EOF
+
+# A for initializer resolves its type name in block scope, like any other
+# declaration: a block typedef names a type there, and a local object hides a
+# file-scope typedef.
+try_ 7 << EOF
+int main(void) {
+    typedef int T;
+    typedef int *P;
+    int values[2] = { 3, 4 };
+    int s = 0;
+    for (T i = 0; i < 2; i++)
+        s += i;
+    for (P p = values; p != values + 2; p++)
+        s += *p;
+    return s - 1;
+}
+EOF
+try_flags 3 --std=c99 << EOF
+int T = 9;
+int main(void) {
+    typedef char T;
+    int s = 0;
+    for (T i = 0; i < 3; i++)
+        s += i;
+    return s + sizeof(T) - 1;
+}
+EOF
+try_ 3 << EOF
+typedef int T;
+int main(void) {
+    int T = 2;
+    int s = 0;
+    for (T = 0; T < 3; T++)
+        s += T;
+    return s;
+}
+EOF
 try_ 17 << EOF
 int main(void) {
     typedef unsigned long count_t, *count_p;
@@ -12112,6 +12225,36 @@ int main(void) {
     return global_compound_bounded[0] + global_compound_bounded[1] +
            global_compound_bounded[2] + global_compound_bounded[3];
 }
+EOF
+
+# The element type of a file-scope array compound literal is a full type name:
+# qualifiers, several keywords, enum tags and qualified typedefs.
+try_flags 231 --std=c99 << EOF
+enum E { A = 1, B = 2 };
+typedef unsigned char byte;
+struct S { int x; };
+const int *global_const_compound = (const int[]){1, 2};
+unsigned char *global_uchar_compound = (unsigned char[]){1, 200};
+long long *global_llong_compound = (long long[2]){1, 0x100000000LL};
+volatile short *global_short_compound = (volatile short[3]){1, 2, 3};
+const long *global_long_compound = (long const[]){7, 8};
+enum E *global_enum_compound = (enum E[]){A, B};
+const byte *global_byte_compound = (const byte[]){9, 10};
+const struct S *global_record_compound = (const struct S[]){{4}, {5}};
+int main(void) {
+    return global_const_compound[1] + global_uchar_compound[1] +
+           (int) (global_llong_compound[1] >> 32) + global_short_compound[2] +
+           global_long_compound[1] + global_enum_compound[1] +
+           global_byte_compound[1] + global_record_compound[1].x;
+}
+EOF
+try_compile_error << EOF
+long long *global_llong_mismatch = (int[2]){1, 2};
+int main(void) { return 0; }
+EOF
+try_compile_error << EOF
+unsigned char *global_sign_mismatch = (signed char[]){1, 2};
+int main(void) { return 0; }
 EOF
 try_ 5 << EOF
 int global_pointer_array_rows[2][2] = {{1, 2}, {3, 4}};
@@ -27899,6 +28042,32 @@ int main(void) { label: int value = 1; return value; }
 EOF
 try_compile_error_flag --std=c99 << EOF
 int main(void) { label: typedef int value; return 0; }
+EOF
+
+# The label lookahead resolves identifiers in the label's own scope: a block
+# typedef starts a declaration, and an object hiding a file-scope typedef starts
+# an expression statement.
+try_compile_error_flag --std=c99 << EOF
+int main(void) { typedef int T; goto label; label: T value = 0; return value; }
+EOF
+try_compile_error_flag --std=c99 << EOF
+int main(void) {
+    typedef int T;
+    switch (1) { case 1: T value = 1; return value; }
+    return 0;
+}
+EOF
+try_flags 4 --std=c99 << EOF
+typedef int T;
+int main(void) { int T = 3; goto label; label: T = 4; return T; }
+EOF
+try_flags 5 --std=c99 << EOF
+typedef int T;
+int main(void) {
+    int T = 0;
+    switch (1) { case 1: T = 5; }
+    return T;
+}
 EOF
 try_compile_error_flag --std=c99 << EOF
 enum { first = 1, second = 1 };
