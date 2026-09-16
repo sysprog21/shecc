@@ -22,6 +22,84 @@
 /* Dead store elimination window size */
 #define OVERWRITE_WINDOW 3
 
+/* Whether @var lives in memory that other code can reach without naming it: a
+ * global, or a variable whose address is taken. SSA gives such a variable one
+ * name, and a write to it is observable however unused it looks.
+ */
+bool var_in_memory(const var_t *var)
+{
+    return var->is_global || var->address_taken;
+}
+
+/* Whether @insn accesses a volatile object, which C99 6.7.3p6 counts as a side
+ * effect whether or not anything uses the value: it names such an object as an
+ * operand, or reads through an address mark_volatile_addresses() traced to one.
+ * Taking an object's address does not access it.
+ */
+bool insn_reads_volatile(const insn_t *insn)
+{
+    if (insn->opcode == OP_address_of || insn->opcode == OP_allocat)
+        return false;
+    if (insn->opcode == OP_read && insn->rs1 && insn->rs1->is_volatile)
+        return !insn->rd || !insn->rd->is_assignment_reload;
+    return var_is_volatile_object(insn->rs1) ||
+           var_is_volatile_object(insn->rs2) ||
+           var_is_volatile_object(insn->rs3);
+}
+
+/* Whether @var holds an address into a volatile object: a volatile pointer or
+ * array, or a temporary already traced to one.
+ */
+bool var_is_volatile_address(const var_t *var)
+{
+    if (!var || !var->is_volatile)
+        return false;
+    return var->ptr_level || var->array_size ||
+           (var->type && var->type->ptr_level) || var->var_name[0] == '.';
+}
+
+/* Mark every temporary that holds an address into a volatile object.
+ *
+ * A declaration says its object is volatile, but a member or an element of the
+ * object, or whatever a pointer to volatile designates, is read through an
+ * address the parser computed into a temporary, and nothing on the temporary
+ * says what it points into. Follow each address from the object or pointer it
+ * was derived from, so that the read at the end of the chain is recognizable as
+ * the side effect it is. Only addresses are followed: an int computed from a
+ * volatile int is an ordinary value.
+ */
+void mark_volatile_addresses(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            var_t *rd = insn->rd;
+            bool from_volatile = false;
+
+            if (!rd || rd->is_volatile || rd->var_name[0] != '.')
+                continue;
+
+            switch (insn->opcode) {
+            case OP_address_of:
+                from_volatile = insn->rs1 && insn->rs1->is_volatile;
+                break;
+            case OP_add:
+            case OP_sub:
+                from_volatile = var_is_volatile_address(insn->rs1) ||
+                                var_is_volatile_address(insn->rs2);
+                break;
+            case OP_assign:
+            case OP_cast:
+                from_volatile = var_is_volatile_address(insn->rs1);
+                break;
+            default:
+                break;
+            }
+            if (from_volatile)
+                rd->is_volatile = true;
+        }
+    }
+}
+
 void var_list_ensure_capacity(var_list_t *list, int min_capacity)
 {
     if (list->capacity >= min_capacity)
@@ -89,7 +167,7 @@ void bb_forward_traversal(bb_traversal_args_t *args)
     basic_block_t *bb = args->bb;
     func_t *func = args->func;
 
-    bb->visited++;
+    bb->visited = func->visited;
 
     if (args->preorder_cb)
         args->preorder_cb(func, bb);
@@ -125,7 +203,7 @@ void bb_backward_traversal(bb_traversal_args_t *args)
     basic_block_t *bb = args->bb;
     func_t *func = args->func;
 
-    bb->visited++;
+    bb->visited = func->visited;
 
     if (args->preorder_cb)
         args->preorder_cb(func, bb);
@@ -727,6 +805,9 @@ bool var_check_in_scope(const var_t *var, block_t *block)
             return true;
     }
 
+    if (func->returns_aggregate && &func->sret_def == var)
+        return true;
+
     return false;
 }
 
@@ -800,7 +881,10 @@ void solve_phi_insertion(void)
                     if (df == func->exit)
                         continue;
 
-                    if (var->is_global)
+                    /* Neither a global nor an address-taken variable is
+                     * renamed, so there is no version for a phi to choose.
+                     */
+                    if (var_in_memory(var))
                         continue;
 
                     if (insert_phi_insn(df, var)) {
@@ -850,6 +934,7 @@ var_t *new_const_var(block_t *scope, int val)
     var->var_name = gen_name();
     var->is_const = true;
     var->init_val = val;
+    var->init_val_hi = 0;
     return var;
 }
 bool is_dominate(const basic_block_t *pred, basic_block_t *succ);
@@ -873,6 +958,22 @@ void rename_stack_push(var_t *base, int sub)
     r->stack[r->stack_idx++] = sub;
 }
 
+/* The one name an address-taken variable keeps for its whole life.
+ *
+ * A store through a pointer changes such a variable without any instruction
+ * naming it, and a read through one sees whatever its last assignment by name
+ * wrote. Separate SSA versions would give each assignment a place of its own,
+ * so neither kind of access would reach the other. Like a global, it keeps one
+ * var_t for every definition and use: the entry version for a parameter, under
+ * which the allocator finds its incoming register, and the declaration itself
+ * for anything else.
+ */
+var_t *addressed_name(var_t *v)
+{
+    var_t *entry = var_subscript0(v->base);
+    return entry ? entry : v->base;
+}
+
 void new_name(block_t *block, var_t **var)
 {
     var_t *v = *var;
@@ -880,6 +981,10 @@ void new_name(block_t *block, var_t **var)
         v->base = v;
     if (v->is_global)
         return;
+    if (v->address_taken) {
+        var[0] = addressed_name(v);
+        return;
+    }
 
     rename_t *r = var_rename(v->base);
     int i = r->counter++;
@@ -887,6 +992,12 @@ void new_name(block_t *block, var_t **var)
     var_t *vd = require_var(block);
     memcpy(vd, *var, sizeof(var_t));
     var_reset_subscripts(vd); /* the copy shares nothing with its base */
+    /* A fresh SSA definition has no physical-register residence. In particular,
+     * it must not inherit either half of a future wide pair from the version it
+     * was copied from.
+     */
+    vd->phys_reg = -1;
+    vd->phys_reg_hi = -1;
     vd->base = *var;
     vd->subscript = i;
     var_add_subscript(v, vd);
@@ -916,13 +1027,17 @@ void rename_var(var_t **var)
         v->base = v;
     if (v->is_global)
         return;
+    if (v->address_taken) {
+        var[0] = addressed_name(v);
+        return;
+    }
 
     var[0] = get_stack_top_subscript_var(*var);
 }
 
 void pop_name(var_t *var)
 {
-    if (var->is_global)
+    if (var_in_memory(var))
         return;
 
     /* Pop unconditionally, creating the state if the variable has none: the
@@ -1006,14 +1121,22 @@ void solve_phi_params(void)
         if (!func->bbs)
             continue;
 
-        for (int i = 0; i < func->num_params; i++) {
+        /* The aggregate return destination is an ABI parameter even though it
+         * is not a source-language parameter. Build its entry SSA version
+         * before the visible parameters.
+         */
+        for (int i = -1; i < func->num_params; i++) {
             /* FIXME: Direct argument renaming in SSA construction phase may
              * interfere with later optimization passes
              */
             var_t *var = require_var(func->bbs->scope);
-            var_t *base = &func->param_defs[i];
+            if (i < 0 && !func->returns_aggregate)
+                continue;
+            var_t *base = i < 0 ? &func->sret_def : &func->param_defs[i];
             memcpy(var, base, sizeof(var_t));
             var_reset_subscripts(var); /* the copy shares nothing with base */
+            var->phys_reg = -1;
+            var->phys_reg_hi = -1;
             var->base = base;
             var->subscript = 0;
 
@@ -1224,6 +1347,12 @@ insn_t *new_insn(opcode_t op, var_t *rd, var_t *rs1, var_t *rs2)
  */
 bool insn_is_speculatable(const insn_t *insn)
 {
+    /* Running an arm unconditionally would read a volatile object on a path
+     * that never evaluates it, and that read is a side effect.
+     */
+    if (insn_reads_volatile(insn))
+        return false;
+
     switch (insn->opcode) {
     case OP_add:
     case OP_sub:
@@ -1290,7 +1419,7 @@ basic_block_t *if_arm_chain(basic_block_t *arm,
              * store is a side effect however plain the arithmetic producing it
              * looks.
              */
-            if (insn->rd && (insn->rd->is_global || insn->rd->address_taken))
+            if (insn->rd && var_in_memory(insn->rd))
                 return NULL;
             *count = *count + 1;
         }
@@ -1346,6 +1475,16 @@ bool if_arm_reads_other(basic_block_t **a,
     return false;
 }
 
+/* Whether @var is an integer scalar a 32-bit target keeps in a register pair.
+ * The widening pass below, the allocator and the backends all ask this.
+ */
+bool var_needs_register_pair(const var_t *var)
+{
+    return PTR_SIZE < 8 && var && !var->ptr_level && !var->is_func &&
+           !var->array_size && var->type && var->type->size == 8 &&
+           !is_record_type(var->type);
+}
+
 /* Flatten "if (c) x = A; else x = B;" into both computations and a select.
  *
  * A branch the hardware cannot predict costs far more than the arm it skips:
@@ -1385,7 +1524,7 @@ bool if_convert_bb(func_t *func, basic_block_t *bb)
     insn_t *e_phi = if_chain_phi(e_chain, e_len);
     if (!t_phi || !e_phi || t_phi->rd != e_phi->rd)
         return false;
-    if (t_phi->rd->is_global || t_phi->rd->address_taken)
+    if (var_in_memory(t_phi->rd))
         return false;
     /* Both arms handing over the same value makes the select pointless. */
     if (t_phi->rs1 == e_phi->rs1)
@@ -1588,8 +1727,12 @@ bool thread_const_branch(func_t *func, basic_block_t *join)
                 break;
             }
 
-            basic_block_t *target =
-                def->rs1->init_val ? join->then_ : join->else_;
+            /* A wide constant with a zero low word, such as 1ULL << 32, is
+             * still true.
+             */
+            basic_block_t *target = def->rs1->init_val || def->rs1->init_val_hi
+                                        ? join->then_
+                                        : join->else_;
 
             bb_remove_insn(pred, def);
             bb_disconnect(pred, join);
@@ -1689,6 +1832,7 @@ var_t *inline_lookup(var_t *var, block_t *scope)
     copy->ptr_level = var->ptr_level;
     copy->is_const = var->is_const;
     copy->init_val = var->init_val;
+    copy->init_val_hi = var->init_val_hi;
     inline_from[inline_map_n] = var;
     inline_to[inline_map_n] = copy;
     inline_map_n++;
@@ -1805,7 +1949,7 @@ bool func_is_inlinable(func_t *func)
              */
             if (!insn_is_speculatable(insn))
                 return false;
-            if (insn->rd && (insn->rd->is_global || insn->rd->address_taken))
+            if (insn->rd && var_in_memory(insn->rd))
                 return false;
 
             /* Writing a parameter would mean the copy assigns to the caller's
@@ -2323,7 +2467,7 @@ bool sr_collect_chain(func_t *func, var_t *var, insn_t **chain, int *len)
 
     if (!base || base->def_cnt != 1)
         return false;
-    if (base->is_global || base->address_taken)
+    if (var_in_memory(base))
         return false;
 
     chain[*len] = def;
@@ -2496,7 +2640,7 @@ void sr_sweep_dead_consts(func_t *func)
             next = insn->next;
             if (insn->opcode != OP_load_constant || !insn->rd)
                 continue;
-            if (insn->rd->is_global || insn->rd->address_taken)
+            if (var_in_memory(insn->rd))
                 continue;
             if (var_read_by(func, insn->rd, NULL, 0, true))
                 continue;
@@ -2607,6 +2751,194 @@ void sr_loop(func_t *func, basic_block_t *header, basic_block_t *latch)
 
     if (made)
         sr_sweep_dead_consts(func);
+}
+
+/* Whether @var is an integer scalar narrower than a register pair. */
+bool ssa_is_narrow_scalar(const var_t *var)
+{
+    return var && !var->ptr_level && !var->is_func && !var->array_size &&
+           var->type && var->type->size < 8 && !var->type->ptr_level &&
+           !is_record_type(var->type);
+}
+
+/* The int type of @var's signedness, which a narrow operand converts to. */
+type_t *int_type_of(const var_t *var)
+{
+    return var->type->is_unsigned ? TY_uint : TY_int;
+}
+
+/* Insert before @at a copy of the narrow @var widened to @type, sign- or
+ * zero-extended by @var's own signedness as the usual arithmetic conversions
+ * require, and return it.
+ */
+var_t *widen_before(basic_block_t *bb, insn_t *at, var_t *var, type_t *type)
+{
+    var_t *wide = require_var(bb->scope);
+    insn_t *ext;
+
+    wide->var_name = gen_name();
+    wide->type = type;
+    ext = new_insn(OP_sign_ext, wide, var, NULL);
+    ext->sz = (var->type->size << 16) | 8;
+    bb_insert_after(bb, at->prev, ext);
+    return wide;
+}
+
+/* Make @insn define a new variable of @type and convert that into its original
+ * destination straight after, with @conv (an extension or a truncation).
+ */
+void convert_result_after(basic_block_t *bb,
+                          insn_t *insn,
+                          type_t *type,
+                          opcode_t conv)
+{
+    var_t *result = insn->rd;
+    var_t *inner = require_var(bb->scope);
+    insn_t *copy;
+
+    inner->var_name = gen_name();
+    inner->type = type;
+    insn->rd = inner;
+    copy = new_insn(conv, result, inner, NULL);
+    copy->sz = conv == OP_trunc ? result->type->size : (4 << 16) | 8;
+    bb_insert_after(bb, insn, copy);
+}
+
+/* Give every register-pair operation operands of its own width.
+ *
+ * The 32-bit backends lower a wide operation only when all of its values are
+ * pairs; with a narrow operand they fall back to the one-word form, which keeps
+ * no high word. The parser does not convert every operand it builds, and an
+ * LP64 target never noticed, since its registers are already wide: a long long
+ * compared with an int temporary, or stored from one, lost the high word on Arm
+ * and RISC-V. Convert those operands here, after the optimizer, so that the
+ * allocator and the backends see one width per operation. Where the low word of
+ * a narrow result is exact -- addition, subtraction, multiplication, bitwise
+ * operations and left shifts -- a narrow destination is left as it is.
+ */
+void widen_pair_operands(void)
+{
+    if (PTR_SIZE >= 8)
+        return;
+
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+                var_t *rd = insn->rd;
+                bool wide1 = var_needs_register_pair(insn->rs1);
+                bool wide2 = var_needs_register_pair(insn->rs2);
+
+                switch (insn->opcode) {
+                case OP_eq:
+                case OP_neq:
+                case OP_lt:
+                case OP_leq:
+                case OP_gt:
+                case OP_geq:
+                    if (wide1 && ssa_is_narrow_scalar(insn->rs2))
+                        insn->rs2 =
+                            widen_before(bb, insn, insn->rs2, insn->rs1->type);
+                    else if (wide2 && ssa_is_narrow_scalar(insn->rs1))
+                        insn->rs1 =
+                            widen_before(bb, insn, insn->rs1, insn->rs2->type);
+                    break;
+                case OP_add:
+                case OP_sub:
+                case OP_mul:
+                case OP_div:
+                case OP_mod:
+                case OP_bit_and:
+                case OP_bit_or:
+                case OP_bit_xor:
+                    if (var_needs_register_pair(rd)) {
+                        if (!wide1 && !wide2) {
+                            /* Both operands narrow: the operation is an int one
+                             * whose result is then converted.
+                             */
+                            if (ssa_is_narrow_scalar(insn->rs1) &&
+                                ssa_is_narrow_scalar(insn->rs2))
+                                convert_result_after(
+                                    bb, insn,
+                                    insn->rs1->type->is_unsigned ||
+                                            insn->rs2->type->is_unsigned
+                                        ? TY_uint
+                                        : TY_int,
+                                    OP_sign_ext);
+                            break;
+                        }
+                        if (!wide1 && ssa_is_narrow_scalar(insn->rs1))
+                            insn->rs1 =
+                                widen_before(bb, insn, insn->rs1, rd->type);
+                        if (!wide2 && ssa_is_narrow_scalar(insn->rs2))
+                            insn->rs2 =
+                                widen_before(bb, insn, insn->rs2, rd->type);
+                        break;
+                    }
+
+                    /* A quotient's low word depends on the high words. */
+                    if ((insn->opcode == OP_div || insn->opcode == OP_mod) &&
+                        ssa_is_narrow_scalar(rd) && (wide1 || wide2)) {
+                        type_t *type =
+                            wide1 ? insn->rs1->type : insn->rs2->type;
+
+                        if (!wide1 && ssa_is_narrow_scalar(insn->rs1))
+                            insn->rs1 = widen_before(bb, insn, insn->rs1, type);
+                        if (!wide2 && ssa_is_narrow_scalar(insn->rs2))
+                            insn->rs2 = widen_before(bb, insn, insn->rs2, type);
+                        convert_result_after(bb, insn, type, OP_trunc);
+                    }
+                    break;
+                case OP_lshift:
+                case OP_rshift:
+                    /* The result has the left operand's type. */
+                    if (var_needs_register_pair(rd) &&
+                        ssa_is_narrow_scalar(insn->rs1))
+                        convert_result_after(bb, insn, int_type_of(insn->rs1),
+                                             OP_sign_ext);
+                    else if (insn->opcode == OP_rshift && wide1 &&
+                             ssa_is_narrow_scalar(rd))
+                        convert_result_after(bb, insn, insn->rs1->type,
+                                             OP_trunc);
+                    break;
+                case OP_negate:
+                case OP_bit_not:
+                    if (var_needs_register_pair(rd) &&
+                        ssa_is_narrow_scalar(insn->rs1))
+                        convert_result_after(bb, insn, int_type_of(insn->rs1),
+                                             OP_sign_ext);
+                    break;
+                case OP_assign:
+                case OP_unwound_phi:
+                    if (var_needs_register_pair(rd) &&
+                        ssa_is_narrow_scalar(insn->rs1))
+                        insn->rs1 = widen_before(bb, insn, insn->rs1, rd->type);
+                    break;
+                case OP_read:
+                    if (var_needs_register_pair(rd) && insn->sz == 4)
+                        convert_result_after(bb, insn, int_type_of(rd),
+                                             OP_sign_ext);
+                    break;
+                case OP_write:
+                    if (insn->sz == 8 && ssa_is_narrow_scalar(insn->rs2))
+                        insn->rs2 = widen_before(bb, insn, insn->rs2,
+                                                 insn->rs2->type->is_unsigned
+                                                     ? TY_ulong_long
+                                                     : TY_long_long);
+                    break;
+                case OP_return:
+                    if (var_needs_register_pair(&func->return_def) &&
+                        ssa_is_narrow_scalar(insn->rs1))
+                        insn->rs1 = widen_before(bb, insn, insn->rs1,
+                                                 func->return_def.type);
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void strength_reduce(void)
@@ -3198,6 +3530,36 @@ void prune_unused_funcs(void)
     for (func_t *func = FUNC_LIST.head; func;) {
         func_t *next = func->next;
 
+        /* A reachable call to a function with no body is resolved by the
+         * dynamic linker, which cannot see a static function and is absent from
+         * a static link. Either way the input is incomplete, so report it here
+         * once rather than leave every backend its own abort.
+         */
+        if (func->is_used && !func->bbs && (func->is_static || !dynlink)) {
+            char message[MAX_LINE_LEN];
+
+            snprintf(message, MAX_LINE_LEN, "undefined %sfunction '%s'",
+                     func->is_static ? "static " : "",
+                     func->return_def.var_name);
+            error_at(message, NULL);
+        }
+
+        /* The dynamic linker path leaves a bodiless function reachable, but one
+         * returning a record would be called through a function pointer with
+         * shecc's destination-pointer convention rather than the platform's.
+         * Direct calls are rejected when parsing ends; a reachable one here has
+         * had its address taken.
+         */
+        if (func->is_used && !func->bbs && func->returns_aggregate) {
+            char message[MAX_LINE_LEN];
+
+            snprintf(message, MAX_LINE_LEN,
+                     "aggregate-return function '%s' has its address taken "
+                     "but is not defined",
+                     func->return_def.var_name);
+            error_at(message, NULL);
+        }
+
         func->next = NULL;
         if (func->bbs && !func->is_used) {
             func = next;
@@ -3281,44 +3643,40 @@ bool cse(insn_t *insn, const basic_block_t *bb)
         if (base->is_global || idx->is_global)
             return false;
 
-        /* Look for identical add+read patterns */
-        for (use_chain_t *user = base->users_head; user; user = user->next) {
-            insn_t *i = user->insn;
-            if (i == prev)
-                continue;
-            if (i->opcode != OP_add)
-                continue;
-            if (!i->next)
-                continue;
-            if (i->next->opcode != OP_read)
-                continue;
-            if (i->rs1 != base || i->rs2 != idx)
+        /* Each read of a volatile object is an access of its own. */
+        if (insn->rs1->is_volatile)
+            return false;
+
+        /* A read is a copy of memory, not a function of its operands: the same
+         * address holds something else once anything has written there. So only
+         * a repeat further down this block qualifies, and the search stops at
+         * the first instruction that could have changed memory -- a write
+         * through a pointer, a call, or an assignment to a variable that lives
+         * in memory -- since nothing says where that write landed.
+         *
+         * The repeat's own addition is left in place. Its result can have other
+         * users, such as the write "p[i] += 1" performs to the same element,
+         * and removing it left that write with no address at all. Dead code
+         * elimination takes it once nothing needs it.
+         */
+        for (insn_t *i = insn->next; i; i = i->next) {
+            if (i->opcode == OP_write || i->opcode == OP_call ||
+                i->opcode == OP_indirect)
+                break;
+            if (i->rd && var_in_memory(i->rd))
+                break;
+            if (i->opcode != OP_add || i->rs1 != base || i->rs2 != idx)
                 continue;
 
-            /* Check dominance */
-            basic_block_t *i_bb = i->belong_to;
-            bool check_dom = false;
-            for (;; i_bb = i_bb->idom) {
-                if (i_bb == bb) {
-                    check_dom = true;
-                    break;
-                }
-                if (i_bb == i_bb->idom)
-                    break;
-            }
-            if (!check_dom)
+            insn_t *read = i->next;
+            if (!read || read->opcode != OP_read || read->rs1 != i->rd ||
+                read->sz != insn->sz)
                 continue;
 
             /* Replace with assignment */
-            i->next->opcode = OP_assign;
-            i->next->rs1 = def;
-            if (i->prev) {
-                i->prev->next = i->next;
-                i->next->prev = i->prev;
-            } else {
-                i->belong_to->insn_list.head = i->next;
-                i->next->prev = NULL;
-            }
+            read->opcode = OP_assign;
+            read->rs1 = def;
+            read->rs2 = NULL;
         }
         return true;
     }
@@ -3332,6 +3690,14 @@ bool cse(insn_t *insn, const basic_block_t *bb)
 
     /* Don't CSE operations with global variables */
     if (insn->rs1->is_global || insn->rs2->is_global)
+        return false;
+
+    /* Nor with an address-taken one. It is named by one var_t for every value
+     * it takes, so matching operands say nothing about matching values: a store
+     * through a pointer, or by a callee handed the address, can change it
+     * between the two instructions without any instruction naming it.
+     */
+    if (insn->rs1->address_taken || insn->rs2->address_taken)
         return false;
 
     /* Look for identical binary operations */
@@ -3380,7 +3746,7 @@ bool mark_const(insn_t *insn)
      * materialise the initialiser instead of reading the slot, which is how
      * "int a = 0; f(&a); int b = a;" left b holding zero.
      */
-    if (insn->rd && insn->rd->address_taken)
+    if (insn->rd && (insn->rd->address_taken || insn->rd->is_volatile))
         return false;
 
     if (insn->opcode == OP_load_constant) {
@@ -3399,9 +3765,11 @@ bool mark_const(insn_t *insn)
     /* Copying from such a variable is no better: the value read is whatever the
      * pointer last wrote, not the constant the source was assigned.
      */
-    if (insn->rs1->address_taken)
+    if (insn->rs1->address_taken || insn->rs1->is_volatile)
         return false;
     if (!insn->rs1->is_const) {
+        if (insn->rs1->init_val_hi)
+            return false;
         if (!insn->prev)
             return false;
         if (insn->prev->opcode != OP_load_constant)
@@ -3413,8 +3781,29 @@ bool mark_const(insn_t *insn)
     insn->opcode = OP_load_constant;
     insn->rd->is_const = true;
     insn->rd->init_val = insn->rs1->init_val;
+    insn->rd->init_val_hi = insn->rs1->init_val_hi;
     insn->rs1 = NULL;
     return true;
+}
+
+bool ssa_is_unsigned_scalar(const var_t *var)
+{
+    return var && !var->ptr_level && var->type && var->type->is_unsigned;
+}
+
+/* Whether @insn computes a scalar wider than int, a long long on any target. */
+bool ssa_is_wide_operation(const insn_t *insn)
+{
+    var_t *ops[2];
+
+    ops[0] = insn->rd;
+    ops[1] = insn->rs1;
+    for (int i = 0; i < 2; i++) {
+        if (ops[i] && !ops[i]->ptr_level && ops[i]->type &&
+            !ops[i]->type->ptr_level && ops[i]->type->size > TY_int->size)
+            return true;
+    }
+    return false;
 }
 
 bool eval_const_arithmetic(insn_t *insn)
@@ -3423,9 +3812,24 @@ bool eval_const_arithmetic(insn_t *insn)
         return false;
     if (!insn->rs1->is_const)
         return false;
+    if (insn->rs1->init_val_hi)
+        return false;
     if (!insn->rs2)
         return false;
     if (!insn->rs2->is_const)
+        return false;
+    if (insn->rs2->init_val_hi)
+        return false;
+
+    /* Constant folding predates unsigned arithmetic and evaluates every
+     * operation as signed int. Leave unsigned and wider-than-int expressions to
+     * target lowering until this pass gains width-aware evaluation.
+     */
+    if (ssa_is_unsigned_scalar(insn->rs1) ||
+        ssa_is_unsigned_scalar(insn->rs2) || ssa_is_unsigned_scalar(insn->rd) ||
+        (insn->rs1->type && insn->rs1->type->size > TY_int->size) ||
+        (insn->rs2->type && insn->rs2->type->size > TY_int->size) ||
+        (insn->rd && insn->rd->type && insn->rd->type->size > TY_int->size))
         return false;
 
     int res;
@@ -3451,10 +3855,18 @@ bool eval_const_arithmetic(insn_t *insn)
             return false; /* avoid modulo by zero */
         res = l % r;
         break;
+
+    /* As in the parser's folder, an out-of-range count keeps the shift for the
+     * target rather than asking the host for an undefined result.
+     */
     case OP_lshift:
-        res = l << r;
+        if (r < 0 || r >= 32)
+            return false;
+        res = (int) ((unsigned int) l << r);
         break;
     case OP_rshift:
+        if (r < 0 || r >= 32)
+            return false;
         res = l >> r;
         break;
     case OP_bit_and:
@@ -3507,6 +3919,11 @@ bool eval_const_unary(insn_t *insn)
     if (!insn->rs1)
         return false;
     if (!insn->rs1->is_const)
+        return false;
+    if (insn->rs1->init_val_hi)
+        return false;
+    if ((insn->rs1->type && insn->rs1->type->size > TY_int->size) ||
+        (insn->rd && insn->rd->type && insn->rd->type->size > TY_int->size))
         return false;
 
     int res;
@@ -3649,10 +4066,23 @@ int dce_init_mark(insn_t *insn, insn_t *work_list[], int work_list_idx)
         }
         break;
     default:
+        /* So is an access to a volatile object, whether or not anything uses
+         * the value it produces.
+         */
+        if (insn_reads_volatile(insn)) {
+            insn->useful = true;
+            insn->belong_to->useful = true;
+            dce_init_push(work_list, work_list_idx, &mark_num, insn);
+            break;
+        }
+
         if (!insn->rd)
             break;
-        /* if the instruction affects a global value, set "useful" */
-        if (insn->rd->is_global && !insn->useful) {
+
+        /* A global, or a variable a pointer can read, is observable whether or
+         * not a later instruction names it.
+         */
+        if (var_in_memory(insn->rd) && !insn->useful) {
             insn->useful = true;
             insn->belong_to->useful = true;
             dce_init_push(work_list, work_list_idx, &mark_num, insn);
@@ -3773,7 +4203,7 @@ void dce_sweep(void)
                         basic_block_t *jump_bb = bb->r_idom;
                         bb_disconnect(bb, bb->then_);
                         bb_disconnect(bb, bb->else_);
-                        while (jump_bb != bb->belong_to->exit) {
+                        while (jump_bb && jump_bb != bb->belong_to->exit) {
                             if (jump_bb->useful) {
                                 bb_connect(bb, jump_bb, NEXT);
                                 break;
@@ -3810,6 +4240,12 @@ void optimize(void)
 
     use_chain_build();
 
+    /* Before anything below decides which reads it can drop or share. */
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (func->bbs)
+            mark_volatile_addresses(func);
+    }
+
     /* Run constant cast optimization for truncation */
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         /* Skip function declarations without bodies */
@@ -3830,6 +4266,7 @@ void optimize(void)
             /* instruction level optimizations */
             for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
                 /* record the instruction assigned value to rd */
+                insn_t *prior_assign = insn->rd ? insn->rd->last_assign : NULL;
                 if (insn->rd)
                     insn->rd->last_assign = insn;
 
@@ -3842,7 +4279,12 @@ void optimize(void)
                 /* Eliminate redundant assignments: x = x */
                 if (insn->opcode == OP_assign && insn->rd && insn->rs1 &&
                     insn->rd == insn->rs1) {
-                    /* Convert to no-op that DCE will remove */
+                    /* Convert to no-op that DCE will remove. A global is not
+                     * renamed, so "g = g" names one variable twice; a later
+                     * read of g must depend on the store before this one, or
+                     * DCE keeps an assignment with no operands.
+                     */
+                    insn->rd->last_assign = prior_assign;
                     insn->rd = NULL;
                     insn->rs1 = NULL;
                     continue;
@@ -3961,8 +4403,21 @@ void optimize(void)
                 }
 
                 /* Identity and constant optimizations */
-                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                if (insn->rs2 && insn->rs2->is_const &&
+                    !insn->rs2->init_val_hi && insn->rd) {
                     int val = insn->rs2->init_val;
+
+                    /* init_val holds only the low word. In an operation wider
+                     * than int, a low word of -1 is all ones only when the
+                     * constant is a signed narrow one that the usual
+                     * conversions sign-extend: 0xffffffffULL has a zero high
+                     * word, so "x & 0xffffffffULL" is not x.
+                     */
+                    bool all_ones =
+                        val == -1 && !(ssa_is_wide_operation(insn) &&
+                                       (!insn->rs2->type ||
+                                        insn->rs2->type->size > TY_int->size ||
+                                        insn->rs2->type->is_unsigned));
 
                     /* x + 0 = x, x - 0 = x, x | 0 = x, x ^ 0 = x */
                     if (val == 0) {
@@ -4004,7 +4459,7 @@ void optimize(void)
                         }
                     }
                     /* x & -1 = x (all bits set) */
-                    else if (val == -1) {
+                    else if (all_ones) {
                         if (insn->opcode == OP_bit_and) {
                             insn->opcode = OP_assign;
                             insn->rs2 = NULL;
@@ -4014,6 +4469,8 @@ void optimize(void)
                             insn->opcode = OP_load_constant;
                             insn->rd->is_const = true;
                             insn->rd->init_val = -1;
+                            insn->rd->init_val_hi =
+                                ssa_is_wide_operation(insn) ? -1 : 0;
                             insn->rs1 = NULL;
                             insn->rs2 = NULL;
                         }
@@ -4028,7 +4485,8 @@ void optimize(void)
                 /* Multi-instruction analysis and optimization Store-to-load
                  * forwarding
                  */
-                if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
+                if (insn->opcode == OP_load && insn->rs1 && insn->rd &&
+                    !insn->rs1->is_volatile) {
                     insn_t *search = insn->prev;
                     int search_limit = 10; /* Look back up to 10 instructions */
 
@@ -4076,7 +4534,8 @@ void optimize(void)
                 }
 
                 /* Redundant load elimination */
-                if (insn->opcode == OP_load && insn->rs1 && insn->rd) {
+                if (insn->opcode == OP_load && insn->rs1 && insn->rd &&
+                    !insn->rs1->is_volatile) {
                     insn_t *search = bb->insn_list.head;
 
                     while (search && search != insn) {
@@ -4125,9 +4584,12 @@ void optimize(void)
                  * var_t, and that var_t is what its defining OP_load_constant
                  * materialises, so rewriting init_val in place changes the
                  * value every other use sees: "int k = 8; return a*k + b*k;"
-                 * returned 2 << 3 + 3 * 3.
+                 * returned 2 << 3 + 3 * 3. A wide constant with a high word,
+                 * such as 0x100000004ULL, is not the power of two its low word
+                 * is.
                  */
-                if (insn->rs2 && insn->rs2->is_const && insn->rd) {
+                if (insn->rs2 && insn->rs2->is_const &&
+                    !insn->rs2->init_val_hi && insn->rd) {
                     int val = insn->rs2->init_val;
                     int shift = exact_log2(val);
                     opcode_t reduced = OP_generic;
@@ -4140,12 +4602,14 @@ void optimize(void)
                             operand = shift;
                         }
                         /* x / power_of_2 = x >> shift (unsigned) */
-                        else if (insn->opcode == OP_div) {
+                        else if (insn->opcode == OP_div &&
+                                 ssa_is_unsigned_scalar(insn->rs1)) {
                             reduced = OP_rshift;
                             operand = shift;
                         }
                         /* x % power_of_2 = x & (power_of_2 - 1) */
-                        else if (insn->opcode == OP_mod) {
+                        else if (insn->opcode == OP_mod &&
+                                 ssa_is_unsigned_scalar(insn->rs1)) {
                             reduced = OP_bit_and;
                             operand = val - 1;
                         }
@@ -4427,6 +4891,8 @@ void liveness_analysis(void)
         bb_forward_traversal(args);
 
         /* Add function parameters as killed in entry block */
+        if (func->returns_aggregate)
+            bb_add_killed_var(func->bbs, var_subscript0(&func->sret_def));
         for (int i = 0; i < func->num_params; i++)
             bb_add_killed_var(func->bbs, var_subscript0(&func->param_defs[i]));
     }

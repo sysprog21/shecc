@@ -47,6 +47,37 @@ LIBDIR := $(shell find lib -type d)
 
 BUILTIN_LIBC_SOURCE ?= c.c
 BUILTIN_LIBC_HEADER := c.h
+# The translation timestamp belongs to generated configuration rather than the
+# compiler's host clock. A single value is consequently embedded in stages 0,
+# 1, and 2, which keeps bootstrap byte-for-byte reproducible. Rebuilders can
+# supply SOURCE_DATE_EPOCH for a stable timestamp across separate invocations.
+# The fallback is read once: a recursive "?=" would rerun date for the date
+# and again for the time, which then disagree across a second boundary.
+ifeq ($(origin SOURCE_DATE_EPOCH),undefined)
+SOURCE_DATE_EPOCH := $(shell date -u +%s)
+endif
+# The epoch is spliced into the date command below, so anything but decimal
+# digits would be run by the shell there. $(value) keeps make from expanding a
+# supplied $(...) before it is checked.
+EPOCH_NONDIGITS := $(value SOURCE_DATE_EPOCH)
+$(foreach d,0 1 2 3 4 5 6 7 8 9,$(eval EPOCH_NONDIGITS := $$(subst $(d),,$$(EPOCH_NONDIGITS))))
+ifneq ($(if $(strip $(value SOURCE_DATE_EPOCH)),$(EPOCH_NONDIGITS),empty),)
+$(error SOURCE_DATE_EPOCH must be a Unix epoch in decimal seconds)
+endif
+# GNU date converts an epoch given as -d @SECONDS, which BSD and macOS date do
+# not accept; they take the seconds as -r SECONDS instead. Ask for the Unix
+# epoch itself to learn which spelling this date understands.
+ifeq ($(shell date -u -d @0 +%s 2>/dev/null),0)
+EPOCH_DATE = LC_ALL=C TZ=UTC date -u -d "@$(SOURCE_DATE_EPOCH)"
+else
+EPOCH_DATE = LC_ALL=C TZ=UTC date -u -r "$(SOURCE_DATE_EPOCH)"
+endif
+TRANSLATION_DATE := $(shell $(EPOCH_DATE) '+%b %e %Y')
+TRANSLATION_TIME := $(shell $(EPOCH_DATE) '+%H:%M:%S')
+ifeq ($(strip $(TRANSLATION_DATE)$(TRANSLATION_TIME)),)
+$(error SOURCE_DATE_EPOCH must be a Unix epoch accepted by date)
+endif
+TRANSLATION_DEFS = "\#define SHECC_TRANSLATION_DATE \"$(TRANSLATION_DATE)\"\n\#define SHECC_TRANSLATION_TIME \"$(TRANSLATION_TIME)\"\n"
 # --dump-ir is what makes out/shecc-stage1.log the IR of the stage 1 build
 # rather than an empty file. It is the only thing in the tree that exercises
 # dump_insn()/dump_ph2_ir(), and it is what a failed CI run uploads.
@@ -98,7 +129,8 @@ endif
 # previous architecture's generated config, so require an explicit reconfigure
 # instead.
 #
-# Naming "config" or "distclean" anywhere in the goals is that reconfigure: the
+# Naming "config", "distclean", or "check-all-targets" anywhere in the goals
+# is that reconfigure: the
 # record is about to be rewritten or removed, so the architecture it still holds
 # does not apply and the check must not fire. Testing for their presence rather
 # than filtering them out is what lets a goal list combine them with real work,
@@ -106,7 +138,7 @@ endif
 # generated config, so a mismatch cannot affect it either.
 CONFIGURED_ARCH := $(shell sed -n 's/^ARCH=//p' $(BUILD_SESSION) 2>/dev/null)
 ifneq (,$(CONFIGURED_ARCH))
-ifeq (,$(filter config distclean,$(MAKECMDGOALS)))
+ifeq (,$(filter config distclean check-all-targets,$(MAKECMDGOALS)))
 ifneq (,$(filter-out clean,$(or $(MAKECMDGOALS),all)))
 ifneq ($(CONFIGURED_ARCH),$(ARCH))
 $(error Tree is configured for ARCH=$(CONFIGURED_ARCH). Run "make config ARCH=$(ARCH)" to switch)
@@ -132,6 +164,7 @@ include mk/common.mk
 config:
 	$(Q)ln -sf $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
 	$(Q)$(PRINTF) $(ARCH_DEFS) > $@.tmp
+	$(Q)$(PRINTF) $(TRANSLATION_DEFS) >> $@.tmp
 	$(Q)if cmp -s $@.tmp $@; then $(RM) $@.tmp; else mv $@.tmp $@; fi
 	$(Q)$(PRINTF) "ARCH=$(ARCH)" > $(BUILD_SESSION)
 	$(VECHO) "Target machine code switch to %s\n" $(ARCH)
@@ -140,6 +173,26 @@ config:
 .PHONY: $(STYLE_GOALS)
 
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2
+
+# Run the complete check -- driver and ABI suites at stages 0 and 2 -- on every
+# backend, as CI does. Driver cases that need 64-bit values are gated on the
+# target's pointer width, so each target runs everything it can represent.
+# Configuration is global to this worktree, so keep recursive invocations
+# sequential and restore the caller's architecture even when a target fails.
+# Each target is rebuilt after its own `config`, preventing an old compiler from
+# being paired with a newly selected backend. This make exported the emulator
+# for the caller's architecture, so each recursive make has to derive its own:
+# an inherited qemu-arm would run the x64 binaries.
+.PHONY: check-all-targets
+check-all-targets:
+	$(Q)set -e; \
+	unset TARGET_EXEC; \
+	active_arch='$(or $(CONFIGURED_ARCH),$(ARCH))'; \
+	trap '$(MAKE) config ARCH="$$active_arch"' EXIT; \
+	for target_arch in $(ARCHS); do \
+		$(MAKE) config ARCH="$$target_arch"; \
+		$(MAKE) check ARCH="$$target_arch"; \
+	done
 
 # One checker per target: they share nothing, so "make -j check-style" runs them
 # concurrently and finishes in the time the slowest one takes.

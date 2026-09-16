@@ -35,6 +35,9 @@ typedef enum {
     arm_sub = 2,
     arm_rsb = 3,
     arm_add = 4,
+    arm_adc = 5,
+    arm_sbc = 6,
+    arm_rsc = 7,
     arm_ldm = 9,
     arm_teq = 9,
     arm_cmp = 10,
@@ -52,6 +55,7 @@ typedef enum {
     __NE = 1,  /* Not equal */
     __CS = 2,  /* Unsigned higher or same */
     __CC = 3,  /* Unsigned lower */
+    __HI = 8,  /* Unsigned higher */
     __LS = 9,  /* Unsigned lower or same */
     __GE = 10, /* Signed greater than or equal */
     __LT = 11, /* Signed less than */
@@ -87,7 +91,7 @@ typedef enum {
     rotat_rs = 3  /* Rotate right shift */
 } shift_type;
 
-arm_cond_t arm_get_cond(opcode_t op)
+arm_cond_t arm_get_cond(opcode_t op, bool is_unsigned)
 {
     switch (op) {
     case OP_eq:
@@ -95,13 +99,13 @@ arm_cond_t arm_get_cond(opcode_t op)
     case OP_neq:
         return __NE;
     case OP_lt:
-        return __LT;
+        return is_unsigned ? __CC : __LT;
     case OP_geq:
-        return __GE;
+        return is_unsigned ? __CS : __GE;
     case OP_gt:
-        return __GT;
+        return is_unsigned ? __HI : __GT;
     case OP_leq:
-        return __LE;
+        return is_unsigned ? __LS : __LE;
     default:
         fatal("Unsupported condition IR opcode");
     }
@@ -125,6 +129,15 @@ int arm_encode(arm_cond_t cond, int opcode, int rn, int rd, int op2)
     return (cond << 28) + (opcode << 20) + (rn << 16) + (rd << 12) + op2;
 }
 
+/* ARM A8.8.247: unsigned 32x32 -> 64 multiply. RdLo/RdHi receive the complete
+ * product, which is the primitive paired wide multiplication needs.
+ */
+int __umull(arm_cond_t cond, arm_reg rdlo, arm_reg rdhi, arm_reg rm, arm_reg rs)
+{
+    return (cond << 28) + 0x00800090 + (rdhi << 16) + (rdlo << 12) + (rs << 8) +
+           rm;
+}
+
 int __svc(void)
 {
     return arm_encode(__AL, 240, 0, 0, 0);
@@ -133,19 +146,25 @@ int __svc(void)
 int __mov(arm_cond_t cond, int io, int opcode, int s, int rn, int rd, int op2)
 {
     int shift = 0;
-    if (op2 > 255) {
+
+    /* ARM's immediate is a rotated 32-bit bit pattern. Treat it as unsigned
+     * while finding that rotation: an `int` carrying 0x80000000 must not look
+     * like a small negative value and be encoded as zero.
+     */
+    unsigned int encoded_op2 = op2;
+    if (encoded_op2 > 255) {
         shift = 16; /* full rotation */
-        while ((op2 & 3) == 0) {
+        while ((encoded_op2 & 3) == 0) {
             /* we can shift by two bits */
-            op2 >>= 2;
+            encoded_op2 >>= 2;
             shift -= 1;
         }
-        if (op2 > 255)
+        if (encoded_op2 > 255)
             /* value spans more than 8 bits */
             fatal("Unable to represent value");
     }
     return arm_encode(cond, s + (opcode << 1) + (io << 5), rn, rd,
-                      (shift << 8) + (op2 & 255));
+                      (shift << 8) + (encoded_op2 & 255));
 }
 
 int __and_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
@@ -248,9 +267,44 @@ int __add_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
     return __mov(cond, 0, arm_add, 0, rs, rd, ro);
 }
 
+int __adds_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_add, 1, rs, rd, ro);
+}
+
+int __adc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_adc, 0, rs, rd, ro);
+}
+
 int __sub_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
 {
     return __mov(cond, 0, arm_sub, 0, rs, rd, ro);
+}
+
+int __subs_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_sub, 1, rs, rd, ro);
+}
+
+int __sbc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_sbc, 0, rs, rd, ro);
+}
+
+int __sbcs_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
+{
+    return __mov(cond, 0, arm_sbc, 1, rs, rd, ro);
+}
+
+int __rsbs_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
+{
+    return __mov(cond, 1, arm_rsb, 1, rn, rd, imm);
+}
+
+int __rsc_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
+{
+    return __mov(cond, 1, arm_rsc, 0, rn, rd, imm);
 }
 
 int __zero(int rd)
@@ -317,6 +371,26 @@ int __lb(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
     return arm_transfer(cond, 1, 1, rn, rd, ofs);
 }
 
+/* ARM signed byte load (LDRSB). Its immediate-offset encoding shares the
+ * halfword-transfer layout, but uses 1101 in bits [7:4] rather than LDRH's 1011
+ * or LDRSH's 1111.
+ */
+int __lsb(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
+{
+    int opcode = 16 + 8 + 4 + 1;
+
+    if (ofs < 0) {
+        opcode -= 8;
+        ofs = -ofs;
+    }
+    if (ofs > 255)
+        fatal("Signed byte offset too large");
+
+    int imm4h = ((ofs >> 4) & 0xF) << 8;
+    int imm4l = ofs & 0xF;
+    return arm_encode(cond, opcode, rn, rd, imm4h | 0xD0 | imm4l);
+}
+
 int __sw(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 {
     return arm_transfer(cond, 0, 4, rn, rd, ofs);
@@ -331,6 +405,12 @@ int __sb(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 int __lh(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
 {
     return arm_halfword_transfer(cond, 1, rn, rd, ofs, 1);
+}
+
+/* ARM unsigned halfword load (LDRH). */
+int __lhu(arm_cond_t cond, arm_reg rd, arm_reg rn, int ofs)
+{
+    return arm_halfword_transfer(cond, 1, rn, rd, ofs, 0);
 }
 
 /* ARM halfword store (STRH) */
@@ -390,6 +470,11 @@ int __mul(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
 int __div(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
 {
     return arm_encode(cond, 113, rd, 15, (r1 << 8) + 16 + r2);
+}
+
+int __udiv(arm_cond_t cond, arm_reg rd, arm_reg r1, arm_reg r2)
+{
+    return arm_encode(cond, 115, rd, 15, (r1 << 8) + 16 + r2);
 }
 
 int __rsb_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)

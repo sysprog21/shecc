@@ -281,6 +281,7 @@ test_eight_args()
 int sum8(int a, int b, int c, int d, int e, int f, int g, int h) {
     return a + b + c + d + e + f + g + h;
 }
+
 int main() {
     int result = sum8(1, 2, 3, 4, 5, 6, 7, 8);
     if (result == 36) {
@@ -288,6 +289,115 @@ int main() {
         return 0;
     }
     printf("FAIL: expected 36, got %d\n", result);
+    return 1;
+}
+' "PASS"
+}
+
+# shecc currently represents long as a 32-bit signed scalar. Exercise that
+# spelling through both register and stack argument slots and a return value.
+test_long_args_and_return()
+{
+    run_abi_test "Long arguments and return" "Parameter Passing" '
+#include <stdio.h>
+long combine(long a, long b, long c, long d, long e, long f, long g) {
+    return a + b + c + d + e + f + g;
+}
+int main() {
+    long result = combine(1, 2, 3, 4, 5, 6, 21);
+    if (result == 42) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: got %d\n", result);
+    return 1;
+}
+' "PASS"
+}
+
+# Exercise four register and four stack slots with narrow unsigned values.
+# Callee-side loads must preserve the declared zero extension before promotion.
+test_narrow_unsigned_args()
+{
+    run_abi_test "Narrow unsigned register and stack arguments" "Parameter Passing" '
+#include <stdio.h>
+int sum_narrow(unsigned char a, unsigned short b, unsigned char c,
+               unsigned short d, unsigned char e, unsigned short f,
+               unsigned char g, unsigned short h) {
+    return a + b + c + d + e + f + g + h;
+}
+int main(void) {
+    int result = sum_narrow(255U, 65535U, 255U, 65535U,
+                            255U, 65535U, 255U, 65535U);
+    if (result == 263160) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+test_mixed_narrow_args()
+{
+    run_abi_test "Mixed narrow register and stack arguments" "Parameter Passing" '
+#include <stdio.h>
+int sum_mixed(signed char a, unsigned char b, short c, unsigned short d,
+              signed char e, unsigned char f, short g, unsigned short h) {
+    return a + b + c + d + e + f + g + h;
+}
+int main(void) {
+    int result = sum_mixed(-128, 255U, -32768, 65535U,
+                           -1, 128U, -2, 32768U);
+    if (result == 65787) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+# A long long starts at an even core register, so after one int it takes r2 and
+# r3. The callee reads the words as ints through a pointer of the caller's
+# function type.
+test_long_long_after_int()
+{
+    run_abi_test "Long long after one int (r2, r3)" "Parameter Passing" '
+#include <stdio.h>
+typedef int (*call_t)(int, long long);
+int words(int a, int skipped, int low, int high) { return low == 3 && high == 2; }
+int main() {
+    call_t call = (call_t) words;
+    if (call(1, 0x200000003LL)) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: long long not in r2 and r3\n");
+    return 1;
+}
+' "PASS"
+}
+
+# A long long that does not fit in the core registers goes to the stack whole,
+# leaving r3 unused, and the next argument follows it on the stack.
+test_long_long_on_stack()
+{
+    run_abi_test "Long long after three ints on the stack" "Parameter Passing" '
+#include <stdio.h>
+typedef int (*call_t)(int, int, int, long long, int);
+int words(int a, int b, int c, int skipped, int low, int high, int e) {
+    return low == 3 && high == 2 && e == 9;
+}
+int main() {
+    call_t call = (call_t) words;
+    if (call(1, 2, 3, 0x200000003LL, 9)) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: long long not at the bottom of the stack\n");
     return 1;
 }
 ' "PASS"
@@ -351,6 +461,61 @@ test_return_char()
 char get_char(void) { return '\''A'\''; }
 int main() {
     if (get_char() == '\''A'\'') {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+# Verify that AAPCS narrow unsigned return values are consumed with zero
+# extension at the caller's integer-promotion boundary.
+test_return_narrow_unsigned()
+{
+    run_abi_test "Return narrow unsigned values" "Return Values" '
+#include <stdio.h>
+unsigned char get_byte(void) { return 255U; }
+unsigned short get_half(void) { return 65535U; }
+int main(void) {
+    if (get_byte() == 255U && get_half() == 65535U) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+test_return_mixed_narrow()
+{
+    run_abi_test "Return mixed narrow signedness" "Return Values" '
+#include <stdio.h>
+signed char get_sbyte(void) { return -128; }
+unsigned char get_ubyte(void) { return 255U; }
+short get_shalf(void) { return -32768; }
+unsigned short get_uhalf(void) { return 65535U; }
+int main(void) {
+    if (get_sbyte() == -128 && get_ubyte() == 255U &&
+        get_shalf() == -32768 && get_uhalf() == 65535U) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+' "PASS"
+}
+
+test_bool_argument_and_return()
+{
+    run_abi_test "Bool argument and return normalization" "Return Values" '
+#include <stdio.h>
+_Bool echo_bool(_Bool value) { return value; }
+int main(void) {
+    if (echo_bool(7) == 1 && echo_bool(0) == 0) {
         printf("PASS\n");
         return 0;
     }
@@ -544,6 +709,11 @@ test_two_args
 test_four_args
 test_five_args
 test_eight_args
+test_long_args_and_return
+test_narrow_unsigned_args
+test_mixed_narrow_args
+test_long_long_after_int
+test_long_long_on_stack
 
 echo ""
 echo -e "${CYAN}Running Stack Alignment Tests...${NC}"
@@ -553,6 +723,9 @@ test_stack_alignment_extended
 echo ""
 echo -e "${CYAN}Running Return Value Tests...${NC}"
 test_return_char
+test_return_narrow_unsigned
+test_return_mixed_narrow
+test_bool_argument_and_return
 test_return_int
 test_return_pointer
 

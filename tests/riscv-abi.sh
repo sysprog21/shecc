@@ -293,6 +293,74 @@ int main() {
 ' "PASS"
 }
 
+# A named long long takes the next two argument registers, even after an odd
+# number of words. The callee reads the words as ints through a pointer of the
+# caller's function type.
+test_long_long_after_int()
+{
+    run_abi_test "Long long after one int (a1, a2)" "Parameter Passing" '
+#include <stdio.h>
+typedef int (*call_t)(int, long long);
+int words(int a, int low, int high, int unused) { return low == 3 && high == 2; }
+int main() {
+    call_t call = (call_t) words;
+    if (call(1, 0x200000003LL)) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: long long not in a1 and a2\n");
+    return 1;
+}
+' "PASS"
+}
+
+# A variadic long long takes an even-numbered register pair.
+test_variadic_long_long()
+{
+    run_abi_test "Variadic long long in an aligned pair (a2, a3)" "Parameter Passing" '
+#include <stdio.h>
+typedef int (*call_t)(int, ...);
+int words(int a, int skipped, int low, int high) { return low == 3 && high == 2; }
+int main() {
+    call_t call = (call_t) words;
+    if (call(1, 0x200000003LL)) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: variadic long long not in a2 and a3\n");
+    return 1;
+}
+' "PASS"
+}
+
+# With only a7 left, a named long long puts its low word there and its high word
+# in the first stack slot.
+test_long_long_split()
+{
+    run_abi_test "Long long split between a7 and the stack" "Parameter Passing" '
+#include <stdio.h>
+#include <stdarg.h>
+typedef int (*call_t)(int, int, int, int, int, int, int, long long);
+int words(int a, int b, int c, int d, int e, int f, int g, int low, ...) {
+    va_list ap;
+    int high;
+    va_start(ap, low);
+    high = va_arg(ap, int);
+    va_end(ap);
+    return low == 3 && high == 2;
+}
+int main() {
+    call_t call = (call_t) words;
+    if (call(1, 2, 3, 4, 5, 6, 7, 0x200000003LL)) {
+        printf("PASS\n");
+        return 0;
+    }
+    printf("FAIL: long long not split between a7 and the stack\n");
+    return 1;
+}
+' "PASS"
+}
+
 # Stack Alignment Tests
 
 test_stack_alignment_basic()
@@ -546,6 +614,9 @@ test_two_args
 test_four_args
 test_five_args
 test_eight_args
+test_long_long_after_int
+test_variadic_long_long
+test_long_long_split
 
 echo ""
 echo -e "${CYAN}Running Stack Alignment Tests...${NC}"

@@ -68,13 +68,12 @@ void elf_write_quad(strbuf_t *elf_array, int val)
     elf_write_int(elf_array, 0);
 }
 
-void elf_write_blk(strbuf_t *elf_array, void *blk, int sz)
+void elf_write_blk(strbuf_t *elf_array, const void *blk, int sz)
 {
-    if (!elf_array || !blk || sz <= 0)
+    if (!elf_array || !blk || sz <= 0 || !strbuf_extend(elf_array, sz))
         return;
-    const char *ptr = blk;
-    for (int i = 0; i < sz; i++)
-        strbuf_putc(elf_array, ptr[i]);
+    memcpy(elf_array->elements + elf_array->size, blk, sz);
+    elf_array->size += sz;
 }
 
 /* The dynamic-linking tables differ only in width between the two ELF classes,
@@ -294,8 +293,13 @@ void elf_generate_header(void)
         phnum = 2;
         shnum = 8;
         shstrndx = 7;
-        shoff = elf_header_len + elf_code->size + elf_data->size +
-                elf_rodata->size + elf_symtab->size + elf_strtab->size +
+
+        /* .data starts the second load segment on a page boundary, and
+         * elf_generate() pads the file up to it; count that padding too.
+         */
+        shoff = ALIGN_UP(elf_header_len + elf_code->size + elf_rodata->size,
+                         PAGESIZE) +
+                elf_data->size + elf_symtab->size + elf_strtab->size +
                 elf_shstrtab->size;
     }
 
@@ -512,7 +516,9 @@ void elf_generate_program_headers(void)
     /* program header - readable and writable segment */
     phdr.p_type = 1; /* PT_LOAD */
     phdr.p_offset = elf_header_len + elf_code->size +
-                    elf_rodata->size;             /* offset of segment */
+                    elf_rodata->size; /* offset of segment */
+    if (!dynlink)
+        phdr.p_offset = ALIGN_UP(phdr.p_offset, PAGESIZE);
     phdr.p_vaddr = elf_data_start;                /* virtual address */
     phdr.p_paddr = elf_data_start;                /* physical address */
     phdr.p_filesz = elf_data->size;               /* size in file */
@@ -803,6 +809,9 @@ void elf_generate_section_headers(void)
         sh_name += strlen(".dynamic") + 1;
     }
 
+    if (!dynlink)
+        ofs = ALIGN_UP(ofs, PAGESIZE);
+
     /* .data */
     shdr.sh_name = sh_name;
     shdr.sh_type = 1;
@@ -919,6 +928,7 @@ void elf_generate_dynamic_sections(void)
      * .plt section is generated at the code generation phase.
      */
     int dymsym_idx = 1, func_plt_ofs, st_name = 0;
+    int libdl_name = 0;
     int rel_offset;
 
     /* .interp section */
@@ -941,6 +951,20 @@ void elf_generate_dynamic_sections(void)
     elf_write_str(dynamic_sections.elf_dynstr, LIBC_SO);
     elf_write_byte(dynamic_sections.elf_dynstr, 0);
     st_name += strlen(LIBC_SO) + 1;
+
+    /* lib/c.h reaches the host's stream objects through dlsym(), which glibc
+     * moved into libc.so.6 only in 2.34. Earlier releases keep it in
+     * libdl.so.2, and later ones still ship that name as an empty stub, so a
+     * program that calls it depends on both.
+     */
+    func_t *dlsym_func = find_func("dlsym");
+
+    if (dlsym_func && dlsym_func->is_used && !dlsym_func->bbs) {
+        libdl_name = st_name;
+        elf_write_str(dynamic_sections.elf_dynstr, LIBDL_SO);
+        elf_write_byte(dynamic_sections.elf_dynstr, 0);
+        st_name += strlen(LIBDL_SO) + 1;
+    }
 
     /* Perform the following steps for each external function.
      * - Add a new PLT relocation entry to .relplt section.
@@ -1086,6 +1110,8 @@ void elf_generate_dynamic_sections(void)
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x3,
                   dynamic_sections.elf_got_start);
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, 0x1);
+    if (libdl_name)
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, libdl_name);
 #if DYN_BIND_NOW == 1
     /* Resolve every PLT entry at load time. This target's PLT[0] does not
      * arrange the GOT[1]/GOT[2] hand-off the lazy resolver needs, so the loader
@@ -1263,18 +1289,13 @@ void elf_preprocess(void)
         /* To prevent two load segments from sharing a common page, add PAGESIZE
          * to elf_data_start, since the first section of the second load segment
          * is .data in static linking mode. ELF requires p_offset and p_vaddr to
-         * agree modulo p_align. ELF64 output pads the file to the next page
-         * before .data, so derive its virtual address from that same aligned
-         * file offset rather than merely adding a page to the preceding virtual
-         * end.
+         * agree modulo p_align. Derive its virtual address from the same
+         * aligned file offset used before .data, rather than merely adding a
+         * page to the preceding virtual end.
          */
-#if ELF_IS_64 == 1
         elf_data_start =
             ELF_START +
             ALIGN_UP(elf_header_len + elf_offset + elf_rodata->size, PAGESIZE);
-#else
-        elf_data_start = elf_rodata_start + elf_rodata->size + PAGESIZE;
-#endif
     }
     elf_bss_start = elf_data_start + elf_data->size;
     elf_align(elf_symtab);
@@ -1360,7 +1381,7 @@ void elf_generate(const char *outfile)
         elf_write_all(fp, dynamic_sections.elf_dynamic->elements,
                       dynamic_sections.elf_dynamic->size);
     }
-#if ELF_IS_64 == 1
+
     /* Statically linked, .data begins the second load segment and has to start
      * on a page boundary so that p_vaddr === p_offset (mod p_align). Linked
      * dynamically that segment starts back at .interp, and everything from
@@ -1386,7 +1407,6 @@ void elf_generate(const char *outfile)
             left -= n;
         }
     }
-#endif
     /* Readable and writable sections */
     elf_write_all(fp, elf_data->elements, elf_data->size);
 
@@ -1411,6 +1431,6 @@ void elf_generate(const char *outfile)
      * yields 0666. Every compiler that reaches here -- host-built, static
      * self-hosted, or dynamic -- therefore sets the bits explicitly.
      */
-    if (chmod((char *) outfile, 0x1ed) < 0) /* 0755 */
+    if (chmod(outfile, 0x1ed) < 0) /* 0755 */
         usage_error("Unable to mark output executable");
 }

@@ -109,6 +109,10 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
             dump_ir = true;
+        else if (!strcmp(argv[i], "--warn-string-literals"))
+            warn_string_literals = true;
+        else if (!strcmp(argv[i], "--std=c99"))
+            strict_c99 = true;
         else if (!strcmp(argv[i], "--dot"))
             dump_dot = true;
         else if (!strcmp(argv[i], "+m"))
@@ -119,7 +123,17 @@ int main(int argc, char *argv[])
             dynlink = true;
         else if (!strcmp(argv[i], "-E"))
             expand_only = true;
-        else if (!strcmp(argv[i], "-o")) {
+        else if (!strcmp(argv[i], "-I")) {
+            if (i + 1 >= argc)
+                usage_error("-I requires an include directory");
+            if (include_dirs_idx == MAX_INCLUDE_DIRS)
+                usage_error("Too many include directories");
+            include_dirs[include_dirs_idx++] = argv[++i];
+        } else if (!strncmp(argv[i], "-I", 2) && argv[i][2]) {
+            if (include_dirs_idx == MAX_INCLUDE_DIRS)
+                usage_error("Too many include directories");
+            include_dirs[include_dirs_idx++] = argv[i] + 2;
+        } else if (!strcmp(argv[i], "-o")) {
             if (i + 1 < argc) {
                 out = argv[i + 1];
                 i++;
@@ -133,7 +147,8 @@ int main(int argc, char *argv[])
 
     if (!in) {
         printf(
-            "Usage: shecc [-o output] [+m] [--dot] [--dump-ir] [--no-libc] "
+            "Usage: shecc [-I directory] [-o output] [+m] [--dot] [--dump-ir] "
+            "[--warn-string-literals] [--std=c99] [--no-libc] "
             "[--dynlink] [-E] <input.c>\n");
         usage_error("Missing source file");
     }
@@ -247,6 +262,9 @@ int main(int argc, char *argv[])
 
     /* Compact arenas after SSA optimization to free temporary SSA structures */
     compact_all_arenas();
+
+    /* Give each register-pair operation operands of its width. */
+    widen_pair_operands();
 
     /* SSA-based liveness analyses */
     liveness_analysis();

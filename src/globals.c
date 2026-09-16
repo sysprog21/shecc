@@ -15,6 +15,10 @@
 
 #include "defs.h"
 
+source_location_t *cur_token_loc(void);
+__noreturn void error_at(char *msg, source_location_t *loc);
+__noreturn void limit_error(char *msg);
+
 /* Forward declaration for string interning */
 char *intern_string(char *str);
 
@@ -37,9 +41,20 @@ int types_idx = 0;
 
 type_t *TY_void;
 type_t *TY_char;
+type_t *TY_schar;
+type_t *TY_uchar;
 type_t *TY_bool;
 type_t *TY_int;
+type_t *TY_uint;
+type_t *TY_long;
+type_t *TY_ulong;
 type_t *TY_short;
+type_t *TY_ushort;
+type_t *TY_long_long;
+type_t *TY_ulong_long;
+type_t *TY_float;
+type_t *TY_double;
+type_t *TY_long_double;
 
 /* Arenas */
 
@@ -106,6 +121,10 @@ bool expand_only = false;
 bool dump_ir = false;
 bool dump_dot = false;
 bool hard_mul_div = false;
+bool warn_string_literals = false;
+bool strict_c99 = false;
+char *include_dirs[MAX_INCLUDE_DIRS];
+int include_dirs_idx = 0;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -588,11 +607,33 @@ type_t *find_type(const char *type_name, int flag)
                 continue;
             if (!strcmp(TYPES[i].type_name, type_name)) {
                 /* If it is a forwardly declared alias of a structure, return
-                 * the base structure type.
+                 * the base structure type. A function type alias with a void
+                 * return is no such alias despite its zero size.
                  */
-                if (TYPES[i].base_type == TYPE_typedef && TYPES[i].size == 0)
-                    return TYPES[i].base_struct;
-                return &TYPES[i];
+                type_t *alias = &TYPES[i];
+                type_t *base = alias->base_struct;
+
+                if (alias->base_type != TYPE_typedef || alias->size ||
+                    alias->ptr_level || alias->is_direct_function_type)
+                    return alias;
+
+                /* The base would drop the qualifiers of `typedef const struct S
+                 * cs_t;`, so a qualified alias keeps its own descriptor and
+                 * takes the layout once the tag has been completed.
+                 */
+                if (!base || (!alias->is_const_qualified &&
+                              !alias->is_volatile_qualified))
+                    return base;
+                if (!base->size)
+                    return alias;
+                alias->size = base->size;
+                alias->alignment = base->alignment;
+                alias->fields = base->fields;
+                alias->num_fields = base->num_fields;
+                alias->is_union = base->is_union;
+                alias->has_flexible_array_member =
+                    base->has_flexible_array_member;
+                return alias;
             }
         }
     }
@@ -601,11 +642,8 @@ type_t *find_type(const char *type_name, int flag)
 
 ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 {
-    if (ph2_ir_idx >= MAX_IR_INSTR) {
-        printf("Error: too many phase-2 IR instructions\n");
-        fflush(stdout); /* see fatal() */
-        abort();
-    }
+    if (ph2_ir_idx >= MAX_IR_INSTR)
+        limit_error("too many phase-2 IR instructions");
     PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
     return ph2_ir;
 }
@@ -639,6 +677,7 @@ ph2_ir_t *add_ph2_ir(opcode_t op)
     ph2_ir->is_pointer = false;
     ph2_ir->src0_is_pointer = false;
     ph2_ir->src1_is_pointer = false;
+    ph2_ir->is_volatile = false;
     return add_existed_ph2_ir(ph2_ir);
 }
 
@@ -651,6 +690,9 @@ block_t *add_block(block_t *parent, func_t *func)
     blk->locals.capacity = 16;
     blk->locals.elements =
         arena_alloc(BLOCK_ARENA, blk->locals.capacity * sizeof(var_t *));
+    blk->type_tags = NULL;
+    blk->constants = NULL;
+    blk->typedefs = NULL;
     blk->parent = parent;
     blk->func = func;
     blk->next = NULL;
@@ -702,6 +744,65 @@ int hex_digit_value(char c)
     return -1;
 }
 
+/* Encode a valid Unicode scalar value into this implementation's UTF-8
+ * execution character set. Narrow literals retain bytes, so this also keeps a
+ * UCN usable in strings, character constants, and #if character constants.
+ */
+static int append_utf8(char *output, int out, int limit, unsigned int value)
+{
+    if (value <= 0x7f) {
+        if (out + 1 >= limit)
+            return -1;
+        output[out++] = value;
+    } else if (value <= 0x7ff) {
+        if (out + 2 >= limit)
+            return -1;
+        output[out++] = 0xc0 | (value >> 6);
+        output[out++] = 0x80 | (value & 0x3f);
+    } else if (value <= 0xffff) {
+        if (out + 3 >= limit)
+            return -1;
+        output[out++] = 0xe0 | (value >> 12);
+        output[out++] = 0x80 | ((value >> 6) & 0x3f);
+        output[out++] = 0x80 | (value & 0x3f);
+    } else {
+        if (out + 4 >= limit)
+            return -1;
+        output[out++] = 0xf0 | (value >> 18);
+        output[out++] = 0x80 | ((value >> 12) & 0x3f);
+        output[out++] = 0x80 | ((value >> 6) & 0x3f);
+        output[out++] = 0x80 | (value & 0x3f);
+    }
+    return out;
+}
+
+/* C99 6.4.4.4 requires the value of a hexadecimal escape in a character
+ * constant or narrow string literal to fit an unsigned char. Report whether a
+ * literal's spelling holds one that does not. Wide literals accept larger
+ * values, so only narrow callers ask.
+ */
+bool hex_escape_exceeds_byte(const char *text)
+{
+    for (int i = 0; text[i]; i++) {
+        if (text[i] != '\\')
+            continue;
+        i++;
+        if (!text[i])
+            break;
+        if (text[i] != 'x')
+            continue;
+
+        unsigned int value = 0;
+        while (isxdigit((unsigned char) text[i + 1])) {
+            i++;
+            value = (value << 4) + hex_digit_value(text[i]);
+            if (value > 0xff)
+                return true;
+        }
+    }
+    return false;
+}
+
 int unescape_string(const char *input, char *output, int output_size)
 {
     if (!input || !output || output_size == 0)
@@ -732,6 +833,10 @@ int unescape_string(const char *input, char *output, int output_size)
             i++;
             break;
         case 'e':
+            if (strict_c99) {
+                output[j] = '\0';
+                return -1;
+            }
             output[j++] = 27;
             i++;
             break;
@@ -768,7 +873,9 @@ int unescape_string(const char *input, char *output, int output_size)
             i++;
             break;
         case 'x': {
-            /* Hexadecimal escape sequence: \xhh */
+            /* C99 hexadecimal escapes consume the complete run of hex digits,
+             * unlike octal escapes which are limited to three.
+             */
             i++; /* Skips 'x' */
 
             if (!isxdigit(input[i])) {
@@ -779,16 +886,50 @@ int unescape_string(const char *input, char *output, int output_size)
                 return -1;
             }
 
-            int value = 0;
-            int count = 0;
-
-            while (isxdigit(input[i]) && count < 2) {
-                value = (value << 4) + hex_digit_value(input[i]);
+            /* Only the low byte reaches the output, so keep only that much
+             * rather than shift a long digit run out of range. A narrow literal
+             * whose value does not fit has already been diagnosed by
+             * hex_escape_exceeds_byte(); a wide one takes its value from
+             * decode_wstring_units() instead.
+             */
+            unsigned int value = 0;
+            while (isxdigit(input[i])) {
+                value = ((value << 4) + hex_digit_value(input[i])) & 0xff;
                 i++;
-                count++;
             }
 
             output[j++] = (char) value;
+            break;
+        }
+        case 'u':
+        case 'U': {
+            int digits = input[i] == 'u' ? 4 : 8;
+            unsigned int value = 0;
+
+            i++;
+            for (int digit = 0; digit < digits; digit++) {
+                if (!isxdigit(input[i])) {
+                    output[j] = '\0';
+                    return -1;
+                }
+                value = (value << 4) + hex_digit_value(input[i++]);
+            }
+
+            /* C99 6.4.3 excludes surrogate code points, values above the
+             * Unicode range, and basic-source characters other than $, @, and
+             * `. The latter must be spelt directly in source.
+             */
+            if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) ||
+                (value < 0xa0 && value != '$' && value != '@' &&
+                 value != '`')) {
+                output[j] = '\0';
+                return -1;
+            }
+            j = append_utf8(output, j, output_size, value);
+            if (j < 0) {
+                output[0] = '\0';
+                return -1;
+            }
             break;
         }
         case '0':
@@ -828,15 +969,180 @@ int unescape_string(const char *input, char *output, int output_size)
     return j;
 }
 
+/* C99 permits multi-character constants with an implementation-defined int
+ * value. shecc packs their first four bytes left to right.
+ */
+int parse_character_constant(const char *literal)
+{
+    char unescaped[MAX_TOKEN_LEN];
+    unsigned int value = 0;
+    int length = unescape_string(literal, unescaped, sizeof(unescaped));
+
+    if (length < 0)
+        return 0;
+    for (int i = 0; i < length && i < 4; i++)
+        value = (value << 8) | (unsigned char) unescaped[i];
+    return (int) value;
+}
+
+/* The narrow decoder translates UCNs to UTF-8, which is correct for char
+ * strings but not for a wide literal: one UCN is one wchar_t element. This
+ * execution-wide-character policy stores each source byte/escape value as an
+ * int unit and preserves UCN scalar values directly.
+ */
+int decode_wstring_units(const char *text, int *units, int capacity)
+{
+    int in = 0;
+    int out = 0;
+
+    while (text[in]) {
+        unsigned int value;
+
+        if (out >= capacity)
+            return -1;
+        if (text[in] != '\\') {
+            units[out++] = (unsigned char) text[in++];
+            continue;
+        }
+        in++;
+        switch (text[in]) {
+        case 'a':
+            value = '\a';
+            in++;
+            break;
+        case 'b':
+            value = '\b';
+            in++;
+            break;
+        case 'f':
+            value = '\f';
+            in++;
+            break;
+        case 'n':
+            value = '\n';
+            in++;
+            break;
+        case 'r':
+            value = '\r';
+            in++;
+            break;
+        case 't':
+            value = '\t';
+            in++;
+            break;
+        case 'v':
+            value = '\v';
+            in++;
+            break;
+        case '\\':
+            value = '\\';
+            in++;
+            break;
+        case '\'':
+            value = '\'';
+            in++;
+            break;
+        case '"':
+            value = '"';
+            in++;
+            break;
+        case '?':
+            value = '?';
+            in++;
+            break;
+        case 'e':
+            if (strict_c99)
+                return -1;
+            value = 27;
+            in++;
+            break;
+        case 'x':
+            in++;
+            if (!isxdigit(text[in]))
+                return -1;
+            value = 0;
+            while (isxdigit(text[in])) {
+                if (value > 0x07ffffffU)
+                    return -1;
+                value = (value << 4) + hex_digit_value(text[in++]);
+            }
+            if (value > 0x7fffffffU)
+                return -1;
+            break;
+        case 'u':
+        case 'U': {
+            int digits = text[in] == 'u' ? 4 : 8;
+
+            value = 0;
+            in++;
+            for (int i = 0; i < digits; i++) {
+                if (!isxdigit(text[in]))
+                    return -1;
+                if (value > 0x07ffffffU)
+                    return -1;
+                value = (value << 4) + hex_digit_value(text[in++]);
+            }
+            if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) ||
+                (value < 0xa0 && value != '$' && value != '@' && value != '`'))
+                return -1;
+            break;
+        }
+        default:
+            if (text[in] < '0' || text[in] > '7')
+                value = (unsigned char) text[in++];
+            else {
+                value = 0;
+                for (int i = 0; i < 3 && text[in] >= '0' && text[in] <= '7';
+                     i++)
+                    value = value * 8 + (text[in++] - '0');
+            }
+            break;
+        }
+        units[out++] = (int) value;
+    }
+    return out;
+}
+
+/* A wide character constant that holds one execution-wide unit has the value of
+ * that unit. Its hexadecimal and octal escapes are therefore not cut to the
+ * byte a narrow constant keeps, and a UCN is not spread over UTF-8 bytes. A
+ * constant of several units keeps the implementation-defined packing of
+ * parse_character_constant().
+ *
+ * Returns false when an escape does not fit a unit.
+ */
+bool wide_character_constant(const char *literal, int *value)
+{
+    int units[MAX_TOKEN_LEN];
+    int length = decode_wstring_units(literal, units, MAX_TOKEN_LEN);
+
+    *value = 0;
+    if (length < 0)
+        return false;
+    *value = length == 1 ? units[0] : parse_character_constant(literal);
+    return true;
+}
+
+/* The value of an integer literal in one word. A literal past that word keeps
+ * its low bits; the accumulator is unsigned so that is a wrap, never the host
+ * compiler's signed overflow. Constant expressions that can hold such a literal
+ * fold it through the two-word evaluator instead.
+ */
 int parse_numeric_constant(const char *buffer)
 {
     int i = 0;
-    int value = 0;
+    unsigned int value = 0;
     while (buffer[i]) {
+        /* The lexer keeps C99 integer suffixes in the token. Their type is
+         * selected by the parser; they are not digits of the value.
+         */
+        if ((buffer[i] | 32) == 'u' || (buffer[i] | 32) == 'l')
+            break;
         if (i == 1 && (buffer[i] | 32) == 'x') { /* hexadecimal */
             value = 0;
             i = 2;
-            while (buffer[i]) {
+            while (buffer[i] && (buffer[i] | 32) != 'u' &&
+                   (buffer[i] | 32) != 'l') {
                 char c = buffer[i++];
                 value <<= 4;
                 if (isdigit(c))
@@ -850,7 +1156,8 @@ int parse_numeric_constant(const char *buffer)
         if (i == 1 && (buffer[i] | 32) == 'b') { /* binary */
             value = 0;
             i = 2;
-            while (buffer[i]) {
+            while (buffer[i] && (buffer[i] | 32) != 'u' &&
+                   (buffer[i] | 32) != 'l') {
                 char c = buffer[i++];
                 value <<= 1;
                 value += (c == '1');
@@ -893,11 +1200,11 @@ void type_ensure_fields(type_t *type)
 
 type_t *add_type(void)
 {
-    if (types_idx >= MAX_TYPES) {
-        printf("Error: Maximum number of types (%d) exceeded\n", MAX_TYPES);
-        fflush(stdout); /* see fatal() */
-        abort();
-    }
+    /* Every struct, union and enum specifier with a body, and every typedef,
+     * takes an entry, so a large enough input reaches the end of the table.
+     */
+    if (types_idx >= MAX_TYPES)
+        limit_error("Maximum number of types exceeded");
     type_t *t = &TYPES[types_idx++];
     t->fields = NULL;
     return t;
@@ -938,6 +1245,7 @@ void add_constant(char alias[], int value)
     /* Use interned string for constant name */
     strcpy(constant->alias, intern_string(alias));
     constant->value = value;
+    constant->next = NULL;
     hashmap_put(CONSTANTS_MAP, alias, constant);
 }
 
@@ -946,13 +1254,345 @@ constant_t *find_constant(char alias[])
     return hashmap_get(CONSTANTS_MAP, alias);
 }
 
+/* Enum names declared in a block shadow enclosing names, but must disappear
+ * with that block. Keep their bindings on the parser's existing block tree.
+ */
+void add_scoped_constant(block_t *block, char alias[], int value)
+{
+    constant_t *constant = arena_alloc_constant();
+
+    if (!constant)
+        fatal("Failed to allocate scoped enum constant");
+    strcpy(constant->alias, intern_string(alias));
+    constant->value = value;
+    constant->next = block->constants;
+    block->constants = constant;
+}
+
+/* The kinds of binding an ordinary identifier can have in one scope. Objects,
+ * functions, typedef names and enumeration constants share C99's ordinary
+ * identifier name space (6.2.3p1), so each scope binds a name to at most one of
+ * them. The values are bits, so a lookup can ask for several kinds at once.
+ */
+typedef enum {
+    ORDINARY_NONE = 0,
+    ORDINARY_CONSTANT = 1,  /* enumeration constant declared in the block */
+    ORDINARY_VARIABLE = 2,  /* local object, or block-scope function alias */
+    ORDINARY_TYPEDEF = 4,   /* typedef name declared in the block */
+    ORDINARY_PARAMETER = 8, /* parameter, seen from the function body's block */
+    ORDINARY_ANY = 15
+} ordinary_kind_t;
+
+/* The first local of @block at or after index *@pos named @name, or NULL, with
+ * *@pos left just past it so that a caller can continue to the next one.
+ *
+ * A block's locals include all of its IR temporaries, and every declaration
+ * scans its block's locals at least twice, so the scan is quadratic in the size
+ * of a block and its compare is what a large one pays for. Settle the first two
+ * bytes before the library call: temporaries differ in the first, and names
+ * sharing a prefix letter, such as a run of generated declarations, usually in
+ * the second. A nonzero first byte that matches means neither name has ended.
+ */
+var_t *find_block_local(block_t *block, const char *name, int *pos)
+{
+    char head = name[0];
+    char second = head ? name[1] : 0;
+
+    for (int i = *pos; i < block->locals.size; i++) {
+        var_t *var = block->locals.elements[i];
+        const char *var_name = var->var_name;
+
+        if (var_name[0] != head || (head && var_name[1] != second))
+            continue;
+        if (!strcmp(var_name, name)) {
+            *pos = i + 1;
+            return var;
+        }
+    }
+    *pos = block->locals.size;
+    return NULL;
+}
+
+/* The binding @name has in @block's own scope among the @kinds asked for, or
+ * ORDINARY_NONE. The outermost block of a function body shares the scope of the
+ * function's parameters (C99 6.2.1p4); a nested block only hides them. When
+ * @binding is not NULL it receives the constant_t, var_t or typedef_binding_t
+ * found. A valid program binds a name once per scope, so the order in which the
+ * kinds are tried only decides what an invalid redeclaration reports.
+ */
+ordinary_kind_t find_block_ordinary(block_t *block,
+                                    const char *name,
+                                    int kinds,
+                                    void **binding)
+{
+    char head = name[0];
+    void *unused;
+
+    if (!binding)
+        binding = &unused;
+    if (kinds & ORDINARY_CONSTANT) {
+        for (constant_t *constant = block->constants; constant;
+             constant = constant->next) {
+            if (!strcmp(constant->alias, name)) {
+                *binding = constant;
+                return ORDINARY_CONSTANT;
+            }
+        }
+    }
+    if (kinds & ORDINARY_VARIABLE) {
+        int pos = 0;
+
+        *binding = find_block_local(block, name, &pos);
+        if (*binding)
+            return ORDINARY_VARIABLE;
+    }
+    if (kinds & ORDINARY_TYPEDEF) {
+        for (typedef_binding_t *td = block->typedefs; td; td = td->next) {
+            if (td->name[0] == head && !strcmp(td->name, name)) {
+                *binding = td;
+                return ORDINARY_TYPEDEF;
+            }
+        }
+    }
+    if ((kinds & ORDINARY_PARAMETER) && !block->parent && block->func) {
+        func_t *func = block->func;
+
+        for (int i = 0; i < func->num_params; i++) {
+            var_t *param = &func->param_defs[i];
+
+            if (param->var_name[0] == head && !strcmp(param->var_name, name)) {
+                *binding = param;
+                return ORDINARY_PARAMETER;
+            }
+        }
+    }
+    return ORDINARY_NONE;
+}
+
+/* The enumeration constant @alias as seen from @block, or NULL when none is
+ * visible. Constants share the ordinary identifier name space, so an object,
+ * parameter or typedef name declared in a nearer scope hides an outer constant
+ * of the same name (C99 6.2.1p4).
+ *
+ * Every identifier operand asks, and nearly all of them name no constant, so
+ * find the constant first, which costs no scan of any block's locals. Only when
+ * there is one are the scopes between the use and the constant's own searched
+ * for a binding that hides it.
+ */
+constant_t *find_scoped_constant(char alias[], block_t *block)
+{
+    block_t *owner;
+    void *constant = NULL;
+
+    for (owner = block; owner && owner != GLOBAL_BLOCK; owner = owner->parent)
+        if (find_block_ordinary(owner, alias, ORDINARY_CONSTANT, &constant))
+            break;
+    if (!owner || owner == GLOBAL_BLOCK)
+        constant = find_constant(alias);
+    if (!constant)
+        return NULL;
+    for (; block != owner; block = block->parent) {
+        if (find_block_ordinary(
+                block, alias,
+                ORDINARY_VARIABLE | ORDINARY_TYPEDEF | ORDINARY_PARAMETER,
+                NULL))
+            return NULL;
+    }
+    return constant;
+}
+
+void add_type_tag(block_t *block, char name[], type_t *type)
+{
+    type_tag_t *tag = arena_alloc(BLOCK_ARENA, sizeof(type_tag_t));
+
+    if (strlen(name) >= MAX_TYPE_LEN)
+        fatal("Type name too long");
+    strcpy(tag->name, intern_string(name));
+    tag->type = type;
+    tag->next = block->type_tags;
+    block->type_tags = tag;
+}
+
+type_t *find_local_type_tag(char name[], block_t *block)
+{
+    for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
+        if (!strcmp(tag->name, name))
+            return tag->type;
+    return NULL;
+}
+
+/* An enum type is int based (see initialize_enum_type()), which is also what
+ * tells its tag apart from a struct or union tag.
+ */
+#define ENUM_TAG_KIND TYPE_int
+
+/* C99 6.7.2.3p3: every declaration of a tag names the same kind of type, and
+ * struct, union and enum tags share one name space, so a tag found under
+ * another keyword is an error rather than a miss. @kind is TYPE_struct,
+ * TYPE_union or ENUM_TAG_KIND.
+ */
+static type_t *check_tag_kind(type_t *type, base_type_t kind)
+{
+    if (type && type->base_type != kind)
+        error_at("tag was previously declared as a different kind of tag",
+                 cur_token_loc());
+    return type;
+}
+
+/* The tag @name of @kind as seen from @block, or NULL when no tag of that name
+ * is visible. Tags are registered with the block that declares them, file-scope
+ * ones with GLOBAL_BLOCK, which a function body's chain does not reach on its
+ * own, so a NULL @block sees file scope only. A tag declared in some other
+ * block is never found. Looking in the tag table, not the type table, also
+ * keeps a typedef name out of it.
+ */
+static type_t *find_visible_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = NULL;
+
+    for (; block && !type; block = block->parent)
+        type = find_local_type_tag(name, block);
+    if (!type)
+        type = find_local_type_tag(name, GLOBAL_BLOCK);
+    return check_tag_kind(type, kind);
+}
+
+/* Create the incomplete struct or union tag @name of @kind in @block. */
+static type_t *declare_record_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = add_named_type(name);
+
+    type->base_type = kind;
+    add_type_tag(block, name, type);
+    return type;
+}
+
+/* The struct or union tag @name as seen from @block, spelled with the keyword
+ * for @kind, or NULL when no such tag is visible.
+ */
+type_t *find_record_tag(char name[], block_t *block, base_type_t kind)
+{
+    return find_visible_tag(name, block, kind);
+}
+
+/* A struct or union specifier with no member list: the visible tag, or else a
+ * new incomplete one in the current scope (C99 6.7.2.3p8), file scope when
+ * @block is NULL. An object of that type is rejected once its declarator is
+ * read.
+ */
+type_t *reference_record_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = find_record_tag(name, block, kind);
+
+    return type ? type
+                : declare_record_tag(name, block ? block : GLOBAL_BLOCK, kind);
+}
+
+/* The tag @name that @block itself declares, created incomplete when it has
+ * none yet. A member list or a bare "struct tag;" declares the tag in the
+ * current scope, shadowing any outer one (C99 6.7.2.3p5 and p7).
+ */
+type_t *local_record_tag(char name[], block_t *block, base_type_t kind)
+{
+    type_t *type = check_tag_kind(find_local_type_tag(name, block), kind);
+
+    return type ? type : declare_record_tag(name, block, kind);
+}
+
+/* Open the member list of the struct or union tag @tag. C99 6.7.2.3p1 lets a
+ * scope define a tag's content only once, and a definition of the same tag
+ * inside that member list is a second one in the same scope, since a member
+ * list opens no scope of its own. The tag is still incomplete there, so mark it
+ * now rather than rely on its field count.
+ */
+void begin_record_definition(type_t *tag)
+{
+    if (tag->num_fields || tag->definition_started)
+        error_at("redefinition of struct or union tag", cur_token_loc());
+    tag->definition_started = true;
+}
+
+/* The enum tag @name as seen from @block, or NULL when none is visible. */
+type_t *find_enum_tag(char name[], block_t *block)
+{
+    return find_visible_tag(name, block, ENUM_TAG_KIND);
+}
+
+/* The enum tag @name named by a specifier seen from @block. Unlike a record
+ * tag, an enum tag is never incomplete (C99 6.7.2.3p2 requires an enumerator
+ * list before the type is used), so a name with no visible definition is an
+ * error.
+ */
+type_t *reference_enum_tag(char name[], block_t *block)
+{
+    type_t *type = find_enum_tag(name, block);
+
+    if (!type)
+        error_at("Unknown enum type: C99 forbids forward references to enums",
+                 cur_token_loc());
+    return type;
+}
+
+/* The enum tag @name that @block itself declares, or NULL. */
+type_t *local_enum_tag(char name[], block_t *block)
+{
+    return check_tag_kind(find_local_type_tag(name, block), ENUM_TAG_KIND);
+}
+
+bool find_block_typedef(block_t *block, const char *name)
+{
+    return find_block_ordinary(block, name, ORDINARY_TYPEDEF, NULL) !=
+           ORDINARY_NONE;
+}
+
+/* A nested block may legally shadow a parameter with a typedef, but the
+ * function body's outermost block shares the parameters' scope.
+ */
+void add_block_typedef(block_t *block, char name[], type_t *type)
+{
+    if (find_block_ordinary(block, name, ORDINARY_ANY, NULL))
+        error_at("typedef name conflicts with an ordinary identifier",
+                 cur_token_loc());
+
+    typedef_binding_t *binding;
+
+    binding = arena_alloc(BLOCK_ARENA, sizeof(*binding));
+    binding->name = intern_string(name);
+    binding->type = type;
+    binding->next = block->typedefs;
+    block->typedefs = binding;
+}
+
+/* Ordinary identifiers and typedef names share C's ordinary identifier
+ * namespace. Search each lexical scope inward-out so an object declaration
+ * masks an outer typedef before the global type table is considered.
+ */
+type_t *find_visible_type(const char *name, block_t *block)
+{
+    /* Parameters are tried with the function body's outermost block, so they
+     * too hide a file-scope typedef unless a nearer binding has hidden them.
+     */
+    for (; block; block = block->parent) {
+        void *binding;
+        ordinary_kind_t kind =
+            find_block_ordinary(block, name, ORDINARY_ANY, &binding);
+
+        if (kind == ORDINARY_TYPEDEF)
+            return ((typedef_binding_t *) binding)->type;
+        if (kind != ORDINARY_NONE)
+            return NULL;
+    }
+    return find_type(name, 1);
+}
+
 var_t *find_member(const char token[], type_t *type)
 {
-    /* If it is a forwardly declared alias of a structure, switch to the base
-     * structure type. A scalar -- or "void", whose size is also 0 -- has no
-     * base to switch to, and following the NULL was a SIGSEGV.
+    /* An alias that names a structure tag instead of defining the members,
+     * whether forward declared or as a pointer as in "typedef struct S *SP",
+     * finds them on the tag. A scalar -- or "void" -- has no base to switch to,
+     * and following the NULL was a SIGSEGV.
      */
-    if (type->size == 0)
+    if (!type->num_fields)
         type = type->base_struct;
     if (!type)
         return NULL;
@@ -1030,6 +1670,8 @@ var_t *find_var(char *token, block_t *parent)
 int size_var(var_t *var)
 {
     int size;
+    if (var->is_flexible_array_member)
+        return 0;
     if (var->ptr_level > 0 || var->is_func) {
         /* Pointers and function pointers occupy a target pointer, which is 8
          * bytes on LP64 targets and 4 on the 32-bit ones.
@@ -1198,7 +1840,7 @@ void *arena_grow(arena_t *arena,
 {
     int new_cap = *cap ? *cap << 1 : first;
     if (limit && new_cap > limit)
-        fatal(what);
+        limit_error(what);
     void *grown = arena_realloc(arena, ptr, *cap * elem_sz, new_cap * elem_sz);
     *cap = new_cap;
     return grown;
@@ -1366,6 +2008,19 @@ void add_symbol(basic_block_t *bb, var_t *var)
     }
 }
 
+/* Whether @var is a volatile object named by its declaration, as opposed to a
+ * temporary the parser generated. Temporaries are named ".tN".
+ */
+bool var_is_volatile_object(const var_t *var)
+{
+    return var && var->is_volatile && var->var_name[0] != '.';
+}
+
+/* A volatile object a primary expression has named and no instruction has read
+ * yet. See discard_operand().
+ */
+var_t *unread_volatile_object;
+
 void add_insn(block_t *block,
               basic_block_t *bb,
               opcode_t op,
@@ -1400,6 +2055,13 @@ void add_insn(block_t *block,
 
     n->str = str ? intern_string(str) : NULL;
 
+    /* An instruction reading the object discard_operand() watches has given it
+     * the read it is owed.
+     */
+    if (unread_volatile_object &&
+        (rs1 == unread_volatile_object || rs2 == unread_volatile_object))
+        unread_volatile_object = NULL;
+
     /* Mark variables as address-taken to prevent incorrect constant
      * optimization
      */
@@ -1407,6 +2069,14 @@ void add_insn(block_t *block,
         rs1->address_taken = true;
         rs1->is_const = false; /* disable constant optimization */
     }
+
+    /* A volatile object can be read or written behind the program's back, and
+     * every access to it is a side effect (C99 6.7.3p6). Keep a local one in
+     * its slot as though its address had escaped, so that each access by name
+     * reaches memory rather than a register copy.
+     */
+    if (op == OP_allocat && rd && rd->is_volatile && !rd->is_global)
+        rd->address_taken = true;
 
     if (!bb->insn_list.head)
         bb->insn_list.head = n;
@@ -1425,6 +2095,7 @@ strbuf_t *strbuf_create(int init_capacity)
 
     array->size = 0;
     array->capacity = init_capacity;
+    array->plain_source = false;
     array->elements = malloc(array->capacity * sizeof(char));
     if (!array->elements) {
         free(array);
@@ -1732,6 +2403,18 @@ void global_release(void)
     if (TOKEN_ARENA)
         arena_free(TOKEN_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
+
+    /* Every value in TOKEN_CACHE is one heap-allocated token_stream_t: the
+     * tokens it spans come from TOKEN_ARENA, which is already gone, but the
+     * header itself is malloc'd by the two gen_*_token_stream functions and
+     * hashmap_free() releases only the table, never the values.
+     */
+    if (TOKEN_CACHE) {
+        for (int i = 0; i < TOKEN_CACHE->cap; i++) {
+            if (TOKEN_CACHE->table[i].occupied)
+                free(TOKEN_CACHE->table[i].val);
+        }
+    }
     hashmap_free(TOKEN_CACHE);
     hashmap_free(SRC_FILE_MAP);
     hashmap_free(FUNC_MAP);
@@ -1760,6 +2443,12 @@ void global_release(void)
     strbuf_free(dynamic_sections.elf_got);
 }
 
+/* The function whose body the back half of the pipeline is working on, or NULL
+ * before register allocation. An internal failure there carries no source
+ * position, so naming the function is what points back at the input.
+ */
+char *fatal_function_context = NULL;
+
 /* Reports a broken invariant, which has no position in the source to point at
  * because nothing in the source is necessarily wrong. This one abort()s: a core
  * dump is what makes an internal failure debuggable. A mistake in the input
@@ -1767,18 +2456,21 @@ void global_release(void)
  */
 __noreturn void fatal(const char *msg)
 {
-    printf("[Error]: %s\n", msg);
+    if (fatal_function_context)
+        printf("[Error]: %s (in function '%s')\n", msg, fatal_function_context);
+    else
+        printf("[Error]: %s\n", msg);
 
     /* abort() does not flush, so a diagnostic written to a pipe -- a build log,
      * or any invocation whose output is captured -- is discarded and the
      * compiler appears to die silently.
      *
      * The stream is NULL rather than stdout because a dynamically linked build
-     * resolves fflush through the PLT to the host libc, for which lib/c.h's
-     * 'stdout' -- the plain file descriptor 1 -- is not a FILE *. NULL means
-     * "every stream" there and is ignored by the unbuffered embedded libc, so
-     * it is right for both. That build needs the flush most, being the only one
-     * whose stdio actually buffers.
+     * resolves fflush through the PLT to the host libc, where error output may
+     * sit in any of its buffered streams. NULL means "every stream" there and
+     * is ignored by the unbuffered embedded libc, so it is right for both. That
+     * build needs the flush most, being the only one whose stdio actually
+     * buffers.
      */
     fflush(NULL);
     abort();
@@ -1793,6 +2485,18 @@ __noreturn void usage_error(const char *msg)
     printf("[Error]: %s\n", msg);
     fflush(NULL);
     exit(1);
+}
+
+/* Reports an input that exceeds one of the compiler's fixed limits, such as the
+ * size of the type table or the predecessors of one basic block. The program
+ * may be valid C, but the limit is not a broken invariant either, so it exits
+ * through error_at() rather than taking fatal()'s core dump. The current token
+ * is quoted while the parser still holds one; a limit reached after the token
+ * arena is released has no line to point at.
+ */
+__noreturn void limit_error(char *msg)
+{
+    error_at(msg, cur_token && TOKEN_ARENA ? cur_token_loc() : NULL);
 }
 
 /* Reports a mistake in the input, quoting the line it sits on. A program the

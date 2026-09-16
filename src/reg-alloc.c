@@ -44,12 +44,31 @@ bool is_address_like(var_t *v)
  * widths and int narrowing by it, so it keeps counting pointer-like operands
  * alone rather than acquiring arrays and changing a settled target.
  */
+bool is_unsigned_scalar(const var_t *var)
+{
+    return var && !var->ptr_level && !var->is_func && var->type &&
+           var->type->is_unsigned;
+}
+
 void set_ptr_flags(ph2_ir_t *ir, insn_t *insn)
 {
     ir->src0_is_pointer = is_address_like(insn->rs1);
     ir->src1_is_pointer = is_address_like(insn->rs2);
     ir->is_pointer = is_pointer_like(insn->rd) || is_pointer_like(insn->rs1) ||
                      is_pointer_like(insn->rs2);
+    ir->is_unsigned = is_unsigned_scalar(insn->rd) ||
+                      is_unsigned_scalar(insn->rs1) ||
+                      is_unsigned_scalar(insn->rs2);
+    ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+    ir->src1_is_unsigned = is_unsigned_scalar(insn->rs2);
+
+    /* Addresses are ordered as unsigned values (C99 6.5.8): one above the
+     * signed range still compares greater than one below it.
+     */
+    if ((insn->opcode == OP_lt || insn->opcode == OP_leq ||
+         insn->opcode == OP_gt || insn->opcode == OP_geq) &&
+        (ir->src0_is_pointer || ir->src1_is_pointer))
+        ir->src0_is_unsigned = true;
 }
 
 /* Width of the value a local's frame slot actually holds.
@@ -74,9 +93,20 @@ int var_slot_size(var_t *v)
      * carries the type of the expression that made it, which for pointer
      * arithmetic is still int, and a four-byte slot truncates the address.
      */
-    if (!v->address_taken)
-        return PTR_SIZE;
     if (!v->type)
+        return PTR_SIZE;
+
+    /* A direct wide scalar needs both words even when its address never
+     * escapes: spilling an SSA temporary is still a memory round trip.
+     */
+    if (!is_record_type(v->type) && v->type->size == 8)
+        return 8;
+
+    /* A global is memory another function reads, and its data slot is only as
+     * wide as its type: "unsigned int a, b;" places b four bytes after a on
+     * LP64, so a full-width store to a overwrites b.
+     */
+    if (!v->address_taken && !v->is_global)
         return PTR_SIZE;
 
     /* Classify by the stored width rather than by type identity: an enum is a
@@ -91,10 +121,34 @@ int var_slot_size(var_t *v)
     return PTR_SIZE;
 }
 
+/* High halves stay out of REGS[]: its users assume a register entry names one
+ * ordinary scalar owner. This parallel reservation table prevents a pair's high
+ * machine register from being handed to a different value.
+ */
+var_t *pair_high_owner[REG_CNT];
+
 void vreg_map_to_phys(var_t *var, int phys_reg)
 {
     if (var)
         var->phys_reg = phys_reg;
+}
+
+/* A wide scalar on a 32-bit target owns two independent machine registers.
+ * Keeping the high mapping on the SSA value, rather than duplicating @var in
+ * REGS[], lets the existing register file continue to mean one complete
+ * single-word owner per entry while paired allocation is introduced.
+ */
+void vreg_map_pair_to_phys(var_t *var, int low_reg, int high_reg)
+{
+    if (!var)
+        return;
+    if (high_reg < 0 || high_reg >= REG_CNT)
+        fatal("Invalid high register for wide value");
+    if (pair_high_owner[high_reg] && pair_high_owner[high_reg] != var)
+        fatal("Wide value high register is already reserved");
+    var->phys_reg = low_reg;
+    var->phys_reg_hi = high_reg;
+    pair_high_owner[high_reg] = var;
 }
 
 int vreg_get_phys(var_t *var)
@@ -104,10 +158,71 @@ int vreg_get_phys(var_t *var)
     return -1;
 }
 
-void vreg_clear_phys(var_t *var)
+int vreg_get_phys_hi(var_t *var)
 {
     if (var)
+        return var->phys_reg_hi;
+    return -1;
+}
+
+/* ABI argument locations are measured in machine words, not source parameters.
+ * Keeping that calculation in one place matters once a direct 64-bit scalar
+ * occupies two words on a 32-bit target: its first word must be even-aligned,
+ * and every following argument starts after both words.
+ */
+int abi_arg_words(const var_t *var)
+{
+    return var_needs_register_pair(var) ? 2 : 1;
+}
+
+/* Where an argument starts, given the next free ABI word.
+ *
+ * AAPCS32 starts every long long at an even word, in registers and on the stack
+ * alike. The RV32 calling convention does so only for a variadic argument and
+ * on the stack, whose slots are eight-byte aligned; a named one takes the next
+ * two words, and when only a7 is left its low word goes there and its high word
+ * to the first stack slot.
+ */
+int abi_arg_start(int cursor, const var_t *var, bool variadic)
+{
+    if (abi_arg_words(var) == 2 &&
+        (ELF_MACHINE != 0xf3 || variadic || cursor >= MAX_ARGS_IN_REG))
+        cursor = ALIGN_UP(cursor, 2);
+    return cursor;
+}
+
+int abi_arg_next(int cursor, const var_t *var, bool variadic)
+{
+    return abi_arg_start(cursor, var, variadic) + abi_arg_words(var);
+}
+
+/* Whether an argument starting at @word is split between the last argument
+ * register and the stack, which only a named RV32 long long can be.
+ */
+bool abi_arg_is_split(int word, const var_t *var)
+{
+    return word < MAX_ARGS_IN_REG &&
+           word + abi_arg_words(var) > MAX_ARGS_IN_REG;
+}
+
+int abi_param_start(const func_t *func, int param_idx)
+{
+    int cursor = func->returns_aggregate ? 1 : 0;
+
+    for (int i = 0; i < param_idx; i++)
+        cursor = abi_arg_next(cursor, &func->param_defs[i], false);
+    return abi_arg_start(cursor, &func->param_defs[param_idx], false);
+}
+
+void vreg_clear_phys(var_t *var)
+{
+    if (var) {
+        if (var->phys_reg_hi >= 0 && var->phys_reg_hi < REG_CNT &&
+            pair_high_owner[var->phys_reg_hi] == var)
+            pair_high_owner[var->phys_reg_hi] = NULL;
         var->phys_reg = -1;
+        var->phys_reg_hi = -1;
+    }
 }
 
 /* Aligns size to nearest multiple of 4, this meets ARMv7's alignment
@@ -209,6 +324,9 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
      */
     n->src2 = 0;
     n->dest = 0;
+    n->src0_hi = -1;
+    n->src1_hi = -1;
+    n->dest_hi = -1;
     n->func_name = NULL;
     n->next_bb = NULL;
     n->then_bb = NULL;
@@ -216,8 +334,12 @@ ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
     n->ofs_based_on_stack_top = false;
     n->size_bytes = PTR_SIZE; /* default to the full slot; see add_ph2_ir */
     n->is_pointer = false;
+    n->is_unsigned = false;
     n->src0_is_pointer = false;
     n->src1_is_pointer = false;
+    n->src0_is_unsigned = false;
+    n->src1_is_unsigned = false;
+    n->is_volatile = false;
 
     if (!bb->ph2_ir_list.head)
         bb->ph2_ir_list.head = n;
@@ -299,12 +421,22 @@ var_t *pinned_base[REG_CNT];
  */
 int reg_locked;
 
-/* Whether @reg holds an operand of the instruction being lowered. */
+/* ABI argument registers already staged for the call being lowered. A staged
+ * register can lose its REGS[] owner while the call still needs its value: a
+ * variable passed twice as a pair, as in "f(g, g, ...)", is moved to its second
+ * argument pair, which released the first, and the next argument was loaded
+ * straight over it.
+ */
+int abi_args_staged;
+
+/* Whether @reg holds an operand of the instruction being lowered, or an
+ * argument of the call being staged.
+ */
 bool reg_is_locked(int reg)
 {
     if (reg < 0 || reg >= REG_CNT)
         return false;
-    return (reg_locked >> reg) & 1;
+    return ((reg_locked | abi_args_staged) >> reg) & 1;
 }
 
 /* The register @var's base is pinned to, or -1. */
@@ -393,7 +525,8 @@ void slot_var_track(var_t *var)
  */
 bool slot_is_private(const var_t *var)
 {
-    if (var->address_taken || var->array_size || var->has_backing_storage)
+    if (var->address_taken || var->array_size || var->has_backing_storage ||
+        var_is_volatile_object(var))
         return false;
     if (var->is_global || var->ofs_based_on_stack_top)
         return false;
@@ -538,8 +671,16 @@ bool ph2_writes_reg(const ph2_ir_t *ir, int reg)
     case OP_indirect:
         return true; /* the call clobbers the caller-saved registers */
     default:
-        return ir->dest == reg;
+        /* A pair result writes its high register too. */
+        return ir->dest == reg || (reg >= 0 && ir->dest_hi == reg);
     }
+}
+
+/* Whether @ir clobbers either register of the value stored from @store. */
+bool ph2_writes_stored_value(const ph2_ir_t *ir, const ph2_ir_t *store)
+{
+    return ph2_writes_reg(ir, store->src0) ||
+           (store->src0_hi >= 0 && ph2_writes_reg(ir, store->src0_hi));
 }
 
 /* Collapse a value that goes out to a stack slot and comes straight back.
@@ -601,7 +742,7 @@ void collapse_slot_roundtrip(func_t *func)
                     ok = true;
                     break;
                 }
-                if (ph2_writes_reg(ir, store->src0))
+                if (ph2_writes_stored_value(ir, store))
                     break;
                 prev = ir;
             }
@@ -626,21 +767,26 @@ void collapse_slot_roundtrip(func_t *func)
                         break;
                     }
                 }
-                if (store && ph2_writes_reg(ir, store->src0))
+                if (store && ph2_writes_stored_value(ir, store))
                     break;
                 prev = ir;
             }
         }
-        if (!ok)
+
+        /* A pair is moved as a pair: forwarding only the low register turned
+         * the load into a move that left the high register unwritten.
+         */
+        if (!ok || (store->src0_hi >= 0) != (load->dest_hi >= 0))
             continue;
 
         load->op = OP_assign;
         load->src0 = store->src0;
+        load->src0_hi = store->src0_hi;
 
         /* Removing the store first would leave prev_load stale when the store
          * is the load's predecessor, so drop the later one first.
          */
-        if (load->dest == load->src0)
+        if (load->dest == load->src0 && load->dest_hi == load->src0_hi)
             ph2_list_remove(home, prev_load, load);
         ph2_list_remove(home, prev_store, store);
     }
@@ -682,11 +828,20 @@ void dead_store_elim(func_t *func)
  */
 void alloc_var_slot(func_t *func, var_t *var)
 {
+    int slot_size = var_slot_size(var);
+
     if (var->address_taken)
         func->stack_size = ALIGN_UP(func->stack_size, 16);
+
+    /* A future 32-bit wide scalar occupies a low/high word pair. It must not
+     * start at an arbitrary four-byte offset: both AAPCS32 and the RV32 ABI
+     * require the pair's stack home to be eight-byte aligned.
+     */
+    if (slot_size > PTR_SIZE)
+        func->stack_size = ALIGN_UP(func->stack_size, slot_size);
     var->offset = func->stack_size;
     var->space_is_allocated = true;
-    func->stack_size += PTR_SIZE;
+    func->stack_size += slot_size;
     slot_var_track(var);
 }
 
@@ -698,10 +853,13 @@ void store_var(basic_block_t *bb, var_t *var, int idx)
     ph2_ir_t *ir = var->is_global ? bb_add_ph2_ir(bb, OP_global_store)
                                   : bb_add_ph2_ir(bb, OP_store);
     ir->src0 = idx;
+    ir->src0_hi = vreg_get_phys_hi(var);
     ir->src1 = var->offset;
     ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
     ir->is_pointer = is_pointer_like(var);
+    ir->is_unsigned = is_unsigned_scalar(var);
     ir->size_bytes = var_slot_size(var);
+    ir->is_volatile = var_is_volatile_object(var);
     REGS[idx].polluted = 0;
 }
 
@@ -722,7 +880,8 @@ void spill_var(basic_block_t *bb, var_t *var, int idx)
  */
 bool reg_is_free(int i)
 {
-    return !REGS[i].var && !pinned_base[i];
+    return !REGS[i].var && !pinned_base[i] && !pair_high_owner[i] &&
+           !((abi_args_staged >> i) & 1);
 }
 
 /* Return the index of register for given variable. Otherwise, return -1. */
@@ -741,6 +900,8 @@ int find_in_regs(const var_t *var)
 bool var_is_pinnable(var_t *var)
 {
     if (!var || var->is_const || !var->base)
+        return false;
+    if (var_is_volatile_object(var))
         return false;
 
     /* slot_is_private() rules out everything reachable other than by name:
@@ -764,6 +925,7 @@ void pin_registers(func_t *func)
 {
     int limit = REG_CNT / 2;
     bool calls = false;
+    bool pairs = false;
 
     for (int i = 0; i < REG_CNT; i++)
         pinned_base[i] = NULL;
@@ -776,11 +938,22 @@ void pin_registers(func_t *func)
             if (insn->opcode == OP_call || insn->opcode == OP_indirect ||
                 insn->opcode == OP_push)
                 calls = true;
+            if (!pairs && (var_needs_register_pair(insn->rd) ||
+                           var_needs_register_pair(insn->rs1) ||
+                           var_needs_register_pair(insn->rs2)))
+                pairs = true;
             /* Taking an address makes the frame reachable by other means. */
             if (insn->opcode == OP_address_of)
                 return;
         }
     }
+
+    /* A binary operation on register pairs holds two operand pairs and a
+     * destination pair at once. Pinning half the file left a 32-bit target with
+     * too few registers to lower one, so keep six of them unpinned.
+     */
+    if (pairs && limit > REG_CNT - 6)
+        limit = REG_CNT - 6;
 
     /* Across a call only the registers the callee preserves will still hold
      * their value. Those sit at the top of the file, which is the end the loop
@@ -827,7 +1000,9 @@ void pin_registers(func_t *func)
                 for (int q = 0; q < func->num_params; q++) {
                     if (var->base != &func->param_defs[q])
                         continue;
-                    if (q < MAX_ARGS_IN_REG)
+                    int word = abi_param_start(func, q);
+                    if (word + abi_arg_words(&func->param_defs[q]) <=
+                        MAX_ARGS_IN_REG)
                         in_reg = true;
                     else
                         on_stack = true;
@@ -916,16 +1091,27 @@ void pin_registers(func_t *func)
          * them; the variable would then read a parameter's value instead.
          */
         int reg = REG_CNT - 1 - taken;
-        int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
-                                                             : MAX_ARGS_IN_REG;
+        int arg_words_in_reg = func->returns_aggregate ? 1 : 0;
+        for (int i = 0; i < func->num_params; i++) {
+            int word = abi_param_start(func, i);
 
-        if (reg < args_in_reg)
+            if (word + abi_arg_words(&func->param_defs[i]) > MAX_ARGS_IN_REG)
+                break;
+            arg_words_in_reg = abi_arg_next(word, &func->param_defs[i], false);
+        }
+
+        if (reg < arg_words_in_reg)
             return;
 
         pinned_base[reg] = best;
         func->pinned_regs = func->pinned_regs | (1 << reg);
     }
 }
+
+/* Defined beside OP_push handling below; allocation must not reclaim ABI
+ * argument registers once argument staging has begun.
+ */
+extern bool is_pushing_args;
 
 void load_var(basic_block_t *bb, var_t *var, int idx)
 {
@@ -935,6 +1121,7 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
     if (var->is_const) {
         ir = bb_add_ph2_ir(bb, OP_load_constant);
         ir->src0 = var->init_val;
+        ir->src1 = var->init_val_hi;
     } else if (var->is_global && var->array_size) {
         /* A global array's address is fixed for the life of the program, and
          * the initialiser recorded where its storage sits. Computing it beats
@@ -949,14 +1136,83 @@ void load_var(basic_block_t *bb, var_t *var, int idx)
                             : bb_add_ph2_ir(bb, OP_load);
         ir->src0 = var->offset;
         ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
+        ir->is_volatile = var_is_volatile_object(var);
     }
 
     ir->dest = idx;
+    ir->dest_hi = vreg_get_phys_hi(var);
     ir->is_pointer = is_pointer_like(var);
-    ir->size_bytes = var_slot_size(var);
+    ir->is_unsigned = is_unsigned_scalar(var);
+
+    /* Incoming stack arguments use ABI-sized slots but carry a scalar in the
+     * low declared-width bytes. Reloading all eight bytes can retain a caller's
+     * sign extension; use the declaration width to preserve unsigned argument
+     * semantics.
+     */
+    ir->size_bytes = var->ofs_based_on_stack_top && !var->ptr_level &&
+                             !var->is_func && var->type
+                         ? var->type->size
+                         : var_slot_size(var);
     REGS[idx].var = var;
     REGS[idx].polluted = 0;
     vreg_map_to_phys(var, idx);
+}
+
+/* The two lowest free registers, in *@low and *@high. */
+bool find_free_pair(int *low, int *high)
+{
+    *low = -1;
+    *high = -1;
+    for (int r = 0; r < REG_CNT; r++) {
+        if (!reg_is_free(r))
+            continue;
+        if (*low < 0) {
+            *low = r;
+        } else {
+            *high = r;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Two free registers for a register pair, in *@low and *@high, spilling to make
+ * room when the file is full. The ordinary chooser frees one register, which
+ * cannot help a pair, so spill whole pairs through their slots first, which
+ * keeps both words, and then one-word values, whether live or dead. Neither
+ * @operand_0 nor @operand_1 is touched, nor a pinned register, and a one-word
+ * spill also leaves reserved high halves and locked inputs alone. Once OP_push
+ * has installed ABI arguments, those registers are live until the call, so
+ * nothing is spilled then.
+ */
+bool claim_free_pair(basic_block_t *bb,
+                     int operand_0,
+                     int operand_1,
+                     int *low,
+                     int *high)
+{
+    if (find_free_pair(low, high) || is_pushing_args)
+        return *high >= 0;
+
+    for (int scalars = 0; scalars < 2; scalars++) {
+        for (int r = 0; r < REG_CNT; r++) {
+            var_t *owner = REGS[r].var;
+
+            if (!owner || r == operand_0 || r == operand_1 || pinned_base[r])
+                continue;
+            if (scalars) {
+                if (var_needs_register_pair(owner) || pair_high_owner[r] ||
+                    reg_is_locked(r))
+                    continue;
+            } else if (!var_needs_register_pair(owner)) {
+                continue;
+            }
+            spill_var(bb, owner, r);
+            if (find_free_pair(low, high))
+                return true;
+        }
+    }
+    return false;
 }
 
 int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
@@ -974,15 +1230,59 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
         return pinned;
     }
 
-    /* Check VReg mapping first for O(1) lookup */
+    /* Check VReg mapping first for O(1) lookup. A register holding a volatile
+     * variable only as its storage last held it is left to the reload below.
+     */
     int phys_reg = vreg_get_phys(var);
-    if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var)
-        return phys_reg;
+    if (phys_reg >= 0 && phys_reg < REG_CNT && REGS[phys_reg].var == var) {
+        if (!var_is_volatile_object(var) || REGS[phys_reg].polluted)
+            return phys_reg;
 
-    /* Force reload for address-taken variables (may be modified via pointer) */
+        /* Reload a volatile variable into the register, or the pair, that
+         * already names it. Loading it into others left two registers naming
+         * the variable, and store_addressed_def(), which finds the first, took
+         * the stale one for the one a later assignment wrote and skipped the
+         * store.
+         */
+        if (phys_reg != operand_0) {
+            load_var(bb, var, phys_reg);
+            return phys_reg;
+        }
+    }
+
+    if (var_needs_register_pair(var)) {
+        int low, high;
+
+        if (!claim_free_pair(bb, operand_0, -1, &low, &high))
+            fatal("Wide operand needs two free registers");
+        vreg_map_pair_to_phys(var, low, high);
+        load_var(bb, var, low);
+        return low;
+    }
+
+    /* Force reload for address-taken variables (may be modified via pointer).
+     *
+     * Not when the register holds a value the slot never received, though. No
+     * pointer can have reached the slot since: taking the address stores the
+     * register first, and a write through a pointer or a call spills or drops
+     * every register. A parameter still in the register it arrived in is that
+     * case, and its slot may not exist yet, so reloading it read whatever sat
+     * at offset zero of the frame instead.
+     *
+     * A volatile global is reloaded for the same reason and one more: every
+     * read of it is an access the program has to perform (C99 6.7.3p6), not
+     * just a way to learn its value. A volatile local is address-taken already.
+     */
     int i = find_in_regs(var);
-    if (i > -1 && !var->address_taken) {
+    if (i > -1 && (!(var->address_taken || var_is_volatile_object(var)) ||
+                   REGS[i].polluted)) {
         vreg_map_to_phys(var, i);
+        return i;
+    }
+
+    /* As above, when the register lost the mapping but still names it. */
+    if (i > -1 && i != operand_0 && var_is_volatile_object(var)) {
+        load_var(bb, var, i);
         return i;
     }
 
@@ -1010,9 +1310,9 @@ int prepare_operand(basic_block_t *bb, var_t *var, int operand_0)
         }
     }
 
-    if (REGS[spilled].var)
-        vreg_clear_phys(REGS[spilled].var);
-
+    /* spill_var() forgets the mapping once it has stored the value. Clearing it
+     * first dropped a pair's high register, so only the low word was stored.
+     */
     spill_var(bb, REGS[spilled].var, spilled);
     load_var(bb, var, spilled);
     vreg_map_to_phys(var, spilled);
@@ -1054,7 +1354,10 @@ bool var_read_later_in_bb(basic_block_t *bb, insn_t *from, const var_t *var)
 void clobber_caller_saved(void)
 {
     for (int i = 0; i < REG_CNT; i++) {
-        REGS[i].var = pinned_base[i] ? REGS[i].var : NULL;
+        if (!pinned_base[i] && REGS[i].var) {
+            vreg_clear_phys(REGS[i].var);
+            REGS[i].var = NULL;
+        }
         if (!REGS[i].var)
             REGS[i].polluted = 0;
     }
@@ -1125,6 +1428,25 @@ int prepare_dest(basic_block_t *bb,
                  int operand_0,
                  int operand_1)
 {
+    if (var_needs_register_pair(var)) {
+        int mapped_low = vreg_get_phys(var);
+        int mapped_high = vreg_get_phys_hi(var);
+        if (mapped_low >= 0 && mapped_low < REG_CNT && mapped_high >= 0 &&
+            mapped_high < REG_CNT && REGS[mapped_low].var == var &&
+            pair_high_owner[mapped_high] == var) {
+            REGS[mapped_low].polluted = 1;
+            return mapped_low;
+        }
+        int low, high;
+
+        if (!claim_free_pair(bb, operand_0, operand_1, &low, &high))
+            fatal("Wide destination needs two free registers");
+        REGS[low].var = var;
+        REGS[low].polluted = 1;
+        vreg_map_pair_to_phys(var, low, high);
+        return low;
+    }
+
     int pinned = pinned_reg_of(var);
     if (pinned >= 0) {
         REGS[pinned].var = var;
@@ -1191,9 +1513,9 @@ int prepare_dest(basic_block_t *bb,
     if (spilled < 0)
         return -1;
 
-    if (REGS[spilled].var)
-        vreg_clear_phys(REGS[spilled].var);
-
+    /* As in prepare_operand(), spill before forgetting the mapping, or a pair's
+     * high word is not stored.
+     */
     spill_var(bb, REGS[spilled].var, spilled);
     REGS[spilled].var = var;
     REGS[spilled].polluted = 1;
@@ -1204,13 +1526,16 @@ int prepare_dest(basic_block_t *bb,
 
 void spill_alive(basic_block_t *bb, const insn_t *insn)
 {
-    /* Spill all locals on pointer writes (conservative aliasing handling) */
+    /* Spill every variable on pointer writes (conservative aliasing handling).
+     * A global is no exception: the pointer can hold its address, and a copy
+     * left in a register is what the next read of it would use.
+     */
     if (insn && insn->opcode == OP_write) {
         for (int i = 0; i < REG_CNT; i++) {
             /* A pinned variable has no address, so no write through a pointer
              * can reach it.
              */
-            if (REGS[i].var && !REGS[i].var->is_global && !pinned_base[i])
+            if (REGS[i].var && !pinned_base[i])
                 spill_var(bb, REGS[i].var, i);
         }
         return;
@@ -1370,22 +1695,176 @@ void extend_liveness(basic_block_t *bb,
         var->consumed = insn->idx + offset;
 }
 
+/* Materialize a wide argument exactly where the ABI consumes it. Moving a pair
+ * after arbitrary allocation is not generally safe: the source and destination
+ * pairs can overlap in a cycle. A spill/reload costs a little more in that
+ * uncommon path, but gives both 32-bit backends an unambiguous pair in the
+ * required ABI registers.
+ */
+void prepare_pair_argument(basic_block_t *bb, var_t *var, int low)
+{
+    int high = low + 1;
+    int old_low = vreg_get_phys(var);
+    int old_high = vreg_get_phys_hi(var);
+
+    if (old_low == low && old_high == high && REGS[low].var == var &&
+        pair_high_owner[high] == var)
+        return;
+
+    if (old_low >= 0 && old_low < REG_CNT && REGS[old_low].var == var)
+        spill_var(bb, var, old_low);
+    else
+        vreg_clear_phys(var);
+
+    if (REGS[low].var)
+        spill_var(bb, REGS[low].var, low);
+    if (pair_high_owner[high]) {
+        var_t *owner = pair_high_owner[high];
+        int owner_low = vreg_get_phys(owner);
+
+        if (owner_low >= 0 && owner_low < REG_CNT &&
+            REGS[owner_low].var == owner)
+            spill_var(bb, owner, owner_low);
+        else
+            vreg_clear_phys(owner);
+    }
+
+    vreg_map_pair_to_phys(var, low, high);
+    load_var(bb, var, low);
+}
+
+/* Reserve the outgoing stack-argument area @func's calls need.
+ *
+ * add_func() reserves one pointer-sized word for each source parameter that
+ * cannot go in a register, which is enough only while every argument takes one
+ * ABI word. A long long takes two on a 32-bit target, and may be preceded by a
+ * padding word, so a call can reach well past that reservation: RISC-V, which
+ * passes MAX_PARAMS arguments in registers, reserves nothing at all. The words
+ * abi_lower_call_args() stores above the reservation then overwrote the first
+ * locals of the caller's frame. Nothing is placed in the frame before register
+ * allocation, so growing the reservation here moves every slot above it.
+ */
+void reserve_outgoing_args(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        int cursor = 0;
+
+        for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
+            if (insn->opcode != OP_push) {
+                cursor = 0;
+                continue;
+            }
+            /* Aligning every argument bounds both placement rules. */
+            cursor = abi_arg_next(cursor, insn->rs1, true);
+            if ((cursor - MAX_ARGS_IN_REG) * PTR_SIZE > func->stack_size)
+                func->stack_size = (cursor - MAX_ARGS_IN_REG) * PTR_SIZE;
+        }
+    }
+}
+
+/* The first ABI word of each argument of the call being staged, in push order,
+ * and the next one OP_push takes. abi_lower_call_args() fills them in once per
+ * call, since only it sees the callee and so which arguments are variadic.
+ */
+int call_arg_starts[MAX_PARAMS + 1];
+int call_arg_next;
+
+/* Load only the low word of the register pair @var into @reg. */
+void load_low_word(basic_block_t *bb, var_t *var, int reg)
+{
+    int held = vreg_get_phys(var);
+    ph2_ir_t *ir;
+
+    if (held >= 0 && held < REG_CNT && REGS[held].var == var) {
+        ir = bb_add_ph2_ir(bb, OP_assign);
+        ir->src0 = held;
+    } else if (var->is_const) {
+        ir = bb_add_ph2_ir(bb, OP_load_constant);
+        ir->src0 = var->init_val;
+    } else {
+        ir = bb_add_ph2_ir(bb, var->is_global ? OP_global_load : OP_load);
+        ir->src0 = var->offset;
+        ir->ofs_based_on_stack_top = var->ofs_based_on_stack_top;
+        ir->size_bytes = 4;
+        ir->is_volatile = var_is_volatile_object(var);
+    }
+    ir->dest = reg;
+}
+
 /* Return whether extra arguments are pushed onto stack. */
 bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
 {
+    /* An aggregate-return call has one ABI-only destination in addition to the
+     * MAX_PARAMS source arguments.
+     */
+    insn_t *pushes[MAX_PARAMS + 1];
+    int *starts = call_arg_starts;
     int num_of_args = 0;
-    int stack_args = 0;
+    int cursor = 0;
+    insn_t *call = insn;
+    func_t *callee = NULL;
+    int first_param = 0;
+
+    while (call && call->opcode == OP_push)
+        call = call->next;
+    if (call && call->opcode == OP_call)
+        callee = find_func(call->str);
+    else if (call && call->opcode == OP_indirect)
+        callee = get_func_signature(call->rs1);
+    if (callee && callee->returns_aggregate)
+        first_param = 1;
+
+    call_arg_next = 0;
     while (insn && insn->opcode == OP_push) {
-        num_of_args += 1;
+        bool variadic;
+
+        if (num_of_args >= MAX_PARAMS + 1)
+            fatal("Too many call arguments");
+        variadic = callee && callee->va_args &&
+                   num_of_args - first_param >= callee->num_params;
+        starts[num_of_args] = abi_arg_start(cursor, insn->rs1, variadic);
+        pushes[num_of_args++] = insn;
+        cursor = abi_arg_next(cursor, insn->rs1, variadic);
         insn = insn->next;
     }
 
-    if (num_of_args <= MAX_ARGS_IN_REG)
+    if (cursor <= MAX_ARGS_IN_REG)
         return false;
 
-    insn = insn->prev;
-    stack_args = num_of_args - MAX_ARGS_IN_REG;
-    while (stack_args) {
+    for (int i = num_of_args - 1; i >= 0; i--) {
+        insn = pushes[i];
+
+        /* A split long long leaves its high word in the first stack slot. Its
+         * low word is placed with the register arguments.
+         */
+        if (abi_arg_is_split(starts[i], insn->rs1)) {
+            int scratch = MAX_ARGS_IN_REG - 2;
+
+            prepare_pair_argument(bb, insn->rs1, scratch);
+            ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
+            ir->src0 = scratch + 1;
+            ir->src1 = 0;
+            ir->size_bytes = 4;
+            spill_var(bb, insn->rs1, scratch);
+            continue;
+        }
+
+        if (starts[i] < MAX_ARGS_IN_REG)
+            continue;
+
+        if (abi_arg_words(insn->rs1) == 2) {
+            int scratch = MAX_ARGS_IN_REG - 2;
+
+            prepare_pair_argument(bb, insn->rs1, scratch);
+            ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
+            ir->src0 = scratch;
+            ir->src0_hi = scratch + 1;
+            ir->src1 = (starts[i] - MAX_ARGS_IN_REG) * PTR_SIZE;
+            ir->size_bytes = 8;
+            spill_var(bb, insn->rs1, scratch);
+            continue;
+        }
+
         /* A pinned variable has no slot to load from: its value only ever lives
          * in its register, so reading the frame here handed the callee whatever
          * the slot happened to hold.
@@ -1401,10 +1880,7 @@ bool abi_lower_call_args(basic_block_t *bb, insn_t *insn)
         }
         ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_store);
         ir->src0 = MAX_ARGS_IN_REG - 1;
-        /* One pointer-sized slot per stack-passed argument. */
-        ir->src1 = (stack_args - 1) * PTR_SIZE;
-        stack_args -= 1;
-        insn = insn->prev;
+        ir->src1 = (starts[i] - MAX_ARGS_IN_REG) * PTR_SIZE;
     }
     REGS[MAX_ARGS_IN_REG - 1].var = NULL;
     return true;
@@ -2031,6 +2507,107 @@ void coalesce_phi_slots(func_t *func)
     }
 }
 
+/* Fill a lowered binary operation from its SSA instruction. Function bodies and
+ * global setup share it, so a wide initializer such as the element of "long
+ * long a[] = {1LL << 40}" names the high registers of its operands.
+ */
+void fill_binary_ph2_ir(ph2_ir_t *ir,
+                        insn_t *insn,
+                        int src0,
+                        int src1,
+                        int dest)
+{
+    ir->src0 = src0;
+    ir->src0_hi = vreg_get_phys_hi(insn->rs1);
+    ir->src1 = src1;
+    ir->src1_hi = vreg_get_phys_hi(insn->rs2);
+    ir->dest = dest;
+    ir->dest_hi = vreg_get_phys_hi(insn->rd);
+
+    /* Record whether the result is an address, and which operand it came from.
+     * On LP64 an int-typed result has to wrap at 32 bits, while a pointer must
+     * keep all 64, and pointer arithmetic has to widen the int index beside the
+     * address.
+     */
+    set_ptr_flags(ir, insn);
+    ir->size_bytes = insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+
+    /* SSA temporaries normally retain their result type, but width is a
+     * property of the operation as well: a wide operand must not be narrowed
+     * merely because an intermediate lost its annotation. This includes
+     * comparisons: their result is int, while CMP must inspect the common
+     * operand width rather than stale high halves of 32-bit register values.
+     */
+    int left_size = insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
+    int right_size = insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
+    if (left_size > ir->size_bytes)
+        ir->size_bytes = left_size;
+
+    /* A shift is the exception: its type is that of the promoted left operand
+     * alone, so "(x ^ y) >> (n & 31)" with a long long n is an int shift, and a
+     * 64-bit shift of that int register brought zeros in as its sign.
+     */
+    if (right_size > ir->size_bytes && insn->opcode != OP_lshift &&
+        insn->opcode != OP_rshift)
+        ir->size_bytes = right_size;
+}
+
+/* The unary counterpart of fill_binary_ph2_ir(). */
+void fill_unary_ph2_ir(ph2_ir_t *ir, insn_t *insn, int src0, int dest)
+{
+    ir->src0 = src0;
+    ir->src0_hi = vreg_get_phys_hi(insn->rs1);
+    ir->dest = dest;
+    ir->dest_hi = vreg_get_phys_hi(insn->rd);
+
+    /* As for OP_branch: the width of the test follows the operand, not the
+     * result.
+     */
+    ir->src0_is_pointer = is_address_like(insn->rs1);
+    ir->is_unsigned = is_unsigned_scalar(insn->rd);
+    ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+    ir->size_bytes = insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+
+    /* !x yields an int, but it tests all of a long long operand. */
+    if (insn->opcode == OP_log_not && !insn->rs1->ptr_level &&
+        insn->rs1->type->size > ir->size_bytes)
+        ir->size_bytes = insn->rs1->type->size;
+}
+
+/* Narrow a conversion result in @dest again by its own type.
+ *
+ * A byte or short sits in its register extended by its own signedness, which a
+ * later widening or comparison relies on. OP_cast is a move and OP_sign_ext
+ * extends by the source alone, so a conversion that changes signedness broke
+ * that: a signed char -17 became unsigned short 0xffffffef, and cast to
+ * unsigned char it kept every high bit. A signed destination only needs this
+ * when it is no wider than its unsigned source; any other value already fits.
+ * The 64-bit x86 backend redoes the extension itself, the others do not.
+ */
+void narrow_conversion_result(basic_block_t *bb, insn_t *insn, int dest)
+{
+    var_t *rd = insn->rd, *rs = insn->rs1;
+
+    if (!rd || !rs || rd->ptr_level || rd->is_func || !rd->type || !rs->type ||
+        is_record_type(rd->type) || is_record_type(rs->type))
+        return;
+
+    int size = rd->type->size;
+    bool rd_unsigned = is_unsigned_scalar(rd);
+
+    if ((size != 1 && size != 2) || rd_unsigned == is_unsigned_scalar(rs))
+        return;
+    if (!rd_unsigned && (rs->ptr_level || rs->type->size < size))
+        return;
+
+    ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_trunc);
+    ir->src0 = dest;
+    ir->src1 = size;
+    ir->dest = dest;
+    ir->is_unsigned = rd_unsigned;
+    ir->size_bytes = size;
+}
+
 /* Place one global initializer, which has no basic block of its own. */
 void reg_alloc_global(insn_t *global_insn)
 {
@@ -2056,7 +2633,7 @@ void reg_alloc_global(insn_t *global_insn)
             /* Stash base offset for this array variable */
             global_insn->rd->init_val = src0;
 
-            if (global_insn->rd->ptr_level)
+            if (global_insn->rd->ptr_level || global_insn->rd->is_func)
                 GLOBAL_FUNC->stack_size +=
                     align_size(PTR_SIZE * global_insn->rd->array_size);
             else {
@@ -2075,7 +2652,7 @@ void reg_alloc_global(insn_t *global_insn)
         } else {
             global_insn->rd->offset = GLOBAL_FUNC->stack_size;
             global_insn->rd->space_is_allocated = true;
-            if (global_insn->rd->ptr_level)
+            if (global_insn->rd->ptr_level || global_insn->rd->is_func)
                 GLOBAL_FUNC->stack_size += PTR_SIZE;
             else if (global_insn->rd->type != TY_int &&
                      global_insn->rd->type != TY_short &&
@@ -2094,25 +2671,94 @@ void reg_alloc_global(insn_t *global_insn)
         dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
         ir->src0 = global_insn->rd->init_val;
+        ir->src1 = global_insn->rd->init_val_hi;
         ir->dest = dest;
+        ir->dest_hi = vreg_get_phys_hi(global_insn->rd);
+        ir->is_unsigned = is_unsigned_scalar(global_insn->rd);
+        ir->size_bytes =
+            global_insn->rd->ptr_level ? PTR_SIZE : global_insn->rd->type->size;
         break;
     case OP_assign:
-        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        if (global_insn->rs1 && global_insn->rs1->is_global_address) {
+            src0 =
+                prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rs1, -1, -1);
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+            ir->src0 = global_insn->rs1->offset;
+            ir->dest = src0;
+            ir->is_pointer = true;
+            ir->size_bytes = PTR_SIZE;
+        } else
+            src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
         dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
-        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_assign);
+
+        /* An initializer such as "unsigned long long g = c ? 7U : 1U" has an
+         * int-sized value; a move would leave the high register unwritten, so
+         * extend it by its own signedness instead.
+         */
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs,
+                           var_needs_register_pair(global_insn->rd) &&
+                                   !var_needs_register_pair(global_insn->rs1)
+                               ? OP_cast
+                               : OP_assign);
         ir->src0 = src0;
+        ir->src0_hi = vreg_get_phys_hi(global_insn->rs1);
+        ir->src0_is_unsigned = is_unsigned_scalar(global_insn->rs1);
+        ir->src0_is_pointer = is_address_like(global_insn->rs1);
         ir->dest = dest;
+        ir->dest_hi = vreg_get_phys_hi(global_insn->rd);
         spill_var(GLOBAL_FUNC->bbs, global_insn->rd, dest);
         /* release the unused constant number in register manually */
         REGS[src0].polluted = 0;
         vreg_clear_phys(REGS[src0].var);
         REGS[src0].var = NULL;
         break;
+    case OP_address_of:
+    case OP_global_address_of:
+        /* A global function-pointer initializer first forms the address of its
+         * global storage slot. Its address is GP-relative, unlike an address
+         * formed in a function body.
+         */
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, -1, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+
+        /* Global arrays have a pointer slot followed by their backing region;
+         * an address constant for the array denotes that backing region.
+         */
+        ir->src0 = global_insn->rs1->array_size ? global_insn->rs1->init_val
+                                                : global_insn->rs1->offset;
+        ir->dest = dest;
+        ir->is_pointer = true;
+        ir->size_bytes = PTR_SIZE;
+        if (global_insn->rd->is_global_address) {
+            global_insn->rd->offset = ir->src0;
+            global_insn->rd->space_is_allocated = true;
+
+            /* This temporary carries a compile-time GP-relative offset, not a
+             * stack-resident value. Leaving it mapped in REGS[] lets the next
+             * global setup instruction spill its address to `sp + offset`; on a
+             * global array that offset is the backing-region address, so the
+             * spill overwrites an initialized element. The folded
+             * OP_add/OP_assign paths rematerialize this address from offset, so
+             * it has no runtime register lifetime.
+             */
+            REGS[dest].polluted = 0;
+            vreg_clear_phys(global_insn->rd);
+            REGS[dest].var = NULL;
+        }
+        break;
     case OP_add: {
         /* Special-case address computation for globals: if rs1 is a global base
          * and rs2 is a constant, propagate absolute offset to rd so OP_write
          * can fold into OP_global_store.
          */
+        if (global_insn->rs1 && global_insn->rs1->is_global_address &&
+            global_insn->rs2) {
+            global_insn->rd->offset =
+                global_insn->rs1->offset + global_insn->rs2->init_val;
+            global_insn->rd->is_global_address = true;
+            global_insn->rd->space_is_allocated = true;
+            break;
+        }
         if (global_insn->rs1 && global_insn->rs1->is_global &&
             global_insn->rs2) {
             int base_off = global_insn->rs1->offset;
@@ -2125,25 +2771,109 @@ void reg_alloc_global(insn_t *global_insn)
             global_insn->rd->is_global = true;
             break;
         }
-        /* Fallback: generate an add */
+        /* Fall through to the ordinary scalar binary lowering below. */
+        goto lower_global_binary;
+    }
+    case OP_negate:
+    case OP_bit_not:
+    case OP_log_not: {
+        /* Unary wide global constant expressions use the normal phase-2
+         * instruction too. Keeping these separate from binary lowering avoids
+         * preparing a nonexistent right operand.
+         */
+        src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+        dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, -1);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
+        fill_unary_ph2_ir(ir, global_insn, src0, dest);
+        break;
+    }
+    case OP_sub:
+    case OP_mul:
+    case OP_div:
+    case OP_mod:
+    case OP_lshift:
+    case OP_rshift:
+    case OP_bit_and:
+    case OP_bit_or:
+    case OP_bit_xor:
+    case OP_eq:
+    case OP_neq:
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+    lower_global_binary: {
+        /* Global scalar initializers may have been parsed as a binary constant
+         * expression. Use the same phase-2 operation as a function body so wide
+         * division, comparison, and bitwise expressions do not stop at global
+         * setup merely because they are not pointer-address arithmetic.
+         */
         int src1;
         src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
         src1 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, src0);
         dest =
             prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rd, src0, src1);
-        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_add);
-        ir->src0 = src0;
-        ir->src1 = src1;
-        ir->dest = dest;
-        set_ptr_flags(ir, global_insn);
+        ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, global_insn->opcode);
+        fill_binary_ph2_ir(ir, global_insn, src0, src1, dest);
         break;
     }
     case OP_write: {
+        if (global_insn->rs2 && global_insn->rs2->is_func) {
+            /* A direct aggregate field address is itself a global object, not a
+             * pointer value stored in that object. Loading it here turns an
+             * all-zero callback slot into the destination address.
+             */
+            if (global_insn->rs1 && global_insn->rs1->is_global) {
+                dest = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rs1,
+                                    -1, -1);
+                ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+                ir->src0 = global_insn->rs1->array_size
+                               ? global_insn->rs1->init_val
+                               : global_insn->rs1->offset;
+                ir->dest = dest;
+                ir->is_pointer = true;
+                ir->size_bytes = PTR_SIZE;
+                src0 = dest;
+            } else {
+                src0 = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs1, -1);
+            }
+            ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_address_of_func);
+            ir->src0 = src0;
+            ir->func_name = intern_string(global_insn->rs2->var_name);
+
+            /* The GP-relative address exists only to receive this one
+             * relocation. In particular, an address temporary for a later array
+             * element must not be spilled: its slot allocation can be the very
+             * element being initialized, which would overwrite the function
+             * address with the address itself.
+             */
+            REGS[src0].polluted = 0;
+            vreg_clear_phys(REGS[src0].var);
+            REGS[src0].var = NULL;
+            if (dynlink) {
+                func_t *target_fn = find_func(ir->func_name);
+                if (target_fn)
+                    target_fn->is_used = true;
+            }
+            break;
+        }
         /* Fold (addr, val) where addr carries GP-relative offset */
         if (global_insn->rs1 && (global_insn->rs1->is_global)) {
-            int vreg = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
+            int vreg;
+
+            if (global_insn->rs2 && global_insn->rs2->is_global_address) {
+                vreg = prepare_dest(GLOBAL_FUNC->bbs, NULL, global_insn->rs2,
+                                    -1, -1);
+                ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_address_of);
+                ir->src0 = global_insn->rs2->offset;
+                ir->dest = vreg;
+                ir->is_pointer = true;
+                ir->size_bytes = PTR_SIZE;
+            } else
+                vreg = prepare_operand(GLOBAL_FUNC->bbs, global_insn->rs2, -1);
             ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_global_store);
             ir->src0 = vreg;
+            ir->src0_hi = vreg_get_phys_hi(global_insn->rs2);
 
             /* For array variables used as base, store to the backing region's
              * base offset (cached in init_val).
@@ -2152,6 +2882,26 @@ void reg_alloc_global(insn_t *global_insn)
             if (global_insn->rs1->array_size > 0)
                 base_off = global_insn->rs1->init_val;
             ir->src1 = base_off;
+
+            /* OP_global_store selects its instruction width from this field.
+             * Leaving it at zero falls through to an eight-byte store, which
+             * makes a global int field initializer overwrite its successor.
+             */
+            ir->size_bytes = global_insn->sz;
+            ir->is_pointer = global_insn->rs2->ptr_level > 0;
+            ir->is_unsigned = is_unsigned_scalar(global_insn->rs2);
+
+            /* A materialized global address is consumed by this one store. Its
+             * descriptor offset is GP-relative data, not a spill slot;
+             * retaining the vreg mapping lets the next initializer spill the
+             * address at sp + offset and overwrite the source element (for
+             * example, a pointer row initialized from &values[0][1]).
+             */
+            if (global_insn->rs2 && global_insn->rs2->is_global_address) {
+                REGS[vreg].polluted = 0;
+                vreg_clear_phys(global_insn->rs2);
+                REGS[vreg].var = NULL;
+            }
             break;
         }
         /* Fallback generic write */
@@ -2161,7 +2911,9 @@ void reg_alloc_global(insn_t *global_insn)
         ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_write);
         ir->src0 = src0;
         ir->src1 = src1;
+        ir->src1_hi = vreg_get_phys_hi(global_insn->rs2);
         ir->dest = global_insn->sz;
+        set_ptr_flags(ir, global_insn);
         break;
     }
     case OP_trunc:
@@ -2177,6 +2929,17 @@ void reg_alloc_global(insn_t *global_insn)
         ir->src0 = src0;
         ir->src1 = global_insn->sz;
         ir->dest = dest;
+
+        /* Widening "long long g[] = {1}" extends into a register pair, and the
+         * backends select that form and the extension's sign from these fields
+         * exactly as they do inside a function.
+         */
+        ir->src0_hi = vreg_get_phys_hi(global_insn->rs1);
+        ir->dest_hi = vreg_get_phys_hi(global_insn->rd);
+        ir->is_unsigned = is_unsigned_scalar(global_insn->rd);
+        ir->src0_is_unsigned = is_unsigned_scalar(global_insn->rs1);
+        if (global_insn->opcode != OP_trunc)
+            narrow_conversion_result(GLOBAL_FUNC->bbs, global_insn, dest);
         break;
     default:
         printf("Unsupported global operation: %d\n", global_insn->opcode);
@@ -2185,14 +2948,44 @@ void reg_alloc_global(insn_t *global_insn)
     }
 }
 
+/* Write the value @insn just gave an address-taken scalar to its slot.
+ *
+ * A pointer to the variable reads the slot, never the register, and nothing the
+ * allocator tracks says when that happens: the variable need not be named again
+ * for a read through the pointer, or a callee handed it, to want this value. A
+ * global is stored straight after its assignment for the same reason. Records
+ * and arrays are left alone, since their name holds an address and what a
+ * pointer reaches is the storage behind it.
+ */
+void store_addressed_def(basic_block_t *bb, const insn_t *insn)
+{
+    var_t *var = insn->rd;
+
+    if (!var || !var->address_taken || var->is_global)
+        return;
+    if (insn->opcode == OP_allocat)
+        return;
+    if (var->array_size || var->has_backing_storage)
+        return;
+    if (!var->ptr_level && (!var->type || is_record_type(var->type)))
+        return;
+
+    int reg = find_in_regs(var);
+    if (reg < 0 || !REGS[reg].polluted)
+        return;
+    store_var(bb, var, reg);
+}
+
 /* Assign registers across one basic block, and emit the phase-2 IR that carries
  * the assignment.
  */
 void reg_alloc_bb(func_t *func, basic_block_t *bb)
 {
     bool handle_abi = false, args_on_stack = false;
+    bool riscv_indirect_target_staged = false;
 
     is_pushing_args = false;
+    abi_args_staged = 0;
     int args = 0;
 
     bb->visited++;
@@ -2259,6 +3052,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             src0 = prepare_operand(bb, insn->rs1, -1);
             ir = bb_add_ph2_ir(bb, OP_store);
             ir->src0 = src0;
+
+            /* The phi's slot is eight bytes for a pair; a store of the low
+             * register alone left the high word of the previous iteration.
+             */
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->src1 = insn->rd->offset;
             ir->ofs_based_on_stack_top = insn->rd->ofs_based_on_stack_top;
             ir->is_pointer = is_pointer_like(insn->rd);
@@ -2276,7 +3074,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             func->stack_size += PTR_SIZE;
             src0 = func->stack_size;
 
-            if (insn->rd->ptr_level)
+            if (insn->rd->ptr_level || insn->rd->is_func)
                 sz = PTR_SIZE;
             else {
                 sz = insn->rd->type->size;
@@ -2301,6 +3099,21 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             /* For arrays, store the base address just like global arrays do */
             if (insn->rd->array_size)
                 spill_var(bb, insn->rd, dest);
+            else if (insn->rd->is_func ||
+                     (!insn->rd->ptr_level && !insn->rd->type->ptr_level &&
+                      is_record_type(insn->rd->type) &&
+                      !insn->rd->has_backing_storage)) {
+                /* OP_allocat's result is the backing address for a callback
+                 * object, not the pointer value stored in that object. Keeping
+                 * it mapped as the object lets a later conservative spill
+                 * overwrite an initialized callback with its own address. A
+                 * record is reached through &record, which names the slot
+                 * itself, so the same spill would overwrite its first member.
+                 */
+                REGS[dest].var = NULL;
+                REGS[dest].polluted = 0;
+                vreg_clear_phys(insn->rd);
+            }
             break;
         case OP_load_constant:
         case OP_load_data_address:
@@ -2308,13 +3121,20 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, -1, -1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src0 = insn->rd->init_val;
+            ir->src1 = insn->rd->init_val_hi;
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
 
             /* store global variable immediately after assignment */
             if (insn->rd->is_global) {
                 ir = bb_add_ph2_ir(bb, OP_global_store);
                 ir->src0 = dest;
+                ir->src0_hi = vreg_get_phys_hi(insn->rd);
                 ir->src1 = insn->rd->offset;
+                ir->is_volatile = var_is_volatile_object(insn->rd);
                 REGS[dest].polluted = 0;
             }
 
@@ -2324,6 +3144,59 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             /* Mark variable as address-taken, disable constant optimization */
             insn->rs1->address_taken = true;
             insn->rs1->is_const = false;
+
+            /* Source-level record parameters arrive as hidden pointers to the
+             * caller's by-value copy. Their declaration must stay a record for
+             * parsing and type checks, but taking its address produces the ABI
+             * pointer rather than allocating a scalar spill slot.
+             */
+            if (insn->rs1->is_aggregate_param) {
+                int param_idx = -1;
+                for (int i = 0; i < func->num_params; i++)
+                    if (insn->rs1->base == &func->param_defs[i] ||
+                        insn->rs1 == &func->param_defs[i]) {
+                        param_idx = i;
+                        break;
+                    }
+                if (param_idx < 0)
+                    fatal("Aggregate parameter is not owned by its function");
+
+                dest = prepare_dest(bb, insn, insn->rd, -1, -1);
+
+                /* A variadic callee reserves the final named aggregate's
+                 * complete ABI footprint in its contiguous argument-save area.
+                 * `va_start` obtains that slot's address, then advances by the
+                 * same rounded extent to the first unnamed argument.
+                 */
+                if (func->va_args && param_idx + 1 == func->num_params &&
+                    insn->rs1->space_is_allocated) {
+                    ir = bb_add_ph2_ir(bb, OP_address_of);
+                    ir->src0 = insn->rs1->offset;
+                    ir->dest = dest;
+                    ir->ofs_based_on_stack_top =
+                        insn->rs1->ofs_based_on_stack_top;
+                } else if (insn->rs1->space_is_allocated) {
+                    ir = bb_add_ph2_ir(bb, OP_load);
+                    ir->src0 = insn->rs1->offset;
+                    ir->dest = dest;
+                    ir->ofs_based_on_stack_top =
+                        insn->rs1->ofs_based_on_stack_top;
+                } else if (abi_param_start(func, param_idx) < MAX_ARGS_IN_REG) {
+                    ir = bb_add_ph2_ir(bb, OP_assign);
+                    ir->src0 = abi_param_start(func, param_idx);
+                    ir->dest = dest;
+                } else {
+                    ir = bb_add_ph2_ir(bb, OP_load);
+                    ir->src0 =
+                        (abi_param_start(func, param_idx) - MAX_ARGS_IN_REG) *
+                        PTR_SIZE;
+                    ir->dest = dest;
+                    ir->ofs_based_on_stack_top = true;
+                }
+                ir->is_pointer = true;
+                ir->size_bytes = PTR_SIZE;
+                break;
+            }
 
             /* OP_allocat puts a local aggregate's spill slot before its backing
              * storage. &aggregate must name the backing storage, not the spill
@@ -2368,11 +3241,17 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                     if (REGS[i].var == insn->rs1 && !pinned_base[i]) {
                         ir = bb_add_ph2_ir(bb, OP_store);
                         ir->src0 = i;
+
+                        /* A pair spills both words: the slot is about to be
+                         * read through the address, not from this register.
+                         */
+                        ir->src0_hi = vreg_get_phys_hi(insn->rs1);
                         ir->src1 = insn->rs1->offset;
                         ir->ofs_based_on_stack_top =
                             insn->rs1->ofs_based_on_stack_top;
                         /* Clear stale register tracking */
                         REGS[i].var = NULL;
+                        vreg_clear_phys(insn->rs1);
                     }
             }
 
@@ -2446,16 +3325,38 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src1 = taken;
             ir->src2 = other;
             ir->dest = dest;
-            ir->size_bytes = var_slot_size(insn->rd);
+
+            /* As for OP_branch, the recorded width is the condition's: a select
+             * tests that value, and the arms are moved whole. An int condition
+             * is decided by its low word alone, whatever the width of the
+             * result.
+             */
+            ir->size_bytes =
+                insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
+            ir->src0_is_pointer = is_address_like(insn->rs2);
             ir->is_pointer = is_pointer_like(insn->rd);
             break;
         }
         case OP_assign:
-            if (insn->rd->consumed == -1)
+            /* A copy nothing reads is dropped, unless it copies from or to a
+             * volatile object. Copying from one is the read a discarded
+             * expression such as "status;" asks for, and a write to one is a
+             * side effect however little the program reads it back.
+             */
+            if (insn->rd->consumed == -1 &&
+                !var_is_volatile_object(insn->rs1) &&
+                !var_is_volatile_object(insn->rd))
                 break;
 
             track_var_use(insn->rs1, insn->idx);
             src0 = find_in_regs(insn->rs1);
+
+            /* A volatile object whose register matches its storage is read
+             * again, as prepare_operand() does.
+             */
+            if (src0 > -1 && var_is_volatile_object(insn->rs1) &&
+                !REGS[src0].polluted)
+                src0 = -1;
 
             /* If operand is loaded from stack, clear the original slot after
              * moving.
@@ -2469,13 +3370,24 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, src0, -1);
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = src0;
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->src0_is_pointer = is_address_like(insn->rs1);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
 
             /* store global variable immediately after assignment */
             if (insn->rd->is_global) {
                 ir = bb_add_ph2_ir(bb, OP_global_store);
                 ir->src0 = dest;
+                ir->src0_hi = vreg_get_phys_hi(insn->rd);
                 ir->src1 = insn->rd->offset;
+                ir->is_unsigned = is_unsigned_scalar(insn->rd);
+                ir->size_bytes = var_slot_size(insn->rd);
+                ir->is_volatile = var_is_volatile_object(insn->rd);
                 REGS[dest].polluted = 0;
             }
 
@@ -2483,6 +3395,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 vreg_clear_phys(REGS[src0].var);
                 REGS[src0].var = NULL;
             }
+
+            /* An assignment creates storage-backed state. It must not retain a
+             * literal's compile-time cache for later reads.
+             */
+            insn->rd->is_const = false;
 
             break;
         case OP_read:
@@ -2492,6 +3409,9 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0 = src0;
             ir->src1 = insn->sz;
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
+            ir->is_volatile = insn_reads_volatile(insn);
+            set_ptr_flags(ir, insn);
             break;
         case OP_write:
             if (insn->rs2->is_func) {
@@ -2515,11 +3435,18 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 ir = bb_add_ph2_ir(bb, OP_write);
                 ir->src0 = src0;
                 ir->src1 = src1;
+                ir->src1_hi = vreg_get_phys_hi(insn->rs2);
                 ir->dest = insn->sz;
+                set_ptr_flags(ir, insn);
             }
             break;
         case OP_branch:
             src0 = prepare_operand(bb, insn->rs1, -1);
+
+            /* Read the high register now: spill_live_out_keep() below forgets
+             * the mapping of a condition that does not outlive the block.
+             */
+            src1 = vreg_get_phys_hi(insn->rs1);
 
             /* REGS[src0].var had been set to NULL, but the actual content is
              * still holded in the register.
@@ -2533,11 +3460,19 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
 
             ir = bb_add_ph2_ir(bb, OP_branch);
             ir->src0 = src0;
+            ir->src0_hi = src1;
 
             /* An LP64 backend tests an address over its full width and an int
              * over its low word only.
              */
             ir->src0_is_pointer = is_address_like(insn->rs1);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+
+            /* A long long is tested whole too, which AArch64 selects by the
+             * width recorded here.
+             */
+            ir->size_bytes =
+                insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
             ir->then_bb = bb->then_;
             ir->else_bb = bb->else_;
             break;
@@ -2545,6 +3480,24 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             extend_liveness(bb, insn, insn->rs1, insn->sz);
 
             if (!is_pushing_args) {
+                /* RV32 has four ABI argument registers. A call with two aligned
+                 * 64-bit arguments fills all four, leaving no virtual register
+                 * in which OP_indirect may materialize its target. Stage it
+                 * before assigning that file. The RV32 backend keeps this value
+                 * in s2, an otherwise-unused callee-saved register.
+                 */
+                if (ELF_MACHINE == 0xf3) {
+                    insn_t *call = insn;
+
+                    while (call && call->opcode == OP_push)
+                        call = call->next;
+                    if (call && call->opcode == OP_indirect) {
+                        src0 = prepare_operand(bb, call->rs1, -1);
+                        ir = bb_add_ph2_ir(bb, OP_load_func);
+                        ir->src0 = src0;
+                        riscv_indirect_target_staged = true;
+                    }
+                }
                 spill_alive(bb, insn);
                 is_pushing_args = true;
             }
@@ -2553,15 +3506,38 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
                 handle_abi = true;
             }
 
-            if (args_on_stack && args >= MAX_ARGS_IN_REG)
+            args = call_arg_starts[call_arg_next++];
+            if (args_on_stack && args >= MAX_ARGS_IN_REG) {
+                args += abi_arg_words(insn->rs1);
                 break;
+            }
+
+            if (abi_arg_words(insn->rs1) == 2) {
+                if (abi_arg_is_split(args, insn->rs1)) {
+                    /* Nothing is placed after it in a register, so the last one
+                     * takes the low word without being claimed.
+                     */
+                    load_low_word(bb, insn->rs1, args);
+                    abi_args_staged |= 1 << args;
+                    args += 2;
+                    break;
+                }
+                prepare_pair_argument(bb, insn->rs1, args);
+                abi_args_staged |= 3 << args;
+                args += 2;
+                break;
+            }
 
             src0 = prepare_operand(bb, insn->rs1, -1);
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = src0;
-            ir->dest = args++;
+            ir->dest = args;
+            ir->is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             REGS[ir->dest].var = insn->rs1;
             REGS[ir->dest].polluted = 0;
+            abi_args_staged |= 1 << args;
+            args++;
             break;
         case OP_call:
             callee_func = find_func(insn->str);
@@ -2576,6 +3552,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->func_name = insn->str;
 
             is_pushing_args = false;
+            abi_args_staged = 0;
             args = 0;
             handle_abi = false;
 
@@ -2586,15 +3563,20 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             if (!args)
                 spill_alive(bb, insn);
 
-            src0 = prepare_operand(bb, insn->rs1, -1);
-            ir = bb_add_ph2_ir(bb, OP_load_func);
-            ir->src0 = src0;
+            if (!riscv_indirect_target_staged) {
+                src0 = prepare_operand(bb, insn->rs1, -1);
+                ir = bb_add_ph2_ir(bb, OP_load_func);
+                ir->src0 = src0;
+                ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            }
 
             bb_add_ph2_ir(bb, OP_indirect);
 
             is_pushing_args = false;
+            abi_args_staged = 0;
             args = 0;
             handle_abi = false;
+            riscv_indirect_target_staged = false;
 
             clobber_caller_saved();
             break;
@@ -2602,7 +3584,13 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             dest = prepare_dest(bb, insn, insn->rd, -1, -1);
             ir = bb_add_ph2_ir(bb, OP_assign);
             ir->src0 = 0;
+            if (var_needs_register_pair(insn->rd))
+                ir->src0_hi = 1;
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
             break;
         case OP_return:
             if (insn->rs1)
@@ -2612,6 +3600,11 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
 
             ir = bb_add_ph2_ir(bb, OP_return);
             ir->src0 = src0;
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            if (insn->rs1)
+                ir->size_bytes =
+                    insn->rs1->ptr_level ? PTR_SIZE : insn->rs1->type->size;
             break;
         case OP_add:
         case OP_sub:
@@ -2635,16 +3628,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             src1 = prepare_operand(bb, insn->rs2, src0);
             dest = prepare_dest(bb, insn, insn->rd, src0, src1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
-            ir->src0 = src0;
-            ir->src1 = src1;
-            ir->dest = dest;
-
-            /* Record whether the result is an address, and which operand it
-             * came from. On LP64 an int-typed result has to wrap at 32 bits,
-             * while a pointer must keep all 64, and pointer arithmetic has to
-             * widen the int index beside the address.
-             */
-            set_ptr_flags(ir, insn);
+            fill_binary_ph2_ir(ir, insn, src0, src1, dest);
             break;
         case OP_negate:
         case OP_bit_not:
@@ -2652,13 +3636,7 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             src0 = prepare_operand(bb, insn->rs1, -1);
             dest = prepare_dest(bb, insn, insn->rd, src0, -1);
             ir = bb_add_ph2_ir(bb, insn->opcode);
-            ir->src0 = src0;
-            ir->dest = dest;
-
-            /* As for OP_branch: the width of the test follows the operand, not
-             * the result.
-             */
-            ir->src0_is_pointer = is_address_like(insn->rs1);
+            fill_unary_ph2_ir(ir, insn, src0, dest);
             break;
         case OP_trunc:
         case OP_sign_ext:
@@ -2668,13 +3646,23 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir = bb_add_ph2_ir(bb, insn->opcode);
             ir->src1 = insn->sz;
             ir->src0 = src0;
+            ir->src0_hi = vreg_get_phys_hi(insn->rs1);
             ir->dest = dest;
+            ir->dest_hi = vreg_get_phys_hi(insn->rd);
+            ir->is_unsigned = is_unsigned_scalar(insn->rd);
+            ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
+            ir->size_bytes =
+                insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+            if (insn->opcode != OP_trunc)
+                narrow_conversion_result(bb, insn, dest);
             break;
         default:
             printf("Unknown opcode\n");
             fflush(stdout); /* see fatal() */
             abort();
         }
+
+        store_addressed_def(bb, insn);
     }
 
     if (bb->next) {
@@ -2720,23 +3708,39 @@ void reg_alloc(void)
             continue;
 
         func->visited++;
+        fatal_function_context = func->return_def.var_name;
 
         if (!strcmp(func->return_def.var_name, "main"))
             MAIN_BB = func->bbs;
 
-        for (int i = 0; i < REG_CNT; i++)
+        for (int i = 0; i < REG_CNT; i++) {
             REGS[i].var = NULL;
+            pair_high_owner[i] = NULL;
+        }
 
         slot_var_count = 0;
+        reserve_outgoing_args(func);
         coalesce_phi_slots(func);
         pin_registers(func);
 
-        /* set arguments available */
-        int args_in_reg = func->num_params < MAX_ARGS_IN_REG ? func->num_params
-                                                             : MAX_ARGS_IN_REG;
-        for (int i = 0; i < args_in_reg; i++) {
-            REGS[i].var = var_subscript0(&func->param_defs[i]);
-            REGS[i].polluted = 1;
+        /* Set arguments available. The register file is indexed by ABI word,
+         * whereas param_defs is indexed by source parameter.
+         */
+        int args_in_reg = 0;
+        if (func->returns_aggregate) {
+            REGS[0].var = var_subscript0(&func->sret_def);
+            REGS[0].polluted = 1;
+        }
+        for (int i = 0; i < func->num_params; i++) {
+            int word = abi_param_start(func, i);
+
+            if (word + abi_arg_words(&func->param_defs[i]) > MAX_ARGS_IN_REG)
+                break;
+            REGS[word].var = var_subscript0(&func->param_defs[i]);
+            REGS[word].polluted = 1;
+            if (abi_arg_words(&func->param_defs[i]) == 2)
+                vreg_map_pair_to_phys(REGS[word].var, word, word + 1);
+            args_in_reg++;
         }
 
         /* Move a pinned parameter out of the argument register it arrived in
@@ -2747,17 +3751,18 @@ void reg_alloc(void)
         for (int i = 0; i < args_in_reg; i++) {
             var_t *param = var_subscript0(&func->param_defs[i]);
             int home = pinned_reg_of(param);
+            int word = abi_param_start(func, i);
 
             if (home < 0)
                 continue;
 
             ph2_ir_t *mv = bb_add_ph2_ir(func->bbs, OP_assign);
-            mv->src0 = i;
+            mv->src0 = word;
             mv->dest = home;
             REGS[home].var = param;
             REGS[home].polluted = 0;
-            REGS[i].var = NULL;
-            REGS[i].polluted = 0;
+            REGS[word].var = NULL;
+            REGS[word].polluted = 0;
         }
 
         /* variadic function implementation */
@@ -2765,8 +3770,27 @@ void reg_alloc(void)
             /* When encountering a variadic function, allocate space for all
              * arguments on the local stack to ensure their addresses are
              * contiguous.
+             *
+             * On a 32-bit target a long long argument takes two words, after a
+             * padding word when it would start at an odd one, so a call can
+             * pass twice as many words as it has arguments: save that many.
+             * va_arg rounds its cursor to an even word by rounding the address
+             * to eight bytes, so the first word must sit at an address that is
+             * a multiple of eight too.
              */
-            for (int i = 0; i < MAX_PARAMS; i++) {
+            int va_words = PTR_SIZE < 8 ? 2 * MAX_PARAMS : MAX_PARAMS;
+
+            /* A stack word is fetched through the register after the argument
+             * registers. RISC-V passes as many words in registers as the file
+             * holds, so it borrows the last argument register instead, which
+             * has been saved by then.
+             */
+            int scratch =
+                MAX_ARGS_IN_REG < REG_CNT ? MAX_ARGS_IN_REG : REG_CNT - 1;
+
+            if (PTR_SIZE < 8)
+                func->stack_size = ALIGN_UP(func->stack_size, 8);
+            for (int i = 0; i < va_words; i++) {
                 ph2_ir_t *ir;
                 int src0 = i;
 
@@ -2775,14 +3799,26 @@ void reg_alloc(void)
                      * arguments.
                      */
                     ir = bb_add_ph2_ir(func->bbs, OP_load);
-                    ir->dest = MAX_ARGS_IN_REG;
+                    ir->dest = scratch;
                     ir->src0 = (i - MAX_ARGS_IN_REG) * PTR_SIZE;
                     ir->ofs_based_on_stack_top = true;
-                    src0 = MAX_ARGS_IN_REG;
+                    src0 = scratch;
                 }
 
-                if (i < args_in_reg) {
-                    var_t *param = var_subscript0(&func->param_defs[i]);
+                /* Slot i saves ABI word i. The parameter homed there is found
+                 * by its ABI position, since a hidden aggregate-return pointer
+                 * takes word 0 and shifts every named parameter up.
+                 */
+                int param_idx = -1;
+                for (int q = 0; q < func->num_params; q++) {
+                    if (abi_param_start(func, q) == i) {
+                        param_idx = q;
+                        break;
+                    }
+                }
+
+                if (param_idx >= 0) {
+                    var_t *param = var_subscript0(&func->param_defs[param_idx]);
                     param->offset = func->stack_size;
                     param->space_is_allocated = true;
                 }
@@ -2791,6 +3827,40 @@ void reg_alloc(void)
                 ir->src0 = src0;
                 ir->src1 = func->stack_size;
                 func->stack_size += PTR_SIZE;
+                if (param_idx >= 0) {
+                    var_t *param = var_subscript0(&func->param_defs[param_idx]);
+
+                    if (param_idx + 1 == func->num_params &&
+                        param->is_aggregate_param) {
+                        int footprint = ALIGN_UP(param->type->size, PTR_SIZE);
+
+                        /* The first word was just saved above. Reserve the
+                         * remaining words before spilling unnamed arguments.
+                         */
+                        func->stack_size += footprint - PTR_SIZE;
+                    }
+                }
+            }
+
+            /* A parameter that arrived in the borrowed register now lives only
+             * in its save slot.
+             */
+            if (va_words > MAX_ARGS_IN_REG && scratch < MAX_ARGS_IN_REG) {
+                var_t *owner = pair_high_owner[scratch];
+
+                if (owner) {
+                    int low = vreg_get_phys(owner);
+
+                    if (low >= 0 && low < REG_CNT && REGS[low].var == owner) {
+                        REGS[low].var = NULL;
+                        REGS[low].polluted = 0;
+                    }
+                    vreg_clear_phys(owner);
+                } else if (REGS[scratch].var) {
+                    vreg_clear_phys(REGS[scratch].var);
+                    REGS[scratch].var = NULL;
+                    REGS[scratch].polluted = 0;
+                }
             }
         } else {
             /* If the number of function arguments is fixed, the extra arguments
@@ -2826,12 +3896,51 @@ void reg_alloc(void)
              * cfg_flatten(), the operand's offset will be recalculated by
              * adding the function's stack size.
              */
-            for (int i = MAX_ARGS_IN_REG; i < func->num_params; i++) {
+            for (int i = 0; i < func->num_params; i++) {
                 var_t *param = var_subscript0(&func->param_defs[i]);
-                param->offset = (i - MAX_ARGS_IN_REG) * PTR_SIZE;
+                int word = abi_param_start(func, i);
+
+                if (abi_arg_is_split(word, param)) {
+                    /* A long long split between a7 and the first stack slot
+                     * gets a slot of its own: store the low word, then fetch
+                     * the high word through a7, which holds nothing else.
+                     */
+                    ph2_ir_t *ir;
+
+                    if (!param->space_is_allocated)
+                        alloc_var_slot(func, param);
+                    ir = bb_add_ph2_ir(func->bbs, OP_store);
+                    ir->src0 = word;
+                    ir->src1 = param->offset;
+                    ir->size_bytes = 4;
+                    ir = bb_add_ph2_ir(func->bbs, OP_load);
+                    ir->dest = word;
+                    ir->src0 = 0;
+                    ir->ofs_based_on_stack_top = true;
+                    ir->size_bytes = 4;
+                    ir = bb_add_ph2_ir(func->bbs, OP_store);
+                    ir->src0 = word;
+                    ir->src1 = param->offset + 4;
+                    ir->size_bytes = 4;
+                    continue;
+                }
+                if (word < MAX_ARGS_IN_REG)
+                    continue;
+                param->offset = (word - MAX_ARGS_IN_REG) * PTR_SIZE;
                 param->space_is_allocated = true;
                 param->ofs_based_on_stack_top = true;
             }
+        }
+
+        /* A volatile parameter lives in its slot, so write it there on entry.
+         * Its register then matches the slot, and every read reloads it.
+         */
+        for (int i = 0; i < args_in_reg; i++) {
+            var_t *param = var_subscript0(&func->param_defs[i]);
+            int word = abi_param_start(func, i);
+
+            if (var_is_volatile_object(param) && REGS[word].var == param)
+                store_var(func->bbs, param, word);
         }
 
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
@@ -2859,6 +3968,15 @@ void reg_alloc(void)
         collapse_slot_roundtrip(func);
         dead_store_elim(func);
     }
+}
+
+/* Name the high register of a 32-bit target's register pair after its low one,
+ * as "%x2:%x3", when @reg is one.
+ */
+void dump_pair_high(int reg)
+{
+    if (reg >= 0)
+        printf(":%%x%c", reg + 48);
 }
 
 void dump_ph2_ir(void)
@@ -2914,16 +4032,24 @@ void dump_ph2_ir(void)
                 printf("\tret %%x%c", rs1);
             break;
         case OP_load:
-            printf("\tload %%x%c, %d(sp)", rd, ph2_ir->src0);
+            printf("\tload %%x%c", rd);
+            dump_pair_high(ph2_ir->dest_hi);
+            printf(", %d(sp)", ph2_ir->src0);
             break;
         case OP_store:
-            printf("\tstore %%x%c, %d(sp)", rs1, ph2_ir->src1);
+            printf("\tstore %%x%c", rs1);
+            dump_pair_high(ph2_ir->src0_hi);
+            printf(", %d(sp)", ph2_ir->src1);
             break;
         case OP_global_load:
-            printf("\tload %%x%c, %d(gp)", rd, ph2_ir->src0);
+            printf("\tload %%x%c", rd);
+            dump_pair_high(ph2_ir->dest_hi);
+            printf(", %d(gp)", ph2_ir->src0);
             break;
         case OP_global_store:
-            printf("\tstore %%x%c, %d(gp)", rs1, ph2_ir->src1);
+            printf("\tstore %%x%c", rs1);
+            dump_pair_high(ph2_ir->src0_hi);
+            printf(", %d(gp)", ph2_ir->src1);
             break;
         case OP_read:
             printf("\t%%x%c = (%%x%c)", rd, rs1);

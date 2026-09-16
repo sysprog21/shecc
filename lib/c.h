@@ -109,14 +109,28 @@ int isblank(int c);
 /* File I/O */
 typedef int FILE;
 
+#ifdef __SHECC_DYNLINK__
+/* The host libc's own stream objects. Its stdio functions dereference the
+ * stream pointer they are given, so a descriptor number would fault there. The
+ * output cannot import a data symbol, only functions through the PLT, so each
+ * use asks the dynamic linker for the address of the host's variable. A null
+ * handle is RTLD_DEFAULT. Before glibc 2.34 dlsym() lived in libdl.so.2, so a
+ * program that calls it names that library as well.
+ */
+void *dlsym(void *handle, const char *name);
+#define stdin (*(FILE **) dlsym((void *) 0, "stdin"))
+#define stdout (*(FILE **) dlsym((void *) 0, "stdout"))
+#define stderr (*(FILE **) dlsym((void *) 0, "stderr"))
+#else
 /* Standard streams, as raw file descriptors */
-#define stdin 0
-#define stdout 1
-#define stderr 2
+#define stdin ((FILE *) 0)
+#define stdout ((FILE *) 1)
+#define stderr ((FILE *) 2)
+#endif
 
-FILE *fopen(char *filename, char *mode);
+FILE *fopen(const char *filename, const char *mode);
 int fclose(FILE *stream);
-int chmod(char *filename, int mode);
+int chmod(const char *filename, int mode);
 int fgetc(FILE *stream);
 char *fgets(char *str, int n, FILE *stream);
 int fputc(int c, FILE *stream);
@@ -126,33 +140,41 @@ int fputc(int c, FILE *stream);
  * through '__syscall' instead.
  */
 int fread(char *ptr, int size, int nmemb, FILE *stream);
-int fwrite(char *ptr, int size, int nmemb, FILE *stream);
+int fwrite(const void *ptr, int size, int nmemb, FILE *stream);
 int fseek(FILE *stream, int offset, int whence);
 int ftell(FILE *stream);
 
 /* string-related functions */
-int strlen(char *str);
-int strcmp(char *s1, char *s2);
-int strncmp(char *s1, char *s2, int len);
-char *strcpy(char *dest, char *src);
-char *strncpy(char *dest, char *src, int len);
-char *strcat(char *dest, char *src);
-char *strncat(char *dest, char *src, int len);
+int strlen(const char *str);
+int strcmp(const char *s1, const char *s2);
+int strncmp(const char *s1, const char *s2, int len);
+char *strcpy(char *dest, const char *src);
+char *strncpy(char *dest, const char *src, int len);
+char *strcat(char *dest, const char *src);
+char *strncat(char *dest, const char *src, int len);
 char *strchr(char *str, int ch);
-char *memcpy(char *dest, char *src, int count);
-int memcmp(void *s1, void *s2, int n);
+void *memcpy(void *dest, const void *src, int count);
+int memcmp(const void *s1, const void *s2, int n);
 void *memset(void *s, int c, int n);
 
 /* formatted output string */
-int printf(char *str, ...);
-int sprintf(char *buffer, char *str, ...);
-int snprintf(char *buffer, int n, char *str, ...);
-int fprintf(FILE *stream, char *str, ...);
+int printf(const char *str, ...);
+int sprintf(char *buffer, const char *str, ...);
+int snprintf(char *buffer, int n, const char *str, ...);
+int fprintf(FILE *stream, const char *str, ...);
 int fflush(FILE *stream);
 
 /* Terminating program */
 void exit(int exit_code);
 void abort(void);
+
+/* glibc's signature, so a dynamically linked program reaches the host's handler
+ * with every argument it reads.
+ */
+void __assert_fail(const char *expr,
+                   const char *file,
+                   unsigned int line,
+                   const char *function);
 
 /* Dynamic memory allocation/deallocation functions */
 void *malloc(int size);

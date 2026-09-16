@@ -7,7 +7,6 @@
 
 /* minimal libc implementation */
 #include "c.h"
-#define INT_BUF_LEN 16
 
 /* Staging buffer for the printf family that writes straight to a descriptor.
  *
@@ -47,7 +46,7 @@ int isblank(int c)
     return c == ' ' || c == '\t';
 }
 
-int strlen(char *str)
+int strlen(const char *str)
 {
     /* process the string by checking 4 characters (a 32-bit word) at a time */
     int i = 0;
@@ -63,7 +62,7 @@ int strlen(char *str)
     }
 }
 
-int strcmp(char *s1, char *s2)
+int strcmp(const char *s1, const char *s2)
 {
     int i = 0;
     while (s1[i] && s2[i]) {
@@ -76,7 +75,7 @@ int strcmp(char *s1, char *s2)
     return s1[i] - s2[i];
 }
 
-int strncmp(char *s1, char *s2, int len)
+int strncmp(const char *s1, const char *s2, int len)
 {
     int i = 0;
     while (i < len) {
@@ -91,7 +90,7 @@ int strncmp(char *s1, char *s2, int len)
     return 0;
 }
 
-char *strcpy(char *dest, char *src)
+char *strcpy(char *dest, const char *src)
 {
     int i = 0;
     while (src[i]) {
@@ -102,13 +101,13 @@ char *strcpy(char *dest, char *src)
     return dest;
 }
 
-char *strcat(char *dest, char *src)
+char *strcat(char *dest, const char *src)
 {
     strcpy(&dest[strlen(dest)], src);
     return dest;
 }
 
-char *strncat(char *dest, char *src, int len)
+char *strncat(char *dest, const char *src, int len)
 {
     int i = strlen(dest), j = 0;
     while (j < len && src[j]) {
@@ -148,7 +147,7 @@ char *strchr(char *str, int ch)
     return NULL;
 }
 
-char *strncpy(char *dest, char *src, int len)
+char *strncpy(char *dest, const char *src, int len)
 {
     int i = 0;
     int beyond = 0;
@@ -165,30 +164,33 @@ char *strncpy(char *dest, char *src, int len)
     return dest;
 }
 
-char *memcpy(char *dest, char *src, int count)
+void *memcpy(void *dest, const void *src, int count)
 {
+    char *d = dest;
+    const char *s = src;
     int i = 0;
 
     /* Continues as long as there are at least 4 bytes remaining to copy. */
     for (; i + 4 <= count; i += 4) {
-        dest[i] = src[i];
-        dest[i + 1] = src[i + 1];
-        dest[i + 2] = src[i + 2];
-        dest[i + 3] = src[i + 3];
+        d[i] = s[i];
+        d[i + 1] = s[i + 1];
+        d[i + 2] = s[i + 2];
+        d[i + 3] = s[i + 3];
     }
 
     /* Ensure all @count bytes are copied, even if @count is not a multiple of
      * 4, or if @count was less than 4 initially.
      */
     for (; i < count; i++)
-        dest[i] = src[i];
+        d[i] = s[i];
 
     return dest;
 }
 
-int memcmp(void *s1, void *s2, int n)
+int memcmp(const void *s1, const void *s2, int n)
 {
-    char *p1 = (char *) s1, *p2 = (char *) s2;
+    /* C99 7.21.4 compares the bytes as unsigned char. */
+    const unsigned char *p1 = s1, *p2 = s2;
 
     for (int i = 0; i < n; i++) {
         if (p1[i] < p2[i])
@@ -217,101 +219,11 @@ void *memset(void *s, int c, int n)
     return s;
 }
 
-/* set 10 digits (32bit) without div
- *
- * This function converts a given integer value to its string representation in
- * base-10 without using division operations. The method involves calculating
- * the approximate quotient and remainder using bitwise operations, which are
- * then used to derive each digit of the result.
- *
- * The logic is based on an efficient method of dividing by constants, as
- * detailed in the reference link:
- * http://web.archive.org/web/20180517023231/http://www.hackersdelight.org/divcMore.pdf.
- * This approach avoids expensive division instructions by using a series of
- * bitwise shifts and additions to calculate the quotient and remainder. Pointer
- * width of the target, held in a variable rather than tested with the
+/* Pointer width of the target, held in a variable rather than tested with the
  * preprocessor: shecc must be able to compile this file for either target, and
  * a constant condition would leave statically dead code behind.
  */
 int __ptr_width = __SIZEOF_POINTER__;
-
-void __str_base10(char *pb, int val)
-{
-    int neg = 0;
-    int q, r, t;
-    int i = INT_BUF_LEN - 1;
-
-    /* val is an int on every target: negating INT_MIN overflows even when
-     * pointers and registers are 64-bit. Spell it directly so the digit loop
-     * never walks its stack buffer backwards indefinitely.
-     */
-    if (val == -2147483648) {
-        strncpy(pb + INT_BUF_LEN - 11, "-2147483648", 11);
-        return;
-    }
-    if (val < 0) {
-        neg = 1;
-        val = -val;
-    }
-
-    while (val) {
-        q = (val >> 1) + (val >> 2);
-        q += (q >> 4);
-        q += (q >> 8);
-        q += (q >> 16);
-        q >>= 3;
-        r = val - (((q << 2) + q) << 1);
-        t = ((r + 6) >> 4);
-        q += t;
-        r -= (((t << 2) + t) << 1);
-
-        pb[i] += r;
-        val = q;
-        i--;
-    }
-
-    if (neg)
-        pb[i] = '-';
-}
-
-void __str_base8(char *pb, int val)
-{
-    int c = INT_BUF_LEN - 1, v;
-
-    /* Because every 3 binary digits can be converted to 1 octal digit, here
-     * performs the conversion 10 times, derived from 32 divided by 3.
-     *
-     * Finally, the remaining 2 bits are processed after the loop.
-     */
-    int times = (sizeof(int) << 3) / 3;
-    for (int i = 0; i < times; i++) {
-        v = val & 0x7;
-        pb[c] = '0' + v;
-        val >>= 3;
-        c--;
-    }
-    v = val & 0x3;
-    pb[c] = '0' + v;
-}
-
-void __str_base16(char *pb, int val)
-{
-    int c = INT_BUF_LEN - 1;
-    int times = sizeof(int) << 1;
-    for (int i = 0; i < times; i++) {
-        int v = val & 0xf;
-        if (v < 10)
-            pb[c] = '0' + v;
-        else if (v < 16)
-            pb[c] = 'a' + v - 10;
-        else {
-            abort();
-            break;
-        }
-        val >>= 4;
-        c--;
-    }
-}
 
 /* The specification of snprintf() is defined in C99 7.19.6.5, and its behavior
  * and return value should comply with the following description:
@@ -374,90 +286,131 @@ void __fmtbuf_write_str(fmtbuf_t *fmtbuf, char *str, int l)
     fmtbuf->n -= l;
 }
 
-void __format(fmtbuf_t *fmtbuf,
-              int val,
-              int width,
-              int zeropad,
-              int base,
-              int alternate_form)
+void __fmtbuf_pad(fmtbuf_t *fmtbuf, int ch, int count)
 {
-    char pb[INT_BUF_LEN], ch;
-    int pbi;
-
-    /* set to zeroes */
-    for (pbi = 0; pbi < INT_BUF_LEN; pbi++)
-        pb[pbi] = '0';
-
-    pbi = 0;
-
-    switch (base) {
-    case 8:
-        __str_base8(pb, val);
-        break;
-    case 10:
-        __str_base10(pb, val);
-        break;
-    case 16:
-        __str_base16(pb, val);
-        break;
-    default:
-        abort();
-        break;
-    }
-
-    while (pb[pbi] == '0' && pbi < INT_BUF_LEN - 1)
-        pbi++;
-
-    switch (base) {
-    case 8:
-        if (alternate_form) {
-            if (width && zeropad && pb[pbi] != '0') {
-                __fmtbuf_write_char(fmtbuf, '0');
-                width -= 1;
-            } else if (pb[pbi] != '0')
-                pb[--pbi] = '0';
-        }
-        break;
-    case 10:
-        if (width && zeropad && pb[pbi] == '-') {
-            __fmtbuf_write_char(fmtbuf, '-');
-            pbi++;
-            width--;
-        }
-        break;
-    case 16:
-        if (alternate_form) {
-            if (width && zeropad && pb[pbi] != '0') {
-                __fmtbuf_write_char(fmtbuf, '0');
-                __fmtbuf_write_char(fmtbuf, 'x');
-                width -= 2;
-            } else if (pb[pbi] != '0') {
-                pb[--pbi] = 'x';
-                pb[--pbi] = '0';
-            }
-        }
-        break;
-    }
-
-    width -= (INT_BUF_LEN - pbi);
-    if (width < 0)
-        width = 0;
-
-    ch = zeropad ? '0' : ' ';
-    while (width) {
+    for (; count > 0; count--)
         __fmtbuf_write_char(fmtbuf, ch);
-        width--;
-    }
-
-    __fmtbuf_write_str(fmtbuf, pb + pbi, INT_BUF_LEN - pbi);
 }
 
-void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
-{
-    int si = 0, pi = 0;
+/* Conversion flags (C99 7.19.6.1p6) */
+#define __FMT_LEFT 1
+#define __FMT_PLUS 2
+#define __FMT_SPACE 4
+#define __FMT_ALT 8
+#define __FMT_ZERO 16
 
-    /* A pointer-width view of the same argument area, for %s. Reading a pointer
-     * argument through an int would truncate it on LP64.
+/* Convert the 64-bit integer @hi:@lo for conversion @conv, one of d, i, u, o,
+ * x, X and p, with @flags, @width and @precision, where a negative precision is
+ * none. This avoids long long arithmetic, so that the library needs no 64-bit
+ * lowering on a 32-bit target: a digit is the remainder of a bitwise long
+ * division of the two words, over the low word alone once the high one is zero.
+ */
+void __format_int(fmtbuf_t *fmtbuf,
+                  unsigned lo,
+                  unsigned hi,
+                  int conv,
+                  int flags,
+                  int width,
+                  int precision)
+{
+    char digits[24], prefix[2];
+    char *symbols = conv == 'X' ? "0123456789ABCDEF" : "0123456789abcdef";
+    int di = 24, prefix_len = 0, zeros = 0, count, base = 10;
+
+    if (conv == 'o')
+        base = 8;
+    else if (conv == 'x' || conv == 'X' || conv == 'p')
+        base = 16;
+
+    if (conv == 'd' || conv == 'i') {
+        if (hi & 0x80000000) {
+            prefix[prefix_len++] = '-';
+            lo = ~lo + 1;
+            hi = ~hi + (lo == 0);
+        } else if (flags & __FMT_PLUS)
+            prefix[prefix_len++] = '+';
+        else if (flags & __FMT_SPACE)
+            prefix[prefix_len++] = ' ';
+    } else if ((lo || hi) && (conv == 'p' || ((flags & __FMT_ALT) &&
+                                              (conv == 'x' || conv == 'X')))) {
+        prefix[prefix_len++] = '0';
+        prefix[prefix_len++] = conv == 'X' ? 'X' : 'x';
+    }
+
+    /* A zero precision converts a zero value to no characters. */
+    if (precision || lo || hi) {
+        do {
+            unsigned rem = 0;
+
+            for (int bit = hi ? 63 : 31; bit >= 0; bit--) {
+                unsigned *word = bit >= 32 ? &hi : &lo;
+                unsigned mask = 1U << (bit % 32);
+
+                rem = (rem << 1) | ((*word & mask) != 0);
+                *word &= ~mask;
+                if (rem >= (unsigned) base) {
+                    rem -= base;
+                    *word |= mask;
+                }
+            }
+            digits[--di] = symbols[rem];
+        } while (lo || hi);
+    }
+    count = 24 - di;
+
+    if (precision > count)
+        zeros = precision - count;
+
+    /* The alternate form of o makes the first digit a zero. */
+    if ((flags & __FMT_ALT) && conv == 'o' && !zeros &&
+        (!count || digits[di] != '0'))
+        zeros = 1;
+
+    /* The 0 flag pads with zeros after the sign or prefix, unless a precision
+     * is given or the field is left-justified.
+     */
+    if ((flags & __FMT_ZERO) && !(flags & __FMT_LEFT) && precision < 0 &&
+        width > prefix_len + zeros + count)
+        zeros = width - prefix_len - count;
+
+    width -= prefix_len + zeros + count;
+    if (!(flags & __FMT_LEFT))
+        __fmtbuf_pad(fmtbuf, ' ', width);
+    __fmtbuf_write_str(fmtbuf, prefix, prefix_len);
+    __fmtbuf_pad(fmtbuf, '0', zeros);
+    __fmtbuf_write_str(fmtbuf, digits + di, count);
+    if (flags & __FMT_LEFT)
+        __fmtbuf_pad(fmtbuf, ' ', width);
+}
+
+/* Write @length characters of @str in a field of @width, as %s and %c do. */
+void __format_str(fmtbuf_t *fmtbuf, char *str, int length, int flags, int width)
+{
+    width -= length;
+    if (!(flags & __FMT_LEFT))
+        __fmtbuf_pad(fmtbuf, ' ', width);
+    __fmtbuf_write_str(fmtbuf, str, length);
+    if (flags & __FMT_LEFT)
+        __fmtbuf_pad(fmtbuf, ' ', width);
+}
+
+/* @var_args follows @named named arguments. Each variadic argument takes
+ * VA_INT_STEP int-sized slots, and a 64-bit one takes two. On a 32-bit target
+ * the pair starts at an even slot counted from the first named argument, so one
+ * after an odd count of slots is preceded by an unused one.
+ *
+ * long has the width of int in shecc, so l changes no argument's width; ll and
+ * j read 64 bits everywhere, and z and t read a pointer's width.
+ */
+void __format_to_buf(fmtbuf_t *fmtbuf,
+                     const char *format,
+                     int *var_args,
+                     int named)
+{
+    int si = 0, slot = 0;
+
+    /* A pointer-width view of the same argument area, for %s, %p and %n.
+     * Reading a pointer argument through an int would truncate it on LP64.
      */
     char **var_args_p = (char **) var_args;
 
@@ -465,89 +418,170 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
         if (format[si] != '%') {
             __fmtbuf_write_char(fmtbuf, format[si]);
             si++;
+            continue;
+        }
+
+        int flags = 0, width = 0, precision = -1, size = 0, conv;
+        unsigned lo, hi;
+
+        si++;
+        for (;; si++) {
+            if (format[si] == '-')
+                flags |= __FMT_LEFT;
+            else if (format[si] == '+')
+                flags |= __FMT_PLUS;
+            else if (format[si] == ' ')
+                flags |= __FMT_SPACE;
+            else if (format[si] == '#')
+                flags |= __FMT_ALT;
+            else if (format[si] == '0')
+                flags |= __FMT_ZERO;
+            else
+                break;
+        }
+
+        /* A negative width from '*' is a '-' flag and a positive width. */
+        if (format[si] == '*') {
+            width = var_args[slot];
+            slot += VA_INT_STEP;
+            si++;
+            if (width < 0) {
+                flags |= __FMT_LEFT;
+                width = -width;
+            }
         } else {
-            int w = 0, zp = 0, pp = 0, v = var_args[pi * VA_INT_STEP], l;
+            while (format[si] >= '0' && format[si] <= '9')
+                width = width * 10 + format[si++] - '0';
+        }
 
+        /* A negative precision from '*' is taken as none. */
+        if (format[si] == '.') {
             si++;
-            if (format[si] == '#') {
-                pp = 1;
+            precision = 0;
+            if (format[si] == '*') {
+                precision = var_args[slot];
+                slot += VA_INT_STEP;
                 si++;
+                if (precision < 0)
+                    precision = -1;
+            } else {
+                while (format[si] >= '0' && format[si] <= '9')
+                    precision = precision * 10 + format[si++] - '0';
             }
-            if (format[si] == '0') {
-                zp = 1;
-                si++;
-            }
-            if (format[si] >= '1' && format[si] <= '9') {
-                w = format[si] - '0';
-                si++;
-                while (format[si] >= '0' && format[si] <= '9') {
-                    w *= 10;
-                    w += format[si] - '0';
-                    si++;
-                }
-            }
-            switch (format[si]) {
-            case 's':
-                /* append param pi as string; read it at pointer width */
-                l = strlen(var_args_p[pi]);
-                __fmtbuf_write_str(fmtbuf, var_args_p[pi], l);
-                break;
-            case 'c':
-                /* append param pi as char */
-                __fmtbuf_write_char(fmtbuf, (char) v);
-                break;
-            case 'o':
-                /* append param as octal */
-                __format(fmtbuf, v, w, zp, 8, pp);
-                break;
-            case 'd':
-                /* append param as decimal */
-                __format(fmtbuf, v, w, zp, 10, 0);
-                break;
-            case 'x':
-                /* append param as hex */
-                __format(fmtbuf, v, w, zp, 16, pp);
-                break;
-            case 'p': {
-                /* Append param as a pointer.
-                 *
-                 * A pointer occupies VA_INT_STEP int-sized slots, so on an LP64
-                 * target the second one carries the high word. Printing only @v
-                 * would drop it, and the graph writer in ssa.c names its nodes
-                 * after these values, so two objects sharing a low word would
-                 * collapse into one node.
-                 *
-                 * A pointer has one spelling here, "0x" and its significant
-                 * digits, so any width or zero-pad in the format is ignored.
-                 * Honoring them on one branch and not the other would render
-                 * the same conversion two ways depending on the value.
-                 */
-                int hi = 0;
+        }
 
-                if (VA_INT_STEP > 1)
-                    hi = var_args[pi * VA_INT_STEP + 1];
-
-                __fmtbuf_write_char(fmtbuf, '0');
-                __fmtbuf_write_char(fmtbuf, 'x');
-                if (hi) {
-                    __format(fmtbuf, hi, 0, 0, 16, 0);
-
-                    /* The low word keeps its leading zeros, or the two halves
-                     * would run together into a different number.
-                     */
-                    __format(fmtbuf, v, 8, 1, 16, 0);
-                } else
-                    __format(fmtbuf, v, 0, 0, 16, 0);
-                break;
-            }
-            case '%':
-                /* append literal '%' character */
-                __fmtbuf_write_char(fmtbuf, '%');
+        /* @size: -2 hh, -1 h, 0 int or long, 8 a 64-bit argument. */
+        if (format[si] == 'h') {
+            size = -1;
+            if (format[++si] == 'h') {
+                size = -2;
                 si++;
-                continue;
             }
-            pi++;
+        } else if (format[si] == 'l') {
+            if (format[++si] == 'l') {
+                size = 8;
+                si++;
+            }
+        } else if (format[si] == 'j') {
+            size = 8;
             si++;
+        } else if (format[si] == 'z' || format[si] == 't') {
+            if (__ptr_width == 8)
+                size = 8;
+            si++;
+        }
+
+        conv = format[si];
+        if (!conv)
+            break;
+        si++;
+
+        switch (conv) {
+        case 'd':
+        case 'i':
+        case 'u':
+        case 'o':
+        case 'x':
+        case 'X':
+            if (size == 8) {
+                if (__ptr_width == 4 && ((named + slot) & 1))
+                    slot++;
+                lo = var_args[slot];
+                hi = var_args[slot + 1];
+                slot += 2;
+            } else {
+                int v = var_args[slot];
+
+                slot += VA_INT_STEP;
+                if (size == -2)
+                    v = conv == 'd' || conv == 'i' ? (signed char) v : v & 0xff;
+                else if (size == -1)
+                    v = conv == 'd' || conv == 'i' ? (short) v : v & 0xffff;
+                lo = v;
+                hi = (conv == 'd' || conv == 'i') && v < 0 ? 0xffffffff : 0;
+            }
+            __format_int(fmtbuf, lo, hi, conv, flags, width, precision);
+            break;
+        case 'p':
+            /* A pointer occupies VA_INT_STEP int-sized slots, so on an LP64
+             * target the second one carries the high word. A null pointer is
+             * spelled "(nil)", as glibc does.
+             */
+            lo = var_args[slot];
+            hi = VA_INT_STEP > 1 ? var_args[slot + 1] : 0;
+            slot += VA_INT_STEP;
+            if (lo || hi)
+                __format_int(fmtbuf, lo, hi, 'p', flags & __FMT_LEFT, width,
+                             -1);
+            else
+                __format_str(fmtbuf, "(nil)", 5, flags, width);
+            break;
+        case 'c': {
+            char ch = (char) var_args[slot];
+
+            slot += VA_INT_STEP;
+            __format_str(fmtbuf, &ch, 1, flags, width);
+            break;
+        }
+        case 's': {
+            /* A precision bounds the characters read, so the array need not be
+             * null-terminated (C99 7.19.6.1p8).
+             */
+            char *str = var_args_p[slot / VA_INT_STEP];
+            int length = 0;
+
+            slot += VA_INT_STEP;
+            if (!str)
+                str = "(null)";
+            while ((precision < 0 || length < precision) && str[length])
+                length++;
+            __format_str(fmtbuf, str, length, flags, width);
+            break;
+        }
+        case 'n': {
+            /* Store the count of characters written so far. */
+            int *count = (int *) var_args_p[slot / VA_INT_STEP];
+
+            slot += VA_INT_STEP;
+            if (size == -2)
+                *(char *) count = fmtbuf->len;
+            else if (size == -1)
+                *(short *) count = fmtbuf->len;
+            else {
+                count[0] = fmtbuf->len;
+                if (size == 8)
+                    count[1] = 0;
+            }
+            break;
+        }
+        case '%':
+            __fmtbuf_write_char(fmtbuf, '%');
+            break;
+        default:
+            /* An unknown conversion is written as it stands. */
+            __fmtbuf_write_char(fmtbuf, '%');
+            __fmtbuf_write_char(fmtbuf, conv);
+            break;
         }
     }
 
@@ -556,7 +590,7 @@ void __format_to_buf(fmtbuf_t *fmtbuf, char *format, int *var_args)
         fmtbuf->buf[0] = 0;
 }
 
-int __write_fmt(int fd, char *str, int *var_args)
+int __write_fmt(int fd, const char *str, int *var_args, int named)
 {
     char buffer[FMT_BUF_LEN];
     fmtbuf_t fmtbuf;
@@ -564,7 +598,7 @@ int __write_fmt(int fd, char *str, int *var_args)
     fmtbuf.buf = buffer;
     fmtbuf.n = FMT_BUF_LEN;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, var_args);
+    __format_to_buf(&fmtbuf, str, var_args, named);
 
     /* len counts what the conversion would have produced, not what fit. */
     int len = fmtbuf.len;
@@ -583,7 +617,7 @@ int __write_fmt(int fd, char *str, int *var_args)
     fmtbuf.buf = wide;
     fmtbuf.n = len + 1;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, var_args);
+    __format_to_buf(&fmtbuf, str, var_args, named);
 
     int written = __syscall(__syscall_write, fd, wide, fmtbuf.len);
 
@@ -591,38 +625,38 @@ int __write_fmt(int fd, char *str, int *var_args)
     return written;
 }
 
-int printf(char *str, ...)
+int printf(const char *str, ...)
 {
-    return __write_fmt(1, str, &str + 1);
+    return __write_fmt(1, str, &str + 1, 1);
 }
 
-int sprintf(char *buffer, char *str, ...)
+int sprintf(char *buffer, const char *str, ...)
 {
     fmtbuf_t fmtbuf;
 
     fmtbuf.buf = buffer;
     fmtbuf.n = INT_MAX;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 1);
+    __format_to_buf(&fmtbuf, str, &str + 1, 2);
     return fmtbuf.len;
 }
 
-int snprintf(char *buffer, int n, char *str, ...)
+int snprintf(char *buffer, int n, const char *str, ...)
 {
     fmtbuf_t fmtbuf;
 
     fmtbuf.buf = buffer;
     fmtbuf.n = n;
     fmtbuf.len = 0;
-    __format_to_buf(&fmtbuf, str, &str + 1);
+    __format_to_buf(&fmtbuf, str, &str + 1, 3);
     return fmtbuf.len;
 }
 
 int __free_all(void);
 
-int fprintf(FILE *stream, char *str, ...)
+int fprintf(FILE *stream, const char *str, ...)
 {
-    return __write_fmt(stream, str, &str + 1);
+    return __write_fmt(stream, str, &str + 1, 2);
 }
 
 int fflush(FILE *stream)
@@ -643,7 +677,20 @@ void abort(void)
     exit(-1);
 }
 
-FILE *fopen(char *filename, char *mode)
+/* C99 7.2.1.1 has the message name the expression, the source file, the line
+ * and the enclosing function.
+ */
+void __assert_fail(const char *expr,
+                   const char *file,
+                   unsigned int line,
+                   const char *function)
+{
+    fprintf(stderr, "Assertion failed: %s, function %s, file %s, line %d\n",
+            expr, function, file, line);
+    abort();
+}
+
+FILE *fopen(const char *filename, const char *mode)
 {
     int fd;
 
@@ -681,7 +728,7 @@ FILE *fopen(char *filename, char *mode)
      */
     if (fd < 0)
         return NULL;
-    return fd;
+    return (FILE *) fd;
 }
 
 int fclose(FILE *stream)
@@ -690,7 +737,7 @@ int fclose(FILE *stream)
     return 0;
 }
 
-int chmod(char *filename, int mode)
+int chmod(const char *filename, int mode)
 {
 #if defined(__riscv) || defined(__aarch64__)
     /* sys_fchmodat takes (dirfd, filename, mode); AT_FDCWD is -100. */
@@ -776,8 +823,8 @@ int ftell(FILE *stream)
 #define CHUNK_GET_SIZE(size) (size & CHUNK_SIZE_SZ_MASK)
 #define IS_CHUNK_GET_FREED(size) (size & CHUNK_SIZE_FREED_MASK)
 
-typedef struct chunk {
-    struct chunk *next, *prev;
+typedef struct __chunk {
+    struct __chunk *next, *prev;
     int size;
 } chunk_t;
 
@@ -812,9 +859,9 @@ void *malloc(int size)
     size = ALIGN_UP(size, MIN_ALIGNMENT);
 
     if (!__alloc_head) {
-        chunk_t *tmp =
-            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t)), prot,
-                      flags, -1, 0);
+        chunk_t *tmp = (chunk_t *) __syscall(__syscall_mmap2, NULL,
+                                             __align_up(sizeof(chunk_t)), prot,
+                                             flags, -1, 0);
         if (tmp == (void *) -1)
             return NULL;
         __alloc_head = tmp;
@@ -825,9 +872,9 @@ void *malloc(int size)
     }
 
     if (!__freelist_head) {
-        chunk_t *tmp =
-            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t)), prot,
-                      flags, -1, 0);
+        chunk_t *tmp = (chunk_t *) __syscall(__syscall_mmap2, NULL,
+                                             __align_up(sizeof(chunk_t)), prot,
+                                             flags, -1, 0);
         if (tmp == (void *) -1)
             return NULL;
         __freelist_head = tmp;
@@ -867,9 +914,9 @@ void *malloc(int size)
     }
 
     if (!allocated) {
-        allocated =
-            __syscall(__syscall_mmap2, NULL, __align_up(sizeof(chunk_t) + size),
-                      prot, flags, -1, 0);
+        allocated = (chunk_t *) __syscall(__syscall_mmap2, NULL,
+                                          __align_up(sizeof(chunk_t) + size),
+                                          prot, flags, -1, 0);
         if (allocated == (void *) -1)
             return NULL;
         allocated->size = __align_up(sizeof(chunk_t) + size);

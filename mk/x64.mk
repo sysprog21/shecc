@@ -11,6 +11,7 @@ ARCH_DEFS = \
     \#define MAX_ARGS_IN_REG 6 /* System V: rdi rsi rdx rcx r8 r9 */\n$\
     \#define DYN_LINKER \"/lib64/ld-linux-x86-64.so.2\"\n$\
     \#define LIBC_SO \"libc.so.6\"\n$\
+    \#define LIBDL_SO \"libdl.so.2\"\n$\
     \#define PLT_FIXUP_SIZE 16\n$\
     \#define PLT_ENT_SIZE 16\n$\
     \#define RESERVED_GOT_NUM 3\n$\

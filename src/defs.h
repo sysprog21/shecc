@@ -35,6 +35,13 @@
 #define MAX_TOKEN_LEN 256
 #define MAX_ID_LEN 64
 #define MAX_LINE_LEN 256
+
+/* A string literal after its adjacent pieces are decoded and joined. Each piece
+ * is still one token of at most MAX_TOKEN_LEN, but a long message is routinely
+ * written as many of them.
+ */
+#define MAX_STRING_LEN 4096
+#define MAX_INCLUDE_DIRS 16
 #define MAX_VAR_LEN 128
 /* ".label." plus an int, for basic_block_t's dump name. */
 #define MAX_LABEL_LEN 24
@@ -44,7 +51,11 @@
  * operator and 41 bytes of markup.
  */
 #define DUMP_INSN_LEN 512
-#define MAX_TYPE_LEN 32
+
+/* A type name is a struct, union, enum or typedef identifier, which the lexer
+ * already bounds by MAX_ID_LEN; a narrower buffer rejects valid tags.
+ */
+#define MAX_TYPE_LEN MAX_ID_LEN
 
 /* Declaration limit, and with MAX_ARGS_IN_REG it also sizes the outgoing
  * stack-argument area every frame reserves (see add_func() in globals.c). A
@@ -57,11 +68,15 @@
 #define MAX_PARAMS 8
 #endif
 #define MAX_LOCALS 3200
-#define MAX_FIELDS 64
+
+/* var_t itself is parsed as a record by every bootstrap stage. Leave room for
+ * compiler metadata as well as user records with many declarators; C99 5.2.4.1
+ * asks for 127 members in one structure. Field tables are allocated lazily, so
+ * this does not inflate scalar type storage.
+ */
+#define MAX_FIELDS 128
 #define MAX_TYPES 256
 #define MAX_LABELS 256
-/* Pending postfix ++/-- effects in one statement; each one appends 3. */
-#define MAX_SIDE_EFFECT 64
 /* Elements captured from an implicitly sized array initializer. */
 #define MAX_IMPLICIT_ARRAY 256
 /* A self-compile emits ~101k ph2_ir; one pointer per slot in PH2_IR_FLATTEN. */
@@ -282,10 +297,13 @@ typedef enum {
     T_start, /* FIXME: Unused, intended for lexer state machine init */
     T_eof,   /* end-of-file (EOF) */
     T_numeric,
+    T_floating, /* C99 floating literal; lowering is staged separately */
     T_identifier,
-    T_comma,  /* , */
-    T_string, /* null-terminated string */
+    T_comma,   /* , */
+    T_string,  /* null-terminated string */
+    T_wstring, /* L"..." wide string literal */
     T_char,
+    T_wchar,         /* L'...' wide character constant */
     T_open_bracket,  /* ( */
     T_close_bracket, /* ) */
     T_open_curly,    /* { */
@@ -349,6 +367,20 @@ typedef enum {
     T_continue,
     T_goto,
     T_const, /* const qualifier */
+    T_volatile,
+    T_static,
+    T_extern,
+    T_register,
+    T_auto,
+    T_restrict,
+    T_inline,
+    T_signed,
+    T_unsigned,
+    T_long,
+    T_float,
+    T_double,
+    T_complex,
+    T_imaginary,
     /* C pre-processor directives */
     T_cppd_include,
     T_cppd_define,
@@ -361,6 +393,8 @@ typedef enum {
     T_cppd_ifdef,
     T_cppd_ifndef,
     T_cppd_pragma,
+    T_cppd_line,
+    T_cppd_unknown, /* a directive name shecc does not support */
 
     /* C pre-processor specific, these kinds will be removed after
      * pre-processing is done.
@@ -383,6 +417,11 @@ typedef struct {
     int len; /* length of token */
     int line;
     int column;
+
+    /* Immutable physical path used for quoted-include lookup. #line changes
+     * filename only, which remains the logical diagnostic/__FILE__ name.
+     */
+    char *physical_filename;
     char *filename;
 } source_location_t;
 
@@ -414,6 +453,11 @@ typedef enum {
     TYPE_int,
     TYPE_char,
     TYPE_short,
+    TYPE_long,
+    TYPE_long_long,
+    TYPE_float,
+    TYPE_double,
+    TYPE_long_double,
     TYPE_struct,
     TYPE_union,
     TYPE_typedef
@@ -541,6 +585,8 @@ typedef struct var_list {
 
 struct var {
     type_t *type;
+    /* Lexical owner, used while parsing declarator constant expressions. */
+    void *scope;
 
     /* Interned, not copied. A MAX_VAR_LEN array was 128 of this struct's 312
      * bytes on every one of the ~86k variables a self-compile creates, and
@@ -552,9 +598,65 @@ struct var {
     char *var_name;
     int ptr_level;
     bool is_func;
+
+    /* A pointer-to-callback object is not callable itself. Its compact callback
+     * pointee signature is restored only after one dereference.
+     */
+    void *pointee_func_signature;
+
+    /* Set only for the unparenthesized `result name(parameters)` spelling.
+     * Block typedef support uses it to keep direct function aliases distinct
+     * from the older parenthesized pointer-to-function declarator path.
+     */
+    bool is_direct_function_declarator;
+
+    /* The parenthesized callback spelling `int (*name)(int)` is distinct from a
+     * direct function declarator. Block typedef lowering uses this count to
+     * admit exactly one pointer layer as a callback-pointer alias.
+     */
+    int parenthesized_function_pointer_level;
+    bool parenthesized_function_pointer_const;
+    bool parenthesized_function_pointer_restrict;
+
+    /* For a depth-two callback slot, only the second (outer) star denotes the
+     * pointer object retained after normalization. Keep qualifier placement so
+     * its mask can be collapsed with that object rather than silently lost.
+     */
+    bool parenthesized_function_pointer_outer_const;
+    bool parenthesized_function_pointer_outer_volatile;
+    bool parenthesized_function_pointer_outer_restrict;
+    bool parenthesized_function_pointer_inner_qualified;
+
+    /* A block-scope `extern int f(void);` hides a local object named f but
+     * resolves expressions through the translation unit's function table.
+     */
+    bool is_extern_function_alias;
+
+    /* A function declaration originated in a block. Its linkage metadata
+     * remains global, but its ordinary identifier is lexical until a real
+     * file-scope declaration appears.
+     */
+    bool is_block_scope_function_declaration;
     bool is_global;
+
+    /* A compile-time address of static storage, kept distinct from reading a
+     * global object's value while lowering aggregate initializers.
+     */
+    bool is_global_address;
+    bool is_static;       /* declaration used the static storage class */
+    bool is_extern;       /* file-scope declaration used extern */
+    bool is_register;     /* declaration used the register storage class */
+    bool is_inline;       /* declaration used the inline function specifier */
+    bool has_initializer; /* a file-scope definition supplied an initializer */
     bool is_const_qualified; /* true if variable has const qualifier */
-    bool address_taken;      /* true if variable address was taken (&var) */
+    bool is_volatile;        /* declaration used the volatile qualifier */
+    bool is_const_pointer;   /* true for the outermost `* const` qualifier */
+    /* One bit per pointer level, counted from the base type. The legacy
+     * is_const_pointer flag describes only the outermost level; this retains
+     * qualifiers on intermediate pointers such as `int * const *`.
+     */
+    unsigned int pointer_const_mask;
+    bool address_taken; /* true if variable address was taken (&var) */
     /* Working state for strength_reduce(): how many instructions in the
      * function write the variable, whether it is written inside the loop being
      * examined, and how much its value moves per iteration when it does. All
@@ -586,9 +688,41 @@ struct var {
      */
     bool in_select_arm;
     int array_size;
-    int array_dim2; /* second dimension size for 2D arrays */
-    int offset;     /* offset from stack or frame, index 0 is reserved */
-    int init_val;   /* for global initialization */
+    bool has_direct_array_declarator;
+    bool has_unsized_array; /* `T name[]`: bound is supplied by initializer */
+    /* `T member[]` at the end of a struct has no initializer-supplied bound and
+     * contributes no bytes to the record's fixed layout.
+     */
+    bool is_flexible_array_member;
+    int array_dim2; /* second dimension size for multidimensional arrays */
+    int array_dim3; /* third dimension size for multidimensional arrays */
+    int array_dim4; /* fourth dimension size for multidimensional arrays */
+    /* Bounds of the array addressed by a parenthesized pointer declarator, e.g.
+     * `int (*row)[2]`. They describe the pointee, not this pointer-sized
+     * object, so they must never participate in size_var().
+     */
+    int pointee_array_size;
+    bool has_direct_pointee_array_declarator;
+    int pointee_array_dim2;
+    int pointee_array_dim3;
+    int pointee_array_dim4;
+
+    /* Pointer depth of one element in the array described above. This
+     * distinguishes `int (*p)[2]` from `int *(*p)[2]`: both address rows, but
+     * the latter's row elements are pointers.
+     */
+    int pointee_array_element_ptr_level;
+    int offset; /* offset from stack or frame, index 0 is reserved */
+    /* Record bit-field metadata. `offset` is the containing storage unit's byte
+     * offset. `is_bitfield` distinguishes an ordinary member from the valid
+     * unnamed zero-width field used as an allocation-unit barrier.
+     */
+    bool is_bitfield;
+    int bit_width;
+    int bit_offset;
+    int bit_storage_size;
+    int init_val;    /* for global initialization */
+    int init_val_hi; /* upper word of an 8-byte integer constant */
     /* Generation stamps used by compute_live_in() to test set membership in
      * constant time instead of rescanning live_kill and live_in per element.
      */
@@ -623,7 +757,18 @@ struct var {
     bool is_ternary_ret;
     bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
-    int phys_reg;  /* Physical register assignment (-1 if unassigned) */
+
+    /* The value of an assignment expression, read back from the object the
+     * assignment stored. C11 6.5.16p3 permits that read without requiring it,
+     * even of a volatile object, so it is not an access that must survive when
+     * nothing uses the value.
+     */
+    bool is_assignment_reload;
+    int phys_reg; /* low physical register (-1 if unassigned) */
+    /* The high word of a 32-bit-target wide scalar. It remains -1 for the
+     * ordinary single-register representation and on LP64 targets.
+     */
+    int phys_reg_hi;
     int first_use; /* First instruction index where variable is used */
     int last_use;  /* Last instruction index where variable is used */
     int use_count; /* Number of times variable is used */
@@ -639,30 +784,128 @@ struct var {
      * array or struct literal temporaries).
      */
     bool is_compound_literal;
+
+    /* A value loaded from an object that has no declaration of its own: an
+     * element or member of a compound literal, or an object reached through a
+     * dereference, subscript or member selection. This points at the object's
+     * address so a following update, store or member selection reaches the
+     * object rather than the temporary.
+     */
+    bool is_compound_literal_reference;
+    struct var *compound_literal_address;
+
+    /* A record value with no storage of its own: its bytes are those of the
+     * object at compound_literal_address. A member selection or address-of uses
+     * that object, and a record copy reads the bytes from it.
+     */
+    bool defers_record_copy;
+
+    /* A non-NULL field means the reference is a bit-field and must use the
+     * mask-and-merge store path rather than a byte/word OP_write.
+     */
+    struct var *compound_literal_bitfield;
+
+    /* String literals have immutable storage duration in C. Preserve that
+     * provenance separately from the pointer type so the compatibility warning
+     * can remain opt-in while legacy source still compiles.
+     */
+    bool is_string_literal;
+
+    /* For the address of a static object in a constant initializer, the bytes
+     * one integer step moves it by, so `1 + array` advances as `array + 1`
+     * does; 0 where no such step is known.
+     */
+    int address_stride;
+
+    /* The null pointer constant `(void *) 0` (C99 6.3.2.3p3), which unlike any
+     * other void pointer converts to a function pointer.
+     */
+    bool is_void_null_pointer;
+
+    /* For a callback slot, whether the callback pointer it finally reaches is
+     * itself const or volatile: `int (*const *slot)(int)`.
+     */
+    bool callback_is_const;
+    bool callback_is_volatile;
+
+    /* `&__func__` is a pointer to the compiler's static character array. Its
+     * address has the same machine representation as the decayed char pointer,
+     * but one unary dereference must restore that pointer without loading the
+     * first bytes of the string as an address.
+     */
+    bool is_func_name_array_address;
+
+    /* A function-pointer declarator owns a prototype separately from its value
+     * type. Keeping this syntax-only object lets an indirect call use the same
+     * argument lowering as a direct call (notably record-by-value arguments)
+     * without putting function ABI details into type_t. Kept void-typed so the
+     * self-hosted parser does not need an incomplete `struct func` declaration
+     * while reading var_t itself. parser.c owns the cast back to func_t.
+     */
+    void *func_signature;
+
+    /* C ABI lowering passes record parameters as pointers to caller-owned
+     * copies. The source-level declaration remains a record so field access and
+     * record assignment keep their C semantics; OP_address_of materializes the
+     * hidden incoming pointer instead of an address of a scalar slot.
+     */
+    bool is_aggregate_param;
 };
 
 typedef struct func func_t;
 
+typedef struct typedef_binding {
+    char *name;
+    type_t *type;
+    struct typedef_binding *next;
+} typedef_binding_t;
+
 /* block definition */
 struct block {
     var_list_t locals;
+
+    /* C tags and enumeration constants have lexical, not translation-unit,
+     * scope. Variables remain in locals; these lists serve parser lookups.
+     */
+    void *type_tags;
+    void *constants;
+    typedef_binding_t *typedefs;
     struct block *parent;
     func_t *func;
     struct block *next;
 };
 
 typedef struct block block_t;
+
+int read_const_sizeof_type(block_t *scope);
+int read_const_wstring_size(void);
+int read_sizeof_constant(block_t *scope);
+int read_const_expr_operand(block_t *scope);
+void add_block_typedef(block_t *block, char name[], type_t *type);
+bool find_block_typedef(block_t *block, const char *name);
+type_t *find_visible_type(const char *name, block_t *block);
+type_t *find_record_tag(char name[], block_t *block, base_type_t kind);
+type_t *reference_record_tag(char name[], block_t *block, base_type_t kind);
+type_t *local_record_tag(char name[], block_t *block, base_type_t kind);
+void begin_record_definition(type_t *tag);
+type_t *find_enum_tag(char name[], block_t *block);
+type_t *reference_enum_tag(char name[], block_t *block);
+type_t *local_enum_tag(char name[], block_t *block);
 typedef struct basic_block basic_block_t;
 
 /* Definition of a growable buffer for a mutable null-terminated string
  * @size: Current number of elements in the array
  * @capacity: Number of elements that can be stored without resizing
  * @elements: Pointer to the array of characters
+ * @plain_source: set by the lexer once it has checked that a source buffer has
+ *                no trigraph and no line splice, so phases 1 and 2 are the
+ *                identity on it
  */
 typedef struct {
     int size;
     int capacity;
     char *elements;
+    bool plain_source;
 } strbuf_t;
 
 /* phase-2 IR definition */
@@ -686,6 +929,13 @@ struct ph2_ir {
     /* The register OP_cmov keeps when its condition does not hold. */
     int src2;
     int dest;
+
+    /* A 32-bit target represents a wide integer as low/high register pairs. -1
+     * means this instruction uses the existing single-register form.
+     */
+    int src0_hi;
+    int src1_hi;
+    int dest_hi;
     /* Type information for LP64 support */
     int size_bytes; /* Size in bytes for load/store/read/write operations */
 
@@ -701,11 +951,26 @@ struct ph2_ir {
      */
     bool ofs_based_on_stack_top;
     bool is_pointer; /* True if this operation involves a pointer type */
+    /* Scalar signedness accompanies register values independently of their
+     * storage width. Comparisons inspect their sources; arithmetic and loads
+     * inspect the result.
+     */
+    bool is_unsigned;
+
     /* Operand provenance is required by LP64 backends: pointer arithmetic keeps
      * the address operand wide but sign-extends an int index.
      */
     bool src0_is_pointer;
     bool src1_is_pointer;
+    bool src0_is_unsigned;
+    bool src1_is_unsigned;
+
+    /* The load, read or store accesses a volatile object, which is a side
+     * effect whether or not its value is used (C99 6.7.3p6), so no rewrite may
+     * drop it, replace a load with a copy of a value read earlier, or drop a
+     * store for writing what the object already holds.
+     */
+    bool is_volatile;
 };
 
 typedef struct ph2_ir ph2_ir_t;
@@ -717,6 +982,12 @@ struct type {
     struct type *base_struct;
     int size;
 
+    /* Natural ABI alignment of an object of this type. Record definitions
+     * retain their maximum member alignment so nested records lay out correctly
+     * too.
+     */
+    int alignment;
+
     /* Member table, allocated when the type is created rather than inlined. A
      * MAX_FIELDS array of var_t by value made type_t 12 KiB, and TYPES is a
      * flat MAX_TYPES array that global_init() zeroes up front -- 3 MiB of
@@ -725,22 +996,159 @@ struct type {
     var_t *fields;
     int num_fields;
     int ptr_level; /* pointer level for typedef pointer types */
+    /* A function-pointer typedef retains its parsed prototype here. Keep it
+     * opaque because type_t is declared before func_t is complete.
+     */
+    void *func_signature;
+
+    /* A pointer-to-callback typedef is itself non-callable, but its pointee
+     * callback prototype must survive object declarations and conversions.
+     */
+    void *pointee_func_signature;
+
+    /* Unlike a pointer-to-function typedef, this descriptor denotes the
+     * function type itself. A single use-site star then forms a callable
+     * function-pointer object.
+     */
+    bool is_direct_function_type;
+
+    /* Qualifiers on a callback-pointer typedef apply to each pointer object,
+     * not to its function return type.
+     */
+    bool is_volatile_qualified;
+
+    /* Array bounds carried by an array typedef. Object declarators copy these
+     * into var_t, where ordinary indexing and initialization already retain
+     * their row-major representation.
+     */
+    int array_size;
+    int array_dim2;
+    int array_dim3;
+    int array_dim4;
+
+    /* Pointer depth of one element of an array typedef. This is distinct from
+     * ptr_level when a later typedef adds a pointer to the whole array.
+     */
+    int array_element_ptr_level;
+
+    /* Scalar base descriptor of an array typedef's element. Pointer-element
+     * arrays need this after a subscript: the outer typedef descriptor still
+     * carries the array's pointer depth and is not the loaded element type.
+     */
+    struct type *array_element_type;
+
+    /* An array of callback slots is not itself a slot. Preserve the
+     * non-callable callback prototype on each element for subscript loads.
+     */
+    void *array_element_pointee_func_signature;
+
+    /* Qualifiers on `(**const slots[N])` and `(**volatile slots[N])` apply to
+     * each selected outer slot pointer, not to the array object or the callback
+     * pointer reached after one dereference.
+     */
+    bool array_element_is_const_pointer;
+    bool array_element_is_volatile;
+
+    /* Bounds carried by a pointer-to-array typedef, e.g. `int (*)[2]`. These
+     * describe the pointed-to array rather than the pointer-sized alias itself
+     * and are copied to var_t when the typedef names an object.
+     */
+    int pointee_array_size;
+    int pointee_array_dim2;
+    int pointee_array_dim3;
+    int pointee_array_dim4;
+    int pointee_array_element_ptr_level;
+
+    /* The scalar element descriptor of a pointer-to-array typedef. Unlike an
+     * ordinary pointer typedef, its outer descriptor is TYPE_typedef and
+     * pointer-sized, so row indexing cannot recover this from `size`.
+     */
+    struct type *pointee_array_element_type;
+
+    /* Qualifiers written after stars inside a typedef declarator. These bits
+     * are relative to the typedef's own pointer depth; var_t keeps any stars
+     * subsequently written at a use site.
+     */
+    unsigned int pointer_const_mask;
+    bool is_union; /* preserves union semantics for anonymous typedef unions */
+    bool
+        has_flexible_array_member; /* cannot be embedded by value in a record */
+    bool is_const_qualified;       /* qualifier carried by a scalar typedef */
+    /* Set on a struct or union tag once its member list opens. num_fields is
+     * written only when the list closes, so it cannot tell a definition nested
+     * in the tag's own member list from the first one.
+     */
+    bool definition_started;
+
+    /* Integer representation is distinct from signedness: unsigned char and
+     * unsigned int keep the ordinary scalar widths but require zero extension
+     * and unsigned arithmetic lowering.
+     */
+    bool is_unsigned;
+
+    /* Floating scalars require a distinct IR/register class. This identity is
+     * intentionally separate from width and signedness so they can never be
+     * lowered as integer values by accident.
+     */
+    bool is_floating;
+
+    /* Plain char and signed char share this target's representation but are
+     * distinct C types. Scalar typedefs preserve this fact.
+     */
+    bool is_signed_char;
+
+    /* `_Bool` otherwise shares the byte-sized TYPE_char representation. Keep
+     * its C type identity through typedefs where pointer equality is lost.
+     */
+    bool is_bool;
 };
 
 /* lvalue details */
 typedef struct {
     int size;
     int ptr_level;
+
+    /* Pointer depth of the value designated by this lvalue. A subscript
+     * computes an address (one level deeper than its selected value), so this
+     * must not be inferred from the address provenance alone.
+     */
+    int value_ptr_level;
     bool is_func;
     bool is_reference;
+    bool is_const_qualified;
+
+    /* The lvalue designates an array, which C99 6.5.16 does not let an
+     * assignment, ++ or -- modify.
+     */
+    bool is_array;
+
+    /* Subscripts applied to the declaration in lvalue_t.decl. A designated
+     * array keeps the bounds after the first this many.
+     */
+    int subscript_depth;
+    unsigned int pointer_const_mask;
     type_t *type;
+
+    /* A selected array element can be a non-callable callback slot even when
+     * the array's scalar base type has no ordinary pointer descriptor.
+     */
+    void *pointee_func_signature;
+    /* The declaration selected by the lvalue, including a struct member. */
+    var_t *decl;
 } lvalue_t;
 
 /* constants for enums */
-typedef struct {
+typedef struct constant {
     char alias[MAX_VAR_LEN];
     int value;
+    struct constant *next;
 } constant_t;
+
+typedef struct type_tag {
+    char name[MAX_TYPE_LEN];
+    type_t *type;
+    struct type_tag *next;
+} type_tag_t;
 
 struct phi_operand {
     var_t *var;
@@ -943,9 +1351,32 @@ typedef struct {
 struct func {
     /* Syntatic info */
     var_t return_def;
+
+    /* By-value record returns use a private caller-provided destination pointer
+     * as ABI argument zero. It is deliberately outside param_defs so C
+     * prototype arity and compatibility remain source-level facts.
+     */
+    bool returns_aggregate;
+    var_t sret_def;
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
+
+    /* `f()` has no prototype in C99, while `f(void)` and every typed parameter
+     * list constrain call arity.
+     */
+    bool has_prototype;
+
+    /* A declaration introduced only within a block still has linkage, but its
+     * ordinary identifier is visible only through that block's lexical alias
+     * until a file-scope declaration or definition appears.
+     */
+    bool is_block_scope_only_declaration;
+    bool is_static; /* internal-linkage declaration */
+    /* The definition used the inline function specifier. C99 applies extra
+     * linkage constraints to external-linkage inline definitions.
+     */
+    bool is_inline;
 
     /* inline_calls()'s verdict on this body and the return that ends it,
      * stamped with the round that reached them: a body is examined once per
@@ -978,6 +1409,8 @@ struct func {
 
     /* Information used for dynamic linking */
     bool is_used;
+    /* A direct aggregate-return call requires shecc's private sret ABI. */
+    bool aggregate_call_used;
     int plt_offset;
 
     struct func *next;
