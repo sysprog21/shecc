@@ -705,10 +705,10 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 
         int size = type->size;
 
-        if (array_size > 0)
-            size = array_size * type->size;
         if (ptr_cnt)
             size = PTR_SIZE;
+        if (array_size > 0)
+            size *= array_size;
         push_sizeof_result(parent, *bb, size);
         return;
     }
@@ -801,10 +801,13 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         array_size = type->array_size;
     int size = type->size;
 
-    if (array_size > 0)
-        size = array_size * type->size;
+    /* An array result, as a call result's row or member is under sizeof, may
+     * have pointer elements: its extent counts pointer-sized slots.
+     */
     if (ptr_cnt)
         size = PTR_SIZE;
+    if (array_size > 0)
+        size *= array_size;
     lex_expect(T_close_bracket);
     push_sizeof_result(parent, *bb, size);
 }

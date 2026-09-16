@@ -189,12 +189,63 @@ void copy_call_result_array_shape(var_t *result, const var_t *return_def)
                 ? fixed_array_shape_from_pointee_var(return_def)
                 : fixed_array_shape_from_type(return_def->type);
     fixed_array_shape_to_pointee_var(result, &shape);
+
+    /* A row typedef of pointers, `typedef int *row[2]`, keeps its element depth
+     * in the alias's own stars, exactly as a declared `row *p` leaves it there.
+     * A copy here would count them twice. A row of callbacks spells no star on
+     * the alias, so its element depth still comes from the alias.
+     */
     result->pointee_array_element_ptr_level =
         return_def->pointee_array_element_ptr_level
             ? return_def->pointee_array_element_ptr_level
-            : return_def->type->array_element_ptr_level;
+            : (return_def->type->ptr_level
+                   ? 0
+                   : return_def->type->array_element_ptr_level);
     result->is_const_qualified =
         return_def->is_const_qualified || return_def->type->is_const_qualified;
+}
+
+/* The element type of array typedef @type, or @type itself when it is none. A
+ * row of callbacks keeps its typedef, which carries their prototype.
+ */
+static type_t *array_typedef_element_type(type_t *type)
+{
+    if (type->array_size && type->array_element_type && !type->func_signature)
+        return type->array_element_type;
+    return type;
+}
+
+/* What @consumed subscripts leave of an array of @shape at @address, whose
+ * elements are @type with @element_ptr_level stars. sizeof observes that
+ * remaining array; any other use decays it to a pointer that keeps the
+ * remaining bounds, so its own subscripts and arithmetic step by whole rows.
+ */
+static var_t *array_subscript_remainder(block_t *parent,
+                                        basic_block_t **bb,
+                                        type_t *type,
+                                        int element_ptr_level,
+                                        fixed_array_shape_t shape,
+                                        int consumed,
+                                        var_t *address)
+{
+    var_t *result;
+
+    for (int i = 0; i < consumed; i++)
+        fixed_array_shape_drop_outer(&shape);
+    if (unevaluated_expression_depth) {
+        result = require_typed_ptr_var(parent, type, element_ptr_level);
+        fixed_array_shape_to_var(result, &shape);
+        result->var_name = gen_name();
+        return result;
+    }
+    fixed_array_shape_drop_outer(&shape);
+    result = require_typed_ptr_var(parent, type, element_ptr_level + 1);
+    fixed_array_shape_to_pointee_var(result, &shape);
+    if (shape.rank)
+        result->pointee_array_element_ptr_level = element_ptr_level;
+    result->var_name = gen_name();
+    add_insn(parent, *bb, OP_assign, result, address, NULL, 0, NULL);
+    return result;
 }
 
 void lower_call_result_array_postfix(var_t **value,
@@ -203,8 +254,10 @@ void lower_call_result_array_postfix(var_t **value,
 {
     var_t *base;
     var_t *address;
+    type_t *element_type;
     fixed_array_shape_t shape;
     int dimensions;
+    int element_ptr_level;
     int depth = 0;
 
     if (!value || !(base = *value) || !base->pointee_array_size ||
@@ -212,6 +265,15 @@ void lower_call_result_array_postfix(var_t **value,
         return;
 
     shape = fixed_array_shape_from_pointee_var(base);
+
+    /* A `row *` result keeps the row typedef as its type. What the subscripts
+     * reach is an element of that row, which must not report the row's extent.
+     * The alias carries the element's own stars where the result does not.
+     */
+    element_type = array_typedef_element_type(base->type);
+    element_ptr_level = base->pointee_array_element_ptr_level
+                            ? base->pointee_array_element_ptr_level
+                            : base->type->array_element_ptr_level;
 
     /* One subscript selects the pointed-to array; its outer bound and every
      * inner bound then consume their own postfix subscript.
@@ -221,8 +283,7 @@ void lower_call_result_array_postfix(var_t **value,
     address = base;
     do {
         var_t *index;
-        int stride =
-            base->pointee_array_element_ptr_level ? PTR_SIZE : base->type->size;
+        int stride = element_ptr_level ? PTR_SIZE : base->type->size;
 
         if (depth >= dimensions)
             error_at("Too many subscripts for function result",
@@ -258,11 +319,12 @@ void lower_call_result_array_postfix(var_t **value,
     } while (lex_peek(T_open_square, NULL));
 
     if (depth == dimensions) {
-        var_t *element = require_typed_var(parent, base->type);
+        var_t *element = require_typed_var(parent, element_type);
         opcode_t compound_op = OP_generic;
         bool assignment;
+        bool record;
 
-        element->ptr_level = base->pointee_array_element_ptr_level;
+        element->ptr_level = element_ptr_level;
 
         /* A call returning a pointer to an array of callbacks carries their
          * prototype on the result rather than on its scalar base type.
@@ -273,8 +335,18 @@ void lower_call_result_array_postfix(var_t **value,
         element->is_const_qualified =
             base->is_const_qualified || base->type->is_const_qualified;
         element->var_name = gen_name();
-        add_insn(parent, *bb, OP_read, element, address, NULL,
-                 element->ptr_level ? PTR_SIZE : base->type->size, NULL);
+
+        /* A record element is no register value: it stays at its address for a
+         * member selection or a record copy to read, as push_object_at() leaves
+         * one.
+         */
+        record = is_record_object(element) && !element->func_signature &&
+                 !is_incomplete_record_object(element);
+        if (record)
+            element->defers_record_copy = true;
+        else
+            add_insn(parent, *bb, OP_read, element, address, NULL,
+                     element->ptr_level ? PTR_SIZE : base->type->size, NULL);
         element->is_compound_literal_reference = true;
         element->compound_literal_address = address;
 
@@ -290,6 +362,14 @@ void lower_call_result_array_postfix(var_t **value,
                 read_ternary_operation(parent, bb);
             }
             assigned = opstack_pop();
+            if (record) {
+                if (compound_op != OP_generic || !is_record_object(assigned))
+                    error_at("Invalid record assignment", cur_token_loc());
+                emit_record_copy_to_address(parent, bb, address, assigned);
+                *value = assigned;
+                opstack_push(*value);
+                return;
+            }
             if (compound_op != OP_generic) {
                 if (is_pointer_operation(compound_op, element, assigned)) {
                     handle_pointer_arithmetic(parent, bb, compound_op, element,
@@ -325,6 +405,11 @@ void lower_call_result_array_postfix(var_t **value,
             var_t *one;
             var_t *updated;
 
+            if (record)
+                error_at(
+                    "Increment or decrement requires a scalar modifiable "
+                    "lvalue",
+                    cur_token_loc());
             if (element->is_const_qualified)
                 error_at("assignment of read-only location", cur_token_loc());
             one = require_typed_var(parent, TY_int);
@@ -346,7 +431,12 @@ void lower_call_result_array_postfix(var_t **value,
         }
         *value = element;
     } else {
-        *value = address;
+        /* The first subscript selected the pointed-to array itself. */
+        *value = array_subscript_remainder(parent, bb, element_type,
+                                           element_ptr_level, shape, depth - 1,
+                                           address);
+        (*value)->is_const_qualified =
+            base->is_const_qualified || base->type->is_const_qualified;
     }
     opstack_push(*value);
     var_t *callable = *value;
@@ -1678,6 +1768,12 @@ static bool lower_pointee_array_dereference(var_t *source,
     element_type = source->type->pointee_array_element_type
                        ? source->type->pointee_array_element_type
                        : source->type;
+
+    /* For `row *p`, the row typedef is p's type, not the type of its elements.
+     * A row of pointers keeps it, as its element depth is counted there.
+     */
+    if (!element_type->ptr_level)
+        element_type = array_typedef_element_type(element_type);
     row = require_var(parent);
     row->type = element_type;
     fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
@@ -2266,18 +2362,26 @@ void lower_member_postfix(var_t *address,
                                      : "Cannot apply arrow operator to record",
                          next_token_loc());
         } else if (lex_accept(T_arrow)) {
-            /* Only a selected pointer-to-record member can be followed. */
-            if (depth < shape.rank || field->ptr_level != 1 ||
-                field->type->ptr_level || field->is_func ||
-                !is_record_type(field->type))
+            /* Only a selected pointer-to-record member can be followed. Its
+             * star may be spelled on the member or hidden in a pointer typedef
+             * such as `typedef struct node *link`.
+             */
+            type_t *pointee =
+                field->ptr_level
+                    ? field->type
+                    : pointee_type_from_pointer_typedef(field->type);
+
+            if (depth < shape.rank || effective_pointer_depth(field) != 1 ||
+                field->is_func || !is_record_type(pointee))
                 error_at("Invalid record member access", cur_token_loc());
-            var_t *pointer = require_typed_ptr_var(parent, field->type, 1);
+            var_t *pointer =
+                require_typed_ptr_var(parent, field->type, field->ptr_level);
 
             pointer->var_name = gen_name();
             add_insn(parent, *bb, OP_read, pointer, address, NULL, PTR_SIZE,
                      NULL);
             address = pointer;
-            record_type = field->type;
+            record_type = pointee;
             is_lvalue = true;
             record_const =
                 field->is_const_qualified || field->type->is_const_qualified;

@@ -10920,6 +10920,27 @@ int main(void) {
     return sizeof((int[2][3]){{1, 2, 3}, {4, 5, 6}});
 }
 EOF
+
+# Fewer subscripts than an array compound literal's rank select a row, which
+# sizeof measures whole and a following use decays to a pointer that steps by
+# the remaining bounds.
+try_ 0 << 'EOF'
+int main(void)
+{
+    int *row = (int[2][3]){{1, 2, 3}, {4, 5, 6}}[1];
+
+    if (sizeof((int[2][3]){{1}}[1]) != 3 * sizeof(int) ||
+        sizeof((int[2][2][3]){{{1}}}[1]) != 6 * sizeof(int))
+        return 1;
+    if (sizeof((int[2][3]){{1}}[1][2]) != sizeof(int) ||
+        sizeof((int[2][3]){{1}}) != 6 * sizeof(int))
+        return 2;
+    if (row[2] != 6 || *(int[2][3]){{1, 2, 3}, {4, 5, 6}}[1] != 4 ||
+        (int[2][3]){{1, 2, 3}, {4, 5, 6}}[1][2] != 6)
+        return 3;
+    return 0;
+}
+EOF
 try_ 7 << EOF
 typedef int matrix[2][2];
 int main(void) {
@@ -15899,6 +15920,61 @@ int main(void) {
     if (OFF(&q[i], m3) != sizeof m3[0] || OFF(&q[1][1], m3) != 36 ||
         OFF(&q[i][1] + 1, m3) != 48 || OFF(&q[1][1][2], m3) != 44)
         return 3;
+    return 0;
+}
+EOF
+
+# An inner subscript of a pointer to a multidimensional array selects a row too.
+# It decays to a pointer that steps by the remaining bounds, and it is never
+# loaded as though it were one element, whether the pointer is named directly,
+# reached through a typedef, a record member, an array slot or another pointer.
+try_ 0 << 'EOF'
+typedef int matrix[2][3];
+int m[2][3];
+int space[2][2][3];
+char *names[2][2] = {{"a", "b"}, {"c", "d"}};
+typedef int *slots[2][2];
+int k0 = 5, k1 = 6;
+slots pointers = {{&k0, &k1}, {&k1, &k0}};
+struct holder { int (*direct)[2][3]; matrix *named; } holder = {&m, &m};
+int main(void)
+{
+    matrix *p = &m;
+    int (*q)[2][3] = &m;
+    int (*deep)[2][2][3] = &space;
+    char *(*words)[2][2] = &names;
+    slots *slot = &pointers;
+    int (*row_slots[2])[2][3] = {&m, &m};
+    int (**indirect)[2][3] = &row_slots[1];
+    struct holder *hp = &holder;
+    int *row;
+
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 3; j++)
+            m[i][j] = i * 10 + j;
+    space[1][1][2] = 7;
+    if (p[0][1] != m[1] || q[0][1] != m[1] || p[0][1][2] != 12)
+        return 1;
+    row = p[0][1];
+    if (row[0] != 10 || p[0][1] - p[0][0] != 3 || *(p[0][1] + 1) != 11)
+        return 2;
+    if (deep[0][1][1] != space[1][1] || deep[0][1][1][2] != 7 ||
+        &p[0][1][2] != &m[1][2])
+        return 3;
+    if (words[0][1] != names[1] || words[0][1][0][0] != 'c' || *words[0][1][1] != 'd')
+        return 4;
+    if (slot[0][1] != pointers[1] || *slot[0][1][1] != 5)
+        return 5;
+    if (holder.direct[0][1] != m[1] || hp->named[0][1] != m[1] ||
+        holder.direct[0][1][2] != 12)
+        return 6;
+    if (row_slots[1][0][1] != m[1] || indirect[0][0][1] != m[1] ||
+        indirect[0][0][1][2] != 12)
+        return 7;
+    p[0][1][2] = 55;
+    p[0][1][1]++;
+    if (m[1][2] != 55 || m[1][1] != 12)
+        return 8;
     return 0;
 }
 EOF
@@ -27165,6 +27241,62 @@ struct pair make_pair(void) { struct pair value = {1, 2}; return value; }
 int main(void) { make_pair().left = 3; return 0; }
 EOF
 
+# A member of what a call returns is an lvalue: it may be assigned, compounded
+# and updated, whether it is reached through the returned pointer, through a
+# pointer member of that record, or through a subscript of the result.
+try_ 0 << 'EOF'
+struct pair { int x, y; };
+struct pair pairs[2] = {{1, 2}, {3, 4}};
+struct pair *first(void) { return pairs; }
+struct node;
+typedef struct node *link;
+struct node { int v; link next; };
+struct node tail = {2, 0};
+struct node head = {1, &tail};
+struct node *list(void) { return &head; }
+typedef struct pair duo[2];
+duo *duos(void) { return &pairs; }
+struct holder { int slots[3]; };
+struct holder holder = {{1, 2, 3}};
+struct holder *held(void) { return &holder; }
+struct pair *(*callback)(void) = first;
+int main(void)
+{
+    int value;
+
+    first()->y = 8;
+    first()->y += 1;
+    (*first()).x = 5;
+    if (pairs[0].y != 9 || pairs[0].x != 5)
+        return 1;
+    list()->next->v = 1;
+    list()->next->v += 4;
+    if (tail.v != 5)
+        return 2;
+    duos()[0][1].x = 7;
+    held()->slots[1] = 9;
+    callback()->x = 6;
+    if (pairs[1].x != 7 || holder.slots[1] != 9 || pairs[0].x != 6)
+        return 3;
+    value = (first()->y = 12);
+    first()->y++;
+    ++first()->y;
+    if (value != 12 || pairs[0].y != 14)
+        return 4;
+    return 0;
+}
+EOF
+try_compile_error_message "Assignment requires a modifiable lvalue" << 'EOF'
+struct holder { int slots[3]; };
+struct holder *held(void);
+int main(void) { held()->slots = 0; return 0; }
+EOF
+try_compile_error_message "assignment of read-only location" << 'EOF'
+struct pair { const int x; int y; };
+struct pair *first(void);
+int main(void) { first()->x = 1; return 0; }
+EOF
+
 # A function-pointer member of a call result, or of a record reached through a
 # dereference, is called like any other function pointer.
 try_ 17 << EOF
@@ -27181,6 +27313,57 @@ int main(void) {
     return make_ops().apply(3) + (*q).apply(4) + (make_ops()).apply(1) +
            make_ops().bias;
 }
+EOF
+
+# A pointer member whose star is hidden in a typedef is followed by -> after a
+# call result or a dereferenced value too, and keeps the pointee's qualifier.
+try_ 0 << 'EOF'
+struct node;
+typedef struct node *link;
+struct node { int v; link next; };
+typedef struct { char c; short s; } pair;
+typedef pair *pair_ptr;
+struct holder { char tag; pair_ptr p; const pair_ptr q; pair_ptr ps[2]; };
+struct node n3 = {3, 0};
+struct node n2 = {2, &n3};
+struct node n1 = {1, &n2};
+pair p0 = {10, 20};
+pair p1 = {30, 40};
+struct holder h = {'x', &p0, &p1, {&p0, &p1}};
+struct node *head(void) { return &n1; }
+struct holder *holder(void) { return &h; }
+struct holder holder_value(void) { return h; }
+int main(void)
+{
+    struct node *p = &n1;
+    if (head()->next->v != 2 || head()->next->next->v != 3 || p->next->next->v != 3)
+        return 1;
+    if ((*head()->next).v != 2 || (*p).next->v != 2 || head()->next->next->next)
+        return 2;
+    if (holder()->p->s != 20 || holder_value().q->c != 30 || holder()->ps[1]->s != 40)
+        return 3;
+    ++head()->next->v;
+    holder()->q->s++;
+    if (n2.v != 3 || p1.s != 41 || sizeof(head()->next->v) != sizeof(int))
+        return 4;
+    return 0;
+}
+EOF
+try_compile_error_message "assignment of read-only location" << 'EOF'
+struct node { int v; };
+typedef const struct node *const_link;
+struct holder { const_link p; };
+struct holder h;
+struct holder *holder(void) { return &h; }
+int main(void) { ++holder()->p->v; return 0; }
+EOF
+try_compile_error_message "Invalid record member access" << 'EOF'
+struct node { int v; };
+typedef struct node *link;
+struct holder { link *pp; };
+struct holder h;
+struct holder *holder(void) { return &h; }
+int main(void) { return holder()->pp->v; }
 EOF
 try_compile_error_message "Unknown struct or union member" << EOF
 struct pair { int left; int right; };
@@ -27249,6 +27432,30 @@ row *pointers(void) {
     return &value;
 }
 int main(void) { return pointers()[0][1] == &second ? 4 : 0; }
+EOF
+
+# A call returning a pointer to a row of pointers keeps the element depth where
+# the typedef spells it. Dereferencing the result yields that row, whose
+# elements are pointers to read, not rows to select again.
+try_ 0 << 'EOF'
+typedef int *pointer_row[2];
+static int first = 3, second = 4;
+pointer_row values = {&first, &second};
+pointer_row *rows(void) { return &values; }
+int main(void)
+{
+    int **loaded = *rows();
+    if (*(*rows())[1] != 4 || (*rows())[0] != &first)
+        return 1;
+    if (*loaded[1] != 4 || sizeof((*rows())[1]) != sizeof(int *))
+        return 2;
+    if (sizeof(*rows()) != 2 * sizeof(int *) || *rows()[0][1] != 4)
+        return 3;
+    (*rows())[1] = &first;
+    if (*values[1] != 3)
+        return 4;
+    return 0;
+}
 EOF
 try_compile_error_message "Expected a global object or function after '&'" << EOF
 typedef int *row[2];
@@ -27368,6 +27575,100 @@ row *callbacks(void) {
     return &callback_storage;
 }
 int main(void) { return callbacks()[0][1](4); }
+EOF
+
+# Fewer subscripts on a call returning a pointer to an array leave an array, not
+# one scalar: it keeps its remaining bounds for sizeof, for its own subscripts
+# and for pointer arithmetic, and so does a dereferenced call result.
+try_ 0 << 'EOF'
+typedef int grid[2][3];
+typedef int cube[2][2][3];
+typedef int *pointer_row[2];
+grid *grids(void)
+{
+    static grid value = {{1, 2, 3}, {4, 5, 6}};
+    return &value;
+}
+cube *cubes(void)
+{
+    static cube value;
+    value[1][1][2] = 9;
+    value[1][0][1] = 7;
+    return &value;
+}
+static int first = 3, second = 4;
+pointer_row *pointers(void)
+{
+    static pointer_row value = {&first, &second};
+    return &value;
+}
+struct slots { int *a[2]; } holder;
+struct slots *slots(void) { return &holder; }
+int main(void)
+{
+    int *row = grids()[0][1];
+    int (*rows)[3] = grids()[0];
+    int (*plane)[3] = cubes()[0][1];
+    int **pp = pointers()[0];
+    if (row[2] != 6 || rows[1][0] != 4 || plane[1][2] != 9)
+        return 1;
+    if (*grids()[0][1] != 4 || (*grids()[0])[2] != 3 || *(grids()[0] + 1)[0] != 4)
+        return 2;
+    if (grids()[0] + 1 - grids()[0] != 1 || *pp[1] != 4 || cubes()[0][1][0][1] != 7)
+        return 3;
+    if (sizeof(grids()[0]) != 6 * sizeof(int) ||
+        sizeof(grids()[0][1]) != 3 * sizeof(int) ||
+        sizeof(grids()[0][1][2]) != sizeof(int) || sizeof(*grids()[0][1]) != sizeof(int))
+        return 4;
+    if (sizeof((*grids())[1]) != 3 * sizeof(int) ||
+        sizeof((*grids())[1][2]) != sizeof(int) || (*grids())[1][2] != 6)
+        return 5;
+    if (sizeof(cubes()[0][1]) != 6 * sizeof(int) ||
+        sizeof(pointers()[0]) != 2 * sizeof(int *) ||
+        sizeof(slots()->a) != 2 * sizeof(int *))
+        return 6;
+    return 0;
+}
+EOF
+
+# A record element of a call result's array is copied as a record, never loaded
+# or stored as one scalar word, whether it is read, passed or assigned.
+try_ 0 << 'EOF'
+struct triple { char c; int v; short s; };
+typedef struct triple trio[2];
+struct triple store[2] = {{1, 2, 3}, {4, 5, 6}};
+trio *trios(void) { return &store; }
+int sum(struct triple t) { return t.c * 100 + t.v * 10 + t.s; }
+int main(void)
+{
+    struct triple copy = trios()[0][1];
+    struct triple next = {7, 8, 9};
+    if (copy.c != 4 || copy.v != 5 || copy.s != 6)
+        return 1;
+    if (sum(trios()[0][0]) != 123 || trios()[0][1].s != 6)
+        return 2;
+    copy = trios()[0][0];
+    if (copy.c != 1 || copy.s != 3)
+        return 3;
+    trios()[0][1] = next;
+    if (store[1].c != 7 || store[1].v != 8 || store[1].s != 9)
+        return 4;
+    if (sizeof(trios()[0][1]) != sizeof(struct triple))
+        return 5;
+    return 0;
+}
+EOF
+try_compile_error << 'EOF'
+struct pair { int x, y; };
+typedef struct pair duo[2];
+duo *duos(void);
+int main(void) { duos()[0][1]++; return 0; }
+EOF
+try_compile_error << 'EOF'
+struct pair { int x, y; };
+typedef struct pair duo[2];
+duo *duos(void);
+int main(void) { duos()[0][1] = 1; return 0; }
 EOF
 
 # Normal case

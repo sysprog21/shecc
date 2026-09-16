@@ -396,10 +396,26 @@ static void lower_value_subscript(block_t *parent, basic_block_t **bb)
             subscript_depth++;
         } while (subscript_depth < array_dims && lex_accept(T_open_square));
 
-        if (subscript_depth < array_dims) {
+        if (subscript_depth < array_dims && !element_signature) {
+            opstack_push(array_subscript_remainder(
+                parent, bb, base->type, base->ptr_level,
+                fixed_array_shape_from_var(base), subscript_depth, address));
+        } else if (subscript_depth < array_dims) {
             opstack_push(address);
         } else {
-            vd = require_typed_ptr_var(parent, base->type, base->ptr_level);
+            /* A row of a pointer typedef array, `typedef int *row[2]`, keeps
+             * that alias as its type. Its element is one of those pointers, not
+             * another whole row.
+             */
+            type_t *element_type = base->type;
+            int element_ptr_level = base->ptr_level;
+
+            if (!element_signature && element_type->ptr_level &&
+                element_type->array_size && element_type->array_element_type) {
+                element_ptr_level += element_type->array_element_ptr_level;
+                element_type = element_type->array_element_type;
+            }
+            vd = require_typed_ptr_var(parent, element_type, element_ptr_level);
             vd->var_name = gen_name();
             vd->is_const_qualified = base->is_const_qualified;
             vd->pointer_const_mask = base->pointer_const_mask;
@@ -680,9 +696,13 @@ static void lower_array_literal_subscripts(block_t *parent,
 
     if (subscript_depth < tn->array_dims) {
         /* A partially selected row decays to its first element. It remains a
-         * pointer value, not a scalar read.
+         * pointer value, not a scalar read, and keeps the bounds the subscripts
+         * left for sizeof and for its own later subscripts.
          */
-        opstack_push(address);
+        opstack_push(array_subscript_remainder(
+            parent, bb, compound_var->type, compound_var->ptr_level,
+            fixed_array_shape_from_var(compound_var), subscript_depth,
+            address));
     } else {
         opcode_t compound_op = OP_generic;
         if (lex_accept(T_assign) || accept_compound_assign_op(&compound_op)) {
@@ -3960,6 +3980,32 @@ void read_lvalue(lvalue_t *lvalue,
                 vd->is_const_qualified = var->is_const_qualified;
                 lvalue->value_ptr_level = indexed_ptr_level;
                 array_row = vd;
+            } else if (loaded_scalar_row || (!is_array_declarator(var) &&
+                                             is_pointee_array_pointer(var))) {
+                /* So do the later subscripts of a pointer to an array that
+                 * leave some of its bounds: `p[0][1]` of `int (*p)[2][3]` is a
+                 * row of three, not an element to load. A pointer loaded from a
+                 * slot, as `pp[0]` is for `int (**pp)[2][3]`, counts its
+                 * subscripts from there.
+                 */
+                var_t *row_source = loaded_scalar_row ? loaded_scalar_row : var;
+                int row_depth = subscript_depth - !!loaded_scalar_row;
+
+                row_shape = fixed_array_shape_from_pointee_var(row_source);
+                if (row_depth > 0 && row_depth < row_shape.rank) {
+                    for (int i = 0; i <= row_depth; i++)
+                        fixed_array_shape_drop_outer(&row_shape);
+                    vd->ptr_level =
+                        row_source->pointee_array_element_ptr_level + 1;
+                    if (row_shape.rank) {
+                        fixed_array_shape_to_pointee_var(vd, &row_shape);
+                        vd->pointee_array_element_ptr_level =
+                            row_source->pointee_array_element_ptr_level;
+                    }
+                    vd->is_const_qualified = var->is_const_qualified;
+                    lvalue->value_ptr_level = indexed_ptr_level;
+                    array_row = vd;
+                }
             }
 
             /* A following subscript loads only when this selected element is
@@ -5223,6 +5269,58 @@ static bool grouped_postfix_lvalue_follows(void)
     return true;
 }
 
+/* Whether the next token assigns to what precedes it. */
+static bool assignment_operator_follows(void)
+{
+    token_t *token = cur_token->next;
+
+    if (!token)
+        return false;
+    switch (token->kind) {
+    case T_assign:
+    case T_pluseq:
+    case T_minuseq:
+    case T_asteriskeq:
+    case T_divideeq:
+    case T_modeq:
+    case T_lshifteq:
+    case T_rshifteq:
+    case T_xoreq:
+    case T_oreq:
+    case T_andeq:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* Whether the assignment ahead has a call result as the root of its left
+ * operand, `one()->y = v` or `rows()[0][1].x = v`. No declaration describes
+ * such an operand, so the lvalue parser cannot follow it, but the postfix
+ * lowering records the address of what it reaches.
+ */
+static bool call_postfix_lvalue_follows(void)
+{
+    token_t *token = cur_token->next;
+    int depth = 0;
+
+    if (!token || token->kind != T_identifier)
+        return false;
+    token = token->next;
+    if (!token || token->kind != T_open_bracket)
+        return false;
+    for (; token; token = token->next) {
+        if (token->kind == T_open_bracket)
+            depth++;
+        else if (token->kind == T_close_bracket && !--depth)
+            break;
+    }
+    if (!token || !(token = token->next))
+        return false;
+    return token->kind == T_dot || token->kind == T_arrow ||
+           token->kind == T_open_square;
+}
+
 /* Assign through a left operand that the expression parser lowers as a value,
  * using the address that value records.
  */
@@ -5238,6 +5336,14 @@ static void read_grouped_postfix_assignment(block_t *parent, basic_block_t **bb)
 
     read_expr_operand(parent, bb);
     target = opstack_pop();
+
+    /* A subscript of a call result owns the assignment that follows it, so the
+     * operand above has already stored the value this expression has.
+     */
+    if (!assignment_operator_follows()) {
+        opstack_push(target);
+        return;
+    }
     if (!target->is_compound_literal_reference || target->array_size ||
         target->is_func)
         error_at("Assignment requires a modifiable lvalue", cur_token_loc());
@@ -5384,7 +5490,7 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
     if ((var && is_swapped_subscript_base(var)) ||
         (lex_peek(T_numeric, NULL) && cur_token->next->next &&
          cur_token->next->next->kind == T_open_square) ||
-        grouped_postfix_lvalue_follows()) {
+        grouped_postfix_lvalue_follows() || call_postfix_lvalue_follows()) {
         read_grouped_postfix_assignment(parent, bb);
         return true;
     }
