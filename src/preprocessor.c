@@ -585,9 +585,11 @@ void install_stdarg_header(void)
     hashmap_put(MACROS, macro->name, macro);
 }
 
-/* An angle header is lexed as ordinary preprocessing tokens. Recover its raw
+/* An angle header is lexed as ordinary preprocessing tokens. Recover its
  * spelling from the immutable source buffer so dotted and slash-separated names
- * do not need special punctuation reconstruction here.
+ * do not need special punctuation reconstruction here. That buffer holds the
+ * physical bytes, so read it through translation phases 1 and 2: a trigraph
+ * stands for its character and a backslash-newline joins the name.
  */
 bool resolve_angle_include(token_t *open,
                            token_t *close,
@@ -595,13 +597,19 @@ bool resolve_angle_include(token_t *open,
                            int resolved_size)
 {
     strbuf_t *source = get_file_buf(open->location.physical_filename);
-    int start = open->location.pos + open->location.len;
-    int len = close->location.pos - start;
+    int pos = open->location.pos + open->location.len;
+    int end = close->location.pos;
+    int len = 0;
     char name[MAX_LINE_LEN];
 
-    if (len <= 0 || len >= MAX_LINE_LEN)
+    while ((pos = skip_splices(source, pos)) < end) {
+        if (len >= MAX_LINE_LEN - 1)
+            error_at("Invalid #include <...> header name", &open->location);
+        name[len++] = source_char_at(source, pos);
+        pos += source_char_width(source, pos);
+    }
+    if (len <= 0)
         error_at("Invalid #include <...> header name", &open->location);
-    memcpy(name, source->elements + start, len);
     name[len] = '\0';
     for (int i = 0; i < len; i++)
         if (name[i] == ' ' || name[i] == '\t')
@@ -802,6 +810,12 @@ cond_incl_t *push_cond(cond_incl_t *ci, token_t *tk, bool included)
  */
 typedef struct preprocess_ctx {
     hide_set_t *hide_set;
+
+    /* The hide set of the invocation whose arguments macro_args holds. An
+     * argument is replaced before it is substituted (C99 6.10.3.1), outside the
+     * macro it is an argument to, so "A(A(1))" expands both.
+     */
+    hide_set_t *arg_hide_set;
     hashmap_t *macro_args;
     token_t *expanded_from;
     token_t *end_of_token; /* end of token stream of current context */
@@ -835,6 +849,7 @@ token_t *pp_expand_line_operands(token_t *directive)
     tail->next = new_token(T_eof, &raw->location, 0);
     ctx.expanded_from = directive;
     ctx.hide_set = NULL;
+    ctx.arg_hide_set = NULL;
     ctx.macro_args = NULL;
     ctx.trim_eof = false;
     return pp_preprocess_internal(head.next, &ctx);
@@ -853,7 +868,21 @@ void pp_read_line_operands(token_t *directive,
     if (!pp_lex_peek_token(cursor, T_numeric, true))
         error_at("#line requires a decimal line number", &directive->location);
     cursor = pp_lex_next_token(cursor, true);
-    *requested_line = parse_numeric_constant(cursor->literal);
+
+    /* C99 6.10.4 takes a digit sequence, which is decimal even with a leading
+     * zero and admits neither a prefix nor a suffix, naming a line from 1 to
+     * 2147483647.
+     */
+    *requested_line = 0;
+    for (int i = 0; cursor->literal[i]; i++) {
+        int digit = cursor->literal[i] - '0';
+
+        if (digit < 0 || digit > 9)
+            error_at("#line requires a decimal line number", &cursor->location);
+        if (*requested_line > (2147483647 - digit) / 10)
+            error_at("#line number is out of range", &cursor->location);
+        *requested_line = *requested_line * 10 + digit;
+    }
     if (*requested_line <= 0)
         error_at("#line number must be positive", &cursor->location);
     if (pp_lex_peek_token(cursor, T_string, true)) {
@@ -1383,6 +1412,7 @@ token_t *pp_expand_function_macro_in_constant_expr(token_t *before)
 
     ctx.expanded_from = first;
     ctx.hide_set = NULL;
+    ctx.arg_hide_set = NULL;
     ctx.macro_args = NULL;
     ctx.trim_eof = true;
     token_t *expanded = pp_preprocess_internal(head.next, &ctx);
@@ -1455,9 +1485,13 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
         else if (!wide_character_constant(tk->literal, &character))
             error_at("Invalid wide character escape sequence", &tk->location);
 
+        /* A character constant has type int, so a typed enumerator or case
+         * label gives it the int width a numeric operand gets.
+         */
         val->lo = character;
         val->hi = character < 0 ? ~0U : 0;
         val->is_unsigned = false;
+        val->enum_width = 32;
         return tk;
     }
 
@@ -1521,6 +1555,7 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
                 preprocess_ctx_t ctx;
                 ctx.expanded_from = tk;
                 ctx.hide_set = NULL;
+                ctx.arg_hide_set = NULL;
                 ctx.macro_args = NULL;
                 ctx.trim_eof = false;
                 expanded_tk = pp_preprocess_internal(macro->replacement, &ctx);
@@ -2176,6 +2211,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             expansion_ctx.expanded_from =
                 ctx->expanded_from ? ctx->expanded_from : tk;
             expansion_ctx.macro_args = ctx->macro_args;
+            expansion_ctx.arg_hide_set = ctx->arg_hide_set;
             expansion_ctx.trim_eof = true;
 
             token_t *macro_arg_replacement = NULL;
@@ -2202,7 +2238,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 if (macro_arg_replacement) {
                     /* Recursively expand the argument to handle nested macros
                      */
-                    expansion_ctx.hide_set = ctx->hide_set;
+                    expansion_ctx.hide_set = ctx->arg_hide_set;
                     expansion_ctx.macro_args =
                         NULL; /* Don't take account of macro arguments, this
                                  might run into infinite loop
@@ -2264,6 +2300,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                  */
                 expansion_ctx.hide_set =
                     hide_set_union(ctx->hide_set, new_hide_set(tk->literal));
+                expansion_ctx.arg_hide_set = ctx->hide_set;
                 /* Create parameter mapping table for this macro invocation */
                 expansion_ctx.macro_args = hashmap_create(8);
 
@@ -2293,7 +2330,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                         if (arg_tk) {
                             preprocess_ctx_t arg_expansion_ctx;
                             arg_expansion_ctx.expanded_from = tk->next;
-                            arg_expansion_ctx.hide_set = expansion_ctx.hide_set;
+                            arg_expansion_ctx.hide_set = ctx->arg_hide_set;
+                            arg_expansion_ctx.arg_hide_set = NULL;
                             arg_expansion_ctx.macro_args = NULL;
                             arg_tk = pp_preprocess_internal(arg_tk,
                                                             &arg_expansion_ctx);
@@ -2457,6 +2495,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             bool angle_form = false;
             preprocess_ctx_t inclusion_ctx;
             inclusion_ctx.hide_set = ctx->hide_set;
+            inclusion_ctx.arg_hide_set = NULL;
             inclusion_ctx.expanded_from = NULL;
             inclusion_ctx.macro_args = NULL;
             inclusion_ctx.trim_eof = true;
@@ -2947,6 +2986,7 @@ token_t *preprocess(token_t *tk)
 {
     preprocess_ctx_t ctx;
     ctx.hide_set = NULL;
+    ctx.arg_hide_set = NULL;
     ctx.expanded_from = NULL;
     ctx.macro_args = NULL;
     ctx.trim_eof = false;

@@ -22012,6 +22012,22 @@ enum typed_sizeof_values { first = sizeof(int) + 1U,
                            second = 0 ? sizeof(int) : 1U };
 int main(void) { return first + second - 6; }
 EOF
+
+# A character constant is an int operand of the typed evaluator, so it can be
+# shifted and extended at int width like a number.
+try_ 5 << EOF
+enum typed_char_values { first = 'a' << 1U, second = ('x' << 2) + 0U,
+                         third = 'b' >> 1U, fourth = -'c' >> 1U };
+int main(void) {
+    int hit = 0;
+    switch (194) {
+    case 'a' << 1U:
+        hit = 1;
+    }
+    return (first == 194) + (second == 480) + (third == 49) +
+           (fourth == -50) + hit;
+}
+EOF
 try_ 1 << EOF
 enum conditional_wide_rank { first = 1 ? -1LL : 1U,
                              second = first + 1U };
@@ -22578,6 +22594,16 @@ try_compile_error << EOF
 #define SECOND_HEADER FIRST_HEADER
 #include FIRST_HEADER
 int main(void) { return 0; }
+EOF
+
+# An angle header name is read through translation phases 1 and 2, so a
+# backslash-newline or a trigraph splice inside it joins the name.
+try_ 2 << 'EOF'
+#include <std\
+bool.h>
+#include <stdbool.h??/
+>
+int main(void) { bool yes = true; return yes + (int) true; }
 EOF
 try_compile_error_message "unsupported platform configuration" << EOF
 #error unsupported platform configuration
@@ -23578,6 +23604,28 @@ try_compile_error << EOF
 int main(void) { return 0; }
 EOF
 
+# The line number is a decimal digit sequence: a leading zero is not octal, and
+# a prefix, a suffix or a value past 2147483647 is rejected.
+try_ 1 << EOF
+#line 010
+int main(void) { return __LINE__ == 10; }
+EOF
+
+try_compile_error << EOF
+#line 0x10
+int main(void) { return 0; }
+EOF
+
+try_compile_error << EOF
+#line 10u
+int main(void) { return 0; }
+EOF
+
+try_compile_error << EOF
+#line 4294967297
+int main(void) { return 0; }
+EOF
+
 # C99 fixes the spelling and extent of these translation-time string literals.
 # Their actual value is supplied once at configuration time so all bootstrap
 # stages use precisely the same expansion.
@@ -23613,6 +23661,27 @@ try_ 9 << EOF
 #define TARGET target
 int target(void) { return 9; }
 int main(void) { return TARGET(); }
+EOF
+
+# An argument is macro-replaced before it is substituted (C99 6.10.3.1), so a
+# macro used in its own argument expands too, directly or through another macro,
+# while the rescanned replacement still does not recurse.
+try_output 0 "3 3 5 15 9 12 ((((1) + 1)) + 1)" << EOF
+#define A(x) ((x) + 1)
+#define B(y) A(y)
+#define C(a, b) A(a) * A(b)
+#define SELF(x) SELF
+#define REC(x) REC(x)
+#define STR(x) #x
+#define XSTR(x) STR(x)
+int SELF = 9;
+int REC(int v) { return v * 2; }
+int main()
+{
+    printf("%d %d %d %d %d %d %s\n", A(A(1)), B(A(1)), A(B(A(2))),
+           C(A(1), C(1, A(0))), SELF(SELF(0)), REC(REC(3)), XSTR(A(A(1))));
+    return 0;
+}
 EOF
 
 # stringification: '#' spells the argument as it was written
