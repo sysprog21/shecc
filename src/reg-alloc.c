@@ -2574,6 +2574,40 @@ void fill_unary_ph2_ir(ph2_ir_t *ir, insn_t *insn, int src0, int dest)
         ir->size_bytes = insn->rs1->type->size;
 }
 
+/* Narrow a conversion result in @dest again by its own type.
+ *
+ * A byte or short sits in its register extended by its own signedness, which a
+ * later widening or comparison relies on. OP_cast is a move and OP_sign_ext
+ * extends by the source alone, so a conversion that changes signedness broke
+ * that: a signed char -17 became unsigned short 0xffffffef, and cast to
+ * unsigned char it kept every high bit. A signed destination only needs this
+ * when it is no wider than its unsigned source; any other value already fits.
+ * The 64-bit x86 backend redoes the extension itself, the others do not.
+ */
+void narrow_conversion_result(basic_block_t *bb, insn_t *insn, int dest)
+{
+    var_t *rd = insn->rd, *rs = insn->rs1;
+
+    if (!rd || !rs || rd->ptr_level || rd->is_func || !rd->type || !rs->type ||
+        is_record_type(rd->type) || is_record_type(rs->type))
+        return;
+
+    int size = rd->type->size;
+    bool rd_unsigned = is_unsigned_scalar(rd);
+
+    if ((size != 1 && size != 2) || rd_unsigned == is_unsigned_scalar(rs))
+        return;
+    if (!rd_unsigned && (rs->ptr_level || rs->type->size < size))
+        return;
+
+    ph2_ir_t *ir = bb_add_ph2_ir(bb, OP_trunc);
+    ir->src0 = dest;
+    ir->src1 = size;
+    ir->dest = dest;
+    ir->is_unsigned = rd_unsigned;
+    ir->size_bytes = size;
+}
+
 /* Place one global initializer, which has no basic block of its own. */
 void reg_alloc_global(insn_t *global_insn)
 {
@@ -2904,6 +2938,8 @@ void reg_alloc_global(insn_t *global_insn)
         ir->dest_hi = vreg_get_phys_hi(global_insn->rd);
         ir->is_unsigned = is_unsigned_scalar(global_insn->rd);
         ir->src0_is_unsigned = is_unsigned_scalar(global_insn->rs1);
+        if (global_insn->opcode != OP_trunc)
+            narrow_conversion_result(GLOBAL_FUNC->bbs, global_insn, dest);
         break;
     default:
         printf("Unsupported global operation: %d\n", global_insn->opcode);
@@ -3289,7 +3325,15 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src1 = taken;
             ir->src2 = other;
             ir->dest = dest;
-            ir->size_bytes = var_slot_size(insn->rd);
+
+            /* As for OP_branch, the recorded width is the condition's: a select
+             * tests that value, and the arms are moved whole. An int condition
+             * is decided by its low word alone, whatever the width of the
+             * result.
+             */
+            ir->size_bytes =
+                insn->rs2->ptr_level ? PTR_SIZE : insn->rs2->type->size;
+            ir->src0_is_pointer = is_address_like(insn->rs2);
             ir->is_pointer = is_pointer_like(insn->rd);
             break;
         }
@@ -3609,6 +3653,8 @@ void reg_alloc_bb(func_t *func, basic_block_t *bb)
             ir->src0_is_unsigned = is_unsigned_scalar(insn->rs1);
             ir->size_bytes =
                 insn->rd->ptr_level ? PTR_SIZE : insn->rd->type->size;
+            if (insn->opcode != OP_trunc)
+                narrow_conversion_result(bb, insn, dest);
             break;
         default:
             printf("Unknown opcode\n");

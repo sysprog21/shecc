@@ -22,6 +22,28 @@ void wrap_to_int(int rd, bool is_ptr)
     emit_narrow_move(rd, rd, 4, !is_ptr);
 }
 
+/* Whether a value of @size_bytes, or a pointer when @is_pointer, occupies the
+ * whole register.
+ *
+ * A narrow value means only its low bytes here. Arithmetic runs in 64-bit
+ * registers and leaves whatever it likes above bit 31: an unsigned int
+ * subtraction leaves a borrow there, and ~x on a zero-extended unsigned leaves
+ * ones. Comparisons already respect that by taking their width from the
+ * operation, and the tests that ask whether a value is zero have to as well.
+ */
+bool test_is_wide(int size_bytes, bool is_pointer)
+{
+    return is_pointer || size_bytes > 4;
+}
+
+/* TEST @reg against itself at the width @wide selects. */
+void emit_test_self(bool wide, int reg)
+{
+    emit_rex(wide, reg, reg);
+    emit_byte(0x85);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(reg), reg_low3(reg)));
+}
+
 /* Materialise a condition as 0 or 1 in @rd, given a SETcc opcode byte.
  *
  * SETcc lands in R11B and is then zero-extended into rd. R11 is outside
@@ -1860,8 +1882,15 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
          * the save/restore around it: SAR r64, imm8 is one instruction.
          */
         if (src1_const_known && src1_const >= 0 && src1_const < 64) {
+            /* A right shift is the one reader of the bits above 31 that a
+             * narrow value leaves unspecified, so it puts its source in range
+             * first: zero-extended for an unsigned one, sign-extended for a
+             * signed one, which SAR then replicates correctly.
+             */
             if (ph2_ir->src0_is_unsigned)
                 emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
+            else if (ph2_ir->size_bytes <= 4 && !ph2_ir->src0_is_pointer)
+                emit_narrow_move(rd, rs1, 4, true);
             else
                 emit_mov_reg(rd, rs1);
             emit_shift_imm(
@@ -1885,14 +1914,20 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, 1, 2));
 
-        /* As in the literal-count form above, an unsigned int is zero-extended
-         * first: an unsigned int subtraction leaves a borrow in the upper half,
-         * which SHR would bring down into the result.
+        /* As in the literal-count form above, the source is put in range first:
+         * an unsigned int subtraction leaves a borrow in the upper half, which
+         * SHR would bring down into the result, and a signed int one leaves a
+         * borrow SAR would.
          */
-        emit_rex(!(ph2_ir->src0_is_unsigned && ph2_ir->size_bytes <= 4), rs1,
-                 11); /* MOV r11{d}, rs1{d} */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
+        if (!ph2_ir->src0_is_unsigned && ph2_ir->size_bytes <= 4 &&
+            !ph2_ir->src0_is_pointer) {
+            emit_narrow_move(11, rs1, 4, true); /* MOVSXD r11, rs1d */
+        } else {
+            emit_rex(!(ph2_ir->src0_is_unsigned && ph2_ir->size_bytes <= 4),
+                     rs1, 11); /* MOV r11{d}, rs1{d} */
+            emit_byte(0x89);
+            emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), 3));
+        }
         emit_rex(1, rs2, -1); /* MOV rcx, rs2 */
         emit_byte(0x89);
         emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), 1));
@@ -2017,10 +2052,11 @@ void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
             return;
         }
 
-        /* TEST rs1, rs1 */
-        emit_rex(1, rs1, rs1);
-        emit_byte(0x85);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rs1)));
+        /* TEST rs1, rs1, over the width the branch records for its condition:
+         * an int one is decided by its low word alone.
+         */
+        emit_test_self(
+            test_is_wide(ph2_ir->size_bytes, ph2_ir->src0_is_pointer), rs1);
 
         /* Emit both edges explicitly: JNZ then_bb, then JMP else_bb.
          *
@@ -2241,11 +2277,11 @@ void emit_memory(ph2_ir_t *ph2_ir, int rd, int rs1)
          * condition's own register: the condition dies at this instruction, so
          * the allocator is free to hand its register to the destination.
          * Reading the flags before overwriting it costs nothing -- MOV leaves
-         * them alone -- and testing after would have tested the wrong value.
+         * them alone -- and testing after would have tested the wrong value. As
+         * for OP_branch, size_bytes is the width of the condition.
          */
-        emit_rex(1, cond, cond); /* TEST cond, cond */
-        emit_byte(0x85);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(cond), reg_low3(cond)));
+        emit_test_self(
+            test_is_wide(ph2_ir->size_bytes, ph2_ir->src0_is_pointer), cond);
 
         /* When the destination already holds the value the test selects,
          * copying the other over it would destroy it; keep what is there and
@@ -2726,9 +2762,8 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
          * The source is rs1, which is not always the same register as rd -- for
          * a global it never is.
          */
-        emit_rex(1, rs1, rs1);
-        emit_byte(0x85);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(rs1), reg_low3(rs1)));
+        emit_test_self(
+            test_is_wide(ph2_ir->size_bytes, ph2_ir->src0_is_pointer), rs1);
 
         emit_setcc_bool(rd, 0x94); /* SETE */
     }
@@ -3053,13 +3088,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     if (ph2_ir->op == OP_bit_and && emit_next_ir &&
         emit_next_ir->op == OP_branch && emit_next_ir->src0 == ph2_ir->dest &&
         emit_ir_index >= 0 && reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
+        bool wide = test_is_wide(ph2_ir->size_bytes, ph2_ir->is_pointer);
+
         if (src1_const_known) {
-            emit_rex(1, 0, rs1);
+            emit_rex(wide, 0, rs1);
             emit_byte(0xF7); /* TEST rs1, imm32 */
             emit_byte(modrm(MOD_DIRECT, 0, reg_low3(rs1)));
             emit_dword(src1_const);
         } else {
-            emit_rex(1, rs2, rs1);
+            emit_rex(wide, rs2, rs1);
             emit_byte(0x85); /* TEST rs1, rs2 */
             emit_byte(modrm(MOD_DIRECT, reg_low3(rs2), reg_low3(rs1)));
         }

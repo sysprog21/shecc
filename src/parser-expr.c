@@ -2674,7 +2674,14 @@ type_t *integer_binary_result_type(opcode_t op,
 
 var_t *integer_promote_operand(block_t *parent, basic_block_t **bb, var_t *var)
 {
-    if (!var || var->ptr_level || !var->type || var->type->size >= TY_int->size)
+    /* An array operand carries its element type, so a char array would look
+     * like a char here and be sign-extended from the low byte of its address.
+     * The value is an address, which C99 6.3.2.1p3 converts to a pointer to the
+     * first element rather than promoting, so leave it alone as for a pointer.
+     */
+    if (is_pointer_like_value(var))
+        return var;
+    if (!var || !var->type || var->type->size >= TY_int->size)
         return var;
     return promote_unchecked(parent, bb, var, TY_int, 0);
 }
@@ -3085,6 +3092,13 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
                 vd->type = result_type;
                 vd->is_const = true;
                 vd->init_val = result;
+
+                /* The high word is the int result extended by its type, as a
+                 * literal or a folded negation keeps it: a cast to long long
+                 * copies it, and "(long long) (0 - 42)" came out positive.
+                 */
+                vd->init_val_hi =
+                    result < 0 && !result_type->is_unsigned ? -1 : 0;
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0,
                          NULL);

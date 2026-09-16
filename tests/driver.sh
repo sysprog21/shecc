@@ -2803,6 +2803,51 @@ int main(void) {
     return (byte == 0U) + (half == 0U);
 }
 EOF
+
+# An int-width result is zero when its low word is, whatever an LP64 backend
+# leaves above it, so a truth test, a ternary, a ! and an if all agree.
+try_ 0 << EOF
+unsigned uid(unsigned x) { return x; }
+int iid(int x) { return x; }
+int main(void) {
+    unsigned u = uid(0xffffffffU);
+    unsigned one = uid(1U);
+    unsigned top = uid(0x80000000U);
+    int s = iid(-1);
+    int fails = 0;
+    if (~u)
+        fails = fails + 1;
+    if ((~u) ? 1 : 0)
+        fails = fails + 2;
+    if (!(~u) != 1)
+        fails = fails + 4;
+    if (u + one)
+        fails = fails + 8;
+    if (top - top)
+        fails = fails + 16;
+    if (top * uid(2U))
+        fails = fails + 32;
+    if (top << uid(1U))
+        fails = fails + 64;
+    if ((~u) & u)
+        fails = fails + 128;
+    if ((~u) | (u + one))
+        fails = fails + 256;
+    if (u ^ uid(0xffffffffU))
+        fails = fails + 512;
+    if (~s + 1)
+        fails = fails + 1024;
+    if ((iid(3) - iid(3)) ? 1 : 0)
+        fails = fails + 2048;
+    if (!(iid(0) * iid(5)) != 1)
+        fails = fails + 4096;
+    if (((u + one) >> uid(1U)) != 0)
+        fails = fails + 8192;
+    if (((iid(-8) + iid(0)) >> 1) != -4)
+        fails = fails + 16384;
+    return fails;
+}
+EOF
 # A folded ~ or unary minus of an unsigned int constant has a zero high word.
 try_ 0 << EOF
 int main(void) {
@@ -2814,6 +2859,25 @@ int main(void) {
            grouped != 0xfffffff7ULL || signed_flip != -6;
 }
 EOF
+
+# A folded negative int is sign-extended when converted to long long, and a
+# folded unsigned int result is not.
+try_ 0 << EOF
+long long g = (long long) (0 - 42);
+int main(void) {
+    static unsigned long long s = (unsigned long long) (2 * -21);
+    long long a = (long long) (0 - 42);
+    unsigned long long b = (unsigned long long) (-45 - 32);
+    long long c = (long long) (35 | -38);
+    unsigned long long d = (unsigned long long) (-13 ^ 55);
+    unsigned long long e = (unsigned long long) ((22 | -3) >> 28);
+    unsigned long long u = (unsigned long long) (0U - 42);
+    return a != -42 || b != 0xffffffffffffffb3ULL || c != -5 ||
+           d != 0xffffffffffffffc4ULL || e != ~0ULL || g != -42 ||
+           s != 0xffffffffffffffd6ULL || u != 0xffffffd6ULL ||
+           (long long) (0 - 42) >= 0;
+}
+EOF
 # A constant narrowed to an unsigned type folds zero-extended, not to -2.
 try_ 0 << EOF
 int main(void) {
@@ -2821,6 +2885,26 @@ int main(void) {
     unsigned short wide = 0xfffffffeULL;
     unsigned char byte = 0xfe;
     return (int) half != 65534 || (int) wide != 65534 || (int) byte != 254;
+}
+EOF
+
+# A conversion between narrow types that changes signedness leaves the result
+# extended by its own type, not by its source's.
+try_ 0 << EOF
+unsigned short widen(signed char c) { unsigned short v = c; return v; }
+int main(void) {
+    signed char c = -17;
+    unsigned char u = 255;
+    unsigned short v = c;
+    unsigned short z = (unsigned short) ((unsigned char) c);
+    unsigned short m = (unsigned short) ((signed char) u);
+    unsigned char b = (unsigned char) c;
+    signed char s = (signed char) u;
+    short h = (signed char) u;
+    return (unsigned) v != 0xffef || (unsigned) z != 0xef ||
+           (m >> 8) != 0xff || (long long) b != 239 || s != -1 || h != -1 ||
+           1000 / (unsigned short) ((unsigned char) c) != 4 ||
+           (int) widen(c) != 0xffef;
 }
 EOF
 
@@ -6716,6 +6800,59 @@ int main(void) {
            v[1] - v[0] != 2 || global_rows[2] - global_rows[0] != 4 ||
            sizeof(v[1]) != 2 * sizeof(int) || !v[1] ||
            sizeof(*global_planes[1]) != 3 * sizeof(int);
+}
+EOF
+
+# An array name compared against a pointer decays to the address of its first
+# element. A narrow element type must not make the comparison an integer one,
+# which used to sign-extend the address from its low byte.
+ans="1100
+1111
+1110
+1111
+1100
+0011
+0111
+3"
+try_output 0 "$ans" << EOF
+struct holder {
+    char field[4];
+    int numbers[2];
+};
+
+int by_param(char param[], void *raw)
+{
+    return (raw == param) + 2 * (param == raw) + 4 * (raw != param);
+}
+
+int main(void)
+{
+    char buf[8];
+    char grid[2][3];
+    struct holder box;
+    int values[3];
+    char *p = buf;
+    int *ip = values;
+    void *r = p;
+    void *rg = grid;
+    void *rg1 = grid[1];
+    void *rf = box.field;
+    void *rv = ip;
+
+    printf("%d%d%d%d\n", r == buf, buf == r, r != buf, buf != r);
+    printf("%d%d%d%d\n", r == &buf[0], &buf[0] == r, r == &buf, &buf == r);
+    printf("%d%d%d%d\n", rg == grid, grid == rg, rg1 == grid[1],
+           grid[0] != rg);
+    printf("%d%d%d%d\n", rf == box.field, box.field == rf, rv == values,
+           values == rv);
+    printf("%d%d%d%d\n", rv == ip, ip == values, rv != values,
+           rf != box.field);
+    printf("%d%d%d%d\n", (char *) r < buf, buf < (char *) r,
+           (char *) r >= buf, buf >= (char *) r);
+    printf("%d%d%d%d\n", (char *) r > buf, (int *) rv <= values,
+           (int *) rv >= values, (char *) rg1 > grid[0]);
+    printf("%d\n", by_param(buf, r));
+    return 0;
 }
 EOF
 try_ 0 << EOF
