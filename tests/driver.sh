@@ -707,6 +707,7 @@ begin_category "Standalone Programs" "Testing checked-in end-to-end programs"
 try_file 0 'F(10) = 55' "$TESTS_DIR/fib.c"
 try_file 0 $'1\nHello World' "$TESTS_DIR/hello.c"
 try_file 0 '' "$TESTS_DIR/strength-reduce.c"
+try_file 0 '' "$TESTS_DIR/escaped-param.c"
 
 # The section header table closes an ELF32 image, so e_shoff plus its extent
 # must reach exactly the end of the file, including the page padding a static
