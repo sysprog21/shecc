@@ -21,7 +21,7 @@ jobs:
   # Bootstrap each target and run the consolidated behavioral suite against
   # the stage 0 and stage 2 compilers.
   host-x86:
-    name: ${{ matrix.architecture }}/${{ matrix.link_mode }} (${{ matrix.compiler }})
+    name: ${{ matrix.architecture }}/${{ matrix.link_mode }}/${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'immediate' || 'default') || 'none' }} (${{ matrix.compiler }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -32,10 +32,28 @@ jobs:
         compiler: [gcc, clang]
         architecture: [arm, arm64, riscv, x64]
         link_mode: [static, dynamic]
+        include:
+          - compiler: gcc
+            architecture: arm
+            link_mode: dynamic
+            binding_mode: immediate
+          - compiler: clang
+            architecture: arm
+            link_mode: dynamic
+            binding_mode: immediate
+          - compiler: gcc
+            architecture: riscv
+            link_mode: dynamic
+            binding_mode: immediate
+          - compiler: clang
+            architecture: riscv
+            link_mode: dynamic
+            binding_mode: immediate
     env:
       CC: ${{ matrix.compiler }}
       ARCH: ${{ matrix.architecture }}
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
+      BINDING: ${{ matrix.binding_mode == 'immediate' && 'now' || 'lazy' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -49,14 +67,14 @@ jobs:
       # environment: the build session the tree records assigns ARCH outright,
       # and a makefile assignment wins over the environment.
       - name: Build artifacts
-        run: make ARCH="$ARCH" DYNLINK="$DYNLINK"
+        run: make ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Unit tests
-        run: make check ARCH="$ARCH" DYNLINK="$DYNLINK"
+        run: make check ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Upload the test logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: logs-${{ matrix.compiler }}-${{ matrix.architecture }}-${{ matrix.link_mode }}
+          name: logs-${{ matrix.compiler }}-${{ matrix.architecture }}-${{ matrix.link_mode }}-${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'immediate' || 'default') || 'none' }}
           path: |
             out/*.log
           if-no-files-found: ignore
@@ -68,7 +86,7 @@ jobs:
   # sanitizer step of host-x86 used to do. Building "sanitizer" first, in a
   # job that builds nothing else, is what puts the instrumentation in.
   sanitizer:
-    name: Sanitizers ${{ matrix.architecture }}/${{ matrix.link_mode }}
+    name: Sanitizers ${{ matrix.architecture }}/${{ matrix.link_mode }}/${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'immediate' || 'default') || 'none' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -82,9 +100,17 @@ jobs:
         # why first.
         architecture: [arm, arm64, riscv, x64]
         link_mode: [static, dynamic]
+        include:
+          - architecture: arm
+            link_mode: dynamic
+            binding_mode: immediate
+          - architecture: riscv
+            link_mode: dynamic
+            binding_mode: immediate
     env:
       ARCH: ${{ matrix.architecture }}
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
+      BINDING: ${{ matrix.binding_mode == 'immediate' && 'now' || 'lazy' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -95,9 +121,9 @@ jobs:
           link-mode: ${{ matrix.link_mode }}
           github-token: ${{ github.token }}
       - name: Build the stage 0 compiler with sanitizers
-        run: make sanitizer ARCH="$ARCH" DYNLINK="$DYNLINK"
+        run: make sanitizer ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Sanitizer-enabled stage 0 tests
-        run: make check-sanitizer ARCH="$ARCH" DYNLINK="$DYNLINK"
+        run: make check-sanitizer ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
 
   # Preprocess shecc with itself, then compile the result: the stage 1 source
   # is the largest input the preprocessor gets, and the only one that exercises
@@ -135,7 +161,7 @@ jobs:
   # AArch64 that is the only place the real loader is exercised: QEMU-user maps
   # the image itself, and on an x86-64 host it always presents 4 KiB pages.
   host-arm:
-    name: ${{ matrix.architecture }}/${{ matrix.link_mode }} on Arm64
+    name: ${{ matrix.architecture }}/${{ matrix.link_mode }}/${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'immediate' || 'default') || 'none' }} on Arm64
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     strategy:
@@ -143,9 +169,14 @@ jobs:
       matrix:
         architecture: [arm, arm64]
         link_mode: [static, dynamic]
+        include:
+          - architecture: arm
+            link_mode: dynamic
+            binding_mode: immedaite
     env:
       ARCH: ${{ matrix.architecture }}
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
+      BINDING: ${{ matrix.binding_mode == 'immediate' && 'now' || 'lazy' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -156,14 +187,14 @@ jobs:
           link-mode: ${{ matrix.link_mode }}
           github-token: ${{ github.token }}
       - name: Build artifacts
-        run: make ARCH="$ARCH" DYNLINK="$DYNLINK"
+        run: make ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Unit tests
-        run: make check ARCH="$ARCH" DYNLINK="$DYNLINK"
+        run: make check ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Upload the test logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: logs-arm64-host-${{ matrix.architecture }}-${{ matrix.link_mode }}
+          name: logs-arm64-host-${{ matrix.architecture }}-${{ matrix.link_mode }}-${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'immediate' || 'default') || 'none' }}
           path: |
             out/*.log
             out/tests/*.log
@@ -174,15 +205,19 @@ jobs:
   # build that produces the object files, and that job has already made them
   # without instrumentation.
   host-arm-sanitizer:
-    name: Sanitizers arm/${{ matrix.link_mode }} on Arm64
+    name: Sanitizers arm/${{ matrix.link_mode }}/${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'immediate' || 'default') || 'none' }} on Arm64
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         link_mode: [static, dynamic]
+        include:
+          - link_mode: dynamic
+            binding_mode: immediate
     env:
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
+      BINDING: ${{ matrix.binding_mode == 'immediate' && 'now' || 'lazy' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -193,9 +228,9 @@ jobs:
           link-mode: ${{ matrix.link_mode }}
           github-token: ${{ github.token }}
       - name: Build the stage 0 compiler with sanitizers
-        run: make sanitizer ARCH=arm DYNLINK="$DYNLINK"
+        run: make sanitizer ARCH=arm DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Sanitizer-enabled stage 0 tests
-        run: make check-sanitizer ARCH=arm DYNLINK="$DYNLINK"
+        run: make check-sanitizer ARCH=arm DYNLINK="$DYNLINK" BINDING="$BINDING"
 
   coding-style:
     name: Coding style
