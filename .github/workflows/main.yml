@@ -197,6 +197,49 @@ jobs:
       - name: Sanitizer-enabled stage 0 tests
         run: make check-sanitizer ARCH=arm DYNLINK="$DYNLINK"
 
+  # Run the stage 2 bootstrap and tests under each target's own kernel, booted
+  # in QEMU system emulation, rather than under QEMU-user, which answers system
+  # calls with the runner's x86-64 kernel; see "Testing under a real kernel" in
+  # README.md.
+  qemu-system:
+    name: ${{ matrix.architecture }}/${{ matrix.link_mode }} in qemu-system
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [arm, arm64, riscv]
+        link_mode: [static, dynamic]
+    env:
+      ARCH: ${{ matrix.architecture }}
+      DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Install the QEMU system emulator and a C compiler
+        run: |
+          case "$ARCH" in
+              riscv) emulator=qemu-system-misc ;;
+              *) emulator=qemu-system-arm ;;
+          esac
+          sudo apt-get update -q -y
+          sudo apt-get install -q -y --no-install-recommends build-essential "$emulator"
+      # Shorter than the job, so a hung guest still leaves time for the upload.
+      - name: Bootstrap and test in the guest
+        timeout-minutes: 90
+        run: make qemu-system-check ARCH="$ARCH" DYNLINK="$DYNLINK"
+      - name: Upload the guest logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-qemu-system-${{ matrix.architecture }}-${{ matrix.link_mode }}
+          path: |
+            out/*.log
+            out/qemu-system/console.log
+            out/qemu-system/results/
+          if-no-files-found: ignore
+          retention-days: 7
+
   coding-style:
     name: Coding style
     runs-on: ubuntu-24.04
