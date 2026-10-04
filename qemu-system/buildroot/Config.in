@@ -1,0 +1,2 @@
+# Buildroot requires this file in every external tree. This one adds no
+# configuration options; see external.mk.

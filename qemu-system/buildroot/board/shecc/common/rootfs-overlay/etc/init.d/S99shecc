@@ -1,0 +1,8 @@
+#!/bin/sh
+#
+# Hand the end of boot to the shecc test runner, which acts only when the
+# kernel command line asks it to; see /usr/libexec/shecc/guest-init.sh.
+
+case "$1" in
+    start) exec /usr/libexec/shecc/guest-init.sh ;;
+esac
