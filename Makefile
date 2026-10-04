@@ -148,6 +148,19 @@ endif
 endif
 
 include mk/$(ARCH).mk
+
+# qemu-system-check and qemu-system-shell run target code only inside a guest
+# under QEMU system emulation, so they need neither QEMU-user nor the cross
+# sysroot for dynamic linking. USE_QEMU selects QEMU-user, and turning it off
+# before mk/common.mk reads it drops both.
+QEMU_SYSTEM_GOALS := qemu-system-check qemu-system-shell
+ifneq (,$(filter $(QEMU_SYSTEM_GOALS),$(MAKECMDGOALS)))
+ifneq (,$(filter-out $(QEMU_SYSTEM_GOALS) config clean distclean,$(MAKECMDGOALS)))
+$(error $(QEMU_SYSTEM_GOALS) cannot share a make invocation with goals that run target code on the host)
+endif
+override USE_QEMU := 0
+endif
+
 include mk/common.mk
 
 # Selecting a target rewrites every file that records the choice, so switching
@@ -254,6 +267,14 @@ check-abi-stage0: $(OUT)/$(STAGE0)
 check-abi-stage2: $(OUT)/$(STAGE2)
 	tests/$(ARCH)-abi.sh 2 $(DYNLINK);
 
+# Boot the guest for ARCH under QEMU system emulation, build stage 2 there with
+# the stage 1 made here, require the two to match, and run the stage 2 tests.
+# qemu-system-shell boots the same guest to a prompt instead.
+.PHONY: $(QEMU_SYSTEM_GOALS)
+$(QEMU_SYSTEM_GOALS): $(OUT)/$(STAGE1)
+	$(Q)qemu-system/run.sh $(if $(filter qemu-system-shell,$@),shell,check) \
+		$(ARCH) $(DYNLINK) "$(STAGE1_FLAGS)"
+
 # Both prerequisites are order-only, and both exist because "make -j" would
 # otherwise let a compile start beside the thing it reads. Selecting a target
 # replaces src/codegen.c with "ln -sf", which unlinks before it relinks, so a
@@ -324,6 +345,7 @@ clean:
 	-$(RM) $(TESTBINS) $(OUT)/tests/*.log $(OUT)/tests/*.lst
 	-$(RM) $(OUT)/shecc*.log
 	-$(RM) $(OUT)/libc.inc
+	-$(RM) -r $(OUT)/qemu-system
 
 distclean: clean
 	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config config.tmp $(BUILD_SESSION)

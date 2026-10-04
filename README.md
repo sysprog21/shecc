@@ -84,7 +84,9 @@ system to determine whether native execution can be enabled.
 
 It is still possible to build `shecc` on macOS or Microsoft Windows. However,
 the second stage bootstrapping would fail due to `qemu-arm` absence, and the
-`x64` target expects an x86-64 GNU/Linux host to execute its own output.
+`x64` target expects an x86-64 GNU/Linux host to execute its own output. On
+macOS, [`make qemu-system-check`](#testing-under-a-real-kernel) runs the second
+stage under QEMU system emulation instead.
 
 ### Additional packages
 
@@ -255,6 +257,78 @@ OK
 
 To clean up the generated compiler files, execute the command `make clean`.
 For resetting architecture configurations, use the command `make distclean`.
+
+## Testing under a real kernel
+
+On most hosts, `make check` runs the target's output under QEMU-user, which
+loads each program itself and serves its system calls through the host's kernel.
+`make qemu-system-check` boots a Linux kernel built for the target under QEMU
+system emulation instead. Stage 1 is built on the host; the guest builds stage 2
+with it, requires the two to be identical, and runs the stage 2 driver and ABI
+suites, so the target's own kernel loads every program and answers its system
+calls. The guests are 32-bit Arm, AArch64 with 64 KiB pages, and RV32.
+[qemu-system/README.md](qemu-system/README.md) explains what this catches that
+QEMU-user cannot, and how the guests are built.
+
+### What the host needs
+
+A C compiler and QEMU's system emulators. Neither QEMU-user nor a cross
+toolchain is needed, so this also works on macOS.
+```shell
+$ brew install qemu                                        # macOS
+$ sudo apt-get install qemu-system-arm qemu-system-misc    # Ubuntu
+```
+
+### Running the tests in a guest
+
+Select the target, then run each linking mode:
+```shell
+$ make config ARCH=riscv                       # or arm, arm64
+$ make qemu-system-check ARCH=riscv            # static linking
+$ make qemu-system-check ARCH=riscv DYNLINK=1  # dynamic linking
+```
+
+The guest images are committed under `qemu-system/images`, so nothing is
+downloaded. A run ends with `qemu-system: riscv guest passed (DYNLINK=0)`, or
+with an error and a non-zero exit status. The guest's console output is in
+`out/qemu-system/console.log`, and `out/qemu-system/results/` holds the guest's
+log, its kernel log, and the facts it reported: machine, kernel version and page
+size. `make qemu-system-check` cannot share a `make` invocation with goals that
+run target code on the host, such as `make check`.
+
+To look around in a guest, boot it to a root prompt instead. The sources,
+stage 1 and the tests are unpacked in `/work/payload`, and Ctrl-A X quits QEMU:
+```shell
+$ make qemu-system-shell ARCH=riscv
+```
+
+### Updating the guest images
+
+`qemu-system/images` holds each guest's kernel, root filesystem and, for riscv,
+firmware, built from the Buildroot recipe in `qemu-system/buildroot`. Rebuild
+them whenever `qemu-system/buildroot/`, `qemu-system/pins.env` or
+`qemu-system/build-images.sh` changes, and commit them with that change. The
+test procedure itself, `qemu-system/guest.sh`, travels with each run, so
+changing it needs no new images. Each rebuild adds about 40 MB to the
+repository's history, so batch recipe changes together.
+
+1. Build every guest from scratch. This needs Docker, takes hours, and about
+   10 GB of Docker disk per guest:
+   ```shell
+   $ qemu-system/build-images.sh --clean arm arm64 riscv
+   ```
+   It replaces `qemu-system/images/<arch>` for each guest, and writes the
+   complete source of what the images contain to
+   `out/qemu-system-sources/<arch>-sources.tar`, which is not committed.
+2. Test every guest in both linking modes:
+   ```shell
+   $ for arch in arm arm64 riscv; do
+         make config ARCH=$arch &&
+         make clean qemu-system-check ARCH=$arch &&
+         make clean qemu-system-check ARCH=$arch DYNLINK=1 || break
+     done
+   ```
+3. Commit `qemu-system/images` together with the change that called for it.
 
 ## Intermediate Representation
 
@@ -456,3 +530,6 @@ see [COMPLIANCE.md](COMPLIANCE.md).
 
 `shecc` is freely redistributable under the BSD 2 clause license.
 Use of this source code is governed by a BSD-style license that can be found in the `LICENSE` file.
+The guest images under `qemu-system/images` hold third-party programs under
+their own licenses, the GPL among them; see
+[qemu-system/README.md](qemu-system/README.md#licenses).
