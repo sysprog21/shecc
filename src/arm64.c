@@ -89,6 +89,18 @@ int a64_sub_imm_insn(bool sf, int rd, int rn, int imm12)
     return a64_sf(sf) | 0x51000000 | ((imm12 & 0xfff) << 10) | (rn << 5) | rd;
 }
 
+int a64_add_sub_imm_insn(bool sub,
+                         bool sf,
+                         int rd,
+                         int rn,
+                         int imm12,
+                         bool shift)
+{
+    return (sub ? a64_sub_imm_insn(sf, rd, rn, imm12)
+                : a64_add_imm_insn(sf, rd, rn, imm12)) |
+           (shift << 22);
+}
+
 /* CMP #imm is SUBS into the zero register. */
 int a64_cmp_imm_insn(bool sf, int rn, int imm12)
 {

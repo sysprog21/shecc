@@ -29,7 +29,7 @@ static int read_global_sizeof_expression(block_t *scope)
 int read_const_wstring_size(void)
 {
     int values[MAX_STRING_LEN];
-    type_t *wide_type = find_type("wchar_t", true);
+    type_t *wide_type = find_builtin_type("wchar_t");
     return (read_wstring_units(values, MAX_STRING_LEN) + 1) * wide_type->size;
 }
 
@@ -53,120 +53,38 @@ int read_sizeof_constant(block_t *scope)
 
 int eval_expression_imm(opcode_t op, int op1, int op2)
 {
-    /* return immediate result */
-    int tmp = op2;
     int res = 0;
-    switch (op) {
-    case OP_add:
-        if (checking_enum_constant && ((op2 > 0 && op1 > INT_MAX - op2) ||
-                                       (op2 < 0 && op1 < INT_MIN - op2)))
+
+    if (checking_enum_constant) {
+        if (op == OP_add && ((op2 > 0 && op1 > INT_MAX - op2) ||
+                             (op2 < 0 && op1 < INT_MIN - op2)))
             error_at("Enumerator value exceeds int range", cur_token_loc());
-        res = op1 + op2;
-        break;
-    case OP_sub:
-        if (checking_enum_constant && ((op2 < 0 && op1 > INT_MAX + op2) ||
-                                       (op2 > 0 && op1 < INT_MIN + op2)))
+        if (op == OP_sub && ((op2 < 0 && op1 > INT_MAX + op2) ||
+                             (op2 > 0 && op1 < INT_MIN + op2)))
             error_at("Enumerator value exceeds int range", cur_token_loc());
-        res = op1 - op2;
-        break;
-    case OP_mul:
-        if (checking_enum_constant && op1 && op2 &&
+        if (op == OP_mul && op1 && op2 &&
             ((op1 > 0 && op2 > 0 && op1 > INT_MAX / op2) ||
              (op1 > 0 && op2 < 0 && op2 < INT_MIN / op1) ||
              (op1 < 0 && op2 > 0 && op1 < INT_MIN / op2) ||
              (op1 < 0 && op2 < 0 && op1 < INT_MAX / op2)))
             error_at("Enumerator value exceeds int range", cur_token_loc());
-        res = op1 * op2;
-        break;
-    case OP_div:
-        if (!op2)
-            error_at("Division by zero in constant expression",
-                     cur_token_loc());
-
-        /* INT_MIN / -1 has no representable result; on x86 it raises SIGFPE
-         * rather than producing one.
-         */
-        if (op1 == INT_MIN && op2 == -1)
-            error_at("Overflow in constant expression", cur_token_loc());
-        res = op1 / op2;
-        break;
-    case OP_mod:
-        if (!op2)
-            error_at("Modulo by zero in constant expression", cur_token_loc());
-        if (op1 == INT_MIN && op2 == -1)
-            error_at("Overflow in constant expression", cur_token_loc());
-        /* Use bitwise AND for modulo optimization when divisor is power of 2 */
-        if (tmp == INT_MIN) {
-            res = op1 % op2;
-            break;
-        }
-        tmp = tmp < 0 ? -tmp : tmp;
-        tmp &= (tmp - 1);
-        if (tmp != 0) {
-            res = op1 % op2;
-            break;
-        }
-        op2 = op2 < 0 ? -op2 : op2;
-        res = op1 & (op2 - 1);
-        if (op1 < 0 && res != 0)
-            res -= op2;
-        break;
-    case OP_lshift:
-        if (checking_enum_constant &&
+        if (op == OP_lshift &&
             (op2 < 0 || op2 >= 32 || op1 < 0 || op1 > (INT_MAX >> op2)))
             error_at("Enumerator value exceeds int range", cur_token_loc());
-
-        /* A count outside the int width has no defined result, and the host
-         * compiler must not be asked to produce one. Shift the unsigned bit
-         * pattern so a set sign bit is not host undefined behavior either.
-         */
-        if (op2 < 0 || op2 >= 32)
-            error_at("Shift count out of range in constant expression",
-                     cur_token_loc());
-        res = (int) ((unsigned int) op1 << op2);
-        break;
-    case OP_rshift:
-        if (op2 < 0 || op2 >= 32)
-            error_at("Shift count out of range in constant expression",
-                     cur_token_loc());
-        res = op1 >> op2;
-        break;
-    case OP_log_and:
-        res = op1 && op2;
-        break;
-    case OP_log_or:
-        res = op1 || op2;
-        break;
-    case OP_eq:
-        res = op1 == op2;
-        break;
-    case OP_neq:
-        res = op1 != op2;
-        break;
-    case OP_lt:
-        res = op1 < op2;
-        break;
-    case OP_gt:
-        res = op1 > op2;
-        break;
-    case OP_leq:
-        res = op1 <= op2;
-        break;
-    case OP_geq:
-        res = op1 >= op2;
-        break;
-    case OP_bit_and:
-        res = op1 & op2;
-        break;
-    case OP_bit_or:
-        res = op1 | op2;
-        break;
-    case OP_bit_xor:
-        res = op1 ^ op2;
-        break;
-    default:
-        error_at("The requested operation is not supported.", cur_token_loc());
     }
+    if (op == OP_div || op == OP_mod) {
+        if (!op2)
+            error_at(op == OP_div ? "Division by zero in constant expression"
+                                  : "Modulo by zero in constant expression",
+                     cur_token_loc());
+        if (op1 == INT_MIN && op2 == -1)
+            error_at("Overflow in constant expression", cur_token_loc());
+    }
+    if ((op == OP_lshift || op == OP_rshift) && (op2 < 0 || op2 >= 32))
+        error_at("Shift count out of range in constant expression",
+                 cur_token_loc());
+    if (!vir_frontend_fold_i32(op, op1, op2, &res))
+        error_at("The requested operation is not supported.", cur_token_loc());
     return res;
 }
 
@@ -258,22 +176,14 @@ static bool initializer_needs_wide_reader(token_t *token,
                                           block_t *scope,
                                           bool casts)
 {
-    int bracket_depth = 0;
+    int depth = 0;
 
     for (; token; token = token->next) {
         if ((token->kind == T_numeric &&
-             (numeric_literal_needs_wide_path(token->literal) ||
-              numeric_literal_needs_typed_global_path(token->literal))) ||
+             numeric_literal_needs_global_reader(token->literal)) ||
             (casts && global_integer_cast_starts_at(token, scope)))
             return true;
-        if (token->kind == T_open_bracket)
-            bracket_depth++;
-        else if (token->kind == T_close_bracket) {
-            if (bracket_depth == 0)
-                return false;
-            bracket_depth--;
-        } else if (bracket_depth == 0 &&
-                   (token->kind == T_semicolon || token->kind == T_comma))
+        if (!initializer_scan_continue(token, &depth, false))
             return false;
     }
     return false;
@@ -296,21 +206,13 @@ bool typed_global_literal_appears_before_initializer_end(token_t *token)
  */
 bool string_element_appears_before_initializer_end(token_t *token)
 {
-    int bracket_depth = 0;
+    int depth = 0;
 
     for (; token; token = token->next) {
         if ((token->kind == T_string || token->kind == T_wstring) &&
             token->next && token->next->kind == T_open_square)
             return true;
-        if (token->kind == T_open_bracket)
-            bracket_depth++;
-        else if (token->kind == T_close_bracket) {
-            if (bracket_depth == 0)
-                return false;
-            bracket_depth--;
-        } else if (bracket_depth == 0 &&
-                   (token->kind == T_semicolon || token->kind == T_comma ||
-                    token->kind == T_close_curly))
+        if (!initializer_scan_continue(token, &depth, true))
             return false;
     }
     return false;
@@ -564,15 +466,15 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
     }
 
     if (op == OP_div || op == OP_mod) {
-        unsigned int rem_lo = 0, rem_hi = 0, quo_lo = 0, quo_hi = 0;
-
         /* The usual arithmetic conversions choose the signedness: a signed long
          * long divided by an unsigned int stays signed long long.
          */
         type_t *common = integer_common_type(left, right);
         bool is_unsigned = common->is_unsigned;
-        bool neg_left = !is_unsigned && (hi >> 31);
-        bool neg_right = !is_unsigned && (rhs_hi >> 31);
+        pp_integer_t dividend = {
+            .lo = lo, .hi = hi, .is_unsigned = is_unsigned};
+        pp_integer_t divisor = {
+            .lo = rhs_lo, .hi = rhs_hi, .is_unsigned = is_unsigned};
 
         if (rhs_lo == 0 && rhs_hi == 0)
             error_at("division by zero in global constant expression",
@@ -586,47 +488,9 @@ bool emit_wide_global_word_arithmetic(block_t *parent,
             (common->size <= TY_int->size ? lo == 0x80000000U
                                           : hi == 0x80000000U && lo == 0))
             error_at("Overflow in constant expression", cur_token_loc());
-        if (neg_left) {
-            lo = ~lo + 1;
-            hi = ~hi + (lo == 0);
-        }
-        if (neg_right) {
-            rhs_lo = ~rhs_lo + 1;
-            rhs_hi = ~rhs_hi + (rhs_lo == 0);
-        }
-        for (int i = 0; i < 64; i++) {
-            unsigned int incoming = hi >> 31;
-
-            hi = (hi << 1) | (lo >> 31);
-            lo <<= 1;
-            rem_hi = (rem_hi << 1) | (rem_lo >> 31);
-            rem_lo = (rem_lo << 1) | incoming;
-            quo_hi = (quo_hi << 1) | (quo_lo >> 31);
-            quo_lo <<= 1;
-            if (rem_hi > rhs_hi || (rem_hi == rhs_hi && rem_lo >= rhs_lo)) {
-                unsigned int borrow = rem_lo < rhs_lo;
-
-                rem_lo -= rhs_lo;
-                rem_hi = rem_hi - rhs_hi - borrow;
-                quo_lo |= 1;
-            }
-        }
-        if (op == OP_div) {
-            out_lo = quo_lo;
-            out_hi = quo_hi;
-            if (neg_left != neg_right) {
-                out_lo = ~out_lo + 1;
-                out_hi = ~out_hi + (out_lo == 0);
-            }
-        } else {
-            out_lo = rem_lo;
-            out_hi = rem_hi;
-            if (neg_left) {
-                out_lo = ~out_lo + 1;
-                out_hi = ~out_hi + (out_lo == 0);
-            }
-        }
-        store_wide_global_word_result(parent, bb, result, out_lo, out_hi);
+        pp_divmod(&dividend, &divisor, op == OP_mod);
+        store_wide_global_word_result(parent, bb, result, dividend.lo,
+                                      dividend.hi);
         return true;
     }
 
@@ -727,8 +591,7 @@ static var_t *promote_wide_global_operand(block_t *parent,
     if (value->ptr_level || wide_global_address_operand(value) ||
         value->type->size >= TY_int->size)
         return value;
-    promoted = require_typed_var(parent, TY_int);
-    promoted->var_name = gen_name();
+    promoted = name_var(require_typed_var(parent, TY_int));
     promoted->init_val = value->init_val;
     promoted->init_val_hi = wide_global_narrow_high(value->init_val, false);
     promoted->is_const = true;
@@ -774,8 +637,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         zero->type = value->type;
         zero->init_val = 0;
         add_insn(parent, bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-        result = require_var(parent);
-        result->var_name = gen_name();
+        result = require_named_var(parent);
         result->type = value->type;
         emit_wide_global_word_arithmetic(parent, bb, result, OP_sub, zero,
                                          value);
@@ -786,8 +648,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
 
         value = promote_wide_global_operand(
             parent, bb, read_wide_global_literal_primary(parent, bb, scope));
-        result = require_var(parent);
-        result->var_name = gen_name();
+        result = require_named_var(parent);
         result->type = value->type;
         emit_wide_global_word_arithmetic(parent, bb, result, OP_bit_not, value,
                                          NULL);
@@ -797,8 +658,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         var_t *result;
 
         value = read_wide_global_literal_primary(parent, bb, scope);
-        result = require_typed_var(parent, TY_int);
-        result->var_name = gen_name();
+        result = name_var(require_typed_var(parent, TY_int));
         result->init_val = !wide_global_operand_is_true(value);
         result->init_val_hi = 0;
         result->is_const = true;
@@ -825,8 +685,8 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         return address;
     }
     if (lex_accept(T_sizeof)) {
-        value = require_typed_var(parent, find_type("size_t", true));
-        value->var_name = gen_name();
+        value =
+            name_var(require_typed_var(parent, find_builtin_type("size_t")));
         value->init_val = read_sizeof_constant(scope);
         value->init_val_hi = 0;
         value->is_const = true;
@@ -859,8 +719,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         if (operand->type->size <= TY_int->size)
             hi = wide_global_narrow_high(operand->init_val,
                                          operand->type->is_unsigned);
-        value = require_typed_var(parent, type);
-        value->var_name = gen_name();
+        value = name_var(require_typed_var(parent, type));
         fold_integer_constant_cast(value, (unsigned int) operand->init_val, hi);
         value->is_const = true;
         add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
@@ -878,8 +737,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
             error_at("Typed global initializer needs a constant operand",
                      next_token_loc());
         lex_expect(T_identifier);
-        value = require_typed_var(parent, TY_int);
-        value->var_name = gen_name();
+        value = name_var(require_typed_var(parent, TY_int));
 
         /* Every operand this reader returns carries its high word, the
          * extension of an int-sized value, so no consumer rebuilds it.
@@ -900,8 +758,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
             error_at("Wide string literal element is not a constant",
                      next_token_loc());
         read_string_literal_element(scope, &element);
-        value = require_typed_var(parent, TY_int);
-        value->var_name = gen_name();
+        value = name_var(require_typed_var(parent, TY_int));
         value->init_val = element;
         value->init_val_hi = wide_global_narrow_high(element, false);
         value->is_const = true;
@@ -934,6 +791,42 @@ var_t *read_wide_global_literal_primary(block_t *parent,
  * subexpressions, without sending a high word through the legacy int-only
  * constant evaluator.
  */
+static void reduce_wide_global_top_op(block_t *parent,
+                                      basic_block_t *bb,
+                                      opcode_t *op_stack,
+                                      bool *protected_rhs,
+                                      var_t **val_stack,
+                                      int *op_count,
+                                      int *value_count)
+{
+    var_t *right = val_stack[--*value_count];
+    var_t *left = val_stack[--*value_count];
+    int top = --*op_count;
+    var_t *result = require_var(parent);
+
+    if (protected_rhs[top])
+        wide_global_unevaluated_depth--;
+    result->var_name = gen_name();
+    result->type = integer_binary_result_type(op_stack[top], left, right);
+    if (!emit_wide_global_word_arithmetic(parent, bb, result, op_stack[top],
+                                          left, right))
+        add_insn(parent, bb, op_stack[top], result, left, right, 0, NULL);
+    val_stack[(*value_count)++] = result;
+}
+
+static void reduce_wide_global_pending_ops(block_t *parent,
+                                           basic_block_t *bb,
+                                           opcode_t *op_stack,
+                                           bool *protected_rhs,
+                                           var_t **val_stack,
+                                           int *op_count,
+                                           int *value_count)
+{
+    while (*op_count > 0)
+        reduce_wide_global_top_op(parent, bb, op_stack, protected_rhs,
+                                  val_stack, op_count, value_count);
+}
+
 var_t *read_wide_global_literal_expression(block_t *parent,
                                            basic_block_t *bb,
                                            block_t *scope)
@@ -959,24 +852,9 @@ var_t *read_wide_global_literal_expression(block_t *parent,
              * operator first so the condition is the complete expression, not
              * merely the primary immediately before `?`.
              */
-            while (op_stack_index > 0) {
-                var_t *right = val_stack[--val_stack_index];
-                var_t *left = val_stack[--val_stack_index];
-                var_t *result = require_var(parent);
-
-                op_stack_index--;
-                if (protected_rhs[op_stack_index])
-                    wide_global_unevaluated_depth--;
-                result->var_name = gen_name();
-                result->type = integer_binary_result_type(
-                    op_stack[op_stack_index], left, right);
-                if (!emit_wide_global_word_arithmetic(parent, bb, result,
-                                                      op_stack[op_stack_index],
-                                                      left, right))
-                    add_insn(parent, bb, op_stack[op_stack_index], result, left,
-                             right, 0, NULL);
-                val_stack[val_stack_index++] = result;
-            }
+            reduce_wide_global_pending_ops(parent, bb, op_stack, protected_rhs,
+                                           val_stack, &op_stack_index,
+                                           &val_stack_index);
             condition = val_stack[--val_stack_index];
             condition_true = wide_global_operand_is_true(condition);
 
@@ -1016,23 +894,10 @@ var_t *read_wide_global_literal_expression(block_t *parent,
         }
         while (op_stack_index > 0 &&
                get_operator_prio(op_stack[op_stack_index - 1]) >=
-                   get_operator_prio(op)) {
-            var_t *right = val_stack[--val_stack_index];
-            var_t *left = val_stack[--val_stack_index];
-            var_t *result = require_var(parent);
-
-            op_stack_index--;
-            if (protected_rhs[op_stack_index])
-                wide_global_unevaluated_depth--;
-            result->var_name = gen_name();
-            result->type = integer_binary_result_type(op_stack[op_stack_index],
-                                                      left, right);
-            if (!emit_wide_global_word_arithmetic(
-                    parent, bb, result, op_stack[op_stack_index], left, right))
-                add_insn(parent, bb, op_stack[op_stack_index], result, left,
-                         right, 0, NULL);
-            val_stack[val_stack_index++] = result;
-        }
+                   get_operator_prio(op))
+            reduce_wide_global_top_op(parent, bb, op_stack, protected_rhs,
+                                      val_stack, &op_stack_index,
+                                      &val_stack_index);
         if (op_stack_index >= MAX_OPERATOR_STACK_SIZE ||
             val_stack_index >= MAX_OPERATOR_STACK_SIZE)
             fatal("Wide global initializer is too complex");
@@ -1053,23 +918,9 @@ var_t *read_wide_global_literal_expression(block_t *parent,
             parent, bb, read_wide_global_literal_primary(parent, bb, scope));
         op = get_operator();
     }
-    while (op_stack_index > 0) {
-        var_t *right = val_stack[--val_stack_index];
-        var_t *left = val_stack[--val_stack_index];
-        var_t *result = require_var(parent);
-
-        op_stack_index--;
-        if (protected_rhs[op_stack_index])
-            wide_global_unevaluated_depth--;
-        result->var_name = gen_name();
-        result->type =
-            integer_binary_result_type(op_stack[op_stack_index], left, right);
-        if (!emit_wide_global_word_arithmetic(
-                parent, bb, result, op_stack[op_stack_index], left, right))
-            add_insn(parent, bb, op_stack[op_stack_index], result, left, right,
-                     0, NULL);
-        val_stack[val_stack_index++] = result;
-    }
+    reduce_wide_global_pending_ops(parent, bb, op_stack, protected_rhs,
+                                   val_stack, &op_stack_index,
+                                   &val_stack_index);
     return val_stack[0];
 }
 
@@ -1171,7 +1022,8 @@ bool read_global_assignment_var(var_t *var)
         if (cast_signature) {
             func_t *saved_signature = global_function_cast_signature;
 
-            global_function_cast_signature = cast_signature;
+            global_function_cast_signature =
+                saved_signature ? saved_signature : cast_signature;
             read_global_assignment_var(var);
             global_function_cast_signature = saved_signature;
             return true;
@@ -1218,20 +1070,17 @@ bool read_global_assignment_var(var_t *var)
 
             address_dereference_identifier =
                 consume_global_function_address_dereference();
-            if (!find_visible_func(address_dereference_identifier->literal,
-                                   scope))
+            func_t *addressed = find_visible_func(
+                address_dereference_identifier->literal, scope);
+            if (!addressed)
                 error_at("Function address requires a visible declaration",
                          cur_token_loc());
             if (!var->is_func && !var->ptr_level &&
                 !(var->type && var->type->ptr_level))
                 error_at("Function address requires a pointer initializer",
                          cur_token_loc());
-            addr = require_ref_var(parent, var->type, var->ptr_level);
-            symbol = require_func_symbol_var(parent);
-            addr->var_name = gen_name();
-            symbol->is_func = true;
-            symbol->var_name =
-                intern_string(address_dereference_identifier->literal);
+            addr = name_var(require_ref_var(parent, var->type, var->ptr_level));
+            symbol = function_designator_value(parent, addressed);
             diagnose_global_function_conversion(symbol, var);
             add_insn(parent, bb, OP_address_of, addr, var, NULL, 0, NULL);
             add_insn(parent, bb, OP_write, NULL, addr, symbol, PTR_SIZE, NULL);
@@ -1252,11 +1101,9 @@ bool read_global_assignment_var(var_t *var)
                              cur_token_loc());
                 var_t *addr =
                     require_ref_var(parent, var->type, var->ptr_level);
-                var_t *symbol = require_func_symbol_var(parent);
+                var_t *symbol = function_designator_value(parent, func);
 
                 addr->var_name = gen_name();
-                symbol->is_func = true;
-                symbol->var_name = intern_string(token);
                 diagnose_global_function_conversion(symbol, var);
                 lex_expect(T_identifier);
                 if (grouped_function_designator)
@@ -1275,10 +1122,8 @@ bool read_global_assignment_var(var_t *var)
             if (object && object->is_global &&
                 (explicit_address || object->array_size)) {
                 fixed_array_shape_t shape = fixed_array_shape_from_var(object);
-                var_t *object_addr =
-                    require_ref_var(parent, object->type, object->ptr_level);
-
-                object_addr->var_name = gen_name();
+                var_t *object_addr = name_var(
+                    require_ref_var(parent, object->type, object->ptr_level));
                 object_addr->is_global_address = true;
 
                 /* Taking the address of a callback object creates a slot.
@@ -1305,8 +1150,8 @@ bool read_global_assignment_var(var_t *var)
                                      ? PTR_SIZE
                                      : object->type->size;
                     var_t *byte_offset = require_var(parent);
-                    var_t *offset_addr = require_ref_var(parent, object->type,
-                                                         object->ptr_level);
+                    var_t *offset_addr = name_var(require_ref_var(
+                        parent, object->type, object->ptr_level));
 
                     stride = global_pointer_cast_stride
                                  ? global_pointer_cast_stride
@@ -1315,7 +1160,6 @@ bool read_global_assignment_var(var_t *var)
                     byte_offset->init_val = index * stride;
                     add_insn(parent, bb, OP_load_constant, byte_offset, NULL,
                              NULL, 0, NULL);
-                    offset_addr->var_name = gen_name();
                     offset_addr->is_global_address = true;
                     offset_addr->pointee_func_signature =
                         object_addr->pointee_func_signature;
@@ -1346,15 +1190,16 @@ bool read_global_assignment_var(var_t *var)
              * address.
              */
             type_t *literal_type;
+            var_t return_decl;
             var_t *literal;
             var_t *literal_addr;
             int literal_ptr_level = 0;
             func_t *callback = NULL;
 
             lex_expect(T_open_bracket);
-            literal_type = read_type_name_specifiers(GLOBAL_BLOCK);
-            while (lex_accept(T_asterisk))
-                literal_ptr_level++;
+            read_type_name_decl(GLOBAL_BLOCK, &return_decl);
+            literal_type = return_decl.type;
+            literal_ptr_level = return_decl.ptr_level;
 
             /* `&(int (*)(int)){f}` and `&(callback_t){f}` address a callback
              * object; the pointer they initialize is a callback slot.
@@ -1362,8 +1207,8 @@ bool read_global_assignment_var(var_t *var)
             if (literal_type && abstract_function_pointer_follows()) {
                 int callback_level;
 
-                callback = read_abstract_function_pointer(
-                    literal_type, literal_ptr_level, &callback_level);
+                callback = read_abstract_function_pointer(&return_decl,
+                                                          &callback_level);
                 if (callback_level != 1)
                     error_at("Incompatible compound literal address",
                              cur_token_loc());
@@ -1383,8 +1228,8 @@ bool read_global_assignment_var(var_t *var)
                     !compatible_function_signature(slot, callback))
                     error_at("Incompatible compound literal address",
                              cur_token_loc());
-                literal = require_typed_var(GLOBAL_BLOCK, literal_type);
-                literal->var_name = gen_name();
+                literal =
+                    name_var(require_typed_var(GLOBAL_BLOCK, literal_type));
                 literal->is_global = true;
                 literal->ptr_level =
                     literal_type->func_signature ? 0 : literal_ptr_level;
@@ -1399,9 +1244,8 @@ bool read_global_assignment_var(var_t *var)
                 read_global_assignment_var(literal);
                 lex_accept(T_comma);
                 lex_expect(T_close_curly);
-                literal_addr =
-                    require_ref_var(parent, literal->type, literal->ptr_level);
-                literal_addr->var_name = gen_name();
+                literal_addr = name_var(
+                    require_ref_var(parent, literal->type, literal->ptr_level));
                 literal_addr->is_global_address = true;
                 literal_addr->pointee_func_signature = callback;
                 add_insn(parent, bb, OP_address_of, literal_addr, literal, NULL,
@@ -1417,8 +1261,7 @@ bool read_global_assignment_var(var_t *var)
                   (var->type == TY_void && !literal_ptr_level)))
                 error_at("Incompatible compound literal address",
                          cur_token_loc());
-            literal = require_typed_var(GLOBAL_BLOCK, literal_type);
-            literal->var_name = gen_name();
+            literal = name_var(require_typed_var(GLOBAL_BLOCK, literal_type));
             literal->is_global = true;
             literal->ptr_level = literal_ptr_level;
             add_insn(GLOBAL_BLOCK, bb, OP_allocat, literal, NULL, NULL, 0,
@@ -1434,9 +1277,8 @@ bool read_global_assignment_var(var_t *var)
                 lex_accept(T_comma);
                 lex_expect(T_close_curly);
             }
-            literal_addr =
-                require_ref_var(parent, literal->type, literal->ptr_level);
-            literal_addr->var_name = gen_name();
+            literal_addr = name_var(
+                require_ref_var(parent, literal->type, literal->ptr_level));
             literal_addr->is_global_address = true;
             add_insn(parent, bb, OP_address_of, literal_addr, literal, NULL, 0,
                      NULL);
@@ -1483,127 +1325,15 @@ bool read_global_assignment_var(var_t *var)
             return true;
         }
 
-        opcode_t op_stack[MAX_OPERATOR_STACK_SIZE];
-        opcode_t op, next_op;
-        int val_stack[MAX_OPERATOR_STACK_SIZE];
-        int op_stack_index = 0, val_stack_index = 0;
-        int operand1, operand2;
-        operand1 = read_const_expr_operand(scope);
-        op = get_operator();
-        /* only one value after assignment */
-        if (op == OP_generic) {
-            vd = require_var(parent);
-            vd->var_name = gen_name();
-            vd->init_val = operand1;
-            add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
+        bool has_ternary;
+        int value = read_const_expr_until_ternary(scope, &has_ternary);
 
-            rs1 = vd;
-            emit_global_scalar_assignment(parent, bb, var, rs1);
-            return true;
-        }
-        if (op == OP_ternary) {
+        if (has_ternary) {
             lex_expect(T_question);
-            eval_ternary_imm(operand1, var);
-            return true;
-        }
-        operand2 = read_const_expr_operand(scope);
-        next_op = get_operator();
-        if (next_op == OP_generic) {
-            /* only two operands, apply and return */
-            vd = require_var(parent);
-            vd->var_name = gen_name();
-            vd->init_val = eval_expression_imm(op, operand1, operand2);
-            add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
-
-            rs1 = vd;
-            reject_global_integer_pointer(var, rs1);
-            add_insn(parent, bb, OP_assign, var, rs1, NULL, 0, NULL);
-            return true;
-        }
-
-        /* using stack if operands more than two */
-        op_stack[op_stack_index++] = op;
-        op = next_op;
-        val_stack[val_stack_index++] = operand1;
-        val_stack[val_stack_index++] = operand2;
-
-        while (op != OP_generic && op != OP_ternary) {
-            if (op_stack_index > 0) {
-                /* we have a continuation, use stack */
-                int same_op = 0;
-                do {
-                    opcode_t stack_op = op_stack[op_stack_index - 1];
-                    if (get_operator_prio(stack_op) >= get_operator_prio(op)) {
-                        operand1 = val_stack[val_stack_index - 2];
-                        operand2 = val_stack[val_stack_index - 1];
-                        val_stack_index -= 2;
-
-                        /* apply stack operator and push result back */
-                        val_stack[val_stack_index++] =
-                            eval_expression_imm(stack_op, operand1, operand2);
-
-                        /* pop op stack */
-                        op_stack_index--;
-                    } else {
-                        same_op = 1;
-                    }
-                    /* continue util next operation is higher prio */
-                } while (op_stack_index > 0 && same_op == 0);
-            }
-            /* push next operand on stack */
-            if (val_stack_index >= MAX_OPERATOR_STACK_SIZE ||
-                op_stack_index >= MAX_OPERATOR_STACK_SIZE)
-                fatal("Constant expression too complex");
-            val_stack[val_stack_index++] = read_const_expr_operand(scope);
-            /* push operator on stack */
-            op_stack[op_stack_index++] = op;
-            op = get_operator();
-        }
-        /* unwind stack and apply operations */
-        while (op_stack_index > 0) {
-            opcode_t stack_op = op_stack[op_stack_index - 1];
-
-            /* pop stack and apply operators */
-            operand1 = val_stack[val_stack_index - 2];
-            operand2 = val_stack[val_stack_index - 1];
-            val_stack_index -= 2;
-
-            /* apply stack operator and push value back on stack */
-            val_stack[val_stack_index++] =
-                eval_expression_imm(stack_op, operand1, operand2);
-
-            if (op_stack_index == 1) {
-                if (op == OP_ternary) {
-                    lex_expect(T_question);
-                    eval_ternary_imm(val_stack[0], var);
-                } else {
-                    vd = require_var(parent);
-                    vd->var_name = gen_name();
-                    vd->init_val = val_stack[0];
-                    add_insn(parent, bb, OP_load_constant, vd, NULL, NULL, 0,
-                             NULL);
-
-                    rs1 = vd;
-                    emit_global_scalar_assignment(parent, bb, var, rs1);
-                }
-                return true;
-            }
-
-            /* pop op stack */
-            op_stack_index--;
-        }
-        if (op == OP_ternary) {
-            lex_expect(T_question);
-            eval_ternary_imm(val_stack[0], var);
+            eval_ternary_imm(value, var);
         } else {
-            vd = require_var(parent);
-            vd->var_name = gen_name();
-            vd->init_val = val_stack[0];
-            add_insn(parent, GLOBAL_FUNC->bbs, OP_load_constant, vd, NULL, NULL,
-                     0, NULL);
-
-            rs1 = vd;
-            emit_global_scalar_assignment(parent, GLOBAL_FUNC->bbs, var, rs1);
+            rs1 = load_constant(parent, bb, value, TY_int);
+            emit_global_scalar_assignment(parent, bb, var, rs1);
         }
         return true;
     }

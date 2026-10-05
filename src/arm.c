@@ -218,32 +218,21 @@ int __srl(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
                       rm + (1 << 4) + (1 << 5) + (rs << 8));
 }
 
-int __srl_amt(arm_cond_t cond,
-              int s,
-              shift_type shift,
-              arm_reg rd,
-              arm_reg rm,
-              int amt)
-{
-    return arm_encode(cond, s + (arm_mov << 1) + (0 << 5), 0, rd,
-                      rm + (0 << 4) + (shift << 5) + (amt << 7));
-}
+#define DEFINE_SHIFT_IMMEDIATE(name)                                           \
+    int name(arm_cond_t cond, int s, shift_type shift, arm_reg rd, arm_reg rm, \
+             int amt)                                                          \
+    {                                                                          \
+        return arm_encode(cond, s + (arm_mov << 1) + (0 << 5), 0, rd,          \
+                          rm + (0 << 4) + (shift << 5) + (amt << 7));          \
+    }
+DEFINE_SHIFT_IMMEDIATE(__srl_amt)
+DEFINE_SHIFT_IMMEDIATE(__sll_amt)
+#undef DEFINE_SHIFT_IMMEDIATE
 
 int __sll(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
 {
     return arm_encode(cond, 0 + (arm_mov << 1) + (0 << 5), 0, rd,
                       rm + (1 << 4) + (0 << 5) + (rs << 8));
-}
-
-int __sll_amt(arm_cond_t cond,
-              int s,
-              shift_type shift,
-              arm_reg rd,
-              arm_reg rm,
-              int amt)
-{
-    return arm_encode(cond, s + (arm_mov << 1) + (0 << 5), 0, rd,
-                      rm + (0 << 4) + (shift << 5) + (amt << 7));
 }
 
 int __sra(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)

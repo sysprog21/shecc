@@ -17,6 +17,56 @@
  */
 #define A64_STACK_ALIGN 16
 #define A64_SAVE_BYTES 48
+void emit(int insn);
+void emit_ph2_ir(ph2_ir_t *ir);
+void a64_mov_imm(int d, int v);
+void a64_mov_sp(int d);
+void a64_mem(int access, int size, int rt, int rn, int ofs);
+void a64_extend(int d, int n, int size, bool is_unsigned);
+void a64_bl_addr(int target);
+
+/* Offset planning counts the same instruction stream used for emission. */
+static bool a64_count_only;
+static int a64_counted_words;
+
+static void arm64_halfword_counts(unsigned long long value,
+                                  int *zero_words,
+                                  int *one_words)
+{
+    *zero_words = 0;
+    *one_words = 0;
+    for (int shift = 0; shift < 64; shift += 16) {
+        unsigned int word = (unsigned int) (value >> shift) & 0xffffU;
+        *zero_words += word != 0;
+        *one_words += word != 0xffffU;
+    }
+}
+
+static void emit_arm64_wide_const(int reg, unsigned long long value)
+{
+    int zero_words, one_words, first = -1;
+    bool use_movn;
+
+    arm64_halfword_counts(value, &zero_words, &one_words);
+    use_movn = one_words < zero_words;
+    for (int shift = 0; shift < 64; shift += 16) {
+        unsigned int word = (unsigned int) (value >> shift) & 0xffffU;
+        bool differs = use_movn ? word != 0xffffU : word != 0;
+
+        if (!differs)
+            continue;
+        if (first < 0) {
+            first = shift / 16;
+            emit(use_movn ? a64_movn_insn(true, reg, (~word) & 0xffffU, first)
+                          : a64_movz_insn(true, reg, word, first));
+        } else {
+            emit(a64_movk_insn(true, reg, word, shift / 16));
+        }
+    }
+    if (first < 0)
+        emit(use_movn ? a64_movn_insn(true, reg, 0, 0)
+                      : a64_movz_insn(true, reg, 0, 0));
+}
 
 int a64_reg(int r)
 {
@@ -24,7 +74,12 @@ int a64_reg(int r)
 }
 void emit(int insn)
 {
-    elf_write_int(elf_code, insn);
+    if (a64_count_only) {
+        if (a64_counted_words < INT_MAX)
+            a64_counted_words++;
+    } else {
+        elf_write_int(elf_code, insn);
+    }
 }
 void a64_mov(int d, int n)
 {
@@ -44,6 +99,9 @@ void a64_mov_imm(int d, int v)
      * compiler. A negative C int must therefore become a sign-extended
      * X-register value, not 0x00000000ffffffff-style zero extension. MOVN
      * supplies the upper one bits while MOVK fills the second halfword.
+     *
+     * Always two instructions: callers pass segment addresses that are not
+     * final when code size is estimated, so the length cannot depend on v.
      */
     if (v < 0)
         emit(a64_movn_insn(true, d, ~v, 0));
@@ -52,30 +110,23 @@ void a64_mov_imm(int d, int v)
     emit(a64_movk_insn(true, d, v >> 16, 1));
 }
 
-/* A 32-bit unsigned constant has zeroes above bit 31 when it later widens to an
- * X-register scalar. The signed helper intentionally uses MOVN for a negative
- * int, so keep this spelling separate.
+/* A phase-2 constant is final before sizes are estimated, so unlike an address
+ * it takes only the halfwords it needs; update_elf_offset() counts this very
+ * emission. An eight-byte constant keeps its upper word in src1, and a smaller
+ * one widens to the X register by its C signedness.
  */
-void a64_mov_imm_unsigned(int d, int v)
+static void a64_load_constant(int d, const ph2_ir_t *p)
 {
-    unsigned int value = v;
+    unsigned long long value;
 
-    emit(a64_movz_insn(true, d, value, 0));
-    emit(a64_movk_insn(true, d, value >> 16, 1));
-}
-
-/* Phase-2 constants retain their upper word in src1. Materialise all four
- * halfwords for an eight-byte scalar rather than silently discarding it in the
- * ordinary int helper above.
- */
-void a64_mov_imm_wide(int d, int lo, int hi)
-{
-    unsigned int low = lo, high = hi;
-
-    emit(a64_movz_insn(true, d, low, 0));
-    emit(a64_movk_insn(true, d, low >> 16, 1));
-    emit(a64_movk_insn(true, d, high, 2));
-    emit(a64_movk_insn(true, d, high >> 16, 3));
+    if (p->size_bytes == 8)
+        value = (unsigned int) p->src0 |
+                (unsigned long long) (unsigned int) p->src1 << 32;
+    else if (p->is_unsigned)
+        value = (unsigned int) p->src0;
+    else
+        value = (unsigned long long) (long long) p->src0;
+    emit_arm64_wide_const(d, value);
 }
 
 /* Rd = Rn / Rm, unsigned when either operand is. */
@@ -118,19 +169,6 @@ void a64_sub(int d, int n, int m)
 void a64_sxtw(int d, int n)
 {
     emit(a64_sext_insn(d, n, 32));
-}
-
-/* Xd = Xn +/- sign_extend(Wm). The extended-register forms fold the widening of
- * an int index into the address arithmetic that consumes it, so pointer
- * arithmetic costs the same one instruction as any other add.
- */
-void a64_add_sxtw(int d, int n, int m)
-{
-    emit(a64_add_ext_insn(d, n, m, A64_EXT_SXTW));
-}
-void a64_sub_sxtw(int d, int n, int m)
-{
-    emit(a64_sub_ext_insn(d, n, m, A64_EXT_SXTW));
 }
 
 /* Sign-extend the low @size bytes of Xn into Xd. Always one instruction, so
@@ -189,6 +227,8 @@ void a64_mem(int access, int size, int rt, int rn, int ofs)
  */
 void a64_check_disp(int disp, int bits, char *what)
 {
+    if (a64_count_only)
+        return;
     int lim = 1 << (bits - 1);
     if (disp < -lim || disp >= lim)
         fatal(what);
@@ -224,17 +264,6 @@ int a64_adrp_insn(int d, int pc, int target)
     return a64_adrp_pages_insn(d, pages);
 }
 
-/* Which operand of an address expression is the int index that must widen: 0
- * for neither, 1 for src0, 2 for src1. Exactly one source being an address is
- * what makes the other an index, so the two source flags decide alone.
- */
-int a64_ptr_index(ph2_ir_t *p)
-{
-    if (p->src0_is_pointer == p->src1_is_pointer)
-        return 0;
-    return p->src0_is_pointer ? 2 : 1;
-}
-
 /* A comparison is as wide as the values it compares. An address has to be
  * compared whole, an array included, since what reaches the instruction is its
  * decayed base. The source flags say so and is_pointer does not: it counts
@@ -263,66 +292,33 @@ a64_cond_t a64_cond(opcode_t op, bool is_unsigned)
     }
 }
 
-/* All estimates below exactly match emit_ph2_ir(). Fixed-width AArch64 makes
- * this deliberately simpler and more reliable than a relocation pass.
+static int arm64_count_ph2_ir_words(ph2_ir_t *ir)
+{
+    char *saved_fatal_function_context = fatal_function_context;
+    a64_count_only = true;
+    a64_counted_words = 0;
+    emit_ph2_ir(ir);
+    int words = a64_counted_words;
+    a64_count_only = false;
+
+    fatal_function_context = saved_fatal_function_context;
+    return words;
+}
+
+/* Count the actual instruction sequence so offset planning stays in step with
+ * the emitter as it changes.
  */
 void update_elf_offset(ph2_ir_t *ir)
 {
-    int n = 1;
-    switch (ir->op) {
-    case OP_allocat:
-        n = 0;
-        break;
-    case OP_assign:
-        n = ir->dest == ir->src0 ? 0 : 1;
-        break;
-    case OP_load_constant:
-    case OP_load_data_address:
-    case OP_load_rodata_address:
-        n = ir->op == OP_load_constant && ir->size_bytes == 8 ? 4 : 2;
-        break;
-    case OP_address_of:
-    case OP_global_address_of:
-        n = 3;
-        break;
-    case OP_load:
-    case OP_global_load:
-        n = a64_mem_count(ir->size_bytes, ir->src0);
-        break;
-    case OP_store:
-    case OP_global_store:
-        n = a64_mem_count(ir->size_bytes, ir->src1);
-        break;
-    case OP_address_of_func:
-        n = 3;
-        break;
-    case OP_return:
-        n = (ir->src0 >= 0 && a64_reg(ir->src0) != 0) ? 8 : 7;
-        break;
-    case OP_branch:
-        n = 2;
-        break;
-    case OP_mod:
-        n = 2;
-        break;
-    case OP_eq:
-    case OP_neq:
-    case OP_gt:
-    case OP_lt:
-    case OP_geq:
-    case OP_leq:
-    case OP_log_not:
-        n = 2;
-        break;
-    default:
-        break;
-    }
-    elf_offset += n * 4;
+    if (ir->op != OP_allocat)
+        elf_offset += arm64_count_ph2_ir_words(ir) * 4;
 }
 
 void cfg_flatten(void)
 {
     func_t *f;
+    ph2_ir_prepare(false);
+    bool has_main = MAIN_BB != NULL;
 
     /* Entry sequence lengths, which the block offsets below start after.
      * Static: 12 instructions of setup, then the 9-instruction __syscall
@@ -342,13 +338,12 @@ void cfg_flatten(void)
     else
         elf_offset = 21 * 4;
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
-    for (ph2_ir_t *p = GLOBAL_FUNC->bbs->ph2_ir_list.head; p; p = p->next)
-        update_elf_offset(p);
+    ph2_ir_visit_globals(update_elf_offset);
 
     /* code_generate() emits the call to main only when there is one, so a
      * translation unit without main must not be charged for it either.
      */
-    if (MAIN_BB) {
+    if (has_main) {
         int global_frame = ALIGN_UP(GLOBAL_FUNC->stack_size, A64_STACK_ALIGN);
         if (dynlink)
             elf_offset += (10 + a64_mem_count(8, global_frame) +
@@ -372,37 +367,22 @@ void cfg_flatten(void)
          */
         int stack_top_ofs =
             ALIGN_UP(f->stack_size, A64_STACK_ALIGN) + A64_SAVE_BYTES;
-        for (basic_block_t *b = f->bbs; b; b = b->rpo_next) {
-            b->elf_offset = elf_offset;
-
-            /* The entry block's offset deliberately names the prologue so calls
-             * enter at a valid function entry. Later block labels must however
-             * account for that prologue before their first IR word.
-             */
-            if (b == f->bbs) {
-                elf_offset += 7 * 4;
-                if (dynlink && !strcmp(f->return_def.var_name, "main"))
-                    elf_offset += 3 * 4;
-            }
-            for (ph2_ir_t *p = b->ph2_ir_list.head; p; p = p->next) {
-                if (p->ofs_based_on_stack_top) {
-                    if (p->op == OP_load || p->op == OP_address_of)
-                        p->src0 += stack_top_ofs;
-                    else if (p->op == OP_store)
-                        p->src1 += stack_top_ofs;
-                }
-                ph2_ir_t *q = add_existed_ph2_ir(p);
-                if (q->op == OP_return)
-                    q->src1 = f->stack_size;
-                update_elf_offset(q);
-            }
-        }
+        int prologue_bytes = arm64_count_ph2_ir_words(d) * 4;
+        ph2_ir_flatten_function(f, stack_top_ofs, prologue_bytes, 0, false,
+                                update_elf_offset);
     }
 }
 
 void emit_ph2_ir(ph2_ir_t *p)
 {
     int d = a64_reg(p->dest), n = a64_reg(p->src0), m = a64_reg(p->src1);
+    if (op_is_comparison(p->op)) {
+        emit(a64_cmp_reg_insn(a64_cmp_wide(p), n, m));
+        emit(a64_cset_insn(
+            a64_cmp_wide(p), d,
+            a64_cond(p->op, p->src0_is_unsigned || p->src1_is_unsigned)));
+        return;
+    }
     switch (p->op) {
     case OP_define: {
         bool reload_global_base = dynlink && !strcmp(p->func_name, "main");
@@ -434,12 +414,7 @@ void emit_ph2_ir(ph2_ir_t *p)
         return;
     }
     case OP_load_constant:
-        if (p->size_bytes == 8)
-            a64_mov_imm_wide(d, p->src0, p->src1);
-        else if (p->is_unsigned)
-            a64_mov_imm_unsigned(d, p->src0);
-        else
-            a64_mov_imm(d, p->src0);
+        a64_load_constant(d, p);
         return;
     case OP_assign:
         if (d != n)
@@ -472,31 +447,10 @@ void emit_ph2_ir(ph2_ir_t *p)
         a64_mem(A64_STORE, p->dest, m, n, 0);
         return;
     case OP_add:
-        /* Index expressions are int-valued, so the index has to widen before it
-         * joins a 64-bit address; otherwise -1 becomes +4294967295 on LP64.
-         * Addition is commutative, so either operand may be the index.
-         *
-         * The fall-through stays the X form for both cases a64_ptr_index()
-         * reports as 0: two addresses, which is pointer minus pointer and
-         * genuinely 64-bit, and two ints, whose upper half no reader looks at.
-         * See the width note at the comparisons below.
-         */
-        if (a64_ptr_index(p) == 2)
-            a64_add_sxtw(d, n, m);
-        else if (a64_ptr_index(p) == 1)
-            a64_add_sxtw(d, m, n);
-        else
-            a64_add(d, n, m);
+        a64_add(d, n, m);
         return;
     case OP_sub:
-        /* Only pointer-minus-int widens: int-minus-pointer is not an address
-         * expression, and pointer-minus-pointer is already 64-bit on both
-         * sides.
-         */
-        if (a64_ptr_index(p) == 2)
-            a64_sub_sxtw(d, n, m);
-        else
-            a64_sub(d, n, m);
+        a64_sub(d, n, m);
         return;
     case OP_mul:
         emit(a64_mul_insn(p->size_bytes == 8, d, n, m));
@@ -531,17 +485,6 @@ void emit_ph2_ir(ph2_ir_t *p)
         return;
     case OP_bit_not:
         emit(a64_mvn_insn(p->size_bytes == 8, d, n));
-        return;
-    case OP_eq:
-    case OP_neq:
-    case OP_gt:
-    case OP_lt:
-    case OP_geq:
-    case OP_leq:
-        emit(a64_cmp_reg_insn(a64_cmp_wide(p), n, m));
-        emit(a64_cset_insn(
-            a64_cmp_wide(p), d,
-            a64_cond(p->op, p->src0_is_unsigned || p->src1_is_unsigned)));
         return;
 
     /* Width follows the operand, exactly as the comparisons above do. A pointer
@@ -589,6 +532,7 @@ void emit_ph2_ir(ph2_ir_t *p)
         func_t *f = find_func(p->func_name);
         if (!f)
             fatal("arm64 call to unknown function");
+
         if (!f->bbs) {
             if (!dynlink)
                 fatal("arm64 external call requires --dynlink");
@@ -668,6 +612,8 @@ void plt_generate(void)
 void code_generate(void)
 {
     int global_frame = ALIGN_UP(GLOBAL_FUNC->stack_size, A64_STACK_ALIGN);
+    bool has_main = MAIN_BB != NULL;
+    int main_offset = has_main ? MAIN_BB->elf_offset : -1;
 
     /* At Linux process entry argc is at [sp] and argv begins at sp + 8; they
      * are loaded into x20 and x21. Those two are allocatable by the global
@@ -728,13 +674,12 @@ void code_generate(void)
         emit(a64_svc_insn(0));
         emit(a64_ret_insn());
     }
-    for (ph2_ir_t *p = GLOBAL_FUNC->bbs->ph2_ir_list.head; p; p = p->next)
-        emit_ph2_ir(p);
-    if (MAIN_BB) {
+    ph2_ir_visit_globals(emit_ph2_ir);
+    if (has_main) {
         if (dynlink) {
             a64_mem(A64_LOAD, 8, 23, A64_SP, global_frame);
             a64_mem(A64_LOAD, 8, 24, A64_SP, global_frame + 8);
-            a64_mov_imm(0, elf_code_start + MAIN_BB->elf_offset);
+            a64_mov_imm(0, elf_code_start + main_offset);
             a64_mov(1, 23);
             a64_mov(2, 24);
             a64_mov(3, A64_ZR);
@@ -746,7 +691,7 @@ void code_generate(void)
         } else {
             a64_mov(0, 23);
             a64_mov(1, 24);
-            emit(a64_bl_insn((MAIN_BB->elf_offset - elf_code->size) / 4));
+            emit(a64_bl_insn((main_offset - elf_code->size) / 4));
             a64_mov_imm(8, 93);
             emit(a64_svc_insn(0));
         }

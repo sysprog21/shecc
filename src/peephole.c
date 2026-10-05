@@ -9,142 +9,179 @@
 #include "defs.h"
 #include "globals.c"
 
-/* Determines if an instruction can be fused with a following OP_assign. Fusible
- * instructions are those whose results can be directly written to the final
- * destination register, eliminating intermediate moves.
- */
-bool is_fusible_insn(const ph2_ir_t *ph2_ir)
+/* Share peephole rewrite and register-write properties in one table. */
+enum {
+    OP_WRITES_DEST = 1,
+    OP_SRC0_REG = 2,
+    OP_SRC1_REG = 4,
+    OP_SRC2_REG = 8,
+    OP_COPY_FORWARD_SAFE = 16,
+    OP_FUSIBLE = 32,
+    OP_BINARY_ALU = 64,
+    OP_INTEGER_BINARY = 128,
+    OP_COMPARISON = 256,
+    OP_SCALAR_UNARY = 512,
+    OP_SCALAR_CAST = 1024,
+};
+
+#define OP_PROPERTY(op, flags) [op] = flags,
+#define OP_DEST(flags) ((flags) | OP_WRITES_DEST)
+#define OP_COPY(flags) ((flags) | OP_COPY_FORWARD_SAFE)
+#define OP_FUSE(flags) ((flags) | OP_FUSIBLE)
+#define OP_COPY_FUSE(flags) ((flags) | OP_COPY_FORWARD_SAFE | OP_FUSIBLE)
+#define OP_BINARY (OP_SRC0_REG | OP_SRC1_REG | OP_BINARY_ALU)
+#define OP_UNARY OP_SRC0_REG
+#define OP_INTEGER (OP_BINARY | OP_INTEGER_BINARY)
+/* Each macro expands to an initializer and comma. */
+/* clang-format off */
+static const unsigned short op_properties[] = {
+    OP_PROPERTY(OP_generic, 0)
+    OP_PROPERTY(OP_cmov, OP_DEST(OP_SRC0_REG | OP_SRC1_REG | OP_SRC2_REG))
+    OP_PROPERTY(OP_define, 0)
+    OP_PROPERTY(OP_push, OP_SRC0_REG)
+    OP_PROPERTY(OP_call, 0)
+    OP_PROPERTY(OP_indirect, OP_SRC0_REG)
+    OP_PROPERTY(OP_return, OP_SRC0_REG)
+    OP_PROPERTY(OP_va_start, 0)
+    OP_PROPERTY(OP_allocat, 0)
+    OP_PROPERTY(OP_assign, OP_DEST(OP_COPY(OP_SRC0_REG)))
+    OP_PROPERTY(OP_load_constant, OP_DEST(0))
+    OP_PROPERTY(OP_load_data_address, OP_DEST(OP_FUSE(0)))
+    OP_PROPERTY(OP_load_rodata_address, OP_DEST(OP_FUSE(0)))
+    OP_PROPERTY(OP_branch, OP_COPY(OP_SRC0_REG))
+    OP_PROPERTY(OP_jump, 0)
+    OP_PROPERTY(OP_func_ret, 0)
+    OP_PROPERTY(OP_address_of_func, OP_SRC0_REG)
+    OP_PROPERTY(OP_load_func, OP_SRC0_REG)
+    OP_PROPERTY(OP_global_load_func, OP_SRC0_REG)
+    OP_PROPERTY(OP_address_of, OP_DEST(0))
+    OP_PROPERTY(OP_global_address_of, OP_DEST(0))
+    OP_PROPERTY(OP_load, OP_DEST(OP_FUSE(0)))
+    OP_PROPERTY(OP_global_load, OP_DEST(OP_FUSE(0)))
+    OP_PROPERTY(OP_store, OP_COPY(OP_SRC0_REG))
+    OP_PROPERTY(OP_global_store, OP_COPY(OP_SRC0_REG))
+    OP_PROPERTY(OP_read, OP_DEST(OP_COPY(OP_SRC0_REG)))
+    OP_PROPERTY(OP_write, OP_COPY(OP_SRC0_REG | OP_SRC1_REG))
+    OP_PROPERTY(OP_add, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_sub, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_mul, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_div, OP_DEST(OP_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_mod, OP_DEST(OP_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_ternary, OP_DEST(OP_SRC0_REG))
+    OP_PROPERTY(OP_lshift, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_rshift, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_log_and, OP_DEST(OP_FUSE(OP_UNARY)))
+    OP_PROPERTY(OP_log_or, OP_DEST(OP_FUSE(OP_UNARY)))
+    OP_PROPERTY(OP_log_not, OP_DEST(OP_COPY_FUSE(OP_UNARY | OP_SCALAR_UNARY)))
+    OP_PROPERTY(OP_eq, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_neq, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_lt, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_leq, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_gt, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_geq, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_bit_or, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_bit_and, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_bit_xor, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_bit_not, OP_DEST(OP_COPY_FUSE(OP_UNARY | OP_SCALAR_UNARY)))
+    OP_PROPERTY(OP_negate, OP_DEST(OP_COPY_FUSE(OP_UNARY | OP_SCALAR_UNARY)))
+    OP_PROPERTY(OP_trunc, OP_DEST(OP_COPY(OP_SRC0_REG | OP_SCALAR_CAST)))
+    OP_PROPERTY(OP_sign_ext, OP_DEST(OP_COPY(OP_SRC0_REG | OP_SCALAR_CAST)))
+    OP_PROPERTY(OP_cast, OP_DEST(OP_SRC0_REG | OP_SCALAR_CAST))
+    OP_PROPERTY(OP_start, 0)
+};
+/* clang-format on */
+#undef OP_COPY
+#undef OP_FUSE
+#undef OP_COPY_FUSE
+#undef OP_BINARY
+#undef OP_INTEGER
+#undef OP_UNARY
+#undef OP_DEST
+#undef OP_PROPERTY
+typedef char op_property_count_check
+    [sizeof(op_properties) / sizeof(op_properties[0]) == OP_start + 1 ? 1 : -1];
+
+static unsigned int op_property(opcode_t op, unsigned int property)
 {
-    switch (ph2_ir->op) {
-    case OP_add: /* Arithmetic operations */
-    case OP_sub:
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-    case OP_lshift: /* Shift operations */
-    case OP_rshift:
-    case OP_bit_and: /* Bitwise operations */
-    case OP_bit_or:
-    case OP_bit_xor:
-    case OP_log_and: /* Logical operations */
-    case OP_log_or:
-    case OP_log_not:
-    case OP_negate: /* Unary operations */
-    case OP_load:   /* Memory operations */
-    case OP_global_load:
-    case OP_load_data_address:
-    case OP_load_rodata_address:
-        return true;
-    default:
-        return false;
-    }
+    if (op < OP_generic || op > OP_start)
+        return 0;
+    return op_properties[op] & property;
 }
 
-/* Opcodes whose "dest" names a register they write. Only opcodes that certainly
- * do are listed, so a live register is never mistaken for dead.
- */
 bool op_writes_dest(opcode_t op)
 {
-    switch (op) {
-    case OP_cmov:
-    case OP_load:
-    case OP_load_constant:
-    case OP_global_load:
-    case OP_assign:
-    case OP_add:
-    case OP_sub:
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-    case OP_lshift:
-    case OP_rshift:
-    case OP_bit_and:
-    case OP_bit_or:
-    case OP_bit_xor:
-    case OP_bit_not:
-    case OP_negate:
-    case OP_log_not:
-    case OP_eq:
-    case OP_neq:
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-    case OP_read:
-    case OP_address_of:
-    case OP_global_address_of:
-    case OP_trunc:
-    case OP_sign_ext:
-        return true;
-    default:
-        return false;
-    }
+    return op_property(op, OP_WRITES_DEST) != 0;
 }
-
-/* Opcodes whose src0 holds something other than a register number. Anything not
- * listed is assumed to read src0, which only costs a missed rewrite.
- */
+bool op_is_binary_alu(opcode_t op)
+{
+    return op_property(op, OP_BINARY_ALU);
+}
+bool op_is_integer_binary(opcode_t op)
+{
+    return op_property(op, OP_INTEGER_BINARY);
+}
+bool op_is_comparison(opcode_t op)
+{
+    return op_property(op, OP_COMPARISON);
+}
+bool op_is_scalar_unary(opcode_t op)
+{
+    return op_property(op, OP_SCALAR_UNARY);
+}
+bool op_is_scalar_cast(opcode_t op)
+{
+    return op_property(op, OP_SCALAR_CAST);
+}
 bool op_src0_is_reg(opcode_t op)
 {
-    switch (op) {
-    case OP_load:
-    case OP_load_constant:
-    case OP_global_load:
-    case OP_address_of:
-    case OP_global_address_of:
-    case OP_load_data_address:
-    case OP_load_rodata_address:
-    case OP_define:
-    case OP_label:
-    case OP_jump:
-        return false;
-    default:
-        return true;
-    }
+    return op_property(op, OP_SRC0_REG);
 }
-
-/* Opcodes whose src1 is a register rather than a width, slot or immediate. */
 bool op_src1_is_reg(opcode_t op)
 {
-    switch (op) {
-    case OP_add:
-    case OP_sub:
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-    case OP_lshift:
-    case OP_rshift:
-    case OP_bit_and:
-    case OP_bit_or:
-    case OP_bit_xor:
-    case OP_eq:
-    case OP_neq:
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-    case OP_write:
-    case OP_cmov:
-        return true;
-    default:
-        return false;
-    }
+    return op_property(op, OP_SRC1_REG);
 }
-
-/* Whether src2 names a register. Only a select does: it is the value kept when
- * the condition does not hold, and a scan that missed it would take that value
- * for dead and drop whatever computed it.
- */
 bool op_src2_is_reg(opcode_t op)
 {
-    return op == OP_cmov;
+    return op_property(op, OP_SRC2_REG);
 }
 
+int func_highest_used_reg(func_t *func, int first_callee_saved)
+{
+    int top = first_callee_saved - 1;
+
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+            if (op_writes_dest(ir->op) && ir->dest > top)
+                top = ir->dest;
+            if (op_src0_is_reg(ir->op) && ir->src0 > top)
+                top = ir->src0;
+            if (op_src1_is_reg(ir->op) && ir->src1 > top)
+                top = ir->src1;
+            if (op_src2_is_reg(ir->op) && ir->src2 > top)
+                top = ir->src2;
+        }
+    return top < REG_CNT ? top : REG_CNT - 1;
+}
+
+/* These instructions can write their result straight to a following move's
+ * destination, eliminating the intermediate register copy.
+ */
+bool is_fusible_insn(const ph2_ir_t *ir)
+{
+    return op_property(ir->op, OP_FUSIBLE);
+}
+
+int call_arg_regs(ph2_ir_t *ir);
+
 /* Whether @ir reads @reg as an operand. A 32-bit target names the high half of
- * a wide operand in src0_hi or src1_hi, which are -1 when unused.
+ * a wide operand in src0_hi or src1_hi, which are -1 when unused. A call reads
+ * its argument registers without naming any of them.
  */
 bool ir_reads_reg(ph2_ir_t *ir, int reg)
 {
+    if ((ir->op == OP_call || ir->op == OP_indirect) && reg >= 0 &&
+        reg < MAX_ARGS_IN_REG && reg < call_arg_regs(ir))
+        return true;
     if (reg >= 0 && (ir->src0_hi == reg || ir->src1_hi == reg))
         return true;
     if (op_src2_is_reg(ir->op) && ir->src2 == reg)
@@ -152,6 +189,68 @@ bool ir_reads_reg(ph2_ir_t *ir, int reg)
     if (op_src0_is_reg(ir->op) && ir->src0 == reg)
         return true;
     return op_src1_is_reg(ir->op) && ir->src1 == reg;
+}
+
+/* Calls read their ABI arguments before clobbering the caller registers. */
+unsigned int ph2_ir_defs(ph2_ir_t *ir)
+{
+    unsigned int defs = 0;
+    if (op_writes_dest(ir->op)) {
+        if (ir->dest >= 0 && ir->dest < REG_CNT)
+            defs |= 1u << ir->dest;
+        if (ir->dest_hi >= 0 && ir->dest_hi < REG_CNT)
+            defs |= 1u << ir->dest_hi;
+    }
+    if (ir->op == OP_call || ir->op == OP_indirect)
+        defs |= (1u << (REG_CNT - CALLEE_SAVED_REGS)) - 1;
+    return defs;
+}
+
+/* Allocated registers can cross machine edges. Three block masks suffice:
+ * live-in is use | (live-out & ~def), including both halves of a pair.
+ */
+void ph2_compute_liveness(void)
+{
+    FOR_EACH_FUNCTION_BODY(func)
+    {
+        int count = 0;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+            count++;
+        basic_block_t **blocks = malloc(count * sizeof(*blocks));
+        if (!blocks)
+            fatal("Machine liveness allocation failed");
+        int index = 0;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            blocks[index++] = bb;
+            bb->machine_use = bb->machine_def = bb->machine_liveout = 0;
+            for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+                for (int reg = 0; reg < REG_CNT; reg++)
+                    if (ir_reads_reg(ir, reg))
+                        bb->machine_use |= (1u << reg) & ~bb->machine_def;
+                bb->machine_def |= ph2_ir_defs(ir);
+            }
+        }
+        bool changed;
+        do {
+            changed = false;
+            for (int at = count - 1; at >= 0; at--) {
+                basic_block_t *bb = blocks[at];
+                basic_block_t *successors[3] = {bb->next, bb->then_, bb->else_};
+                unsigned int out = 0;
+                for (int edge = 0; edge < 3; edge++) {
+                    basic_block_t *next = successors[edge];
+                    if (next)
+                        out |= next->machine_use |
+                               (next->machine_liveout & ~next->machine_def);
+                }
+                if (out != bb->machine_liveout) {
+                    bb->machine_liveout = out;
+                    changed = true;
+                }
+            }
+        } while (changed);
+        free(blocks);
+    }
 }
 
 /* Main peephole optimization function that applies pattern matching and
@@ -189,65 +288,20 @@ int call_arg_regs(ph2_ir_t *ir)
     return words < MAX_ARGS_IN_REG ? words : MAX_ARGS_IN_REG;
 }
 
-/* True when @reg still holds a live value past the end of @bb.
- *
- * reg_alloc() hands its register file to a successor that this block is the
- * only way into (bb_export_regs()), so a register can outlive the block that
- * filled it. Scans that stop at the block boundary conclude there according to
- * this: with nothing carried, every register dies at the end of a block and an
- * unread value is dead.
- */
-bool reg_live_out_of_bb(basic_block_t *bb, int reg)
-{
-    basic_block_t *succs[3];
-
-    if (!bb || reg < 0 || reg >= REG_CNT)
-        return false;
-
-    /* A register the allocator pinned holds its variable on every path, so it
-     * is live out of every block regardless of what the successors record.
-     */
-    if (bb->belong_to && ((bb->belong_to->pinned_regs >> reg) & 1))
-        return true;
-
-    succs[0] = bb->next;
-    succs[1] = bb->then_;
-    succs[2] = bb->else_;
-
-    for (int i = 0; i < 3; i++) {
-        if (succs[i] && succs[i]->entry_regs && succs[i]->entry_regs[reg])
-            return true;
-    }
-    return false;
-}
-
-/* Whether @reg may still be read after @ir, before anything writes it again.
- *
- * The scan covers the rest of @bb, with a call reading its argument registers.
- * Past the end of the block a register keeps its value only when it is pinned,
- * or when reg_alloc() handed it to a successor through bb_export_regs(); every
- * other successor loads what it reads.
- */
-bool reg_read_after(basic_block_t *bb, ph2_ir_t *ir, int reg)
+/* Scan local reads and definitions, then consult the successor live set. */
+static bool reg_read_after(basic_block_t *bb, ph2_ir_t *ir, int reg)
 {
     if (reg < 0)
         return false;
     if (reg >= REG_CNT)
         return true;
-
     for (ph2_ir_t *p = ir->next; p; p = p->next) {
-        if (p->op == OP_call || p->op == OP_indirect) {
-            if (reg < call_arg_regs(p))
-                return true;
-            continue;
-        }
         if (ir_reads_reg(p, reg))
             return true;
-        if (op_writes_dest(p->op) && (p->dest == reg || p->dest_hi == reg))
+        if (ph2_ir_defs(p) & (1u << reg))
             return false;
     }
-
-    return reg_live_out_of_bb(bb, reg);
+    return (bb->machine_liveout & (1u << reg)) != 0;
 }
 
 /* Whether folding @ir into @last loses a value that is still wanted. The folded
@@ -314,26 +368,29 @@ bool pair_insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
     return true;
 }
 
+static bool replace_with_move(basic_block_t *bb,
+                              ph2_ir_t *ir,
+                              ph2_ir_t *next,
+                              int source)
+{
+    ir->op = OP_assign;
+    ir->src0 = source;
+    ir->dest = next->dest;
+    ph2_ir_drop_after(bb, ir, next);
+    return true;
+}
+
 bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
 {
     ph2_ir_t *next = ph2_ir->next;
     if (!next)
         return false;
 
-    /* ALU instruction fusion. Eliminates redundant move operations following
-     * arithmetic/logical operations. This is the most fundamental optimization
-     * that removes temporary register usage.
-     */
+    /* Fuse result moves and fold constant identities. */
     if (next->op == OP_assign) {
         if (is_fusible_insn(ph2_ir) && ph2_ir->dest == next->src0 &&
             !fold_loses_dest(bb, ph2_ir, next)) {
-            /* Pattern: {ALU rn, rs1, rs2; mv rd, rn} → {ALU rd, rs1, rs2}
-             * Example: {add t1, a, b; mv result, t1} → {add result, a, b}
-             *
-             * Only when nothing reads rn afterwards. A value with two names is
-             * copied and then read through the first one as well, and the fused
-             * instruction no longer writes it.
-             */
+            /* Do not remove a temporary that still has another live use. */
             ph2_ir->dest = next->dest;
             ph2_ir_drop_after(bb, ph2_ir, next);
             return true;
@@ -346,36 +403,18 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
         if (next->op == OP_add &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1) &&
             const_fold_ok(bb, ph2_ir, next)) {
-            /* Pattern: {li 0; add x, 0} → {mov x} (additive identity: x+0 = x)
-             * Handles both operand positions due to addition commutativity
-             * Example: {li t1, 0; add result, var, t1} → {mov result, var}
-             */
             int non_zero_src =
                 (ph2_ir->dest == next->src0) ? next->src1 : next->src0;
 
-            ph2_ir->op = OP_assign;
-            ph2_ir->src0 = non_zero_src;
-            ph2_ir->dest = next->dest;
-            ph2_ir_drop_after(bb, ph2_ir, next);
-            return true;
+            return replace_with_move(bb, ph2_ir, next, non_zero_src);
         }
 
         if (next->op == OP_sub && const_fold_ok(bb, ph2_ir, next)) {
             if (ph2_ir->dest == next->src1) {
-                /* Pattern: {li 0; sub x, 0} → {mov x} (x - 0 = x)
-                 * Example: {li t1, 0; sub result, var, t1} → {mov result, var}
-                 */
-                ph2_ir->op = OP_assign;
-                ph2_ir->src0 = next->src0;
-                ph2_ir->dest = next->dest;
-                ph2_ir_drop_after(bb, ph2_ir, next);
-                return true;
+                return replace_with_move(bb, ph2_ir, next, next->src0);
             }
 
             if (ph2_ir->dest == next->src0) {
-                /* Pattern: {li 0; sub 0, x} → {neg x} (0 - x = -x)
-                 * Example: {li t1, 0; sub result, t1, var} → {neg result, var}
-                 */
                 ph2_ir->op = OP_negate;
                 ph2_ir->src0 = next->src1;
                 ph2_ir->dest = next->dest;
@@ -387,10 +426,6 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
         if (next->op == OP_mul &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1) &&
             const_fold_ok(bb, ph2_ir, next)) {
-            /* Pattern: {li 0; mul x, 0} → {li 0} (absorbing element: x * 0 = 0)
-             * Example: {li t1, 0; mul result, var, t1} → {li result, 0}
-             * Eliminates multiplication entirely
-             */
             ph2_ir->op = OP_load_constant;
             ph2_ir->src0 = 0;
             ph2_ir->dest = next->dest;
@@ -405,16 +440,9 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
         if (next->op == OP_mul &&
             (ph2_ir->dest == next->src0 || ph2_ir->dest == next->src1) &&
             const_fold_ok(bb, ph2_ir, next)) {
-            /* Pattern: {li 1; mul x, 1} → {mov x} (multiplicative identity: x *
-             * 1 = x) Example: {li t1, 1; mul result, var, t1} → {mov result,
-             * var} Handles both operand positions due to multiplication
-             * commutativity
-             */
-            ph2_ir->op = OP_assign;
-            ph2_ir->src0 = ph2_ir->dest == next->src0 ? next->src1 : next->src0;
-            ph2_ir->dest = next->dest;
-            ph2_ir_drop_after(bb, ph2_ir, next);
-            return true;
+            return replace_with_move(
+                bb, ph2_ir, next,
+                ph2_ir->dest == next->src0 ? next->src1 : next->src0);
         }
     }
 
@@ -425,93 +453,15 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
         ph2_ir->src1 == (next->size_bytes > 4 ? -1 : 0) &&
         next->op == OP_bit_and && ph2_ir->dest == next->src1 &&
         const_fold_ok(bb, ph2_ir, next)) {
-        /* Pattern: {li -1; and x, -1} → {mov x} (x & 0xFFFFFFFF = x) Example:
-         * {li t1, -1; and result, var, t1} → {mov result, var} Eliminates
-         * bitwise AND with all-ones mask
-         */
-        ph2_ir->op = OP_assign;
-        ph2_ir->src0 = next->src0;
-        ph2_ir->dest = next->dest;
-        ph2_ir_drop_after(bb, ph2_ir, next);
-        return true;
+        return replace_with_move(bb, ph2_ir, next, next->src0);
     }
 
     if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        ph2_ir->src1 == 0 && (next->op == OP_lshift || next->op == OP_rshift) &&
-        ph2_ir->dest == next->src1 && const_fold_ok(bb, ph2_ir, next)) {
-        /* Pattern: {li 0; shl/shr x, 0} → {mov x} (x << 0 = x >> 0 = x)
-         * Example: {li t1, 0; shl result, var, t1} → {mov result, var}
-         * Eliminates no-op shift operations
-         */
-        ph2_ir->op = OP_assign;
-        ph2_ir->src0 = next->src0;
-        ph2_ir->dest = next->dest;
-        ph2_ir_drop_after(bb, ph2_ir, next);
-        return true;
-    }
-
-    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        ph2_ir->src1 == 0 && next->op == OP_bit_or &&
-        ph2_ir->dest == next->src1 && const_fold_ok(bb, ph2_ir, next)) {
-        /* Pattern: {li 0; or x, 0} → {mov x} (x | 0 = x) Example: {li t1, 0; or
-         * result, var, t1} → {mov result, var} Eliminates bitwise OR with zero
-         * (identity element)
-         */
-        ph2_ir->op = OP_assign;
-        ph2_ir->src0 = next->src0;
-        ph2_ir->dest = next->dest;
-        ph2_ir_drop_after(bb, ph2_ir, next);
-        return true;
-    }
-
-    /* Power-of-2 multiplication to shift conversion. Shift operations are
-     * significantly faster than multiplication
-     */
-    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 > 0 &&
-        ph2_ir->src1 == 0 && next->op == OP_mul && ph2_ir->dest == next->src1) {
-        int shift_amount = exact_log2(ph2_ir->src0);
-        if (shift_amount >= 0 && const_fold_ok(bb, ph2_ir, next)) {
-            /* Pattern: {li 2^n; mul x, 2^n} → {li n; shl x, n} Example: {li t1,
-             * 4; mul result, var, t1} →
-             *          {li t1, 2; shl result, var, t1}
-             */
-            ph2_ir->src0 = shift_amount;
-            next->op = OP_lshift;
-            return true;
-        }
-    }
-
-    /* XOR identity operation */
-    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 0 &&
-        ph2_ir->src1 == 0 && next->op == OP_bit_xor &&
-        ph2_ir->dest == next->src1 && const_fold_ok(bb, ph2_ir, next)) {
-        /* Pattern: {li 0; xor x, 0} → {mov x} (x ^ 0 = x) Example: {li t1, 0;
-         * xor result, var, t1} → {mov result, var} Completes bitwise identity
-         * optimization coverage
-         */
-        ph2_ir->op = OP_assign;
-        ph2_ir->src0 = next->src0;
-        ph2_ir->dest = next->dest;
-        ph2_ir_drop_after(bb, ph2_ir, next);
-        return true;
-    }
-
-    /* Extended multiplicative identity (operand position variant) Handles the
-     * case where constant 1 is in src0 position of multiplication
-     */
-    if (ph2_ir->op == OP_load_constant && ph2_ir->src0 == 1 &&
-        ph2_ir->src1 == 0 && next->op == OP_mul && ph2_ir->dest == next->src0 &&
-        const_fold_ok(bb, ph2_ir, next)) {
-        /* Pattern: {li 1; mul 1, x} → {mov x} (1 * x = x) Example: {li t1, 1;
-         * mul result, t1, var} → {mov result, var} Covers multiplication
-         * commutativity edge case
-         */
-        ph2_ir->op = OP_assign;
-        ph2_ir->src0 = next->src1;
-        ph2_ir->dest = next->dest;
-        ph2_ir_drop_after(bb, ph2_ir, next);
-        return true;
-    }
+        ph2_ir->src1 == 0 &&
+        (next->op == OP_lshift || next->op == OP_rshift ||
+         next->op == OP_bit_or || next->op == OP_bit_xor) &&
+        ph2_ir->dest == next->src1 && const_fold_ok(bb, ph2_ir, next))
+        return replace_with_move(bb, ph2_ir, next, next->src0);
 
     return false;
 }
@@ -523,6 +473,14 @@ bool is_plain_register_def(const ph2_ir_t *ir)
 {
     return ir->op == OP_assign || ir->op == OP_load ||
            ir->op == OP_global_load || ir->op == OP_load_constant;
+}
+
+static bool is_full_register_copy(const ph2_ir_t *ir)
+{
+    return ir && ir->op == OP_assign && ir->dest_hi < 0 && ir->src0_hi < 0 &&
+           !(ir->is_unsigned && ir->size_bytes < PTR_SIZE) &&
+           ir->dest != ir->src0 && ir->dest >= 0 && ir->dest < REG_CNT &&
+           ir->src0 >= 0 && ir->src0 < REG_CNT;
 }
 
 /* Redundant move elimination: a move, load or constant load whose register is
@@ -552,6 +510,94 @@ bool redundant_move_elim(basic_block_t *bb, ph2_ir_t *ph2_ir)
         return false;
 
     memcpy(ph2_ir, next, sizeof(ph2_ir_t));
+    ph2_ir_drop_after(bb, ph2_ir, ph2_ir);
+    return true;
+}
+
+/* {t = r; op ..., t, ...} -> {op ..., r, ...} when t dies there. A post
+ * increment ("i++" keeps i's old value in a temporary) and argument staging
+ * leave such copies in every loop; forwarding the source drops the move.
+ *
+ * Only a plain full-width copy qualifies: a register pair, or an unsigned
+ * narrowing copy that x86-64 emits as a zero extension, changes the value.
+ */
+bool copy_forward(basic_block_t *bb, ph2_ir_t *ph2_ir)
+{
+    ph2_ir_t *next = ph2_ir->next;
+    int t = ph2_ir->dest;
+    int r = ph2_ir->src0;
+    bool used = false;
+
+    if (!next || !is_full_register_copy(ph2_ir))
+        return false;
+    if (next->src0_hi >= 0 || next->src1_hi >= 0 || next->dest_hi >= 0)
+        return false;
+
+    /* Only instructions that read exactly the registers they name. A call reads
+     * its argument registers without naming them, and several opcodes keep
+     * something other than a register in src0; the copy may stage an argument,
+     * or its number may merely match an unrelated field.
+     */
+    if (!op_property(next->op, OP_COPY_FORWARD_SAFE))
+        return false;
+    /* The copy has to die here, unless the instruction itself rewrites it. */
+    if (!(op_writes_dest(next->op) && next->dest == t) &&
+        reg_read_after(bb, next, t))
+        return false;
+
+    /* Backends lower "rd = op a, b" as "mov rd, a; op rd, b", so an instruction
+     * that writes r may read r only as its first operand: "t = r; r = sub a, t"
+     * must not become "r = sub a, r".
+     */
+    if (op_writes_dest(next->op) && next->dest == r &&
+        ((op_src1_is_reg(next->op) && next->src1 == t) ||
+         (op_src2_is_reg(next->op) && next->src2 == t)))
+        return false;
+    if (op_src0_is_reg(next->op) && next->src0 == t) {
+        next->src0 = r;
+        used = true;
+    }
+    if (op_src1_is_reg(next->op) && next->src1 == t) {
+        next->src1 = r;
+        used = true;
+    }
+    if (op_src2_is_reg(next->op) && next->src2 == t) {
+        next->src2 = r;
+        used = true;
+    }
+    if (!used)
+        return false;
+    memcpy(ph2_ir, next, sizeof(ph2_ir_t));
+    ph2_ir_drop_after(bb, ph2_ir, ph2_ir);
+    return true;
+}
+
+/* {t = r; li r, K; [t] = r} -> {li t, K; [r] = t} when both die at the store.
+ * The copy exists only because the value was loaded into the register the
+ * address was in; swapping the two roles drops it, and leaves the address
+ * feeding the store directly, where a backend can fold it into the access.
+ */
+bool store_copy_swap(basic_block_t *bb, ph2_ir_t *ph2_ir)
+{
+    ph2_ir_t *li = ph2_ir->next;
+    ph2_ir_t *wr = li ? li->next : NULL;
+    int t = ph2_ir->dest;
+    int r = ph2_ir->src0;
+
+    if (!wr || !is_full_register_copy(ph2_ir))
+        return false;
+    if (li->op != OP_load_constant || li->dest != r || li->dest_hi >= 0)
+        return false;
+    if (wr->op != OP_write || wr->src0 != t || wr->src1 != r ||
+        wr->src0_hi >= 0 || wr->src1_hi >= 0)
+        return false;
+    if (reg_read_after(bb, wr, t) || reg_read_after(bb, wr, r))
+        return false;
+
+    memcpy(ph2_ir, li, sizeof(ph2_ir_t));
+    ph2_ir->dest = t;
+    wr->src0 = r;
+    wr->src1 = t;
     ph2_ir_drop_after(bb, ph2_ir, ph2_ir);
     return true;
 }
@@ -800,11 +846,7 @@ bool bitwise_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
      */
     if (ph2_ir->op == OP_bit_not && next->op == OP_bit_not &&
         next->src0 == ph2_ir->dest && !fold_loses_dest(bb, ph2_ir, next)) {
-        /* Replace with simple assignment */
-        ph2_ir->op = OP_assign;
-        ph2_ir->dest = next->dest;
-        ph2_ir_drop_after(bb, ph2_ir, next);
-        return true;
+        return replace_with_move(bb, ph2_ir, next, ph2_ir->src0);
     }
 
     /* Pattern 2: AND with zero → zero x & 0 = 0, and OR with all-ones →
@@ -909,8 +951,8 @@ bool triple_pattern_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
  *
  * This runs on ph2_ir_t, after register allocation, and so sees only what
  * assigning registers makes visible. Constant folding, common subexpression
- * elimination and dead code elimination have already run over insn_t in the SSA
- * optimizer and are not repeated here.
+ * elimination and dead code elimination have already run over VIR and are not
+ * repeated here.
  *
  * What is left to do at this level:
  * - self-assignment elimination, for assignments allocation itself created
@@ -919,74 +961,75 @@ bool triple_pattern_optimization(basic_block_t *bb, ph2_ir_t *ph2_ir)
  * - bitwise identities on registers
  * - load/store pattern elimination
  */
+/* Apply the first rule that matches the window starting at @ir, and report
+ * whether one did. Every rewrite leaves @ir in place and changes what follows
+ * it, so the caller tries the same position again.
+ */
+bool peephole_at(basic_block_t *bb, ph2_ir_t *ir)
+{
+    ph2_ir_t *next = ir->next;
+    if (!next)
+        return false;
+
+    /* Self-assignment elimination Keep this as a safety net: SSA handles most
+     * cases, but register allocation might create new self-assignments
+     */
+    if (next->op == OP_assign && next->dest == next->src0 &&
+        next->dest_hi == next->src0_hi) {
+        ph2_ir_drop_after(bb, ir, next);
+        return true;
+    }
+
+    if (PTR_SIZE < 8 && (ph2_ir_has_pair(ir) || ph2_ir_has_pair(next) ||
+                         ph2_ir_has_pair(next->next)))
+        return pair_insn_fusion(bb, ir);
+
+    /* Try triple pattern optimization first (3-instruction sequences) */
+    if (triple_pattern_optimization(bb, ir))
+        return true;
+
+    /* Try instruction fusion (2-instruction sequences) */
+    if (insn_fusion(bb, ir))
+        return true;
+
+    /* Apply strength reduction for power-of-2 operations */
+    if (strength_reduction(bb, ir))
+        return true;
+
+    /* Apply bitwise operation optimizations */
+    if (bitwise_optimization(bb, ir))
+        return true;
+
+    /* Swap a copied address with the constant stored through it */
+    if (store_copy_swap(bb, ir))
+        return true;
+
+    /* Forward a copy into the instruction that consumes it */
+    if (copy_forward(bb, ir))
+        return true;
+
+    /* Apply redundant move elimination */
+    if (redundant_move_elim(bb, ir))
+        return true;
+
+    /* Apply load/store elimination */
+    return eliminate_load_store_pairs(bb, ir);
+}
+
 void peephole(void)
 {
-    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        /* Skip function declarations without bodies */
-        if (!func->bbs)
-            continue;
-
-        /* Local peephole optimizations on post-register-allocation IR */
+    FOR_EACH_FUNCTION_BODY(func)
+    {
+        /* Local peephole optimizations on post-register-allocation IR. A
+         * rewrite can expose another at the same position -- a dead load
+         * dropped in front of a copy leaves the copy there to be forwarded --
+         * so each position is retried, a bounded number of times in case a rule
+         * reports a change that does not shrink the window.
+         */
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
-                ph2_ir_t *next = ir->next;
-                if (!next)
-                    continue;
-
-                /* Self-assignment elimination Keep this as a safety net: SSA
-                 * handles most cases, but register allocation might create new
-                 * self-assignments
-                 */
-                if (next->op == OP_assign && next->dest == next->src0 &&
-                    next->dest_hi == next->src0_hi) {
-                    ph2_ir_drop_after(bb, ir, next);
-                    continue;
-                }
-
-                /* Every rewrite below moves this instruction's result to the
-                 * destination of the one after it, dropping the write to the
-                 * register it named. That is fine for a temporary, whose value
-                 * nothing wants again, and wrong for a pinned register: a
-                 * variable lives there for the whole function and nothing else
-                 * ever reloads it, so "li rbx, 0; add rax, rsi, rbx" must not
-                 * become "mov rax, rsi" and leave rbx unwritten.
-                 */
-                if (ir->dest >= 0 && ir->dest < REG_CNT &&
-                    ((func->pinned_regs >> ir->dest) & 1))
-                    continue;
-
-                if (PTR_SIZE < 8 &&
-                    (ph2_ir_has_pair(ir) || ph2_ir_has_pair(next) ||
-                     ph2_ir_has_pair(next->next))) {
-                    pair_insn_fusion(bb, ir);
-                    continue;
-                }
-
-                /* Try triple pattern optimization first (3-instruction
-                 * sequences)
-                 */
-                if (triple_pattern_optimization(bb, ir))
-                    continue;
-
-                /* Try instruction fusion (2-instruction sequences) */
-                if (insn_fusion(bb, ir))
-                    continue;
-
-                /* Apply strength reduction for power-of-2 operations */
-                if (strength_reduction(bb, ir))
-                    continue;
-
-                /* Apply bitwise operation optimizations */
-                if (bitwise_optimization(bb, ir))
-                    continue;
-
-                /* Apply redundant move elimination */
-                if (redundant_move_elim(bb, ir))
-                    continue;
-
-                /* Apply load/store elimination */
-                if (eliminate_load_store_pairs(bb, ir))
-                    continue;
+                for (int tries = 0; tries < 4 && peephole_at(bb, ir); tries++)
+                    ;
             }
         }
     }

@@ -122,27 +122,22 @@ int rv_encode_R(rv_op op, rv_reg rd, rv_reg rs1, rv_reg rs2)
     return op + (rd << 7) + (rs1 << 15) + (rs2 << 20);
 }
 
-int rv_encode_I(rv_op op, rv_reg rd, rv_reg rs1, int imm)
+static int rv_imm12(int imm)
 {
     if (imm > 2047 || imm < -2048)
         fatal("Offset too large");
+    return imm < 0 ? imm + 4096 : imm;
+}
 
-    if (imm < 0) {
-        imm += 4096;
-        imm &= (1 << 13) - 1;
-    }
+int rv_encode_I(rv_op op, rv_reg rd, rv_reg rs1, int imm)
+{
+    imm = rv_imm12(imm);
     return op + (rd << 7) + (rs1 << 15) + (imm << 20);
 }
 
 int rv_encode_S(rv_op op, rv_reg rs1, rv_reg rs2, int imm)
 {
-    if (imm > 2047 || imm < -2048)
-        fatal("Offset too large");
-
-    if (imm < 0) {
-        imm += 4096;
-        imm &= (1 << 13) - 1;
-    }
+    imm = rv_imm12(imm);
     return op + (rs1 << 15) + (rs2 << 20) + rv_extract_bits(imm, 0, 4, 7, 11) +
            rv_extract_bits(imm, 5, 11, 25, 31);
 }

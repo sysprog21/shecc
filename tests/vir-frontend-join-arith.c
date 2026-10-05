@@ -1,0 +1,15 @@
+int choose(int flag, int left, int right)
+{
+    int value;
+
+    if (flag < 0)
+        value = left + right;
+    else
+        value = left - right;
+    return value * 2 + 1;
+}
+
+int main(void)
+{
+    return choose(-1, 7, 2) + choose(1, 7, 2);
+}

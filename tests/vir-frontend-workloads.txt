@@ -1,0 +1,37 @@
+# fixture                         expected shadow functions                    exit
+shadow                             main:verified                                14
+fallback                           main:verified                                 3
+param                              add:verified,main:verified                   14
+cfg-fallback                       choose:verified,main:verified               10
+join                               choose:verified,main:verified               14
+join-trivial                       choose:verified,main:verified               14 - - - choose,4
+join-uninitialized                 choose:fallback,main:verified                8
+join-arith                         choose:verified,main:verified               30
+join-branch                        choose:verified,main:verified                4
+pointer-join                       main:verified                                47 - - - - 101
+comparisons                        not_equal:verified,less_equal:verified,greater_equal:verified,greater:verified,logical_not:verified,branch_not:verified,logical_arith:verified,comparison_arith:verified,main:verified 0
+bitwise                            bits:verified,shifts:verified,shifts_unsigned:verified,main:verified 26
+casts                              signed_char_promote:verified,unsigned_char_promote:verified,signed_short_promote:verified,unsigned_short_promote:verified,narrow_then_extend:verified,main:verified 2
+load                               load_value:verified,main:verified           42
+volatile                           access_volatile:verified,main:verified      29
+volatile-mixed                     access_mixed:verified,main:verified         30
+store                              store_then_load:verified,main:verified      42
+roots                              store_local:verified,store_global:verified,main:verified 42
+roots-init                         initialized_local:verified,main:verified   42
+deferred-store                     main:verified                                52 - - - - 53
+global-read                        main:verified                               29
+calls                              add:verified,call_add:verified,main:verified 13
+dce                                callee:verified,dce_chain:verified,main:verified 13 dce_chain,1,5,4
+sccp                               sccp_branch:verified,main:verified          21 - sccp_branch,3,6,0,1,1
+sccp-widths                        signed_sccp_i32:verified,unsigned_sccp_i32:verified,main:verified 0 - signed_sccp_i32,10,17,4,2,1;unsigned_sccp_i32,10,17,4,2,1
+cse                                local_cse:verified,main:verified            28 local_cse,1,3,1 - local_cse,1,3,1,1
+loop-fallback                      count_to:verified,main:verified              9
+do-loop                            count_to:verified,main:verified              9
+for-loop                           count_to:verified,main:verified              9
+nested-loop                        nested_licm:verified,main:verified          159
+do-exit-value                      last_before:verified,main:verified           3
+loop-index                         copy_bytes:verified,main:verified            18
+void                               set_explicit:verified,add_implicit:verified,add_early:verified,copy_bytes:verified,main:verified 25
+swap                               swap_loop:verified,main:verified             21
+local-array                        local_arrays:verified,last_element:verified,main:verified 27
+ternary-array                      pick:verified,main:verified                  60
