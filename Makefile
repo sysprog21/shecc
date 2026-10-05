@@ -172,7 +172,8 @@ config:
 
 .PHONY: $(STYLE_GOALS)
 
-check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2
+check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2 \
+	check-vir-core check-vir-fuzz
 
 # Run the complete check -- driver and ABI suites at stages 0 and 2 -- on every
 # backend, as CI does. Driver cases that need 64-bit values are gated on the
@@ -253,6 +254,15 @@ check-abi-stage0: $(OUT)/$(STAGE0)
 
 check-abi-stage2: $(OUT)/$(STAGE2)
 	tests/$(ARCH)-abi.sh 2 $(DYNLINK);
+
+.PHONY: check-vir-core check-vir-fuzz
+check-vir-core: tests/vir-core.c src/vir.c src/vir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-core.c src/vir.c -o $(OUT)/vir-core
+	$(OUT)/vir-core
+
+check-vir-fuzz: tests/vir-fuzz.c src/vir.c src/vir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-fuzz.c src/vir.c -o $(OUT)/vir-fuzz
+	$(OUT)/vir-fuzz
 
 # Both prerequisites are order-only, and both exist because "make -j" would
 # otherwise let a compile start beside the thing it reads. Selecting a target
