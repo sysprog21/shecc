@@ -14,10 +14,9 @@ Despite its simplistic nature, it is capable of performing basic optimization st
 * Provide a minimal C standard library for basic I/O on GNU/Linux.
 * The cross-compiler is written in ANSI C, making it compatible with most platforms.
 * Include a self-contained C front-end with an integrated machine code generator; no external assembler or linker needed.
-* Utilize a two-pass compilation process: the first pass checks syntax and breaks down complex statements into basic operations,
-  while the second pass translates these operations into target machine code.
-* Develop a register allocation system that is compatible with RISC-style architectures.
-* Implement an architecture-independent, [static single assignment](https://en.wikipedia.org/wiki/Static_single-assignment_form) (SSA)-based middle-end for enhanced optimizations.
+* Use [VIR](docs/vir.md), a value-centric SSA representation, for target-independent optimization.
+* Share ABI lowering, register allocation, and spill handling across all four targets.
+* Lower VIR to allocated machine IR before target-specific instruction emission.
 * Support dynamic linking to allow generated executables to run with glibc.
 * Emit both ELF32 (Arm, RISC-V) and ELF64 (AArch64, x86-64) images; the ELF class follows the target pointer width.
 
@@ -172,15 +171,19 @@ $ make check-sanitizer
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```shell
-$ shecc [-o output] [+m] [--dot] [--no-libc] [--dump-ir] [--dynlink] [-E] <infile.c>
+$ shecc [-o output] [+m] [--dot] [--no-libc] [--dump-ir] [--dump-vir] [--stats] [--no-opt] [--dynlink] [-E] <infile.c>
 ```
 
 Compiler options:
 - `-o` : Specify output file name (default: `out.elf`)
 - `+m` : Use hardware multiplication/division instructions (default: disabled)
-- `--dot` : Write the SSA control-flow graph in Graphviz DOT format and stop
+- `--dot` : Write the VIR control-flow graph in Graphviz DOT format and stop
 - `--no-libc` : Exclude embedded C library (default: embedded)
 - `--dump-ir` : Dump intermediate representation (IR)
+- `--stats` : Print deterministic compiler and VIR counters
+- `--no-opt` : Skip the optional VIR optimizations (default: enabled)
+- VIR inspection and optimization options are
+  documented in the [VIR reference](docs/vir.md).
 - `--dynlink` : Use dynamic linking (default: disabled)
 - `-E` : Preprocess only; write the expanded token stream and stop
 
@@ -258,186 +261,45 @@ For resetting architecture configurations, use the command `make distclean`.
 
 ## Intermediate Representation
 
-The middle end is SSA-based, and two options expose it. `--dot` draws the
-control-flow graph as it stands after SSA construction and pruning; `--dump-ir`
-prints the instructions as text, once before optimization and once after
-register allocation. Both use `tests/fib.c` below as the running example, a
-recursive Fibonacci function and its caller:
-
-```c
-#include <stdio.h>
-
-int fib(int n)
-{
-    if (n == 0)
-        return 0;
-    else if (n == 1)
-        return 1;
-    return fib(n - 1) + fib(n - 2);
-}
-
-int main()
-{
-    printf("F(10) = %d\n", fib(10));
-    return 0;
-}
-```
+[VIR](docs/vir.md) (Value Intermediate Representation) is shecc's native
+value-centric SSA representation. The reference describes its invariants,
+optimization schedule, shared machine lowering, and validation commands.
 
 ### Control-flow graph
 
-`--dot` writes Graphviz DOT and stops; no executable is generated. Without
-`-o`, the name is the input path with its final suffix replaced, or `.dot`
-appended when it has none, so `tests/fib.c` would write `tests/fib.dot` into the
-source tree.
+`--dot` writes the optimized VIR control-flow graph as Graphviz DOT and stops
+before executable generation. Without `-o`, the output name replaces the input
+path's final suffix with `.dot`, or appends `.dot` when no suffix exists.
 
 ```shell
 $ out/shecc --dot -o fib.dot tests/fib.c
 $ dot -Tsvg fib.dot -o fib.svg
 ```
 
-Graphviz renders the result but is not needed to produce it, and nothing in
-`make check` depends on it.
-
-The output holds one cluster per function definition, one nested cluster per
-basic block,
-and one node per IR instruction; a block holding no instruction gets a single
-placeholder node labeled `pseudo`. Edges inside a block are instruction order,
-and the edges leaving a block's last node are control flow. The graph is emitted
-before phi values are unwound into edge copies, so the phi nodes are still in
-it, and functions the input cannot reach are pruned first. That pruning is what
-keeps the picture readable: with the embedded C library prepended, `fib.c` gives
-48 function bodies, of which 22 are reachable. The 20 that are neither `fib` nor
-`main` are what `printf` drags in transitively, down to `malloc` and `abort`.
-
-The figure below is the `fib` and `main` clusters of that output, with the
-run-specific pointer values dropped from the labels. Those two are the last
-clusters emitted, so keeping everything from `fib` to the end of the file is
-exactly the input's own code; that is what makes the crude recipe below work,
-not a general way to slice one function out:
-
-```shell
-$ { echo 'strict digraph CFG {'; echo 'node [shape=box]'
-    awk '/\(fib\)"$/ { keep = 1; print prev } keep; { prev = $0 }' fib.dot; } |
-  sed -E 's/"(BasicBlock )?0x[0-9a-f]+ \((.+)\)"/"\2"/' > fib-fn.dot
-$ dot -Tpng -Granksep=0.3 -Nfontname=Helvetica fib-fn.dot -o docs/fib-cfg.png
-```
-
-![SSA control-flow graph of tests/fib.c](docs/fib-cfg.png)
-
-Reading `fib` from the top:
-
-* `.label.1986` and `.label.1987` carry no instructions. Every function gets a
-  dedicated entry block and a single exit block; the entry block is empty only
-  when the body opens with a control-flow construct, as `fib` does with its
-  `if`, while `main` starts straight into instructions. All three `RETURN`s edge
-  into the exit, so the graph stays single-entry and single-exit no matter how
-  many `return` statements the C code spells out.
-* `.label.1988` is the `n == 0` test: materialize the constant, compare, then
-  `BRANCH`. The true edge leaves the bottom-left corner of a `BRANCH` node and
-  the false edge the bottom-right; where the two targets land is up to Graphviz,
-  so the edges cross whenever it places them the other way around.
-* `.label.1991` is `return 0`. `.label.1992` is the else arm, an empty block
-  that falls into `.label.1995`, the `n == 1` test. Those empty blocks are
-  branch targets the parser reserved before it knew what the arm would contain.
-* `.label.1998` is `return 1`, and `.label.1999` falls into `.label.2002`, the
-  recursive tail.
-* Each call in `.label.2002` is a `PUSH` per argument, a `CALL`, and a
-  `RETURN VALUE` naming the result. Argument passing stays explicit in the IR,
-  so the register allocator, not the front end, decides which registers carry
-  them.
-
-Subscripts in the figure are SSA versions: `n₀` is the incoming parameter,
-`.t1247₀` the first definition of the temporary `.t1247`. `fib` needs no phi,
-because control flow never merges after a write here; every value is defined
-once on the path that reaches its use. A phi appears where it does merge. In the
-same graph, `strlen` carries `i₂ := PHI(i₁, i₃)` at its loop header, one argument
-per incoming edge: `i₁` from the block ahead of the loop, `i₃` from the back edge.
-
-Temporary and label numbers shift whenever `lib/c.c` changes. Read them as
-identity within one dump, not as stable names.
+Each node represents a basic block, labeled with its function name and block
+number. Edges represent control flow between blocks. Only reachable functions
+are included. Graphviz is needed to render the file, but not to produce it.
 
 ### Instruction dump
 
 ```shell
 $ out/shecc --dump-ir -o fib tests/fib.c
+$ out/shecc --dump-vir -o fib tests/fib.c 2> fib.vir
 ```
 
-The first dump, delimited by `==<START OF INSN DUMP>==` and
-`==<END OF INSN DUMP>==`, is the IR before optimization, walked in
-dominator-tree order. Three things have already happened to it: small callees
-are inlined into their callers, the phis are unwound into copies, and the
-printer then elides those copies along with the SSA subscripts, so `--dot` is
-the only view that shows either. Pruning has not run yet, so every function with
-a body is listed, libc included. Line by line against the C source:
+`--dump-ir` prints optimized VIR to standard output; `--dump-vir` prints it to
+standard error. Each function starts with `function NAME`, followed by blocks,
+typed SSA values, block parameters, and instructions. Calls carry their
+arguments and signatures directly. Memory operations carry their widths, and
+volatile operations remain explicit. The dump precedes shared register
+allocation and machine lowering.
 
-```
-C source              IR                                      Notes
----------------------+---------------------------------------+---------------------------------
-int fib(int n)        def int @fib(int %n) {                  %n parameter, %.tN temporary
-{
-  if (n == 0)           const %.t1247, 0
-                        %.t1248 = eq %n, %.t1247
-                        br %.t1248, .label.1991, .label.1992  true target first, false second
-    return 0;         .label.1991:
-                        const %.t1249, 0
-                        ret %.t1249
-  else if (n == 1)    .label.1995:                            reached via empty .label.1992
-                        const %.t1250, 1
-                        %.t1251 = eq %n, %.t1250
-                        br %.t1251, .label.1998, .label.1999
-    return 1;         .label.1998:
-                        const %.t1252, 1
-                        ret %.t1252
-  return fib(n - 1)   .label.2002:
-                        const %.t1253, 1
-                        %.t1254 = sub %n, %.t1253
-                        push %.t1254                          one push per argument
-                        call @fib
-                        retval %.t1255                        names the callee's result
-       + fib(n - 2);    const %.t1256, 2
-                        %.t1257 = sub %n, %.t1256
-                        push %.t1257
-                        call @fib
-                        retval %.t1258
-                        %.t1259 = add %.t1255, %.t1258
-                        ret %.t1259
-}                     }
-```
-
-A block earns a label line only by holding instructions, and the first one that
-qualifies is folded into the function header. That is why neither `.label.1992`,
-an empty block the graph shows, nor `.label.1988`, which holds the first three
-instructions, appears as a label here. The graph is the better view of control
-flow; this dump is the better view of what each block computes.
-
-The second dump follows register allocation, the peephole pass, the
-architecture-specific lowering, and the flattening of the CFG into a linear
-list. It is the last IR before machine code:
-
-```
-fib:
-	store %x0, 16(sp)
-	li %x1, $0
-	%x2 = eq %x0, %x1
-	br %x2
-	...
-	li %x1, $2
-	load %x2, 16(sp)
-	%x2 = sub %x2, %x1
-	store %x0, 24(sp)
-	%x0 = %x2
-	call @fib
-```
-
-The listing above is the default Arm configuration; the register numbers follow
-whatever target `make config` selected. `%xN` are post-allocation register
-slots rather than SSA values, and how many exist and which hardware register
-each maps to is the backend's business. `16(sp)` is a stack slot: `n` is spilled
-on entry because it stays live across both calls, and the first call's result is
-spilled in turn while the second one runs. `br` prints only its condition, but
-both targets are still on the instruction; the backend encodes the true one as an
-offset and lets the false one fall through when it is the next block in the
-list.
+Optimization is on by default; `--no-opt` turns the optional passes off. That
+is for debugging and for isolating an optimizer fault, not for speed: the
+unoptimized graph leaves more values to lower, so compilation is no faster.
+Construction and final graph verification run either way. Value and block
+numbers identify entities within a dump and can change as source or
+optimization settings change.
 
 ## C99 Compliance
 
