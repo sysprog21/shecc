@@ -19,11 +19,8 @@
 void arch_lower(void)
 {
 #if ELF_MACHINE == ELF_MACHINE_ARM32
-    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        /* Skip function declarations without bodies */
-        if (!func->bbs)
-            continue;
-
+    FOR_EACH_FUNCTION_BODY(func)
+    {
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
             for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
                  insn = insn->next) {

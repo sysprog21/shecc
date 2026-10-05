@@ -20,6 +20,7 @@ ARCH_DEFS = \
     \#define RESERVED_GOT_NUM 3\n$\
     \#define R_ARCH_JUMP_SLOT 0x16\n$\
     \#define MAX_ARGS_IN_REG 4\n$\
+    \#define CALLEE_SAVED_REGS 4 /* r4-r7: AAPCS, and __syscall restores them */\n$\
     "
 
 # If the running machine has the "fastfetch" tool installed, the build

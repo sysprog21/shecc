@@ -1,0 +1,7 @@
+# Self-host sources and focused control-flow workloads exercise native VIR
+# construction and provide cross-stage compile-time/structure baselines.
+src/main.c self_hosting_main file_macro_handler=verified
+src/vir.c self_hosting_vir_core vir_integer_type_width=verified
+tests/vir-frontend-nested-loop.c nested_loop_licm nested_licm=verified
+tests/vir-frontend-licm.c single_loop_licm hoist=verified
+tests/vir-frontend-join.c branch_join choose=verified

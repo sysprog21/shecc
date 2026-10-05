@@ -1,0 +1,6 @@
+# path                              purpose
+tests/vir-frontend-param.c          all_parameter_arithmetic
+tests/vir-frontend-join.c           all_block_parameter_cfg
+tests/vir-frontend-loop-fallback.c  all_loop_cfg
+tests/vir-frontend-cse.c            all_local_cse
+tests/vir-frontend-large-cfg.c      large_cfg vir_large_cfg=verified
