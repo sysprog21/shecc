@@ -10,9 +10,8 @@
 
 /* Staging buffer for the printf family that writes straight to a descriptor.
  *
- * The longest single call in the tree is ssa.c's "insn_%p [label=%s]": a
- * DUMP_INSN_LEN staging buffer plus 26 bytes around it, so 537. Every byte here
- * is stack in every program shecc emits, so it stays close to that.
+ * Keep the buffer bounded: every byte here occupies stack space in programs
+ * compiled by shecc.
  */
 #define FMT_BUF_LEN 576
 
@@ -792,27 +791,27 @@ int fputc(int c, FILE *stream)
 
 int fseek(FILE *stream, int offset, int whence)
 {
-    int result;
-
     /* RV32 has only _llseek, which splits the offset and returns the result
      * through a pointer. Every other target takes (fd, offset, whence)
      * directly. lib/c.h rejects an architecture that is neither.
      */
 #if defined(__riscv)
-    result = __syscall(__syscall_lseek, stream, 0, offset, NULL, whence);
+    long long position;
+    return __syscall(__syscall_lseek, stream, offset < 0 ? -1 : 0, offset,
+                     &position, whence) < 0;
 #else
-    result = __syscall(__syscall_lseek, stream, offset, whence);
+    return __syscall(__syscall_lseek, stream, offset, whence) < 0;
 #endif
-    return result == -1;
 }
 
 int ftell(FILE *stream)
 {
     /* See fseek(): only RV32 needs the split-offset _llseek form. */
 #if defined(__riscv)
-    int result;
-    __syscall(__syscall_lseek, stream, 0, 0, &result, SEEK_CUR);
-    return result;
+    long long result;
+    if (__syscall(__syscall_lseek, stream, 0, 0, &result, SEEK_CUR) < 0)
+        return -1;
+    return (int) result;
 #else
     return __syscall(__syscall_lseek, stream, 0, SEEK_CUR);
 #endif
@@ -843,6 +842,12 @@ int __align_up(int size)
     return ALIGN_UP(size, PAGESIZE);
 }
 
+/* The raw mmap2 system call reports failure as -errno, -4095 to -1, not the -1
+ * of libc's wrapper. Success is always page aligned and those values never are,
+ * so the low bits alone tell them apart on every word size.
+ */
+#define __mmap_failed(addr) (((int) (addr) & (PAGESIZE - 1)) != 0)
+
 chunk_t *__alloc_head;
 chunk_t *__alloc_tail;
 chunk_t *__freelist_head;
@@ -862,7 +867,7 @@ void *malloc(int size)
         chunk_t *tmp = (chunk_t *) __syscall(__syscall_mmap2, NULL,
                                              __align_up(sizeof(chunk_t)), prot,
                                              flags, -1, 0);
-        if (tmp == (void *) -1)
+        if (__mmap_failed(tmp))
             return NULL;
         __alloc_head = tmp;
         __alloc_tail = tmp;
@@ -875,7 +880,7 @@ void *malloc(int size)
         chunk_t *tmp = (chunk_t *) __syscall(__syscall_mmap2, NULL,
                                              __align_up(sizeof(chunk_t)), prot,
                                              flags, -1, 0);
-        if (tmp == (void *) -1)
+        if (__mmap_failed(tmp))
             return NULL;
         __freelist_head = tmp;
         __freelist_head->next = NULL;
@@ -893,7 +898,8 @@ void *malloc(int size)
     } else {
         for (chunk_t *fh = __freelist_head; fh->next; fh = fh->next) {
             int fh_size = CHUNK_GET_SIZE(fh->size);
-            if (fh_size >= size && (!best_fit_chunk || fh_size < best_size)) {
+            if (fh_size - (int) sizeof(chunk_t) >= size &&
+                (!best_fit_chunk || fh_size < best_size)) {
                 best_fit_chunk = fh;
                 best_size = fh_size;
             }
@@ -917,7 +923,7 @@ void *malloc(int size)
         allocated = (chunk_t *) __syscall(__syscall_mmap2, NULL,
                                           __align_up(sizeof(chunk_t) + size),
                                           prot, flags, -1, 0);
-        if (allocated == (void *) -1)
+        if (__mmap_failed(allocated))
             return NULL;
         allocated->size = __align_up(sizeof(chunk_t) + size);
     }
@@ -1015,8 +1021,9 @@ void free(void *ptr)
     if (cur->next) {
         chunk_t *next = cur->next;
         next->prev = cur->prev;
-    } else if (prev) {
-        prev->next = NULL;
+    } else {
+        if (prev)
+            prev->next = NULL;
         __alloc_tail = prev;
     }
 
