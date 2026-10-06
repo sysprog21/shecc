@@ -1029,10 +1029,8 @@ static void native_finish(native_function_t *ctx)
         native_require(vir_effect_remove(&ctx->graph, load->effect),
                        "unused local load");
     }
-    for (native_block_t *node = ctx->blocks; node; node = node->next)
-        if (node != ctx->blocks)
-            native_require(vir_ssa_seal(ctx->ssa, node->cursor->vir),
-                           "sealed block arguments");
+    native_require(vir_ssa_seal_blocks(ctx->ssa, ctx->graph.blocks->next),
+                   "sealed block arguments");
     for (native_store_t *store = ctx->stores; store; store = store->next)
         if (!native_memory(ctx, store->object))
             native_require(vir_effect_remove(&ctx->graph, store->effect),

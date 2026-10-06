@@ -47,3 +47,24 @@ CPU 63, unchanged schedutil governor.
 | calls | 87.47% | 86.12% | 101.52% | 101.83% |
 | sort | 81.52% | 81.28% | 86.57% | 86.48% |
 | indexed | 89.29% | 88.85% | 99.67% | 99.73% |
+
+## Compilation time
+
+`tests/compiler-throughput.py` measures native executable compilation against
+GCC `-O1 -fwrapv`, including process startup, preprocessing, optimization, code
+emission, and linking. It checks both output ELF targets, warms each compiler,
+alternates their order, and records raw wall/child CPU samples and medians.
+Use an otherwise idle CPU; the small programs emphasize startup and linking.
+
+```sh
+python3 tests/compiler-throughput.py --shecc out/shecc \
+    --rounds 7 --batch 3 --output out/compile-programs.json \
+    tests/native-throughput/*.c
+python3 tests/compiler-throughput.py --shecc out/shecc \
+    --rounds 5 --output out/compile-self.json src/main.c
+```
+
+Add `--no-libc` to measure programs that omit shecc's bundled libc.
+
+These measure compilation speed separately from the generated-program
+throughput measurements above. Results depend on the input and native host.

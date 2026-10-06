@@ -152,6 +152,8 @@ struct vir_block {
     vir_effect_t *effects;
     vir_effect_t *last_effect;
     int next_order;
+    /* Position in the function's block list, kept by its block table. */
+    int index;
     vir_block_t *next;
 };
 
@@ -182,6 +184,8 @@ struct vir_edge {
     vir_value_t **args;
     vir_use_t *arg_uses;
     int arg_count;
+    /* Position among the function's outgoing edges, numbered by SCCP. */
+    int sccp_index;
     vir_edge_t *next_outgoing;
     vir_edge_t *next_incoming;
 };
@@ -212,6 +216,10 @@ typedef struct {
     vir_arena_t arena;
     vir_block_t *blocks;
     vir_block_t *last_block;
+    /* The block list in order, so a block's membership is one comparison. */
+    vir_block_t **block_table;
+    int block_count;
+    int block_capacity;
     int next_value_id;
     int next_block_id;
     /* Selected target layout, never inferred from the compiler host. */
@@ -605,6 +613,7 @@ vir_value_t *vir_ssa_read_sealed(vir_ssa_t *ssa,
                                  vir_block_t *block,
                                  unsigned int variable);
 int vir_ssa_seal(vir_ssa_t *ssa, vir_block_t *block);
+int vir_ssa_seal_blocks(vir_ssa_t *ssa, vir_block_t *first);
 vir_edge_t *vir_ssa_jump(vir_ssa_t *ssa, vir_block_t *from, vir_block_t *to);
 int vir_ssa_branch(vir_ssa_t *ssa,
                    vir_block_t *from,

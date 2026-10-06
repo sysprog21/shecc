@@ -470,6 +470,9 @@ static void test_call_result_pin(void)
                 lower.locations[i].fixed = -1;
         for (int reg = 0; reg < REG_CNT; reg++)
             lower.owners[reg] = -1;
+        vir_dominance_t dominance;
+        assert(vir_dominance_init(&function, &dominance));
+        lower.dominance = &dominance;
         assert(vir_machine_slots(&lower));
         vir_location_t *location = &lower.locations[first->result->id];
         assert(location->fixed >= REG_CNT - CALLEE_SAVED_REGS);
@@ -479,12 +482,11 @@ static void test_call_result_pin(void)
          * interference proof accepts it. This tests transfer ordering, not
          * whether score-based selection chooses that argument.
          */
-        vir_value_t *values[4] = {0};
-        values[first->result->id] = first->result;
+        int pinned[] = {first->result->id};
         int seen[1];
         vir_block_t *work[1];
-        assert(vir_machine_pin_safe(&lower, argument, fixed, values,
-                                    function.next_value_id, seen, work));
+        assert(vir_machine_pin_safe(&lower, argument, fixed, pinned, 1, seen,
+                                    work));
         vir_location_t *input = &lower.locations[argument->id];
         input->fixed = input->reg = fixed;
         input->high = vir_machine_pair(&lower, argument) ? fixed + 1 : -1;
@@ -501,6 +503,7 @@ static void test_call_result_pin(void)
                (pair ? fixed + 1 : fixed));
         vir_machine_call(&lower, second);
         assert(location->reg == fixed);
+        vir_dominance_release(&dominance);
         free(lower.locations);
         free(lower.block_positions);
         vir_function_release(&function);
@@ -538,16 +541,18 @@ static void test_pin_family_reuse(void)
         else
             assert(vir_user_operation(&function, block, VIR_OP_ADD, next->type,
                                       next, next));
-        int count = function.next_value_id;
-        vir_value_t *values[8] = {0};
+        int count = 0;
+        int pinned[2];
         vir_location_t locations[8] = {{0}};
-        for (int id = 0; id < count; id++)
+        for (int id = 0; id < function.next_value_id; id++)
             locations[id].fixed = -1;
-        values[old->id] = old;
+        locations[old->id].value = old;
         locations[old->id].fixed = 4;
+        pinned[count++] = old->id;
         if (member) {
-            values[member->id] = member;
+            locations[member->id].value = member;
             locations[member->id].fixed = 4;
+            pinned[count++] = member->id;
         }
         vir_lower_t lower = {0};
         lower.function = &function;
@@ -556,10 +561,10 @@ static void test_pin_family_reuse(void)
         vir_block_t *work[1];
         int fixed = shape == 3 && PTR_SIZE == 4 ? 5 : 4;
         bool safe = shape == 0 || shape == 2;
-        assert(vir_machine_pin_safe(&lower, next, fixed, values, count, seen,
+        assert(vir_machine_pin_safe(&lower, next, fixed, pinned, count, seen,
                                     work) == safe);
         assert(
-            vir_machine_pin_safe(&lower, next, 8, values, count, seen, work));
+            vir_machine_pin_safe(&lower, next, 8, pinned, count, seen, work));
         vir_function_release(&function);
     }
 }
