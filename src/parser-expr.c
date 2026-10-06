@@ -51,6 +51,11 @@ static var_t *scale_pointer_index(block_t *parent,
 
     if (stride == 1)
         return index;
+    type_t *index_type = integer_promoted_type(index);
+    if (index_type->size < PTR_SIZE)
+        index = promote_unchecked(
+            parent, &bb, index,
+            index_type->is_unsigned ? TY_ulong_long : TY_long_long, 0);
     scaled = (long long) index->init_val * stride;
     if (index->is_const && !index->is_global && index->type &&
         index->type->size <= TY_int->size && scaled >= INT_MIN &&
@@ -267,6 +272,8 @@ static void lower_value_subscript(block_t *parent, basic_block_t **bb)
                 require_typed_ptr_var(parent, element_type, element_ptr_level));
             vd->is_const_qualified = base->is_const_qualified;
             vd->pointer_const_mask = base->pointer_const_mask;
+            vd->pointer_volatile_mask = base->pointer_volatile_mask;
+            address->is_volatile_access = var_volatile_pointee(base);
             vd->is_const_pointer = base->is_const_pointer;
             if (element_signature) {
                 vd->func_signature = element_signature;
@@ -369,7 +376,10 @@ void lower_postfix_operators(block_t *parent, basic_block_t **bb)
         var_t *top = operand_stack[operand_stack_idx - 1];
 
         if (lex_peek(T_open_square, NULL)) {
-            if (top->pointee_array_size)
+            if (top->pointee_array_size &&
+                (is_pointee_array_pointer(top) ||
+                 effective_pointer_depth(top) <=
+                     top->pointee_array_element_ptr_level + 1))
                 lower_call_result_array_postfix(&top, parent, bb);
             else
                 lower_value_subscript(parent, bb);
@@ -2764,10 +2774,18 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
         if (lvalue->decl && lvalue->decl->pointee_array_size &&
             !lvalue->pointee_func_signature &&
             (is_array_declarator(lvalue->decl)
-                 ? lvalue->decl->ptr_level == 1 && lvalue->subscript_depth == 1
+                 ? effective_pointer_depth(lvalue->decl) >
+                           lvalue->decl->pointee_array_element_ptr_level &&
+                       lvalue->subscript_depth == 1
                  : !lvalue->subscript_depth ||
-                       lvalue->subscript_depth == lvalue->decl->ptr_level - 1))
+                       lvalue->subscript_depth ==
+                           lvalue->decl->ptr_level - 1)) {
             copy_pointee_array_shape(t, lvalue->decl);
+            t->pointer_const_mask =
+                dereferenced_pointer_const_mask(lvalue->decl);
+            if (depth < 32)
+                t->pointer_const_mask &= (1U << depth) - 1;
+        }
 
         /* Retain a callback prototype even through a selected slot. A direct
          * loaded callback is callable, while unary `*` restores this marker
@@ -3305,20 +3323,9 @@ void read_lvalue(lvalue_t *lvalue,
             }
 
             if (multiplier != 1) {
-                vd = load_constant(parent, *bb, multiplier, TY_int);
-                opstack_push(vd);
-
-                rs2 = opstack_pop();
                 rs1 = opstack_pop();
-                vd = require_named_var(parent);
-
-                /* The scaled offset retains the promoted index type. In
-                 * particular, an unsigned int index must remain unsigned when
-                 * the later pointer addition widens it to pointer width.
-                 */
-                vd->type = integer_promoted_type(rs1);
-                opstack_push(vd);
-                add_insn(parent, *bb, OP_mul, vd, rs1, rs2, 0, NULL);
+                opstack_push(
+                    scale_pointer_index(parent, *bb, rs1, multiplier, false));
             }
 
             rs2 = opstack_pop();
@@ -3789,6 +3796,7 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
 
     /* ternary-operator */
     vd = opstack_pop();
+    var_t *condition = vd;
     reject_record_operand(vd);
     add_insn(parent, *bb, OP_branch, NULL, vd, NULL, 0, NULL);
 
@@ -3965,6 +3973,16 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
         vd->type = array_ref->type;
     }
 
+    if (unevaluated_expression_depth && condition->is_const &&
+        !is_pointer_like_value(condition) && !is_pointer_like_value(vd) &&
+        !is_record_type(vd->type) && vd->type != TY_void) {
+        var_t *selected = condition->init_val || condition->init_val_hi
+                              ? true_val
+                              : false_val;
+        vd->is_const = selected->is_const;
+        vd->init_val = selected->init_val;
+        vd->init_val_hi = selected->init_val_hi;
+    }
     vd->is_ternary_ret = true;
     opstack_push(vd);
     bb[0] = end_ternary;

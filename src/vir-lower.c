@@ -1,10 +1,12 @@
 #include "vir-lower.h"
 
 typedef struct {
+    vir_value_t *value;
     int slot;
     int reg;
     int high;
     bool dirty;
+    bool rematerializable;
     int end;
     int fixed;
 } vir_location_t;
@@ -18,12 +20,13 @@ typedef struct {
     int owners[REG_CNT];
     unsigned int locked;
     unsigned int pinned_mask;
-    vir_value_t *pins[REG_CNT];
-    int pin_count;
     int frame;
     int copy_slot;
+    int transfer_slot;
     int position;
     int *block_positions;
+    int *live_seen;
+    vir_block_t **live_work;
     int (*global_offset)(const char *, void *);
     void *global_context;
 } vir_lower_t;
@@ -54,6 +57,44 @@ static basic_block_t *vir_machine_block(vir_lower_t *lower)
         lower->tail->rpo_next = block;
     lower->tail = block;
     return block;
+}
+
+static bool vir_machine_literal(const vir_value_t *value)
+{
+    return value->opcode == VIR_OP_CONST ||
+           value->opcode == VIR_OP_GLOBAL_ADDR ||
+           value->opcode == VIR_OP_RODATA_ADDR;
+}
+
+/* ABI and edge transfers can consume homes without going through read(). */
+static bool vir_machine_rematerializable(const vir_value_t *value)
+{
+    if (!vir_machine_literal(value))
+        return false;
+    for (const vir_use_t *use = value->uses; use; use = use->next)
+        if (use->edge || (use->effect && use->effect->kind == VIR_EFFECT_CALL))
+            return false;
+    return true;
+}
+
+static void vir_machine_materialize(vir_lower_t *lower,
+                                    const vir_value_t *value,
+                                    ph2_ir_t *instruction)
+{
+    instruction->is_pointer = value->type == VIR_TYPE_PTR;
+    if (value->opcode == VIR_OP_CONST) {
+        instruction->op = OP_load_constant;
+        instruction->src0 = (int) value->constant;
+        instruction->src1 = (int) (value->constant >> 32);
+        instruction->is_unsigned = true;
+    } else if (value->opcode == VIR_OP_GLOBAL_ADDR) {
+        instruction->op = OP_global_address_of;
+        instruction->src0 =
+            lower->global_offset(value->address_name, lower->global_context);
+    } else {
+        instruction->op = OP_load_rodata_address;
+        instruction->src0 = (int) value->constant;
+    }
 }
 
 static void vir_machine_spill(vir_lower_t *lower, int reg)
@@ -145,6 +186,8 @@ static int vir_machine_read(vir_lower_t *lower, vir_value_t *value)
          * their consuming instruction, while reloads preserve all bits.
          */
         instruction->is_unsigned = true;
+        if (location->rematerializable)
+            vir_machine_materialize(lower, value, instruction);
     }
     lower->locked |= 1u << reg;
     if (location->high >= 0)
@@ -160,7 +203,8 @@ static void vir_machine_result(vir_lower_t *lower,
     instruction->dest_hi = lower->locations[value->id].high;
     instruction->size_bytes = vir_machine_width(lower, value->type);
     instruction->is_pointer = value->type == VIR_TYPE_PTR;
-    lower->locations[value->id].dirty = true;
+    lower->locations[value->id].dirty =
+        !lower->locations[value->id].rematerializable;
 }
 
 static void vir_machine_normalize(vir_lower_t *lower, vir_value_t *value)
@@ -192,51 +236,38 @@ static void vir_machine_normalize(vir_lower_t *lower, vir_value_t *value)
 
 static opcode_t vir_machine_opcode(vir_opcode_t opcode)
 {
+#define MAP(vir, machine) \
+    case VIR_OP_##vir:    \
+        return OP_##machine
     switch (opcode) {
-    case VIR_OP_ADD:
-    case VIR_OP_PTRADD:
-        return OP_add;
-    case VIR_OP_SUB:
-        return OP_sub;
-    case VIR_OP_MUL:
-        return OP_mul;
-    case VIR_OP_SDIV:
-    case VIR_OP_UDIV:
-        return OP_div;
-    case VIR_OP_SREM:
-    case VIR_OP_UREM:
-        return OP_mod;
-    case VIR_OP_SHL:
-        return OP_lshift;
-    case VIR_OP_ASHR:
-    case VIR_OP_LSHR:
-        return OP_rshift;
-    case VIR_OP_BITAND:
-        return OP_bit_and;
-    case VIR_OP_BITOR:
-        return OP_bit_or;
-    case VIR_OP_BITXOR:
-        return OP_bit_xor;
-    case VIR_OP_EQ:
-        return OP_eq;
-    case VIR_OP_SLT:
-    case VIR_OP_ULT:
-        return OP_lt;
-    case VIR_OP_NEG:
-        return OP_negate;
-    case VIR_OP_BITNOT:
-        return OP_bit_not;
-    case VIR_OP_TRUNC:
-        return OP_trunc;
-    case VIR_OP_SEXT:
-    case VIR_OP_ZEXT:
-        return OP_sign_ext;
-    case VIR_OP_PTRTOINT:
-    case VIR_OP_INTTOPTR:
-        return OP_cast;
+        MAP(ADD, add);
+        MAP(PTRADD, add);
+        MAP(SUB, sub);
+        MAP(MUL, mul);
+        MAP(SDIV, div);
+        MAP(UDIV, div);
+        MAP(SREM, mod);
+        MAP(UREM, mod);
+        MAP(SHL, lshift);
+        MAP(ASHR, rshift);
+        MAP(LSHR, rshift);
+        MAP(BITAND, bit_and);
+        MAP(BITOR, bit_or);
+        MAP(BITXOR, bit_xor);
+        MAP(EQ, eq);
+        MAP(SLT, lt);
+        MAP(ULT, lt);
+        MAP(NEG, negate);
+        MAP(BITNOT, bit_not);
+        MAP(TRUNC, trunc);
+        MAP(SEXT, sign_ext);
+        MAP(ZEXT, sign_ext);
+        MAP(PTRTOINT, cast);
+        MAP(INTTOPTR, cast);
     default:
         return OP_load_constant;
     }
+#undef MAP
 }
 
 static bool vir_machine_unsigned(vir_opcode_t opcode)
@@ -250,28 +281,49 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
 {
     ph2_ir_t *instruction;
     int first = -1, second = -1;
+    vir_value_t *op0 = value->op0, *op1 = value->op1;
+    bool negate = value->opcode == VIR_OP_EQ &&
+                  value->block->branch_condition != value &&
+                  op0->type == VIR_TYPE_I1 &&
+                  ((vir_is_constant(op0) && !op0->constant) ||
+                   (vir_is_constant(op1) && !op1->constant));
+    if (negate) {
+        op0 = vir_is_constant(op0) && !op0->constant ? op1 : op0;
+        op1 = NULL;
+    }
+
+    /* Keep literals in the immediate operand without changing the value graph.
+     */
+    if (op0 && op1 && op0->opcode == VIR_OP_CONST &&
+        op1->opcode != VIR_OP_CONST &&
+        (value->opcode == VIR_OP_ADD || value->opcode == VIR_OP_MUL ||
+         value->opcode == VIR_OP_BITAND || value->opcode == VIR_OP_BITOR ||
+         value->opcode == VIR_OP_BITXOR)) {
+        op0 = value->op1;
+        op1 = value->op0;
+    }
 
     if (value->is_block_param || value->def_effect)
         return;
     lower->locked = 0;
     vir_machine_expire(lower);
-    if (value->op0)
-        first = vir_machine_read(lower, value->op0);
-    if (value->op1)
-        second = vir_machine_read(lower, value->op1);
-    int first_high = value->op0 ? lower->locations[value->op0->id].high : -1;
-    int second_high = value->op1 ? lower->locations[value->op1->id].high : -1;
+    if (op0)
+        first = vir_machine_read(lower, op0);
+    if (op1)
+        second = vir_machine_read(lower, op1);
+    int first_high = op0 ? lower->locations[op0->id].high : -1;
+    int second_high = op1 ? lower->locations[op1->id].high : -1;
 
     /* Reuse a dying input of the same width: no move or spill is needed to
      * preserve it, and pair operations keep both halves in their original
      * order.
      */
-    if (value->op0 && lower->locations[value->op0->id].fixed < 0 &&
+    if (op0 && lower->locations[op0->id].fixed < 0 &&
         lower->locations[value->id].fixed < 0 &&
-        lower->locations[value->op0->id].end == lower->position &&
-        vir_machine_width(lower, value->op0->type) ==
+        lower->locations[op0->id].end == lower->position &&
+        vir_machine_width(lower, op0->type) ==
             vir_machine_width(lower, value->type)) {
-        vir_location_t *old = &lower->locations[value->op0->id];
+        vir_location_t *old = &lower->locations[op0->id];
         vir_location_t *result = &lower->locations[value->id];
         result->reg = first;
         result->high = first_high;
@@ -283,17 +335,18 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
     }
     /* Claim before appending the operation: eviction must precede the write. */
     vir_machine_claim(lower, value);
-    instruction = vir_machine_insn(lower, vir_machine_opcode(value->opcode));
+    instruction = vir_machine_insn(
+        lower, negate ? OP_log_not : vir_machine_opcode(value->opcode));
     vir_machine_result(lower, instruction, value);
     if (first >= 0) {
         instruction->src0 = first;
         instruction->src0_hi = first_high;
-        instruction->src0_is_pointer = value->op0->type == VIR_TYPE_PTR;
+        instruction->src0_is_pointer = op0->type == VIR_TYPE_PTR;
     }
     if (second >= 0) {
         instruction->src1 = second;
         instruction->src1_hi = second_high;
-        instruction->src1_is_pointer = value->op1->type == VIR_TYPE_PTR;
+        instruction->src1_is_pointer = op1->type == VIR_TYPE_PTR;
     }
     if (value->opcode == VIR_OP_EQ || value->opcode == VIR_OP_SLT ||
         value->opcode == VIR_OP_ULT)
@@ -301,17 +354,11 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
     instruction->is_unsigned = vir_machine_unsigned(value->opcode);
     instruction->src0_is_unsigned = instruction->is_unsigned;
     instruction->src1_is_unsigned = instruction->is_unsigned;
-    if (value->opcode == VIR_OP_CONST) {
-        instruction->src0 = (int) value->constant;
-        instruction->src1 = (int) (value->constant >> 32);
-        instruction->is_unsigned = true;
+    if (vir_machine_literal(value)) {
+        vir_machine_materialize(lower, value, instruction);
     } else if (value->opcode == VIR_OP_STACK_ADDR) {
         instruction->op = OP_address_of;
         instruction->src0 = lower->locations[value->id].slot;
-    } else if (value->opcode == VIR_OP_GLOBAL_ADDR) {
-        instruction->op = OP_global_address_of;
-        instruction->src0 =
-            lower->global_offset(value->address_name, lower->global_context);
     } else if (value->opcode == VIR_OP_FUNC_ADDR) {
         /* Existing PH2 function relocation writes through an address. Reuse it
          * without constructing a source variable or source instruction.
@@ -325,9 +372,6 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
         vir_machine_result(lower, instruction, value);
         instruction->src0 = lower->locations[value->id].slot;
         lower->locations[value->id].dirty = false;
-    } else if (value->opcode == VIR_OP_RODATA_ADDR) {
-        instruction->op = OP_load_rodata_address;
-        instruction->src0 = (int) value->constant;
     } else if (value->opcode == VIR_OP_TRUNC) {
         instruction->src1 = vir_machine_width(lower, value->type);
         instruction->is_unsigned = true;
@@ -402,6 +446,48 @@ static bool vir_machine_interferes(vir_lower_t *lower,
     return false;
 }
 
+/* A direct sole-predecessor successor can inherit unmodified register owners.
+ */
+static void vir_machine_flush_successor(vir_lower_t *lower,
+                                        vir_block_t *block,
+                                        const vir_dominance_t *dom)
+{
+    vir_block_t *next = block->next;
+    bool direct = next && !next->param_count && next->incoming &&
+                  !next->incoming->next_incoming &&
+                  next->incoming->from == block;
+    for (vir_edge_t *edge = block->outgoing; edge; edge = edge->next_outgoing)
+        direct = direct && !edge->arg_count;
+    for (int reg = 0; reg < REG_CNT; reg++) {
+        int id = lower->owners[reg];
+        if (id < 0 || lower->locations[id].reg != reg)
+            continue;
+        vir_value_t *value = lower->locations[id].value;
+        bool retain = direct && value != block->branch_condition;
+        for (vir_use_t *use = value->uses; retain && use; use = use->next) {
+            vir_block_t *used = vir_use_block(use);
+            if (used == value->block && lower->block_positions[used->id] <=
+                                            lower->block_positions[block->id])
+                continue;
+            retain = vir_dominance_block_dominates(dom, next, used);
+        }
+        if (!retain) {
+            vir_value_t boundary = {0};
+            boundary.block = block;
+            boundary.order = block->next_order;
+            bool argument = false;
+            for (vir_use_t *use = value->uses; use; use = use->next)
+                argument |= use->edge && use->edge->from == block;
+            if (!value->is_block_param && !argument &&
+                value != block->branch_condition &&
+                !vir_machine_interferes(lower, &boundary, value,
+                                        lower->live_seen, lower->live_work))
+                lower->locations[id].dirty = false;
+            vir_machine_spill(lower, reg);
+        }
+    }
+}
+
 static bool vir_machine_dominated(vir_lower_t *lower,
                                   vir_block_t *header,
                                   vir_block_t *target,
@@ -425,6 +511,29 @@ static bool vir_machine_dominated(vir_lower_t *lower,
                 seen[edge->to->id] = 1;
                 work[pending++] = edge->to;
             }
+    }
+    return true;
+}
+
+/* Every value sharing physical lanes must survive either definition safely. */
+static bool vir_machine_pin_safe(vir_lower_t *lower,
+                                 vir_value_t *value,
+                                 int fixed,
+                                 vir_value_t **values,
+                                 int count,
+                                 int *seen,
+                                 vir_block_t **work)
+{
+    unsigned int lanes = (vir_machine_pair(lower, value) ? 3u : 1u) << fixed;
+    for (int id = 0; id < count; id++) {
+        vir_value_t *other = values[id];
+        int reg = lower->locations[id].fixed;
+        if (!other || reg < 0 ||
+            !(lanes & ((vir_machine_pair(lower, other) ? 3u : 1u) << reg)))
+            continue;
+        if (vir_machine_interferes(lower, value, other, seen, work) ||
+            vir_machine_interferes(lower, other, value, seen, work))
+            return false;
     }
     return true;
 }
@@ -471,15 +580,25 @@ static bool vir_machine_slots(vir_lower_t *lower)
     ends[positions] = -1;
     for (int id = 0; id < count; id++) {
         vir_value_t *value = values[id];
+        free_slots[id] = 0;
         if (!value)
             continue;
+        lower->locations[id].value = value;
+        lower->locations[id].rematerializable =
+            vir_machine_rematerializable(value);
+        int score = 0, ordinary_uses = 0;
         int start = lower->block_positions[value->block->id] +
                     (value->is_block_param ? 0 : value->order);
-        int end = start;
+        int end = start, last_local_use = value->order;
         int pending = 0;
         for (vir_use_t *use = value->uses; use; use = use->next) {
+            ordinary_uses += !use->edge;
             vir_block_t *block = vir_use_block(use);
             int used = lower->block_positions[block->id] + vir_use_order(use);
+            if (block != value->block)
+                score += 16;
+            else if (vir_use_order(use) > last_local_use)
+                last_local_use = vir_use_order(use);
             if (used > end)
                 end = used;
             if (used < start)
@@ -489,6 +608,13 @@ static bool vir_machine_slots(vir_lower_t *lower)
                 work[pending++] = block;
             }
         }
+        if (value->opcode == VIR_OP_CALL)
+            for (vir_effect_t *effect = value->block->effects; effect;
+                 effect = effect->next)
+                if (effect->kind == VIR_EFFECT_CALL &&
+                    effect->order > value->order &&
+                    effect->order < last_local_use)
+                    score += 16;
         while (pending) {
             const vir_block_t *block = work[--pending];
             int begin = lower->block_positions[block->id];
@@ -506,6 +632,19 @@ static bool vir_machine_slots(vir_lower_t *lower)
                     work[pending++] = edge->from;
                 }
         }
+        if (score && value->is_block_param)
+            for (vir_edge_t *edge = value->block->incoming; edge;
+                 edge = edge->next_incoming) {
+                int span = lower->block_positions[edge->from->id] -
+                           lower->block_positions[value->block->id];
+                if (span >= 0) {
+                    long long weighted =
+                        score +
+                        (100000LL + 65536 / (span + 1)) * (ordinary_uses + 1);
+                    score = weighted > INT_MAX ? INT_MAX : (int) weighted;
+                }
+            }
+        free_slots[id] = score;
         lower->locations[id].end = end;
         next_start[id] = heads[start];
         heads[start] = id;
@@ -520,101 +659,85 @@ static bool vir_machine_slots(vir_lower_t *lower)
     int limit = REG_CNT - 1;
     if (limit - base > REG_CNT - 6)
         limit = base + REG_CNT - 6;
-    for (int reg = base; reg < limit;) {
+
+    /* Reuse the future home freelist for immutable pin scores. Adding fixed
+     * values can only make a failed lane assignment less available.
+     */
+    while (true) {
         vir_value_t *best = NULL;
-        int best_score = 0;
+        int best_score = 0, best_reg = -1;
         for (int id = 0; id < count; id++) {
             vir_value_t *value = values[id];
-            if (!value || lower->locations[id].fixed >= 0 ||
-                value->opcode == VIR_OP_CALL ||
-                reg + (vir_machine_pair(lower, value) ? 2 : 1) > limit)
+            if (!value || lower->locations[id].fixed >= 0)
                 continue;
-            int score = 0;
-            for (vir_use_t *use = value->uses; use; use = use->next) {
-                const vir_block_t *block = vir_use_block(use);
-                if (block != value->block)
-                    score += 16;
-            }
-            if (!score)
+            int score = free_slots[id];
+            if (score <= best_score)
                 continue;
-            if (value->is_block_param)
-                for (vir_edge_t *edge = value->block->incoming; edge;
-                     edge = edge->next_incoming) {
-                    int span = lower->block_positions[edge->from->id] -
-                               lower->block_positions[value->block->id];
-                    if (span >= 0)
-                        score += 100000 + 65536 / (span + 1);
+            int words = vir_machine_pair(lower, value) ? 2 : 1;
+            int reg;
+            for (reg = base; reg + words <= limit; reg++)
+                if (vir_machine_pin_safe(lower, value, reg, values, count, seen,
+                                         work)) {
+                    best = value;
+                    best_score = score;
+                    best_reg = reg;
+                    break;
                 }
-            if (score > best_score) {
-                best = value;
-                best_score = score;
-            }
+            if (reg + words > limit)
+                free_slots[id] = 0;
         }
         if (!best)
             break;
         vir_location_t *location = &lower->locations[best->id];
         int words = vir_machine_pair(lower, best) ? 2 : 1;
-        location->fixed = location->reg = reg;
-        location->high = words == 2 ? reg + 1 : -1;
-        lower->pinned_mask |= ((1u << words) - 1) << reg;
-        lower->pins[lower->pin_count++] = best;
-        reg += words;
-    }
+        location->fixed = location->reg = best_reg;
+        location->high = words == 2 ? best_reg + 1 : -1;
+        lower->pinned_mask |= ((1u << words) - 1) << best_reg;
 
-    /* Phi affinity extends a pin through values feeding the same family.
-     * Checking both directions against every member prevents alternate branch
-     * results from overwriting one another before their outgoing copies.
-     */
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (int id = 0; id < count; id++) {
-            vir_value_t *value = values[id];
-            if (!value || !value->uses || lower->locations[id].fixed >= 0 ||
-                value->def_effect)
-                continue;
-            int fixed = -1;
-            bool safe = true;
-            for (vir_use_t *use = value->uses; use; use = use->next) {
-                if (!use->edge)
+        /* Phi affinity extends a pin through values feeding the same family.
+         * Checking both directions against every member prevents alternate
+         * branch results from overwriting one another before their outgoing
+         * copies.
+         */
+        bool changed = best->is_block_param;
+        while (changed) {
+            changed = false;
+            for (int id = 0; id < count; id++) {
+                vir_value_t *value = values[id];
+                if (!value || !value->uses || lower->locations[id].fixed >= 0 ||
+                    value->def_effect)
                     continue;
-                vir_value_t *param = use->edge->to->params;
-                for (int index = 0; param && index < use->operand; index++)
-                    param = param->param_next;
-                if (!param || param->type != value->type ||
-                    lower->locations[param->id].fixed < 0) {
-                    safe = false;
-                    break;
+                int fixed = -1;
+                bool safe = true;
+                for (vir_use_t *use = value->uses; use; use = use->next) {
+                    if (!use->edge)
+                        continue;
+                    vir_value_t *param = use->edge->to->params;
+                    for (int index = 0; param && index < use->operand; index++)
+                        param = param->param_next;
+                    if (!param || param->type != value->type ||
+                        lower->locations[param->id].fixed < 0 ||
+                        !vir_machine_dominated(lower, param->block,
+                                               value->block, seen, work)) {
+                        safe = false;
+                        break;
+                    }
+                    int destination = lower->locations[param->id].fixed;
+                    if (fixed >= 0 && fixed != destination) {
+                        safe = false;
+                        break;
+                    }
+                    fixed = destination;
                 }
-                int destination = lower->locations[param->id].fixed;
-                if (fixed >= 0 && fixed != destination) {
-                    safe = false;
-                    break;
-                }
-                fixed = destination;
+                if (!safe || fixed < 0 ||
+                    !vir_machine_pin_safe(lower, value, fixed, values, count,
+                                          seen, work))
+                    continue;
+                lower->locations[id].fixed = lower->locations[id].reg = fixed;
+                lower->locations[id].high =
+                    vir_machine_pair(lower, value) ? fixed + 1 : -1;
+                changed = true;
             }
-            if (!safe)
-                continue;
-            vir_value_t *root = NULL;
-            for (int index = 0; index < lower->pin_count; index++)
-                if (lower->locations[lower->pins[index]->id].fixed == fixed)
-                    root = lower->pins[index];
-            if (!root || !root->is_block_param ||
-                !vir_machine_dominated(lower, root->block, value->block, seen,
-                                       work))
-                continue;
-            for (int other = 0; other < count && safe; other++)
-                if (values[other] && lower->locations[other].fixed == fixed)
-                    safe = !vir_machine_interferes(lower, value, values[other],
-                                                   seen, work) &&
-                           !vir_machine_interferes(lower, values[other], value,
-                                                   seen, work);
-            if (!safe)
-                continue;
-            lower->locations[id].fixed = lower->locations[id].reg = fixed;
-            lower->locations[id].high =
-                vir_machine_pair(lower, value) ? fixed + 1 : -1;
-            changed = true;
         }
     }
     for (int position = 0; position < positions; position++) {
@@ -630,8 +753,13 @@ static bool vir_machine_slots(vir_lower_t *lower)
     success = true;
 done:
     free(values);
-    free(seen);
-    free(work);
+    if (success) {
+        lower->live_seen = seen;
+        lower->live_work = work;
+    } else {
+        free(seen);
+        free(work);
+    }
     free(free_slots);
     free(next_start);
     free(next_end);
@@ -651,87 +779,149 @@ static int vir_machine_arg_start(vir_lower_t *lower,
     return cursor;
 }
 
-static void vir_machine_pin_parameters(vir_lower_t *lower)
+/* Word-sized transfers keep pair lanes in the same dependency graph as scalars.
+ */
+typedef struct {
+    int from, slot, to, width;
+    bool is_unsigned, abi;
+} vir_transfer_t;
+
+static void vir_machine_transfer(vir_lower_t *lower, vir_transfer_t *copy)
 {
-    for (int index = 0; index < lower->pin_count; index++) {
-        vir_value_t *value = lower->pins[index];
-        if (!value->is_block_param || value->block != lower->function->blocks)
+    if (copy->from == copy->to && (!copy->abi || copy->width >= PTR_SIZE))
+        return;
+    opcode_t op = copy->from < 0 ? OP_load : OP_assign;
+    if (copy->from >= 0 && copy->abi && copy->width < PTR_SIZE)
+        op = OP_sign_ext;
+    ph2_ir_t *instruction = vir_machine_insn(lower, op);
+    instruction->dest = copy->to;
+    instruction->src0 = copy->from < 0 ? copy->slot : copy->from;
+    instruction->size_bytes = copy->width;
+    instruction->is_unsigned = copy->is_unsigned;
+    if (op == OP_sign_ext) {
+        instruction->src1 = (copy->width << 16) | PTR_SIZE;
+        instruction->src0_is_unsigned = copy->is_unsigned;
+    }
+}
+
+/* Save one source word to break cycles without clobbering completed copies. */
+static void vir_machine_transfer_save(vir_lower_t *lower,
+                                      vir_transfer_t *copies,
+                                      int count,
+                                      int reg,
+                                      int slot)
+{
+    ph2_ir_t *instruction = vir_machine_insn(lower, OP_store);
+    instruction->src0 = reg;
+    instruction->src1 = slot;
+    instruction->size_bytes = PTR_SIZE;
+    for (int index = 0; index < count; index++)
+        if (copies[index].from == reg) {
+            copies[index].from = -1;
+            copies[index].slot = slot;
+        }
+}
+
+static void vir_machine_parallel(vir_lower_t *lower,
+                                 vir_transfer_t *copies,
+                                 int count)
+{
+    while (count) {
+        int ready = -1;
+        for (int index = 0; index < count; index++) {
+            bool blocked = false;
+            for (int other = 0; other < count; other++)
+                if (other != index && copies[other].from == copies[index].to)
+                    blocked = true;
+            if (!blocked) {
+                ready = index;
+                break;
+            }
+        }
+        if (ready < 0) {
+            vir_machine_transfer_save(lower, copies, count, copies[0].from,
+                                      lower->transfer_slot);
             continue;
-        vir_location_t *location = &lower->locations[value->id];
-        ph2_ir_t *instruction = vir_machine_insn(lower, OP_load);
-        instruction->dest = location->fixed;
-        instruction->dest_hi = location->high;
-        instruction->src0 = location->slot;
-        instruction->size_bytes = vir_machine_width(lower, value->type);
-        instruction->is_unsigned = true;
+        }
+        vir_machine_transfer(lower, &copies[ready]);
+        copies[ready] = copies[--count];
     }
 }
 
 static void vir_machine_call(vir_lower_t *lower, vir_effect_t *effect)
 {
-    int cursor = 0;
+    int cursor = 0, count = 0;
+    vir_transfer_t *copies = calloc(effect->arg_count + 1, 2 * sizeof(*copies));
+    if (!copies)
+        fatal("VIR: cannot allocate call transfers");
     ph2_ir_t *instruction;
 
-    /* Make every live value recoverable before argument registers are reused.
-     * Staging reads directly from homes, so pair moves cannot overwrite another
-     * argument that has yet to be loaded.
+    /* Capture residents before flushing invalidates their allocator locations.
      */
-    vir_machine_flush(lower);
-    for (int index = -1; index < effect->arg_count; index++) {
-        vir_value_t *argument =
-            index < 0 ? effect->callee_value : effect->args[index];
-        if (!argument)
-            continue;
+    for (int index = 0; index < effect->arg_count; index++) {
+        vir_value_t *argument = effect->args[index];
         vir_location_t *location = &lower->locations[argument->id];
-        if (location->fixed < 0)
-            continue;
-        instruction = vir_machine_insn(lower, OP_store);
-        instruction->src0 = location->fixed;
-        instruction->src0_hi = location->high;
-        instruction->src1 = location->slot;
-        instruction->size_bytes = vir_machine_width(lower, argument->type);
-    }
-
-    /* Stack arguments precede register arguments, so no staging scratch value
-     * can overwrite an argument already placed for the call.
-     */
-    for (int pass = 0; pass < 2; pass++) {
-        cursor = 0;
-        for (int index = 0; index < effect->arg_count; index++) {
-            vir_value_t *argument = effect->args[index];
-            int words = vir_machine_pair(lower, argument) ? 2 : 1;
-            cursor = vir_machine_arg_start(
-                lower, cursor, argument,
-                effect->signature->is_variadic &&
-                    index >= effect->signature->fixed_param_count);
-            for (int word = 0; word < words; word++) {
-                int abi_word = cursor + word;
-                bool on_stack = abi_word >= MAX_ARGS_IN_REG;
-                int reg = on_stack ? REG_CNT - 1 : abi_word;
-                if (on_stack != (pass == 0))
-                    continue;
-                instruction = vir_machine_insn(lower, OP_load);
-                instruction->dest = reg;
-                instruction->src0 =
-                    lower->locations[argument->id].slot + word * PTR_SIZE;
-                instruction->size_bytes =
-                    words == 2 ? 4 : vir_machine_width(lower, argument->type);
-                instruction->is_unsigned =
-                    effect->signature->params[index].is_unsigned || words == 2;
-                if (on_stack) {
-                    instruction = vir_machine_insn(lower, OP_store);
-                    instruction->src0 = reg;
-                    instruction->src1 = (abi_word - MAX_ARGS_IN_REG) * PTR_SIZE;
-                    instruction->size_bytes = PTR_SIZE;
-                }
-            }
-            cursor += words;
+        int words = vir_machine_pair(lower, argument) ? 2 : 1;
+        cursor = vir_machine_arg_start(
+            lower, cursor, argument,
+            effect->signature->is_variadic &&
+                index >= effect->signature->fixed_param_count);
+        for (int word = 0; word < words; word++) {
+            int abi_word = cursor + word;
+            copies[count++] = (vir_transfer_t) {
+                location->reg < 0 ? -1 : location->reg + word,
+                location->slot + word * PTR_SIZE,
+                abi_word < MAX_ARGS_IN_REG ? abi_word
+                                           : -1 - (abi_word - MAX_ARGS_IN_REG),
+                words == 2 ? 4 : vir_machine_width(lower, argument->type),
+                effect->signature->params[index].is_unsigned || words == 2,
+                true};
         }
+        cursor += words;
     }
     if (effect->callee_value) {
-        instruction = vir_machine_insn(lower, OP_load);
-        instruction->dest = REG_CNT - 1;
-        instruction->src0 = lower->locations[effect->callee_value->id].slot;
+        vir_location_t *location = &lower->locations[effect->callee_value->id];
+        copies[count++] = (vir_transfer_t) {
+            location->reg, location->slot, REG_CNT - 1, PTR_SIZE, true, false};
+    }
+    for (int reg = 0; reg < REG_CNT; reg++) {
+        int id = lower->owners[reg];
+        if (id >= 0 && lower->locations[id].end <= lower->position)
+            lower->locations[id].dirty = false;
+        vir_machine_spill(lower, reg);
+    }
+
+    /* Stack arguments precede register copies. Protect any resident in the
+     * stack staging scratch, including a saved indirect callee.
+     */
+    bool stack = false;
+    for (int index = 0; index < count; index++)
+        stack |= copies[index].to < 0;
+    if (stack)
+        for (int index = 0; index < count; index++)
+            if (copies[index].from == REG_CNT - 1) {
+                vir_machine_transfer_save(lower, copies, count, REG_CNT - 1,
+                                          copies[index].slot);
+                break;
+            }
+    int registers = 0;
+    for (int index = 0; index < count; index++) {
+        vir_transfer_t copy = copies[index];
+        if (copy.to >= 0) {
+            copies[registers++] = copy;
+            continue;
+        }
+        int destination = (-1 - copy.to) * PTR_SIZE;
+        copy.to = REG_CNT - 1;
+        vir_machine_transfer(lower, &copy);
+        instruction = vir_machine_insn(lower, OP_store);
+        instruction->src0 = copy.to;
+        instruction->src1 = destination;
+        instruction->size_bytes = PTR_SIZE;
+    }
+    vir_machine_parallel(lower, copies, registers);
+    free(copies);
+    if (effect->callee_value) {
         instruction = vir_machine_insn(lower, OP_load_func);
         instruction->src0 = REG_CNT - 1;
     }
@@ -752,6 +942,21 @@ static void vir_machine_call(vir_lower_t *lower, vir_effect_t *effect)
         lower->locked = 0;
         vir_machine_normalize(lower, effect->result);
         lower->locked = 0;
+        if (location->fixed >= 0) {
+            int words = vir_machine_pair(lower, effect->result) ? 2 : 1;
+            for (int word = 0; word < words; word++) {
+                vir_transfer_t copy = {location->reg + word,
+                                       location->slot,
+                                       location->fixed + word,
+                                       words == 2 ? 4 : PTR_SIZE,
+                                       true,
+                                       false};
+                vir_machine_transfer(lower, &copy);
+                lower->owners[location->reg + word] = -1;
+            }
+            location->reg = location->fixed;
+            location->high = words == 2 ? location->fixed + 1 : -1;
+        }
     }
 }
 
@@ -790,48 +995,38 @@ static void vir_machine_effect(vir_lower_t *lower, vir_effect_t *effect)
     lower->locked = 0;
 }
 
-/* Copy a bitvector between a register (or pair) and its stack home. */
+/* Copy a bitvector from a register (or pair) or home to another home. */
 static void vir_machine_copy(vir_lower_t *lower,
                              vir_value_t *value,
                              int from,
                              int source,
-                             int to,
                              int destination)
 {
     bool pair = vir_machine_pair(lower, value);
     if (from < 0) {
         ph2_ir_t *instruction = vir_machine_insn(lower, OP_load);
-        instruction->dest = to < 0 ? 0 : to;
+        instruction->dest = 0;
         instruction->dest_hi = pair ? instruction->dest + 1 : -1;
         instruction->src0 = source;
         instruction->size_bytes = vir_machine_width(lower, value->type);
         instruction->is_unsigned = true;
-        if (to >= 0)
-            return;
         from = 0;
     }
-    ph2_ir_t *instruction =
-        vir_machine_insn(lower, to < 0 ? OP_store : OP_assign);
+    ph2_ir_t *instruction = vir_machine_insn(lower, OP_store);
     instruction->src0 = from;
     instruction->src0_hi = pair ? from + 1 : -1;
     instruction->size_bytes = vir_machine_width(lower, value->type);
     instruction->is_unsigned = true;
-    if (to < 0)
-        instruction->src1 = destination;
-    else {
-        instruction->dest = to;
-        instruction->dest_hi = pair ? to + 1 : -1;
-    }
+    instruction->src1 = destination;
 }
 
-/* Parallel register copies use a scratch outside every live source. */
-static void vir_machine_parallel(vir_lower_t *lower,
-                                 vir_edge_t *edge,
-                                 bool resident,
-                                 bool snapshot)
+static void vir_machine_edge_registers(vir_lower_t *lower,
+                                       vir_edge_t *edge,
+                                       bool resident,
+                                       bool snapshot)
 {
-    vir_value_t *source[REG_CNT];
-    int dest[REG_CNT], from[REG_CNT], slot[REG_CNT], count = 0;
+    vir_transfer_t copies[REG_CNT];
+    int count = 0;
     vir_value_t *parameter = edge->to->params;
     for (int index = 0; index < edge->arg_count;
          index++, parameter = parameter->param_next) {
@@ -841,51 +1036,18 @@ static void vir_machine_parallel(vir_lower_t *lower,
         int reg = snapshot ? -1 : resident ? location->reg : location->fixed;
         if (target < 0 || target == reg)
             continue;
-        source[count] = argument;
-        dest[count] = target;
-        from[count] = reg;
-        slot[count++] =
-            snapshot ? lower->copy_slot + index * 8 : location->slot;
+        int words = vir_machine_pair(lower, argument) ? 2 : 1;
+        for (int word = 0; word < words; word++)
+            copies[count++] = (vir_transfer_t) {
+                reg < 0 ? -1 : reg + word,
+                (snapshot ? lower->copy_slot + index * 8 : location->slot) +
+                    word * PTR_SIZE,
+                target + word,
+                words == 2 ? 4 : vir_machine_width(lower, argument->type),
+                true,
+                false};
     }
-    while (count) {
-        int ready = -1;
-        for (int index = 0; index < count; index++) {
-            bool blocked = false;
-            for (int other = 0; other < count; other++)
-                if (from[other] == dest[index])
-                    blocked = true;
-            if (!blocked) {
-                ready = index;
-                break;
-            }
-        }
-        if (ready < 0) {
-            int reg = from[0], scratch = 0;
-            unsigned int occupied = lower->pinned_mask;
-            for (int index = 0; index < count; index++)
-                if (from[index] >= 0)
-                    occupied |=
-                        ((1u
-                          << (vir_machine_pair(lower, source[index]) ? 2 : 1)) -
-                         1)
-                        << from[index];
-            int words = vir_machine_pair(lower, source[0]) ? 2 : 1;
-            while (occupied & (((1u << words) - 1) << scratch))
-                scratch++;
-            vir_machine_copy(lower, source[0], reg, -1, scratch, -1);
-            for (int index = 0; index < count; index++)
-                if (from[index] == reg)
-                    from[index] = scratch;
-            continue;
-        }
-        vir_machine_copy(lower, source[ready], from[ready], slot[ready],
-                         dest[ready], -1);
-        count--;
-        source[ready] = source[count];
-        dest[ready] = dest[count];
-        from[ready] = from[count];
-        slot[ready] = slot[count];
-    }
+    vir_machine_parallel(lower, copies, count);
 }
 
 /* Only overlapping memory destinations need snapshots. All-register edges
@@ -927,7 +1089,7 @@ static basic_block_t *vir_machine_edge(vir_lower_t *lower, vir_edge_t *edge)
         for (int index = 0; index < edge->arg_count; index++) {
             vir_value_t *argument = edge->args[index];
             vir_location_t *source = &lower->locations[argument->id];
-            vir_machine_copy(lower, argument, source->fixed, source->slot, -1,
+            vir_machine_copy(lower, argument, source->fixed, source->slot,
                              lower->copy_slot + index * 8);
         }
     vir_value_t *parameter = edge->to->params;
@@ -939,9 +1101,9 @@ static basic_block_t *vir_machine_edge(vir_lower_t *lower, vir_edge_t *edge)
         vir_location_t *source = &lower->locations[argument->id];
         vir_machine_copy(lower, argument, overlap ? -1 : source->fixed,
                          overlap ? lower->copy_slot + index * 8 : source->slot,
-                         -1, lower->locations[parameter->id].slot);
+                         lower->locations[parameter->id].slot);
     }
-    vir_machine_parallel(lower, edge, resident, overlap);
+    vir_machine_edge_registers(lower, edge, resident, overlap);
     ph2_ir_t *instruction = vir_machine_insn(lower, OP_jump);
     instruction->next_bb = lower->blocks[edge->to->id];
     lower->block = saved;
@@ -1066,6 +1228,69 @@ static bool vir_machine_layout(vir_machine_function_t *output)
     return true;
 }
 
+static void vir_machine_save_argument(vir_lower_t *lower,
+                                      int word,
+                                      int slot,
+                                      int width)
+{
+    int reg = word < MAX_ARGS_IN_REG ? word : REG_CNT - 1;
+    ph2_ir_t *instruction;
+    if (word >= MAX_ARGS_IN_REG) {
+        instruction = vir_machine_insn(lower, OP_load);
+        instruction->dest = reg;
+        instruction->src0 = (word - MAX_ARGS_IN_REG) * PTR_SIZE;
+        instruction->ofs_based_on_stack_top = true;
+        instruction->size_bytes = PTR_SIZE;
+    }
+    instruction = vir_machine_insn(lower, OP_store);
+    instruction->src0 = reg;
+    instruction->src1 = slot;
+    instruction->size_bytes = width;
+}
+
+/* Keep incoming words resident when they already satisfy the allocator's pair
+ * alignment. Narrow and split arguments retain their canonical home path.
+ */
+static void vir_machine_parameters(vir_lower_t *lower)
+{
+    int cursor = 0;
+    for (vir_value_t *value = lower->function->blocks->params; value;
+         value = value->param_next) {
+        vir_location_t *location = &lower->locations[value->id];
+        int words = vir_machine_pair(lower, value) ? 2 : 1;
+        int width = vir_machine_width(lower, value->type);
+        cursor = vir_machine_arg_start(lower, cursor, value, false);
+        int source = cursor;
+        cursor += words;
+        if (!value->uses)
+            continue;
+        bool resident = width >= 4 && cursor <= MAX_ARGS_IN_REG &&
+                        (words == 1 || !(source & 1));
+        if (!resident)
+            for (int word = 0; word < words; word++)
+                vir_machine_save_argument(lower, source + word,
+                                          location->slot + word * PTR_SIZE,
+                                          words == 2 ? 4 : width);
+        if (location->fixed >= 0) {
+            ph2_ir_t *instruction =
+                vir_machine_insn(lower, resident ? OP_assign : OP_load);
+            instruction->dest = location->fixed;
+            instruction->dest_hi = location->high;
+            instruction->src0 = resident ? source : location->slot;
+            instruction->src0_hi = resident && words == 2 ? source + 1 : -1;
+            instruction->size_bytes = width;
+            instruction->is_pointer = value->type == VIR_TYPE_PTR;
+            instruction->is_unsigned = true;
+        } else if (resident) {
+            location->reg = source;
+            location->high = words == 2 ? source + 1 : -1;
+            location->dirty = true;
+            for (int word = 0; word < words; word++)
+                lower->owners[source + word] = value->id;
+        }
+    }
+}
+
 bool vir_lower_machine(const vir_function_t *function,
                        const vir_call_signature_t *signature,
                        int (*global_offset)(const char *, void *),
@@ -1073,9 +1298,12 @@ bool vir_lower_machine(const vir_function_t *function,
                        vir_machine_function_t *output)
 {
     vir_lower_t lower;
+    vir_dominance_t dominance = {0};
     int outgoing = 0, copy_count = 0, variadic_base = -1, object_end = 0;
     vir_value_t *parameter;
     int cursor = 0;
+    int *objects = NULL;
+    bool success = false;
 
     if (!function || !function->blocks || !signature || !output ||
         function->pointer_bits != PTR_SIZE * 8 ||
@@ -1091,11 +1319,8 @@ bool vir_lower_machine(const vir_function_t *function,
         calloc(function->next_value_id ? function->next_value_id : 1,
                sizeof(vir_location_t));
     lower.blocks = calloc(function->next_block_id, sizeof(basic_block_t *));
-    if (!lower.locations || !lower.blocks) {
-        free(lower.locations);
-        free(lower.blocks);
-        return false;
-    }
+    if (!lower.locations || !lower.blocks)
+        goto unsupported;
     for (int reg = 0; reg < REG_CNT; reg++)
         lower.owners[reg] = -1;
     for (vir_block_t *block = function->blocks; block; block = block->next) {
@@ -1135,6 +1360,9 @@ bool vir_lower_machine(const vir_function_t *function,
     lower.frame = ALIGN_UP(lower.frame, 8);
     lower.copy_slot = lower.frame;
     lower.frame += copy_count * 8;
+    lower.transfer_slot = lower.frame;
+    if (copy_count || outgoing)
+        lower.frame += 8;
     if (signature->is_variadic) {
         variadic_base = lower.frame;
         lower.frame += (PTR_SIZE == 4 ? 2 * MAX_PARAMS : MAX_PARAMS) * PTR_SIZE;
@@ -1148,8 +1376,8 @@ bool vir_lower_machine(const vir_function_t *function,
     if (!vir_machine_slots(&lower))
         goto unsupported;
     /* Object storage is separate from each address value's spill home. */
-    int *objects = malloc(
-        (function->next_value_id ? function->next_value_id : 1) * sizeof(int));
+    objects = malloc((function->next_value_id ? function->next_value_id : 1) *
+                     sizeof(int));
     if (!objects)
         goto unsupported;
     for (int index = 0; index < function->next_value_id; index++)
@@ -1163,10 +1391,8 @@ bool vir_lower_machine(const vir_function_t *function,
                                     ? signature->param_slots[index]
                                     : (unsigned int) -1;
             if (slot != (unsigned int) -1) {
-                if (slot >= (unsigned int) function->next_value_id) {
-                    free(objects);
+                if (slot >= (unsigned int) function->next_value_id)
                     goto unsupported;
-                }
                 objects[slot] = variadic_base + cursor * PTR_SIZE;
             }
             cursor += vir_machine_pair(&lower, parameter) ? 2 : 1;
@@ -1174,10 +1400,8 @@ bool vir_lower_machine(const vir_function_t *function,
         }
         if (signature->va_start_slot != (unsigned int) -1) {
             if (signature->va_start_slot >=
-                (unsigned int) function->next_value_id) {
-                free(objects);
+                (unsigned int) function->next_value_id)
                 goto unsupported;
-            }
             objects[signature->va_start_slot] =
                 variadic_base + cursor * PTR_SIZE;
         }
@@ -1187,10 +1411,8 @@ bool vir_lower_machine(const vir_function_t *function,
         for (vir_value_t *value = block->head; value; value = value->next) {
             if (value->opcode != VIR_OP_STACK_ADDR)
                 continue;
-            if (value->address_slot >= (unsigned int) function->next_value_id) {
-                free(objects);
+            if (value->address_slot >= (unsigned int) function->next_value_id)
                 goto unsupported;
-            }
             if (objects[value->address_slot] < 0) {
                 lower.frame = ALIGN_UP(lower.frame, value->address_alignment);
                 objects[value->address_slot] = lower.frame;
@@ -1203,49 +1425,13 @@ bool vir_lower_machine(const vir_function_t *function,
     lower.block = output->entry;
     if (signature->is_variadic) {
         int words = PTR_SIZE == 4 ? 2 * MAX_PARAMS : MAX_PARAMS;
-        for (int word = 0; word < words; word++) {
-            int reg = word < MAX_ARGS_IN_REG ? word : REG_CNT - 1;
-            ph2_ir_t *instruction;
-            if (word >= MAX_ARGS_IN_REG) {
-                instruction = vir_machine_insn(&lower, OP_load);
-                instruction->dest = reg;
-                instruction->src0 = (word - MAX_ARGS_IN_REG) * PTR_SIZE;
-                instruction->ofs_based_on_stack_top = true;
-                instruction->size_bytes = PTR_SIZE;
-            }
-            instruction = vir_machine_insn(&lower, OP_store);
-            instruction->src0 = reg;
-            instruction->src1 = variadic_base + word * PTR_SIZE;
-            instruction->size_bytes = PTR_SIZE;
-        }
+        for (int word = 0; word < words; word++)
+            vir_machine_save_argument(
+                &lower, word, variadic_base + word * PTR_SIZE, PTR_SIZE);
     }
-    parameter = function->blocks->params;
-    cursor = 0;
-    while (parameter) {
-        int words = vir_machine_pair(&lower, parameter) ? 2 : 1;
-        cursor = vir_machine_arg_start(&lower, cursor, parameter, false);
-        for (int word = 0; word < words; word++) {
-            int abi_word = cursor + word;
-            int reg = abi_word < MAX_ARGS_IN_REG ? abi_word : REG_CNT - 1;
-            ph2_ir_t *instruction;
-            if (abi_word >= MAX_ARGS_IN_REG) {
-                instruction = vir_machine_insn(&lower, OP_load);
-                instruction->dest = reg;
-                instruction->src0 = (abi_word - MAX_ARGS_IN_REG) * PTR_SIZE;
-                instruction->ofs_based_on_stack_top = true;
-                instruction->size_bytes = PTR_SIZE;
-            }
-            instruction = vir_machine_insn(&lower, OP_store);
-            instruction->src0 = reg;
-            instruction->src1 =
-                lower.locations[parameter->id].slot + word * PTR_SIZE;
-            instruction->size_bytes =
-                words == 2 ? 4 : vir_machine_width(&lower, parameter->type);
-        }
-        cursor += words;
-        parameter = parameter->param_next;
-    }
-    vir_machine_pin_parameters(&lower);
+    if (!vir_dominance_init(function, &dominance))
+        goto unsupported;
+    vir_machine_parameters(&lower);
     for (vir_block_t *block = function->blocks; block; block = block->next) {
         vir_value_t *value = block->head;
         vir_effect_t *effect = block->effects;
@@ -1286,17 +1472,14 @@ bool vir_lower_machine(const vir_function_t *function,
             /* A return has no successor to observe dirty homes. */
             for (int reg = 0; reg < REG_CNT; reg++) {
                 int id = lower.owners[reg];
-                if (id >= 0) {
-                    lower.locations[id].reg = -1;
-                    lower.locations[id].high = -1;
+                if (id >= 0)
                     lower.locations[id].dirty = false;
-                    lower.owners[reg] = -1;
-                }
             }
+            vir_machine_flush(&lower);
         } else if (block->terminator == VIR_TERM_JUMP) {
             basic_block_t *target = vir_machine_edge(&lower, block->outgoing);
             vir_machine_edge_temporaries(&lower, block);
-            vir_machine_flush(&lower);
+            vir_machine_flush_successor(&lower, block, &dominance);
             instruction = vir_machine_insn(&lower, OP_jump);
             instruction->next_bb = target;
         } else if (block->terminator == VIR_TERM_BRANCH) {
@@ -1310,7 +1493,7 @@ bool vir_lower_machine(const vir_function_t *function,
             vir_use_t *use = block->branch_condition->uses;
             if (use && !use->next && use->branch_block == block)
                 lower.locations[block->branch_condition->id].dirty = false;
-            vir_machine_flush(&lower);
+            vir_machine_flush_successor(&lower, block, &dominance);
             instruction = vir_machine_insn(&lower, OP_branch);
             instruction->src0 = condition;
             instruction->src0_hi = condition_high;
@@ -1339,24 +1522,22 @@ bool vir_lower_machine(const vir_function_t *function,
                 output->stack_size = accessed;
         }
     }
-    if (!vir_machine_layout(output)) {
-        free(objects);
+    if (!vir_machine_layout(output))
         goto unsupported;
-    }
     output->stack_size = ALIGN_UP(output->stack_size, PTR_SIZE);
     for (basic_block_t *block = output->entry; block; block = block->rpo_next)
         for (ph2_ir_t *instruction = block->ph2_ir_list.head; instruction;
              instruction = instruction->next)
             if (instruction->op == OP_return)
                 instruction->src1 = output->stack_size;
+    success = true;
+unsupported:
+    free(lower.live_seen);
+    free(lower.live_work);
+    vir_dominance_release(&dominance);
     free(objects);
     free(lower.locations);
     free(lower.blocks);
     free(lower.block_positions);
-    return true;
-unsupported:
-    free(lower.locations);
-    free(lower.blocks);
-    free(lower.block_positions);
-    return false;
+    return success;
 }

@@ -1701,11 +1701,10 @@ static vir_value_t *vir_integer_unary(vir_function_t *func,
 
     if (!operand || !vir_has_block(func, block) ||
         !vir_has_value(func, operand) ||
-        (cast ? !vir_integer_cast_valid(opcode, type, operand->type)
-              : (type != operand->type || !vir_type_is_i32_or_i64(type))))
+        !vir_unary_types_valid(func, opcode, type, operand->type))
         return NULL;
     if (!vir_is_constant(operand))
-        return vir_unary(func, block, opcode, type, operand);
+        return vir_user_operation(func, block, opcode, type, operand, NULL);
     if (cast)
         return vir_const_int(
             func, block, type,
@@ -1929,7 +1928,7 @@ static void vir_set_use_slot(vir_value_t **slot,
     vir_link_use(value, use);
 }
 
-static vir_value_t **vir_use_value_slot(vir_use_t *use)
+static vir_value_t **vir_use_value_slot(const vir_use_t *use)
 {
     if (use->user)
         return use->operand == 0 ? &use->user->op0 : &use->user->op1;
@@ -2144,11 +2143,71 @@ static int vir_cse_run(vir_function_t *func,
     return replacements;
 }
 
+/* Equivalent pure address trees do not require new SSA identities. */
+static bool vir_same_address(const vir_value_t *a,
+                             const vir_value_t *b,
+                             int depth)
+{
+    if (a == b)
+        return true;
+    if (!a || !b || !depth || a->opcode != b->opcode || a->type != b->type ||
+        a->def_effect || b->def_effect || a->is_block_param ||
+        b->is_block_param)
+        return false;
+    if (a->opcode == VIR_OP_CONST)
+        return a->constant == b->constant;
+    return a->nr_ops && a->nr_ops == b->nr_ops &&
+           vir_same_address(a->op0, b->op0, depth - 1) &&
+           (a->nr_ops == 1 || vir_same_address(a->op1, b->op1, depth - 1));
+}
+
+/* Only a single-entry, effect-free path may carry a prior load forward. */
+static int vir_reuse_incoming_loads(vir_function_t *func)
+{
+    int changes = 0;
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        vir_block_t *pred = block;
+        vir_effect_t *leader = NULL;
+        for (int depth = 0; depth < 8; depth++) {
+            if (!pred->incoming || pred->incoming->next_incoming)
+                break;
+            pred = pred->incoming->from;
+            if (pred == block)
+                break;
+            if (pred->last_effect) {
+                if (pred->last_effect->kind == VIR_EFFECT_LOAD)
+                    leader = pred->last_effect;
+                break;
+            }
+        }
+        if (!leader)
+            continue;
+        for (vir_effect_t *effect = block->effects, *next; effect;
+             effect = next) {
+            next = effect->next;
+            if (effect->kind != VIR_EFFECT_LOAD)
+                break;
+            if (effect->result->type == leader->result->type &&
+                vir_same_address(effect->address, leader->address, 8) &&
+                vir_replace_all_uses(func, effect->result, leader->result) &&
+                vir_effect_remove(func, effect))
+                changes++;
+        }
+    }
+    return changes;
+}
+
 int vir_local_cse_with_stats(vir_function_t *func,
                              vir_opt_level_t opt_level,
                              vir_cse_stats_t *stats)
 {
-    return vir_cse_run(func, opt_level, stats, false);
+    int changes = vir_cse_run(func, opt_level, stats, false);
+    if (changes < 0 || opt_level == VIR_OPT_O0)
+        return changes;
+    int loads = vir_reuse_incoming_loads(func);
+    if (stats)
+        stats->replacements += loads;
+    return changes + loads;
 }
 
 int vir_local_cse(vir_function_t *func, vir_opt_level_t opt_level)
@@ -2208,6 +2267,57 @@ static void vir_repair_value_positions(vir_block_t *block)
         }
     }
     block->next_order = order;
+}
+
+/* Delay nontrapping pointer arithmetic until old operands have been consumed,
+ * so an outgoing pointer can reuse their register without changing effects.
+ */
+static void vir_sink_pointer_adds(vir_block_t *block)
+{
+    for (vir_value_t **link = &block->head; *link; link = &(*link)->next) {
+        vir_value_t *value = *link;
+        if (value->opcode != VIR_OP_PTRADD)
+            continue;
+        int limit = block->next_order;
+        for (vir_use_t *use = value->uses; use; use = use->next)
+            if (vir_use_block(use) == block && vir_use_order(use) < limit)
+                limit = vir_use_order(use);
+        for (vir_effect_t *effect = block->effects;
+             effect && effect->order < limit; effect = effect->next)
+            if (effect->order > value->order && effect->kind != VIR_EFFECT_LOAD)
+                limit = effect->order;
+        vir_value_t *after = NULL;
+        for (int operand = 0; operand < value->nr_ops; operand++) {
+            vir_value_t *input = operand ? value->op1 : value->op0;
+            for (vir_use_t *use = input->uses; use; use = use->next) {
+                int order = vir_use_order(use);
+                if (vir_use_block(use) != block || order <= value->order ||
+                    order >= limit)
+                    continue;
+                vir_value_t *user = use->user;
+                if (!user && use->effect)
+                    user = use->effect->result;
+                if (user && (!after || user->order > after->order))
+                    after = user;
+            }
+        }
+        if (!after)
+            continue;
+        *link = value->next;
+        int order = after->order;
+        for (vir_value_t *node = block->head; node; node = node->next)
+            if (node->order > order)
+                node->order++;
+        for (vir_effect_t *effect = block->effects; effect;
+             effect = effect->next)
+            if (effect->order > order)
+                effect->order++;
+        block->next_order++;
+        value->order = order + 1;
+        value->next = after->next;
+        after->next = value;
+        link = &after->next;
+    }
 }
 
 /* Promote a nonescaping stack scalar used only by direct, nonvolatile memory
@@ -2430,6 +2540,7 @@ int vir_dce_with_stats(vir_function_t *func,
                 effect_link = &effect->next;
             }
         }
+        vir_sink_pointer_adds(block);
         vir_repair_value_positions(block);
     }
     result = removed;
@@ -3217,21 +3328,14 @@ static bool vir_value_dominates_by_reachability(const vir_function_t *func,
         return true;
     reachable = calloc((size_t) count, sizeof(*reachable));
     work = malloc((size_t) count * sizeof(*work));
-    if (!reachable || !work) {
-        free(reachable);
-        free(work);
-        return false;
-    }
 
     /* If the use is unreachable, no path can avoid the definition and the
      * result is vacuously true. The same walk also handles that case.
      */
-    if (!vir_mark_reachable_blocks(func, value->block, reachable, work)) {
-        free(reachable);
-        free(work);
-        return false;
-    }
-    use_index = !reachable[use_index];
+    use_index =
+        reachable && work &&
+        vir_mark_reachable_blocks(func, value->block, reachable, work) &&
+        !reachable[use_index];
     free(reachable);
     free(work);
     return use_index;
@@ -3534,6 +3638,7 @@ static vir_value_t *vir_sr_base(vir_function_t *func,
 typedef struct {
     unsigned long long first;
     unsigned long long step;
+    vir_value_t *dynamic_first;
 } vir_sr_offset_t;
 
 static int vir_sr_pointer(vir_function_t *func,
@@ -3555,6 +3660,10 @@ static int vir_sr_pointer(vir_function_t *func,
                                    : initial->opcode == VIR_OP_PTRADD &&
                                          initial->op0 == base &&
                                          vir_is_const_int(initial->op1, first);
+        if (offsets->dynamic_first)
+            same_initial = initial->opcode == VIR_OP_PTRADD &&
+                           initial->op0 == base &&
+                           initial->op1 == offsets->dynamic_first;
         if (param->type == VIR_TYPE_PTR && same_initial &&
             next->opcode == VIR_OP_PTRADD && next->op0 == param &&
             vir_is_const_int(next->op1, offsets->step)) {
@@ -3569,7 +3678,9 @@ static int vir_sr_pointer(vir_function_t *func,
     if (!vir_param_edit_prepare(func, header, NULL, header->param_count,
                                 header->param_count, true, &edit))
         return -1;
-    vir_value_t *offset = vir_const_int(func, entry->from, width, first);
+    vir_value_t *offset = offsets->dynamic_first
+                              ? offsets->dynamic_first
+                              : vir_const_int(func, entry->from, width, first);
     vir_value_t *initial =
         offset ? vir_ptradd(func, entry->from, base, offset) : NULL;
     vir_value_t *step = vir_const_int(func, back->from, width, offsets->step);
@@ -3611,9 +3722,108 @@ static vir_value_t *vir_sr_condition(vir_value_t *value, bool *positive)
     return NULL;
 }
 
-/* A unique latch incremented by one under a signed i < bound test cannot wrap
- * before exiting. Literal bounds additionally allow a pointer equality exit
- * test and retirement of an otherwise unused counter recurrence.
+/* Accept only widened unsigned indices with a common constant stride. */
+static bool vir_sr_descending_offset(vir_value_t *offset,
+                                     vir_value_t *iv,
+                                     unsigned long long *stride,
+                                     bool *previous)
+{
+    *stride = 1;
+    if (offset->opcode == VIR_OP_MUL || offset->opcode == VIR_OP_SHL) {
+        vir_value_t *constant = offset->op1;
+        vir_value_t *index = offset->op0;
+        if (offset->opcode == VIR_OP_MUL && vir_is_constant(index)) {
+            constant = index;
+            index = offset->op1;
+        }
+        if (!vir_is_constant(constant))
+            return false;
+        *stride =
+            offset->opcode == VIR_OP_SHL
+                ? (constant->constant < 31 ? 1ULL << constant->constant : 0)
+                : constant->constant;
+        offset = index;
+    }
+    if (!*stride || *stride > INT_MAX || offset->opcode != VIR_OP_ZEXT ||
+        offset->type != VIR_TYPE_I64 || offset->op0->type != VIR_TYPE_I32)
+        return false;
+    offset = offset->op0;
+    *previous = offset != iv;
+    return offset == iv || (offset->opcode == VIR_OP_SUB && offset->op0 == iv &&
+                            vir_is_const_int(offset->op1, 1));
+}
+
+typedef struct {
+    const vir_dominance_t *dominance;
+    vir_block_t *body;
+    vir_value_t *iv, *condition, *increment, *base;
+    vir_edge_t *back;
+    int index;
+    unsigned long long stride;
+} vir_sr_descending_t;
+
+static bool vir_sr_descending_uses(vir_sr_descending_t *loop,
+                                   vir_value_t *value,
+                                   int depth)
+{
+    if (depth == 8)
+        return false;
+    for (vir_use_t *use = value->uses; use; use = use->next) {
+        if (use->user == loop->condition)
+            continue;
+        if (value == loop->increment && use->edge == loop->back &&
+            use->operand == loop->index)
+            continue;
+        vir_value_t *user = use->user;
+        if (!user)
+            return false;
+        if (user->opcode == VIR_OP_PTRADD) {
+            unsigned long long stride;
+            bool previous;
+            if (!vir_sr_descending_offset(user->op1, loop->iv, &stride,
+                                          &previous) ||
+                (previous && !vir_dominance_block_dominates(
+                                 loop->dominance, loop->body, user->block)) ||
+                (loop->base &&
+                 (loop->base != user->op0 || loop->stride != stride)))
+                return false;
+            loop->base = user->op0;
+            loop->stride = stride;
+        } else if ((user->opcode != VIR_OP_SUB && user->opcode != VIR_OP_ZEXT &&
+                    user->opcode != VIR_OP_MUL && user->opcode != VIR_OP_SHL) ||
+                   !vir_sr_descending_uses(loop, user, depth + 1))
+            return false;
+    }
+    return true;
+}
+
+/* Retarget the existing address without changing its effect ordering. */
+static vir_value_t *vir_sr_derived_pointer(vir_function_t *func,
+                                           vir_block_t *pre,
+                                           vir_value_t *address,
+                                           vir_value_t *pointer,
+                                           unsigned long long bias)
+{
+    if (!(bias & vir_width_mask(func->pointer_bits)))
+        return pointer;
+    vir_type_t width = func->pointer_bits == 64 ? VIR_TYPE_I64 : VIR_TYPE_I32;
+    vir_value_t *delta = vir_const_int(func, pre, width, bias);
+    if (!delta)
+        return NULL;
+    for (int operand = 0; operand < 2; operand++) {
+        vir_value_t **slot = operand ? &address->op1 : &address->op0;
+        vir_use_t *use = (*slot)->uses;
+        while (use && (use->user != address || use->operand != operand))
+            use = use->next;
+        if (!use)
+            return NULL;
+        vir_set_use_slot(slot, operand ? delta : pointer, use);
+    }
+    return address;
+}
+
+/* Reduce proven bounded ascending or widened unsigned descending counters to
+ * pointer recurrences; retire counters when a pointer endpoint suffices.
  */
 int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
 {
@@ -3629,13 +3839,24 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
         vir_dominance_release(&dominance);
         return -1;
     }
+    int cfg = vir_simplify_cfg(func, opt_level);
+    if (cfg < 0) {
+        vir_dominance_release(&dominance);
+        return -1;
+    }
+    if (cfg) {
+        vir_dominance_release(&dominance);
+        if (!vir_dominance_init(func, &dominance))
+            return -1;
+    }
     for (vir_block_t *header = func->blocks; header; header = header->next) {
         vir_edge_t *entry = NULL, *back = NULL;
         bool positive = true;
         vir_value_t *branch = header->branch_condition;
         vir_value_t *condition = vir_sr_condition(branch, &positive);
         if (header->terminator != VIR_TERM_BRANCH || !condition ||
-            condition->opcode != VIR_OP_SLT ||
+            (condition->opcode != VIR_OP_SLT &&
+             condition->opcode != VIR_OP_ULT) ||
             condition->op0->type != VIR_TYPE_I32)
             continue;
         for (vir_edge_t *edge = header->incoming; edge;
@@ -3656,11 +3877,15 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
         }
         vir_value_t *iv = condition->op0;
         vir_value_t *limit = condition->op1;
+        bool descending = func->pointer_bits == 64 &&
+                          condition->opcode == VIR_OP_ULT &&
+                          vir_is_const_int(iv, 0) && limit->is_block_param;
         bool inclusive = vir_is_constant(iv) && limit->is_block_param;
         if (inclusive) {
             iv = condition->op1;
             limit = condition->op0;
-            positive = !positive;
+            if (!descending)
+                positive = !positive;
         }
         vir_edge_t *body_edge =
             positive ? header->true_edge : header->false_edge;
@@ -3680,39 +3905,110 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
             continue;
         vir_value_t *initial = entry->args[index];
         vir_value_t *increment = back->args[index];
-        if (!vir_is_constant(initial) || initial->constant > INT_MAX ||
-            increment->opcode != VIR_OP_ADD ||
-            !((increment->op0 == iv && vir_is_const_int(increment->op1, 1)) ||
-              (increment->op1 == iv && vir_is_const_int(increment->op0, 1))))
+        if (descending) {
+            if (body_edge->to->incoming != body_edge ||
+                body_edge->next_incoming || increment->opcode != VIR_OP_SUB ||
+                increment->op0 != iv || !vir_is_const_int(increment->op1, 1) ||
+                condition != branch)
+                continue;
+        } else if (!vir_is_constant(initial) || initial->constant > INT_MAX ||
+                   increment->opcode != VIR_OP_ADD ||
+                   !((increment->op0 == iv &&
+                      vir_is_const_int(increment->op1, 1)) ||
+                     (increment->op1 == iv &&
+                      vir_is_const_int(increment->op0, 1))))
             continue;
+        vir_sr_descending_t down = {&dominance, body_edge->to, iv,
+                                    condition,  increment,     NULL,
+                                    back,       index,         0};
+        if (descending && (!vir_sr_descending_uses(&down, iv, 0) || !down.base))
+            continue;
+        bool unsigned_counter = condition->opcode == VIR_OP_ULT;
+        if (unsigned_counter && !descending) {
+            bool counter_only = vir_is_constant(limit) && increment->uses &&
+                                !increment->uses->next &&
+                                increment->uses->edge == back &&
+                                increment->uses->operand == index;
+            for (vir_use_t *use = iv->uses; use; use = use->next)
+                counter_only &=
+                    use->user == condition || use->user == increment;
+            if (!counter_only)
+                continue;
+        }
         unsigned long long bound = vir_is_constant(limit)
                                        ? limit->constant + (inclusive ? 1 : 0)
                                        : INT_MAX;
-        if (!bound || bound > INT_MAX || initial->constant >= bound)
+        if (!descending &&
+            (!bound || bound > INT_MAX || initial->constant >= bound))
             continue;
         vir_value_t *walk = NULL, *walk_base = NULL;
         unsigned long long walk_scale = 0, walk_bias = 0;
         for (vir_block_t *block = func->blocks; block; block = block->next) {
             if (!vir_dominance_block_dominates(&dominance, header, block) ||
-                !vir_dominance_block_dominates(&dominance, block, back->from))
+                (!descending &&
+                 !vir_dominance_block_dominates(&dominance, block, back->from)))
                 continue;
             for (vir_value_t *address = block->head, *next; address;
                  address = next) {
                 next = address->next;
                 unsigned long long scale, bias;
-                if (address->opcode != VIR_OP_PTRADD || !address->uses ||
-                    !vir_sr_affine(func, address->op1, iv, bound, &scale, &bias,
-                                   0))
+                if (address->opcode != VIR_OP_PTRADD || !address->uses)
+                    continue;
+                if (descending) {
+                    bool previous;
+                    if (!vir_sr_descending_offset(address->op1, iv, &scale,
+                                                  &previous))
+                        continue;
+                    bias = previous ? 0ULL - scale : 0;
+                } else if (!vir_sr_affine(func, address->op1, iv, bound, &scale,
+                                          &bias, 0))
                     continue;
                 vir_value_t *pointer;
                 vir_value_t *base =
                     vir_sr_base(func, &dominance, entry->from, address->op0, 0);
                 if (!base)
                     continue;
+                if (walk && base == walk_base && scale == walk_scale) {
+                    vir_value_t *derived =
+                        bias == walk_bias
+                            ? walk
+                            : vir_sr_derived_pointer(func, entry->from, address,
+                                                     walk, bias - walk_bias);
+                    if (!derived ||
+                        !vir_replace_all_uses(func, address, derived)) {
+                        changed = -1;
+                        goto done;
+                    }
+                    changed++;
+                    continue;
+                }
+                vir_value_t *dynamic_first = NULL;
+                if (descending) {
+                    dynamic_first =
+                        vir_zext(func, entry->from, initial, VIR_TYPE_I64);
+                    vir_value_t *factor =
+                        vir_const_int(func, entry->from, VIR_TYPE_I64, scale);
+                    dynamic_first =
+                        dynamic_first && factor
+                            ? vir_mul(func, entry->from, dynamic_first, factor)
+                            : NULL;
+                    if (dynamic_first && bias) {
+                        vir_value_t *add = vir_const_int(func, entry->from,
+                                                         VIR_TYPE_I64, bias);
+                        dynamic_first =
+                            add ? vir_add(func, entry->from, dynamic_first, add)
+                                : NULL;
+                    }
+                    if (!dynamic_first) {
+                        changed = -1;
+                        goto done;
+                    }
+                }
                 vir_sr_offset_t offsets = {
-                    (initial->constant * scale + bias) &
-                        vir_width_mask(func->pointer_bits),
-                    scale};
+                    descending ? 0
+                               : (initial->constant * scale + bias) &
+                                     vir_width_mask(func->pointer_bits),
+                    descending ? 0ULL - scale : scale, dynamic_first};
                 if (vir_sr_pointer(func, header, entry, back, address, base,
                                    &offsets, &pointer) < 0) {
                     changed = -1;
@@ -3725,20 +4021,41 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
                 walk_bias = bias;
             }
         }
+        if (!walk && unsigned_counter && !descending) {
+            int slot = 0;
+            for (vir_value_t *param = header->params; param;
+                 param = param->param_next, slot++) {
+                vir_value_t *next = back->args[slot];
+                if (param->type != VIR_TYPE_PTR ||
+                    next->opcode != VIR_OP_PTRADD || next->op0 != param ||
+                    !vir_is_constant(next->op1) || !next->op1->constant ||
+                    next->op1->constant > INT_MAX)
+                    continue;
+                walk = param;
+                walk_base = entry->args[slot];
+                walk_scale = next->op1->constant;
+                walk_bias = 0ULL - initial->constant * walk_scale;
+                break;
+            }
+        }
         if (!walk || !vir_is_constant(limit) ||
-            (bound - initial->constant) >
-                vir_width_mask(func->pointer_bits) / walk_scale ||
+            (!descending &&
+             (bound - initial->constant) >
+                 vir_width_mask(func->pointer_bits) / walk_scale) ||
             !branch->uses || branch->uses->next ||
             branch->uses->branch_block != header)
             continue;
+        if (unsigned_counter && !descending)
+            changed++;
 
         /* The equality endpoint works even when the concrete pointer wraps: the
          * bounded span cannot complete a full address-space revolution.
          */
         vir_type_t width =
             func->pointer_bits == 64 ? VIR_TYPE_I64 : VIR_TYPE_I32;
-        vir_value_t *offset = vir_const_int(func, entry->from, width,
-                                            bound * walk_scale + walk_bias);
+        vir_value_t *offset =
+            vir_const_int(func, entry->from, width,
+                          (descending ? 0 : bound * walk_scale) + walk_bias);
         vir_value_t *end =
             offset ? vir_ptradd(func, entry->from, walk_base, offset) : NULL;
         vir_value_t *equal = end ? vir_eq(func, header, walk, end) : NULL;
@@ -3898,16 +4215,9 @@ int vir_remove_unreachable(vir_function_t *func)
         return 0;
     reachable = calloc((size_t) count, sizeof(*reachable));
     work = malloc(sizeof(*work) * (size_t) count);
-    if (!reachable || !work) {
-        free(reachable);
-        free(work);
-        return 0;
-    }
-    if (!vir_mark_reachable_blocks(func, NULL, reachable, work)) {
-        free(reachable);
-        free(work);
-        return 0;
-    }
+    if (!reachable || !work ||
+        !vir_mark_reachable_blocks(func, NULL, reachable, work))
+        goto fail;
     for (block = func->blocks, i = 0; block; block = block->next, i++) {
         const vir_value_t *value;
         if (reachable[i])
@@ -3951,14 +4261,14 @@ int vir_remove_unreachable(vir_function_t *func)
         }
         i++;
     }
-    free(reachable);
-    free(work);
-    return 1;
-
+    i = 1;
+    goto cleanup;
 fail:
+    i = 0;
+cleanup:
     free(reachable);
     free(work);
-    return 0;
+    return i;
 }
 
 static bool vir_is_empty_jump_forwarder(const vir_function_t *func,
@@ -4066,6 +4376,63 @@ static bool vir_fold_branch_condition(vir_block_t *block)
     return true;
 }
 
+/* An incoming constant can select a branch without materializing its boolean
+ * parameter. Keep the bypassed computations local and successors argument-free.
+ */
+static int vir_thread_constant_edge(vir_function_t *func, vir_block_t *block)
+{
+    vir_value_t *param = block->branch_condition;
+    vir_value_t *constant = NULL;
+    int index = 0;
+
+    if (block == func->blocks || block->effects ||
+        block->terminator != VIR_TERM_BRANCH || !param ||
+        block->true_edge->arg_count || block->false_edge->arg_count)
+        return 0;
+    if (param->opcode == VIR_OP_EQ) {
+        constant = param->op1;
+        param = param->op0;
+        if (param->opcode == VIR_OP_CONST) {
+            vir_value_t *swap = param;
+            param = constant;
+            constant = swap;
+        }
+        if (constant->opcode != VIR_OP_CONST)
+            return 0;
+    } else if (param->type != VIR_TYPE_I1) {
+        return 0;
+    }
+    if (!param->is_block_param || param->block != block)
+        return 0;
+    for (vir_value_t *value = block->params; value != param;
+         value = value->param_next)
+        index++;
+    for (int list = 0; list < 2; list++)
+        for (vir_value_t *value = list ? block->head : block->params; value;
+             value = list ? value->next : value->param_next) {
+            if (list && value->opcode != VIR_OP_CONST &&
+                value->opcode != VIR_OP_EQ)
+                return 0;
+            for (vir_use_t *use = value->uses; use; use = use->next)
+                if (vir_use_block(use) != block)
+                    return 0;
+        }
+    for (vir_edge_t *edge = block->incoming; edge; edge = edge->next_incoming) {
+        vir_value_t *actual = edge->args[index];
+        if (actual->opcode != VIR_OP_CONST)
+            continue;
+        bool truth = constant ? actual->constant == constant->constant
+                              : actual->constant != 0;
+        vir_block_t *target =
+            (truth ? block->true_edge : block->false_edge)->to;
+        if (target == block || target == edge->from || target == func->blocks)
+            continue;
+        vir_edge_replace_args(edge, NULL, NULL, 0);
+        return vir_edge_redirect(func, edge, target) ? 1 : -1;
+    }
+    return 0;
+}
+
 int vir_simplify_cfg_with_pruning(vir_function_t *func,
                                   vir_opt_level_t opt_level,
                                   bool prune_unreachable)
@@ -4090,7 +4457,9 @@ int vir_simplify_cfg_with_pruning(vir_function_t *func,
             vir_block_t *target;
             int inlined;
 
-            inlined = vir_inline_return_param(func, block);
+            inlined = vir_thread_constant_edge(func, block);
+            if (!inlined)
+                inlined = vir_inline_return_param(func, block);
             if (inlined < 0)
                 return -1;
             if (inlined) {
@@ -4351,8 +4720,8 @@ int vir_licm_with_stats(vir_function_t *func,
 {
     vir_dominance_t dominance;
     vir_block_t **blocks;
-    unsigned char *in_loop;
-    int *work;
+    unsigned char *in_loop = NULL;
+    int *work = NULL;
     int *pending = NULL;
     vir_value_t **ready = NULL;
     int count;
@@ -4392,17 +4761,13 @@ int vir_licm_with_stats(vir_function_t *func,
         !vir_licm_add_temporary_bytes(&temporary_bytes,
                                       (size_t) count * sizeof(*in_loop)) ||
         !vir_licm_add_temporary_bytes(&temporary_bytes,
-                                      (size_t) count * sizeof(*work))) {
-        vir_dominance_release(&dominance);
-        return -1;
-    }
+                                      (size_t) count * sizeof(*work)))
+        goto fail;
     bytes = (int) temporary_bytes;
     in_loop = calloc(count, sizeof(*in_loop));
     work = malloc(count * sizeof(*work));
-    if (!in_loop || !work) {
-        vir_licm_release(in_loop, work, pending, ready, &dominance);
-        return -1;
-    }
+    if (!in_loop || !work)
+        goto fail;
     if (stats)
         stats[VIR_LICM_STAT_TEMPORARY_BYTES] = bytes;
     for (header_index = 0; header_index < count; header_index++) {
@@ -4497,16 +4862,12 @@ int vir_licm_with_stats(vir_function_t *func,
                     &temporary_bytes,
                     (size_t) value_count * sizeof(*pending)) ||
                 !vir_licm_add_temporary_bytes(
-                    &temporary_bytes, (size_t) value_count * sizeof(*ready))) {
-                vir_licm_release(in_loop, work, pending, ready, &dominance);
-                return -1;
-            }
+                    &temporary_bytes, (size_t) value_count * sizeof(*ready)))
+                goto fail;
             pending = malloc((size_t) value_count * sizeof(*pending));
             ready = malloc((size_t) value_count * sizeof(*ready));
-            if (!pending || !ready) {
-                vir_licm_release(in_loop, work, pending, ready, &dominance);
-                return -1;
-            }
+            if (!pending || !ready)
+                goto fail;
             bytes = (int) temporary_bytes;
             if (stats)
                 stats[VIR_LICM_STAT_TEMPORARY_BYTES] = bytes;
@@ -4556,9 +4917,13 @@ int vir_licm_with_stats(vir_function_t *func,
                 vir_repair_value_positions(blocks[i]);
         vir_repair_value_positions(preheader);
     }
-    vir_licm_release(in_loop, work, pending, ready, &dominance);
     if (stats)
         stats[VIR_LICM_STAT_VALUES_HOISTED] = hoisted;
+    goto cleanup;
+fail:
+    hoisted = -1;
+cleanup:
+    vir_licm_release(in_loop, work, pending, ready, &dominance);
     return hoisted;
 }
 
@@ -4578,19 +4943,16 @@ static bool vir_verify_reverse_uses(const vir_function_t *func,
             return 0;
         if (use->user) {
             if (!vir_has_value(func, use->user) ||
-                (use->operand != 0 && use->operand != 1) ||
-                (use->operand == 0 ? use->user->op0 : use->user->op1) != value)
+                (use->operand != 0 && use->operand != 1))
                 return 0;
         } else if (use->edge) {
             if (!vir_has_block(func, use->edge->from) ||
                 !vir_has_block(func, use->edge->to) ||
                 !vir_has_outgoing_edge(use->edge->from, use->edge) ||
-                use->operand < 0 || use->operand >= use->edge->arg_count ||
-                use->edge->args[use->operand] != value)
+                use->operand < 0 || use->operand >= use->edge->arg_count)
                 return 0;
         } else if (use->effect) {
             const vir_effect_t *effect = use->effect;
-            const vir_value_t *effect_value;
             if (!vir_has_block(func, effect->block) ||
                 !vir_has_effect(effect->block, effect))
                 return 0;
@@ -4600,33 +4962,27 @@ static bool vir_verify_reverse_uses(const vir_function_t *func,
                         effect->callee_value_use->effect != effect ||
                         effect->callee_value_use->operand != -1)
                         return 0;
-                    effect_value = effect->callee_value;
                 } else {
                     if (use->operand < 0 || use->operand >= effect->arg_count ||
                         !effect->args || !effect->arg_uses ||
                         effect->arg_uses[use->operand].effect != effect ||
                         effect->arg_uses[use->operand].operand != use->operand)
                         return 0;
-                    effect_value = effect->args[use->operand];
                 }
             } else {
                 if (use->operand != 0 && use->operand != 1)
                     return 0;
-                effect_value =
-                    use->operand == 0 ? effect->address : effect->stored_value;
             }
-            if (effect_value != value)
-                return 0;
         } else if (use->return_block) {
             if (!vir_has_block(func, use->return_block) ||
-                use->return_block->terminator != VIR_TERM_RETURN ||
-                use->return_block->return_value != value)
+                use->return_block->terminator != VIR_TERM_RETURN)
                 return 0;
         } else if (!vir_has_block(func, use->branch_block) ||
-                   use->branch_block->terminator != VIR_TERM_BRANCH ||
-                   use->branch_block->branch_condition != value) {
+                   use->branch_block->terminator != VIR_TERM_BRANCH) {
             return 0;
         }
+        if (*vir_use_value_slot(use) != value)
+            return 0;
     }
     return 1;
 }

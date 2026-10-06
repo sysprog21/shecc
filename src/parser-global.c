@@ -793,317 +793,75 @@ static void read_global_typedef_declarator(block_t *block,
                                            bool typedef_volatile,
                                            const type_t *base)
 {
-    type_t *type = add_type();
-
-    type->base_type = base->base_type;
-    type->size = base->size;
-
-    /* A typedef of a record typedef remains a record type. Sharing its
-     * immutable member table preserves ordinary `alias.member` and
-     * `pointer_alias->member` lookup instead of turning the alias into a scalar
-     * descriptor with no fields.
-     */
-    type->fields = base->fields;
-    type->num_fields = base->num_fields;
-    type->base_struct = base->base_struct;
-    if (base->base_type == TYPE_typedef && base->num_fields &&
-        !type->base_struct)
-        type->base_struct = (type_t *) base;
-    type->alignment = base->alignment;
-    type->is_union = base->is_union;
-    type->has_flexible_array_member = base->has_flexible_array_member;
-    type->ptr_level = base->ptr_level;
-    type->pointer_const_mask = base->pointer_const_mask;
-    type->pointer_volatile_mask = base->pointer_volatile_mask;
-    type->is_const_qualified = typedef_const || base->is_const_qualified;
-    type->is_volatile_qualified = base->is_volatile_qualified;
-    if (typedef_volatile) {
-        int depth = base->ptr_level + (base->func_signature &&
-                                       !base->is_direct_function_type &&
-                                       !base->ptr_level);
-        if (depth && depth <= 32)
-            type->pointer_volatile_mask |= 1U << (depth - 1);
-        else
-            type->is_volatile_qualified = true;
+    var_t decl = {0};
+    init_type_name_decl(&decl, (type_t *) base, typedef_const,
+                        typedef_volatile);
+    decl.scope = block;
+    decl.is_const_qualified |= base->is_const_qualified;
+    decl.pointer_volatile_mask |= base->pointer_volatile_mask;
+    decl.pointee_func_signature = base->pointee_func_signature;
+    decl.is_const_pointer |= typedef_const && base->pointee_func_signature;
+    bool saved = parsing_sizeof_function_signature;
+    parsing_sizeof_function_signature = true;
+    bool saved_typedef = parsing_block_typedef_declarator;
+    token_t *head = cur_token->next;
+    while (head->kind == T_asterisk || head->kind == T_const ||
+           head->kind == T_volatile || head->kind == T_restrict)
+        head = head->next;
+    parsing_block_typedef_declarator =
+        head->kind != T_open_bracket &&
+        (base->array_size || (!base->ptr_level && !base->func_signature &&
+                              !is_record_type(base) && !base->is_floating));
+    if (base->base_type == TYPE_void && !base->ptr_level &&
+        !base->func_signature && !base->pointee_func_signature &&
+        lex_peek(T_identifier, NULL) &&
+        (head->next->kind == T_comma || head->next->kind == T_semicolon)) {
+        char name[MAX_ID_LEN];
+        lex_ident(T_identifier, name);
+        decl.var_name = intern_string(name);
+    } else
+        read_inner_var_decl(&decl, false, false, false);
+    parsing_block_typedef_declarator = saved_typedef;
+    parsing_sizeof_function_signature = saved;
+    if (decl.is_direct_function_declarator &&
+        !decl.parenthesized_function_pointer_level &&
+        function_signature_has_floating(decl.func_signature))
+        error_at("Floating point types are not yet supported", cur_token_loc());
+    if (decl.is_direct_function_declarator && base->array_size)
+        error_at("Unexpected token", cur_token_loc());
+    if (decl.has_direct_pointee_array_declarator && decl.type->func_signature &&
+        !decl.type->is_direct_function_type)
+        base = decl.type;
+    if (!decl.is_func &&
+        (head->kind == T_open_bracket ||
+         decl.parenthesized_function_pointer_level ||
+         decl.has_direct_pointee_array_declarator) &&
+        !((!decl.array_size && !decl.has_unsized_array &&
+           !decl.pointee_array_size && !base->func_signature &&
+           !base->array_size) ||
+          (decl.has_direct_pointee_array_declarator && !decl.array_size &&
+           !base->array_size &&
+           (!base->func_signature ||
+            (!base->is_direct_function_type && !base->ptr_level)) &&
+           !base->pointee_func_signature &&
+           effective_pointer_depth(&decl) ==
+               decl.pointee_array_element_ptr_level + base->ptr_level + 1 &&
+           decl.pointee_array_element_ptr_level + base->ptr_level <= 1)))
+        error_at("Typedef parenthesized declarator must be a function pointer",
+                 cur_token_loc());
+    if (base->is_direct_function_type && decl.array_size && decl.is_func &&
+        !decl.parenthesized_function_pointer_level) {
+        decl.type = (type_t *) base;
+        decl.ptr_level = 1;
+        decl.is_func = false;
     }
-
-    /* `const ptr_t` qualifies the pointer that the base typedef hides, not its
-     * pointee.
-     */
-    if (typedef_const && base->ptr_level && base->ptr_level <= 32 &&
-        !base->func_signature && !base->pointee_func_signature) {
-        type->is_const_qualified = base->is_const_qualified;
-        type->pointer_const_mask |= 1U << (base->ptr_level - 1);
-    }
-    type->is_unsigned = base->is_unsigned;
-    type->is_floating = base->is_floating;
-    type->is_signed_char = base->is_signed_char;
-    type->is_bool = base->is_bool;
-    type->array_size = base->array_size;
-    type->array_dim2 = base->array_dim2;
-    type->array_dim3 = base->array_dim3;
-    type->array_dim4 = base->array_dim4;
-    type->array_element_ptr_level = base->array_element_ptr_level;
-    type->array_element_type = base->array_element_type;
-    type->func_signature = base->func_signature;
-
-    /* A tag is not a typedef name. As for `typedef struct S alias`, the alias
-     * reaches the record through base_struct, which also sees a later
-     * completion of the tag.
-     */
-    if (base->base_type == TYPE_struct || base->base_type == TYPE_union) {
-        type->base_type = TYPE_typedef;
-        type->base_struct = (type_t *) base;
-        type->is_union = base->base_type == TYPE_union;
-    }
-
-    /* Handle pointer types in typedef: typedef char *string; */
-    unsigned int star_const_mask = 0;
-
-    while (lex_accept(T_asterisk)) {
-        type->ptr_level++;
-        type->size = PTR_SIZE;
-        while (true) {
-            if (lex_accept(T_const)) {
-                if (type->ptr_level <= 32) {
-                    type->pointer_const_mask |= 1U << (type->ptr_level - 1);
-                    star_const_mask |= 1U << (type->ptr_level - 1);
-                }
-            } else if (lex_accept(T_volatile)) {
-                if (type->ptr_level <= 32)
-                    type->pointer_volatile_mask |= 1U << (type->ptr_level - 1);
-            } else if (lex_accept(T_restrict)) {
-                ;
-            } else
-                break;
-        }
-    }
-
-    if (type->ptr_level == 1)
-        alias_callback_array_pointer(type, base, star_const_mask);
-
-    /* A parenthesized declarator is the function-pointer form: `typedef int
-     * (*callback_t)(int)`. Parse it through the normal declarator reader so its
-     * prototype has exactly the same shape as an object declaration, then
-     * retain that syntax-only signature on the alias for each later object or
-     * parameter declaration.
-     */
-    if (lex_peek(T_open_bracket, NULL)) {
-        var_t declarator = {0};
-        bool saved_sizeof_signature = parsing_sizeof_function_signature;
-
-        init_type_name_decl(&declarator, (type_t *) base, typedef_const,
-                            typedef_volatile);
-        declarator.scope = block;
-        declarator.ptr_level = type->ptr_level - base->ptr_level;
-        declarator.pointer_const_mask =
-            base->ptr_level < 32 ? type->pointer_const_mask >> base->ptr_level
-                                 : 0;
-        declarator.pointer_volatile_mask = type->pointer_volatile_mask;
-        /* A returned compact callback keeps its own qualifiers on base. */
-        if (base->func_signature && !base->is_direct_function_type &&
-            !type->ptr_level) {
-            declarator.pointer_const_mask = 0;
-            declarator.pointer_volatile_mask = 0;
-        }
-        declarator.is_const_qualified = type->is_const_qualified;
-        declarator.is_volatile = type->is_volatile_qualified;
-
-        /* A callback typedef carries only a function signature. Its floating
-         * parameters do not materialize values until a call, which remains
-         * rejected by the ordinary floating gates.
-         */
-        parsing_sizeof_function_signature = true;
-        read_inner_var_decl(&declarator, false, false, false);
-        parsing_sizeof_function_signature = saved_sizeof_signature;
-
-        /* Without a parameter list or an array suffix the parentheses only
-         * group pointers: `typedef int (*int_ptr)` is `typedef int *int_ptr`.
-         */
-        if (!declarator.is_func && !declarator.array_size &&
-            !declarator.has_unsized_array && !declarator.pointee_array_size &&
-            !base->func_signature && !base->array_size) {
-            strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
-            type->type_name[MAX_TYPE_LEN - 1] = '\0';
-            type->ptr_level = effective_pointer_depth(&declarator);
-            type->size = PTR_SIZE;
-            if (base->ptr_level < 32)
-                type->pointer_const_mask |= declarator.pointer_const_mask
-                                            << base->ptr_level;
-            type->pointer_volatile_mask |= declarator.pointer_volatile_mask;
-            if (declarator.is_volatile)
-                type->is_volatile_qualified = true;
-
-            /* `typedef int (**slot_t)(int)` names a callback slot. */
-            type->pointee_func_signature = declarator.pointee_func_signature;
-            add_tu_typedef(type);
-            return;
-        }
-
-        /* `typedef int (*row_ptr)[2]` points to a whole row. As a block-scope
-         * alias does, keep the pointer-sized descriptor and carry the row
-         * bounds and element separately. The spelled `int (*(*rows_t)[2])(int)`
-         * reads its row against the unnamed callback type, which the declarator
-         * then carries.
-         */
-        if (declarator.type && declarator.type->func_signature &&
-            !declarator.type->is_direct_function_type)
-            base = declarator.type;
-        if (!declarator.is_func &&
-            declarator.has_direct_pointee_array_declarator &&
-            !declarator.array_size && !base->array_size &&
-            (!base->func_signature ||
-             (!base->is_direct_function_type && !base->ptr_level)) &&
-            !base->pointee_func_signature &&
-            effective_pointer_depth(&declarator) ==
-                declarator.pointee_array_element_ptr_level + base->ptr_level +
-                    1 &&
-            declarator.pointee_array_element_ptr_level + base->ptr_level <= 1) {
-            strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
-            type->type_name[MAX_TYPE_LEN - 1] = '\0';
-
-            /* A callback typedef base, `fn_t (*rows_t)[2]`, is the row's
-             * element with its prototype and qualifiers; the row pointer itself
-             * is no callback.
-             */
-            if (base->func_signature)
-                alias_callback_row_pointer(type, base, 0);
-
-            /* A pointer typedef base, `ptr_t (*rows_t)[2]`, is spelled out as
-             * `int *(*rows_t)[2]`: the declarator already counts its stars on
-             * the row's element, which then points to the base's pointee.
-             */
-            type->ptr_level = effective_pointer_depth(&declarator);
-            type->size = PTR_SIZE;
-            if (base->ptr_level < 32)
-                type->pointer_const_mask |= declarator.pointer_const_mask
-                                            << base->ptr_level;
-            type->pointer_volatile_mask |= declarator.pointer_volatile_mask;
-            declarator.pointee_array_element_ptr_level += base->ptr_level;
-            copy_pointee_array_shape_to_type(type, &declarator);
-            type->pointee_array_element_type =
-                base->ptr_level
-                    ? pointee_type_from_pointer_typedef((type_t *) base)
-                    : (type_t *) base;
-            add_tu_typedef(type);
-            return;
-        }
-        if (!declarator.is_func)
-            error_at(
-                "Typedef parenthesized declarator must be a function "
-                "pointer",
-                cur_token_loc());
-
-        /* `typedef int (*get_t(void))(int)` names a function type whose return
-         * is a callback, which the declarator reader already built.
-         */
-        if (declarator.is_direct_function_declarator) {
-            memcpy(type, declarator.type, sizeof(type_t));
-            strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
-            type->type_name[MAX_TYPE_LEN - 1] = '\0';
-            add_tu_typedef(type);
-            return;
-        }
-        strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
-        type->type_name[MAX_TYPE_LEN - 1] = '\0';
-        type->size = PTR_SIZE;
-        type->alignment = PTR_SIZE;
-        type->func_signature = declarator.func_signature;
-
-        /* `typedef int (*row[2])(int)` is an array typedef whose elements are
-         * callback pointers. The signature describes each element, while the
-         * bounds are needed later when a pointer-to-row is indexed (including
-         * after a call result).
-         */
-        type->array_size = declarator.array_size;
-        type->array_dim2 = declarator.array_dim2;
-        type->array_dim3 = declarator.array_dim3;
-        type->array_dim4 = declarator.array_dim4;
-        type->array_element_ptr_level = declarator.array_size ? 1 : 0;
-
-        /* Stars before the parenthesized callback declarator belong to the
-         * callback's return type. That depth is retained in its parsed
-         * signature; the typedef alias itself is the pointer-sized callback
-         * object, not a derived pointer alias.
-         */
-        int return_depth = declarator.ptr_level + declarator.type->ptr_level;
-        type->ptr_level = 0;
-        type->pointer_const_mask =
-            declarator.ptr_level < 32
-                ? declarator.pointer_const_mask >> declarator.ptr_level
-                : 0;
-        type->pointer_volatile_mask =
-            return_depth < 32 ? declarator.pointer_volatile_mask >> return_depth
-                              : 0;
-        type->is_const_qualified = false;
-        type->is_volatile_qualified = false;
-        add_tu_typedef(type);
-        return;
-    }
-
-    lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
-
-    /* `typedef int unary_t(int)` names a function type. Mirror the block-scope
-     * direct function alias: its scalar or void base is only the return type,
-     * and the prototype stays on the descriptor.
-     */
-    if (lex_peek(T_open_bracket, NULL) && !base->ptr_level &&
-        !base->array_size && !base->func_signature && !is_record_type(base) &&
-        !base->is_floating) {
-        func_t *func = arena_alloc_func();
-
-        /* The stars of `char *name_t(void)` belong to the return type. */
-        func->return_def.type = (type_t *) base;
-        func->return_def.ptr_level = type->ptr_level;
-        func->return_def.pointer_const_mask = type->pointer_const_mask;
-        func->return_def.pointer_volatile_mask = type->pointer_volatile_mask;
-        func->return_def.scope = block;
-        type->ptr_level = 0;
-        type->pointer_const_mask = 0;
-        type->pointer_volatile_mask = 0;
-        type->size = base->size;
-        read_parameter_list_decl(func, true);
-        type->base_type = TYPE_typedef;
-        type->func_signature = func;
-        type->is_direct_function_type = true;
-        add_tu_typedef(type);
-        return;
-    }
-
-    /* A typedef declarator may wrap an existing array typedef: `typedef row
-     * matrix[2]`. Gather its leading bounds first, then prepend them to the
-     * base alias's bounds instead of overwriting the inner extent.
-     */
-    fixed_array_shape_t base_shape = fixed_array_shape_from_type(type);
-    fixed_array_shape_t decl_shape = {0};
-    read_array_shape_bounds(
-        block, &decl_shape, "Array declarators support at most four dimensions",
-        "Typedef array needs a positive bound",
-        "Typedef array needs a positive bound", true, false);
-    if (decl_shape.rank) {
-        fixed_array_shape_t shape =
-            fixed_array_shape_prepend(&decl_shape, &base_shape);
-
-        if (!type->ptr_level && !type->size && type->base_struct &&
-            !type->base_struct->size)
-            error_at("Typedef array element has incomplete record type",
-                     cur_token_loc());
-
-        fixed_array_shape_to_type(type, &shape);
-
-        /* At the point an array typedef is introduced, ptr_level describes each
-         * array element. A later alias may add a pointer to the whole array, so
-         * preserve this separately.
-         */
-        type->array_element_ptr_level = type->ptr_level;
-        type->array_element_type =
-            base->array_element_type
-                ? base->array_element_type
-                : (base->ptr_level
-                       ? pointee_type_from_pointer_typedef((type_t *) base)
-                       : (type_t *) base);
-    }
-    add_tu_typedef(type);
+    if (decl.has_unsized_array)
+        error_at("Typedef array needs a positive bound", cur_token_loc());
+    type_t *alias = typedef_alias_from_declarator(&decl, typedef_const,
+                                                  typedef_volatile, true);
+    strncpy(alias->type_name, decl.var_name, MAX_TYPE_LEN - 1);
+    alias->type_name[MAX_TYPE_LEN - 1] = '\0';
+    add_tu_typedef(alias);
 }
 
 /* The declarator list of a file-scope typedef whose specifier resolved to

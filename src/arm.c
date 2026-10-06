@@ -167,20 +167,15 @@ int __mov(arm_cond_t cond, int io, int opcode, int s, int rn, int rd, int op2)
                       (shift << 8) + (encoded_op2 & 255));
 }
 
-int __and_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
-{
-    return __mov(cond, 0, arm_and, 0, rs, rd, rm);
-}
-
-int __or_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
-{
-    return __mov(cond, 0, arm_orr, 0, rs, rd, rm);
-}
-
-int __eor_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
-{
-    return __mov(cond, 0, arm_eor, 0, rs, rd, rm);
-}
+/* Preserve each register ALU helper's opcode, flag update and operand name. */
+#define ARM_REGISTER_INSN(name, opcode, flags, operand)                \
+    int name(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg operand) \
+    {                                                                  \
+        return __mov(cond, 0, opcode, flags, rs, rd, operand);         \
+    }
+ARM_REGISTER_INSN(__and_r, arm_and, 0, rm)
+ARM_REGISTER_INSN(__or_r, arm_orr, 0, rm)
+ARM_REGISTER_INSN(__eor_r, arm_eor, 0, rm)
 
 int __mvn_r(arm_cond_t cond, arm_reg rd, arm_reg rm)
 {
@@ -250,41 +245,13 @@ int __add_i(arm_cond_t cond, arm_reg rd, arm_reg rs, int imm)
         return __mov(cond, 1, arm_add, 0, rs, rd, imm);
     return __mov(cond, 1, arm_sub, 0, rs, rd, -imm);
 }
-
-int __add_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_add, 0, rs, rd, ro);
-}
-
-int __adds_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_add, 1, rs, rd, ro);
-}
-
-int __adc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_adc, 0, rs, rd, ro);
-}
-
-int __sub_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_sub, 0, rs, rd, ro);
-}
-
-int __subs_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_sub, 1, rs, rd, ro);
-}
-
-int __sbc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_sbc, 0, rs, rd, ro);
-}
-
-int __sbcs_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_sbc, 1, rs, rd, ro);
-}
+ARM_REGISTER_INSN(__add_r, arm_add, 0, ro)
+ARM_REGISTER_INSN(__adds_r, arm_add, 1, ro)
+ARM_REGISTER_INSN(__adc_r, arm_adc, 0, ro)
+ARM_REGISTER_INSN(__sub_r, arm_sub, 0, ro)
+ARM_REGISTER_INSN(__subs_r, arm_sub, 1, ro)
+ARM_REGISTER_INSN(__sbc_r, arm_sbc, 0, ro)
+ARM_REGISTER_INSN(__sbcs_r, arm_sbc, 1, ro)
 
 int __rsbs_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
 {
@@ -503,3 +470,5 @@ int __sxth(arm_cond_t cond, arm_reg rd, arm_reg rm, int rotation)
     return arm_encode(cond, 107, 0xF, rd,
                       rm | ((rotation >> 3) << 10) | (0x7 << 4));
 }
+
+#undef ARM_REGISTER_INSN

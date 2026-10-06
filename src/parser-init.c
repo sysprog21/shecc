@@ -13,6 +13,7 @@
  */
 
 void read_parameter_list_decl(func_t *func, bool anon);
+void read_wstring_param(block_t *parent, basic_block_t *bb);
 void read_indirect_call(var_t *callee, block_t *parent, basic_block_t **bb);
 var_t *integer_promote_operand(block_t *parent, basic_block_t **bb, var_t *var);
 var_t *resolve_global_declarator(block_t *block,
@@ -28,18 +29,17 @@ int read_const_expr(block_t *scope);
 var_t *read_wide_global_literal_expression(block_t *parent,
                                            basic_block_t *bb,
                                            block_t *scope);
+var_t *read_wide_global_literal_tail(block_t *parent,
+                                     basic_block_t *bb,
+                                     block_t *scope,
+                                     var_t *first);
 var_t *read_wide_global_literal_primary(block_t *parent,
                                         basic_block_t *bb,
                                         block_t *scope);
 bool subscripted_string_literal_starts_here(void);
-bool string_element_appears_before_initializer_end(token_t *token);
 var_t *read_string_literal_element_address(block_t *parent,
                                            basic_block_t *bb,
                                            block_t *scope);
-bool string_address_offset_starts_here(void);
-var_t *read_string_address_offset(block_t *parent,
-                                  basic_block_t *bb,
-                                  block_t *scope);
 
 static void parse_array_init_at(var_t *var,
                                 block_t *parent,
@@ -218,9 +218,6 @@ void emit_object_assignment(block_t *parent,
 type_t *read_type_name_specifiers(block_t *scope);
 void read_type_name_decl(block_t *scope, var_t *decl);
 int read_const_expr_operand(block_t *scope);
-int read_global_address_offset(block_t *scope,
-                               block_t *parent,
-                               basic_block_t *bb);
 
 /* While the operand of a pointer cast in a static initializer is read, the size
  * of what the cast pointer points to, and 0 otherwise. An offset that follows
@@ -228,12 +225,6 @@ int read_global_address_offset(block_t *scope,
  * byte past the array whatever its element type.
  */
 int global_pointer_cast_stride = 0;
-
-/* While the operand of a cast to a function pointer type in a static
- * initializer is read, the prototype that cast names, and NULL otherwise. The
- * cast, not the designated function, is converted to the initialized object.
- */
-func_t *global_function_cast_signature = NULL;
 
 bool abstract_function_pointer_follows(void);
 func_t *read_abstract_function_pointer(const var_t *return_decl,
@@ -347,50 +338,50 @@ bool global_pointer_cast_starts_here(block_t *scope)
     return token && has_type && is_pointer && (!function_type || depth > 1);
 }
 
-/* Consume a cast that global_pointer_cast_starts_here() recognized and return
- * the size of what its pointer type points to. @slot_signature receives the
- * prototype of the function pointers that type points to, as `(int (**)(void))`
- * or `(callback_t *)` do, and NULL for any other pointer.
+/* Consume an object-pointer cast, retain its complete destination type, and
+ * return the pointee stride used by static address arithmetic.
  */
-int read_global_pointer_cast(block_t *scope, func_t **slot_signature)
+int read_global_pointer_cast(block_t *scope, var_t *cast)
 {
-    var_t return_decl;
-    type_t *type;
-    int depth = 0;
-    int size;
-
-    *slot_signature = NULL;
     lex_expect(T_open_bracket);
-    read_type_name_decl(scope, &return_decl);
-    type = return_decl.type;
-    depth = return_decl.ptr_level;
+    read_type_name_decl(scope, cast);
+    type_t *type = cast->type;
+    int depth = cast->ptr_level;
     if (!type)
         error_at("Unknown type in pointer cast", cur_token_loc());
+    cast->is_func = false;
+    cast->func_signature = NULL;
 
-    /* A pointer to function pointers, spelled out or through a callback
-     * typedef, steps over pointer objects.
-     */
     if (abstract_function_pointer_follows()) {
         int pointer_level;
         func_t *signature =
-            read_abstract_function_pointer(&return_decl, &pointer_level);
-
+            read_abstract_function_pointer(cast, &pointer_level);
         lex_expect(T_close_bracket);
-        if (pointer_level == 2)
-            *slot_signature = signature;
+        cast->ptr_level += pointer_level - 1;
+        cast->pointee_func_signature = signature;
         return PTR_SIZE;
     }
     lex_expect(T_close_bracket);
     if (type->func_signature &&
-        (type->is_direct_function_type ? depth == 2
-                                       : !type->ptr_level && depth == 1))
-        *slot_signature = type->func_signature;
+        (type->is_direct_function_type ? depth >= 2
+                                       : !type->ptr_level && depth >= 1))
+        cast->pointee_func_signature = type->func_signature;
+    if (cast->pointee_func_signature) {
+        func_t *signature = cast->pointee_func_signature;
+        cast->type = signature->return_def.type;
+        cast->ptr_level = signature->return_def.ptr_level + depth -
+                          type->is_direct_function_type;
+        return PTR_SIZE;
+    }
     if (depth + type->ptr_level > 1 || type->func_signature)
         return PTR_SIZE;
     type = pointee_type_from_pointer_typedef(type);
-    if (type == TY_void)
+    if (type == TY_void) {
+        cast->type = TY_void;
+        cast->ptr_level = 1;
         return 1;
-    size = type->size;
+    }
+    int size = type->size;
     if (!size && type->base_struct)
         size = type->base_struct->size;
     if (type->array_size)
@@ -405,7 +396,9 @@ bool global_address_operand_starts_here(block_t *scope)
 {
     char name[MAX_ID_LEN];
 
-    if (lex_peek(T_ampersand, NULL) || lex_peek(T_string, NULL) ||
+    if (lex_peek(T_ampersand, NULL) ||
+        (lex_peek(T_string, NULL) &&
+         !subscripted_string_literal_starts_here()) ||
         global_pointer_cast_starts_here(scope) ||
         grouped_global_function_designator_starts_here(false) ||
         global_function_address_dereference_starts_here())
@@ -419,17 +412,17 @@ bool global_address_operand_starts_here(block_t *scope)
     return false;
 }
 
-/* Read an integer constant operand of a pointer cast with @stride and
- * @slot_signature, and any offset that follows it, as the address constant the
- * cast produces.
- */
+static bool wide_global_address_operand(const var_t *value);
+bool is_pointer_like_value(var_t *var);
+
+/* Read a pointer cast's integer or grouped address operand. */
 var_t *read_global_cast_integer_address(block_t *parent,
                                         basic_block_t *bb,
                                         block_t *scope,
                                         int stride,
                                         func_t *slot_signature)
 {
-    var_t *address = require_var(parent);
+    var_t *address;
     char name[MAX_ID_LEN];
     unsigned int lo;
     unsigned int hi;
@@ -443,20 +436,26 @@ var_t *read_global_cast_integer_address(block_t *parent,
         lo = read_const_expr_operand(scope);
         hi = lo & 0x80000000U ? ~0U : 0;
     } else {
+        int saved_stride = global_pointer_cast_stride;
+        global_pointer_cast_stride = 0;
         var_t *operand = read_wide_global_literal_primary(parent, bb, scope);
+        global_pointer_cast_stride = saved_stride;
 
+        if (wide_global_address_operand(operand)) {
+            if (operand->is_function_designator)
+                error_at("incompatible function pointer types",
+                         cur_token_loc());
+            operand->is_global_address = true;
+            operand->address_stride = stride;
+            return operand;
+        }
         lo = operand->init_val;
         hi = operand->init_val_hi;
-        if (operand->type->size <= TY_int->size)
+        if (!is_pointer_like_value(operand) &&
+            operand->type->size <= TY_int->size)
             hi = operand->type->is_unsigned || !(lo & 0x80000000U) ? 0 : ~0U;
     }
-    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL)) {
-        int offset = read_global_address_offset(scope, parent, bb) * stride;
-        unsigned int sum = lo + offset;
-
-        hi += (offset < 0 ? ~0U : 0) + (sum < lo);
-        lo = sum;
-    }
+    address = require_var(parent);
     address->var_name = gen_name();
     address->init_val = lo;
     address->init_val_hi = PTR_SIZE == 8 ? hi : 0;
@@ -507,8 +506,9 @@ var_t *read_global_address_designator(block_t *scope,
             shape = fixed_array_shape_from_var(target);
             subscripts = 0;
         } else if (lex_accept(T_open_square)) {
-            int element_size =
-                target->ptr_level ? PTR_SIZE : target->type->size;
+            int element_size = target->ptr_level || target->is_func
+                                   ? PTR_SIZE
+                                   : target->type->size;
             int index;
 
             if (!target->array_size || subscripts >= shape.rank)
@@ -526,28 +526,20 @@ var_t *read_global_address_designator(block_t *scope,
         object_addr->is_global_address = true;
     }
 
-    /* A trailing offset after a partial multidimensional subscript advances by
-     * the remaining row or plane, the complete pointed-to object, rather than
-     * by its scalar leaf. read_global_address_offset() takes the sign as part
-     * of the constant expression.
-     */
     if (decays && (!target->array_size || subscripts >= shape.rank))
         error_at("Global initializer requires a constant address",
                  cur_token_loc());
-    int element_size = target->ptr_level ? PTR_SIZE : target->type->size;
+    int element_size =
+        target->ptr_level || target->is_func ? PTR_SIZE : target->type->size;
     int stride = global_pointer_cast_stride
                      ? global_pointer_cast_stride
                      : fixed_array_shape_stride(&shape, subscripts - !decays,
                                                 element_size);
 
-    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL)) {
-        int index = read_global_address_offset(scope, parent, *bb);
-
-        object_addr =
-            compute_element_address(parent, bb, object_addr, index, stride);
-        object_addr->ptr_level = target->ptr_level + 1;
-        object_addr->is_global_address = true;
-    }
+    object_addr->type = target->type;
+    object_addr->pointee_func_signature = target->pointee_func_signature
+                                              ? target->pointee_func_signature
+                                              : target->func_signature;
     object_addr->address_stride = stride;
     *object = target;
     return object_addr;
@@ -579,36 +571,104 @@ block_t *initializer_name_scope(block_t *parent)
     return parent;
 }
 
-/* Nonzero while the constant expression reader has this function read one
- * address operand of the expression it is already reading.
- */
-int global_tested_operand_depth;
+typedef struct {
+    block_t *scope;
+    var_t *dest;
+} global_constant_context_t;
 
-/* Whether the element ahead is an address constant that an operator only
- * tests, as in `"a" && 1`, `1 ? "a" : "b"` or `array || 0`. Such an element is
- * a constant expression, not the address itself, so the whole expression
- * belongs to the constant expression reader.
- */
-static bool global_tested_operand_starts_here(block_t *scope)
+static var_t *global_constant_destination;
+static int wide_global_unevaluated_depth;
+
+static void validate_global_compound_address(const var_t *dest,
+                                             const var_t *literal);
+
+static void diagnose_global_function_value(global_constant_context_t *ctx,
+                                           var_t *value)
 {
-    char name[MAX_ID_LEN];
-    token_t *after;
-
-    if (global_tested_operand_depth || !cur_token->next)
-        return false;
-    if (!lex_peek(T_string, NULL) &&
-        !(lex_peek(T_identifier, name) &&
-          (find_visible_func(name, scope) || find_var(name, scope))))
-        return false;
-    after = cur_token->next->next;
-    return after && (after->kind == T_log_and || after->kind == T_log_or ||
-                     after->kind == T_question);
+    if (!ctx->dest)
+        return;
+    if (!ctx->dest->is_func && !ctx->dest->ptr_level &&
+        !(ctx->dest->type && ctx->dest->type->ptr_level))
+        error_at("Function address requires a pointer initializer",
+                 cur_token_loc());
+    diagnose_function_pointer_conversion(value, ctx->dest);
 }
 
-var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
+static var_t *read_global_compound_address(block_t *parent,
+                                           basic_block_t **bb,
+                                           global_constant_context_t *ctx)
+{
+    var_t return_decl;
+    func_t *callback = NULL;
+    lex_expect(T_open_bracket);
+    read_type_name_decl(GLOBAL_BLOCK, &return_decl);
+    type_t *type = return_decl.type;
+    int depth = return_decl.ptr_level;
+    if (type && abstract_function_pointer_follows()) {
+        int callback_level;
+        callback =
+            read_abstract_function_pointer(&return_decl, &callback_level);
+        if (callback_level != 1)
+            error_at("Incompatible compound literal address", cur_token_loc());
+    } else if (type && type->func_signature && !type->is_direct_function_type &&
+               !type->array_size && !depth) {
+        callback = type->func_signature;
+    }
+    lex_expect(T_close_bracket);
+    if (!type || type->array_size || (!callback && type->func_signature))
+        error_at("Incompatible compound literal address", cur_token_loc());
+    var_t declaration = return_decl;
+    declaration.ptr_level = callback && type->func_signature ? 0 : depth;
+    declaration.is_func = callback != NULL;
+    declaration.func_signature = callback;
+    validate_global_compound_address(ctx->dest, &declaration);
+    var_t *literal = name_var(require_typed_var(GLOBAL_BLOCK, type));
+    literal->is_global = true;
+    literal->ptr_level = callback && type->func_signature ? 0 : depth;
+    literal->is_func = callback != NULL;
+    literal->func_signature = callback;
+    add_insn(GLOBAL_BLOCK, *bb, OP_allocat, literal, NULL, NULL, 0, NULL);
+    if (!callback && !depth && is_record_type(type)) {
+        parse_global_record_init(literal, GLOBAL_BLOCK);
+    } else {
+        lex_expect(T_open_curly);
+        if (lex_peek(T_close_curly, NULL))
+            error_at("Scalar compound literal needs an initializer",
+                     next_token_loc());
+        read_global_assignment_var(literal);
+        lex_accept(T_comma);
+        lex_expect(T_close_curly);
+    }
+    var_t *address =
+        name_var(require_ref_var(parent, type, literal->ptr_level));
+    address->is_global_address = true;
+    address->pointee_func_signature = callback;
+    add_insn(parent, *bb, OP_address_of, address, literal, NULL, 0, NULL);
+    return address;
+}
+
+static var_t *read_global_function_cast_value(block_t *parent,
+                                              basic_block_t *bb,
+                                              block_t *scope,
+                                              func_t *signature)
+{
+    var_t *value = read_wide_global_literal_primary(parent, bb, scope);
+    value->type = signature->return_def.type;
+    value->ptr_level = 1;
+    value->func_signature = signature;
+    value->pointee_func_signature = NULL;
+    if (PTR_SIZE == 4)
+        value->init_val_hi = 0;
+    return value;
+}
+
+static var_t *read_global_constant_primary(block_t *parent,
+                                           basic_block_t **bb,
+                                           global_constant_context_t *ctx)
 {
     var_t *val = NULL;
-    block_t *scope = initializer_name_scope(parent);
+    block_t *scope = ctx->scope;
+    bool scalar = ctx->dest != NULL;
     bool address_dereference =
         global_function_address_dereference_starts_here();
     token_t *address_dereference_identifier = NULL;
@@ -620,20 +680,9 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
      */
     func_t *cast_signature = read_global_function_pointer_cast(scope);
 
-    if (cast_signature) {
-        val = parse_global_constant_value(parent, bb);
-        if (val && val->is_func)
-            val->func_signature = cast_signature;
-        else if (val && !effective_pointer_depth(val)) {
-            /* An integer cast to a function pointer type is an explicit
-             * conversion: keep the cast's type on the value, so the element
-             * store does not take it for an implicit one.
-             */
-            val->ptr_level = 1;
-            val->func_signature = cast_signature;
-        }
-        return val;
-    }
+    if (cast_signature)
+        return read_global_function_cast_value(parent, *bb, scope,
+                                               cast_signature);
 
     if (address_dereference) {
         address_dereference_identifier =
@@ -648,25 +697,48 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
     }
     if (global_pointer_cast_starts_here(scope)) {
         int saved_stride = global_pointer_cast_stride;
-        func_t *slot_signature;
-        int stride = read_global_pointer_cast(scope, &slot_signature);
+        var_t cast;
+        int stride = read_global_pointer_cast(scope, &cast);
 
         /* In a chain of casts the outermost one decides the stride. */
         if (saved_stride)
             stride = saved_stride;
-        if (!global_address_operand_starts_here(scope))
-            return read_global_cast_integer_address(parent, *bb, scope, stride,
-                                                    slot_signature);
-        global_pointer_cast_stride = stride;
-        val = parse_global_constant_value(parent, bb);
-        global_pointer_cast_stride = saved_stride;
+        if (!global_address_operand_starts_here(scope)) {
+            val = read_global_cast_integer_address(parent, *bb, scope, stride,
+                                                   cast.pointee_func_signature);
+        } else {
+            global_pointer_cast_stride = stride;
+            val = read_global_constant_primary(parent, bb, ctx);
+            global_pointer_cast_stride = saved_stride;
+        }
+        if (val->is_function_designator)
+            error_at("incompatible function pointer types", cur_token_loc());
+        val->address_stride = stride;
+        val->type = cast.type;
+        val->ptr_level = cast.ptr_level;
+        val->is_func = false;
+        val->func_signature = NULL;
+        val->pointee_func_signature = cast.pointee_func_signature;
+        val->is_const_qualified = cast.is_const_qualified;
+        val->is_const_pointer = cast.is_const_pointer;
+        val->pointer_const_mask = cast.pointer_const_mask;
+        val->is_volatile = cast.is_volatile;
+        val->pointer_volatile_mask = cast.pointer_volatile_mask;
+        val->is_void_null_pointer = is_plain_void_pointer(val) &&
+                                    val->is_const && !val->init_val &&
+                                    !val->init_val_hi;
         return val;
     }
     explicit_address = lex_accept(T_ampersand);
+    if (explicit_address && (scalar || global_constant_destination) &&
+        scope == GLOBAL_BLOCK && global_compound_literal_starts_here()) {
+        global_constant_context_t compound = *ctx;
+        if (!compound.dest)
+            compound.dest = global_constant_destination;
+        return read_global_compound_address(parent, bb, &compound);
+    }
     if (explicit_address && subscripted_string_literal_starts_here())
         return read_string_literal_element_address(parent, *bb, scope);
-    if (!explicit_address && string_address_offset_starts_here())
-        return read_string_address_offset(parent, *bb, scope);
 
     if (grouped_global_function_designator_starts_here(false)) {
         lex_expect(T_open_bracket);
@@ -681,13 +753,12 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
          lex_peek(T_log_not, NULL) || lex_peek(T_open_bracket, NULL) ||
          lex_peek(T_sizeof, NULL) || lex_peek(T_char, NULL) ||
          lex_peek(T_wchar, NULL) || subscripted_string_literal_starts_here() ||
-         global_tested_operand_starts_here(scope) ||
          (lex_peek(T_identifier, constant_name) &&
           find_scoped_constant(constant_name, scope)))) {
         /* Any integer constant expression, including casts, sizeof and grouped
          * subexpressions. The two-word reader keeps a wide value's high word.
          */
-        val = read_wide_global_literal_expression(parent, *bb, scope);
+        val = read_wide_global_literal_primary(parent, *bb, scope);
     } else if (explicit_address || grouped_function_designator ||
                lex_peek(T_identifier, NULL)) {
         char name[MAX_ID_LEN];
@@ -695,10 +766,10 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         if (lex_peek(T_identifier, name)) {
             func_t *func = find_visible_func(name, scope);
             if (func) {
+                val = function_designator_value(parent, func);
                 lex_expect(T_identifier);
                 if (grouped_function_designator)
                     lex_expect(T_close_bracket);
-                val = function_designator_value(parent, func);
                 return val;
             }
             if (explicit_address) {
@@ -734,21 +805,50 @@ var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
         if (explicit_address)
             error_at("Expected a global object or function after '&'",
                      cur_token_loc());
-        error_at("Global aggregate initializer requires a constant value",
+        if (scalar)
+            return read_wide_global_literal_primary(parent, *bb, scope);
+        error_at("Global initializer requires a constant value",
                  cur_token_loc());
-    } else if (lex_peek(T_string, NULL)) {
+    } else if (lex_peek(T_string, NULL) || lex_peek(T_wstring, NULL)) {
         /* A character-pointer member has the same constant-expression form as a
          * standalone global pointer: retain the rodata address, including
          * adjacent-literal concatenation, for the aggregate store.
          */
-        read_literal_param(parent, *bb);
+        if (lex_peek(T_wstring, NULL))
+            read_wstring_param(parent, *bb);
+        else
+            read_literal_param(parent, *bb);
         val = opstack_pop();
     } else {
+        if (scalar)
+            return read_wide_global_literal_primary(parent, *bb, scope);
         error_at("Global array initialization requires constant values",
                  next_token_loc());
     }
 
     return val;
+}
+
+static var_t *read_global_constant_value(block_t *parent,
+                                         basic_block_t **bb,
+                                         global_constant_context_t *ctx)
+{
+    var_t *saved_destination = global_constant_destination;
+    global_constant_destination = ctx->dest;
+    var_t *first = read_global_constant_primary(parent, bb, ctx);
+    var_t *value =
+        read_wide_global_literal_tail(parent, *bb, ctx->scope, first);
+    global_constant_destination = saved_destination;
+    if (value->is_function_designator || value->is_func)
+        diagnose_global_function_value(ctx, value);
+    return value;
+}
+
+var_t *parse_global_constant_value(block_t *parent, basic_block_t **bb)
+{
+    global_constant_context_t ctx = {0};
+    ctx.scope = initializer_name_scope(parent);
+    return read_global_constant_value(parent, bb, &ctx);
 }
 
 bool is_record_type(const type_t *type)
@@ -925,7 +1025,6 @@ static var_t *read_array_scalar_initializer(block_t *parent,
         char name[MAX_ID_LEN];
 
         if (global_array_scope && lex_peek(T_identifier, name) &&
-            !global_tested_operand_starts_here(global_array_scope) &&
             !find_scoped_constant(name, global_array_scope) &&
             !find_visible_func(name, global_array_scope)) {
             var_t *object = find_var(name, global_array_scope);
@@ -2069,35 +2168,14 @@ basic_block_t *handle_if_statement(block_t *parent, basic_block_t *bb)
     bb_connect(bb, else_, ELSE);
 
     basic_block_t *then_body = read_body_statement(parent, then_);
-    basic_block_t *then_next_ = NULL;
-    if (then_body) {
-        then_next_ = bb_create(parent);
-        bb_connect(then_body, then_next_, NEXT);
-    }
-
-    if (lex_accept(T_else)) {
-        basic_block_t *else_body = read_body_statement(parent, else_);
-        basic_block_t *else_next_ = NULL;
-        if (else_body) {
-            else_next_ = bb_create(parent);
-            bb_connect(else_body, else_next_, NEXT);
-        }
-
-        if (then_next_ && else_next_) {
-            basic_block_t *next_ = bb_create(parent);
-            bb_connect(then_next_, next_, NEXT);
-            bb_connect(else_next_, next_, NEXT);
-            return next_;
-        }
-
-        return then_next_ ? then_next_ : else_next_;
-    } else {
-        if (then_next_) {
-            bb_connect(else_, then_next_, NEXT);
-            return then_next_;
-        }
-        return else_;
-    }
+    basic_block_t *else_body =
+        lex_accept(T_else) ? read_body_statement(parent, else_) : else_;
+    if (!then_body && !else_body)
+        return NULL;
+    basic_block_t *next = bb_create(parent);
+    bb_connect(then_body, next, NEXT);
+    bb_connect(else_body, next, NEXT);
+    return next;
 }
 
 basic_block_t *handle_while_statement(block_t *parent, basic_block_t *bb)
@@ -2378,6 +2456,7 @@ static void parse_array_init_at(var_t *var,
                                              ? var->func_signature
                                              : var->type->func_signature;
                 diagnose_function_pointer_conversion(val, &element);
+                diagnose_callback_slot_initializer(val, &element);
             } else if (val &&
                        (val->is_func || val->func_signature ||
                         (val->type && val->type->func_signature)) &&

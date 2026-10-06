@@ -522,28 +522,21 @@ void elf_generate_section_headers(void)
 
     if (dynlink) {
         /* .rel.plt or .rela.plt */
-        int sh_type, sh_addr, sh_size, sh_entsize, __ofs, __sh_name;
-
-        if (dynamic_sections.use_relaplt) {
-            sh_type = 4; /* SHT_RELA */
-            sh_addr = dynamic_sections.elf_relaplt_start;
-            sh_size = dynamic_sections.elf_relaplt->size;
-            sh_entsize = sizeof(elf32_rela_t);
-            __ofs = dynamic_sections.elf_relaplt->size;
-            __sh_name = strlen(".rela.plt") + 1;
-        } else {
-            sh_type = 9; /* SHT_REL */
-            sh_addr = dynamic_sections.elf_relplt_start;
-            sh_size = dynamic_sections.elf_relplt->size;
-            sh_entsize = sizeof(elf32_rel_t);
-            __ofs = dynamic_sections.elf_relplt->size;
-            __sh_name = strlen(".rel.plt") + 1;
-        }
-        shdr = (elf32_shdr_t) {sh_name, sh_type, 0x42, sh_addr, ofs,
-                               sh_size, 8,       6,    4,       sh_entsize};
+        bool rela = dynamic_sections.use_relaplt;
+        shdr = (elf32_shdr_t) {sh_name,
+                               rela ? 4 : 9,
+                               0x42,
+                               rela ? dynamic_sections.elf_relaplt_start
+                                    : dynamic_sections.elf_relplt_start,
+                               ofs,
+                               elf_relplt->size,
+                               8,
+                               6,
+                               4,
+                               elf_jmprel_size()};
         elf_write_section_header(&shdr);
-        ofs += __ofs;
-        sh_name += __sh_name;
+        ofs += elf_relplt->size;
+        sh_name += rela ? sizeof(".rela.plt") : sizeof(".rel.plt");
 
         /* .plt */
         WRITE_FILE_SECTION(".plt", 1, 0x6, dynamic_sections.elf_plt_start,

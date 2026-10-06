@@ -1188,11 +1188,29 @@ void pp_parse_integer_literal(token_t *tk, pp_integer_t *val)
     }
 }
 
-#define PP_SIGNED_RELATION(left, right, signed_result, unsigned_result) \
-    ((!(left)->is_unsigned && !(right)->is_unsigned &&                  \
-      ((left)->hi >> 31) != ((right)->hi >> 31))                        \
-         ? (signed_result)                                              \
-         : (unsigned_result))
+static bool pp_compare(opcode_t op,
+                       const pp_integer_t *lhs,
+                       const pp_integer_t *rhs)
+{
+    int order = pp_compare_unsigned(lhs, rhs);
+    if (!lhs->is_unsigned && !rhs->is_unsigned &&
+        ((lhs->hi ^ rhs->hi) & 0x80000000U))
+        order = lhs->hi & 0x80000000U ? -1 : 1;
+    switch (op) {
+#define RELATION(name, test) \
+    case OP_##name:          \
+        return order test 0
+        RELATION(eq, ==);
+        RELATION(neq, !=);
+        RELATION(lt, <);
+        RELATION(leq, <=);
+        RELATION(gt, >);
+        RELATION(geq, >=);
+#undef RELATION
+    default:
+        return false;
+    }
+}
 
 token_t *pp_read_constant_infix_expr(int precedence,
                                      token_t *tk,
@@ -1565,30 +1583,12 @@ token_t *pp_read_constant_infix_expr(int precedence,
                     pp_shift_right_one(&lhs, !lhs.is_unsigned);
                 break;
             case OP_gt:
-                pp_set_boolean(&lhs, PP_SIGNED_RELATION(
-                                         &lhs, &rhs, !(lhs.hi >> 31),
-                                         pp_compare_unsigned(&lhs, &rhs) > 0));
-                break;
             case OP_geq:
-                pp_set_boolean(&lhs, PP_SIGNED_RELATION(
-                                         &lhs, &rhs, !(lhs.hi >> 31),
-                                         pp_compare_unsigned(&lhs, &rhs) >= 0));
-                break;
             case OP_lt:
-                pp_set_boolean(&lhs, PP_SIGNED_RELATION(
-                                         &lhs, &rhs, lhs.hi >> 31,
-                                         pp_compare_unsigned(&lhs, &rhs) < 0));
-                break;
             case OP_leq:
-                pp_set_boolean(&lhs, PP_SIGNED_RELATION(
-                                         &lhs, &rhs, lhs.hi >> 31,
-                                         pp_compare_unsigned(&lhs, &rhs) <= 0));
-                break;
             case OP_eq:
-                pp_set_boolean(&lhs, lhs.lo == rhs.lo && lhs.hi == rhs.hi);
-                break;
             case OP_neq:
-                pp_set_boolean(&lhs, lhs.lo != rhs.lo || lhs.hi != rhs.hi);
+                pp_set_boolean(&lhs, pp_compare(op, &lhs, &rhs));
                 break;
             case OP_log_and:
                 pp_set_boolean(&lhs, pp_is_true(&lhs) && pp_is_true(&rhs));
@@ -1613,8 +1613,6 @@ token_t *pp_read_constant_infix_expr(int precedence,
     val->enum_width = lhs.enum_width;
     return tk;
 }
-
-#undef PP_SIGNED_RELATION
 
 token_t *pp_read_constant_expr(token_t *tk, pp_integer_t *val)
 {

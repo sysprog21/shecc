@@ -18,7 +18,7 @@ check_count()
 }
 
 # The parser rejects these before optimization runs.
-for fixture in vir-const-local-getter vir-const-abstract-return-pointer vir-const-hidden-return-alias vir-const-callback-pointer-return-alias vir-const-callback-return-pointee vir-const-callback-return-pointer vir-const-grouped-pointer-alias; do
+for fixture in vir-const-typedef-pointer-slot-write vir-const-pointer-row-write vir-const-direct-pointer-row-write vir-const-callback-row-write vir-const-local-getter vir-const-abstract-return-pointer vir-const-hidden-return-alias vir-const-callback-pointer-return-alias vir-const-callback-return-pointee vir-const-callback-return-pointer vir-const-grouped-pointer-alias vir-const-typedef-realias vir-const-slot-realias; do
     if "${compiler[@]}" -o "$task_dir/test" "tests/$fixture.c" > "$task_dir/diagnostic" 2>&1; then
         echo "$fixture accepted assignment" >&2
         exit 1
@@ -43,6 +43,8 @@ for opt_flag in --no-opt ''; do
         check_count "$graph" ' = volatile[.]load[.]i(8|16|32|64) ' "$integers" "$fixture ${opt_flag:-default} scalar loads"
         check_count "$graph" '^[[:space:]]+volatile[.]store ' "$stores" "$fixture ${opt_flag:-default} stores"
     done << 'CASES'
+vir-volatile-pointer-row-elements touch_row 2 0 0
+vir-typedef-alias-builder touch_alias_qualifiers 3 0 1
 vir-volatile-arithmetic touch 0 3 0
 vir-volatile-storage check 3 2 0
 vir-volatile-local main 3 2 4
