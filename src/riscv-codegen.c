@@ -143,8 +143,8 @@ void update_elf_offset(ph2_ir_t *ph2_ir)
         elf_offset += ph2_ir->src1_hi >= 0 ? 8 : 4;
         return;
     case OP_call:
-        /* A call through the PLT may be farther than a JAL reaches. */
-        elf_offset += dynlink && !find_func(ph2_ir->func_name)->bbs ? 8 : 4;
+        /* Any call may be farther than a JAL reaches. */
+        elf_offset += 8;
         return;
     case OP_jump:
     case OP_load_func:
@@ -313,11 +313,14 @@ void cfg_flatten(void)
         update_elf_offset(ph2_ir);
     }
 
-    /* prepare 'argc' and 'argv', then proceed to 'main' function */
+    /* prepare 'argc' and 'argv', then proceed to 'main' function. The stub
+     * precedes every function, so 'main' can lie beyond the 1 MiB a JAL
+     * reaches; it is called through AUIPC and JALR instead.
+     */
     if (dynlink)
-        elf_offset += 44;
+        elf_offset += 48;
     else
-        elf_offset += 24;
+        elf_offset += 28;
 
     for (func = FUNC_LIST.head; func; func = func->next) {
         /* Skip function declarations without bodies */
@@ -589,24 +592,23 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_call:
         func = find_func(ph2_ir->func_name);
+
+        /* A self-hosted image is past the 1 MiB a JAL reaches, and the PLT
+         * follows the code and read-only data. Call PC-relative through AUIPC
+         * and JALR, which reach anywhere.
+         */
         if (func->bbs)
             ofs = func->bbs->elf_offset - elf_code->size;
-        else if (dynlink) {
-            /* The PLT follows the code and read-only data, so a large image
-             * puts it beyond the 1 MiB a JAL reaches. Call it PC-relative
-             * through AUIPC and JALR, which reach anywhere.
-             */
+        else if (dynlink)
             ofs = (dynamic_sections.elf_plt_start + func->plt_offset) -
                   (elf_code_start + elf_code->size);
-            emit(__auipc(__ra, rv_hi(ofs)));
-            emit(__jalr(__ra, __ra, rv_lo(ofs)));
-            return;
-        } else {
+        else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
             fflush(stdout); /* see fatal() */
             abort();
         }
-        emit(__jal(__ra, ofs));
+        emit(__auipc(__ra, rv_hi(ofs)));
+        emit(__jalr(__ra, __ra, rv_lo(ofs)));
         return;
     case OP_load_data_address:
         emit(__lui(rd, rv_hi(elf_data_start + ph2_ir->src0)));
@@ -1283,7 +1285,9 @@ void code_generate(void)
         if (dynlink) {
             emit(__addi(__a0, __s0, 0));
             emit(__addi(__a1, __s1, 0));
-            emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
+            ofs = MAIN_BB->elf_offset - elf_code->size;
+            emit(__auipc(__ra, rv_hi(ofs)));
+            emit(__jalr(__ra, __ra, rv_lo(ofs)));
 
             /* - Restore sp, s0 and s1.
              * - Transfer control back to __libc_start_main() using
@@ -1302,7 +1306,9 @@ void code_generate(void)
             emit(__addi(__t0, __s0, 0));
             emit(__lw(__a0, __t0, 0));
             emit(__addi(__a1, __t0, 4));
-            emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
+            ofs = MAIN_BB->elf_offset - elf_code->size;
+            emit(__auipc(__ra, rv_hi(ofs)));
+            emit(__jalr(__ra, __ra, rv_lo(ofs)));
 
             /* exit with main's return value in a0 */
             emit(__addi(__a7, __zero, 93));
