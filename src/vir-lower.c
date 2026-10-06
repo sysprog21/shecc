@@ -27,6 +27,9 @@ typedef struct {
     int *block_positions;
     int *live_seen;
     vir_block_t **live_work;
+    /* Last mark vir_machine_interferes() left in a block-indexed seen array. */
+    int live_stamp;
+    const vir_dominance_t *dominance;
     int (*global_offset)(const char *, void *);
     void *global_context;
 } vir_lower_t;
@@ -407,6 +410,12 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
 /* A shared register is safe only when neither definition can overwrite a
  * still-used instance of the other value. Re-entering its defining block starts
  * a new SSA instance; the initial block needs instruction ordering.
+ *
+ * Rather than walking forward from the writer, walk backward from the
+ * survivor's uses to the blocks it is live into, stopping at its definition.
+ * The writer interferes when it reaches one of them, and the backward walk is
+ * bounded by the survivor's live range instead of everything the writer
+ * reaches. @seen holds a fresh mark per call, so it is not cleared each time.
  */
 static bool vir_machine_interferes(vir_lower_t *lower,
                                    vir_value_t *writer,
@@ -414,34 +423,48 @@ static bool vir_machine_interferes(vir_lower_t *lower,
                                    int *seen,
                                    vir_block_t **work)
 {
-    memset(seen, 0, lower->function->next_block_id * sizeof(int));
-    int pending = 0;
-    const vir_block_t *block = writer->block;
+    const vir_block_t *first = writer->block;
     int start = writer->is_block_param ? -1 : writer->order;
-    bool initial = true;
-    while (block) {
-        int stop = block->next_order + 1;
-        if (block == survivor->block) {
-            int definition = survivor->is_block_param ? -1 : survivor->order;
-            if (!initial || definition > start)
-                stop = definition;
+    int definition = survivor->is_block_param ? -1 : survivor->order;
+    bool defined_later = first == survivor->block && definition > start;
+    int first_stop = defined_later ? definition : first->next_order + 1;
+    int pending = 0;
+
+    /* Fresh arrays start zeroed, so any mark from 2 up is unused. */
+    if (lower->live_stamp < 2 || lower->live_stamp == INT_MAX) {
+        memset(seen, 0, lower->function->next_block_id * sizeof(int));
+        lower->live_stamp = 1;
+    }
+    int mark = ++lower->live_stamp;
+    for (vir_use_t *use = survivor->uses; use; use = use->next) {
+        vir_block_t *used = vir_use_block(use);
+        int order = vir_use_order(use);
+        int stop = used == survivor->block ? definition : used->next_order + 1;
+        if (used == first && order > start && order < first_stop)
+            return true;
+        if (order > -1 && order < stop && seen[used->id] != mark) {
+            seen[used->id] = mark;
+            work[pending++] = used;
         }
-        for (vir_use_t *use = survivor->uses; use; use = use->next) {
-            const vir_block_t *used = vir_use_block(use);
-            int order = vir_use_order(use);
-            if (used == block && order > start && order < stop)
+    }
+
+    /* The writer's own block continues past its end unless the survivor is
+     * defined later in it.
+     */
+    if (defined_later)
+        return false;
+    while (pending) {
+        const vir_block_t *block = work[--pending];
+        for (vir_edge_t *edge = block->incoming; edge;
+             edge = edge->next_incoming) {
+            vir_block_t *from = edge->from;
+            if (from == first)
                 return true;
+            if (from != survivor->block && seen[from->id] != mark) {
+                seen[from->id] = mark;
+                work[pending++] = from;
+            }
         }
-        if (stop > block->next_order)
-            for (vir_edge_t *edge = block->outgoing; edge;
-                 edge = edge->next_outgoing)
-                if (!seen[edge->to->id]) {
-                    seen[edge->to->id] = 1;
-                    work[pending++] = edge->to;
-                }
-        block = pending ? work[--pending] : NULL;
-        initial = false;
-        start = -1;
     }
     return false;
 }
@@ -488,48 +511,22 @@ static void vir_machine_flush_successor(vir_lower_t *lower,
     }
 }
 
-static bool vir_machine_dominated(vir_lower_t *lower,
-                                  vir_block_t *header,
-                                  vir_block_t *target,
-                                  int *seen,
-                                  vir_block_t **work)
-{
-    memset(seen, 0, lower->function->next_block_id * sizeof(int));
-    int pending = 0;
-    vir_block_t *entry = lower->function->blocks;
-    if (entry != header) {
-        seen[entry->id] = 1;
-        work[pending++] = entry;
-    }
-    while (pending) {
-        const vir_block_t *block = work[--pending];
-        if (block == target)
-            return false;
-        for (vir_edge_t *edge = block->outgoing; edge;
-             edge = edge->next_outgoing)
-            if (edge->to != header && !seen[edge->to->id]) {
-                seen[edge->to->id] = 1;
-                work[pending++] = edge->to;
-            }
-    }
-    return true;
-}
-
-/* Every value sharing physical lanes must survive either definition safely. */
+/* Every value sharing physical lanes must survive either definition safely.
+ * @pinned lists the IDs of the @count values given a fixed register.
+ */
 static bool vir_machine_pin_safe(vir_lower_t *lower,
                                  vir_value_t *value,
                                  int fixed,
-                                 vir_value_t **values,
+                                 const int *pinned,
                                  int count,
                                  int *seen,
                                  vir_block_t **work)
 {
     unsigned int lanes = (vir_machine_pair(lower, value) ? 3u : 1u) << fixed;
-    for (int id = 0; id < count; id++) {
-        vir_value_t *other = values[id];
-        int reg = lower->locations[id].fixed;
-        if (!other || reg < 0 ||
-            !(lanes & ((vir_machine_pair(lower, other) ? 3u : 1u) << reg)))
+    for (int i = 0; i < count; i++) {
+        vir_value_t *other = lower->locations[pinned[i]].value;
+        int reg = lower->locations[pinned[i]].fixed;
+        if (!(lanes & ((vir_machine_pair(lower, other) ? 3u : 1u) << reg)))
             continue;
         if (vir_machine_interferes(lower, value, other, seen, work) ||
             vir_machine_interferes(lower, other, value, seen, work))
@@ -555,7 +552,7 @@ static bool vir_machine_slots(vir_lower_t *lower)
     int *free_slots = malloc(count * sizeof(int));
     int *next_start = malloc(count * sizeof(int));
     int *next_end = malloc(count * sizeof(int));
-    int *heads = NULL, *ends = NULL;
+    int *heads = NULL, *ends = NULL, *pinned = NULL;
     bool success = false;
 
     lower->block_positions = calloc(function->next_block_id, sizeof(int));
@@ -663,6 +660,10 @@ static bool vir_machine_slots(vir_lower_t *lower)
     /* Reuse the future home freelist for immutable pin scores. Adding fixed
      * values can only make a failed lane assignment less available.
      */
+    int pinned_count = 0;
+    pinned = malloc(count * sizeof(int));
+    if (!pinned)
+        goto done;
     while (true) {
         vir_value_t *best = NULL;
         int best_score = 0, best_reg = -1;
@@ -676,8 +677,8 @@ static bool vir_machine_slots(vir_lower_t *lower)
             int words = vir_machine_pair(lower, value) ? 2 : 1;
             int reg;
             for (reg = base; reg + words <= limit; reg++)
-                if (vir_machine_pin_safe(lower, value, reg, values, count, seen,
-                                         work)) {
+                if (vir_machine_pin_safe(lower, value, reg, pinned,
+                                         pinned_count, seen, work)) {
                     best = value;
                     best_score = score;
                     best_reg = reg;
@@ -692,6 +693,7 @@ static bool vir_machine_slots(vir_lower_t *lower)
         int words = vir_machine_pair(lower, best) ? 2 : 1;
         location->fixed = location->reg = best_reg;
         location->high = words == 2 ? best_reg + 1 : -1;
+        pinned[pinned_count++] = best->id;
         lower->pinned_mask |= ((1u << words) - 1) << best_reg;
 
         /* Phi affinity extends a pin through values feeding the same family.
@@ -717,8 +719,8 @@ static bool vir_machine_slots(vir_lower_t *lower)
                         param = param->param_next;
                     if (!param || param->type != value->type ||
                         lower->locations[param->id].fixed < 0 ||
-                        !vir_machine_dominated(lower, param->block,
-                                               value->block, seen, work)) {
+                        !vir_dominance_block_dominates(
+                            lower->dominance, param->block, value->block)) {
                         safe = false;
                         break;
                     }
@@ -730,12 +732,13 @@ static bool vir_machine_slots(vir_lower_t *lower)
                     fixed = destination;
                 }
                 if (!safe || fixed < 0 ||
-                    !vir_machine_pin_safe(lower, value, fixed, values, count,
-                                          seen, work))
+                    !vir_machine_pin_safe(lower, value, fixed, pinned,
+                                          pinned_count, seen, work))
                     continue;
                 lower->locations[id].fixed = lower->locations[id].reg = fixed;
                 lower->locations[id].high =
                     vir_machine_pair(lower, value) ? fixed + 1 : -1;
+                pinned[pinned_count++] = id;
                 changed = true;
             }
         }
@@ -765,6 +768,7 @@ done:
     free(next_end);
     free(heads);
     free(ends);
+    free(pinned);
     return success;
 }
 
@@ -1373,6 +1377,9 @@ bool vir_lower_machine(const vir_function_t *function,
         lower.locations[index].reg = -1;
         lower.locations[index].high = -1;
     }
+    if (!vir_dominance_init(function, &dominance))
+        goto unsupported;
+    lower.dominance = &dominance;
     if (!vir_machine_slots(&lower))
         goto unsupported;
     /* Object storage is separate from each address value's spill home. */
@@ -1429,8 +1436,6 @@ bool vir_lower_machine(const vir_function_t *function,
             vir_machine_save_argument(
                 &lower, word, variadic_base + word * PTR_SIZE, PTR_SIZE);
     }
-    if (!vir_dominance_init(function, &dominance))
-        goto unsupported;
     vir_machine_parameters(&lower);
     for (vir_block_t *block = function->blocks; block; block = block->next) {
         vir_value_t *value = block->head;

@@ -16,6 +16,9 @@ typedef enum {
 
 typedef struct vir_dominance vir_dominance_t;
 
+static int vir_dominance_index(const vir_dominance_t *dominance,
+                               const vir_block_t *block);
+
 static const struct {
     const char *name;
     unsigned char width;
@@ -54,6 +57,10 @@ static bool vir_value_dominates_effect(const vir_function_t *func,
                                        const vir_value_t *value,
                                        const vir_effect_t *effect);
 static void vir_effect_append(vir_block_t *block, vir_effect_t *effect);
+static bool vir_mark_reachable_blocks(const vir_function_t *func,
+                                      const vir_block_t *blocked,
+                                      unsigned char *reachable,
+                                      int *work);
 static void vir_repair_value_positions(vir_block_t *block);
 static vir_effect_t *vir_new_effect(vir_function_t *func,
                                     vir_block_t *block,
@@ -398,6 +405,18 @@ DEFINE_VIR_OPCODE_PREDICATE(vir_is_pure_binary_opcode,
 #undef DEFINE_VIR_OPCODE_PREDICATE
 #undef VIR_OPCODE_ITEM
 
+#define VIR_ARENA_GROWTH_LIMIT (256 * 1024)
+
+static void vir_arena_release(vir_arena_t *arena)
+{
+    vir_arena_block_t *block = arena->head;
+    while (block) {
+        vir_arena_block_t *next = block->next;
+        free(block);
+        block = next;
+    }
+}
+
 static void *vir_arena_alloc(vir_arena_t *arena, int size)
 {
     const int align = sizeof(void *);
@@ -411,7 +430,14 @@ static void *vir_arena_alloc(vir_arena_t *arena, int size)
     size = (size + align - 1) & ~(align - 1);
     block = arena->head;
     if (!block || size > block->capacity - block->used) {
-        capacity = arena->block_size;
+        /* Grow with the arena, up to a cap, so a large graph takes a handful of
+         * blocks rather than one per block_size bytes.
+         */
+        capacity = arena->capacity < VIR_ARENA_GROWTH_LIMIT
+                       ? arena->capacity
+                       : VIR_ARENA_GROWTH_LIMIT;
+        if (capacity < arena->block_size)
+            capacity = arena->block_size;
         if (capacity < size)
             capacity = size;
         if (arena->capacity > INT_MAX - capacity)
@@ -451,12 +477,8 @@ int vir_function_set_pointer_bits(vir_function_t *func, int pointer_bits)
 
 void vir_function_release(vir_function_t *func)
 {
-    vir_arena_block_t *block = func->arena.head;
-    while (block) {
-        vir_arena_block_t *next = block->next;
-        free(block);
-        block = next;
-    }
+    free(func->block_table);
+    vir_arena_release(&func->arena);
     memset(func, 0, sizeof(*func));
 }
 
@@ -497,18 +519,38 @@ void vir_collect_stats(const vir_function_t *func, vir_stats_t *stats)
     }
 }
 
-vir_block_t *vir_block_create(vir_function_t *func)
+/* Link @block after the function's last block. */
+static bool vir_block_link(vir_function_t *func, vir_block_t *block)
 {
-    vir_block_t *block = vir_arena_alloc(&func->arena, sizeof(*block));
-    if (!block)
-        return NULL;
+    if (func->block_count == func->block_capacity) {
+        if (func->block_capacity >= INT_MAX / (int) sizeof(block) / 2)
+            return false;
+        int capacity = func->block_capacity ? func->block_capacity * 2 : 16;
+        vir_block_t **table = malloc((size_t) capacity * sizeof(*table));
+        if (!table)
+            return false;
+        if (func->block_table)
+            memcpy(table, func->block_table,
+                   (size_t) func->block_count * sizeof(*table));
+        free(func->block_table);
+        func->block_table = table;
+        func->block_capacity = capacity;
+    }
+    block->index = func->block_count;
+    func->block_table[func->block_count++] = block;
     block->id = func->next_block_id++;
     if (func->last_block)
         func->last_block->next = block;
     else
         func->blocks = block;
     func->last_block = block;
-    return block;
+    return true;
+}
+
+vir_block_t *vir_block_create(vir_function_t *func)
+{
+    vir_block_t *block = vir_arena_alloc(&func->arena, sizeof(*block));
+    return block && vir_block_link(func, block) ? block : NULL;
 }
 
 static vir_value_t *vir_value_alloc(vir_function_t *func,
@@ -978,12 +1020,8 @@ vir_block_t *vir_edge_split(vir_function_t *func, vir_edge_t *edge)
     forward = vir_edge_alloc(func, edge->arg_count);
     if (!forward)
         return NULL;
-    split->id = func->next_block_id++;
-    if (func->last_block)
-        func->last_block->next = split;
-    else
-        func->blocks = split;
-    func->last_block = split;
+    if (!vir_block_link(func, split))
+        return NULL;
     for (target_param = split->params, i = 0; target_param;
          target_param = target_param->param_next, i++) {
         target_param->id = func->next_value_id++;
@@ -1968,23 +2006,51 @@ static bool vir_replacement_dominates_with_context(
     const vir_value_t *to)
 {
     const vir_use_t *use;
-    for (use = from->uses; use; use = use->next) {
+
+    /* Without a dominance tree, every use in another block asks the same
+     * question: is it unreachable once the definition's block is removed? Walk
+     * the CFG once for all of them rather than once per use.
+     */
+    unsigned char *reachable = NULL;
+    int *work = NULL;
+    bool dominates = true;
+    for (use = from->uses; use && dominates; use = use->next) {
         const vir_block_t *block;
         int position;
         if (!use->user && !use->edge && use->effect) {
-            if (!vir_value_dominates_effect(func, dominance, to, use->effect))
-                return 0;
+            dominates =
+                vir_value_dominates_effect(func, dominance, to, use->effect);
             continue;
         }
-        if (!(block = vir_use_block(use)))
-            return 0;
+        if (!(block = vir_use_block(use))) {
+            dominates = false;
+            continue;
+        }
+        if (!dominance && func && func->blocks && block != to->block) {
+            int index = vir_block_index(func, block);
+            if (vir_block_index(func, to->block) < 0 || index < 0)
+                dominates = false;
+            else if (to->block == func->blocks)
+                continue;
+            else if (!reachable) {
+                reachable =
+                    calloc((size_t) func->block_count, sizeof(*reachable));
+                work = malloc((size_t) func->block_count * sizeof(*work));
+                dominates =
+                    reachable && work &&
+                    vir_mark_reachable_blocks(func, to->block, reachable, work);
+            }
+            dominates = dominates && !reachable[index];
+            continue;
+        }
         position = use->user     ? use->user->position
                    : block->tail ? block->tail->position + 1
                                  : 0;
-        if (!vir_value_dominates(func, dominance, to, block, position))
-            return 0;
+        dominates = vir_value_dominates(func, dominance, to, block, position);
     }
-    return 1;
+    free(reachable);
+    free(work);
+    return dominates;
 }
 
 static bool vir_replacement_dominates(const vir_function_t *func,
@@ -2632,19 +2698,6 @@ static bool vir_sccp_value(const vir_function_t *func,
     return vir_sccp_set(state, constant, value->id, VIR_SCCP_CONST, result);
 }
 
-static int vir_sccp_edge_index(const vir_function_t *func,
-                               const vir_edge_t *needle)
-{
-    int index = 0;
-
-    for (const vir_block_t *block = func->blocks; block; block = block->next)
-        for (const vir_edge_t *edge = block->outgoing; edge;
-             edge = edge->next_outgoing, index++)
-            if (edge == needle)
-                return index;
-    return -1;
-}
-
 typedef struct {
     unsigned char *queued_blocks;
     int *queue;
@@ -2687,7 +2740,7 @@ static void vir_sccp_schedule_uses(vir_sccp_worklist_t *worklist,
         else if (use->branch_block && use->branch_block != current_block)
             vir_sccp_queue_block(worklist, func, use->branch_block, true);
         else if (use->edge) {
-            int index = vir_sccp_edge_index(func, use->edge);
+            int index = use->edge->sccp_index;
 
             if (index >= 0 && executable_edges[index])
                 vir_sccp_queue_block(worklist, func, use->edge->to, true);
@@ -2698,7 +2751,6 @@ static void vir_sccp_schedule_uses(vir_sccp_worklist_t *worklist,
 static bool vir_sccp_param(const vir_value_t *param,
                            int index,
                            const unsigned char *executable_edges,
-                           const vir_function_t *func,
                            unsigned char *state,
                            unsigned long long *constant)
 {
@@ -2708,10 +2760,8 @@ static bool vir_sccp_param(const vir_value_t *param,
     unsigned long long next_constant = 0;
 
     for (edge = param->block->incoming; edge; edge = edge->next_incoming) {
-        int edge_index = vir_sccp_edge_index(func, edge);
+        int edge_index = edge->sccp_index;
 
-        if (edge_index < 0)
-            return false;
         if (!executable_edges[edge_index])
             continue;
         seen = 1;
@@ -2746,10 +2796,8 @@ static void vir_sccp_mark_edge(vir_sccp_worklist_t *worklist,
                                const vir_edge_t *edge,
                                unsigned char *executable_edges)
 {
-    int edge_index = vir_sccp_edge_index(func, edge);
+    int edge_index = edge->sccp_index;
 
-    if (edge_index < 0)
-        return;
     if (!executable_edges[edge_index]) {
         executable_edges[edge_index] = 1;
         vir_sccp_queue_block(worklist, func, edge->to, false);
@@ -2857,11 +2905,15 @@ int vir_sccp_with_stats_and_pruning(vir_function_t *func,
         return 0;
     vir_promote_private_stack_values(func);
     capacity = func->next_value_id;
+
+    /* The solver never changes the CFG, so this edge numbering holds until the
+     * edges are rewritten after it.
+     */
     for (vir_block_t *block = func->blocks; block; block = block->next) {
         block_count++;
         for (vir_edge_t *edge = block->outgoing; edge;
              edge = edge->next_outgoing)
-            edge_count++;
+            edge->sccp_index = edge_count++;
     }
     if (capacity <= 0 ||
         capacity > INT_MAX / (int) (sizeof(*state) + sizeof(*constant)))
@@ -2896,13 +2948,11 @@ int vir_sccp_with_stats_and_pruning(vir_function_t *func,
         goto fail;
     while (worklist.count) {
         int block_index = worklist.queue[worklist.head];
-        vir_block_t *block = func->blocks;
+        vir_block_t *block = func->block_table[block_index];
 
         worklist.head = (worklist.head + 1) % worklist.capacity;
         worklist.count--;
-        for (int i = 0; i < block_index; i++)
-            block = block->next;
-        if (!block || worklist.queued_blocks[block_index] != 2)
+        if (worklist.queued_blocks[block_index] != 2)
             goto fail;
         worklist.queued_blocks[block_index] = 1;
         if (passes)
@@ -2911,8 +2961,8 @@ int vir_sccp_with_stats_and_pruning(vir_function_t *func,
 
         for (vir_value_t *value = block->params; value;
              value = value->param_next, param_index++) {
-            if (vir_sccp_param(value, param_index, executable_edges, func,
-                               state, constant))
+            if (vir_sccp_param(value, param_index, executable_edges, state,
+                               constant))
                 vir_sccp_schedule_uses(&worklist, func, value, block,
                                        executable_edges);
         }
@@ -3014,8 +3064,14 @@ typedef struct {
     vir_value_t *inserted;
 } vir_edge_resize_t;
 
+/* Most blocks have few predecessors, so their resize records fit inline and an
+ * edit needs no allocation of its own. An edit must not move once prepared.
+ */
+#define VIR_PARAM_EDIT_INLINE 4
+
 typedef struct {
     vir_edge_resize_t *edges;
+    vir_edge_resize_t inline_edges[VIR_PARAM_EDIT_INLINE];
     int count;
     int old_count;
     int index;
@@ -3024,7 +3080,8 @@ typedef struct {
 
 static void vir_param_edit_release(vir_param_edit_t *edit)
 {
-    free(edit->edges);
+    if (edit->edges != edit->inline_edges)
+        free(edit->edges);
     memset(edit, 0, sizeof(*edit));
 }
 
@@ -3056,9 +3113,10 @@ static bool vir_param_edit_prepare(vir_function_t *func,
     }
     for (edge = block->incoming; edge; edge = edge->next_incoming)
         edit->count++;
-    edit->edges =
-        edit->count ? calloc((size_t) edit->count, sizeof(*edit->edges)) : NULL;
-    if (edit->count && !edit->edges)
+    if (edit->count <= VIR_PARAM_EDIT_INLINE)
+        edit->edges = edit->inline_edges;
+    else if (!(edit->edges =
+                   calloc((size_t) edit->count, sizeof(*edit->edges))))
         return 0;
     edit->old_count = old_count;
     edit->index = index;
@@ -3173,15 +3231,11 @@ DEFINE_BLOCK_LIST_CONTAINS(vir_has_effect, vir_effect_t, effects, next)
 static int vir_block_index(const vir_function_t *func,
                            const vir_block_t *needle)
 {
-    const vir_block_t *block;
-    int index = 0;
-
-    if (!func || !needle)
+    if (!func || !needle || needle->index < 0 ||
+        needle->index >= func->block_count ||
+        func->block_table[needle->index] != needle)
         return -1;
-    for (block = func->blocks; block; block = block->next, index++)
-        if (block == needle)
-            return index;
-    return -1;
+    return needle->index;
 }
 
 static bool vir_has_block(const vir_function_t *func, const vir_block_t *needle)
@@ -3217,16 +3271,43 @@ static int vir_count_values(const vir_function_t *func,
     return count;
 }
 
-static bool vir_has_value(const vir_function_t *func, const vir_value_t *needle)
+static bool vir_has_value_with_context(const vir_function_t *func,
+                                       const vir_dominance_t *dominance,
+                                       const vir_value_t *needle)
 {
     if (!needle)
         return false;
+
+    /* Most queries find the value in its recorded block. Keep the full scan as
+     * a fallback for detached values and malformed ownership metadata.
+     */
+    if (dominance ? vir_dominance_index(dominance, needle->block) >= 0
+                  : vir_has_block(func, needle->block)) {
+        for (const vir_value_t *value = needle->block->params; value;
+             value = value->param_next)
+            if (value == needle)
+                return true;
+        for (const vir_value_t *value = needle->block->head; value;
+             value = value->next)
+            if (value == needle)
+                return true;
+    }
     return vir_count_values(func, needle, 0) != 0;
 }
 
-static int vir_value_id_count(const vir_function_t *func, int id)
+static bool vir_has_value(const vir_function_t *func, const vir_value_t *needle)
 {
-    return vir_count_values(func, NULL, id);
+    return vir_has_value_with_context(func, NULL, needle);
+}
+
+static bool vir_verify_value_id(const vir_function_t *func,
+                                unsigned char *seen,
+                                int id)
+{
+    if (id < 0)
+        return false;
+    return id < func->next_value_id ? !seen[id]++
+                                    : vir_count_values(func, NULL, id) == 1;
 }
 
 #define VIR_LIST_HAS_CYCLE(type, head, link)       \
@@ -3263,11 +3344,7 @@ static bool vir_lists_are_acyclic(const vir_function_t *func)
 
 int vir_function_block_count(const vir_function_t *func)
 {
-    const vir_block_t *block;
-    int count = 0;
-    for (block = func->blocks; block; block = block->next)
-        count++;
-    return count;
+    return func->block_count;
 }
 
 static bool vir_mark_reachable_blocks(const vir_function_t *func,
@@ -3281,12 +3358,9 @@ static bool vir_mark_reachable_blocks(const vir_function_t *func,
     reachable[0] = 1;
     work[tail++] = 0;
     while (head < tail) {
-        const vir_block_t *block = func->blocks;
-        int index = work[head++];
+        const vir_block_t *block = func->block_table[work[head++]];
         const vir_edge_t *edge;
 
-        for (; index; index--)
-            block = block->next;
         for (edge = block->outgoing; edge; edge = edge->next_outgoing) {
             int target;
 
@@ -4174,16 +4248,6 @@ static bool vir_value_dominates_effect(const vir_function_t *func,
     return dominates;
 }
 
-static int vir_block_id_count(const vir_function_t *func, int id)
-{
-    const vir_block_t *block;
-    int count = 0;
-    for (block = func->blocks; block; block = block->next)
-        if (block->id == id)
-            count++;
-    return count;
-}
-
 static bool vir_value_uses_are_dead(const vir_function_t *func,
                                     const vir_value_t *value,
                                     const unsigned char *reachable)
@@ -4251,12 +4315,15 @@ int vir_remove_unreachable(vir_function_t *func)
     }
     link = &func->blocks;
     func->last_block = NULL;
+    func->block_count = 0;
     for (i = 0; *link;) {
         block = *link;
         if (!reachable[i])
             *link = block->next;
         else {
             func->last_block = block;
+            block->index = func->block_count;
+            func->block_table[func->block_count++] = block;
             link = &block->next;
         }
         i++;
@@ -4933,6 +5000,7 @@ int vir_licm(vir_function_t *func, vir_opt_level_t opt_level)
 }
 
 static bool vir_verify_reverse_uses(const vir_function_t *func,
+                                    const vir_dominance_t *dominance,
                                     const vir_value_t *value)
 {
     const vir_use_t *use;
@@ -4942,18 +5010,18 @@ static bool vir_verify_reverse_uses(const vir_function_t *func,
             1)
             return 0;
         if (use->user) {
-            if (!vir_has_value(func, use->user) ||
+            if (!vir_has_value_with_context(func, dominance, use->user) ||
                 (use->operand != 0 && use->operand != 1))
                 return 0;
         } else if (use->edge) {
-            if (!vir_has_block(func, use->edge->from) ||
-                !vir_has_block(func, use->edge->to) ||
+            if (vir_dominance_index(dominance, use->edge->from) < 0 ||
+                vir_dominance_index(dominance, use->edge->to) < 0 ||
                 !vir_has_outgoing_edge(use->edge->from, use->edge) ||
                 use->operand < 0 || use->operand >= use->edge->arg_count)
                 return 0;
         } else if (use->effect) {
             const vir_effect_t *effect = use->effect;
-            if (!vir_has_block(func, effect->block) ||
+            if (vir_dominance_index(dominance, effect->block) < 0 ||
                 !vir_has_effect(effect->block, effect))
                 return 0;
             if (effect->kind == VIR_EFFECT_CALL) {
@@ -4974,10 +5042,10 @@ static bool vir_verify_reverse_uses(const vir_function_t *func,
                     return 0;
             }
         } else if (use->return_block) {
-            if (!vir_has_block(func, use->return_block) ||
+            if (vir_dominance_index(dominance, use->return_block) < 0 ||
                 use->return_block->terminator != VIR_TERM_RETURN)
                 return 0;
-        } else if (!vir_has_block(func, use->branch_block) ||
+        } else if (vir_dominance_index(dominance, use->branch_block) < 0 ||
                    use->branch_block->terminator != VIR_TERM_BRANCH) {
             return 0;
         }
@@ -5038,7 +5106,7 @@ static bool vir_verify_effect_operand(const vir_function_t *func,
                                       const vir_use_t *use,
                                       int operand)
 {
-    return value && vir_has_value(func, value) && use &&
+    return value && vir_has_value_with_context(func, dominance, value) && use &&
            use->effect == effect && use->operand == operand &&
            vir_value_dominates_effect(func, dominance, value, effect) &&
            vir_effect_use_count(value, effect, operand) == 1;
@@ -5053,7 +5121,7 @@ static bool vir_verify_value_operands(const vir_function_t *func,
     for (int i = 0; i < value->nr_ops; i++) {
         const vir_value_t *operand = i ? value->op1 : value->op0;
 
-        if (!operand || !vir_has_value(func, operand) ||
+        if (!operand || !vir_has_value_with_context(func, dominance, operand) ||
             !vir_type_width(func, operand->type) ||
             vir_use_count(operand, value, i) != 1 ||
             !vir_value_dominates(func, dominance, operand, value->block,
@@ -5071,6 +5139,7 @@ static bool vir_verify_value_operands(const vir_function_t *func,
 static int vir_verify_block(const vir_function_t *func,
                             const vir_dominance_t *dominance,
                             const vir_block_t *block,
+                            unsigned char *seen,
                             char **error)
 {
     const vir_value_t *value;
@@ -5079,15 +5148,15 @@ static int vir_verify_block(const vir_function_t *func,
     int position = 0;
     int terminator_position;
     int param_count = 0;
-    if (block->id < 0 || vir_block_id_count(func, block->id) != 1)
+    if (vir_dominance_index(dominance, block) < 0)
         return vir_verify_invalid_order(error);
     for (value = block->params; value; value = value->param_next) {
         if (value->block != block || !value->is_block_param || value->nr_ops ||
             !vir_type_width(func, value->type) || value->id < 0 ||
             !vir_has_no_address_metadata(value) ||
-            vir_value_id_count(func, value->id) != 1)
+            !vir_verify_value_id(func, seen, value->id))
             return vir_verify_invalid_value(error);
-        if (!vir_verify_reverse_uses(func, value))
+        if (!vir_verify_reverse_uses(func, dominance, value))
             return vir_verify_invalid_value(error);
         param_count++;
     }
@@ -5096,13 +5165,12 @@ static int vir_verify_block(const vir_function_t *func,
         block->param_count != param_count)
         return vir_verify_invalid_order(error);
     for (value = block->head; value; value = value->next) {
-        if (value->block != block || !vir_has_block(func, value->block) ||
-            value->is_block_param || value->position != position ||
-            value->id < 0 || value->order < 0 ||
+        if (value->block != block || value->is_block_param ||
+            value->position != position || value->id < 0 || value->order < 0 ||
             value->order >= block->next_order)
             return vir_verify_invalid_value(error);
         position++;
-        if (vir_value_id_count(func, value->id) != 1)
+        if (!vir_verify_value_id(func, seen, value->id))
             return vir_verify_invalid_value(error);
         if (value->opcode != VIR_OP_STACK_ADDR &&
             value->opcode != VIR_OP_GLOBAL_ADDR &&
@@ -5155,7 +5223,7 @@ static int vir_verify_block(const vir_function_t *func,
         } else if (!vir_verify_value_operands(func, dominance, value)) {
             return vir_verify_invalid_value(error);
         }
-        if (!vir_verify_reverse_uses(func, value))
+        if (!vir_verify_reverse_uses(func, dominance, value))
             return vir_verify_invalid_value(error);
     }
     if (block->tail && block->tail->next)
@@ -5202,7 +5270,7 @@ static int vir_verify_block(const vir_function_t *func,
             if (!effect->address || !effect->result || effect->stored_value ||
                 effect->stored_value_use ||
                 vir_effect_has_call_metadata(effect) ||
-                !vir_has_value(func, effect->result) ||
+                !vir_has_value_with_context(func, dominance, effect->result) ||
                 effect->address->type != VIR_TYPE_PTR ||
                 effect->result->def_effect != effect ||
                 !vir_verify_effect_operand(func, dominance, effect,
@@ -5274,7 +5342,8 @@ static int vir_verify_block(const vir_function_t *func,
         return vir_verify_invalid_order(error);
     if (block->terminator == VIR_TERM_BRANCH) {
         if (!block->branch_condition ||
-            !vir_has_value(func, block->branch_condition) ||
+            !vir_has_value_with_context(func, dominance,
+                                        block->branch_condition) ||
             block->branch_condition->type != VIR_TYPE_I1 || !block->true_edge ||
             !block->false_edge || block->true_edge == block->false_edge ||
             block->true_edge->from != block ||
@@ -5294,7 +5363,7 @@ static int vir_verify_block(const vir_function_t *func,
     if (block->terminator == VIR_TERM_RETURN &&
         (block->outgoing ||
          (block->return_value &&
-          (!vir_has_value(func, block->return_value) ||
+          (!vir_has_value_with_context(func, dominance, block->return_value) ||
            vir_return_use_count(block->return_value, block) != 1 ||
            !vir_value_dominates(func, dominance, block->return_value, block,
                                 terminator_position)))))
@@ -5302,13 +5371,15 @@ static int vir_verify_block(const vir_function_t *func,
     for (edge = block->outgoing; edge; edge = edge->next_outgoing) {
         int i;
         vir_value_t *param;
-        if (edge->from != block || !vir_has_block(func, edge->to) ||
+        if (edge->from != block ||
+            vir_dominance_index(dominance, edge->to) < 0 ||
             !vir_has_incoming_edge(edge->to, edge) ||
             edge->arg_count != edge->to->param_count)
             return vir_verify_invalid_order(error);
         param = edge->to->params;
         for (i = 0; i < edge->arg_count; i++) {
-            if (!edge->args[i] || !vir_has_value(func, edge->args[i]) ||
+            if (!edge->args[i] ||
+                !vir_has_value_with_context(func, dominance, edge->args[i]) ||
                 !param || edge->args[i]->type != param->type ||
                 vir_edge_use_count(edge->args[i], edge, i) != 1 ||
                 !vir_value_dominates(func, dominance, edge->args[i], block,
@@ -5318,7 +5389,8 @@ static int vir_verify_block(const vir_function_t *func,
         }
     }
     for (edge = block->incoming; edge; edge = edge->next_incoming)
-        if (edge->to != block || !vir_has_block(func, edge->from) ||
+        if (edge->to != block ||
+            vir_dominance_index(dominance, edge->from) < 0 ||
             !vir_has_outgoing_edge(edge->from, edge))
             return vir_verify_invalid_order(error);
     return 1;
@@ -5333,12 +5405,20 @@ int vir_verify(const vir_function_t *func, char **error)
         return vir_verify_invalid_order(error);
     if (!vir_dominance_init(func, &dominance))
         return vir_verify_invalid_order(error);
-    for (block = func->blocks; block; block = block->next)
-        if (!vir_verify_block(func, &dominance, block, error)) {
-            vir_dominance_release(&dominance);
-            return 0;
-        }
+    unsigned char *seen =
+        calloc(func->next_value_id > 0 ? (size_t) func->next_value_id : 1,
+               sizeof(*seen));
+    if (!seen) {
+        vir_dominance_release(&dominance);
+        return vir_verify_invalid_value(error);
+    }
+    int ok = 1;
+    for (block = func->blocks; block && ok; block = block->next)
+        ok = vir_verify_block(func, &dominance, block, seen, error);
+    free(seen);
     vir_dominance_release(&dominance);
+    if (!ok)
+        return 0;
     if (error)
         *error = NULL;
     return 1;
@@ -5350,19 +5430,61 @@ typedef struct vir_ssa_binding {
     vir_value_t *value;
     vir_value_t *param;
     struct vir_ssa_binding *next;
+    struct vir_ssa_binding *block_next;
 } vir_ssa_binding_t;
 
 typedef struct vir_ssa_block_state {
     vir_block_t *block;
+    vir_ssa_binding_t *bindings;
     int sealed;
-    struct vir_ssa_block_state *next;
 } vir_ssa_block_state_t;
 
+/* Bindings, block states and per-edge scratch live in @arena until the builder
+ * is released; a discarded binding waits on @spare for reuse.
+ */
 struct vir_ssa {
     vir_function_t *func;
+    vir_arena_t arena;
     vir_ssa_binding_t *bindings;
-    vir_ssa_block_state_t *blocks;
+    vir_ssa_binding_t *spare;
+    vir_ssa_block_state_t **blocks;
+    int block_capacity;
 };
+
+static vir_ssa_binding_t *vir_ssa_new_binding(vir_ssa_t *ssa)
+{
+    vir_ssa_binding_t *binding = ssa->spare;
+    if (!binding)
+        return vir_arena_alloc(&ssa->arena, sizeof(*binding));
+    ssa->spare = binding->next;
+    memset(binding, 0, sizeof(*binding));
+    return binding;
+}
+
+static void vir_ssa_drop_binding(vir_ssa_t *ssa, vir_ssa_binding_t *binding)
+{
+    binding->next = ssa->spare;
+    ssa->spare = binding;
+}
+
+static vir_ssa_block_state_t *vir_ssa_find_block(const vir_ssa_t *ssa,
+                                                 const vir_block_t *block)
+{
+    if (!block || block->id < 0 || block->id >= ssa->block_capacity)
+        return NULL;
+    vir_ssa_block_state_t *state = ssa->blocks[block->id];
+    return state && state->block == block ? state : NULL;
+}
+
+static void vir_ssa_link_binding(vir_ssa_t *ssa,
+                                 vir_ssa_block_state_t *state,
+                                 vir_ssa_binding_t *binding)
+{
+    binding->next = ssa->bindings;
+    ssa->bindings = binding;
+    binding->block_next = state->bindings;
+    state->bindings = binding;
+}
 
 bool vir_ssa_discard_variable(vir_ssa_t *ssa, unsigned int variable)
 {
@@ -5395,8 +5517,13 @@ bool vir_ssa_discard_variable(vir_ssa_t *ssa, unsigned int variable)
             vir_param_edit_apply(binding->block, binding->param, &edit);
             vir_param_edit_release(&edit);
         }
+        vir_ssa_block_state_t *state = vir_ssa_find_block(ssa, binding->block);
+        vir_ssa_binding_t **local = &state->bindings;
+        while (*local != binding)
+            local = &(*local)->block_next;
+        *local = binding->block_next;
         *link = binding->next;
-        free(binding);
+        vir_ssa_drop_binding(ssa, binding);
     }
     return true;
 }
@@ -5406,10 +5533,10 @@ static vir_ssa_binding_t *vir_ssa_find_binding(const vir_ssa_t *ssa,
                                                unsigned int variable,
                                                const vir_value_t *param)
 {
-    vir_ssa_binding_t *binding;
-    for (binding = ssa->bindings; binding; binding = binding->next)
-        if (binding->block == block &&
-            (param ? binding->param == param : binding->variable == variable))
+    vir_ssa_block_state_t *state = vir_ssa_find_block(ssa, block);
+    for (vir_ssa_binding_t *binding = state ? state->bindings : NULL; binding;
+         binding = binding->block_next)
+        if (param ? binding->param == param : binding->variable == variable)
             return binding;
     return NULL;
 }
@@ -5418,18 +5545,32 @@ static vir_ssa_block_state_t *vir_ssa_block_state(vir_ssa_t *ssa,
                                                   vir_block_t *block,
                                                   int create)
 {
-    vir_ssa_block_state_t *state;
-    for (state = ssa->blocks; state; state = state->next)
-        if (state->block == block)
-            return state;
-    if (!create)
+    vir_ssa_block_state_t *state = vir_ssa_find_block(ssa, block);
+    if (state || !create)
+        return state;
+    if (!block || block->id < 0 ||
+        block->id >= INT_MAX / (int) sizeof(*ssa->blocks) / 2)
         return NULL;
-    state = calloc(1, sizeof(*state));
+    if (block->id >= ssa->block_capacity) {
+        int capacity = (block->id + 1) * 2;
+        vir_ssa_block_state_t **blocks =
+            calloc((size_t) capacity, sizeof(*blocks));
+        if (!blocks)
+            return NULL;
+        if (ssa->blocks)
+            memcpy(blocks, ssa->blocks,
+                   (size_t) ssa->block_capacity * sizeof(*blocks));
+        free(ssa->blocks);
+        ssa->blocks = blocks;
+        ssa->block_capacity = capacity;
+    }
+    if (ssa->blocks[block->id])
+        return NULL;
+    state = vir_arena_alloc(&ssa->arena, sizeof(*state));
     if (!state)
         return NULL;
     state->block = block;
-    state->next = ssa->blocks;
-    ssa->blocks = state;
+    ssa->blocks[block->id] = state;
     return state;
 }
 
@@ -5446,25 +5587,20 @@ vir_ssa_t *vir_ssa_create(vir_function_t *func)
     if (!func)
         return NULL;
     ssa = calloc(1, sizeof(*ssa));
-    if (ssa)
+    if (ssa) {
         ssa->func = func;
+        ssa->arena.block_size = 4096;
+        ssa->arena.fail_after = -1;
+    }
     return ssa;
 }
 
 void vir_ssa_release(vir_ssa_t *ssa)
 {
-    vir_ssa_binding_t *binding;
-    vir_ssa_block_state_t *state;
     if (!ssa)
         return;
-    while ((binding = ssa->bindings)) {
-        ssa->bindings = binding->next;
-        free(binding);
-    }
-    while ((state = ssa->blocks)) {
-        ssa->blocks = state->next;
-        free(state);
-    }
+    vir_arena_release(&ssa->arena);
+    free(ssa->blocks);
     free(ssa);
 }
 
@@ -5482,13 +5618,15 @@ int vir_ssa_write(vir_ssa_t *ssa,
         return 0;
     binding = vir_ssa_find_binding(ssa, block, variable, NULL);
     if (!binding) {
-        binding = calloc(1, sizeof(*binding));
+        vir_ssa_block_state_t *state = vir_ssa_block_state(ssa, block, 1);
+        if (!state)
+            return 0;
+        binding = vir_ssa_new_binding(ssa);
         if (!binding)
             return 0;
         binding->block = block;
         binding->variable = variable;
-        binding->next = ssa->bindings;
-        ssa->bindings = binding;
+        vir_ssa_link_binding(ssa, state, binding);
     }
     binding->value = value;
     return 1;
@@ -5583,7 +5721,7 @@ vir_value_t *vir_ssa_predeclare(vir_ssa_t *ssa,
     state = vir_ssa_block_state(ssa, block, 1);
     if (!state || state->sealed)
         return NULL;
-    binding = calloc(1, sizeof(*binding));
+    binding = vir_ssa_new_binding(ssa);
     if (!binding)
         return NULL;
     if (!block->incoming) {
@@ -5611,18 +5749,19 @@ vir_value_t *vir_ssa_predeclare(vir_ssa_t *ssa,
     binding->variable = variable;
     binding->value = value;
     binding->param = value;
-    binding->next = ssa->bindings;
-    ssa->bindings = binding;
+    vir_ssa_link_binding(ssa, state, binding);
     vir_param_edit_release(&edit);
     return value;
 
 fail:
     vir_param_edit_release(&edit);
-    free(binding);
+    vir_ssa_drop_binding(ssa, binding);
     return NULL;
 }
 
-int vir_ssa_seal(vir_ssa_t *ssa, vir_block_t *block)
+static int vir_ssa_seal_with_context(vir_ssa_t *ssa,
+                                     vir_block_t *block,
+                                     const vir_dominance_t *dominance)
 {
     typedef struct {
         vir_value_t *param;
@@ -5639,15 +5778,18 @@ int vir_ssa_seal(vir_ssa_t *ssa, vir_block_t *block)
     int index;
     int i;
 
-    if (!ssa || !vir_has_block(ssa->func, block))
+    if (!ssa || (dominance ? vir_dominance_index(dominance, block) < 0
+                           : !vir_has_block(ssa->func, block)))
         return 0;
     state = vir_ssa_block_state(ssa, block, 1);
     if (!state || state->sealed)
         return 0;
     param_count = block->param_count;
-    trivial_params = param_count
-                         ? calloc((size_t) param_count, sizeof(*trivial_params))
-                         : NULL;
+    trivial_params =
+        param_count
+            ? vir_arena_alloc(&ssa->arena,
+                              param_count * (int) sizeof(*trivial_params))
+            : NULL;
     if (param_count && !trivial_params)
         return 0;
     for (param = block->params, index = 0; param;
@@ -5674,7 +5816,8 @@ int vir_ssa_seal(vir_ssa_t *ssa, vir_block_t *block)
                 trivial = 0;
         }
         if (candidate && candidate != param && trivial) {
-            if (!vir_replacement_dominates(ssa->func, param, candidate))
+            if (!vir_replacement_dominates_with_context(ssa->func, dominance,
+                                                        param, candidate))
                 goto fail;
             trivial_params[trivial_count].param = param;
             trivial_params[trivial_count].candidate = candidate;
@@ -5699,18 +5842,36 @@ int vir_ssa_seal(vir_ssa_t *ssa, vir_block_t *block)
     }
     for (i = 0; i < trivial_count; i++)
         vir_param_edit_release(&trivial_params[i].edit);
-    free(trivial_params);
     state->sealed = 1;
     return 1;
 
 fail:
     for (i = 0; i < trivial_count; i++)
         vir_param_edit_release(&trivial_params[i].edit);
-    free(trivial_params);
     return 0;
 }
 
-static bool vir_ssa_edge_args(const vir_ssa_t *ssa,
+int vir_ssa_seal(vir_ssa_t *ssa, vir_block_t *block)
+{
+    return vir_ssa_seal_with_context(ssa, block, NULL);
+}
+
+/* Sealing removes parameters, not CFG edges, so one dominance context serves
+ * the whole suffix of blocks. Keep the single-block API for incremental CFGs.
+ */
+int vir_ssa_seal_blocks(vir_ssa_t *ssa, vir_block_t *first)
+{
+    vir_dominance_t dominance;
+    if (!ssa || !vir_dominance_init(ssa->func, &dominance))
+        return 0;
+    int ok = 1;
+    for (vir_block_t *block = first; block && ok; block = block->next)
+        ok = vir_ssa_seal_with_context(ssa, block, &dominance);
+    vir_dominance_release(&dominance);
+    return ok;
+}
+
+static bool vir_ssa_edge_args(vir_ssa_t *ssa,
                               const vir_block_t *from,
                               const vir_block_t *to,
                               vir_value_t ***args)
@@ -5723,7 +5884,8 @@ static bool vir_ssa_edge_args(const vir_ssa_t *ssa,
     if (!ssa || !from || !to || to->param_count < 0)
         return false;
     if (to->param_count &&
-        !(*args = calloc((size_t) to->param_count, sizeof(**args))))
+        !(*args = vir_arena_alloc(&ssa->arena,
+                                  to->param_count * (int) sizeof(**args))))
         return false;
     for (const vir_value_t *param = to->params; param;
          param = param->param_next) {
@@ -5737,7 +5899,6 @@ static bool vir_ssa_edge_args(const vir_ssa_t *ssa,
     if (i == to->param_count)
         return true;
 fail:
-    free(*args);
     *args = NULL;
     return false;
 }
@@ -5746,15 +5907,12 @@ vir_edge_t *vir_ssa_jump(vir_ssa_t *ssa, vir_block_t *from, vir_block_t *to)
 {
     vir_value_t **args;
     int count = to ? to->param_count : 0;
-    vir_edge_t *edge;
     if (!ssa || !from || !to || !vir_has_block(ssa->func, from) ||
         !vir_has_block(ssa->func, to) || vir_ssa_is_sealed(ssa, to))
         return NULL;
     if (!vir_ssa_edge_args(ssa, from, to, &args))
         return NULL;
-    edge = vir_edge_create(ssa->func, from, to, args, count);
-    free(args);
-    return edge;
+    return vir_edge_create(ssa->func, from, to, args, count);
 }
 
 int vir_ssa_branch(vir_ssa_t *ssa,
@@ -5784,8 +5942,6 @@ int vir_ssa_branch(vir_ssa_t *ssa,
         result = vir_block_set_branch(ssa->func, from, condition, &t, &f);
     }
 out:
-    free(true_args);
-    free(false_args);
     return result;
 }
 

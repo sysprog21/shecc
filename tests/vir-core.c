@@ -1490,6 +1490,13 @@ int main(void)
     assert(vir_ssa_branch(ssa, entry, sum, merge, otherwise_ssa));
     assert(vir_block_set_return(&func, merge, param));
     assert(vir_block_set_return(&func, otherwise_ssa, product));
+    assert(vir_ssa_seal_blocks(ssa, merge));
+    assert(merge->param_count == 0 && otherwise_ssa->param_count == 0);
+    assert(vir_ssa_read(ssa, merge, 9) == one);
+    assert(vir_ssa_read(ssa, otherwise_ssa, 9) == one);
+    assert(vir_ssa_discard_variable(ssa, 9));
+    assert(!vir_ssa_read(ssa, merge, 9));
+    assert(!vir_ssa_read(ssa, otherwise_ssa, 9));
     assert(vir_verify(&func, &error));
     vir_ssa_release(ssa);
     vir_function_release(&func);
@@ -2895,6 +2902,51 @@ int main(void)
     }
     assert(vir_block_set_return(&func, entry, sum));
     assert(vir_verify(&func, &error));
+    vir_function_release(&func);
+
+    /* Sparse IDs and duplicate IDs retain the verifier's previous behavior. */
+    vir_function_init(&func, 64);
+    entry = vir_block_create(&func);
+    merge = vir_block_create(&func);
+    one = vir_const_i32(&func, entry, 1);
+    two = vir_const_i32(&func, merge, 2);
+    assert(vir_block_set_return(&func, entry, one));
+    assert(vir_block_set_return(&func, merge, two));
+    two->id = one->id;
+    assert(!vir_verify(&func, &error));
+    two->id = func.next_value_id + 100;
+    assert(vir_verify(&func, &error));
+    two->id = -1;
+    assert(!vir_verify(&func, &error));
+    two->id = 1;
+    ssa = vir_ssa_create(&func);
+    vir_value_t detached = *one;
+    assert(!vir_ssa_write(ssa, entry, 1, &detached));
+    one->block = merge;
+    assert(vir_ssa_write(ssa, merge, 1, one));
+    assert(!vir_verify(&func, &error));
+    one->block = entry;
+    assert(vir_verify(&func, &error));
+    vir_ssa_release(ssa);
+    vir_function_release(&func);
+
+    /* Grow the SSA block index repeatedly and unlink every local binding. */
+    vir_function_init(&func, 64);
+    ssa = vir_ssa_create(&func);
+    assert(ssa);
+    for (int i = 0; i < 128; i++) {
+        vir_block_t *block = vir_block_create(&func);
+        vir_value_t *value = vir_const_i32(&func, block, i);
+        assert(value && vir_ssa_write(ssa, block, 1, value));
+        assert(vir_block_set_return(&func, block, value));
+    }
+    for (vir_block_t *block = func.blocks; block; block = block->next)
+        assert(vir_ssa_read(ssa, block, 1) == block->return_value);
+    assert(vir_ssa_discard_variable(ssa, 1));
+    for (vir_block_t *block = func.blocks; block; block = block->next)
+        assert(!vir_ssa_read(ssa, block, 1));
+    assert(vir_verify(&func, &error));
+    vir_ssa_release(ssa);
     vir_function_release(&func);
     return 0;
 }

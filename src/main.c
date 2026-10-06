@@ -139,22 +139,30 @@ static void optimize_native_graph(vir_function_t *graph)
     }
 }
 
+/* Functions marked used but not yet optimized. Each enters once, when it is
+ * first marked, so reachability costs one visit per function.
+ */
+static func_t **native_worklist;
+static int native_worklist_count;
+
+static void mark_native_used(func_t *func)
+{
+    if (!func || func->is_used)
+        return;
+    func->is_used = true;
+    native_worklist[native_worklist_count++] = func;
+}
+
 static void mark_native_references(const vir_function_t *graph)
 {
     for (const vir_block_t *block = graph->blocks; block; block = block->next) {
         for (const vir_effect_t *effect = block->effects; effect;
              effect = effect->next)
-            if (effect->kind == VIR_EFFECT_CALL && effect->callee) {
-                func_t *target = find_func((char *) effect->callee);
-                if (target)
-                    target->is_used = true;
-            }
+            if (effect->kind == VIR_EFFECT_CALL && effect->callee)
+                mark_native_used(find_func((char *) effect->callee));
         for (const vir_value_t *value = block->head; value; value = value->next)
-            if (value->opcode == VIR_OP_FUNC_ADDR) {
-                func_t *target = find_func((char *) value->address_name);
-                if (target)
-                    target->is_used = true;
-            }
+            if (value->opcode == VIR_OP_FUNC_ADDR)
+                mark_native_used(find_func((char *) value->address_name));
     }
 }
 
@@ -206,10 +214,14 @@ static void lower_native_function(func_t *func, bool global)
 
 static void compile_native_vir(const char *output)
 {
+    int function_count = 0;
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
         func->is_used = false;
-        func->visited = 0;
+        function_count++;
     }
+    native_worklist = malloc((function_count + 1) * sizeof(func_t *));
+    if (!native_worklist)
+        fatal("Out of memory");
     vir_frontend_layout_globals();
     vir_function_t *global =
         (vir_function_t *) vir_frontend_function(GLOBAL_FUNC);
@@ -219,25 +231,21 @@ static void compile_native_vir(const char *output)
     }
     func_t *main_func = find_func("main");
     if (main_func)
-        main_func->is_used = true;
+        mark_native_used(main_func);
     else
         for (func_t *func = FUNC_LIST.head; func; func = func->next)
-            func->is_used = vir_frontend_function(func) != NULL;
-    bool changed;
-    do {
-        changed = false;
-        for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-            vir_function_t *graph =
-                (vir_function_t *) vir_frontend_function(func);
-            if (!func->is_used || !graph || func->visited)
-                continue;
-            func->visited = true;
-            fatal_function_context = func->return_def.var_name;
-            optimize_native_graph(graph);
-            mark_native_references(graph);
-            changed = true;
-        }
-    } while (changed);
+            if (vir_frontend_function(func))
+                mark_native_used(func);
+    while (native_worklist_count) {
+        func_t *func = native_worklist[--native_worklist_count];
+        vir_function_t *graph = (vir_function_t *) vir_frontend_function(func);
+        if (!graph)
+            continue;
+        fatal_function_context = func->return_def.var_name;
+        optimize_native_graph(graph);
+        mark_native_references(graph);
+    }
+    free(native_worklist);
     FILE *dot = dump_dot ? fopen(output, "w") : NULL;
     if (dump_dot && !dot)
         fatal("Cannot open DOT output");
