@@ -121,10 +121,14 @@ static void optimize_native_graph(vir_function_t *graph)
     if (vir_frontend_opt_level == VIR_OPT_O2)
         check_native_pass("gvn", vir_gvn_with_stats(graph, VIR_OPT_O2, NULL));
     check_native_pass("licm", vir_licm(graph, vir_frontend_opt_level));
-    check_native_pass("strength",
-                      vir_strength_reduce(graph, vir_frontend_opt_level));
+    int strengthened = vir_strength_reduce(graph, vir_frontend_opt_level);
+    check_native_pass("strength", strengthened);
     check_native_pass("cse", vir_local_cse(graph, vir_frontend_opt_level));
     check_native_pass("dce", vir_dce(graph, vir_frontend_opt_level));
+    check_native_pass("cfg", vir_simplify_cfg(graph, vir_frontend_opt_level));
+    check_native_pass("final-cse",
+                      vir_local_cse(graph, vir_frontend_opt_level));
+    check_native_pass("final-dce", vir_dce(graph, vir_frontend_opt_level));
     char *error = NULL;
     if (!vir_verify(graph, &error)) {
         fprintf(stderr, "Invalid optimized VIR in %s: %s\n",

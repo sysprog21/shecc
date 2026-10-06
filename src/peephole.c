@@ -14,7 +14,6 @@ enum {
     OP_WRITES_DEST = 1,
     OP_SRC0_REG = 2,
     OP_SRC1_REG = 4,
-    OP_SRC2_REG = 8,
     OP_COPY_FORWARD_SAFE = 16,
     OP_FUSIBLE = 32,
     OP_BINARY_ALU = 64,
@@ -36,7 +35,6 @@ enum {
 /* clang-format off */
 static const unsigned short op_properties[] = {
     OP_PROPERTY(OP_generic, 0)
-    OP_PROPERTY(OP_cmov, OP_DEST(OP_SRC0_REG | OP_SRC1_REG | OP_SRC2_REG))
     OP_PROPERTY(OP_define, 0)
     OP_PROPERTY(OP_push, OP_SRC0_REG)
     OP_PROPERTY(OP_call, 0)
@@ -53,7 +51,6 @@ static const unsigned short op_properties[] = {
     OP_PROPERTY(OP_func_ret, 0)
     OP_PROPERTY(OP_address_of_func, OP_SRC0_REG)
     OP_PROPERTY(OP_load_func, OP_SRC0_REG)
-    OP_PROPERTY(OP_global_load_func, OP_SRC0_REG)
     OP_PROPERTY(OP_address_of, OP_DEST(0))
     OP_PROPERTY(OP_global_address_of, OP_DEST(0))
     OP_PROPERTY(OP_load, OP_DEST(OP_FUSE(0)))
@@ -87,7 +84,6 @@ static const unsigned short op_properties[] = {
     OP_PROPERTY(OP_trunc, OP_DEST(OP_COPY(OP_SRC0_REG | OP_SCALAR_CAST)))
     OP_PROPERTY(OP_sign_ext, OP_DEST(OP_COPY(OP_SRC0_REG | OP_SCALAR_CAST)))
     OP_PROPERTY(OP_cast, OP_DEST(OP_SRC0_REG | OP_SCALAR_CAST))
-    OP_PROPERTY(OP_start, 0)
 };
 /* clang-format on */
 #undef OP_COPY
@@ -99,51 +95,29 @@ static const unsigned short op_properties[] = {
 #undef OP_DEST
 #undef OP_PROPERTY
 typedef char op_property_count_check
-    [sizeof(op_properties) / sizeof(op_properties[0]) == OP_start + 1 ? 1 : -1];
+    [sizeof(op_properties) / sizeof(op_properties[0]) == OP_cast + 1 ? 1 : -1];
 
 static unsigned int op_property(opcode_t op, unsigned int property)
 {
-    if (op < OP_generic || op > OP_start)
+    if (op < OP_generic || op > OP_cast)
         return 0;
     return op_properties[op] & property;
 }
 
-bool op_writes_dest(opcode_t op)
-{
-    return op_property(op, OP_WRITES_DEST) != 0;
-}
-bool op_is_binary_alu(opcode_t op)
-{
-    return op_property(op, OP_BINARY_ALU);
-}
-bool op_is_integer_binary(opcode_t op)
-{
-    return op_property(op, OP_INTEGER_BINARY);
-}
-bool op_is_comparison(opcode_t op)
-{
-    return op_property(op, OP_COMPARISON);
-}
-bool op_is_scalar_unary(opcode_t op)
-{
-    return op_property(op, OP_SCALAR_UNARY);
-}
-bool op_is_scalar_cast(opcode_t op)
-{
-    return op_property(op, OP_SCALAR_CAST);
-}
-bool op_src0_is_reg(opcode_t op)
-{
-    return op_property(op, OP_SRC0_REG);
-}
-bool op_src1_is_reg(opcode_t op)
-{
-    return op_property(op, OP_SRC1_REG);
-}
-bool op_src2_is_reg(opcode_t op)
-{
-    return op_property(op, OP_SRC2_REG);
-}
+#define OP_QUERY(name, property)               \
+    bool name(opcode_t op)                     \
+    {                                          \
+        return op_property(op, property) != 0; \
+    }
+OP_QUERY(op_writes_dest, OP_WRITES_DEST)
+OP_QUERY(op_is_binary_alu, OP_BINARY_ALU)
+OP_QUERY(op_is_integer_binary, OP_INTEGER_BINARY)
+OP_QUERY(op_is_comparison, OP_COMPARISON)
+OP_QUERY(op_is_scalar_unary, OP_SCALAR_UNARY)
+OP_QUERY(op_is_scalar_cast, OP_SCALAR_CAST)
+OP_QUERY(op_src0_is_reg, OP_SRC0_REG)
+OP_QUERY(op_src1_is_reg, OP_SRC1_REG)
+#undef OP_QUERY
 
 int func_highest_used_reg(func_t *func, int first_callee_saved)
 {
@@ -151,16 +125,20 @@ int func_highest_used_reg(func_t *func, int first_callee_saved)
 
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
         for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
-            if (op_writes_dest(ir->op) && ir->dest > top)
+            if (op_writes_dest(ir->op) && ir->dest < REG_CNT && ir->dest > top)
                 top = ir->dest;
-            if (op_src0_is_reg(ir->op) && ir->src0 > top)
+            if (op_src0_is_reg(ir->op) && ir->src0 < REG_CNT && ir->src0 > top)
                 top = ir->src0;
-            if (op_src1_is_reg(ir->op) && ir->src1 > top)
+            if (op_src1_is_reg(ir->op) && ir->src1 < REG_CNT && ir->src1 > top)
                 top = ir->src1;
-            if (op_src2_is_reg(ir->op) && ir->src2 > top)
-                top = ir->src2;
+            if (ir->dest_hi > top && ir->dest_hi < REG_CNT)
+                top = ir->dest_hi;
+            if (ir->src0_hi > top && ir->src0_hi < REG_CNT)
+                top = ir->src0_hi;
+            if (ir->src1_hi > top && ir->src1_hi < REG_CNT)
+                top = ir->src1_hi;
         }
-    return top < REG_CNT ? top : REG_CNT - 1;
+    return top;
 }
 
 /* These instructions can write their result straight to a following move's
@@ -183,8 +161,6 @@ bool ir_reads_reg(ph2_ir_t *ir, int reg)
         reg < MAX_ARGS_IN_REG && reg < call_arg_regs(ir))
         return true;
     if (reg >= 0 && (ir->src0_hi == reg || ir->src1_hi == reg))
-        return true;
-    if (op_src2_is_reg(ir->op) && ir->src2 == reg)
         return true;
     if (op_src0_is_reg(ir->op) && ir->src0 == reg)
         return true;
@@ -386,6 +362,15 @@ bool insn_fusion(basic_block_t *bb, ph2_ir_t *ph2_ir)
     if (!next)
         return false;
 
+    if ((ph2_ir->op == OP_eq || ph2_ir->op == OP_neq) &&
+        next->op == OP_log_not && next->src0 == ph2_ir->dest &&
+        !fold_loses_dest(bb, ph2_ir, next)) {
+        ph2_ir->op = ph2_ir->op == OP_eq ? OP_neq : OP_eq;
+        ph2_ir->dest = next->dest;
+        ph2_ir_drop_after(bb, ph2_ir, next);
+        return true;
+    }
+
     /* Fuse result moves and fold constant identities. */
     if (next->op == OP_assign) {
         if (is_fusible_insn(ph2_ir) && ph2_ir->dest == next->src0 &&
@@ -550,8 +535,7 @@ bool copy_forward(basic_block_t *bb, ph2_ir_t *ph2_ir)
      * must not become "r = sub a, r".
      */
     if (op_writes_dest(next->op) && next->dest == r &&
-        ((op_src1_is_reg(next->op) && next->src1 == t) ||
-         (op_src2_is_reg(next->op) && next->src2 == t)))
+        op_src1_is_reg(next->op) && next->src1 == t)
         return false;
     if (op_src0_is_reg(next->op) && next->src0 == t) {
         next->src0 = r;
@@ -559,10 +543,6 @@ bool copy_forward(basic_block_t *bb, ph2_ir_t *ph2_ir)
     }
     if (op_src1_is_reg(next->op) && next->src1 == t) {
         next->src1 = r;
-        used = true;
-    }
-    if (op_src2_is_reg(next->op) && next->src2 == t) {
-        next->src2 = r;
         used = true;
     }
     if (!used)
@@ -646,21 +626,22 @@ bool eliminate_load_store_pairs(basic_block_t *bb, ph2_ir_t *ph2_ir)
     if (next->is_volatile)
         return false;
 
-    /* Pattern 2: Redundant consecutive loads from same local location {load
-     * rd1, [addr]; load rd2, [addr]} → {load rd1, [addr]; mov rd2, rd1} Second
-     * load can reuse the first load's result Only apply if addresses are simple
-     * (not complex expressions)
+    /* Reuse only an identical load. Width, extension and frame origin affect
+     * the loaded value even when the encoded offsets match.
      */
-    if (ph2_ir->op == OP_load && next->op == OP_load) {
-        /* Check if loading from same memory location */
-        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
-            ph2_ir->src0 >= 0 && ph2_ir->src1 >= 0) {
-            /* Replace second load with move */
-            next->op = OP_assign;
-            next->src0 = ph2_ir->dest; /* Result of first load */
-            next->src1 = 0;
-            return true;
-        }
+    if (ph2_ir->op == next->op &&
+        (ph2_ir->op == OP_load || ph2_ir->op == OP_global_load) &&
+        ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1 &&
+        (ph2_ir->op == OP_global_load ||
+         (ph2_ir->src0 >= 0 && ph2_ir->src1 >= 0)) &&
+        ph2_ir->size_bytes == next->size_bytes &&
+        ph2_ir->is_unsigned == next->is_unsigned &&
+        ph2_ir->is_pointer == next->is_pointer &&
+        ph2_ir->ofs_based_on_stack_top == next->ofs_based_on_stack_top) {
+        next->op = OP_assign;
+        next->src0 = ph2_ir->dest;
+        next->src1 = 0;
+        return true;
     }
 
     /* Pattern 3: Store followed by load from same location (store-to-load
@@ -714,16 +695,6 @@ bool eliminate_load_store_pairs(basic_block_t *bb, ph2_ir_t *ph2_ir)
         }
     }
 
-    if (ph2_ir->op == OP_global_load && next->op == OP_global_load) {
-        /* Consecutive global loads from same location */
-        if (ph2_ir->src0 == next->src0 && ph2_ir->src1 == next->src1) {
-            /* Replace second load with move */
-            next->op = OP_assign;
-            next->src0 = ph2_ir->dest;
-            next->src1 = 0;
-            return true;
-        }
-    }
 
     return false;
 }
@@ -971,11 +942,11 @@ bool peephole_at(basic_block_t *bb, ph2_ir_t *ir)
     if (!next)
         return false;
 
-    /* Self-assignment elimination Keep this as a safety net: SSA handles most
-     * cases, but register allocation might create new self-assignments
-     */
-    if (next->op == OP_assign && next->dest == next->src0 &&
-        next->dest_hi == next->src0_hi) {
+    /* Remove moves to themselves and unused scalar literals. */
+    if ((next->op == OP_assign && next->dest == next->src0 &&
+         next->dest_hi == next->src0_hi) ||
+        (next->op == OP_load_constant && next->dest_hi < 0 &&
+         !reg_read_after(bb, next, next->dest))) {
         ph2_ir_drop_after(bb, ir, next);
         return true;
     }
@@ -984,36 +955,10 @@ bool peephole_at(basic_block_t *bb, ph2_ir_t *ir)
                          ph2_ir_has_pair(next->next)))
         return pair_insn_fusion(bb, ir);
 
-    /* Try triple pattern optimization first (3-instruction sequences) */
-    if (triple_pattern_optimization(bb, ir))
-        return true;
-
-    /* Try instruction fusion (2-instruction sequences) */
-    if (insn_fusion(bb, ir))
-        return true;
-
-    /* Apply strength reduction for power-of-2 operations */
-    if (strength_reduction(bb, ir))
-        return true;
-
-    /* Apply bitwise operation optimizations */
-    if (bitwise_optimization(bb, ir))
-        return true;
-
-    /* Swap a copied address with the constant stored through it */
-    if (store_copy_swap(bb, ir))
-        return true;
-
-    /* Forward a copy into the instruction that consumes it */
-    if (copy_forward(bb, ir))
-        return true;
-
-    /* Apply redundant move elimination */
-    if (redundant_move_elim(bb, ir))
-        return true;
-
-    /* Apply load/store elimination */
-    return eliminate_load_store_pairs(bb, ir);
+    return triple_pattern_optimization(bb, ir) || insn_fusion(bb, ir) ||
+           strength_reduction(bb, ir) || bitwise_optimization(bb, ir) ||
+           store_copy_swap(bb, ir) || copy_forward(bb, ir) ||
+           redundant_move_elim(bb, ir) || eliminate_load_store_pairs(bb, ir);
 }
 
 void peephole(void)

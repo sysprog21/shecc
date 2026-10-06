@@ -1583,8 +1583,9 @@ static bool lower_pointee_array_dereference(var_t *source,
      * lower levels of the pointer-to-array's mask belong to the element.
      */
     if (row->ptr_level > 0 && row->ptr_level < 32) {
-        row->pointer_const_mask =
-            effective_pointer_const_mask(source) & ((1U << row->ptr_level) - 1);
+        unsigned int mask = (1U << row->ptr_level) - 1;
+        row->pointer_const_mask = effective_pointer_const_mask(source) & mask;
+        row->pointer_volatile_mask = source->pointer_volatile_mask & mask;
         row->is_const_pointer =
             row->pointer_const_mask & (1U << (row->ptr_level - 1));
     }
@@ -1705,6 +1706,8 @@ static var_t *decay_dereferenced_array(block_t *parent,
         set_pointee_array_shape(pointer, &shape, array->ptr_level);
     }
     pointer->is_const_qualified = array->is_const_qualified;
+    pointer->pointer_const_mask = array->pointer_const_mask;
+    pointer->pointer_volatile_mask = array->pointer_volatile_mask;
     add_insn(parent, *bb, OP_assign, pointer, array, NULL, 0, NULL);
     return pointer;
 }

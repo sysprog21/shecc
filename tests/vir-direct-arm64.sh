@@ -1008,6 +1008,7 @@ check_direct call-i32-branch 2 3
 check_direct call-i32-pointer 42
 check_direct call-i32-zero 42
 check_direct call-narrow 42
+check_direct frame-runtime 0
 check_direct call-void 42
 check_direct call-i64 120
 check_direct call-i64-eight 42
@@ -1156,19 +1157,48 @@ run_compiler --dump-vir -o "$work/global-ptradd-dump" \
 vir_extract_function main "$work/global-ptradd.vir" \
     | awk '/^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ } /^  %d[0-9]+ = ptradd %d[0-9]+, %d[0-9]+$/ { ptradd++ } END { exit root < 1 || ptradd != 2 }'
 
+# Binary dump names retain .i32; the operand producers prove I64 scaling.
 run_compiler --dump-vir -o "$work/global-ptradd-dynamic-dump" \
     tests/vir-direct-global-ptradd-dynamic.c \
     2> "$work/global-ptradd-dynamic.vir"
 vir_extract_function main \
     "$work/global-ptradd-dynamic.vir" \
-    | awk '/^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ } /^  %d[0-9]+ = sext\.i32\.i64 %d[0-9]+$/ { sext[$1] = 1 } /^  %d[0-9]+ = ptradd %d[0-9]+, %d[0-9]+$/ { if (!sext[$5]) bad = 1; ptradd++ } END { exit bad || root < 1 || ptradd != 2 }'
+    | awk '
+        /^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ }
+        $3 == "sext.i32.i64" { extended[$1] = 1; extensions++ }
+        $3 == "zext.i32.i64" { bad = 1 }
+        $3 == "const.i64" && $4 == "4" { scale[$1] = 1 }
+        $3 == "mul.i32" {
+            sub(/,$/, "", $4)
+            if (extended[$4] && scale[$5] || scale[$4] && extended[$5])
+                scaled[$1] = 1
+            else bad = 1
+            multiplies++
+        }
+        $3 == "ptradd" { if (!scaled[$5]) bad = 1; ptradd++ }
+        END { exit bad || root < 1 || extensions != 2 || multiplies != 2 || ptradd != 2 }
+    '
 
 run_compiler --dump-vir -o "$work/global-ptradd-unsigned-dump" \
     tests/vir-direct-global-ptradd-unsigned.c \
     2> "$work/global-ptradd-unsigned.vir"
 vir_extract_function main \
     "$work/global-ptradd-unsigned.vir" \
-    | awk '/^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ } /^  %d[0-9]+ = zext\.i32\.i64 %d[0-9]+$/ { zext[$1] = 1 } /^  %d[0-9]+ = ptradd %d[0-9]+, %d[0-9]+$/ { if (!zext[$5]) bad = 1; ptradd++ } END { exit bad || root < 1 || ptradd != 2 }'
+    | awk '
+        /^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ }
+        $3 == "zext.i32.i64" { extended[$1] = 1; extensions++ }
+        $3 == "sext.i32.i64" { bad = 1 }
+        $3 == "const.i64" && $4 == "4" { scale[$1] = 1 }
+        $3 == "mul.i32" {
+            sub(/,$/, "", $4)
+            if (extended[$4] && scale[$5] || scale[$4] && extended[$5])
+                scaled[$1] = 1
+            else bad = 1
+            multiplies++
+        }
+        $3 == "ptradd" { if (!scaled[$5]) bad = 1; ptradd++ }
+        END { exit bad || root < 1 || extensions != 2 || multiplies != 2 || ptradd != 2 }
+    '
 vir_extract_function main "$work/narrow.vir" \
     | grep -Eq '^  %d[0-9]+ = zext\.i16\.i32 %d[0-9]+$'
 

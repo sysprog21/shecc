@@ -33,7 +33,12 @@ trap 'rm -rf "$workdir"' EXIT
 # Output and exit status of one program, as a single string to compare.
 run()
 {
-    timeout 10 "${runner[@]}" "$1" < /dev/null 2>&1
+    local -a args=()
+    case "$2" in
+        *-argv-index-char-other | *-argv-index-char-offset-other) args=(abc def) ;;
+        *-argv-index-char-* | *-argv-index-other) args=(abc) ;;
+    esac
+    timeout 10 "${runner[@]}" "$1" "${args[@]}" < /dev/null 2>&1
     echo "exit=$?"
 }
 
@@ -60,6 +65,9 @@ programs=0
 failed=0
 for src in tests/*.c "$workdir"/gen-*.c; do
     name=$(basename "$src" .c)
+    case "$name" in
+        vir-x64-encoders | vir-x64-and-flags | vir-x64-liveout) continue ;;
+    esac
     # Redirecting the group, not just the command, also silences the shell's
     # report should the compiler crash on a file it cannot build. A refusal
     # skips the file; a crash is a failure of its own. Self-compiled compilers
@@ -79,7 +87,7 @@ for src in tests/*.c "$workdir"/gen-*.c; do
     # A file without main is one part of a multi-file test, not a program.
     grep -q '^function main$' "$workdir/$name.ir" || continue
     programs=$((programs + 1))
-    expected=$(run "$workdir/$name.o0")
+    expected=$(run "$workdir/$name.o0" "$name")
     if [ "${expected##*exit=}" = 124 ]; then
         echo "FAIL $name: the native O0 build times out" >&2
         failed=$((failed + 1))
@@ -96,7 +104,7 @@ for src in tests/*.c "$workdir"/gen-*.c; do
             failed=$((failed + 1))
             continue
         fi
-        actual=$(run "$workdir/$name.vir")
+        actual=$(run "$workdir/$name.vir" "$name")
         if [ "$actual" != "$expected" ]; then
             echo "FAIL $name ($mode): output differs" >&2
             diff <(echo "$expected") <(echo "$actual") | head -6 >&2

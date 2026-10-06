@@ -121,16 +121,28 @@ check_global_pointer_effect_order()
 
 check_vir_dump()
 {
-    local name=$1
+    local name=$1 extension=$2 opposite=$3
     local dump="$work/$name.vir"
 
     dump_main_vir "$name"
-    test "$(grep -c ' = zext.i32.i64 ' "$dump.main")" -eq 4
-    if grep -q 'sext.i32.i64' "$dump.main"; then exit 1; fi
-    awk '
-        / = zext.i32.i64 / { zext[$1] = 1 }
-        / = ptradd / { if (!zext[$NF]) failed = 1; ptradd++ }
-        END { exit failed || ptradd != 4 }
+    test "$(grep -c " = $extension.i32.i64 " "$dump.main")" -eq 4
+    if grep -q "$opposite.i32.i64" "$dump.main"; then exit 1; fi
+    awk -v extension="$extension" '
+        $3 == extension ".i32.i64" { extended[$1] = 1 }
+        / = const.i64 2$/ { scale[$1] = 1 }
+        / = mul\.i[0-9]+ / {
+            sub(/,$/, "", $4)
+            if (extended[$4] && scale[$5] || scale[$4] && extended[$5])
+                scaled[$1] = 1
+            else failed = 1
+            multiplies++
+        }
+        / = ptradd / {
+            if (extended[$NF]) direct++
+            else if (scaled[$NF]) multiplied++
+            else failed = 1
+        }
+        END { exit failed || direct != 2 || multiplied != 2 || multiplies != 2 }
     ' "$dump.main"
 }
 
@@ -304,7 +316,8 @@ check_direct narrow-global 29 -
 check_direct narrow-array 229 -
 check_direct narrow-array-index 229 229
 check_direct narrow-array-index-unsigned 229 229
-check_vir_dump narrow-array-index-unsigned
+check_vir_dump narrow-array-index sext zext
+check_vir_dump narrow-array-index-unsigned zext sext
 check_direct narrow-volatile 230 -
 check_direct narrow-volatile-local 230 -
 check_direct stack-array 29 -

@@ -568,23 +568,17 @@ int read_const_expr_operand(block_t *scope)
 
 bool constant_expression_needs_typed_value(token_t *token);
 
-static int read_const_expr_impl(block_t *scope,
-                                bool stop_at_ternary,
-                                bool *has_ternary)
+int read_const_expr(block_t *scope)
 {
     opcode_t op_stack[MAX_CONST_EXPR_OPS];
     int val_stack[MAX_CONST_EXPR_OPS];
     int op_n = 0, val_n = 0;
 
-    if (stop_at_ternary)
-        *has_ternary = false;
-
     /* An int cannot hold a literal such as 4294967296 or give 3000000000U its
      * unsigned rank. Fold an expression holding one in the typed two-word
      * evaluator, and accept its value only if the int result keeps it.
      */
-    if (!stop_at_ternary &&
-        constant_expression_needs_typed_value(cur_token->next)) {
+    if (constant_expression_needs_typed_value(cur_token->next)) {
         pp_integer_t typed_value;
         block_t *saved_scope = pp_integer_constant_scope;
         unsigned int extension;
@@ -621,10 +615,6 @@ static int read_const_expr_impl(block_t *scope,
                 val_stack[val_n - 1] = eval_expression_imm(
                     op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
             }
-            if (stop_at_ternary) {
-                *has_ternary = true;
-                return val_stack[0];
-            }
             lex_expect(T_question);
             bool saved_checking = checking_enum_constant;
             checking_enum_constant = saved_checking && val_stack[0];
@@ -646,8 +636,6 @@ static int read_const_expr_impl(block_t *scope,
             val_stack[val_n - 1] = eval_expression_imm(
                 op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
         }
-        if (stop_at_ternary && op_n >= MAX_OPERATOR_STACK_SIZE - 1)
-            fatal("Constant expression too complex");
         if (op_n >= MAX_CONST_EXPR_OPS - 1)
             error_at("Constant expression nests too deeply", next_token_loc());
         op_stack[op_n++] = op;
@@ -661,18 +649,6 @@ static int read_const_expr_impl(block_t *scope,
             op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
     }
     return val_stack[0];
-}
-
-int read_const_expr(block_t *scope)
-{
-    return read_const_expr_impl(scope, false, NULL);
-}
-
-static int read_const_expr_until_ternary(block_t *scope, bool *has_ternary)
-{
-    /* read_global_assignment_var() already routed typed and wide expressions.
-     */
-    return read_const_expr_impl(scope, true, has_ternary);
 }
 
 /* Whether the declarator ahead is a parenthesized name, `int (x)` or `int
@@ -2418,49 +2394,15 @@ void read_wstring_param(block_t *parent, basic_block_t *bb)
     add_insn(parent, bb, OP_load_rodata_address, vd, NULL, NULL, 0, NULL);
 }
 
-/* Whether the static initializer at the next token is a string literal plus or
- * minus an integer constant, as in `"abc" + 1` or `2 + "abcd"`: an address
- * constant (C99 6.6p7). The literal must follow a '+' or start the initializer
- * with an additive operator after it; a subscripted one is an element instead.
- */
-bool string_address_offset_starts_here(void)
-{
-    token_t *prev = NULL;
-    int bracket_depth = 0;
-
-    for (token_t *token = cur_token->next; token; token = token->next) {
-        if (!initializer_scan_continue(token, &bracket_depth, true))
-            return false;
-        if (bracket_depth == 0 &&
-            (token->kind == T_string || token->kind == T_wstring)) {
-            token_t *after = token;
-
-            while (after->next && after->next->kind == token->kind)
-                after = after->next;
-            after = after->next;
-            if (after && after->kind == T_open_square)
-                return false;
-            if (!prev)
-                return after &&
-                       (after->kind == T_plus || after->kind == T_minus);
-            return prev->kind == T_plus;
-        }
-        prev = token;
-    }
-    return false;
-}
-
-/* The address constant string_address_offset_starts_here() accepted: the
- * literal's address advanced by the integer constants added to or subtracted
- * from it, in element units.
- */
+/* Advance a string literal address by an element index. */
 static var_t *string_literal_address(block_t *parent,
                                      basic_block_t **bb,
                                      var_t *literal,
-                                     int index)
+                                     int index,
+                                     int stride)
 {
-    var_t *address = compute_element_address(parent, bb, literal, index,
-                                             literal->type->size);
+    var_t *address =
+        compute_element_address(parent, bb, literal, index, stride);
 
     if (address != literal) {
         address->type = literal->type;
@@ -2469,39 +2411,6 @@ static var_t *string_literal_address(block_t *parent,
         address->is_string_literal = true;
     }
     return address;
-}
-
-var_t *read_string_address_offset(block_t *parent,
-                                  basic_block_t *bb,
-                                  block_t *scope)
-{
-    var_t *literal;
-    int index = 0;
-
-    if (!lex_peek(T_string, NULL) && !lex_peek(T_wstring, NULL)) {
-        token_t *token = cur_token->next;
-        token_t *plus = NULL;
-
-        /* Find the '+' before the literal and end the integer operand there
-         * while it is read, so the constant reader does not meet the literal.
-         */
-        while (token->kind != T_string && token->kind != T_wstring) {
-            plus = token;
-            token = token->next;
-        }
-        plus->kind = T_semicolon;
-        index = read_const_expr(scope);
-        plus->kind = T_plus;
-        lex_expect(T_plus);
-    }
-    if (lex_peek(T_wstring, NULL))
-        read_wstring_param(parent, bb);
-    else
-        read_literal_param(parent, bb);
-    literal = opstack_pop();
-    if (lex_peek(T_plus, NULL) || lex_peek(T_minus, NULL))
-        index += read_global_address_offset(scope, parent, bb);
-    return string_literal_address(parent, &bb, literal, index);
 }
 
 /* The address constant `&"ab"[1]` in a static initializer, with the '&' already
@@ -2528,5 +2437,6 @@ var_t *read_string_literal_element_address(block_t *parent,
     lex_expect(T_open_square);
     read_const_expr(scope);
     lex_expect(T_close_square);
-    return string_literal_address(parent, &bb, literal, index);
+    return string_literal_address(parent, &bb, literal, index,
+                                  literal->type->size);
 }

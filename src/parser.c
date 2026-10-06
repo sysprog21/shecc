@@ -260,7 +260,9 @@ static void compose_block_typedef_array(type_t *alias,
                                         type_t *base,
                                         var_t *decl)
 {
-    fixed_array_shape_t base_shape = fixed_array_shape_from_type(base);
+    fixed_array_shape_t base_shape = {0};
+    if (!decl->ptr_level || !decl->pointee_array_size)
+        base_shape = fixed_array_shape_from_type(base);
     fixed_array_shape_t decl_shape = fixed_array_shape_from_var(decl);
     fixed_array_shape_t shape;
 
@@ -1413,9 +1415,6 @@ typedef struct switch_case_value {
 } switch_case_value_t;
 
 int read_const_expr(block_t *scope);
-int read_global_address_offset(block_t *scope,
-                               block_t *parent,
-                               basic_block_t *bb);
 
 static void set_array_dimension(int *size,
                                 int *dim2,
@@ -1778,6 +1777,26 @@ opcode_t get_operator(void)
     return op;
 }
 
+void fold_integer_constant_cast(var_t *result,
+                                unsigned int lo,
+                                unsigned int hi);
+
+static void preserve_integer_constant(var_t *result, const var_t *source)
+{
+    if (!source->is_const || source->ptr_level || source->type->ptr_level ||
+        source->array_size || source->is_func || result->ptr_level ||
+        result->type->ptr_level || is_record_type(source->type) ||
+        is_record_type(result->type) || result->type == TY_void)
+        return;
+    unsigned int lo = (unsigned int) source->init_val;
+    unsigned int hi = source->type->size > TY_int->size
+                          ? (unsigned int) source->init_val_hi
+                      : source->type->is_unsigned ? 0
+                                                  : 0U - (lo >> 31);
+    result->is_const = true;
+    fold_integer_constant_cast(result, lo, hi);
+}
+
 var_t *promote_unchecked(block_t *block,
                          basic_block_t **bb,
                          var_t *var,
@@ -1796,6 +1815,7 @@ var_t *promote_unchecked(block_t *block,
     else
         encoded_size |= target_type->size;
     add_insn(block, *bb, OP_sign_ext, rd, var, NULL, encoded_size, NULL);
+    preserve_integer_constant(rd, var);
     return rd;
 }
 
@@ -1827,6 +1847,7 @@ var_t *truncate_unchecked(block_t *block,
     var_t *rd = name_var(require_typed_ptr_var(block, target_type, target_ptr));
     add_insn(block, *bb, OP_trunc, rd, var, NULL,
              target_ptr ? PTR_SIZE : target_type->size, NULL);
+    preserve_integer_constant(rd, var);
     return rd;
 }
 
@@ -2241,8 +2262,11 @@ bool incompatible_pointee_callback_conversion(const var_t *from,
         effective_pointer_depth(from) > 0 && from->type &&
         from->type->func_signature && !from->type->is_direct_function_type)
         from_signature = from->type->func_signature;
-    if (!to_signature && effective_pointer_depth(to) > 0 && to->type &&
-        to->type->func_signature && !to->type->is_direct_function_type)
+    if (!to_signature && to->type &&
+        (!to->func_signature ||
+         to->func_signature == to->type->func_signature) &&
+        effective_pointer_depth(to) > 0 && to->type->func_signature &&
+        !to->type->is_direct_function_type)
         to_signature = to->type->func_signature;
     if (!(from_signature || to_signature))
         return false;

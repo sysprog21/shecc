@@ -319,60 +319,25 @@ bool emit_lea_scaled_sum_width(int rd,
     return true;
 }
 
-bool emit_lea_sum(int rd, int base, int index)
-{
-    return emit_lea_scaled_sum_width(rd, base, index, 0, true);
-}
+/* Multi-byte NOP encodings, indexed by their byte count. */
+static const char *x64_nops[] = {"",
+                                 "\x90",
+                                 "\x66\x90",
+                                 "\x0f\x1f\x00",
+                                 "\x0f\x1f\x40\x00",
+                                 "\x0f\x1f\x44\x00\x00",
+                                 "\x66\x0f\x1f\x44\x00\x00",
+                                 "\x0f\x1f\x80\x00\x00\x00\x00",
+                                 "\x0f\x1f\x84\x00\x00\x00\x00\x00",
+                                 "\x66\x0f\x1f\x84\x00\x00\x00\x00\x00"};
 
-/* Pad with @n bytes that do nothing.
- *
- * x86 has a multi-byte NOP, so a run of padding costs one instruction instead
- * of one per byte -- which matters because alignment padding in front of a loop
- * header is executed on every entry to the loop. The encodings are spelled out
- * rather than tabulated because shecc cannot compile the initialiser such a
- * table needs, and this file builds under shecc itself.
- */
 void emit_nop_bytes(int n)
 {
     while (n > 0) {
         int chunk = n > 9 ? 9 : n;
+        for (int i = 0; i < chunk; i++)
+            emit_byte(x64_nops[chunk][i]);
         n -= chunk;
-
-        /* The 6- and 9-byte forms are the 5- and 8-byte ones behind an
-         * operand-size prefix.
-         */
-        if (chunk == 6 || chunk == 9) {
-            emit_byte(0x66);
-            chunk--;
-        }
-        if (chunk == 1) {
-            emit_byte(0x90);
-            continue;
-        }
-        if (chunk == 2) {
-            emit_byte(0x66);
-            emit_byte(0x90);
-            continue;
-        }
-        emit_byte(0x0F);
-        emit_byte(0x1F);
-        if (chunk == 3)
-            emit_byte(0x00);
-        else if (chunk == 4) {
-            emit_byte(0x40);
-            emit_byte(0x00);
-        } else if (chunk == 5) {
-            emit_byte(0x44);
-            emit_byte(0x00);
-            emit_byte(0x00);
-        } else if (chunk == 7) {
-            emit_byte(0x80);
-            emit_dword(0);
-        } else { /* 8 */
-            emit_byte(0x84);
-            emit_byte(0x00);
-            emit_dword(0);
-        }
     }
 }
 
@@ -391,17 +356,7 @@ bool emit_lea_disp_width(int rd, int base, int disp, bool wide)
     if (wide || rd >= 8 || base >= 8)
         emit_rex(wide, rd, base);
     emit_byte(0x8D);
-    if (disp >= -128 && disp <= 127) {
-        emit_byte(modrm(MOD_DISP8, reg_low3(rd), reg_low3(base)));
-        emit_byte(disp);
-        return true;
-    }
-
-    /* A wider displacement is still one instruction, and still shorter than
-     * copying the source and then adding to it.
-     */
-    emit_byte(modrm(MOD_DISP32, reg_low3(rd), reg_low3(base)));
-    emit_dword(disp);
+    emit_mem_base(rd, base, disp, true);
     return true;
 }
 
@@ -433,11 +388,6 @@ void emit_alu_imm_width(int rd, int ext, int imm, bool wide)
     emit_byte(0x81);
     emit_byte(modrm(MOD_DIRECT, ext, reg_low3(rd)));
     emit_dword(imm);
-}
-
-void emit_alu_imm(int rd, int ext, int imm)
-{
-    emit_alu_imm_width(rd, ext, imm, true);
 }
 
 /* Register and accumulator opcodes for the 0x81/0x83 ALU operations. */

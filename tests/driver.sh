@@ -2991,6 +2991,10 @@ try_compile_error_message "restrict requires a pointer type" << EOF
 typedef int restrict R;
 int main(void) { return 0; }
 EOF
+try_compile_error_message "Shift count out of range in constant expression" << EOF
+static unsigned long long x = 1ULL << 64;
+int main(void) { return x != 0; }
+EOF
 try_ 3 << EOF
 struct S { int a; };
 struct S g = {3};
@@ -4184,14 +4188,13 @@ int main(void) {
            (wide_min_quotient_by_uint == -2147483648LL);
 }
 EOF
-try_compile_error << EOF
-int invalid_wide_discarded_ternary_object;
-unsigned long long invalid_wide_discarded_ternary =
-    0 ? invalid_wide_discarded_ternary_object : 1U;
+try_ 0 << EOF
+int discarded_ternary_object;
+unsigned long long discarded_ternary = 0 ? discarded_ternary_object : 1U;
+int main(void) { return discarded_ternary != 1U; }
 EOF
 
-# The word-sized evaluator skips a discarded arm up to its matching ':', or to
-# the end of the declarator, past grouped and nested conditionals inside it.
+# Discarded arms retain their type through grouped and nested conditionals.
 try_ 8 << EOF
 int int_ternary_grouped_true_arm = 0 ? (1 ? 2 : 3) : 4;
 int int_ternary_nested_true_arm = 0 ? 1 ? 2 : 3 : 4;
@@ -4441,11 +4444,11 @@ unsigned long long invalid_wide_sizeof_function_value =
     sizeof invalid_wide_sizeof_function ? 0x100000000ULL : 1U;
 int main(void) { return 0; }
 EOF
-try_compile_error << EOF
-int invalid_wide_logical_operand;
-unsigned long long invalid_wide_logical_value =
-    0 && invalid_wide_logical_operand ? 0x100000000ULL : 1U;
-int main(void) { return 0; }
+try_ 0 << EOF
+int discarded_logical_operand;
+unsigned long long discarded_logical_value =
+    0 && discarded_logical_operand ? 0x100000000ULL : 1U;
+int main(void) { return discarded_logical_value != 1U; }
 EOF
 try_compile_error << EOF
 unsigned long long invalid_wide_active_and =

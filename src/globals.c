@@ -2282,19 +2282,13 @@ void bb_connect(basic_block_t *pred,
     vir_frontend_note_edge(pred, succ);
 }
 
-/* Count the predecessors still wired to 'bb'. bb_disconnect() leaves holes in
- * prev[], so prev_idx is only a high-water mark and the entries must be counted
- * rather than trusted.
- */
-int bb_pred_count(const basic_block_t *bb)
+/* bb_disconnect() leaves holes in prev[], so prev_idx alone is not enough. */
+bool bb_has_pred(const basic_block_t *bb)
 {
-    int n = 0;
-
-    for (int i = 0; i < bb->prev_idx; i++) {
+    for (int i = 0; i < bb->prev_idx; i++)
         if (bb->prev[i].bb)
-            n++;
-    }
-    return n;
+            return true;
+    return false;
 }
 
 /* Return the sole live predecessor, or NULL when the block has zero or many. */

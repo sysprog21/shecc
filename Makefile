@@ -225,6 +225,19 @@ check-vir-large-cfg-stage2: $(OUT)/$(STAGE2) tests/vir-large-cfg.sh tests/vir-fr
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-large-cfg.sh 2
 
 ifeq ($(ARCH),x64)
+.PHONY: check-vir-x64-encoders check-vir-x64-and-flags
+check: check-vir-x64-encoders check-vir-x64-and-flags
+check-vir-x64-encoders check-vir-x64-and-flags: check-vir-x64-%: $(OUT)/$(STAGE0) tests/vir-x64-%.c config $(wildcard src/*.c src/*.h)
+	$(CC) $(CFLAGS) tests/vir-x64-$*.c -o $(OUT)/vir-x64-$*
+	$(OUT)/vir-x64-$*
+
+.PHONY: check-vir-x64-fold
+check: check-vir-x64-fold
+check-vir-x64-fold: $(OUT)/$(STAGE0) tests/vir-x64-fold.c tests/vir-x64-liveout.c tests/vir-x64-liveout.sh tests/vir-x64-shift-counts.c config $(wildcard src/*.c src/*.h)
+	$(CC) $(CFLAGS) tests/vir-x64-fold.c -o $(OUT)/vir-x64-fold
+	$(OUT)/vir-x64-fold
+	CC="$(CC)" bash tests/vir-x64-liveout.sh $(OUT)/$(STAGE0)
+
 .PHONY: check-vir-native-x64-stage0 check-vir-native-x64-stage2 \
 	check-x64-startup-globals-stage0 check-x64-startup-globals-stage2
 check: check-x64-startup-globals-stage0 check-x64-startup-globals-stage2 \
@@ -244,6 +257,22 @@ endif
 ifeq ($(ARCH),arm64)
 .PHONY: check-vir-native-arm64-stage0 check-vir-native-arm64-stage2
 check: check-vir-native-arm64-stage0 check-vir-native-arm64-stage2
+check: check-vir-arm64-branch-frame check-vir-arm64-startup-bank
+.PHONY: check-vir-arm64-branch-frame check-vir-arm64-startup-bank
+check: check-vir-arm64-select
+check: check-vir-arm64-register-memory
+.PHONY: check-vir-arm64-register-memory
+check-vir-arm64-register-memory: $(OUT)/$(STAGE0) tests/arm64-register-memory-unit.c tests/arm64-register-memory.sh
+	CC="$(CC)" bash tests/arm64-register-memory.sh
+.PHONY: check-vir-arm64-select
+check-vir-arm64-select: $(OUT)/$(STAGE0) tests/vir-arm64-select-direct.c tests/vir-arm64-logical-gas.py
+	$(CC) $(CFLAGS) -Isrc tests/vir-arm64-select-direct.c -o $(OUT)/vir-arm64-select-direct
+	python3 tests/vir-arm64-logical-gas.py $(OUT)/vir-arm64-select-direct
+check-vir-arm64-branch-frame: $(OUT)/$(STAGE0) tests/vir-arm64-branch-frame.c
+	$(CC) $(CFLAGS) -Isrc tests/vir-arm64-branch-frame.c -o $(OUT)/vir-arm64-branch-frame
+	$(OUT)/vir-arm64-branch-frame
+check-vir-arm64-startup-bank: $(OUT)/$(STAGE0) tests/vir-arm64-startup-bank.sh
+	CC="$(CC)" A64_CC="$(if $(filter 1,$(USE_QEMU)),$(or $(ARCH_CC),aarch64-linux-gnu-gcc),$(CC))" TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-arm64-startup-bank.sh
 
 check-vir-native-arm64-stage0: $(OUT)/$(STAGE0) $(VIR_NATIVE_ARM64_FIXTURES) tests/vir-direct-arm64.sh tests/vir-direct-common.sh
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-direct-arm64.sh 0
@@ -538,3 +567,9 @@ distclean: clean
 	-$(RM) DOM.dot CFG.dot
 
 -include $(deps)
+
+# Manual native hardware measurement; excluded from correctness checks.
+.PHONY: benchmark-native-throughput
+benchmark-native-throughput: $(OUT)/$(STAGE0)
+	$(Q)python3 tests/native-throughput.py --shecc $(OUT)/$(STAGE0) \
+		--output $(OUT)/native-throughput $(NATIVE_BENCH_FLAGS)

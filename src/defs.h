@@ -100,13 +100,6 @@
 #define MAX_GOTPLT 1024
 #define MAX_NESTING 128
 
-/* How many instructions an if may speculate when flattened into a select, and
- * how many blocks one of its arms may span. Beyond a handful, running the arm
- * that would have been skipped costs more than the misprediction it avoids.
- */
-#define MAX_SPECULATED_INSNS 8
-#define MAX_IF_ARM_BLOCKS 4
-
 /* Recursion limits for nesting in the input. The parser descends recursively
  * for each of these, so a deeply nested program would otherwise exhaust the
  * machine stack before any diagnostic could be produced.
@@ -251,10 +244,6 @@
  * a variable for the whole of a function that calls anything. A target states
  * its own count in mk/<arch>.mk, beside the REG_CNT that fixes the file it
  * counts from; a target that has not had its file checked this way keeps none.
- *
- * HAVE_COND_MOVE comes from the same place and says whether the target can
- * select between two values without branching, which is what makes flattening
- * an if into a select worthwhile.
  */
 #ifndef CALLEE_SAVED_REGS
 #define CALLEE_SAVED_REGS 0
@@ -489,9 +478,6 @@ typedef enum {
     /* intermediate use in front-end. No code generation */
     OP_generic,
 
-    /* rd = rs2 ? rs1 : rs3 -- select without a branch. */
-    OP_cmov,
-
     /* calling convention */
     OP_define,   /* function entry point */
     OP_push,     /* prepare arguments */
@@ -514,7 +500,6 @@ typedef enum {
     /* function pointer */
     OP_address_of_func, /* resolve function entry */
     OP_load_func,       /* prepare indirective call */
-    OP_global_load_func,
 
     /* memory address operations */
     OP_address_of, /* lookup variable's address */
@@ -553,10 +538,7 @@ typedef enum {
     /* data type conversion */
     OP_trunc,
     OP_sign_ext,
-    OP_cast,
-
-    /* entry point of the state machine */
-    OP_start
+    OP_cast
 } opcode_t;
 
 #define OP_USUAL_ARITHMETIC_CASES \
@@ -861,7 +843,7 @@ struct ph2_ir {
     opcode_t op;
     int src0;
     int src1;
-    /* The register OP_cmov keeps when its condition does not hold. */
+    /* Backend frame metadata. */
     int src2;
     int dest;
 
