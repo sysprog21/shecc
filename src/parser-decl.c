@@ -302,15 +302,21 @@ static type_t *read_qualified_type_name_specifiers(block_t *scope,
         if (type)
             lex_expect(T_identifier);
     }
-    /* A qualifier may follow the record, enum or typedef name as well. */
+
+    /* A qualifier may follow the record, enum or typedef name as well; restrict
+     * qualifies only a pointer typedef.
+     */
     while (lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
            lex_peek(T_restrict, NULL)) {
         if (lex_accept(T_const))
             is_const = true;
         else if (lex_accept(T_volatile))
             is_volatile = true;
-        else
+        else {
             lex_expect(T_restrict);
+            if (!type || !type->ptr_level)
+                error_at("restrict requires a pointer type", cur_token_loc());
+        }
     }
     *const_out |= is_const;
     *volatile_out |= is_volatile;

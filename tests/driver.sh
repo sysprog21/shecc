@@ -2991,6 +2991,21 @@ try_compile_error_message "restrict requires a pointer type" << EOF
 typedef int restrict R;
 int main(void) { return 0; }
 EOF
+try_compile_error_message "restrict requires a pointer type" << EOF
+typedef int I;
+static int *p = (I restrict *) 0;
+int main(void) { return p != 0; }
+EOF
+try_compile_error_message "conflicting types for typedef" << EOF
+typedef int T;
+typedef char T;
+int main(void) { return sizeof(T); }
+EOF
+try_ 0 << EOF
+typedef int T;
+typedef int T;
+int main(void) { T t = 0; return t; }
+EOF
 try_compile_error_message "Shift count out of range in constant expression" << EOF
 static unsigned long long x = 1ULL << 64;
 int main(void) { return x != 0; }

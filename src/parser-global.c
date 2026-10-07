@@ -861,6 +861,15 @@ static void read_global_typedef_declarator(block_t *block,
                                                   typedef_volatile, true);
     strncpy(alias->type_name, decl.var_name, MAX_TYPE_LEN - 1);
     alias->type_name[MAX_TYPE_LEN - 1] = '\0';
+
+    /* A repeated typedef must name a compatible type; the first binding is the
+     * one later uses resolve to, so a conflicting one would be ignored.
+     */
+    void *previous = NULL;
+    if (find_block_ordinary(CURRENT_TU_SCOPE, alias->type_name,
+                            ORDINARY_TYPEDEF, &previous) == ORDINARY_TYPEDEF &&
+        !compatible_decl_type(((typedef_binding_t *) previous)->type, alias))
+        error_at("conflicting types for typedef", cur_token_loc());
     add_tu_typedef(alias);
 }
 
