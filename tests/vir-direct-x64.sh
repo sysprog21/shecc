@@ -416,13 +416,15 @@ check_direct branch-initialized-root 31 29
 dump_main_vir branch-initialized-root tests/vir-direct-branch-initialized-root.c
 check_entry_root_effects branch-initialized-root 1 0 2
 check_case branch-volatile-root 31 29 'root-address|volatile'
-for level in 0 1 2; do
-    "$compiler" --vir-opt="$level" \
+for level in 0 2; do
+    opt_flags=()
+    [ "$level" -eq 2 ] || opt_flags=(--no-opt)
+    "$compiler" "${opt_flags[@]}" \
         --dump-vir --dump-vir --stats \
         -o "$work/branch-initialized-root-o$level" \
         tests/vir-direct-branch-initialized-root.c \
         2> "$work/branch-initialized-root-o$level.stats"
-    "$compiler" --vir-opt="$level" \
+    "$compiler" "${opt_flags[@]}" \
         --dump-vir --dump-vir --stats \
         -o "$work/branch-initialized-root-o$level-repeat" \
         tests/vir-direct-branch-initialized-root.c \

@@ -20,7 +20,7 @@ case "$1" in
         ;;
 esac
 
-modes=("--vir-opt=1" "--vir-opt=2")
+modes=("")
 compile_timeout=${VIR_CORPUS_COMPILE_TIMEOUT:-300}
 
 runner=()
@@ -73,7 +73,7 @@ for src in tests/*.c "$workdir"/gen-*.c; do
     # skips the file; a crash is a failure of its own. Self-compiled compilers
     # under emulation need time to parse compiler-sized unit files.
     {
-        timeout "$compile_timeout" "${compiler[@]}" --dump-ir --vir-opt=0 -o "$workdir/$name.o0" \
+        timeout "$compile_timeout" "${compiler[@]}" --dump-ir --no-opt -o "$workdir/$name.o0" \
             "$src"
     } > "$workdir/$name.ir" 2> /dev/null
     status=$?

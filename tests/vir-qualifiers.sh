@@ -17,20 +17,22 @@ check_count()
     fi
 }
 
-for level in 0 1 2; do
+for level in 0 2; do
+    opt_flags=()
+    [ "$level" -eq 2 ] || opt_flags=(--no-opt)
     for fixture in vir-const-typedef-pointer-slot-write vir-const-pointer-row-write vir-const-direct-pointer-row-write vir-const-callback-row-write vir-const-local-getter vir-const-abstract-return-pointer vir-const-hidden-return-alias vir-const-callback-pointer-return-alias vir-const-callback-return-pointee vir-const-callback-return-pointer vir-const-grouped-pointer-alias vir-const-typedef-realias vir-const-slot-realias; do
-        if "${compiler[@]}" "--vir-opt=$level" -o "$task_dir/test" "tests/$fixture.c" > "$task_dir/diagnostic" 2>&1; then
+        if "${compiler[@]}" "${opt_flags[@]}" -o "$task_dir/test" "tests/$fixture.c" > "$task_dir/diagnostic" 2>&1; then
             echo "$fixture accepted assignment" >&2
             exit 1
         fi
         grep -q 'assignment of read-only' "$task_dir/diagnostic"
     done
     for fixture in vir-hidden-const-return-compatible vir-pointer-comparison vir-grouped-pointer-alias; do
-        "${compiler[@]}" "--vir-opt=$level" -o "$task_dir/test" "tests/$fixture.c"
+        "${compiler[@]}" "${opt_flags[@]}" -o "$task_dir/test" "tests/$fixture.c"
         "${runner[@]}" "$task_dir/test"
     done
     while read -r fixture function pointers integers stores; do
-        "${compiler[@]}" --dump-vir "--vir-opt=$level" -o "$task_dir/test" "tests/$fixture.c" 2> "$task_dir/graph"
+        "${compiler[@]}" --dump-vir "${opt_flags[@]}" -o "$task_dir/test" "tests/$fixture.c" 2> "$task_dir/graph"
         "${runner[@]}" "$task_dir/test"
         graph=$(awk -v name="$function" '
             /^function / { active = ($2 == name); next }
@@ -65,4 +67,4 @@ vir-volatile-member discard_pointees 2 0 0
 vir-direct-arm64-i64-memory main 0 1 2
 CASES
 done
-echo 'Native pointer and volatile qualifier checks passed at O0, O1, and O2'
+echo 'Native pointer and volatile qualifier checks passed with and without optimization'

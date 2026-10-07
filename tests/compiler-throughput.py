@@ -47,7 +47,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='shecc-compile-bench-') as temp:
         for source in args.sources:
             commands = {
-                'shecc': [compilers['shecc'], '--vir-opt=1',
+                'shecc': [compilers['shecc'],
                           *(['--no-libc'] if args.no_libc else []),
                           '-o', str(Path(temp) / 'shecc.elf'), str(source)],
                 'gcc': [compilers['gcc'], '-O1', '-fwrapv', '-std=c99',

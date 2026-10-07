@@ -340,12 +340,8 @@ int main(int argc, char *argv[])
             *flags[flag].setting = flags[flag].value;
             continue;
         }
-        if (!strcmp(argv[i], "--vir-opt=0"))
+        if (!strcmp(argv[i], "--no-opt"))
             vir_frontend_opt_level = VIR_OPT_O0;
-        else if (!strcmp(argv[i], "--vir-opt=1"))
-            vir_frontend_opt_level = VIR_OPT_O1;
-        else if (!strcmp(argv[i], "--vir-opt=2"))
-            vir_frontend_opt_level = VIR_OPT_O2;
         else if (!strcmp(argv[i], "-I")) {
             if (i + 1 >= argc)
                 usage_error("-I requires an include directory");
@@ -372,7 +368,7 @@ int main(int argc, char *argv[])
         printf(
             "Usage: shecc [-I directory] [-o output] [+m] [--dot] [--dump-ir] "
             "[--dump-vir] "
-            "[--vir-opt=0|1|2] "
+            "[--no-opt] "
             "[--warn-string-literals] [--std=c99] [--no-libc] "
             "[--dynlink] [-E] <input.c> [input.c ...]\n");
         usage_error("Missing source file");

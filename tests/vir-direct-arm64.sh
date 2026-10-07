@@ -740,7 +740,7 @@ check_fallback_o0()
 {
     local name=$1 expected=$2 status
 
-    run_compiler --vir-opt=0 --dump-vir --stats -o "$work/$name-o0" \
+    run_compiler --no-opt --dump-vir --stats -o "$work/$name-o0" \
         "tests/vir-direct-arm64-$name.c" 2> "$work/$name-o0.stats"
     if run_static "$work/$name-o0"; then status=0; else status=$?; fi
     test "$status" -eq "$expected"
@@ -872,13 +872,15 @@ test "$(grep -c ' = stackaddr ' "$work/branch-initialized-root.dump")" -eq 1
 test "$(grep -c '^  store ' "$work/branch-initialized-root.dump")" -eq 2
 grep -Eq '^b[0-9]+:$' "$work/branch-initialized-root.dump"
 grep -Eq ' = load\.i32 ' "$work/branch-initialized-root.dump"
-for level in 0 1 2; do
-    run_compiler --vir-opt="$level" --dump-vir \
+for level in 0 2; do
+    opt_flags=()
+    [ "$level" -eq 2 ] || opt_flags=(--no-opt)
+    run_compiler "${opt_flags[@]}" --dump-vir \
         --dump-vir --stats \
         -o "$work/branch-initialized-root-o$level" \
         tests/vir-direct-branch-initialized-root.c \
         2> "$work/branch-initialized-root-o$level.stats"
-    run_compiler --vir-opt="$level" --dump-vir \
+    run_compiler "${opt_flags[@]}" --dump-vir \
         --dump-vir --stats \
         -o "$work/branch-initialized-root-o$level-repeat" \
         tests/vir-direct-branch-initialized-root.c \

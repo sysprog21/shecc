@@ -33,8 +33,10 @@ for mode in default no-folds; do
     "$task_dir/$mode.elf" and two
 done
 compiler=${1:-out/shecc}
-for opt in 0 1 2; do
-    "$compiler" --no-libc --vir-opt="$opt" -o "$task_dir/shift.elf" tests/vir-x64-shift-counts.c
+for opt in 0 2; do
+    opt_flags=()
+    [ "$opt" -eq 2 ] || opt_flags=(--no-opt)
+    "$compiler" --no-libc "${opt_flags[@]}" -o "$task_dir/shift.elf" tests/vir-x64-shift-counts.c
     chmod +x "$task_dir/shift.elf"
     "$task_dir/shift.elf"
 done

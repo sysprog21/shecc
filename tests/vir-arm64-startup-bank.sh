@@ -59,9 +59,11 @@ int main(int argc, char **argv)
            padding[$((size - 1))];
 }
 C
-    for opt in 0 1 2; do
-        "$task_dir/compiler" --no-libc --vir-opt="$opt" -o "$task_dir/static.elf" "$task_dir/input.c"
-        "$task_dir/compiler" --no-libc --dynlink --vir-opt="$opt" -o "$task_dir/dynamic.elf" "$task_dir/input.c"
+    for opt in 0 2; do
+        opt_flags=()
+        [ "$opt" -eq 2 ] || opt_flags=(--no-opt)
+        "$task_dir/compiler" --no-libc "${opt_flags[@]}" -o "$task_dir/static.elf" "$task_dir/input.c"
+        "$task_dir/compiler" --no-libc --dynlink "${opt_flags[@]}" -o "$task_dir/dynamic.elf" "$task_dir/input.c"
         chmod +x "$task_dir/static.elf" "$task_dir/dynamic.elf"
         "${runner[@]}" "$task_dir/static.elf" abc bcd
         if ((${#runner[@]})); then

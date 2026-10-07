@@ -74,21 +74,23 @@ while read -r source purpose _expectation; do
             continue
             ;;
     esac
-    for opt in 0 1 2; do
+    for opt in 0 2; do
+        opt_flags=()
+        [ "$opt" -eq 2 ] || opt_flags=(--no-opt)
         for run in $(seq 1 "$runs"); do
             stats="$workdir/$opt-$run.stats"
             output="$workdir/$opt-$run.elf"
             elapsed="$workdir/$opt-$run.seconds"
             rss="$workdir/$opt-$run.rss"
             if [ "$no_timing" = 1 ]; then
-                "${compiler[@]}" --vir-opt="$opt" --dump-vir --stats \
+                "${compiler[@]}" "${opt_flags[@]}" --dump-vir --stats \
                     -o "$output" "$source" > /dev/null 2> "$stats"
                 printf 'not_measured\n' > "$elapsed"
                 printf 'not_measured\n' > "$rss"
             else
                 benchmark_time_resource_command "$elapsed" "$rss" \
                     "${compiler[@]}" \
-                    --vir-opt="$opt" --dump-vir --stats \
+                    "${opt_flags[@]}" --dump-vir --stats \
                     -o "$output" "$source" > /dev/null 2> "$stats"
             fi
             if [ "$run" -gt 1 ]; then

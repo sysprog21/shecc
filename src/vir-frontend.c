@@ -3,7 +3,7 @@
 #include <string.h>
 #include "vir.h"
 
-int vir_frontend_opt_level = VIR_OPT_O1;
+int vir_frontend_opt_level = VIR_OPT_O2;
 extern int unevaluated_expression_depth;
 int alignment_var(var_t *var);
 static int type_bytes(vir_type_t type)

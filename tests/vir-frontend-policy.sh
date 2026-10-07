@@ -30,7 +30,9 @@ check_policy_workload()
 {
     local name=$1 source=$2 _function_name=$3 expected_exit=$4
 
-    for opt in 0 1 2; do
+    for opt in 0 2; do
+        opt_flags=()
+        [ "$opt" -eq 2 ] || opt_flags=(--no-opt)
         local plain="$PWD/out/vir-frontend-$name-plain-o$opt-$suffix"
         local output="$PWD/out/vir-frontend-$name-verified-o$opt-$suffix"
         local stats="$output.stats"
@@ -40,8 +42,8 @@ check_policy_workload()
             dump_option=(--dump-vir)
         fi
 
-        "${compiler[@]}" --vir-opt="$opt" -o "$plain" "$source"
-        "${compiler[@]}" --vir-opt="$opt" --stats "${dump_option[@]}" \
+        "${compiler[@]}" "${opt_flags[@]}" -o "$plain" "$source"
+        "${compiler[@]}" "${opt_flags[@]}" --stats "${dump_option[@]}" \
             "$frontend_flag" \
             -o "$output" "$source" 2> "$stats"
         cmp "$plain" "$output"

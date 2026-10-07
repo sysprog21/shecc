@@ -10,8 +10,10 @@ for fixture in shift-width adjusted-array operand-signedness global-scratch call
     pointer-scale-width pointer-scale-rows x64-and-loop global-conditional-compound \
     arm64-select-runtime arm64-indexed-widths; do
     source="tests/vir-$fixture.c"
-    for level in 0 1 2; do
-        "${compiler[@]}" "--vir-opt=$level" -o "$task_dir/test" "$source"
+    for level in 0 2; do
+        opt_flags=()
+        [ "$level" -eq 2 ] || opt_flags=(--no-opt)
+        "${compiler[@]}" "${opt_flags[@]}" -o "$task_dir/test" "$source"
         chmod +x "$task_dir/test"
         "${runner[@]}" "$task_dir/test"
     done
@@ -31,4 +33,4 @@ bash tests/vir-global-slot-initializers.sh "${compiler[@]}"
 bash tests/vir-global-conditional-compound.sh "${compiler[@]}"
 bash tests/vir-strength.sh "${compiler[@]}"
 bash tests/vir-qualifiers.sh "${compiler[@]}"
-echo 'Native VIR regression programs passed at O0, O1, and O2'
+echo 'Native VIR regression programs passed with and without optimization'

@@ -79,7 +79,7 @@ def main():
     for name in NAMES:
         source = fixtures / (name + '.c')
         commands = {
-            'shecc': [str(shecc), '--no-libc', '--vir-opt=1', '-o',
+            'shecc': [str(shecc), '--no-libc', '-o',
                       str(output / (name + '.shecc')), str(source)],
             'gcc': [str(gcc), '-O1', '-fwrapv', '-nostdlib', '-static', '-fno-pie',
                     '-no-pie', '-Wl,--build-id=none', str(fixtures / 'start.S'),

@@ -20,7 +20,7 @@ workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
 stats="$workdir/stats"
 output="$workdir/output.elf"
-"${compiler[@]}" --vir-opt=2 --dump-vir --stats \
+"${compiler[@]}" --dump-vir --stats \
     -o "$output" tests/vir-frontend-large-cfg.c \
     > /dev/null 2> "$stats"
 

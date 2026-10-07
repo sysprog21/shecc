@@ -18,8 +18,8 @@ Remove or rename an earlier output directory before another Make invocation.
 The seven workloads cover arithmetic, branches, pointers, recursion, calls,
 sorting, and indexed access. Every binary returns failure unless its full 32-bit
 checksum matches the literal expected result. Both compilers use the same source;
-shecc uses `--no-libc --vir-opt=1`, GCC uses `-O1 -fwrapv` and static minimal
-startup. One warmup precedes nine rotating rounds of eight executions per sample.
+shecc uses `--no-libc` at its default optimization, GCC uses `-O1 -fwrapv` and
+static minimal startup. One warmup precedes nine rotating rounds of eight executions per sample.
 Wall and child CPU medians and raw samples are recorded separately. Throughput
 is GCC time divided by shecc time; every fixture must reach the configurable
 target (default 0.8) in both wall and child CPU time.
