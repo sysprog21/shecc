@@ -95,15 +95,14 @@ int a64_cmp_imm_insn(bool sf, int rn, int imm12)
     return a64_sf(sf) | 0x7100001f | ((imm12 & 0xfff) << 10) | (rn << 5);
 }
 
-int a64_add_reg_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x0b000000 | (rm << 16) | (rn << 5) | rd;
-}
-
-int a64_sub_reg_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x4b000000 | (rm << 16) | (rn << 5) | rd;
-}
+/* Three-register data processing shares its operand bit layout. */
+#define A64_REGISTER_INSN(name, opcode)                           \
+    int name(bool sf, int rd, int rn, int rm)                     \
+    {                                                             \
+        return a64_sf(sf) | opcode | (rm << 16) | (rn << 5) | rd; \
+    }
+A64_REGISTER_INSN(a64_add_reg_insn, 0x0b000000)
+A64_REGISTER_INSN(a64_sub_reg_insn, 0x4b000000)
 
 /* CMP Rn, Rm is SUBS into the zero register. */
 int a64_cmp_reg_insn(bool sf, int rn, int rm)
@@ -137,57 +136,22 @@ int a64_mvn_insn(bool sf, int rd, int rm)
 {
     return a64_sf(sf) | 0x2a2003e0 | (rm << 16) | rd;
 }
-
-int a64_and_reg_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x0a000000 | (rm << 16) | (rn << 5) | rd;
-}
-
-int a64_orr_reg_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x2a000000 | (rm << 16) | (rn << 5) | rd;
-}
-
-int a64_eor_reg_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x4a000000 | (rm << 16) | (rn << 5) | rd;
-}
+A64_REGISTER_INSN(a64_and_reg_insn, 0x0a000000)
+A64_REGISTER_INSN(a64_orr_reg_insn, 0x2a000000)
+A64_REGISTER_INSN(a64_eor_reg_insn, 0x4a000000)
 
 /* MUL is MADD with the zero register as addend; MSUB computes Ra - Rn * Rm. */
-int a64_mul_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x1b007c00 | (rm << 16) | (rn << 5) | rd;
-}
+A64_REGISTER_INSN(a64_mul_insn, 0x1b007c00)
 
 int a64_msub_insn(bool sf, int rd, int rn, int rm, int ra)
 {
     return a64_sf(sf) | 0x1b008000 | (rm << 16) | (ra << 10) | (rn << 5) | rd;
 }
-
-int a64_udiv_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x1ac00800 | (rm << 16) | (rn << 5) | rd;
-}
-
-int a64_sdiv_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x1ac00c00 | (rm << 16) | (rn << 5) | rd;
-}
-
-int a64_lslv_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x1ac02000 | (rm << 16) | (rn << 5) | rd;
-}
-
-int a64_lsrv_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x1ac02400 | (rm << 16) | (rn << 5) | rd;
-}
-
-int a64_asrv_insn(bool sf, int rd, int rn, int rm)
-{
-    return a64_sf(sf) | 0x1ac02800 | (rm << 16) | (rn << 5) | rd;
-}
+A64_REGISTER_INSN(a64_udiv_insn, 0x1ac00800)
+A64_REGISTER_INSN(a64_sdiv_insn, 0x1ac00c00)
+A64_REGISTER_INSN(a64_lslv_insn, 0x1ac02000)
+A64_REGISTER_INSN(a64_lsrv_insn, 0x1ac02400)
+A64_REGISTER_INSN(a64_asrv_insn, 0x1ac02800)
 
 /* SXTB/SXTH/SXTW and UXTB/UXTH/UXTW into an X register are SBFM and UBFM taking
  * the low @bits bits.
@@ -235,6 +199,19 @@ int a64_mem_op(int access, int size)
     if (access == A64_LOAD && size != 8)
         return 0x38000000 | (sz << 30) | (2 << 22);
     return 0x38000000 | (sz << 30) | (1 << 22);
+}
+
+/* LDR/STR with an X or zero-extended W offset, optionally scaled by size. */
+int a64_mem_register_insn(int access,
+                          int size,
+                          int rt,
+                          int rn,
+                          int rm,
+                          bool scaled,
+                          bool word_index)
+{
+    return a64_mem_op(access, size) | 0x204800 | (!word_index << 13) |
+           (rm << 16) | (scaled << 12) | (rn << 5) | rt;
 }
 
 /* LDUR/STUR: a signed 9-bit byte offset. */
@@ -296,6 +273,11 @@ int a64_bl_insn(int disp)
     return 0x94000000 | (disp & 0x3ffffff);
 }
 
+int a64_b_cond_insn(a64_cond_t cond, int disp)
+{
+    return 0x54000000 | ((disp & 0x7ffff) << 5) | cond;
+}
+
 int a64_cbz_insn(bool sf, int rt, int disp)
 {
     return a64_sf(sf) | 0x34000000 | ((disp & 0x7ffff) << 5) | rt;
@@ -336,4 +318,24 @@ int a64_adrp_pages_insn(int rd, int pages)
 {
     return 0x90000000 | ((pages & 3) << 29) | (((pages >> 2) & 0x7ffff) << 5) |
            rd;
+}
+
+#undef A64_REGISTER_INSN
+
+int a64_lsl_imm_insn(bool sf, int rd, int rn, int shift)
+{
+    int bits = sf ? 63 : 31;
+    return (sf ? 0xd3400000U : 0x53000000U) | (((-shift) & bits) << 16) |
+           ((bits - shift) << 10) | (rn << 5) | rd;
+}
+
+int a64_csel_insn(bool sf, int rd, int rn, int rm, int cond)
+{
+    return a64_sf(sf) | 0x1a800000 | (rm << 16) | (cond << 12) | (rn << 5) | rd;
+}
+
+int a64_logic_imm_insn(int opcode, bool sf, int rd, int rn, int ones)
+{
+    return a64_sf(sf) | opcode | (sf ? 1 << 22 : 0) | ((ones - 1) << 10) |
+           (rn << 5) | rd;
 }

@@ -18,6 +18,8 @@ ARCH_DEFS = \
     \#define RESERVED_GOT_NUM 2\n$\
     \#define R_ARCH_JUMP_SLOT 0x5\n$\
     \#define MAX_ARGS_IN_REG 8\n$\
+    \#define REG_CNT 11 /* a0-a7, then s3-s5 */\n$\
+    \#define CALLEE_SAVED_REGS 3 /* s3-s5 */\n$\
     "
 
 TOOLCHAIN_CANDIDATES = riscv32-unknown-linux-gnu-

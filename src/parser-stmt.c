@@ -87,8 +87,7 @@ bool constant_expression_needs_typed_value(token_t *token)
                    (bracket_depth == 0 && token->kind == T_comma))
             return false;
         else if (token->kind == T_numeric &&
-                 (numeric_literal_needs_wide_path(token->literal) ||
-                  numeric_literal_needs_typed_global_path(token->literal)))
+                 numeric_literal_needs_global_reader(token->literal))
             return true;
     }
     return false;
@@ -158,16 +157,14 @@ basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
             context->seen_cases = seen;
         }
 
-        constant =
-            require_typed_var(context->dispatch_parent, context->control->type);
-        constant->var_name = gen_name();
+        constant = name_var(require_typed_var(context->dispatch_parent,
+                                              context->control->type));
         constant->init_val = case_lo;
         constant->init_val_hi = case_hi;
         add_insn(context->dispatch_parent, context->dispatch_tail,
                  OP_load_constant, constant, NULL, NULL, 0, NULL);
 
-        comparison = require_var(context->dispatch_parent);
-        comparison->var_name = gen_name();
+        comparison = require_named_var(context->dispatch_parent);
         add_insn(context->dispatch_parent, context->dispatch_tail, OP_eq,
                  comparison, constant, context->control, 0, NULL);
         add_insn(context->dispatch_parent, context->dispatch_tail, OP_branch,
@@ -341,6 +338,49 @@ typedef struct {
     bool is_volatile;
 } block_decl_specifiers_t;
 
+static bool read_block_decl_specifiers(block_decl_specifiers_t *spec)
+{
+    bool saw_specifier = false;
+
+    while (lex_peek(T_static, NULL) || lex_peek(T_extern, NULL) ||
+           lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
+           lex_peek(T_register, NULL) || lex_peek(T_auto, NULL)) {
+        saw_specifier = true;
+        if (lex_accept(T_static)) {
+            if (spec->is_static)
+                error_at("duplicate static storage class specifier",
+                         cur_token_loc());
+            spec->is_static = true;
+        } else if (lex_accept(T_extern)) {
+            if (spec->is_extern)
+                error_at("duplicate extern storage class specifier",
+                         cur_token_loc());
+            spec->is_extern = true;
+        } else if (lex_accept(T_register)) {
+            if (spec->is_register)
+                error_at("duplicate register storage class specifier",
+                         cur_token_loc());
+            spec->is_register = true;
+        } else if (lex_accept(T_auto)) {
+            if (spec->is_auto)
+                error_at("duplicate auto storage class specifier",
+                         cur_token_loc());
+            spec->is_auto = true;
+        } else if (lex_accept(T_volatile)) {
+            spec->is_volatile = true;
+        } else {
+            lex_expect(T_const);
+            spec->is_const = true;
+        }
+    }
+    if ((spec->is_static &&
+         (spec->is_register || spec->is_extern || spec->is_auto)) ||
+        (spec->is_register && (spec->is_extern || spec->is_auto)) ||
+        (spec->is_extern && spec->is_auto))
+        error_at("incompatible storage class specifiers", cur_token_loc());
+    return saw_specifier;
+}
+
 static basic_block_t *read_block_declarators(
     block_t *parent,
     basic_block_t *bb,
@@ -354,12 +394,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     char token[MAX_ID_LEN];
     type_t *type;
     var_t *vd;
-    bool is_const = false;
-    bool is_static = false;
-    bool is_extern = false;
-    bool is_register = false;
-    bool is_auto = false;
-    bool is_volatile = false;
+    block_decl_specifiers_t spec = {0};
     bool saw_decl_specifier = false;
     bool for_decl_semicolon_consumed = false;
 
@@ -383,42 +418,8 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
          * emits no setup IR.
          */
         handle_block_typedef_statement(blk, setup);
-        for_decl_semicolon_consumed = true;
     } else if (!lex_accept(T_semicolon)) {
-        while (lex_peek(T_static, NULL) || lex_peek(T_extern, NULL) ||
-               lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
-               lex_peek(T_register, NULL) || lex_peek(T_auto, NULL)) {
-            saw_decl_specifier = true;
-            if (lex_accept(T_static)) {
-                if (is_static)
-                    error_at("duplicate static storage class specifier",
-                             cur_token_loc());
-                is_static = true;
-            } else if (lex_accept(T_extern)) {
-                if (is_extern)
-                    error_at("duplicate extern storage class specifier",
-                             cur_token_loc());
-                is_extern = true;
-            } else if (lex_accept(T_register)) {
-                if (is_register)
-                    error_at("duplicate register storage class specifier",
-                             cur_token_loc());
-                is_register = true;
-            } else if (lex_accept(T_auto)) {
-                if (is_auto)
-                    error_at("duplicate auto storage class specifier",
-                             cur_token_loc());
-                is_auto = true;
-            } else if (lex_accept(T_volatile)) {
-                is_volatile = true;
-            } else {
-                lex_expect(T_const);
-                is_const = true;
-            }
-        }
-        if ((is_static && (is_register || is_extern || is_auto)) ||
-            (is_register && (is_extern || is_auto)) || (is_extern && is_auto))
-            error_at("incompatible storage class specifiers", cur_token_loc());
+        saw_decl_specifier = read_block_decl_specifiers(&spec);
 
         bool has_builtin_type = lex_peek(T_signed, NULL) ||
                                 lex_peek(T_unsigned, NULL) ||
@@ -447,22 +448,14 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
         if (!type && saw_decl_specifier)
             error_at("declaration specifier requires a type", cur_token_loc());
         if (type) {
-            block_decl_specifiers_t spec = {0};
-
             /* C99 6.8.5.3 admits only automatic or register object declarations
              * here. The default mode retains its historical block-scope
              * static/extern extension.
              */
-            if (strict_c99 && (is_static || is_extern))
+            if (strict_c99 && (spec.is_static || spec.is_extern))
                 error_at(
                     "C99 for initializer permits only auto or register objects",
                     cur_token_loc());
-            spec.is_const = is_const;
-            spec.is_static = is_static;
-            spec.is_extern = is_extern;
-            spec.is_register = is_register;
-            spec.is_auto = is_auto;
-            spec.is_volatile = is_volatile;
 
             /* The loop scope takes the ordinary block declaration lowering,
              * which also consumes the terminating semicolon.
@@ -491,20 +484,16 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
         lex_expect(T_semicolon);
     } else {
         /* always true */
-        vd = require_var(blk);
-        vd->init_val = 1;
-        vd->var_name = gen_name();
+        vd = load_constant(blk, cond_, 1, TY_int);
         opstack_push(vd);
-        add_insn(blk, cond_, OP_load_constant, vd, NULL, NULL, 0, NULL);
     }
     bb_connect(cond_, for_end, ELSE);
 
-    vd = opstack_pop();
-    reject_record_operand(vd);
-    add_insn(blk, cond_, OP_branch, NULL, vd, NULL, 0, NULL);
+    emit_control_branch(blk, cond_);
 
     basic_block_t *inc_ = bb_create(blk);
-    continue_bb_push(inc_);
+    basic_block_t *inc_start = inc_;
+    continue_bb_push(inc_start);
 
     /* increment after each loop */
     if (!lex_accept(T_close_bracket)) {
@@ -520,10 +509,10 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
 
     /* Normal fallthrough from the loop body goes through the increment block. A
      * continue statement may already have connected another predecessor to
-     * inc_.
+     * inc_start.
      */
     if (body_)
-        bb_connect(body_, inc_, NEXT);
+        bb_connect(body_, inc_start, NEXT);
 
     /* An empty increment block still needs its back-edge when it is reachable
      * through normal fallthrough or continue.
@@ -534,14 +523,7 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
      *         break;
      *     }
      */
-    bool has_pred = false;
-    for (int i = 0; i < inc_->prev_idx; i++) {
-        if (inc_->prev[i].bb) {
-            has_pred = true;
-            break;
-        }
-    }
-    if (has_pred)
+    if (bb_has_pred(inc_start))
         bb_connect(inc_, cond_start, NEXT);
 
     /* jump to increment */
@@ -553,8 +535,6 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
 /* A do-while loop, whose condition is tested after the body. */
 basic_block_t *handle_do_statement(block_t *parent, basic_block_t *bb)
 {
-    var_t *vd;
-
     basic_block_t *n = bb_create(parent);
     bb_connect(bb, n, NEXT);
     bb = n;
@@ -570,13 +550,7 @@ basic_block_t *handle_do_statement(block_t *parent, basic_block_t *bb)
         bb_connect(do_body, cond_, NEXT);
 
     lex_expect(T_while);
-    lex_expect(T_open_bracket);
-    read_control_expression(parent, &cond_);
-    lex_expect(T_close_bracket);
-
-    vd = opstack_pop();
-    reject_record_operand(vd);
-    add_insn(parent, cond_, OP_branch, NULL, vd, NULL, 0, NULL);
+    read_control_branch(parent, &cond_);
 
     lex_expect(T_semicolon);
 
@@ -698,7 +672,7 @@ type_t *read_enum_specifier(block_t *parent, bool *is_definition)
     int val = 0;
     type_t *type = NULL;
     bool has_tag = false;
-    block_t *scope = parent ? parent : GLOBAL_BLOCK;
+    block_t *scope = parent ? parent : CURRENT_TU_SCOPE;
 
     lex_expect(T_enum);
     if (lex_peek(T_identifier, token)) {
@@ -735,6 +709,10 @@ type_t *read_enum_specifier(block_t *parent, bool *is_definition)
         }
         first = false;
         if (!parent) {
+            if (find_block_ordinary(CURRENT_TU_SCOPE, token, ORDINARY_ANY,
+                                    NULL))
+                error_at("identifier redeclared as a different kind of symbol",
+                         cur_token_loc());
             add_constant(token, val);
             continue;
         }
@@ -853,9 +831,7 @@ static void emit_scalar_initializer(block_t *parent,
          var->type->base_type == TYPE_short) &&
         expr_result->var_name[0] == '.') {
         /* Extract first element from compound literal array */
-        var_t *first_elem = require_var(parent);
-        first_elem->type = var->type;
-        first_elem->var_name = gen_name();
+        var_t *first_elem = name_var(require_typed_var(parent, var->type));
 
         /* Read first element from array at offset 0 expr_result is the array
          * itself, so we can read directly from it
@@ -887,7 +863,6 @@ static void read_block_declarator_storage(block_t *parent,
     add_insn(spec->is_static ? GLOBAL_BLOCK : parent,
              spec->is_static ? GLOBAL_FUNC->bbs : *bb, OP_allocat, var, NULL,
              NULL, 0, NULL);
-    add_symbol(*bb, var);
     if (lex_accept(T_assign)) {
         validate_string_array_initializer(var);
         if (spec->is_static) {
@@ -930,18 +905,14 @@ static void read_block_declarator_storage(block_t *parent,
                 struct_type->base_struct)
                 struct_type = struct_type->base_struct;
 
-            var_t *struct_addr = require_var(parent);
-            struct_addr->var_name = gen_name();
+            var_t *struct_addr = require_named_var(parent);
             add_insn(parent, *bb, OP_address_of, struct_addr, var, NULL, 0,
                      NULL);
             lex_expect(T_open_curly);
             parse_struct_field_init(parent, bb, struct_type, struct_addr);
             lex_expect(T_close_curly);
         } else {
-            if (!read_assignment_expression(parent, bb)) {
-                read_expr(parent, bb);
-                read_ternary_operation(parent, bb);
-            }
+            read_assignment_or_expression(parent, bb);
 
             emit_scalar_initializer(parent, bb, var, opstack_pop());
         }
@@ -1140,41 +1111,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
     type_t *type;
     block_decl_specifiers_t spec = {0};
 
-    while (lex_peek(T_static, NULL) || lex_peek(T_extern, NULL) ||
-           lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
-           lex_peek(T_register, NULL) || lex_peek(T_auto, NULL)) {
-        if (lex_accept(T_static)) {
-            if (spec.is_static)
-                error_at("duplicate static storage class specifier",
-                         cur_token_loc());
-            spec.is_static = true;
-        } else if (lex_accept(T_extern)) {
-            if (spec.is_extern)
-                error_at("duplicate extern storage class specifier",
-                         cur_token_loc());
-            spec.is_extern = true;
-        } else if (lex_accept(T_register)) {
-            if (spec.is_register)
-                error_at("duplicate register storage class specifier",
-                         cur_token_loc());
-            spec.is_register = true;
-        } else if (lex_accept(T_auto)) {
-            if (spec.is_auto)
-                error_at("duplicate auto storage class specifier",
-                         cur_token_loc());
-            spec.is_auto = true;
-        } else if (lex_accept(T_volatile)) {
-            spec.is_volatile = true;
-        } else {
-            lex_expect(T_const);
-            spec.is_const = true;
-        }
-    }
-    if ((spec.is_static &&
-         (spec.is_register || spec.is_extern || spec.is_auto)) ||
-        (spec.is_register && (spec.is_extern || spec.is_auto)) ||
-        (spec.is_extern && spec.is_auto))
-        error_at("incompatible storage class specifiers", cur_token_loc());
+    read_block_decl_specifiers(&spec);
 
     if (floating_type_starts_here())
         error_at("Floating point types are not yet supported", cur_token_loc());
@@ -1298,7 +1235,6 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
         basic_block_t *n = bb_create(parent);
         bb_connect(bb, n, NEXT);
         add_label(token, n);
-        add_insn(parent, n, OP_label, NULL, NULL, NULL, 0, token);
         return n;
     }
     return read_full_expression_statement(parent, bb);
@@ -1343,152 +1279,118 @@ static void peek_specifier_qualifiers(bool *is_const, bool *is_volatile)
  * selected direct-function, callback-pointer, and fixed callback-array forms;
  * remaining derived declarations await the shared declarator path.
  */
-basic_block_t *handle_block_typedef_statement(block_t *parent,
-                                              basic_block_t *bb)
+static type_t *typedef_alias_from_declarator(const var_t *source,
+                                             bool specifier_const,
+                                             bool specifier_volatile,
+                                             bool file_scope)
 {
-    var_t decl = {0};
-    bool specifier_const = false;
-    bool specifier_volatile = false;
+    var_t decl;
+    memcpy(&decl, source, sizeof(decl));
+    type_t *base = decl.type;
+    type_t *alias = add_type();
+    func_t *direct_function_signature = decl.func_signature;
+    func_t *callback_signature = decl.func_signature;
+    func_t *callback_slot_signature = decl.pointee_func_signature;
+    bool direct_array = decl.has_direct_array_declarator;
+    bool direct_pointee_array = decl.has_direct_pointee_array_declarator;
 
-    lex_expect(T_typedef);
-    decl.scope = parent;
-    peek_specifier_qualifiers(&specifier_const, &specifier_volatile);
-    parsing_block_typedef_declarator = true;
-
-    /* The shared specifier reader resolves an enum tag but cannot define one,
-     * so read an enum specifier here, then its trailing qualifiers and the
-     * declarators. A leading qualifier is still ahead of the enum keyword.
+    /* `fn_t (*rows_t)[2]`, or the spelled `int (*(*rows_t)[2])(int)`, points to
+     * a row of callbacks: the callback typedef is the element.
      */
-    read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile, false);
-    if (lex_peek(T_enum, NULL)) {
-        bool is_definition;
+    bool callback_row_alias =
+        direct_pointee_array && base->func_signature &&
+        !base->is_direct_function_type && !base->pointee_func_signature &&
+        !decl.array_size &&
+        (file_scope || !decl.pointee_array_element_ptr_level);
+    bool inherited_pointee_array = base->pointee_array_size != 0;
+    bool direct_function_alias =
+        decl.is_direct_function_declarator && decl.is_func &&
+        decl.func_signature && !decl.array_size && !decl.pointee_array_size &&
+        !base->ptr_level &&
+        (file_scope || (!is_record_type(base) && !base->is_floating)) &&
+        !direct_function_signature->returns_aggregate;
+    bool callback_pointer_alias =
+        decl.is_func && decl.func_signature &&
+        decl.parenthesized_function_pointer_level == 1 && !decl.array_size &&
+        (file_scope || !decl.pointee_array_size) &&
+        (file_scope || !base->ptr_level ||
+         (!base->func_signature && !base->pointee_func_signature)) &&
+        (file_scope || (!is_record_type(base) && !base->is_floating)) &&
+        (file_scope || !callback_signature->va_args) &&
+        (file_scope || !callback_signature->returns_aggregate);
+    bool callback_pointer_realias =
+        decl.is_func && decl.func_signature &&
+        !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
+        !decl.array_size && !decl.pointee_array_size && !base->ptr_level &&
+        base->func_signature && !base->is_direct_function_type;
 
-        decl.type = read_enum_specifier(parent, &is_definition);
-        read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile,
-                             false);
-        read_inner_var_decl(&decl, false, false, false);
-    } else if ((lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) &&
-               (cur_token->next->next->kind == T_open_curly ||
-                (cur_token->next->next->kind == T_identifier &&
-                 cur_token->next->next->next->kind == T_open_curly))) {
-        /* A record body defines its type, and its tag in this block, before the
-         * declarators; the shared specifier reader only names a tag.
-         */
-        char tag[MAX_ID_LEN];
-        base_type_t kind = accept_record_keyword();
-        bool has_tag = lex_peek(T_identifier, tag);
+    /* `int (**slot_t)(int)` is a pointer-to-callback object, not a callable
+     * callback pointer. The shared declarator parser has already normalized the
+     * extra star into decl.ptr_level and retained the prototype as pointee
+     * metadata. Keep this first exact typedef form equally narrow: scalar/void,
+     * no arrays or qualifiers; each further star, as in `int (***slot_t)(int)`,
+     * is one more object pointer.
+     */
+    bool callback_slot_alias =
+        callback_slot_signature &&
+        decl.parenthesized_function_pointer_level >= 2 &&
+        (file_scope ||
+         decl.ptr_level == decl.parenthesized_function_pointer_level - 1) &&
+        !decl.array_size && !decl.pointee_array_size &&
+        (file_scope || (!base->ptr_level && !is_record_type(base) &&
+                        !base->is_floating && !decl.is_const_qualified &&
+                        !decl.parenthesized_function_pointer_inner_qualified &&
+                        !callback_slot_signature->va_args &&
+                        !callback_slot_signature->returns_aggregate));
+    bool callback_slot_realias =
+        decl.pointee_func_signature &&
+        !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
+        !decl.array_size && !decl.pointee_array_size && base->ptr_level >= 1 &&
+        base->pointee_func_signature && !decl.is_const_qualified &&
+        !decl.parenthesized_function_pointer_inner_qualified &&
+        !decl.parenthesized_function_pointer_restrict;
+    bool callback_slot_array_alias =
+        callback_slot_signature &&
+        decl.parenthesized_function_pointer_level == 2 && decl.ptr_level == 1 &&
+        decl.array_size > 0 && !decl.has_unsized_array &&
+        !decl.pointee_array_size && !base->ptr_level && !base->array_size &&
+        !is_record_type(base) && !base->is_floating &&
+        !decl.is_const_qualified &&
+        (!decl.is_const_pointer ||
+         decl.parenthesized_function_pointer_outer_const) &&
+        (!decl.pointer_const_mask ||
+         (decl.parenthesized_function_pointer_outer_const &&
+          decl.pointer_const_mask == 1U)) &&
+        (!decl.is_volatile ||
+         decl.parenthesized_function_pointer_outer_volatile) &&
+        !decl.parenthesized_function_pointer_inner_qualified &&
+        (!decl.parenthesized_function_pointer_restrict ||
+         decl.parenthesized_function_pointer_outer_restrict) &&
+        (file_scope || !callback_slot_signature->va_args) &&
+        (file_scope || !callback_slot_signature->returns_aggregate);
+    bool callback_slot_array_realias =
+        !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
+        !decl.pointee_array_size && base->array_size > 0 &&
+        base->array_element_ptr_level == 1 &&
+        base->array_element_pointee_func_signature && !decl.is_const_pointer &&
+        !decl.pointer_const_mask &&
+        !decl.parenthesized_function_pointer_restrict;
+    bool callback_array_alias =
+        decl.is_func && decl.func_signature &&
+        decl.parenthesized_function_pointer_level == 1 && decl.array_size > 0 &&
+        (file_scope || !decl.pointee_array_size) &&
+        (file_scope || (!decl.ptr_level && !base->ptr_level &&
+                        !is_record_type(base) && !base->is_floating)) &&
+        (file_scope || !callback_signature->va_args) &&
+        (file_scope || !callback_signature->returns_aggregate);
+    bool callback_array_realias =
+        decl.is_func && decl.func_signature &&
+        !decl.parenthesized_function_pointer_level && !direct_array &&
+        !decl.ptr_level && !decl.pointee_array_size && base->array_size > 0 &&
+        base->array_element_ptr_level == 1 && base->func_signature &&
+        !base->is_direct_function_type;
 
-        if (has_tag)
-            lex_expect(T_identifier);
-        decl.type = read_record_body(parent, kind, has_tag, tag);
-        read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile,
-                             false);
-        read_inner_var_decl(&decl, false, false, false);
-    } else
-        read_full_var_decl(&decl, false, false, false);
-    parsing_block_typedef_declarator = false;
-    do {
-        type_t *base = decl.type;
-        type_t *alias = add_type();
-        func_t *direct_function_signature = decl.func_signature;
-        func_t *callback_signature = decl.func_signature;
-        func_t *callback_slot_signature = decl.pointee_func_signature;
-        bool direct_array = decl.has_direct_array_declarator;
-        bool direct_pointee_array = decl.has_direct_pointee_array_declarator;
-
-        /* `fn_t (*rows_t)[2]`, or the spelled `int (*(*rows_t)[2])(int)`,
-         * points to a row of callbacks: the callback typedef is the element.
-         */
-        bool callback_row_alias =
-            direct_pointee_array && base->func_signature &&
-            !base->is_direct_function_type && !base->pointee_func_signature &&
-            !decl.array_size && !decl.pointee_array_element_ptr_level;
-        bool inherited_pointee_array = base->pointee_array_size != 0;
-        bool direct_function_alias =
-            decl.is_direct_function_declarator && decl.is_func &&
-            decl.func_signature && !decl.array_size &&
-            !decl.pointee_array_size && !base->ptr_level &&
-            !is_record_type(base) && !base->is_floating &&
-            !direct_function_signature->returns_aggregate;
-        bool callback_pointer_alias =
-            decl.is_func && decl.func_signature &&
-            decl.parenthesized_function_pointer_level == 1 && !decl.ptr_level &&
-            !decl.array_size && !decl.pointee_array_size && !base->ptr_level &&
-            !is_record_type(base) && !base->is_floating &&
-            !callback_signature->va_args &&
-            !callback_signature->returns_aggregate;
-        bool callback_pointer_realias =
-            decl.is_func && decl.func_signature &&
-            !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
-            !decl.array_size && !decl.pointee_array_size && !base->ptr_level &&
-            base->func_signature && !base->is_direct_function_type;
-
-        /* `int (**slot_t)(int)` is a pointer-to-callback object, not a callable
-         * callback pointer. The shared declarator parser has already normalized
-         * the extra star into decl.ptr_level and retained the prototype as
-         * pointee metadata. Keep this first exact typedef form equally narrow:
-         * scalar/void, no arrays or qualifiers; each further star, as in `int
-         * (***slot_t)(int)`, is one more object pointer.
-         */
-        bool callback_slot_alias =
-            callback_slot_signature &&
-            decl.parenthesized_function_pointer_level >= 2 &&
-            decl.ptr_level == decl.parenthesized_function_pointer_level - 1 &&
-            !decl.array_size && !decl.pointee_array_size && !base->ptr_level &&
-            !is_record_type(base) && !base->is_floating &&
-            !decl.is_const_qualified &&
-            !decl.parenthesized_function_pointer_inner_qualified &&
-            !callback_slot_signature->va_args &&
-            !callback_slot_signature->returns_aggregate;
-        bool callback_slot_realias =
-            decl.pointee_func_signature &&
-            !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
-            !decl.array_size && !decl.pointee_array_size &&
-            base->ptr_level >= 1 && base->pointee_func_signature &&
-            !decl.is_const_qualified &&
-            !decl.parenthesized_function_pointer_inner_qualified &&
-            !decl.parenthesized_function_pointer_restrict;
-        bool callback_slot_array_alias =
-            callback_slot_signature &&
-            decl.parenthesized_function_pointer_level == 2 &&
-            decl.ptr_level == 1 && decl.array_size > 0 &&
-            !decl.has_unsized_array && !decl.pointee_array_size &&
-            !base->ptr_level && !base->array_size && !is_record_type(base) &&
-            !base->is_floating && !decl.is_const_qualified &&
-            (!decl.is_const_pointer ||
-             decl.parenthesized_function_pointer_outer_const) &&
-            (!decl.pointer_const_mask ||
-             (decl.parenthesized_function_pointer_outer_const &&
-              decl.pointer_const_mask == 1U)) &&
-            (!decl.is_volatile ||
-             decl.parenthesized_function_pointer_outer_volatile) &&
-            !decl.parenthesized_function_pointer_inner_qualified &&
-            (!decl.parenthesized_function_pointer_restrict ||
-             decl.parenthesized_function_pointer_outer_restrict) &&
-            !callback_slot_signature->va_args &&
-            !callback_slot_signature->returns_aggregate;
-        bool callback_slot_array_realias =
-            !decl.parenthesized_function_pointer_level && !decl.ptr_level &&
-            !decl.pointee_array_size && base->array_size > 0 &&
-            base->array_element_ptr_level == 1 &&
-            base->array_element_pointee_func_signature &&
-            !decl.is_const_pointer && !decl.pointer_const_mask &&
-            !decl.parenthesized_function_pointer_restrict;
-        bool callback_array_alias =
-            decl.is_func && decl.func_signature &&
-            decl.parenthesized_function_pointer_level == 1 &&
-            decl.array_size > 0 && !decl.ptr_level &&
-            !decl.pointee_array_size && !base->ptr_level &&
-            !is_record_type(base) && !base->is_floating &&
-            !callback_signature->va_args &&
-            !callback_signature->returns_aggregate;
-        bool callback_array_realias =
-            decl.is_func && decl.func_signature &&
-            !decl.parenthesized_function_pointer_level && !direct_array &&
-            !decl.ptr_level && !decl.pointee_array_size &&
-            base->array_size > 0 && base->array_element_ptr_level == 1 &&
-            base->func_signature && !base->is_direct_function_type;
-
+    if (!file_scope) {
         if (decl.parenthesized_function_pointer_level > 1 &&
             !callback_slot_alias && !callback_slot_array_alias)
             error_at(
@@ -1548,166 +1450,286 @@ basic_block_t *handle_block_typedef_statement(block_t *parent,
         if (lex_peek(T_assign, NULL))
             error_at("typedef declaration cannot have an initializer",
                      next_token_loc());
-        memcpy(alias, base, sizeof(*alias));
+    }
+    memcpy(alias, base, sizeof(*alias));
 
-        /* A record alias takes the typedef descriptor, which reaches the layout
-         * through base_struct, and so does a function alias, whose void or
-         * scalar base is only its return type. A data alias keeps its base's
-         * type, as a file-scope one does: with no base_struct to follow,
-         * dereferencing a pointer alias would otherwise yield the pointer type
-         * itself.
+    /* A record alias takes the typedef descriptor, which reaches the layout
+     * through base_struct, and so does a function alias, whose void or scalar
+     * base is only its return type. A data alias keeps its base's type, as a
+     * file-scope one does: with no base_struct to follow, dereferencing a
+     * pointer alias would otherwise yield the pointer type itself.
+     */
+    bool is_function_alias =
+        decl.is_func || decl.func_signature || decl.pointee_func_signature ||
+        base->func_signature || base->pointee_func_signature ||
+        base->array_element_pointee_func_signature;
+
+    if (is_function_alias && !file_scope)
+        alias->base_type = TYPE_typedef;
+    if (is_record_type(base) && !base->ptr_level) {
+        alias->base_type = TYPE_typedef;
+        alias->base_struct = base;
+
+        /* A pointer to the record is no record itself: like `typedef struct S
+         * *SP` at file scope it finds the members on its base.
          */
-        bool is_function_alias = decl.is_func || decl.func_signature ||
-                                 decl.pointee_func_signature ||
-                                 base->func_signature ||
-                                 base->pointee_func_signature ||
-                                 base->array_element_pointee_func_signature;
-
-        if (is_function_alias)
-            alias->base_type = TYPE_typedef;
-        if (is_record_type(base) && !base->ptr_level) {
-            alias->base_type = TYPE_typedef;
-            alias->base_struct = base;
-
-            /* A pointer to the record is no record itself: like `typedef struct
-             * S *SP` at file scope it finds the members on its base.
-             */
-            if (decl.ptr_level) {
-                alias->fields = NULL;
-                alias->num_fields = 0;
-            }
+        if (decl.ptr_level) {
+            alias->fields = NULL;
+            alias->num_fields = 0;
         }
-        alias->ptr_level = base->ptr_level + decl.ptr_level;
+    }
+    alias->ptr_level = base->ptr_level + decl.ptr_level;
+    if (file_scope)
+        alias->is_direct_function_type = false;
+    alias->pointer_const_mask =
+        base->pointer_const_mask | (decl.pointer_const_mask << base->ptr_level);
+    alias->pointer_volatile_mask = decl.pointer_volatile_mask;
+    if (file_scope && decl.ptr_level && base->func_signature &&
+        !base->is_direct_function_type && !base->ptr_level &&
+        decl.callback_is_volatile)
+        alias->pointer_volatile_mask |= 1U;
+
+    /* `const ptr_t` qualifies the pointer that the base typedef hides, not its
+     * pointee, for every declarator of the list.
+     */
+    if (specifier_const && base->ptr_level && base->ptr_level <= 32 &&
+        !is_function_alias)
+        alias->pointer_const_mask |= 1U << (base->ptr_level - 1);
+    alias->is_const_qualified = decl.is_const_qualified;
+    if (callback_pointer_realias && decl.is_const_qualified) {
+        /* A callback alias itself is a pointer type, even though its compact
+         * descriptor stores no ordinary pointer depth.
+         */
+        alias->pointer_const_mask |= 1U;
+        alias->is_const_qualified = false;
+    }
+    alias->is_volatile_qualified =
+        decl.is_volatile || base->is_volatile_qualified;
+    int volatile_depth =
+        base->ptr_level + (base->func_signature &&
+                           !base->is_direct_function_type && !base->ptr_level);
+    if (specifier_volatile && volatile_depth && volatile_depth <= 32) {
+        alias->pointer_volatile_mask |= 1U << (volatile_depth - 1);
+        alias->is_volatile_qualified = base->is_volatile_qualified;
+    }
+    if (direct_function_alias) {
+        alias->base_type = TYPE_typedef;
+
+        /* The stars of `char *name_t(void)` belong to the return type, which
+         * the signature already records.
+         */
+        alias->ptr_level = base->ptr_level;
+        alias->pointer_const_mask = base->pointer_const_mask;
+        if (file_scope)
+            alias->pointer_volatile_mask = 0;
+        alias->func_signature = decl.func_signature;
+        alias->is_direct_function_type = true;
+    }
+    if (callback_pointer_alias || (file_scope && callback_array_alias)) {
+        int return_depth = effective_pointer_depth(&decl);
+        alias->ptr_level = 0;
         alias->pointer_const_mask =
-            base->pointer_const_mask |
-            (decl.pointer_const_mask << base->ptr_level);
-
-        /* `const ptr_t` qualifies the pointer that the base typedef hides, not
-         * its pointee, for every declarator of the list.
+            decl.ptr_level < 32 ? decl.pointer_const_mask >> decl.ptr_level : 0;
+        alias->pointer_volatile_mask =
+            return_depth < 32 ? decl.pointer_volatile_mask >> return_depth : 0;
+        if (base->func_signature && !base->is_direct_function_type &&
+            !base->ptr_level) {
+            alias->pointer_const_mask = decl.callback_is_const ? 1U : 0;
+            alias->pointer_volatile_mask = decl.callback_is_volatile ? 1U : 0;
+        }
+        alias->is_const_qualified = false;
+        alias->is_volatile_qualified = false;
+        alias->size = PTR_SIZE;
+        alias->alignment = PTR_SIZE;
+        alias->func_signature = decl.func_signature;
+        alias->pointee_func_signature = NULL;
+        alias->is_direct_function_type = false;
+    }
+    if (file_scope && (callback_pointer_alias || callback_array_alias ||
+                       callback_slot_alias)) {
+        fixed_array_shape_t shape = fixed_array_shape_from_var(&decl);
+        fixed_array_shape_to_type(alias, &shape);
+        alias->array_element_ptr_level = decl.array_size ? 1 : 0;
+        alias->array_element_type = NULL;
+        alias->array_element_pointee_func_signature = NULL;
+        alias->array_element_is_const_pointer = false;
+        alias->array_element_is_volatile = false;
+        var_t callback_shape = {0};
+        copy_pointee_array_shape_to_type(alias, &callback_shape);
+        alias->pointee_array_element_type = NULL;
+    }
+    if (callback_slot_alias) {
+        alias->size = PTR_SIZE;
+        alias->alignment = PTR_SIZE;
+        alias->func_signature = NULL;
+        alias->pointee_func_signature = callback_slot_signature;
+        alias->is_direct_function_type = false;
+    }
+    if (callback_slot_array_alias) {
+        alias->ptr_level = 0;
+        alias->size = PTR_SIZE;
+        alias->alignment = PTR_SIZE;
+        alias->func_signature = NULL;
+        alias->pointee_func_signature = NULL;
+        alias->is_direct_function_type = false;
+        alias->pointer_const_mask = 0;
+        alias->is_volatile_qualified = false;
+        compose_block_typedef_array(alias, base, &decl);
+        alias->array_element_ptr_level = 1;
+        alias->array_element_pointee_func_signature = callback_slot_signature;
+        alias->array_element_is_const_pointer =
+            decl.parenthesized_function_pointer_outer_const;
+        alias->array_element_is_volatile =
+            decl.parenthesized_function_pointer_outer_volatile;
+    }
+    if (callback_slot_array_realias && direct_array) {
+        /* Wrapping a completed slot-array alias prepends bounds but must keep
+         * its element as a callback slot. compose_* records the declaration's
+         * zero direct pointer depth, so restore the completed element
+         * descriptor after composition.
          */
-        if (specifier_const && base->ptr_level && base->ptr_level <= 32 &&
-            !is_function_alias)
-            alias->pointer_const_mask |= 1U << (base->ptr_level - 1);
-        alias->is_const_qualified = decl.is_const_qualified;
-        if (callback_pointer_realias && decl.is_const_qualified) {
-            /* A callback alias itself is a pointer type, even though its
-             * compact descriptor stores no ordinary pointer depth.
-             */
-            alias->pointer_const_mask |= 1U;
-            alias->is_const_qualified = false;
-        }
-        alias->is_volatile_qualified =
-            decl.is_volatile || base->is_volatile_qualified;
-        if (direct_function_alias) {
-            /* The stars of `char *name_t(void)` belong to the return type,
-             * which the signature already records.
-             */
-            alias->ptr_level = base->ptr_level;
-            alias->pointer_const_mask = base->pointer_const_mask;
-            alias->func_signature = decl.func_signature;
-            alias->is_direct_function_type = true;
-        }
-        if (callback_pointer_alias) {
-            alias->size = PTR_SIZE;
-            alias->func_signature = decl.func_signature;
-            alias->is_direct_function_type = false;
-        }
-        if (callback_slot_alias) {
-            alias->size = PTR_SIZE;
-            alias->alignment = PTR_SIZE;
-            alias->func_signature = NULL;
-            alias->pointee_func_signature = callback_slot_signature;
-            alias->is_direct_function_type = false;
-        }
-        if (callback_slot_array_alias) {
-            alias->ptr_level = 0;
-            alias->size = PTR_SIZE;
-            alias->alignment = PTR_SIZE;
-            alias->func_signature = NULL;
-            alias->pointee_func_signature = NULL;
-            alias->is_direct_function_type = false;
-            alias->pointer_const_mask = 0;
-            alias->is_volatile_qualified = false;
+        compose_block_typedef_array(alias, base, &decl);
+        alias->array_element_ptr_level = base->array_element_ptr_level;
+        alias->array_element_pointee_func_signature =
+            base->array_element_pointee_func_signature;
+    }
+    if (callback_slot_array_realias) {
+        /* Qualifying an array typedef qualifies its element type. Keep that
+         * fact on the final callback-slot lvalue rather than making the array
+         * object itself const or volatile. `restrict` has no runtime
+         * representation, but was validated while parsing.
+         */
+        alias->is_const_qualified = false;
+        alias->is_volatile_qualified = false;
+        alias->array_element_is_const_pointer |= decl.is_const_qualified;
+        alias->array_element_is_volatile |= decl.is_volatile;
+    }
+    if (callback_slot_realias && decl.is_const_pointer) {
+        /* `slot_t const` qualifies the typedef-hidden outer slot pointer, so do
+         * not shift the declaration's compact bit past it.
+         */
+        alias->pointer_const_mask |= 1U;
+        alias->is_const_qualified = false;
+    }
+    if (callback_array_alias) {
+        alias->size = PTR_SIZE;
+        alias->alignment = PTR_SIZE;
+        alias->func_signature = decl.func_signature;
+        alias->is_direct_function_type = false;
+    }
+    if (file_scope && direct_array && !alias->ptr_level && !alias->size &&
+        alias->base_struct && !alias->base_struct->size)
+        error_at("Typedef array element has incomplete record type",
+                 cur_token_loc());
+    if (direct_array || callback_array_alias) {
+        if (!file_scope || !callback_array_alias)
             compose_block_typedef_array(alias, base, &decl);
-            alias->array_element_ptr_level = 1;
-            alias->array_element_pointee_func_signature =
-                callback_slot_signature;
-            alias->array_element_is_const_pointer =
-                decl.parenthesized_function_pointer_outer_const;
-            alias->array_element_is_volatile =
-                decl.parenthesized_function_pointer_outer_volatile;
-        }
-        if (callback_slot_array_realias && direct_array) {
-            /* Wrapping a completed slot-array alias prepends bounds but must
-             * keep its element as a callback slot. compose_* records the
-             * declaration's zero direct pointer depth, so restore the completed
-             * element descriptor after composition.
-             */
-            compose_block_typedef_array(alias, base, &decl);
-            alias->array_element_ptr_level = base->array_element_ptr_level;
-            alias->array_element_pointee_func_signature =
-                base->array_element_pointee_func_signature;
-        }
-        if (callback_slot_array_realias) {
-            /* Qualifying an array typedef qualifies its element type. Keep that
-             * fact on the final callback-slot lvalue rather than making the
-             * array object itself const or volatile. `restrict` has no runtime
-             * representation, but was validated while parsing.
-             */
-            alias->is_const_qualified = false;
-            alias->is_volatile_qualified = false;
-            alias->array_element_is_const_pointer |= decl.is_const_qualified;
-            alias->array_element_is_volatile |= decl.is_volatile;
-        }
-        if (callback_slot_realias && decl.is_const_pointer) {
-            /* `slot_t const` qualifies the typedef-hidden outer slot pointer,
-             * so do not shift the declaration's compact bit past it.
-             */
-            alias->pointer_const_mask |= 1U;
-            alias->is_const_qualified = false;
-        }
         if (callback_array_alias) {
-            alias->size = PTR_SIZE;
-            alias->alignment = PTR_SIZE;
-            alias->func_signature = decl.func_signature;
-            alias->is_direct_function_type = false;
+            alias->array_element_ptr_level = 1;
+            if (file_scope)
+                alias->array_element_type = NULL;
+        } else if (file_scope) {
+            alias->array_element_ptr_level = alias->ptr_level;
+            alias->array_element_type =
+                base->array_element_type
+                    ? base->array_element_type
+                    : (base->ptr_level ? pointee_type_from_pointer_typedef(base)
+                                       : base);
         }
-        if (direct_array || callback_array_alias) {
-            compose_block_typedef_array(alias, base, &decl);
-            if (callback_array_alias)
-                alias->array_element_ptr_level = 1;
-            if (direct_array && inherited_pointee_array) {
-                /* A direct array suffix around `int (*row_t)[N]` stores
-                 * pointer-to-row elements. Keep the row descriptor on the
-                 * completed array and mark the selected element as that pointer
-                 * slot so its later load retains the row stride.
-                 */
-                alias->array_element_ptr_level = base->ptr_level;
-                alias->array_element_type =
-                    base->pointee_array_element_type
-                        ? base->pointee_array_element_type
-                        : base;
-            }
-        }
-        if (callback_row_alias)
-            alias_callback_row_pointer(alias, base, decl.pointer_const_mask);
-
-        /* As at file scope, `typedef arr_t *rows_t` points to a row of the
-         * callbacks in the array typedef arr_t.
-         */
-        if (decl.ptr_level == 1 && !direct_array && !direct_pointee_array)
-            alias_callback_array_pointer(alias, base, decl.pointer_const_mask);
-        if (direct_pointee_array) {
-            alias->pointee_array_size = decl.pointee_array_size;
-            alias->pointee_array_dim2 = decl.pointee_array_dim2;
-            alias->pointee_array_dim3 = decl.pointee_array_dim3;
-            alias->pointee_array_dim4 = decl.pointee_array_dim4;
+        if (direct_array && decl.ptr_level && decl.pointee_array_size &&
+            base->array_size) {
+            copy_pointee_array_shape_to_type(alias, &decl);
             alias->pointee_array_element_ptr_level =
-                decl.pointee_array_element_ptr_level;
-            alias->pointee_array_element_type = base;
+                base->array_element_ptr_level;
+            alias->pointee_array_element_type =
+                base->array_element_type ? base->array_element_type : base;
+            alias->array_element_type = alias->pointee_array_element_type;
+            if (alias->array_element_type->func_signature)
+                alias_callback_row_pointer(alias, alias->array_element_type,
+                                           decl.pointer_const_mask);
         }
-        if (alias->ptr_level)
-            alias->size = PTR_SIZE;
+        if (direct_array && inherited_pointee_array) {
+            /* A direct array suffix around `int (*row_t)[N]` stores
+             * pointer-to-row elements. Keep the row descriptor on the completed
+             * array and mark the selected element as that pointer slot so its
+             * later load retains the row stride.
+             */
+            alias->array_element_ptr_level = base->ptr_level;
+            alias->array_element_type = base->pointee_array_element_type
+                                            ? base->pointee_array_element_type
+                                            : base;
+        }
+    }
+    if (callback_row_alias)
+        alias_callback_row_pointer(alias, base, decl.pointer_const_mask);
+
+    /* As at file scope, `typedef arr_t *rows_t` points to a row of the
+     * callbacks in the array typedef arr_t.
+     */
+    if (decl.ptr_level == 1 && !direct_array && !direct_pointee_array)
+        alias_callback_array_pointer(alias, base, decl.pointer_const_mask);
+    if (direct_pointee_array) {
+        if (file_scope)
+            decl.pointee_array_element_ptr_level += base->ptr_level;
+        copy_pointee_array_shape_to_type(alias, &decl);
+        alias->pointee_array_element_type =
+            file_scope && base->ptr_level
+                ? pointee_type_from_pointer_typedef(base)
+                : base;
+    }
+    if (alias->ptr_level)
+        alias->size = PTR_SIZE;
+    return alias;
+}
+
+basic_block_t *handle_block_typedef_statement(block_t *parent,
+                                              basic_block_t *bb)
+{
+    var_t decl = {0};
+    bool specifier_const = false;
+    bool specifier_volatile = false;
+
+    lex_expect(T_typedef);
+    decl.scope = parent;
+    peek_specifier_qualifiers(&specifier_const, &specifier_volatile);
+    parsing_block_typedef_declarator = true;
+
+    /* The shared specifier reader resolves an enum tag but cannot define one,
+     * so read an enum specifier here, then its trailing qualifiers and the
+     * declarators. A leading qualifier is still ahead of the enum keyword.
+     */
+    read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile, false);
+    if (lex_peek(T_enum, NULL)) {
+        bool is_definition;
+
+        decl.type = read_enum_specifier(parent, &is_definition);
+        read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile,
+                             false);
+        read_inner_var_decl(&decl, false, false, false);
+    } else if ((lex_peek(T_struct, NULL) || lex_peek(T_union, NULL)) &&
+               (cur_token->next->next->kind == T_open_curly ||
+                (cur_token->next->next->kind == T_identifier &&
+                 cur_token->next->next->next->kind == T_open_curly))) {
+        /* A record body defines its type, and its tag in this block, before the
+         * declarators; the shared specifier reader only names a tag.
+         */
+        char tag[MAX_ID_LEN];
+        base_type_t kind = accept_record_keyword();
+        bool has_tag = lex_peek(T_identifier, tag);
+
+        if (has_tag)
+            lex_expect(T_identifier);
+        decl.type = read_record_body(parent, kind, has_tag, tag);
+        read_type_qualifiers(&decl.is_const_qualified, &decl.is_volatile,
+                             false);
+        read_inner_var_decl(&decl, false, false, false);
+    } else
+        read_full_var_decl(&decl, false, false, false);
+    parsing_block_typedef_declarator = false;
+    do {
+        type_t *base = decl.type;
+        type_t *alias = typedef_alias_from_declarator(
+            &decl, specifier_const, specifier_volatile, false);
         alias->type_name[0] = '\0';
         add_block_typedef(parent, decl.var_name, alias);
         if (!lex_accept(T_comma))
@@ -1791,7 +1813,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         return handle_do_statement(parent, bb);
 
     if (lex_accept(T_goto))
-        return handle_goto_statement(parent, bb);
+        return handle_goto_statement(bb);
 
     hoist_storage_class_specifiers();
     if (lex_peek(T_typedef, NULL))
@@ -1800,9 +1822,6 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     /* empty statement */
     if (lex_accept(T_semicolon))
         return bb;
-
-    if (grouped_scalar_pointee_row_store_starts(parent))
-        return handle_grouped_scalar_pointee_row_store(parent, bb);
 
     /* These cannot begin a declaration, so they are unambiguously expression
      * statements. Identifiers remain delegated to handle_declaration(), which
@@ -1847,8 +1866,6 @@ basic_block_t *read_code_block(func_t *func, block_t *parent, basic_block_t *bb)
     return bb;
 }
 
-void var_add_killed_bb(var_t *var, basic_block_t *bb);
-
 void read_func_body(func_t *func)
 {
     block_t *blk = add_block(NULL, func);
@@ -1859,9 +1876,6 @@ void read_func_body(func_t *func)
         func->sret_def.type = func->return_def.type;
         func->sret_def.ptr_level = 1;
         func->sret_def.var_name = "__shecc_sret";
-        func->sret_def.base = &func->sret_def;
-        add_symbol(func->bbs, &func->sret_def);
-        var_add_killed_bb(&func->sret_def, func->bbs);
     }
 
     for (int i = 0; i < func->num_params; i++) {
@@ -1872,18 +1886,15 @@ void read_func_body(func_t *func)
         /* A volatile parameter lives in its slot, as a volatile local does. */
         if (func->param_defs[i].is_volatile)
             func->param_defs[i].address_taken = true;
-        add_symbol(func->bbs, &func->param_defs[i]);
-        func->param_defs[i].base = &func->param_defs[i];
-        var_add_killed_bb(&func->param_defs[i], func->bbs);
     }
+    vir_frontend_begin(func);
     basic_block_t *body = read_code_block(func, NULL, func->bbs);
     if (body)
         bb_connect(body, func->exit, NEXT);
 
     for (int i = 0; i < backpatch_bb_idx; i++) {
         basic_block_t *bb = backpatch_bb[i];
-        insn_t *g = bb->insn_list.tail;
-        label_t *label = find_label(g->str);
+        label_t *label = find_label(backpatch_label[i]);
         if (!label)
             error_at("goto label undefined", cur_token_loc());
 
@@ -1901,4 +1912,5 @@ void read_func_body(func_t *func)
 
     backpatch_bb_idx = 0;
     label_idx = 0;
+    vir_frontend_end(func);
 }

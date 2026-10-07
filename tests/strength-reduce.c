@@ -28,5 +28,12 @@ read_loop:
     goto read_loop;
 
 read_done:
-    return sum != 10;
+    /* The same walks as for loops with "i++", whose counter is incremented
+     * through a copy of its old value.
+     */
+    for (i = 0; i < 4; i++)
+        a[i * 4] = a[i * 4] * 2;
+    for (int j = 0; j < 4; j++)
+        sum = sum + a[j * 4];
+    return sum != 30;
 }

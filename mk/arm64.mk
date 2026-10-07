@@ -17,8 +17,8 @@ ARCH_DEFS = \
      * gap leaves both inside one 64K page, where the writable mapping replaces\n$\
      * the executable one. */\n$\
     \#define PAGESIZE 65536\n$\
-    \#define REG_CNT 11\n$\
-    \#define CALLEE_SAVED_REGS 3\n$\
+    \#define REG_CNT 24\n$\
+    \#define CALLEE_SAVED_REGS 9\n$\
     \#define DYN_LINKER \"/lib/ld-linux-aarch64.so.1\"\n$\
     \#define LIBC_SO \"libc.so.6\"\n$\
     \#define LIBDL_SO \"libdl.so.2\"\n$\

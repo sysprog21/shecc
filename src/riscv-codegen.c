@@ -12,385 +12,234 @@
 
 #define RV32_ALIGNMENT 16
 
-/* Explanation: registers preservation/restoration
- *
- * The following table illustrates which registers are caller-saved or
- * callee-saved:
- * +-----------+--------+
- * | Register  | Saver  |
- * | ABI Name  |        |
- * +-----------+--------+
- * | zero,     |        |
- * | gp,       | (None) |
- * | tp        |        |
- * +-----------+--------+
- * | ra        | Caller |
- * +-----------+--------+
- * | sp        | Callee |
- * +-----------+--------+
- * | a0 - a7   | Caller |
- * +-----------+--------+
- * | s0 - s11  | Callee |
- * +-----------+--------+
- * | t0 - t6   | Caller |
- * +-----------+--------+
- *
- * - ra and sp: are properly handled by the code generator.
- *
- * - a0 - a7: are implicitly handled in register allocation phase.
- *
- *   Register allocation use 8 virtual registers (vreg0 - vreg7) to
- *   allocate registers from IR. When encountering a function call,
- *   all virtual registers are spilled properly before the call, and
- *   their contents will also be restored if they are used after the
- *   call.
- *
- *   Since vreg0 - vreg7 map to a0 - a7 directly, these physical
- *   registers are also preserved/restored naturally whan a function
- *   is invoked or returned.
- *
- * - s0 and s1: handling depends on the linking mode.
- *
- *   Static linking:
- *     For s0 register, it is used at the program entry point under
- *     static linking. The program entry point will use s0 to store
- *     the value of sp register and obtain 'argc' and 'argv' via s0
- *     before calling the main function. Then, the content of s0 is
- *     no longer used after calling the main function, so its
- *     preservation and restoration can also be ignored.
- *
- *     s1 is not used under static linking, so it is not necessary to
- *     be handled.
- *
- *   Dynamic linking:
- *     Both registers are used to preserve 'argc' and 'argv' and pass
- *     them to the main function. Therefore, the code generator ensures
- *     that proper instructions are generated to preserve/restore
- *     their contents via stack.
- *
- * - s2 - s11: are not necessary to be preserved or restored.
- *
- *   The current code generator does not use s2 - s11 to generate
- *   instructions, so these registers are not needed to be processed.
- *
- * - t0 - t6: are not necessary to be handled.
- *
- *   These registers are used to store certain temporary values;
- *   however, the code generator ensures that these values do not
- *   persist across function calls.
+static bool rv_count_only;
+static int rv_counted_words;
+
+void emit_ph2_ir(ph2_ir_t *ph2_ir);
+
+/* a0-a7 hold virtual registers 0-7; s3-s5 hold the remaining allocatable
+ * registers and are saved when used. s2 stages indirect callees, while s0/s1
+ * belong to startup argument handling. The backend does not use other saved
+ * registers; ra and sp are handled by the function prologue and epilogue.
  */
+
+/* The machine register for IR register @ir_reg. The first eight are the
+ * argument registers a0-a7; the rest are s3-s5, which a callee preserves, so a
+ * value pinned there survives a call. s0 and s1 belong to the entry code and s2
+ * holds an indirect call's target.
+ */
+int rv_reg_of(int ir_reg)
+{
+    return ir_reg < 8 ? ir_reg + __a0 : __s3 + ir_reg - 8;
+}
+
+/* The callee-saved registers @func writes, and so must save on entry and
+ * restore on return: how many of s3-s5, which are handed out in order so the
+ * highest one used decides, and in bit 8 whether it stages an indirect call's
+ * target in s2.
+ */
+int rv_saved_regs(func_t *func)
+{
+    int top = func_highest_used_reg(func, 8);
+    int s2 = 0;
+
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+            if (ir->dest_hi > top)
+                top = ir->dest_hi;
+            if (ir->src0_hi > top)
+                top = ir->src0_hi;
+            if (ir->src1_hi > top)
+                top = ir->src1_hi;
+            if (ir->op == OP_load_func)
+                s2 = 1 << 8;
+        }
+    }
+    if (top >= REG_CNT)
+        top = REG_CNT - 1;
+    return (top - 7) | s2;
+}
+
+/* How many words rv_saved_regs()'s @saved occupies in the frame. */
+int rv_saved_words(int saved)
+{
+    return (saved & 0xff) + (saved >> 8);
+}
+
+/* The frame a function allocates: its locals, ra, and the saved registers, kept
+ * 16-byte aligned.
+ */
+int rv_frame_bytes(int stack_size, int saved)
+{
+    return ALIGN_UP(stack_size + 4 + rv_saved_words(saved) * 4, RV32_ALIGNMENT);
+}
+
+/* The register saved in frame word @i: s3 onwards, then s2. */
+int rv_saved_reg(int saved, int i)
+{
+    return i < (saved & 0xff) ? __s3 + i : __s2;
+}
+
+static int rv_count_ph2_ir_words(ph2_ir_t *ph2_ir)
+{
+    bool saved_count_only = rv_count_only;
+    int saved_counted_words = rv_counted_words;
+    char *saved_fatal_function_context = fatal_function_context;
+
+    rv_count_only = true;
+    rv_counted_words = 0;
+    emit_ph2_ir(ph2_ir);
+    int words = rv_counted_words;
+
+    rv_count_only = saved_count_only;
+    rv_counted_words = saved_counted_words;
+    fatal_function_context = saved_fatal_function_context;
+    return words;
+}
 
 void update_elf_offset(ph2_ir_t *ph2_ir)
 {
-    switch (ph2_ir->op) {
-    case OP_load_constant:
-        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
-            elf_offset += 8;
-        else
-            elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0) {
-            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047)
-                elf_offset += 8;
-            else
-                elf_offset += 4;
-        }
-        return;
-    case OP_address_of:
-    case OP_global_address_of:
-        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
-            elf_offset += 12;
-        else
-            elf_offset += 4;
-        return;
-    case OP_assign:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->dest_hi != ph2_ir->src0_hi)
-            elf_offset += 4;
-        /* Exchanging the two registers of a pair takes a third move. */
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->dest == ph2_ir->src0_hi &&
-            ph2_ir->dest_hi == ph2_ir->src0)
-            elf_offset += 4;
-        return;
-    case OP_load:
-    case OP_global_load:
-        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047)
-            if (ph2_ir->dest_hi >= 0)
-                elf_offset += 20;
-            else
-                elf_offset += 16;
-        else if (ph2_ir->dest_hi >= 0)
-            elf_offset += 8;
-        else
-            elf_offset += 4;
-        return;
-    case OP_store:
-    case OP_global_store:
-        if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047)
-            if (ph2_ir->src0_hi >= 0)
-                elf_offset += 20;
-            else
-                elf_offset += 16;
-        else if (ph2_ir->src0_hi >= 0)
-            elf_offset += 8;
-        else
-            elf_offset += 4;
-        return;
-    case OP_read:
-        elf_offset += ph2_ir->dest_hi >= 0 ? 8 : 4;
-        return;
-    case OP_write:
-        elf_offset += ph2_ir->src1_hi >= 0 ? 8 : 4;
-        return;
-    case OP_call:
-        /* A call through the PLT may be farther than a JAL reaches. */
-        elf_offset += dynlink && !find_func(ph2_ir->func_name)->bbs ? 8 : 4;
-        return;
-    case OP_jump:
-    case OP_load_func:
-    case OP_indirect:
-    case OP_lshift:
-    case OP_rshift:
-        elf_offset += ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 ? 52 : 4;
-        return;
-    case OP_gt:
-    case OP_lt:
-        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 28 : 4;
-        return;
-    case OP_negate:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
-            elf_offset += 12;
-        return;
-    case OP_add:
-    case OP_sub:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            elf_offset += 12;
-        return;
-    case OP_bit_and:
-    case OP_bit_or:
-    case OP_bit_xor:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_bit_not:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_mul:
-        if (hard_mul_div) {
-            if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-                ph2_ir->src1_hi >= 0)
-                elf_offset += 24;
-            else
-                elf_offset += 4;
-        } else if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-                   ph2_ir->src1_hi >= 0)
-            elf_offset += 100;
-        else
-            elf_offset += 52;
-        return;
-    case OP_div:
-    case OP_mod:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
+    if (ph2_ir->op != OP_allocat)
+        elf_offset += rv_count_ph2_ir_words(ph2_ir) * 4;
+}
 
-            /* Four copied input words, a quotient pair, a remainder pair, and a
-             * fixed 64-round restoring loop. The modulo form copies the final
-             * remainder out after the loop. Signed operands add magnitude
-             * conversion and a sign-restoration sequence.
-             */
-            elf_offset += ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned
-                              ? (ph2_ir->op == OP_mod ? 168 : 160)
-                              : 244;
-        else if (hard_mul_div)
-            elf_offset += 4;
-        else
-            elf_offset += 116;
-        return;
-    case OP_load_data_address:
-    case OP_load_rodata_address:
-    case OP_geq:
-    case OP_leq:
-        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 32 : 8;
-        return;
-    case OP_log_not:
-        elf_offset += ph2_ir->src0_hi >= 0 ? 12 : 8;
-        return;
-    case OP_address_of_func:
-        elf_offset += 12;
-        return;
-    case OP_eq:
-        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 20 : 12;
-        return;
-    case OP_neq:
-        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 16 : 8;
-        return;
-    case OP_branch:
-        elf_offset += ph2_ir->src0_hi >= 0 ? 24 : 20;
-        return;
-    case OP_return:
-        elf_offset += 24;
-        if (ph2_ir->src0_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_trunc:
-        /* A byte and a short each need a shift pair to keep the sign. */
-        if (ph2_ir->src1 == 1 || ph2_ir->src1 == 2)
-            elf_offset += 8;
-        else
-            elf_offset += 4;
-        return;
-    case OP_sign_ext: {
-        /* Decode source size from upper 16 bits */
-        int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi < 0) {
-            /* Mirror the emitter: a zero-extended byte is one ANDI, a
-             * sign-extended byte and either halfword take a shift pair, and a
-             * word is one move; the high word adds one more instruction. The
-             * byte cases were swapped, so a (long long) cast of an unsigned
-             * char moved every later branch target by four bytes.
-             */
-            bool zero_ext = ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer;
-            elf_offset +=
-                source_size == 2 || (source_size == 1 && !zero_ext) ? 12 : 8;
-            return;
-        }
-        if (source_size == 2)
-            elf_offset += 8; /* short extension: 2 instructions */
-        else
-            elf_offset += 12; /* byte extension: 3 instructions */
-        return;
-    }
-    case OP_cast:
-        elf_offset +=
-            ph2_ir->dest_hi >= 0 &&
-                    (ph2_ir->src0_hi < 0 || ph2_ir->dest_hi != ph2_ir->src0_hi)
-                ? 8
-                : 4;
-        return;
-    default:
-        fatal("Unknown opcode");
-    }
+static ph2_frame_layout_t rv_frame_layout(func_t *func, ph2_ir_t *define)
+{
+    int saved = rv_saved_regs(func);
+
+    define->src2 = saved;
+    return (ph2_frame_layout_t) {rv_frame_bytes(func->stack_size, saved),
+                                 rv_count_ph2_ir_words(define) * 4, saved,
+                                 true};
 }
 
 void cfg_flatten(void)
 {
     func_t *func;
+    ph2_ir_prepare(false);
 
     if (dynlink) {
-        /* When using dynamic linking, 25 instructions are generated at the
+        /* When using dynamic linking, 26 instructions are generated at the
          * program entry point to perform the following operations:
          * - prepare arguments and call __libc_start_main()
          * - preserve a0 ('argc'), a1 ('argv') and sp.
          * - allocate and clear a global stack, then jump to global init
          *   function.
          */
-        elf_offset = 100;
+        elf_offset = 104;
     } else {
         /* Under static linking, "__syscall" must be generated to allow the
          * program to invoke system calls.
          *
-         * "__syscall" consists of 9 instructions, preceded by 6 initial
-         * instructions. Consequently, the elf offset for "__syscall" is is 24
-         * bytes, and the offset for the subsequent function (GLOBAL_FUNC) is 60
-         * bytes.
+         * "__syscall" consists of 9 instructions, preceded by 7 initial
+         * instructions because the global-init call is an AUIPC/JALR pair.
+         * Consequently, "__syscall" starts at byte 28 and the subsequent
+         * function (GLOBAL_FUNC) starts at byte 64.
          */
         func = find_func("__syscall");
-        func->bbs->elf_offset = 24;
-        elf_offset = 60;
+        func->bbs->elf_offset = 28;
+        elf_offset = 64;
     }
 
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
 
-    for (ph2_ir_t *ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
-         ph2_ir = ph2_ir->next) {
-        update_elf_offset(ph2_ir);
-    }
+    ph2_ir_visit_globals(update_elf_offset);
 
-    /* prepare 'argc' and 'argv', then proceed to 'main' function */
-    if (dynlink)
-        elf_offset += 44;
-    else
-        elf_offset += 24;
+    /* Prepare argc/argv and reach main through a range-independent call.
+     * code_generate() emits this only when there is a main, so a translation
+     * unit without one must not be charged for it either: every function after
+     * would be placed 28 bytes from where it is emitted.
+     */
+    if (MAIN_BB)
+        elf_offset += dynlink ? 48 : 28;
 
-    for (func = FUNC_LIST.head; func; func = func->next) {
-        /* Skip function declarations without bodies */
-        if (!func->bbs)
-            continue;
-
-        /* reserve stack */
-        ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
-        flatten_ir->src0 = func->stack_size;
-        flatten_ir->func_name = intern_string(func->return_def.var_name);
-
-        /* Except for local variables, it must allocate additional space to
-         * preserve the content of ra at each function entry point.
-         *
-         * 'stack_size' doesn't include the additional space, so an extra number
-         * '4' is added to 'stack_size'.
-         */
-        int stack_top_ofs = ALIGN_UP(func->stack_size + 4, RV32_ALIGNMENT);
-
-        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            bb->elf_offset = elf_offset;
-
-            if (bb == func->bbs) {
-                /* save ra, sp */
-                elf_offset += 16;
-            }
-
-            for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
-                 insn = insn->next) {
-                if (insn->ofs_based_on_stack_top) {
-                    switch (insn->op) {
-                    case OP_load:
-                    case OP_address_of:
-                        insn->src0 = insn->src0 + stack_top_ofs;
-                        break;
-                    case OP_store:
-                        insn->src1 = insn->src1 + stack_top_ofs;
-                        break;
-                    default:
-                        /* Ignore opcodes with the ofs_based_on_stack_top flag
-                         * set since only the three opcodes above needs to
-                         * access a variable's address.
-                         */
-                        break;
-                    }
-                }
-                flatten_ir = add_existed_ph2_ir(insn);
-
-                if (insn->op == OP_return) {
-                    /* restore sp */
-                    flatten_ir->src1 = bb->belong_to->stack_size;
-                }
-
-                update_elf_offset(flatten_ir);
-            }
-        }
-    }
+    ph2_ir_flatten_functions(rv_frame_layout, update_elf_offset);
 }
 
 void emit(int code)
 {
-    elf_write_int(elf_code, code);
+    if (rv_count_only) {
+        if (rv_counted_words < INT_MAX)
+            rv_counted_words++;
+    } else
+        elf_write_int(elf_code, code);
+}
+
+static void emit_rv32_split_address(bool pc_relative,
+                                    rv_reg rd,
+                                    rv_reg base,
+                                    int offset)
+{
+    int hi = rv_hi(offset), lo = rv_lo(offset);
+
+    emit(pc_relative ? __auipc(base, hi) : __lui(base, hi));
+    emit(pc_relative ? __jalr(rd, base, lo) : __addi(rd, base, lo));
+}
+
+static rv_reg rv_memory_base(rv_reg base, int offset, int pair, int *disp)
+{
+    *disp = offset;
+    if (offset >= -2048 && offset <= 2047 - pair * 4)
+        return base;
+    emit_rv32_split_address(false, __t0, __t0, offset);
+    emit(__add(__t0, base, __t0));
+    *disp = 0;
+    return __t0;
+}
+
+static void rv_load(rv_reg dest,
+                    rv_reg base,
+                    int offset,
+                    int size,
+                    bool is_unsigned)
+{
+    if (size == 1)
+        emit(is_unsigned ? __lbu(dest, base, offset)
+                         : __lb(dest, base, offset));
+    else if (size == 2)
+        emit(is_unsigned ? __lhu(dest, base, offset)
+                         : __lh(dest, base, offset));
+    else
+        emit(__lw(dest, base, offset));
+}
+
+static void rv_store(rv_reg src, rv_reg base, int offset, int size)
+{
+    if (size == 1)
+        emit(__sb(src, base, offset));
+    else if (size == 2)
+        emit(__sh(src, base, offset));
+    else
+        emit(__sw(src, base, offset));
+}
+
+static int riscv_bitwise_insn(opcode_t op,
+                              rv_reg dest,
+                              rv_reg left,
+                              rv_reg right)
+{
+    switch (op) {
+    case OP_bit_and:
+        return __and(dest, left, right);
+    case OP_bit_or:
+        return __or(dest, left, right);
+    case OP_bit_xor:
+        return __xor(dest, left, right);
+    default:
+        fatal("unsupported RISC-V bitwise operation");
+    }
+    return 0;
 }
 
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
 {
     func_t *func;
-    int rd = ph2_ir->dest + 10;
-    int rs1 = ph2_ir->src0 + 10;
-    int rs2 = ph2_ir->src1 + 10;
-    int rd_hi = ph2_ir->dest_hi + 10;
-    int rs1_hi = ph2_ir->src0_hi + 10;
-    int rs2_hi = ph2_ir->src1_hi + 10;
+    int rd = rv_reg_of(ph2_ir->dest);
+    int rs1 = rv_reg_of(ph2_ir->src0);
+    int rs2 = rv_reg_of(ph2_ir->src1);
+    int rd_hi = rv_reg_of(ph2_ir->dest_hi);
+    int rs1_hi = rv_reg_of(ph2_ir->src0_hi);
+    int rs2_hi = rv_reg_of(ph2_ir->src1_hi);
     int ofs;
 
     /* Prepare the variables to reuse the same code for the instruction sequence
@@ -404,23 +253,28 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     switch (ph2_ir->op) {
     case OP_define:
         fatal_function_context = ph2_ir->func_name;
-        ofs = ALIGN_UP(ph2_ir->src0 + 4, RV32_ALIGNMENT);
-        emit(__sw(__ra, __sp, -4));
-        emit(__lui(__t0, rv_hi(ofs)));
-        emit(__addi(__t0, __t0, rv_lo(ofs)));
+        ofs = rv_frame_bytes(ph2_ir->src0, ph2_ir->src2);
+
+        /* Lower sp before saving below the frame's top: there is no red zone,
+         * and a signal delivered in between would overwrite anything stored
+         * below sp. t1 holds the old sp to address the saves from.
+         */
+        emit_rv32_split_address(false, __t0, __t0, ofs);
+        emit(__addi(__t1, __sp, 0));
         emit(__sub(__sp, __sp, __t0));
+        emit(__sw(__ra, __t1, -4));
+        for (int i = 0; i < rv_saved_words(ph2_ir->src2); i++)
+            emit(__sw(rv_saved_reg(ph2_ir->src2, i), __t1, -8 - i * 4));
         return;
     case OP_load_constant:
         if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-            emit(__lui(rd, rv_hi(ph2_ir->src0)));
-            emit(__addi(rd, rd, rv_lo(ph2_ir->src0)));
+            emit_rv32_split_address(false, rd, rd, ph2_ir->src0);
 
         } else
             emit(__addi(rd, __zero, ph2_ir->src0));
         if (ph2_ir->dest_hi >= 0) {
             if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
-                emit(__lui(rd_hi, rv_hi(ph2_ir->src1)));
-                emit(__addi(rd_hi, rd_hi, rv_lo(ph2_ir->src1)));
+                emit_rv32_split_address(false, rd_hi, rd_hi, ph2_ir->src1);
             } else
                 emit(__addi(rd_hi, __zero, ph2_ir->src1));
         }
@@ -429,14 +283,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_global_address_of:
         interm = ph2_ir->op == OP_address_of ? __sp : __gp;
         if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-            emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
+            emit_rv32_split_address(false, __t0, __t0, ph2_ir->src0);
             emit(__add(rd, interm, __t0));
         } else
             emit(__addi(rd, interm, ph2_ir->src0));
         return;
     case OP_assign:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 && rd == rs1_hi) {
+        if (PH2_PAIR_DEST_SRC0(ph2_ir) && rd == rs1_hi) {
             /* A pair moved one register over, as a slot round trip collapsed
              * into a move can leave it: the low destination is the high source,
              * so move the high word first, through t0 when the two registers
@@ -453,105 +306,57 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             return;
         }
         emit(__addi(rd, rs1, 0));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->dest_hi != ph2_ir->src0_hi)
+        if (PH2_PAIR_DEST_SRC0(ph2_ir) && ph2_ir->dest_hi != ph2_ir->src0_hi)
             emit(__addi(rd_hi, rs1_hi, 0));
         return;
     case OP_load:
     case OP_global_load:
         interm = ph2_ir->op == OP_load ? __sp : __gp;
         if (ph2_ir->dest_hi >= 0) {
-            if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-                emit(__add(__t0, interm, __t0));
-                emit(__lw(rd, __t0, 0));
-                emit(__lw(rd_hi, __t0, 4));
-            } else {
-                emit(__lw(rd, interm, ph2_ir->src0));
-                emit(__lw(rd_hi, interm, ph2_ir->src0 + 4));
-            }
+            int disp;
+            rv_reg base = rv_memory_base(interm, ph2_ir->src0, 1, &disp);
+
+            rv_load(rd, base, disp, 4, true);
+            rv_load(rd_hi, base, disp + 4, 4, true);
             return;
         }
-        if (ph2_ir->src0 < -2048 || ph2_ir->src0 > 2047) {
-            emit(__lui(__t0, rv_hi(ph2_ir->src0)));
-            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src0)));
-            emit(__add(__t0, interm, __t0));
-            if (ph2_ir->size_bytes == 1)
-                emit(ph2_ir->is_unsigned ? __lbu(rd, __t0, 0)
-                                         : __lb(rd, __t0, 0));
-            else if (ph2_ir->size_bytes == 2)
-                emit(ph2_ir->is_unsigned ? __lhu(rd, __t0, 0)
-                                         : __lh(rd, __t0, 0));
-            else
-                emit(__lw(rd, __t0, 0));
-        } else if (ph2_ir->size_bytes == 1)
-            emit(ph2_ir->is_unsigned ? __lbu(rd, interm, ph2_ir->src0)
-                                     : __lb(rd, interm, ph2_ir->src0));
-        else if (ph2_ir->size_bytes == 2)
-            emit(ph2_ir->is_unsigned ? __lhu(rd, interm, ph2_ir->src0)
-                                     : __lh(rd, interm, ph2_ir->src0));
-        else
-            emit(__lw(rd, interm, ph2_ir->src0));
+        {
+            int disp;
+            rv_reg base = rv_memory_base(interm, ph2_ir->src0, 0, &disp);
+
+            rv_load(rd, base, disp, ph2_ir->size_bytes, ph2_ir->is_unsigned);
+        }
         return;
     case OP_store:
     case OP_global_store:
         interm = ph2_ir->op == OP_store ? __sp : __gp;
         if (ph2_ir->src0_hi >= 0) {
-            if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
-                emit(__lui(__t0, rv_hi(ph2_ir->src1)));
-                emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
-                emit(__add(__t0, interm, __t0));
-                emit(__sw(rs1, __t0, 0));
-                emit(__sw(rs1_hi, __t0, 4));
-            } else {
-                emit(__sw(rs1, interm, ph2_ir->src1));
-                emit(__sw(rs1_hi, interm, ph2_ir->src1 + 4));
-            }
+            int disp;
+            rv_reg base = rv_memory_base(interm, ph2_ir->src1, 1, &disp);
+
+            rv_store(rs1, base, disp, 4);
+            rv_store(rs1_hi, base, disp + 4, 4);
             return;
         }
-        if (ph2_ir->src1 < -2048 || ph2_ir->src1 > 2047) {
-            emit(__lui(__t0, rv_hi(ph2_ir->src1)));
-            emit(__addi(__t0, __t0, rv_lo(ph2_ir->src1)));
-            emit(__add(__t0, interm, __t0));
-            if (ph2_ir->size_bytes == 1)
-                emit(__sb(rs1, __t0, 0));
-            else if (ph2_ir->size_bytes == 2)
-                emit(__sh(rs1, __t0, 0));
-            else
-                emit(__sw(rs1, __t0, 0));
-        } else if (ph2_ir->size_bytes == 1)
-            emit(__sb(rs1, interm, ph2_ir->src1));
-        else if (ph2_ir->size_bytes == 2)
-            emit(__sh(rs1, interm, ph2_ir->src1));
-        else
-            emit(__sw(rs1, interm, ph2_ir->src1));
+        {
+            int disp;
+            rv_reg base = rv_memory_base(interm, ph2_ir->src1, 0, &disp);
+
+            rv_store(rs1, base, disp, ph2_ir->size_bytes);
+        }
         return;
     case OP_read:
         if (ph2_ir->dest_hi >= 0) {
-            /* A pair read through a pointer. When the low destination is the
-             * address register itself, fetch the high word first so the address
-             * survives until both words are loaded.
-             */
             if (ph2_ir->src1 != 8)
                 fatal("unsupported RISC-V pair load width");
-            if (rd == rs1) {
-                emit(__lw(rd_hi, rs1, 4));
-                emit(__lw(rd, rs1, 0));
-            } else {
-                emit(__lw(rd, rs1, 0));
-                emit(__lw(rd_hi, rs1, 4));
-            }
+#define RV_WORD_LOAD(dst, base, offset) emit(__lw(dst, base, offset))
+            EMIT_PAIR_LOAD(RV_WORD_LOAD, rd, rd_hi, rs1);
+#undef RV_WORD_LOAD
             return;
         }
-        if (ph2_ir->src1 == 1)
-            emit(ph2_ir->is_unsigned ? __lbu(rd, rs1, 0) : __lb(rd, rs1, 0));
-        else if (ph2_ir->src1 == 2)
-            emit(ph2_ir->is_unsigned ? __lhu(rd, rs1, 0) : __lh(rd, rs1, 0));
-        else if (ph2_ir->src1 == 4)
-            emit(__lw(rd, rs1, 0));
-        else
+        if (ph2_ir->src1 != 1 && ph2_ir->src1 != 2 && ph2_ir->src1 != 4)
             fatal("unsupported RISC-V load width");
+        rv_load(rd, rs1, 0, ph2_ir->src1, ph2_ir->is_unsigned);
         return;
     case OP_write:
         if (ph2_ir->src1_hi >= 0) {
@@ -561,19 +366,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__sw(rs2_hi, rs1, 4));
             return;
         }
-        if (ph2_ir->dest == 1)
-            emit(__sb(rs2, rs1, 0));
-        else if (ph2_ir->dest == 2)
-            emit(__sh(rs2, rs1, 0));
-        else if (ph2_ir->dest == 4)
-            emit(__sw(rs2, rs1, 0));
-        else
+        if (ph2_ir->dest != 1 && ph2_ir->dest != 2 && ph2_ir->dest != 4)
             fatal("unsupported RISC-V store width");
+        rv_store(rs2, rs1, 0, ph2_ir->dest);
         return;
     case OP_branch:
         ofs = elf_code_start + ph2_ir->then_bb->elf_offset;
-        emit(__lui(__t0, rv_hi(ofs)));
-        emit(__addi(__t0, __t0, rv_lo(ofs)));
+        emit_rv32_split_address(false, __t0, __t0, ofs);
 
         /* A pair is true when either word is nonzero. */
         if (ph2_ir->src0_hi >= 0) {
@@ -582,53 +381,43 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
         emit(__beq(rs1, __zero, 8));
         emit(__jalr(__zero, __t0, 0));
-        emit(__jal(__zero, ph2_ir->else_bb->elf_offset - elf_code->size));
+        ofs = elf_code_start + ph2_ir->else_bb->elf_offset;
+        emit_rv32_split_address(false, __t0, __t0, ofs);
+        emit(__jalr(__zero, __t0, 0));
         return;
     case OP_jump:
-        emit(__jal(__zero, ph2_ir->next_bb->elf_offset - elf_code->size));
+        ofs = ph2_ir->next_bb->elf_offset - elf_code->size;
+        emit_rv32_split_address(true, __zero, __t0, ofs);
         return;
     case OP_call:
         func = find_func(ph2_ir->func_name);
-        if (func->bbs)
+        if (func->bbs) {
             ofs = func->bbs->elf_offset - elf_code->size;
-        else if (dynlink) {
+            emit_rv32_split_address(true, __ra, __ra, ofs);
+            return;
+        } else if (dynlink) {
             /* The PLT follows the code and read-only data, so a large image
              * puts it beyond the 1 MiB a JAL reaches. Call it PC-relative
              * through AUIPC and JALR, which reach anywhere.
              */
             ofs = (dynamic_sections.elf_plt_start + func->plt_offset) -
                   (elf_code_start + elf_code->size);
-            emit(__auipc(__ra, rv_hi(ofs)));
-            emit(__jalr(__ra, __ra, rv_lo(ofs)));
+            emit_rv32_split_address(true, __ra, __ra, ofs);
             return;
         } else {
             printf("The '%s' function is not implemented\n", ph2_ir->func_name);
             fflush(stdout); /* see fatal() */
             abort();
         }
-        emit(__jal(__ra, ofs));
-        return;
     case OP_load_data_address:
-        emit(__lui(rd, rv_hi(elf_data_start + ph2_ir->src0)));
-        emit(__addi(rd, rd, rv_lo(elf_data_start + ph2_ir->src0)));
+        emit_rv32_split_address(false, rd, rd, elf_data_start + ph2_ir->src0);
         return;
     case OP_load_rodata_address:
-        emit(__lui(rd, rv_hi(elf_rodata_start + ph2_ir->src0)));
-        emit(__addi(rd, rd, rv_lo(elf_rodata_start + ph2_ir->src0)));
+        emit_rv32_split_address(false, rd, rd, elf_rodata_start + ph2_ir->src0);
         return;
     case OP_address_of_func:
-        func = find_func(ph2_ir->func_name);
-        if (func->bbs)
-            ofs = elf_code_start + func->bbs->elf_offset;
-        else if (dynlink)
-            ofs = dynamic_sections.elf_plt_start + func->plt_offset;
-        else {
-            printf("The '%s' function is not implemented\n", ph2_ir->func_name);
-            fflush(stdout); /* see fatal() */
-            abort();
-        }
-        emit(__lui(__t0, rv_hi(ofs)));
-        emit(__addi(__t0, __t0, rv_lo(ofs)));
+        ofs = function_entry_address(ph2_ir->func_name);
+        emit_rv32_split_address(false, __t0, __t0, ofs);
         emit(__sw(__t0, rs1, 0));
         return;
     case OP_load_func:
@@ -644,57 +433,62 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__addi(__a0, rs1, 0));
         if (ph2_ir->src0_hi >= 0)
             emit(__addi(__a1, rs1_hi, 0));
-        ofs = ALIGN_UP(ph2_ir->src1 + 4, RV32_ALIGNMENT);
-        emit(__lui(__t0, rv_hi(ofs)));
-        emit(__addi(__t0, __t0, rv_lo(ofs)));
-        emit(__add(__sp, __sp, __t0));
-        emit(__lw(__ra, __sp, -4));
+        ofs = rv_frame_bytes(ph2_ir->src1, ph2_ir->src2);
+        /* Reload the saved registers while sp still covers them. */
+        emit_rv32_split_address(false, __t0, __t0, ofs);
+        emit(__add(__t1, __sp, __t0));
+        emit(__lw(__ra, __t1, -4));
+        for (int i = 0; i < rv_saved_words(ph2_ir->src2); i++)
+            emit(__lw(rv_saved_reg(ph2_ir->src2, i), __t1, -8 - i * 4));
+        emit(__addi(__sp, __t1, 0));
         emit(__jalr(__zero, __ra, 0));
         return;
     case OP_add:
-        emit(__add(rd, rs1, rs2));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0) {
-            emit(__sltu(__t0, rd, rs1));
+        if (PH2_PAIR_BINARY(ph2_ir)) {
+            /* Preserve the original low words until carry is known, including
+             * an in-place destination and x + x using the same register pair.
+             */
+            emit(__add(__t0, rs1, rs2));
+            emit(__sltu(__t1, __t0, rs1));
             emit(__add(rd_hi, rs1_hi, rs2_hi));
-            emit(__add(rd_hi, rd_hi, __t0));
-        }
+            emit(__add(rd_hi, rd_hi, __t1));
+            emit(__addi(rd, __t0, 0));
+        } else
+            emit(__add(rd, rs1, rs2));
         return;
     case OP_sub:
-        emit(__sub(rd, rs1, rs2));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0) {
+        if (PH2_PAIR_BINARY(ph2_ir))
             emit(__sltu(__t0, rs1, rs2));
+        emit(__sub(rd, rs1, rs2));
+        if (PH2_PAIR_BINARY(ph2_ir)) {
             emit(__sub(rd_hi, rs1_hi, rs2_hi));
             emit(__sub(rd_hi, rd_hi, __t0));
         }
         return;
     case OP_mul:
         if (hard_mul_div) {
-            if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-                ph2_ir->src1_hi >= 0) {
-                emit(__mul(rd, rs1, rs2));
-                emit(__mulhu(rd_hi, rs1, rs2));
+            if (PH2_PAIR_BINARY(ph2_ir)) {
                 emit(__mul(__t0, rs1, rs2_hi));
                 emit(__mul(__t1, rs1_hi, rs2));
-                emit(__add(rd_hi, rd_hi, __t0));
+                emit(__mulhu(__t2, rs1, rs2));
+                emit(__mul(rd, rs1, rs2));
+                emit(__add(rd_hi, __t2, __t0));
                 emit(__add(rd_hi, rd_hi, __t1));
             } else
                 emit(__mul(rd, rs1, rs2));
         } else {
-            if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-                ph2_ir->src1_hi >= 0) {
+            if (PH2_PAIR_BINARY(ph2_ir)) {
                 /* Multiply two 64-bit pairs modulo 2^64 without the M
                  * extension. Keep the product in the destination pair, so t0-t3
                  * can hold the shifting multiplicand and multiplier; the loop
                  * ends once both multiplier words are zero.
                  */
-                emit(__addi(rd, __zero, 0));
-                emit(__addi(rd_hi, __zero, 0));
                 emit(__addi(__t0, rs1, 0));
                 emit(__addi(__t1, rs1_hi, 0));
                 emit(__addi(__t2, rs2, 0));
                 emit(__addi(__t3, rs2_hi, 0));
+                emit(__addi(rd, __zero, 0));
+                emit(__addi(rd_hi, __zero, 0));
                 emit(__andi(__t4, __t2, 1));
                 emit(__sub(__t4, __zero, __t4));
                 emit(__and(__t5, __t0, __t4));
@@ -733,8 +527,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_div:
     case OP_mod:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0) {
+        if (PH2_PAIR_BINARY(ph2_ir)) {
             bool is_unsigned =
                 ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
 
@@ -911,7 +704,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sub(rd, __zero, rd));
         return;
     case OP_lshift:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
             emit(__addi(__t0, __zero, 32));
             emit(__bltu(rs2, __t0, 20));
             emit(__sub(__t1, rs2, __t0));
@@ -936,7 +729,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sll(rd, rs1, rs2));
         return;
     case OP_rshift:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
             bool is_unsigned = ph2_ir->src0_is_unsigned;
 
             emit(__addi(__t0, __zero, 32));
@@ -1029,7 +822,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_negate:
         emit(__sub(rd, __zero, rs1));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
             emit(__sltu(__t0, __zero, rs1));
             emit(__sub(rd_hi, __zero, rs1_hi));
             emit(__sub(rd_hi, rd_hi, __t0));
@@ -1037,26 +830,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_bit_not:
         emit(__xori(rd, rs1, -1));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
+        if (PH2_PAIR_DEST_SRC0(ph2_ir))
             emit(__xori(rd_hi, rs1_hi, -1));
         return;
     case OP_bit_and:
-        emit(__and(rd, rs1, rs2));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            emit(__and(rd_hi, rs1_hi, rs2_hi));
-        return;
     case OP_bit_or:
-        emit(__or(rd, rs1, rs2));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            emit(__or(rd_hi, rs1_hi, rs2_hi));
-        return;
     case OP_bit_xor:
-        emit(__xor(rd, rs1, rs2));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            emit(__xor(rd_hi, rs1_hi, rs2_hi));
+        emit(riscv_bitwise_insn(ph2_ir->op, rd, rs1, rs2));
+        if (PH2_PAIR_BINARY(ph2_ir))
+            emit(riscv_bitwise_insn(ph2_ir->op, rd_hi, rs1_hi, rs2_hi));
         return;
     case OP_log_not:
         if (ph2_ir->src0_hi >= 0) {
@@ -1158,6 +940,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 void plt_generate(void);
 void code_generate(void)
 {
+    int global_stack_size;
     int ofs;
 
     if (dynlink) {
@@ -1192,8 +975,7 @@ void code_generate(void)
          * __libc_start_main(main_wrapper, argc, argv, NULL,
          *                      NULL, NULL, stack_end)
          */
-        emit(__lui(__a0, rv_hi(elf_code_start + 40)));
-        emit(__addi(__a0, __a0, rv_lo(elf_code_start + 40)));
+        emit_rv32_split_address(false, __a0, __a0, elf_code_start + 40);
         emit(__lw(__a1, __sp, 0));
         emit(__addi(__a2, __sp, 4));
         emit(__addi(__a3, __zero, 0));
@@ -1206,8 +988,7 @@ void code_generate(void)
          */
         ofs = (dynamic_sections.elf_plt_start + PLT_FIXUP_SIZE) -
               (elf_code_start + elf_code->size);
-        emit(__auipc(__ra, rv_hi(ofs)));
-        emit(__jalr(__ra, __ra, rv_lo(ofs)));
+        emit_rv32_split_address(true, __ra, __ra, ofs);
 
         /* The main wrapper is located here under the dynamic linking mode
          *
@@ -1224,14 +1005,15 @@ void code_generate(void)
         emit(__sw(__s0, __sp, 0));   /* callee-saved */
         emit(__addi(__s0, __a0, 0)); /* argc */
         emit(__addi(__s1, __a1, 0)); /* argv */
-        ofs = ALIGN_UP(GLOBAL_FUNC->stack_size, RV32_ALIGNMENT) + 4;
+        global_stack_size =
+            ALIGN_UP(GLOBAL_FUNC->stack_size, RV32_ALIGNMENT) + 4;
     } else {
         /* When using static linking, the starting address of the main wrapper
          * is here.
          *
          * Save original sp in s0 first.
          */
-        ofs = ALIGN_UP(GLOBAL_FUNC->stack_size, RV32_ALIGNMENT);
+        global_stack_size = ALIGN_UP(GLOBAL_FUNC->stack_size, RV32_ALIGNMENT);
         emit(__addi(__s0, __sp, 0));
     }
 
@@ -1240,8 +1022,7 @@ void code_generate(void)
      *   2. jump to global init function
      *   3. call the main function
      */
-    emit(__lui(__t0, rv_hi(ofs)));
-    emit(__addi(__t0, __t0, rv_lo(ofs)));
+    emit_rv32_split_address(false, __t0, __t0, global_stack_size);
     emit(__sub(__sp, __sp, __t0));
     emit(__addi(__gp, __sp, 0)); /* Set up global pointer */
 
@@ -1258,7 +1039,8 @@ void code_generate(void)
         emit(__sw(__zero, __t1, 0));
         emit(__bne(__t0, __zero, -12));
     }
-    emit(__jal(__ra, GLOBAL_FUNC->bbs->elf_offset - elf_code->size));
+    ofs = GLOBAL_FUNC->bbs->elf_offset - elf_code->size;
+    emit_rv32_split_address(true, __ra, __ra, ofs);
 
     if (!dynlink) {
         /* syscall trampoline for __syscall */
@@ -1273,24 +1055,21 @@ void code_generate(void)
         emit(__jalr(__zero, __ra, 0));
     }
 
-    ph2_ir_t *ph2_ir;
-    for (ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
-         ph2_ir = ph2_ir->next)
-        emit_ph2_ir(ph2_ir);
+    ph2_ir_visit_globals(emit_ph2_ir);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
     if (MAIN_BB) {
         if (dynlink) {
             emit(__addi(__a0, __s0, 0));
             emit(__addi(__a1, __s1, 0));
-            emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
+            ofs = MAIN_BB->elf_offset - elf_code->size;
+            emit_rv32_split_address(true, __ra, __ra, ofs);
 
             /* - Restore sp, s0 and s1.
              * - Transfer control back to __libc_start_main() using
              *   the preserved ra.
              */
-            emit(__lui(__t0, rv_hi(ofs)));
-            emit(__addi(__t0, __t0, rv_lo(ofs)));
+            emit_rv32_split_address(false, __t0, __t0, global_stack_size);
             emit(__add(__sp, __sp, __t0));
             emit(__lw(__ra, __sp, 8));
             emit(__lw(__s1, __sp, 4));
@@ -1302,7 +1081,8 @@ void code_generate(void)
             emit(__addi(__t0, __s0, 0));
             emit(__lw(__a0, __t0, 0));
             emit(__addi(__a1, __t0, 4));
-            emit(__jal(__ra, MAIN_BB->elf_offset - elf_code->size));
+            ofs = MAIN_BB->elf_offset - elf_code->size;
+            emit_rv32_split_address(true, __ra, __ra, ofs);
 
             /* exit with main's return value in a0 */
             emit(__addi(__a7, __zero, 93));
@@ -1311,7 +1091,7 @@ void code_generate(void)
     }
 
     for (int i = 0; i < ph2_ir_idx; i++) {
-        ph2_ir = PH2_IR_FLATTEN[i];
+        ph2_ir_t *ph2_ir = PH2_IR_FLATTEN[i];
         emit_ph2_ir(ph2_ir);
     }
 }

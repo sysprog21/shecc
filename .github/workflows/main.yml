@@ -23,7 +23,9 @@ jobs:
   host-x86:
     name: ${{ matrix.architecture }}/${{ matrix.link_mode }} (${{ matrix.compiler }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The stage 2 suites run the self-hosted compiler under qemu for every
+    # case, and the cross-compiled lanes need more than half an hour of it.
+    timeout-minutes: 60
     strategy:
       # One target failing says nothing about the others, and finding out
       # which of them share the failure is the point of the matrix.

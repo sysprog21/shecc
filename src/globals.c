@@ -7,6 +7,7 @@
 
 #pragma once
 #include <ctype.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,8 @@ __noreturn void limit_error(char *msg);
 
 /* Forward declaration for string interning */
 char *intern_string(char *str);
+func_t *find_func(char *func_name);
+__noreturn void fatal(const char *msg);
 
 /* Lexer */
 token_t *cur_token;
@@ -32,12 +35,54 @@ strbuf_t *LIBC_SRC;
 
 hashmap_t *SRC_FILE_MAP;
 hashmap_t *FUNC_MAP;
-hashmap_t *CONSTANTS_MAP;
 
 /* Types */
 
 type_t *TYPES;
 int types_idx = 0;
+int builtin_types_idx;
+static unsigned int internal_linkage_name_idx;
+
+static const char *file_scope_var_name(const var_t *var)
+{
+    return var->source_name ? var->source_name : var->var_name;
+}
+
+static void assign_internal_linkage_name(var_t *var, const char *source_name)
+{
+    char name[48];
+
+    var->source_name = intern_string((char *) source_name);
+    snprintf(name, sizeof(name), "__shecc_internal_%u",
+             internal_linkage_name_idx++);
+    var->var_name = intern_string(name);
+}
+
+static const char *function_source_name(const func_t *func)
+{
+    return file_scope_var_name(&func->return_def);
+}
+
+typedef enum {
+    ORDINARY_NONE = 0,
+    ORDINARY_CONSTANT = 1,
+    ORDINARY_VARIABLE = 2,
+    ORDINARY_TYPEDEF = 4,
+    ORDINARY_PARAMETER = 8,
+    ORDINARY_ANY = 15
+} ordinary_kind_t;
+
+typedef struct tu_ordinary_binding {
+    ordinary_kind_t kind;
+    void *value;
+} tu_ordinary_binding_t;
+
+static void register_tu_ordinary_name(const char *name,
+                                      ordinary_kind_t kind,
+                                      void *value);
+static ordinary_kind_t lookup_tu_ordinary_name(const char *name,
+                                               int kinds,
+                                               void **value);
 
 type_t *TY_void;
 type_t *TY_char;
@@ -58,10 +103,6 @@ type_t *TY_long_double;
 
 /* Arenas */
 
-arena_t *INSN_ARENA;
-
-/* HASHMAP_ARENA is responsible for hashmap_node_t allocation */
-arena_t *HASHMAP_ARENA;
 
 /* BLOCK_ARENA is responsible for block_t / var_t allocation */
 arena_t *BLOCK_ARENA;
@@ -74,23 +115,23 @@ arena_t *BB_ARENA;
  */
 arena_t *TOKEN_ARENA;
 
-/* GENERAL_ARENA is responsible for functions, symbols, constants, aliases,
- * macros, and traversal args
+/* GENERAL_ARENA is responsible for functions, symbols, constants, aliases, and
+ * macros
  */
 arena_t *GENERAL_ARENA;
 
-int bb_label_idx = 0;
-
 ph2_ir_t **PH2_IR_FLATTEN;
 int ph2_ir_idx = 0;
+int ph2_ir_capacity;
 
 func_list_t FUNC_LIST;
 func_t *GLOBAL_FUNC;
 block_t *GLOBAL_BLOCK;
+block_t *CURRENT_TU_SCOPE;
 basic_block_t *MAIN_BB;
 int elf_offset = 0;
+int translation_unit_count;
 
-regfile_t REGS[REG_CNT];
 
 hashmap_t *INCLUSION_MAP;
 
@@ -114,17 +155,157 @@ int elf_bss_size;
 int elf_entry_offset = 0;
 dynamic_sections_t dynamic_sections;
 
+/* C99 integer suffix order: [u][l|ll][u]. */
+bool numeric_suffix_is_valid(const char *suffix)
+{
+    int pos = 0;
+
+    if ((suffix[pos] | 32) == 'u')
+        pos++;
+    if ((suffix[pos] | 32) == 'l') {
+        pos++;
+        if ((suffix[pos] | 32) == 'l')
+            pos++;
+    }
+    if ((suffix[pos] | 32) == 'u')
+        pos++;
+    return suffix[pos] == '\0';
+}
+
+/* The radix implied by an integer literal's leading characters. */
+int numeric_literal_base(const char *literal)
+{
+    if (literal[0] != '0')
+        return 10;
+    if ((literal[1] | 32) == 'x')
+        return 16;
+    if ((literal[1] | 32) == 'b')
+        return 2;
+    return 8;
+}
+
+opcode_t operator_for_token(token_kind_t token)
+{
+    switch (token) {
+    case T_plus:
+        return OP_add;
+    case T_minus:
+        return OP_sub;
+    case T_bit_not:
+        return OP_bit_not;
+    case T_log_not:
+        return OP_log_not;
+    case T_asterisk:
+        return OP_mul;
+    case T_divide:
+        return OP_div;
+    case T_mod:
+        return OP_mod;
+    case T_lshift:
+        return OP_lshift;
+    case T_rshift:
+        return OP_rshift;
+    case T_log_and:
+        return OP_log_and;
+    case T_log_or:
+        return OP_log_or;
+    case T_eq:
+        return OP_eq;
+    case T_noteq:
+        return OP_neq;
+    case T_lt:
+        return OP_lt;
+    case T_le:
+        return OP_leq;
+    case T_gt:
+        return OP_gt;
+    case T_ge:
+        return OP_geq;
+    case T_ampersand:
+        return OP_bit_and;
+    case T_bit_or:
+        return OP_bit_or;
+    case T_bit_xor:
+        return OP_bit_xor;
+    case T_question:
+        return OP_ternary;
+    default:
+        return OP_generic;
+    }
+}
+
+/* Shared by the parser and preprocessor's expression evaluator. */
+int get_operator_prio(opcode_t op)
+{
+    switch (op) {
+    case OP_ternary:
+        return 3;
+    case OP_log_or:
+        return 4;
+    case OP_log_and:
+        return 5;
+    case OP_bit_or:
+        return 6;
+    case OP_bit_xor:
+        return 7;
+    case OP_bit_and:
+        return 8;
+    case OP_eq:
+    case OP_neq:
+        return 9;
+    case OP_lt:
+    case OP_leq:
+    case OP_gt:
+    case OP_geq:
+        return 10;
+    case OP_lshift:
+    case OP_rshift:
+        return 11;
+    case OP_add:
+    case OP_sub:
+        return 12;
+    case OP_mul:
+    case OP_div:
+    case OP_mod:
+        return 13;
+    default:
+        return 0;
+    }
+}
+
 /* Command line compilation flags */
 bool dynlink = false;
 bool libc = true;
 bool expand_only = false;
 bool dump_ir = false;
+bool dump_vir = false;
 bool dump_dot = false;
 bool hard_mul_div = false;
 bool warn_string_literals = false;
 bool strict_c99 = false;
+bool dump_stats = false;
 char *include_dirs[MAX_INCLUDE_DIRS];
 int include_dirs_idx = 0;
+
+/* Allocation counters are a stable pre-VIR baseline even when later passes
+ * delete or rewrite the objects they counted.
+ */
+int stats_func_count = 0;
+int stats_var_count = 0;
+int stats_field_slot_count = 0;
+int stats_bb_count = 0;
+int stats_ph2_ir_count = 0;
+static int stats_tu_index_lookups = 0;
+static int stats_tu_index_registrations = 0;
+static hashmap_t *TU_ORDINARY_MAP;
+
+/* Payload capacity currently retained by all live arenas, and its true
+ * allocation-time high water. This deliberately excludes arena headers, malloc
+ * metadata, and non-arena allocations.
+ */
+int stats_live_arena_capacity = 0;
+int stats_peak_arena_capacity = 0;
+int stats_retired_token_arena_peak = 0;
 
 /* Create a new arena block with given capacity.
  * @capacity: The capacity of the arena block. Must be positive.
@@ -180,6 +361,10 @@ arena_t *arena_init(int initial_capacity)
     }
     arena->head = arena_block_create(initial_capacity);
     arena->total_bytes = initial_capacity;
+    arena->peak_bytes = initial_capacity;
+    stats_live_arena_capacity += initial_capacity;
+    if (stats_live_arena_capacity > stats_peak_arena_capacity)
+        stats_peak_arena_capacity = stats_live_arena_capacity;
     /* Use the initial capacity as the default block size for future growth. */
     arena->block_size = initial_capacity;
     return arena;
@@ -217,11 +402,69 @@ void *arena_alloc(arena_t *arena, int size)
         new_block->next = arena->head;
         arena->head = new_block;
         arena->total_bytes += new_capacity;
+        stats_live_arena_capacity += new_capacity;
+        if (stats_live_arena_capacity > stats_peak_arena_capacity)
+            stats_peak_arena_capacity = stats_live_arena_capacity;
+        if (arena->total_bytes > arena->peak_bytes)
+            arena->peak_bytes = arena->total_bytes;
     }
 
     void *ptr = arena->head->memory + arena->head->offset;
     arena->head->offset += size;
     return ptr;
+}
+
+/* Mark consumed arena payload without charging future allocations. The mark is
+ * valid while its block remains in the arena's newest-to-oldest chain.
+ */
+arena_mark_t arena_mark(arena_t *arena)
+{
+    arena_mark_t mark;
+
+    mark.head = arena ? arena->head : NULL;
+    mark.offset = mark.head ? mark.head->offset : 0;
+    return mark;
+}
+
+/* Return payload allocated since a mark, including new blocks and growth of its
+ * original head block.
+ *
+ * Return -1 if the marked block is no longer present.
+ */
+int arena_bytes_since(arena_t *arena, arena_mark_t mark)
+{
+    int bytes = 0;
+    arena_block_t *block = arena ? arena->head : NULL;
+
+    while (block && block != mark.head) {
+        bytes += block->offset;
+        block = block->next;
+    }
+    if (block != mark.head)
+        return -1;
+    return bytes + (mark.head ? mark.head->offset - mark.offset : 0);
+}
+
+bool arena_rewind(arena_t *arena, arena_mark_t mark)
+{
+    if (!arena || !mark.head)
+        return false;
+
+    arena_block_t *block = arena->head;
+    while (block && block != mark.head)
+        block = block->next;
+    if (!block || mark.offset > mark.head->offset)
+        return false;
+
+    while (arena->head != mark.head) {
+        block = arena->head;
+        arena->head = block->next;
+        arena->total_bytes -= block->capacity;
+        stats_live_arena_capacity -= block->capacity;
+        arena_block_free(block);
+    }
+    arena->head->offset = mark.offset;
+    return true;
 }
 
 /* arena_alloc() plus explicit zero‑initialization.
@@ -329,12 +572,16 @@ char *arena_strdup(arena_t *arena, const char *str)
 /* Typed allocators for consistent memory management */
 func_t *arena_alloc_func(void)
 {
-    return arena_calloc(GENERAL_ARENA, 1, sizeof(func_t));
+    func_t *func = arena_calloc(GENERAL_ARENA, 1, sizeof(func_t));
+
+    stats_func_count++;
+    return func;
 }
 
-symbol_t *arena_alloc_symbol(void)
+basic_block_t *arena_alloc_bb(void)
 {
-    return arena_calloc(GENERAL_ARENA, 1, sizeof(symbol_t));
+    stats_bb_count++;
+    return arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
 }
 
 constant_t *arena_alloc_constant(void)
@@ -346,14 +593,11 @@ constant_t *arena_alloc_constant(void)
     return c;
 }
 
-bb_traversal_args_t *arena_alloc_traversal_args(void)
-{
-    /* Keep using calloc for safety */
-    return arena_calloc(GENERAL_ARENA, 1, sizeof(bb_traversal_args_t));
-}
-
 void arena_free(arena_t *arena)
 {
+    if (!arena)
+        return;
+
     arena_block_t *block = arena->head;
     arena_block_t *next;
 
@@ -363,6 +607,7 @@ void arena_free(arena_t *arena)
         block = next;
     }
 
+    stats_live_arena_capacity -= arena->total_bytes;
     free(arena);
 }
 
@@ -419,6 +664,7 @@ hashmap_t *hashmap_create(int cap)
 
     map->size = 0;
     map->cap = round_up_pow2(cap);
+    map->has_owned_keys = false;
     map->table = calloc(map->cap, sizeof(hashmap_node_t));
 
     if (!map->table) {
@@ -431,7 +677,7 @@ hashmap_t *hashmap_create(int cap)
 }
 
 
-void hashmap_rehash(hashmap_t *map)
+static void hashmap_rehash(hashmap_t *map)
 {
     if (!map)
         return;
@@ -471,36 +717,32 @@ void hashmap_rehash(hashmap_t *map)
             map->table[index].key = key;
             map->table[index].val = val;
             map->table[index].occupied = true;
+            map->table[index].owns_key = old_table[i].owns_key;
             map->size++;
         }
     }
     free(old_table);
 }
 
-/* Put a key-value pair into given hashmap. If key already contains a value,
- * then replace it with new value, the old value will be freed.
- * @map: The hashmap to be put into. Must not be NULL.
- * @key: The key string. May be NULL.
- * @val: The value pointer. May be NULL. This value's lifetime is held by
- * hashmap.
+/* Find an existing key or the empty slot for a new one, growing the table
+ * before its load factor exceeds 50%.
  */
-void hashmap_put(hashmap_t *map, char *key, void *val)
+static hashmap_node_t *hashmap_prepare_slot(hashmap_t *map, char *key)
 {
-    if (!map)
-        return;
+    int index;
+    int start;
 
-    /* Check if size of map exceeds load factor 50% (or 1/2 of capacity) */
+    if (!map)
+        return NULL;
+
     if ((map->cap >> 1) <= map->size)
         hashmap_rehash(map);
 
-    int index = hashmap_hash_index(map->cap, key);
-    int start = index;
-
+    index = hashmap_hash_index(map->cap, key);
+    start = index;
     while (map->table[index].occupied) {
-        if (!strcmp(map->table[index].key, key)) {
-            map->table[index].val = val;
-            return;
-        }
+        if (!strcmp(map->table[index].key, key))
+            return &map->table[index];
 
         index = (index + 1) & (map->cap - 1);
         if (index == start) {
@@ -510,15 +752,64 @@ void hashmap_put(hashmap_t *map, char *key, void *val)
         }
     }
 
-    map->table[index].key = arena_strdup(HASHMAP_ARENA, key);
-    map->table[index].val = val;
-    map->table[index].occupied = true;
-    map->size++;
+    return &map->table[index];
+}
+
+/* Put an owned copy of @key into the map. Replacing an existing value keeps its
+ * original key and ownership.
+ * @map: The hashmap to be put into. May be NULL.
+ * @key: Non-NULL key string.
+ * @val: The value pointer. May be NULL. The map does not own the value.
+ */
+static void hashmap_put_impl(hashmap_t *map,
+                             char *key,
+                             void *val,
+                             bool copy_key)
+{
+    hashmap_node_t *node = hashmap_prepare_slot(map, key);
+
+    if (!node)
+        return;
+
+    if (!node->occupied) {
+        if (copy_key) {
+            size_t key_size = strlen(key) + 1;
+            char *stored_key = malloc(key_size);
+
+            if (!stored_key) {
+                printf("Failed to allocate hashmap key\n");
+                fflush(stdout); /* see fatal() */
+                abort();
+            }
+            memcpy(stored_key, key, key_size);
+            key = stored_key;
+        }
+        node->key = key;
+        node->occupied = true;
+        node->owns_key = copy_key;
+        map->has_owned_keys |= copy_key;
+        map->size++;
+    }
+
+    node->val = val;
+}
+
+void hashmap_put(hashmap_t *map, char *key, void *val)
+{
+    hashmap_put_impl(map, key, val, true);
+}
+
+/* The caller must provide a non-NULL key and keep it alive for the map's
+ * lifetime.
+ */
+void hashmap_put_borrowed(hashmap_t *map, char *key, void *val)
+{
+    hashmap_put_impl(map, key, val, false);
 }
 
 /* Get key-value pair node from hashmap from given key.
- * @map: The hashmap to be looked up. Must no be NULL.
- * @key: The key string. May be NULL.
+ * @map: The hashmap to be looked up. May be NULL.
+ * @key: Non-NULL key string.
  *
  * Return: The look up result, if the key-value pair entry exists, then returns
  * address of itself, NULL otherwise.
@@ -544,8 +835,8 @@ hashmap_node_t *hashmap_get_node(hashmap_t *map, char *key)
 }
 
 /* Get value from hashmap from given key.
- * @map: The hashmap to be looked up. Must no be NULL.
- * @key: The key string. May be NULL.
+ * @map: The hashmap to be looked up. May be NULL.
+ * @key: Non-NULL key string.
  *
  * Return: The look up result, if the key-value pair entry exists, then returns
  * its value's address, NULL otherwise.
@@ -557,8 +848,8 @@ void *hashmap_get(hashmap_t *map, char *key)
 }
 
 /* Check if the key-value pair entry exists from given key.
- * @map: The hashmap to be looked up. Must no be NULL.
- * @key: The key string. May be NULL.
+ * @map: The hashmap to be looked up. May be NULL.
+ * @key: Non-NULL key string.
  *
  * Return: The look up result, if the key-value pair entry exists, then returns
  * true, false otherwise.
@@ -568,16 +859,102 @@ bool hashmap_contains(hashmap_t *map, char *key)
     return hashmap_get_node(map, key);
 }
 
-/* Free the hashmap, this also frees key-value pair entry's value.
- * @map: The hashmap to be looked up. Must no be NULL.
+/* Free the map table, any owned key copies, and the header. Mapped values have
+ * separate lifetimes and are not freed here.
+ * @map: The hashmap to be freed. May be NULL.
  */
 void hashmap_free(hashmap_t *map)
 {
     if (!map)
         return;
 
+    if (map->has_owned_keys)
+        for (int i = 0; i < map->cap; i++)
+            if (map->table[i].occupied && map->table[i].owns_key)
+                free(map->table[i].key);
     free(map->table);
     free(map);
+}
+
+void reset_tu_ordinary_index(void)
+{
+    hashmap_free(TU_ORDINARY_MAP);
+    TU_ORDINARY_MAP = hashmap_create(32);
+    if (!TU_ORDINARY_MAP)
+        fatal("Failed to allocate translation-unit ordinary-name index");
+}
+
+static void register_tu_ordinary_name(const char *name,
+                                      ordinary_kind_t kind,
+                                      void *value)
+{
+    tu_ordinary_binding_t *binding;
+    char *stable_name;
+
+    if (!TU_ORDINARY_MAP)
+        fatal("Translation-unit ordinary-name index is not initialized");
+    stable_name = intern_string((char *) name);
+    binding = hashmap_get(TU_ORDINARY_MAP, stable_name);
+    if (binding)
+        return;
+    binding = arena_alloc(BLOCK_ARENA, sizeof(*binding));
+    binding->kind = kind;
+    binding->value = value;
+    hashmap_put_borrowed(TU_ORDINARY_MAP, stable_name, binding);
+    if (dump_stats)
+        stats_tu_index_registrations++;
+}
+
+static ordinary_kind_t lookup_tu_ordinary_name(const char *name,
+                                               int kinds,
+                                               void **value)
+{
+    tu_ordinary_binding_t *binding;
+
+    if (dump_stats)
+        stats_tu_index_lookups++;
+    binding =
+        TU_ORDINARY_MAP ? hashmap_get(TU_ORDINARY_MAP, (char *) name) : NULL;
+    if (!binding || !(kinds & binding->kind))
+        return ORDINARY_NONE;
+    if (value)
+        *value = binding->value;
+    return binding->kind;
+}
+
+static type_t *resolve_type_alias(type_t *alias)
+{
+    type_t *base = alias->base_struct;
+
+    if (alias->base_type != TYPE_typedef || alias->size || alias->ptr_level ||
+        alias->is_direct_function_type)
+        return alias;
+
+    /* A zero-sized alias can be a forward declaration of a record, but a
+     * function type with a void return is also zero-sized and is not an alias
+     * to its return type.
+     */
+    if (!base || (!alias->is_const_qualified && !alias->is_volatile_qualified))
+        return base;
+    if (!base->size)
+        return alias;
+
+    /* Keep qualifiers on the alias while filling in the completed tag's layout.
+     */
+    alias->size = base->size;
+    alias->alignment = base->alignment;
+    alias->fields = base->fields;
+    alias->num_fields = base->num_fields;
+    alias->is_union = base->is_union;
+    alias->has_flexible_array_member = base->has_flexible_array_member;
+    return alias;
+}
+
+/* Reject mismatched prefixes before strcmp. */
+static bool identifier_matches(const char *name, const char *query)
+{
+    return name[0] == query[0] && (!query[0] || name[1] == query[1]) &&
+           !strcmp(name, query);
 }
 
 /* Find the type by the given name.
@@ -591,95 +968,188 @@ void hashmap_free(hashmap_t *map)
  */
 type_t *find_type(const char *type_name, int flag)
 {
-    char head = type_name[0];
-
     for (int i = 0; i < types_idx; i++) {
-        if (TYPES[i].type_name[0] != head)
+        type_t *type = &TYPES[i];
+
+        if (!identifier_matches(type->type_name, type_name))
             continue;
-        if (TYPES[i].base_type == TYPE_struct ||
-            TYPES[i].base_type == TYPE_union) {
-            if (flag == 1)
-                continue;
-            if (!strcmp(TYPES[i].type_name, type_name))
-                return &TYPES[i];
-        } else {
-            if (flag == 2)
-                continue;
-            if (!strcmp(TYPES[i].type_name, type_name)) {
-                /* If it is a forwardly declared alias of a structure, return
-                 * the base structure type. A function type alias with a void
-                 * return is no such alias despite its zero size.
-                 */
-                type_t *alias = &TYPES[i];
-                type_t *base = alias->base_struct;
+        bool is_tag =
+            type->base_type == TYPE_struct || type->base_type == TYPE_union;
 
-                if (alias->base_type != TYPE_typedef || alias->size ||
-                    alias->ptr_level || alias->is_direct_function_type)
-                    return alias;
-
-                /* The base would drop the qualifiers of `typedef const struct S
-                 * cs_t;`, so a qualified alias keeps its own descriptor and
-                 * takes the layout once the tag has been completed.
-                 */
-                if (!base || (!alias->is_const_qualified &&
-                              !alias->is_volatile_qualified))
-                    return base;
-                if (!base->size)
-                    return alias;
-                alias->size = base->size;
-                alias->alignment = base->alignment;
-                alias->fields = base->fields;
-                alias->num_fields = base->num_fields;
-                alias->is_union = base->is_union;
-                alias->has_flexible_array_member =
-                    base->has_flexible_array_member;
-                return alias;
-            }
-        }
+        if ((is_tag && flag == 1) || (!is_tag && flag == 2))
+            continue;
+        return is_tag ? type : resolve_type_alias(type);
     }
     return NULL;
 }
 
+/* Builtin types are initialized once before translation units are parsed. User
+ * typedefs share TYPES for their descriptors, but must be reached only through
+ * their translation-unit/lexical bindings.
+ */
+static type_t *find_builtin_type(const char *name)
+{
+    for (int i = 0; i < builtin_types_idx; i++) {
+        type_t *type = &TYPES[i];
+
+        if (type->base_type != TYPE_struct && type->base_type != TYPE_union &&
+            identifier_matches(type->type_name, name))
+            return type;
+    }
+    return NULL;
+}
+
+bool ph2_ir_function_included(const func_t *func, bool include_declarations)
+{
+    return func && (func->bbs || include_declarations);
+}
+
+void ph2_ir_prepare(bool include_declarations)
+{
+    int count = 0;
+
+    if (ph2_ir_idx != 0 || PH2_IR_FLATTEN)
+        fatal("phase-2 IR prepared more than once");
+
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!ph2_ir_function_included(func, include_declarations))
+            continue;
+        if (count >= (INT_MAX - ((int) sizeof(void *) - 1)) /
+                         (int) sizeof(*PH2_IR_FLATTEN))
+            limit_error("too many phase-2 IR instructions");
+        count++;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+                if (count >= (INT_MAX - ((int) sizeof(void *) - 1)) /
+                                 (int) sizeof(*PH2_IR_FLATTEN))
+                    limit_error("too many phase-2 IR instructions");
+                count++;
+            }
+        }
+    }
+
+    ph2_ir_capacity = count;
+    if (count)
+        PH2_IR_FLATTEN = arena_alloc(
+            GENERAL_ARENA, (int) ((size_t) count * sizeof(*PH2_IR_FLATTEN)));
+}
+
 ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
 {
-    if (ph2_ir_idx >= MAX_IR_INSTR)
-        limit_error("too many phase-2 IR instructions");
+    if (ph2_ir_idx >= ph2_ir_capacity)
+        fatal("phase-2 IR pre-count mismatch");
     PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
     return ph2_ir;
 }
 
+ph2_ir_t *ph2_ir_flatten_insn(ph2_ir_t *insn,
+                              int stack_top_ofs,
+                              int stack_size,
+                              int saved_regs,
+                              bool restore_saved_regs)
+{
+    if (insn->ofs_based_on_stack_top) {
+        if (insn->op == OP_load || insn->op == OP_address_of)
+            insn->src0 += stack_top_ofs;
+        else if (insn->op == OP_store)
+            insn->src1 += stack_top_ofs;
+    }
+    ph2_ir_t *flat = add_existed_ph2_ir(insn);
+    if (insn->op == OP_return) {
+        flat->src1 = stack_size;
+        if (restore_saved_regs)
+            flat->src2 = saved_regs;
+    }
+    return flat;
+}
+
+int ph2_ir_flatten_function(func_t *func,
+                            int stack_top_ofs,
+                            int prologue_bytes,
+                            int saved_regs,
+                            bool restore_saved_regs,
+                            void (*update_offset)(ph2_ir_t *))
+{
+    int count = 0;
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        bb->elf_offset = elf_offset;
+        if (bb == func->bbs)
+            elf_offset += prologue_bytes;
+        for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn; insn = insn->next) {
+            ph2_ir_t *flat =
+                ph2_ir_flatten_insn(insn, stack_top_ofs, func->stack_size,
+                                    saved_regs, restore_saved_regs);
+            count++;
+            if (update_offset)
+                update_offset(flat);
+        }
+    }
+    return count;
+}
+
+static ph2_ir_t *ph2_ir_create(opcode_t op)
+{
+    ph2_ir_t *instruction = arena_calloc(BB_ARENA, 1, sizeof(ph2_ir_t));
+    stats_ph2_ir_count++;
+    instruction->op = op;
+    instruction->src0_hi = instruction->src1_hi = instruction->dest_hi = -1;
+    instruction->size_bytes = PTR_SIZE;
+    return instruction;
+}
+
+ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
+{
+    ph2_ir_t *instruction = ph2_ir_create(op);
+    if (bb->ph2_ir_list.tail)
+        bb->ph2_ir_list.tail->next = instruction;
+    else
+        bb->ph2_ir_list.head = instruction;
+    bb->ph2_ir_list.tail = instruction;
+    return instruction;
+}
+
 ph2_ir_t *add_ph2_ir(opcode_t op)
 {
-    ph2_ir_t *ph2_ir = arena_alloc(BB_ARENA, sizeof(ph2_ir_t));
-    ph2_ir->op = op;
-    /* Initialize all fields explicitly */
-    ph2_ir->next = NULL;
-    ph2_ir->is_branch_detached = 0;
-    ph2_ir->src0 = 0;
-    ph2_ir->src1 = 0;
-
-    /* Only a select names a third source, but the allocation is not zeroed and
-     * every field is set here by hand.
-     */
-    ph2_ir->src2 = 0;
-    ph2_ir->dest = 0;
-    ph2_ir->func_name = NULL;
-    ph2_ir->next_bb = NULL;
-    ph2_ir->then_bb = NULL;
-    ph2_ir->else_bb = NULL;
-    ph2_ir->ofs_based_on_stack_top = false;
-
-    /* Default to the full slot. Slots are PTR_SIZE wide, so a wide access is
-     * always valid; only an address-taken narrow scalar may be written behind
-     * the allocator's back, and reg-alloc narrows those explicitly.
-     */
-    ph2_ir->size_bytes = PTR_SIZE;
-    ph2_ir->is_pointer = false;
-    ph2_ir->src0_is_pointer = false;
-    ph2_ir->src1_is_pointer = false;
-    ph2_ir->is_volatile = false;
-    return add_existed_ph2_ir(ph2_ir);
+    return add_existed_ph2_ir(ph2_ir_create(op));
 }
+
+#if ELF_MACHINE == ELF_MACHINE_ARM32 || ELF_MACHINE == ELF_MACHINE_RV32 || \
+    ELF_MACHINE == ELF_MACHINE_AARCH64
+static void ph2_ir_visit_globals(void (*visit)(ph2_ir_t *))
+{
+    for (ph2_ir_t *ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ir; ir = ir->next)
+        visit(ir);
+}
+#endif
+
+#if ELF_MACHINE == ELF_MACHINE_ARM32 || ELF_MACHINE == ELF_MACHINE_RV32
+typedef struct {
+    int stack_top;
+    int prologue_bytes;
+    int saved_regs;
+    bool restore_saved_regs;
+} ph2_frame_layout_t;
+
+static void ph2_ir_flatten_functions(
+    ph2_frame_layout_t (*frame_layout)(func_t *, ph2_ir_t *),
+    void (*update_offset)(ph2_ir_t *))
+{
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        ph2_ir_t *define;
+        ph2_frame_layout_t frame;
+
+        if (!func->bbs)
+            continue;
+        define = add_ph2_ir(OP_define);
+        define->src0 = func->stack_size;
+        define->func_name = intern_string(func->return_def.var_name);
+        frame = frame_layout(func, define);
+        ph2_ir_flatten_function(func, frame.stack_top, frame.prologue_bytes,
+                                frame.saved_regs, frame.restore_saved_regs,
+                                update_offset);
+    }
+}
+#endif
 
 block_t *add_block(block_t *parent, func_t *func)
 {
@@ -728,7 +1198,7 @@ char *intern_string(char *str)
     interned = arena_alloc(GENERAL_ARENA, len);
     strcpy(interned, str);
 
-    hashmap_put(string_pool->strings, interned, interned);
+    hashmap_put_borrowed(string_pool->strings, interned, interned);
 
     return interned;
 }
@@ -803,6 +1273,126 @@ bool hex_escape_exceeds_byte(const char *text)
     return false;
 }
 
+/* Decode one escape beginning at text[*input]. Narrow strings mask hex runs to
+ * a byte; wide strings retain their value as one int unit.
+ */
+static bool decode_escape_value(const char *text,
+                                int *input,
+                                bool wide,
+                                unsigned int *value,
+                                bool *is_ucn)
+{
+    int i = *input;
+
+    *is_ucn = false;
+    switch (text[i]) {
+    case 'a':
+        *value = '\a';
+        i++;
+        break;
+    case 'b':
+        *value = '\b';
+        i++;
+        break;
+    case 'f':
+        *value = '\f';
+        i++;
+        break;
+    case 'n':
+        *value = '\n';
+        i++;
+        break;
+    case 'r':
+        *value = '\r';
+        i++;
+        break;
+    case 't':
+        *value = '\t';
+        i++;
+        break;
+    case 'v':
+        *value = '\v';
+        i++;
+        break;
+    case '\\':
+        *value = '\\';
+        i++;
+        break;
+    case '\'':
+        *value = '\'';
+        i++;
+        break;
+    case '"':
+        *value = '"';
+        i++;
+        break;
+    case '?':
+        *value = '?';
+        i++;
+        break;
+    case 'e':
+        if (strict_c99)
+            return false;
+        *value = 27;
+        i++;
+        break;
+    case 'x':
+        i++;
+        if (!isxdigit((unsigned char) text[i]))
+            return false;
+        *value = 0;
+        while (isxdigit((unsigned char) text[i])) {
+            int digit = hex_digit_value(text[i]);
+
+            if (wide) {
+                if (*value > 0x07ffffffU)
+                    return false;
+                *value = (*value << 4) + digit;
+            } else
+                *value = ((*value << 4) + digit) & 0xff;
+            i++;
+        }
+        if (wide && *value > 0x7fffffffU)
+            return false;
+        break;
+    case 'u':
+    case 'U': {
+        int digits = text[i] == 'u' ? 4 : 8;
+
+        *value = 0;
+        i++;
+        for (int n = 0; n < digits; n++) {
+            if (!isxdigit((unsigned char) text[i]) ||
+                (wide && *value > 0x07ffffffU))
+                return false;
+            *value = (*value << 4) + hex_digit_value(text[i++]);
+        }
+
+        /* C99 excludes surrogates, out-of-range values, and basic-source
+         * characters other than $, @, and ` from universal escapes.
+         */
+        if ((wide && *value > 0x7fffffffU) || *value > 0x10ffff ||
+            (*value >= 0xd800 && *value <= 0xdfff) ||
+            (*value < 0xa0 && *value != '$' && *value != '@' && *value != '`'))
+            return false;
+        *is_ucn = true;
+        break;
+    }
+    default:
+        if (!text[i])
+            return false;
+        if (text[i] >= '0' && text[i] <= '7') {
+            *value = 0;
+            for (int n = 0; n < 3 && text[i] >= '0' && text[i] <= '7'; n++)
+                *value = *value * 8 + (text[i++] - '0');
+        } else
+            *value = (unsigned char) text[i++];
+        break;
+    }
+    *input = i;
+    return true;
+}
+
 int unescape_string(const char *input, char *output, int output_size)
 {
     if (!input || !output || output_size == 0)
@@ -812,160 +1402,31 @@ int unescape_string(const char *input, char *output, int output_size)
 
     while (input[i] != '\0' && j < output_size - 1) {
         if (input[i] != '\\') {
-            /* Regular characters */
             output[j++] = input[i++];
             continue;
         }
-
         i++;
 
-        switch (input[i]) {
-        case 'a':
-            output[j++] = '\a';
-            i++;
-            break;
-        case 'b':
-            output[j++] = '\b';
-            i++;
-            break;
-        case 'f':
-            output[j++] = '\f';
-            i++;
-            break;
-        case 'e':
-            if (strict_c99) {
-                output[j] = '\0';
-                return -1;
-            }
-            output[j++] = 27;
-            i++;
-            break;
-        case 'n':
-            output[j++] = '\n';
-            i++;
-            break;
-        case 'r':
-            output[j++] = '\r';
-            i++;
-            break;
-        case 't':
-            output[j++] = '\t';
-            i++;
-            break;
-        case 'v':
-            output[j++] = '\v';
-            i++;
-            break;
-        case '\\':
-            output[j++] = '\\';
-            i++;
-            break;
-        case '\'':
-            output[j++] = '\'';
-            i++;
-            break;
-        case '"':
-            output[j++] = '"';
-            i++;
-            break;
-        case '?':
-            output[j++] = '\?';
-            i++;
-            break;
-        case 'x': {
-            /* C99 hexadecimal escapes consume the complete run of hex digits,
-             * unlike octal escapes which are limited to three.
-             */
-            i++; /* Skips 'x' */
+        unsigned int value;
+        bool is_ucn;
 
-            if (!isxdigit(input[i])) {
-                /* Terminate before bailing: callers read output[0], and an
-                 * unterminated buffer left them reading stack garbage.
-                 */
-                output[j] = '\0';
-                return -1;
-            }
-
-            /* Only the low byte reaches the output, so keep only that much
-             * rather than shift a long digit run out of range. A narrow literal
-             * whose value does not fit has already been diagnosed by
-             * hex_escape_exceeds_byte(); a wide one takes its value from
-             * decode_wstring_units() instead.
-             */
-            unsigned int value = 0;
-            while (isxdigit(input[i])) {
-                value = ((value << 4) + hex_digit_value(input[i])) & 0xff;
-                i++;
-            }
-
-            output[j++] = (char) value;
-            break;
+        if (!decode_escape_value(input, &i, false, &value, &is_ucn)) {
+            output[j] = '\0';
+            return -1;
         }
-        case 'u':
-        case 'U': {
-            int digits = input[i] == 'u' ? 4 : 8;
-            unsigned int value = 0;
-
-            i++;
-            for (int digit = 0; digit < digits; digit++) {
-                if (!isxdigit(input[i])) {
-                    output[j] = '\0';
-                    return -1;
-                }
-                value = (value << 4) + hex_digit_value(input[i++]);
-            }
-
-            /* C99 6.4.3 excludes surrogate code points, values above the
-             * Unicode range, and basic-source characters other than $, @, and
-             * `. The latter must be spelt directly in source.
-             */
-            if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) ||
-                (value < 0xa0 && value != '$' && value != '@' &&
-                 value != '`')) {
-                output[j] = '\0';
-                return -1;
-            }
+        if (is_ucn) {
             j = append_utf8(output, j, output_size, value);
             if (j < 0) {
                 output[0] = '\0';
                 return -1;
             }
-            break;
-        }
-        case '0':
-        case '1':
-        case '2':
-        case '3':
-        case '4':
-        case '5':
-        case '6':
-        case '7': {
-            /* Octal escape sequence: \ooo (up to 3 digits) */
-            int value = 0;
-            int digit_count = 0;
-
-            while (input[i] >= '0' && input[i] <= '7' && digit_count < 3) {
-                value = value * 8 + (input[i] - '0');
-                i++;
-                digit_count++;
-            }
-
+        } else
             output[j++] = (char) value;
-            break;
-        }
-        default:
-            /* Unknown escape sequence - treat as literal character */
-            output[j++] = input[i++];
-            break;
-        }
     }
 
     output[j] = '\0';
-
-    /* Check if we ran out of output space */
     if (input[i] != '\0')
         return -1;
-
     return j;
 }
 
@@ -1005,99 +1466,11 @@ int decode_wstring_units(const char *text, int *units, int capacity)
             continue;
         }
         in++;
-        switch (text[in]) {
-        case 'a':
-            value = '\a';
-            in++;
-            break;
-        case 'b':
-            value = '\b';
-            in++;
-            break;
-        case 'f':
-            value = '\f';
-            in++;
-            break;
-        case 'n':
-            value = '\n';
-            in++;
-            break;
-        case 'r':
-            value = '\r';
-            in++;
-            break;
-        case 't':
-            value = '\t';
-            in++;
-            break;
-        case 'v':
-            value = '\v';
-            in++;
-            break;
-        case '\\':
-            value = '\\';
-            in++;
-            break;
-        case '\'':
-            value = '\'';
-            in++;
-            break;
-        case '"':
-            value = '"';
-            in++;
-            break;
-        case '?':
-            value = '?';
-            in++;
-            break;
-        case 'e':
-            if (strict_c99)
-                return -1;
-            value = 27;
-            in++;
-            break;
-        case 'x':
-            in++;
-            if (!isxdigit(text[in]))
-                return -1;
-            value = 0;
-            while (isxdigit(text[in])) {
-                if (value > 0x07ffffffU)
-                    return -1;
-                value = (value << 4) + hex_digit_value(text[in++]);
-            }
-            if (value > 0x7fffffffU)
-                return -1;
-            break;
-        case 'u':
-        case 'U': {
-            int digits = text[in] == 'u' ? 4 : 8;
 
-            value = 0;
-            in++;
-            for (int i = 0; i < digits; i++) {
-                if (!isxdigit(text[in]))
-                    return -1;
-                if (value > 0x07ffffffU)
-                    return -1;
-                value = (value << 4) + hex_digit_value(text[in++]);
-            }
-            if (value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff) ||
-                (value < 0xa0 && value != '$' && value != '@' && value != '`'))
-                return -1;
-            break;
-        }
-        default:
-            if (text[in] < '0' || text[in] > '7')
-                value = (unsigned char) text[in++];
-            else {
-                value = 0;
-                for (int i = 0; i < 3 && text[in] >= '0' && text[in] <= '7';
-                     i++)
-                    value = value * 8 + (text[in++] - '0');
-            }
-            break;
-        }
+        bool is_ucn;
+
+        if (!decode_escape_value(text, &in, true, &value, &is_ucn))
+            return -1;
         units[out++] = (int) value;
     }
     return out;
@@ -1130,7 +1503,8 @@ bool wide_character_constant(const char *literal, int *value)
  */
 int parse_numeric_constant(const char *buffer)
 {
-    int i = 0;
+    int base = numeric_literal_base(buffer);
+    int i = base == 16 || base == 2 ? 2 : 0;
     unsigned int value = 0;
     while (buffer[i]) {
         /* The lexer keeps C99 integer suffixes in the token. Their type is
@@ -1138,36 +1512,18 @@ int parse_numeric_constant(const char *buffer)
          */
         if ((buffer[i] | 32) == 'u' || (buffer[i] | 32) == 'l')
             break;
-        if (i == 1 && (buffer[i] | 32) == 'x') { /* hexadecimal */
-            value = 0;
-            i = 2;
-            while (buffer[i] && (buffer[i] | 32) != 'u' &&
-                   (buffer[i] | 32) != 'l') {
-                char c = buffer[i++];
-                value <<= 4;
-                if (isdigit(c))
-                    value += c - '0';
-                c |= 32; /* convert to lower case */
-                if (c >= 'a' && c <= 'f')
-                    value += (c - 'a') + 10;
-            }
-            return value;
-        }
-        if (i == 1 && (buffer[i] | 32) == 'b') { /* binary */
-            value = 0;
-            i = 2;
-            while (buffer[i] && (buffer[i] | 32) != 'u' &&
-                   (buffer[i] | 32) != 'l') {
-                char c = buffer[i++];
-                value <<= 1;
-                value += (c == '1');
-            }
-            return value;
-        }
-        if (buffer[0] == '0') /* octal */
-            value = value * 8 + buffer[i++] - '0';
-        else
-            value = value * 10 + buffer[i++] - '0';
+        char c = buffer[i++];
+        value *= base;
+        if (base == 2)
+            value += c == '1';
+        else if (base == 16) {
+            c |= 32;
+            if (isdigit(c))
+                value += c - '0';
+            else if (c >= 'a' && c <= 'f')
+                value += c - 'a' + 10;
+        } else
+            value += c - '0';
     }
     return value;
 }
@@ -1190,6 +1546,7 @@ void type_ensure_fields(type_t *type)
         return;
 
     type->fields = arena_calloc(GENERAL_ARENA, MAX_FIELDS, sizeof(var_t));
+    stats_field_slot_count += MAX_FIELDS;
 
     /* The field variables come out of a zeroed allocation, so give their
      * interned name pointers the empty string a reader can dereference.
@@ -1234,28 +1591,9 @@ type_t *add_named_type(char *name)
     return type;
 }
 
-void add_constant(char alias[], int value)
-{
-    constant_t *constant = arena_alloc_constant();
-    if (!constant) {
-        printf("Failed to allocate constant_t\n");
-        return;
-    }
-
-    /* Use interned string for constant name */
-    strcpy(constant->alias, intern_string(alias));
-    constant->value = value;
-    constant->next = NULL;
-    hashmap_put(CONSTANTS_MAP, alias, constant);
-}
-
-constant_t *find_constant(char alias[])
-{
-    return hashmap_get(CONSTANTS_MAP, alias);
-}
-
 /* Enum names declared in a block shadow enclosing names, but must disappear
- * with that block. Keep their bindings on the parser's existing block tree.
+ * with that block. File-scope names use the active translation-unit root of the
+ * same scope tree.
  */
 void add_scoped_constant(block_t *block, char alias[], int value)
 {
@@ -1267,49 +1605,77 @@ void add_scoped_constant(block_t *block, char alias[], int value)
     constant->value = value;
     constant->next = block->constants;
     block->constants = constant;
+    if (block == CURRENT_TU_SCOPE)
+        register_tu_ordinary_name(alias, ORDINARY_CONSTANT, constant);
 }
 
-/* The kinds of binding an ordinary identifier can have in one scope. Objects,
- * functions, typedef names and enumeration constants share C99's ordinary
- * identifier name space (6.2.3p1), so each scope binds a name to at most one of
- * them. The values are bits, so a lookup can ask for several kinds at once.
+/* A file-scope enumeration constant has translation-unit scope, not process
+ * scope. Keep the parser API but store it on the active input's root.
  */
-typedef enum {
-    ORDINARY_NONE = 0,
-    ORDINARY_CONSTANT = 1,  /* enumeration constant declared in the block */
-    ORDINARY_VARIABLE = 2,  /* local object, or block-scope function alias */
-    ORDINARY_TYPEDEF = 4,   /* typedef name declared in the block */
-    ORDINARY_PARAMETER = 8, /* parameter, seen from the function body's block */
-    ORDINARY_ANY = 15
-} ordinary_kind_t;
-
-/* The first local of @block at or after index *@pos named @name, or NULL, with
- * *@pos left just past it so that a caller can continue to the next one.
- *
- * A block's locals include all of its IR temporaries, and every declaration
- * scans its block's locals at least twice, so the scan is quadratic in the size
- * of a block and its compare is what a large one pays for. Settle the first two
- * bytes before the library call: temporaries differ in the first, and names
- * sharing a prefix letter, such as a run of generated declarations, usually in
- * the second. A nonzero first byte that matches means neither name has ended.
- */
-var_t *find_block_local(block_t *block, const char *name, int *pos)
+void add_constant(char alias[], int value)
 {
-    char head = name[0];
-    char second = head ? name[1] : 0;
+    add_scoped_constant(CURRENT_TU_SCOPE, alias, value);
+}
 
-    for (int i = *pos; i < block->locals.size; i++) {
-        var_t *var = block->locals.elements[i];
-        const char *var_name = var->var_name;
+/* Keep names declared at file scope in the active unit's ordinary namespace.
+ * Global storage is merged for code generation, but this small per-unit index
+ * preserves scope-sensitive collisions with no-linkage enumerators.
+ */
+void add_tu_global_var(var_t *var)
+{
+    if (lookup_tu_ordinary_name(file_scope_var_name(var), ORDINARY_VARIABLE,
+                                NULL))
+        return;
+    register_tu_ordinary_name(file_scope_var_name(var), ORDINARY_VARIABLE, var);
+}
 
-        if (var_name[0] != head || (head && var_name[1] != second))
-            continue;
-        if (!strcmp(var_name, name)) {
-            *pos = i + 1;
+static var_t *find_var_in_list(var_list_t *vars, const char *name, int *pos)
+{
+    for (int i = pos ? *pos : 0; i < vars->size; i++) {
+        var_t *var = vars->elements[i];
+
+        if (identifier_matches(var->var_name, name)) {
+            if (pos)
+                *pos = i + 1;
             return var;
         }
     }
-    *pos = block->locals.size;
+    if (pos)
+        *pos = vars->size;
+    return NULL;
+}
+
+/* Resume at *@pos so callers can continue after a previous match. */
+var_t *find_block_local(block_t *block, const char *name, int *pos)
+{
+    if (block == CURRENT_TU_SCOPE) {
+        void *binding = NULL;
+
+        if ((*pos)++)
+            return NULL;
+        if (lookup_tu_ordinary_name(name, ORDINARY_VARIABLE, &binding))
+            return binding;
+        return NULL;
+    }
+    return find_var_in_list(&block->locals, name, pos);
+}
+
+static var_t *find_tu_declaration(const char *name)
+{
+    void *binding = NULL;
+
+    if (lookup_tu_ordinary_name(name, ORDINARY_VARIABLE, &binding))
+        return binding;
+    return NULL;
+}
+
+static var_t *find_func_param(func_t *func, const char *name)
+{
+    if (!func)
+        return NULL;
+    for (int i = 0; i < func->num_params; i++)
+        if (identifier_matches(func->param_defs[i].var_name, name))
+            return &func->param_defs[i];
     return NULL;
 }
 
@@ -1325,15 +1691,16 @@ ordinary_kind_t find_block_ordinary(block_t *block,
                                     int kinds,
                                     void **binding)
 {
-    char head = name[0];
     void *unused;
 
     if (!binding)
         binding = &unused;
+    if (block == CURRENT_TU_SCOPE)
+        return lookup_tu_ordinary_name(name, kinds, binding);
     if (kinds & ORDINARY_CONSTANT) {
         for (constant_t *constant = block->constants; constant;
              constant = constant->next) {
-            if (!strcmp(constant->alias, name)) {
+            if (identifier_matches(constant->alias, name)) {
                 *binding = constant;
                 return ORDINARY_CONSTANT;
             }
@@ -1348,25 +1715,47 @@ ordinary_kind_t find_block_ordinary(block_t *block,
     }
     if (kinds & ORDINARY_TYPEDEF) {
         for (typedef_binding_t *td = block->typedefs; td; td = td->next) {
-            if (td->name[0] == head && !strcmp(td->name, name)) {
+            if (identifier_matches(td->name, name)) {
                 *binding = td;
                 return ORDINARY_TYPEDEF;
             }
         }
     }
     if ((kinds & ORDINARY_PARAMETER) && !block->parent && block->func) {
-        func_t *func = block->func;
+        var_t *param = find_func_param(block->func, name);
 
-        for (int i = 0; i < func->num_params; i++) {
-            var_t *param = &func->param_defs[i];
-
-            if (param->var_name[0] == head && !strcmp(param->var_name, name)) {
-                *binding = param;
-                return ORDINARY_PARAMETER;
-            }
+        if (param) {
+            *binding = param;
+            return ORDINARY_PARAMETER;
         }
     }
     return ORDINARY_NONE;
+}
+
+/* File-scope typedef aliases still use the legacy process-wide type table for
+ * lookup, but their declaration names also belong in the active unit's
+ * ordinary-identifier index for same-unit collision checks.
+ */
+void add_tu_typedef(type_t *type)
+{
+    const char *name = type->type_name;
+
+    if (!name[0])
+        return;
+    ordinary_kind_t kind =
+        find_block_ordinary(CURRENT_TU_SCOPE, name, ORDINARY_ANY, NULL);
+    if (kind == ORDINARY_TYPEDEF)
+        return;
+    if (kind != ORDINARY_NONE)
+        error_at("typedef name conflicts with an ordinary identifier",
+                 cur_token_loc());
+
+    typedef_binding_t *binding = arena_alloc(BLOCK_ARENA, sizeof(*binding));
+    binding->name = intern_string(type->type_name);
+    binding->type = type;
+    binding->next = CURRENT_TU_SCOPE->typedefs;
+    CURRENT_TU_SCOPE->typedefs = binding;
+    register_tu_ordinary_name(name, ORDINARY_TYPEDEF, binding);
 }
 
 /* The enumeration constant @alias as seen from @block, or NULL when none is
@@ -1387,11 +1776,13 @@ constant_t *find_scoped_constant(char alias[], block_t *block)
     for (owner = block; owner && owner != GLOBAL_BLOCK; owner = owner->parent)
         if (find_block_ordinary(owner, alias, ORDINARY_CONSTANT, &constant))
             break;
-    if (!owner || owner == GLOBAL_BLOCK)
-        constant = find_constant(alias);
-    if (!constant)
-        return NULL;
-    for (; block != owner; block = block->parent) {
+    if (!owner || owner == GLOBAL_BLOCK) {
+        /* Function scopes are not parented to the translation-unit scope. */
+        owner = GLOBAL_BLOCK;
+        if (!lookup_tu_ordinary_name(alias, ORDINARY_CONSTANT, &constant))
+            return NULL;
+    }
+    for (; block && block != owner; block = block->parent) {
         if (find_block_ordinary(
                 block, alias,
                 ORDINARY_VARIABLE | ORDINARY_TYPEDEF | ORDINARY_PARAMETER,
@@ -1416,7 +1807,7 @@ void add_type_tag(block_t *block, char name[], type_t *type)
 type_t *find_local_type_tag(char name[], block_t *block)
 {
     for (type_tag_t *tag = block->type_tags; tag; tag = tag->next)
-        if (!strcmp(tag->name, name))
+        if (identifier_matches(tag->name, name))
             return tag->type;
     return NULL;
 }
@@ -1425,6 +1816,15 @@ type_t *find_local_type_tag(char name[], block_t *block)
  * tells its tag apart from a struct or union tag.
  */
 #define ENUM_TAG_KIND TYPE_int
+
+/* File-scope tags live in the active translation unit, not the merged block
+ * that owns global object declarations. Some parser paths still pass that
+ * merged block to type lookup; normalize those file-scope arguments here.
+ */
+static block_t *tag_scope(block_t *block)
+{
+    return !block || block == GLOBAL_BLOCK ? CURRENT_TU_SCOPE : block;
+}
 
 /* C99 6.7.2.3p3: every declaration of a tag names the same kind of type, and
  * struct, union and enum tags share one name space, so a tag found under
@@ -1441,19 +1841,20 @@ static type_t *check_tag_kind(type_t *type, base_type_t kind)
 
 /* The tag @name of @kind as seen from @block, or NULL when no tag of that name
  * is visible. Tags are registered with the block that declares them, file-scope
- * ones with GLOBAL_BLOCK, which a function body's chain does not reach on its
- * own, so a NULL @block sees file scope only. A tag declared in some other
- * block is never found. Looking in the tag table, not the type table, also
- * keeps a typedef name out of it.
+ * ones with CURRENT_TU_SCOPE, which a function body's chain does not reach on
+ * its own, so a NULL @block sees the current file scope only. A tag declared in
+ * another translation unit is never found. Looking in the tag table, not the
+ * type table, also keeps a typedef name out of it.
  */
 static type_t *find_visible_tag(char name[], block_t *block, base_type_t kind)
 {
     type_t *type = NULL;
 
-    for (; block && !type; block = block->parent)
+    block = tag_scope(block);
+    for (; block && block != CURRENT_TU_SCOPE && !type; block = block->parent)
         type = find_local_type_tag(name, block);
     if (!type)
-        type = find_local_type_tag(name, GLOBAL_BLOCK);
+        type = find_local_type_tag(name, CURRENT_TU_SCOPE);
     return check_tag_kind(type, kind);
 }
 
@@ -1482,10 +1883,10 @@ type_t *find_record_tag(char name[], block_t *block, base_type_t kind)
  */
 type_t *reference_record_tag(char name[], block_t *block, base_type_t kind)
 {
+    block = tag_scope(block);
     type_t *type = find_record_tag(name, block, kind);
 
-    return type ? type
-                : declare_record_tag(name, block ? block : GLOBAL_BLOCK, kind);
+    return type ? type : declare_record_tag(name, block, kind);
 }
 
 /* The tag @name that @block itself declares, created incomplete when it has
@@ -1494,6 +1895,7 @@ type_t *reference_record_tag(char name[], block_t *block, base_type_t kind)
  */
 type_t *local_record_tag(char name[], block_t *block, base_type_t kind)
 {
+    block = tag_scope(block);
     type_t *type = check_tag_kind(find_local_type_tag(name, block), kind);
 
     return type ? type : declare_record_tag(name, block, kind);
@@ -1536,6 +1938,7 @@ type_t *reference_enum_tag(char name[], block_t *block)
 /* The enum tag @name that @block itself declares, or NULL. */
 type_t *local_enum_tag(char name[], block_t *block)
 {
+    block = tag_scope(block);
     return check_tag_kind(find_local_type_tag(name, block), ENUM_TAG_KIND);
 }
 
@@ -1569,6 +1972,11 @@ void add_block_typedef(block_t *block, char name[], type_t *type)
  */
 type_t *find_visible_type(const char *name, block_t *block)
 {
+    bool searched_tu = false;
+
+    if (!block || block == GLOBAL_BLOCK)
+        block = CURRENT_TU_SCOPE;
+
     /* Parameters are tried with the function body's outermost block, so they
      * too hide a file-scope typedef unless a nearer binding has hidden them.
      */
@@ -1577,12 +1985,24 @@ type_t *find_visible_type(const char *name, block_t *block)
         ordinary_kind_t kind =
             find_block_ordinary(block, name, ORDINARY_ANY, &binding);
 
+        if (block == CURRENT_TU_SCOPE)
+            searched_tu = true;
         if (kind == ORDINARY_TYPEDEF)
-            return ((typedef_binding_t *) binding)->type;
+            return resolve_type_alias(((typedef_binding_t *) binding)->type);
         if (kind != ORDINARY_NONE)
             return NULL;
     }
-    return find_type(name, 1);
+    if (!searched_tu) {
+        void *binding;
+        ordinary_kind_t kind =
+            find_block_ordinary(CURRENT_TU_SCOPE, name, ORDINARY_ANY, &binding);
+
+        if (kind == ORDINARY_TYPEDEF)
+            return resolve_type_alias(((typedef_binding_t *) binding)->type);
+        if (kind != ORDINARY_NONE)
+            return NULL;
+    }
+    return find_builtin_type(name);
 }
 
 var_t *find_member(const char token[], type_t *type)
@@ -1597,66 +2017,35 @@ var_t *find_member(const char token[], type_t *type)
     if (!type)
         return NULL;
 
-    char head = token[0];
-
     for (int i = 0; i < type->num_fields; i++) {
-        if (type->fields[i].var_name[0] != head)
-            continue;
-        if (!strcmp(type->fields[i].var_name, token))
+        if (identifier_matches(type->fields[i].var_name, token))
             return &type->fields[i];
     }
     return NULL;
 }
 
-/* Name lookup is the parser's inner loop: every identifier walks the enclosing
- * scopes, then the parameter list, then the globals, and all but the one match
- * is a strcmp against a name that differs immediately. A call into the C
- * library's vectorized strcmp costs far more than the comparison it performs on
- * such names, so each scan settles the common case -- a different first letter
- * -- before making the call. Names are never empty, so reading the first byte
- * of either side is always in bounds.
- */
+/* Search locals from the innermost scope outward, then parameters. */
 var_t *find_local_var(const char *token, block_t *block)
 {
     func_t *func = block->func;
-    char head = token[0];
+    var_t *var;
 
     for (; block; block = block->parent) {
-        var_list_t *var_list = &block->locals;
-        for (int i = 0; i < var_list->size; i++) {
-            var_t *var = var_list->elements[i];
-            if (var->var_name[0] != head)
-                continue;
-            if (!strcmp(var->var_name, token))
-                return var;
-        }
+        if ((var = find_var_in_list(&block->locals, token, NULL)))
+            return var;
     }
 
-    if (func) {
-        for (int i = 0; i < func->num_params; i++) {
-            var_t *param = &func->param_defs[i];
-            if (param->var_name[0] != head)
-                continue;
-            if (!strcmp(param->var_name, token))
-                return param;
-        }
-    }
-    return NULL;
+    return find_func_param(func, token);
 }
 
 var_t *find_global_var(const char *token)
 {
-    var_list_t *var_list = &GLOBAL_BLOCK->locals;
-    char head = token[0];
+    var_t *unit_var = find_tu_declaration(token);
 
-    for (int i = 0; i < var_list->size; i++) {
-        var_t *var = var_list->elements[i];
-        if (var->var_name[0] != head)
-            continue;
-        if (!strcmp(var->var_name, token))
-            return var;
-    }
-    return NULL;
+    if (unit_var && !unit_var->is_block_scope_function_declaration)
+        return find_func(unit_var->var_name) ? NULL : unit_var;
+
+    return find_var_in_list(&GLOBAL_BLOCK->locals, token, NULL);
 }
 
 var_t *find_var(char *token, block_t *parent)
@@ -1704,17 +2093,18 @@ int size_var(var_t *var)
  */
 func_t *add_func(char *func_name, bool synthesize)
 {
+    char *stable_name;
     func_t *func = hashmap_get(FUNC_MAP, func_name);
 
     if (func)
         return func;
 
+    stable_name = intern_string(func_name);
     func = arena_alloc_func();
-    hashmap_put(FUNC_MAP, func_name, func);
+    hashmap_put_borrowed(FUNC_MAP, stable_name, func);
     for (int i = 0; i < MAX_PARAMS; i++)
         func->param_defs[i].var_name = "";
-    /* Use interned string for function name */
-    func->return_def.var_name = intern_string(func_name);
+    func->return_def.var_name = stable_name;
 
     /* Prepare space for function arguments.
      *
@@ -1770,6 +2160,19 @@ func_t *find_func(char *func_name)
     return hashmap_get(FUNC_MAP, func_name);
 }
 
+int function_entry_address(char *name)
+{
+    func_t *func = find_func(name);
+
+    if (func->bbs)
+        return elf_code_start + func->bbs->elf_offset;
+    if (dynlink)
+        return dynamic_sections.elf_plt_start + func->plt_offset;
+    printf("The '%s' function is not implemented\n", name);
+    fflush(stdout);
+    abort();
+}
+
 /* Create a basic block and set the scope of variables to 'parent' block */
 basic_block_t *bb_create(block_t *parent)
 {
@@ -1777,7 +2180,7 @@ basic_block_t *bb_create(block_t *parent)
      * zeroing (live_gen, live_kill, live_in, live_out, DF, RDF, dom_next, etc.)
      * This is simpler and safer than manually initializing everything.
      */
-    basic_block_t *bb = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    basic_block_t *bb = arena_alloc_bb();
 
     /* Initialize non-zero fields */
     bb->scope = parent;
@@ -1789,27 +2192,8 @@ basic_block_t *bb_create(block_t *parent)
      */
     bb->elf_offset = -1;
 
-    if (dump_ir || dump_dot) {
-        /* MAX_VAR_LEN spent 128 bytes on a string that is always ".label." plus
-         * an int. A self-compile calls bb_create() 52k times, so that was 6.4
-         * MiB of arena where 1.2 MiB does.
-         */
-        bb->bb_label_name = arena_alloc(GENERAL_ARENA, MAX_LABEL_LEN);
-        snprintf(bb->bb_label_name, MAX_LABEL_LEN, ".label.%d", bb_label_idx++);
-    }
-
     return bb;
 }
-
-/* Bumped once per compute_live_in() call; a variable belongs to the set being
- * built when its stamp equals the current value.
- */
-int liveness_gen;
-
-/* Bumped once per recompute_live_out() call, stamping the union of successor
- * live_in sets as it is assembled.
- */
-int live_merge_gen;
 
 /* log2 of @v when it is a power of two, otherwise -1. */
 int exact_log2(int v)
@@ -1838,65 +2222,19 @@ void *arena_grow(arena_t *arena,
                  int limit,
                  char *what)
 {
-    int new_cap = *cap ? *cap << 1 : first;
+    int new_cap;
+
+    if (*cap < 0 || elem_sz <= 0 || first <= 0 || *cap > INT_MAX / 2)
+        return NULL;
+    new_cap = *cap ? *cap << 1 : first;
+    if (new_cap > INT_MAX / elem_sz)
+        return NULL;
     if (limit && new_cap > limit)
         limit_error(what);
     void *grown = arena_realloc(arena, ptr, *cap * elem_sz, new_cap * elem_sz);
-    *cap = new_cap;
+    if (grown)
+        *cap = new_cap;
     return grown;
-}
-
-/* Record another SSA version of @v, growing the version array as needed. */
-void var_add_subscript(var_t *v, var_t *sub)
-{
-    if (v->subscripts_idx >= v->subscripts_cap)
-        v->subscripts =
-            arena_grow(BLOCK_ARENA, (char *) v->subscripts, &v->subscripts_cap,
-                       sizeof(var_t *), 4, 0, NULL);
-    v->subscripts[v->subscripts_idx++] = sub;
-}
-
-/* The first SSA version of @v, or NULL when it has none. Callers relied on the
- * old array being zero-filled to get NULL here.
- */
-var_t *var_subscript0(var_t *v)
-{
-    if (!v->subscripts_idx)
-        return NULL;
-    return v->subscripts[0];
-}
-
-/* Detach @v from any version array it inherited from a by-value copy. */
-void var_reset_subscripts(var_t *v)
-{
-    /* memcpy'd from a base, so the copy would otherwise alias the base's
-     * renaming state as well as its version list.
-     */
-    v->rename = NULL;
-    v->subscripts = NULL;
-    v->subscripts_idx = 0;
-    v->subscripts_cap = 0;
-}
-
-/* Append to a basic block's dominance frontier, growing the array as needed.
- * The array starts unallocated, so a block that never contributes to a frontier
- * costs nothing beyond the pointer.
- */
-void bb_add_df(basic_block_t *bb, basic_block_t *df)
-{
-    if (bb->df_idx >= bb->df_cap)
-        bb->DF = arena_grow(BB_ARENA, (char *) bb->DF, &bb->df_cap,
-                            sizeof(basic_block_t *), 8, 0, NULL);
-    bb->DF[bb->df_idx++] = df;
-}
-
-/* The reverse-dominance-frontier counterpart of bb_add_df(). */
-void bb_add_rdf(basic_block_t *bb, basic_block_t *rdf)
-{
-    if (bb->rdf_idx >= bb->rdf_cap)
-        bb->RDF = arena_grow(BB_ARENA, (char *) bb->RDF, &bb->rdf_cap,
-                             sizeof(basic_block_t *), 8, 0, NULL);
-    bb->RDF[bb->rdf_idx++] = rdf;
 }
 
 /* The pred-succ pair must have only one connection */
@@ -1941,79 +2279,76 @@ void bb_connect(basic_block_t *pred,
     default:
         abort();
     }
+    vir_frontend_note_edge(pred, succ);
 }
 
-/* The pred-succ pair must have only one connection */
-void bb_disconnect(basic_block_t *pred, basic_block_t *succ)
+/* bb_disconnect() leaves holes in prev[], so prev_idx alone is not enough. */
+bool bb_has_pred(const basic_block_t *bb)
 {
-    for (int i = 0; i < succ->prev_idx; i++) {
-        if (succ->prev[i].bb == pred) {
-            switch (succ->prev[i].type) {
-            case NEXT:
-                pred->next = NULL;
-                break;
-            case THEN:
-                pred->then_ = NULL;
-                break;
-            case ELSE:
-                pred->else_ = NULL;
-                break;
-            default:
-                abort();
-            }
-
-            succ->prev[i].bb = NULL;
-            break;
-        }
-    }
+    for (int i = 0; i < bb->prev_idx; i++)
+        if (bb->prev[i].bb)
+            return true;
+    return false;
 }
 
-/* Count the predecessors still wired to 'bb'. bb_disconnect() leaves holes in
- * prev[], so prev_idx is only a high-water mark and the entries must be counted
- * rather than trusted.
- */
-int bb_pred_count(const basic_block_t *bb)
+/* Return the sole live predecessor, or NULL when the block has zero or many. */
+basic_block_t *bb_sole_pred(const basic_block_t *bb)
 {
-    int n = 0;
+    basic_block_t *pred = NULL;
 
     for (int i = 0; i < bb->prev_idx; i++) {
-        if (bb->prev[i].bb)
-            n++;
+        basic_block_t *candidate = bb->prev[i].bb;
+
+        if (!candidate)
+            continue;
+        if (pred)
+            return NULL;
+        pred = candidate;
     }
-    return n;
+    return pred;
 }
 
-/* The symbol is an argument of function or the variable in declaration */
-void add_symbol(basic_block_t *bb, var_t *var)
-{
-    if (!bb)
-        return;
-    symbol_t *sym;
-    for (sym = bb->symbol_list.head; sym; sym = sym->next) {
-        if (sym->var == var)
-            return;
-    }
-
-    sym = arena_alloc_symbol();
-    sym->var = var;
-
-    if (!bb->symbol_list.head) {
-        sym->index = 0;
-        bb->symbol_list.head = sym;
-        bb->symbol_list.tail = sym;
-    } else {
-        sym->index = bb->symbol_list.tail->index + 1;
-        bb->symbol_list.tail->next = sym;
-        bb->symbol_list.tail = sym;
-    }
-}
-
-/* Whether @var is a volatile object named by its declaration, as opposed to a
- * temporary the parser generated. Temporaries are named ".tN".
+/* Pointer-star qualifiers describe pointer storage independently of its base.
  */
+static int var_volatile_pointer_depth(const var_t *var)
+{
+    return var->ptr_level + var->type->ptr_level + var->is_func +
+           !!(var->array_size || var->has_unsized_array);
+}
+bool var_volatile_storage(const var_t *var)
+{
+    if (!var || !var->type)
+        return false;
+    int depth = var_volatile_pointer_depth(var);
+    return depth ? depth <= 32 &&
+                       (var->pointer_volatile_mask & (1U << (depth - 1)))
+                 : var->is_volatile || var->type->is_volatile_qualified;
+}
+bool var_volatile_pointee(const var_t *var)
+{
+    if (!var || !var->type)
+        return false;
+    int depth = var_volatile_pointer_depth(var);
+    const func_t *signature = var->pointee_func_signature;
+    if (!signature && !var->is_func && var->type->func_signature &&
+        !var->type->is_direct_function_type)
+        signature = var->type->func_signature;
+    if (signature) {
+        const var_t *result = &signature->return_def;
+        int return_depth =
+            var->type->func_signature && !var->type->is_direct_function_type
+                ? 0
+                : result->ptr_level + result->type->ptr_level;
+        if (depth == return_depth + 1)
+            return var->callback_is_volatile;
+    }
+    return depth > 1 ? depth <= 33 &&
+                           (var->pointer_volatile_mask & (1U << (depth - 2)))
+                     : var->is_volatile || var->type->is_volatile_qualified;
+}
 bool var_is_volatile_object(const var_t *var)
 {
-    return var && var->is_volatile && var->var_name[0] != '.';
+    return var_volatile_storage(var) && var->var_name[0] != '.';
 }
 
 /* A volatile object a primary expression has named and no instruction has read
@@ -2035,26 +2370,6 @@ void add_insn(block_t *block,
 
     bb->scope = block;
 
-    insn_t *n = arena_alloc(INSN_ARENA, sizeof(insn_t));
-    n->next = NULL;
-    n->prev = NULL;
-    n->opcode = op;
-    n->rd = rd;
-    n->rs1 = rs1;
-    n->rs2 = rs2;
-
-    /* Only a select names a third source. The allocation is not zeroed and
-     * every field is set here by hand, so this one has to be too.
-     */
-    n->rs3 = NULL;
-    n->sz = sz;
-    n->useful = false;
-    n->belong_to = bb;
-    n->phi_ops = NULL;
-    n->idx = 0;
-
-    n->str = str ? intern_string(str) : NULL;
-
     /* An instruction reading the object discard_operand() watches has given it
      * the read it is owed.
      */
@@ -2066,6 +2381,8 @@ void add_insn(block_t *block,
      * optimization
      */
     if ((op == OP_address_of || op == OP_global_address_of) && rs1) {
+        if (rd)
+            rd->is_volatile_access = var_volatile_storage(rs1);
         rs1->address_taken = true;
         rs1->is_const = false; /* disable constant optimization */
     }
@@ -2075,16 +2392,81 @@ void add_insn(block_t *block,
      * its slot as though its address had escaped, so that each access by name
      * reaches memory rather than a register copy.
      */
-    if (op == OP_allocat && rd && rd->is_volatile && !rd->is_global)
+    if (op == OP_allocat && var_volatile_storage(rd) && !rd->is_global)
         rd->address_taken = true;
 
-    if (!bb->insn_list.head)
-        bb->insn_list.head = n;
-    else
-        bb->insn_list.tail->next = n;
+    vir_frontend_note_insn(bb, op, rd, rs1, rs2, sz,
+                           str ? intern_string(str) : NULL);
+}
 
-    n->prev = bb->insn_list.tail;
-    bb->insn_list.tail = n;
+void dump_stats_phase(const char *phase)
+{
+    if (!dump_stats)
+        return;
+
+    /* Keep each call within the compiler's current fixed-argument ABI limit.
+     * The line grouping is also intentionally stable for benchmark parsers.
+     */
+    fprintf(stderr, "stats phase=%s funcs=%d vars=%d bbs=%d\n", phase,
+            stats_func_count, stats_var_count, stats_bb_count);
+    if (!strcmp(phase, "parse")) {
+        fprintf(stderr, "stats phase=parse translation_units=%d\n",
+                translation_unit_count);
+        fprintf(stderr,
+                "stats phase=parse tu_index_lookups=%d "
+                "tu_index_registrations=%d\n",
+                stats_tu_index_lookups, stats_tu_index_registrations);
+    }
+    fprintf(stderr,
+            "stats phase=%s field_slots=%d param_slots=%d var_slots=%d\n",
+            phase, stats_field_slot_count, stats_func_count * MAX_PARAMS,
+            stats_var_count + stats_field_slot_count +
+                stats_func_count * MAX_PARAMS);
+    vir_stats_t totals = {0};
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        const vir_function_t *graph = vir_frontend_function(func);
+        if (!graph)
+            continue;
+        vir_stats_t stats;
+        vir_collect_stats(graph, &stats);
+        totals.blocks += stats.blocks;
+        totals.values += stats.values;
+        totals.params += stats.params;
+        totals.effects += stats.effects;
+        totals.arena_capacity += stats.arena_capacity;
+    }
+    fprintf(stderr,
+            "stats phase=%s vir_blocks=%d vir_values=%d vir_params=%d\n", phase,
+            totals.blocks, totals.values, totals.params);
+    fprintf(stderr, "stats phase=%s vir_effects=%d vir_arena=%d ph2=%d\n",
+            phase, totals.effects, totals.arena_capacity, stats_ph2_ir_count);
+    fprintf(stderr, "stats phase=%s arena_capacity block=%d bb=%d\n", phase,
+            BLOCK_ARENA ? BLOCK_ARENA->total_bytes : 0,
+            BB_ARENA ? BB_ARENA->total_bytes : 0);
+    fprintf(stderr, "stats phase=%s arena_capacity token=%d general=%d\n",
+            phase, TOKEN_ARENA ? TOKEN_ARENA->total_bytes : 0,
+            GENERAL_ARENA ? GENERAL_ARENA->total_bytes : 0);
+    fprintf(stderr, "stats phase=%s arena_capacity_peak block=%d bb=%d\n",
+            phase, BLOCK_ARENA ? BLOCK_ARENA->peak_bytes : 0,
+            BB_ARENA ? BB_ARENA->peak_bytes : 0);
+    fprintf(
+        stderr, "stats phase=%s arena_capacity_peak token=%d general=%d\n",
+        phase,
+        TOKEN_ARENA ? TOKEN_ARENA->peak_bytes : stats_retired_token_arena_peak,
+        GENERAL_ARENA ? GENERAL_ARENA->peak_bytes : 0);
+    fprintf(stderr, "stats phase=%s arena_total_capacity=%d\n", phase,
+            stats_live_arena_capacity);
+    fprintf(stderr, "stats phase=%s arena_total_capacity_peak=%d\n", phase,
+            stats_peak_arena_capacity);
+}
+
+void dump_stats_layout(void)
+{
+    if (!dump_stats)
+        return;
+
+    fprintf(stderr, "stats layout var=%d bb=%d ph2=%d\n", (int) sizeof(var_t),
+            (int) sizeof(basic_block_t), (int) sizeof(ph2_ir_t));
 }
 
 strbuf_t *strbuf_create(int init_capacity)
@@ -2177,23 +2559,22 @@ void strbuf_free(strbuf_t *src)
  */
 void global_init(void)
 {
+    internal_linkage_name_idx = 0;
     FUNC_LIST.head = NULL;
     FUNC_LIST.tail = NULL;
-    memset(REGS, 0, sizeof(regfile_t) * REG_CNT);
 
     /* Initialize arenas first so we can use them for allocation */
     BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Variables/blocks */
-    INSN_ARENA = arena_init(LARGE_ARENA_SIZE); /* Instructions - high usage */
-    BB_ARENA = arena_init(SMALL_ARENA_SIZE);   /* Basic blocks - low usage */
-    HASHMAP_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Hash nodes */
+    BB_ARENA = arena_init(SMALL_ARENA_SIZE);      /* Basic blocks - low usage */
     TOKEN_ARENA = arena_init(LARGE_ARENA_SIZE);
     GENERAL_ARENA =
-        arena_init(DEFAULT_ARENA_SIZE); /* For TYPES and PH2_IR_FLATTEN */
+        arena_init(DEFAULT_ARENA_SIZE); /* For TYPES and flattened IR */
 
     /* Use arena allocation for better memory management */
     TYPES = arena_calloc(GENERAL_ARENA, MAX_TYPES, sizeof(type_t));
-    PH2_IR_FLATTEN =
-        arena_alloc(GENERAL_ARENA, MAX_IR_INSTR * sizeof(ph2_ir_t *));
+    PH2_IR_FLATTEN = NULL;
+    ph2_ir_capacity = 0;
+    ph2_ir_idx = 0;
 
     /* Initialize string pool for identifier deduplication */
     string_pool = arena_alloc(GENERAL_ARENA, sizeof(string_pool_t));
@@ -2207,7 +2588,6 @@ void global_init(void)
     TOKEN_CACHE = hashmap_create(DEFAULT_SRC_FILE_COUNT);
     SRC_FILE_MAP = hashmap_create(DEFAULT_SRC_FILE_COUNT);
     FUNC_MAP = hashmap_create(DEFAULT_FUNCS_SIZE);
-    CONSTANTS_MAP = hashmap_create(MAX_CONSTANTS);
 
     LIBC_SRC = strbuf_create(4096);
     elf_code = strbuf_create(MAX_CODE);
@@ -2290,6 +2670,7 @@ int arena_free_trailing_blocks(arena_t *arena)
             arena_block_t *next = block->next;
             freed += block->capacity;
             arena->total_bytes -= block->capacity;
+            stats_live_arena_capacity -= block->capacity;
             arena_block_free(block);
             block = next;
         }
@@ -2305,14 +2686,22 @@ int arena_free_trailing_blocks(arena_t *arena)
  * reach the parser through intern_string(), which copies into GENERAL_ARENA,
  * and every parser entry point copies a token's text into a local buffer before
  * storing it. So once parse() returns, all 17 MiB of it is garbage that would
- * otherwise stay resident through the memory peak in reg_alloc().
+ * otherwise stay resident through the memory peak in machine lowering.
  *
  * The source buffers in SRC_FILE_MAP exist only to quote a line in a parse
  * error, so they go at the same time.
  */
 void release_token_arena(void)
 {
+    /* The lexer maps borrow pointers into TOKEN_ARENA, so destroy them before
+     * releasing their values. Parsing is complete and they have no later
+     * readers. global_release() may call this cleanup again safely.
+     */
+    lexer_cleanup();
+
     if (TOKEN_ARENA) {
+        if (TOKEN_ARENA->peak_bytes > stats_retired_token_arena_peak)
+            stats_retired_token_arena_peak = TOKEN_ARENA->peak_bytes;
         arena_free(TOKEN_ARENA);
         TOKEN_ARENA = NULL;
     }
@@ -2336,73 +2725,42 @@ void release_token_arena(void)
     }
 }
 
-/* Compact all arenas to reduce memory usage after compilation phases. This
- * safely frees only trailing empty blocks without invalidating pointers.
- *
- * Return: Total bytes freed across all arenas.
- */
-int compact_all_arenas(void)
-{
-    int total_saved = 0;
-
-    /* Free trailing blocks from each arena */
-    total_saved += arena_free_trailing_blocks(BLOCK_ARENA);
-    total_saved += arena_free_trailing_blocks(INSN_ARENA);
-    total_saved += arena_free_trailing_blocks(BB_ARENA);
-    total_saved += arena_free_trailing_blocks(HASHMAP_ARENA);
-    total_saved += arena_free_trailing_blocks(GENERAL_ARENA);
-
-    return total_saved;
-}
-
-/* Compact specific arenas based on compilation phase. Different phases have
- * different memory usage patterns.
- *
- * @phase_mask: Bitmask using COMPACT_ARENA_* defines
- *              to indicate which arenas to compact.
- *
- * Return: Total bytes freed.
- */
-int compact_arenas_selective(int phase_mask)
+static int compact_arenas(int phase_mask)
 {
     int total_saved = 0;
 
     if (phase_mask & COMPACT_ARENA_BLOCK)
         total_saved += arena_free_trailing_blocks(BLOCK_ARENA);
-
-    if (phase_mask & COMPACT_ARENA_INSN)
-        total_saved += arena_free_trailing_blocks(INSN_ARENA);
-
     if (phase_mask & COMPACT_ARENA_BB)
         total_saved += arena_free_trailing_blocks(BB_ARENA);
-
-    if (phase_mask & COMPACT_ARENA_HASHMAP)
-        total_saved += arena_free_trailing_blocks(HASHMAP_ARENA);
-
     if (phase_mask & COMPACT_ARENA_GENERAL)
         total_saved += arena_free_trailing_blocks(GENERAL_ARENA);
 
     return total_saved;
 }
 
+/* Compact selected arenas for their compilation phase. */
+int compact_arenas_selective(int phase_mask)
+{
+    return compact_arenas(phase_mask);
+}
+
 void global_release(void)
 {
-    /* Cleanup lexer hashmaps */
-    lexer_cleanup();
+    /* Release token and source storage before the remaining compiler state. */
+    release_token_arena();
 
     /* Free string interning hashmaps */
     if (string_pool && string_pool->strings)
         hashmap_free(string_pool->strings);
     if (string_literal_pool && string_literal_pool->literals)
         hashmap_free(string_literal_pool->literals);
+    hashmap_free(TU_ORDINARY_MAP);
+    TU_ORDINARY_MAP = NULL;
 
     arena_free(BLOCK_ARENA);
-    arena_free(INSN_ARENA);
     arena_free(BB_ARENA);
-    arena_free(HASHMAP_ARENA);
-    if (TOKEN_ARENA)
-        arena_free(TOKEN_ARENA);
-    arena_free(GENERAL_ARENA); /* free TYPES and PH2_IR_FLATTEN */
+    arena_free(GENERAL_ARENA); /* free TYPES */
 
     /* Every value in TOKEN_CACHE is one heap-allocated token_stream_t: the
      * tokens it spans come from TOKEN_ARENA, which is already gone, but the
@@ -2416,31 +2774,34 @@ void global_release(void)
         }
     }
     hashmap_free(TOKEN_CACHE);
-    hashmap_free(SRC_FILE_MAP);
     hashmap_free(FUNC_MAP);
     hashmap_free(INCLUSION_MAP);
-    hashmap_free(CONSTANTS_MAP);
 
-    strbuf_free(LIBC_SRC);
-    strbuf_free(elf_code);
-    strbuf_free(elf_data);
-    strbuf_free(elf_rodata);
-    strbuf_free(elf_header);
-    strbuf_free(elf_program_header);
-    strbuf_free(elf_symtab);
-    strbuf_free(elf_strtab);
-    strbuf_free(elf_shstrtab);
-    strbuf_free(elf_section_header);
-    strbuf_free(dynamic_sections.elf_interp);
-    strbuf_free(dynamic_sections.elf_dynamic);
-    strbuf_free(dynamic_sections.elf_dynsym);
-    strbuf_free(dynamic_sections.elf_dynstr);
-    if (dynamic_sections.use_relaplt)
-        strbuf_free(dynamic_sections.elf_relaplt);
-    else
-        strbuf_free(dynamic_sections.elf_relplt);
-    strbuf_free(dynamic_sections.elf_plt);
-    strbuf_free(dynamic_sections.elf_got);
+    strbuf_t *buffers[] = {
+        LIBC_SRC,
+        elf_code,
+        elf_data,
+        elf_rodata,
+        elf_header,
+        elf_program_header,
+        elf_symtab,
+        elf_strtab,
+        elf_shstrtab,
+        elf_section_header,
+        dynamic_sections.elf_interp,
+        dynamic_sections.elf_dynamic,
+        dynamic_sections.elf_dynsym,
+        dynamic_sections.elf_dynstr,
+        dynamic_sections.use_relaplt ? dynamic_sections.elf_relaplt
+                                     : dynamic_sections.elf_relplt,
+        dynamic_sections.elf_plt,
+        dynamic_sections.elf_got,
+    };
+    for (size_t i = 0; i < sizeof(buffers) / sizeof(*buffers); i++)
+        strbuf_free(buffers[i]);
+    PH2_IR_FLATTEN = NULL;
+    ph2_ir_idx = 0;
+    ph2_ir_capacity = 0;
 }
 
 /* The function whose body the back half of the pipeline is working on, or NULL
@@ -2579,300 +2940,14 @@ __noreturn void error_at(char *msg, source_location_t *loc)
     exit(1);
 }
 
-void print_indent(int indent)
+int abi_arg_next(int cursor, const var_t *var, bool variadic)
 {
-    for (int i = 0; i < indent; i++)
-        printf("\t");
-}
-
-void dump_bb_insn(const func_t *func,
-                  const basic_block_t *bb,
-                  bool *at_func_start)
-{
-    if (!bb)
-        return;
-    const var_t *rd, *rs1, *rs2;
-
-    if (bb != func->bbs && bb->insn_list.head) {
-        if (!at_func_start[0])
-            printf("%s:\n", bb->bb_label_name);
-        else
-            at_func_start[0] = false;
-    }
-
-    for (insn_t *insn = bb->insn_list.head; insn; insn = insn->next) {
-        rd = insn->rd;
-        rs1 = insn->rs1;
-        rs2 = insn->rs2;
-
-        switch (insn->opcode) {
-        case OP_unwound_phi:
-            /* Ignored */
-            continue;
-        case OP_allocat:
-            print_indent(1);
-            printf("allocat %s", rd->type->type_name);
-
-            for (int i = 0; i < rd->ptr_level; i++)
-                printf("*");
-
-            printf(" %%%s", rd->var_name);
-
-            if (rd->array_size > 0)
-                printf("[%d]", rd->array_size);
-
-            break;
-        case OP_load_constant:
-            print_indent(1);
-            printf("const %%%s, %d", rd->var_name, rd->init_val);
-            break;
-        case OP_load_data_address:
-            print_indent(1);
-            /* offset from .data section */
-            printf("%%%s = .data (%d)", rd->var_name, rd->init_val);
-            break;
-        case OP_load_rodata_address:
-            print_indent(1);
-            /* offset from .rodata section */
-            printf("%%%s = .rodata (%d)", rd->var_name, rd->init_val);
-            break;
-        case OP_address_of:
-            print_indent(1);
-            printf("%%%s = &(%%%s)", rd->var_name, rs1->var_name);
-            break;
-        case OP_assign:
-            print_indent(1);
-            printf("%%%s = %%%s", rd->var_name, rs1->var_name);
-            break;
-        case OP_branch:
-            print_indent(1);
-            printf("br %%%s, %s, %s", rs1->var_name, bb->then_->bb_label_name,
-                   bb->else_->bb_label_name);
-            break;
-        case OP_jump:
-            print_indent(1);
-            printf("jmp %s", bb->next->bb_label_name);
-            break;
-        case OP_label:
-            print_indent(0);
-            printf("%s:", insn->str);
-            break;
-        case OP_push:
-            print_indent(1);
-            printf("push %%%s", rs1->var_name);
-            break;
-        case OP_call:
-            print_indent(1);
-            printf("call @%s", insn->str);
-            break;
-        case OP_func_ret:
-            print_indent(1);
-            printf("retval %%%s", rd->var_name);
-            break;
-        case OP_return:
-            print_indent(1);
-            if (rs1)
-                printf("ret %%%s", rs1->var_name);
-            else
-                printf("ret");
-            break;
-        case OP_read:
-            print_indent(1);
-            printf("%%%s = (%%%s), %d", rd->var_name, rs1->var_name, insn->sz);
-            break;
-        case OP_write:
-            print_indent(1);
-            if (rs1->is_func)
-                printf("(%%%s) = @%s", rs1->var_name, rs2->var_name);
-            else
-                printf("(%%%s) = %%%s, %d", rs1->var_name, rs2->var_name,
-                       insn->sz);
-            break;
-        case OP_indirect:
-            print_indent(1);
-            printf("indirect call @(%%%s)", rs1->var_name);
-            break;
-        case OP_negate:
-            print_indent(1);
-            printf("neg %%%s, %%%s", rd->var_name, rs1->var_name);
-            break;
-        case OP_add:
-            print_indent(1);
-            printf("%%%s = add %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_sub:
-            print_indent(1);
-            printf("%%%s = sub %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_mul:
-            print_indent(1);
-            printf("%%%s = mul %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_div:
-            print_indent(1);
-            printf("%%%s = div %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_mod:
-            print_indent(1);
-            printf("%%%s = mod %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_eq:
-            print_indent(1);
-            printf("%%%s = eq %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_neq:
-            print_indent(1);
-            printf("%%%s = neq %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_gt:
-            print_indent(1);
-            printf("%%%s = gt %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_lt:
-            print_indent(1);
-            printf("%%%s = lt %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_geq:
-            print_indent(1);
-            printf("%%%s = geq %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_leq:
-            print_indent(1);
-            printf("%%%s = leq %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_bit_and:
-            print_indent(1);
-            printf("%%%s = and %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_bit_or:
-            print_indent(1);
-            printf("%%%s = or %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_bit_not:
-            print_indent(1);
-            printf("%%%s = not %%%s", rd->var_name, rs1->var_name);
-            break;
-        case OP_bit_xor:
-            print_indent(1);
-            printf("%%%s = xor %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_log_and:
-            print_indent(1);
-            printf("%%%s = and %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_log_or:
-            print_indent(1);
-            printf("%%%s = or %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_log_not:
-            print_indent(1);
-            printf("%%%s = not %%%s", rd->var_name, rs1->var_name);
-            break;
-        case OP_rshift:
-            print_indent(1);
-            printf("%%%s = rshift %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_lshift:
-            print_indent(1);
-            printf("%%%s = lshift %%%s, %%%s", rd->var_name, rs1->var_name,
-                   rs2->var_name);
-            break;
-        case OP_trunc:
-            print_indent(1);
-            printf("%%%s = trunc %%%s, %d", rd->var_name, rs1->var_name,
-                   insn->sz);
-            break;
-        case OP_sign_ext:
-            print_indent(1);
-            printf("%%%s = sign_ext %%%s, %d", rd->var_name, rs1->var_name,
-                   insn->sz);
-            break;
-        case OP_cast:
-            print_indent(1);
-            printf("%%%s = cast %%%s", rd->var_name, rs1->var_name);
-            break;
-        default:
-            printf("<Unsupported opcode: %d>", insn->opcode);
-            break;
-        }
-
-        printf("\n");
-    }
-}
-
-void dump_bb_insn_by_dom(func_t *func, basic_block_t *bb, bool *at_func_start)
-{
-    dump_bb_insn(func, bb, at_func_start);
-    for (int i = 0; bb && i < bb->dom_next_idx; i++)
-        dump_bb_insn_by_dom(func, bb->dom_next[i], at_func_start);
-}
-
-void dump_insn(void)
-{
-    printf("==<START OF INSN DUMP>==\n");
-
-    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        /* Skip function declarations without bodies */
-        if (!func->bbs)
-            continue;
-
-        bool at_func_start = true;
-
-        printf("def %s", func->return_def.type->type_name);
-
-        for (int i = 0; i < func->return_def.ptr_level; i++)
-            printf("*");
-        printf(" @%s(", func->return_def.var_name);
-
-        for (int i = 0; i < func->num_params; i++) {
-            if (i != 0)
-                printf(", ");
-            printf("%s", func->param_defs[i].type->type_name);
-
-            for (int k = 0; k < func->param_defs[i].ptr_level; k++)
-                printf("*");
-            printf(" %%%s", func->param_defs[i].var_name);
-        }
-        printf(") {\n");
-
-        dump_bb_insn_by_dom(func, func->bbs, &at_func_start);
-
-        /* Handle implicit return */
-        for (int i = 0; func->exit && i < func->exit->prev_idx; i++) {
-            const basic_block_t *bb = func->exit->prev[i].bb;
-            if (!bb)
-                continue;
-
-            if (func->return_def.type != TY_void)
-                continue;
-
-            if (bb->insn_list.tail)
-                if (bb->insn_list.tail->opcode == OP_return)
-                    continue;
-
-            print_indent(1);
-            printf("ret\n");
-        }
-
-        printf("}\n");
-    }
-
-    printf("==<END OF INSN DUMP>==\n");
+    bool pair = PTR_SIZE == 4 && var && var->type && !var->ptr_level &&
+                !var->array_size && !var->is_func &&
+                var->type->base_type != TYPE_struct &&
+                var->type->base_type != TYPE_union && var->type->size == 8;
+    if (pair && (ELF_MACHINE != ELF_MACHINE_RV32 || variadic ||
+                 cursor >= MAX_ARGS_IN_REG))
+        cursor = ALIGN_UP(cursor, 2);
+    return cursor + (pair ? 2 : 1);
 }

@@ -75,12 +75,11 @@
  * this does not inflate scalar type storage.
  */
 #define MAX_FIELDS 128
-#define MAX_TYPES 256
+/* The self-hosting compiler has outgrown the original 256-entry table. */
+#define MAX_TYPES 512
 #define MAX_LABELS 256
 /* Elements captured from an implicitly sized array initializer. */
 #define MAX_IMPLICIT_ARRAY 256
-/* A self-compile emits ~101k ph2_ir; one pointer per slot in PH2_IR_FLATTEN. */
-#define MAX_IR_INSTR 262144
 #define MAX_BB_PRED 128
 #define MAX_BB_DOM_SUCC 64
 #define MAX_CODE 262144
@@ -99,15 +98,7 @@
 #define MAX_RELAPLT 1024
 #define MAX_PLT 1024
 #define MAX_GOTPLT 1024
-#define MAX_CONSTANTS 1024
 #define MAX_NESTING 128
-
-/* How many instructions an if may speculate when flattened into a select, and
- * how many blocks one of its arms may span. Beyond a handful, running the arm
- * that would have been skipped costs more than the misprediction it avoids.
- */
-#define MAX_SPECULATED_INSNS 8
-#define MAX_IF_ARM_BLOCKS 4
 
 /* Recursion limits for nesting in the input. The parser descends recursively
  * for each of these, so a deeply nested program would otherwise exhaust the
@@ -128,15 +119,13 @@
  */
 #define DEFAULT_ARENA_SIZE 262144 /* 256 KiB - standard default */
 #define SMALL_ARENA_SIZE 65536    /* 64 KiB - for small allocations */
-#define LARGE_ARENA_SIZE 524288   /* 512 KiB - for instruction arena */
+#define LARGE_ARENA_SIZE 524288   /* 512 KiB - for token storage */
 #define DEFAULT_FUNCS_SIZE 64
 #define DEFAULT_SRC_FILE_COUNT 8
 
 /* Arena compaction bitmask flags for selective memory reclamation */
 #define COMPACT_ARENA_BLOCK 0x01   /* BLOCK_ARENA - variables/blocks */
-#define COMPACT_ARENA_INSN 0x02    /* INSN_ARENA - instructions */
 #define COMPACT_ARENA_BB 0x04      /* BB_ARENA - basic blocks */
-#define COMPACT_ARENA_HASHMAP 0x08 /* HASHMAP_ARENA - hash nodes */
 #define COMPACT_ARENA_GENERAL 0x10 /* GENERAL_ARENA - misc allocations */
 
 #define ELF_START 0x10000
@@ -248,17 +237,13 @@
  * how many nesting levels still multiply it.
  */
 #define LOOP_USE_WEIGHT 8
-#define MAX_WEIGHTED_LOOP_DEPTH 3
+#define MAX_WEIGHTED_LOOP_DEPTH 4
 
 /* How many registers at the top of the allocator's file a call preserves. Only
  * such a register can hold a value across a call, so only these may be given to
  * a variable for the whole of a function that calls anything. A target states
  * its own count in mk/<arch>.mk, beside the REG_CNT that fixes the file it
  * counts from; a target that has not had its file checked this way keeps none.
- *
- * HAVE_COND_MOVE comes from the same place and says whether the target can
- * select between two values without branching, which is what makes flattening
- * an if into a select worthwhile.
  */
 #ifndef CALLEE_SAVED_REGS
 #define CALLEE_SAVED_REGS 0
@@ -275,8 +260,19 @@ typedef struct arena_block {
 typedef struct {
     arena_block_t *head;
     int total_bytes; /* Track total allocation for profiling */
+    int peak_bytes;  /* High-water payload capacity before compaction. */
     int block_size;  /* Default block size for new blocks */
 } arena_t;
+
+typedef struct {
+    arena_block_t *head;
+    int offset;
+} arena_mark_t;
+
+arena_mark_t arena_mark(arena_t *arena);
+int arena_bytes_since(arena_t *arena, arena_mark_t mark);
+/* Discard allocations after a live mark; return false if the mark is stale. */
+bool arena_rewind(arena_t *arena, arena_mark_t mark);
 
 /* string-based hash map definitions */
 
@@ -284,18 +280,29 @@ typedef struct hashmap_node {
     char *key;
     void *val;
     bool occupied;
+    bool owns_key;
 } hashmap_node_t;
 
 typedef struct {
     int size;
     int cap;
     hashmap_node_t *table;
+    bool has_owned_keys;
 } hashmap_t;
+
+hashmap_t *hashmap_create(int cap);
+void hashmap_put(hashmap_t *map, char *key, void *val);
+void hashmap_put_borrowed(hashmap_t *map, char *key, void *val);
+hashmap_node_t *hashmap_get_node(hashmap_t *map, char *key);
+void *hashmap_get(hashmap_t *map, char *key);
+bool hashmap_contains(hashmap_t *map, char *key);
+void hashmap_free(hashmap_t *map);
 
 /* lexer tokens */
 typedef enum {
     T_start, /* FIXME: Unused, intended for lexer state machine init */
-    T_eof,   /* end-of-file (EOF) */
+    T_translation_unit, /* internal boundary between source input files */
+    T_eof,              /* end-of-file (EOF) */
     T_numeric,
     T_floating, /* C99 floating literal; lowering is staged separately */
     T_identifier,
@@ -437,6 +444,9 @@ typedef struct token_stream {
     token_t *tail;
 } token_stream_t;
 
+bool numeric_suffix_is_valid(const char *suffix);
+int numeric_literal_base(const char *literal);
+
 /* String pool for identifier deduplication */
 typedef struct {
     hashmap_t *strings; /* Map string -> interned string */
@@ -468,11 +478,6 @@ typedef enum {
     /* intermediate use in front-end. No code generation */
     OP_generic,
 
-    OP_phi,
-    OP_unwound_phi, /* work like address_of + store */
-    /* rd = rs2 ? rs1 : rs3 -- select without a branch. */
-    OP_cmov,
-
     /* calling convention */
     OP_define,   /* function entry point */
     OP_push,     /* prepare arguments */
@@ -480,7 +485,8 @@ typedef enum {
     OP_indirect, /* indirect call with function pointer */
     OP_return,   /* explicit return */
 
-    OP_allocat, /* allocate space on stack */
+    OP_va_start, /* address of the first unnamed ABI argument */
+    OP_allocat,  /* allocate space on stack */
     OP_assign,
     OP_load_constant,       /* load constant */
     OP_load_data_address,   /* lookup address of a constant in data section */
@@ -490,12 +496,10 @@ typedef enum {
     OP_branch,   /* conditional jump */
     OP_jump,     /* unconditional jump */
     OP_func_ret, /* returned value */
-    OP_label,    /* for goto label */
 
     /* function pointer */
     OP_address_of_func, /* resolve function entry */
     OP_load_func,       /* prepare indirective call */
-    OP_global_load_func,
 
     /* memory address operations */
     OP_address_of, /* lookup variable's address */
@@ -534,45 +538,20 @@ typedef enum {
     /* data type conversion */
     OP_trunc,
     OP_sign_ext,
-    OP_cast,
-
-    /* entry point of the state machine */
-    OP_start
+    OP_cast
 } opcode_t;
 
+#define OP_USUAL_ARITHMETIC_CASES \
+    case OP_add:                  \
+    case OP_sub:                  \
+    case OP_mul:                  \
+    case OP_div:                  \
+    case OP_mod:                  \
+    case OP_bit_and:              \
+    case OP_bit_or:               \
+    case OP_bit_xor
+
 /* variable definition */
-
-/* Depth of the SSA renaming stack: how many definitions of one variable can be
- * live along a single dominator path.
- */
-#define MAX_RENAME_STACK 64
-
-typedef struct {
-    int counter;
-
-    /* Grown on demand: only a base variable is ever renamed, so the SSA
-     * versions copied from it -- the large majority of all variables -- would
-     * otherwise each carry an unused MAX_RENAME_STACK array.
-     */
-    int *stack;
-    int stack_idx;
-    int stack_cap;
-} rename_t;
-
-typedef struct ref_block ref_block_t;
-
-struct ref_block_list {
-    ref_block_t *head, *tail;
-};
-
-typedef struct ref_block_list ref_block_list_t;
-
-typedef struct insn insn_t;
-
-typedef struct use_chain_node {
-    insn_t *insn;
-    struct use_chain_node *next, *prev;
-} use_chain_t;
 
 typedef struct var var_t;
 typedef struct type type_t;
@@ -596,8 +575,14 @@ struct var {
      * intern_string(). Never NULL -- an unnamed variable holds "".
      */
     char *var_name;
+
+    /* Original C spelling when an internal-linkage name is mangled for the
+     * merged object/function tables. NULL for names emitted as-is.
+     */
+    char *source_name;
     int ptr_level;
     bool is_func;
+    bool is_function_designator;
 
     /* A pointer-to-callback object is not callable itself. Its compact callback
      * pointee signature is restored only after one dereference.
@@ -650,43 +635,15 @@ struct var {
     bool has_initializer; /* a file-scope definition supplied an initializer */
     bool is_const_qualified; /* true if variable has const qualifier */
     bool is_volatile;        /* declaration used the volatile qualifier */
+    bool is_volatile_access; /* computed address designates volatile storage */
     bool is_const_pointer;   /* true for the outermost `* const` qualifier */
     /* One bit per pointer level, counted from the base type. The legacy
      * is_const_pointer flag describes only the outermost level; this retains
      * qualifiers on intermediate pointers such as `int * const *`.
      */
     unsigned int pointer_const_mask;
+    unsigned int pointer_volatile_mask;
     bool address_taken; /* true if variable address was taken (&var) */
-    /* Working state for strength_reduce(): how many instructions in the
-     * function write the variable, whether it is written inside the loop being
-     * examined, and how much its value moves per iteration when it does. All
-     * three are recomputed per loop; nothing outside that pass reads them.
-     */
-    int def_cnt;
-    int loop_stamp;
-    int iv_gen;
-    int iv_step;
-
-    /* pin_registers()'s tally for the variable: what its namings are worth
-     * weighted by loop depth, the reverse-post-order number of the last block
-     * that named it, whether it was ever named in two, and whether a loop named
-     * it. Stamped per function so that no array has to hold the candidates --
-     * the file has a handful of registers and a function names hundreds of
-     * variables, and the one worth a register is not reliably among the first
-     * few met.
-     */
-    int pin_gen;
-    int pin_weight;
-    int pin_blk;
-    bool pin_cross;
-    bool pin_hot;
-
-    /* Defined inside an arm that if_convert() flattened into a select. The
-     * register its variable is pinned to still holds the value flowing into the
-     * select, which the arms read and the select overwrites, so a value
-     * computed on the way there must go somewhere else.
-     */
-    bool in_select_arm;
     int array_size;
     bool has_direct_array_declarator;
     bool has_unsized_array; /* `T name[]`: bound is supplied by initializer */
@@ -713,6 +670,8 @@ struct var {
      */
     int pointee_array_element_ptr_level;
     int offset; /* offset from stack or frame, index 0 is reserved */
+    int vir_source_index;
+
     /* Record bit-field metadata. `offset` is the containing storage unit's byte
      * offset. `is_bitfield` distinguishes an ordinary member from the valid
      * unnamed zero-width field used as an allocation-unit barrier.
@@ -723,37 +682,6 @@ struct var {
     int bit_storage_size;
     int init_val;    /* for global initialization */
     int init_val_hi; /* upper word of an 8-byte integer constant */
-    /* Generation stamps used by compute_live_in() to test set membership in
-     * constant time instead of rescanning live_kill and live_in per element.
-     */
-    int kill_gen;
-    int in_gen;
-    /* Stamp for the successor-union set merge_live_in() builds. */
-    int merge_gen;
-    struct var *base;
-    int subscript;
-
-    /* Every SSA version of this variable, grown on demand. A fixed 128-entry
-     * array made every var_t 1 KiB heavier -- and var_t is embedded by value in
-     * type_t's field table and in every function's parameter list -- while the
-     * append was unchecked, so a variable assigned more than 128 times in one
-     * function wrote past the end.
-     */
-    struct var **subscripts;
-    int subscripts_idx;
-    int subscripts_cap;
-
-    /* SSA renaming state, allocated on first use by var_rename(). Only a base
-     * variable is ever renamed, so the versions copied from it -- the large
-     * majority of all variables -- each carried an unused 24-byte rename_t
-     * inline. Field order here is load-bearing: reordering var_t breaks the
-     * bootstrap, so the pointer stays where the struct sat.
-     */
-    rename_t *rename;
-    ref_block_list_t ref_block_list; /* blocks which kill variable */
-    use_chain_t *users_head, *users_tail;
-    struct insn *last_assign;
-    int consumed;
     bool is_ternary_ret;
     bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
@@ -764,21 +692,8 @@ struct var {
      * nothing uses the value.
      */
     bool is_assignment_reload;
-    int phys_reg; /* low physical register (-1 if unassigned) */
-    /* The high word of a 32-bit-target wide scalar. It remains -1 for the
-     * ordinary single-register representation and on LP64 targets.
-     */
-    int phys_reg_hi;
-    int first_use; /* First instruction index where variable is used */
-    int last_use;  /* Last instruction index where variable is used */
-    int use_count; /* Number of times variable is used */
     bool space_is_allocated; /* whether space is allocated for this variable */
     bool has_backing_storage;
-
-    /* This flag is used to indicate to the compiler that the offset of the
-     * variable is based on the top of the local stack.
-     */
-    bool ofs_based_on_stack_top;
 
     /* True when this variable was synthesized to hold a compound literal (e.g.,
      * array or struct literal temporaries).
@@ -864,8 +779,9 @@ typedef struct typedef_binding {
 struct block {
     var_list_t locals;
 
-    /* C tags and enumeration constants have lexical, not translation-unit,
-     * scope. Variables remain in locals; these lists serve parser lookups.
+    /* Tags and enumerators follow C lexical scope. File-scope tag/enum bindings
+     * live on the active translation-unit root; typedef bindings remain on the
+     * migration path through TYPES. Variables remain in locals.
      */
     void *type_tags;
     void *constants;
@@ -881,6 +797,7 @@ int read_const_sizeof_type(block_t *scope);
 int read_const_wstring_size(void);
 int read_sizeof_constant(block_t *scope);
 int read_const_expr_operand(block_t *scope);
+int alignment_type(type_t *type);
 void add_block_typedef(block_t *block, char name[], type_t *type);
 bool find_block_typedef(block_t *block, const char *name);
 type_t *find_visible_type(const char *name, block_t *block);
@@ -926,7 +843,7 @@ struct ph2_ir {
     opcode_t op;
     int src0;
     int src1;
-    /* The register OP_cmov keeps when its condition does not hold. */
+    /* Backend frame metadata. */
     int src2;
     int dest;
 
@@ -1070,6 +987,7 @@ struct type {
      * subsequently written at a use site.
      */
     unsigned int pointer_const_mask;
+    unsigned int pointer_volatile_mask;
     bool is_union; /* preserves union semantics for anonymous typedef unions */
     bool
         has_flexible_array_member; /* cannot be embedded by value in a record */
@@ -1150,44 +1068,6 @@ typedef struct type_tag {
     struct type_tag *next;
 } type_tag_t;
 
-struct phi_operand {
-    var_t *var;
-    basic_block_t *from;
-    struct phi_operand *next;
-};
-
-typedef struct phi_operand phi_operand_t;
-
-struct insn {
-    struct insn *next, *prev;
-    int idx;
-    opcode_t opcode;
-    var_t *rd;
-    var_t *rs1;
-    var_t *rs2;
-
-    /* The value OP_cmov keeps when its condition does not hold. A select needs
-     * three inputs and the two source fields are taken by the chosen value and
-     * the condition; every other opcode leaves this NULL.
-     */
-    var_t *rs3;
-    int sz;
-    bool useful; /* Used in DCE process. Set true if instruction is useful. */
-    basic_block_t *belong_to;
-    phi_operand_t *phi_ops;
-
-    /* Callee or goto-label name, interned rather than copied. add_insn()
-     * already interned the text before copying it in, so the array was 64 of
-     * this struct's 136 bytes for a string the pool owns anyway, on all ~73k
-     * instructions a self-compile builds. NULL when the opcode names nothing.
-     */
-    char *str;
-};
-
-typedef struct {
-    insn_t *head, *tail;
-} insn_list_t;
-
 typedef struct {
     ph2_ir_t *head, *tail;
 } ph2_ir_list_t;
@@ -1199,31 +1079,10 @@ typedef struct {
     bb_connection_type_t type;
 } bb_connection_t;
 
-struct symbol {
-    var_t *var;
-    int index;
-    struct symbol *next;
-};
-
-typedef struct symbol symbol_t;
-
-typedef struct {
-    symbol_t *head, *tail;
-} symbol_list_t;
-
 struct basic_block {
-    /* Members are grouped by width -- 16-byte lists, then pointers, then ints,
-     * then the flags -- so the struct carries no interior padding. Mixed in
-     * declaration order it was 320 bytes for 302 bytes of fields, on every one
-     * of the ~51k blocks a self-compile creates.
-     */
-    insn_list_t insn_list;
+    struct vir_block *vir;
     ph2_ir_list_t ph2_ir_list;
-    var_list_t live_gen;
-    var_list_t live_kill;
-    var_list_t live_in;
-    var_list_t live_out;
-    symbol_list_t symbol_list; /* variable declaration */
+    unsigned int machine_use, machine_def, machine_liveout;
 
     /* Predecessor edges, grown on demand. A fixed MAX_BB_PRED array cost two
      * kilobytes in every basic block -- by far the largest thing in one --
@@ -1231,50 +1090,10 @@ struct basic_block {
      */
     bb_connection_t *prev;
 
-    /* Register file on entry to this block, captured by reg_alloc() at the end
-     * of the predecessor it falls out of. Non-NULL only when a file was handed
-     * over, and bb_export_regs() does that only for an edge that is all three
-     * of: the predecessor's single successor, that predecessor's rpo_next, and
-     * this block's single predecessor. A sole predecessor alone is NOT enough
-     * -- a branch target is emitted wherever the backend's linear walk puts it,
-     * so the registers reaching it are not the ones the branch left.
-     *
-     * Allocated only for a block that actually inherits a file: fewer than one
-     * block in thirteen does, so a REG_CNT array here cost 64 bytes on all ~51k
-     * blocks to serve 7% of them.
-     */
-    struct var **entry_regs;
-
-    /* Used in instruction dumping when ir_dump is enabled, and allocated only
-     * then: a fixed array here is 128 bytes on every one of the tens of
-     * thousands of blocks a self-compile creates, all of it zeroed for nothing
-     * in the default path.
-     */
-    char *bb_label_name;
     struct basic_block *next;  /* normal BB */
     struct basic_block *then_; /* conditional BB */
     struct basic_block *else_;
-    struct basic_block *idom;
-    struct basic_block *r_idom;
     struct basic_block *rpo_next;
-    struct basic_block *rpo_r_next;
-
-    /* Dominance and reverse-dominance frontiers. These were fixed worst-case
-     * arrays sized MAX_BB_DOM_SUCC / MAX_BB_RDOM_SUCC, which cost 2560 bytes in
-     * every basic block while a typical block uses a handful of entries. Worse,
-     * the appends were unchecked and a self-compile really does push df_idx to
-     * 72, overrunning a 64-entry DF into the RDF that followed it. Growing them
-     * on demand removes both the waste and the fixed ceiling.
-     */
-    struct basic_block **DF;
-    struct basic_block **RDF;
-
-    /* Dominator-tree children, grown on demand for the same reason as prev[]
-     * and the frontiers: a fixed array cost half a kilobyte in every block.
-     */
-    struct basic_block **dom_next;
-    struct basic_block *dom_prev;
-    struct basic_block *rdom_prev;
     func_t *belong_to;
     block_t *scope;
 
@@ -1294,34 +1113,11 @@ struct basic_block {
      */
     int ph2_base;
     int rpo;
-    int rpo_r;
-
-    /* How many loops enclose the block. pin_registers() weights a variable's
-     * uses by it: a name inside a loop stands for as many reads as the loop has
-     * iterations, and ranking by the plain count gave a register to a variable
-     * named four times in straight-line code over one named once in the
-     * innermost loop.
-     */
-    int loop_depth;
-
-    /* What one naming of a variable in this block is worth to pin_registers(),
-     * derived from loop_depth once rather than on every operand of every
-     * instruction the tally walks.
-     */
-    int loop_weight;
-
-    /* Stamp marking the block as already counted for the loop being walked, so
-     * that one loop raises its depth once however many ways in there are.
-     */
-    int loop_mark;
-    int df_idx;
-    int rdf_idx;
-    int df_cap;
-    int rdf_cap;
-    int visited;
-    int dom_next_idx;
-    int dom_next_cap;
     int elf_offset;
+
+    /* VIR block-map index plus one; zero means this parser block is unmapped.
+     */
+    int vir_map_id;
 
     /* Whether any emitted branch or jump names this block as its target. A
      * block no edge jumps to is reached only by falling out of the block
@@ -1329,18 +1125,7 @@ struct basic_block {
      * registers hold across the boundary.
      */
     bool is_branch_target;
-    bool useful; /* indicate whether this BB contains useful instructions */
 };
-
-struct ref_block {
-    basic_block_t *bb;
-    struct ref_block *next;
-};
-
-/* Syntactic representation of func, combines syntactic details (e.g., return
- * type, parameters) with SSA-related information (e.g., basic blocks, control
- * flow) to support parsing, analysis, optimization, and code generation.
- */
 
 typedef struct {
     char label_name[MAX_ID_LEN];
@@ -1378,34 +1163,16 @@ struct func {
      */
     bool is_inline;
 
-    /* inline_calls()'s verdict on this body and the return that ends it,
-     * stamped with the round that reached them: a body is examined once per
-     * round rather than once per call site that names it.
-     */
-    int inline_gen;
-    bool inline_ok;
-    struct insn *inline_ret;
     int stack_size;
+    void *vir_context;
 
-    /* SSA info */
+    /* Parser cursors become the allocated machine CFG after lowering. */
     basic_block_t *bbs;
     basic_block_t *exit;
-    symbol_list_t global_sym_list;
-    int bb_cnt;
     int visited;
 
-    /* How many callee-saved registers this function's prologue must preserve,
-     * counted from RBX upward. Functions that never need them pay nothing.
-     */
+    /* Callee-saved registers the backend must preserve. */
     int saved_regs;
-
-    /* Registers holding a variable for the whole function, one bit each. The
-     * backend needs these: its notion of what is live out of a block comes from
-     * the successor's entry registers, which say nothing about a variable that
-     * is resident everywhere, and it would otherwise drop the code that puts a
-     * value into one as dead.
-     */
-    int pinned_regs;
 
     /* Information used for dynamic linking */
     bool is_used;
@@ -1420,17 +1187,25 @@ typedef struct {
     func_t *head, *tail;
 } func_list_t;
 
-typedef struct {
-    func_t *func;
-    basic_block_t *bb;
-    void (*preorder_cb)(func_t *, basic_block_t *);
-    void (*postorder_cb)(func_t *, basic_block_t *);
-} bb_traversal_args_t;
+/* Iterate over functions with bodies, skipping declarations. */
+#define FOR_EACH_FUNCTION_BODY(func)                             \
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) \
+        if ((func)->bbs)
 
-typedef struct {
-    var_t *var;
-    int polluted;
-} regfile_t;
+/* Load a two-word value without clobbering its address register. */
+#define EMIT_PAIR_LOAD(load, rd, rd_hi, base) \
+    do {                                      \
+        if ((rd) == (base)) {                 \
+            load(rd_hi, base, 4);             \
+            load(rd, base, 0);                \
+        } else {                              \
+            load(rd, base, 0);                \
+            load(rd_hi, base, 4);             \
+        }                                     \
+    } while (0)
+
+#define PH2_PAIR_DEST_SRC0(ir) ((ir)->dest_hi >= 0 && (ir)->src0_hi >= 0)
+#define PH2_PAIR_BINARY(ir) (PH2_PAIR_DEST_SRC0(ir) && (ir)->src1_hi >= 0)
 
 /* In the ELF specification, the following data types are defined for data
  * representation:
@@ -1561,5 +1336,28 @@ typedef struct {
     int r_info;   /* Elf32_Word */
     int r_addend; /* Elf32_Sword */
 } elf32_rela_t;
+
+int ph2_ir_flatten_function(func_t *func,
+                            int stack_top_ofs,
+                            int prologue_bytes,
+                            int saved_regs,
+                            bool restore_saved_regs,
+                            void (*update_offset)(ph2_ir_t *));
+ph2_ir_t *ph2_ir_flatten_insn(ph2_ir_t *insn,
+                              int stack_top_ofs,
+                              int stack_size,
+                              int saved_regs,
+                              bool restore_saved_regs);
+int func_highest_used_reg(func_t *func, int first_callee_saved);
+bool op_is_binary_alu(opcode_t op);
+bool op_writes_dest(opcode_t op);
+unsigned int ph2_ir_defs(ph2_ir_t *ir);
+void ph2_compute_liveness(void);
+bool op_is_integer_binary(opcode_t op);
+bool op_is_comparison(opcode_t op);
+bool op_is_scalar_unary(opcode_t op);
+bool op_is_scalar_cast(opcode_t op);
+const char *opcode_mnemonic(opcode_t op);
+basic_block_t *bb_sole_pred(const basic_block_t *bb);
 
 #define ELF32_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))

@@ -122,27 +122,22 @@ int rv_encode_R(rv_op op, rv_reg rd, rv_reg rs1, rv_reg rs2)
     return op + (rd << 7) + (rs1 << 15) + (rs2 << 20);
 }
 
-int rv_encode_I(rv_op op, rv_reg rd, rv_reg rs1, int imm)
+static int rv_imm12(int imm)
 {
     if (imm > 2047 || imm < -2048)
         fatal("Offset too large");
+    return imm < 0 ? imm + 4096 : imm;
+}
 
-    if (imm < 0) {
-        imm += 4096;
-        imm &= (1 << 13) - 1;
-    }
+int rv_encode_I(rv_op op, rv_reg rd, rv_reg rs1, int imm)
+{
+    imm = rv_imm12(imm);
     return op + (rd << 7) + (rs1 << 15) + (imm << 20);
 }
 
 int rv_encode_S(rv_op op, rv_reg rs1, rv_reg rs2, int imm)
 {
-    if (imm > 2047 || imm < -2048)
-        fatal("Offset too large");
-
-    if (imm < 0) {
-        imm += 4096;
-        imm &= (1 << 13) - 1;
-    }
+    imm = rv_imm12(imm);
     return op + (rs1 << 15) + (rs2 << 20) + rv_extract_bits(imm, 0, 4, 7, 11) +
            rv_extract_bits(imm, 5, 11, 25, 31);
 }
@@ -186,193 +181,82 @@ int rv_encode_U(rv_op op, rv_reg rd, int imm)
     return op + (rd << 7) + rv_extract_bits(imm, 12, 31, 12, 31);
 }
 
-int __add(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_add, rd, rs1, rs2);
-}
-
-int __sub(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_sub, rd, rs1, rs2);
-}
-
-int __mulhu(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_mulhu, rd, rs1, rs2);
-}
-
-int __xor(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_xor, rd, rs1, rs2);
-}
-
-int __or(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_or, rd, rs1, rs2);
-}
-
-int __and(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_and, rd, rs1, rs2);
-}
-
-int __sll(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_sll, rd, rs1, rs2);
-}
-
-int __srl(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_srl, rd, rs1, rs2);
-}
-
-int __sra(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_sra, rd, rs1, rs2);
-}
-
-int __slt(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_slt, rd, rs1, rs2);
-}
-
-int __sltu(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_sltu, rd, rs1, rs2);
-}
-
-int __addi(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_addi, rd, rs1, imm);
-}
-
-int __xori(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_xori, rd, rs1, imm);
-}
-
-int __andi(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_andi, rd, rs1, imm);
-}
-
-int __slli(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_slli, rd, rs1, imm);
-}
-
-int __srli(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_srli, rd, rs1, imm);
-}
-
-int __srai(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_srai, rd, rs1, imm);
-}
-
-int __lb(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_lb, rd, rs1, imm);
-}
-
-int __lh(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_lh, rd, rs1, imm);
-}
-
-int __lbu(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_lbu, rd, rs1, imm);
-}
-
-int __lhu(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_lhu, rd, rs1, imm);
-}
-
-int __lw(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_lw, rd, rs1, imm);
-}
-
-int __sb(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_S(rv_sb, rs1, rd, imm);
-}
-
-int __sh(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_S(rv_sh, rs1, rd, imm);
-}
-
-int __sw(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_S(rv_sw, rs1, rd, imm);
-}
-
-int __beq(rv_reg rs1, rv_reg rs2, int imm)
-{
-    return rv_encode_B(rv_beq, rs1, rs2, imm);
-}
-
-int __bne(rv_reg rs1, rv_reg rs2, int imm)
-{
-    return rv_encode_B(rv_bne, rs1, rs2, imm);
-}
-
-int __bltu(rv_reg rs1, rv_reg rs2, int imm)
-{
-    return rv_encode_B(rv_bltu, rs1, rs2, imm);
-}
+/* Typed wrappers share the encoding-format argument order. */
+#define RV_INSN_R(name, op)                     \
+    int name(rv_reg rd, rv_reg rs1, rv_reg rs2) \
+    {                                           \
+        return rv_encode_R(op, rd, rs1, rs2);   \
+    }
+#define RV_INSN_I(name, op)                   \
+    int name(rv_reg rd, rv_reg rs1, int imm)  \
+    {                                         \
+        return rv_encode_I(op, rd, rs1, imm); \
+    }
+#define RV_INSN_S(name, op)                   \
+    int name(rv_reg rd, rv_reg rs1, int imm)  \
+    {                                         \
+        return rv_encode_S(op, rs1, rd, imm); \
+    }
+#define RV_INSN_B(name, op)                    \
+    int name(rv_reg rs1, rv_reg rs2, int imm)  \
+    {                                          \
+        return rv_encode_B(op, rs1, rs2, imm); \
+    }
+#define RV_INSN_U(name, op)              \
+    int name(rv_reg rd, int imm)         \
+    {                                    \
+        return rv_encode_U(op, rd, imm); \
+    }
+RV_INSN_R(__add, rv_add)
+RV_INSN_R(__sub, rv_sub)
+RV_INSN_R(__mulhu, rv_mulhu)
+RV_INSN_R(__xor, rv_xor)
+RV_INSN_R(__or, rv_or)
+RV_INSN_R(__and, rv_and)
+RV_INSN_R(__sll, rv_sll)
+RV_INSN_R(__srl, rv_srl)
+RV_INSN_R(__sra, rv_sra)
+RV_INSN_R(__slt, rv_slt)
+RV_INSN_R(__sltu, rv_sltu)
+RV_INSN_I(__addi, rv_addi)
+RV_INSN_I(__xori, rv_xori)
+RV_INSN_I(__andi, rv_andi)
+RV_INSN_I(__slli, rv_slli)
+RV_INSN_I(__srli, rv_srli)
+RV_INSN_I(__srai, rv_srai)
+RV_INSN_I(__lb, rv_lb)
+RV_INSN_I(__lh, rv_lh)
+RV_INSN_I(__lbu, rv_lbu)
+RV_INSN_I(__lhu, rv_lhu)
+RV_INSN_I(__lw, rv_lw)
+RV_INSN_S(__sb, rv_sb)
+RV_INSN_S(__sh, rv_sh)
+RV_INSN_S(__sw, rv_sw)
+RV_INSN_B(__beq, rv_beq)
+RV_INSN_B(__bne, rv_bne)
+RV_INSN_B(__bltu, rv_bltu)
 
 int __jal(rv_reg rd, int imm)
 {
     return rv_encode_J(rv_jal, rd, imm);
 }
-
-int __jalr(rv_reg rd, rv_reg rs1, int imm)
-{
-    return rv_encode_I(rv_jalr, rd, rs1, imm);
-}
-
-int __lui(rv_reg rd, int imm)
-{
-    return rv_encode_U(rv_lui, rd, imm);
-}
-
-int __auipc(rv_reg rd, int imm)
-{
-    return rv_encode_U(rv_auipc, rd, imm);
-}
+RV_INSN_I(__jalr, rv_jalr)
+RV_INSN_U(__lui, rv_lui)
+RV_INSN_U(__auipc, rv_auipc)
 
 int __ecall(void)
 {
     return rv_encode_I(rv_ecall, __zero, __zero, 0);
 }
 
+RV_INSN_R(__mul, rv_mul)
+RV_INSN_R(__div, rv_div)
+RV_INSN_R(__divu, rv_divu)
+RV_INSN_R(__mod, rv_mod)
+RV_INSN_R(__modu, rv_modu)
 
-int __mul(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_mul, rd, rs1, rs2);
-}
-
-int __div(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_div, rd, rs1, rs2);
-}
-
-int __divu(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_divu, rd, rs1, rs2);
-}
-
-int __mod(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_mod, rd, rs1, rs2);
-}
-
-int __modu(rv_reg rd, rv_reg rs1, rv_reg rs2)
-{
-    return rv_encode_R(rv_modu, rd, rs1, rs2);
-}
+#undef RV_INSN_R
+#undef RV_INSN_I
+#undef RV_INSN_S
+#undef RV_INSN_B
+#undef RV_INSN_U

@@ -13,6 +13,8 @@
 #include "defs.h"
 #include "globals.c"
 
+func_t *find_visible_func(char *name, block_t *scope);
+
 /* C language syntactic analyzer */
 int global_var_idx = 0;
 
@@ -26,6 +28,7 @@ int continue_pos_idx = 0;
 label_t labels[MAX_LABELS];
 int label_idx = 0;
 basic_block_t *backpatch_bb[MAX_LABELS];
+char *backpatch_label[MAX_LABELS];
 int backpatch_bb_idx = 0;
 
 /* stack of the operands of 3AC */
@@ -60,111 +63,151 @@ typedef struct fixed_array_shape {
 source_location_t *cur_token_loc(void);
 source_location_t *next_token_loc(void);
 
+/* Advance one initializer scan token, returning false at its boundary. */
+static bool initializer_scan_continue(token_t *token,
+                                      int *depth,
+                                      bool close_curly)
+{
+    if (token->kind == T_open_bracket)
+        (*depth)++;
+    else if (token->kind == T_close_bracket) {
+        if (!*depth)
+            return false;
+        (*depth)--;
+    } else if (!*depth &&
+               (token->kind == T_semicolon || token->kind == T_comma ||
+                (close_curly && token->kind == T_close_curly)))
+        return false;
+    return true;
+}
+
+static token_t *skip_balanced_delimiter(token_t *token,
+                                        token_kind_t open,
+                                        token_kind_t close)
+{
+    int depth = 0;
+
+    for (; token; token = token->next) {
+        if (token->kind == open)
+            depth++;
+        else if (token->kind == close && !--depth)
+            return token;
+    }
+    return NULL;
+}
+
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
-static fixed_array_shape_t fixed_array_shape_from_type(const type_t *type)
+static fixed_array_shape_t fixed_array_shape_from_bounds(int size,
+                                                         int dim2,
+                                                         int dim3,
+                                                         int dim4)
 {
     fixed_array_shape_t shape = {0};
     int trailing = 1;
 
-    if (!type->array_size)
+    if (!size)
         return shape;
-    if (type->array_dim2)
-        trailing *= type->array_dim2;
-    if (type->array_dim3)
-        trailing *= type->array_dim3;
-    if (type->array_dim4)
-        trailing *= type->array_dim4;
-    shape.bounds[shape.rank++] = type->array_size / trailing;
-    if (type->array_dim2)
-        shape.bounds[shape.rank++] = type->array_dim2;
-    if (type->array_dim3)
-        shape.bounds[shape.rank++] = type->array_dim3;
-    if (type->array_dim4)
-        shape.bounds[shape.rank++] = type->array_dim4;
+    if (dim2)
+        trailing *= dim2;
+    if (dim3)
+        trailing *= dim3;
+    if (dim4)
+        trailing *= dim4;
+    shape.bounds[shape.rank++] = size / trailing;
+    if (dim2)
+        shape.bounds[shape.rank++] = dim2;
+    if (dim3)
+        shape.bounds[shape.rank++] = dim3;
+    if (dim4)
+        shape.bounds[shape.rank++] = dim4;
     return shape;
+}
+
+static fixed_array_shape_t fixed_array_shape_from_type(const type_t *type)
+{
+    return fixed_array_shape_from_bounds(type->array_size, type->array_dim2,
+                                         type->array_dim3, type->array_dim4);
 }
 
 static fixed_array_shape_t fixed_array_shape_from_var(const var_t *var)
 {
-    type_t shape = {0};
-
-    shape.array_size = var->array_size;
-    shape.array_dim2 = var->array_dim2;
-    shape.array_dim3 = var->array_dim3;
-    shape.array_dim4 = var->array_dim4;
-    return fixed_array_shape_from_type(&shape);
+    return fixed_array_shape_from_bounds(var->array_size, var->array_dim2,
+                                         var->array_dim3, var->array_dim4);
 }
 
 static fixed_array_shape_t fixed_array_shape_from_pointee_type(
     const type_t *type)
 {
-    type_t shape = {0};
-
-    shape.array_size = type->pointee_array_size;
-    shape.array_dim2 = type->pointee_array_dim2;
-    shape.array_dim3 = type->pointee_array_dim3;
-    shape.array_dim4 = type->pointee_array_dim4;
-    return fixed_array_shape_from_type(&shape);
+    return fixed_array_shape_from_bounds(
+        type->pointee_array_size, type->pointee_array_dim2,
+        type->pointee_array_dim3, type->pointee_array_dim4);
 }
 
 static fixed_array_shape_t fixed_array_shape_from_pointee_var(const var_t *var)
 {
-    type_t shape = {0};
+    return fixed_array_shape_from_bounds(
+        var->pointee_array_size, var->pointee_array_dim2,
+        var->pointee_array_dim3, var->pointee_array_dim4);
+}
 
-    shape.array_size = var->pointee_array_size;
-    shape.array_dim2 = var->pointee_array_dim2;
-    shape.array_dim3 = var->pointee_array_dim3;
-    shape.array_dim4 = var->pointee_array_dim4;
-    return fixed_array_shape_from_type(&shape);
+static void fixed_array_shape_write(const fixed_array_shape_t *shape,
+                                    int *size,
+                                    int *dim2,
+                                    int *dim3,
+                                    int *dim4)
+{
+    *size = shape->rank ? shape->bounds[0] : 0;
+    *dim2 = *dim3 = *dim4 = 0;
+    for (int i = 1; i < shape->rank; i++) {
+        *size *= shape->bounds[i];
+        if (i == 1)
+            *dim2 = shape->bounds[i];
+        else if (i == 2)
+            *dim3 = shape->bounds[i];
+        else
+            *dim4 = shape->bounds[i];
+    }
 }
 
 static void fixed_array_shape_to_type(type_t *type,
                                       const fixed_array_shape_t *shape)
 {
-    type->array_size = shape->rank ? shape->bounds[0] : 0;
-    type->array_dim2 = type->array_dim3 = type->array_dim4 = 0;
-    for (int i = 1; i < shape->rank; i++) {
-        type->array_size *= shape->bounds[i];
-        if (i == 1)
-            type->array_dim2 = shape->bounds[i];
-        else if (i == 2)
-            type->array_dim3 = shape->bounds[i];
-        else
-            type->array_dim4 = shape->bounds[i];
-    }
+    fixed_array_shape_write(shape, &type->array_size, &type->array_dim2,
+                            &type->array_dim3, &type->array_dim4);
 }
 
 static void fixed_array_shape_to_var(var_t *var,
                                      const fixed_array_shape_t *shape)
 {
-    var->array_size = shape->rank ? shape->bounds[0] : 0;
-    var->array_dim2 = var->array_dim3 = var->array_dim4 = 0;
-    for (int i = 1; i < shape->rank; i++) {
-        var->array_size *= shape->bounds[i];
-        if (i == 1)
-            var->array_dim2 = shape->bounds[i];
-        else if (i == 2)
-            var->array_dim3 = shape->bounds[i];
-        else
-            var->array_dim4 = shape->bounds[i];
-    }
+    fixed_array_shape_write(shape, &var->array_size, &var->array_dim2,
+                            &var->array_dim3, &var->array_dim4);
 }
 
 static void fixed_array_shape_to_pointee_var(var_t *var,
                                              const fixed_array_shape_t *shape)
 {
-    var->pointee_array_size = shape->rank ? shape->bounds[0] : 0;
-    var->pointee_array_dim2 = var->pointee_array_dim3 =
-        var->pointee_array_dim4 = 0;
-    for (int i = 1; i < shape->rank; i++) {
-        var->pointee_array_size *= shape->bounds[i];
-        if (i == 1)
-            var->pointee_array_dim2 = shape->bounds[i];
-        else if (i == 2)
-            var->pointee_array_dim3 = shape->bounds[i];
-        else
-            var->pointee_array_dim4 = shape->bounds[i];
-    }
+    fixed_array_shape_write(shape, &var->pointee_array_size,
+                            &var->pointee_array_dim2, &var->pointee_array_dim3,
+                            &var->pointee_array_dim4);
+}
+
+static void set_pointee_array_shape(var_t *var,
+                                    const fixed_array_shape_t *shape,
+                                    int element_ptr_level)
+{
+    fixed_array_shape_to_pointee_var(var, shape);
+    var->pointee_array_element_ptr_level = element_ptr_level;
+}
+
+static void copy_pointee_array_shape_to_type(type_t *type, const var_t *source)
+{
+    fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
+
+    fixed_array_shape_write(
+        &shape, &type->pointee_array_size, &type->pointee_array_dim2,
+        &type->pointee_array_dim3, &type->pointee_array_dim4);
+    type->pointee_array_element_ptr_level =
+        source->pointee_array_element_ptr_level;
 }
 
 static fixed_array_shape_t fixed_array_shape_prepend(
@@ -188,21 +231,18 @@ static int fixed_array_shape_stride(const fixed_array_shape_t *shape,
                                     int element_size);
 static bool fixed_array_shape_drop_outer(fixed_array_shape_t *shape);
 
+static int fixed_array_trailing_count(int dim2, int dim3, int dim4)
+{
+    return (dim2 ? dim2 : 1) * (dim3 ? dim3 : 1) * (dim4 ? dim4 : 1);
+}
+
 /* Elements in one outer element of @var's direct array. Only the inner bounds
- * matter, which is what keeps this right while an unsized outer bound is still
- * being inferred from its initializer and array_size is not yet known.
+ * matter while an unsized outer bound is inferred from its initializer.
  */
 static int fixed_array_inner_count(const var_t *var)
 {
-    int count = 1;
-
-    if (var->array_dim2)
-        count *= var->array_dim2;
-    if (var->array_dim3)
-        count *= var->array_dim3;
-    if (var->array_dim4)
-        count *= var->array_dim4;
-    return count;
+    return fixed_array_trailing_count(var->array_dim2, var->array_dim3,
+                                      var->array_dim4);
 }
 
 /* Rewrite @var's direct array bounds to those of one element of the array: a
@@ -220,7 +260,9 @@ static void compose_block_typedef_array(type_t *alias,
                                         type_t *base,
                                         var_t *decl)
 {
-    fixed_array_shape_t base_shape = fixed_array_shape_from_type(base);
+    fixed_array_shape_t base_shape = {0};
+    if (!decl->ptr_level || !decl->pointee_array_size)
+        base_shape = fixed_array_shape_from_type(base);
     fixed_array_shape_t decl_shape = fixed_array_shape_from_var(decl);
     fixed_array_shape_t shape;
 
@@ -274,6 +316,19 @@ static void alias_callback_array_pointer(type_t *alias,
 
 basic_block_t *handle_block_typedef_statement(block_t *parent,
                                               basic_block_t *bb);
+static var_t *scale_pointer_index(block_t *parent,
+                                  basic_block_t *bb,
+                                  var_t *index,
+                                  int stride,
+                                  bool constant_scale);
+static var_t *lower_array_element_address(block_t *parent,
+                                          basic_block_t *bb,
+                                          var_t *base,
+                                          var_t *index,
+                                          type_t *element_type,
+                                          int pointer_level,
+                                          int stride,
+                                          bool rematerialize_scale);
 bool read_assignment_expression(block_t *parent, basic_block_t **bb);
 bool is_null_pointer_constant(var_t *value);
 bool is_record_type(const type_t *type);
@@ -333,7 +388,8 @@ void push_object_at(block_t *parent,
 var_t *lower_reference_update(var_t *object,
                               opcode_t op,
                               block_t *parent,
-                              basic_block_t **bb);
+                              basic_block_t **bb,
+                              bool need_updated_value);
 void lower_member_postfix(var_t *address,
                           type_t *record_type,
                           bool arrow_first,
@@ -441,12 +497,12 @@ bool global_compound_literal_starts_here(void)
     if (!lex_peek(T_open_bracket, NULL))
         return false;
     next = cur_token->next->next;
-    if (!next ||
-        !((next->kind == T_identifier && find_type(next->literal, true)) ||
-          next->kind == T_struct || next->kind == T_union ||
-          next->kind == T_enum || next->kind == T_const ||
-          next->kind == T_volatile || next->kind == T_signed ||
-          next->kind == T_unsigned || next->kind == T_long))
+    if (!next || !((next->kind == T_identifier &&
+                    find_visible_type(next->literal, CURRENT_TU_SCOPE)) ||
+                   next->kind == T_struct || next->kind == T_union ||
+                   next->kind == T_enum || next->kind == T_const ||
+                   next->kind == T_volatile || next->kind == T_signed ||
+                   next->kind == T_unsigned || next->kind == T_long))
         return false;
 
     /* Only a brace after the type name makes a compound literal; otherwise the
@@ -474,7 +530,7 @@ bool grouped_global_function_designator_starts_here(bool allow_address)
     return token && token->kind == T_open_bracket && token->next &&
            token->next->kind == T_identifier && token->next->next &&
            token->next->next->kind == T_close_bracket &&
-           find_func(token->next->literal);
+           find_visible_func(token->next->literal, CURRENT_TU_SCOPE);
 }
 
 /* `&*function` and `*&function` are both the original function designator.
@@ -490,7 +546,8 @@ bool global_function_designator_tokens(token_t *token,
 
     if (!token)
         return false;
-    if (token->kind == T_identifier && find_func(token->literal)) {
+    if (token->kind == T_identifier &&
+        find_visible_func(token->literal, CURRENT_TU_SCOPE)) {
         *after = token->next;
         *identifier = token;
         return true;
@@ -623,25 +680,29 @@ var_t *require_var(block_t *blk)
     }
 
     var_t *var = arena_calloc(BLOCK_ARENA, 1, sizeof(var_t));
+    stats_var_count++;
     var_list->elements[var_list->size++] = var;
 
     /* var_name is a pointer now; every reader dereferences it unconditionally,
      * so an unnamed variable points at the empty string rather than NULL.
      */
     var->var_name = "";
-    var->consumed = -1;
-    var->phys_reg = -1;
-    var->phys_reg_hi = -1;
-    var->first_use = -1;
-    var->last_use = -1;
-    var->use_count = 0;
-    var->base = var;
     var->type = TY_int;
     var->scope = blk;
     var->space_is_allocated = false;
     var->has_backing_storage = false;
-    var->ofs_based_on_stack_top = false;
     return var;
+}
+
+static var_t *name_var(var_t *var)
+{
+    var->var_name = gen_name();
+    return var;
+}
+
+static var_t *require_named_var(block_t *blk)
+{
+    return name_var(require_var(blk));
 }
 
 var_t *require_typed_var(block_t *blk, type_t *type)
@@ -654,6 +715,17 @@ var_t *require_typed_var(block_t *blk, type_t *type)
     return var;
 }
 
+static var_t *load_constant(block_t *parent,
+                            basic_block_t *bb,
+                            int value,
+                            type_t *type)
+{
+    var_t *constant = name_var(require_typed_var(parent, type));
+    constant->init_val = value;
+    add_insn(parent, bb, OP_load_constant, constant, NULL, NULL, 0, NULL);
+    return constant;
+}
+
 /* Function-address operands carry a function name, but are not declarations in
  * the current scope. Keeping them out of the local lookup list lets find_var()
  * distinguish a resolved function-pointer variable from a generated function
@@ -664,6 +736,17 @@ var_t *require_func_symbol_var(block_t *blk)
     var_t *var = require_var(blk);
     blk->locals.size--;
     return var;
+}
+
+/* A resolved function designator used as a parser expression value. */
+var_t *function_designator_value(block_t *block, func_t *func)
+{
+    var_t *value = require_func_symbol_var(block);
+
+    value->is_func = true;
+    value->is_function_designator = true;
+    value->var_name = func->return_def.var_name;
+    return value;
 }
 
 var_t *require_typed_ptr_var(block_t *blk, type_t *type, int ptr)
@@ -812,7 +895,6 @@ type_t *pointee_type_from_pointer_typedef(type_t *type)
  * based on the represented type. Records retain nominal identity.
  */
 bool compatible_function_signature(const func_t *left, const func_t *right);
-func_t *find_visible_func(char *name, block_t *scope);
 var_t *materialize_function_designator(block_t *parent,
                                        basic_block_t **bb,
                                        var_t *value);
@@ -863,7 +945,147 @@ static bool is_plain_record_alias(const type_t *type)
            !type->func_signature && !type->pointee_func_signature;
 }
 
-bool compatible_decl_type(const type_t *left, const type_t *right)
+typedef struct compatible_record_pair {
+    const type_t *left;
+    const type_t *right;
+    const struct compatible_record_pair *next;
+} compatible_record_pair_t;
+
+static bool compatible_decl_type_with_records(
+    const type_t *left,
+    const type_t *right,
+    const compatible_record_pair_t *seen);
+static bool compatible_function_signature_with_records(
+    const func_t *left,
+    const func_t *right,
+    const compatible_record_pair_t *seen);
+static bool compatible_function_param_decl_with_records(
+    const var_t *left,
+    const var_t *right,
+    const compatible_record_pair_t *seen);
+
+static bool compatible_optional_decl_type_with_records(
+    const type_t *left,
+    const type_t *right,
+    const compatible_record_pair_t *seen)
+{
+    return !!left == !!right &&
+           (!left || compatible_decl_type_with_records(left, right, seen));
+}
+
+static bool compatible_var_function_type_with_records(
+    const var_t *left,
+    const var_t *right,
+    const compatible_record_pair_t *seen)
+{
+    if (left->is_func != right->is_func ||
+        !!left->pointee_func_signature != !!right->pointee_func_signature)
+        return false;
+    if (left->is_func &&
+        (callback_pointer_indirection(left) !=
+             callback_pointer_indirection(right) ||
+         !compatible_function_signature_with_records(
+             left->func_signature, right->func_signature, seen)))
+        return false;
+    return !left->pointee_func_signature ||
+           compatible_function_signature_with_records(
+               left->pointee_func_signature, right->pointee_func_signature,
+               seen);
+}
+
+static bool compatible_record_member(const var_t *left,
+                                     const var_t *right,
+                                     const compatible_record_pair_t *seen)
+{
+    return !strcmp(left->var_name, right->var_name) &&
+           left->ptr_level == right->ptr_level &&
+           compatible_var_function_type_with_records(left, right, seen) &&
+           (!left->is_func ||
+            (left->callback_is_const == right->callback_is_const &&
+             left->callback_is_volatile == right->callback_is_volatile)) &&
+           left->array_size == right->array_size &&
+           left->has_unsized_array == right->has_unsized_array &&
+           left->array_dim2 == right->array_dim2 &&
+           left->array_dim3 == right->array_dim3 &&
+           left->array_dim4 == right->array_dim4 &&
+           left->pointee_array_size == right->pointee_array_size &&
+           left->has_direct_pointee_array_declarator ==
+               right->has_direct_pointee_array_declarator &&
+           left->pointee_array_dim2 == right->pointee_array_dim2 &&
+           left->pointee_array_dim3 == right->pointee_array_dim3 &&
+           left->pointee_array_dim4 == right->pointee_array_dim4 &&
+           left->pointee_array_element_ptr_level ==
+               right->pointee_array_element_ptr_level &&
+           left->type && right->type &&
+           compatible_optional_decl_type_with_records(
+               left->type->pointee_array_element_type,
+               right->type->pointee_array_element_type, seen) &&
+           left->is_flexible_array_member == right->is_flexible_array_member &&
+           left->is_const_qualified == right->is_const_qualified &&
+           left->is_volatile == right->is_volatile &&
+           left->pointer_const_mask == right->pointer_const_mask &&
+           left->pointer_volatile_mask == right->pointer_volatile_mask &&
+           left->is_bitfield == right->is_bitfield &&
+           left->bit_width == right->bit_width &&
+           left->bit_storage_size == right->bit_storage_size &&
+           compatible_decl_type_with_records(left->type, right->type, seen);
+}
+
+static bool compatible_record_type(const type_t *left,
+                                   const type_t *right,
+                                   const compatible_record_pair_t *seen)
+{
+    compatible_record_pair_t pair;
+
+    if (left->base_type != right->base_type ||
+        strcmp(left->type_name, right->type_name))
+        return false;
+    for (const compatible_record_pair_t *p = seen; p; p = p->next)
+        if ((p->left == left && p->right == right) ||
+            (p->left == right && p->right == left))
+            return true;
+
+    /* A declaration of an incomplete tagged type is compatible with the
+     * completed declaration in another translation unit.
+     */
+    if (!left->definition_started || !right->definition_started)
+        return true;
+    if (left->num_fields != right->num_fields)
+        return false;
+
+    pair.left = left;
+    pair.right = right;
+    pair.next = seen;
+    if (left->base_type == TYPE_struct) {
+        for (int i = 0; i < left->num_fields; i++)
+            if (!compatible_record_member(&left->fields[i], &right->fields[i],
+                                          &pair))
+                return false;
+        return true;
+    }
+
+    bool matched[MAX_FIELDS] = {false};
+    for (int i = 0; i < left->num_fields; i++) {
+        bool found = false;
+
+        for (int j = 0; j < right->num_fields; j++) {
+            if (matched[j] || !compatible_record_member(
+                                  &left->fields[i], &right->fields[j], &pair))
+                continue;
+            matched[j] = true;
+            found = true;
+            break;
+        }
+        if (!found)
+            return false;
+    }
+    return true;
+}
+
+static bool compatible_decl_type_with_records(
+    const type_t *left,
+    const type_t *right,
+    const compatible_record_pair_t *seen)
 {
     /* A typedef of a struct or union tag denotes the tag's type. Its own
      * qualifiers were copied into each declarator, which the callers compare.
@@ -885,8 +1107,8 @@ bool compatible_decl_type(const type_t *left, const type_t *right)
                left->pointer_const_mask == right->pointer_const_mask &&
                left->is_const_qualified == right->is_const_qualified &&
                left->is_volatile_qualified == right->is_volatile_qualified &&
-               compatible_function_signature(left->func_signature,
-                                             right->func_signature);
+               compatible_function_signature_with_records(
+                   left->func_signature, right->func_signature, seen);
 
     /* So may a callback slot typedef, `int (**slot_t)(int)`. */
     if (left && right && left->pointee_func_signature &&
@@ -895,10 +1117,16 @@ bool compatible_decl_type(const type_t *left, const type_t *right)
                left->pointer_const_mask == right->pointer_const_mask &&
                left->is_const_qualified == right->is_const_qualified &&
                left->is_volatile_qualified == right->is_volatile_qualified &&
-               compatible_function_signature(left->pointee_func_signature,
-                                             right->pointee_func_signature);
-    if (!left || !right || left->base_type != right->base_type ||
-        left->size != right->size || left->ptr_level != right->ptr_level ||
+               compatible_function_signature_with_records(
+                   left->pointee_func_signature, right->pointee_func_signature,
+                   seen);
+    if (!left || !right)
+        return false;
+    if ((left->base_type == TYPE_struct || left->base_type == TYPE_union) &&
+        (right->base_type == TYPE_struct || right->base_type == TYPE_union))
+        return compatible_record_type(left, right, seen);
+    if (left->base_type != right->base_type || left->size != right->size ||
+        left->ptr_level != right->ptr_level ||
         left->is_unsigned != right->is_unsigned ||
         left->is_signed_char != right->is_signed_char ||
         left->is_bool != right->is_bool)
@@ -906,15 +1134,18 @@ bool compatible_decl_type(const type_t *left, const type_t *right)
     if (!!left->func_signature != !!right->func_signature)
         return false;
     if (left->func_signature &&
-        !compatible_function_signature(left->func_signature,
-                                       right->func_signature))
-        return false;
-    if (left->base_type == TYPE_struct || left->base_type == TYPE_union)
+        !compatible_function_signature_with_records(
+            left->func_signature, right->func_signature, seen))
         return false;
     if (left->base_type == TYPE_typedef &&
         (left->num_fields || right->num_fields))
         return left->base_struct == right->base_struct;
     return true;
+}
+
+bool compatible_decl_type(const type_t *left, const type_t *right)
+{
+    return compatible_decl_type_with_records(left, right, NULL);
 }
 
 /* Function-pointer declarators carry their pointee function type separately
@@ -925,29 +1156,28 @@ bool compatible_decl_type(const type_t *left, const type_t *right)
  */
 bool compatible_function_param_decl(const var_t *left, const var_t *right)
 {
+    return compatible_function_param_decl_with_records(left, right, NULL);
+}
+
+static bool compatible_function_param_decl_with_records(
+    const var_t *left,
+    const var_t *right,
+    const compatible_record_pair_t *seen)
+{
     bool left_points_to_value;
     bool right_points_to_value;
 
-    if (!left || !right || left->is_func != right->is_func)
+    if (!left || !right ||
+        !compatible_var_function_type_with_records(left, right, seen))
         return false;
 
     if (left->is_func) {
         if (!left->func_signature || !right->func_signature)
             return false;
-        return callback_pointer_indirection(left) ==
-                   callback_pointer_indirection(right) &&
-               compatible_function_signature(left->func_signature,
-                                             right->func_signature);
+        return true;
     }
 
-    if (left->pointee_func_signature || right->pointee_func_signature) {
-        if (!left->pointee_func_signature || !right->pointee_func_signature ||
-            !compatible_function_signature(left->pointee_func_signature,
-                                           right->pointee_func_signature))
-            return false;
-    }
-
-    if (!compatible_decl_type(left->type, right->type) ||
+    if (!compatible_decl_type_with_records(left->type, right->type, seen) ||
         left->ptr_level != right->ptr_level)
         return false;
 
@@ -991,11 +1221,59 @@ bool parameter_changes_under_default_promotion(const var_t *param)
 
 bool compatible_function_signature(const func_t *left, const func_t *right)
 {
+    return compatible_function_signature_with_records(left, right, NULL);
+}
+
+static bool compatible_function_return_decl_with_records(
+    const var_t *left,
+    const var_t *right,
+    const compatible_record_pair_t *seen)
+{
+    if (!left || !right || !left->type || !right->type)
+        return false;
+    int depth = left->ptr_level + left->type->ptr_level;
+    if (depth != right->ptr_level + right->type->ptr_level)
+        return false;
+    if (left->ptr_level != right->ptr_level ||
+        !compatible_decl_type_with_records(left->type, right->type, seen)) {
+        if (left->type->func_signature || right->type->func_signature ||
+            left->type->pointee_func_signature ||
+            right->type->pointee_func_signature || left->type->array_size ||
+            right->type->array_size || left->type->pointee_array_size ||
+            right->type->pointee_array_size || left->pointee_array_size ||
+            right->pointee_array_size ||
+            !compatible_decl_type_with_records(
+                pointee_type_from_pointer_typedef(left->type),
+                pointee_type_from_pointer_typedef(right->type), seen))
+            return false;
+    }
+
+    /* Scalar and compact callback returns have only top-level qualifiers. An
+     * ordinary pointer return also keeps qualifiers on its reached objects.
+     */
+    if (!depth)
+        return true;
+    unsigned int inner_mask = depth <= 32 ? (1U << (depth - 1)) - 1 : ~0U;
+    return (left->is_const_qualified || left->type->is_const_qualified) ==
+               (right->is_const_qualified || right->type->is_const_qualified) &&
+           (left->is_volatile || left->type->is_volatile_qualified) ==
+               (right->is_volatile || right->type->is_volatile_qualified) &&
+           (effective_pointer_const_mask(left) & inner_mask) ==
+               (effective_pointer_const_mask(right) & inner_mask) &&
+           ((left->pointer_volatile_mask | left->type->pointer_volatile_mask) &
+            inner_mask) == ((right->pointer_volatile_mask |
+                             right->type->pointer_volatile_mask) &
+                            inner_mask);
+}
+
+static bool compatible_function_signature_with_records(
+    const func_t *left,
+    const func_t *right,
+    const compatible_record_pair_t *seen)
+{
     if (!left || !right ||
-        !compatible_decl_type(left->return_def.type, right->return_def.type) ||
-        left->return_def.ptr_level != right->return_def.ptr_level ||
-        left->return_def.is_const_qualified !=
-            right->return_def.is_const_qualified)
+        !compatible_function_return_decl_with_records(&left->return_def,
+                                                      &right->return_def, seen))
         return false;
 
     if (!left->has_prototype || !right->has_prototype)
@@ -1004,8 +1282,8 @@ bool compatible_function_signature(const func_t *left, const func_t *right)
         left->va_args != right->va_args)
         return false;
     for (int i = 0; i < left->num_params; i++)
-        if (!compatible_function_param_decl(&left->param_defs[i],
-                                            &right->param_defs[i]))
+        if (!compatible_function_param_decl_with_records(
+                &left->param_defs[i], &right->param_defs[i], seen))
             return false;
     return true;
 }
@@ -1017,7 +1295,13 @@ bool compatible_function_signature(const func_t *left, const func_t *right)
  */
 func_t *find_visible_func(char *name, block_t *scope)
 {
-    func_t *func = find_func(name);
+    var_t *unit_decl = find_tu_declaration(name);
+    func_t *func;
+
+    if (unit_decl)
+        func = find_func(unit_decl->var_name);
+    else
+        func = find_func(name);
     var_t *binding;
 
     if (!func || !func->is_block_scope_only_declaration)
@@ -1131,9 +1415,68 @@ typedef struct switch_case_value {
 } switch_case_value_t;
 
 int read_const_expr(block_t *scope);
-int read_global_address_offset(block_t *scope,
-                               block_t *parent,
-                               basic_block_t *bb);
+
+static void set_array_dimension(int *size,
+                                int *dim2,
+                                int *dim3,
+                                int *dim4,
+                                int dimension,
+                                int bound,
+                                bool infer_missing_size)
+{
+    if (!dimension) {
+        *size = bound;
+    } else {
+        int *dimensions[] = {dim2, dim3, dim4};
+
+        if (dimension > 3)
+            dimension = 3;
+        *dimensions[dimension - 1] = bound;
+        if (!*size && infer_missing_size)
+            *size = bound;
+        else
+            *size *= bound;
+    }
+}
+
+static void read_array_shape_bounds(block_t *scope,
+                                    fixed_array_shape_t *shape,
+                                    char *rank_error,
+                                    char *missing_bound_error,
+                                    char *invalid_bound_error,
+                                    bool check_rank_first,
+                                    bool opening_consumed)
+{
+    /* Preserve each declarator's error order and any checks after `['. */
+    while (opening_consumed || lex_accept(T_open_square)) {
+        int bound;
+
+        opening_consumed = false;
+        if (check_rank_first && shape->rank >= MAX_FIXED_ARRAY_RANK)
+            error_at(rank_error, cur_token_loc());
+        if (missing_bound_error && lex_peek(T_close_square, NULL))
+            error_at(missing_bound_error, cur_token_loc());
+        bound = read_const_expr(scope);
+        if (!check_rank_first && shape->rank >= MAX_FIXED_ARRAY_RANK)
+            error_at(rank_error, cur_token_loc());
+        if (bound <= 0)
+            error_at(invalid_bound_error, cur_token_loc());
+        shape->bounds[shape->rank++] = bound;
+        lex_expect(T_close_square);
+    }
+}
+
+static void fixed_array_shape_apply(const fixed_array_shape_t *shape,
+                                    int *size,
+                                    int *dim2,
+                                    int *dim3,
+                                    int *dim4)
+{
+    /* Unlike fixed_array_shape_write(), retain any unused trailing dimensions.
+     */
+    for (int i = 0; i < shape->rank; i++)
+        set_array_dimension(size, dim2, dim3, dim4, i, shape->bounds[i], false);
+}
 
 /* Enumerator values must be representable as int. */
 bool checking_enum_constant = false;
@@ -1336,12 +1679,12 @@ void discard_operand(block_t *parent, basic_block_t *bb)
     bool unread = var && var == unread_volatile_object;
 
     unread_volatile_object = NULL;
-    if (!unread || var->is_func || var->array_size ||
-        (!var->ptr_level && is_record_type(var->type)))
+    if (!unread || var->is_function_designator || var->array_size ||
+        (!var->is_func && !var->ptr_level && is_record_type(var->type)))
         return;
 
-    var_t *copy = require_typed_ptr_var(parent, var->type, var->ptr_level);
-    copy->var_name = gen_name();
+    var_t *copy = name_var(require_typed_ptr_var(
+        parent, var->type, var->is_func ? 1 : var->ptr_level));
     add_insn(parent, bb, OP_assign, copy, var, NULL, 0, NULL);
 }
 
@@ -1422,87 +1765,36 @@ int get_size(var_t *var)
     return var->type->size;
 }
 
-int get_operator_prio(opcode_t op)
-{
-    /* https://www.cs.uic.edu/~i109/Notes/COperatorPrecedenceTable.pdf */
-    switch (op) {
-    case OP_ternary:
-        return 3;
-    case OP_log_or:
-        return 4;
-    case OP_log_and:
-        return 5;
-    case OP_bit_or:
-        return 6;
-    case OP_bit_xor:
-        return 7;
-    case OP_bit_and:
-        return 8;
-    case OP_eq:
-    case OP_neq:
-        return 9;
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-        return 10;
-    case OP_lshift:
-    case OP_rshift:
-        return 11;
-    case OP_add:
-    case OP_sub:
-        return 12;
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-        return 13;
-    default:
-        return 0;
-    }
-}
-
 opcode_t get_operator(void)
 {
-    opcode_t op = OP_generic;
-    if (lex_accept(T_plus))
-        op = OP_add;
-    else if (lex_accept(T_minus))
-        op = OP_sub;
-    else if (lex_accept(T_asterisk))
-        op = OP_mul;
-    else if (lex_accept(T_divide))
-        op = OP_div;
-    else if (lex_accept(T_mod))
-        op = OP_mod;
-    else if (lex_accept(T_lshift))
-        op = OP_lshift;
-    else if (lex_accept(T_rshift))
-        op = OP_rshift;
-    else if (lex_accept(T_log_and))
-        op = OP_log_and;
-    else if (lex_accept(T_log_or))
-        op = OP_log_or;
-    else if (lex_accept(T_eq))
-        op = OP_eq;
-    else if (lex_accept(T_noteq))
-        op = OP_neq;
-    else if (lex_accept(T_lt))
-        op = OP_lt;
-    else if (lex_accept(T_le))
-        op = OP_leq;
-    else if (lex_accept(T_gt))
-        op = OP_gt;
-    else if (lex_accept(T_ge))
-        op = OP_geq;
-    else if (lex_accept(T_ampersand))
-        op = OP_bit_and;
-    else if (lex_accept(T_bit_or))
-        op = OP_bit_or;
-    else if (lex_accept(T_bit_xor))
-        op = OP_bit_xor;
-    else if (lex_peek(T_question, NULL))
-        op = OP_ternary;
+    opcode_t op = cur_token->next ? operator_for_token(cur_token->next->kind)
+                                  : OP_generic;
+
+    if (op == OP_bit_not || op == OP_log_not)
+        return OP_generic;
+    if (op != OP_generic && op != OP_ternary)
+        lex_next();
     return op;
+}
+
+void fold_integer_constant_cast(var_t *result,
+                                unsigned int lo,
+                                unsigned int hi);
+
+static void preserve_integer_constant(var_t *result, const var_t *source)
+{
+    if (!source->is_const || source->ptr_level || source->type->ptr_level ||
+        source->array_size || source->is_func || result->ptr_level ||
+        result->type->ptr_level || is_record_type(source->type) ||
+        is_record_type(result->type) || result->type == TY_void)
+        return;
+    unsigned int lo = (unsigned int) source->init_val;
+    unsigned int hi = source->type->size > TY_int->size
+                          ? (unsigned int) source->init_val_hi
+                      : source->type->is_unsigned ? 0
+                                                  : 0U - (lo >> 31);
+    result->is_const = true;
+    fold_integer_constant_cast(result, lo, hi);
 }
 
 var_t *promote_unchecked(block_t *block,
@@ -1511,8 +1803,7 @@ var_t *promote_unchecked(block_t *block,
                          type_t *target_type,
                          int target_ptr)
 {
-    var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
-    rd->var_name = gen_name();
+    var_t *rd = name_var(require_typed_ptr_var(block, target_type, target_ptr));
 
     /* Encode both source and target sizes in src1: Lower 16 bits: target size
      * Upper 16 bits: source size This allows codegen to distinguish between
@@ -1524,6 +1815,7 @@ var_t *promote_unchecked(block_t *block,
     else
         encoded_size |= target_type->size;
     add_insn(block, *bb, OP_sign_ext, rd, var, NULL, encoded_size, NULL);
+    preserve_integer_constant(rd, var);
     return rd;
 }
 
@@ -1552,10 +1844,10 @@ var_t *truncate_unchecked(block_t *block,
                           type_t *target_type,
                           int target_ptr)
 {
-    var_t *rd = require_typed_ptr_var(block, target_type, target_ptr);
-    rd->var_name = gen_name();
+    var_t *rd = name_var(require_typed_ptr_var(block, target_type, target_ptr));
     add_insn(block, *bb, OP_trunc, rd, var, NULL,
              target_ptr ? PTR_SIZE : target_type->size, NULL);
+    preserve_integer_constant(rd, var);
     return rd;
 }
 
@@ -1567,31 +1859,33 @@ var_t *normalize_bool(block_t *block, basic_block_t **bb, var_t *var)
     if (is_bool_scalar(var->type, var->ptr_level))
         return var;
     if (var->is_const && !var->ptr_level) {
-        rd = require_typed_var(block, TY_bool);
-        rd->var_name = gen_name();
-        rd->init_val = var->init_val || var->init_val_hi;
+        rd = load_constant(block, *bb, var->init_val || var->init_val_hi,
+                           TY_bool);
         rd->is_const = true;
-        add_insn(block, *bb, OP_load_constant, rd, NULL, NULL, 0, NULL);
         return rd;
     }
 
-    zero = require_typed_var(block, TY_int);
-    zero->var_name = gen_name();
-    zero->init_val = 0;
+    zero = load_constant(block, *bb, 0, TY_int);
     zero->is_const = true;
-    add_insn(block, *bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
 
-    rd = require_typed_var(block, TY_bool);
-    rd->var_name = gen_name();
+    rd = name_var(require_typed_var(block, TY_bool));
     add_insn(block, *bb, OP_neq, rd, var, zero, 0, NULL);
     return rd;
 }
 
+var_t *resize_to(block_t *block,
+                 basic_block_t **bb,
+                 var_t *val,
+                 type_t *type,
+                 int ptr_level);
+
 /* The value an OP_write of a scalar object of @type should store. A store
  * narrows to the object width by itself, which is the conversion C wants for
  * every integer type except _Bool: 0x100 has to become 1, not its low byte 0.
- * Paths that write a plain assignment through an address share this rather than
- * each resizing their value.
+ * It does not widen, so an int stored into a long long is converted first:
+ * otherwise the high word held whatever the int's register did above it, the
+ * carry of an overflowed sum, say. Paths that write a plain assignment through
+ * an address share this rather than each resizing their value.
  */
 var_t *convert_stored_value(block_t *block,
                             basic_block_t **bb,
@@ -1599,9 +1893,13 @@ var_t *convert_stored_value(block_t *block,
                             type_t *type,
                             int ptr_level)
 {
-    if (!is_bool_scalar(type, ptr_level))
-        return value;
-    return normalize_bool(block, bb, value);
+    if (is_bool_scalar(type, ptr_level))
+        return normalize_bool(block, bb, value);
+    if (!ptr_level && type && !type->ptr_level && !is_record_type(type) &&
+        !value->ptr_level && !value->array_size && !value->is_func &&
+        get_size(value) < type->size)
+        return resize_to(block, bb, value, type, ptr_level);
+    return value;
 }
 
 var_t *resize_var(block_t *block, basic_block_t **bb, var_t *from, var_t *to)
@@ -1964,8 +2262,11 @@ bool incompatible_pointee_callback_conversion(const var_t *from,
         effective_pointer_depth(from) > 0 && from->type &&
         from->type->func_signature && !from->type->is_direct_function_type)
         from_signature = from->type->func_signature;
-    if (!to_signature && effective_pointer_depth(to) > 0 && to->type &&
-        to->type->func_signature && !to->type->is_direct_function_type)
+    if (!to_signature && to->type &&
+        (!to->func_signature ||
+         to->func_signature == to->type->func_signature) &&
+        effective_pointer_depth(to) > 0 && to->type->func_signature &&
+        !to->type->is_direct_function_type)
         to_signature = to->type->func_signature;
     if (!(from_signature || to_signature))
         return false;
@@ -1983,12 +2284,60 @@ void diagnose_callback_slot_initializer(const var_t *from, const var_t *to)
                  cur_token_loc());
 }
 
+/* Array subscripts undergo integer promotion before their byte offset is
+ * scaled. Keep that representation on synthetic scaling values: narrowing a
+ * `unsigned char` product would otherwise wrap before pointer addition.
+ */
+type_t *integer_promoted_type(const var_t *var)
+{
+    return var->type->size < TY_int->size ? TY_int : var->type;
+}
+
 /* The rest of the parser, in the order it was written. Each file depends on
  * what the ones before it define, so the order below is load-bearing and must
  * not be sorted.
  */
 /* clang-format off */
+static void skip_type_qualifiers(void)
+{
+    while (lex_accept(T_const) || lex_accept(T_volatile) ||
+           lex_accept(T_restrict))
+        ;
+}
+
+static token_t *function_pointer_declarator_suffix(token_t *open,
+                                                   int *star_count);
+
+static void read_assignment_or_expression(block_t *parent,
+                                          basic_block_t **bb);
+static void read_comma_expression(block_t *parent,
+                                  basic_block_t **bb,
+                                  bool clear_reference);
+static var_t *read_subscript_address(block_t *parent,
+                                     basic_block_t **bb,
+                                     var_t *base,
+                                     type_t *element_type,
+                                     int pointer_level,
+                                     int stride)
+{
+    var_t *index;
+
+    read_assignment_or_expression(parent, bb);
+    index = opstack_pop();
+    lex_expect(T_close_square);
+    return lower_array_element_address(parent, *bb, base, index, element_type,
+                                       pointer_level, stride, false);
+}
+
 #include "parser-init.c"
+static void read_assignment_or_expression(block_t *parent,
+                                          basic_block_t **bb)
+{
+    if (!read_assignment_expression(parent, bb)) {
+        read_expr(parent, bb);
+        read_ternary_operation(parent, bb);
+    }
+}
 #include "parser-decl.c"
 #include "parser-call.c"
 #include "parser-sizeof.c"

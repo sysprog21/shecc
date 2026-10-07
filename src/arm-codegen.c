@@ -11,6 +11,13 @@
 #include "defs.h"
 #include "globals.c"
 
+static bool arm_count_only;
+static int arm_counted_words;
+
+void emit_ph2_ir(ph2_ir_t *ph2_ir);
+
+static int arm_count_ph2_ir_words(ph2_ir_t *ph2_ir);
+
 /* Whether a load or store materializes its frame or data offset with
  * MOVW/MOVT/ADD because no immediate form reaches it. LDR, LDRB, STR and STRB
  * take 12 bits, LDRSB, LDRH, LDRSH and STRH eight, and a register pair also
@@ -31,253 +38,21 @@ bool arm_offset_needs_movw(const ph2_ir_t *ph2_ir)
 
 void update_elf_offset(ph2_ir_t *ph2_ir)
 {
-    func_t *func;
-    switch (ph2_ir->op) {
-    case OP_load_constant:
-        /* ARMv7 uses 12 bits to encode immediate value, but the higher 4 bits
-         * are for rotation. See A5.2.4 "Modified immediate constants in ARM
-         * instructions" in ARMv7-A manual.
-         */
-        if (ph2_ir->src0 < 0)
-            elf_offset += 12;
-        else if (ph2_ir->src0 > 255)
-            elf_offset += 8;
-        else
-            elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0) {
-            if (ph2_ir->src1 < 0)
-                elf_offset += 12;
-            else if (ph2_ir->src1 > 255)
-                elf_offset += 8;
-            else
-                elf_offset += 4;
-        }
-        return;
-    case OP_address_of:
-    case OP_global_address_of:
-        /* ARMv7 uses 12 bits to encode immediate value, but the higher 4 bits
-         * are for rotation. See A5.2.4 "Modified immediate constants in ARM
-         * instructions" in ARMv7-A manual.
-         */
-        if (ph2_ir->src0 > 255)
-            elf_offset += 12;
-        else if (ph2_ir->src0 >= 0)
-            elf_offset += 4;
-        else
-            abort();
-        return;
-    case OP_assign:
-        if (ph2_ir->dest != ph2_ir->src0)
-            elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->dest_hi != ph2_ir->src0_hi)
-            elf_offset += 4;
-        /* Exchanging the two registers of a pair takes a third move. */
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->dest == ph2_ir->src0_hi &&
-            ph2_ir->dest_hi == ph2_ir->src0)
-            elf_offset += 4;
-        return;
-    case OP_load:
-    case OP_global_load:
-        /* LDR/LDRB use a 12-bit offset, but LDRSB and LDRH/LDRSH use eight
-         * bits. A larger signed-byte or halfword offset is materialized with
-         * MOVW/MOVT/ADD before the load, exactly as an offset beyond the
-         * general load range is. A wide pair also loads its high word four
-         * bytes further up.
-         */
-        if (arm_offset_needs_movw(ph2_ir))
-            if (ph2_ir->dest_hi >= 0)
-                elf_offset += 20;
-            else
-                elf_offset += 16;
-        else if (ph2_ir->src0 >= 0)
-            if (ph2_ir->dest_hi >= 0)
-                elf_offset += 8;
-            else
-                elf_offset += 4;
-        else
-            abort();
-        return;
-    case OP_store:
-    case OP_global_store:
-        /* ARMv7 straight uses 12 bits to encode the offset of store instruction
-         * (no rotation), but STRH only eight. A wide pair also stores its high
-         * word four bytes further up.
-         */
-        if (arm_offset_needs_movw(ph2_ir))
-            if (ph2_ir->src0_hi >= 0)
-                elf_offset += 20;
-            else
-                elf_offset += 16;
-        else if (ph2_ir->src1 >= 0)
-            if (ph2_ir->src0_hi >= 0)
-                elf_offset += 8;
-            else
-                elf_offset += 4;
-        else
-            abort();
-        return;
-    case OP_read:
-        elf_offset += ph2_ir->dest_hi >= 0 ? 8 : 4;
-        return;
-    case OP_write:
-        elf_offset += ph2_ir->src1_hi >= 0 ? 8 : 4;
-        return;
-    case OP_indirect:
-        /* blx, then under dynamic linking the r12 reload that OP_call adds. */
-        elf_offset += dynlink ? 16 : 4;
-        return;
-    case OP_jump:
-    case OP_load_func:
-    case OP_lshift:
-    case OP_rshift:
-        elf_offset += ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 ? 48 : 4;
-        return;
-    case OP_mul:
-        elf_offset +=
-            ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0
-                ? 20
-                : 4;
-        return;
-    case OP_negate:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_add:
-    case OP_sub:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_bit_and:
-    case OP_bit_or:
-    case OP_bit_xor:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_bit_not:
-        elf_offset += 4;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_call:
-        func = find_func(ph2_ir->func_name);
-        if (func->bbs)
-            elf_offset += 4;
-        else if (dynlink) {
-            /* When calling external functions in dynamic linking mode, the
-             * following instructions are required:
-             * - movw + movt: set r8 to 'elf_data_start'
-             * - ldr: load a word from the address 'elf_data_start' into r12.
-             *        (restore the global stack pointer.)
-             *
-             * Therefore, the total offset is 16 bytes (4 instructions).
-             */
-            elf_offset += 16;
-        } else {
-            printf("The '%s' function is not implemented\n", ph2_ir->func_name);
-            fflush(stdout); /* see fatal() */
-            abort();
-        }
-        return;
-    case OP_div:
-    case OP_mod:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0) {
-            /* The stack-backed restoring loop below has a fixed 64-round body.
-             * It keeps all pair state out of operand registers: an SSA result
-             * may coalesce with either dying input pair.
-             */
-            if (ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned)
-                elf_offset += 284;
-            else
-                elf_offset += ph2_ir->op == OP_div ? 424 : 416;
-            return;
-        }
-        if (hard_mul_div) {
-            if (ph2_ir->op == OP_div)
-                elf_offset += 4;
-            else
-                elf_offset += 12;
-            return;
-        }
-        /* div/mod emulation's offset */
-        elf_offset += 124;
-        return;
-    case OP_load_data_address:
-    case OP_load_rodata_address:
-        elf_offset += 8;
-        return;
-    case OP_address_of_func:
-        elf_offset += 12;
-        return;
-    case OP_log_not:
-        elf_offset += ph2_ir->src0_hi >= 0 ? 16 : 12;
-        return;
-    case OP_gt:
-    case OP_lt:
-    case OP_geq:
-    case OP_leq:
-        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 16 : 12;
-        return;
-    case OP_eq:
-    case OP_neq:
-        elf_offset += ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0 ? 16 : 12;
-        return;
-    case OP_branch:
-        if (ph2_ir->is_branch_detached)
-            elf_offset += 12;
-        else
-            elf_offset += 8;
-        if (ph2_ir->src0_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_return:
-        elf_offset += 24;
-        if (ph2_ir->src0_hi >= 0)
-            elf_offset += 4;
-        return;
-    case OP_trunc:
-        /* Unsigned byte/half truncation uses a logical shift pair; signed
-         * narrowing uses the single-instruction SXTB/SXTH forms.
-         */
-        if (ph2_ir->is_unsigned && (ph2_ir->src1 == 1 || ph2_ir->src1 == 2))
-            elf_offset += 8;
-        else
-            elf_offset += 4;
-        return;
-    case OP_sign_ext:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi < 0) {
-            int source_size = (ph2_ir->src1 >> 16) & 0xFFFF;
-            elf_offset +=
-                (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer) &&
-                        (source_size == 1 || source_size == 2)
-                    ? 12
-                    : 8;
-        } else if (ph2_ir->src0_is_unsigned)
-            elf_offset += 8;
-        else
-            elf_offset += 4;
-        return;
-    case OP_cast:
-        elf_offset +=
-            ph2_ir->dest_hi >= 0 &&
-                    (ph2_ir->src0_hi < 0 || ph2_ir->dest_hi != ph2_ir->src0_hi)
-                ? 8
-                : 4;
-        return;
-    default:
-        fatal("Unknown opcode");
-    }
+    elf_offset += arm_count_ph2_ir_words(ph2_ir) * 4;
+}
+
+static ph2_frame_layout_t arm_frame_layout(func_t *func, ph2_ir_t *define)
+{
+    /* Eight-byte alignment follows the nine saved words and one padding word.
+     */
+    return (ph2_frame_layout_t) {ALIGN_UP(func->stack_size, MIN_ALIGNMENT) + 40,
+                                 arm_count_ph2_ir_words(define) * 4, 0, false};
 }
 
 void cfg_flatten(void)
 {
     func_t *func;
+    ph2_ir_prepare(false);
 
     if (dynlink)
         elf_offset = 132; /* __libc_start_main call, main_wrapper, and the
@@ -291,10 +66,7 @@ void cfg_flatten(void)
 
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
 
-    for (ph2_ir_t *ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
-         ph2_ir = ph2_ir->next) {
-        update_elf_offset(ph2_ir);
-    }
+    ph2_ir_visit_globals(update_elf_offset);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
     if (dynlink)
@@ -302,75 +74,50 @@ void cfg_flatten(void)
     else
         elf_offset += 32; /* 6 insns for main call + 2 for exit */
 
-    for (func = FUNC_LIST.head; func; func = func->next) {
-        /* Skip function declarations without bodies */
-        if (!func->bbs)
-            continue;
-
-        /* reserve stack */
-        ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
-        flatten_ir->src0 = func->stack_size;
-        flatten_ir->func_name = intern_string(func->return_def.var_name);
-
-        /* The actual offset of the top of the local stack is the sum of:
-         * - 36 bytes (pushing registers r4-r11 and lr onto the stack)
-         * - 4 bytes
-         *   (to ensure 8-byte alignment after pushing the 9 registers)
-         * - ALIGN_UP(func->stack_size, 8)
-         *
-         * Note that func->stack_size does not include the 36 + 4 bytes, so an
-         * additional 40 bytes should be added to ALIGN_UP(func->stack_size, 8).
-         */
-        int stack_top_ofs = ALIGN_UP(func->stack_size, MIN_ALIGNMENT) + 40;
-
-        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            bb->elf_offset = elf_offset;
-
-            if (bb == func->bbs) {
-                /* retrieve the global stack pointer and save ra, sp */
-                elf_offset += 28;
-            }
-
-            for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
-                 insn = insn->next) {
-                /* For the instructions whose ofs_based_on_stack_top is set,
-                 * recalculate the operand's offset by adding stack_top_ofs.
-                 */
-                if (insn->ofs_based_on_stack_top) {
-                    switch (insn->op) {
-                    case OP_load:
-                    case OP_address_of:
-                        insn->src0 = insn->src0 + stack_top_ofs;
-                        break;
-                    case OP_store:
-                        insn->src1 = insn->src1 + stack_top_ofs;
-                        break;
-                    default:
-                        /* Ignore opcodes with the ofs_based_on_stack_top flag
-                         * set since only the three opcodes above needs to
-                         * access a variable's address.
-                         */
-                        break;
-                    }
-                }
-                flatten_ir = add_existed_ph2_ir(insn);
-
-                if (insn->op == OP_return) {
-                    /* restore sp */
-                    flatten_ir->src1 = bb->belong_to->stack_size;
-                }
-
-                /* Branch detachment is determined in the arch-lowering stage */
-
-                update_elf_offset(flatten_ir);
-            }
-        }
-    }
+    ph2_ir_flatten_functions(arm_frame_layout, update_elf_offset);
 }
 
 void emit(int code)
 {
-    elf_write_int(elf_code, code);
+    if (arm_count_only)
+        ++arm_counted_words;
+    else
+        elf_write_int(elf_code, code);
+}
+
+static int arm_count_ph2_ir_words(ph2_ir_t *ph2_ir)
+{
+    bool saved_count_only = arm_count_only;
+    int saved_counted_words = arm_counted_words;
+    char *saved_fatal_function_context = fatal_function_context;
+
+    arm_count_only = true;
+    arm_counted_words = 0;
+    emit_ph2_ir(ph2_ir);
+    int words = arm_counted_words;
+
+    arm_count_only = saved_count_only;
+    arm_counted_words = saved_counted_words;
+    fatal_function_context = saved_fatal_function_context;
+    return words;
+}
+
+static int arm_bitwise_insn(opcode_t op,
+                            arm_reg dest,
+                            arm_reg left,
+                            arm_reg right)
+{
+    switch (op) {
+    case OP_bit_and:
+        return __and_r(__AL, dest, left, right);
+    case OP_bit_or:
+        return __or_r(__AL, dest, left, right);
+    case OP_bit_xor:
+        return __eor_r(__AL, dest, left, right);
+    default:
+        fatal("unsupported ARM bitwise operation");
+    }
+    return 0;
 }
 
 void emit_ph2_ir(ph2_ir_t *ph2_ir)
@@ -458,8 +205,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * emitting one here would push every later address out by four bytes
          * and leave the data segment's p_offset and p_vaddr incongruent.
          */
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            rd == ph2_ir->src0_hi) {
+        if (PH2_PAIR_DEST_SRC0(ph2_ir) && rd == ph2_ir->src0_hi) {
             /* A pair moved one register over, as a slot round trip collapsed
              * into a move can leave it: the low destination is the high source,
              * so move the high word first, through r8 when the two registers
@@ -477,8 +223,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
         if (rd != rn)
             emit(__mov_r(__AL, rd, rn));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->dest_hi != ph2_ir->src0_hi)
+        if (PH2_PAIR_DEST_SRC0(ph2_ir) && ph2_ir->dest_hi != ph2_ir->src0_hi)
             emit(__mov_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
         return;
     case OP_load:
@@ -565,19 +310,11 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_read:
         if (ph2_ir->dest_hi >= 0) {
-            /* A pair read through a pointer. When the low destination is the
-             * address register itself, fetch the high word first so the address
-             * survives until both words are loaded.
-             */
             if (ph2_ir->src1 != 8)
                 fatal("unsupported Arm pair load width");
-            if (rd == rn) {
-                emit(__lw(__AL, ph2_ir->dest_hi, rn, 4));
-                emit(__lw(__AL, rd, rn, 0));
-            } else {
-                emit(__lw(__AL, rd, rn, 0));
-                emit(__lw(__AL, ph2_ir->dest_hi, rn, 4));
-            }
+#define ARM_WORD_LOAD(dst, base, offset) emit(__lw(__AL, dst, base, offset))
+            EMIT_PAIR_LOAD(ARM_WORD_LOAD, rd, ph2_ir->dest_hi, rn);
+#undef ARM_WORD_LOAD
             return;
         }
         if (ph2_ir->src1 == 1)
@@ -675,16 +412,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__movt(__AL, rd, ph2_ir->src0 + elf_rodata_start));
         return;
     case OP_address_of_func:
-        func = find_func(ph2_ir->func_name);
-        if (func->bbs)
-            ofs = elf_code_start + func->bbs->elf_offset;
-        else if (dynlink)
-            ofs = dynamic_sections.elf_plt_start + func->plt_offset;
-        else {
-            printf("The '%s' function is not implemented\n", ph2_ir->func_name);
-            fflush(stdout); /* see fatal() */
-            abort();
-        }
+        ofs = function_entry_address(ph2_ir->func_name);
         emit(__movw(__AL, __r8, ofs));
         emit(__movt(__AL, __r8, ofs));
         emit(__sw(__AL, __r8, rn, 0));
@@ -730,8 +458,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__bx(__AL, __lr));
         return;
     case OP_add:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0) {
+        if (PH2_PAIR_BINARY(ph2_ir)) {
             emit(__adds_r(__AL, rd, rn, rm));
             emit(__adc_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
                          ph2_ir->src1_hi));
@@ -739,8 +466,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__add_r(__AL, rd, rn, rm));
         return;
     case OP_sub:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0) {
+        if (PH2_PAIR_BINARY(ph2_ir)) {
             emit(__subs_r(__AL, rd, rn, rm));
             emit(__sbc_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
                          ph2_ir->src1_hi));
@@ -748,8 +474,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__sub_r(__AL, rd, rn, rm));
         return;
     case OP_mul:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0) {
+        if (PH2_PAIR_BINARY(ph2_ir)) {
             /* Sum the cross terms before UMULL writes the result pair, so the
              * product stays right even if that pair shares a register with an
              * operand. The allocator does not hand out such a pair today, and
@@ -765,8 +490,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_div:
     case OP_mod:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0) {
+        if (PH2_PAIR_BINARY(ph2_ir)) {
             bool is_unsigned =
                 ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
 
@@ -984,7 +708,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__rsb_i(__NE, rd, 0, rd));
         return;
     case OP_lshift:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
             emit(__cmp_i(__AL, rm, 32));
             emit(__b(__CS, 32));
             emit(__mov_r(__AL, __r8, rn));
@@ -1002,7 +726,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__sll(__AL, rd, rn, rm));
         return;
     case OP_rshift:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
             int shift_kind = ph2_ir->src0_is_unsigned ? logic_rs : arith_rs;
 
             emit(__cmp_i(__AL, rm, 32));
@@ -1076,7 +800,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                      rd, 1));
         return;
     case OP_negate:
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0) {
+        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
             emit(__rsbs_i(__AL, rd, 0, rn));
             emit(__rsc_i(__AL, ph2_ir->dest_hi, 0, ph2_ir->src0_hi));
         } else
@@ -1084,29 +808,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     case OP_bit_not:
         emit(__mvn_r(__AL, rd, rn));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0)
+        if (PH2_PAIR_DEST_SRC0(ph2_ir))
             emit(__mvn_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
         return;
     case OP_bit_and:
-        emit(__and_r(__AL, rd, rn, rm));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            emit(__and_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
-                         ph2_ir->src1_hi));
-        return;
     case OP_bit_or:
-        emit(__or_r(__AL, rd, rn, rm));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            emit(__or_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
-                        ph2_ir->src1_hi));
-        return;
     case OP_bit_xor:
-        emit(__eor_r(__AL, rd, rn, rm));
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi >= 0 &&
-            ph2_ir->src1_hi >= 0)
-            emit(__eor_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
-                         ph2_ir->src1_hi));
+        emit(arm_bitwise_insn(ph2_ir->op, rd, rn, rm));
+        if (PH2_PAIR_BINARY(ph2_ir))
+            emit(arm_bitwise_insn(ph2_ir->op, ph2_ir->dest_hi, ph2_ir->src0_hi,
+                                  ph2_ir->src1_hi));
         return;
     case OP_log_not:
         if (ph2_ir->src0_hi >= 0) {
@@ -1340,10 +1051,7 @@ void code_generate(void)
         emit(__bx(__AL, __lr));
     }
 
-    ph2_ir_t *ph2_ir;
-    for (ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
-         ph2_ir = ph2_ir->next)
-        emit_ph2_ir(ph2_ir);
+    ph2_ir_visit_globals(emit_ph2_ir);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
     if (MAIN_BB) {
@@ -1382,7 +1090,7 @@ void code_generate(void)
     }
 
     for (int i = 0; i < ph2_ir_idx; i++) {
-        ph2_ir = PH2_IR_FLATTEN[i];
+        ph2_ir_t *ph2_ir = PH2_IR_FLATTEN[i];
         emit_ph2_ir(ph2_ir);
     }
 }

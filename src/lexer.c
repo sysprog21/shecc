@@ -10,11 +10,6 @@
 #include "defs.h"
 #include "globals.c"
 
-/* Hash table constants */
-#define NUM_DIRECTIVES 12
-#define NUM_KEYWORDS 32
-
-/* Token mapping structure for elegant initialization */
 typedef struct {
     char *name;
     token_kind_t token;
@@ -28,18 +23,25 @@ hashmap_t *KEYWORD_MAP = NULL;
 token_kind_t *directive_tokens_storage = NULL;
 token_kind_t *keyword_tokens_storage = NULL;
 
+static void init_token_map(hashmap_t **map,
+                           token_kind_t **storage,
+                           const token_mapping_t *mappings,
+                           int count,
+                           int capacity)
+{
+    *map = hashmap_create(capacity);
+    *storage = arena_alloc(TOKEN_ARENA, count * sizeof(**storage));
+    for (int i = 0; i < count; i++) {
+        (*storage)[i] = mappings[i].token;
+        hashmap_put_borrowed(*map, mappings[i].name, &(*storage)[i]);
+    }
+}
+
 void lex_init_directives(void)
 {
     if (DIRECTIVE_MAP)
         return;
 
-    DIRECTIVE_MAP = hashmap_create(16); /* Small capacity for directives */
-
-    /* Initialization using struct compound literals for elegance */
-    directive_tokens_storage =
-        arena_alloc(GENERAL_ARENA, NUM_DIRECTIVES * sizeof(token_kind_t));
-
-    /* Use array compound literal for directive mappings */
     token_mapping_t directives[] = {
         {"#define", T_cppd_define},   {"#elif", T_cppd_elif},
         {"#else", T_cppd_else},       {"#endif", T_cppd_endif},
@@ -48,13 +50,8 @@ void lex_init_directives(void)
         {"#include", T_cppd_include}, {"#pragma", T_cppd_pragma},
         {"#undef", T_cppd_undef},     {"#line", T_cppd_line},
     };
-
-    /* hashmap insertion */
-    for (int i = 0; i < NUM_DIRECTIVES; i++) {
-        directive_tokens_storage[i] = directives[i].token;
-        hashmap_put(DIRECTIVE_MAP, directives[i].name,
-                    &directive_tokens_storage[i]);
-    }
+    init_token_map(&DIRECTIVE_MAP, &directive_tokens_storage, directives,
+                   sizeof(directives) / sizeof(*directives), 16);
 }
 
 void lex_init_keywords(void)
@@ -62,13 +59,6 @@ void lex_init_keywords(void)
     if (KEYWORD_MAP)
         return;
 
-    KEYWORD_MAP = hashmap_create(32); /* Capacity for keywords */
-
-    /* Initialization using struct compound literals for elegance */
-    keyword_tokens_storage =
-        arena_alloc(GENERAL_ARENA, NUM_KEYWORDS * sizeof(token_kind_t));
-
-    /* Use array compound literal for keyword mappings */
     token_mapping_t keywords[] = {
         {"if", T_if},
         {"while", T_while},
@@ -103,12 +93,8 @@ void lex_init_keywords(void)
         {"_Complex", T_complex},
         {"_Imaginary", T_imaginary},
     };
-
-    /* hashmap insertion */
-    for (int i = 0; i < NUM_KEYWORDS; i++) {
-        keyword_tokens_storage[i] = keywords[i].token;
-        hashmap_put(KEYWORD_MAP, keywords[i].name, &keyword_tokens_storage[i]);
-    }
+    init_token_map(&KEYWORD_MAP, &keyword_tokens_storage, keywords,
+                   sizeof(keywords) / sizeof(*keywords), 32);
 }
 
 /* Hash table lookup for preprocessor directives */
@@ -125,8 +111,11 @@ token_kind_t lookup_directive(char *token)
 }
 
 /* Hash table lookup for C keywords */
-token_kind_t lookup_keyword(char *token)
+token_kind_t lookup_keyword(char *token, int length)
 {
+    if (length < 2 || length > 10)
+        return T_identifier;
+
     if (!KEYWORD_MAP)
         lex_init_keywords();
 
@@ -151,9 +140,8 @@ void lexer_cleanup(void)
         KEYWORD_MAP = NULL;
     }
 
-    /* Token storage arrays are allocated from GENERAL_ARENA and will be
-     * automatically freed when the arena is freed in global_release(). No need
-     * to explicitly free them here.
+    /* Token storage arrays share TOKEN_ARENA's parse lifetime and are released
+     * by release_token_arena().
      */
     directive_tokens_storage = NULL;
     keyword_tokens_storage = NULL;
@@ -320,15 +308,14 @@ int file_read_all(FILE *f, char *dst, int len)
 }
 #endif
 
-strbuf_t *read_file(const char *filename)
+/* @filename's contents, or NULL when it cannot be opened. */
+strbuf_t *try_read_file(const char *filename)
 {
     FILE *f = fopen(filename, "rb");
     strbuf_t *src;
 
-    if (!f) {
-        printf("filename: %s\n", filename);
-        fatal("source file cannot be found.");
-    }
+    if (!f)
+        return NULL;
 
     fseek(f, 0, SEEK_END);
     int len = ftell(f);
@@ -342,17 +329,34 @@ strbuf_t *read_file(const char *filename)
     return src;
 }
 
-strbuf_t *get_file_buf(char *filename)
+/* @filename's contents, read once and kept for every later request; NULL when
+ * it cannot be opened, so that a caller with a better place to report the
+ * mistake can.
+ */
+strbuf_t *try_get_file_buf(char *filename)
 {
     strbuf_t *buf;
 
-    if (!hashmap_contains(SRC_FILE_MAP, filename)) {
-        buf = read_file(filename);
-        hashmap_put(SRC_FILE_MAP, filename, buf);
-    } else {
-        buf = hashmap_get(SRC_FILE_MAP, filename);
-    }
+    if (hashmap_contains(SRC_FILE_MAP, filename))
+        return hashmap_get(SRC_FILE_MAP, filename);
+    buf = try_read_file(filename);
+    if (buf)
+        hashmap_put_borrowed(SRC_FILE_MAP, filename, buf);
+    return buf;
+}
 
+strbuf_t *get_file_buf(char *filename)
+{
+    strbuf_t *buf = try_get_file_buf(filename);
+
+    /* A file that cannot be opened is a mistake in how the compiler was
+     * invoked, not a broken invariant, so it exits rather than abort()ing.
+     */
+    if (!buf) {
+        printf("[Error]: cannot open source file '%s'\n", filename);
+        fflush(NULL);
+        exit(1);
+    }
     return buf;
 }
 
@@ -368,6 +372,16 @@ token_t *new_token(token_kind_t kind, const source_location_t *loc, int len)
     token->next = NULL;
     memcpy(&token->location, loc, sizeof(source_location_t));
     token->location.len = len;
+    return token;
+}
+
+static token_t *new_token_at_column(source_location_t *loc,
+                                    token_kind_t kind,
+                                    int len)
+{
+    token_t *token = new_token(kind, loc, len);
+
+    loc->column += len;
     return token;
 }
 
@@ -440,9 +454,7 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
                 paste_len += source_char_width(buf, buf->size);
                 read_char(buf);
             }
-            token = new_token(T_hashhash, loc, paste_len);
-            loc->column += paste_len;
-            return token;
+            return new_token_at_column(loc, T_hashhash, paste_len);
         }
 
         if (!lex_at_line_start) {
@@ -450,9 +462,7 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
 
             for (int i = 0; i < hash_chars; i++)
                 read_char(buf);
-            token = new_token(T_hash, loc, hash_len);
-            loc->column += hash_len;
-            return token;
+            return new_token_at_column(loc, T_hash, hash_len);
         }
 
         int sz = 0, source_len = hash_len;
@@ -511,9 +521,7 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
         if (directive_kind == T_identifier)
             directive_kind = T_cppd_unknown;
 
-        token = new_token(directive_kind, loc, source_len);
-        loc->column += source_len;
-        return token;
+        return new_token_at_column(loc, directive_kind, source_len);
     }
 
     /* Leave a UCN to lex_word(); an ordinary backslash remains available for
@@ -521,9 +529,7 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
      */
     if (ch == '\\' && peek_char(buf, 1) != 'u' && peek_char(buf, 1) != 'U') {
         read_char(buf);
-        token = new_token(T_backslash, loc, 1);
-        loc->column++;
-        return token;
+        return new_token_at_column(loc, T_backslash, 1);
     }
 
     if (ch == '\n') {
@@ -577,14 +583,10 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
 
         if (ch == '=') {
             ch = read_char(buf);
-            token = new_token(T_divideeq, loc, 2);
-            loc->column += 2;
-            return token;
+            return new_token_at_column(loc, T_divideeq, 2);
         }
 
-        token = new_token(T_divide, loc, 1);
-        loc->column++;
-        return token;
+        return new_token_at_column(loc, T_divide, 1);
     }
 
     if (ch == ' ') {
@@ -594,23 +596,17 @@ token_t *lex_layout(strbuf_t *buf, source_location_t *loc, char ch)
         while (read_char(buf) == ' ')
             sz++;
 
-        token = new_token(T_whitespace, loc, sz);
-        loc->column += sz;
-        return token;
+        return new_token_at_column(loc, T_whitespace, sz);
     }
 
     if (ch == '\t') {
         read_char(buf);
-        token = new_token(T_tab, loc, 1);
-        loc->column++;
-        return token;
+        return new_token_at_column(loc, T_tab, 1);
     }
 
     if (ch == '\0') {
         read_char(buf);
-        token = new_token(T_eof, loc, 1);
-        loc->column++;
-        return token;
+        return new_token_at_column(loc, T_eof, 1);
     }
 
     return NULL;
@@ -930,118 +926,70 @@ token_t *lex_literal(strbuf_t *buf, source_location_t *loc, char ch)
  */
 token_t *lex_punct(strbuf_t *buf, source_location_t *loc, char ch)
 {
-    token_t *token;
-
-    if (ch == '(') {
-        ch = read_char(buf);
-        token = new_token(T_open_bracket, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ')') {
-        ch = read_char(buf);
-        token = new_token(T_close_bracket, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '{') {
-        ch = read_char(buf);
-        token = new_token(T_open_curly, loc, 1);
-        loc->column++;
-        return token;
-    }
-
     if (ch == '<' && peek_char(buf, 1) == '%') {
         read_char(buf);
         read_char(buf);
-        token = new_token(T_open_curly, loc, 2);
-        loc->column += 2;
-        return token;
-    }
-
-    if (ch == '}') {
-        ch = read_char(buf);
-        token = new_token(T_close_curly, loc, 1);
-        loc->column++;
-        return token;
+        return new_token_at_column(loc, T_open_curly, 2);
     }
 
     if (ch == '%' && peek_char(buf, 1) == '>') {
         read_char(buf);
         read_char(buf);
-        token = new_token(T_close_curly, loc, 2);
-        loc->column += 2;
-        return token;
-    }
-
-    if (ch == '[') {
-        ch = read_char(buf);
-        token = new_token(T_open_square, loc, 1);
-        loc->column++;
-        return token;
+        return new_token_at_column(loc, T_close_curly, 2);
     }
 
     if (ch == '<' && peek_char(buf, 1) == ':') {
         read_char(buf);
         read_char(buf);
-        token = new_token(T_open_square, loc, 2);
-        loc->column += 2;
-        return token;
-    }
-
-    if (ch == ']') {
-        ch = read_char(buf);
-        token = new_token(T_close_square, loc, 1);
-        loc->column++;
-        return token;
+        return new_token_at_column(loc, T_open_square, 2);
     }
 
     if (ch == ':' && peek_char(buf, 1) == '>') {
         read_char(buf);
         read_char(buf);
-        token = new_token(T_close_square, loc, 2);
-        loc->column += 2;
-        return token;
+        return new_token_at_column(loc, T_close_square, 2);
     }
 
-    if (ch == ',') {
-        ch = read_char(buf);
-        token = new_token(T_comma, loc, 1);
-        loc->column++;
-        return token;
+    token_kind_t kind;
+    switch (ch) {
+    case '(':
+        kind = T_open_bracket;
+        break;
+    case ')':
+        kind = T_close_bracket;
+        break;
+    case '{':
+        kind = T_open_curly;
+        break;
+    case '}':
+        kind = T_close_curly;
+        break;
+    case '[':
+        kind = T_open_square;
+        break;
+    case ']':
+        kind = T_close_square;
+        break;
+    case ',':
+        kind = T_comma;
+        break;
+    case '~':
+        kind = T_bit_not;
+        break;
+    case ';':
+        kind = T_semicolon;
+        break;
+    case '?':
+        kind = T_question;
+        break;
+    case ':':
+        kind = T_colon;
+        break;
+    default:
+        return NULL;
     }
-
-    if (ch == '~') {
-        ch = read_char(buf);
-        token = new_token(T_bit_not, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ';') {
-        read_char(buf);
-        token = new_token(T_semicolon, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '?') {
-        read_char(buf);
-        token = new_token(T_question, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == ':') {
-        read_char(buf);
-        token = new_token(T_colon, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    return NULL;
+    read_char(buf);
+    return new_token_at_column(loc, kind, 1);
 }
 
 /* Operators, each of which may or may not continue into a longer one.
@@ -1049,254 +997,114 @@ token_t *lex_punct(strbuf_t *buf, source_location_t *loc, char ch)
  * Returns NULL when 'ch' is none of its business, so that lex_token() can offer
  * the character to the next reader in line.
  */
+static token_t *lex_short_operator(strbuf_t *buf,
+                                   source_location_t *loc,
+                                   char pair_char,
+                                   token_kind_t pair_kind,
+                                   char alternate_char,
+                                   token_kind_t alternate_kind,
+                                   token_kind_t assign_kind,
+                                   token_kind_t single_kind)
+{
+    int length = 1;
+    token_kind_t kind = single_kind;
+
+    char ch = read_char(buf);
+    if (pair_char && ch == pair_char) {
+        kind = pair_kind;
+        length++;
+    } else if (alternate_char && ch == alternate_char) {
+        kind = alternate_kind;
+        length++;
+    } else if (ch == '=' && assign_kind != T_start) {
+        kind = assign_kind;
+        length++;
+    }
+    if (length == 2)
+        read_char(buf);
+    return new_token_at_column(loc, kind, length);
+}
+
+static token_t *lex_angle_operator(strbuf_t *buf,
+                                   source_location_t *loc,
+                                   char first,
+                                   token_kind_t single,
+                                   token_kind_t equal,
+                                   token_kind_t shift,
+                                   token_kind_t shift_equal)
+{
+    char ch = read_char(buf);
+    int length = 1;
+    token_kind_t kind = single;
+
+    if (ch == '=') {
+        kind = equal;
+        length = 2;
+        read_char(buf);
+    } else if (ch == first) {
+        ch = read_char(buf);
+        kind = shift;
+        length = 2;
+        if (ch == '=') {
+            kind = shift_equal;
+            length++;
+            read_char(buf);
+        }
+    }
+    return new_token_at_column(loc, kind, length);
+}
+
 token_t *lex_operator(strbuf_t *buf, source_location_t *loc, char ch)
 {
-    token_t *token;
+    if (ch == '^')
+        return lex_short_operator(buf, loc, 0, T_start, 0, T_start, T_xoreq,
+                                  T_bit_xor);
+    if (ch == '*')
+        return lex_short_operator(buf, loc, 0, T_start, 0, T_start,
+                                  T_asteriskeq, T_asterisk);
+    if (ch == '&')
+        return lex_short_operator(buf, loc, '&', T_log_and, 0, T_start, T_andeq,
+                                  T_ampersand);
+    if (ch == '|')
+        return lex_short_operator(buf, loc, '|', T_log_or, 0, T_start, T_oreq,
+                                  T_bit_or);
 
-    if (ch == '^') {
-        ch = read_char(buf);
+    if (ch == '<')
+        return lex_angle_operator(buf, loc, '<', T_lt, T_le, T_lshift,
+                                  T_lshifteq);
 
-        if (ch == '=') {
-            ch = read_char(buf);
-            token = new_token(T_xoreq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
+    if (ch == '%')
+        return lex_short_operator(buf, loc, 0, T_start, 0, T_start, T_modeq,
+                                  T_mod);
 
-        token = new_token(T_bit_xor, loc, 1);
-        loc->column++;
-        return token;
-    }
+    if (ch == '>')
+        return lex_angle_operator(buf, loc, '>', T_gt, T_ge, T_rshift,
+                                  T_rshifteq);
 
-    if (ch == '*') {
-        ch = read_char(buf);
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_asteriskeq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_asterisk, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '&') {
-        ch = read_char(buf);
-
-        if (ch == '&') {
-            read_char(buf);
-            token = new_token(T_log_and, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_andeq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_ampersand, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '|') {
-        ch = read_char(buf);
-
-        if (ch == '|') {
-            read_char(buf);
-            token = new_token(T_log_or, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_oreq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_bit_or, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '<') {
-        ch = read_char(buf);
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_le, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        if (ch == '<') {
-            ch = read_char(buf);
-
-            if (ch == '=') {
-                read_char(buf);
-                token = new_token(T_lshifteq, loc, 3);
-                loc->column += 3;
-                return token;
-            }
-
-            token = new_token(T_lshift, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_lt, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '%') {
-        ch = read_char(buf);
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_modeq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_mod, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '>') {
-        ch = read_char(buf);
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_ge, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        if (ch == '>') {
-            ch = read_char(buf);
-
-            if (ch == '=') {
-                read_char(buf);
-                token = new_token(T_rshifteq, loc, 3);
-                loc->column += 3;
-                return token;
-            }
-
-            token = new_token(T_rshift, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_gt, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '!') {
-        ch = read_char(buf);
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_noteq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_log_not, loc, 1);
-        loc->column++;
-        return token;
-    }
+    if (ch == '!')
+        return lex_short_operator(buf, loc, 0, T_start, 0, T_start, T_noteq,
+                                  T_log_not);
 
     if (ch == '.') {
         ch = read_char(buf);
 
         if (ch == '.' && peek_char(buf, 1) == '.') {
             buf->size += 2;
-            token = new_token(T_elipsis, loc, 3);
-            loc->column += 3;
-            return token;
+            return new_token_at_column(loc, T_elipsis, 3);
         }
 
-        token = new_token(T_dot, loc, 1);
-        loc->column++;
-        return token;
+        return new_token_at_column(loc, T_dot, 1);
     }
 
-    if (ch == '-') {
-        ch = read_char(buf);
-
-        if (ch == '>') {
-            read_char(buf);
-            token = new_token(T_arrow, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        if (ch == '-') {
-            read_char(buf);
-            token = new_token(T_decrement, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_minuseq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_minus, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '+') {
-        ch = read_char(buf);
-
-        if (ch == '+') {
-            read_char(buf);
-            token = new_token(T_increment, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_pluseq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_plus, loc, 1);
-        loc->column++;
-        return token;
-    }
-
-    if (ch == '=') {
-        ch = read_char(buf);
-
-        if (ch == '=') {
-            read_char(buf);
-            token = new_token(T_eq, loc, 2);
-            loc->column += 2;
-            return token;
-        }
-
-        token = new_token(T_assign, loc, 1);
-        loc->column++;
-        return token;
-    }
+    if (ch == '-')
+        return lex_short_operator(buf, loc, '-', T_decrement, '>', T_arrow,
+                                  T_minuseq, T_minus);
+    if (ch == '+')
+        return lex_short_operator(buf, loc, '+', T_increment, 0, T_start,
+                                  T_pluseq, T_plus);
+    if (ch == '=')
+        return lex_short_operator(buf, loc, '=', T_eq, 0, T_start, T_start,
+                                  T_assign);
 
     return NULL;
 }
@@ -1318,7 +1126,6 @@ static int lex_ucn_identifier(char *out, int out_size, strbuf_t *buf)
 {
     int digits = peek_char(buf, 1) == 'u' ? 4 : 8;
     unsigned int value = 0;
-    int out_len;
 
     for (int i = 0; i < digits; i++) {
         int digit = hex_digit_value(peek_char(buf, i + 2));
@@ -1337,33 +1144,7 @@ static int lex_ucn_identifier(char *out, int out_size, strbuf_t *buf)
         value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff))
         return -1;
 
-    if (value <= 0x7f)
-        out_len = 1;
-    else if (value <= 0x7ff)
-        out_len = 2;
-    else if (value <= 0xffff)
-        out_len = 3;
-    else
-        out_len = 4;
-    if (out_len >= out_size)
-        return -1;
-
-    if (out_len == 1) {
-        out[0] = value;
-    } else if (out_len == 2) {
-        out[0] = 0xc0 | (value >> 6);
-        out[1] = 0x80 | (value & 0x3f);
-    } else if (out_len == 3) {
-        out[0] = 0xe0 | (value >> 12);
-        out[1] = 0x80 | ((value >> 6) & 0x3f);
-        out[2] = 0x80 | (value & 0x3f);
-    } else {
-        out[0] = 0xf0 | (value >> 18);
-        out[1] = 0x80 | ((value >> 12) & 0x3f);
-        out[2] = 0x80 | ((value >> 6) & 0x3f);
-        out[3] = 0x80 | (value & 0x3f);
-    }
-    return out_len;
+    return append_utf8(out, 0, out_size, value);
 }
 
 /* Identifiers, and the keywords spelled like them.
@@ -1413,113 +1194,7 @@ token_t *lex_word(strbuf_t *buf, source_location_t *loc, char ch)
         } while (isalnum(ch) || ch == '_' || lex_ucn_starts(buf));
         token_buffer[sz] = 0;
 
-        /* Fast path for common keywords - avoid hashmap lookup */
-        token_kind_t kind = T_identifier;
-
-        /* Check most common keywords inline based on token length and first
-         * character.
-         */
-        switch (sz) {
-        case 2: /* 2-letter keywords: if, do */
-            if (token_buffer[0] == 'i' && token_buffer[1] == 'f')
-                kind = T_if;
-            else if (token_buffer[0] == 'd' && token_buffer[1] == 'o')
-                kind = T_do;
-            break;
-
-        case 3: /* 3-letter keywords: for */
-            if (token_buffer[0] == 'f' && token_buffer[1] == 'o' &&
-                token_buffer[2] == 'r')
-                kind = T_for;
-            break;
-
-        case 4: /* 4-letter keywords: else, enum, case */
-            if (token_buffer[0] == 'e') {
-                if (!memcmp(token_buffer, "else", 4))
-                    kind = T_else;
-                else if (!memcmp(token_buffer, "enum", 4))
-                    kind = T_enum;
-            } else if (!memcmp(token_buffer, "case", 4))
-                kind = T_case;
-            else if (!memcmp(token_buffer, "goto", 4))
-                kind = T_goto;
-            break;
-
-        case 5: /* 5-letter keywords: while, break, union, const, float */
-            if (token_buffer[0] == 'w' && !memcmp(token_buffer, "while", 5))
-                kind = T_while;
-            else if (token_buffer[0] == 'b' &&
-                     !memcmp(token_buffer, "break", 5))
-                kind = T_break;
-            else if (token_buffer[0] == 'u' &&
-                     !memcmp(token_buffer, "union", 5))
-                kind = T_union;
-            else if (token_buffer[0] == 'c' &&
-                     !memcmp(token_buffer, "const", 5))
-                kind = T_const;
-            else if (token_buffer[0] == 'f' &&
-                     !memcmp(token_buffer, "float", 5))
-                kind = T_float;
-            break;
-
-        case 6: /* 6-letter keywords: return, struct, switch, sizeof, static,
-                   extern, inline
-                   */
-            if (token_buffer[0] == 'r' && !memcmp(token_buffer, "return", 6))
-                kind = T_return;
-            else if (token_buffer[0] == 'e' &&
-                     !memcmp(token_buffer, "extern", 6))
-                kind = T_extern;
-            else if (token_buffer[0] == 'i' &&
-                     !memcmp(token_buffer, "inline", 6))
-                kind = T_inline;
-            else if (token_buffer[0] == 'd' &&
-                     !memcmp(token_buffer, "double", 6))
-                kind = T_double;
-            else if (token_buffer[0] == 's') {
-                if (!memcmp(token_buffer, "struct", 6))
-                    kind = T_struct;
-                else if (!memcmp(token_buffer, "switch", 6))
-                    kind = T_switch;
-                else if (!memcmp(token_buffer, "sizeof", 6))
-                    kind = T_sizeof;
-                else if (!memcmp(token_buffer, "static", 6))
-                    kind = T_static;
-            }
-            break;
-
-        case 7: /* 7-letter keywords: typedef, default */
-            if (!memcmp(token_buffer, "typedef", 7))
-                kind = T_typedef;
-            else if (!memcmp(token_buffer, "default", 7))
-                kind = T_default;
-            break;
-
-        case 8: /* 8-letter keywords: continue, register, restrict, volatile */
-            if (!memcmp(token_buffer, "continue", 8))
-                kind = T_continue;
-            else if (!memcmp(token_buffer, "register", 8))
-                kind = T_register;
-            else if (!memcmp(token_buffer, "restrict", 8))
-                kind = T_restrict;
-            else if (!memcmp(token_buffer, "volatile", 8))
-                kind = T_volatile;
-            break;
-
-        default:
-            /* Keywords longer than 8 chars or identifiers - use hashmap */
-            break;
-        }
-
-        /* Fall back to the hashmap for anything the switch does not name. No
-         * keyword is shorter than two characters or longer than eight, so a
-         * name outside that range cannot be one and needs no lookup -- which is
-         * most of the identifiers in a real program.
-         */
-        if (kind == T_identifier && !strcmp(token_buffer, "_Imaginary"))
-            kind = T_imaginary;
-        else if (kind == T_identifier && sz >= 2 && sz <= 8)
-            kind = lookup_keyword(token_buffer);
+        token_kind_t kind = lookup_keyword(token_buffer, sz);
 
         token = new_token(kind, loc, source_len);
         token->literal = intern_string(token_buffer);
@@ -1688,6 +1363,18 @@ static char *normalize_filename(const char *filename)
     return intern_string(path);
 }
 
+static token_stream_t *cache_token_stream(char *filename,
+                                          token_t *head,
+                                          token_t *tail)
+{
+    token_stream_t *stream = malloc(sizeof(*stream));
+
+    stream->head = head;
+    stream->tail = tail;
+    hashmap_put_borrowed(TOKEN_CACHE, filename, stream);
+    return stream;
+}
+
 token_stream_t *gen_file_token_stream(char *filename)
 {
     token_t head;
@@ -1734,11 +1421,7 @@ token_stream_t *gen_file_token_stream(char *filename)
         error_at("Internal error, expected eof at the end of file",
                  &cur->location);
 
-    tks = malloc(sizeof(token_stream_t));
-    tks->head = head.next;
-    tks->tail = cur;
-    hashmap_put(TOKEN_CACHE, filename, tks);
-    return tks;
+    return cache_token_stream(filename, head.next, cur);
 }
 
 token_stream_t *gen_libc_token_stream(void)
@@ -1756,12 +1439,12 @@ token_stream_t *gen_libc_token_stream(void)
         return tks;
 
     if (!hashmap_contains(SRC_FILE_MAP, filename))
-        hashmap_put(SRC_FILE_MAP, filename, LIBC_SRC);
+        hashmap_put_borrowed(SRC_FILE_MAP, filename, LIBC_SRC);
 
     /* This buffer was built by appending, so its capacity is whatever the
      * doubling left and runs past the text into memory that was never written
      * -- while the scan below, like the one over a file, stops at capacity.
-     * Terminate it the way read_file() leaves a file: the text, a NUL, and
+     * Terminate it the way try_read_file() leaves a file: the text, a NUL, and
      * capacity naming one past the text. Without this the lexer reads
      * uninitialised bytes, and what it finds there depends on the allocator,
      * which is enough to make the compiler emit different code from one build
@@ -1796,11 +1479,7 @@ token_stream_t *gen_libc_token_stream(void)
         error_at("Internal error, expected eof at the end of file",
                  &cur->location);
 
-    tks = malloc(sizeof(token_stream_t));
-    tks->head = head.next;
-    tks->tail = cur;
-    hashmap_put(TOKEN_CACHE, filename, tks);
-    return tks;
+    return cache_token_stream(filename, head.next, cur);
 }
 
 /* Fetches current token's location. */

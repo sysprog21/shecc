@@ -89,6 +89,14 @@ typedef struct macro {
     token_t *(*handler)(token_t *);
 } macro_t;
 
+static macro_t *new_macro(char *name)
+{
+    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(*macro));
+
+    macro->name = name;
+    return macro;
+}
+
 bool is_macro_defined(char *name)
 {
     const macro_t *macro = hashmap_get(MACROS, name);
@@ -115,13 +123,11 @@ void define_builtin_object_macro(const char *name,
                                  token_kind_t kind,
                                  const char *replacement)
 {
-    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-
-    macro->name = intern_string((char *) name);
+    macro_t *macro = new_macro(intern_string((char *) name));
     macro->replacement =
         new_token(kind, &synth_built_in_loc, strlen(replacement));
     macro->replacement->literal = intern_string((char *) replacement);
-    hashmap_put(MACROS, macro->name, macro);
+    hashmap_put_borrowed(MACROS, macro->name, macro);
 }
 
 /* Integer minimum macros are preprocessing token sequences rather than one
@@ -130,23 +136,54 @@ void define_builtin_object_macro(const char *name,
  */
 void define_builtin_negative_macro(const char *name, const char *magnitude)
 {
-    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    macro_t *macro = new_macro(intern_string((char *) name));
     token_t *minus = new_token(T_minus, &synth_built_in_loc, 1);
     token_t *numeric =
         new_token(T_numeric, &synth_built_in_loc, strlen(magnitude));
 
-    macro->name = intern_string((char *) name);
     minus->literal = "-";
     numeric->literal = intern_string((char *) magnitude);
     minus->next = numeric;
     macro->replacement = minus;
-    hashmap_put(MACROS, macro->name, macro);
+    hashmap_put_borrowed(MACROS, macro->name, macro);
 }
 
 token_t *append_builtin_macro_token(token_t **replacement,
                                     token_t **tail,
                                     token_kind_t kind,
                                     const char *literal);
+
+typedef struct {
+    token_kind_t kind;
+    const char *literal;
+} builtin_macro_token_t;
+
+static void append_builtin_macro_tokens(token_t **replacement,
+                                        token_t **tail,
+                                        const builtin_macro_token_t *tokens,
+                                        unsigned int count)
+{
+    for (unsigned int i = 0; i < count; i++)
+        append_builtin_macro_token(replacement, tail, tokens[i].kind,
+                                   tokens[i].literal);
+}
+
+static macro_t *new_builtin_function_macro(const char *name,
+                                           const char *first_param,
+                                           const char *second_param)
+{
+    macro_t *macro = new_macro(intern_string((char *) name));
+    const char *params[] = {first_param, second_param};
+
+    macro->is_function_like = true;
+    macro->param_num = second_param ? 2 : 1;
+    for (int i = 0; i < macro->param_num; i++) {
+        macro->param_names[i] =
+            new_token(T_identifier, &synth_built_in_loc, strlen(params[i]));
+        macro->param_names[i]->literal = intern_string((char *) params[i]);
+    }
+    return macro;
+}
 
 /* C99's integer construction macros append a target representation suffix to
  * their single integer-token argument. The preprocessor's ordinary ## path
@@ -155,10 +192,9 @@ token_t *append_builtin_macro_token(token_t **replacement,
 void define_builtin_integer_construction_macro(const char *name,
                                                const char *suffix)
 {
-    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    macro_t *macro = new_macro(intern_string((char *) name));
     token_t *tail = NULL;
 
-    macro->name = intern_string((char *) name);
     macro->is_function_like = true;
     macro->param_num = 1;
     macro->param_names[0] = new_token(T_identifier, &synth_built_in_loc, 5);
@@ -171,7 +207,7 @@ void define_builtin_integer_construction_macro(const char *name,
         append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
                                    suffix);
     }
-    hashmap_put(MACROS, macro->name, macro);
+    hashmap_put_borrowed(MACROS, macro->name, macro);
 }
 
 token_t *append_builtin_macro_token(token_t **replacement,
@@ -199,18 +235,16 @@ void define_builtin_minimum_macro(const char *name,
                                   const char *maximum,
                                   const char *one)
 {
-    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    const builtin_macro_token_t replacement[] = {
+        {T_open_bracket, "("}, {T_minus, "-"},   {T_numeric, maximum},
+        {T_minus, "-"},        {T_numeric, one}, {T_close_bracket, ")"},
+    };
+    macro_t *macro = new_macro(intern_string((char *) name));
     token_t *tail = NULL;
 
-    macro->name = intern_string((char *) name);
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_minus, "-");
-    append_builtin_macro_token(&macro->replacement, &tail, T_numeric, maximum);
-    append_builtin_macro_token(&macro->replacement, &tail, T_minus, "-");
-    append_builtin_macro_token(&macro->replacement, &tail, T_numeric, one);
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    hashmap_put(MACROS, macro->name, macro);
+    append_builtin_macro_tokens(&macro->replacement, &tail, replacement,
+                                sizeof(replacement) / sizeof(*replacement));
+    hashmap_put_borrowed(MACROS, macro->name, macro);
 }
 
 /* offsetof is specified as a function-like macro. Route its type/member
@@ -219,64 +253,62 @@ void define_builtin_minimum_macro(const char *name,
  */
 void install_stddef_offsetof_macro(void)
 {
-    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    static const builtin_macro_token_t replacement[] = {
+        {T_identifier, "__builtin_offsetof"},
+        {T_open_bracket, "("},
+        {T_identifier, "type"},
+        {T_comma, ","},
+        {T_identifier, "member"},
+        {T_close_bracket, ")"},
+    };
+    macro_t *macro = new_builtin_function_macro("offsetof", "type", "member");
     token_t *tail = NULL;
 
-    macro->name = intern_string("offsetof");
-    macro->is_function_like = true;
-    macro->param_num = 2;
-    macro->param_names[0] = new_token(T_identifier, &synth_built_in_loc, 4);
-    macro->param_names[0]->literal = "type";
-    macro->param_names[1] = new_token(T_identifier, &synth_built_in_loc, 6);
-    macro->param_names[1]->literal = "member";
-
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "__builtin_offsetof");
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "type");
-    append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "member");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    hashmap_put(MACROS, macro->name, macro);
+    append_builtin_macro_tokens(&macro->replacement, &tail, replacement,
+                                sizeof(replacement) / sizeof(*replacement));
+    hashmap_put_borrowed(MACROS, macro->name, macro);
 }
 
 /* shecc currently has signed plain char, 16-bit short, 32-bit int/long, and
  * 64-bit long long on every target. Keep <limits.h> tied to those actual
  * language types rather than to the host compiler's ABI.
  */
+#define LIMIT_OBJECT(name, value) \
+    define_builtin_object_macro(name, T_numeric, value)
+#define LIMIT_NEGATIVE(name, value) define_builtin_negative_macro(name, value)
+#define LIMIT_MINIMUM(name, maximum, one) \
+    define_builtin_minimum_macro(name, maximum, one)
+#define LIMIT_CONSTRUCTION(name, suffix) \
+    define_builtin_integer_construction_macro(name, suffix)
+
 void install_limits_header(void)
 {
-    define_builtin_object_macro("CHAR_BIT", T_numeric, "8");
-    define_builtin_object_macro("SCHAR_MAX", T_numeric, "127");
-    define_builtin_object_macro("UCHAR_MAX", T_numeric, "255U");
-    define_builtin_object_macro("CHAR_MAX", T_numeric, "127");
-    define_builtin_object_macro("SHRT_MAX", T_numeric, "32767");
-    define_builtin_object_macro("USHRT_MAX", T_numeric, "65535U");
-    define_builtin_object_macro("INT_MAX", T_numeric, "2147483647");
-    define_builtin_object_macro("UINT_MAX", T_numeric, "4294967295U");
-    define_builtin_object_macro("LONG_MAX", T_numeric, "2147483647L");
-    define_builtin_object_macro("ULONG_MAX", T_numeric, "4294967295UL");
-    define_builtin_object_macro("LLONG_MAX", T_numeric,
-                                "9223372036854775807LL");
-    define_builtin_object_macro("ULLONG_MAX", T_numeric,
-                                "18446744073709551615ULL");
-    define_builtin_object_macro("MB_LEN_MAX", T_numeric, "1");
+    LIMIT_OBJECT("CHAR_BIT", "8");
+    LIMIT_OBJECT("SCHAR_MAX", "127");
+    LIMIT_OBJECT("UCHAR_MAX", "255U");
+    LIMIT_OBJECT("CHAR_MAX", "127");
+    LIMIT_OBJECT("SHRT_MAX", "32767");
+    LIMIT_OBJECT("USHRT_MAX", "65535U");
+    LIMIT_OBJECT("INT_MAX", "2147483647");
+    LIMIT_OBJECT("UINT_MAX", "4294967295U");
+    LIMIT_OBJECT("LONG_MAX", "2147483647L");
+    LIMIT_OBJECT("ULONG_MAX", "4294967295UL");
+    LIMIT_OBJECT("LLONG_MAX", "9223372036854775807LL");
+    LIMIT_OBJECT("ULLONG_MAX", "18446744073709551615ULL");
+    LIMIT_OBJECT("MB_LEN_MAX", "1");
 
-    define_builtin_negative_macro("SCHAR_MIN", "128");
-    define_builtin_negative_macro("CHAR_MIN", "128");
-    define_builtin_negative_macro("SHRT_MIN", "32768");
-    define_builtin_minimum_macro("INT_MIN", "2147483647", "1");
-    define_builtin_minimum_macro("LONG_MIN", "2147483647L", "1L");
-    define_builtin_minimum_macro("LLONG_MIN", "9223372036854775807LL", "1LL");
+    LIMIT_NEGATIVE("SCHAR_MIN", "128");
+    LIMIT_NEGATIVE("CHAR_MIN", "128");
+    LIMIT_NEGATIVE("SHRT_MIN", "32768");
+    LIMIT_MINIMUM("INT_MIN", "2147483647", "1");
+    LIMIT_MINIMUM("LONG_MIN", "2147483647L", "1L");
+    LIMIT_MINIMUM("LLONG_MIN", "9223372036854775807LL", "1LL");
 }
 
 /* A C null pointer constant may be the integer constant expression 0. */
 void install_stddef_header(void)
 {
-    define_builtin_object_macro("NULL", T_numeric, "0");
+    LIMIT_OBJECT("NULL", "0");
     install_stddef_offsetof_macro();
 }
 
@@ -285,93 +317,82 @@ void install_stddef_header(void)
  */
 void install_stdint_header(void)
 {
-    define_builtin_negative_macro("INT8_MIN", "128");
-    define_builtin_object_macro("INT8_MAX", T_numeric, "127");
-    define_builtin_object_macro("UINT8_MAX", T_numeric, "255U");
-    define_builtin_negative_macro("INT16_MIN", "32768");
-    define_builtin_object_macro("INT16_MAX", T_numeric, "32767");
-    define_builtin_object_macro("UINT16_MAX", T_numeric, "65535U");
-    define_builtin_minimum_macro("INT32_MIN", "2147483647", "1");
-    define_builtin_object_macro("INT32_MAX", T_numeric, "2147483647");
-    define_builtin_object_macro("UINT32_MAX", T_numeric, "4294967295U");
-    define_builtin_minimum_macro("INT64_MIN", "9223372036854775807LL", "1LL");
-    define_builtin_object_macro("INT64_MAX", T_numeric,
-                                "9223372036854775807LL");
-    define_builtin_object_macro("UINT64_MAX", T_numeric,
-                                "18446744073709551615ULL");
-    define_builtin_minimum_macro("INTMAX_MIN", "9223372036854775807LL", "1LL");
-    define_builtin_object_macro("INTMAX_MAX", T_numeric,
-                                "9223372036854775807LL");
-    define_builtin_object_macro("UINTMAX_MAX", T_numeric,
-                                "18446744073709551615ULL");
-    define_builtin_minimum_macro("SIG_ATOMIC_MIN", "2147483647", "1");
-    define_builtin_object_macro("SIG_ATOMIC_MAX", T_numeric, "2147483647");
-    define_builtin_minimum_macro("WCHAR_MIN", "2147483647", "1");
-    define_builtin_object_macro("WCHAR_MAX", T_numeric, "2147483647");
-    define_builtin_object_macro("WINT_MIN", T_numeric, "0U");
-    define_builtin_object_macro("WINT_MAX", T_numeric, "4294967295U");
-    define_builtin_negative_macro("INT_LEAST8_MIN", "128");
-    define_builtin_object_macro("INT_LEAST8_MAX", T_numeric, "127");
-    define_builtin_object_macro("UINT_LEAST8_MAX", T_numeric, "255U");
-    define_builtin_negative_macro("INT_LEAST16_MIN", "32768");
-    define_builtin_object_macro("INT_LEAST16_MAX", T_numeric, "32767");
-    define_builtin_object_macro("UINT_LEAST16_MAX", T_numeric, "65535U");
-    define_builtin_minimum_macro("INT_LEAST32_MIN", "2147483647", "1");
-    define_builtin_object_macro("INT_LEAST32_MAX", T_numeric, "2147483647");
-    define_builtin_object_macro("UINT_LEAST32_MAX", T_numeric, "4294967295U");
-    define_builtin_minimum_macro("INT_LEAST64_MIN", "9223372036854775807LL",
-                                 "1LL");
-    define_builtin_object_macro("INT_LEAST64_MAX", T_numeric,
-                                "9223372036854775807LL");
-    define_builtin_object_macro("UINT_LEAST64_MAX", T_numeric,
-                                "18446744073709551615ULL");
-    define_builtin_minimum_macro("INT_FAST8_MIN", "2147483647", "1");
-    define_builtin_object_macro("INT_FAST8_MAX", T_numeric, "2147483647");
-    define_builtin_object_macro("UINT_FAST8_MAX", T_numeric, "4294967295U");
-    define_builtin_minimum_macro("INT_FAST16_MIN", "2147483647", "1");
-    define_builtin_object_macro("INT_FAST16_MAX", T_numeric, "2147483647");
-    define_builtin_object_macro("UINT_FAST16_MAX", T_numeric, "4294967295U");
-    define_builtin_minimum_macro("INT_FAST32_MIN", "2147483647", "1");
-    define_builtin_object_macro("INT_FAST32_MAX", T_numeric, "2147483647");
-    define_builtin_object_macro("UINT_FAST32_MAX", T_numeric, "4294967295U");
-    define_builtin_minimum_macro("INT_FAST64_MIN", "9223372036854775807LL",
-                                 "1LL");
-    define_builtin_object_macro("INT_FAST64_MAX", T_numeric,
-                                "9223372036854775807LL");
-    define_builtin_object_macro("UINT_FAST64_MAX", T_numeric,
-                                "18446744073709551615ULL");
-    define_builtin_integer_construction_macro("INT8_C", "");
-    define_builtin_integer_construction_macro("UINT8_C", "");
-    define_builtin_integer_construction_macro("INT16_C", "");
-    define_builtin_integer_construction_macro("UINT16_C", "");
-    define_builtin_integer_construction_macro("INT32_C", "");
-    define_builtin_integer_construction_macro("UINT32_C", "U");
-    define_builtin_integer_construction_macro("INT64_C", "LL");
-    define_builtin_integer_construction_macro("UINT64_C", "ULL");
-    define_builtin_integer_construction_macro("INTMAX_C", "LL");
-    define_builtin_integer_construction_macro("UINTMAX_C", "ULL");
+    LIMIT_NEGATIVE("INT8_MIN", "128");
+    LIMIT_OBJECT("INT8_MAX", "127");
+    LIMIT_OBJECT("UINT8_MAX", "255U");
+    LIMIT_NEGATIVE("INT16_MIN", "32768");
+    LIMIT_OBJECT("INT16_MAX", "32767");
+    LIMIT_OBJECT("UINT16_MAX", "65535U");
+    LIMIT_MINIMUM("INT32_MIN", "2147483647", "1");
+    LIMIT_OBJECT("INT32_MAX", "2147483647");
+    LIMIT_OBJECT("UINT32_MAX", "4294967295U");
+    LIMIT_MINIMUM("INT64_MIN", "9223372036854775807LL", "1LL");
+    LIMIT_OBJECT("INT64_MAX", "9223372036854775807LL");
+    LIMIT_OBJECT("UINT64_MAX", "18446744073709551615ULL");
+    LIMIT_MINIMUM("INTMAX_MIN", "9223372036854775807LL", "1LL");
+    LIMIT_OBJECT("INTMAX_MAX", "9223372036854775807LL");
+    LIMIT_OBJECT("UINTMAX_MAX", "18446744073709551615ULL");
+    LIMIT_MINIMUM("SIG_ATOMIC_MIN", "2147483647", "1");
+    LIMIT_OBJECT("SIG_ATOMIC_MAX", "2147483647");
+    LIMIT_MINIMUM("WCHAR_MIN", "2147483647", "1");
+    LIMIT_OBJECT("WCHAR_MAX", "2147483647");
+    LIMIT_OBJECT("WINT_MIN", "0U");
+    LIMIT_OBJECT("WINT_MAX", "4294967295U");
+    LIMIT_NEGATIVE("INT_LEAST8_MIN", "128");
+    LIMIT_OBJECT("INT_LEAST8_MAX", "127");
+    LIMIT_OBJECT("UINT_LEAST8_MAX", "255U");
+    LIMIT_NEGATIVE("INT_LEAST16_MIN", "32768");
+    LIMIT_OBJECT("INT_LEAST16_MAX", "32767");
+    LIMIT_OBJECT("UINT_LEAST16_MAX", "65535U");
+    LIMIT_MINIMUM("INT_LEAST32_MIN", "2147483647", "1");
+    LIMIT_OBJECT("INT_LEAST32_MAX", "2147483647");
+    LIMIT_OBJECT("UINT_LEAST32_MAX", "4294967295U");
+    LIMIT_MINIMUM("INT_LEAST64_MIN", "9223372036854775807LL", "1LL");
+    LIMIT_OBJECT("INT_LEAST64_MAX", "9223372036854775807LL");
+    LIMIT_OBJECT("UINT_LEAST64_MAX", "18446744073709551615ULL");
+    LIMIT_MINIMUM("INT_FAST8_MIN", "2147483647", "1");
+    LIMIT_OBJECT("INT_FAST8_MAX", "2147483647");
+    LIMIT_OBJECT("UINT_FAST8_MAX", "4294967295U");
+    LIMIT_MINIMUM("INT_FAST16_MIN", "2147483647", "1");
+    LIMIT_OBJECT("INT_FAST16_MAX", "2147483647");
+    LIMIT_OBJECT("UINT_FAST16_MAX", "4294967295U");
+    LIMIT_MINIMUM("INT_FAST32_MIN", "2147483647", "1");
+    LIMIT_OBJECT("INT_FAST32_MAX", "2147483647");
+    LIMIT_OBJECT("UINT_FAST32_MAX", "4294967295U");
+    LIMIT_MINIMUM("INT_FAST64_MIN", "9223372036854775807LL", "1LL");
+    LIMIT_OBJECT("INT_FAST64_MAX", "9223372036854775807LL");
+    LIMIT_OBJECT("UINT_FAST64_MAX", "18446744073709551615ULL");
+    LIMIT_CONSTRUCTION("INT8_C", "");
+    LIMIT_CONSTRUCTION("UINT8_C", "");
+    LIMIT_CONSTRUCTION("INT16_C", "");
+    LIMIT_CONSTRUCTION("UINT16_C", "");
+    LIMIT_CONSTRUCTION("INT32_C", "");
+    LIMIT_CONSTRUCTION("UINT32_C", "U");
+    LIMIT_CONSTRUCTION("INT64_C", "LL");
+    LIMIT_CONSTRUCTION("UINT64_C", "ULL");
+    LIMIT_CONSTRUCTION("INTMAX_C", "LL");
+    LIMIT_CONSTRUCTION("UINTMAX_C", "ULL");
     if (PTR_SIZE == 8) {
-        define_builtin_minimum_macro("INTPTR_MIN", "9223372036854775807LL",
-                                     "1LL");
-        define_builtin_object_macro("INTPTR_MAX", T_numeric,
-                                    "9223372036854775807LL");
-        define_builtin_object_macro("UINTPTR_MAX", T_numeric,
-                                    "18446744073709551615ULL");
-        define_builtin_minimum_macro("PTRDIFF_MIN", "9223372036854775807LL",
-                                     "1LL");
-        define_builtin_object_macro("PTRDIFF_MAX", T_numeric,
-                                    "9223372036854775807LL");
-        define_builtin_object_macro("SIZE_MAX", T_numeric,
-                                    "18446744073709551615ULL");
+        LIMIT_MINIMUM("INTPTR_MIN", "9223372036854775807LL", "1LL");
+        LIMIT_OBJECT("INTPTR_MAX", "9223372036854775807LL");
+        LIMIT_OBJECT("UINTPTR_MAX", "18446744073709551615ULL");
+        LIMIT_MINIMUM("PTRDIFF_MIN", "9223372036854775807LL", "1LL");
+        LIMIT_OBJECT("PTRDIFF_MAX", "9223372036854775807LL");
+        LIMIT_OBJECT("SIZE_MAX", "18446744073709551615ULL");
     } else {
-        define_builtin_minimum_macro("INTPTR_MIN", "2147483647L", "1L");
-        define_builtin_object_macro("INTPTR_MAX", T_numeric, "2147483647L");
-        define_builtin_object_macro("UINTPTR_MAX", T_numeric, "4294967295UL");
-        define_builtin_minimum_macro("PTRDIFF_MIN", "2147483647L", "1L");
-        define_builtin_object_macro("PTRDIFF_MAX", T_numeric, "2147483647L");
-        define_builtin_object_macro("SIZE_MAX", T_numeric, "4294967295UL");
+        LIMIT_MINIMUM("INTPTR_MIN", "2147483647L", "1L");
+        LIMIT_OBJECT("INTPTR_MAX", "2147483647L");
+        LIMIT_OBJECT("UINTPTR_MAX", "4294967295UL");
+        LIMIT_MINIMUM("PTRDIFF_MIN", "2147483647L", "1L");
+        LIMIT_OBJECT("PTRDIFF_MAX", "2147483647L");
+        LIMIT_OBJECT("SIZE_MAX", "4294967295UL");
     }
 }
+
+#undef LIMIT_OBJECT
+#undef LIMIT_NEGATIVE
+#undef LIMIT_MINIMUM
+#undef LIMIT_CONSTRUCTION
 
 /* stdbool.h is entirely macro-defined in C99. Supplying it here makes the
  * freestanding compiler usable with --no-libc too, rather than relying on the
@@ -409,87 +430,63 @@ void install_iso646_header(void)
  */
 void install_assert_header(void)
 {
-    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
+    static const builtin_macro_token_t enabled[] = {
+        {T_open_bracket, "("},
+        {T_open_bracket, "("},
+        {T_identifier, "expr"},
+        {T_close_bracket, ")"},
+        {T_question, "?"},
+        {T_open_bracket, "("},
+        {T_identifier, "void"},
+        {T_close_bracket, ")"},
+        {T_numeric, "0"},
+        {T_colon, ":"},
+        {T_identifier, "__assert_fail"},
+        {T_open_bracket, "("},
+        {T_hash, "#"},
+        {T_identifier, "expr"},
+        {T_comma, ","},
+        {T_identifier, "__FILE__"},
+        {T_comma, ","},
+        {T_identifier, "__LINE__"},
+        {T_comma, ","},
+        {T_identifier, "__func__"},
+        {T_close_bracket, ")"},
+        {T_close_bracket, ")"},
+    };
+    static const builtin_macro_token_t disabled[] = {
+        {T_open_bracket, "("},
+        {T_identifier, "void"},
+        {T_close_bracket, ")"},
+        {T_numeric, "0"},
+    };
+    macro_t *macro = new_builtin_function_macro("assert", "expr", NULL);
     token_t *tail = NULL;
 
-    macro->name = intern_string("assert");
-    macro->is_function_like = true;
-    macro->param_num = 1;
-    macro->param_names[0] = new_token(T_identifier, &synth_built_in_loc, 4);
-    macro->param_names[0]->literal = "expr";
-
-    if (!is_macro_defined("NDEBUG")) {
-        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
-                                   "(");
-        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
-                                   "(");
-        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                                   "expr");
-        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                                   ")");
-        append_builtin_macro_token(&macro->replacement, &tail, T_question, "?");
-        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
-                                   "(");
-        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                                   "void");
-        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                                   ")");
-        append_builtin_macro_token(&macro->replacement, &tail, T_numeric, "0");
-        append_builtin_macro_token(&macro->replacement, &tail, T_colon, ":");
-        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                                   "__assert_fail");
-        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
-                                   "(");
-        append_builtin_macro_token(&macro->replacement, &tail, T_hash, "#");
-        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                                   "expr");
-        append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
-        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                                   "__FILE__");
-        append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
-        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                                   "__LINE__");
-        append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
-        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                                   "__func__");
-        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                                   ")");
-        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                                   ")");
-    } else {
+    if (!is_macro_defined("NDEBUG"))
+        append_builtin_macro_tokens(&macro->replacement, &tail, enabled,
+                                    sizeof(enabled) / sizeof(*enabled));
+    else {
         /* C99 requires the disabled form to remain a void expression while not
          * evaluating its operand.
          */
-        append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket,
-                                   "(");
-        append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                                   "void");
-        append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                                   ")");
-        append_builtin_macro_token(&macro->replacement, &tail, T_numeric, "0");
+        append_builtin_macro_tokens(&macro->replacement, &tail, disabled,
+                                    sizeof(disabled) / sizeof(*disabled));
     }
-    hashmap_put(MACROS, macro->name, macro);
+    hashmap_put_borrowed(MACROS, macro->name, macro);
 }
 
-macro_t *new_stdarg_macro(const char *name,
-                          const char *first_param,
-                          const char *second_param)
-{
-    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-
-    macro->name = intern_string((char *) name);
-    macro->is_function_like = true;
-    macro->param_num = second_param ? 2 : 1;
-    macro->param_names[0] =
-        new_token(T_identifier, &synth_built_in_loc, strlen(first_param));
-    macro->param_names[0]->literal = intern_string((char *) first_param);
-    if (second_param) {
-        macro->param_names[1] =
-            new_token(T_identifier, &synth_built_in_loc, strlen(second_param));
-        macro->param_names[1]->literal = intern_string((char *) second_param);
-    }
-    return macro;
-}
+#define INSTALL_STDARG_MACRO(macro_name, first_param, second_param,            \
+                             token_array)                                      \
+    do {                                                                       \
+        macro_t *macro =                                                       \
+            new_builtin_function_macro(macro_name, first_param, second_param); \
+        token_t *tail = NULL;                                                  \
+        append_builtin_macro_tokens(                                           \
+            &macro->replacement, &tail, token_array,                           \
+            sizeof(token_array) / sizeof(*token_array));                       \
+        hashmap_put_borrowed(MACROS, macro->name, macro);                      \
+    } while (0)
 
 /* The current ABI spills every variadic argument into a pointer-sized slot.
  * These macros deliberately cover integer and pointer arguments only; floating
@@ -497,93 +494,40 @@ macro_t *new_stdarg_macro(const char *name,
  */
 void install_stdarg_header(void)
 {
-    macro_t *macro;
-    token_t *tail;
-
-    define_builtin_object_macro("__VA_SLOT_WORDS", T_numeric,
-                                PTR_SIZE == 8 ? "2" : "1");
-    define_builtin_object_macro("__VA_SLOT_BYTES", T_numeric,
-                                PTR_SIZE == 8 ? "8" : "4");
-
-    macro = new_stdarg_macro("va_start", "ap", "last");
-    tail = NULL;
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier, "ap");
-    append_builtin_macro_token(&macro->replacement, &tail, T_assign, "=");
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "va_list");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    append_builtin_macro_token(&macro->replacement, &tail, T_ampersand, "&");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "last");
-    append_builtin_macro_token(&macro->replacement, &tail, T_plus, "+");
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_sizeof, "sizeof");
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "last");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    append_builtin_macro_token(&macro->replacement, &tail, T_plus, "+");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "__VA_SLOT_BYTES");
-    append_builtin_macro_token(&macro->replacement, &tail, T_minus, "-");
-    append_builtin_macro_token(&macro->replacement, &tail, T_numeric, "1");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    append_builtin_macro_token(&macro->replacement, &tail, T_divide, "/");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "__VA_SLOT_BYTES");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    append_builtin_macro_token(&macro->replacement, &tail, T_asterisk, "*");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "__VA_SLOT_WORDS");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    hashmap_put(MACROS, macro->name, macro);
-
-    macro = new_stdarg_macro("va_arg", "ap", "type");
-    tail = NULL;
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "__builtin_va_arg");
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_ampersand, "&");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier, "ap");
-    append_builtin_macro_token(&macro->replacement, &tail, T_comma, ",");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "type");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    hashmap_put(MACROS, macro->name, macro);
-
-    macro = new_stdarg_macro("va_copy", "dest", "src");
-    tail = NULL;
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "dest");
-    append_builtin_macro_token(&macro->replacement, &tail, T_assign, "=");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier, "src");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    hashmap_put(MACROS, macro->name, macro);
-
-    macro = new_stdarg_macro("va_end", "ap", NULL);
-    tail = NULL;
-    append_builtin_macro_token(&macro->replacement, &tail, T_open_bracket, "(");
-    append_builtin_macro_token(&macro->replacement, &tail, T_identifier,
-                               "void");
-    append_builtin_macro_token(&macro->replacement, &tail, T_close_bracket,
-                               ")");
-    append_builtin_macro_token(&macro->replacement, &tail, T_numeric, "0");
-    hashmap_put(MACROS, macro->name, macro);
+    static const builtin_macro_token_t va_start_replacement[] = {
+        {T_identifier, "__builtin_va_start"},
+        {T_open_bracket, "("},
+        {T_ampersand, "&"},
+        {T_identifier, "ap"},
+        {T_comma, ","},
+        {T_identifier, "last"},
+        {T_close_bracket, ")"},
+    };
+    static const builtin_macro_token_t va_arg_replacement[] = {
+        {T_identifier, "__builtin_va_arg"},
+        {T_open_bracket, "("},
+        {T_ampersand, "&"},
+        {T_identifier, "ap"},
+        {T_comma, ","},
+        {T_identifier, "type"},
+        {T_close_bracket, ")"},
+    };
+    static const builtin_macro_token_t va_copy_replacement[] = {
+        {T_open_bracket, "("}, {T_identifier, "dest"}, {T_assign, "="},
+        {T_identifier, "src"}, {T_close_bracket, ")"},
+    };
+    static const builtin_macro_token_t va_end_replacement[] = {
+        {T_open_bracket, "("},
+        {T_identifier, "void"},
+        {T_close_bracket, ")"},
+        {T_numeric, "0"},
+    };
+    INSTALL_STDARG_MACRO("va_start", "ap", "last", va_start_replacement);
+    INSTALL_STDARG_MACRO("va_arg", "ap", "type", va_arg_replacement);
+    INSTALL_STDARG_MACRO("va_copy", "dest", "src", va_copy_replacement);
+    INSTALL_STDARG_MACRO("va_end", "ap", NULL, va_end_replacement);
 }
+#undef INSTALL_STDARG_MACRO
 
 /* An angle header is lexed as ordinary preprocessing tokens. Recover its
  * spelling from the immutable source buffer so dotted and slash-separated names
@@ -893,45 +837,6 @@ void pp_read_line_operands(token_t *directive,
         error_at("Unexpected token in #line directive", &cursor->location);
 }
 
-int pp_get_operator_prio(opcode_t op)
-{
-    /* https://www.cs.uic.edu/~i109/Notes/COperatorPrecedenceTable.pdf */
-    switch (op) {
-    case OP_ternary:
-        return 3;
-    case OP_log_or:
-        return 4;
-    case OP_log_and:
-        return 5;
-    case OP_bit_or:
-        return 6;
-    case OP_bit_xor:
-        return 7;
-    case OP_bit_and:
-        return 8;
-    case OP_eq:
-    case OP_neq:
-        return 9;
-    case OP_lt:
-    case OP_leq:
-    case OP_gt:
-    case OP_geq:
-        return 10;
-    case OP_lshift:
-    case OP_rshift:
-        return 11;
-    case OP_add:
-    case OP_sub:
-        return 12;
-    case OP_mul:
-    case OP_div:
-    case OP_mod:
-        return 13;
-    default:
-        return 0;
-    }
-}
-
 int pp_get_unary_operator_prio(opcode_t op)
 {
     switch (op) {
@@ -957,75 +862,9 @@ token_t *pp_get_operator(token_t *tk, opcode_t *op, bool consume)
         error_at("Unexpected error when trying to evaulate constant operator",
                  &tk->location);
 
-    switch (tk->next->kind) {
-    case T_plus:
-        op[0] = OP_add;
-        break;
-    case T_minus:
-        op[0] = OP_sub;
-        break;
-    case T_bit_not:
-        op[0] = OP_bit_not;
-        break;
-    case T_log_not:
-        op[0] = OP_log_not;
-        break;
-    case T_asterisk:
-        op[0] = OP_mul;
-        break;
-    case T_divide:
-        op[0] = OP_div;
-        break;
-    case T_mod:
-        op[0] = OP_mod;
-        break;
-    case T_lshift:
-        op[0] = OP_lshift;
-        break;
-    case T_rshift:
-        op[0] = OP_rshift;
-        break;
-    case T_log_and:
-        op[0] = OP_log_and;
-        break;
-    case T_log_or:
-        op[0] = OP_log_or;
-        break;
-    case T_eq:
-        op[0] = OP_eq;
-        break;
-    case T_noteq:
-        op[0] = OP_neq;
-        break;
-    case T_lt:
-        op[0] = OP_lt;
-        break;
-    case T_le:
-        op[0] = OP_leq;
-        break;
-    case T_gt:
-        op[0] = OP_gt;
-        break;
-    case T_ge:
-        op[0] = OP_geq;
-        break;
-    case T_ampersand:
-        op[0] = OP_bit_and;
-        break;
-    case T_bit_or:
-        op[0] = OP_bit_or;
-        break;
-    case T_bit_xor:
-        op[0] = OP_bit_xor;
-        break;
-    case T_question:
-        op[0] = OP_ternary;
-        break;
-    default:
-        /* Maybe it's an operand, we immediately return here. */
-        op[0] = OP_generic;
+    op[0] = operator_for_token(tk->next->kind);
+    if (op[0] == OP_generic)
         return tk;
-    }
     return consume ? pp_lex_next_token(tk, true) : tk;
 }
 
@@ -1184,22 +1023,6 @@ int pp_literal_will_overflow(const pp_integer_t *value, int base, int digit)
             digit > remainder);
 }
 
-int pp_numeric_suffix_is_valid(const char *suffix)
-{
-    int pos = 0;
-
-    if ((suffix[pos] | 32) == 'u')
-        pos++;
-    if ((suffix[pos] | 32) == 'l') {
-        pos++;
-        if ((suffix[pos] | 32) == 'l')
-            pos++;
-    }
-    if ((suffix[pos] | 32) == 'u')
-        pos++;
-    return suffix[pos] == '\0';
-}
-
 void pp_multiply(pp_integer_t *lhs, const pp_integer_t *rhs)
 {
     pp_integer_t multiplicand, multiplier, product = {0};
@@ -1209,7 +1032,6 @@ void pp_multiply(pp_integer_t *lhs, const pp_integer_t *rhs)
     multiplicand.is_unsigned = lhs->is_unsigned;
     multiplier.lo = rhs->lo;
     multiplier.hi = rhs->hi;
-    multiplier.is_unsigned = rhs->is_unsigned;
 
     for (int i = 0; i < 64; i++) {
         if (multiplier.lo & 1)
@@ -1297,19 +1119,14 @@ void pp_parse_integer_literal(token_t *tk, pp_integer_t *val)
     int is_decimal;
     pp_integer_t parsed = {0};
 
-    if (literal[0] == '0') {
-        if ((literal[1] | 32) == 'x') {
-            base = 16;
-            i = 2;
-        } else if ((literal[1] | 32) == 'b') {
-            base = 2;
-            i = 2;
-        } else if (literal[1] && (literal[1] | 32) != 'u' &&
-                   (literal[1] | 32) != 'l') {
-            base = 8;
-            i = 1;
-        }
-    }
+    base = numeric_literal_base(literal);
+    if (base == 8 && literal[1] &&
+        ((literal[1] | 32) == 'u' || (literal[1] | 32) == 'l'))
+        base = 10;
+    if (base == 16 || base == 2)
+        i = 2;
+    else if (base == 8)
+        i = 1;
     is_decimal = base == 10;
     while (literal[i] && (literal[i] | 32) != 'u' && (literal[i] | 32) != 'l') {
         int digit;
@@ -1339,7 +1156,7 @@ void pp_parse_integer_literal(token_t *tk, pp_integer_t *val)
             error_at("Invalid integer constant suffix", &tk->location);
         i++;
     }
-    if (!pp_numeric_suffix_is_valid(suffix))
+    if (!numeric_suffix_is_valid(suffix))
         error_at("Invalid integer constant suffix", &tk->location);
     if (!val->is_unsigned && (parsed.hi & 0x80000000U)) {
         if (is_decimal)
@@ -1368,6 +1185,30 @@ void pp_parse_integer_literal(token_t *tk, pp_integer_t *val)
             val->enum_width = parsed.hi || parsed.lo > 0x7fffffffU ? 64 : 32;
         }
         pp_enum_normalize(val);
+    }
+}
+
+static bool pp_compare(opcode_t op,
+                       const pp_integer_t *lhs,
+                       const pp_integer_t *rhs)
+{
+    int order = pp_compare_unsigned(lhs, rhs);
+    if (!lhs->is_unsigned && !rhs->is_unsigned &&
+        ((lhs->hi ^ rhs->hi) & 0x80000000U))
+        order = lhs->hi & 0x80000000U ? -1 : 1;
+    switch (op) {
+#define RELATION(name, test) \
+    case OP_##name:          \
+        return order test 0
+        RELATION(eq, ==);
+        RELATION(neq, !=);
+        RELATION(lt, <);
+        RELATION(leq, <=);
+        RELATION(gt, >);
+        RELATION(geq, >=);
+#undef RELATION
+    default:
+        return false;
     }
 }
 
@@ -1587,7 +1428,6 @@ token_t *pp_read_constant_infix_expr(int precedence,
                                      bool evaluate)
 {
     pp_integer_t lhs = {0}, rhs = {0};
-    int comparison;
 
     /* Evaluate unary expression first */
     opcode_t op;
@@ -1626,7 +1466,7 @@ token_t *pp_read_constant_infix_expr(int precedence,
 
     while (true) {
         tk = pp_get_operator(tk, &op, false);
-        current_precedence = pp_get_operator_prio(op);
+        current_precedence = get_operator_prio(op);
 
         if (current_precedence == 0 || current_precedence <= precedence)
             break;
@@ -1670,14 +1510,7 @@ token_t *pp_read_constant_infix_expr(int precedence,
             pp_enum_usual_arithmetic(&lhs, &rhs);
 
         switch (op) {
-        case OP_add:
-        case OP_sub:
-        case OP_mul:
-        case OP_div:
-        case OP_mod:
-        case OP_bit_and:
-        case OP_bit_or:
-        case OP_bit_xor:
+        OP_USUAL_ARITHMETIC_CASES:
             lhs.is_unsigned = PP_USES_UNSIGNED(&lhs, &rhs);
             break;
         default:
@@ -1750,46 +1583,12 @@ token_t *pp_read_constant_infix_expr(int precedence,
                     pp_shift_right_one(&lhs, !lhs.is_unsigned);
                 break;
             case OP_gt:
-                if (!lhs.is_unsigned && !rhs.is_unsigned &&
-                    (lhs.hi >> 31) != (rhs.hi >> 31))
-                    pp_set_boolean(&lhs, !(lhs.hi >> 31));
-                else {
-                    comparison = pp_compare_unsigned(&lhs, &rhs);
-                    pp_set_boolean(&lhs, comparison > 0);
-                }
-                break;
             case OP_geq:
-                if (!lhs.is_unsigned && !rhs.is_unsigned &&
-                    (lhs.hi >> 31) != (rhs.hi >> 31))
-                    pp_set_boolean(&lhs, !(lhs.hi >> 31));
-                else {
-                    comparison = pp_compare_unsigned(&lhs, &rhs);
-                    pp_set_boolean(&lhs, comparison >= 0);
-                }
-                break;
             case OP_lt:
-                if (!lhs.is_unsigned && !rhs.is_unsigned &&
-                    (lhs.hi >> 31) != (rhs.hi >> 31))
-                    pp_set_boolean(&lhs, lhs.hi >> 31);
-                else {
-                    comparison = pp_compare_unsigned(&lhs, &rhs);
-                    pp_set_boolean(&lhs, comparison < 0);
-                }
-                break;
             case OP_leq:
-                if (!lhs.is_unsigned && !rhs.is_unsigned &&
-                    (lhs.hi >> 31) != (rhs.hi >> 31))
-                    pp_set_boolean(&lhs, lhs.hi >> 31);
-                else {
-                    comparison = pp_compare_unsigned(&lhs, &rhs);
-                    pp_set_boolean(&lhs, comparison <= 0);
-                }
-                break;
             case OP_eq:
-                pp_set_boolean(&lhs, lhs.lo == rhs.lo && lhs.hi == rhs.hi);
-                break;
             case OP_neq:
-                pp_set_boolean(&lhs, lhs.lo != rhs.lo || lhs.hi != rhs.hi);
+                pp_set_boolean(&lhs, pp_compare(op, &lhs, &rhs));
                 break;
             case OP_log_and:
                 pp_set_boolean(&lhs, pp_is_true(&lhs) && pp_is_true(&rhs));
@@ -1962,7 +1761,8 @@ token_t *pp_pragma_operator(token_t *tk, token_t *owner)
     while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t'))
         len--;
     if (len == 4 && !strncmp(p, "once", 4))
-        hashmap_put(PRAGMA_ONCE, owner->location.physical_filename, NULL);
+        hashmap_put_borrowed(PRAGMA_ONCE, owner->location.physical_filename,
+                             NULL);
 
     return pp_lex_expect_token(tk, T_close_bracket, true);
 }
@@ -2027,6 +1827,23 @@ token_t *pp_paste_tokens(token_t *lhs, token_t *rhs, source_location_t *loc)
  * own. Membership in @args, rather than a non-empty value, is what makes a name
  * a parameter.
  */
+static bool pp_append_significant_tokens(token_t *tokens,
+                                         token_t **tail,
+                                         token_t **tail_prev)
+{
+    bool appended = false;
+
+    for (token_t *tk = tokens; tk; tk = tk->next) {
+        if (pp_is_layout(tk))
+            continue;
+        *tail_prev = *tail;
+        (*tail)->next = copy_token(tk);
+        *tail = (*tail)->next;
+        appended = true;
+    }
+    return appended;
+}
+
 token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
 {
     token_t head;
@@ -2073,17 +1890,8 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
                 !strcmp(operand->literal, "__VA_ARGS__") &&
                 hashmap_contains(args, operand->literal)) {
                 token_t *comma_prev = tail_prev;
-                bool any = false;
-
-                for (token_t *t = hashmap_get(args, operand->literal); t;
-                     t = t->next) {
-                    if (pp_is_layout(t))
-                        continue;
-                    tail_prev = tail;
-                    tail->next = copy_token(t);
-                    tail = tail->next;
-                    any = true;
-                }
+                bool any = pp_append_significant_tokens(
+                    hashmap_get(args, operand->literal), &tail, &tail_prev);
                 if (!any) {
                     tail = comma_prev;
                     tail->next = NULL;
@@ -2130,13 +1938,7 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
                  * emit the remainder of the macro body twice.
                  */
                 if (rhs_is_arg) {
-                    for (token_t *rest = rhs->next; rest; rest = rest->next) {
-                        if (pp_is_layout(rest))
-                            continue;
-                        tail_prev = tail;
-                        tail->next = copy_token(rest);
-                        tail = tail->next;
-                    }
+                    pp_append_significant_tokens(rhs->next, &tail, &tail_prev);
                 }
                 lhs_empty = false;
             }
@@ -2152,16 +1954,7 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
         if (args && tk->kind == T_identifier && after &&
             after->kind == T_hashhash && hashmap_contains(args, tk->literal)) {
             token_t *arg = hashmap_get(args, tk->literal);
-            bool any = false;
-
-            for (token_t *t = arg; t; t = t->next) {
-                if (pp_is_layout(t))
-                    continue;
-                tail_prev = tail;
-                tail->next = copy_token(t);
-                tail = tail->next;
-                any = true;
-            }
+            bool any = pp_append_significant_tokens(arg, &tail, &tail_prev);
             lhs_present = true;
             lhs_empty = !any;
             continue;
@@ -2181,6 +1974,81 @@ token_t *pp_subst_hash(token_t *rep, hashmap_t *args)
     }
 
     return head.next;
+}
+
+/* An expansion whose last token names a function-like macro calls it when the
+ * stream being rescanned follows with '(': a parameter bound to ADD in a body
+ * "f(a, b)", "#define F ADD" before "F(1, 2)", or "ID(ADD)(1, 2)". The standard
+ * rescans the expansion together with the rest of the stream; this expander
+ * rescans the expansion alone, so hand that name back. Splice what precedes it
+ * in @expanded onto *@cur and return a copy of it chained to the stream after
+ * @tk, or NULL when no such call follows.
+ *
+ * @hidden is the hide set the name came out of: a macro's own name in its
+ * expansion is never invoked again, so "#define f(x) f" leaves "f(1)(2)" as
+ * "f(2)", as gcc does. Each resumption consumes a '(' from the stream, so it
+ * terminates.
+ */
+static token_t *pp_resume_callee(token_t *expanded,
+                                 token_t *end,
+                                 token_t *tk,
+                                 const preprocess_ctx_t *ctx,
+                                 hide_set_t *hidden,
+                                 token_t **cur)
+{
+    token_t *callee = NULL;
+    token_t *before = NULL;
+    token_t *prev = NULL;
+    token_t *resume;
+    macro_t *macro;
+
+    if (!expanded || !pp_lex_peek_token(tk, T_open_bracket, true))
+        return NULL;
+    for (token_t *t = expanded; t; t = t->next) {
+        if (!pp_is_layout(t)) {
+            callee = t;
+            before = prev;
+        }
+        if (t == end)
+            break;
+        prev = t;
+    }
+    /* A parameter's own name would be substituted again, not invoked. */
+    if (!callee || callee->kind != T_identifier ||
+        (ctx->macro_args &&
+         hashmap_contains(ctx->macro_args, callee->literal)) ||
+        hide_set_contains(hidden, callee->literal))
+        return NULL;
+    macro = hashmap_get(MACROS, callee->literal);
+    if (!macro || !macro->is_function_like || macro->is_disabled)
+        return NULL;
+    if (before) {
+        (*cur)->next = expanded;
+        *cur = before;
+    }
+    resume = copy_token(callee);
+    resume->next = tk->next;
+    return resume;
+}
+
+static bool pp_resume_or_append(token_t *expanded,
+                                token_t *end,
+                                token_t **tk,
+                                const preprocess_ctx_t *ctx,
+                                hide_set_t *hidden,
+                                token_t **cur)
+{
+    token_t *resume = pp_resume_callee(expanded, end, *tk, ctx, hidden, cur);
+
+    if (resume) {
+        *tk = resume;
+        return true;
+    }
+    if (expanded) {
+        (*cur)->next = expanded;
+        *cur = end;
+    }
+    return false;
 }
 
 token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
@@ -2245,10 +2113,11 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                                  */
                     macro_arg_replacement = pp_preprocess_internal(
                         macro_arg_replacement, &expansion_ctx);
-                    if (macro_arg_replacement) {
-                        cur->next = macro_arg_replacement;
-                        cur = expansion_ctx.end_of_token;
-                    }
+
+                    if (pp_resume_or_append(macro_arg_replacement,
+                                            expansion_ctx.end_of_token, &tk,
+                                            ctx, ctx->hide_set, &cur))
+                        continue;
                 }
                 tk = pp_lex_next_token(tk, false);
                 continue;
@@ -2374,13 +2243,14 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                      */
                     if (empty_zero_arg_call) {
                         if (macro->is_variadic)
-                            hashmap_put(expansion_ctx.macro_args,
-                                        macro->variadic_tk->literal, NULL);
+                            hashmap_put_borrowed(expansion_ctx.macro_args,
+                                                 macro->variadic_tk->literal,
+                                                 NULL);
                         /* Bind argument to corresponding parameter */
                     } else if (arg_idx < macro->param_num) {
                         param_tk = macro->param_names[arg_idx++];
-                        hashmap_put(expansion_ctx.macro_args, param_tk->literal,
-                                    arg_head.next);
+                        hashmap_put_borrowed(expansion_ctx.macro_args,
+                                             param_tk->literal, arg_head.next);
                     } else {
                         /* Handle variadic macro overflow
                          *
@@ -2405,10 +2275,10 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                                 prev->next =
                                     new_token(T_comma, &param_tk->location, 1);
                                 prev->next->next = arg_head.next;
-                                prev = arg_cur;
                             } else {
-                                hashmap_put(expansion_ctx.macro_args,
-                                            param_tk->literal, arg_head.next);
+                                hashmap_put_borrowed(expansion_ctx.macro_args,
+                                                     param_tk->literal,
+                                                     arg_head.next);
                             }
                         } else {
                             error_at(
@@ -2445,8 +2315,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 if (macro->is_variadic &&
                     !hashmap_contains(expansion_ctx.macro_args,
                                       macro->variadic_tk->literal))
-                    hashmap_put(expansion_ctx.macro_args,
-                                macro->variadic_tk->literal, NULL);
+                    hashmap_put_borrowed(expansion_ctx.macro_args,
+                                         macro->variadic_tk->literal, NULL);
 
                 /* Expand macro body with collected arguments Replace parameter
                  * references with supplied argument tokens
@@ -2454,12 +2324,17 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 token_t *expanded = pp_preprocess_internal(
                     pp_subst_hash(macro->replacement, expansion_ctx.macro_args),
                     &expansion_ctx);
-                if (expanded) {
-                    cur->next = expanded;
-                    cur = expansion_ctx.end_of_token;
-                }
-
                 hashmap_free(expansion_ctx.macro_args);
+                if (pp_resume_or_append(expanded, expansion_ctx.end_of_token,
+                                        &tk, ctx, expansion_ctx.hide_set, &cur))
+                    continue;
+            } else if (macro->is_function_like) {
+                /* A function-like macro expands only when followed by '('. Its
+                 * bare identifier may be an ordinary identifier or a later
+                 * macro argument, so preserve it unchanged.
+                 */
+                cur->next = copy_token(tk);
+                cur = cur->next;
             } else {
                 /* Handle object-like macro expansion (no parameters) Simply
                  * expand the replacement with current hide set plus this macro
@@ -2469,10 +2344,9 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                     hide_set_union(ctx->hide_set, new_hide_set(tk->literal));
                 token_t *expanded = pp_preprocess_internal(
                     pp_subst_hash(macro->replacement, NULL), &expansion_ctx);
-                if (expanded) {
-                    cur->next = expanded;
-                    cur = expansion_ctx.end_of_token;
-                }
+                if (pp_resume_or_append(expanded, expansion_ctx.end_of_token,
+                                        &tk, ctx, expansion_ctx.hide_set, &cur))
+                    continue;
             }
 
             tk = pp_lex_next_token(tk, false);
@@ -2602,6 +2476,14 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 inclusion_path[MAX_LINE_LEN - 1] = '\0';
             }
 
+            /* A header that is missing is the directive's mistake, and is
+             * reported there. Reading it here also leaves it cached for the
+             * lexer, under the name the lexer will ask for.
+             */
+            if (!try_get_file_buf(normalize_filename(inclusion_path)))
+                error_at("Included file cannot be found",
+                         &include_tk->location);
+
             tk = pp_lex_expect_token(tk, T_newline, true);
             tk = pp_lex_next_token(tk, false);
 
@@ -2632,8 +2514,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             macro = hashmap_get(MACROS, tk->literal);
 
             if (!macro) {
-                macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-                macro->name = tk->literal;
+                macro = new_macro(tk->literal);
             } else {
                 /* Ensures that #undef effect is overwritten */
                 macro->is_disabled = false;
@@ -2712,7 +2593,7 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
             tk = pp_lex_expect_token(tk, T_newline, false);
             tk = pp_lex_next_token(tk, false);
             macro->replacement = r_head;
-            hashmap_put(MACROS, macro->name, macro);
+            hashmap_put_borrowed(MACROS, macro->name, macro);
             continue;
         }
         case T_cppd_undef: {
@@ -2795,8 +2676,8 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
                 tk = pp_lex_next_token(tk, true);
 
                 if (!strcmp("once", tk->literal))
-                    hashmap_put(PRAGMA_ONCE, tk->location.physical_filename,
-                                NULL);
+                    hashmap_put_borrowed(PRAGMA_ONCE,
+                                         tk->location.physical_filename, NULL);
             }
 
             while (!pp_lex_peek_token(tk, T_newline, true))
@@ -2834,7 +2715,6 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
              * included previously while created by #define.
              */
             error_at("Backslash is not allowed here", &cur->location);
-            break;
         }
         case T_eof: {
             if (ctx->trim_eof) {
@@ -3001,72 +2881,62 @@ token_t *preprocess(token_t *tk)
     synth_built_in_loc.line = 1;
     synth_built_in_loc.filename = "<built-in>";
 
-    macro_t *macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = "__FILE__";
+    macro_t *macro = new_macro("__FILE__");
     macro->handler = file_macro_handler;
-    hashmap_put(MACROS, "__FILE__", macro);
+    hashmap_put_borrowed(MACROS, "__FILE__", macro);
 
-    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = "__LINE__";
+    macro = new_macro("__LINE__");
     macro->handler = line_macro_handler;
-    hashmap_put(MACROS, "__LINE__", macro);
+    hashmap_put_borrowed(MACROS, "__LINE__", macro);
 
-    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = "__DATE__";
+    macro = new_macro("__DATE__");
     macro->handler = date_macro_handler;
-    hashmap_put(MACROS, "__DATE__", macro);
+    hashmap_put_borrowed(MACROS, "__DATE__", macro);
 
-    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = "__TIME__";
+    macro = new_macro("__TIME__");
     macro->handler = time_macro_handler;
-    hashmap_put(MACROS, "__TIME__", macro);
+    hashmap_put_borrowed(MACROS, "__TIME__", macro);
 
     /* C99-required implementation macros. shecc supplies its own small runtime
      * rather than a complete hosted library, so advertise freestanding mode
      * while retaining the C99 language-version identifier.
      */
-    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = "__STDC__";
+    macro = new_macro("__STDC__");
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
     macro->replacement->literal = "1";
-    hashmap_put(MACROS, "__STDC__", macro);
+    hashmap_put_borrowed(MACROS, "__STDC__", macro);
 
-    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = "__STDC_VERSION__";
+    macro = new_macro("__STDC_VERSION__");
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 7);
     macro->replacement->literal = "199901L";
-    hashmap_put(MACROS, "__STDC_VERSION__", macro);
+    hashmap_put_borrowed(MACROS, "__STDC_VERSION__", macro);
 
-    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = "__STDC_HOSTED__";
+    macro = new_macro("__STDC_HOSTED__");
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
     macro->replacement->literal = "0";
-    hashmap_put(MACROS, "__STDC_HOSTED__", macro);
+    hashmap_put_borrowed(MACROS, "__STDC_HOSTED__", macro);
 
     /* architecture defines */
-    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = ARCH_PREDEFINED;
+    macro = new_macro(ARCH_PREDEFINED);
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
     macro->replacement->literal = "1";
-    hashmap_put(MACROS, ARCH_PREDEFINED, macro);
+    hashmap_put_borrowed(MACROS, ARCH_PREDEFINED, macro);
 
     /* shecc run-time defines */
-    macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-    macro->name = "__SHECC__";
+    macro = new_macro("__SHECC__");
     macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
     macro->replacement->literal = "1";
-    hashmap_put(MACROS, "__SHECC__", macro);
+    hashmap_put_borrowed(MACROS, "__SHECC__", macro);
 
     /* Tells the source being compiled that the embedded libc is not part of the
      * output, so the functions lib/c.c would have supplied -- '__syscall' above
      * all -- are unavailable and libc resolves through the PLT instead.
      */
     if (dynlink) {
-        macro = arena_calloc(TOKEN_ARENA, 1, sizeof(macro_t));
-        macro->name = "__SHECC_DYNLINK__";
+        macro = new_macro("__SHECC_DYNLINK__");
         macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
         macro->replacement->literal = "1";
-        hashmap_put(MACROS, "__SHECC_DYNLINK__", macro);
+        hashmap_put_borrowed(MACROS, "__SHECC_DYNLINK__", macro);
     }
 
     tk = pp_preprocess_internal(tk, &ctx);
@@ -3075,6 +2945,10 @@ token_t *preprocess(token_t *tk)
     hashmap_free(PRAGMA_ONCE);
     return tk;
 }
+
+#define TOKEN_SPELLING(kind, spelling) \
+    case kind:                         \
+        return spelling
 
 char *token_to_string(token_t *tk, char *dest)
 {
@@ -3103,164 +2977,85 @@ char *token_to_string(token_t *tk, char *dest)
     case T_wchar:
         snprintf(dest, MAX_TOKEN_LEN, "L'%s'", tk->literal);
         return dest;
-    case T_comma:
-        return ",";
-    case T_open_bracket:
-        return "(";
-    case T_close_bracket:
-        return ")";
-    case T_open_curly:
-        return "{";
-    case T_close_curly:
-        return "}";
-    case T_open_square:
-        return "[";
-    case T_close_square:
-        return "]";
-    case T_asterisk:
-        return "*";
-    case T_divide:
-        return "/";
-    case T_mod:
-        return "%";
-    case T_bit_or:
-        return "|";
-    case T_bit_xor:
-        return "^";
-    case T_bit_not:
-        return "~";
-    case T_log_and:
-        return "&&";
-    case T_log_or:
-        return "||";
-    case T_log_not:
-        return "!";
-    case T_lt:
-        return "<";
-    case T_gt:
-        return ">";
-    case T_le:
-        return "<=";
-    case T_ge:
-        return ">=";
-    case T_lshift:
-        return "<<";
-    case T_rshift:
-        return ">>";
-    case T_dot:
-        return ".";
-    case T_arrow:
-        return "->";
-    case T_plus:
-        return "+";
-    case T_minus:
-        return "-";
-    case T_minuseq:
-        return "-=";
-    case T_pluseq:
-        return "+=";
-    case T_asteriskeq:
-        return "*=";
-    case T_divideeq:
-        return "/=";
-    case T_modeq:
-        return "%=";
-    case T_lshifteq:
-        return "<<=";
-    case T_rshifteq:
-        return ">>=";
-    case T_xoreq:
-        return "^=";
-    case T_oreq:
-        return "|=";
-    case T_andeq:
-        return "&=";
-    case T_eq:
-        return "==";
-    case T_noteq:
-        return "!=";
-    case T_assign:
-        return "=";
-    case T_increment:
-        return "++";
-    case T_decrement:
-        return "--";
-    case T_question:
-        return "?";
-    case T_colon:
-        return ":";
-    case T_semicolon:
-        return ";";
-    case T_ampersand:
-        return "&";
-    case T_return:
-        return "return";
-    case T_if:
-        return "if";
-    case T_else:
-        return "else";
-    case T_while:
-        return "while";
-    case T_for:
-        return "for";
-    case T_do:
-        return "do";
-    case T_typedef:
-        return "typedef";
-    case T_enum:
-        return "enum";
-    case T_struct:
-        return "struct";
-    case T_union:
-        return "union";
-    case T_sizeof:
-        return "sizeof";
-    case T_elipsis:
-        return "...";
-    case T_switch:
-        return "switch";
-    case T_case:
-        return "case";
-    case T_break:
-        return "break";
-    case T_default:
-        return "default";
-    case T_continue:
-        return "continue";
-    case T_goto:
-        return "goto";
-    case T_const:
-        return "const";
-    case T_volatile:
-        return "volatile";
-    case T_static:
-        return "static";
-    case T_extern:
-        return "extern";
-    case T_register:
-        return "register";
-    case T_auto:
-        return "auto";
-    case T_restrict:
-        return "restrict";
-    case T_inline:
-        return "inline";
-    case T_signed:
-        return "signed";
-    case T_unsigned:
-        return "unsigned";
-    case T_long:
-        return "long";
-    case T_float:
-        return "float";
-    case T_double:
-        return "double";
-    case T_complex:
-        return "_Complex";
-    case T_imaginary:
-        return "_Imaginary";
-    case T_newline:
-        return "\n";
+        TOKEN_SPELLING(T_comma, ",");
+        TOKEN_SPELLING(T_open_bracket, "(");
+        TOKEN_SPELLING(T_close_bracket, ")");
+        TOKEN_SPELLING(T_open_curly, "{");
+        TOKEN_SPELLING(T_close_curly, "}");
+        TOKEN_SPELLING(T_open_square, "[");
+        TOKEN_SPELLING(T_close_square, "]");
+        TOKEN_SPELLING(T_asterisk, "*");
+        TOKEN_SPELLING(T_divide, "/");
+        TOKEN_SPELLING(T_mod, "%");
+        TOKEN_SPELLING(T_bit_or, "|");
+        TOKEN_SPELLING(T_bit_xor, "^");
+        TOKEN_SPELLING(T_bit_not, "~");
+        TOKEN_SPELLING(T_log_and, "&&");
+        TOKEN_SPELLING(T_log_or, "||");
+        TOKEN_SPELLING(T_log_not, "!");
+        TOKEN_SPELLING(T_lt, "<");
+        TOKEN_SPELLING(T_gt, ">");
+        TOKEN_SPELLING(T_le, "<=");
+        TOKEN_SPELLING(T_ge, ">=");
+        TOKEN_SPELLING(T_lshift, "<<");
+        TOKEN_SPELLING(T_rshift, ">>");
+        TOKEN_SPELLING(T_dot, ".");
+        TOKEN_SPELLING(T_arrow, "->");
+        TOKEN_SPELLING(T_plus, "+");
+        TOKEN_SPELLING(T_minus, "-");
+        TOKEN_SPELLING(T_minuseq, "-=");
+        TOKEN_SPELLING(T_pluseq, "+=");
+        TOKEN_SPELLING(T_asteriskeq, "*=");
+        TOKEN_SPELLING(T_divideeq, "/=");
+        TOKEN_SPELLING(T_modeq, "%=");
+        TOKEN_SPELLING(T_lshifteq, "<<=");
+        TOKEN_SPELLING(T_rshifteq, ">>=");
+        TOKEN_SPELLING(T_xoreq, "^=");
+        TOKEN_SPELLING(T_oreq, "|=");
+        TOKEN_SPELLING(T_andeq, "&=");
+        TOKEN_SPELLING(T_eq, "==");
+        TOKEN_SPELLING(T_noteq, "!=");
+        TOKEN_SPELLING(T_assign, "=");
+        TOKEN_SPELLING(T_increment, "++");
+        TOKEN_SPELLING(T_decrement, "--");
+        TOKEN_SPELLING(T_question, "?");
+        TOKEN_SPELLING(T_colon, ":");
+        TOKEN_SPELLING(T_semicolon, ";");
+        TOKEN_SPELLING(T_ampersand, "&");
+        TOKEN_SPELLING(T_return, "return");
+        TOKEN_SPELLING(T_if, "if");
+        TOKEN_SPELLING(T_else, "else");
+        TOKEN_SPELLING(T_while, "while");
+        TOKEN_SPELLING(T_for, "for");
+        TOKEN_SPELLING(T_do, "do");
+        TOKEN_SPELLING(T_typedef, "typedef");
+        TOKEN_SPELLING(T_enum, "enum");
+        TOKEN_SPELLING(T_struct, "struct");
+        TOKEN_SPELLING(T_union, "union");
+        TOKEN_SPELLING(T_sizeof, "sizeof");
+        TOKEN_SPELLING(T_elipsis, "...");
+        TOKEN_SPELLING(T_switch, "switch");
+        TOKEN_SPELLING(T_case, "case");
+        TOKEN_SPELLING(T_break, "break");
+        TOKEN_SPELLING(T_default, "default");
+        TOKEN_SPELLING(T_continue, "continue");
+        TOKEN_SPELLING(T_goto, "goto");
+        TOKEN_SPELLING(T_const, "const");
+        TOKEN_SPELLING(T_volatile, "volatile");
+        TOKEN_SPELLING(T_static, "static");
+        TOKEN_SPELLING(T_extern, "extern");
+        TOKEN_SPELLING(T_register, "register");
+        TOKEN_SPELLING(T_auto, "auto");
+        TOKEN_SPELLING(T_restrict, "restrict");
+        TOKEN_SPELLING(T_inline, "inline");
+        TOKEN_SPELLING(T_signed, "signed");
+        TOKEN_SPELLING(T_unsigned, "unsigned");
+        TOKEN_SPELLING(T_long, "long");
+        TOKEN_SPELLING(T_float, "float");
+        TOKEN_SPELLING(T_double, "double");
+        TOKEN_SPELLING(T_complex, "_Complex");
+        TOKEN_SPELLING(T_imaginary, "_Imaginary");
+        TOKEN_SPELLING(T_newline, "\n");
     case T_backslash:
         error_at(
             "Internal error, backslash should be ommited after "
@@ -3276,6 +3071,8 @@ char *token_to_string(token_t *tk, char *dest)
     }
     case T_tab:
         return "\t";
+    case T_translation_unit:
+        return "\n";
     case T_start:
         /* FIXME: Unused token kind */
         break;
@@ -3305,16 +3102,22 @@ char *token_to_string(token_t *tk, char *dest)
     return NULL;
 }
 
+#undef TOKEN_SPELLING
+
 void emit_preprocessed_token(token_t *tk)
 {
     char token_buffer[MAX_TOKEN_LEN], *literal;
+    token_kind_t previous_kind = T_start;
 
     while (tk) {
-        literal = token_to_string(tk, token_buffer);
+        literal = tk->kind == T_translation_unit && previous_kind == T_newline
+                      ? ""
+                      : token_to_string(tk, token_buffer);
 
         if (literal)
             printf("%s", literal);
 
+        previous_kind = tk->kind;
         tk = tk->next;
     }
 }

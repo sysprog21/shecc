@@ -208,6 +208,31 @@ void patch_qword(int at, int val)
     patch_dword(at + 4, 0);
 }
 
+/* Copy a register at 32 or 64 bits. A 32-bit write also clears the upper half
+ * of its destination, as the x86-64 ABI requires for zero-extended values.
+ */
+void emit_reg_move(int dst, int src, bool wide)
+{
+    int rex = REX_BASE | (wide ? REX_W : 0) | (src >= 8 ? REX_R : 0) |
+              (dst >= 8 ? REX_B : 0);
+
+    if (wide && dst == src)
+        return;
+    if (rex != REX_BASE)
+        emit_byte(rex);
+    emit_byte(0x89);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(dst)));
+}
+
+/* Emit a two-operand register instruction from its opcode byte. */
+void emit_opcode_reg(int opcode, int dst, int src, bool wide)
+{
+    if (wide || dst >= 8 || src >= 8)
+        emit_rex(wide, src, dst);
+    emit_byte(opcode);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(dst)));
+}
+
 /* Move @src into @dst keeping only its low @width bytes, sign-extended, when
  * @narrow says the upper ones do not belong to the value; otherwise copy it
  * whole. @width of 8 is always a plain copy.
@@ -220,11 +245,7 @@ void patch_qword(int at, int val)
 void emit_narrow_move(int dst, int src, int width, bool narrow)
 {
     if (!narrow || width >= 8) {
-        if (dst == src)
-            return;
-        emit_rex(1, src, dst); /* MOV dst, src */
-        emit_byte(0x89);
-        emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(dst)));
+        emit_reg_move(dst, src, true);
         return;
     }
     if (width == 4) {
@@ -246,17 +267,11 @@ void emit_narrow_move(int dst, int src, int width, bool narrow)
 void emit_zero_extend(int dst, int src, int width)
 {
     if (width >= 8) {
-        if (dst != src) {
-            emit_rex(1, src, dst);
-            emit_byte(0x89);
-            emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(dst)));
-        }
+        emit_reg_move(dst, src, true);
         return;
     }
     if (width == 4) {
-        emit_rex(0, src, dst);
-        emit_byte(0x89); /* MOV r32, r32 */
-        emit_byte(modrm(MOD_DIRECT, reg_low3(src), reg_low3(dst)));
+        emit_reg_move(dst, src, false);
         return;
     }
     emit_rex(1, dst, src);
@@ -268,15 +283,15 @@ void emit_zero_extend(int dst, int src, int width)
 /* MOV dst, src, or nothing when the value is already in the destination. */
 void emit_mov_reg(int dst, int src)
 {
-    emit_narrow_move(dst, src, 8, false);
+    emit_reg_move(dst, src, true);
 }
 
 /* Shift @reg by an immediate count. @ext picks the shift: SHIFT_EXT_SHL,
  * SHIFT_EXT_SHR, or SHIFT_EXT_SAR.
  */
-void emit_shift_imm(int reg, int ext, int imm)
+void emit_shift_imm(int reg, int ext, int imm, bool wide)
 {
-    emit_rex(1, -1, reg);
+    emit_rex(wide, -1, reg);
     emit_byte(0xC1);
     emit_byte(modrm(MOD_DIRECT, ext, reg_low3(reg)));
     emit_byte(imm);
@@ -289,65 +304,40 @@ void emit_shift_imm(int reg, int ext, int imm)
  * back: RSP cannot be an index at all and R12 shares its low three bits, while
  * RBP and R13 need a displacement this zero-displacement form does not carry.
  */
-bool emit_lea_sum(int rd, int base, int index)
+bool emit_lea_scaled_sum_width(int rd,
+                               int base,
+                               int index,
+                               int scale,
+                               bool wide)
 {
-    if (reg_low3(base) == 5 || reg_low3(index) == 4)
+    if (scale < 0 || scale > 3 || reg_low3(base) == 5 || reg_low3(index) == 4)
         return false;
-    emit_rex_sib(1, rd, base, index);
+    if (wide || rd >= 8 || base >= 8 || index >= 8)
+        emit_rex_sib(wide, rd, base, index);
     emit_byte(0x8D);
-    emit_mem_sib(rd, base, index, 0, 0);
+    emit_mem_sib(rd, base, index, scale, 0);
     return true;
 }
 
-/* Pad with @n bytes that do nothing.
- *
- * x86 has a multi-byte NOP, so a run of padding costs one instruction instead
- * of one per byte -- which matters because alignment padding in front of a loop
- * header is executed on every entry to the loop. The encodings are spelled out
- * rather than tabulated because shecc cannot compile the initialiser such a
- * table needs, and this file builds under shecc itself.
- */
+/* Multi-byte NOP encodings, indexed by their byte count. */
+static const char *x64_nops[] = {"",
+                                 "\x90",
+                                 "\x66\x90",
+                                 "\x0f\x1f\x00",
+                                 "\x0f\x1f\x40\x00",
+                                 "\x0f\x1f\x44\x00\x00",
+                                 "\x66\x0f\x1f\x44\x00\x00",
+                                 "\x0f\x1f\x80\x00\x00\x00\x00",
+                                 "\x0f\x1f\x84\x00\x00\x00\x00\x00",
+                                 "\x66\x0f\x1f\x84\x00\x00\x00\x00\x00"};
+
 void emit_nop_bytes(int n)
 {
     while (n > 0) {
         int chunk = n > 9 ? 9 : n;
+        for (int i = 0; i < chunk; i++)
+            emit_byte(x64_nops[chunk][i]);
         n -= chunk;
-
-        /* The 6- and 9-byte forms are the 5- and 8-byte ones behind an
-         * operand-size prefix.
-         */
-        if (chunk == 6 || chunk == 9) {
-            emit_byte(0x66);
-            chunk--;
-        }
-        if (chunk == 1) {
-            emit_byte(0x90);
-            continue;
-        }
-        if (chunk == 2) {
-            emit_byte(0x66);
-            emit_byte(0x90);
-            continue;
-        }
-        emit_byte(0x0F);
-        emit_byte(0x1F);
-        if (chunk == 3)
-            emit_byte(0x00);
-        else if (chunk == 4) {
-            emit_byte(0x40);
-            emit_byte(0x00);
-        } else if (chunk == 5) {
-            emit_byte(0x44);
-            emit_byte(0x00);
-            emit_byte(0x00);
-        } else if (chunk == 7) {
-            emit_byte(0x80);
-            emit_dword(0);
-        } else { /* 8 */
-            emit_byte(0x84);
-            emit_byte(0x00);
-            emit_dword(0);
-        }
     }
 }
 
@@ -355,7 +345,7 @@ void emit_nop_bytes(int n)
  * instruction, where MOV plus ADD needs two. This is the two-operand LEA form,
  * which is full speed, unlike the scaled-index form.
  */
-bool emit_lea_disp(int rd, int base, int disp)
+bool emit_lea_disp_width(int rd, int base, int disp, bool wide)
 {
     /* RSP and R12 need a SIB byte to be addressed at all, so they are left to
      * the two-instruction form.
@@ -363,35 +353,86 @@ bool emit_lea_disp(int rd, int base, int disp)
     if (reg_low3(base) == 4)
         return false;
 
-    emit_rex(1, rd, base);
+    if (wide || rd >= 8 || base >= 8)
+        emit_rex(wide, rd, base);
     emit_byte(0x8D);
-    if (disp >= -128 && disp <= 127) {
-        emit_byte(modrm(MOD_DISP8, reg_low3(rd), reg_low3(base)));
-        emit_byte(disp);
-        return true;
-    }
-
-    /* A wider displacement is still one instruction, and still shorter than
-     * copying the source and then adding to it.
-     */
-    emit_byte(modrm(MOD_DISP32, reg_low3(rd), reg_low3(base)));
-    emit_dword(disp);
+    emit_mem_base(rd, base, disp, true);
     return true;
 }
 
-/* op rd, imm -- @ext is the opcode extension selecting the operation. Uses the
- * sign-extended imm8 form when it fits.
- */
-void emit_alu_imm(int rd, int ext, int imm)
+bool emit_lea_disp(int rd, int base, int disp)
 {
-    emit_rex(1, -1, rd);
+    return emit_lea_disp_width(rd, base, disp, true);
+}
+
+/* op rd, imm -- @ext selects the operation, and @wide selects a 64-bit operand.
+ * Uses the sign-extended imm8 form when it fits.
+ */
+int alu_opcode(int ext, bool accumulator);
+
+void emit_alu_imm_width(int rd, int ext, int imm, bool wide)
+{
+    if (wide || rd >= 8)
+        emit_rex(wide, -1, rd);
     if (imm >= -128 && imm <= 127) {
         emit_byte(0x83);
         emit_byte(modrm(MOD_DIRECT, ext, reg_low3(rd)));
         emit_byte(imm);
         return;
     }
+    if (rd == 0) {
+        emit_byte(alu_opcode(ext, true));
+        emit_dword(imm);
+        return;
+    }
     emit_byte(0x81);
     emit_byte(modrm(MOD_DIRECT, ext, reg_low3(rd)));
     emit_dword(imm);
+}
+
+/* Register and accumulator opcodes for the 0x81/0x83 ALU operations. */
+int alu_opcode(int ext, bool accumulator)
+{
+    switch (ext) {
+    case 0:
+        return accumulator ? 0x05 : 0x01;
+    case 1:
+        return accumulator ? 0x0D : 0x09;
+    case 4:
+        return accumulator ? 0x25 : 0x21;
+    case 5:
+        return accumulator ? 0x2D : 0x29;
+    case 6:
+        return accumulator ? 0x35 : 0x31;
+    case 7:
+        return accumulator ? 0x3D : 0x39;
+    default:
+        return -1;
+    }
+}
+
+/* IMUL rd, rs, imm, using the shortest sign-extended immediate form. */
+void emit_imul_imm(int rd, int rs, unsigned int imm, bool wide)
+{
+    if (wide || rd >= 8 || rs >= 8)
+        emit_rex(wide, rd, rs);
+    if (imm <= 127 || imm >= 0xffffff80u) {
+        emit_byte(0x6B);
+        emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs)));
+        emit_byte(imm);
+        return;
+    }
+    emit_byte(0x69);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(rs)));
+    emit_dword(imm);
+}
+
+/* IMUL dst, src, preserving the selected operand width. */
+void emit_imul_reg(int dst, int src, bool wide)
+{
+    if (wide || dst >= 8 || src >= 8)
+        emit_rex(wide, dst, src);
+    emit_byte(0x0F);
+    emit_byte(0xAF);
+    emit_byte(modrm(MOD_DIRECT, reg_low3(dst), reg_low3(src)));
 }

@@ -1,6 +1,7 @@
 /*
  * AArch64 Linux code generator. The allocator's virtual registers map to
- * x0..x7, x20..x22; x16/x17 are reserved scratch and x19 is the global base.
+ * x0..x7, x9..x15, x20..x28; x16/x17 are reserved scratch and x19 is the global
+ * base.
  */
 #include "arm64.c"
 #include "defs.h"
@@ -12,19 +13,92 @@
  */
 #define A64_GP 19
 
-/* AAPCS64 keeps SP 16-byte aligned, and the prologue saves five registers in
- * three pairs. Every frame calculation derives from these two.
+/* AAPCS64 keeps SP 16-byte aligned. Save used callee registers in pairs,
+ * together with FP/LR and the global base when dynamic main replaces it.
  */
 #define A64_STACK_ALIGN 16
-#define A64_SAVE_BYTES 48
+#define A64_FIRST_CALLEE (REG_CNT - CALLEE_SAVED_REGS)
+#define A64_SAVE_GP 16
+
+static int a64_save_bytes(int registers)
+{
+    return 16 + ALIGN_UP(((registers & 15) + !!(registers & A64_SAVE_GP)) * 8,
+                         A64_STACK_ALIGN);
+}
+
+/* The packed save list ends with x19 only when main replaces its ABI value. */
+static int a64_saved_reg(int saved, int index)
+{
+    if (index < (saved & 15))
+        return 20 + index;
+    return index == (saved & 15) && (saved & A64_SAVE_GP) ? A64_GP : A64_ZR;
+}
+
+void emit(int insn);
+void emit_ph2_ir(ph2_ir_t *ir);
+void a64_mov_imm(int d, int v);
+void a64_mov_sp(int d);
+void a64_mem(int access, int size, int rt, int rn, int ofs);
+void a64_extend(int d, int n, int size, bool is_unsigned);
+void a64_bl_addr(int target);
+
+/* Offset planning counts the same instruction stream used for emission. */
+static bool a64_count_only;
+static int a64_counted_words;
+
+static void arm64_halfword_counts(unsigned long long value,
+                                  int *zero_words,
+                                  int *one_words)
+{
+    *zero_words = 0;
+    *one_words = 0;
+    for (int shift = 0; shift < 64; shift += 16) {
+        unsigned int word = (unsigned int) (value >> shift) & 0xffffU;
+        *zero_words += word != 0;
+        *one_words += word != 0xffffU;
+    }
+}
+
+static void emit_arm64_wide_const(int reg, unsigned long long value)
+{
+    int zero_words, one_words, first = -1;
+    bool use_movn;
+
+    arm64_halfword_counts(value, &zero_words, &one_words);
+    use_movn = one_words < zero_words;
+    for (int shift = 0; shift < 64; shift += 16) {
+        unsigned int word = (unsigned int) (value >> shift) & 0xffffU;
+        bool differs = use_movn ? word != 0xffffU : word != 0;
+
+        if (!differs)
+            continue;
+        if (first < 0) {
+            first = shift / 16;
+            emit(use_movn ? a64_movn_insn(true, reg, (~word) & 0xffffU, first)
+                          : a64_movz_insn(true, reg, word, first));
+        } else {
+            emit(a64_movk_insn(true, reg, word, shift / 16));
+        }
+    }
+    if (first < 0)
+        emit(use_movn ? a64_movn_insn(true, reg, 0, 0)
+                      : a64_movz_insn(true, reg, 0, 0));
+}
 
 int a64_reg(int r)
 {
-    return r < 8 ? r : r + 12;
+    if (r == REG_CNT || r == REG_CNT + 1)
+        return A64_IP0 + r - REG_CNT;
+    return r < 8 ? r : r < A64_FIRST_CALLEE ? r + 1 : r + 5;
 }
 void emit(int insn)
 {
-    elf_write_int(elf_code, insn);
+    if (a64_count_only) {
+        if (a64_counted_words < INT_MAX)
+            a64_counted_words++;
+    } else {
+        elf_write_int(elf_code, insn);
+    }
 }
 void a64_mov(int d, int n)
 {
@@ -44,6 +118,9 @@ void a64_mov_imm(int d, int v)
      * compiler. A negative C int must therefore become a sign-extended
      * X-register value, not 0x00000000ffffffff-style zero extension. MOVN
      * supplies the upper one bits while MOVK fills the second halfword.
+     *
+     * Always two instructions: callers pass segment addresses that are not
+     * final when code size is estimated, so the length cannot depend on v.
      */
     if (v < 0)
         emit(a64_movn_insn(true, d, ~v, 0));
@@ -52,30 +129,28 @@ void a64_mov_imm(int d, int v)
     emit(a64_movk_insn(true, d, v >> 16, 1));
 }
 
-/* A 32-bit unsigned constant has zeroes above bit 31 when it later widens to an
- * X-register scalar. The signed helper intentionally uses MOVN for a negative
- * int, so keep this spelling separate.
+/* A phase-2 constant is final before sizes are estimated, so unlike an address
+ * it takes only the halfwords it needs; update_elf_offset() counts this very
+ * emission. An eight-byte constant keeps its upper word in src1, and a smaller
+ * one widens to the X register by its C signedness.
  */
-void a64_mov_imm_unsigned(int d, int v)
+static unsigned long long a64_constant_value(const ph2_ir_t *p)
 {
-    unsigned int value = v;
+    unsigned long long value;
 
-    emit(a64_movz_insn(true, d, value, 0));
-    emit(a64_movk_insn(true, d, value >> 16, 1));
+    if (p->size_bytes == 8)
+        value = (unsigned int) p->src0 |
+                (unsigned long long) (unsigned int) p->src1 << 32;
+    else if (p->is_unsigned)
+        value = (unsigned int) p->src0;
+    else
+        value = (unsigned long long) (long long) p->src0;
+    return value;
 }
 
-/* Phase-2 constants retain their upper word in src1. Materialise all four
- * halfwords for an eight-byte scalar rather than silently discarding it in the
- * ordinary int helper above.
- */
-void a64_mov_imm_wide(int d, int lo, int hi)
+static void a64_load_constant(int d, const ph2_ir_t *p)
 {
-    unsigned int low = lo, high = hi;
-
-    emit(a64_movz_insn(true, d, low, 0));
-    emit(a64_movk_insn(true, d, low >> 16, 1));
-    emit(a64_movk_insn(true, d, high, 2));
-    emit(a64_movk_insn(true, d, high >> 16, 3));
+    emit_arm64_wide_const(d, a64_constant_value(p));
 }
 
 /* Rd = Rn / Rm, unsigned when either operand is. */
@@ -115,22 +190,25 @@ void a64_sub(int d, int n, int m)
     else
         emit(a64_sub_reg_insn(true, d, n, m));
 }
+
+static void a64_adjust_frame(int bytes, bool subtract)
+{
+    if (!bytes)
+        return;
+    if (bytes < 4096)
+        emit(subtract ? a64_sub_imm_insn(true, A64_SP, A64_SP, bytes)
+                      : a64_add_imm_insn(true, A64_SP, A64_SP, bytes));
+    else {
+        a64_mov_imm(A64_IP0, bytes);
+        if (subtract)
+            a64_sub(A64_SP, A64_SP, A64_IP0);
+        else
+            a64_add(A64_SP, A64_SP, A64_IP0);
+    }
+}
 void a64_sxtw(int d, int n)
 {
     emit(a64_sext_insn(d, n, 32));
-}
-
-/* Xd = Xn +/- sign_extend(Wm). The extended-register forms fold the widening of
- * an int index into the address arithmetic that consumes it, so pointer
- * arithmetic costs the same one instruction as any other add.
- */
-void a64_add_sxtw(int d, int n, int m)
-{
-    emit(a64_add_ext_insn(d, n, m, A64_EXT_SXTW));
-}
-void a64_sub_sxtw(int d, int n, int m)
-{
-    emit(a64_sub_ext_insn(d, n, m, A64_EXT_SXTW));
 }
 
 /* Sign-extend the low @size bytes of Xn into Xd. Always one instruction, so
@@ -189,6 +267,8 @@ void a64_mem(int access, int size, int rt, int rn, int ofs)
  */
 void a64_check_disp(int disp, int bits, char *what)
 {
+    if (a64_count_only)
+        return;
     int lim = 1 << (bits - 1);
     if (disp < -lim || disp >= lim)
         fatal(what);
@@ -224,17 +304,6 @@ int a64_adrp_insn(int d, int pc, int target)
     return a64_adrp_pages_insn(d, pages);
 }
 
-/* Which operand of an address expression is the int index that must widen: 0
- * for neither, 1 for src0, 2 for src1. Exactly one source being an address is
- * what makes the other an index, so the two source flags decide alone.
- */
-int a64_ptr_index(ph2_ir_t *p)
-{
-    if (p->src0_is_pointer == p->src1_is_pointer)
-        return 0;
-    return p->src0_is_pointer ? 2 : 1;
-}
-
 /* A comparison is as wide as the values it compares. An address has to be
  * compared whole, an array included, since what reaches the instruction is its
  * decayed base. The source flags say so and is_pointer does not: it counts
@@ -263,70 +332,416 @@ a64_cond_t a64_cond(opcode_t op, bool is_unsigned)
     }
 }
 
-/* All estimates below exactly match emit_ph2_ir(). Fixed-width AArch64 makes
- * this deliberately simpler and more reliable than a relocation pass.
+/* Which successor of a branch, if any, is the block laid out after @bb. */
+static int a64_branch_fallthrough(basic_block_t *bb, ph2_ir_t *ir)
+{
+    return ir->else_bb == bb->rpo_next   ? 1
+           : ir->then_bb == bb->rpo_next ? 2
+                                         : 0;
+}
+
+static bool a64_branch_only_compare(basic_block_t *bb, ph2_ir_t *ir)
+{
+    return op_is_comparison(ir->op) && ir->next && ir->next->op == OP_branch &&
+           ir->next->src0 == ir->dest &&
+           !(bb->machine_liveout & (1U << ir->dest));
+}
+
+static int arm64_count_ph2_ir_words(ph2_ir_t *ir)
+{
+    char *saved_fatal_function_context = fatal_function_context;
+    a64_count_only = true;
+    a64_counted_words = 0;
+    emit_ph2_ir(ir);
+    int words = a64_counted_words;
+    a64_count_only = false;
+
+    fatal_function_context = saved_fatal_function_context;
+    return words;
+}
+
+/* Count the actual instruction sequence so offset planning stays in step with
+ * the emitter as it changes.
  */
 void update_elf_offset(ph2_ir_t *ir)
 {
-    int n = 1;
-    switch (ir->op) {
-    case OP_allocat:
-        n = 0;
-        break;
-    case OP_assign:
-        n = ir->dest == ir->src0 ? 0 : 1;
-        break;
-    case OP_load_constant:
-    case OP_load_data_address:
-    case OP_load_rodata_address:
-        n = ir->op == OP_load_constant && ir->size_bytes == 8 ? 4 : 2;
-        break;
-    case OP_address_of:
-    case OP_global_address_of:
-        n = 3;
-        break;
-    case OP_load:
-    case OP_global_load:
-        n = a64_mem_count(ir->size_bytes, ir->src0);
-        break;
-    case OP_store:
-    case OP_global_store:
-        n = a64_mem_count(ir->size_bytes, ir->src1);
-        break;
-    case OP_address_of_func:
-        n = 3;
-        break;
-    case OP_return:
-        n = (ir->src0 >= 0 && a64_reg(ir->src0) != 0) ? 8 : 7;
-        break;
-    case OP_branch:
-        n = 2;
-        break;
-    case OP_mod:
-        n = 2;
-        break;
-    case OP_eq:
-    case OP_neq:
-    case OP_gt:
-    case OP_lt:
-    case OP_geq:
-    case OP_leq:
-    case OP_log_not:
-        n = 2;
-        break;
-    default:
-        break;
+    if (ir->op != OP_allocat)
+        elf_offset += arm64_count_ph2_ir_words(ir) * 4;
+}
+
+/* Loop literals use otherwise idle callee-saved registers. Their definitions
+ * move to function entry; a local copy remains when a successor or call needs
+ * its old lane. Values and addresses outside this literal-only pass are left to
+ * the shared lowerer.
+ */
+static void a64_hoist_constants(func_t *f)
+{
+    int first = func_highest_used_reg(f, A64_FIRST_CALLEE) + 1;
+    int begin = INT_MAX, end = -1, count = 0;
+    ph2_ir_t *constants[CALLEE_SAVED_REGS];
+    if (first >= REG_CNT)
+        return;
+    for (basic_block_t *bb = f->bbs; bb; bb = bb->rpo_next) {
+        basic_block_t *targets[3] = {bb->next, bb->then_, bb->else_};
+        for (int i = 0; i < 3; i++)
+            if (targets[i] && targets[i]->rpo <= bb->rpo) {
+                if (targets[i]->rpo < begin)
+                    begin = targets[i]->rpo;
+                if (bb->rpo > end)
+                    end = bb->rpo;
+            }
     }
-    elf_offset += n * 4;
+    for (basic_block_t *bb = f->bbs; bb; bb = bb->rpo_next) {
+        if (bb->rpo < begin || bb->rpo > end)
+            continue;
+        ph2_ir_t **link = &bb->ph2_ir_list.head, *previous = NULL;
+        while (*link) {
+            ph2_ir_t *ir = *link;
+            if (ir->op != OP_load_constant) {
+                previous = ir;
+                link = &ir->next;
+                continue;
+            }
+            unsigned long long value = a64_constant_value(ir);
+            int index = 0;
+            while (index < count &&
+                   a64_constant_value(constants[index]) != value)
+                index++;
+            if (index == count) {
+                if (first + count >= REG_CNT) {
+                    previous = ir;
+                    link = &ir->next;
+                    continue;
+                }
+                ph2_ir_t *setup = ph2_ir_create(OP_load_constant);
+                *setup = *ir;
+                setup->dest = first + count;
+                setup->next = NULL;
+                if (count)
+                    constants[count - 1]->next = setup;
+                constants[count++] = setup;
+            }
+            int old = ir->dest, reg = constants[index]->dest;
+            bool copy = (bb->machine_liveout & (1u << old)) != 0;
+            for (ph2_ir_t *use = ir->next; !copy && use; use = use->next) {
+                if (use->op == OP_call || use->op == OP_indirect) {
+                    copy = true;
+                    break;
+                }
+                if (op_writes_dest(use->op) && use->dest == old)
+                    break;
+            }
+            if (copy) {
+                ir->op = OP_assign;
+                ir->src0 = reg;
+                previous = ir;
+                link = &ir->next;
+                continue;
+            }
+            for (ph2_ir_t *use = ir->next; use; use = use->next) {
+                if (op_src0_is_reg(use->op) && use->src0 == old)
+                    use->src0 = reg;
+                if (op_src1_is_reg(use->op) && use->src1 == old)
+                    use->src1 = reg;
+                if (use->src0_hi == old)
+                    use->src0_hi = reg;
+                if (op_writes_dest(use->op) && use->dest == old)
+                    break;
+            }
+            *link = ir->next;
+            if (bb->ph2_ir_list.tail == ir)
+                bb->ph2_ir_list.tail = previous;
+        }
+    }
+    if (count) {
+        constants[count - 1]->next = f->bbs->ph2_ir_list.head;
+        f->bbs->ph2_ir_list.head = constants[0];
+        if (!f->bbs->ph2_ir_list.tail)
+            f->bbs->ph2_ir_list.tail = constants[count - 1];
+    }
+}
+
+/* Fold a dead adjacent literal into the arithmetic instruction. src2 is an
+ * opcode-local immediate plus one; zero retains the register form.
+ */
+static void arm64_fold_immediates(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        ph2_ir_t **link = &bb->ph2_ir_list.head;
+        while (*link && (*link)->next) {
+            ph2_ir_t *literal = *link, *use = literal->next;
+            long long value = (long long) a64_constant_value(literal);
+            if (literal->op == OP_load_constant && use->src1 == literal->dest &&
+                use->src0 != literal->dest &&
+                (use->op == OP_bit_and || use->op == OP_bit_or ||
+                 use->op == OP_bit_xor) &&
+                !reg_read_after(bb, use, literal->dest)) {
+                unsigned long long mask = a64_constant_value(literal);
+                int ones = 0, bits = use->size_bytes == 8 ? 64 : 32;
+                while (ones < bits && (mask & 1)) {
+                    ones++;
+                    mask >>= 1;
+                }
+                if (!mask && ones && ones < bits) {
+                    use->src2 = ones;
+                    use->src1 = -1;
+                    *link = use;
+                    continue;
+                }
+            }
+            if (literal->op == OP_lshift && literal->src2 > 0 &&
+                literal->size_bytes == 8 && use->size_bytes == 8 &&
+                (use->op == OP_add || use->op == OP_sub) && !use->src2 &&
+                use->src1 == literal->dest && use->src0 != literal->dest &&
+                !reg_read_after(bb, use, literal->dest)) {
+                use->src1 = literal->src0;
+                use->src2 = -literal->src2;
+                *link = use;
+                continue;
+            }
+            if (literal->op != OP_load_constant || use->src1 != literal->dest ||
+                use->src0 == literal->dest ||
+                (use->op != OP_add && use->op != OP_sub &&
+                 use->op != OP_lshift) ||
+                reg_read_after(bb, use, literal->dest) ||
+                (use->op == OP_lshift
+                     ? value < 0 || value >= (use->size_bytes == 8 ? 64 : 32)
+                     : value < -4095 || value > 4095)) {
+                link = &literal->next;
+                continue;
+            }
+            if (value < 0) {
+                use->op = use->op == OP_add ? OP_sub : OP_add;
+                value = -value;
+            }
+            use->src2 = (int) value + 1;
+            use->src1 = -1;
+            *link = use;
+        }
+        link = &bb->ph2_ir_list.head;
+        while (*link && (*link)->next) {
+            ph2_ir_t *address = *link, *memory = address->next;
+            int size = memory->op == OP_read ? memory->src1 : memory->dest;
+            if (address->size_bytes != 8 ||
+                (address->op != OP_add && address->op != OP_sub) ||
+                (memory->op != OP_read && memory->op != OP_write) ||
+                (address->src2 <= 0 &&
+                 (address->op != OP_add || address->src2 < -4 ||
+                  (address->src2 < -1 &&
+                   (1 << (-address->src2 - 1)) != size))) ||
+                memory->src0_hi >= 0 || memory->src2 != 0 ||
+                memory->src0 != address->dest ||
+                (memory->op == OP_write && memory->src1 == address->dest) ||
+                reg_read_after(bb, memory, address->dest)) {
+                link = &address->next;
+                continue;
+            }
+            memory->src0 = address->src0;
+            memory->src0_hi = address->src2 <= 0 ? address->src1 : -1;
+            memory->src2 =
+                address->src2 <= 0
+                    ? (address->src2 ? address->src2 : -1)
+                    : (address->src2 - 1) * (address->op == OP_sub ? -1 : 1);
+            *link = memory;
+        }
+        link = &bb->ph2_ir_list.head;
+        while (*link && (*link)->next) {
+            ph2_ir_t *extend = *link, *memory = extend->next;
+            if (extend->op != OP_sign_ext || extend->src1 != ((4 << 16) | 8) ||
+                !extend->src0_is_unsigned || extend->is_pointer ||
+                (memory->op != OP_read && memory->op != OP_write) ||
+                memory->src0_hi != extend->dest ||
+                memory->src0 == extend->dest || memory->src2 > -1 ||
+                memory->src2 < -4 ||
+                (memory->op == OP_write && memory->src1 == extend->dest) ||
+                reg_read_after(bb, memory, extend->dest)) {
+                link = &extend->next;
+                continue;
+            }
+            memory->src0_hi = extend->src0;
+            memory->src2 -= 4;
+            *link = memory;
+        }
+    }
+}
+
+/* Select between short, effect-free expression arms without a data-dependent
+ * branch. Only a single live result may change; both scratch evaluations read
+ * the original inputs and retain the comparison flags.
+ */
+static void a64_select_diamonds(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next)
+            if (ir->op == OP_load_func || ir->op == OP_indirect)
+                return;
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        ph2_ir_t *branch = bb->ph2_ir_list.tail, *compare = NULL;
+        if (!branch || branch->op != OP_branch)
+            continue;
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next)
+            if (ir->next == branch)
+                compare = ir;
+        if (!compare || !a64_branch_only_compare(bb, compare))
+            continue;
+        basic_block_t *arms[2][4];
+        ph2_ir_t *ops[2][4];
+        int lengths[2] = {0}, nops[2] = {0}, join_at[2] = {-1, -1};
+        bool safe = true;
+        for (int side = 0; side < 2; side++) {
+            basic_block_t *arm = side ? branch->else_bb : branch->then_bb;
+            while (arm && lengths[side] < 4) {
+                arms[side][lengths[side]++] = arm;
+                ph2_ir_t *tail = arm->ph2_ir_list.tail;
+                arm = tail && tail->op == OP_jump ? tail->next_bb : NULL;
+            }
+        }
+        for (int left = 0; left < lengths[0] && join_at[0] < 0; left++)
+            for (int right = 0; right < lengths[1]; right++)
+                if (arms[0][left] == arms[1][right]) {
+                    join_at[0] = left;
+                    join_at[1] = right;
+                    break;
+                }
+        if (join_at[0] <= 0 || join_at[1] <= 0)
+            continue;
+        int output = -1;
+        for (int side = 0; side < 2 && safe; side++) {
+            unsigned int written = 0;
+            int last = -1;
+            for (int index = 0; index < join_at[side] && safe; index++) {
+                basic_block_t *arm = arms[side][index];
+                if (!bb_sole_pred(arm)) {
+                    safe = false;
+                    break;
+                }
+                for (ph2_ir_t *ir = arm->ph2_ir_list.head; ir; ir = ir->next) {
+                    if (ir->op == OP_jump)
+                        continue;
+                    if (nops[side] == 4 ||
+                        (ir->op != OP_add && ir->op != OP_sub &&
+                         ir->op != OP_bit_xor && ir->op != OP_bit_and &&
+                         ir->op != OP_bit_or && ir->op != OP_assign) ||
+                        ((written & (1u << ir->src0)) && ir->src0 != last) ||
+                        (op_src1_is_reg(ir->op) && ir->src1 >= 0 &&
+                         (written & (1u << ir->src1)) && ir->src1 != last)) {
+                        safe = false;
+                        break;
+                    }
+                    ops[side][nops[side]++] = ir;
+                    written |= 1u << ir->dest;
+                    last = ir->dest;
+                }
+            }
+            if (!nops[side])
+                safe = false;
+            else {
+                unsigned int live =
+                    written & arms[side][join_at[side] - 1]->machine_liveout;
+                if (!live || (live & (live - 1)) || !(live & (1u << last)) ||
+                    (output >= 0 && output != last))
+                    safe = false;
+                output = last;
+            }
+        }
+        if (!safe)
+            continue;
+        ph2_ir_t *tail = compare;
+        compare->src2 = 1;
+        for (int side = 0; side < 2; side++) {
+            int last = -1, scratch = REG_CNT + side;
+            for (int index = 0; index < nops[side]; index++) {
+                ph2_ir_t *old = ops[side][index];
+                ph2_ir_t *ir = ph2_ir_create(old->op);
+                *ir = *old;
+                ir->next = NULL;
+                if (ir->src0 == last)
+                    ir->src0 = scratch;
+                if (op_src1_is_reg(ir->op) && ir->src1 == last)
+                    ir->src1 = scratch;
+                ir->dest = scratch;
+                last = old->dest;
+                tail->next = ir;
+                tail = ir;
+            }
+            for (int index = 0; index < join_at[side]; index++) {
+                arms[side][index]->ph2_ir_list.head = NULL;
+                arms[side][index]->ph2_ir_list.tail = NULL;
+            }
+        }
+        ph2_ir_t *select = ph2_ir_create(OP_ternary);
+        select->dest = output;
+        select->src0 = REG_CNT;
+        select->src1 = REG_CNT + 1;
+        select->src2 = a64_cond(compare->op, compare->src0_is_unsigned ||
+                                                 compare->src1_is_unsigned);
+        tail->next = select;
+        select->next = branch;
+        branch->op = OP_jump;
+        branch->next_bb = arms[0][join_at[0]];
+    }
 }
 
 void cfg_flatten(void)
 {
     func_t *f;
+    for (f = FUNC_LIST.head; f; f = f->next)
+        if (f->bbs) {
+            arm64_fold_immediates(f);
+            a64_hoist_constants(f);
+            a64_select_diamonds(f);
+            for (basic_block_t *bb = f->bbs; bb; bb = bb->rpo_next)
+                for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+                    ph2_ir_t *next = ir->next;
+                    if (a64_branch_only_compare(bb, ir)) {
+                        ir->src2 = 1;
+                        next->src1 =
+                            a64_cond(ir->op, ir->src0_is_unsigned ||
+                                                 ir->src1_is_unsigned) +
+                            1;
+                    }
+                    if (ir->op == OP_jump)
+                        ir->src2 = ir->next_bb == bb->rpo_next;
+                    else if (ir->op == OP_branch)
+                        ir->src2 = a64_branch_fallthrough(bb, ir);
+                }
+
+            /* Repeat a small loop test at its back edge so the body needs only
+             * one taken branch per iteration. Keep the original comparison
+             * flags; only the copied branch's physical fallthrough changes.
+             */
+            for (basic_block_t *bb = f->bbs; bb; bb = bb->rpo_next) {
+                ph2_ir_t *jump = bb->ph2_ir_list.tail;
+                if (!jump || jump->op != OP_jump || !jump->next_bb ||
+                    jump->next_bb->rpo > bb->rpo)
+                    continue;
+                basic_block_t *head = jump->next_bb;
+                int count = 0;
+                for (ph2_ir_t *ir = head->ph2_ir_list.head; ir; ir = ir->next)
+                    count += ir->op == OP_load || ir->op == OP_load_constant ||
+                                     op_is_comparison(ir->op) ||
+                                     ir->op == OP_branch
+                                 ? 1
+                                 : 4;
+                if (!count || count > 3 ||
+                    head->ph2_ir_list.tail->op != OP_branch)
+                    continue;
+                for (ph2_ir_t *ir = head->ph2_ir_list.head; ir; ir = ir->next) {
+                    *jump = *ir;
+                    jump->next = ir->next ? ph2_ir_create(ir->next->op) : NULL;
+                    bb->ph2_ir_list.tail = jump;
+                    if (jump->next)
+                        jump = jump->next;
+                }
+                jump->src2 = a64_branch_fallthrough(bb, jump);
+            }
+        }
+    ph2_ir_prepare(false);
+    bool has_main = MAIN_BB != NULL;
 
     /* Entry sequence lengths, which the block offsets below start after.
-     * Static: 12 instructions of setup, then the 9-instruction __syscall
-     * helper, so 21 in all. Dynamic: 25, having no __syscall helper but saving
+     * Static: 15 instructions of setup, then the 9-instruction __syscall
+     * helper, so 24 in all. Dynamic: 24, having no __syscall helper but saving
      * the original stack pointer for __libc_start_main's stack_end argument,
      * spilling argc/argv, and clearing the frame with an inline loop.
      */
@@ -335,27 +750,26 @@ void cfg_flatten(void)
         if (dynlink)
             f->bbs->elf_offset = 0;
         else
-            f->bbs->elf_offset = 12 * 4;
+            f->bbs->elf_offset = 15 * 4;
     }
-    if (dynlink)
-        elf_offset = 25 * 4;
-    else
-        elf_offset = 21 * 4;
+    elf_offset = 24 * 4;
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
-    for (ph2_ir_t *p = GLOBAL_FUNC->bbs->ph2_ir_list.head; p; p = p->next)
-        update_elf_offset(p);
+    ph2_ir_visit_globals(update_elf_offset);
 
     /* code_generate() emits the call to main only when there is one, so a
      * translation unit without main must not be charged for it either.
      */
-    if (MAIN_BB) {
+    if (has_main) {
         int global_frame = ALIGN_UP(GLOBAL_FUNC->stack_size, A64_STACK_ALIGN);
         if (dynlink)
             elf_offset += (10 + a64_mem_count(8, global_frame) +
-                           a64_mem_count(8, global_frame + 8)) *
+                           a64_mem_count(8, global_frame + 8) +
+                           a64_mem_count(8, global_frame + 16)) *
                           4;
         else
-            elf_offset += 6 * 4;
+            elf_offset += (6 + a64_mem_count(8, global_frame) +
+                           a64_mem_count(8, global_frame + 8)) *
+                          4;
     }
     for (f = FUNC_LIST.head; f; f = f->next) {
         if (!f->bbs)
@@ -363,6 +777,11 @@ void cfg_flatten(void)
         ph2_ir_t *d = add_ph2_ir(OP_define);
         d->src0 = f->stack_size;
         d->func_name = intern_string(f->return_def.var_name);
+        int saved =
+            func_highest_used_reg(f, A64_FIRST_CALLEE) - (A64_FIRST_CALLEE - 1);
+        if (dynlink && !strcmp(d->func_name, "main"))
+            saved |= A64_SAVE_GP;
+        d->src2 = saved;
 
         /* Where the caller's stack arguments sit, seen from the callee's own
          * SP. This must round the frame exactly as the prologue does: rounding
@@ -371,54 +790,35 @@ void cfg_flatten(void)
          * one slot low.
          */
         int stack_top_ofs =
-            ALIGN_UP(f->stack_size, A64_STACK_ALIGN) + A64_SAVE_BYTES;
-        for (basic_block_t *b = f->bbs; b; b = b->rpo_next) {
-            b->elf_offset = elf_offset;
-
-            /* The entry block's offset deliberately names the prologue so calls
-             * enter at a valid function entry. Later block labels must however
-             * account for that prologue before their first IR word.
-             */
-            if (b == f->bbs) {
-                elf_offset += 7 * 4;
-                if (dynlink && !strcmp(f->return_def.var_name, "main"))
-                    elf_offset += 3 * 4;
-            }
-            for (ph2_ir_t *p = b->ph2_ir_list.head; p; p = p->next) {
-                if (p->ofs_based_on_stack_top) {
-                    if (p->op == OP_load || p->op == OP_address_of)
-                        p->src0 += stack_top_ofs;
-                    else if (p->op == OP_store)
-                        p->src1 += stack_top_ofs;
-                }
-                ph2_ir_t *q = add_existed_ph2_ir(p);
-                if (q->op == OP_return)
-                    q->src1 = f->stack_size;
-                update_elf_offset(q);
-            }
-        }
+            ALIGN_UP(f->stack_size, A64_STACK_ALIGN) + a64_save_bytes(saved);
+        int prologue_bytes = arm64_count_ph2_ir_words(d) * 4;
+        ph2_ir_flatten_function(f, stack_top_ofs, prologue_bytes, saved, true,
+                                update_elf_offset);
     }
 }
 
 void emit_ph2_ir(ph2_ir_t *p)
 {
     int d = a64_reg(p->dest), n = a64_reg(p->src0), m = a64_reg(p->src1);
+    if (op_is_comparison(p->op)) {
+        emit(a64_cmp_reg_insn(a64_cmp_wide(p), n, m));
+        if (!p->src2)
+            emit(a64_cset_insn(
+                a64_cmp_wide(p), d,
+                a64_cond(p->op, p->src0_is_unsigned || p->src1_is_unsigned)));
+        return;
+    }
     switch (p->op) {
     case OP_define: {
-        bool reload_global_base = dynlink && !strcmp(p->func_name, "main");
-
         fatal_function_context = p->func_name;
         emit(a64_stp_pre_insn(A64_FP, A64_LR, A64_SP, -16));
         emit(a64_add_imm_insn(true, A64_FP, A64_SP, 0));
-        emit(a64_stp_pre_insn(20, 21, A64_SP, -16));
-
-        /* x19 holds the synthetic global-frame base, but AAPCS64 makes it
-         * callee-saved and glibc calls into this code at main. Saving it
-         * alongside x22 costs nothing: the slot was half empty anyway.
-         */
-        emit(a64_stp_pre_insn(22, A64_GP, A64_SP, -16));
-        a64_mov_imm(A64_IP0, ALIGN_UP(p->src0, A64_STACK_ALIGN));
-        a64_sub(A64_SP, A64_SP, A64_IP0);
+        for (int reg = 0; reg < (p->src2 & 15) + !!(p->src2 & A64_SAVE_GP);
+             reg += 2)
+            emit(a64_stp_pre_insn(a64_saved_reg(p->src2, reg),
+                                  a64_saved_reg(p->src2, reg + 1), A64_SP,
+                                  -16));
+        a64_adjust_frame(ALIGN_UP(p->src0, A64_STACK_ALIGN), true);
 
         /* Reload x19 rather than trust what called us: glibc enters at main,
          * and AAPCS64 lets everything in between clobber a callee-saved
@@ -427,19 +827,14 @@ void emit_ph2_ir(ph2_ir_t *p)
          * itself is allocated once in code_generate(), which is also where the
          * question of clearing it is settled.
          */
-        if (reload_global_base) {
+        if (p->src2 & A64_SAVE_GP) {
             a64_mov_imm(A64_IP0, elf_data_start);
             a64_mem(A64_LOAD, 8, A64_GP, A64_IP0, 0);
         }
         return;
     }
     case OP_load_constant:
-        if (p->size_bytes == 8)
-            a64_mov_imm_wide(d, p->src0, p->src1);
-        else if (p->is_unsigned)
-            a64_mov_imm_unsigned(d, p->src0);
-        else
-            a64_mov_imm(d, p->src0);
+        a64_load_constant(d, p);
         return;
     case OP_assign:
         if (d != n)
@@ -466,35 +861,32 @@ void emit_ph2_ir(ph2_ir_t *p)
         a64_mem(A64_STORE, p->size_bytes, n, A64_GP, p->src1);
         return;
     case OP_read:
-        a64_mem(a64_load_access(p), p->src1, d, n, 0);
+    case OP_write: {
+        bool read = p->op == OP_read;
+        int access = read ? a64_load_access(p) : A64_STORE;
+        int size = read ? p->src1 : p->dest;
+        int rt = read ? d : m;
+        if (p->src0_hi >= 0)
+            emit(a64_mem_register_insn(access, size, rt, n, a64_reg(p->src0_hi),
+                                       p->src2 != -1 && p->src2 != -5,
+                                       p->src2 <= -5));
+        else
+            a64_mem(access, size, rt, n, p->src2);
         return;
-    case OP_write:
-        a64_mem(A64_STORE, p->dest, m, n, 0);
-        return;
+    }
     case OP_add:
-        /* Index expressions are int-valued, so the index has to widen before it
-         * joins a 64-bit address; otherwise -1 becomes +4294967295 on LP64.
-         * Addition is commutative, so either operand may be the index.
-         *
-         * The fall-through stays the X form for both cases a64_ptr_index()
-         * reports as 0: two addresses, which is pointer minus pointer and
-         * genuinely 64-bit, and two ints, whose upper half no reader looks at.
-         * See the width note at the comparisons below.
-         */
-        if (a64_ptr_index(p) == 2)
-            a64_add_sxtw(d, n, m);
-        else if (a64_ptr_index(p) == 1)
-            a64_add_sxtw(d, m, n);
+        if (p->src2 < 0)
+            emit(a64_add_reg_insn(true, d, n, m) | ((-p->src2 - 1) << 10));
+        else if (p->src2)
+            emit(a64_add_imm_insn(true, d, n, p->src2 - 1));
         else
             a64_add(d, n, m);
         return;
     case OP_sub:
-        /* Only pointer-minus-int widens: int-minus-pointer is not an address
-         * expression, and pointer-minus-pointer is already 64-bit on both
-         * sides.
-         */
-        if (a64_ptr_index(p) == 2)
-            a64_sub_sxtw(d, n, m);
+        if (p->src2 < 0)
+            emit(a64_sub_reg_insn(true, d, n, m) | ((-p->src2 - 1) << 10));
+        else if (p->src2)
+            emit(a64_sub_imm_insn(true, d, n, p->src2 - 1));
         else
             a64_sub(d, n, m);
         return;
@@ -512,36 +904,32 @@ void emit_ph2_ir(ph2_ir_t *p)
         emit(a64_msub_insn(p->size_bytes == 8, d, A64_IP0, m, n));
         return;
     case OP_lshift:
-        emit(a64_lslv_insn(p->size_bytes == 8, d, n, m));
+        emit(p->src2 ? a64_lsl_imm_insn(p->size_bytes == 8, d, n, p->src2 - 1)
+                     : a64_lslv_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_rshift:
         emit(a64_rshift_insn(p, d, n, m));
         return;
     case OP_bit_and:
-        emit(a64_and_reg_insn(p->size_bytes == 8, d, n, m));
+        emit(p->src2 ? a64_logic_imm_insn(0x12000000, p->size_bytes == 8, d, n,
+                                          p->src2)
+                     : a64_and_reg_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_bit_or:
-        emit(a64_orr_reg_insn(p->size_bytes == 8, d, n, m));
+        emit(p->src2 ? a64_logic_imm_insn(0x32000000, p->size_bytes == 8, d, n,
+                                          p->src2)
+                     : a64_orr_reg_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_bit_xor:
-        emit(a64_eor_reg_insn(p->size_bytes == 8, d, n, m));
+        emit(p->src2 ? a64_logic_imm_insn(0x52000000, p->size_bytes == 8, d, n,
+                                          p->src2)
+                     : a64_eor_reg_insn(p->size_bytes == 8, d, n, m));
         return;
     case OP_negate:
         emit(a64_neg_insn(p->size_bytes == 8, d, n));
         return;
     case OP_bit_not:
         emit(a64_mvn_insn(p->size_bytes == 8, d, n));
-        return;
-    case OP_eq:
-    case OP_neq:
-    case OP_gt:
-    case OP_lt:
-    case OP_geq:
-    case OP_leq:
-        emit(a64_cmp_reg_insn(a64_cmp_wide(p), n, m));
-        emit(a64_cset_insn(
-            a64_cmp_wide(p), d,
-            a64_cond(p->op, p->src0_is_unsigned || p->src1_is_unsigned)));
         return;
 
     /* Width follows the operand, exactly as the comparisons above do. A pointer
@@ -577,18 +965,35 @@ void emit_ph2_ir(ph2_ir_t *p)
     case OP_cast:
         a64_mov(d, n);
         return;
-    case OP_branch:
-        a64_cbnz(p->src0_is_pointer || p->size_bytes == 8, n,
-                 p->then_bb->elf_offset);
-        a64_b(p->else_bb->elf_offset);
+    case OP_ternary:
+        emit(a64_csel_insn(true, d, n, m, p->src2));
         return;
+    case OP_branch: {
+        bool wide = p->src0_is_pointer || p->size_bytes == 8;
+        if (p->src1 || p->src2 == 2) {
+            int target =
+                p->src2 == 2 ? p->else_bb->elf_offset : p->then_bb->elf_offset;
+            int disp = (target - elf_code->size) / 4;
+            a64_check_disp(disp, 19, "arm64 conditional branch out of range");
+            if (p->src1)
+                emit(a64_b_cond_insn((p->src1 - 1) ^ (p->src2 == 2), disp));
+            else
+                emit(a64_cbz_insn(wide, n, disp));
+        } else
+            a64_cbnz(wide, n, p->then_bb->elf_offset);
+        if (!p->src2)
+            a64_b(p->else_bb->elf_offset);
+        return;
+    }
     case OP_jump:
-        a64_b(p->next_bb->elf_offset);
+        if (!p->src2)
+            a64_b(p->next_bb->elf_offset);
         return;
     case OP_call: {
         func_t *f = find_func(p->func_name);
         if (!f)
             fatal("arm64 call to unknown function");
+
         if (!f->bbs) {
             if (!dynlink)
                 fatal("arm64 external call requires --dynlink");
@@ -631,10 +1036,13 @@ void emit_ph2_ir(ph2_ir_t *p)
     case OP_return:
         if (p->src0 >= 0 && n != 0)
             a64_mov(0, n);
-        a64_mov_imm(A64_IP0, ALIGN_UP(p->src1, A64_STACK_ALIGN));
-        a64_add(A64_SP, A64_SP, A64_IP0);
-        emit(a64_ldp_post_insn(22, A64_GP, A64_SP, 16));
-        emit(a64_ldp_post_insn(20, 21, A64_SP, 16));
+        a64_adjust_frame(ALIGN_UP(p->src1, A64_STACK_ALIGN), false);
+        for (int reg =
+                 (((p->src2 & 15) + !!(p->src2 & A64_SAVE_GP) + 1) & ~1) - 2;
+             reg >= 0; reg -= 2)
+            emit(a64_ldp_post_insn(a64_saved_reg(p->src2, reg),
+                                   a64_saved_reg(p->src2, reg + 1), A64_SP,
+                                   16));
         emit(a64_ldp_post_insn(A64_FP, A64_LR, A64_SP, 16));
         emit(a64_ret_insn());
         return;
@@ -668,24 +1076,22 @@ void plt_generate(void)
 void code_generate(void)
 {
     int global_frame = ALIGN_UP(GLOBAL_FUNC->stack_size, A64_STACK_ALIGN);
+    bool has_main = MAIN_BB != NULL;
+    int main_offset = has_main ? MAIN_BB->elf_offset : -1;
 
-    /* At Linux process entry argc is at [sp] and argv begins at sp + 8; they
-     * are loaded into x20 and x21. Those two are allocatable by the global
-     * initialiser, so the values are parked in x23/x24 -- callee-saved, and
-     * outside this backend's allocation set -- to survive it.
+    /* Park process arguments above the global frame: global initializers may
+     * use every allocated register. Dynamic startup also needs the original SP.
      */
     if (dynlink)
         a64_mov_sp(25);
     a64_mem(A64_LOAD, 8, 20, A64_SP, 0);
     emit(a64_add_imm_insn(true, 21, A64_SP, 8));
-    a64_mov(23, 20);
-    a64_mov(24, 21);
-    if (dynlink) {
-        a64_mov_imm(A64_IP0, A64_STACK_ALIGN);
-        a64_sub(A64_SP, A64_SP, A64_IP0);
-        a64_mem(A64_STORE, 8, 23, A64_SP, 0);
-        a64_mem(A64_STORE, 8, 24, A64_SP, 8);
-    }
+    a64_mov_imm(A64_IP0, 32);
+    a64_sub(A64_SP, A64_SP, A64_IP0);
+    a64_mem(A64_STORE, 8, 20, A64_SP, 0);
+    a64_mem(A64_STORE, 8, 21, A64_SP, 8);
+    if (dynlink)
+        a64_mem(A64_STORE, 8, 25, A64_SP, 16);
 
     /* The synthetic global frame is carved out of the runtime stack, and x19
      * keeps its base; only that base is parked in the data segment, where a
@@ -728,13 +1134,13 @@ void code_generate(void)
         emit(a64_svc_insn(0));
         emit(a64_ret_insn());
     }
-    for (ph2_ir_t *p = GLOBAL_FUNC->bbs->ph2_ir_list.head; p; p = p->next)
-        emit_ph2_ir(p);
-    if (MAIN_BB) {
+    ph2_ir_visit_globals(emit_ph2_ir);
+    if (has_main) {
+        a64_mem(A64_LOAD, 8, 23, A64_SP, global_frame);
+        a64_mem(A64_LOAD, 8, 24, A64_SP, global_frame + 8);
         if (dynlink) {
-            a64_mem(A64_LOAD, 8, 23, A64_SP, global_frame);
-            a64_mem(A64_LOAD, 8, 24, A64_SP, global_frame + 8);
-            a64_mov_imm(0, elf_code_start + MAIN_BB->elf_offset);
+            a64_mem(A64_LOAD, 8, 25, A64_SP, global_frame + 16);
+            a64_mov_imm(0, elf_code_start + main_offset);
             a64_mov(1, 23);
             a64_mov(2, 24);
             a64_mov(3, A64_ZR);
@@ -746,7 +1152,7 @@ void code_generate(void)
         } else {
             a64_mov(0, 23);
             a64_mov(1, 24);
-            emit(a64_bl_insn((MAIN_BB->elf_offset - elf_code->size) / 4));
+            emit(a64_bl_insn((main_offset - elf_code->size) / 4));
             a64_mov_imm(8, 93);
             emit(a64_svc_insn(0));
         }

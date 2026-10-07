@@ -24,6 +24,18 @@ check_flag = $(shell $(CC) $(1) -S -o /dev/null -xc /dev/null 2>/dev/null; \
 # targets have no use for, so skip it when nothing is being compiled.
 STYLE_GOALS := check-style check-newline check-comments check-format check-shell \
 	indent install-hooks uninstall-hooks check-hooks
+
+VIR_FRONTEND_FIXTURES := $(sort $(wildcard tests/vir-frontend-*.c))
+VIR_NATIVE_SHARED_FIXTURES := $(sort $(wildcard tests/vir-direct-global-*.c) \
+	$(wildcard tests/vir-direct-branch-*.c) \
+	$(wildcard tests/vir-direct-narrow-global.c) \
+	tests/vir-direct-external-pointer-origin.c \
+	tests/vir-direct-external-typed-pointer.c \
+	tests/vir-direct-external-typed-pointer-offset.c)
+VIR_NATIVE_X64_FIXTURES := $(sort $(wildcard tests/vir-direct-x64*.c) \
+	$(VIR_NATIVE_SHARED_FIXTURES))
+VIR_NATIVE_ARM64_FIXTURES := $(sort $(wildcard tests/vir-direct-arm64*.c) \
+	$(VIR_NATIVE_SHARED_FIXTURES))
 ifneq ($(filter-out $(STYLE_GOALS),$(or $(MAKECMDGOALS),all)),)
 $(foreach flag, $(CFLAGS_TO_CHECK), $(eval CFLAGS += $(call check_flag, $(flag))))
 endif
@@ -171,8 +183,102 @@ config:
 	$(Q)$(CONFIG_CHECK_CMD)
 
 .PHONY: $(STYLE_GOALS)
+.PHONY: check-vir-frontend-stage0 check-vir-frontend-stage2 \
+	check-vir-stage0 check-vir-stage2 \
+	check-vir-frontend-policy-stage0 check-vir-frontend-policy-stage2 \
+	check-vir-ssa-baseline check-vir-ssa-baseline-stage0 check-vir-ssa-baseline-stage2 \
+	check-vir-large-cfg-stage0 check-vir-large-cfg-stage2 \
+	check-vir-ssa-selfhost check-vir-ssa-selfhost-stage0 check-vir-ssa-selfhost-stage2
 
-check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2
+check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2 \
+	check-vir-core check-vir-frontend-stage0 check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 check-vir-arm-verifier-stage0 \
+	check-vir-multi-input-stage0 check-vir-multi-input-stage2 \
+	check-vir-arm-verifier-stage2 check-vir-stats-stage0 check-vir-stats-stage2 check-vir-baseline check-vir-ssa-baseline check-vir-large-cfg-stage0 check-vir-large-cfg-stage2 check-vir-ssa-selfhost \
+	check-vir-corpus-stage0 check-fuzz-stage0 check-vir-frontend-policy-stage0
+
+# Random programs checked against the host compiler and built by shecc.
+# FUZZ_SEEDS and FUZZ_START widen or move the run; a failing program is kept
+# as out/fuzz-<seed>.c.
+.PHONY: check-fuzz-stage0
+check-fuzz-stage0: $(OUT)/$(STAGE0) tests/fuzz.sh tests/fuzz-gen.c
+	TARGET_EXEC="$(TARGET_EXEC)" CC="$(CC)" bash tests/fuzz.sh 0
+
+# Native IR optimization levels must preserve each corpus program's behavior.
+# Only stage 0 is part of check: under emulation, stage 2 compiles the corpus
+# once per optimization level inside qemu, which costs more than the other checks.
+.PHONY: check-vir-corpus-stage0 check-vir-corpus-stage2
+check-vir-corpus-stage0: $(OUT)/$(STAGE0) tests/vir-corpus.sh
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-corpus.sh 0 $(ARCH)
+check-vir-corpus-stage2: $(OUT)/$(STAGE2) tests/vir-corpus.sh
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-corpus.sh 2 $(ARCH)
+
+.PHONY: check-vir-multi-input-stage0 check-vir-multi-input-stage2
+check-vir-multi-input-stage0: $(OUT)/$(STAGE0) tests/vir-multi-input.sh tests/vir-multi-input-root.c tests/vir-multi-input-main.c
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-multi-input.sh 0
+check-vir-multi-input-stage2: $(OUT)/$(STAGE2) tests/vir-multi-input.sh tests/vir-multi-input-root.c tests/vir-multi-input-main.c
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-multi-input.sh 2
+
+check-vir-large-cfg-stage0: $(OUT)/$(STAGE0) tests/vir-large-cfg.sh tests/vir-frontend-large-cfg.c
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-large-cfg.sh 0
+
+check-vir-large-cfg-stage2: $(OUT)/$(STAGE2) tests/vir-large-cfg.sh tests/vir-frontend-large-cfg.c
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-large-cfg.sh 2
+
+ifeq ($(ARCH),x64)
+.PHONY: check-vir-x64-encoders check-vir-x64-and-flags
+check: check-vir-x64-encoders check-vir-x64-and-flags
+check-vir-x64-encoders check-vir-x64-and-flags: check-vir-x64-%: $(OUT)/$(STAGE0) tests/vir-x64-%.c config $(wildcard src/*.c src/*.h)
+	$(CC) $(CFLAGS) tests/vir-x64-$*.c -o $(OUT)/vir-x64-$*
+	$(OUT)/vir-x64-$*
+
+.PHONY: check-vir-x64-fold
+check: check-vir-x64-fold
+check-vir-x64-fold: $(OUT)/$(STAGE0) tests/vir-x64-fold.c tests/vir-x64-liveout.c tests/vir-x64-liveout.sh tests/vir-x64-shift-counts.c config $(wildcard src/*.c src/*.h)
+	$(CC) $(CFLAGS) tests/vir-x64-fold.c -o $(OUT)/vir-x64-fold
+	$(OUT)/vir-x64-fold
+	CC="$(CC)" bash tests/vir-x64-liveout.sh $(OUT)/$(STAGE0)
+
+.PHONY: check-vir-native-x64-stage0 check-vir-native-x64-stage2 \
+	check-x64-startup-globals-stage0 check-x64-startup-globals-stage2
+check: check-x64-startup-globals-stage0 check-x64-startup-globals-stage2 \
+	check-vir-native-x64-stage0 check-vir-native-x64-stage2
+check-vir-native-x64-stage0: $(OUT)/$(STAGE0) $(VIR_NATIVE_X64_FIXTURES) tests/vir-direct-x64.sh tests/vir-direct-common.sh
+	bash tests/vir-direct-x64.sh 0
+check-vir-native-x64-stage2: $(OUT)/$(STAGE2) $(VIR_NATIVE_X64_FIXTURES) tests/vir-direct-x64.sh tests/vir-direct-common.sh
+	bash tests/vir-direct-x64.sh 2
+
+.PHONY: check-x64-startup-globals-stage0 check-x64-startup-globals-stage2
+check-x64-startup-globals-stage0: $(OUT)/$(STAGE0) tests/vir-direct-x64-startup-globals.c tests/x64-startup-globals.sh
+	bash tests/x64-startup-globals.sh 0
+check-x64-startup-globals-stage2: $(OUT)/$(STAGE2) tests/vir-direct-x64-startup-globals.c tests/x64-startup-globals.sh
+	bash tests/x64-startup-globals.sh 2
+endif
+
+ifeq ($(ARCH),arm64)
+.PHONY: check-vir-native-arm64-stage0 check-vir-native-arm64-stage2
+check: check-vir-native-arm64-stage0 check-vir-native-arm64-stage2
+check: check-vir-arm64-branch-frame check-vir-arm64-startup-bank
+.PHONY: check-vir-arm64-branch-frame check-vir-arm64-startup-bank
+check: check-vir-arm64-select
+check: check-vir-arm64-register-memory
+.PHONY: check-vir-arm64-register-memory
+check-vir-arm64-register-memory: $(OUT)/$(STAGE0) tests/arm64-register-memory-unit.c tests/arm64-register-memory.sh
+	CC="$(CC)" bash tests/arm64-register-memory.sh
+.PHONY: check-vir-arm64-select
+check-vir-arm64-select: $(OUT)/$(STAGE0) tests/vir-arm64-select-direct.c tests/vir-arm64-logical-gas.py
+	$(CC) $(CFLAGS) -Isrc tests/vir-arm64-select-direct.c -o $(OUT)/vir-arm64-select-direct
+	python3 tests/vir-arm64-logical-gas.py $(OUT)/vir-arm64-select-direct
+check-vir-arm64-branch-frame: $(OUT)/$(STAGE0) tests/vir-arm64-branch-frame.c
+	$(CC) $(CFLAGS) -Isrc tests/vir-arm64-branch-frame.c -o $(OUT)/vir-arm64-branch-frame
+	$(OUT)/vir-arm64-branch-frame
+check-vir-arm64-startup-bank: $(OUT)/$(STAGE0) tests/vir-arm64-startup-bank.sh
+	CC="$(CC)" A64_CC="$(if $(filter 1,$(USE_QEMU)),$(or $(ARCH_CC),aarch64-linux-gnu-gcc),$(CC))" TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-arm64-startup-bank.sh
+
+check-vir-native-arm64-stage0: $(OUT)/$(STAGE0) $(VIR_NATIVE_ARM64_FIXTURES) tests/vir-direct-arm64.sh tests/vir-direct-common.sh
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-direct-arm64.sh 0
+check-vir-native-arm64-stage2: $(OUT)/$(STAGE2) $(VIR_NATIVE_ARM64_FIXTURES) tests/vir-direct-arm64.sh tests/vir-direct-common.sh
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-direct-arm64.sh 2
+endif
 
 # Run the complete check -- driver and ABI suites at stages 0 and 2 -- on every
 # backend, as CI does. Driver cases that need 64-bit values are gated on the
@@ -193,6 +299,25 @@ check-all-targets:
 		$(MAKE) config ARCH="$$target_arch"; \
 		$(MAKE) check ARCH="$$target_arch"; \
 	done
+
+.PHONY: vir-baseline
+vir-baseline: $(OUT)/$(STAGE0) tests/vir-baseline.sh tests/benchmark-time.sh \
+	tests/vir-baseline-workloads.txt
+	VIR_BASELINE_RUNS=$${VIR_BASELINE_RUNS:-5} tests/vir-baseline.sh
+
+.PHONY: vir-ssa-baseline
+vir-ssa-baseline: $(OUT)/$(STAGE0) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
+	tests/vir-ssa-baseline-workloads.txt tests/vir-frontend-large-cfg.c
+	tests/vir-ssa-baseline.sh 0
+
+.PHONY: vir-licm-profile
+VIR_LICM_PROFILE_SAMPLES ?= 7
+VIR_LICM_PROFILE_REPEATS ?= 5
+vir-licm-profile: $(OUT)/vir-licm-profile
+	$(OUT)/vir-licm-profile $(VIR_LICM_PROFILE_SAMPLES) $(VIR_LICM_PROFILE_REPEATS)
+
+$(OUT)/vir-licm-profile: tests/vir-licm-profile.c src/vir.c src/vir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-licm-profile.c src/vir.c -o $@
 
 # One checker per target: they share nothing, so "make -j check-style" runs them
 # concurrently and finishes in the time the slowest one takes.
@@ -242,7 +367,7 @@ check-stage2: $(OUT)/$(STAGE2) tests/driver.sh
 	$(VECHO) "  TEST STAGE 2\n"
 	tests/driver.sh 2 $(DYNLINK)
 
-check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh
+check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh check-vir-sanitizer
 	$(VECHO) "  TEST STAGE 0 (with sanitizers)\n"
 	$(Q)cp $(OUT)/$(STAGE0)-sanitizer $(OUT)/shecc
 	tests/driver.sh 0 $(DYNLINK)
@@ -254,12 +379,124 @@ check-abi-stage0: $(OUT)/$(STAGE0)
 check-abi-stage2: $(OUT)/$(STAGE2)
 	tests/$(ARCH)-abi.sh 2 $(DYNLINK);
 
+check-vir-core: tests/vir-core.c src/vir.c src/vir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-core.c src/vir.c -o $(OUT)/vir-core
+	$(OUT)/vir-core
+
+check-vir-frontend-stage0: $(OUT)/$(STAGE0) tests/vir-frontend.sh tests/vir-frontend-workloads.txt $(VIR_FRONTEND_FIXTURES)
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-frontend.sh 0
+
+check-vir-frontend-stage2: $(OUT)/$(STAGE2) tests/vir-frontend.sh tests/vir-frontend-workloads.txt $(VIR_FRONTEND_FIXTURES)
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-frontend.sh 2
+
+check-vir-frontend-policy-stage0: $(OUT)/$(STAGE0) tests/vir-frontend-policy.sh tests/vir-frontend-gvn.c tests/vir-frontend-licm.c tests/vir-frontend-nested-loop.c tests/vir-frontend-multi-latch.c
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-frontend-policy.sh 0
+
+check-vir-frontend-policy-stage2: $(OUT)/$(STAGE2) tests/vir-frontend-policy.sh tests/vir-frontend-gvn.c tests/vir-frontend-licm.c tests/vir-frontend-nested-loop.c tests/vir-frontend-multi-latch.c
+	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-frontend-policy.sh 2
+
+check-vir-fuzz: tests/vir-fuzz.c src/vir.c src/vir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-fuzz.c src/vir.c -o $(OUT)/vir-fuzz
+	$(OUT)/vir-fuzz
+
+check-vir-sanitizer: tests/vir-core.c tests/vir-fuzz.c src/vir.c src/vir.h
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-core.c src/vir.c -o $(OUT)/vir-core-sanitize
+	ASAN_OPTIONS=detect_leaks=1 $(OUT)/vir-core-sanitize
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-fuzz.c src/vir.c -o $(OUT)/vir-fuzz-sanitize
+	ASAN_OPTIONS=detect_leaks=1 $(OUT)/vir-fuzz-sanitize
+
+.PHONY: check-vir
+check-vir: check-vir-core check-vir-frontend-stage0 \
+	check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
+	check-vir-frontend-policy-stage0 \
+	check-vir-frontend-policy-stage2 \
+	check-vir-arm-verifier-stage0 check-vir-arm-verifier-stage2 check-vir-sanitizer
+
+check-vir-stage0: $(OUT)/$(STAGE0) tests/vir-stage0.c src/vir.c src/vir.h
+	$(OUT)/$(STAGE0) -o $(OUT)/vir-stage0 tests/vir-stage0.c
+	$(TARGET_EXEC) $(OUT)/vir-stage0
+
+check-vir-stage2: $(OUT)/$(STAGE2) tests/vir-stage0.c src/vir.c src/vir.h
+	$(TARGET_EXEC) $(OUT)/$(STAGE2) -o $(OUT)/vir-stage2 tests/vir-stage0.c
+	$(TARGET_EXEC) $(OUT)/vir-stage2
+
+.PHONY: check-vir-native-regressions-stage0 check-vir-native-regressions-stage2
+check: check-vir-native-regressions-stage0 check-vir-native-regressions-stage2 check-vir-lower
+check-vir-native-regressions-stage0: $(OUT)/$(STAGE0)
+	TARGET_EXEC="$(TARGET_EXEC)" tests/vir-native-regressions.sh $(OUT)/$(STAGE0)
+check-vir-native-regressions-stage2: $(OUT)/$(STAGE2)
+	TARGET_EXEC="$(TARGET_EXEC)" tests/vir-native-regressions.sh $(TARGET_EXEC) $(OUT)/$(STAGE2)
+
+.PHONY: check-vir-lower
+check-vir-lower: $(OUT)/$(STAGE0) tests/vir-lower.c tests/vir-lower-smoke.c tests/vir-lower.sh
+	CC="$(CC)" TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-lower.sh
+
+# This formerly exposed an Arm stage-0 verifier miscompile. Keep it in both
+# bootstrap gates and on every target so CFG-heavy verifier paths cannot regress.
+check-vir-arm-verifier-stage0: $(OUT)/$(STAGE0) tests/vir-arm-verifier.c src/vir.c src/vir.h
+	$(OUT)/$(STAGE0) -o $(OUT)/vir-arm-verifier-stage0 tests/vir-arm-verifier.c
+	$(TARGET_EXEC) $(OUT)/vir-arm-verifier-stage0
+
+check-vir-arm-verifier-stage2: $(OUT)/$(STAGE2) tests/vir-arm-verifier.c src/vir.c src/vir.h
+	$(TARGET_EXEC) $(OUT)/$(STAGE2) -o $(OUT)/vir-arm-verifier-stage2 tests/vir-arm-verifier.c
+	$(TARGET_EXEC) $(OUT)/vir-arm-verifier-stage2
+
+check-vir-stats-stage0: $(OUT)/$(STAGE0) tests/vir-stats.sh
+	tests/vir-stats.sh 0
+
+check-vir-stats-stage2: $(OUT)/$(STAGE2) tests/vir-stats.sh
+	tests/vir-stats.sh 2
+
+check-vir-baseline: $(OUT)/$(STAGE0) tests/vir-baseline.sh tests/benchmark-time.sh \
+	tests/vir-baseline-workloads.txt
+	VIR_BASELINE_RUNS=1 VIR_BASELINE_NO_TIMING=1 tests/vir-baseline.sh
+
+check-vir-ssa-baseline-stage0: $(OUT)/$(STAGE0) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
+	tests/vir-ssa-baseline-workloads.txt tests/vir-frontend-large-cfg.c
+	VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-baseline-workloads.txt tests/vir-ssa-baseline.sh 0
+
+check-vir-ssa-baseline-stage2: $(OUT)/$(STAGE2) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
+	tests/vir-ssa-baseline-workloads.txt tests/vir-frontend-large-cfg.c
+	TARGET_EXEC="$(TARGET_EXEC)" VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-baseline-workloads.txt tests/vir-ssa-baseline.sh 2
+
+VIR_SSA_BASELINE_NORMALIZE = sed -e 's/stage=[02] /stage=both /' -e 's/ output_bytes=[0-9][0-9]*//'
+
+# The recipe runs both stages itself to compare them, so depending on the
+# per-stage targets would run every workload twice.
+check-vir-ssa-baseline: $(OUT)/$(STAGE0) $(OUT)/$(STAGE2) tests/vir-ssa-baseline.sh \
+	tests/benchmark-time.sh tests/vir-ssa-baseline-workloads.txt tests/vir-frontend-large-cfg.c
+	@set -e; stage0=$$(mktemp); stage2=$$(mktemp); trap 'rm -f "$$stage0" "$$stage2" "$$stage0.normalized" "$$stage2.normalized"' EXIT; \
+	VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-baseline-workloads.txt tests/vir-ssa-baseline.sh 0 > "$$stage0"; \
+	TARGET_EXEC="$(TARGET_EXEC)" VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-baseline-workloads.txt tests/vir-ssa-baseline.sh 2 > "$$stage2"; \
+	$(VIR_SSA_BASELINE_NORMALIZE) "$$stage0" > "$$stage0.normalized"; \
+	$(VIR_SSA_BASELINE_NORMALIZE) "$$stage2" > "$$stage2.normalized"; \
+	cmp -s "$$stage0.normalized" "$$stage2.normalized"
+
+check-vir-ssa-selfhost-stage0: $(OUT)/$(STAGE0) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
+	tests/vir-ssa-selfhost-workloads.txt
+	VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-selfhost-workloads.txt tests/vir-ssa-baseline.sh 0
+
+check-vir-ssa-selfhost-stage2: $(OUT)/$(STAGE2) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
+	tests/vir-ssa-selfhost-workloads.txt
+	TARGET_EXEC="$(TARGET_EXEC)" VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-selfhost-workloads.txt tests/vir-ssa-baseline.sh 2
+
+check-vir-ssa-selfhost: $(OUT)/$(STAGE0) $(OUT)/$(STAGE2) tests/vir-ssa-baseline.sh \
+	tests/benchmark-time.sh tests/vir-ssa-selfhost-workloads.txt
+	@set -e; stage0=$$(mktemp); stage2=$$(mktemp); trap 'rm -f "$$stage0" "$$stage2" "$$stage0.normalized" "$$stage2.normalized"' EXIT; \
+	VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-selfhost-workloads.txt tests/vir-ssa-baseline.sh 0 > "$$stage0"; \
+	TARGET_EXEC="$(TARGET_EXEC)" VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-selfhost-workloads.txt tests/vir-ssa-baseline.sh 2 > "$$stage2"; \
+	$(VIR_SSA_BASELINE_NORMALIZE) "$$stage0" > "$$stage0.normalized"; \
+	$(VIR_SSA_BASELINE_NORMALIZE) "$$stage2" > "$$stage2.normalized"; \
+	cmp -s "$$stage0.normalized" "$$stage2.normalized"
+
 # Both prerequisites are order-only, and both exist because "make -j" would
 # otherwise let a compile start beside the thing it reads. Selecting a target
 # replaces src/codegen.c with "ln -sf", which unlinks before it relinks, so a
 # compile racing "config" can find nothing there. And src/main.c includes
 # out/libc.inc, which is generated: listing it only on the stage0 link left
 # the two free to run in either order on a tree that has never been built.
+$(OBJS) $(SAN_OBJS): $(OUT)/libc.inc
+
 $(OUT)/%.o: %.c | config $(OUT)/libc.inc
 	$(VECHO) "  CC\t$@\n"
 	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
@@ -330,3 +567,9 @@ distclean: clean
 	-$(RM) DOM.dot CFG.dot
 
 -include $(deps)
+
+# Manual native hardware measurement; excluded from correctness checks.
+.PHONY: benchmark-native-throughput
+benchmark-native-throughput: $(OUT)/$(STAGE0)
+	$(Q)python3 tests/native-throughput.py --shecc $(OUT)/$(STAGE0) \
+		--output $(OUT)/native-throughput $(NATIVE_BENCH_FLAGS)

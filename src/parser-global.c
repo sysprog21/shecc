@@ -106,6 +106,20 @@ static bool identifier_list_param_matches(const var_t *defined,
     return compatible_function_param_decl(defined, declared);
 }
 
+static void error_named_declaration(const char *message, const var_t *var)
+{
+    char diagnostic[MAX_LINE_LEN];
+
+    snprintf(diagnostic, sizeof(diagnostic), "%s '%s'", message,
+             file_scope_var_name(var));
+    error_at(diagnostic, next_token_loc());
+}
+
+static void error_conflicting_function_declaration(const var_t *var)
+{
+    error_named_declaration("conflicting types for function declaration", var);
+}
+
 /* A declarator's base type is already known when this runs. Keeping function
  * completion independent of how that type was spelled lets enum, record, and
  * ordinary scalar declarations share linkage and redeclaration checks.
@@ -121,11 +135,29 @@ bool read_global_function_declarator(block_t *block,
      * redeclaration. Without this check the back end emitted colliding labels
      * and the resulting program could jump through object storage.
      */
-    var_t *object = find_global_var(var->var_name);
+    const char *source_name = file_scope_var_name(var);
+    var_t *unit_decl = find_tu_declaration(source_name);
+    var_t *object =
+        unit_decl && !find_func(unit_decl->var_name)
+            ? unit_decl
+            : (!is_static && !unit_decl ? find_global_var(source_name) : NULL);
 
+    if (find_block_ordinary(CURRENT_TU_SCOPE, var->var_name,
+                            ORDINARY_CONSTANT | ORDINARY_TYPEDEF, NULL))
+        error_at("function declaration conflicts with an ordinary identifier",
+                 next_token_loc());
     if (object && object != var)
         error_at("function declaration conflicts with global object",
                  next_token_loc());
+
+    if (unit_decl && find_func(unit_decl->var_name) && unit_decl->is_static) {
+        var->source_name = unit_decl->source_name;
+        var->var_name = unit_decl->var_name;
+    } else if (is_static && !unit_decl) {
+        assign_internal_linkage_name(var, source_name);
+    }
+
+    add_tu_global_var(var);
 
     func_t *func = find_func(var->var_name);
     func_t func_tmp;
@@ -169,7 +201,6 @@ bool read_global_function_declarator(block_t *block,
                  next_token_loc());
     func->is_static = check_decl && func_tmp.is_static ? true : is_static;
     func->is_inline = var->is_inline;
-    var_reset_subscripts(&func->return_def);
     block->locals.size--;
 
     /* Parse this declarator independently of any earlier declaration. A later
@@ -203,19 +234,16 @@ bool read_global_function_declarator(block_t *block,
             func->return_def.ptr_level != func_tmp.return_def.ptr_level ||
             func->return_def.is_const_qualified !=
                 func_tmp.return_def.is_const_qualified)
-            error_at("conflicting types for function declaration",
-                     next_token_loc());
+            error_conflicting_function_declaration(var);
         if (func->has_prototype && func_tmp.has_prototype) {
             if (func->num_params != func_tmp.num_params ||
                 func->va_args != func_tmp.va_args)
-                error_at("conflicting types for function declaration",
-                         next_token_loc());
+                error_conflicting_function_declaration(var);
             for (int i = 0; i < func->num_params; i++) {
                 const var_t *now = &func->param_defs[i];
                 const var_t *before = &func_tmp.param_defs[i];
                 if (!compatible_function_param_decl(now, before))
-                    error_at("conflicting types for function declaration",
-                             next_token_loc());
+                    error_conflicting_function_declaration(var);
             }
         } else if (func->has_prototype && !func_tmp.has_prototype &&
                    func_tmp.num_params) {
@@ -223,13 +251,11 @@ bool read_global_function_declarator(block_t *block,
              * promoted parameter types.
              */
             if (func->num_params != func_tmp.num_params || func->va_args)
-                error_at("conflicting types for function declaration",
-                         next_token_loc());
+                error_conflicting_function_declaration(var);
             for (int i = 0; i < func->num_params; i++)
                 if (!identifier_list_param_matches(&func_tmp.param_defs[i],
                                                    &func->param_defs[i]))
-                    error_at("conflicting types for function declaration",
-                             next_token_loc());
+                    error_conflicting_function_declaration(var);
         } else if (strict_c99 && func->has_prototype &&
                    !func_tmp.has_prototype) {
             /* A variadic prototype and parameters promoted from char, short, or
@@ -238,26 +264,22 @@ bool read_global_function_declarator(block_t *block,
              * mode, where existing old-style sources rely on it.
              */
             if (func->va_args)
-                error_at("conflicting types for function declaration",
-                         next_token_loc());
+                error_conflicting_function_declaration(var);
             for (int i = 0; i < func->num_params; i++)
                 if (parameter_changes_under_default_promotion(
                         &func->param_defs[i]))
-                    error_at("conflicting types for function declaration",
-                             next_token_loc());
+                    error_conflicting_function_declaration(var);
         } else if (!func->has_prototype && func->num_params &&
                    func_tmp.has_prototype) {
             /* An old-style definition of a function declared with a prototype
              * keeps its own parameter names and that prototype.
              */
             if (func->num_params != func_tmp.num_params || func_tmp.va_args)
-                error_at("conflicting types for function declaration",
-                         next_token_loc());
+                error_conflicting_function_declaration(var);
             for (int i = 0; i < func->num_params; i++)
                 if (!identifier_list_param_matches(&func->param_defs[i],
                                                    &func_tmp.param_defs[i]))
-                    error_at("conflicting types for function declaration",
-                             next_token_loc());
+                    error_conflicting_function_declaration(var);
             func->has_prototype = true;
         } else if (!func->has_prototype && func_tmp.has_prototype) {
             /* An empty-list definition has no named parameters. It cannot
@@ -267,8 +289,7 @@ bool read_global_function_declarator(block_t *block,
              */
             if (lex_peek(T_open_curly, NULL) &&
                 (func_tmp.num_params || func_tmp.va_args))
-                error_at("conflicting types for function declaration",
-                         next_token_loc());
+                error_conflicting_function_declaration(var);
 
             /* A prior prototype remains visible after a compatible `f()`
              * declaration and still constrains subsequent calls.
@@ -296,7 +317,7 @@ bool read_global_function_declarator(block_t *block,
             error_at("function definition cannot take its type from a typedef",
                      next_token_loc());
         if (check_decl && func_tmp.bbs)
-            error_at("redefinition of function", next_token_loc());
+            error_named_declaration("redefinition of function", var);
         if (is_incomplete_record_object(&func->return_def))
             error_at("function definition cannot return incomplete record type",
                      next_token_loc());
@@ -334,18 +355,34 @@ var_t *resolve_global_declarator(block_t *block,
                                  bool is_static,
                                  bool *is_redeclaration)
 {
+    const char *source_name = file_scope_var_name(var);
+    var_t *unit_decl = find_tu_declaration(source_name);
     var_t *previous = NULL;
 
     *is_redeclaration = false;
+
+    if (find_block_ordinary(CURRENT_TU_SCOPE, var->var_name,
+                            ORDINARY_CONSTANT | ORDINARY_TYPEDEF, NULL))
+        error_at(
+            "global object declaration conflicts with an ordinary identifier",
+            next_token_loc());
 
     /* The ordinary identifier namespace is shared with functions. This is
      * intentionally before object redeclaration handling: a function is not a
      * compatible tentative definition of an object, even when both happen to
      * have the same declared scalar type.
      */
-    if (find_func(var->var_name))
+    if ((unit_decl && find_func(unit_decl->var_name)) ||
+        (!is_static && !unit_decl && find_func(var->var_name)))
         error_at("global object declaration conflicts with function",
                  next_token_loc());
+
+    if (unit_decl && unit_decl->is_static) {
+        var->source_name = unit_decl->source_name;
+        var->var_name = unit_decl->var_name;
+    } else if (is_static && !unit_decl) {
+        assign_internal_linkage_name(var, source_name);
+    }
 
     for (int i = 0; i + 1 < block->locals.size; i++) {
         var_t *candidate = block->locals.elements[i];
@@ -354,8 +391,10 @@ var_t *resolve_global_declarator(block_t *block,
             break;
         }
     }
-    if (!previous)
+    if (!previous) {
+        add_tu_global_var(var);
         return var;
+    }
 
     *is_redeclaration = true;
 
@@ -386,12 +425,13 @@ var_t *resolve_global_declarator(block_t *block,
         previous->pointee_array_dim4 != var->pointee_array_dim4 ||
         previous->is_const_qualified != var->is_const_qualified ||
         previous->is_volatile != var->is_volatile)
-        error_at("conflicting types for global declaration", next_token_loc());
+        error_named_declaration("conflicting types for global declaration",
+                                var);
     if (!previous->is_static && is_static)
         error_at("static declaration follows non-static declaration",
                  next_token_loc());
     if (lex_peek(T_assign, NULL) && previous->has_initializer)
-        error_at("redefinition of global variable", next_token_loc());
+        error_named_declaration("redefinition of global variable", var);
 
     /* A later bound completes the shared object's type. */
     if (previous->has_unsized_array && !var->has_unsized_array) {
@@ -406,7 +446,51 @@ var_t *resolve_global_declarator(block_t *block,
     if (operand_stack_idx && operand_stack[operand_stack_idx - 1] == var)
         operand_stack[operand_stack_idx - 1] = previous;
     block->locals.size--;
+    add_tu_global_var(previous);
     return previous;
+}
+
+static var_t *prepare_global_object_definition(block_t *block,
+                                               var_t *var,
+                                               bool is_static)
+{
+    bool is_redeclaration;
+    bool is_definition = !var->is_extern;
+
+    if (is_definition && is_incomplete_record_object(var))
+        error_at("Incomplete struct/union type cannot define an object",
+                 cur_token_loc());
+    var = resolve_global_declarator(block, var, is_static, &is_redeclaration);
+    if (is_definition && (!is_redeclaration || var->is_extern)) {
+        var->is_extern = false;
+        add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
+    }
+    return var;
+}
+
+static var_t *read_global_declarator_start(block_t *block,
+                                           type_t *decl_type,
+                                           bool is_const,
+                                           bool is_static,
+                                           bool is_volatile,
+                                           bool is_extern,
+                                           bool is_inline,
+                                           bool full)
+{
+    var_t *var =
+        full ? require_var(block) : require_typed_var(block, decl_type);
+
+    var->is_global = true;
+    var->is_static = is_static;
+    var->is_inline = is_inline;
+    var->is_const_qualified = is_const;
+    var->is_volatile = is_volatile;
+    if (full)
+        read_full_var_decl(var, false, false, false);
+    else
+        read_inner_var_decl(var, false, false, false);
+    var->is_extern = is_extern && !lex_peek(T_assign, NULL);
+    return var;
 }
 
 /* Read one declarator after the first in a global declaration. Each shares the
@@ -420,33 +504,18 @@ bool read_global_declarator(block_t *block,
                             bool is_extern,
                             bool allow_definition)
 {
-    bool is_redeclaration;
-    var_t *nv = require_typed_var(block, decl_type);
-    nv->is_global = true;
-    nv->is_static = is_static;
-    nv->is_const_qualified = is_const;
-    nv->is_volatile = is_volatile;
-    read_inner_var_decl(nv, false, false, false);
-    nv->is_extern = is_extern && !lex_peek(T_assign, NULL);
+    var_t *nv =
+        read_global_declarator_start(block, decl_type, is_const, is_static,
+                                     is_volatile, is_extern, false, false);
     if (lex_peek(T_open_bracket, NULL) ||
         (nv->is_func && nv->type->is_direct_function_type))
         return read_global_function_declarator(block, nv, is_static,
                                                allow_definition);
-    bool is_definition = !nv->is_extern;
-    if (is_definition && is_incomplete_record_object(nv))
-        error_at("Incomplete struct/union type cannot define an object",
-                 cur_token_loc());
-    nv = resolve_global_declarator(block, nv, is_static, &is_redeclaration);
-    if (is_definition && (!is_redeclaration || nv->is_extern)) {
-        nv->is_extern = false;
-        add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, nv, NULL, NULL, 0, NULL);
-    }
+    nv = prepare_global_object_definition(block, nv, is_static);
     read_global_init_var(nv, block);
     discard_global_declarator_operand(nv);
     return false;
 }
-
-void consume_global_compound_literal(void);
 
 /* Lower a scalar record initializer into the global initializer block. Global
  * array elements already use parse_struct_field_init(); scalar records need the
@@ -483,7 +552,7 @@ void parse_global_compound_record_init(var_t *var, block_t *block)
 
     compound_type = record_kind
                         ? find_record_tag(type_name, var->scope, record_kind)
-                        : find_type(type_name, 1);
+                        : find_visible_type(type_name, var->scope);
     target_type = var->type;
     if (target_type->base_type == TYPE_typedef && target_type->base_struct)
         target_type = target_type->base_struct;
@@ -540,6 +609,8 @@ void parse_global_compound_array_init(var_t *var, block_t *block)
     type_t *element_type;
     var_t *array;
     int element_ptr_level = 0;
+    paren_type_name_t shape = {0};
+    bool parenthesized_array;
 
     /* The element type may be qualified or spelled with several keywords, as in
      * `(const unsigned char[])`.
@@ -549,148 +620,62 @@ void parse_global_compound_array_init(var_t *var, block_t *block)
         read_type_name_specifiers(var->scope ? var->scope : GLOBAL_BLOCK);
     while (lex_accept(T_asterisk)) {
         element_ptr_level++;
-        while (lex_accept(T_const) || lex_accept(T_volatile) ||
-               lex_accept(T_restrict))
-            ;
+        skip_type_qualifiers();
     }
 
-    /* `(int (*[])[2]){...}` is an array whose elements are pointers to rows.
-     * The inner suffix supplies the backing array bound; the suffixes after `)`
-     * describe each pointer element's pointee.
-     */
-    if (lex_accept(T_open_bracket)) {
-        int pointee_dims = 0;
-
-        if (element_ptr_level || !lex_peek(T_asterisk, NULL))
-            error_at("Array compound literal needs a pointer declarator",
-                     cur_token_loc());
-        do {
-            lex_expect(T_asterisk);
-            element_ptr_level++;
-            while (lex_accept(T_const) || lex_accept(T_volatile) ||
-                   lex_accept(T_restrict))
-                ;
-        } while (lex_peek(T_asterisk, NULL));
-        lex_expect(T_open_square);
-
-        array = require_typed_var(GLOBAL_BLOCK, element_type);
-        array->var_name = gen_name();
-        array->is_global = true;
-        array->ptr_level = element_ptr_level;
-        if (!lex_peek(T_close_square, NULL)) {
-            array->array_size = read_const_expr(GLOBAL_BLOCK);
-            if (array->array_size <= 0)
-                error_at("Array compound literal needs a positive bound",
-                         cur_token_loc());
-        } else {
-            array->has_unsized_array = true;
-        }
-        lex_expect(T_close_square);
-        lex_expect(T_close_bracket);
-        while (lex_accept(T_open_square)) {
-            int bound = read_const_expr(GLOBAL_BLOCK);
-
-            if (pointee_dims >= 4)
-                error_at("Array declarators support at most four dimensions",
-                         cur_token_loc());
-            if (bound <= 0)
-                error_at("Array size must be positive", cur_token_loc());
-            if (pointee_dims == 0)
-                array->pointee_array_size = bound;
-            else {
-                if (pointee_dims == 1)
-                    array->pointee_array_dim2 = bound;
-                else if (pointee_dims == 2)
-                    array->pointee_array_dim3 = bound;
-                else
-                    array->pointee_array_dim4 = bound;
-                array->pointee_array_size *= bound;
-            }
-            lex_expect(T_close_square);
-            pointee_dims++;
-        }
+    parenthesized_array = read_compound_array_shape(
+                              GLOBAL_BLOCK, element_ptr_level, true, &shape) &&
+                          shape.parenthesized_array;
+    array = name_var(require_typed_var(GLOBAL_BLOCK, element_type));
+    array->is_global = true;
+    array->ptr_level =
+        parenthesized_array ? shape.array_element_ptr_level : element_ptr_level;
+    array->array_size = shape.array_size;
+    array->array_dim2 = shape.array_dim2;
+    array->array_dim3 = shape.array_dim3;
+    array->array_dim4 = shape.array_dim4;
+    array->has_unsized_array = shape.array_outer_unsized;
+    if (parenthesized_array) {
+        array->pointee_array_size = shape.pointee_array_size;
+        array->pointee_array_dim2 = shape.pointee_array_dim2;
+        array->pointee_array_dim3 = shape.pointee_array_dim3;
+        array->pointee_array_dim4 = shape.pointee_array_dim4;
         lex_expect(T_close_bracket);
 
         if (!element_type || element_type != var->type ||
-            var->ptr_level != element_ptr_level + 1 ||
+            var->ptr_level != array->ptr_level + 1 ||
             var->pointee_array_size != array->pointee_array_size ||
             var->pointee_array_dim2 != array->pointee_array_dim2 ||
             var->pointee_array_dim3 != array->pointee_array_dim3 ||
             var->pointee_array_dim4 != array->pointee_array_dim4)
             error_at("Incompatible array compound literal", cur_token_loc());
-        if (!lex_peek(T_open_curly, NULL))
-            error_at("Array compound literal needs an initializer",
-                     next_token_loc());
-        add_insn(GLOBAL_BLOCK, GLOBAL_FUNC->bbs, OP_allocat, array, NULL, NULL,
-                 0, NULL);
-        parse_array_init(array, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
-        add_insn(block, GLOBAL_FUNC->bbs, OP_assign, var, array, NULL, 0, NULL);
-        return;
-    }
-    array = require_typed_var(GLOBAL_BLOCK, element_type);
-    array->var_name = gen_name();
-    array->is_global = true;
-    array->ptr_level = element_ptr_level;
-    for (int dim = 0; lex_accept(T_open_square); dim++) {
-        int bound;
+    } else {
+        lex_expect(T_close_bracket);
 
-        if (dim >= 4)
-            error_at("Array compound literal supports at most four dimensions",
-                     cur_token_loc());
-        if (lex_peek(T_close_square, NULL)) {
-            if (dim)
-                error_at("Only the outer array bound may be inferred",
-                         cur_token_loc());
-            array->has_unsized_array = true;
-            lex_expect(T_close_square);
-            continue;
+        /* The backing array has an outer compound-literal bound and the typedef
+         * element's inner row shape. parse_array_init() keeps that shape on
+         * var_t rather than type_t.
+         */
+        if (element_type && element_type->array_size) {
+            int trailing = fixed_array_trailing_count(element_type->array_dim2,
+                                                      element_type->array_dim3,
+                                                      element_type->array_dim4);
+            if (element_type->array_dim4)
+                error_at(
+                    "Array compound literal supports at most four dimensions",
+                    cur_token_loc());
+            array->array_dim2 = element_type->array_size / trailing;
+            array->array_dim3 = element_type->array_dim2;
+            array->array_dim4 = element_type->array_dim3;
+            if (array->array_size)
+                array->array_size *= element_type->array_size;
         }
-        bound = read_const_expr(GLOBAL_BLOCK);
-        if (bound <= 0)
-            error_at("Array compound literal needs a positive bound",
-                     cur_token_loc());
-        if (!dim)
-            array->array_size = bound;
-        else {
-            if (dim == 1)
-                array->array_dim2 = bound;
-            else if (dim == 2)
-                array->array_dim3 = bound;
-            else
-                array->array_dim4 = bound;
-            array->array_size *= bound;
-        }
-        lex_expect(T_close_square);
+
+        if (!element_type || element_type != var->type ||
+            element_ptr_level + 1 != var->ptr_level ||
+            var->pointee_array_size != array->array_dim2)
+            error_at("Incompatible array compound literal", cur_token_loc());
     }
-    lex_expect(T_close_bracket);
-
-    /* The backing array has an outer compound-literal bound and the typedef
-     * element's inner row shape. parse_array_init() keeps that shape on var_t
-     * rather than type_t.
-     */
-    if (element_type && element_type->array_size) {
-        int trailing = 1;
-
-        if (element_type->array_dim2)
-            trailing *= element_type->array_dim2;
-        if (element_type->array_dim3)
-            trailing *= element_type->array_dim3;
-        if (element_type->array_dim4)
-            trailing *= element_type->array_dim4;
-        if (element_type->array_dim4)
-            error_at("Array compound literal supports at most four dimensions",
-                     cur_token_loc());
-        array->array_dim2 = element_type->array_size / trailing;
-        array->array_dim3 = element_type->array_dim2;
-        array->array_dim4 = element_type->array_dim3;
-        if (array->array_size)
-            array->array_size *= element_type->array_size;
-    }
-
-    if (!element_type || element_type != var->type ||
-        element_ptr_level + 1 != var->ptr_level ||
-        var->pointee_array_size != array->array_dim2)
-        error_at("Incompatible array compound literal", cur_token_loc());
     if (!lex_peek(T_open_curly, NULL))
         error_at("Array compound literal needs an initializer",
                  next_token_loc());
@@ -699,64 +684,6 @@ void parse_global_compound_array_init(var_t *var, block_t *block)
              NULL);
     parse_array_init(array, GLOBAL_BLOCK, &GLOBAL_FUNC->bbs);
     add_insn(block, GLOBAL_FUNC->bbs, OP_assign, var, array, NULL, 0, NULL);
-}
-
-/* Struct and union objects accept brace initializers, unlike scalar globals.
- * Keep their continuation declarators on the same path as the first one so that
- * linkage, qualifiers, and declarator-specific modifiers cannot diverge.
- */
-bool read_global_record_declarator(block_t *block,
-                                   type_t *decl_type,
-                                   bool is_const,
-                                   bool is_static,
-                                   bool is_volatile,
-                                   bool is_extern,
-                                   bool allow_definition)
-{
-    bool is_redeclaration;
-    var_t *var = require_typed_var(block, decl_type);
-    var->is_global = true;
-    var->is_static = is_static;
-    var->is_const_qualified = is_const;
-    var->is_volatile = is_volatile;
-    read_inner_var_decl(var, false, false, false);
-    var->is_extern = is_extern && !lex_peek(T_assign, NULL);
-    if (lex_peek(T_open_bracket, NULL) ||
-        (var->is_func && var->type->is_direct_function_type))
-        return read_global_function_declarator(block, var, is_static,
-                                               allow_definition);
-    bool is_definition = !var->is_extern;
-    if (is_definition && is_incomplete_record_object(var))
-        error_at("Incomplete struct/union type cannot define an object",
-                 cur_token_loc());
-    var = resolve_global_declarator(block, var, is_static, &is_redeclaration);
-    if (is_definition && (!is_redeclaration || var->is_extern)) {
-        var->is_extern = false;
-        add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0, NULL);
-    }
-
-    if (!lex_accept(T_assign)) {
-        discard_global_declarator_operand(var);
-        return false;
-    }
-
-    var->has_initializer = true;
-
-    if (lex_peek(T_open_curly, NULL) &&
-        (var->array_size > 0 || var->has_unsized_array || var->ptr_level > 0)) {
-        parse_array_init(var, block, &GLOBAL_FUNC->bbs);
-    } else if (global_compound_literal_starts_here() &&
-               (var->ptr_level || var->type->ptr_level)) {
-        parse_global_compound_array_init(var, block);
-    } else if (global_compound_literal_starts_here()) {
-        parse_global_compound_record_init(var, block);
-    } else if (lex_peek(T_open_curly, NULL)) {
-        parse_global_record_init(var, block);
-    } else {
-        read_global_assignment_var(var);
-    }
-    discard_global_declarator_operand(var);
-    return false;
 }
 
 /* Read the declarators of a file-scope declaration through its terminating
@@ -771,22 +698,14 @@ void read_global_declarator_list(block_t *block,
                                  bool is_const,
                                  bool is_static,
                                  bool is_volatile,
-                                 bool is_extern,
-                                 bool is_record)
+                                 bool is_extern)
 {
     bool first = true;
 
     read_type_qualifiers(&is_const, &is_volatile, false);
     do {
-        bool ended =
-            is_record
-                ? read_global_record_declarator(block, decl_type, is_const,
-                                                is_static, is_volatile,
-                                                is_extern, first)
-                : read_global_declarator(block, decl_type, is_const, is_static,
-                                         is_volatile, is_extern, first);
-
-        if (ended)
+        if (read_global_declarator(block, decl_type, is_const, is_static,
+                                   is_volatile, is_extern, first))
             return;
         first = false;
     } while (lex_accept(T_comma));
@@ -800,17 +719,9 @@ void read_global_decl(block_t *block,
                       bool is_inline,
                       bool is_volatile)
 {
-    bool is_redeclaration;
-    var_t *var = require_var(block);
-    var->is_global = true;
-    var->is_static = is_static;
-    var->is_inline = is_inline;
-    var->is_const_qualified = is_const;
-    var->is_volatile = is_volatile;
-
-    /* new function, or variables under parent */
-    read_full_var_decl(var, false, false, false);
-    var->is_extern = is_extern && !lex_peek(T_assign, NULL);
+    var_t *var =
+        read_global_declarator_start(block, NULL, is_const, is_static,
+                                     is_volatile, is_extern, is_inline, true);
 
     /* `unary_t f;` with a function typedef declares the function f. */
     if (lex_peek(T_open_bracket, NULL) ||
@@ -818,20 +729,10 @@ void read_global_decl(block_t *block,
         if (read_global_function_declarator(block, var, is_static, true))
             return;
     } else {
-        bool is_definition = !var->is_extern;
         if (var->is_inline)
             error_at("inline specifier requires a function declarator",
                      next_token_loc());
-        if (is_definition && is_incomplete_record_object(var))
-            error_at("Incomplete struct/union type cannot define an object",
-                     cur_token_loc());
-        var =
-            resolve_global_declarator(block, var, is_static, &is_redeclaration);
-        if (is_definition && (!is_redeclaration || var->is_extern)) {
-            var->is_extern = false;
-            add_insn(block, GLOBAL_FUNC->bbs, OP_allocat, var, NULL, NULL, 0,
-                     NULL);
-        }
+        var = prepare_global_object_definition(block, var, is_static);
 
         /* is a variable */
         if (lex_peek(T_assign, NULL)) {
@@ -856,56 +757,9 @@ void read_global_decl(block_t *block,
     lex_expect(T_semicolon);
 }
 
-void consume_global_compound_literal(void)
-{
-    lex_expect(T_open_curly);
-
-    if (!lex_peek(T_close_curly, NULL)) {
-        for (;;) {
-            /* Just consume constant values for now */
-            if (lex_peek(T_numeric, NULL)) {
-                lex_accept(T_numeric);
-            } else if (lex_peek(T_minus, NULL)) {
-                lex_accept(T_minus);
-                lex_accept(T_numeric);
-            } else if (lex_peek(T_string, NULL)) {
-                lex_accept(T_string);
-            } else if (lex_peek(T_char, NULL) || lex_peek(T_wchar, NULL)) {
-                lex_next();
-            } else {
-                error_at(
-                    "Global struct initialization requires constant values",
-                    next_token_loc());
-            }
-
-            if (!lex_accept(T_comma))
-                break;
-            if (lex_peek(T_close_curly, NULL))
-                break;
-        }
-    }
-    lex_expect(T_close_curly);
-}
-
 void initialize_struct_field(var_t *nv, var_t *v, int offset)
 {
-    nv->type = v->type;
-    nv->var_name = "";
-    nv->ptr_level = 0;
-    nv->is_func = false;
-    nv->is_global = false;
-    nv->is_const_qualified = false;
-    nv->array_size = 0;
-    nv->offset = offset;
-    nv->is_bitfield = false;
-    nv->bit_width = 0;
-    nv->bit_offset = 0;
-    nv->bit_storage_size = 0;
-    nv->init_val = 0;
-    nv->base = NULL;
-    nv->subscript = 0;
-    var_reset_subscripts(nv);
-    nv->is_compound_literal = false;
+    *nv = (var_t) {.type = v->type, .var_name = "", .offset = offset};
 }
 
 /* The scalar or typedef-name specifier of a file-scope typedef, and any
@@ -923,7 +777,7 @@ static const type_t *read_global_typedef_base(bool *typedef_const,
 
     if (!base) {
         lex_ident(T_identifier, base_type);
-        base = find_type(base_type, true);
+        base = find_visible_type(base_type, CURRENT_TU_SCOPE);
     }
     if (!base)
         error_at("Unable to find base type", cur_token_loc());
@@ -939,288 +793,84 @@ static void read_global_typedef_declarator(block_t *block,
                                            bool typedef_volatile,
                                            const type_t *base)
 {
-    type_t *type = add_type();
+    var_t decl = {0};
+    init_type_name_decl(&decl, (type_t *) base, typedef_const,
+                        typedef_volatile);
+    decl.scope = block;
+    decl.is_const_qualified |= base->is_const_qualified;
+    decl.pointer_volatile_mask |= base->pointer_volatile_mask;
+    decl.pointee_func_signature = base->pointee_func_signature;
+    decl.is_const_pointer |= typedef_const && base->pointee_func_signature;
+    bool saved = parsing_sizeof_function_signature;
+    parsing_sizeof_function_signature = true;
+    bool saved_typedef = parsing_block_typedef_declarator;
+    token_t *head = cur_token->next;
+    while (head->kind == T_asterisk || head->kind == T_const ||
+           head->kind == T_volatile || head->kind == T_restrict)
+        head = head->next;
+    parsing_block_typedef_declarator =
+        head->kind != T_open_bracket &&
+        (base->array_size || (!base->ptr_level && !base->func_signature &&
+                              !is_record_type(base) && !base->is_floating));
+    if (base->base_type == TYPE_void && !base->ptr_level &&
+        !base->func_signature && !base->pointee_func_signature &&
+        lex_peek(T_identifier, NULL) &&
+        (head->next->kind == T_comma || head->next->kind == T_semicolon)) {
+        char name[MAX_ID_LEN];
+        lex_ident(T_identifier, name);
+        decl.var_name = intern_string(name);
+    } else
+        read_inner_var_decl(&decl, false, false, false);
+    parsing_block_typedef_declarator = saved_typedef;
+    parsing_sizeof_function_signature = saved;
+    if (decl.is_direct_function_declarator &&
+        !decl.parenthesized_function_pointer_level &&
+        function_signature_has_floating(decl.func_signature))
+        error_at("Floating point types are not yet supported", cur_token_loc());
+    if (decl.is_direct_function_declarator && base->array_size)
+        error_at("Unexpected token", cur_token_loc());
+    if (decl.has_direct_pointee_array_declarator && decl.type->func_signature &&
+        !decl.type->is_direct_function_type)
+        base = decl.type;
+    if (!decl.is_func &&
+        (head->kind == T_open_bracket ||
+         decl.parenthesized_function_pointer_level ||
+         decl.has_direct_pointee_array_declarator) &&
+        !((!decl.array_size && !decl.has_unsized_array &&
+           !decl.pointee_array_size && !base->func_signature &&
+           !base->array_size) ||
+          (decl.has_direct_pointee_array_declarator && !decl.array_size &&
+           !base->array_size &&
+           (!base->func_signature ||
+            (!base->is_direct_function_type && !base->ptr_level)) &&
+           !base->pointee_func_signature &&
+           effective_pointer_depth(&decl) ==
+               decl.pointee_array_element_ptr_level + base->ptr_level + 1 &&
+           decl.pointee_array_element_ptr_level + base->ptr_level <= 1)))
+        error_at("Typedef parenthesized declarator must be a function pointer",
+                 cur_token_loc());
+    if (base->is_direct_function_type && decl.array_size && decl.is_func &&
+        !decl.parenthesized_function_pointer_level) {
+        decl.type = (type_t *) base;
+        decl.ptr_level = 1;
+        decl.is_func = false;
+    }
+    if (decl.has_unsized_array)
+        error_at("Typedef array needs a positive bound", cur_token_loc());
+    type_t *alias = typedef_alias_from_declarator(&decl, typedef_const,
+                                                  typedef_volatile, true);
+    strncpy(alias->type_name, decl.var_name, MAX_TYPE_LEN - 1);
+    alias->type_name[MAX_TYPE_LEN - 1] = '\0';
 
-    type->base_type = base->base_type;
-    type->size = base->size;
-
-    /* A typedef of a record typedef remains a record type. Sharing its
-     * immutable member table preserves ordinary `alias.member` and
-     * `pointer_alias->member` lookup instead of turning the alias into a scalar
-     * descriptor with no fields.
+    /* A repeated typedef must name a compatible type; the first binding is the
+     * one later uses resolve to, so a conflicting one would be ignored.
      */
-    type->fields = base->fields;
-    type->num_fields = base->num_fields;
-    type->base_struct = base->base_struct;
-    if (base->base_type == TYPE_typedef && base->num_fields &&
-        !type->base_struct)
-        type->base_struct = (type_t *) base;
-    type->alignment = base->alignment;
-    type->is_union = base->is_union;
-    type->has_flexible_array_member = base->has_flexible_array_member;
-    type->ptr_level = base->ptr_level;
-    type->pointer_const_mask = base->pointer_const_mask;
-    type->is_const_qualified = typedef_const || base->is_const_qualified;
-    type->is_volatile_qualified =
-        typedef_volatile || base->is_volatile_qualified;
-
-    /* `const ptr_t` qualifies the pointer that the base typedef hides, not its
-     * pointee.
-     */
-    if (typedef_const && base->ptr_level && base->ptr_level <= 32 &&
-        !base->func_signature && !base->pointee_func_signature) {
-        type->is_const_qualified = base->is_const_qualified;
-        type->pointer_const_mask |= 1U << (base->ptr_level - 1);
-    }
-    type->is_unsigned = base->is_unsigned;
-    type->is_floating = base->is_floating;
-    type->is_signed_char = base->is_signed_char;
-    type->is_bool = base->is_bool;
-    type->array_size = base->array_size;
-    type->array_dim2 = base->array_dim2;
-    type->array_dim3 = base->array_dim3;
-    type->array_dim4 = base->array_dim4;
-    type->array_element_ptr_level = base->array_element_ptr_level;
-    type->array_element_type = base->array_element_type;
-    type->func_signature = base->func_signature;
-
-    /* A tag is not a typedef name. As for `typedef struct S alias`, the alias
-     * reaches the record through base_struct, which also sees a later
-     * completion of the tag.
-     */
-    if (base->base_type == TYPE_struct || base->base_type == TYPE_union) {
-        type->base_type = TYPE_typedef;
-        type->base_struct = (type_t *) base;
-        type->is_union = base->base_type == TYPE_union;
-    }
-
-    /* Handle pointer types in typedef: typedef char *string; */
-    unsigned int star_const_mask = 0;
-
-    while (lex_accept(T_asterisk)) {
-        type->ptr_level++;
-        type->size = PTR_SIZE;
-        while (true) {
-            if (lex_accept(T_const)) {
-                if (type->ptr_level <= 32) {
-                    type->pointer_const_mask |= 1U << (type->ptr_level - 1);
-                    star_const_mask |= 1U << (type->ptr_level - 1);
-                }
-            } else if (lex_accept(T_volatile)) {
-                /* As for an object declarator, a volatile pointer marks the
-                 * whole declaration volatile.
-                 */
-                type->is_volatile_qualified = true;
-            } else if (lex_accept(T_restrict)) {
-                ;
-            } else
-                break;
-        }
-    }
-
-    if (type->ptr_level == 1)
-        alias_callback_array_pointer(type, base, star_const_mask);
-
-    /* A parenthesized declarator is the function-pointer form: `typedef int
-     * (*callback_t)(int)`. Parse it through the normal declarator reader so its
-     * prototype has exactly the same shape as an object declaration, then
-     * retain that syntax-only signature on the alias for each later object or
-     * parameter declaration.
-     */
-    if (lex_peek(T_open_bracket, NULL)) {
-        var_t declarator = {0};
-        bool saved_sizeof_signature = parsing_sizeof_function_signature;
-
-        declarator.type = (type_t *) base;
-        declarator.scope = block;
-        declarator.ptr_level = type->ptr_level;
-
-        /* A callback typedef carries only a function signature. Its floating
-         * parameters do not materialize values until a call, which remains
-         * rejected by the ordinary floating gates.
-         */
-        parsing_sizeof_function_signature = true;
-        read_inner_var_decl(&declarator, false, false, false);
-        parsing_sizeof_function_signature = saved_sizeof_signature;
-
-        /* Without a parameter list or an array suffix the parentheses only
-         * group pointers: `typedef int (*int_ptr)` is `typedef int *int_ptr`.
-         */
-        if (!declarator.is_func && !declarator.array_size &&
-            !declarator.has_unsized_array && !declarator.pointee_array_size &&
-            !base->func_signature && !base->array_size) {
-            strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
-            type->type_name[MAX_TYPE_LEN - 1] = '\0';
-            type->ptr_level = declarator.ptr_level;
-            type->size = PTR_SIZE;
-            type->pointer_const_mask |= declarator.pointer_const_mask;
-            if (declarator.is_volatile)
-                type->is_volatile_qualified = true;
-
-            /* `typedef int (**slot_t)(int)` names a callback slot. */
-            type->pointee_func_signature = declarator.pointee_func_signature;
-            return;
-        }
-
-        /* `typedef int (*row_ptr)[2]` points to a whole row. As a block-scope
-         * alias does, keep the pointer-sized descriptor and carry the row
-         * bounds and element separately. The spelled `int (*(*rows_t)[2])(int)`
-         * reads its row against the unnamed callback type, which the declarator
-         * then carries.
-         */
-        if (declarator.type && declarator.type->func_signature &&
-            !declarator.type->is_direct_function_type)
-            base = declarator.type;
-        if (!declarator.is_func &&
-            declarator.has_direct_pointee_array_declarator &&
-            !declarator.array_size && !base->array_size &&
-            (!base->func_signature ||
-             (!base->is_direct_function_type && !base->ptr_level)) &&
-            !base->pointee_func_signature &&
-            declarator.ptr_level ==
-                declarator.pointee_array_element_ptr_level + 1 &&
-            declarator.pointee_array_element_ptr_level <= 1) {
-            strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
-            type->type_name[MAX_TYPE_LEN - 1] = '\0';
-
-            /* A callback typedef base, `fn_t (*rows_t)[2]`, is the row's
-             * element with its prototype and qualifiers; the row pointer itself
-             * is no callback.
-             */
-            if (base->func_signature)
-                alias_callback_row_pointer(type, base, 0);
-
-            /* A pointer typedef base, `ptr_t (*rows_t)[2]`, is spelled out as
-             * `int *(*rows_t)[2]`: the declarator already counts its stars on
-             * the row's element, which then points to the base's pointee.
-             */
-            type->ptr_level = declarator.ptr_level;
-            type->size = PTR_SIZE;
-            type->pointer_const_mask |= declarator.pointer_const_mask;
-            type->pointee_array_size = declarator.pointee_array_size;
-            type->pointee_array_dim2 = declarator.pointee_array_dim2;
-            type->pointee_array_dim3 = declarator.pointee_array_dim3;
-            type->pointee_array_dim4 = declarator.pointee_array_dim4;
-            type->pointee_array_element_ptr_level =
-                declarator.pointee_array_element_ptr_level;
-            type->pointee_array_element_type =
-                base->ptr_level
-                    ? pointee_type_from_pointer_typedef((type_t *) base)
-                    : (type_t *) base;
-            return;
-        }
-        if (!declarator.is_func)
-            error_at(
-                "Typedef parenthesized declarator must be a function "
-                "pointer",
-                cur_token_loc());
-
-        /* `typedef int (*get_t(void))(int)` names a function type whose return
-         * is a callback, which the declarator reader already built.
-         */
-        if (declarator.is_direct_function_declarator) {
-            memcpy(type, declarator.type, sizeof(type_t));
-            strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
-            type->type_name[MAX_TYPE_LEN - 1] = '\0';
-            return;
-        }
-        strncpy(type->type_name, declarator.var_name, MAX_TYPE_LEN - 1);
-        type->type_name[MAX_TYPE_LEN - 1] = '\0';
-        type->size = PTR_SIZE;
-        type->alignment = PTR_SIZE;
-        type->func_signature = declarator.func_signature;
-
-        /* `typedef int (*row[2])(int)` is an array typedef whose elements are
-         * callback pointers. The signature describes each element, while the
-         * bounds are needed later when a pointer-to-row is indexed (including
-         * after a call result).
-         */
-        type->array_size = declarator.array_size;
-        type->array_dim2 = declarator.array_dim2;
-        type->array_dim3 = declarator.array_dim3;
-        type->array_dim4 = declarator.array_dim4;
-        type->array_element_ptr_level = declarator.array_size ? 1 : 0;
-
-        /* Stars before the parenthesized callback declarator belong to the
-         * callback's return type. That depth is retained in its parsed
-         * signature; the typedef alias itself is the pointer-sized callback
-         * object, not a derived pointer alias.
-         */
-        type->ptr_level = 0;
-        type->pointer_const_mask = declarator.pointer_const_mask;
-        type->is_volatile_qualified = declarator.is_volatile;
-        return;
-    }
-
-    lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
-
-    /* `typedef int unary_t(int)` names a function type. Mirror the block-scope
-     * direct function alias: its scalar or void base is only the return type,
-     * and the prototype stays on the descriptor.
-     */
-    if (lex_peek(T_open_bracket, NULL) && !base->ptr_level &&
-        !base->array_size && !base->func_signature && !is_record_type(base) &&
-        !base->is_floating) {
-        func_t *func = arena_alloc_func();
-
-        /* The stars of `char *name_t(void)` belong to the return type. */
-        func->return_def.type = (type_t *) base;
-        func->return_def.ptr_level = type->ptr_level;
-        func->return_def.pointer_const_mask = type->pointer_const_mask;
-        func->return_def.scope = block;
-        type->ptr_level = 0;
-        type->pointer_const_mask = 0;
-        type->size = base->size;
-        read_parameter_list_decl(func, true);
-        type->base_type = TYPE_typedef;
-        type->func_signature = func;
-        type->is_direct_function_type = true;
-        return;
-    }
-
-    /* A typedef declarator may wrap an existing array typedef: `typedef row
-     * matrix[2]`. Gather its leading bounds first, then prepend them to the
-     * base alias's bounds instead of overwriting the inner extent.
-     */
-    fixed_array_shape_t base_shape = fixed_array_shape_from_type(type);
-    fixed_array_shape_t decl_shape = {0};
-    while (lex_accept(T_open_square)) {
-        int bound;
-
-        if (decl_shape.rank >= MAX_FIXED_ARRAY_RANK)
-            error_at("Array declarators support at most four dimensions",
-                     cur_token_loc());
-        if (lex_peek(T_close_square, NULL))
-            error_at("Typedef array needs a positive bound", cur_token_loc());
-        bound = read_const_expr(block);
-        if (bound <= 0)
-            error_at("Typedef array needs a positive bound", cur_token_loc());
-        decl_shape.bounds[decl_shape.rank++] = bound;
-        lex_expect(T_close_square);
-    }
-    if (decl_shape.rank) {
-        fixed_array_shape_t shape =
-            fixed_array_shape_prepend(&decl_shape, &base_shape);
-
-        if (!type->ptr_level && !type->size && type->base_struct &&
-            !type->base_struct->size)
-            error_at("Typedef array element has incomplete record type",
-                     cur_token_loc());
-
-        fixed_array_shape_to_type(type, &shape);
-
-        /* At the point an array typedef is introduced, ptr_level describes each
-         * array element. A later alias may add a pointer to the whole array, so
-         * preserve this separately.
-         */
-        type->array_element_ptr_level = type->ptr_level;
-        type->array_element_type =
-            base->array_element_type
-                ? base->array_element_type
-                : (base->ptr_level
-                       ? pointee_type_from_pointer_typedef((type_t *) base)
-                       : (type_t *) base);
-    }
+    void *previous = NULL;
+    if (find_block_ordinary(CURRENT_TU_SCOPE, alias->type_name,
+                            ORDINARY_TYPEDEF, &previous) == ORDINARY_TYPEDEF &&
+        !compatible_decl_type(((typedef_binding_t *) previous)->type, alias))
+        error_at("conflicting types for typedef", cur_token_loc());
+    add_tu_typedef(alias);
 }
 
 /* The declarator list of a file-scope typedef whose specifier resolved to
@@ -1311,7 +961,7 @@ static void read_global_typedef(block_t *block)
         if (lex_peek(T_open_curly, NULL))
             record = read_record_body(NULL, kind, has_tag, token);
         else if (has_tag)
-            tag = local_record_tag(token, GLOBAL_BLOCK, kind);
+            tag = local_record_tag(token, CURRENT_TU_SCOPE, kind);
 
         read_type_qualifiers(&typedef_const, &typedef_volatile, false);
         bool is_plain = global_record_typedef_declarator_is_plain();
@@ -1350,6 +1000,7 @@ static void read_global_typedef(block_t *block)
         /* Only the alias is qualified; the tag must stay plain. */
         type->is_const_qualified = typedef_const;
         type->is_volatile_qualified = typedef_volatile;
+        add_tu_typedef(type);
 
         if (!is_plain) {
             read_global_typedef_declarators(block, typedef_const,
@@ -1387,7 +1038,7 @@ static void read_global_typedef(block_t *block)
 void read_global_statement(void)
 {
     char token[MAX_ID_LEN];
-    block_t *block = GLOBAL_BLOCK; /* global block */
+    block_t *block = GLOBAL_BLOCK; /* merged object/function namespace */
     bool is_const = false;
     bool is_static = false;
     bool is_extern = false;
@@ -1461,7 +1112,7 @@ void read_global_statement(void)
 
         /* variable declaration using existing record tag? */
         if (!lex_peek(T_open_curly, NULL)) {
-            type = local_record_tag(token, GLOBAL_BLOCK, kind);
+            type = local_record_tag(token, CURRENT_TU_SCOPE, kind);
 
             /* A declaration with no declarator only declares the tag. At file
              * scope a repeated one names the same type, so it is valid whether
@@ -1471,7 +1122,7 @@ void read_global_statement(void)
                 return;
 
             read_global_declarator_list(block, type, is_const, is_static,
-                                        is_volatile, is_extern, true);
+                                        is_volatile, is_extern);
             return;
         }
 
@@ -1482,7 +1133,7 @@ void read_global_statement(void)
          */
         if (!lex_accept(T_semicolon))
             read_global_declarator_list(block, type, is_const, is_static,
-                                        is_volatile, is_extern, true);
+                                        is_volatile, is_extern);
     } else if (lex_peek(T_enum, NULL)) {
         bool is_definition;
         type_t *type = read_enum_specifier(NULL, &is_definition);
@@ -1497,7 +1148,7 @@ void read_global_statement(void)
                 next_token_loc());
         if (!is_definition || !lex_accept(T_semicolon))
             read_global_declarator_list(block, type, is_const, is_static,
-                                        is_volatile, is_extern, false);
+                                        is_volatile, is_extern);
     } else if (lex_accept(T_typedef)) {
         read_global_typedef(block);
     } else if (lex_peek(T_identifier, NULL) || lex_peek(T_signed, NULL) ||
@@ -1506,6 +1157,21 @@ void read_global_statement(void)
                          is_volatile);
     } else
         error_at("Syntax error in global statement", next_token_loc());
+}
+
+static type_t *add_builtin_scalar(const char *name,
+                                  base_type_t base_type,
+                                  int size,
+                                  bool is_unsigned,
+                                  bool is_signed_char)
+{
+    type_t *type = add_named_type((char *) name);
+
+    type->base_type = base_type;
+    type->size = size;
+    type->is_unsigned = is_unsigned;
+    type->is_signed_char = is_signed_char;
+    return type;
 }
 
 void parse_internal(void)
@@ -1517,7 +1183,7 @@ void parse_internal(void)
      * occupy a full target pointer, not the historic 32-bit word.
      */
     GLOBAL_FUNC->stack_size = PTR_SIZE;
-    GLOBAL_FUNC->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+    GLOBAL_FUNC->bbs = arena_alloc_bb();
     GLOBAL_FUNC->bbs->belong_to = GLOBAL_FUNC; /* Prevent nullptr deref in RA */
     GLOBAL_FUNC->bbs->elf_offset = -1;         /* not yet emitted */
 
@@ -1593,9 +1259,7 @@ void parse_internal(void)
     TY_ushort->is_unsigned = true;
 
     /* Unlike `long`, which deliberately shares the current 32-bit int ABI, long
-     * long has a distinct type and an eight-byte object representation. Parser
-     * admission and target lowering are staged separately so 32-bit backends
-     * never silently truncate it.
+     * long has a distinct type and an eight-byte object representation.
      */
     TY_long_long = add_named_type("long long");
     TY_long_long->base_type = TYPE_long_long;
@@ -1610,14 +1274,10 @@ void parse_internal(void)
      * builtin type table so declarations, casts, sizeof, and prototypes use the
      * same pointer-width representation as the rest of the compiler.
      */
-    type_t *TY_size = add_named_type("size_t");
-    TY_size->base_type = PTR_SIZE == 8 ? TYPE_long_long : TYPE_long;
-    TY_size->size = PTR_SIZE;
-    TY_size->is_unsigned = true;
-
-    type_t *TY_ptrdiff = add_named_type("ptrdiff_t");
-    TY_ptrdiff->base_type = PTR_SIZE == 8 ? TYPE_long_long : TYPE_long;
-    TY_ptrdiff->size = PTR_SIZE;
+    add_builtin_scalar("size_t", PTR_SIZE == 8 ? TYPE_long_long : TYPE_long,
+                       PTR_SIZE, true, false);
+    add_builtin_scalar("ptrdiff_t", PTR_SIZE == 8 ? TYPE_long_long : TYPE_long,
+                       PTR_SIZE, false, false);
 
     /* <stdarg.h> belongs to C99's freestanding library. Its va_list is the
      * compiler ABI's int-based cursor, so retain that scalar base while
@@ -1631,124 +1291,47 @@ void parse_internal(void)
     /* The execution wide-character type is int until wide literal lowering is
      * implemented; declaring the C99 typedef remains useful independently.
      */
-    type_t *TY_wchar = add_named_type("wchar_t");
-    TY_wchar->base_type = TYPE_int;
-    TY_wchar->size = TY_int->size;
-
-    type_t *TY_sig_atomic = add_named_type("sig_atomic_t");
-    TY_sig_atomic->base_type = TYPE_int;
-    TY_sig_atomic->size = TY_int->size;
-
-    type_t *TY_wint = add_named_type("wint_t");
-    TY_wint->base_type = TYPE_int;
-    TY_wint->size = TY_int->size;
-    TY_wint->is_unsigned = true;
+    add_builtin_scalar("wchar_t", TYPE_int, TY_int->size, false, false);
+    add_builtin_scalar("sig_atomic_t", TYPE_int, TY_int->size, false, false);
+    add_builtin_scalar("wint_t", TYPE_int, TY_int->size, true, false);
 
     /* C99 <stdint.h> aliases share the target scalar representations. Keep them
      * named in the builtin table so declarations, casts, sizeof, and prototypes
      * use the same ABI metadata as their underlying types.
      */
-    type_t *TY_int8 = add_named_type("int8_t");
-    TY_int8->base_type = TYPE_char;
-    TY_int8->size = 1;
-    TY_int8->is_signed_char = true;
-    type_t *TY_uint8 = add_named_type("uint8_t");
-    TY_uint8->base_type = TYPE_char;
-    TY_uint8->size = 1;
-    TY_uint8->is_unsigned = true;
-    type_t *TY_int16 = add_named_type("int16_t");
-    TY_int16->base_type = TYPE_short;
-    TY_int16->size = 2;
-    type_t *TY_uint16 = add_named_type("uint16_t");
-    TY_uint16->base_type = TYPE_short;
-    TY_uint16->size = 2;
-    TY_uint16->is_unsigned = true;
-    type_t *TY_int32 = add_named_type("int32_t");
-    TY_int32->base_type = TYPE_int;
-    TY_int32->size = 4;
-    type_t *TY_uint32 = add_named_type("uint32_t");
-    TY_uint32->base_type = TYPE_int;
-    TY_uint32->size = 4;
-    TY_uint32->is_unsigned = true;
-    type_t *TY_int64 = add_named_type("int64_t");
-    TY_int64->base_type = TYPE_long_long;
-    TY_int64->size = 8;
-    type_t *TY_uint64 = add_named_type("uint64_t");
-    TY_uint64->base_type = TYPE_long_long;
-    TY_uint64->size = 8;
-    TY_uint64->is_unsigned = true;
-    type_t *TY_intmax = add_named_type("intmax_t");
-    TY_intmax->base_type = TYPE_long_long;
-    TY_intmax->size = 8;
-    type_t *TY_uintmax = add_named_type("uintmax_t");
-    TY_uintmax->base_type = TYPE_long_long;
-    TY_uintmax->size = 8;
-    TY_uintmax->is_unsigned = true;
-    type_t *TY_intptr = add_named_type("intptr_t");
-    TY_intptr->base_type = PTR_SIZE == 8 ? TYPE_long_long : TYPE_long;
-    TY_intptr->size = PTR_SIZE;
-    type_t *TY_uintptr = add_named_type("uintptr_t");
-    TY_uintptr->base_type = PTR_SIZE == 8 ? TYPE_long_long : TYPE_long;
-    TY_uintptr->size = PTR_SIZE;
-    TY_uintptr->is_unsigned = true;
+    type_t *TY_int8 = add_builtin_scalar("int8_t", TYPE_char, 1, false, true);
+    type_t *TY_uint8 = add_builtin_scalar("uint8_t", TYPE_char, 1, true, false);
+    add_builtin_scalar("int16_t", TYPE_short, 2, false, false);
+    add_builtin_scalar("uint16_t", TYPE_short, 2, true, false);
+    add_builtin_scalar("int32_t", TYPE_int, 4, false, false);
+    add_builtin_scalar("uint32_t", TYPE_int, 4, true, false);
+    add_builtin_scalar("int64_t", TYPE_long_long, 8, false, false);
+    add_builtin_scalar("uint64_t", TYPE_long_long, 8, true, false);
+    add_builtin_scalar("intmax_t", TYPE_long_long, 8, false, false);
+    add_builtin_scalar("uintmax_t", TYPE_long_long, 8, true, false);
+    add_builtin_scalar("intptr_t", PTR_SIZE == 8 ? TYPE_long_long : TYPE_long,
+                       PTR_SIZE, false, false);
+    add_builtin_scalar("uintptr_t", PTR_SIZE == 8 ? TYPE_long_long : TYPE_long,
+                       PTR_SIZE, true, false);
 
-    type_t *TY_int_least8 = add_named_type("int_least8_t");
-    TY_int_least8->base_type = TY_int8->base_type;
-    TY_int_least8->size = TY_int8->size;
-    TY_int_least8->is_signed_char = true;
-    type_t *TY_uint_least8 = add_named_type("uint_least8_t");
-    TY_uint_least8->base_type = TY_uint8->base_type;
-    TY_uint_least8->size = TY_uint8->size;
-    TY_uint_least8->is_unsigned = true;
-    type_t *TY_int_least16 = add_named_type("int_least16_t");
-    TY_int_least16->base_type = TYPE_short;
-    TY_int_least16->size = 2;
-    type_t *TY_uint_least16 = add_named_type("uint_least16_t");
-    TY_uint_least16->base_type = TYPE_short;
-    TY_uint_least16->size = 2;
-    TY_uint_least16->is_unsigned = true;
-    type_t *TY_int_least32 = add_named_type("int_least32_t");
-    TY_int_least32->base_type = TYPE_int;
-    TY_int_least32->size = 4;
-    type_t *TY_uint_least32 = add_named_type("uint_least32_t");
-    TY_uint_least32->base_type = TYPE_int;
-    TY_uint_least32->size = 4;
-    TY_uint_least32->is_unsigned = true;
-    type_t *TY_int_least64 = add_named_type("int_least64_t");
-    TY_int_least64->base_type = TYPE_long_long;
-    TY_int_least64->size = 8;
-    type_t *TY_uint_least64 = add_named_type("uint_least64_t");
-    TY_uint_least64->base_type = TYPE_long_long;
-    TY_uint_least64->size = 8;
-    TY_uint_least64->is_unsigned = true;
-    type_t *TY_int_fast8 = add_named_type("int_fast8_t");
-    TY_int_fast8->base_type = TYPE_int;
-    TY_int_fast8->size = 4;
-    type_t *TY_uint_fast8 = add_named_type("uint_fast8_t");
-    TY_uint_fast8->base_type = TYPE_int;
-    TY_uint_fast8->size = 4;
-    TY_uint_fast8->is_unsigned = true;
-    type_t *TY_int_fast16 = add_named_type("int_fast16_t");
-    TY_int_fast16->base_type = TYPE_int;
-    TY_int_fast16->size = 4;
-    type_t *TY_uint_fast16 = add_named_type("uint_fast16_t");
-    TY_uint_fast16->base_type = TYPE_int;
-    TY_uint_fast16->size = 4;
-    TY_uint_fast16->is_unsigned = true;
-    type_t *TY_int_fast32 = add_named_type("int_fast32_t");
-    TY_int_fast32->base_type = TYPE_int;
-    TY_int_fast32->size = 4;
-    type_t *TY_uint_fast32 = add_named_type("uint_fast32_t");
-    TY_uint_fast32->base_type = TYPE_int;
-    TY_uint_fast32->size = 4;
-    TY_uint_fast32->is_unsigned = true;
-    type_t *TY_int_fast64 = add_named_type("int_fast64_t");
-    TY_int_fast64->base_type = TYPE_long_long;
-    TY_int_fast64->size = 8;
-    type_t *TY_uint_fast64 = add_named_type("uint_fast64_t");
-    TY_uint_fast64->base_type = TYPE_long_long;
-    TY_uint_fast64->size = 8;
-    TY_uint_fast64->is_unsigned = true;
+    add_builtin_scalar("int_least8_t", TY_int8->base_type, TY_int8->size, false,
+                       true);
+    add_builtin_scalar("uint_least8_t", TY_uint8->base_type, TY_uint8->size,
+                       true, false);
+    add_builtin_scalar("int_least16_t", TYPE_short, 2, false, false);
+    add_builtin_scalar("uint_least16_t", TYPE_short, 2, true, false);
+    add_builtin_scalar("int_least32_t", TYPE_int, 4, false, false);
+    add_builtin_scalar("uint_least32_t", TYPE_int, 4, true, false);
+    add_builtin_scalar("int_least64_t", TYPE_long_long, 8, false, false);
+    add_builtin_scalar("uint_least64_t", TYPE_long_long, 8, true, false);
+    add_builtin_scalar("int_fast8_t", TYPE_int, 4, false, false);
+    add_builtin_scalar("uint_fast8_t", TYPE_int, 4, true, false);
+    add_builtin_scalar("int_fast16_t", TYPE_int, 4, false, false);
+    add_builtin_scalar("uint_fast16_t", TYPE_int, 4, true, false);
+    add_builtin_scalar("int_fast32_t", TYPE_int, 4, false, false);
+    add_builtin_scalar("uint_fast32_t", TYPE_int, 4, true, false);
+    add_builtin_scalar("int_fast64_t", TYPE_long_long, 8, false, false);
+    add_builtin_scalar("uint_fast64_t", TYPE_long_long, 8, true, false);
 
     /* builtin type _Bool was introduced in C99 specification, it is more
      * well-known as macro type bool, which is defined in <std_bool.h> (in
@@ -1759,35 +1342,27 @@ void parse_internal(void)
     TY_bool->size = 1;
     TY_bool->is_bool = true;
 
+    builtin_types_idx = types_idx;
+
     GLOBAL_BLOCK = add_block(NULL, NULL); /* global block */
-    elf_add_symbol("", 0);                /* undef symbol */
+    CURRENT_TU_SCOPE = add_block(NULL, NULL);
+    reset_tu_ordinary_index();
+    elf_add_symbol("", 0); /* undef symbol */
 
     if (dynlink) {
-        /* In dynamic mode, __syscall won't be implemented.
-         *
-         * Simply declare a 'syscall' function as follows if the program needs
-         * to use 'syscall':
-         *
-         * int syscall(int number, ...);
-         *
-         * shecc will treat it as an external function, and the compiled program
-         * will eventually use the implementation provided by the external C
-         * library.
-         *
-         * If shecc supports the 'long' data type in the future, it would be
-         * better to declare syscall using its original prototype:
-         *
-         * long syscall(long number, ...);
+        /* Dynamic callers declare the libc entry with a machine-word ABI:
+         * intptr_t syscall(intptr_t number, ...); intptr_t preserves
+         * pointer-valued results on every target.
          */
     } else {
         /* Linux syscall */
         func_t *func = add_func("__syscall", true);
-        func->return_def.type = TY_int;
+        func->return_def.type = PTR_SIZE == 8 ? TY_long_long : TY_int;
         func->num_params = 0;
         func->va_args = 1;
         func->bbs = NULL;
         /* Otherwise, allocate a basic block to implement in static mode. */
-        func->bbs = arena_calloc(BB_ARENA, 1, sizeof(basic_block_t));
+        func->bbs = arena_alloc_bb();
         func->bbs->elf_offset = -1; /* not yet emitted */
     }
 
@@ -1801,6 +1376,11 @@ void parse_internal(void)
 
     /* lexer initialization */
     do {
+        if (lex_accept(T_translation_unit)) {
+            CURRENT_TU_SCOPE = add_block(NULL, NULL);
+            reset_tu_ordinary_index();
+            continue;
+        }
         read_global_statement();
     } while (!lex_accept(T_eof));
 
