@@ -88,8 +88,10 @@ check_entry_root_effects()
                 entry_stores != expected_entry_stores ||
                 stores != expected_stores)
                 exit 1
+            # The branch reload may be forwarded the stored value; one that
+            # remains must follow the store.
             if (check_branch_order &&
-                (!branch_store || !branch_load || branch_store >= branch_load))
+                (!branch_store || branch_load && branch_store >= branch_load))
                 exit 1
         }
     ' "$work/$name.vir.main"
@@ -125,7 +127,10 @@ check_vir_dump()
     local dump="$work/$name.vir"
 
     dump_main_vir "$name"
-    test "$(grep -c " = $extension.i32.i64 " "$dump.main")" -eq 4
+
+    # Two stores and two loads each extend their index, unless the load right
+    # after the last store is forwarded the stored value instead.
+    test "$(grep -c " = $extension.i32.i64 " "$dump.main")" -ge 3
     if grep -q "$opposite.i32.i64" "$dump.main"; then exit 1; fi
     awk -v extension="$extension" '
         $3 == extension ".i32.i64" { extended[$1] = 1 }
@@ -142,20 +147,30 @@ check_vir_dump()
             else if (scaled[$NF]) multiplied++
             else failed = 1
         }
-        END { exit failed || direct != 2 || multiplied != 2 || multiplies != 2 }
+        END {
+            exit failed || direct < 1 || multiplied < 1 ||
+                 direct + multiplied < 3 || multiplies != multiplied
+        }
     ' "$dump.main"
 }
 
 check_vir_effect_order()
 {
-    local name=$1
+    local name=$1 require_load=${2:-0}
 
     dump_main_vir "$name"
-    awk '
+
+    # A plain load right after the store may be forwarded away; a volatile one
+    # may not. A load that remains must still follow the store and precede the
+    # return.
+    awk -v require_load="$require_load" '
         /store %d|volatile.store %d/ { store = NR }
         /load.i32/ && store && !load { load = NR }
-        /return %d/ && load { ret = NR }
-        END { exit !store || !load || !ret || store >= load || load >= ret }
+        /return %d/ && store { ret = NR }
+        END {
+            exit !store || !ret || (require_load && !load) ||
+                 (load && (store >= load || load >= ret))
+        }
     ' "$work/$name.vir.main"
 }
 
@@ -310,7 +325,7 @@ check_direct merged-pointer-load 29 30
 check_direct merged-volatile-pointer-effect 29 30
 check_direct merged-pointer-effect-void-call 29 30
 check_vir_effect_order merged-pointer-effect
-check_vir_effect_order merged-volatile-pointer-effect
+check_vir_effect_order merged-volatile-pointer-effect 1
 check_direct narrow-memory 29 -
 check_direct narrow-global 29 -
 check_direct narrow-array 229 -

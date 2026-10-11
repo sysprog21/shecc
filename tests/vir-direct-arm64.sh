@@ -532,9 +532,11 @@ check_helper_global_loop_fallback()
     # The general helper check admits what the shape matchers did not.
 }
 
+# The third argument counts the loads left: a plain reload right after the store
+# is forwarded the stored value, a volatile one is not.
 check_helper_global_effect_direct()
 {
-    local name=$1 memory_prefix=$2 status
+    local name=$1 memory_prefix=$2 loads=$3 status
 
     run_compiler --dump-vir --stats -o "$work/$name" \
         "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
@@ -550,8 +552,8 @@ check_helper_global_effect_direct()
         "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
     vir_extract_callee main \
         "$work/$name.vir" | grep -c "^  ${memory_prefix}store " | grep -qx 1
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c "^  %d[0-9]* = ${memory_prefix}load.i32 " | grep -qx 1
+    test "$(vir_extract_callee main "$work/$name.vir" \
+        | grep -c "^  %d[0-9]* = ${memory_prefix}load.i32 ")" -eq "$loads"
 }
 
 check_helper_global_pair_direct()
@@ -572,8 +574,11 @@ check_helper_global_pair_direct()
         "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
     vir_extract_callee main \
         "$work/$name.vir" | grep -c '^  store ' | grep -qx 2
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  %d[0-9]* = load.i32 ' | grep -qx 1
+    # The reload of the global just stored is forwarded the stored value.
+    if vir_extract_callee main "$work/$name.vir" \
+        | grep -q '^  %d[0-9]* = load.i32 '; then
+        return 1
+    fi
 }
 
 check_helper_global_load_store_direct()
@@ -626,8 +631,11 @@ check_helper_global_branch_direct()
         "$work/$name.vir" | grep -c '^  branch ' | grep -qx 1
     vir_extract_callee main \
         "$work/$name.vir" | grep -c '^  store ' | grep -qx 2
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  %d[0-9]* = load.i32 ' | grep -qx 2
+    # Each arm's reload of the global it just stored is forwarded the value.
+    if vir_extract_callee main "$work/$name.vir" \
+        | grep -q '^  %d[0-9]* = load.i32 '; then
+        return 1
+    fi
 }
 
 check_helper_global_branch_fallback()
@@ -771,7 +779,7 @@ check_helper_global_loop_eight_direct
 check_helper_global_loop_nine_direct
 check_helper_global_loop_ten_direct
 check_helper_global_loop_fallback
-check_helper_global_effect_direct helper-global-volatile volatile. 2
+check_helper_global_effect_direct helper-global-volatile volatile. 1
 check_helper_global_effect_direct helper-global '' 0
 check_helper_global_pair_direct
 check_helper_global_load_store_direct
@@ -821,8 +829,8 @@ vir_extract_function main "$work/ptradd-immediate.vir" | awk '
         count++
     }
     /^  store / { address = $2; sub(/,$/, "", address); stored = addresses[address] }
-    / = load.i32 / { loaded = addresses[$4] }
-    END { exit failed || !count || !stored || !loaded }
+    / = load.i32 / { loads++; loaded += addresses[$4] }
+    END { exit failed || !count || !stored || loaded != loads }
 '
 
 check_direct global 15 17
@@ -922,14 +930,16 @@ vir_extract_function main \
 awk '
     / = stackaddr [0-9]+, 4, align 4$/ { scalar[$1] = 1 }
     / = stackaddr [0-9]+, 8, align 8$/ { pointer[$1] = 1 }
+    # A pointer reloaded right after its store is forwarded the stored
+    # address, so the write may land on the scalar itself.
     /^  store / {
         address = $2; sub(/,$/, "", address)
+        if (loaded_pointer[address] || scalar[address] && linked) mutated = 1
         if (scalar[address]) initialized = 1
         if (pointer[address] && scalar[$3]) linked = 1
-        if (loaded_pointer[address]) mutated = 1
     }
     / = load.ptr / { if (pointer[$4]) loaded_pointer[$1] = 1 }
-    / = load.i32 / { if (loaded_pointer[$4]) observed = 1 }
+    / = load.i32 / { if (loaded_pointer[$4] || scalar[$4]) observed = 1 }
     END { exit !initialized || !linked || !mutated || !observed }
 ' "$work/local-pointer-deep.dump"
 
@@ -1150,12 +1160,14 @@ run_compiler --dump-vir -o "$work/global-dump" tests/vir-direct-arm64-global.c \
 vir_extract_function main "$work/global.vir" \
     | awk '/^  %d[0-9]+ = globaladdr @value, 4, align 4$/ { value++ } /^  %d[0-9]+ = globaladdr @first, 4, align 4$/ { first++ } END { exit value != 1 || first != 1 }'
 
+# The reload may be forwarded the stored value, dropping its own ptradd.
 run_compiler --dump-vir -o "$work/global-ptradd-dump" \
     tests/vir-direct-global-ptradd.c 2> "$work/global-ptradd.vir"
 vir_extract_function main "$work/global-ptradd.vir" \
-    | awk '/^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ } /^  %d[0-9]+ = ptradd %d[0-9]+, %d[0-9]+$/ { ptradd++ } END { exit root < 1 || ptradd != 2 }'
+    | awk '/^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ } /^  %d[0-9]+ = ptradd %d[0-9]+, %d[0-9]+$/ { ptradd++ } END { exit root < 1 || ptradd < 1 || ptradd > 2 }'
 
-# Binary dump names retain .i32; the operand producers prove I64 scaling.
+# Binary dump names retain .i32; the operand producers prove I64 scaling. A
+# forwarded reload drops its own extension, scale and ptradd.
 run_compiler --dump-vir -o "$work/global-ptradd-dynamic-dump" \
     tests/vir-direct-global-ptradd-dynamic.c \
     2> "$work/global-ptradd-dynamic.vir"
@@ -1174,7 +1186,10 @@ vir_extract_function main \
             multiplies++
         }
         $3 == "ptradd" { if (!scaled[$5]) bad = 1; ptradd++ }
-        END { exit bad || root < 1 || extensions != 2 || multiplies != 2 || ptradd != 2 }
+        END {
+            exit bad || root < 1 || extensions < 1 || extensions > 2 ||
+                 multiplies != extensions || ptradd != extensions
+        }
     '
 
 run_compiler --dump-vir -o "$work/global-ptradd-unsigned-dump" \
@@ -1195,7 +1210,10 @@ vir_extract_function main \
             multiplies++
         }
         $3 == "ptradd" { if (!scaled[$5]) bad = 1; ptradd++ }
-        END { exit bad || root < 1 || extensions != 2 || multiplies != 2 || ptradd != 2 }
+        END {
+            exit bad || root < 1 || extensions < 1 || extensions > 2 ||
+                 multiplies != extensions || ptradd != extensions
+        }
     '
 vir_extract_function main "$work/narrow.vir" \
     | grep -Eq '^  %d[0-9]+ = zext\.i16\.i32 %d[0-9]+$'
@@ -1222,9 +1240,7 @@ run_compiler --no-libc --dynlink --dump-vir \
     -o "$work/external-typed-pointer-repeat" \
     "$typed_external_pointer_source"
 cmp "$work/external-typed-pointer" "$work/external-typed-pointer-repeat"
-vir_extract_function main \
-    "$work/external-typed-pointer.stats" \
-    | grep -Eq '^  %d[0-9]+ = load\.i32 %d[0-9]+$'
+# The reload right after the store is forwarded the stored value.
 vir_extract_function main \
     "$work/external-typed-pointer.stats" \
     | grep -Eq '^  store %d[0-9]+, %d[0-9]+$'

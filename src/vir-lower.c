@@ -29,6 +29,8 @@ typedef struct {
     vir_block_t **live_work;
     /* Last mark vir_machine_interferes() left in a block-indexed seen array. */
     int live_stamp;
+    /* Whether any value needs a register pair. */
+    bool has_pairs;
     const vir_dominance_t *dominance;
     int (*global_offset)(const char *, void *);
     void *global_context;
@@ -69,13 +71,15 @@ static bool vir_machine_literal(const vir_value_t *value)
            value->opcode == VIR_OP_RODATA_ADDR;
 }
 
-/* ABI and edge transfers can consume homes without going through read(). */
+/* ABI transfers can consume homes without going through read(); edge copies
+ * materialize a literal into its destination instead.
+ */
 static bool vir_machine_rematerializable(const vir_value_t *value)
 {
     if (!vir_machine_literal(value))
         return false;
     for (const vir_use_t *use = value->uses; use; use = use->next)
-        if (use->edge || (use->effect && use->effect->kind == VIR_EFFECT_CALL))
+        if (use->effect && use->effect->kind == VIR_EFFECT_CALL)
             return false;
     return true;
 }
@@ -511,6 +515,126 @@ static void vir_machine_flush_successor(vir_lower_t *lower,
     }
 }
 
+static int vir_machine_arg_start(vir_lower_t *lower,
+                                 int cursor,
+                                 vir_value_t *value,
+                                 bool variadic);
+
+/* Pins hold their registers for the whole function, so the local allocator
+ * keeps only what no pin claims. Whether pinning @words more at @reg still
+ * leaves it enough for an instruction's operands, result and a staged copy.
+ */
+#define VIR_MACHINE_MIN_SCRATCH 5
+
+static bool vir_machine_scratch_left(vir_lower_t *lower, int reg, int words)
+{
+    unsigned int pinned = lower->pinned_mask | (((1u << words) - 1) << reg);
+    int free = 0, pairs = 0;
+    for (int candidate = 0; candidate < REG_CNT; candidate++)
+        free += !(pinned & (1u << candidate));
+
+    /* A function with 64-bit values on a 32-bit target also needs aligned
+     * pairs: two for the operands of one operation and one for its result.
+     */
+    for (int candidate = 0; candidate + 1 < REG_CNT; candidate += 2)
+        pairs += !(pinned & (3u << candidate));
+    return free >= VIR_MACHINE_MIN_SCRATCH && (!lower->has_pairs || pairs >= 3);
+}
+
+/* Caller-saved registers a value may be pinned to when no call lies in its live
+ * range: it then needs no save in the prologue, where a callee-saved lane does.
+ * Each target leaves the registers its own instructions use implicitly, and
+ * enough of the rest to keep the local allocator fed. Register 0, and 1 on a
+ * 32-bit target, are never in this table: a call result lands there unpinned.
+ * Only a parameter may still be pinned to one, in the register it arrives in;
+ * copies therefore stage through the lowest register no value is pinned to.
+ */
+#if ELF_MACHINE == ELF_MACHINE_X86_64
+/* r9 r8 rsi rcx rdx: the emitter already preserves RCX around a variable shift
+ * and RDX around a division.
+ */
+static const int vir_machine_caller_lanes[] = {5, 4, 1, 3, 2};
+#elif ELF_MACHINE == ELF_MACHINE_AARCH64
+static const int vir_machine_caller_lanes[] = {14, 13, 12, 11, 10, 9};
+#elif ELF_MACHINE == ELF_MACHINE_RV32
+static const int vir_machine_caller_lanes[] = {7, 6}; /* a7 a6 */
+#elif ELF_MACHINE == ELF_MACHINE_ARM32
+static const int vir_machine_caller_lanes[] = {3, 2}; /* r3 r2 */
+#else
+static const int vir_machine_caller_lanes[] = {-1};
+#endif
+
+/* Whether a call lies inside @value's live range, so that a caller-saved
+ * register could not hold it: the call follows its definition in some block the
+ * value is live through, and a use or a successor still needs it after.
+ */
+static bool vir_machine_crosses_call(vir_lower_t *lower,
+                                     vir_value_t *value,
+                                     int *seen,
+                                     vir_block_t **work)
+{
+    if (lower->live_stamp < 2 || lower->live_stamp == INT_MAX) {
+        memset(seen, 0, lower->function->next_block_id * sizeof(int));
+        lower->live_stamp = 1;
+    }
+    int mark = ++lower->live_stamp;
+    int definition = value->is_block_param ? -1 : value->order;
+    int count = 0;
+
+    /* Blocks the value is live into, found backward from its uses up to its
+     * definition, queued in @work and marked in @seen.
+     */
+    for (vir_use_t *use = value->uses; use; use = use->next) {
+        vir_block_t *used = vir_use_block(use);
+        if (used != value->block && seen[used->id] != mark) {
+            seen[used->id] = mark;
+            work[count++] = used;
+        }
+    }
+    for (int head = 0; head < count; head++)
+        for (vir_edge_t *edge = work[head]->incoming; edge;
+             edge = edge->next_incoming)
+            if (edge->from != value->block && seen[edge->from->id] != mark) {
+                seen[edge->from->id] = mark;
+                work[count++] = edge->from;
+            }
+
+    for (int index = -1; index < count; index++) {
+        vir_block_t *block = index < 0 ? value->block : work[index];
+        int start = block == value->block ? definition : -1;
+        int after = -1;
+        for (vir_use_t *use = value->uses; use; use = use->next)
+            if (vir_use_block(use) == block && vir_use_order(use) > after)
+                after = vir_use_order(use);
+        for (vir_edge_t *edge = block->outgoing; edge;
+             edge = edge->next_outgoing)
+            if (seen[edge->to->id] == mark)
+                after = block->next_order + 1;
+        for (vir_effect_t *effect = block->effects; effect;
+             effect = effect->next)
+            if (effect->kind == VIR_EFFECT_CALL && effect->order > start &&
+                effect->order < after)
+                return true;
+    }
+    return false;
+}
+
+/* vir_machine_crosses_call() for @value, remembered in @known by value ID: 0
+ * not yet asked, 1 no, 2 yes. A value's live range and the calls in it do not
+ * change while lanes are chosen.
+ */
+static bool vir_machine_crosses_call_cached(vir_lower_t *lower,
+                                            vir_value_t *value,
+                                            int *known,
+                                            int *seen,
+                                            vir_block_t **work)
+{
+    if (!known[value->id])
+        known[value->id] =
+            vir_machine_crosses_call(lower, value, seen, work) ? 2 : 1;
+    return known[value->id] == 2;
+}
+
 /* Every value sharing physical lanes must survive either definition safely.
  * @pinned lists the IDs of the @count values given a fixed register.
  */
@@ -552,7 +676,8 @@ static bool vir_machine_slots(vir_lower_t *lower)
     int *free_slots = malloc(count * sizeof(int));
     int *next_start = malloc(count * sizeof(int));
     int *next_end = malloc(count * sizeof(int));
-    int *heads = NULL, *ends = NULL, *pinned = NULL;
+    int *heads = NULL, *ends = NULL, *pinned = NULL, *param_source = NULL;
+    int *crosses = NULL;
     bool success = false;
 
     lower->block_positions = calloc(function->next_block_id, sizeof(int));
@@ -580,6 +705,7 @@ static bool vir_machine_slots(vir_lower_t *lower)
         free_slots[id] = 0;
         if (!value)
             continue;
+        lower->has_pairs |= vir_machine_pair(lower, value);
         lower->locations[id].value = value;
         lower->locations[id].rematerializable =
             vir_machine_rematerializable(value);
@@ -664,6 +790,47 @@ static bool vir_machine_slots(vir_lower_t *lower)
     pinned = malloc(count * sizeof(int));
     if (!pinned)
         goto done;
+
+    /* Incoming parameters are moved out of their argument registers one at a
+     * time at entry, so a register one of them arrives in cannot be a lane.
+     */
+    unsigned int argument_regs = 0;
+    param_source = malloc(count * sizeof(int));
+    crosses = calloc(count, sizeof(int));
+    if (!param_source || !crosses)
+        goto done;
+
+    /* With no call in the function, no value crosses one. */
+    bool calls = false;
+    for (vir_block_t *block = function->blocks; block && !calls;
+         block = block->next)
+        for (vir_effect_t *effect = block->effects; effect && !calls;
+             effect = effect->next)
+            calls = effect->kind == VIR_EFFECT_CALL;
+    if (!calls)
+        for (int id = 0; id < count; id++)
+            crosses[id] = 1;
+    for (int id = 0; id < count; id++)
+        param_source[id] = -1;
+    {
+        int cursor = 0;
+        for (vir_value_t *param = function->blocks->params; param;
+             param = param->param_next) {
+            cursor = vir_machine_arg_start(lower, cursor, param, false);
+            int words = vir_machine_pair(lower, param) ? 2 : 1;
+
+            /* A parameter left where it arrives needs no move at entry, and the
+             * entry block writes no other argument register, so its own
+             * register is a lane for it alone.
+             */
+            if (words == 1 && cursor < MAX_ARGS_IN_REG &&
+                vir_machine_width(lower, param->type) >= 4)
+                param_source[param->id] = cursor;
+            for (int word = words; word > 0; word--, cursor++)
+                if (cursor < MAX_ARGS_IN_REG)
+                    argument_regs |= 1u << cursor;
+        }
+    }
     while (true) {
         vir_value_t *best = NULL;
         int best_score = 0, best_reg = -1;
@@ -675,16 +842,41 @@ static bool vir_machine_slots(vir_lower_t *lower)
             if (score <= best_score)
                 continue;
             int words = vir_machine_pair(lower, value) ? 2 : 1;
-            int reg;
-            for (reg = base; reg + words <= limit; reg++)
-                if (vir_machine_pin_safe(lower, value, reg, pinned,
-                                         pinned_count, seen, work)) {
-                    best = value;
-                    best_score = score;
-                    best_reg = reg;
-                    break;
+            int reg = -1;
+            bool calm = words == 1 && !vir_machine_crosses_call_cached(
+                                          lower, value, crosses, seen, work);
+            if (calm && param_source[id] >= 0 &&
+                vir_machine_pin_safe(lower, value, param_source[id], pinned,
+                                     pinned_count, seen, work))
+                reg = param_source[id];
+            if (reg < 0 && calm && vir_machine_caller_lanes[0] >= 0)
+                for (int lane = 0;
+                     lane < (int) (sizeof(vir_machine_caller_lanes) /
+                                   sizeof(vir_machine_caller_lanes[0]));
+                     lane++) {
+                    int candidate = vir_machine_caller_lanes[lane];
+                    if (!(argument_regs & (1u << candidate)) &&
+                        vir_machine_pin_safe(lower, value, candidate, pinned,
+                                             pinned_count, seen, work)) {
+                        reg = candidate;
+                        break;
+                    }
                 }
-            if (reg + words > limit)
+            if (reg < 0)
+                for (int candidate = base; candidate + words <= limit;
+                     candidate++)
+                    if (vir_machine_pin_safe(lower, value, candidate, pinned,
+                                             pinned_count, seen, work)) {
+                        reg = candidate;
+                        break;
+                    }
+            if (reg >= 0 && !vir_machine_scratch_left(lower, reg, words))
+                reg = -1;
+            if (reg >= 0) {
+                best = value;
+                best_score = score;
+                best_reg = reg;
+            } else
                 free_slots[id] = 0;
         }
         if (!best)
@@ -732,6 +924,8 @@ static bool vir_machine_slots(vir_lower_t *lower)
                     fixed = destination;
                 }
                 if (!safe || fixed < 0 ||
+                    (fixed < base && vir_machine_crosses_call_cached(
+                                         lower, value, crosses, seen, work)) ||
                     !vir_machine_pin_safe(lower, value, fixed, pinned,
                                           pinned_count, seen, work))
                     continue;
@@ -769,6 +963,8 @@ done:
     free(heads);
     free(ends);
     free(pinned);
+    free(param_source);
+    free(crosses);
     return success;
 }
 
@@ -999,6 +1195,17 @@ static void vir_machine_effect(vir_lower_t *lower, vir_effect_t *effect)
     lower->locked = 0;
 }
 
+/* The lowest @words aligned registers no value is pinned to, for staging a
+ * copy: a pinned one may still hold a live value across it.
+ */
+static int vir_machine_staging(vir_lower_t *lower, int words)
+{
+    int reg = 0;
+    while (lower->pinned_mask & (((1u << words) - 1) << reg))
+        reg += words;
+    return reg;
+}
+
 /* Copy a bitvector from a register (or pair) or home to another home. */
 static void vir_machine_copy(vir_lower_t *lower,
                              vir_value_t *value,
@@ -1008,13 +1215,13 @@ static void vir_machine_copy(vir_lower_t *lower,
 {
     bool pair = vir_machine_pair(lower, value);
     if (from < 0) {
+        from = vir_machine_staging(lower, pair ? 2 : 1);
         ph2_ir_t *instruction = vir_machine_insn(lower, OP_load);
-        instruction->dest = 0;
-        instruction->dest_hi = pair ? instruction->dest + 1 : -1;
+        instruction->dest = from;
+        instruction->dest_hi = pair ? from + 1 : -1;
         instruction->src0 = source;
         instruction->size_bytes = vir_machine_width(lower, value->type);
         instruction->is_unsigned = true;
-        from = 0;
     }
     ph2_ir_t *instruction = vir_machine_insn(lower, OP_store);
     instruction->src0 = from;
@@ -1022,6 +1229,24 @@ static void vir_machine_copy(vir_lower_t *lower,
     instruction->size_bytes = vir_machine_width(lower, value->type);
     instruction->is_unsigned = true;
     instruction->src1 = destination;
+}
+
+/* An edge argument that has no home: a literal rebuilt where it is needed. */
+static bool vir_machine_edge_literal(vir_lower_t *lower, vir_value_t *value)
+{
+    return lower->locations[value->id].rematerializable;
+}
+
+/* Materialize literal @value straight into @reg (and the next, for a pair). */
+static void vir_machine_literal_into(vir_lower_t *lower,
+                                     vir_value_t *value,
+                                     int reg)
+{
+    ph2_ir_t *instruction = vir_machine_insn(lower, OP_load_constant);
+    instruction->dest = reg;
+    instruction->dest_hi = vir_machine_pair(lower, value) ? reg + 1 : -1;
+    instruction->size_bytes = vir_machine_width(lower, value->type);
+    vir_machine_materialize(lower, value, instruction);
 }
 
 static void vir_machine_edge_registers(vir_lower_t *lower,
@@ -1038,7 +1263,8 @@ static void vir_machine_edge_registers(vir_lower_t *lower,
         vir_location_t *location = &lower->locations[argument->id];
         int target = lower->locations[parameter->id].fixed;
         int reg = snapshot ? -1 : resident ? location->reg : location->fixed;
-        if (target < 0 || target == reg)
+        if (target < 0 || target == reg ||
+            (reg < 0 && vir_machine_edge_literal(lower, argument)))
             continue;
         int words = vir_machine_pair(lower, argument) ? 2 : 1;
         for (int word = 0; word < words; word++)
@@ -1052,6 +1278,153 @@ static void vir_machine_edge_registers(vir_lower_t *lower,
                 false};
     }
     vir_machine_parallel(lower, copies, count);
+
+    /* Literals read nothing the copies above write, so they go last. */
+    parameter = edge->to->params;
+    for (int index = 0; index < edge->arg_count;
+         index++, parameter = parameter->param_next) {
+        vir_value_t *argument = edge->args[index];
+        vir_location_t *location = &lower->locations[argument->id];
+        int target = lower->locations[parameter->id].fixed;
+        int reg = snapshot ? -1 : resident ? location->reg : location->fixed;
+        if (target >= 0 && target != reg && reg < 0 &&
+            vir_machine_edge_literal(lower, argument))
+            vir_machine_literal_into(lower, argument, target);
+    }
+}
+
+/* Whether the @a_width bytes at slot @a overlap the @b_width bytes at @b. */
+static bool vir_machine_slots_overlap(int a, int a_width, int b, int b_width)
+{
+    return a < b + b_width && b < a + a_width;
+}
+
+/* Which orders of an edge's memory and register copies are safe: memory first
+ * unless a memory copy overwrites a home a register copy reads, registers first
+ * unless a register copy overwrites a register a memory copy reads.
+ */
+static void vir_machine_edge_order(vir_lower_t *lower,
+                                   vir_edge_t *edge,
+                                   bool *memory_first,
+                                   bool *registers_first)
+{
+    vir_value_t *parameter = edge->to->params;
+    for (int index = 0; index < edge->arg_count;
+         index++, parameter = parameter->param_next) {
+        vir_location_t *target = &lower->locations[parameter->id];
+        vir_value_t *argument = edge->args[index];
+        vir_location_t *source = &lower->locations[argument->id];
+        int width = vir_machine_width(lower, argument->type);
+        if (target->fixed < 0)
+            continue;
+
+        /* A literal reads no home, but it is still written into its target
+         * register, whether copied from where it sits or rebuilt there.
+         */
+        bool literal = vir_machine_edge_literal(lower, argument);
+        int words = vir_machine_pair(lower, parameter) ? 2 : 1;
+        vir_value_t *other = edge->to->params;
+        for (int k = 0; k < edge->arg_count; k++, other = other->param_next) {
+            vir_location_t *home = &lower->locations[other->id];
+            vir_location_t *read = &lower->locations[edge->args[k]->id];
+            if (home->fixed >= 0)
+                continue;
+            if (source->fixed < 0 && !literal &&
+                vir_machine_slots_overlap(
+                    source->slot, width, home->slot,
+                    vir_machine_width(lower, other->type)))
+                *memory_first = false;
+            if (read->fixed >= 0 && read->fixed < target->fixed + words &&
+                target->fixed <
+                    read->fixed +
+                        (vir_machine_pair(lower, edge->args[k]) ? 2 : 1))
+                *registers_first = false;
+        }
+    }
+}
+
+/* Copy an edge's arguments into the parameters that live in memory. A copy goes
+ * once no other pending copy still reads its destination; when every pending
+ * one does, a cycle remains, and one source is staged in the snapshot area to
+ * break it.
+ */
+static void vir_machine_edge_memory(vir_lower_t *lower,
+                                    vir_edge_t *edge,
+                                    bool snapshot)
+{
+    int count = 0, n = edge->arg_count;
+    int *pending = malloc(n * 5 * sizeof(int));
+    if (!pending)
+        fatal("Out of memory");
+    int *from = pending + n;
+    int *source = from + n;
+    int *slot = source + n;
+    int *width = slot + n;
+    vir_value_t *parameter = edge->to->params;
+    for (int index = 0; index < n; index++, parameter = parameter->param_next) {
+        vir_value_t *argument = edge->args[index];
+        vir_location_t *target = &lower->locations[parameter->id];
+        vir_location_t *location = &lower->locations[argument->id];
+        if (target->fixed >= 0)
+            continue;
+        slot[index] = target->slot;
+        width[index] = vir_machine_width(lower, parameter->type);
+        if (location->fixed < 0 && vir_machine_edge_literal(lower, argument))
+            continue;
+        from[index] = snapshot ? -1 : location->fixed;
+        source[index] =
+            snapshot ? lower->copy_slot + index * 8 : location->slot;
+        if (from[index] < 0 && source[index] == target->slot)
+            continue;
+        pending[count++] = index;
+    }
+    while (count) {
+        int pick = -1;
+        for (int i = 0; i < count && pick < 0; i++) {
+            int index = pending[i];
+            bool read = false;
+            for (int j = 0; j < count && !read; j++) {
+                int other = pending[j];
+                read = j != i && from[other] < 0 &&
+                       vir_machine_slots_overlap(
+                           source[other],
+                           vir_machine_width(lower, edge->args[other]->type),
+                           slot[index], width[index]);
+            }
+            if (!read)
+                pick = i;
+        }
+        if (pick < 0) {
+            /* Every destination is still read, so some source is in memory. */
+            int index = -1;
+            for (int i = 0; i < count && index < 0; i++)
+                if (from[pending[i]] < 0)
+                    index = pending[i];
+            vir_machine_copy(lower, edge->args[index], -1, source[index],
+                             lower->copy_slot + index * 8);
+            source[index] = lower->copy_slot + index * 8;
+            continue;
+        }
+        int index = pending[pick];
+        vir_machine_copy(lower, edge->args[index], from[index], source[index],
+                         slot[index]);
+        pending[pick] = pending[--count];
+    }
+
+    /* Literals overwrite no home another copy reads, so they go last. */
+    parameter = edge->to->params;
+    for (int index = 0; index < n; index++, parameter = parameter->param_next) {
+        vir_value_t *argument = edge->args[index];
+        if (lower->locations[parameter->id].fixed >= 0 ||
+            lower->locations[argument->id].fixed >= 0 ||
+            !vir_machine_edge_literal(lower, argument))
+            continue;
+        int reg = vir_machine_staging(
+            lower, vir_machine_pair(lower, argument) ? 2 : 1);
+        vir_machine_literal_into(lower, argument, reg);
+        vir_machine_copy(lower, argument, reg, -1, slot[index]);
+    }
+    free(pending);
 }
 
 /* Only overlapping memory destinations need snapshots. All-register edges
@@ -1078,9 +1451,10 @@ static basic_block_t *vir_machine_edge(vir_lower_t *lower, vir_edge_t *edge)
             vir_value_t *argument = edge->args[index];
             vir_location_t *source = &lower->locations[argument->id];
             if (source->fixed < 0 &&
-                target->slot <
-                    source->slot + vir_machine_width(lower, argument->type) &&
-                source->slot < target->slot + width)
+                !vir_machine_edge_literal(lower, argument) &&
+                vir_machine_slots_overlap(
+                    target->slot, width, source->slot,
+                    vir_machine_width(lower, argument->type)))
                 overlap = true;
         }
     }
@@ -1089,25 +1463,33 @@ static basic_block_t *vir_machine_edge(vir_lower_t *lower, vir_edge_t *edge)
     basic_block_t *saved = lower->block;
     basic_block_t *copy = vir_machine_block(lower);
     lower->block = copy;
+
+    /* Overlapping homes need not cost a snapshot of every argument. Memory
+     * copies run in an order where none overwrites a home another one still
+     * reads, staging one value only to break a cycle, and either before or
+     * after the register copies, whichever leaves the other's sources intact.
+     * Only when both orders clobber something does every argument go through
+     * the snapshot area.
+     */
+    bool memory_first = true, registers_first = true;
     if (overlap)
+        vir_machine_edge_order(lower, edge, &memory_first, &registers_first);
+    bool snapshot = overlap && !memory_first && !registers_first;
+    if (snapshot)
         for (int index = 0; index < edge->arg_count; index++) {
             vir_value_t *argument = edge->args[index];
             vir_location_t *source = &lower->locations[argument->id];
+            if (source->fixed < 0 && vir_machine_edge_literal(lower, argument))
+                continue;
             vir_machine_copy(lower, argument, source->fixed, source->slot,
                              lower->copy_slot + index * 8);
         }
-    vir_value_t *parameter = edge->to->params;
-    for (int index = 0; index < edge->arg_count;
-         index++, parameter = parameter->param_next) {
-        if (lower->locations[parameter->id].fixed >= 0)
-            continue;
-        vir_value_t *argument = edge->args[index];
-        vir_location_t *source = &lower->locations[argument->id];
-        vir_machine_copy(lower, argument, overlap ? -1 : source->fixed,
-                         overlap ? lower->copy_slot + index * 8 : source->slot,
-                         lower->locations[parameter->id].slot);
-    }
-    vir_machine_edge_registers(lower, edge, resident, overlap);
+    if (!snapshot && !memory_first)
+        vir_machine_edge_registers(lower, edge, resident, false);
+    if (!resident)
+        vir_machine_edge_memory(lower, edge, snapshot);
+    if (snapshot || memory_first)
+        vir_machine_edge_registers(lower, edge, resident, snapshot);
     ph2_ir_t *instruction = vir_machine_insn(lower, OP_jump);
     instruction->next_bb = lower->blocks[edge->to->id];
     lower->block = saved;
@@ -1276,6 +1658,9 @@ static void vir_machine_parameters(vir_lower_t *lower)
                                           location->slot + word * PTR_SIZE,
                                           words == 2 ? 4 : width);
         if (location->fixed >= 0) {
+            /* Pinned where it arrives: already in place. */
+            if (resident && location->fixed == source)
+                continue;
             ph2_ir_t *instruction =
                 vir_machine_insn(lower, resident ? OP_assign : OP_load);
             instruction->dest = location->fixed;

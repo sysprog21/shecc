@@ -1342,6 +1342,8 @@ ph2_ir_t *ph2_ir_flatten_insn(ph2_ir_t *insn,
                               int saved_regs,
                               bool restore_saved_regs);
 int func_highest_used_reg(func_t *func, int first_callee_saved);
+unsigned int func_used_reg_mask(func_t *func);
+bool func_makes_call(func_t *func);
 bool op_is_binary_alu(opcode_t op);
 bool op_writes_dest(opcode_t op);
 unsigned int ph2_ir_defs(ph2_ir_t *ir);

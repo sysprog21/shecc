@@ -119,26 +119,52 @@ OP_QUERY(op_src0_is_reg, OP_SRC0_REG)
 OP_QUERY(op_src1_is_reg, OP_SRC1_REG)
 #undef OP_QUERY
 
-int func_highest_used_reg(func_t *func, int first_callee_saved)
+/* The bit for register @reg in a func_used_reg_mask(), or 0 for a field that
+ * names no register.
+ */
+static unsigned int reg_bit(int reg)
 {
-    int top = first_callee_saved - 1;
+    return reg >= 0 && reg < REG_CNT ? 1u << reg : 0;
+}
+
+/* The registers @func names as an operand or result anywhere. */
+unsigned int func_used_reg_mask(func_t *func)
+{
+    unsigned int used = 0;
 
     for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
         for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
-            if (op_writes_dest(ir->op) && ir->dest < REG_CNT && ir->dest > top)
-                top = ir->dest;
-            if (op_src0_is_reg(ir->op) && ir->src0 < REG_CNT && ir->src0 > top)
-                top = ir->src0;
-            if (op_src1_is_reg(ir->op) && ir->src1 < REG_CNT && ir->src1 > top)
-                top = ir->src1;
-            if (ir->dest_hi > top && ir->dest_hi < REG_CNT)
-                top = ir->dest_hi;
-            if (ir->src0_hi > top && ir->src0_hi < REG_CNT)
-                top = ir->src0_hi;
-            if (ir->src1_hi > top && ir->src1_hi < REG_CNT)
-                top = ir->src1_hi;
+            if (op_writes_dest(ir->op))
+                used |= reg_bit(ir->dest);
+            if (op_src0_is_reg(ir->op))
+                used |= reg_bit(ir->src0);
+            if (op_src1_is_reg(ir->op))
+                used |= reg_bit(ir->src1);
+            used |= reg_bit(ir->dest_hi) | reg_bit(ir->src0_hi) |
+                    reg_bit(ir->src1_hi);
         }
+    return used;
+}
+
+int func_highest_used_reg(func_t *func, int first_callee_saved)
+{
+    unsigned int used = func_used_reg_mask(func);
+    int top = first_callee_saved - 1;
+
+    for (int reg = top + 1; reg < REG_CNT; reg++)
+        if (used & (1u << reg))
+            top = reg;
     return top;
+}
+
+/* Whether @func calls anything, directly or through a pointer. */
+bool func_makes_call(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next)
+            if (ir->op == OP_call || ir->op == OP_indirect)
+                return true;
+    return false;
 }
 
 /* These instructions can write their result straight to a following move's

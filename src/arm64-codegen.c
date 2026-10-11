@@ -20,6 +20,11 @@
 #define A64_FIRST_CALLEE (REG_CNT - CALLEE_SAVED_REGS)
 #define A64_SAVE_GP 16
 
+/* A leaf with no frame, no saved register and no stack argument: it keeps
+ * neither FP nor LR, so it pushes nothing and returns straight to LR.
+ */
+#define A64_FRAMELESS 32
+
 static int a64_save_bytes(int registers)
 {
     return 16 + ALIGN_UP(((registers & 15) + !!(registers & A64_SAVE_GP)) * 8,
@@ -332,12 +337,27 @@ a64_cond_t a64_cond(opcode_t op, bool is_unsigned)
     }
 }
 
-/* Which successor of a branch, if any, is the block laid out after @bb. */
+/* Whether control leaving @bb at its end lands in @target: the next block in
+ * layout, or one behind blocks that emit nothing, such as the arms a select
+ * diamond emptied.
+ */
+static bool a64_falls_into(basic_block_t *bb, basic_block_t *target)
+{
+    for (basic_block_t *next = bb->rpo_next; next; next = next->rpo_next) {
+        if (next == target)
+            return true;
+        if (next->ph2_ir_list.head)
+            return false;
+    }
+    return false;
+}
+
+/* Which successor of a branch, if any, control falls into after @bb. */
 static int a64_branch_fallthrough(basic_block_t *bb, ph2_ir_t *ir)
 {
-    return ir->else_bb == bb->rpo_next   ? 1
-           : ir->then_bb == bb->rpo_next ? 2
-                                         : 0;
+    return a64_falls_into(bb, ir->else_bb)   ? 1
+           : a64_falls_into(bb, ir->then_bb) ? 2
+                                             : 0;
 }
 
 static bool a64_branch_only_compare(basic_block_t *bb, ph2_ir_t *ir)
@@ -369,6 +389,21 @@ void update_elf_offset(ph2_ir_t *ir)
         elf_offset += arm64_count_ph2_ir_words(ir) * 4;
 }
 
+/* Registers @f may name anywhere, over-approximated by every operand field. */
+static unsigned int a64_registers_named(func_t *f)
+{
+    unsigned int named = 0;
+    for (basic_block_t *bb = f->bbs; bb; bb = bb->rpo_next)
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+            int fields[] = {ir->dest,    ir->src0,    ir->src1,
+                            ir->dest_hi, ir->src0_hi, ir->src1_hi};
+            for (int i = 0; i < 6; i++)
+                if (fields[i] >= 0 && fields[i] < REG_CNT)
+                    named |= 1u << fields[i];
+        }
+    return named;
+}
+
 /* Loop literals use otherwise idle callee-saved registers. Their definitions
  * move to function entry; a local copy remains when a successor or call needs
  * its old lane. Values and addresses outside this literal-only pass are left to
@@ -376,10 +411,24 @@ void update_elf_offset(ph2_ir_t *ir)
  */
 static void a64_hoist_constants(func_t *f)
 {
-    int first = func_highest_used_reg(f, A64_FIRST_CALLEE) + 1;
-    int begin = INT_MAX, end = -1, count = 0;
+    int begin = INT_MAX, end = -1, count = 0, lanes = 0;
     ph2_ir_t *constants[CALLEE_SAVED_REGS];
-    if (first >= REG_CNT)
+    int lane[CALLEE_SAVED_REGS];
+
+    /* A leaf keeps its literals in caller-saved registers it never names, which
+     * need no save; anything else uses idle callee-saved ones.
+     */
+    if (!func_makes_call(f)) {
+        unsigned int named = a64_registers_named(f);
+        for (int reg = A64_FIRST_CALLEE - 1;
+             reg > 0 && lanes < CALLEE_SAVED_REGS; reg--)
+            if (!(named & (1u << reg)))
+                lane[lanes++] = reg;
+    } else
+        for (int reg = func_highest_used_reg(f, A64_FIRST_CALLEE) + 1;
+             reg < REG_CNT; reg++)
+            lane[lanes++] = reg;
+    if (!lanes)
         return;
     for (basic_block_t *bb = f->bbs; bb; bb = bb->rpo_next) {
         basic_block_t *targets[3] = {bb->next, bb->then_, bb->else_};
@@ -408,14 +457,14 @@ static void a64_hoist_constants(func_t *f)
                    a64_constant_value(constants[index]) != value)
                 index++;
             if (index == count) {
-                if (first + count >= REG_CNT) {
+                if (count >= lanes) {
                     previous = ir;
                     link = &ir->next;
                     continue;
                 }
                 ph2_ir_t *setup = ph2_ir_create(OP_load_constant);
                 *setup = *ir;
-                setup->dest = first + count;
+                setup->dest = lane[count];
                 setup->next = NULL;
                 if (count)
                     constants[count - 1]->next = setup;
@@ -701,7 +750,7 @@ void cfg_flatten(void)
                             1;
                     }
                     if (ir->op == OP_jump)
-                        ir->src2 = ir->next_bb == bb->rpo_next;
+                        ir->src2 = a64_falls_into(bb, ir->next_bb);
                     else if (ir->op == OP_branch)
                         ir->src2 = a64_branch_fallthrough(bb, ir);
                 }
@@ -781,6 +830,10 @@ void cfg_flatten(void)
             func_highest_used_reg(f, A64_FIRST_CALLEE) - (A64_FIRST_CALLEE - 1);
         if (dynlink && !strcmp(d->func_name, "main"))
             saved |= A64_SAVE_GP;
+        if (!saved && !f->stack_size && !f->va_args &&
+            f->num_params + f->returns_aggregate <= MAX_ARGS_IN_REG &&
+            !func_makes_call(f))
+            saved |= A64_FRAMELESS;
         d->src2 = saved;
 
         /* Where the caller's stack arguments sit, seen from the callee's own
@@ -811,6 +864,8 @@ void emit_ph2_ir(ph2_ir_t *p)
     switch (p->op) {
     case OP_define: {
         fatal_function_context = p->func_name;
+        if (p->src2 & A64_FRAMELESS)
+            return;
         emit(a64_stp_pre_insn(A64_FP, A64_LR, A64_SP, -16));
         emit(a64_add_imm_insn(true, A64_FP, A64_SP, 0));
         for (int reg = 0; reg < (p->src2 & 15) + !!(p->src2 & A64_SAVE_GP);
@@ -841,13 +896,19 @@ void emit_ph2_ir(ph2_ir_t *p)
             a64_mov(d, n);
         return;
     case OP_address_of:
+    case OP_global_address_of: {
+        /* Both offsets are final when the size estimate runs, so a 12-bit one
+         * is an immediate of the ADD itself.
+         */
+        int base = p->op == OP_address_of ? A64_SP : A64_GP;
+        if (p->src0 >= 0 && p->src0 < 4096) {
+            emit(a64_add_imm_insn(true, d, base, p->src0));
+            return;
+        }
         a64_mov_imm(A64_IP0, p->src0);
-        a64_add(d, A64_SP, A64_IP0);
+        a64_add(d, base, A64_IP0);
         return;
-    case OP_global_address_of:
-        a64_mov_imm(A64_IP0, p->src0);
-        a64_add(d, A64_GP, A64_IP0);
-        return;
+    }
     case OP_load:
         a64_mem(a64_load_access(p), p->size_bytes, d, A64_SP, p->src0);
         return;
@@ -1043,7 +1104,8 @@ void emit_ph2_ir(ph2_ir_t *p)
             emit(a64_ldp_post_insn(a64_saved_reg(p->src2, reg),
                                    a64_saved_reg(p->src2, reg + 1), A64_SP,
                                    16));
-        emit(a64_ldp_post_insn(A64_FP, A64_LR, A64_SP, 16));
+        if (!(p->src2 & A64_FRAMELESS))
+            emit(a64_ldp_post_insn(A64_FP, A64_LR, A64_SP, 16));
         emit(a64_ret_insn());
         return;
     default:

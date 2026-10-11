@@ -159,7 +159,11 @@ int main(int argc, char **argv)
     a64_hoist_constants(&loop_func);
     assert(loop.ph2_ir_list.head->op == OP_load_constant);
     assert(indexed.src0_hi == loop.ph2_ir_list.head->dest);
-    assert(indexed.src0_hi >= A64_FIRST_CALLEE);
+
+    /* The loop is a leaf, so the literal takes a caller-saved register that no
+     * operand field names rather than a callee-saved one needing a save.
+     */
+    assert(indexed.src0_hi < A64_FIRST_CALLEE && indexed.src0_hi > 4);
     if (oracle)
         assert(fclose(oracle) == 0);
     return 0;

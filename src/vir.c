@@ -2263,6 +2263,34 @@ static int vir_reuse_incoming_loads(vir_function_t *func)
     return changes;
 }
 
+/* A load that reads back what the block last stored there, with nothing but
+ * other loads in between, is the stored value. Any other store, call or
+ * volatile access may change the location, so it ends the forwarding.
+ */
+static int vir_forward_stores(vir_function_t *func)
+{
+    int changes = 0;
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        vir_effect_t *store = NULL;
+        for (vir_effect_t *effect = block->effects, *next; effect;
+             effect = next) {
+            next = effect->next;
+            if (effect->kind == VIR_EFFECT_STORE)
+                store = effect;
+            else if (effect->kind != VIR_EFFECT_LOAD)
+                store = NULL;
+            else if (store &&
+                     effect->result->type == store->stored_value->type &&
+                     vir_same_address(effect->address, store->address, 8) &&
+                     vir_replace_all_uses(func, effect->result,
+                                          store->stored_value) &&
+                     vir_effect_remove(func, effect))
+                changes++;
+        }
+    }
+    return changes;
+}
+
 int vir_local_cse_with_stats(vir_function_t *func,
                              vir_opt_level_t opt_level,
                              vir_cse_stats_t *stats)
@@ -2270,7 +2298,8 @@ int vir_local_cse_with_stats(vir_function_t *func,
     int changes = vir_cse_run(func, opt_level, stats, false);
     if (changes < 0 || opt_level == VIR_OPT_O0)
         return changes;
-    int loads = vir_reuse_incoming_loads(func);
+    int loads = vir_forward_stores(func);
+    loads += vir_reuse_incoming_loads(func);
     if (stats)
         stats->replacements += loads;
     return changes + loads;

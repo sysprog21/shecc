@@ -79,8 +79,12 @@ void emit_byte(int byte)
  * Pass -1 for a field the instruction does not use. REX prefix for reg/rm, and
  * for the SIB index when there is one. @index of -1 means the operand names no
  * index.
+ *
+ * A prefix with no bits set changes nothing, so it is left out unless @force
+ * asks for it: only a byte operand naming SPL, BPL, SIL or DIL needs the bare
+ * prefix, which otherwise selects AH, CH, DH or BH.
  */
-void emit_rex_sib(int w, int reg, int rm, int index)
+void emit_rex_prefix(int w, int reg, int rm, int index, bool force)
 {
     int rex = REX_BASE;
     if (w)
@@ -91,7 +95,13 @@ void emit_rex_sib(int w, int reg, int rm, int index)
         rex = rex | REX_X;
     if (rm >= 8)
         rex = rex | REX_B;
-    emit_byte(rex);
+    if (rex != REX_BASE || force)
+        emit_byte(rex);
+}
+
+void emit_rex_sib(int w, int reg, int rm, int index)
+{
+    emit_rex_prefix(w, reg, rm, index, false);
 }
 
 void emit_rex(int w, int reg, int rm)
@@ -119,6 +129,13 @@ void emit_pop_reg(int reg)
     emit_byte(0x58 + reg_low3(reg));
 }
 
+/* How far above RSP a function body's RBP points, or 0 outside one. Frame slots
+ * then go through RBP, which needs no SIB byte, and the 256 bytes around it
+ * take an 8-bit displacement where [rsp + 128] upward needs 32.
+ */
+#define X64_FRAME_BIAS 120
+int x64_frame_bias;
+
 /* ModRM (plus SIB and displacement as needed) naming [base] or [base + disp].
  * R12 and RSP share the low three bits that mean "a SIB byte follows", and R13
  * and RBP share the ones that mean "RIP-relative"; both therefore need a longer
@@ -126,6 +143,11 @@ void emit_pop_reg(int reg)
  */
 void emit_mem_base(int reg_field, int base, int disp, bool have_disp)
 {
+    if (x64_frame_bias && base == 4) {
+        base = 5;
+        disp -= x64_frame_bias;
+        have_disp = true;
+    }
     int b = reg_low3(base);
     int mod = MOD_INDIRECT;
     if (!have_disp && b == 5) {
@@ -146,6 +168,10 @@ void emit_mem_base(int reg_field, int base, int disp, bool have_disp)
 /* ModRM and SIB naming [base + index * (1 << scale) + disp]. */
 void emit_mem_sib(int reg_field, int base, int index, int scale, int disp)
 {
+    if (x64_frame_bias && base == 4) {
+        base = 5;
+        disp -= x64_frame_bias;
+    }
     int b = reg_low3(base);
     int mod = MOD_INDIRECT;
 
@@ -372,6 +398,13 @@ int alu_opcode(int ext, bool accumulator);
 
 void emit_alu_imm_width(int rd, int ext, int imm, bool wide)
 {
+    /* CMP rd, 0 and TEST rd, rd set every flag a condition reads the same way,
+     * and TEST needs no immediate byte.
+     */
+    if (ext == 7 && !imm) {
+        emit_opcode_reg(0x85, rd, rd, wide);
+        return;
+    }
     if (wide || rd >= 8)
         emit_rex(wide, -1, rd);
     if (imm >= -128 && imm <= 127) {

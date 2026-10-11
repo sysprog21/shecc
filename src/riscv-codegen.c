@@ -17,14 +17,33 @@ static int rv_counted_words;
 
 void emit_ph2_ir(ph2_ir_t *ph2_ir);
 
-/* a0-a7 hold virtual registers 0-7; s3-s5 hold the remaining allocatable
+/* How a branch or jump is encoded, kept in its src2. The long forms reach any
+ * target; rv_relax_branches() picks a shorter one once the layout shows the
+ * target in range or right behind the instruction.
+ */
+enum {
+    RV_BRANCH_LONG,      /* lui/addi then, beqz +8, jr; lui/addi else, jr */
+    RV_BRANCH_THEN,      /* bnez then, falling into else */
+    RV_BRANCH_ELSE,      /* beqz else, falling into then */
+    RV_BRANCH_THEN_JAL,  /* bnez then; jal else */
+    RV_BRANCH_SKIP_THEN, /* beqz +8; jal then, falling into else */
+    RV_BRANCH_SKIP_ELSE, /* bnez +8; jal else, falling into then */
+};
+
+enum {
+    RV_JUMP_LONG, /* auipc/jalr */
+    RV_JUMP_JAL,
+    RV_JUMP_FALL, /* the target follows */
+};
+
+/* a0-a7 hold virtual registers 0-7; s3-s11 hold the remaining allocatable
  * registers and are saved when used. s2 stages indirect callees, while s0/s1
  * belong to startup argument handling. The backend does not use other saved
  * registers; ra and sp are handled by the function prologue and epilogue.
  */
 
 /* The machine register for IR register @ir_reg. The first eight are the
- * argument registers a0-a7; the rest are s3-s5, which a callee preserves, so a
+ * argument registers a0-a7; the rest are s3-s11, which a callee preserves, so a
  * value pinned there survives a call. s0 and s1 belong to the entry code and s2
  * holds an indirect call's target.
  */
@@ -33,37 +52,35 @@ int rv_reg_of(int ir_reg)
     return ir_reg < 8 ? ir_reg + __a0 : __s3 + ir_reg - 8;
 }
 
-/* The callee-saved registers @func writes, and so must save on entry and
- * restore on return: how many of s3-s5, which are handed out in order so the
- * highest one used decides, and in bit 8 whether it stages an indirect call's
- * target in s2.
+/* Bit 9 of rv_saved_regs(): the function stages an indirect call's target in
+ * s2.
+ */
+#define RV_SAVED_S2 (1 << 9)
+
+/* The callee-saved registers @func names, and so must save on entry and restore
+ * on return: s3-s11 as a mask in bits 0-8, and RV_SAVED_S2. A mask rather than
+ * the highest one used, because the lowerer stages stack arguments and indirect
+ * callees through the last of them, s11, which would otherwise drag every lane
+ * below it into the frame.
  */
 int rv_saved_regs(func_t *func)
 {
-    int top = func_highest_used_reg(func, 8);
-    int s2 = 0;
+    int saved = func_used_reg_mask(func) >> 8;
 
-    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
-            if (ir->dest_hi > top)
-                top = ir->dest_hi;
-            if (ir->src0_hi > top)
-                top = ir->src0_hi;
-            if (ir->src1_hi > top)
-                top = ir->src1_hi;
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next)
             if (ir->op == OP_load_func)
-                s2 = 1 << 8;
-        }
-    }
-    if (top >= REG_CNT)
-        top = REG_CNT - 1;
-    return (top - 7) | s2;
+                return saved | RV_SAVED_S2;
+    return saved;
 }
 
 /* How many words rv_saved_regs()'s @saved occupies in the frame. */
 int rv_saved_words(int saved)
 {
-    return (saved & 0xff) + (saved >> 8);
+    int words = !!(saved & RV_SAVED_S2);
+    for (int i = 0; i < CALLEE_SAVED_REGS; i++)
+        words += (saved >> i) & 1;
+    return words;
 }
 
 /* The frame a function allocates: its locals, ra, and the saved registers, kept
@@ -74,10 +91,13 @@ int rv_frame_bytes(int stack_size, int saved)
     return ALIGN_UP(stack_size + 4 + rv_saved_words(saved) * 4, RV32_ALIGNMENT);
 }
 
-/* The register saved in frame word @i: s3 onwards, then s2. */
+/* The register saved in frame word @i: the s3-s11 in @saved, then s2. */
 int rv_saved_reg(int saved, int i)
 {
-    return i < (saved & 0xff) ? __s3 + i : __s2;
+    for (int reg = 0; reg < CALLEE_SAVED_REGS; reg++)
+        if (((saved >> reg) & 1) && !i--)
+            return __s3 + reg;
+    return __s2;
 }
 
 static int rv_count_ph2_ir_words(ph2_ir_t *ph2_ir)
@@ -111,6 +131,142 @@ static ph2_frame_layout_t rv_frame_layout(func_t *func, ph2_ir_t *define)
     return (ph2_frame_layout_t) {rv_frame_bytes(func->stack_size, saved),
                                  rv_count_ph2_ir_words(define) * 4, saved,
                                  true};
+}
+
+/* Where the first function is placed, past the startup code and globals. */
+static int rv_functions_start;
+
+static int rv_insn_bytes(ph2_ir_t *ir)
+{
+    return ir->op == OP_allocat ? 0 : rv_count_ph2_ir_words(ir) * 4;
+}
+
+/* The bytes of each function's prologue and each of its instructions, in layout
+ * order. Only branches and jumps change size as their forms shrink, so the rest
+ * are measured once.
+ */
+static int *rv_sizes;
+
+/* Place every function again with the branch forms chosen so far, in the order
+ * ph2_ir_flatten_functions() placed them, and return where code ends.
+ */
+static int rv_layout_functions(void)
+{
+    int offset = rv_functions_start, define = 0, k = 0;
+    bool first = !rv_sizes;
+
+    if (first) {
+        /* One spare entry: shecc's own malloc() returns NULL for zero bytes,
+         * which a unit with no function bodies would otherwise ask for.
+         */
+        rv_sizes = malloc((ph2_ir_idx + 1) * sizeof(int));
+        if (!rv_sizes)
+            fatal("Out of memory");
+    }
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
+        if (first) {
+            while (PH2_IR_FLATTEN[define]->op != OP_define)
+                define++;
+            rv_sizes[k] = rv_count_ph2_ir_words(PH2_IR_FLATTEN[define++]) * 4;
+        }
+        int prologue = rv_sizes[k++];
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            bb->elf_offset = offset;
+            if (bb == func->bbs)
+                offset += prologue;
+            for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+                if (first || ir->op == OP_jump || ir->op == OP_branch)
+                    rv_sizes[k] = rv_insn_bytes(ir);
+                offset += rv_sizes[k++];
+            }
+        }
+    }
+    return offset;
+}
+
+static bool rv_branch_reaches(int distance)
+{
+    return distance >= -4096 && distance <= 4094;
+}
+
+static bool rv_jal_reaches(int distance)
+{
+    return distance >= -1048576 && distance <= 1048574;
+}
+
+/* Choose the shortest form each branch and jump has in the current layout. A
+ * target "right behind" an instruction starts where it ends; shrinking code
+ * keeps that true and only brings other targets closer, so a form chosen here
+ * stays valid in every later layout.
+ *
+ * Returns whether any form changed.
+ */
+static bool rv_choose_branch_forms(void)
+{
+    bool changed = false;
+    int k = 0;
+
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!func->bbs)
+            continue;
+        int prologue = rv_sizes[k++];
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            int offset = bb->elf_offset + (bb == func->bbs ? prologue : 0);
+            for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+                int size = rv_sizes[k++], end = offset + size;
+                int form = ir->src2, words = 0;
+
+                if (ir->op == OP_jump && ir->next_bb) {
+                    int target = ir->next_bb->elf_offset;
+                    if (target == end)
+                        form = RV_JUMP_FALL;
+                    else if (rv_jal_reaches(target - offset))
+                        form = RV_JUMP_JAL;
+                    words = form == RV_JUMP_FALL  ? 0
+                            : form == RV_JUMP_JAL ? 1
+                                                  : 2;
+                } else if (ir->op == OP_branch) {
+                    int q = offset + (ir->src0_hi >= 0 ? 4 : 0);
+                    int then_at = ir->then_bb->elf_offset;
+                    int else_at = ir->else_bb->elf_offset;
+                    if (else_at == end && rv_branch_reaches(then_at - q))
+                        form = RV_BRANCH_THEN;
+                    else if (then_at == end && rv_branch_reaches(else_at - q))
+                        form = RV_BRANCH_ELSE;
+                    else if (rv_branch_reaches(then_at - q) &&
+                             rv_jal_reaches(else_at - q - 4))
+                        form = RV_BRANCH_THEN_JAL;
+                    else if (else_at == end && rv_jal_reaches(then_at - q - 4))
+                        form = RV_BRANCH_SKIP_THEN;
+                    else if (then_at == end && rv_jal_reaches(else_at - q - 4))
+                        form = RV_BRANCH_SKIP_ELSE;
+                    words = (q - offset) / 4 +
+                            (form == RV_BRANCH_LONG ? 7
+                             : form == RV_BRANCH_THEN || form == RV_BRANCH_ELSE
+                                 ? 1
+                                 : 2);
+                }
+                if (form != ir->src2 && words * 4 < size) {
+                    ir->src2 = form;
+                    changed = true;
+                }
+                offset = end;
+            }
+        }
+    }
+    return changed;
+}
+
+/* Lay the functions out until the branch forms settle. */
+static void rv_relax_branches(void)
+{
+    do
+        elf_offset = rv_layout_functions();
+    while (rv_choose_branch_forms());
+    free(rv_sizes);
+    rv_sizes = NULL;
 }
 
 void cfg_flatten(void)
@@ -153,7 +309,9 @@ void cfg_flatten(void)
     if (MAIN_BB)
         elf_offset += dynlink ? 48 : 28;
 
+    rv_functions_start = elf_offset;
     ph2_ir_flatten_functions(rv_frame_layout, update_elf_offset);
+    rv_relax_branches();
 }
 
 void emit(int code)
@@ -371,6 +529,35 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         rv_store(rs2, rs1, 0, ph2_ir->dest);
         return;
     case OP_branch:
+        if (ph2_ir->src2 != RV_BRANCH_LONG) {
+            int form = ph2_ir->src2;
+
+            if (ph2_ir->src0_hi >= 0) {
+                emit(__or(__t1, rs1, rs1_hi));
+                rs1 = __t1;
+            }
+            if (rv_count_only) {
+                emit(0);
+                if (form >= RV_BRANCH_THEN_JAL)
+                    emit(0);
+                return;
+            }
+            int here = elf_code->size;
+            int then_ofs = ph2_ir->then_bb->elf_offset - here;
+            int else_ofs = ph2_ir->else_bb->elf_offset - here;
+            if (form == RV_BRANCH_THEN || form == RV_BRANCH_THEN_JAL)
+                emit(__bne(rs1, __zero, then_ofs));
+            else if (form == RV_BRANCH_ELSE)
+                emit(__beq(rs1, __zero, else_ofs));
+            else if (form == RV_BRANCH_SKIP_THEN) {
+                emit(__beq(rs1, __zero, 8));
+                emit(__jal(__zero, then_ofs - 4));
+            } else
+                emit(__bne(rs1, __zero, 8));
+            if (form == RV_BRANCH_THEN_JAL || form == RV_BRANCH_SKIP_ELSE)
+                emit(__jal(__zero, else_ofs - 4));
+            return;
+        }
         ofs = elf_code_start + ph2_ir->then_bb->elf_offset;
         emit_rv32_split_address(false, __t0, __t0, ofs);
 
@@ -386,7 +573,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__jalr(__zero, __t0, 0));
         return;
     case OP_jump:
+        if (ph2_ir->src2 == RV_JUMP_FALL)
+            return;
         ofs = ph2_ir->next_bb->elf_offset - elf_code->size;
+        if (ph2_ir->src2 == RV_JUMP_JAL) {
+            emit(rv_count_only ? 0 : __jal(__zero, ofs));
+            return;
+        }
         emit_rv32_split_address(true, __zero, __t0, ofs);
         return;
     case OP_call:

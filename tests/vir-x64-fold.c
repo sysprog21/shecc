@@ -27,6 +27,8 @@ static void check_branch_fallthrough(void)
 
 int main(void)
 {
+    /* Emitted branches are recorded for relaxation in the general arena. */
+    GENERAL_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     check_branch_fallthrough();
     basic_block_t bb = {0};
     ph2_ir_t sum = {0}, read = {0}, ret = {0};

@@ -42,8 +42,13 @@ static void liveout_test_hook(void)
     vir_machine_function_t machine;
     assert(vir_lower_machine(&function, &type, NULL, NULL, &machine));
     assert(machine.entry->ph2_ir_list.head->op == OP_eq);
-    /* This is an allocator-selected fixed lane, not a forced location. */
-    assert(machine.entry->ph2_ir_list.head->dest == 7);
+
+    /* This is an allocator-selected fixed lane, not a forced location: no call
+     * lies in the condition's live range, so it takes the first caller-saved
+     * lane.
+     */
+    assert(machine.entry->ph2_ir_list.head->dest ==
+           vir_machine_caller_lanes[0]);
     install_machine("probe_cmp", &machine);
     vir_function_release(&function);
 
@@ -80,7 +85,8 @@ static void liveout_test_hook(void)
     install_machine("probe_and", &machine);
     ph2_compute_liveness();
     assert(head->machine_liveout & (1u << 7));
-    assert(find_func("probe_cmp")->bbs->machine_liveout & (1u << 7));
+    assert(find_func("probe_cmp")->bbs->machine_liveout &
+           (1u << vir_machine_caller_lanes[0]));
 }
 
 int main(int argc, char **argv)

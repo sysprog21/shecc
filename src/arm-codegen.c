@@ -352,12 +352,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__teq(__r8));
         } else
             emit(__teq(rn));
-        if (ph2_ir->is_branch_detached) {
+        if (ph2_ir->src2)
+            /* The then block follows: only the else edge needs a branch. */
+            emit(__b(__EQ, ph2_ir->else_bb->elf_offset - elf_code->size));
+        else if (ph2_ir->is_branch_detached) {
             /* The else block does not follow, and nothing says the then block
              * does either: a loop's back edge lands behind this one. Jump to
              * both explicitly rather than skipping over the else jump into
-             * whatever was laid out next. The estimator charges 12 bytes for
-             * this form either way.
+             * whatever was laid out next.
              */
             emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code->size));
             emit(__b(__AL, ph2_ir->else_bb->elf_offset - elf_code->size));
@@ -365,7 +367,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code->size));
         return;
     case OP_jump:
-        emit(__b(__AL, ph2_ir->next_bb->elf_offset - elf_code->size));
+        if (!ph2_ir->src2)
+            emit(__b(__AL, ph2_ir->next_bb->elf_offset - elf_code->size));
         return;
     case OP_call:
         func = find_func(ph2_ir->func_name);

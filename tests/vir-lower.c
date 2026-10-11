@@ -1245,7 +1245,10 @@ static void test_literal_rematerialization(void)
     vir_edge_t edge = {0};
     use.edge = &edge;
     locations[1].rematerializable = vir_machine_rematerializable(&literal);
-    assert(!locations[1].rematerializable);
+
+    /* An edge copy rebuilds a literal in its destination, so it needs no home.
+     */
+    assert(locations[1].rematerializable);
     /* Edge-affiliated literals use their fixed lane rather than a fake home. */
     int fixed = REG_CNT - CALLEE_SAVED_REGS;
     locations[1].fixed = locations[1].reg = fixed;
@@ -1254,7 +1257,7 @@ static void test_literal_rematerialization(void)
     literal.constant = 9;
     lower.block = arena_alloc_bb();
     vir_machine_value(&lower, &literal);
-    assert(locations[1].dirty && !locations[1].rematerializable);
+    assert(!locations[1].dirty && locations[1].rematerializable);
     instruction = lower.block->ph2_ir_list.tail;
     assert(instruction->op == OP_load_constant && instruction->dest == fixed);
     assert(vir_machine_read(&lower, &literal) == fixed);
@@ -1493,6 +1496,16 @@ static void test_live_branch_condition(void)
             if (ir->op == OP_store && compare >= 0 && ir->src0 == compare)
                 materialized = true;
         }
+
+        /* The condition outlives the branch: its home holds it, or it stays in
+         * a caller-saved lane, since no call follows, or in a callee-saved
+         * register when arguments fill those lanes.
+         */
+        materialized |= compare >= REG_CNT - CALLEE_SAVED_REGS;
+        for (int lane = 0; lane < (int) (sizeof(vir_machine_caller_lanes) /
+                                         sizeof(vir_machine_caller_lanes[0]));
+             lane++)
+            materialized |= compare == vir_machine_caller_lanes[lane];
         assert(materialized);
         for (int take = 0; take < 2; take++) {
             memset(registers, 0, sizeof(registers));

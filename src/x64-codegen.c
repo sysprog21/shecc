@@ -119,9 +119,25 @@ bool folds_off;
 /* Callee-saved registers the function being emitted preserves. */
 int cur_saved_regs;
 
+/* Whether the function being emitted pushed RBP and points it into its frame. A
+ * leaf with no frame and every argument in a register addresses nothing through
+ * RSP and makes no call that needs RSP aligned, so it does neither.
+ */
+bool cur_frame_rbp = true;
+
+static bool x64_needs_frame(func_t *func)
+{
+    return !func || !func->bbs || func->stack_size ||
+           func->num_params + func->returns_aggregate > MAX_ARGS_IN_REG ||
+           func->va_args || func_makes_call(func);
+}
+
+/* A frameless leaf has no locals and makes no call, so RSP needs neither room
+ * nor alignment: x64_frame_bytes() would only pad for the RBP push it skipped.
+ */
 static void emit_frame_adjust(int operation, int stack_size)
 {
-    int bytes = x64_frame_bytes(stack_size, cur_saved_regs);
+    int bytes = cur_frame_rbp ? x64_frame_bytes(stack_size, cur_saved_regs) : 0;
     if (bytes)
         emit_alu_imm_width(4, operation, bytes, true);
 }
@@ -240,6 +256,71 @@ void add_forward_ref(basic_block_t *target_bb)
     forward_refs[forward_ref_count].patch_location = elf_code->size;
     forward_refs[forward_ref_count].target_bb = target_bb;
     forward_ref_count++;
+}
+
+/* Position-dependent sites recorded for branch relaxation, in emission order.
+ * Every jump and conditional branch is first emitted with a rel32, every loop
+ * header is padded to its 16-byte boundary, and each direct call names its
+ * target by displacement. Once all function code is placed, x64_relax() picks
+ * the two-byte form for the branches that reach, drops jumps that land on the
+ * next instruction, recomputes the padding, and rewrites every displacement.
+ */
+typedef struct {
+    int start;
+    int old_size;
+    int kind; /* 0: JMP, 0x80-0x8F: Jcc, -1: loop-header padding */
+    basic_block_t *target;
+    int new_start;
+    int new_size;
+    bool fixed_long; /* the short form did not reach in some layout */
+} x64_edit_t;
+
+typedef struct {
+    int start;
+    basic_block_t *target;
+} x64_call_site_t;
+
+x64_edit_t *x64_edits;
+int x64_edit_count;
+int x64_edit_cap;
+x64_call_site_t *x64_call_sites;
+int x64_call_site_count;
+int x64_call_site_cap;
+
+static void x64_record_edit(int start,
+                            int old_size,
+                            int kind,
+                            basic_block_t *target)
+{
+    x64_edits = reloc_reserve(x64_edits, x64_edit_count, &x64_edit_cap,
+                              sizeof(x64_edit_t));
+    x64_edit_t *edit = &x64_edits[x64_edit_count++];
+    edit->start = start;
+    edit->old_size = old_size;
+    edit->kind = kind;
+    edit->target = target;
+    edit->new_start = start;
+    edit->new_size = old_size;
+    edit->fixed_long = false;
+}
+
+/* Pad to the next 16-byte boundary, recorded so that x64_relax() can redo the
+ * padding once the code before it shrinks.
+ */
+static void x64_align16(void)
+{
+    int start = elf_code->size;
+    emit_nop_bytes((16 - (start & 15)) & 15);
+    x64_record_edit(start, elf_code->size - start, -1, NULL);
+}
+
+static void x64_record_call(int start, basic_block_t *target)
+{
+    x64_call_sites = reloc_reserve(x64_call_sites, x64_call_site_count,
+                                   &x64_call_site_cap, sizeof(x64_call_site_t));
+    x64_call_sites[x64_call_site_count].start = start;
+    x64_call_sites[x64_call_site_count].target = target;
+    x64_call_site_count++;
 }
 
 /* Emit x86-64 instructions for each IR operation Map an IR register (0-7) onto
@@ -379,6 +460,21 @@ void emit_bb_rel32(basic_block_t *bb)
     }
     add_forward_ref(bb);
     emit_dword(0);
+}
+
+/* JMP rel32 (@condition 0) or Jcc rel32 to @bb, recorded for relaxation. */
+static void x64_emit_branch(int condition, basic_block_t *bb)
+{
+    int start = elf_code->size;
+
+    if (condition) {
+        emit_byte(0x0F);
+        emit_byte(condition);
+    } else
+        emit_byte(0xE9);
+    emit_bb_rel32(bb);
+    x64_record_edit(start, elf_code->size - start, condition,
+                    bb_code_target(bb));
 }
 
 /* Which frame slot each IR register currently mirrors. A reload of a slot the
@@ -1255,6 +1351,72 @@ bool bb_is_loop_header(basic_block_t *bb)
     return false;
 }
 
+/* The latch whose back edge into loop header @bb is a jump the walk rotates, so
+ * the loop runs from the header's in-loop successor and the header itself only
+ * on entry; NULL when the loop is not rotated.
+ */
+static basic_block_t *x64_rotated_loop(basic_block_t *bb)
+{
+    if (!bb || !bb_has_small_test(bb))
+        return NULL;
+    for (int i = 0; i < bb->prev_idx; i++) {
+        basic_block_t *pred = bb->prev[i].bb;
+        ph2_ir_t *last = pred ? pred->ph2_ir_list.tail : NULL;
+        if (pred && pred->rpo >= bb->rpo && last && last->op == OP_jump &&
+            last->next_bb == bb)
+            return pred;
+    }
+    return NULL;
+}
+
+/* Whether @from reaches @latch without passing @header: true of the successor
+ * that stays in the loop, false of its exit even inside an outer loop. The walk
+ * is bounded; a loop too large for it only goes unaligned.
+ */
+static bool x64_in_loop(basic_block_t *from,
+                        basic_block_t *header,
+                        basic_block_t *latch)
+{
+    basic_block_t *work[64];
+    int count = 0;
+    work[count++] = from;
+    for (int i = 0; i < count; i++) {
+        basic_block_t *bb = work[i];
+        if (bb == latch)
+            return true;
+        basic_block_t *succs[3] = {bb->next, bb->then_, bb->else_};
+        for (int k = 0; k < 3; k++) {
+            basic_block_t *succ = succs[k];
+            bool seen = !succ || succ == header;
+            for (int j = 0; j < count && !seen; j++)
+                seen = work[j] == succ;
+            if (!seen && count < 64)
+                work[count++] = succ;
+        }
+    }
+    return false;
+}
+
+/* Whether @bb starts a loop's body: a header the walk does not rotate, or the
+ * in-loop successor of one it does.
+ */
+static bool x64_aligns_block(basic_block_t *bb)
+{
+    if (bb_is_loop_header(bb) && !x64_rotated_loop(bb))
+        return true;
+    for (int p = 0; p < bb->prev_idx; p++) {
+        basic_block_t *header = bb->prev[p].bb;
+        basic_block_t *latch = x64_rotated_loop(header);
+        ph2_ir_t *test = latch ? header->ph2_ir_list.tail : NULL;
+        if (test &&
+            (bb_code_target(test->then_bb) == bb ||
+             bb_code_target(test->else_bb) == bb) &&
+            x64_in_loop(bb, header, latch))
+            return true;
+    }
+    return false;
+}
+
 /* The block whose code actually runs before @bb, when there is exactly one.
  *
  * A block that emits nothing leaves the registers as its own predecessor left
@@ -1320,12 +1482,9 @@ static void emit_conditional_edges(int condition,
         else_bb = target;
         condition ^= 1;
     }
-    emit_byte(0x0F);
-    emit_byte(condition);
-    emit_bb_rel32(then_bb);
+    x64_emit_branch(condition, then_bb);
     if (!bb_falls_through(else_bb)) {
-        emit_byte(0xE9);
-        emit_bb_rel32(else_bb);
+        x64_emit_branch(0, else_bb);
         emit_fell_through = false;
     }
 }
@@ -1345,12 +1504,22 @@ static void emit_alu_imm_rsp(int ext, int slot, int imm, bool wide)
     }
 }
 
+/* MOV reg, imm32, sign-extended to 64 bits when @wide. A 32-bit write
+ * zero-extends, so B8+r with no REX.W already gives a non-negative value its
+ * 64-bit form one or two bytes shorter than C7 /0; only a negative wide value
+ * needs the sign-extending encoding.
+ */
 static void emit_mov_imm32(int reg, int imm, bool wide)
 {
-    if (wide || reg >= 8)
-        emit_rex(wide, -1, reg);
-    emit_byte(0xC7);
-    emit_byte(modrm(MOD_DIRECT, 0, reg_low3(reg)));
+    if (wide && imm < 0) {
+        emit_rex(1, -1, reg);
+        emit_byte(0xC7);
+        emit_byte(modrm(MOD_DIRECT, 0, reg_low3(reg)));
+    } else {
+        if (reg >= 8)
+            emit_byte(REX_B);
+        emit_byte(0xB8 + reg_low3(reg));
+    }
     emit_dword(imm);
 }
 
@@ -1957,8 +2126,7 @@ void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
          * use, so a jump landing on nothing but another jump goes straight to
          * where that one ends up.
          */
-        emit_byte(0xE9);
-        emit_bb_rel32(ph2_ir->next_bb);
+        x64_emit_branch(0, ph2_ir->next_bb);
         return;
     }
 
@@ -2033,6 +2201,7 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
                 fflush(stdout); /* see fatal() */
                 abort();
             } else {
+                x64_record_call(elf_code->size, target_func->bbs);
                 emit_byte(0xE8); /* CALL rel32 */
 
                 /* Check if this is a forward reference (function not compiled
@@ -2089,8 +2258,9 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
         /* R15 is reserved for global base pointer - don't save/restore */
         for (int cs = cur_saved_regs - 1; cs >= 0; cs--)
             emit_pop_reg(map_ir_reg(X64_FIRST_CALLEE_SAVED + cs));
-        emit_byte(0x5D); /* POP rbp */
-        emit_byte(0xC3); /* RET */
+        if (cur_frame_rbp)
+            emit_byte(0x5D); /* POP rbp */
+        emit_byte(0xC3);     /* RET */
         return;
 
     case OP_func_ret:
@@ -2152,12 +2322,8 @@ static void emit_store_instruction(int width,
 
     if (width == 2)
         emit_byte(0x66);
-    if (rex) {
-        if (sib)
-            emit_rex_sib(wide, reg, base, index);
-        else
-            emit_rex(wide, reg, base);
-    }
+    if (rex)
+        emit_rex_prefix(wide, reg, base, sib ? index : -1, true);
     emit_byte(immediate ? (width == 1 ? 0xC6 : 0xC7)
                         : (width == 1 ? 0x88 : 0x89));
 }
@@ -2882,12 +3048,29 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                 return;
         }
 
+        /* A constant that is only returned can go straight into RAX, where the
+         * return would otherwise have to copy it.
+         */
+        bool returned = next_in_same_bb() && emit_next_ir->op == OP_return &&
+                        emit_next_ir->src0 == ph2_ir->dest &&
+                        !(emit_next_ir->src0_is_unsigned &&
+                          emit_next_ir->size_bytes < PTR_SIZE);
+        if (returned)
+            rd = 0;
+
         /* A 32-bit register write zero-extends to 64 bits, which is exactly the
          * representation an unsigned scalar needs before a logical shift or
          * unsigned comparison.
          */
         emit_mov_imm32(rd, ph2_ir->src0,
                        !(ph2_ir->is_unsigned && ph2_ir->size_bytes <= 4));
+        if (returned) {
+            /* The constant went to RAX; the destination was never written. */
+            if (ph2_ir->dest >= 0 && ph2_ir->dest < REG_CNT)
+                const_reg_valid[ph2_ir->dest] = false;
+            src0_override = 0;
+            src0_override_at = emit_ir_index + 1;
+        }
         return;
     }
 
@@ -2966,12 +3149,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         break;
     case OP_define:
         fatal_function_context = ph2_ir->func_name;
-        /* Update the function's actual offset to current code position */
+        /* Update the function's actual offset to current code position. A
+         * function with no body is only declared: it has nothing to set up and
+         * nothing can reach a prologue emitted for it.
+         */
         {
             func_t *func = find_func(ph2_ir->func_name);
-            if (func && func->bbs) {
-                func->bbs->elf_offset = elf_code->size;
-            }
+            if (!func || !func->bbs)
+                return;
+            x64_align16();
+            func->bbs->elf_offset = elf_code->size;
         }
 
         /* Check if this is the main function and record its location */
@@ -2981,11 +3168,13 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             main_code_offset = elf_code->size;
         }
 
-        /* Function prologue: PUSH rbp; MOV rbp, rsp; save callee-saved; SUB
-         * rsp, aligned_size
+        /* Function prologue: PUSH rbp; save callee-saved; SUB rsp,
+         * aligned_size; LEA rbp, [rsp + bias]
          */
-        emit_byte(0x55);           /* PUSH rbp */
-        emit_reg_move(5, 4, true); /* MOV rbp, rsp */
+        x64_frame_bias = 0;
+        cur_frame_rbp = x64_needs_frame(find_func(ph2_ir->func_name));
+        if (cur_frame_rbp)
+            emit_byte(0x55); /* PUSH rbp */
         /* Preserve only the callee-saved registers this function touches,
          * naming them through the same mapping the allocator uses.
          */
@@ -3003,6 +3192,18 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             fflush(stderr);
         }
         emit_frame_adjust(5, stack_size);
+        if (!cur_frame_rbp)
+            return;
+
+        /* LEA rbp, [rsp + X64_FRAME_BIAS]: the bias still fits the LEA's own
+         * 8-bit displacement.
+         */
+        emit_byte(REX_W);
+        emit_byte(0x8D);
+        emit_byte(modrm(MOD_DISP8, 5, 4));
+        emit_byte(0x24); /* SIB: base RSP, no index */
+        emit_byte(X64_FRAME_BIAS);
+        x64_frame_bias = X64_FRAME_BIAS;
         return;
 
     case OP_ternary:
@@ -3177,6 +3378,149 @@ void plt_generate(void)
     }
 }
 
+/* Where old code offset @p lands once the edits are laid out: shifted by what
+ * every edit ending at or before it gained or lost.
+ */
+static int x64_relax_newpos(int p)
+{
+    int lo = 0, hi = x64_edit_count - 1, found = -1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (x64_edits[mid].start + x64_edits[mid].old_size <= p) {
+            found = mid;
+            lo = mid + 1;
+        } else
+            hi = mid - 1;
+    }
+    if (found < 0)
+        return p;
+    x64_edit_t *edit = &x64_edits[found];
+    return p + (edit->new_start + edit->new_size) -
+           (edit->start + edit->old_size);
+}
+
+/* Lay the edits out front to back: a branch takes the size its current decision
+ * gives it, and padding whatever brings its loop header back to a 16-byte
+ * boundary at the new position.
+ */
+static void x64_relax_layout(void)
+{
+    int delta = 0;
+    for (int i = 0; i < x64_edit_count; i++) {
+        x64_edit_t *edit = &x64_edits[i];
+        edit->new_start = edit->start + delta;
+        if (edit->kind < 0)
+            edit->new_size = (16 - (edit->new_start & 15)) & 15;
+        else if (edit->fixed_long)
+            edit->new_size = edit->old_size;
+        else if (edit->kind == 0 &&
+                 edit->target->elf_offset == edit->start + edit->old_size)
+            edit->new_size = 0;
+        else
+            edit->new_size = 2;
+        delta += edit->new_size - edit->old_size;
+    }
+}
+
+/* Shrink the branches recorded during emission. Every edit only ever moves
+ * toward its rel32 form, so the loop below ends; a branch whose two-byte form
+ * misses its target in some layout keeps rel32 from then on. Nothing is changed
+ * when a recorded target was never placed, so that the forward reference
+ * patching reports it as before.
+ */
+static void x64_relax(void)
+{
+    if (!x64_edit_count)
+        return;
+    for (int i = 0; i < x64_edit_count; i++) {
+        x64_edit_t *edit = &x64_edits[i];
+        if (edit->kind >= 0 && (!edit->target || edit->target->elf_offset < 0))
+            return;
+    }
+    for (int i = 0; i < x64_call_site_count; i++)
+        if (!x64_call_sites[i].target ||
+            x64_call_sites[i].target->elf_offset < 0)
+            return;
+
+    for (bool changed = true; changed;) {
+        changed = false;
+        x64_relax_layout();
+        for (int i = 0; i < x64_edit_count; i++) {
+            x64_edit_t *edit = &x64_edits[i];
+            if (edit->kind < 0 || edit->new_size != 2)
+                continue;
+            int disp = x64_relax_newpos(edit->target->elf_offset) -
+                       (edit->new_start + 2);
+            if (disp < -128 || disp > 127) {
+                edit->fixed_long = true;
+                changed = true;
+            }
+        }
+    }
+
+    int old_size = elf_code->size;
+    char *old = malloc(old_size);
+    if (!old)
+        fatal("Out of memory");
+    memcpy(old, elf_code->elements, old_size);
+    elf_code->size = 0;
+    int cursor = 0;
+    for (int i = 0; i < x64_edit_count; i++) {
+        x64_edit_t *edit = &x64_edits[i];
+        while (cursor < edit->start)
+            emit_byte(old[cursor++]);
+        cursor += edit->old_size;
+        if (edit->kind < 0) {
+            emit_nop_bytes(edit->new_size);
+            continue;
+        }
+        if (!edit->new_size)
+            continue;
+        int target = x64_relax_newpos(edit->target->elf_offset);
+        if (edit->new_size == 2) {
+            emit_byte(edit->kind ? edit->kind - 0x10 : 0xEB);
+            emit_byte(target - (edit->new_start + 2));
+        } else {
+            if (edit->kind) {
+                emit_byte(0x0F);
+                emit_byte(edit->kind);
+            } else
+                emit_byte(0xE9);
+            emit_dword(target - (edit->new_start + edit->new_size));
+        }
+    }
+    while (cursor < old_size)
+        emit_byte(old[cursor++]);
+    free(old);
+
+    for (int i = 0; i < x64_call_site_count; i++) {
+        int at = x64_relax_newpos(x64_call_sites[i].start);
+        patch_dword(
+            at + 1,
+            x64_relax_newpos(x64_call_sites[i].target->elf_offset) - (at + 5));
+    }
+
+    /* Every position recorded so far moves with the code. The branch and call
+     * displacements above already name their final targets, which is all the
+     * forward references were waiting for.
+     */
+    for (func_t *func = FUNC_LIST.head; func; func = func->next)
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+            if (bb->elf_offset >= 0)
+                bb->elf_offset = x64_relax_newpos(bb->elf_offset);
+    main_code_offset = x64_relax_newpos(main_code_offset);
+    for (int i = 0; i < pltcall_ref_count; i++)
+        pltcall_refs[i].patch_location =
+            x64_relax_newpos(pltcall_refs[i].patch_location);
+    for (int i = 0; i < funcaddr_ref_count; i++)
+        funcaddr_refs[i].patch_location =
+            x64_relax_newpos(funcaddr_refs[i].patch_location);
+    for (int i = 0; i < rodata_ref_count; i++)
+        rodata_refs[i].patch_location =
+            x64_relax_newpos(rodata_refs[i].patch_location);
+    forward_ref_count = 0;
+}
+
 void code_generate(void)
 {
     arena_mark_t instruction_to_bb_mark;
@@ -3184,6 +3528,7 @@ void code_generate(void)
 
     src0_override = -1;
     src0_override_at = -1;
+    x64_frame_bias = 0;
     cmp_mem_slot = -1;
     addr_fold = false;
     addr_sib = false;
@@ -3281,41 +3626,46 @@ void code_generate(void)
      * back at the end, and each register is read before it is overwritten. Six
      * arguments are needed in full for mmap(2).
      */
-    /* MOV r11, rdi (save sysno) */
-    emit_reg_move(11, 7, true);
-    /* MOV rdi, rsi (a1) */
-    emit_reg_move(7, 6, true);
-    /* MOV rsi, rdx (a2) */
-    emit_reg_move(6, 2, true);
-    /* MOV rdx, rcx (a3) */
-    emit_reg_move(2, 1, true);
-    /* MOV r10, r8 (a4) */
-    emit_reg_move(10, 8, true);
-    /* MOV r8, r9 (a5) */
-    emit_reg_move(8, 9, true);
-
-    /* MOV r9, [rsp + 8] (a6)
-     *
-     * The seventh argument does not travel in a register: the file holds six,
-     * and everything past them goes to the caller's frame, where the call left
-     * it just above the return address. Reading RAX here instead worked only
-     * while RAX happened to hold zero, which is the offset every mmap(2) shecc
-     * makes asks for -- until a caller left something else there.
+    /* Only a program that calls __syscall needs the stub; one built with
+     * --no-libc usually never does.
      */
-    emit_byte(REX_W | REX_R);
-    emit_byte(0x8B);
-    emit_byte(modrm(MOD_DISP8, 1, 4));
-    emit_byte(0x24); /* SIB: base RSP, no index */
-    emit_byte(8);
-    /* MOV rax, r11 (sysno) */
-    emit_reg_move(0, 11, true);
+    if (syscall_func && syscall_func->is_used) {
+        /* MOV r11, rdi (save sysno) */
+        emit_reg_move(11, 7, true);
+        /* MOV rdi, rsi (a1) */
+        emit_reg_move(7, 6, true);
+        /* MOV rsi, rdx (a2) */
+        emit_reg_move(6, 2, true);
+        /* MOV rdx, rcx (a3) */
+        emit_reg_move(2, 1, true);
+        /* MOV r10, r8 (a4) */
+        emit_reg_move(10, 8, true);
+        /* MOV r8, r9 (a5) */
+        emit_reg_move(8, 9, true);
 
-    /* SYSCALL */
-    emit_byte(0x0F);
-    emit_byte(0x05);
+        /* MOV r9, [rsp + 8] (a6)
+         *
+         * The seventh argument does not travel in a register: the file holds
+         * six, and everything past them goes to the caller's frame, where the
+         * call left it just above the return address. Reading RAX here instead
+         * worked only while RAX happened to hold zero, which is the offset
+         * every mmap(2) shecc makes asks for -- until a caller left something
+         * else there.
+         */
+        emit_byte(REX_W | REX_R);
+        emit_byte(0x8B);
+        emit_byte(modrm(MOD_DISP8, 1, 4));
+        emit_byte(0x24); /* SIB: base RSP, no index */
+        emit_byte(8);
+        /* MOV rax, r11 (sysno) */
+        emit_reg_move(0, 11, true);
 
-    /* DEBUG: mark leaving __syscall - DISABLED due to stack corruption RET */
-    emit_byte(0xC3);
+        /* SYSCALL */
+        emit_byte(0x0F);
+        emit_byte(0x05);
+
+        emit_byte(0xC3); /* RET */
+    }
 
     /* Emit all flattened IR - this includes all functions We need to track and
      * update basic block offsets as we emit them Track current function and
@@ -3470,10 +3820,12 @@ void code_generate(void)
                  * is reached from a backward edge. Starting it on a 16-byte
                  * boundary keeps it off a shared predictor slot; without this,
                  * an unrelated change in code size upstream can triple the
-                 * branch misses of a tight loop.
+                 * branch misses of a tight loop. A rotated loop branches back
+                 * to the block after its header instead, so that block is the
+                 * one aligned.
                  */
-                if (bb_is_loop_header(current_instr_bb))
-                    emit_nop_bytes((16 - (elf_code->size & 15)) & 15);
+                if (x64_aligns_block(current_instr_bb))
+                    x64_align16();
 
                 /* Entering a new basic block: record where it starts. A block
                  * can be reached from several predecessors, so nothing learned
@@ -3586,8 +3938,11 @@ void code_generate(void)
 
                 /* Nothing reaches this block by falling into it -- it is placed
                  * here only because the walk never got to it -- so it starts
-                 * from nothing.
+                 * from nothing, in its own function's frame.
                  */
+                cur_saved_regs = lf->saved_regs;
+                cur_frame_rbp = x64_needs_frame(lf);
+                x64_frame_bias = cur_frame_rbp ? X64_FRAME_BIAS : 0;
                 frame_mirror_reset();
                 const_track_reset();
                 shift_cache_reset();
@@ -3602,6 +3957,9 @@ void code_generate(void)
             }
         }
     }
+
+    x64_frame_bias = 0;
+    x64_relax();
 
     /* Track R15 patch offset if entry is emitted at the end */
     int r15_patch_offset = 0;
