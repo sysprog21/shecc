@@ -22,7 +22,7 @@ ARCH_DEFS = \
     \#define DYN_LINKER \"/lib/ld-linux-aarch64.so.1\"\n$\
     \#define LIBC_SO \"libc.so.6\"\n$\
     \#define LIBDL_SO \"libdl.so.2\"\n$\
-    \#define PLT_FIXUP_SIZE 0\n$\
+    \#define PLT_FIXUP_SIZE 32\n$\
     \#define PLT_ENT_SIZE 16\n$\
     \#define RESERVED_GOT_NUM 3\n$\
     \#define R_ARCH_JUMP_SLOT 1026 /* R_AARCH64_JUMP_SLOT */\n$\

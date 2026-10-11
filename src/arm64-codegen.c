@@ -650,10 +650,42 @@ void emit_ph2_ir(ph2_ir_t *p)
  */
 void plt_generate(void)
 {
-    int entries = dynamic_sections.plt_size / PLT_ENT_SIZE;
+    int entries = (dynamic_sections.plt_size - PLT_FIXUP_SIZE) / PLT_ENT_SIZE;
+    int ent = dynamic_sections.elf_plt_start;
+    int got =
+        dynamic_sections.elf_got_start + PTR_SIZE * (RESERVED_GOT_NUM - 1);
+
+    /* _dl_runtime_resolve() requires:
+     *
+     * - ip0: Address of got[2] (&got[2])
+     * - ip1: got[2]
+     * - [sp]: Address of got[N + 3] (Address of the N-th function's GOT stub.)
+     * - [sp + 8]: Value stored in register lr
+     *
+     * PLT[0] uses the STP, ADRP, LDR, ADD and BR instructions to prepare the
+     * above arguments and jump to the resolver.
+     *
+     * The remaining 3 nop instructions are used to pad PLT[0] to 32 bytes,
+     * allowing the later sections to stay aligned.
+     */
+    elf_write_int(dynamic_sections.elf_plt,
+                  a64_stp_pre_insn(A64_IP0, A64_LR, A64_SP, -16));
+    elf_write_int(dynamic_sections.elf_plt,
+                  a64_adrp_insn(A64_IP0, ent + 4, got));
+    elf_write_int(dynamic_sections.elf_plt,
+                  a64_add_imm_insn(true, A64_IP0, A64_IP0, got & 0xfff));
+    elf_write_int(dynamic_sections.elf_plt,
+                  a64_mem_scaled_insn(A64_LOAD, 8, A64_IP1, A64_IP0, 0));
+    elf_write_int(dynamic_sections.elf_plt, a64_br_insn(A64_IP1));
+    elf_write_int(dynamic_sections.elf_plt, a64_nop_insn());
+    elf_write_int(dynamic_sections.elf_plt, a64_nop_insn());
+    elf_write_int(dynamic_sections.elf_plt, a64_nop_insn());
+    ent += PLT_FIXUP_SIZE;
     for (int i = 0; i < entries; i++) {
-        int ent = dynamic_sections.elf_plt_start + i * PLT_ENT_SIZE;
-        int got =
+        /* Each PLT stub uses the ADRP, ADD, LDR and BR instructions to pass
+         * &got[N + 3] and got[N + 3] to ip0 and ip1, respectively.
+         */
+        got =
             dynamic_sections.elf_got_start + PTR_SIZE * (RESERVED_GOT_NUM + i);
         elf_write_int(dynamic_sections.elf_plt,
                       a64_adrp_insn(A64_IP0, ent, got));
@@ -662,6 +694,7 @@ void plt_generate(void)
         elf_write_int(dynamic_sections.elf_plt,
                       a64_mem_scaled_insn(A64_LOAD, 8, A64_IP1, A64_IP0, 0));
         elf_write_int(dynamic_sections.elf_plt, a64_br_insn(A64_IP1));
+        ent += PLT_ENT_SIZE;
     }
 }
 
