@@ -337,3 +337,8 @@ int a64_adrp_pages_insn(int rd, int pages)
     return 0x90000000 | ((pages & 3) << 29) | (((pages >> 2) & 0x7ffff) << 5) |
            rd;
 }
+
+int a64_nop_insn()
+{
+    return 0xd503201f;
+}

@@ -105,6 +105,7 @@ int main(int argc, char *argv[])
     char *in = NULL;
     token_stream_t *libc_token_stream = NULL, *token_stream;
     token_t *tk;
+    bool has_binding_option = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--dump-ir"))
@@ -121,7 +122,19 @@ int main(int argc, char *argv[])
             libc = false;
         else if (!strcmp(argv[i], "--dynlink"))
             dynlink = true;
-        else if (!strcmp(argv[i], "-E"))
+        else if (!strcmp(argv[i], "-z")) {
+            if (i + 1 >= argc)
+                usage_error("-z requires \"lazy\" or \"now\"");
+
+            has_binding_option = true;
+            if (!strcmp(argv[i + 1], "lazy"))
+                imm_binding = false;
+            else if (!strcmp(argv[i + 1], "now"))
+                imm_binding = true;
+            else
+                usage_error("-z requires \"lazy\" or \"now\"");
+            i++;
+        } else if (!strcmp(argv[i], "-E"))
             expand_only = true;
         else if (!strcmp(argv[i], "-I")) {
             if (i + 1 >= argc)
@@ -147,11 +160,15 @@ int main(int argc, char *argv[])
 
     if (!in) {
         printf(
-            "Usage: shecc [-I directory] [-o output] [+m] [--dot] [--dump-ir] "
+            "Usage: shecc [-I directory] [-o output] [+m] [--dot] "
+            "[--dump-ir] "
             "[--warn-string-literals] [--std=c99] [--no-libc] "
-            "[--dynlink] [-E] <input.c>\n");
+            "[--dynlink] [-z <lazy | now>] [-E] <input.c>\n");
         usage_error("Missing source file");
     }
+
+    if (!dynlink && has_binding_option)
+        usage_error("-z cannot be used under static linking.");
 
     /* --dot stops the pipeline at a different phase than these do. */
     if (dump_dot && expand_only)

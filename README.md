@@ -164,6 +164,20 @@ out/shecc-stage2.elf: ELF 32-bit LSB executable, ARM, EABI5 version 1 (SYSV), dy
 out/shecc-stage2.elf: ELF 64-bit LSB executable, ARM aarch64, dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, no section header
 ```
 
+When using `DYNLINK=1`, adding `BINDING=now` can also enable the use of **immediate binding**.
+```shell
+# Dynamic linking with lazy binding
+$ make DYNLINK=1
+$ make DYNLINK=1 BINDING=lazy
+
+# Dynamic linking with immediate binding
+$ make DYNLINK=1 BINDING=now
+
+# BINDING is ignored by the build system if the static linking mode is enabled.
+$ make BINDING=now
+$ make DYNLINK=0 BINDING=lazy
+```
+
 For development builds with memory safety checks:
 ```shell
 $ make sanitizer
@@ -172,7 +186,7 @@ $ make check-sanitizer
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```shell
-$ shecc [-o output] [+m] [--dot] [--no-libc] [--dump-ir] [--dynlink] [-E] <infile.c>
+$ shecc [-o output] [+m] [--dot] [--no-libc] [--dump-ir] [--dynlink] [-z <lazy | now>] [-E] <infile.c>
 ```
 
 Compiler options:
@@ -182,6 +196,9 @@ Compiler options:
 - `--no-libc` : Exclude embedded C library (default: embedded)
 - `--dump-ir` : Dump intermediate representation (IR)
 - `--dynlink` : Use dynamic linking (default: disabled)
+- `-z`: Use lazy binding or immediate binding (default: lazy)
+  - This option is valid only when `--dynlink` is also enabled. Otherwise, the compiler
+    reports an error message if this option is used with static linking.
 - `-E` : Preprocess only; write the expanded token stream and stop
 
 Example 1: static linking mode
