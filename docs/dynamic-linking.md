@@ -5,8 +5,13 @@
 Build the dynamically linked version of shecc:
 
 ```shell
+# The 'DYNLINK' variable can control the use of dynamic linking mode
 $ make ARCH=arm DYNLINK=1
 $ make ARCH=riscv DYNLINK=1
+
+# Enable immediate binding using the 'BINDING' variable (default: lazy)
+$ make ARCH=arm DYNLINK=1 BINDING=now
+$ make ARCH=riscv DYNLINK=1 BINDING=now
 ```
 
 Next, you can use shecc to build dynamically linked programs by adding the `--dynlink` flag:
@@ -17,6 +22,9 @@ $ out/shecc --dynlink -o <output> <input.c>
 # Use the stage 1 or stage 2 compiler
 $ qemu-arm -L <LD_PREFIX> out/shecc-stage2.elf --dynlink -o <output> <input.c>
 $ qemu-riscv32 -L <LD_PREFIX> out/shecc-stage2.elf --dynlink -o <output> <input.c>
+# Enable immediate binding by the '-z now' option
+$ qemu-arm -L <LD_PREFIX> out/shecc-stage2.elf --dynlink -z now -o <output> <input.c>
+$ qemu-riscv32 -L <LD_PREFIX> out/shecc-stage2.elf --dynlink -z now -o <output> <input.c>
 
 # Execute the compiled program
 $ qemu-arm -L <LD_PREFIX> <output>
@@ -331,7 +339,6 @@ For the current implementation of dynamic linking, note the following:
 
 * GOT is located in a writable segment (`.data` segment).
 * The `PT_GNU_RELRO` program header has not yet been implemented.
-* `DT_BIND_NOW` (force immediate binding) is not set.
 
 This implies that:
 
