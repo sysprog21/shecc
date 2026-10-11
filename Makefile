@@ -92,7 +92,7 @@ endif
 TRANSLATION_DEFS = "\#define SHECC_TRANSLATION_DATE \"$(TRANSLATION_DATE)\"\n\#define SHECC_TRANSLATION_TIME \"$(TRANSLATION_TIME)\"\n"
 # --dump-ir is what makes out/shecc-stage1.log the IR of the stage 1 build
 # rather than an empty file. It is the only thing in the tree that exercises
-# dump_insn()/dump_ph2_ir(), and it is what a failed CI run uploads.
+# vir_print(), and it is what a failed CI run uploads.
 STAGE0_FLAGS ?= --dump-ir
 STAGE1_FLAGS ?=
 DYNLINK ?= 0

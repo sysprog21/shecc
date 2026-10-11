@@ -41,14 +41,13 @@ static void liveout_test_hook(void)
     type.va_start_slot = (unsigned int) -1;
     vir_machine_function_t machine;
     assert(vir_lower_machine(&function, &type, NULL, NULL, &machine));
-    assert(machine.entry->ph2_ir_list.head->op == OP_eq);
+    assert(machine.entry->mops.head->op == OP_eq);
 
     /* This is an allocator-selected fixed lane, not a forced location: no call
      * lies in the condition's live range, so it takes the first caller-saved
      * lane.
      */
-    assert(machine.entry->ph2_ir_list.head->dest ==
-           vir_machine_caller_lanes[0]);
+    assert(machine.entry->mops.head->dest == vir_machine_caller_lanes[0]);
     install_machine("probe_cmp", &machine);
     vir_function_release(&function);
 
@@ -60,30 +59,30 @@ static void liveout_test_hook(void)
     fall->rpo = 1;
     live->rpo = 2;
     head->elf_offset = fall->elf_offset = live->elf_offset = -1;
-    ph2_ir_t *ir = bb_add_ph2_ir(head, OP_bit_and);
+    vir_mop_t *ir = bb_add_mop(head, OP_bit_and);
     ir->src0 = 0;
     ir->src1 = 1;
     ir->dest = 7;
     ir->size_bytes = 4;
-    ir = bb_add_ph2_ir(head, OP_branch);
+    ir = bb_add_mop(head, OP_branch);
     ir->src0 = 7;
     ir->then_bb = live;
     ir->else_bb = fall;
     vir_machine_connect(head, live, THEN);
     vir_machine_connect(head, fall, ELSE);
-    ir = bb_add_ph2_ir(fall, OP_load_constant);
+    ir = bb_add_mop(fall, OP_load_constant);
     ir->dest = 7;
     ir->src0 = 99;
     ir->size_bytes = 4;
-    ir = bb_add_ph2_ir(fall, OP_return);
+    ir = bb_add_mop(fall, OP_return);
     ir->src0 = 7;
-    ir = bb_add_ph2_ir(live, OP_return);
+    ir = bb_add_mop(live, OP_return);
     ir->src0 = 7;
     machine.entry = head;
     machine.stack_size = 0;
     machine.block_count = 3;
     install_machine("probe_and", &machine);
-    ph2_compute_liveness();
+    mop_compute_liveness();
     assert(head->machine_liveout & (1u << 7));
     assert(find_func("probe_cmp")->bbs->machine_liveout &
            (1u << vir_machine_caller_lanes[0]));

@@ -20,7 +20,7 @@ int main(int argc, char **argv)
                         basic_block_t bb = {0};
                         func_t f = {0};
                         f.bbs = &bb;
-                        ph2_ir_t extend = {0}, add = {0}, mem = {0};
+                        vir_mop_t extend = {0}, add = {0}, mem = {0};
                         add.op = OP_add;
                         add.src0 = 0;
                         add.src1 = 23;
@@ -36,8 +36,8 @@ int main(int argc, char **argv)
                         mem.src0_hi = mem.src1_hi = mem.dest_hi = -1;
                         mem.is_volatile = true;
                         add.next = &mem;
-                        bb.ph2_ir_list.head = &add;
-                        bb.ph2_ir_list.tail = &mem;
+                        bb.mops.head = &add;
+                        bb.mops.tail = &mem;
                         if (word_index) {
                             extend.op = OP_sign_ext;
                             extend.src0 = 22;
@@ -47,10 +47,10 @@ int main(int argc, char **argv)
                             extend.src0_hi = extend.src1_hi = extend.dest_hi =
                                 -1;
                             extend.next = &add;
-                            bb.ph2_ir_list.head = &extend;
+                            bb.mops.head = &extend;
                         }
                         arm64_fold_immediates(&f);
-                        assert(bb.ph2_ir_list.head == &mem && mem.src0 == 0);
+                        assert(bb.mops.head == &mem && mem.src0 == 0);
                         assert(mem.src0_hi == (word_index ? 22 : 23) &&
                                mem.is_volatile);
                         assert(ir_reads_reg(&mem, word_index ? 22 : 23));
@@ -58,7 +58,7 @@ int main(int argc, char **argv)
                                (word_index ? 22 : 23));
                         elf_code = strbuf_create(32);
                         assert(elf_code);
-                        emit_ph2_ir(&mem);
+                        emit_mop(&mem);
                         unsigned int word = 0;
                         memcpy(&word, elf_code->elements, 4);
                         unsigned int expected =
@@ -79,7 +79,7 @@ int main(int argc, char **argv)
         basic_block_t bb = {0};
         func_t f = {0};
         f.bbs = &bb;
-        ph2_ir_t add = {0}, mem = {0};
+        vir_mop_t add = {0}, mem = {0};
         add.op = OP_add;
         add.src0 = 0;
         add.src1 = 1;
@@ -94,26 +94,26 @@ int main(int argc, char **argv)
         mem.src0_hi = offset ? -1 : 4;
         mem.src2 = offset ? 8 : -1;
         add.next = &mem;
-        bb.ph2_ir_list.head = &add;
+        bb.mops.head = &add;
         arm64_fold_immediates(&f);
-        assert(bb.ph2_ir_list.head == &add);
+        assert(bb.mops.head == &add);
     }
     basic_block_t bb = {0};
     func_t f = {0};
     f.bbs = &bb;
-    ph2_ir_t mem = {0};
+    vir_mop_t mem = {0};
     mem.op = OP_read;
     mem.dest = 0;
     mem.src0 = 0;
     mem.src1 = 8;
     mem.dest_hi = mem.src0_hi = mem.src1_hi = REG_CNT;
-    bb.ph2_ir_list.head = &mem;
+    bb.mops.head = &mem;
     assert(func_highest_used_reg(&f, A64_FIRST_CALLEE) == A64_FIRST_CALLEE - 1);
     for (int reject = 0; reject < 5; reject++) {
         basic_block_t block = {0};
         func_t func = {0};
         func.bbs = &block;
-        ph2_ir_t extend = {0}, memory = {0};
+        vir_mop_t extend = {0}, memory = {0};
         extend.op = OP_sign_ext;
         extend.src0 = 1;
         extend.dest = 2;
@@ -129,16 +129,16 @@ int main(int argc, char **argv)
         memory.src1_hi = memory.dest_hi = -1;
         memory.src2 = -4;
         extend.next = &memory;
-        block.ph2_ir_list.head = &extend;
+        block.mops.head = &extend;
         if (reject == 4)
             block.machine_liveout = 1U << 2;
         arm64_fold_immediates(&func);
-        assert(block.ph2_ir_list.head == &extend && memory.src2 == -4);
+        assert(block.mops.head == &extend && memory.src2 == -4);
     }
     basic_block_t loop = {0};
     func_t loop_func = {0};
     loop_func.bbs = &loop;
-    ph2_ir_t literal = {0}, indexed = {0};
+    vir_mop_t literal = {0}, indexed = {0};
     literal.op = OP_load_constant;
     literal.dest = 0;
     literal.src0 = 3;
@@ -152,13 +152,13 @@ int main(int argc, char **argv)
     indexed.src2 = -3;
     indexed.dest_hi = indexed.src1_hi = -1;
     literal.next = &indexed;
-    loop.ph2_ir_list.head = &literal;
-    loop.ph2_ir_list.tail = &indexed;
+    loop.mops.head = &literal;
+    loop.mops.tail = &indexed;
     loop.next = &loop;
     BB_ARENA = arena_init(SMALL_ARENA_SIZE);
     a64_hoist_constants(&loop_func);
-    assert(loop.ph2_ir_list.head->op == OP_load_constant);
-    assert(indexed.src0_hi == loop.ph2_ir_list.head->dest);
+    assert(loop.mops.head->op == OP_load_constant);
+    assert(indexed.src0_hi == loop.mops.head->dest);
 
     /* The loop is a leaf, so the literal takes a caller-saved register that no
      * operand field names rather than a callee-saved one needing a save.

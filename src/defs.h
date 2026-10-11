@@ -818,72 +818,10 @@ typedef struct {
     bool plain_source;
 } strbuf_t;
 
-/* phase-2 IR definition */
-struct ph2_ir {
-    /* Grouped by width so the struct carries no interior padding: mixed in
-     * declaration order it was 72 bytes for 63 bytes of fields, on all ~101k of
-     * them a self-compile emits. Callee / definition name, interned in
-     * GENERAL_ARENA rather than copied. A MAX_VAR_LEN array here was 128 of
-     * this struct's 192 bytes while only OP_define, OP_call and
-     * OP_address_of_func ever name anything. NULL when unused.
-     */
-    char *func_name;
-    basic_block_t *next_bb;
-    basic_block_t *then_bb;
-    basic_block_t *else_bb;
-    struct ph2_ir *next;
-
-    opcode_t op;
-    int src0;
-    int src1;
-    /* Backend frame metadata. */
-    int src2;
-    int dest;
-
-    /* A 32-bit target represents a wide integer as low/high register pairs. -1
-     * means this instruction uses the existing single-register form.
-     */
-    int src0_hi;
-    int src1_hi;
-    int dest_hi;
-    /* Type information for LP64 support */
-    int size_bytes; /* Size in bytes for load/store/read/write operations */
-
-    bool is_branch_detached;
-
-    /* When an instruction uses a variable that its offset is based on the top
-     * of the stack, this instruction's flag is also set to indicate the
-     * compiler to recalculate the offset after the function's stack size has
-     * been determined.
-     *
-     * Currently, only OP_load, OP_store and OP_address_of need this flag to
-     * recompute the offset.
-     */
-    bool ofs_based_on_stack_top;
-    bool is_pointer; /* True if this operation involves a pointer type */
-    /* Scalar signedness accompanies register values independently of their
-     * storage width. Comparisons inspect their sources; arithmetic and loads
-     * inspect the result.
-     */
-    bool is_unsigned;
-
-    /* Operand provenance is required by LP64 backends: pointer arithmetic keeps
-     * the address operand wide but sign-extends an int index.
-     */
-    bool src0_is_pointer;
-    bool src1_is_pointer;
-    bool src0_is_unsigned;
-    bool src1_is_unsigned;
-
-    /* The load, read or store accesses a volatile object, which is a side
-     * effect whether or not its value is used (C99 6.7.3p6), so no rewrite may
-     * drop it, replace a load with a copy of a value read earlier, or drop a
-     * store for writing what the object already holds.
-     */
-    bool is_volatile;
-};
-
-typedef struct ph2_ir ph2_ir_t;
+/* An allocated machine operation, defined with VIR's machine layer in
+ * vir-lower.h.
+ */
+typedef struct vir_mop vir_mop_t;
 
 /* type definition */
 struct type {
@@ -1062,8 +1000,8 @@ typedef struct type_tag {
 } type_tag_t;
 
 typedef struct {
-    ph2_ir_t *head, *tail;
-} ph2_ir_list_t;
+    vir_mop_t *head, *tail;
+} vir_mop_list_t;
 
 typedef enum { NEXT, ELSE, THEN } bb_connection_type_t;
 
@@ -1074,7 +1012,7 @@ typedef struct {
 
 struct basic_block {
     struct vir_block *vir;
-    ph2_ir_list_t ph2_ir_list;
+    vir_mop_list_t mops;
     unsigned int machine_use, machine_def, machine_liveout;
 
     /* Predecessor edges, grown on demand. A fixed MAX_BB_PRED array cost two
@@ -1100,11 +1038,11 @@ struct basic_block {
      */
     int prev_idx;
 
-    /* Index of this block's first instruction in PH2_IR_FLATTEN, or -1 when it
+    /* Index of this block's first instruction in MOP_FLAT, or -1 when it
      * emitted none. Recorded while that mapping is built so the backend need
      * not search for it.
      */
-    int ph2_base;
+    int mop_base;
     int rpo;
     int elf_offset;
 
@@ -1196,9 +1134,6 @@ typedef struct {
             load(rd_hi, base, 4);             \
         }                                     \
     } while (0)
-
-#define PH2_PAIR_DEST_SRC0(ir) ((ir)->dest_hi >= 0 && (ir)->src0_hi >= 0)
-#define PH2_PAIR_BINARY(ir) (PH2_PAIR_DEST_SRC0(ir) && (ir)->src1_hi >= 0)
 
 /* In the ELF specification, the following data types are defined for data
  * representation:
@@ -1330,24 +1265,8 @@ typedef struct {
     int r_addend; /* Elf32_Sword */
 } elf32_rela_t;
 
-int ph2_ir_flatten_function(func_t *func,
-                            int stack_top_ofs,
-                            int prologue_bytes,
-                            int saved_regs,
-                            bool restore_saved_regs,
-                            void (*update_offset)(ph2_ir_t *));
-ph2_ir_t *ph2_ir_flatten_insn(ph2_ir_t *insn,
-                              int stack_top_ofs,
-                              int stack_size,
-                              int saved_regs,
-                              bool restore_saved_regs);
-int func_highest_used_reg(func_t *func, int first_callee_saved);
-unsigned int func_used_reg_mask(func_t *func);
-bool func_makes_call(func_t *func);
 bool op_is_binary_alu(opcode_t op);
 bool op_writes_dest(opcode_t op);
-unsigned int ph2_ir_defs(ph2_ir_t *ir);
-void ph2_compute_liveness(void);
 bool op_is_integer_binary(opcode_t op);
 bool op_is_comparison(opcode_t op);
 bool op_is_scalar_unary(opcode_t op);

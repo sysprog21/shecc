@@ -36,7 +36,7 @@ bool test_is_wide(int size_bytes, bool is_pointer)
     return is_pointer || size_bytes > 4;
 }
 
-static bool shift_immediate(ph2_ir_t *ir, int count)
+static bool shift_immediate(vir_mop_t *ir, int count)
 {
     return count >= 0 && count < 64 &&
            (ir->op == OP_lshift ||
@@ -110,9 +110,9 @@ bool in_dup_block;
  */
 bool emit_fell_through;
 
-/* Set while emitting instructions whose position in PH2_IR_FLATTEN is unknown.
- * The forward scans below are indexed off emit_ir_index, so without this they
- * would read a stretch of some unrelated block and answer about that.
+/* Set while emitting instructions whose position in MOP_FLAT is unknown. The
+ * forward scans below are indexed off emit_ir_index, so without this they would
+ * read a stretch of some unrelated block and answer about that.
  */
 bool folds_off;
 
@@ -127,9 +127,7 @@ bool cur_frame_rbp = true;
 
 static bool x64_needs_frame(func_t *func)
 {
-    return !func || !func->bbs || func->stack_size ||
-           func->num_params + func->returns_aggregate > MAX_ARGS_IN_REG ||
-           func->va_args || func_makes_call(func);
+    return !func || !func->bbs || !func_is_frameless_leaf(func);
 }
 
 /* A frameless leaf has no locals and makes no call, so RSP needs neither room
@@ -329,8 +327,8 @@ static void x64_record_call(int start, basic_block_t *target)
  * register number.
  *
  * Written as a switch rather than a table: a local array was rebuilt on every
- * one of the tens of thousands of calls to emit_ph2_ir(), and a file-scope
- * array cannot carry an initializer here, because shecc zero-fills those.
+ * one of the tens of thousands of calls to emit_mop(), and a file-scope array
+ * cannot carry an initializer here, because shecc zero-fills those.
  */
 int map_ir_reg(int ir_reg)
 {
@@ -373,7 +371,7 @@ int map_ir_reg(int ir_reg)
 /* The instruction that will be emitted next, so a comparison can see whether
  * the branch consuming its result immediately follows.
  */
-ph2_ir_t *emit_next_ir;
+vir_mop_t *emit_next_ir;
 
 /* A comparison that emitted only its CMP, leaving the flags for the branch. */
 int fused_cc;
@@ -408,10 +406,10 @@ int branch_cc_for(opcode_t op, bool is_unsigned)
 static bool bb_has_small_test(basic_block_t *bb)
 {
     int count = 0;
-    for (ph2_ir_t *ir = bb ? bb->ph2_ir_list.head : NULL; ir; ir = ir->next)
+    for (vir_mop_t *ir = bb ? bb->mops.head : NULL; ir; ir = ir->next)
         if (++count > 6)
             return false;
-    return count && bb->ph2_ir_list.tail->op == OP_branch;
+    return count && bb->mops.tail->op == OP_branch;
 }
 
 /* Emit a rel32 displacement to @bb, deferring to the patch list when the block
@@ -430,7 +428,7 @@ basic_block_t *bb_code_target(basic_block_t *bb)
      * jumps cannot spin here.
      */
     for (int guard = 0; bb && guard < 16; guard++) {
-        ph2_ir_t *only = bb->ph2_ir_list.head;
+        vir_mop_t *only = bb->mops.head;
 
         if (!only) {
             bb = bb->rpo_next;
@@ -492,7 +490,7 @@ bool reg_mirror_valid[REG_CNT];
 bool reg_mirror_sext[REG_CNT];
 
 /* The width OP_load actually reads, matching the emitter's own bucketing. */
-int load_width(ph2_ir_t *ir)
+int load_width(vir_mop_t *ir)
 {
     if (ir->size_bytes == 1)
         return 1;
@@ -507,7 +505,7 @@ int load_width(ph2_ir_t *ir)
  * Only the 8-byte form leaves the slot holding exactly what the register held,
  * which is what makes a later 8-byte load of that slot redundant.
  */
-int store_width(ph2_ir_t *ir)
+int store_width(vir_mop_t *ir)
 {
     int eff = ir->size_bytes;
     if (ir->is_pointer && eff != PTR_SIZE)
@@ -785,8 +783,8 @@ static basic_block_t *fold_scan_setup(int idx, int *stop)
     if (!bb)
         return NULL;
     *stop = idx + LIVENESS_SCAN_LIMIT;
-    if (*stop > ph2_ir_idx)
-        *stop = ph2_ir_idx;
+    if (*stop > mop_flat_count)
+        *stop = mop_flat_count;
     return bb;
 }
 
@@ -802,15 +800,15 @@ bool reg_dead_after(int idx, int reg)
     for (int j = idx; j < stop; j++) {
         if (j >= instruction_to_bb_capacity || instruction_to_bb[j] != bb)
             return !(bb->machine_liveout & (1u << reg));
-        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        vir_mop_t *ir = MOP_FLAT[j];
         if (ir_reads_reg(ir, reg))
             return false;
-        if (ph2_ir_defs(ir) & (1u << reg))
+        if (mop_defs(ir) & (1u << reg))
             return true;
         if (ir->op == OP_return)
             return true;
     }
-    return (stop == ph2_ir_idx || instruction_to_bb[stop] != bb) &&
+    return (stop == mop_flat_count || instruction_to_bb[stop] != bb) &&
            !(bb->machine_liveout & (1u << reg));
 }
 
@@ -856,7 +854,7 @@ bool reg_feeds_address_only(int idx, int reg)
     for (int j = idx; j < stop; j++) {
         if (j >= instruction_to_bb_capacity || instruction_to_bb[j] != bb)
             return false; /* leaves the block: cannot tell */
-        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        vir_mop_t *ir = MOP_FLAT[j];
         bool reads = ir_reads_reg(ir, reg);
         if (reads) {
             if (ir->op != OP_add || !ir->is_pointer)
@@ -898,7 +896,7 @@ bool reg_low32_sufficient(int idx, int reg, int depth)
     for (int j = idx; j < stop; j++) {
         if (j >= instruction_to_bb_capacity || instruction_to_bb[j] != bb)
             return low32_past_block(bb, reg);
-        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        vir_mop_t *ir = MOP_FLAT[j];
         bool reads = ir_reads_reg(ir, reg);
         if (reads) {
             /* An address is used at full width, so its offset has to be exact.
@@ -938,7 +936,7 @@ bool reg_low32_sufficient(int idx, int reg, int depth)
     }
 
     /* The last block of the program ends with the flattened stream. */
-    return stop == ph2_ir_idx && low32_past_block(bb, reg);
+    return stop == mop_flat_count && low32_past_block(bb, reg);
 }
 
 /* Whether @ir can sit between a scaling shift and the addition that consumes it
@@ -946,7 +944,7 @@ bool reg_low32_sufficient(int idx, int reg, int depth)
  * own destination; nothing here rewrites more than one instruction, so the
  * addition stays where the scan found it.
  */
-bool sib_gap_ok(ph2_ir_t *ir)
+bool sib_gap_ok(vir_mop_t *ir)
 {
     switch (ir->op) {
     case OP_global_load:
@@ -978,13 +976,13 @@ int sib_find_access(basic_block_t *bb,
 {
     int stop = from + 4;
 
-    if (stop > ph2_ir_idx)
-        stop = ph2_ir_idx;
+    if (stop > mop_flat_count)
+        stop = mop_flat_count;
     for (int j = from; j < stop; j++) {
         if (instruction_to_bb[j] != bb)
             return -1;
 
-        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        vir_mop_t *ir = MOP_FLAT[j];
         bool reads = ir_reads_reg(ir, addr);
         if (reads) {
             if ((ir->op == OP_read || ir->op == OP_write) && ir->src0 == addr &&
@@ -1027,19 +1025,19 @@ void const_track_reset(void)
  */
 bool gaddr_def_ofs(basic_block_t *bb, int before, int reg, int *ofs)
 {
-    if (!bb || bb->ph2_base < 0 || reg < 0 || reg >= REG_CNT)
+    if (!bb || bb->mop_base < 0 || reg < 0 || reg >= REG_CNT)
         return false;
-    if (before > ph2_ir_idx)
-        before = ph2_ir_idx;
+    if (before > mop_flat_count)
+        before = mop_flat_count;
 
     /* The definition being looked for is always close by; the same cap the
      * other scans use keeps a long block from making this quadratic.
      */
     int stop = before - LIVENESS_SCAN_LIMIT;
-    if (stop < bb->ph2_base)
-        stop = bb->ph2_base;
+    if (stop < bb->mop_base)
+        stop = bb->mop_base;
     for (int j = before - 1; j >= stop; j--) {
-        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        vir_mop_t *ir = MOP_FLAT[j];
 
         if (!op_writes_dest(ir->op) || ir->dest != reg)
             continue;
@@ -1066,7 +1064,7 @@ static void sib_publish(const sib_address_t *address)
 
 static int sib_consumer(basic_block_t *bb,
                         int sum_at,
-                        ph2_ir_t *sum,
+                        vir_mop_t *sum,
                         int base_ir,
                         int index_ir)
 {
@@ -1089,7 +1087,7 @@ static void sib_emit_index(int rs1,
 }
 
 /* Fold a pointer-width scale and address addition into their sole access. */
-bool try_fold_sib(ph2_ir_t *shift, int rd, int rs1, int scale)
+bool try_fold_sib(vir_mop_t *shift, int rd, int rs1, int scale)
 {
     if (folds_off || addr_fold || addr_sib || emit_ir_index < 0 ||
         shift->size_bytes != PTR_SIZE)
@@ -1106,12 +1104,12 @@ bool try_fold_sib(ph2_ir_t *shift, int rd, int rs1, int scale)
      */
     int sum_at = -1;
     int limit = emit_ir_index + 5;
-    if (limit > ph2_ir_idx)
-        limit = ph2_ir_idx;
+    if (limit > mop_flat_count)
+        limit = mop_flat_count;
     for (int j = emit_ir_index + 1; j < limit; j++) {
         if (instruction_to_bb[j] != bb)
             return false;
-        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        vir_mop_t *ir = MOP_FLAT[j];
         bool reads = ir_reads_reg(ir, shift->dest);
         if (reads) {
             sum_at = j;
@@ -1124,7 +1122,7 @@ bool try_fold_sib(ph2_ir_t *shift, int rd, int rs1, int scale)
     }
     if (sum_at < 0)
         return false;
-    ph2_ir_t *sum = PH2_IR_FLATTEN[sum_at];
+    vir_mop_t *sum = MOP_FLAT[sum_at];
     if (sum->op != OP_add)
         return false;
 
@@ -1160,7 +1158,7 @@ bool try_fold_sib(ph2_ir_t *shift, int rd, int rs1, int scale)
     bool base_written = false;
 
     for (int j = emit_ir_index + 1; j < sum_at; j++) {
-        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        vir_mop_t *ir = MOP_FLAT[j];
 
         if (op_writes_dest(ir->op) && ir->dest == base_ir) {
             /* A non-global write also blocks the older-definition fallback. */
@@ -1217,7 +1215,7 @@ bool try_fold_sib(ph2_ir_t *shift, int rd, int rs1, int scale)
 }
 
 /* Build an unscaled address without consuming or publishing the producer. */
-static bool sib_add_address(ph2_ir_t *sum,
+static bool sib_add_address(vir_mop_t *sum,
                             basic_block_t *bb,
                             int at,
                             int global_ir,
@@ -1262,7 +1260,7 @@ static bool sib_add_address(ph2_ir_t *sum,
     return reg_low3(address->index) != 4;
 }
 
-bool try_fold_sib_add(ph2_ir_t *ir, int rs1, int rs2)
+bool try_fold_sib_add(vir_mop_t *ir, int rs1, int rs2)
 {
     if (emit_ir_index < 0 || emit_ir_index >= instruction_to_bb_capacity)
         return false;
@@ -1290,7 +1288,7 @@ bool const_load_dead(int idx, int reg, int val)
     for (int j = idx; j < stop; j++) {
         if (j >= instruction_to_bb_capacity || instruction_to_bb[j] != bb)
             return !(bb->machine_liveout & (1u << reg));
-        ph2_ir_t *ir = PH2_IR_FLATTEN[j];
+        vir_mop_t *ir = MOP_FLAT[j];
         /* Uses that become immediates do not read the register at all. */
         bool folded_count = false;
         if (ir->src1 == reg) {
@@ -1336,7 +1334,7 @@ bool const_load_dead(int idx, int reg, int val)
         }
     }
     /* Ran out of scan budget: assume the register is still needed. */
-    return (stop == ph2_ir_idx || instruction_to_bb[stop] != bb) &&
+    return (stop == mop_flat_count || instruction_to_bb[stop] != bb) &&
            !(bb->machine_liveout & (1u << reg));
 }
 
@@ -1361,7 +1359,7 @@ static basic_block_t *x64_rotated_loop(basic_block_t *bb)
         return NULL;
     for (int i = 0; i < bb->prev_idx; i++) {
         basic_block_t *pred = bb->prev[i].bb;
-        ph2_ir_t *last = pred ? pred->ph2_ir_list.tail : NULL;
+        vir_mop_t *last = pred ? pred->mops.tail : NULL;
         if (pred && pred->rpo >= bb->rpo && last && last->op == OP_jump &&
             last->next_bb == bb)
             return pred;
@@ -1407,7 +1405,7 @@ static bool x64_aligns_block(basic_block_t *bb)
     for (int p = 0; p < bb->prev_idx; p++) {
         basic_block_t *header = bb->prev[p].bb;
         basic_block_t *latch = x64_rotated_loop(header);
-        ph2_ir_t *test = latch ? header->ph2_ir_list.tail : NULL;
+        vir_mop_t *test = latch ? header->mops.tail : NULL;
         if (test &&
             (bb_code_target(test->then_bb) == bb ||
              bb_code_target(test->else_bb) == bb) &&
@@ -1435,7 +1433,7 @@ basic_block_t *bb_sole_code_pred(basic_block_t *bb)
      * this should not arise -- but the walk is cheap to bound and the failure
      * would be a hang rather than a wrong answer.
      */
-    while (pred && !pred->ph2_ir_list.head && guard < MAX_BB_DOM_SUCC) {
+    while (pred && !pred->mops.head && guard < MAX_BB_DOM_SUCC) {
         pred = bb_sole_pred(pred);
         guard++;
     }
@@ -1469,7 +1467,7 @@ void emit_cmp(int size_bytes, int rs1, int rs2)
 bool bb_falls_through(basic_block_t *bb)
 {
     bb = bb_code_target(bb);
-    return bb && emit_next_ir && bb->ph2_ir_list.head == emit_next_ir;
+    return bb && emit_next_ir && bb->mops.head == emit_next_ir;
 }
 
 static void emit_conditional_edges(int condition,
@@ -1557,19 +1555,19 @@ static void emit_x64_constant(int reg, bool wide, unsigned long long constant)
  * instructions should be skipped. Only fires when both accesses use the same
  * width and neither register outlives the sequence.
  */
-bool try_fold_mem_dest(ph2_ir_t *ld)
+bool try_fold_mem_dest(vir_mop_t *ld)
 {
     if (folds_off || emit_ir_index < 0)
         return false;
-    if (ld->op != OP_load || emit_ir_index + 2 >= ph2_ir_idx)
+    if (ld->op != OP_load || emit_ir_index + 2 >= mop_flat_count)
         return false;
     if (emit_ir_index + 2 >= instruction_to_bb_capacity ||
         instruction_to_bb[emit_ir_index] !=
             instruction_to_bb[emit_ir_index + 2])
         return false;
 
-    ph2_ir_t *alu = PH2_IR_FLATTEN[emit_ir_index + 1];
-    ph2_ir_t *st = PH2_IR_FLATTEN[emit_ir_index + 2];
+    vir_mop_t *alu = MOP_FLAT[emit_ir_index + 1];
+    vir_mop_t *st = MOP_FLAT[emit_ir_index + 2];
     int ext = alu_ext_for(alu->op);
     if (ext < 0 || st->op != OP_store)
         return false;
@@ -1620,19 +1618,19 @@ bool try_fold_mem_dest(ph2_ir_t *ld)
  * afterwards -- if the incremented value or its source is read again, keeping
  * it in a register beats making the next reader go back to memory.
  */
-bool try_fold_alu_to_slot(ph2_ir_t *alu)
+bool try_fold_alu_to_slot(vir_mop_t *alu)
 {
     if (folds_off || emit_ir_index < 0)
         return false;
     int ext = alu_ext_for(alu->op);
-    if (ext < 0 || emit_ir_index + 1 >= ph2_ir_idx)
+    if (ext < 0 || emit_ir_index + 1 >= mop_flat_count)
         return false;
     if (emit_ir_index + 1 >= instruction_to_bb_capacity ||
         instruction_to_bb[emit_ir_index] !=
             instruction_to_bb[emit_ir_index + 1])
         return false;
 
-    ph2_ir_t *st = PH2_IR_FLATTEN[emit_ir_index + 1];
+    vir_mop_t *st = MOP_FLAT[emit_ir_index + 1];
     if (st->op != OP_store || st->src0 != alu->dest)
         return false;
     if (alu->src0 < 0 || alu->src0 >= REG_CNT || !reg_mirror_valid[alu->src0])
@@ -1721,10 +1719,10 @@ bool emit_mul_by_const(int rd, int rs1, int c, bool wide)
 /* An OP_jump whose target is a single instruction emits that instruction in
  * place, so the family emitters below reach back into the dispatcher.
  */
-void emit_ph2_ir(ph2_ir_t *ph2_ir);
+void emit_mop(vir_mop_t *mop);
 
 /* DIV/IDIV clobber RAX and RDX regardless of width. Preserve allocated RAX
- * around the PH2 division sequence.
+ * around the division sequence.
  */
 static void emit_x64_division(int rd,
                               int dividend,
@@ -1768,26 +1766,26 @@ static void emit_alu_reg(int ext, int dest, int src, bool wide)
 }
 
 /* Integer arithmetic. */
-void emit_arith(ph2_ir_t *ph2_ir,
+void emit_arith(vir_mop_t *mop,
                 int rd,
                 int rs1,
                 int rs2,
                 bool src1_const_known,
                 int src1_const)
 {
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_add:
     case OP_sub: {
-        bool subtract = ph2_ir->op == OP_sub;
-        bool wide = test_is_wide(ph2_ir->size_bytes, ph2_ir->is_pointer);
+        bool subtract = mop->op == OP_sub;
+        bool wide = test_is_wide(mop->size_bytes, mop->is_pointer);
 
         if (src1_const_known) {
             /* A following memory operation can carry this address directly. */
             if (wide && !subtract && !addr_fold && next_in_same_bb() &&
                 (emit_next_ir->op == OP_read || emit_next_ir->op == OP_write) &&
-                emit_next_ir->src0 == ph2_ir->dest &&
-                emit_next_ir->src1 != ph2_ir->dest && reg_low3(rs1) != 4 &&
-                reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
+                emit_next_ir->src0 == mop->dest &&
+                emit_next_ir->src1 != mop->dest && reg_low3(rs1) != 4 &&
+                reg_dead_after(emit_ir_index + 2, mop->dest)) {
                 addr_fold = true;
                 addr_fold_base = rs1;
                 addr_fold_disp = src1_const;
@@ -1799,7 +1797,7 @@ void emit_arith(ph2_ir_t *ph2_ir,
                 return;
             if (rd != rs1)
                 emit_reg_move(rd, rs1, wide);
-            emit_alu_imm_width(rd, alu_ext_for(ph2_ir->op), src1_const, wide);
+            emit_alu_imm_width(rd, alu_ext_for(mop->op), src1_const, wide);
             return;
         }
 
@@ -1816,7 +1814,7 @@ void emit_arith(ph2_ir_t *ph2_ir,
             return;
         }
 
-        if (wide && try_fold_sib_add(ph2_ir, rs1, rs2)) {
+        if (wide && try_fold_sib_add(mop, rs1, rs2)) {
             gaddr_pending_ir = -1;
             return;
         }
@@ -1833,7 +1831,7 @@ void emit_arith(ph2_ir_t *ph2_ir,
         return;
     }
     case OP_mul: {
-        bool wide = test_is_wide(ph2_ir->size_bytes, ph2_ir->is_pointer);
+        bool wide = test_is_wide(mop->size_bytes, mop->is_pointer);
 
         if (src1_const_known && emit_mul_by_const(rd, rs1, src1_const, wide)) {
             /* nothing further: the product is already in rd */
@@ -1864,8 +1862,8 @@ void emit_arith(ph2_ir_t *ph2_ir,
          * served as one has since joined the file and staging RDX there
          * destroyed a dividend pinned to it.
          */
-        bool wide = ph2_ir->size_bytes > 4;
-        bool is_unsigned = ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
+        bool wide = mop->size_bytes > 4;
+        bool is_unsigned = mop->src0_is_unsigned || mop->src1_is_unsigned;
 
         /* A 32-bit unsigned operation must use EDX:EAX, not its 64-bit
          * counterpart. For example, C requires -1 / 2U to be 2147483647,
@@ -1873,7 +1871,7 @@ void emit_arith(ph2_ir_t *ph2_ir,
          * RAX may hold a live long long beside an int division.
          */
         emit_x64_division(rd, rs1, rs2, true, wide, is_unsigned,
-                          ph2_ir->op == OP_mod);
+                          mop->op == OP_mod);
 
         /* The 32-bit move above zero-extends, but a signed int result must sit
          * in its register sign-extended like every other narrow scalar: a later
@@ -1881,7 +1879,7 @@ void emit_arith(ph2_ir_t *ph2_ir,
          * 4294962296.
          */
         if (!wide && !is_unsigned &&
-            !reg_low32_sufficient(emit_ir_index + 1, ph2_ir->dest, 0))
+            !reg_low32_sufficient(emit_ir_index + 1, mop->dest, 0))
             wrap_to_int(rd, false);
         return;
     }
@@ -1916,19 +1914,19 @@ static void emit_variable_shift(int rd,
     emit_reg_move(rd, 11, true);
 }
 
-void emit_bitwise(ph2_ir_t *ph2_ir,
+void emit_bitwise(vir_mop_t *mop,
                   int rd,
                   int rs1,
                   int rs2,
                   bool src1_const_known,
                   int src1_const)
 {
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_bit_and:
     case OP_bit_or:
     case OP_bit_xor: {
-        int ext = alu_ext_for(ph2_ir->op);
-        bool wide = test_is_wide(ph2_ir->size_bytes, ph2_ir->is_pointer);
+        int ext = alu_ext_for(mop->op);
+        bool wide = test_is_wide(mop->size_bytes, mop->is_pointer);
         if (src1_const_known) {
             if (rd != rs1)
                 emit_reg_move(rd, rs1, wide);
@@ -1955,18 +1953,17 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
         emit_rex(1, -1, rd);
         emit_byte(0xF7);
         emit_byte(
-            modrm(MOD_DIRECT, ph2_ir->op == OP_bit_not ? 2 : 3, reg_low3(rd)));
+            modrm(MOD_DIRECT, mop->op == OP_bit_not ? 2 : 3, reg_low3(rd)));
         return;
 
     case OP_lshift: {
         /* A count the block already loaded as a literal needs neither CL nor
          * the save/restore around it: SHL r64, imm8 is one instruction.
          */
-        if (src1_const_known && shift_immediate(ph2_ir, src1_const)) {
-            bool wide =
-                test_is_wide(ph2_ir->size_bytes, ph2_ir->src0_is_pointer);
-            int want_src = ph2_ir->src0;
-            int dest_ir = ph2_ir->dest;
+        if (src1_const_known && shift_immediate(mop, src1_const)) {
+            bool wide = test_is_wide(mop->size_bytes, mop->src0_is_pointer);
+            int want_src = mop->src0;
+            int dest_ir = mop->dest;
 
             /* The same shift of the same register may already sit in another
              * register; copying it is one instruction instead of three.
@@ -1989,14 +1986,14 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
              * Folding it away removes both the shift and the addition, which is
              * every array subscript in the program.
              */
-            if (try_fold_sib(ph2_ir, rd, rs1, src1_const))
+            if (try_fold_sib(mop, rd, rs1, src1_const))
                 return;
 
             bool shift_wide = wide || src1_const >= 32;
             emit_reg_move(rd, rs1, shift_wide);
             emit_shift_imm(rd, SHIFT_EXT_SHL, src1_const, shift_wide);
-            if (shift_wide && ph2_ir->size_bytes <= 4)
-                wrap_to_int(rd, ph2_ir->is_pointer);
+            if (shift_wide && mop->size_bytes <= 4)
+                wrap_to_int(rd, mop->is_pointer);
 
             /* Recording needs the shift source to still be intact: if the
              * result landed in it, the pairing no longer describes anything.
@@ -2018,26 +2015,25 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
          * in R11, then restore. R10/R11 are never handed out by reg_map, so
          * this is safe for every aliasing of rd, rs1 and rs2.
          */
-        emit_variable_shift(rd, rs1, rs2, ph2_ir->size_bytes,
-                            ph2_ir->src0_is_unsigned, ph2_ir->src0_is_pointer,
-                            true);
+        emit_variable_shift(rd, rs1, rs2, mop->size_bytes,
+                            mop->src0_is_unsigned, mop->src0_is_pointer, true);
 
         /* The shift happened in a 64-bit register, so bits that an int would
          * have dropped survive. Narrow exactly as OP_mul does: without this, "1
          * << 31" (which strength reduction also produces for "x * 2") stayed
          * positive and every later comparison took the wrong branch.
          */
-        if (ph2_ir->size_bytes <= 4)
-            wrap_to_int(rd, ph2_ir->is_pointer);
+        if (mop->size_bytes <= 4)
+            wrap_to_int(rd, mop->is_pointer);
         return;
     }
     case OP_rshift: {
-        bool wide = test_is_wide(ph2_ir->size_bytes, ph2_ir->src0_is_pointer);
-        if (src1_const_known && shift_immediate(ph2_ir, src1_const)) {
+        bool wide = test_is_wide(mop->size_bytes, mop->src0_is_pointer);
+        if (src1_const_known && shift_immediate(mop, src1_const)) {
             if (rd != rs1)
                 emit_reg_move(rd, rs1, wide);
             emit_shift_imm(
-                rd, ph2_ir->src0_is_unsigned ? SHIFT_EXT_SHR : SHIFT_EXT_SAR,
+                rd, mop->src0_is_unsigned ? SHIFT_EXT_SHR : SHIFT_EXT_SAR,
                 src1_const, wide);
             return;
         }
@@ -2050,9 +2046,8 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
          * in R11, then restore. R10/R11 are never handed out by reg_map, so
          * this is safe for every aliasing of rd, rs1 and rs2.
          */
-        emit_variable_shift(rd, rs1, rs2, ph2_ir->size_bytes,
-                            ph2_ir->src0_is_unsigned, ph2_ir->src0_is_pointer,
-                            false);
+        emit_variable_shift(rd, rs1, rs2, mop->size_bytes,
+                            mop->src0_is_unsigned, mop->src0_is_pointer, false);
         return;
     }
     default:
@@ -2061,23 +2056,22 @@ void emit_bitwise(ph2_ir_t *ph2_ir,
 }
 
 /* Comparisons, and the jumps and branches they feed. */
-void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
+void emit_compare_jump(vir_mop_t *mop, int rd, int rs1, int rs2)
 {
-    if (op_is_comparison(ph2_ir->op)) {
+    if (op_is_comparison(mop->op)) {
         /* CMP rs1, rs2, then turn the flags into 0 or 1 in rd. The six
          * comparisons differ only in the condition, and SETcc is the matching
          * Jcc opcode plus 0x10, so branch_cc_for() supplies both forms.
          */
-        emit_cmp(ph2_ir->size_bytes, rs1, rs2);
-        emit_setcc_bool(
-            rd, branch_cc_for(ph2_ir->op, ph2_ir->src0_is_unsigned ||
-                                              ph2_ir->src1_is_unsigned) +
-                    0x10);
+        emit_cmp(mop->size_bytes, rs1, rs2);
+        emit_setcc_bool(rd, branch_cc_for(mop->op, mop->src0_is_unsigned ||
+                                                       mop->src1_is_unsigned) +
+                                0x10);
         return;
     }
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_jump: {
-        if (bb_falls_through(ph2_ir->next_bb))
+        if (bb_falls_through(mop->next_bb))
             return;
 
         /* Everything below either jumps away or emits a rotated copy of the
@@ -2093,25 +2087,24 @@ void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
          * the back edge, so what the registers hold coming out of the body
          * still applies.
          */
-        if (!in_dup_block && ph2_ir->next_bb) {
-            if (bb_has_small_test(ph2_ir->next_bb)) {
-                ph2_ir_t *saved_next = emit_next_ir;
+        if (!in_dup_block && mop->next_bb) {
+            if (bb_has_small_test(mop->next_bb)) {
+                vir_mop_t *saved_next = emit_next_ir;
                 int saved_index = emit_ir_index;
 
                 /* The copy runs the same instructions in the same order, so the
                  * forward scans stay valid -- but only against the block's own
                  * position in the flattened stream, not the jump's.
                  */
-                int dup_base = ph2_ir->next_bb->ph2_base;
+                int dup_base = mop->next_bb->mop_base;
 
                 in_dup_block = true;
                 folds_off = dup_base < 0;
                 int n = 0;
-                for (ph2_ir_t *t = ph2_ir->next_bb->ph2_ir_list.head; t;
-                     t = t->next) {
+                for (vir_mop_t *t = mop->next_bb->mops.head; t; t = t->next) {
                     emit_ir_index = dup_base < 0 ? -1 : dup_base + n;
                     emit_next_ir = t->next ? t->next : saved_next;
-                    emit_ph2_ir(t);
+                    emit_mop(t);
                     n++;
                 }
                 in_dup_block = false;
@@ -2126,7 +2119,7 @@ void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
          * use, so a jump landing on nothing but another jump goes straight to
          * where that one ends up.
          */
-        x64_emit_branch(0, ph2_ir->next_bb);
+        x64_emit_branch(0, mop->next_bb);
         return;
     }
 
@@ -2138,11 +2131,11 @@ void emit_compare_jump(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
             condition = fused_cc;
         } else {
             /* An int condition is decided by its low word alone. */
-            emit_test_self(
-                test_is_wide(ph2_ir->size_bytes, ph2_ir->src0_is_pointer), rs1);
+            emit_test_self(test_is_wide(mop->size_bytes, mop->src0_is_pointer),
+                           rs1);
             condition = 0x85; /* JNZ */
         }
-        emit_conditional_edges(condition, ph2_ir->then_bb, ph2_ir->else_bb);
+        emit_conditional_edges(condition, mop->then_bb, mop->else_bb);
         return;
     }
     default:
@@ -2167,14 +2160,14 @@ static void emit_call_result(void)
 }
 
 /* Calls, and the returns that unwind them. */
-void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
+void emit_call_return(vir_mop_t *mop, int rs1)
 {
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_call:
         /* CALL rel32 - find the target function and calculate relative offset
          */
         {
-            func_t *target_func = find_func(ph2_ir->func_name);
+            func_t *target_func = find_func(mop->func_name);
 
             if (target_func && target_func->is_static && !target_func->bbs) {
                 printf("Error: Undefined static function called: %s\n",
@@ -2197,7 +2190,7 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
                  * silently.
                  */
                 printf("Error: Undefined function called: %s\n",
-                       ph2_ir->func_name);
+                       mop->func_name);
                 fflush(stdout); /* see fatal() */
                 abort();
             } else {
@@ -2227,15 +2220,15 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
     case OP_return:
         emit_fell_through = false;
         /* If there's a return value in src0, move it to RAX */
-        if (ph2_ir->src0 >= 0) {
+        if (mop->src0 >= 0) {
             /* rs1 already names the physical register, including the case where
              * a folded load redirected this instruction to read the register
              * that still holds the value. Re-deriving it from src0 here would
              * ignore that redirection and return a stale register.
              */
             int ret_reg = rs1;
-            if (ph2_ir->src0_is_unsigned && ph2_ir->size_bytes < PTR_SIZE) {
-                emit_zero_extend(0, ret_reg, ph2_ir->size_bytes);
+            if (mop->src0_is_unsigned && mop->size_bytes < PTR_SIZE) {
+                emit_zero_extend(0, ret_reg, mop->size_bytes);
                 ret_reg = 0;
             }
             /* Debug output MOV rax, ret_reg - only if not already in RAX */
@@ -2247,7 +2240,7 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
          * POP rbp; RET (R15 is reserved for global base pointer)
          */
         {
-            int stack_size_ret = ph2_ir->src1;
+            int stack_size_ret = mop->src1;
             if (cur_define_stack >= 0 && stack_size_ret != cur_define_stack)
                 fprintf(stderr,
                         "[x64] FRAME MISMATCH: prologue reserved %d, epilogue "
@@ -2276,7 +2269,7 @@ void emit_call_return(ph2_ir_t *ph2_ir, int rs1)
 }
 
 /* Stack slots, addresses, conditional moves, loads and stores. */
-static int slot_width(const ph2_ir_t *ir)
+static int slot_width(const vir_mop_t *ir)
 {
     return ir->is_pointer && ir->size_bytes != PTR_SIZE ? PTR_SIZE
                                                         : ir->size_bytes;
@@ -2328,7 +2321,7 @@ static void emit_store_instruction(int width,
                         : (width == 1 ? 0x88 : 0x89));
 }
 
-static void emit_slot_store(ph2_ir_t *ir, int reg, int base, bool packed)
+static void emit_slot_store(vir_mop_t *ir, int reg, int base, bool packed)
 {
     int width = slot_width(ir);
 
@@ -2370,9 +2363,9 @@ static void emit_memory_operand(int reg, const x64_memory_operand_t *operand)
                       operand->has_displacement);
 }
 
-void emit_memory(ph2_ir_t *ph2_ir, int rd, int rs1)
+void emit_memory(vir_mop_t *mop, int rd, int rs1)
 {
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_allocat: {
         /* SUB rsp, size.
          *
@@ -2380,7 +2373,7 @@ void emit_memory(ph2_ir_t *ph2_ir, int rd, int rs1)
          * 'rs1' has already been rewritten through reg_map[] above and would
          * turn any size in 0..7 into an unrelated register number.
          */
-        int alloc_bytes = ph2_ir->src0;
+        int alloc_bytes = mop->src0;
         emit_alu_imm_width(4, 5, alloc_bytes, true);
         return;
     }
@@ -2389,19 +2382,19 @@ void emit_memory(ph2_ir_t *ph2_ir, int rd, int rs1)
         /* LEA rd, [rsp + src0] */
         emit_rex(1, rd, -1);
         emit_byte(0x8D);
-        emit_rsp_mem(rd, ph2_ir->src0);
+        emit_rsp_mem(rd, mop->src0);
         return;
     }
 
     case OP_load:
-        emit_load_instruction(rd, slot_width(ph2_ir), ph2_ir->is_unsigned, -1,
-                              -1, false);
-        emit_rsp_mem(rd, ph2_ir->src0);
+        emit_load_instruction(rd, slot_width(mop), mop->is_unsigned, -1, -1,
+                              false);
+        emit_rsp_mem(rd, mop->src0);
         return;
 
     case OP_store:
-        emit_slot_store(ph2_ir, rs1, -1, false);
-        emit_rsp_mem(rs1, ph2_ir->src1);
+        emit_slot_store(mop, rs1, -1, false);
+        emit_rsp_mem(rs1, mop->src1);
         return;
 
     default:
@@ -2410,9 +2403,9 @@ void emit_memory(ph2_ir_t *ph2_ir, int rd, int rs1)
 }
 
 /* Indirect access through a pointer. */
-void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
+void emit_read_write(vir_mop_t *mop, int rd, int rs1, int rs2)
 {
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_read:
         /* Load *rs1 into rd. The element width lives in src1 (1, 2 or 4);
          * pointer-typed reads must move a full pointer instead.
@@ -2422,17 +2415,17 @@ void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
              * the IR width is authoritative. is_pointer describes the address
              * operand, not the element, and must not be consulted.
              */
-            int rsize = ph2_ir->src1;
+            int rsize = mop->src1;
             x64_memory_operand_t address = take_memory_operand(rs1);
-            ph2_ir_t *alu = emit_next_ir;
+            vir_mop_t *alu = emit_next_ir;
             int at = emit_ir_index + 1;
 
             /* A postincrement may sit between the read and its arithmetic use.
              * Moving register arithmetic across it preserves the memory access.
              */
             if (alu && alu->op == OP_add && alu->size_bytes == 8 &&
-                alu->dest == ph2_ir->src0 && alu->src0 == alu->dest &&
-                alu->src1 != ph2_ir->dest && ph2_ir->dest != ph2_ir->src0) {
+                alu->dest == mop->src0 && alu->src0 == alu->dest &&
+                alu->src1 != mop->dest && mop->dest != mop->src0) {
                 alu = alu->next;
                 at++;
             }
@@ -2440,12 +2433,12 @@ void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
             if (!folds_off && ext >= 0 && at < instruction_to_bb_capacity &&
                 instruction_to_bb[at] == instruction_to_bb[emit_ir_index] &&
                 (rsize == 4 || rsize == 8) && alu->size_bytes == rsize &&
-                (!alu->is_pointer || rsize == 8) && alu->src1 == ph2_ir->dest &&
-                alu->dest == alu->src0 && alu->dest != ph2_ir->dest &&
+                (!alu->is_pointer || rsize == 8) && alu->src1 == mop->dest &&
+                alu->dest == alu->src0 && alu->dest != mop->dest &&
                 (at == emit_ir_index + 1 ||
-                 (alu->op != OP_bit_and && alu->dest != ph2_ir->src0 &&
+                 (alu->op != OP_bit_and && alu->dest != mop->src0 &&
                   alu->dest != emit_next_ir->src1)) &&
-                reg_dead_after(at + 1, ph2_ir->dest)) {
+                reg_dead_after(at + 1, mop->dest)) {
                 int accumulator = map_ir_reg(alu->dest);
                 if (address.sib)
                     emit_rex_sib(rsize == 8, accumulator, address.base,
@@ -2461,7 +2454,7 @@ void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
                 return;
             }
 
-            emit_load_instruction(rd, rsize, ph2_ir->is_unsigned, address.base,
+            emit_load_instruction(rd, rsize, mop->is_unsigned, address.base,
                                   address.index, address.sib);
             emit_memory_operand(rd, &address);
         }
@@ -2473,21 +2466,21 @@ void emit_read_write(ph2_ir_t *ph2_ir, int rd, int rs1, int rs2)
             int val_reg = rs2;
             x64_memory_operand_t address = take_memory_operand(rs1);
             /* Debug: trace write width mismatches for pointers */
-            if (ph2_ir->is_pointer && ph2_ir->size_bytes != PTR_SIZE) {
+            if (mop->is_pointer && mop->size_bytes != PTR_SIZE) {
                 if (x64_debug)
                     fprintf(stderr,
                             "[EMIT] OP_write ptr width mismatch: size=%d "
                             "ptr=%d "
                             "addr=%d val=%d\n",
-                            ph2_ir->size_bytes, ph2_ir->is_pointer,
-                            ph2_ir->src0, ph2_ir->src1);
+                            mop->size_bytes, mop->is_pointer, mop->src0,
+                            mop->src1);
             }
 
             /* The store width the IR asks for lives in dest (1, 2 or 4);
              * pointer-typed writes must store a full pointer. As with OP_read,
              * the IR width already accounts for pointers.
              */
-            int wsize = ph2_ir->dest;
+            int wsize = mop->dest;
 
             /* A value the block loaded as a literal is stored as an immediate:
              * MOV r/m, imm, with /0 in the reg field. The literal register's
@@ -2548,9 +2541,9 @@ static void emit_r15_address(int rd, int data_ofs)
     }
 }
 
-void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
+void emit_global(vir_mop_t *mop, int rd, int rs1)
 {
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_load_func:
         /* Stage the callee address in R11 for the OP_indirect that follows. R11
          * is outside reg_map, so nothing the allocator owns is disturbed.
@@ -2563,7 +2556,7 @@ void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
          * until every function has been emitted, so record it for patching.
          */
         {
-            func_t *target = find_func(ph2_ir->func_name);
+            func_t *target = find_func(mop->func_name);
             emit_byte(REX_W | REX_B);
             emit_byte(0xB8 + 3); /* MOVABS r11, imm64 */
             if (target && (target->bbs || dynlink)) {
@@ -2593,25 +2586,25 @@ void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
 
     case OP_global_address_of: {
         /* src0 is a byte offset, not a mapped register. */
-        int data_ofs = ph2_ir->src0;
+        int data_ofs = mop->src0;
 
         /* When the addition right after takes this address only to fold it into
          * an access as [r15 + index + disp], and nothing else reads it, the LEA
          * is dead. These are the conditions try_fold_sib_add() folds under; if
          * it declines anyway, it emits the LEA then.
          */
-        ph2_ir_t *sum = emit_next_ir;
+        vir_mop_t *sum = emit_next_ir;
         basic_block_t *gbb =
             emit_ir_index >= 0 && emit_ir_index + 1 < instruction_to_bb_capacity
                 ? instruction_to_bb[emit_ir_index]
                 : NULL;
         sib_address_t address;
         if (gbb && sum && instruction_to_bb[emit_ir_index + 1] == gbb &&
-            sib_add_address(sum, gbb, emit_ir_index + 1, ph2_ir->dest,
+            sib_add_address(sum, gbb, emit_ir_index + 1, mop->dest,
                             map_ir_reg(sum->src0), map_ir_reg(sum->src1),
                             &address) &&
-            reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
-            gaddr_pending_ir = ph2_ir->dest;
+            reg_dead_after(emit_ir_index + 2, mop->dest)) {
+            gaddr_pending_ir = mop->dest;
             gaddr_pending_ofs = data_ofs;
             gaddr_pending_at = emit_ir_index;
             return;
@@ -2621,19 +2614,19 @@ void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
         return;
 
     case OP_global_load: {
-        int dest_reg = map_ir_reg(ph2_ir->dest);
+        int dest_reg = map_ir_reg(mop->dest);
 
-        emit_load_instruction(dest_reg, slot_width(ph2_ir), ph2_ir->is_unsigned,
-                              15, -1, false);
-        emit_r15_mem(reg_low3(dest_reg), ph2_ir->src0);
+        emit_load_instruction(dest_reg, slot_width(mop), mop->is_unsigned, 15,
+                              -1, false);
+        emit_r15_mem(reg_low3(dest_reg), mop->src0);
     }
         return;
 
     case OP_global_store: {
         int src_reg = rs1; /* honours a redirected source, as OP_store does */
 
-        emit_slot_store(ph2_ir, src_reg, 15, true);
-        emit_r15_mem(reg_low3(src_reg), ph2_ir->src1);
+        emit_slot_store(mop, src_reg, 15, true);
+        emit_r15_mem(reg_low3(src_reg), mop->src1);
     }
         return;
 
@@ -2641,10 +2634,10 @@ void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
         /* Calculate address using R15 + offset (LEA rd, [r15 + offset]).
          *
          * src0 is a byte offset into the data area, not a register index, so it
-         * is read raw rather than through 'rs1', which emit_ph2_ir() has
-         * already rewritten through reg_map[].
+         * is read raw rather than through 'rs1', which emit_mop() has already
+         * rewritten through reg_map[].
          */
-        int data_ofs = ph2_ir->src0;
+        int data_ofs = mop->src0;
         emit_r15_address(rd, data_ofs);
     }
         return;
@@ -2663,7 +2656,7 @@ void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
             /* src0 is a .rodata byte offset, not a register index; read it raw
              * so that offsets 0..7 are not rewritten by reg_map[].
              */
-            rodata_refs[rodata_ref_count].rodata_offset = ph2_ir->src0;
+            rodata_refs[rodata_ref_count].rodata_offset = mop->src0;
             rodata_ref_count++;
         }
         emit_dword(0);
@@ -2676,17 +2669,17 @@ void emit_global(ph2_ir_t *ph2_ir, int rd, int rs1)
 }
 
 /* Logical operators and width conversions. */
-void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
+void emit_logic_cast(vir_mop_t *mop, int rd, int rs1)
 {
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_log_not: {
         /* TEST rs1, rs1; SETE r11b; MOVZX rd, r11b.
          *
          * The source is rs1, which is not always the same register as rd -- for
          * a global it never is.
          */
-        emit_test_self(
-            test_is_wide(ph2_ir->size_bytes, ph2_ir->src0_is_pointer), rs1);
+        emit_test_self(test_is_wide(mop->size_bytes, mop->src0_is_pointer),
+                       rs1);
 
         emit_setcc_bool(rd, 0x94); /* SETE */
     }
@@ -2703,8 +2696,8 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
          * keeps the sign -- 127 + 1 wraps to -128, 32767
          * + 1 to -32768 -- and a 4-byte truncation sign-extends the low word.
          */
-        int tsize = ph2_ir->src1;
-        if (ph2_ir->is_unsigned) {
+        int tsize = mop->src1;
+        if (mop->is_unsigned) {
             emit_zero_extend(rd, rs1, tsize);
             return;
         }
@@ -2719,8 +2712,8 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
          * rs1/rd are already physical registers here; they must not be run
          * through reg_map a second time.
          */
-        int src_size = (ph2_ir->src1 >> 16) & 0xFFFF;
-        int dst_size = ph2_ir->src1 & 0xFFFF;
+        int src_size = (mop->src1 >> 16) & 0xFFFF;
+        int dst_size = mop->src1 & 0xFFFF;
         int width = src_size;
 
         /* Widening to a pointer. The register already holds a complete 64-bit
@@ -2728,11 +2721,11 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
          * half and destroy every stack address. Copy it instead, which is also
          * what a source that is already full width wants.
          */
-        if (ph2_ir->is_pointer && dst_size == PTR_SIZE && PTR_SIZE == 8)
+        if (mop->is_pointer && dst_size == PTR_SIZE && PTR_SIZE == 8)
             width = 8;
         else if (width != 1 && width != 2 && width != 4)
             width = 8;
-        if (ph2_ir->src0_is_unsigned)
+        if (mop->src0_is_unsigned)
             emit_zero_extend(rd, rs1, width);
         else
             emit_narrow_move(rd, rs1, width, true);
@@ -2748,10 +2741,10 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
          * zeroes above it, and shifting it right arithmetically gave
          * 0x7fffffff.
          */
-        if (ph2_ir->is_unsigned && ph2_ir->size_bytes < PTR_SIZE)
-            emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
-        else if (ph2_ir->src0_is_unsigned && ph2_ir->size_bytes < PTR_SIZE)
-            emit_narrow_move(rd, rs1, ph2_ir->size_bytes, true);
+        if (mop->is_unsigned && mop->size_bytes < PTR_SIZE)
+            emit_zero_extend(rd, rs1, mop->size_bytes);
+        else if (mop->src0_is_unsigned && mop->size_bytes < PTR_SIZE)
+            emit_narrow_move(rd, rs1, mop->size_bytes, true);
         else
             emit_mov_reg(rd, rs1);
     }
@@ -2762,7 +2755,7 @@ void emit_logic_cast(ph2_ir_t *ph2_ir, int rd, int rs1)
     }
 }
 
-void emit_ph2_ir(ph2_ir_t *ph2_ir)
+void emit_mop(vir_mop_t *mop)
 {
     for (int i = 0; i < MAX_SKIP_IR; i++) {
         if (skip_ir_index[i] >= 0 && skip_ir_index[i] == emit_ir_index) {
@@ -2774,50 +2767,48 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     /* Only the addition the elided address was meant for may run without it,
      * and only through the fold in try_fold_sib_add().
      */
-    bool gaddr_owner = gaddr_pending_ir >= 0 && ph2_ir->op == OP_add &&
+    bool gaddr_owner = gaddr_pending_ir >= 0 && mop->op == OP_add &&
                        emit_ir_index == gaddr_pending_at + 1;
     if (gaddr_pending_ir >= 0 && !gaddr_owner)
         gaddr_materialize();
-    if (!gaddr_owner && try_fold_mem_dest(ph2_ir))
+    if (!gaddr_owner && try_fold_mem_dest(mop))
         return;
-    if (!gaddr_owner && try_fold_alu_to_slot(ph2_ir))
+    if (!gaddr_owner && try_fold_alu_to_slot(mop))
         return;
 
-    int rd = map_ir_reg(ph2_ir->dest);
-    int rs1 = map_ir_reg(ph2_ir->src0);
+    int rd = map_ir_reg(mop->dest);
+    int rs1 = map_ir_reg(mop->src0);
     if (src0_override >= 0 && src0_override_at == emit_ir_index) {
         rs1 = src0_override;
         src0_override = -1;
         src0_override_at = -1;
     }
-    int rs2 = map_ir_reg(ph2_ir->src1);
+    int rs2 = map_ir_reg(mop->src1);
 
     /* Read the tracked value before invalidating, since dest may alias src1. */
     bool src1_const_known = false;
     int src1_const = 0;
-    if (ph2_ir->src1 >= 0 && ph2_ir->src1 < REG_CNT &&
-        const_reg_valid[ph2_ir->src1]) {
+    if (mop->src1 >= 0 && mop->src1 < REG_CNT && const_reg_valid[mop->src1]) {
         src1_const_known = true;
-        src1_const = const_reg_val[ph2_ir->src1];
+        src1_const = const_reg_val[mop->src1];
     }
-    if (op_writes_dest(ph2_ir->op) && ph2_ir->dest >= 0 &&
-        ph2_ir->dest < REG_CNT) {
-        const_reg_valid[ph2_ir->dest] = false;
-        shift_cache_kill(ph2_ir->dest);
+    if (op_writes_dest(mop->op) && mop->dest >= 0 && mop->dest < REG_CNT) {
+        const_reg_valid[mop->dest] = false;
+        shift_cache_kill(mop->dest);
     }
 
     /* Anything that can touch a register this table does not name -- a call, or
      * a division writing RAX and RDX -- invalidates all of it. This is the same
      * set that drops frame mirrors below.
      */
-    if (!op_keeps_frame_mirrors(ph2_ir->op)) {
+    if (!op_keeps_frame_mirrors(mop->op)) {
         const_track_reset();
         shift_cache_reset();
     }
-    if (ph2_ir->op != OP_branch)
+    if (mop->op != OP_branch)
         fused_cc_pending = false;
-    if (!branch_cc_for(ph2_ir->op,
-                       ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned)) {
+    if (!branch_cc_for(mop->op,
+                       mop->src0_is_unsigned || mop->src1_is_unsigned)) {
         cmp_mem_slot = -1;
         cmp_imm_known = false;
     } else if (src1_const_known) {
@@ -2829,48 +2820,46 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
      * the second compare operand from memory. Unlike arithmetic, nothing reuses
      * this value afterwards, so folding it costs no later reload.
      */
-    if (ph2_ir->op == OP_load && next_in_same_bb() &&
+    if (mop->op == OP_load && next_in_same_bb() &&
         branch_cc_for(emit_next_ir->op, emit_next_ir->src0_is_unsigned ||
                                             emit_next_ir->src1_is_unsigned) &&
-        emit_next_ir->src1 == ph2_ir->dest &&
-        emit_next_ir->src0 != ph2_ir->dest &&
-        reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
-        int w = load_width(ph2_ir);
+        emit_next_ir->src1 == mop->dest && emit_next_ir->src0 != mop->dest &&
+        reg_dead_after(emit_ir_index + 2, mop->dest)) {
+        int w = load_width(mop);
 
         /* A folded memory operand must have the same width as the comparison.
          * In particular, comparing an int load after it has been promoted to
          * long must not turn into an eight-byte read from its four-byte slot.
          */
         if ((w == 4 || w == 8) && w == emit_next_ir->size_bytes) {
-            cmp_mem_slot = ph2_ir->src0;
+            cmp_mem_slot = mop->src0;
             return;
         }
     }
 
-    if (!op_keeps_frame_mirrors(ph2_ir->op)) {
+    if (!op_keeps_frame_mirrors(mop->op)) {
         frame_mirror_reset();
     } else {
         /* A volatile slot is read however recently a register mirrored it: the
          * read is an access the program performs.
          */
-        if (ph2_ir->op == OP_load && !ph2_ir->is_volatile &&
-            ph2_ir->dest >= 0 && ph2_ir->dest < REG_CNT) {
-            int want = load_width(ph2_ir);
-            if (reg_mirror_valid[ph2_ir->dest] &&
-                reg_mirror_slot[ph2_ir->dest] == ph2_ir->src0 &&
-                reg_mirror_size[ph2_ir->dest] == want &&
-                !reg_mirror_sext[ph2_ir->dest])
+        if (mop->op == OP_load && !mop->is_volatile && mop->dest >= 0 &&
+            mop->dest < REG_CNT) {
+            int want = load_width(mop);
+            if (reg_mirror_valid[mop->dest] &&
+                reg_mirror_slot[mop->dest] == mop->src0 &&
+                reg_mirror_size[mop->dest] == want &&
+                !reg_mirror_sext[mop->dest])
                 return; /* the register still holds this slot */
             /* Some other register may already hold it. Copying between
              * registers costs the same instruction but avoids waiting on the
              * store-to-load forwarding this slot would otherwise require.
              */
             for (int i = 0; i < REG_CNT; i++) {
-                if (!reg_mirror_valid[i] ||
-                    reg_mirror_slot[i] != ph2_ir->src0 ||
+                if (!reg_mirror_valid[i] || reg_mirror_slot[i] != mop->src0 ||
                     reg_mirror_size[i] != want)
                     continue;
-                if (i == ph2_ir->dest && !reg_mirror_sext[i])
+                if (i == mop->dest && !reg_mirror_sext[i])
                     continue;
                 int held = map_ir_reg(i);
 
@@ -2887,45 +2876,44 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                  */
                 if (!reg_mirror_sext[i] && src0_override < 0 &&
                     next_in_same_bb() && op_src0_is_reg(emit_next_ir->op) &&
-                    emit_next_ir->src0 == ph2_ir->dest &&
-                    emit_next_ir->src1 != ph2_ir->dest &&
-                    reg_dead_after(emit_ir_index + 2, ph2_ir->dest)) {
+                    emit_next_ir->src0 == mop->dest &&
+                    emit_next_ir->src1 != mop->dest &&
+                    reg_dead_after(emit_ir_index + 2, mop->dest)) {
                     src0_override = held;
                     src0_override_at = emit_ir_index + 1;
                     return;
                 }
                 emit_narrow_move(rd, held, want, reg_mirror_sext[i]);
-                reg_mirror_valid[ph2_ir->dest] = true;
-                reg_mirror_slot[ph2_ir->dest] = ph2_ir->src0;
-                reg_mirror_size[ph2_ir->dest] = want;
-                reg_mirror_sext[ph2_ir->dest] = false;
-                const_reg_valid[ph2_ir->dest] = false;
+                reg_mirror_valid[mop->dest] = true;
+                reg_mirror_slot[mop->dest] = mop->src0;
+                reg_mirror_size[mop->dest] = want;
+                reg_mirror_sext[mop->dest] = false;
+                const_reg_valid[mop->dest] = false;
                 return;
             }
         }
 
-        if (ph2_ir->dest >= 0 && ph2_ir->dest < REG_CNT)
-            reg_mirror_valid[ph2_ir->dest] = false;
+        if (mop->dest >= 0 && mop->dest < REG_CNT)
+            reg_mirror_valid[mop->dest] = false;
 
-        if (ph2_ir->op == OP_load && ph2_ir->dest >= 0 &&
-            ph2_ir->dest < REG_CNT) {
-            reg_mirror_valid[ph2_ir->dest] = true;
-            reg_mirror_slot[ph2_ir->dest] = ph2_ir->src0;
-            reg_mirror_size[ph2_ir->dest] = load_width(ph2_ir);
-            reg_mirror_sext[ph2_ir->dest] = false;
-        } else if (ph2_ir->op == OP_store) {
+        if (mop->op == OP_load && mop->dest >= 0 && mop->dest < REG_CNT) {
+            reg_mirror_valid[mop->dest] = true;
+            reg_mirror_slot[mop->dest] = mop->src0;
+            reg_mirror_size[mop->dest] = load_width(mop);
+            reg_mirror_sext[mop->dest] = false;
+        } else if (mop->op == OP_store) {
             /* Storing a register into the slot it already mirrors writes the
              * bytes that are there. Coalescing a phi with its operand makes
              * this common: the value's own write-back and the phi's copy become
              * the same store.
              */
-            if (ph2_ir->src0 >= 0 && ph2_ir->src0 < REG_CNT &&
-                !ph2_ir->is_volatile && reg_mirror_valid[ph2_ir->src0] &&
-                reg_mirror_slot[ph2_ir->src0] == ph2_ir->src1) {
-                int keep = ph2_ir->size_bytes;
-                if (ph2_ir->is_pointer && keep != PTR_SIZE)
+            if (mop->src0 >= 0 && mop->src0 < REG_CNT && !mop->is_volatile &&
+                reg_mirror_valid[mop->src0] &&
+                reg_mirror_slot[mop->src0] == mop->src1) {
+                int keep = mop->size_bytes;
+                if (mop->is_pointer && keep != PTR_SIZE)
                     keep = PTR_SIZE;
-                if (reg_mirror_size[ph2_ir->src0] == keep)
+                if (reg_mirror_size[mop->src0] == keep)
                     return;
             }
 
@@ -2933,7 +2921,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
              * stale.
              */
             for (int i = 0; i < REG_CNT; i++) {
-                if (reg_mirror_valid[i] && reg_mirror_slot[i] == ph2_ir->src1)
+                if (reg_mirror_valid[i] && reg_mirror_slot[i] == mop->src1)
                     reg_mirror_valid[i] = false;
             }
 
@@ -2943,15 +2931,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
              * slot sign-extends what was written -- which the sext flag
              * records, so the reload becomes a MOVSX rather than a copy.
              */
-            if (ph2_ir->src0 >= 0 && ph2_ir->src0 < REG_CNT) {
-                int eff = ph2_ir->size_bytes;
-                if (ph2_ir->is_pointer && eff != PTR_SIZE)
+            if (mop->src0 >= 0 && mop->src0 < REG_CNT) {
+                int eff = mop->size_bytes;
+                if (mop->is_pointer && eff != PTR_SIZE)
                     eff = PTR_SIZE;
                 if (eff == 1 || eff == 2 || eff == 4 || eff == 8) {
-                    reg_mirror_valid[ph2_ir->src0] = true;
-                    reg_mirror_slot[ph2_ir->src0] = ph2_ir->src1;
-                    reg_mirror_size[ph2_ir->src0] = eff;
-                    reg_mirror_sext[ph2_ir->src0] = eff < 8;
+                    reg_mirror_valid[mop->src0] = true;
+                    reg_mirror_slot[mop->src0] = mop->src1;
+                    reg_mirror_size[mop->src0] = eff;
+                    reg_mirror_sext[mop->src0] = eff < 8;
                 }
             }
         }
@@ -2961,17 +2949,17 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
      * CMP's flags can drive Jcc directly: SETcc, MOVZX and TEST all go away,
      * and the boolean never needs to exist when no successor uses it.
      */
-    int fuse_cc = branch_cc_for(
-        ph2_ir->op, ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned);
-    if (fuse_cc && branch_result_dead(ph2_ir->dest) && next_in_same_bb() &&
-        emit_next_ir->op == OP_branch && emit_next_ir->src0 == ph2_ir->dest) {
+    int fuse_cc =
+        branch_cc_for(mop->op, mop->src0_is_unsigned || mop->src1_is_unsigned);
+    if (fuse_cc && branch_result_dead(mop->dest) && next_in_same_bb() &&
+        emit_next_ir->op == OP_branch && emit_next_ir->src0 == mop->dest) {
         int producer = emit_ir_index - 1;
         if (!folds_off && producer >= 0 && src1_const_known &&
-            src1_const == 0 && ph2_ir->op == OP_eq && cmp_mem_slot < 0 &&
-            ph2_ir->src0 != ph2_ir->src1) {
-            ph2_ir_t *previous = PH2_IR_FLATTEN[producer];
+            src1_const == 0 && mop->op == OP_eq && cmp_mem_slot < 0 &&
+            mop->src0 != mop->src1) {
+            vir_mop_t *previous = MOP_FLAT[producer];
             if (previous->op == OP_load_constant &&
-                previous->dest == ph2_ir->src1 && previous->src0 == 0 &&
+                previous->dest == mop->src1 && previous->src0 == 0 &&
                 previous->src1 == 0)
                 producer--;
         } else
@@ -2979,12 +2967,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         bool flags_ready =
             producer >= 0 &&
             instruction_to_bb[producer] == instruction_to_bb[emit_ir_index] &&
-            PH2_IR_FLATTEN[producer]->op == OP_bit_and &&
-            PH2_IR_FLATTEN[producer]->dest == ph2_ir->src0 &&
-            PH2_IR_FLATTEN[producer]->size_bytes == ph2_ir->size_bytes &&
-            (ph2_ir->size_bytes == 4 || ph2_ir->size_bytes == 8);
+            MOP_FLAT[producer]->op == OP_bit_and &&
+            MOP_FLAT[producer]->dest == mop->src0 &&
+            MOP_FLAT[producer]->size_bytes == mop->size_bytes &&
+            (mop->size_bytes == 4 || mop->size_bytes == 8);
         if (!flags_ready)
-            emit_cmp(ph2_ir->size_bytes, rs1, rs2);
+            emit_cmp(mop->size_bytes, rs1, rs2);
         else
             cmp_imm_known = false;
         fused_cc = fuse_cc;
@@ -2998,10 +2986,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
      * otherwise emit -- three instructions down to one. Only when the masked
      * value is dead afterwards, since TEST does not write it.
      */
-    if (ph2_ir->op == OP_bit_and && next_in_same_bb() &&
-        emit_next_ir->op == OP_branch && emit_next_ir->src0 == ph2_ir->dest &&
-        !folds_off && branch_result_dead(ph2_ir->dest)) {
-        bool wide = test_is_wide(ph2_ir->size_bytes, ph2_ir->is_pointer);
+    if (mop->op == OP_bit_and && next_in_same_bb() &&
+        emit_next_ir->op == OP_branch && emit_next_ir->src0 == mop->dest &&
+        !folds_off && branch_result_dead(mop->dest)) {
+        bool wide = test_is_wide(mop->size_bytes, mop->is_pointer);
 
         if (src1_const_known) {
             emit_rex(wide, 0, rs1);
@@ -3016,7 +3004,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         return;
     }
 
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_load_constant: {
         /* A 64-bit constant whose high word is the sign of its low word is the
          * same value MOV r64, imm32 sign-extends to. Letting it take that path
@@ -3024,11 +3012,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * multiply with it, folds into an immediate instead of materialising
          * the value and shifting through CL.
          */
-        if (ph2_ir->size_bytes == 8 &&
-            ph2_ir->src1 != (ph2_ir->src0 < 0 ? -1 : 0)) {
+        if (mop->size_bytes == 8 && mop->src1 != (mop->src0 < 0 ? -1 : 0)) {
             unsigned long long constant =
-                (unsigned int) ph2_ir->src0 |
-                ((unsigned long long) (unsigned int) ph2_ir->src1 << 32);
+                (unsigned int) mop->src0 |
+                ((unsigned long long) (unsigned int) mop->src1 << 32);
 
             emit_x64_constant(rd, true, constant); /* MOVABS r64, imm64 */
             return;
@@ -3037,14 +3024,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* MOV r64, imm32 (sign-extended). The immediate is in src0, not a
          * register index.
          */
-        if (ph2_ir->dest >= 0 && ph2_ir->dest < REG_CNT) {
-            const_reg_valid[ph2_ir->dest] = true;
-            const_reg_val[ph2_ir->dest] = ph2_ir->src0;
+        if (mop->dest >= 0 && mop->dest < REG_CNT) {
+            const_reg_valid[mop->dest] = true;
+            const_reg_val[mop->dest] = mop->src0;
 
             /* Nothing will read the register itself: every remaining use turns
              * into a shift immediate, so the materialisation is dead.
              */
-            if (const_load_dead(emit_ir_index + 1, ph2_ir->dest, ph2_ir->src0))
+            if (const_load_dead(emit_ir_index + 1, mop->dest, mop->src0))
                 return;
         }
 
@@ -3052,7 +3039,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * return would otherwise have to copy it.
          */
         bool returned = next_in_same_bb() && emit_next_ir->op == OP_return &&
-                        emit_next_ir->src0 == ph2_ir->dest &&
+                        emit_next_ir->src0 == mop->dest &&
                         !(emit_next_ir->src0_is_unsigned &&
                           emit_next_ir->size_bytes < PTR_SIZE);
         if (returned)
@@ -3062,12 +3049,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * representation an unsigned scalar needs before a logical shift or
          * unsigned comparison.
          */
-        emit_mov_imm32(rd, ph2_ir->src0,
-                       !(ph2_ir->is_unsigned && ph2_ir->size_bytes <= 4));
+        emit_mov_imm32(rd, mop->src0,
+                       !(mop->is_unsigned && mop->size_bytes <= 4));
         if (returned) {
             /* The constant went to RAX; the destination was never written. */
-            if (ph2_ir->dest >= 0 && ph2_ir->dest < REG_CNT)
-                const_reg_valid[ph2_ir->dest] = false;
+            if (mop->dest >= 0 && mop->dest < REG_CNT)
+                const_reg_valid[mop->dest] = false;
             src0_override = 0;
             src0_override_at = emit_ir_index + 1;
         }
@@ -3075,8 +3062,8 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     }
 
     case OP_assign: {
-        if (ph2_ir->is_unsigned && ph2_ir->size_bytes < PTR_SIZE)
-            emit_zero_extend(rd, rs1, ph2_ir->size_bytes);
+        if (mop->is_unsigned && mop->size_bytes < PTR_SIZE)
+            emit_zero_extend(rd, rs1, mop->size_bytes);
         else
             emit_mov_reg(rd, rs1);
         return;
@@ -3087,7 +3074,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_mul:
     case OP_div:
     case OP_mod:
-        emit_arith(ph2_ir, rd, rs1, rs2, src1_const_known, src1_const);
+        emit_arith(mop, rd, rs1, rs2, src1_const_known, src1_const);
         break;
     case OP_bit_and:
     case OP_bit_or:
@@ -3096,7 +3083,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_negate:
     case OP_lshift:
     case OP_rshift:
-        emit_bitwise(ph2_ir, rd, rs1, rs2, src1_const_known, src1_const);
+        emit_bitwise(mop, rd, rs1, rs2, src1_const_known, src1_const);
         break;
     case OP_eq:
     case OP_neq:
@@ -3106,18 +3093,18 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_geq:
     case OP_jump:
     case OP_branch:
-        emit_compare_jump(ph2_ir, rd, rs1, rs2);
+        emit_compare_jump(mop, rd, rs1, rs2);
         break;
     case OP_call:
     case OP_return:
     case OP_func_ret:
-        emit_call_return(ph2_ir, rs1);
+        emit_call_return(mop, rs1);
         break;
     case OP_allocat:
     case OP_address_of:
     case OP_load:
     case OP_store:
-        emit_memory(ph2_ir, rd, rs1);
+        emit_memory(mop, rd, rs1);
         break;
     case OP_read:
     case OP_write:
@@ -3127,7 +3114,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          */
         write_imm_known = src1_const_known;
         write_imm_val = src1_const;
-        emit_read_write(ph2_ir, rd, rs1, rs2);
+        emit_read_write(mop, rd, rs1, rs2);
         write_imm_known = false;
         break;
     case OP_load_func:
@@ -3137,7 +3124,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_global_store:
     case OP_load_data_address:
     case OP_load_rodata_address:
-        emit_global(ph2_ir, rd, rs1);
+        emit_global(mop, rd, rs1);
         break;
     case OP_log_not:
     case OP_log_and:
@@ -3145,16 +3132,16 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_trunc:
     case OP_sign_ext:
     case OP_cast:
-        emit_logic_cast(ph2_ir, rd, rs1);
+        emit_logic_cast(mop, rd, rs1);
         break;
     case OP_define:
-        fatal_function_context = ph2_ir->func_name;
+        fatal_function_context = mop->func_name;
         /* Update the function's actual offset to current code position. A
          * function with no body is only declared: it has nothing to set up and
          * nothing can reach a prologue emitted for it.
          */
         {
-            func_t *func = find_func(ph2_ir->func_name);
+            func_t *func = find_func(mop->func_name);
             if (!func || !func->bbs)
                 return;
             x64_align16();
@@ -3162,7 +3149,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
 
         /* Check if this is the main function and record its location */
-        if (!strcmp(ph2_ir->func_name, "main")) {
+        if (!strcmp(mop->func_name, "main")) {
             /* Store the actual location where main starts */
             MAIN_BB->elf_offset = elf_code->size;
             main_code_offset = elf_code->size;
@@ -3172,7 +3159,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * aligned_size; LEA rbp, [rsp + bias]
          */
         x64_frame_bias = 0;
-        cur_frame_rbp = x64_needs_frame(find_func(ph2_ir->func_name));
+        cur_frame_rbp = x64_needs_frame(find_func(mop->func_name));
         if (cur_frame_rbp)
             emit_byte(0x55); /* PUSH rbp */
         /* Preserve only the callee-saved registers this function touches,
@@ -3184,10 +3171,10 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
 
         /* Allocate stack space if needed, keeping 16-byte alignment for calls
          */
-        int stack_size = ph2_ir->src0;
+        int stack_size = mop->src0;
         cur_define_stack = stack_size;
         if (x64_map) {
-            fprintf(stderr, "[map] %s 0x%x\n", ph2_ir->func_name,
+            fprintf(stderr, "[map] %s 0x%x\n", mop->func_name,
                     elf_code_start + elf_code->size);
             fflush(stderr);
         }
@@ -3237,7 +3224,7 @@ void cfg_flatten(void)
     /* __syscall offset will be set when it's actually emitted in code_generate
      */
     func_t *func;
-    ph2_ir_prepare(true);
+    mop_flat_prepare(true);
 
     /* Entry point code varies based on globals: POP rdi (1) + MOV rsi,rsp (3) +
      * global_setup (varies) + CALL globals (0 or 5) + CALL main (5) + MOV
@@ -3252,7 +3239,7 @@ void cfg_flatten(void)
     else
         global_setup_size = 7;
     int global_call_size;
-    if (GLOBAL_FUNC && GLOBAL_FUNC->bbs && GLOBAL_FUNC->bbs->ph2_ir_list.head)
+    if (GLOBAL_FUNC && GLOBAL_FUNC->bbs && GLOBAL_FUNC->bbs->mops.head)
         global_call_size = 5;
     else
         global_call_size = 0;
@@ -3276,7 +3263,7 @@ void cfg_flatten(void)
     /* Entry already fully accounted for above. No extra fudge needed. */
 
     for (func = FUNC_LIST.head; func; func = func->next) {
-        if (!ph2_ir_function_included(func, true))
+        if (!mop_function_included(func, true))
             continue;
 
         /* Arguments past MAX_ARGS_IN_REG stay in the caller's frame, and
@@ -3296,7 +3283,7 @@ void cfg_flatten(void)
             x64_incoming_arg_base(func->stack_size, func->saved_regs);
 
         /* Reserve stack: account prologue via OP_define */
-        ph2_ir_t *flatten_ir = add_ph2_ir(OP_define);
+        vir_mop_t *flatten_ir = add_mop(OP_define);
         flatten_ir->src0 = func->stack_size;
         flatten_ir->func_name = intern_string(func->return_def.var_name);
 
@@ -3305,25 +3292,9 @@ void cfg_flatten(void)
              * enter the BB to avoid stale offsets.
              */
 
-            for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
-                 insn = insn->next) {
-                if (insn->ofs_based_on_stack_top) {
-                    /* Only these three name a variable's address; every other
-                     * opcode carrying the flag has nothing to rebase.
-                     */
-                    if (insn->op == OP_load || insn->op == OP_address_of)
-                        insn->src0 = insn->src0 + stack_top_ofs;
-                    else if (insn->op == OP_store)
-                        insn->src1 = insn->src1 + stack_top_ofs;
-                }
-
-                flatten_ir = add_existed_ph2_ir(insn);
-
-                if (insn->op == OP_return) {
-                    /* restore sp */
-                    flatten_ir->src1 = bb->belong_to->stack_size;
-                }
-            }
+            for (vir_mop_t *mop = bb->mops.head; mop; mop = mop->next)
+                mop_flatten_insn(mop, stack_top_ofs, func->stack_size, 0,
+                                 false);
         }
     }
 }
@@ -3551,7 +3522,7 @@ void code_generate(void)
      */
 
     /* Generate code for the global function */
-    ph2_ir_t *ph2_ir;
+    vir_mop_t *mop;
     if (GLOBAL_FUNC && GLOBAL_FUNC->bbs) {
         /* Record where the global initializer actually starts. cfg_flatten only
          * computed a predicted offset, and x86-64 instruction lengths are
@@ -3560,10 +3531,9 @@ void code_generate(void)
          */
         GLOBAL_FUNC->bbs->elf_offset = elf_code->size;
 
-        for (ph2_ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ph2_ir;
-             ph2_ir = ph2_ir->next) {
+        for (mop = GLOBAL_FUNC->bbs->mops.head; mop; mop = mop->next) {
             if (x64_debug)
-                fprintf(stderr, "[x64] emit global op=%d\n", ph2_ir->op);
+                fprintf(stderr, "[x64] emit global op=%d\n", mop->op);
 
             /* The initializer runs through a CALL with no frame of its own, and
              * the slots it spills temporaries to are allocated from the global
@@ -3572,14 +3542,14 @@ void code_generate(void)
              * the top of the stack once an initializer was large enough to
              * spill.
              */
-            if (ph2_ir->op == OP_load)
-                ph2_ir->op = OP_global_load;
-            else if (ph2_ir->op == OP_store)
-                ph2_ir->op = OP_global_store;
-            else if (ph2_ir->op == OP_address_of)
-                ph2_ir->op = OP_global_address_of;
+            if (mop->op == OP_load)
+                mop->op = OP_global_load;
+            else if (mop->op == OP_store)
+                mop->op = OP_global_store;
+            else if (mop->op == OP_address_of)
+                mop->op = OP_global_address_of;
             emit_next_ir = NULL;
-            emit_ph2_ir(ph2_ir);
+            emit_mop(mop);
         }
 
         /* Add RET instruction at end of global function */
@@ -3686,9 +3656,9 @@ void code_generate(void)
      * scans inspect the end-of-stream entry without reserving a maximum-sized
      * map for every compilation.
      */
-    if (ph2_ir_idx == INT_MAX)
-        limit_error("too many phase-2 IR instructions for x64 map");
-    instruction_to_bb_capacity = ph2_ir_idx + 1;
+    if (mop_flat_count == INT_MAX)
+        limit_error("too many machine operations for x64 map");
+    instruction_to_bb_capacity = mop_flat_count + 1;
     if (instruction_to_bb_capacity > (INT_MAX - ((int) sizeof(void *) - 1)) /
                                          (int) sizeof(*instruction_to_bb))
         limit_error("x64 instruction-to-block map size overflow");
@@ -3698,26 +3668,25 @@ void code_generate(void)
     instruction_to_bb = arena_alloc(GENERAL_ARENA, instruction_to_bb_bytes);
     if (!instruction_to_bb)
         limit_error("cannot allocate x64 instruction-to-block map");
-    instruction_to_bb[ph2_ir_idx] = NULL;
+    instruction_to_bb[mop_flat_count] = NULL;
 
     /* Build the mapping in the same order as cfg_flatten. */
     int instr_idx = 0;
     for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        if (!ph2_ir_function_included(func, true))
+        if (!mop_function_included(func, true))
             continue;
         /* OP_define for the function; it belongs to no BB */
-        if (instr_idx < ph2_ir_idx)
+        if (instr_idx < mop_flat_count)
             instruction_to_bb[instr_idx] = NULL;
         instr_idx++;
 
         int blocks_base = instr_idx;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            bb->ph2_base = bb->ph2_ir_list.head ? instr_idx : -1;
+            bb->mop_base = bb->mops.head ? instr_idx : -1;
 
             /* Map all instructions in this BB */
-            for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
-                 insn = insn->next) {
-                if (instr_idx < ph2_ir_idx)
+            for (vir_mop_t *insn = bb->mops.head; insn; insn = insn->next) {
+                if (instr_idx < mop_flat_count)
                     instruction_to_bb[instr_idx] = bb;
                 instr_idx++;
             }
@@ -3734,8 +3703,7 @@ void code_generate(void)
          */
         int mark_idx = blocks_base;
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn;
-                 insn = insn->next) {
+            for (vir_mop_t *insn = bb->mops.head; insn; insn = insn->next) {
                 basic_block_t *t;
 
                 mark_idx++;
@@ -3744,7 +3712,7 @@ void code_generate(void)
                     if (t)
                         t->is_branch_target = true;
                     t = bb_code_target(insn->else_bb);
-                    if (t && t->ph2_base != mark_idx)
+                    if (t && t->mop_base != mark_idx)
                         t->is_branch_target = true;
                     continue;
                 }
@@ -3753,9 +3721,9 @@ void code_generate(void)
                 t = bb_code_target(insn->next_bb);
                 if (!t)
                     continue;
-                if (t->ph2_base != mark_idx)
+                if (t->mop_base != mark_idx)
                     t->is_branch_target = true;
-                ph2_ir_t *tail = t->ph2_ir_list.tail;
+                vir_mop_t *tail = t->mops.tail;
                 if (tail && tail->op == OP_branch) {
                     basic_block_t *d = bb_code_target(tail->then_bb);
                     if (d)
@@ -3768,32 +3736,31 @@ void code_generate(void)
         }
     }
 
-    if (instr_idx != ph2_ir_idx)
+    if (instr_idx != mop_flat_count)
         fatal("x64: flattened IR and block map counts disagree");
 
     if (x64_map) {
         fprintf(stderr, "[count] flattened IR = %d (map slots %d)\n",
-                ph2_ir_idx, instruction_to_bb_capacity);
+                mop_flat_count, instruction_to_bb_capacity);
         fflush(stderr);
     }
-    for (int i = 0; i < ph2_ir_idx; i++) {
-        ph2_ir = PH2_IR_FLATTEN[i];
-        emit_next_ir = i + 1 < ph2_ir_idx ? PH2_IR_FLATTEN[i + 1] : NULL;
+    for (int i = 0; i < mop_flat_count; i++) {
+        mop = MOP_FLAT[i];
+        emit_next_ir = i + 1 < mop_flat_count ? MOP_FLAT[i + 1] : NULL;
         emit_ir_index = i;
 
         /* Skip __syscall - it's emitted manually early (before other functions)
          */
-        if (ph2_ir->op == OP_define &&
-            !strcmp(ph2_ir->func_name, "__syscall")) {
+        if (mop->op == OP_define && !strcmp(mop->func_name, "__syscall")) {
             continue;
         }
 
         /* Check if we're starting a new function. Its entry block is made
          * current here, so the check at a block's start would not see it.
          */
-        if (ph2_ir->op == OP_define) {
+        if (mop->op == OP_define) {
             fold_state_check(i);
-            emit_func = find_func(ph2_ir->func_name);
+            emit_func = find_func(mop->func_name);
             cur_saved_regs = emit_func ? emit_func->saved_regs : 1;
             if (emit_func && emit_func->bbs) {
                 emit_bb = emit_func->bbs;
@@ -3803,7 +3770,7 @@ void code_generate(void)
                  */
             }
             if (x64_debug)
-                fprintf(stderr, "[x64] define %s\n", ph2_ir->func_name);
+                fprintf(stderr, "[x64] define %s\n", mop->func_name);
         }
 
         /* Check if this instruction starts a new BB */
@@ -3862,7 +3829,7 @@ void code_generate(void)
         }
 
         /* After a branch/jump, track BB changes */
-        if (emit_bb && (ph2_ir->op == OP_branch || ph2_ir->op == OP_jump)) {
+        if (emit_bb && (mop->op == OP_branch || mop->op == OP_jump)) {
             /* The next instruction will be in a different BB */
             emit_bb = NULL;
         }
@@ -3872,8 +3839,8 @@ void code_generate(void)
         /* (removed debug context dump) */
 
         /* Emission-time assertion: pointer stores must be PTR_SIZE wide */
-        if ((ph2_ir->op == OP_store || ph2_ir->op == OP_write) &&
-            ph2_ir->is_pointer && ph2_ir->size_bytes != PTR_SIZE) {
+        if ((mop->op == OP_store || mop->op == OP_write) && mop->is_pointer &&
+            mop->size_bytes != PTR_SIZE) {
             /* Split across two calls: nine arguments exceeds MAX_PARAMS, so the
              * last one was garbage in a self-hosted build.
              */
@@ -3884,20 +3851,20 @@ void code_generate(void)
                 fprintf(stderr,
                         "WARN: pointer store width mismatch at IR idx %d in "
                         "%s: op=%d size=%d\n",
-                        i, fname, ph2_ir->op, ph2_ir->size_bytes);
-                fprintf(stderr, "      src0=%d src1=%d dest=%d\n", ph2_ir->src0,
-                        ph2_ir->src1, ph2_ir->dest);
+                        i, fname, mop->op, mop->size_bytes);
+                fprintf(stderr, "      src0=%d src1=%d dest=%d\n", mop->src0,
+                        mop->src1, mop->dest);
             }
             /* Continue without aborting */
         }
         if (x64_debug)
-            fprintf(stderr, "[x64] emit op=%d\n", ph2_ir->op);
+            fprintf(stderr, "[x64] emit op=%d\n", mop->op);
         emit_fell_through = true;
-        emit_ph2_ir(ph2_ir);
+        emit_mop(mop);
         if (x64_debug)
-            fprintf(stderr, "[x64] done op=%d\n", ph2_ir->op);
+            fprintf(stderr, "[x64] done op=%d\n", mop->op);
     }
-    fold_state_check(ph2_ir_idx);
+    fold_state_check(mop_flat_count);
 
     /* BB offsets from cfg_flatten should now be available for forward reference
      * patching
@@ -3921,7 +3888,7 @@ void code_generate(void)
              * instructions in this BB
              */
             int insn_count = 0;
-            for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+            for (vir_mop_t *ir = bb->mops.head; ir; ir = ir->next) {
                 insn_count++;
             }
 
@@ -3949,9 +3916,9 @@ void code_generate(void)
 
                 /* Emit all instructions in this BB */
                 folds_off = true;
-                for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
+                for (vir_mop_t *ir = bb->mops.head; ir; ir = ir->next) {
                     emit_next_ir = NULL;
-                    emit_ph2_ir(ir);
+                    emit_mop(ir);
                 }
                 folds_off = false;
             }
@@ -4017,8 +3984,7 @@ void code_generate(void)
         emit_dword(0); /* Upper 32 bits - will be patched */
 
         /* Globals setup: if any */
-        if (GLOBAL_FUNC && GLOBAL_FUNC->bbs &&
-            GLOBAL_FUNC->bbs->ph2_ir_list.head) {
+        if (GLOBAL_FUNC && GLOBAL_FUNC->bbs && GLOBAL_FUNC->bbs->mops.head) {
             /* The generated global initializer is not an ABI boundary: it may
              * allocate r12/r13, so do not preserve argv in callee-saved
              * registers across it. Keep both values on the startup stack and

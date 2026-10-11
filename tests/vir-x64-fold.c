@@ -6,11 +6,11 @@ static void check_branch_fallthrough(void)
 {
     for (int condition = 0x80; condition <= 0x8f; condition++)
         for (int fallthrough = 0; fallthrough < 3; fallthrough++) {
-            ph2_ir_t then_ir = {0}, else_ir = {0};
+            vir_mop_t then_ir = {0}, else_ir = {0};
             then_ir.op = else_ir.op = OP_return;
             basic_block_t then_bb = {0}, else_bb = {0};
-            then_bb.ph2_ir_list.head = &then_ir;
-            else_bb.ph2_ir_list.head = &else_ir;
+            then_bb.mops.head = &then_ir;
+            else_bb.mops.head = &else_ir;
             emit_next_ir = fallthrough == 1   ? &then_ir
                            : fallthrough == 2 ? &else_ir
                                               : NULL;
@@ -31,7 +31,7 @@ int main(void)
     GENERAL_ARENA = arena_init(DEFAULT_ARENA_SIZE);
     check_branch_fallthrough();
     basic_block_t bb = {0};
-    ph2_ir_t sum = {0}, read = {0}, ret = {0};
+    vir_mop_t sum = {0}, read = {0}, ret = {0};
     sum.op = OP_add;
     sum.src0 = 0;
     sum.src1 = 1;
@@ -41,10 +41,10 @@ int main(void)
     read.dest = 3;
     ret.op = OP_return;
     ret.src0 = -1;
-    ph2_ir_t *irs[] = {&sum, &read, &ret};
+    vir_mop_t *irs[] = {&sum, &read, &ret};
     basic_block_t *bbs[] = {&bb, &bb, &bb};
-    PH2_IR_FLATTEN = irs;
-    ph2_ir_idx = 3;
+    MOP_FLAT = irs;
+    mop_flat_count = 3;
     instruction_to_bb = bbs;
     instruction_to_bb_capacity = 3;
     emit_ir_index = 0;
@@ -71,17 +71,17 @@ int main(void)
     for (int i = 0; i < MAX_SKIP_IR; i++)
         skip_ir_index[i] = -1;
     sum.size_bytes = 8;
-    ph2_ir_t load = {0};
+    vir_mop_t load = {0};
     load.op = OP_load;
     load.dest = 0;
     load.src0 = 32;
     load.size_bytes = 8;
-    ph2_ir_t *pipeline[] = {&load, &sum, &read, &ret};
+    vir_mop_t *pipeline[] = {&load, &sum, &read, &ret};
     basic_block_t *pipeline_bbs[] = {&bb, &bb, &bb, &bb};
     sum.src0_hi = sum.src1_hi = read.src0_hi = read.src1_hi = ret.src0_hi =
         ret.src1_hi = load.src0_hi = load.src1_hi = -1;
-    PH2_IR_FLATTEN = pipeline;
-    ph2_ir_idx = 4;
+    MOP_FLAT = pipeline;
+    mop_flat_count = 4;
     instruction_to_bb = pipeline_bbs;
     instruction_to_bb_capacity = 4;
     elf_code = strbuf_create(128);
@@ -94,11 +94,11 @@ int main(void)
     src0_override = -1;
     emit_ir_index = 0;
     emit_next_ir = &sum;
-    emit_ph2_ir(&load);
+    emit_mop(&load);
     assert(src0_override == map_ir_reg(9));
     emit_ir_index = 1;
     emit_next_ir = &read;
-    emit_ph2_ir(&sum);
+    emit_mop(&sum);
     assert(addr_sib && addr_sib_base == map_ir_reg(9) &&
            addr_sib_index == map_ir_reg(1));
     strbuf_free(elf_code);

@@ -136,6 +136,15 @@ void emit_pop_reg(int reg)
 #define X64_FRAME_BIAS 120
 int x64_frame_bias;
 
+/* The displacement a ModRM @mod calls for: none, 8 bits or 32 bits. */
+static void emit_disp(int mod, int disp)
+{
+    if (mod == MOD_DISP8)
+        emit_byte(disp);
+    else if (mod == MOD_DISP32)
+        emit_dword(disp);
+}
+
 /* ModRM (plus SIB and displacement as needed) naming [base] or [base + disp].
  * R12 and RSP share the low three bits that mean "a SIB byte follows", and R13
  * and RBP share the ones that mean "RIP-relative"; both therefore need a longer
@@ -159,10 +168,7 @@ void emit_mem_base(int reg_field, int base, int disp, bool have_disp)
     emit_byte(modrm(mod, reg_low3(reg_field), b));
     if (b == 4)
         emit_byte(0x24); /* SIB: no index, base is the register itself */
-    if (mod == MOD_DISP8)
-        emit_byte(disp);
-    else if (mod == MOD_DISP32)
-        emit_dword(disp);
+    emit_disp(mod, disp);
 }
 
 /* ModRM and SIB naming [base + index * (1 << scale) + disp]. */
@@ -181,10 +187,7 @@ void emit_mem_sib(int reg_field, int base, int index, int scale, int disp)
 
     emit_byte(modrm(mod, reg_low3(reg_field), 4)); /* rm = 100: SIB follows */
     emit_byte((scale << 6) | (reg_low3(index) << 3) | b);
-    if (mod == MOD_DISP8)
-        emit_byte(disp);
-    else if (mod == MOD_DISP32)
-        emit_dword(disp);
+    emit_disp(mod, disp);
 }
 
 /* Emit the ModRM/displacement bytes for a [R15 + ofs] memory operand.
@@ -199,10 +202,10 @@ void emit_r15_mem(int reg_low, int ofs)
 
 /* Emit the ModRM/SIB/displacement bytes for a [RSP + ofs] memory operand.
  *
- * The shared phase-2 IR addresses locals as "sp + offset", with offsets growing
- * upward, so the backend must too: an array at sp+16 has its second element at
- * sp+24. Using RBP with negated offsets would invert that and make b[i] walk
- * backwards over neighbouring slots.
+ * The shared machine operations address locals as "sp + offset", with offsets
+ * growing upward, so the backend must too: an array at sp+16 has its second
+ * element at sp+24. Using RBP with negated offsets would invert that and make
+ * b[i] walk backwards over neighbouring slots.
  *
  * RSP as a base register always requires a SIB byte; 0x24 encodes "base = RSP,
  * no index".

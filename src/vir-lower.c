@@ -1,5 +1,480 @@
 #include "vir-lower.h"
 
+/* Machine operations: creation, and the flat emission order the backends walk
+ * once lowering, peepholes and target marks are done.
+ */
+bool mop_function_included(const func_t *func, bool include_declarations)
+{
+    return func && (func->bbs || include_declarations);
+}
+
+void mop_flat_prepare(bool include_declarations)
+{
+    int count = 0;
+    int limit =
+        (INT_MAX - ((int) sizeof(void *) - 1)) / (int) sizeof(*MOP_FLAT);
+
+    if (mop_flat_count != 0 || MOP_FLAT)
+        fatal("machine operations flattened more than once");
+
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        if (!mop_function_included(func, include_declarations))
+            continue;
+        if (count >= limit)
+            limit_error("too many machine operations");
+        count++;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (vir_mop_t *mop = bb->mops.head; mop; mop = mop->next) {
+                if (count >= limit)
+                    limit_error("too many machine operations");
+                count++;
+            }
+        }
+    }
+
+    mop_flat_capacity = count;
+    if (count)
+        MOP_FLAT = arena_alloc(GENERAL_ARENA,
+                               (int) ((size_t) count * sizeof(*MOP_FLAT)));
+}
+
+vir_mop_t *mop_flat_append(vir_mop_t *mop)
+{
+    if (mop_flat_count >= mop_flat_capacity)
+        fatal("machine operation pre-count mismatch");
+    MOP_FLAT[mop_flat_count++] = mop;
+    return mop;
+}
+
+/* Append @mop to the flat order, rebasing a frame offset that counts from the
+ * top of the stack and telling a return how much frame to release.
+ */
+vir_mop_t *mop_flatten_insn(vir_mop_t *mop,
+                            int stack_top_ofs,
+                            int stack_size,
+                            int saved_regs,
+                            bool restore_saved_regs)
+{
+    if (mop->ofs_based_on_stack_top) {
+        if (mop->op == OP_load || mop->op == OP_address_of)
+            mop->src0 += stack_top_ofs;
+        else if (mop->op == OP_store)
+            mop->src1 += stack_top_ofs;
+    }
+    mop_flat_append(mop);
+    if (mop->op == OP_return) {
+        mop->src1 = stack_size;
+        if (restore_saved_regs)
+            mop->src2 = saved_regs;
+    }
+    return mop;
+}
+
+int mop_flatten_function(func_t *func,
+                         int stack_top_ofs,
+                         int prologue_bytes,
+                         int saved_regs,
+                         bool restore_saved_regs,
+                         void (*update_offset)(vir_mop_t *))
+{
+    int count = 0;
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        bb->elf_offset = elf_offset;
+        if (bb == func->bbs)
+            elf_offset += prologue_bytes;
+        for (vir_mop_t *mop = bb->mops.head; mop; mop = mop->next) {
+            mop_flatten_insn(mop, stack_top_ofs, func->stack_size, saved_regs,
+                             restore_saved_regs);
+            count++;
+            if (update_offset)
+                update_offset(mop);
+        }
+    }
+    return count;
+}
+
+static vir_mop_t *mop_create(opcode_t op)
+{
+    vir_mop_t *mop = arena_calloc(BB_ARENA, 1, sizeof(vir_mop_t));
+    stats_mop_count++;
+    mop->op = op;
+    mop->src0_hi = mop->src1_hi = mop->dest_hi = -1;
+    mop->size_bytes = PTR_SIZE;
+    return mop;
+}
+
+vir_mop_t *bb_add_mop(basic_block_t *bb, opcode_t op)
+{
+    vir_mop_t *mop = mop_create(op);
+    if (bb->mops.tail)
+        bb->mops.tail->next = mop;
+    else
+        bb->mops.head = mop;
+    bb->mops.tail = mop;
+    return mop;
+}
+
+vir_mop_t *add_mop(opcode_t op)
+{
+    return mop_flat_append(mop_create(op));
+}
+
+#if ELF_MACHINE == ELF_MACHINE_ARM32 || ELF_MACHINE == ELF_MACHINE_RV32 || \
+    ELF_MACHINE == ELF_MACHINE_AARCH64
+static void mop_visit_globals(void (*visit)(vir_mop_t *))
+{
+    for (vir_mop_t *mop = GLOBAL_FUNC->bbs->mops.head; mop; mop = mop->next)
+        visit(mop);
+}
+#endif
+
+#if ELF_MACHINE == ELF_MACHINE_ARM32 || ELF_MACHINE == ELF_MACHINE_RV32
+typedef struct {
+    int stack_top;
+    int prologue_bytes;
+    int saved_regs;
+    bool restore_saved_regs;
+} mop_frame_layout_t;
+
+static void mop_flatten_functions(
+    mop_frame_layout_t (*frame_layout)(func_t *, vir_mop_t *),
+    void (*update_offset)(vir_mop_t *))
+{
+    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
+        vir_mop_t *define;
+        mop_frame_layout_t frame;
+
+        if (!func->bbs)
+            continue;
+        define = add_mop(OP_define);
+        define->src0 = func->stack_size;
+        define->func_name = intern_string(func->return_def.var_name);
+        frame = frame_layout(func, define);
+        mop_flatten_function(func, frame.stack_top, frame.prologue_bytes,
+                             frame.saved_regs, frame.restore_saved_regs,
+                             update_offset);
+    }
+}
+#endif
+
+/* Machine dataflow: what each operation reads and writes, and which registers
+ * stay live across machine edges. Share peephole rewrite and register-write
+ * properties in one table.
+ */
+enum {
+    OP_WRITES_DEST = 1,
+    OP_SRC0_REG = 2,
+    OP_SRC1_REG = 4,
+    OP_COPY_FORWARD_SAFE = 16,
+    OP_FUSIBLE = 32,
+    OP_BINARY_ALU = 64,
+    OP_INTEGER_BINARY = 128,
+    OP_COMPARISON = 256,
+    OP_SCALAR_UNARY = 512,
+    OP_SCALAR_CAST = 1024,
+};
+
+#define OP_PROPERTY(op, flags) [op] = flags,
+#define OP_DEST(flags) ((flags) | OP_WRITES_DEST)
+#define OP_COPY(flags) ((flags) | OP_COPY_FORWARD_SAFE)
+#define OP_FUSE(flags) ((flags) | OP_FUSIBLE)
+#define OP_COPY_FUSE(flags) ((flags) | OP_COPY_FORWARD_SAFE | OP_FUSIBLE)
+#define OP_BINARY (OP_SRC0_REG | OP_SRC1_REG | OP_BINARY_ALU)
+#define OP_UNARY OP_SRC0_REG
+#define OP_INTEGER (OP_BINARY | OP_INTEGER_BINARY)
+/* Each macro expands to an initializer and comma. */
+/* clang-format off */
+static const unsigned short op_properties[] = {
+    OP_PROPERTY(OP_generic, 0)
+    OP_PROPERTY(OP_define, 0)
+    OP_PROPERTY(OP_push, OP_SRC0_REG)
+    OP_PROPERTY(OP_call, 0)
+    OP_PROPERTY(OP_indirect, OP_SRC0_REG)
+    OP_PROPERTY(OP_return, OP_SRC0_REG)
+    OP_PROPERTY(OP_va_start, 0)
+    OP_PROPERTY(OP_allocat, 0)
+    OP_PROPERTY(OP_assign, OP_DEST(OP_COPY(OP_SRC0_REG)))
+    OP_PROPERTY(OP_load_constant, OP_DEST(0))
+    OP_PROPERTY(OP_load_data_address, OP_DEST(OP_FUSE(0)))
+    OP_PROPERTY(OP_load_rodata_address, OP_DEST(OP_FUSE(0)))
+    OP_PROPERTY(OP_branch, OP_COPY(OP_SRC0_REG))
+    OP_PROPERTY(OP_jump, 0)
+    OP_PROPERTY(OP_func_ret, 0)
+    OP_PROPERTY(OP_address_of_func, OP_SRC0_REG)
+    OP_PROPERTY(OP_load_func, OP_SRC0_REG)
+    OP_PROPERTY(OP_address_of, OP_DEST(0))
+    OP_PROPERTY(OP_global_address_of, OP_DEST(0))
+    OP_PROPERTY(OP_load, OP_DEST(OP_FUSE(0)))
+    OP_PROPERTY(OP_global_load, OP_DEST(OP_FUSE(0)))
+    OP_PROPERTY(OP_store, OP_COPY(OP_SRC0_REG))
+    OP_PROPERTY(OP_global_store, OP_COPY(OP_SRC0_REG))
+    OP_PROPERTY(OP_read, OP_DEST(OP_COPY(OP_SRC0_REG)))
+    OP_PROPERTY(OP_write, OP_COPY(OP_SRC0_REG | OP_SRC1_REG))
+    OP_PROPERTY(OP_add, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_sub, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_mul, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_div, OP_DEST(OP_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_mod, OP_DEST(OP_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_ternary, OP_DEST(OP_SRC0_REG))
+    OP_PROPERTY(OP_lshift, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_rshift, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_log_and, OP_DEST(OP_FUSE(OP_UNARY)))
+    OP_PROPERTY(OP_log_or, OP_DEST(OP_FUSE(OP_UNARY)))
+    OP_PROPERTY(OP_log_not, OP_DEST(OP_COPY_FUSE(OP_UNARY | OP_SCALAR_UNARY)))
+    OP_PROPERTY(OP_eq, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_neq, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_lt, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_leq, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_gt, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_geq, OP_DEST(OP_COPY_FUSE(OP_BINARY | OP_COMPARISON)))
+    OP_PROPERTY(OP_bit_or, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_bit_and, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_bit_xor, OP_DEST(OP_COPY_FUSE(OP_INTEGER)))
+    OP_PROPERTY(OP_bit_not, OP_DEST(OP_COPY_FUSE(OP_UNARY | OP_SCALAR_UNARY)))
+    OP_PROPERTY(OP_negate, OP_DEST(OP_COPY_FUSE(OP_UNARY | OP_SCALAR_UNARY)))
+    OP_PROPERTY(OP_trunc, OP_DEST(OP_COPY(OP_SRC0_REG | OP_SCALAR_CAST)))
+    OP_PROPERTY(OP_sign_ext, OP_DEST(OP_COPY(OP_SRC0_REG | OP_SCALAR_CAST)))
+    OP_PROPERTY(OP_cast, OP_DEST(OP_SRC0_REG | OP_SCALAR_CAST))
+};
+/* clang-format on */
+#undef OP_COPY
+#undef OP_FUSE
+#undef OP_COPY_FUSE
+#undef OP_BINARY
+#undef OP_INTEGER
+#undef OP_UNARY
+#undef OP_DEST
+#undef OP_PROPERTY
+typedef char op_property_count_check
+    [sizeof(op_properties) / sizeof(op_properties[0]) == OP_cast + 1 ? 1 : -1];
+
+static unsigned int op_property(opcode_t op, unsigned int property)
+{
+    if (op < OP_generic || op > OP_cast)
+        return 0;
+    return op_properties[op] & property;
+}
+
+#define OP_QUERY(name, property)               \
+    bool name(opcode_t op)                     \
+    {                                          \
+        return op_property(op, property) != 0; \
+    }
+OP_QUERY(op_writes_dest, OP_WRITES_DEST)
+OP_QUERY(op_is_binary_alu, OP_BINARY_ALU)
+OP_QUERY(op_is_integer_binary, OP_INTEGER_BINARY)
+OP_QUERY(op_is_comparison, OP_COMPARISON)
+OP_QUERY(op_is_scalar_unary, OP_SCALAR_UNARY)
+OP_QUERY(op_is_scalar_cast, OP_SCALAR_CAST)
+OP_QUERY(op_src0_is_reg, OP_SRC0_REG)
+OP_QUERY(op_src1_is_reg, OP_SRC1_REG)
+#undef OP_QUERY
+
+/* The bit for register @reg in a func_used_reg_mask(), or 0 for a field that
+ * names no register.
+ */
+static unsigned int reg_bit(int reg)
+{
+    return reg >= 0 && reg < REG_CNT ? 1u << reg : 0;
+}
+
+/* The registers @func names as an operand or result anywhere. */
+unsigned int func_used_reg_mask(func_t *func)
+{
+    unsigned int used = 0;
+
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        for (vir_mop_t *ir = bb->mops.head; ir; ir = ir->next) {
+            if (op_writes_dest(ir->op))
+                used |= reg_bit(ir->dest);
+            if (op_src0_is_reg(ir->op))
+                used |= reg_bit(ir->src0);
+            if (op_src1_is_reg(ir->op))
+                used |= reg_bit(ir->src1);
+            used |= reg_bit(ir->dest_hi) | reg_bit(ir->src0_hi) |
+                    reg_bit(ir->src1_hi);
+        }
+    return used;
+}
+
+int func_highest_used_reg(func_t *func, int first_callee_saved)
+{
+    unsigned int used = func_used_reg_mask(func);
+    int top = first_callee_saved - 1;
+
+    for (int reg = top + 1; reg < REG_CNT; reg++)
+        if (used & (1u << reg))
+            top = reg;
+    return top;
+}
+
+/* Whether @func contains an operation @a or @b. */
+bool func_has_op(func_t *func, opcode_t a, opcode_t b)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        for (vir_mop_t *mop = bb->mops.head; mop; mop = mop->next)
+            if (mop->op == a || mop->op == b)
+                return true;
+    return false;
+}
+
+/* Whether @func calls anything, directly or through a pointer. */
+bool func_makes_call(func_t *func)
+{
+    return func_has_op(func, OP_call, OP_indirect);
+}
+
+/* Whether @func addresses anything in a frame: locals or spill slots, variadic
+ * arguments, or arguments the caller passed on the stack.
+ */
+bool func_has_frame_slots(func_t *func)
+{
+    return func->stack_size || func->va_args ||
+           func->num_params + func->returns_aggregate > MAX_ARGS_IN_REG;
+}
+
+/* A leaf that needs no frame: it can skip saving the frame pointer and return
+ * address and leave the stack pointer alone.
+ */
+bool func_is_frameless_leaf(func_t *func)
+{
+    return !func_has_frame_slots(func) && !func_makes_call(func);
+}
+
+/* How many argument registers the call @ir reads. A call names none of them. A
+ * prototyped, non-variadic callee reads only the words its own parameters
+ * occupy, the aggregate-return address included; any other call, or a call
+ * through a pointer, may read all of them.
+ */
+int call_arg_regs(vir_mop_t *ir)
+{
+    func_t *callee = ir->op == OP_call ? find_func(ir->func_name) : NULL;
+
+    if (!callee || !callee->has_prototype || callee->va_args)
+        return MAX_ARGS_IN_REG;
+
+    int words = callee->returns_aggregate ? 1 : 0;
+    for (int i = 0; i < callee->num_params && words < MAX_ARGS_IN_REG; i++)
+        words = abi_arg_next(words, &callee->param_defs[i], false);
+    return words < MAX_ARGS_IN_REG ? words : MAX_ARGS_IN_REG;
+}
+
+/* Whether @ir reads @reg as an operand. A 32-bit target names the high half of
+ * a wide operand in src0_hi or src1_hi, which are -1 when unused. A call reads
+ * its argument registers without naming any of them.
+ */
+bool ir_reads_reg(vir_mop_t *ir, int reg)
+{
+    if ((ir->op == OP_call || ir->op == OP_indirect) && reg >= 0 &&
+        reg < MAX_ARGS_IN_REG && reg < call_arg_regs(ir))
+        return true;
+    if (reg >= 0 && (ir->src0_hi == reg || ir->src1_hi == reg))
+        return true;
+    if (op_src0_is_reg(ir->op) && ir->src0 == reg)
+        return true;
+    return op_src1_is_reg(ir->op) && ir->src1 == reg;
+}
+
+/* The registers @ir writes. A call clobbers every caller-saved register, after
+ * reading its arguments.
+ */
+unsigned int mop_defs(vir_mop_t *ir)
+{
+    unsigned int defs = 0;
+    if (op_writes_dest(ir->op))
+        defs |= reg_bit(ir->dest) | reg_bit(ir->dest_hi);
+    if (ir->op == OP_call || ir->op == OP_indirect)
+        defs |= (1u << (REG_CNT - CALLEE_SAVED_REGS)) - 1;
+    return defs;
+}
+
+/* Allocated registers can cross machine edges. Three block masks suffice:
+ * live-in is use | (live-out & ~def), including both halves of a pair.
+ */
+void mop_compute_liveness(void)
+{
+    FOR_EACH_FUNCTION_BODY(func)
+    {
+        int count = 0;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+            count++;
+        basic_block_t **blocks = malloc(count * sizeof(*blocks));
+        if (!blocks)
+            fatal("Machine liveness allocation failed");
+        int index = 0;
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            blocks[index++] = bb;
+            bb->machine_use = bb->machine_def = bb->machine_liveout = 0;
+            for (vir_mop_t *ir = bb->mops.head; ir; ir = ir->next) {
+                for (int reg = 0; reg < REG_CNT; reg++)
+                    if (ir_reads_reg(ir, reg))
+                        bb->machine_use |= (1u << reg) & ~bb->machine_def;
+                bb->machine_def |= mop_defs(ir);
+            }
+        }
+        bool changed;
+        do {
+            changed = false;
+            for (int at = count - 1; at >= 0; at--) {
+                basic_block_t *bb = blocks[at];
+                basic_block_t *successors[3] = {bb->next, bb->then_, bb->else_};
+                unsigned int out = 0;
+                for (int edge = 0; edge < 3; edge++) {
+                    basic_block_t *next = successors[edge];
+                    if (next)
+                        out |= next->machine_use |
+                               (next->machine_liveout & ~next->machine_def);
+                }
+                if (out != bb->machine_liveout) {
+                    bb->machine_liveout = out;
+                    changed = true;
+                }
+            }
+        } while (changed);
+        free(blocks);
+    }
+}
+
+/* Drop the operations after @ir through @last, keeping mops.tail on a node
+ * still in the list.
+ *
+ * Every removal goes through here. A bare "ir->next = last->next" leaves tail
+ * pointing at a removed node, which is why x64-codegen.c used to walk a block
+ * rather than read its tail.
+ */
+void mop_drop_after(basic_block_t *bb, vir_mop_t *ir, vir_mop_t *last)
+{
+    ir->next = last->next;
+    if (!ir->next)
+        bb->mops.tail = ir;
+}
+
+/* Set while a backend measures an operation instead of emitting it: its emit()
+ * then only counts words, so offset planning follows the emitter exactly.
+ */
+bool mop_count_only;
+int mop_counted_words;
+
+/* The instruction words emit_mop() produces for @mop, measured without writing
+ * them.
+ */
+int mop_count_words(vir_mop_t *mop)
+{
+    bool saved_count_only = mop_count_only;
+    int saved_counted_words = mop_counted_words;
+    char *saved_fatal_function_context = fatal_function_context;
+
+    mop_count_only = true;
+    mop_counted_words = 0;
+    emit_mop(mop);
+    int words = mop_counted_words;
+
+    mop_count_only = saved_count_only;
+    mop_counted_words = saved_counted_words;
+    fatal_function_context = saved_fatal_function_context;
+    return words;
+}
+
 typedef struct {
     vir_value_t *value;
     int slot;
@@ -48,16 +523,16 @@ static bool vir_machine_pair(vir_lower_t *lower, vir_value_t *value)
     return PTR_SIZE == 4 && vir_machine_width(lower, value->type) == 8;
 }
 
-static ph2_ir_t *vir_machine_insn(vir_lower_t *lower, opcode_t opcode)
+static vir_mop_t *vir_machine_insn(vir_lower_t *lower, opcode_t opcode)
 {
-    return bb_add_ph2_ir(lower->block, opcode);
+    return bb_add_mop(lower->block, opcode);
 }
 
 static basic_block_t *vir_machine_block(vir_lower_t *lower)
 {
     basic_block_t *block = arena_alloc_bb();
     block->elf_offset = -1;
-    block->ph2_base = -1;
+    block->mop_base = -1;
     if (lower->tail)
         lower->tail->rpo_next = block;
     lower->tail = block;
@@ -86,7 +561,7 @@ static bool vir_machine_rematerializable(const vir_value_t *value)
 
 static void vir_machine_materialize(vir_lower_t *lower,
                                     const vir_value_t *value,
-                                    ph2_ir_t *instruction)
+                                    vir_mop_t *instruction)
 {
     instruction->is_pointer = value->type == VIR_TYPE_PTR;
     if (value->opcode == VIR_OP_CONST) {
@@ -108,7 +583,7 @@ static void vir_machine_spill(vir_lower_t *lower, int reg)
 {
     int id = lower->owners[reg];
     vir_location_t *location;
-    ph2_ir_t *instruction;
+    vir_mop_t *instruction;
 
     if (id < 0)
         return;
@@ -179,7 +654,7 @@ static int vir_machine_read(vir_lower_t *lower, vir_value_t *value)
 {
     vir_location_t *location = &lower->locations[value->id];
     int reg = location->reg;
-    ph2_ir_t *instruction;
+    vir_mop_t *instruction;
 
     if (reg < 0) {
         reg = vir_machine_claim(lower, value);
@@ -203,7 +678,7 @@ static int vir_machine_read(vir_lower_t *lower, vir_value_t *value)
 }
 
 static void vir_machine_result(vir_lower_t *lower,
-                               ph2_ir_t *instruction,
+                               vir_mop_t *instruction,
                                vir_value_t *value)
 {
     instruction->dest = vir_machine_claim(lower, value);
@@ -216,7 +691,7 @@ static void vir_machine_result(vir_lower_t *lower,
 
 static void vir_machine_normalize(vir_lower_t *lower, vir_value_t *value)
 {
-    ph2_ir_t *instruction;
+    vir_mop_t *instruction;
     if (value->type == VIR_TYPE_I1) {
         int result = lower->locations[value->id].reg;
         lower->locked |= 1u << result;
@@ -286,7 +761,7 @@ static bool vir_machine_unsigned(vir_opcode_t opcode)
 
 static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
 {
-    ph2_ir_t *instruction;
+    vir_mop_t *instruction;
     int first = -1, second = -1;
     vir_value_t *op0 = value->op0, *op1 = value->op1;
     bool negate = value->opcode == VIR_OP_EQ &&
@@ -367,8 +842,9 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
         instruction->op = OP_address_of;
         instruction->src0 = lower->locations[value->id].slot;
     } else if (value->opcode == VIR_OP_FUNC_ADDR) {
-        /* Existing PH2 function relocation writes through an address. Reuse it
-         * without constructing a source variable or source instruction.
+        /* Existing machine-operation function relocation writes through an
+         * address. Reuse it without constructing a source variable or source
+         * instruction.
          */
         instruction->op = OP_address_of;
         instruction->src0 = lower->locations[value->id].slot;
@@ -993,7 +1469,7 @@ static void vir_machine_transfer(vir_lower_t *lower, vir_transfer_t *copy)
     opcode_t op = copy->from < 0 ? OP_load : OP_assign;
     if (copy->from >= 0 && copy->abi && copy->width < PTR_SIZE)
         op = OP_sign_ext;
-    ph2_ir_t *instruction = vir_machine_insn(lower, op);
+    vir_mop_t *instruction = vir_machine_insn(lower, op);
     instruction->dest = copy->to;
     instruction->src0 = copy->from < 0 ? copy->slot : copy->from;
     instruction->size_bytes = copy->width;
@@ -1011,7 +1487,7 @@ static void vir_machine_transfer_save(vir_lower_t *lower,
                                       int reg,
                                       int slot)
 {
-    ph2_ir_t *instruction = vir_machine_insn(lower, OP_store);
+    vir_mop_t *instruction = vir_machine_insn(lower, OP_store);
     instruction->src0 = reg;
     instruction->src1 = slot;
     instruction->size_bytes = PTR_SIZE;
@@ -1054,7 +1530,7 @@ static void vir_machine_call(vir_lower_t *lower, vir_effect_t *effect)
     vir_transfer_t *copies = calloc(effect->arg_count + 1, 2 * sizeof(*copies));
     if (!copies)
         fatal("VIR: cannot allocate call transfers");
-    ph2_ir_t *instruction;
+    vir_mop_t *instruction;
 
     /* Capture residents before flushing invalidates their allocator locations.
      */
@@ -1162,7 +1638,7 @@ static void vir_machine_call(vir_lower_t *lower, vir_effect_t *effect)
 
 static void vir_machine_effect(vir_lower_t *lower, vir_effect_t *effect)
 {
-    ph2_ir_t *instruction;
+    vir_mop_t *instruction;
     int address, stored = -1;
 
     if (effect->kind == VIR_EFFECT_CALL) {
@@ -1216,14 +1692,14 @@ static void vir_machine_copy(vir_lower_t *lower,
     bool pair = vir_machine_pair(lower, value);
     if (from < 0) {
         from = vir_machine_staging(lower, pair ? 2 : 1);
-        ph2_ir_t *instruction = vir_machine_insn(lower, OP_load);
+        vir_mop_t *instruction = vir_machine_insn(lower, OP_load);
         instruction->dest = from;
         instruction->dest_hi = pair ? from + 1 : -1;
         instruction->src0 = source;
         instruction->size_bytes = vir_machine_width(lower, value->type);
         instruction->is_unsigned = true;
     }
-    ph2_ir_t *instruction = vir_machine_insn(lower, OP_store);
+    vir_mop_t *instruction = vir_machine_insn(lower, OP_store);
     instruction->src0 = from;
     instruction->src0_hi = pair ? from + 1 : -1;
     instruction->size_bytes = vir_machine_width(lower, value->type);
@@ -1242,7 +1718,7 @@ static void vir_machine_literal_into(vir_lower_t *lower,
                                      vir_value_t *value,
                                      int reg)
 {
-    ph2_ir_t *instruction = vir_machine_insn(lower, OP_load_constant);
+    vir_mop_t *instruction = vir_machine_insn(lower, OP_load_constant);
     instruction->dest = reg;
     instruction->dest_hi = vir_machine_pair(lower, value) ? reg + 1 : -1;
     instruction->size_bytes = vir_machine_width(lower, value->type);
@@ -1490,7 +1966,7 @@ static basic_block_t *vir_machine_edge(vir_lower_t *lower, vir_edge_t *edge)
         vir_machine_edge_memory(lower, edge, snapshot);
     if (snapshot || memory_first)
         vir_machine_edge_registers(lower, edge, resident, snapshot);
-    ph2_ir_t *instruction = vir_machine_insn(lower, OP_jump);
+    vir_mop_t *instruction = vir_machine_insn(lower, OP_jump);
     instruction->next_bb = lower->blocks[edge->to->id];
     lower->block = saved;
     return copy;
@@ -1565,7 +2041,7 @@ static bool vir_machine_layout(vir_machine_function_t *output)
     for (basic_block_t *block = output->entry; block; block = block->rpo_next) {
         blocks[index++] = block;
         block->rpo = -1;
-        ph2_ir_t *tail = block->ph2_ir_list.tail;
+        vir_mop_t *tail = block->mops.tail;
         if (tail && tail->op == OP_jump)
             vir_machine_connect(block, tail->next_bb, NEXT);
         else if (tail && tail->op == OP_branch) {
@@ -1620,7 +2096,7 @@ static void vir_machine_save_argument(vir_lower_t *lower,
                                       int width)
 {
     int reg = word < MAX_ARGS_IN_REG ? word : REG_CNT - 1;
-    ph2_ir_t *instruction;
+    vir_mop_t *instruction;
     if (word >= MAX_ARGS_IN_REG) {
         instruction = vir_machine_insn(lower, OP_load);
         instruction->dest = reg;
@@ -1661,7 +2137,7 @@ static void vir_machine_parameters(vir_lower_t *lower)
             /* Pinned where it arrives: already in place. */
             if (resident && location->fixed == source)
                 continue;
-            ph2_ir_t *instruction =
+            vir_mop_t *instruction =
                 vir_machine_insn(lower, resident ? OP_assign : OP_load);
             instruction->dest = location->fixed;
             instruction->dest_hi = location->high;
@@ -1832,8 +2308,7 @@ bool vir_lower_machine(const vir_function_t *function,
                     lower.block_positions[block->id] + value->order;
                 vir_machine_value(&lower, value);
                 if (value->opcode == VIR_OP_STACK_ADDR)
-                    lower.block->ph2_ir_list.tail->src0 =
-                        objects[value->address_slot];
+                    lower.block->mops.tail->src0 = objects[value->address_slot];
                 value = value->next;
             } else {
                 lower.position =
@@ -1844,7 +2319,7 @@ bool vir_lower_machine(const vir_function_t *function,
             }
         }
         lower.position = lower.block_positions[block->id] + block->next_order;
-        ph2_ir_t *instruction;
+        vir_mop_t *instruction;
         if (block->terminator == VIR_TERM_RETURN) {
             lower.locked = 0;
             int returned = block->return_value
@@ -1898,7 +2373,7 @@ bool vir_lower_machine(const vir_function_t *function,
     output->block_count = 0;
     for (basic_block_t *block = output->entry; block; block = block->rpo_next) {
         output->block_count++;
-        for (ph2_ir_t *instruction = block->ph2_ir_list.head; instruction;
+        for (vir_mop_t *instruction = block->mops.head; instruction;
              instruction = instruction->next) {
             int accessed = 0;
             if (instruction->op == OP_load &&
@@ -1916,7 +2391,7 @@ bool vir_lower_machine(const vir_function_t *function,
         goto unsupported;
     output->stack_size = ALIGN_UP(output->stack_size, PTR_SIZE);
     for (basic_block_t *block = output->entry; block; block = block->rpo_next)
-        for (ph2_ir_t *instruction = block->ph2_ir_list.head; instruction;
+        for (vir_mop_t *instruction = block->mops.head; instruction;
              instruction = instruction->next)
             if (instruction->op == OP_return)
                 instruction->src1 = output->stack_size;

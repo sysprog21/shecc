@@ -12,7 +12,7 @@ read -r -a compiler_flags <<< "${SHECC_CFLAGS:-}"
 
 # Invoke the shared lowerer with independent graphs after the regular compiler
 # has parsed the smoke program. The generated amalgamation stays outside src.
-sed 's/    peephole();/    vir_lower_test_hook(); ph2_compute_liveness(); peephole();/' src/main.c > "$task_dir/main.c"
+sed 's/    peephole();/    vir_lower_test_hook(); mop_compute_liveness(); peephole();/' src/main.c > "$task_dir/main.c"
 "$cc" -O0 -g -std=c99 -fwrapv -DSHECC_VIR_LOWER_TEST \
     "-DVIR_LOWER_TEST_MAIN=\"$task_dir/main.c\"" -iquote src -Isrc \
     tests/vir-lower.c -o "$task_dir/compiler"

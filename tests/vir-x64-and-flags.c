@@ -6,7 +6,7 @@
 static void check_flags(int width, int mode, int mask)
 {
     basic_block_t bb = {0}, other = {0};
-    ph2_ir_t producer = {0}, gap = {0}, compare = {0}, branch = {0};
+    vir_mop_t producer = {0}, gap = {0}, compare = {0}, branch = {0};
     producer.op = mode == 6 ? OP_bit_or : OP_bit_and;
     producer.dest = 0;
     producer.src0 = 2;
@@ -27,13 +27,13 @@ static void check_flags(int width, int mode, int mask)
     branch.op = OP_branch;
     branch.src0 = 4;
     bool has_gap = mode == 1 || mode == 2 || mode == 4;
-    ph2_ir_t *irs[] = {&producer, has_gap ? &gap : &compare,
-                       has_gap ? &compare : &branch, &branch};
+    vir_mop_t *irs[] = {&producer, has_gap ? &gap : &compare,
+                        has_gap ? &compare : &branch, &branch};
     basic_block_t *bbs[] = {mode == 5 ? &other : &bb, &bb, &bb, &bb};
-    PH2_IR_FLATTEN = irs;
-    ph2_ir_idx = has_gap ? 4 : 3;
+    MOP_FLAT = irs;
+    mop_flat_count = has_gap ? 4 : 3;
     instruction_to_bb = bbs;
-    instruction_to_bb_capacity = ph2_ir_idx;
+    instruction_to_bb_capacity = mop_flat_count;
     elf_code = strbuf_create(128);
     folds_off = false;
     frame_mirror_reset();
@@ -48,11 +48,11 @@ static void check_flags(int width, int mode, int mask)
     const_reg_val[3] = mask;
     emit_ir_index = 0;
     emit_next_ir = irs[1];
-    emit_ph2_ir(&producer);
+    emit_mop(&producer);
     if (has_gap) {
         emit_ir_index = 1;
         emit_next_ir = &compare;
-        emit_ph2_ir(&gap);
+        emit_mop(&gap);
     }
     if (mode == 7)
         cmp_mem_slot = 16;
@@ -61,7 +61,7 @@ static void check_flags(int width, int mode, int mask)
     emit_ir_index = has_gap ? 2 : 1;
     emit_next_ir = &branch;
     int before = elf_code->size;
-    emit_ph2_ir(&compare);
+    emit_mop(&compare);
     assert(fused_cc_pending && fused_cc == 0x84);
     assert((elf_code->size == before) == (mode == 0 || mode == 1));
     assert(!cmp_imm_known);

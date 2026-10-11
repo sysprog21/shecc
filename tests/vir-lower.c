@@ -66,7 +66,7 @@ static unsigned long long run_machine(vir_machine_function_t *function)
     basic_block_t *block = function->entry;
     int steps = 0;
     while (block && ++steps < 1000) {
-        for (ph2_ir_t *instruction = block->ph2_ir_list.head; instruction;
+        for (vir_mop_t *instruction = block->mops.head; instruction;
              instruction = instruction->next) {
             unsigned long long left =
                 instruction->src0 >= 0 && instruction->src0 < REG_CNT
@@ -234,7 +234,7 @@ static void test_resident_entry_parameters(void)
         int stores = 0;
         for (basic_block_t *block = machine.entry; block;
              block = block->rpo_next)
-            for (ph2_ir_t *ir = block->ph2_ir_list.head; ir; ir = ir->next)
+            for (vir_mop_t *ir = block->mops.head; ir; ir = ir->next)
                 stores += ir->op == OP_store;
         bool fallback =
             mode == 2 || (mode == 1 && PTR_SIZE == 4 && ELF_MACHINE == 0xf3);
@@ -362,8 +362,8 @@ static void test_inplace_edge(void)
     locations[argument->id].high = PTR_SIZE == 4 ? 1 : -1;
     basic_block_t *copy = vir_machine_edge(&lower, edge);
     assert(copy != blocks[to->id] && lower.tail == copy);
-    assert(copy->ph2_ir_list.tail->op == OP_jump);
-    assert(copy->ph2_ir_list.tail->next_bb == blocks[to->id]);
+    assert(copy->mops.tail->op == OP_jump);
+    assert(copy->mops.tail->next_bb == blocks[to->id]);
     assert(lower.block == blocks[from->id]);
     vir_function_release(&function);
 }
@@ -420,7 +420,7 @@ static void test_parallel_transfers(void)
             count = 4;
         }
         vir_machine_parallel(&lower, copies, count);
-        ph2_ir_t *ret = bb_add_ph2_ir(lower.block, OP_return);
+        vir_mop_t *ret = bb_add_mop(lower.block, OP_return);
         ret->src0 = 0;
         vir_machine_function_t function = {0};
         function.entry = lower.block;
@@ -492,15 +492,14 @@ static void test_call_result_pin(void)
         input->high = vir_machine_pair(&lower, argument) ? fixed + 1 : -1;
         lower.block = arena_alloc_bb();
         vir_machine_call(&lower, first);
-        ph2_ir_t *transfer = lower.block->ph2_ir_list.head;
+        vir_mop_t *transfer = lower.block->mops.head;
         assert(transfer->src0 == fixed && transfer->dest == 0);
         assert(location->reg == fixed && lower.owners[0] == -1);
         bool pair = vir_machine_pair(&lower, first->result);
         assert(location->high == (pair ? fixed + 1 : -1));
         if (pair)
             assert(lower.owners[1] == -1);
-        assert(lower.block->ph2_ir_list.tail->dest ==
-               (pair ? fixed + 1 : fixed));
+        assert(lower.block->mops.tail->dest == (pair ? fixed + 1 : fixed));
         vir_machine_call(&lower, second);
         assert(location->reg == fixed);
         vir_dominance_release(&dominance);
@@ -589,8 +588,8 @@ static void test_pair_multiply_aliases(void)
         assert(vir_lower_machine(&function, &type, NULL, NULL, &machine));
         if (ELF_MACHINE == 0xf3 && side) {
             int low = -1, high = -1;
-            for (ph2_ir_t *instruction = machine.entry->ph2_ir_list.head;
-                 instruction; instruction = instruction->next) {
+            for (vir_mop_t *instruction = machine.entry->mops.head; instruction;
+                 instruction = instruction->next) {
                 if (instruction->op == OP_mul) {
                     low = instruction->dest = instruction->src1;
                     high = instruction->dest_hi = instruction->src1_hi;
@@ -1063,7 +1062,7 @@ static void test_reused_homes(void)
     memset(memory, 0, sizeof(memory));
     assert(run_machine(&machine) == 1000);
     int spills = 0;
-    for (ph2_ir_t *instruction = machine.entry->ph2_ir_list.head; instruction;
+    for (vir_mop_t *instruction = machine.entry->mops.head; instruction;
          instruction = instruction->next)
         if (instruction->op == OP_store)
             spills++;
@@ -1197,35 +1196,35 @@ static void test_literal_rematerialization(void)
     lower.block = arena_alloc_bb();
     vir_machine_value(&lower, &literal);
     assert(!locations[1].dirty);
-    ph2_ir_t *initial = lower.block->ph2_ir_list.tail;
+    vir_mop_t *initial = lower.block->mops.tail;
     vir_machine_flush(&lower);
-    assert(lower.block->ph2_ir_list.tail == initial);
+    assert(lower.block->mops.tail == initial);
     assert(vir_machine_claim(&lower, &kept) == 0);
     lower.locked = 1;
     lower.block = arena_alloc_bb();
     int reg = vir_machine_read(&lower, &literal);
     assert(reg != 0 && lower.owners[0] == 0 && (lower.locked & 1));
-    ph2_ir_t *instruction = lower.block->ph2_ir_list.head;
+    vir_mop_t *instruction = lower.block->mops.head;
     assert(instruction->op == OP_load_constant && instruction->src0 == -1 &&
            instruction->src1 == 0x12345678 && instruction->size_bytes == 8);
     assert(!(lower.pinned_mask & (1u << reg)));
     if (PTR_SIZE == 4)
         assert(instruction->dest_hi == reg + 1 && !(reg & 1));
     vir_machine_spill(&lower, reg);
-    assert(lower.block->ph2_ir_list.tail == instruction);
+    assert(lower.block->mops.tail == instruction);
     lower.locked = 1;
     literal.type = VIR_TYPE_PTR;
     literal.opcode = VIR_OP_GLOBAL_ADDR;
     literal.address_name = "object";
     reg = vir_machine_read(&lower, &literal);
-    instruction = lower.block->ph2_ir_list.tail;
+    instruction = lower.block->mops.tail;
     assert(instruction->op == OP_global_address_of && instruction->src0 == 24 &&
            instruction->is_pointer && instruction->size_bytes == PTR_SIZE);
     vir_machine_spill(&lower, reg);
     literal.opcode = VIR_OP_RODATA_ADDR;
     literal.constant = 19;
     reg = vir_machine_read(&lower, &literal);
-    instruction = lower.block->ph2_ir_list.tail;
+    instruction = lower.block->mops.tail;
     assert(instruction->op == OP_load_rodata_address &&
            instruction->src0 == 19);
     vir_machine_spill(&lower, reg);
@@ -1237,10 +1236,10 @@ static void test_literal_rematerialization(void)
     locations[1].rematerializable = vir_machine_rematerializable(&literal);
     assert(!locations[1].rematerializable);
     reg = vir_machine_read(&lower, &literal);
-    assert(lower.block->ph2_ir_list.tail->op == OP_load);
+    assert(lower.block->mops.tail->op == OP_load);
     lower.locations[1].dirty = true;
     vir_machine_spill(&lower, reg);
-    assert(lower.block->ph2_ir_list.tail->op == OP_store);
+    assert(lower.block->mops.tail->op == OP_store);
     use.effect = NULL;
     vir_edge_t edge = {0};
     use.edge = &edge;
@@ -1258,10 +1257,10 @@ static void test_literal_rematerialization(void)
     lower.block = arena_alloc_bb();
     vir_machine_value(&lower, &literal);
     assert(!locations[1].dirty && locations[1].rematerializable);
-    instruction = lower.block->ph2_ir_list.tail;
+    instruction = lower.block->mops.tail;
     assert(instruction->op == OP_load_constant && instruction->dest == fixed);
     assert(vir_machine_read(&lower, &literal) == fixed);
-    assert(lower.block->ph2_ir_list.tail == instruction);
+    assert(lower.block->mops.tail == instruction);
     vir_function_release(&function);
 }
 
@@ -1305,7 +1304,7 @@ static void test_pair_claim_alignment(void)
     basic_block_t *normalization = arena_alloc_bb();
     lower.block = normalization;
     vir_machine_normalize(&lower, &scalar);
-    assert(normalization->ph2_ir_list.head->dest == 6);
+    assert(normalization->mops.head->dest == 6);
     vir_function_release(&function);
 }
 
@@ -1313,10 +1312,10 @@ static void test_highest_allocated_register(void)
 {
     func_t function = {0};
     basic_block_t block = {0};
-    ph2_ir_t ir = {0};
+    vir_mop_t ir = {0};
     int first = REG_CNT - CALLEE_SAVED_REGS;
     function.bbs = &block;
-    block.ph2_ir_list.head = &ir;
+    block.mops.head = &ir;
     for (int operand = 0; operand < 6; operand++) {
         ir.op = OP_add;
         ir.dest = ir.src0 = ir.src1 = ir.dest_hi = ir.src0_hi = ir.src1_hi = -1;
@@ -1350,31 +1349,31 @@ static void test_machine_liveness(void)
     loop->rpo_next = entry->else_ = exit;
     loop->next = entry;
     int saved = REG_CNT - CALLEE_SAVED_REGS;
-    ph2_ir_t *constant = bb_add_ph2_ir(entry, OP_load_constant);
+    vir_mop_t *constant = bb_add_mop(entry, OP_load_constant);
     constant->dest = 0;
-    ph2_ir_t *copy = bb_add_ph2_ir(entry, OP_assign);
+    vir_mop_t *copy = bb_add_mop(entry, OP_assign);
     copy->dest = 2;
     copy->src0 = 0;
-    ph2_ir_t *pair = bb_add_ph2_ir(loop, OP_assign);
+    vir_mop_t *pair = bb_add_mop(loop, OP_assign);
     pair->dest = 2;
     pair->dest_hi = 3;
     pair->src0 = 0;
     pair->src0_hi = 1;
-    ph2_ir_t *call = bb_add_ph2_ir(exit, OP_call);
+    vir_mop_t *call = bb_add_mop(exit, OP_call);
     call->func_name = callee->return_def.var_name;
-    ph2_ir_t *returned = bb_add_ph2_ir(exit, OP_return);
+    vir_mop_t *returned = bb_add_mop(exit, OP_return);
     returned->src0 = saved;
-    ph2_compute_liveness();
+    mop_compute_liveness();
     assert((entry->machine_liveout & 3u) == 3u);
     assert(entry->machine_liveout & (1u << saved));
     assert(reg_read_after(entry, copy, 0));
     assert(fold_loses_dest(entry, constant, copy));
-    assert(!(ph2_ir_defs(call) & (1u << saved)));
-    assert((ph2_ir_defs(call) & 3u) == 3u);
+    assert(!(mop_defs(call) & (1u << saved)));
+    assert((mop_defs(call) & 3u) == 3u);
     assert(!(exit->machine_use & 1u));
     assert(exit->machine_use & (1u << saved));
     call->func_name = "unknown_liveness_call";
-    ph2_compute_liveness();
+    mop_compute_liveness();
     assert((exit->machine_use & ((1u << MAX_ARGS_IN_REG) - 1)) ==
            (1u << MAX_ARGS_IN_REG) - 1);
     function->bbs = NULL;
@@ -1438,7 +1437,7 @@ static void test_dead_instance_homes(void)
             lower.owners[1] = value->id;
         vir_machine_flush_successor(&lower, block, NULL);
         int stores = 0;
-        for (ph2_ir_t *ir = lower.block->ph2_ir_list.head; ir; ir = ir->next)
+        for (vir_mop_t *ir = lower.block->mops.head; ir; ir = ir->next)
             stores += ir->op == OP_store;
         assert(stores == (mode != 0));
         assert(lower.owners[0] < 0 &&
@@ -1489,8 +1488,7 @@ static void test_live_branch_condition(void)
         assert(vir_lower_machine(&function, &type, NULL, NULL, &machine));
         int compare = -1;
         bool materialized = false;
-        for (ph2_ir_t *ir = machine.entry->ph2_ir_list.head; ir;
-             ir = ir->next) {
+        for (vir_mop_t *ir = machine.entry->mops.head; ir; ir = ir->next) {
             if (ir->op == OP_eq || ir->op == OP_lt)
                 compare = ir->dest;
             if (ir->op == OP_store && compare >= 0 && ir->src0 == compare)
@@ -1552,7 +1550,7 @@ static void test_boolean_branch_lowering(void)
     vir_machine_function_t machine;
     assert(vir_lower_machine(&function, &type, NULL, NULL, &machine));
     int comparisons = 0;
-    for (ph2_ir_t *ir = machine.entry->ph2_ir_list.head; ir; ir = ir->next) {
+    for (vir_mop_t *ir = machine.entry->mops.head; ir; ir = ir->next) {
         comparisons += ir->op == OP_eq;
         assert(ir->op != OP_log_not);
     }
@@ -1597,12 +1595,12 @@ static void test_dead_literal(void)
 {
     for (int mode = 0; mode < 5; mode++) {
         basic_block_t *block = arena_alloc_bb();
-        ph2_ir_t *first = bb_add_ph2_ir(block, OP_eq);
+        vir_mop_t *first = bb_add_mop(block, OP_eq);
         first->src0 = 1;
         first->src1 = 2;
         first->dest = 0;
         first->size_bytes = 4;
-        ph2_ir_t *literal = bb_add_ph2_ir(block, OP_load_constant);
+        vir_mop_t *literal = bb_add_mop(block, OP_load_constant);
         literal->dest = 3;
         literal->src0 = 0;
         literal->src1 = 0;
@@ -1610,12 +1608,12 @@ static void test_dead_literal(void)
         if (mode == 1)
             block->machine_liveout = 1u << 3;
         else if (mode == 2) {
-            ph2_ir_t *use = bb_add_ph2_ir(block, OP_return);
+            vir_mop_t *use = bb_add_mop(block, OP_return);
             use->src0 = 3;
         } else if (mode == 3)
             literal->dest_hi = 4;
         else if (mode == 4) {
-            ph2_ir_t *call = bb_add_ph2_ir(block, OP_call);
+            vir_mop_t *call = bb_add_mop(block, OP_call);
             call->func_name = "unknown_literal_consumer";
         }
         assert(peephole_at(block, first) == (mode == 0));
@@ -1627,8 +1625,8 @@ static void test_comparison_inversion(void)
 {
     for (int mode = 0; mode < 7; mode++) {
         basic_block_t *block = arena_alloc_bb();
-        ph2_ir_t *compare = bb_add_ph2_ir(block, mode == 1 ? OP_neq : OP_eq);
-        ph2_ir_t *invert = bb_add_ph2_ir(block, mode == 5 ? OP_eq : OP_log_not);
+        vir_mop_t *compare = bb_add_mop(block, mode == 1 ? OP_neq : OP_eq);
+        vir_mop_t *invert = bb_add_mop(block, mode == 5 ? OP_eq : OP_log_not);
         compare->src0 = 1;
         compare->src1 = 2;
         compare->dest = 0;
@@ -1645,7 +1643,7 @@ static void test_comparison_inversion(void)
         if (expected) {
             assert(compare->op == (mode == 1 ? OP_eq : OP_neq));
             assert(compare->dest == invert->dest && !compare->next);
-            assert(block->ph2_ir_list.tail == compare);
+            assert(block->mops.tail == compare);
             assert(compare->size_bytes == 8);
             assert(compare->src0_is_unsigned == (mode == 2));
         }
@@ -1658,8 +1656,8 @@ static void test_load_forwarding(void)
         for (int mismatch = -2; mismatch < 5; mismatch++) {
             basic_block_t *block = arena_alloc_bb();
             opcode_t opcode = global ? OP_global_load : OP_load;
-            ph2_ir_t *first = bb_add_ph2_ir(block, opcode);
-            ph2_ir_t *second = bb_add_ph2_ir(block, opcode);
+            vir_mop_t *first = bb_add_mop(block, opcode);
+            vir_mop_t *second = bb_add_mop(block, opcode);
             first->dest = 0;
             second->dest = 1;
             first->src0 = second->src0 = 16;
@@ -1690,9 +1688,9 @@ static void test_call_result_forwarding(void)
     for (int mode = 0; mode < 7; mode++) {
         basic_block_t *block = arena_alloc_bb();
         basic_block_t *other = arena_alloc_bb();
-        ph2_ir_t *call = bb_add_ph2_ir(block, OP_call);
-        ph2_ir_t *copy = bb_add_ph2_ir(block, OP_assign);
-        ph2_ir_t *last = bb_add_ph2_ir(block, OP_return);
+        vir_mop_t *call = bb_add_mop(block, OP_call);
+        vir_mop_t *copy = bb_add_mop(block, OP_assign);
+        vir_mop_t *last = bb_add_mop(block, OP_return);
         copy->src0 = 0;
         copy->dest = 7;
         copy->size_bytes = 4;
@@ -1712,10 +1710,10 @@ static void test_call_result_forwarding(void)
             copy->op = OP_trunc;
         else if (mode == 5)
             copy->dest = 0;
-        ph2_ir_t *instructions[] = {call, copy, last};
+        vir_mop_t *instructions[] = {call, copy, last};
         basic_block_t *blocks[] = {block, block, mode == 6 ? other : block};
-        PH2_IR_FLATTEN = instructions;
-        ph2_ir_idx = 3;
+        MOP_FLAT = instructions;
+        mop_flat_count = 3;
         instruction_to_bb = blocks;
         instruction_to_bb_capacity = 3;
         emit_ir_index = 0;
@@ -1727,8 +1725,8 @@ static void test_call_result_forwarding(void)
         assert((src0_override == 0) == (mode == 0));
         assert(elf_code->size == size + (mode == 0 ? 0 : 3));
     }
-    PH2_IR_FLATTEN = NULL;
-    ph2_ir_idx = 0;
+    MOP_FLAT = NULL;
+    mop_flat_count = 0;
     instruction_to_bb = NULL;
     instruction_to_bb_capacity = 0;
     emit_next_ir = NULL;

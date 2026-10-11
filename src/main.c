@@ -16,6 +16,7 @@
 /* The inclusion must follow the fixed order, otherwise it fails to build. */
 #include "defs.h"
 #include "vir-frontend.h"
+#include "vir-lower.h"
 
 /* Initialize global objects */
 #include "globals.c"
@@ -39,11 +40,8 @@
 /* Register allocator */
 #include "vir-lower.c"
 
-/* Peephole optimization */
+/* Machine peepholes, liveness and target lowering */
 #include "peephole.c"
-
-/* Arch-specific IR lowering boundary */
-#include "arch-lower.c"
 
 /* Machine code generation. support ARMv7-A and RV32I */
 #include "codegen.c"
@@ -184,9 +182,8 @@ static void lower_native_function(func_t *func, bool global)
             machine.stack_size ? (global_bytes + 7) & -8 : global_bytes;
         if (machine.block_count != 1)
             fatal("Unexpected control flow in global initializer");
-        ph2_ir_t *previous = NULL;
-        for (ph2_ir_t *ir = machine.entry->ph2_ir_list.head; ir;
-             ir = ir->next) {
+        vir_mop_t *previous = NULL;
+        for (vir_mop_t *ir = machine.entry->mops.head; ir; ir = ir->next) {
             if (ir->op == OP_load) {
                 ir->op = OP_global_load;
                 ir->src0 += scratch_base;
@@ -200,8 +197,8 @@ static void lower_native_function(func_t *func, bool global)
                 if (previous)
                     previous->next = NULL;
                 else
-                    machine.entry->ph2_ir_list.head = NULL;
-                machine.entry->ph2_ir_list.tail = previous;
+                    machine.entry->mops.head = NULL;
+                machine.entry->mops.tail = previous;
                 break;
             }
             previous = ir;
@@ -482,12 +479,10 @@ int main(int argc, char *argv[])
         exit(0);
     }
 
-    ph2_compute_liveness();
+    mop_compute_liveness();
     peephole();
 
-    /* Apply arch-specific IR tweaks before final codegen */
-    arch_lower();
-    ph2_compute_liveness();
+    mop_compute_liveness();
 
     /* flatten CFG to linear instruction */
     cfg_flatten();

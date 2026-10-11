@@ -5,10 +5,11 @@ trap 'rm -rf "$task_dir"' EXIT
 cc=${CC:-cc}
 
 # Build a test compiler that replaces two parsed placeholders with independent
-# VIR/PH2 graphs. --no-folds is private to this harness, not a compiler option.
-sed 's/    peephole();/    liveout_test_hook(); ph2_compute_liveness(); peephole();/' src/main.c > "$task_dir/main.c"
+# VIR and machine-operation graphs. --no-folds is private to this harness, not a
+# compiler option.
+sed 's/    peephole();/    liveout_test_hook(); mop_compute_liveness(); peephole();/' src/main.c > "$task_dir/main.c"
 # Disable lookahead only in this temporary test compiler.
-sed '/^void emit_ph2_ir(ph2_ir_t \*ph2_ir)$/,/^{/ { /^{$/a\
+sed '/^void emit_mop(vir_mop_t \*mop)$/,/^{/ { /^{$/a\
     if (liveout_no_folds) { folds_off = true; emit_next_ir = NULL; }
 }' src/x64-codegen.c > "$task_dir/codegen.c"
 [[ $(grep -Fc 'if (liveout_no_folds)' "$task_dir/codegen.c") == 1 ]]

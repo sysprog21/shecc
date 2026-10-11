@@ -23,7 +23,7 @@ esac
 static void startup_bank_clobber(void)
 {
     for (int reg = 0; reg < REG_CNT; reg++) {
-        ph2_ir_t *ir = bb_add_ph2_ir(GLOBAL_FUNC->bbs, OP_load_constant);
+        vir_mop_t *ir = bb_add_mop(GLOBAL_FUNC->bbs, OP_load_constant);
         ir->dest = reg;
         ir->src0 = 123;
         ir->src1 = 0;

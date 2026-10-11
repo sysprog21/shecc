@@ -8,8 +8,8 @@ static void diamond(int bad)
     func_t f = {0};
     basic_block_t b = {0}, t = {0}, e = {0}, j = {0};
     bb_connection_t tp[2] = {{0}}, ep[1] = {{0}};
-    ph2_ir_t cmp = {0}, branch = {0}, a = {0}, c = {0};
-    ph2_ir_t tj = {0}, ej = {0}, extra = {0};
+    vir_mop_t cmp = {0}, branch = {0}, a = {0}, c = {0};
+    vir_mop_t tj = {0}, ej = {0}, extra = {0};
     f.bbs = &b;
     b.rpo_next = &t;
     t.rpo_next = &e;
@@ -27,8 +27,8 @@ static void diamond(int bad)
     branch.src0 = 2;
     branch.then_bb = &t;
     branch.else_bb = &e;
-    b.ph2_ir_list.head = &cmp;
-    b.ph2_ir_list.tail = &branch;
+    b.mops.head = &cmp;
+    b.mops.tail = &branch;
     a.op = OP_add;
     a.src0 = 3;
     a.src1 = 4;
@@ -41,10 +41,10 @@ static void diamond(int bad)
     c.next = &ej;
     tj.op = ej.op = OP_jump;
     tj.next_bb = ej.next_bb = &j;
-    t.ph2_ir_list.head = &a;
-    t.ph2_ir_list.tail = &tj;
-    e.ph2_ir_list.head = &c;
-    e.ph2_ir_list.tail = &ej;
+    t.mops.head = &a;
+    t.mops.tail = &tj;
+    e.mops.head = &c;
+    e.mops.tail = &ej;
     t.machine_liveout = e.machine_liveout = 1U << 5;
     if (bad == -1) {
         extra.op = OP_bit_xor;
@@ -52,7 +52,7 @@ static void diamond(int bad)
         extra.src0 = 0;
         extra.src1 = 1;
         extra.next = &a;
-        t.ph2_ir_list.head = &extra;
+        t.mops.head = &extra;
         a.src0 = 6;
     }
     if (bad == 1)
@@ -68,7 +68,7 @@ static void diamond(int bad)
         extra.src0 = 0;
         extra.src1 = 1;
         extra.next = &a;
-        t.ph2_ir_list.head = &extra;
+        t.mops.head = &extra;
     }
     if (bad == 5)
         tj.op = OP_branch;
@@ -81,11 +81,11 @@ static void diamond(int bad)
     }
     if (bad == 8) {
         extra.op = OP_indirect;
-        j.ph2_ir_list.head = j.ph2_ir_list.tail = &extra;
+        j.mops.head = j.mops.tail = &extra;
     }
     if (bad == 9) {
         extra.op = OP_load_func;
-        j.ph2_ir_list.head = j.ph2_ir_list.tail = &extra;
+        j.mops.head = j.mops.tail = &extra;
     }
     if (bad == 10)
         c.dest = 6;
@@ -95,7 +95,7 @@ static void diamond(int bad)
         extra.src0 = 0;
         extra.src1 = 1;
         extra.next = &a;
-        t.ph2_ir_list.head = &extra;
+        t.mops.head = &extra;
         a.src0 = 6;
         a.next = &c;
         c.src0 = 6;
@@ -105,7 +105,7 @@ static void diamond(int bad)
     assert((branch.op == OP_jump) == (bad <= 0));
     if (bad <= 0) {
         assert(cmp.src2 == 1);
-        ph2_ir_t *x = cmp.next;
+        vir_mop_t *x = cmp.next;
         if (bad == -1) {
             assert(x->dest == REG_CNT && x->op == OP_bit_xor);
             x = x->next;
@@ -115,7 +115,7 @@ static void diamond(int bad)
         x = x->next;
         assert(x->dest == REG_CNT + 1 && x->op == OP_sub);
         assert(x->next->op == OP_ternary && x->next->dest == 5);
-        assert(!t.ph2_ir_list.head && !e.ph2_ir_list.head);
+        assert(!t.mops.head && !e.mops.head);
     }
 }
 
@@ -127,7 +127,7 @@ static void masks(void)
             for (int count = 0; count <= (wide ? 64 : 32) + 1; count++) {
                 func_t f = {0};
                 basic_block_t b = {0};
-                ph2_ir_t literal = {0}, use = {0};
+                vir_mop_t literal = {0}, use = {0};
                 unsigned long long mask = count == 0    ? 0
                                           : count >= 64 ? ~0ULL
                                                         : (1ULL << count) - 1;
@@ -146,11 +146,11 @@ static void masks(void)
                 use.dest = 2;
                 use.size_bytes = wide ? 8 : 4;
                 f.bbs = &b;
-                b.ph2_ir_list.head = &literal;
-                b.ph2_ir_list.tail = &use;
+                b.mops.head = &literal;
+                b.mops.tail = &use;
                 arm64_fold_immediates(&f);
                 bool folded = count > 0 && count < (wide ? 64 : 32);
-                assert((b.ph2_ir_list.head == &use) == folded);
+                assert((b.mops.head == &use) == folded);
                 assert(use.src2 == (folded ? count : 0));
                 if (folded) {
                     int opcode = op == 0   ? 0x12000000

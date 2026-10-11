@@ -107,7 +107,7 @@ type_t *TY_long_double;
 /* BLOCK_ARENA is responsible for block_t / var_t allocation */
 arena_t *BLOCK_ARENA;
 
-/* BB_ARENA is responsible for basic_block_t / ph2_ir_t allocation */
+/* BB_ARENA is responsible for basic_block_t / vir_mop_t allocation */
 arena_t *BB_ARENA;
 
 /* TOKEN_ARENA is responsible for token_t (including literal) /
@@ -120,9 +120,9 @@ arena_t *TOKEN_ARENA;
  */
 arena_t *GENERAL_ARENA;
 
-ph2_ir_t **PH2_IR_FLATTEN;
-int ph2_ir_idx = 0;
-int ph2_ir_capacity;
+vir_mop_t **MOP_FLAT;
+int mop_flat_count = 0;
+int mop_flat_capacity;
 
 func_list_t FUNC_LIST;
 func_t *GLOBAL_FUNC;
@@ -296,7 +296,7 @@ int stats_func_count = 0;
 int stats_var_count = 0;
 int stats_field_slot_count = 0;
 int stats_bb_count = 0;
-int stats_ph2_ir_count = 0;
+int stats_mop_count = 0;
 static int stats_tu_index_lookups = 0;
 static int stats_tu_index_registrations = 0;
 static hashmap_t *TU_ORDINARY_MAP;
@@ -1000,158 +1000,6 @@ static type_t *find_builtin_type(const char *name)
     }
     return NULL;
 }
-
-bool ph2_ir_function_included(const func_t *func, bool include_declarations)
-{
-    return func && (func->bbs || include_declarations);
-}
-
-void ph2_ir_prepare(bool include_declarations)
-{
-    int count = 0;
-
-    if (ph2_ir_idx != 0 || PH2_IR_FLATTEN)
-        fatal("phase-2 IR prepared more than once");
-
-    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        if (!ph2_ir_function_included(func, include_declarations))
-            continue;
-        if (count >= (INT_MAX - ((int) sizeof(void *) - 1)) /
-                         (int) sizeof(*PH2_IR_FLATTEN))
-            limit_error("too many phase-2 IR instructions");
-        count++;
-        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            for (ph2_ir_t *ir = bb->ph2_ir_list.head; ir; ir = ir->next) {
-                if (count >= (INT_MAX - ((int) sizeof(void *) - 1)) /
-                                 (int) sizeof(*PH2_IR_FLATTEN))
-                    limit_error("too many phase-2 IR instructions");
-                count++;
-            }
-        }
-    }
-
-    ph2_ir_capacity = count;
-    if (count)
-        PH2_IR_FLATTEN = arena_alloc(
-            GENERAL_ARENA, (int) ((size_t) count * sizeof(*PH2_IR_FLATTEN)));
-}
-
-ph2_ir_t *add_existed_ph2_ir(ph2_ir_t *ph2_ir)
-{
-    if (ph2_ir_idx >= ph2_ir_capacity)
-        fatal("phase-2 IR pre-count mismatch");
-    PH2_IR_FLATTEN[ph2_ir_idx++] = ph2_ir;
-    return ph2_ir;
-}
-
-ph2_ir_t *ph2_ir_flatten_insn(ph2_ir_t *insn,
-                              int stack_top_ofs,
-                              int stack_size,
-                              int saved_regs,
-                              bool restore_saved_regs)
-{
-    if (insn->ofs_based_on_stack_top) {
-        if (insn->op == OP_load || insn->op == OP_address_of)
-            insn->src0 += stack_top_ofs;
-        else if (insn->op == OP_store)
-            insn->src1 += stack_top_ofs;
-    }
-    ph2_ir_t *flat = add_existed_ph2_ir(insn);
-    if (insn->op == OP_return) {
-        flat->src1 = stack_size;
-        if (restore_saved_regs)
-            flat->src2 = saved_regs;
-    }
-    return flat;
-}
-
-int ph2_ir_flatten_function(func_t *func,
-                            int stack_top_ofs,
-                            int prologue_bytes,
-                            int saved_regs,
-                            bool restore_saved_regs,
-                            void (*update_offset)(ph2_ir_t *))
-{
-    int count = 0;
-    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-        bb->elf_offset = elf_offset;
-        if (bb == func->bbs)
-            elf_offset += prologue_bytes;
-        for (ph2_ir_t *insn = bb->ph2_ir_list.head; insn; insn = insn->next) {
-            ph2_ir_t *flat =
-                ph2_ir_flatten_insn(insn, stack_top_ofs, func->stack_size,
-                                    saved_regs, restore_saved_regs);
-            count++;
-            if (update_offset)
-                update_offset(flat);
-        }
-    }
-    return count;
-}
-
-static ph2_ir_t *ph2_ir_create(opcode_t op)
-{
-    ph2_ir_t *instruction = arena_calloc(BB_ARENA, 1, sizeof(ph2_ir_t));
-    stats_ph2_ir_count++;
-    instruction->op = op;
-    instruction->src0_hi = instruction->src1_hi = instruction->dest_hi = -1;
-    instruction->size_bytes = PTR_SIZE;
-    return instruction;
-}
-
-ph2_ir_t *bb_add_ph2_ir(basic_block_t *bb, opcode_t op)
-{
-    ph2_ir_t *instruction = ph2_ir_create(op);
-    if (bb->ph2_ir_list.tail)
-        bb->ph2_ir_list.tail->next = instruction;
-    else
-        bb->ph2_ir_list.head = instruction;
-    bb->ph2_ir_list.tail = instruction;
-    return instruction;
-}
-
-ph2_ir_t *add_ph2_ir(opcode_t op)
-{
-    return add_existed_ph2_ir(ph2_ir_create(op));
-}
-
-#if ELF_MACHINE == ELF_MACHINE_ARM32 || ELF_MACHINE == ELF_MACHINE_RV32 || \
-    ELF_MACHINE == ELF_MACHINE_AARCH64
-static void ph2_ir_visit_globals(void (*visit)(ph2_ir_t *))
-{
-    for (ph2_ir_t *ir = GLOBAL_FUNC->bbs->ph2_ir_list.head; ir; ir = ir->next)
-        visit(ir);
-}
-#endif
-
-#if ELF_MACHINE == ELF_MACHINE_ARM32 || ELF_MACHINE == ELF_MACHINE_RV32
-typedef struct {
-    int stack_top;
-    int prologue_bytes;
-    int saved_regs;
-    bool restore_saved_regs;
-} ph2_frame_layout_t;
-
-static void ph2_ir_flatten_functions(
-    ph2_frame_layout_t (*frame_layout)(func_t *, ph2_ir_t *),
-    void (*update_offset)(ph2_ir_t *))
-{
-    for (func_t *func = FUNC_LIST.head; func; func = func->next) {
-        ph2_ir_t *define;
-        ph2_frame_layout_t frame;
-
-        if (!func->bbs)
-            continue;
-        define = add_ph2_ir(OP_define);
-        define->src0 = func->stack_size;
-        define->func_name = intern_string(func->return_def.var_name);
-        frame = frame_layout(func, define);
-        ph2_ir_flatten_function(func, frame.stack_top, frame.prologue_bytes,
-                                frame.saved_regs, frame.restore_saved_regs,
-                                update_offset);
-    }
-}
-#endif
 
 block_t *add_block(block_t *parent, func_t *func)
 {
@@ -2440,8 +2288,8 @@ void dump_stats_phase(const char *phase)
     fprintf(stderr,
             "stats phase=%s vir_blocks=%d vir_values=%d vir_params=%d\n", phase,
             totals.blocks, totals.values, totals.params);
-    fprintf(stderr, "stats phase=%s vir_effects=%d vir_arena=%d ph2=%d\n",
-            phase, totals.effects, totals.arena_capacity, stats_ph2_ir_count);
+    fprintf(stderr, "stats phase=%s vir_effects=%d vir_arena=%d mop=%d\n",
+            phase, totals.effects, totals.arena_capacity, stats_mop_count);
     fprintf(stderr, "stats phase=%s arena_capacity block=%d bb=%d\n", phase,
             BLOCK_ARENA ? BLOCK_ARENA->total_bytes : 0,
             BB_ARENA ? BB_ARENA->total_bytes : 0);
@@ -2467,8 +2315,8 @@ void dump_stats_layout(void)
     if (!dump_stats)
         return;
 
-    fprintf(stderr, "stats layout var=%d bb=%d ph2=%d\n", (int) sizeof(var_t),
-            (int) sizeof(basic_block_t), (int) sizeof(ph2_ir_t));
+    fprintf(stderr, "stats layout var=%d bb=%d mop=%d\n", (int) sizeof(var_t),
+            (int) sizeof(basic_block_t), (int) sizeof(vir_mop_t));
 }
 
 strbuf_t *strbuf_create(int init_capacity)
@@ -2574,9 +2422,9 @@ void global_init(void)
 
     /* Use arena allocation for better memory management */
     TYPES = arena_calloc(GENERAL_ARENA, MAX_TYPES, sizeof(type_t));
-    PH2_IR_FLATTEN = NULL;
-    ph2_ir_capacity = 0;
-    ph2_ir_idx = 0;
+    MOP_FLAT = NULL;
+    mop_flat_capacity = 0;
+    mop_flat_count = 0;
 
     /* Initialize string pool for identifier deduplication */
     string_pool = arena_alloc(GENERAL_ARENA, sizeof(string_pool_t));
@@ -2801,9 +2649,9 @@ void global_release(void)
     };
     for (size_t i = 0; i < sizeof(buffers) / sizeof(*buffers); i++)
         strbuf_free(buffers[i]);
-    PH2_IR_FLATTEN = NULL;
-    ph2_ir_idx = 0;
-    ph2_ir_capacity = 0;
+    MOP_FLAT = NULL;
+    mop_flat_count = 0;
+    mop_flat_capacity = 0;
 }
 
 /* The function whose body the back half of the pipeline is working on, or NULL

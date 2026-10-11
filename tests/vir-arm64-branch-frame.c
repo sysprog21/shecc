@@ -11,7 +11,7 @@ int main(void)
             for (int uns = 0; uns < 2; uns++)
                 for (int layout = 0; layout < 3; layout++) {
                     basic_block_t bb = {0}, yes = {0}, no = {0};
-                    ph2_ir_t compare = {0}, branch = {0};
+                    vir_mop_t compare = {0}, branch = {0};
                     compare.op = ops[i];
                     compare.src0 = 1;
                     compare.src1 = 2;
@@ -36,9 +36,9 @@ int main(void)
                     compare.src2 = 1;
                     branch.src1 = a64_cond(ops[i], uns) + 1;
                     elf_code = strbuf_create(32);
-                    emit_ph2_ir(&compare);
+                    emit_mop(&compare);
                     assert(elf_code->size == 4);
-                    emit_ph2_ir(&branch);
+                    emit_mop(&branch);
                     assert(elf_code->size == (layout ? 8 : 12));
                     unsigned instruction = 0;
                     memcpy(&instruction, elf_code->elements + 4, 4);

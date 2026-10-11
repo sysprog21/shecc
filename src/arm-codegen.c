@@ -11,48 +11,64 @@
 #include "defs.h"
 #include "globals.c"
 
-static bool arm_count_only;
-static int arm_counted_words;
-
-void emit_ph2_ir(ph2_ir_t *ph2_ir);
-
-static int arm_count_ph2_ir_words(ph2_ir_t *ph2_ir);
-
 /* Whether a load or store materializes its frame or data offset with
  * MOVW/MOVT/ADD because no immediate form reaches it. LDR, LDRB, STR and STRB
  * take 12 bits, LDRSB, LDRH, LDRSH and STRH eight, and a register pair also
  * addresses its high word four bytes further up. The size estimator and the
  * emitter both ask this, so the two cannot disagree.
  */
-bool arm_offset_needs_movw(const ph2_ir_t *ph2_ir)
+bool arm_offset_needs_movw(const vir_mop_t *mop)
 {
-    bool load = ph2_ir->op == OP_load || ph2_ir->op == OP_global_load;
-    int offset = load ? ph2_ir->src0 : ph2_ir->src1;
-    bool eight_bits = ph2_ir->size_bytes == 2 ||
-                      (load && ph2_ir->size_bytes == 1 && !ph2_ir->is_unsigned);
+    bool load = mop->op == OP_load || mop->op == OP_global_load;
+    int offset = load ? mop->src0 : mop->src1;
+    bool eight_bits = mop->size_bytes == 2 ||
+                      (load && mop->size_bytes == 1 && !mop->is_unsigned);
 
-    if ((load ? ph2_ir->dest_hi : ph2_ir->src0_hi) >= 0)
+    if ((load ? mop->dest_hi : mop->src0_hi) >= 0)
         return offset > 4091;
     return offset > (eight_bits ? 255 : 4095);
 }
 
-void update_elf_offset(ph2_ir_t *ph2_ir)
+void update_elf_offset(vir_mop_t *mop)
 {
-    elf_offset += arm_count_ph2_ir_words(ph2_ir) * 4;
+    elf_offset += mop_count_words(mop) * 4;
 }
 
-static ph2_frame_layout_t arm_frame_layout(func_t *func, ph2_ir_t *define)
+static mop_frame_layout_t arm_frame_layout(func_t *func, vir_mop_t *define)
 {
     /* Eight-byte alignment follows the nine saved words and one padding word.
      */
-    return (ph2_frame_layout_t) {ALIGN_UP(func->stack_size, MIN_ALIGNMENT) + 40,
-                                 arm_count_ph2_ir_words(define) * 4, 0, false};
+    return (mop_frame_layout_t) {ALIGN_UP(func->stack_size, MIN_ALIGNMENT) + 40,
+                                 mop_count_words(define) * 4, 0, false};
+}
+
+/* Mark the edges that fall into the block laid out next, before offsets are
+ * planned: a jump there emits nothing, and a branch tests for one edge alone. A
+ * branch keeps 1 when its else block follows, 2 when its then block does, and 0
+ * when neither does, so both edges need a branch.
+ */
+static void arm_mark_fallthrough(void)
+{
+    FOR_EACH_FUNCTION_BODY(func)
+    {
+        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+            for (vir_mop_t *mop = bb->mops.head; mop; mop = mop->next) {
+                if (mop->op == OP_branch)
+                    mop->src2 = mop->else_bb == bb->rpo_next   ? 1
+                                : mop->then_bb == bb->rpo_next ? 2
+                                                               : 0;
+                else if (mop->op == OP_jump && !mop->next)
+                    mop->src2 = mop->next_bb == bb->rpo_next;
+            }
+        }
+    }
 }
 
 void cfg_flatten(void)
 {
     func_t *func;
-    ph2_ir_prepare(false);
+    mop_flat_prepare(false);
+    arm_mark_fallthrough();
 
     if (dynlink)
         elf_offset = 132; /* __libc_start_main call, main_wrapper, and the
@@ -66,7 +82,7 @@ void cfg_flatten(void)
 
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
 
-    ph2_ir_visit_globals(update_elf_offset);
+    mop_visit_globals(update_elf_offset);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
     if (dynlink)
@@ -74,32 +90,15 @@ void cfg_flatten(void)
     else
         elf_offset += 32; /* 6 insns for main call + 2 for exit */
 
-    ph2_ir_flatten_functions(arm_frame_layout, update_elf_offset);
+    mop_flatten_functions(arm_frame_layout, update_elf_offset);
 }
 
 void emit(int code)
 {
-    if (arm_count_only)
-        ++arm_counted_words;
+    if (mop_count_only)
+        ++mop_counted_words;
     else
         elf_write_int(elf_code, code);
-}
-
-static int arm_count_ph2_ir_words(ph2_ir_t *ph2_ir)
-{
-    bool saved_count_only = arm_count_only;
-    int saved_counted_words = arm_counted_words;
-    char *saved_fatal_function_context = fatal_function_context;
-
-    arm_count_only = true;
-    arm_counted_words = 0;
-    emit_ph2_ir(ph2_ir);
-    int words = arm_counted_words;
-
-    arm_count_only = saved_count_only;
-    arm_counted_words = saved_counted_words;
-    fatal_function_context = saved_fatal_function_context;
-    return words;
 }
 
 static int arm_bitwise_insn(opcode_t op,
@@ -120,12 +119,12 @@ static int arm_bitwise_insn(opcode_t op,
     return 0;
 }
 
-void emit_ph2_ir(ph2_ir_t *ph2_ir)
+void emit_mop(vir_mop_t *mop)
 {
     func_t *func;
-    const int rd = ph2_ir->dest;
-    const int rn = ph2_ir->src0;
-    int rm = ph2_ir->src1; /* Not const because OP_trunc modifies it */
+    const int rd = mop->dest;
+    const int rn = mop->src0;
+    int rm = mop->src1; /* Not const because OP_trunc modifies it */
     int ofs;
     int store_offset;
     bool is_external_call = false;
@@ -137,9 +136,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
      */
     arm_reg interm;
 
-    switch (ph2_ir->op) {
+    switch (mop->op) {
     case OP_define:
-        fatal_function_context = ph2_ir->func_name;
+        fatal_function_context = mop->func_name;
 
         /* We should handle the function entry point carefully due to the
          * following constraints:
@@ -156,89 +155,89 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * 2. retrieve the global stack pointer from the 4-byte global object
          *    located at 'elf_data_start' to ensure correct access to the global
          *    stack.
-         * 3. set ofs to align(ph2_ir->src0, 8) + 4, and prepare a local
+         * 3. set ofs to align(mop->src0, 8) + 4, and prepare a local
          *    stack for the callee by subtracting ofs from sp.
          */
         emit(__stmdb(__AL, 1, __sp, 0x4FF0));
         emit(__movw(__AL, __r8, elf_data_start));
         emit(__movt(__AL, __r8, elf_data_start));
         emit(__lw(__AL, __r12, __r8, 0));
-        ofs = ALIGN_UP(ph2_ir->src0, MIN_ALIGNMENT) + 4;
+        ofs = ALIGN_UP(mop->src0, MIN_ALIGNMENT) + 4;
         emit(__movw(__AL, __r8, ofs));
         emit(__movt(__AL, __r8, ofs));
         emit(__sub_r(__AL, __sp, __sp, __r8));
         return;
     case OP_load_constant:
-        if (ph2_ir->src0 < 0) {
-            emit(__movw(__AL, __r8, -ph2_ir->src0));
-            emit(__movt(__AL, __r8, -ph2_ir->src0));
+        if (mop->src0 < 0) {
+            emit(__movw(__AL, __r8, -mop->src0));
+            emit(__movt(__AL, __r8, -mop->src0));
             emit(__rsb_i(__AL, rd, 0, __r8));
-        } else if (ph2_ir->src0 > 255) {
-            emit(__movw(__AL, rd, ph2_ir->src0));
-            emit(__movt(__AL, rd, ph2_ir->src0));
+        } else if (mop->src0 > 255) {
+            emit(__movw(__AL, rd, mop->src0));
+            emit(__movt(__AL, rd, mop->src0));
         } else
-            emit(__mov_i(__AL, rd, ph2_ir->src0));
-        if (ph2_ir->dest_hi >= 0) {
-            if (ph2_ir->src1 < 0) {
-                emit(__movw(__AL, __r8, -ph2_ir->src1));
-                emit(__movt(__AL, __r8, -ph2_ir->src1));
-                emit(__rsb_i(__AL, ph2_ir->dest_hi, 0, __r8));
-            } else if (ph2_ir->src1 > 255) {
-                emit(__movw(__AL, ph2_ir->dest_hi, ph2_ir->src1));
-                emit(__movt(__AL, ph2_ir->dest_hi, ph2_ir->src1));
+            emit(__mov_i(__AL, rd, mop->src0));
+        if (mop->dest_hi >= 0) {
+            if (mop->src1 < 0) {
+                emit(__movw(__AL, __r8, -mop->src1));
+                emit(__movt(__AL, __r8, -mop->src1));
+                emit(__rsb_i(__AL, mop->dest_hi, 0, __r8));
+            } else if (mop->src1 > 255) {
+                emit(__movw(__AL, mop->dest_hi, mop->src1));
+                emit(__movt(__AL, mop->dest_hi, mop->src1));
             } else
-                emit(__mov_i(__AL, ph2_ir->dest_hi, ph2_ir->src1));
+                emit(__mov_i(__AL, mop->dest_hi, mop->src1));
         }
         return;
     case OP_address_of:
     case OP_global_address_of:
-        interm = ph2_ir->op == OP_address_of ? __sp : __r12;
-        if (ph2_ir->src0 > 255) {
-            emit(__movw(__AL, __r8, ph2_ir->src0));
-            emit(__movt(__AL, __r8, ph2_ir->src0));
+        interm = mop->op == OP_address_of ? __sp : __r12;
+        if (mop->src0 > 255) {
+            emit(__movw(__AL, __r8, mop->src0));
+            emit(__movt(__AL, __r8, mop->src0));
             emit(__add_r(__AL, rd, interm, __r8));
         } else
-            emit(__add_i(__AL, rd, interm, ph2_ir->src0));
+            emit(__add_i(__AL, rd, interm, mop->src0));
         return;
     case OP_assign:
         /* update_elf_offset() reserves no space for a self-assignment, so
          * emitting one here would push every later address out by four bytes
          * and leave the data segment's p_offset and p_vaddr incongruent.
          */
-        if (PH2_PAIR_DEST_SRC0(ph2_ir) && rd == ph2_ir->src0_hi) {
+        if (MOP_PAIR_DEST_SRC0(mop) && rd == mop->src0_hi) {
             /* A pair moved one register over, as a slot round trip collapsed
              * into a move can leave it: the low destination is the high source,
              * so move the high word first, through r8 when the two registers
              * trade places.
              */
-            if (ph2_ir->dest_hi == rn) {
+            if (mop->dest_hi == rn) {
                 emit(__mov_r(__AL, __r8, rn));
-                emit(__mov_r(__AL, rd, ph2_ir->src0_hi));
-                emit(__mov_r(__AL, ph2_ir->dest_hi, __r8));
+                emit(__mov_r(__AL, rd, mop->src0_hi));
+                emit(__mov_r(__AL, mop->dest_hi, __r8));
             } else {
-                emit(__mov_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
+                emit(__mov_r(__AL, mop->dest_hi, mop->src0_hi));
                 emit(__mov_r(__AL, rd, rn));
             }
             return;
         }
         if (rd != rn)
             emit(__mov_r(__AL, rd, rn));
-        if (PH2_PAIR_DEST_SRC0(ph2_ir) && ph2_ir->dest_hi != ph2_ir->src0_hi)
-            emit(__mov_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
+        if (MOP_PAIR_DEST_SRC0(mop) && mop->dest_hi != mop->src0_hi)
+            emit(__mov_r(__AL, mop->dest_hi, mop->src0_hi));
         return;
     case OP_load:
     case OP_global_load:
-        interm = ph2_ir->op == OP_load ? __sp : __r12;
-        if (ph2_ir->dest_hi >= 0) {
-            if (arm_offset_needs_movw(ph2_ir)) {
-                emit(__movw(__AL, __r8, ph2_ir->src0));
-                emit(__movt(__AL, __r8, ph2_ir->src0));
+        interm = mop->op == OP_load ? __sp : __r12;
+        if (mop->dest_hi >= 0) {
+            if (arm_offset_needs_movw(mop)) {
+                emit(__movw(__AL, __r8, mop->src0));
+                emit(__movt(__AL, __r8, mop->src0));
                 emit(__add_r(__AL, __r8, interm, __r8));
                 emit(__lw(__AL, rd, __r8, 0));
-                emit(__lw(__AL, ph2_ir->dest_hi, __r8, 4));
+                emit(__lw(__AL, mop->dest_hi, __r8, 4));
             } else {
-                emit(__lw(__AL, rd, interm, ph2_ir->src0));
-                emit(__lw(__AL, ph2_ir->dest_hi, interm, ph2_ir->src0 + 4));
+                emit(__lw(__AL, rd, interm, mop->src0));
+                emit(__lw(__AL, mop->dest_hi, interm, mop->src0 + 4));
             }
             return;
         }
@@ -246,41 +245,41 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* LDRSB, LDRH and LDRSH have only eight immediate bits, unlike LDRB's
          * 12-bit field. Materialize a larger offset before loading.
          */
-        if (arm_offset_needs_movw(ph2_ir)) {
-            emit(__movw(__AL, __r8, ph2_ir->src0));
-            emit(__movt(__AL, __r8, ph2_ir->src0));
+        if (arm_offset_needs_movw(mop)) {
+            emit(__movw(__AL, __r8, mop->src0));
+            emit(__movt(__AL, __r8, mop->src0));
             emit(__add_r(__AL, __r8, interm, __r8));
-            if (ph2_ir->size_bytes == 1)
-                emit(ph2_ir->is_unsigned ? __lb(__AL, rd, __r8, 0)
-                                         : __lsb(__AL, rd, __r8, 0));
-            else if (ph2_ir->size_bytes == 2)
-                emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, __r8, 0)
-                                         : __lh(__AL, rd, __r8, 0));
+            if (mop->size_bytes == 1)
+                emit(mop->is_unsigned ? __lb(__AL, rd, __r8, 0)
+                                      : __lsb(__AL, rd, __r8, 0));
+            else if (mop->size_bytes == 2)
+                emit(mop->is_unsigned ? __lhu(__AL, rd, __r8, 0)
+                                      : __lh(__AL, rd, __r8, 0));
             else
                 emit(__lw(__AL, rd, __r8, 0));
-        } else if (ph2_ir->size_bytes == 1)
-            emit(ph2_ir->is_unsigned ? __lb(__AL, rd, interm, ph2_ir->src0)
-                                     : __lsb(__AL, rd, interm, ph2_ir->src0));
-        else if (ph2_ir->size_bytes == 2)
-            emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, interm, ph2_ir->src0)
-                                     : __lh(__AL, rd, interm, ph2_ir->src0));
+        } else if (mop->size_bytes == 1)
+            emit(mop->is_unsigned ? __lb(__AL, rd, interm, mop->src0)
+                                  : __lsb(__AL, rd, interm, mop->src0));
+        else if (mop->size_bytes == 2)
+            emit(mop->is_unsigned ? __lhu(__AL, rd, interm, mop->src0)
+                                  : __lh(__AL, rd, interm, mop->src0));
         else
-            emit(__lw(__AL, rd, interm, ph2_ir->src0));
+            emit(__lw(__AL, rd, interm, mop->src0));
         return;
     case OP_store:
     case OP_global_store:
-        interm = ph2_ir->op == OP_store ? __sp : __r12;
-        store_offset = ph2_ir->src1;
-        if (ph2_ir->src0_hi >= 0) {
-            if (arm_offset_needs_movw(ph2_ir)) {
+        interm = mop->op == OP_store ? __sp : __r12;
+        store_offset = mop->src1;
+        if (mop->src0_hi >= 0) {
+            if (arm_offset_needs_movw(mop)) {
                 emit(__movw(__AL, __r8, store_offset));
                 emit(__movt(__AL, __r8, store_offset));
                 emit(__add_r(__AL, __r8, interm, __r8));
                 emit(__sw(__AL, rn, __r8, 0));
-                emit(__sw(__AL, ph2_ir->src0_hi, __r8, 4));
+                emit(__sw(__AL, mop->src0_hi, __r8, 4));
             } else {
                 emit(__sw(__AL, rn, interm, store_offset));
-                emit(__sw(__AL, ph2_ir->src0_hi, interm, store_offset + 4));
+                emit(__sw(__AL, mop->src0_hi, interm, store_offset + 4));
             }
             return;
         }
@@ -288,7 +287,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* STRH has an 8-bit split immediate while STR/STRB accept 12 bits.
          * Materialize larger halfword offsets before selecting the width.
          */
-        if (arm_offset_needs_movw(ph2_ir)) {
+        if (arm_offset_needs_movw(mop)) {
             emit(__movw(__AL, __r8, store_offset));
             emit(__movt(__AL, __r8, store_offset));
             emit(__add_r(__AL, __r8, interm, __r8));
@@ -301,77 +300,77 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * neighbouring designated members on ARM. Ordinary stack slots remain
          * word-sized unless their IR says otherwise.
          */
-        if (ph2_ir->size_bytes == 1)
+        if (mop->size_bytes == 1)
             emit(__sb(__AL, rn, interm, store_offset));
-        else if (ph2_ir->size_bytes == 2)
+        else if (mop->size_bytes == 2)
             emit(__sh(__AL, rn, interm, store_offset));
         else
             emit(__sw(__AL, rn, interm, store_offset));
         return;
     case OP_read:
-        if (ph2_ir->dest_hi >= 0) {
-            if (ph2_ir->src1 != 8)
+        if (mop->dest_hi >= 0) {
+            if (mop->src1 != 8)
                 fatal("unsupported Arm pair load width");
 #define ARM_WORD_LOAD(dst, base, offset) emit(__lw(__AL, dst, base, offset))
-            EMIT_PAIR_LOAD(ARM_WORD_LOAD, rd, ph2_ir->dest_hi, rn);
+            EMIT_PAIR_LOAD(ARM_WORD_LOAD, rd, mop->dest_hi, rn);
 #undef ARM_WORD_LOAD
             return;
         }
-        if (ph2_ir->src1 == 1)
-            emit(ph2_ir->is_unsigned ? __lb(__AL, rd, rn, 0)
-                                     : __lsb(__AL, rd, rn, 0));
-        else if (ph2_ir->src1 == 2)
-            emit(ph2_ir->is_unsigned ? __lhu(__AL, rd, rn, 0)
-                                     : __lh(__AL, rd, rn, 0));
-        else if (ph2_ir->src1 == 4)
+        if (mop->src1 == 1)
+            emit(mop->is_unsigned ? __lb(__AL, rd, rn, 0)
+                                  : __lsb(__AL, rd, rn, 0));
+        else if (mop->src1 == 2)
+            emit(mop->is_unsigned ? __lhu(__AL, rd, rn, 0)
+                                  : __lh(__AL, rd, rn, 0));
+        else if (mop->src1 == 4)
             emit(__lw(__AL, rd, rn, 0));
         else
             fatal("unsupported Arm load width");
         return;
     case OP_write:
-        if (ph2_ir->src1_hi >= 0) {
-            if (ph2_ir->dest != 8)
+        if (mop->src1_hi >= 0) {
+            if (mop->dest != 8)
                 fatal("unsupported Arm pair store width");
             emit(__sw(__AL, rm, rn, 0));
-            emit(__sw(__AL, ph2_ir->src1_hi, rn, 4));
+            emit(__sw(__AL, mop->src1_hi, rn, 4));
             return;
         }
-        if (ph2_ir->dest == 1)
+        if (mop->dest == 1)
             emit(__sb(__AL, rm, rn, 0));
-        else if (ph2_ir->dest == 2)
+        else if (mop->dest == 2)
             emit(__sh(__AL, rm, rn, 0));
-        else if (ph2_ir->dest == 4)
+        else if (mop->dest == 4)
             emit(__sw(__AL, rm, rn, 0));
         else
             fatal("unsupported Arm store width");
         return;
     case OP_branch:
         /* A pair is true when either word is nonzero. */
-        if (ph2_ir->src0_hi >= 0) {
-            emit(__or_r(__AL, __r8, rn, ph2_ir->src0_hi));
+        if (mop->src0_hi >= 0) {
+            emit(__or_r(__AL, __r8, rn, mop->src0_hi));
             emit(__teq(__r8));
         } else
             emit(__teq(rn));
-        if (ph2_ir->src2)
+        if (mop->src2 == 2)
             /* The then block follows: only the else edge needs a branch. */
-            emit(__b(__EQ, ph2_ir->else_bb->elf_offset - elf_code->size));
-        else if (ph2_ir->is_branch_detached) {
+            emit(__b(__EQ, mop->else_bb->elf_offset - elf_code->size));
+        else if (!mop->src2) {
             /* The else block does not follow, and nothing says the then block
              * does either: a loop's back edge lands behind this one. Jump to
              * both explicitly rather than skipping over the else jump into
              * whatever was laid out next.
              */
-            emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code->size));
-            emit(__b(__AL, ph2_ir->else_bb->elf_offset - elf_code->size));
+            emit(__b(__NE, mop->then_bb->elf_offset - elf_code->size));
+            emit(__b(__AL, mop->else_bb->elf_offset - elf_code->size));
         } else
-            emit(__b(__NE, ph2_ir->then_bb->elf_offset - elf_code->size));
+            emit(__b(__NE, mop->then_bb->elf_offset - elf_code->size));
         return;
     case OP_jump:
-        if (!ph2_ir->src2)
-            emit(__b(__AL, ph2_ir->next_bb->elf_offset - elf_code->size));
+        if (!mop->src2)
+            emit(__b(__AL, mop->next_bb->elf_offset - elf_code->size));
         return;
     case OP_call:
-        func = find_func(ph2_ir->func_name);
+        func = find_func(mop->func_name);
         if (func->bbs)
             ofs = func->bbs->elf_offset - elf_code->size;
         else if (dynlink) {
@@ -379,7 +378,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
                   (elf_code_start + elf_code->size);
             is_external_call = true;
         } else {
-            printf("The '%s' function is not implemented\n", ph2_ir->func_name);
+            printf("The '%s' function is not implemented\n", mop->func_name);
             fflush(stdout); /* see fatal() */
             abort();
         }
@@ -407,15 +406,15 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
         return;
     case OP_load_data_address:
-        emit(__movw(__AL, rd, ph2_ir->src0 + elf_data_start));
-        emit(__movt(__AL, rd, ph2_ir->src0 + elf_data_start));
+        emit(__movw(__AL, rd, mop->src0 + elf_data_start));
+        emit(__movt(__AL, rd, mop->src0 + elf_data_start));
         return;
     case OP_load_rodata_address:
-        emit(__movw(__AL, rd, ph2_ir->src0 + elf_rodata_start));
-        emit(__movt(__AL, rd, ph2_ir->src0 + elf_rodata_start));
+        emit(__movw(__AL, rd, mop->src0 + elf_rodata_start));
+        emit(__movt(__AL, rd, mop->src0 + elf_rodata_start));
         return;
     case OP_address_of_func:
-        ofs = function_entry_address(ph2_ir->func_name);
+        ofs = function_entry_address(mop->func_name);
         emit(__movw(__AL, __r8, ofs));
         emit(__movt(__AL, __r8, ofs));
         emit(__sw(__AL, __r8, rn, 0));
@@ -437,12 +436,12 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         }
         return;
     case OP_return:
-        if (ph2_ir->src0 == -1)
+        if (mop->src0 == -1)
             emit(__mov_r(__AL, __r0, __r0));
         else
             emit(__mov_r(__AL, __r0, rn));
-        if (ph2_ir->src0_hi >= 0)
-            emit(__mov_r(__AL, __r1, ph2_ir->src0_hi));
+        if (mop->src0_hi >= 0)
+            emit(__mov_r(__AL, __r1, mop->src0_hi));
 
         /* When calling a function, the following operations are performed:
          * 1. push r4-r11 and lr onto the stack.
@@ -453,7 +452,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * upon returning to restore the stack and the contents of r4-r11 and
          * lr.
          */
-        ofs = ALIGN_UP(ph2_ir->src1, MIN_ALIGNMENT) + 4;
+        ofs = ALIGN_UP(mop->src1, MIN_ALIGNMENT) + 4;
         emit(__movw(__AL, __r8, ofs));
         emit(__movt(__AL, __r8, ofs));
         emit(__add_r(__AL, __sp, __sp, __r8));
@@ -461,41 +460,38 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__bx(__AL, __lr));
         return;
     case OP_add:
-        if (PH2_PAIR_BINARY(ph2_ir)) {
+        if (MOP_PAIR_BINARY(mop)) {
             emit(__adds_r(__AL, rd, rn, rm));
-            emit(__adc_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
-                         ph2_ir->src1_hi));
+            emit(__adc_r(__AL, mop->dest_hi, mop->src0_hi, mop->src1_hi));
         } else
             emit(__add_r(__AL, rd, rn, rm));
         return;
     case OP_sub:
-        if (PH2_PAIR_BINARY(ph2_ir)) {
+        if (MOP_PAIR_BINARY(mop)) {
             emit(__subs_r(__AL, rd, rn, rm));
-            emit(__sbc_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi,
-                         ph2_ir->src1_hi));
+            emit(__sbc_r(__AL, mop->dest_hi, mop->src0_hi, mop->src1_hi));
         } else
             emit(__sub_r(__AL, rd, rn, rm));
         return;
     case OP_mul:
-        if (PH2_PAIR_BINARY(ph2_ir)) {
+        if (MOP_PAIR_BINARY(mop)) {
             /* Sum the cross terms before UMULL writes the result pair, so the
              * product stays right even if that pair shares a register with an
              * operand. The allocator does not hand out such a pair today, and
              * this order costs nothing over the other.
              */
-            emit(__mul(__AL, __r8, rn, ph2_ir->src1_hi));
-            emit(__mul(__AL, __r9, ph2_ir->src0_hi, rm));
+            emit(__mul(__AL, __r8, rn, mop->src1_hi));
+            emit(__mul(__AL, __r9, mop->src0_hi, rm));
             emit(__add_r(__AL, __r8, __r8, __r9));
-            emit(__umull(__AL, rd, ph2_ir->dest_hi, rn, rm));
-            emit(__add_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r8));
+            emit(__umull(__AL, rd, mop->dest_hi, rn, rm));
+            emit(__add_r(__AL, mop->dest_hi, mop->dest_hi, __r8));
         } else
             emit(__mul(__AL, rd, rn, rm));
         return;
     case OP_div:
     case OP_mod:
-        if (PH2_PAIR_BINARY(ph2_ir)) {
-            bool is_unsigned =
-                ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
+        if (MOP_PAIR_BINARY(mop)) {
+            bool is_unsigned = mop->src0_is_unsigned || mop->src1_is_unsigned;
 
             /* Stack words: dividend (0,4), divisor (8,12), remainder (16,20),
              * quotient (24,28), counter (32), and the incoming dividend bit
@@ -504,9 +500,9 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
              */
             emit(__add_i(__AL, __sp, __sp, is_unsigned ? -40 : -48));
             emit(__sw(__AL, rn, __sp, 0));
-            emit(__sw(__AL, ph2_ir->src0_hi, __sp, 4));
+            emit(__sw(__AL, mop->src0_hi, __sp, 4));
             emit(__sw(__AL, rm, __sp, 8));
-            emit(__sw(__AL, ph2_ir->src1_hi, __sp, 12));
+            emit(__sw(__AL, mop->src1_hi, __sp, 12));
             if (!is_unsigned) {
                 /* x ^ sign + -sign produces its unsigned magnitude. */
                 emit(__lw(__AL, __r8, __sp, 4));
@@ -604,32 +600,31 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__cmp_i(__AL, __r8, 0));
             emit(__b(__NE, -220));
 
-            emit(__lw(__AL, rd, __sp, ph2_ir->op == OP_mod ? 16 : 24));
-            emit(__lw(__AL, ph2_ir->dest_hi, __sp,
-                      ph2_ir->op == OP_mod ? 20 : 28));
+            emit(__lw(__AL, rd, __sp, mop->op == OP_mod ? 16 : 24));
+            emit(__lw(__AL, mop->dest_hi, __sp, mop->op == OP_mod ? 20 : 28));
             if (!is_unsigned) {
                 emit(__lw(__AL, __r10, __sp, 40));
-                if (ph2_ir->op == OP_div) {
+                if (mop->op == OP_div) {
                     emit(__lw(__AL, __r8, __sp, 44));
                     emit(__eor_r(__AL, __r10, __r10, __r8));
                 }
                 emit(__eor_r(__AL, rd, rd, __r10));
-                emit(__eor_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r10));
+                emit(__eor_r(__AL, mop->dest_hi, mop->dest_hi, __r10));
                 emit(__rsbs_i(__AL, __r8, 0, __r10));
                 emit(__adds_r(__AL, rd, rd, __r8));
                 emit(__zero(__r8));
-                emit(__adc_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r8));
+                emit(__adc_r(__AL, mop->dest_hi, mop->dest_hi, __r8));
             }
             emit(__add_i(__AL, __sp, __sp, is_unsigned ? 40 : 48));
             return;
         }
         if (hard_mul_div) {
-            if (ph2_ir->op == OP_div)
-                emit(ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned
+            if (mop->op == OP_div)
+                emit(mop->src0_is_unsigned || mop->src1_is_unsigned
                          ? __udiv(__AL, rd, rm, rn)
                          : __div(__AL, rd, rm, rn));
             else {
-                emit(ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned
+                emit(mop->src0_is_unsigned || mop->src1_is_unsigned
                          ? __udiv(__AL, __r8, rm, rn)
                          : __div(__AL, __r8, rm, rn));
                 emit(__mul(__AL, __r8, rm, __r8));
@@ -644,7 +639,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         /* Unsigned operands already are magnitudes. Keep the signed path's
          * instruction count so the fixed branch displacements remain valid.
          */
-        if (ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned) {
+        if (mop->src0_is_unsigned || mop->src1_is_unsigned) {
             emit(__zero(__r8));
             emit(__mov_r(__AL, __r8, __r8));
             emit(__mov_r(__AL, __r8, __r8));
@@ -659,7 +654,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__add_r(__AL, rm, rm, __r9));
             emit(__eor_r(__AL, rm, rm, __r9));
         }
-        if (ph2_ir->op == OP_div)
+        if (mop->op == OP_div)
             emit(__eor_r(__AL, __r10, __r8, __r9));
         else {
             /* If the requested operation is modulo, the result will be stored
@@ -711,30 +706,30 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__rsb_i(__NE, rd, 0, rd));
         return;
     case OP_lshift:
-        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
+        if (MOP_PAIR_DEST_SRC0(mop)) {
             emit(__cmp_i(__AL, rm, 32));
             emit(__b(__CS, 32));
             emit(__mov_r(__AL, __r8, rn));
             emit(__sll(__AL, rd, rn, rm));
-            emit(__sll(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi, rm));
+            emit(__sll(__AL, mop->dest_hi, mop->src0_hi, rm));
             emit(__rsb_i(__AL, __r9, 32, rm));
             emit(__srl(__AL, __r8, __r8, __r9));
-            emit(__or_r(__AL, ph2_ir->dest_hi, ph2_ir->dest_hi, __r8));
+            emit(__or_r(__AL, mop->dest_hi, mop->dest_hi, __r8));
             emit(__b(__AL, 16));
             emit(__add_i(__AL, __r9, rm, -32));
-            emit(__sll(__AL, ph2_ir->dest_hi, rn, __r9));
+            emit(__sll(__AL, mop->dest_hi, rn, __r9));
             emit(__zero(rd));
             return;
         }
         emit(__sll(__AL, rd, rn, rm));
         return;
     case OP_rshift:
-        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
-            int shift_kind = ph2_ir->src0_is_unsigned ? logic_rs : arith_rs;
+        if (MOP_PAIR_DEST_SRC0(mop)) {
+            int shift_kind = mop->src0_is_unsigned ? logic_rs : arith_rs;
 
             emit(__cmp_i(__AL, rm, 32));
             emit(__b(__CS, 32));
-            emit(__mov_r(__AL, __r8, ph2_ir->src0_hi));
+            emit(__mov_r(__AL, __r8, mop->src0_hi));
 
             /* The sign lives in the high word. The low word's vacated top bits
              * are the high word's low bits, ORed in below, so shifting in the
@@ -745,22 +740,21 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
             emit(__sll(__AL, __r8, __r8, __r9));
             emit(__or_r(__AL, rd, rd, __r8));
             emit(shift_kind == logic_rs
-                     ? __srl(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi, rm)
-                     : __sra(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi, rm));
+                     ? __srl(__AL, mop->dest_hi, mop->src0_hi, rm)
+                     : __sra(__AL, mop->dest_hi, mop->src0_hi, rm));
             emit(__b(__AL, 16));
             emit(__add_i(__AL, __r9, rm, -32));
-            emit(shift_kind == logic_rs
-                     ? __srl(__AL, rd, ph2_ir->src0_hi, __r9)
-                     : __sra(__AL, rd, ph2_ir->src0_hi, __r9));
+            emit(shift_kind == logic_rs ? __srl(__AL, rd, mop->src0_hi, __r9)
+                                        : __sra(__AL, rd, mop->src0_hi, __r9));
             if (shift_kind == logic_rs)
-                emit(__zero(ph2_ir->dest_hi));
+                emit(__zero(mop->dest_hi));
             else
-                emit(__srl_amt(__AL, 0, arith_rs, ph2_ir->dest_hi,
-                               ph2_ir->src0_hi, 31));
+                emit(__srl_amt(__AL, 0, arith_rs, mop->dest_hi, mop->src0_hi,
+                               31));
             return;
         }
-        emit(ph2_ir->src0_is_unsigned ? __srl(__AL, rd, rn, rm)
-                                      : __sra(__AL, rd, rn, rm));
+        emit(mop->src0_is_unsigned ? __srl(__AL, rd, rn, rm)
+                                   : __sra(__AL, rd, rn, rm));
         return;
     case OP_eq:
     case OP_neq:
@@ -777,54 +771,53 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * any operand register. Equality is left to the word-by-word sequence
          * below, since Z is not valid after SBCS.
          */
-        if (ph2_ir->op != OP_eq && ph2_ir->op != OP_neq &&
-            ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0) {
-            bool unsigned_cmp =
-                ph2_ir->src0_is_unsigned || ph2_ir->src1_is_unsigned;
-            bool swap = ph2_ir->op == OP_gt || ph2_ir->op == OP_leq;
-            bool below = ph2_ir->op == OP_lt || ph2_ir->op == OP_gt;
+        if (mop->op != OP_eq && mop->op != OP_neq && mop->src0_hi >= 0 &&
+            mop->src1_hi >= 0) {
+            bool unsigned_cmp = mop->src0_is_unsigned || mop->src1_is_unsigned;
+            bool swap = mop->op == OP_gt || mop->op == OP_leq;
+            bool below = mop->op == OP_lt || mop->op == OP_gt;
             arm_cond_t cond = below ? (unsigned_cmp ? __CC : __LT)
                                     : (unsigned_cmp ? __CS : __GE);
 
             emit(__cmp_r(__AL, swap ? rm : rn, swap ? rn : rm));
-            emit(__sbcs_r(__AL, __r8, swap ? ph2_ir->src1_hi : ph2_ir->src0_hi,
-                          swap ? ph2_ir->src0_hi : ph2_ir->src1_hi));
+            emit(__sbcs_r(__AL, __r8, swap ? mop->src1_hi : mop->src0_hi,
+                          swap ? mop->src0_hi : mop->src1_hi));
             emit(__zero(rd));
             emit(__mov_i(cond, rd, 1));
             return;
         }
         emit(__cmp_r(__AL, rn, rm));
-        if ((ph2_ir->op == OP_eq || ph2_ir->op == OP_neq) &&
-            ph2_ir->src0_hi >= 0 && ph2_ir->src1_hi >= 0)
-            emit(__cmp_r(__EQ, ph2_ir->src0_hi, ph2_ir->src1_hi));
+        if ((mop->op == OP_eq || mop->op == OP_neq) && mop->src0_hi >= 0 &&
+            mop->src1_hi >= 0)
+            emit(__cmp_r(__EQ, mop->src0_hi, mop->src1_hi));
         emit(__zero(rd));
-        emit(__mov_i(arm_get_cond(ph2_ir->op, ph2_ir->src0_is_unsigned ||
-                                                  ph2_ir->src1_is_unsigned),
+        emit(__mov_i(arm_get_cond(mop->op, mop->src0_is_unsigned ||
+                                               mop->src1_is_unsigned),
                      rd, 1));
         return;
     case OP_negate:
-        if (PH2_PAIR_DEST_SRC0(ph2_ir)) {
+        if (MOP_PAIR_DEST_SRC0(mop)) {
             emit(__rsbs_i(__AL, rd, 0, rn));
-            emit(__rsc_i(__AL, ph2_ir->dest_hi, 0, ph2_ir->src0_hi));
+            emit(__rsc_i(__AL, mop->dest_hi, 0, mop->src0_hi));
         } else
             emit(__rsb_i(__AL, rd, 0, rn));
         return;
     case OP_bit_not:
         emit(__mvn_r(__AL, rd, rn));
-        if (PH2_PAIR_DEST_SRC0(ph2_ir))
-            emit(__mvn_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
+        if (MOP_PAIR_DEST_SRC0(mop))
+            emit(__mvn_r(__AL, mop->dest_hi, mop->src0_hi));
         return;
     case OP_bit_and:
     case OP_bit_or:
     case OP_bit_xor:
-        emit(arm_bitwise_insn(ph2_ir->op, rd, rn, rm));
-        if (PH2_PAIR_BINARY(ph2_ir))
-            emit(arm_bitwise_insn(ph2_ir->op, ph2_ir->dest_hi, ph2_ir->src0_hi,
-                                  ph2_ir->src1_hi));
+        emit(arm_bitwise_insn(mop->op, rd, rn, rm));
+        if (MOP_PAIR_BINARY(mop))
+            emit(arm_bitwise_insn(mop->op, mop->dest_hi, mop->src0_hi,
+                                  mop->src1_hi));
         return;
     case OP_log_not:
-        if (ph2_ir->src0_hi >= 0) {
-            emit(__or_r(__AL, __r8, rn, ph2_ir->src0_hi));
+        if (mop->src0_hi >= 0) {
+            emit(__or_r(__AL, __r8, rn, mop->src0_hi));
             emit(__cmp_i(__AL, __r8, 0));
         } else
             emit(__cmp_i(__AL, rn, 0));
@@ -832,7 +825,7 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
         emit(__mov_i(__EQ, rd, 1));
         return;
     case OP_trunc:
-        if (ph2_ir->is_unsigned && (rm == 1 || rm == 2)) {
+        if (mop->is_unsigned && (rm == 1 || rm == 2)) {
             int shift = rm == 1 ? 24 : 16;
 
             emit(__sll_amt(__AL, 0, logic_ls, rd, rn, shift));
@@ -850,28 +843,28 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
     case OP_sign_ext: {
         /* Decode source size from upper 16 bits */
         int source_size = (rm >> 16) & 0xFFFF;
-        if (ph2_ir->dest_hi >= 0 && ph2_ir->src0_hi < 0) {
+        if (mop->dest_hi >= 0 && mop->src0_hi < 0) {
             if (source_size == 1) {
-                if (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer) {
+                if (mop->src0_is_unsigned || mop->src0_is_pointer) {
                     emit(__sll_amt(__AL, 0, logic_ls, rd, rn, 24));
                     emit(__srl_amt(__AL, 0, logic_rs, rd, rd, 24));
                 } else
                     emit(__sxtb(__AL, rd, rn, 0));
             } else if (source_size == 2) {
-                if (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer) {
+                if (mop->src0_is_unsigned || mop->src0_is_pointer) {
                     emit(__sll_amt(__AL, 0, logic_ls, rd, rn, 16));
                     emit(__srl_amt(__AL, 0, logic_rs, rd, rd, 16));
                 } else
                     emit(__sxth(__AL, rd, rn, 0));
             } else
                 emit(__mov_r(__AL, rd, rn));
-            if (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer)
-                emit(__zero(ph2_ir->dest_hi));
+            if (mop->src0_is_unsigned || mop->src0_is_pointer)
+                emit(__zero(mop->dest_hi));
             else
-                emit(__srl_amt(__AL, 0, arith_rs, ph2_ir->dest_hi, rd, 31));
+                emit(__srl_amt(__AL, 0, arith_rs, mop->dest_hi, rd, 31));
             return;
         }
-        if (ph2_ir->src0_is_unsigned) {
+        if (mop->src0_is_unsigned) {
             int shift = source_size == 2 ? 16 : 24;
             emit(__sll_amt(__AL, 0, logic_ls, rd, rn, shift));
             emit(__srl_amt(__AL, 0, logic_rs, rd, rd, shift));
@@ -891,14 +884,14 @@ void emit_ph2_ir(ph2_ir_t *ph2_ir)
          * zero-extend the source according to its original type.
          */
         emit(__mov_r(__AL, rd, rn));
-        if (ph2_ir->dest_hi >= 0) {
-            if (ph2_ir->src0_hi >= 0) {
-                if (ph2_ir->dest_hi != ph2_ir->src0_hi)
-                    emit(__mov_r(__AL, ph2_ir->dest_hi, ph2_ir->src0_hi));
-            } else if (ph2_ir->src0_is_unsigned || ph2_ir->src0_is_pointer)
-                emit(__zero(ph2_ir->dest_hi));
+        if (mop->dest_hi >= 0) {
+            if (mop->src0_hi >= 0) {
+                if (mop->dest_hi != mop->src0_hi)
+                    emit(__mov_r(__AL, mop->dest_hi, mop->src0_hi));
+            } else if (mop->src0_is_unsigned || mop->src0_is_pointer)
+                emit(__zero(mop->dest_hi));
             else
-                emit(__srl_amt(__AL, 0, arith_rs, ph2_ir->dest_hi, rn, 31));
+                emit(__srl_amt(__AL, 0, arith_rs, mop->dest_hi, rn, 31));
         }
         return;
     default:
@@ -1054,7 +1047,7 @@ void code_generate(void)
         emit(__bx(__AL, __lr));
     }
 
-    ph2_ir_visit_globals(emit_ph2_ir);
+    mop_visit_globals(emit_mop);
 
     /* prepare 'argc' and 'argv', then proceed to 'main' function */
     if (MAIN_BB) {
@@ -1092,9 +1085,9 @@ void code_generate(void)
         }
     }
 
-    for (int i = 0; i < ph2_ir_idx; i++) {
-        ph2_ir_t *ph2_ir = PH2_IR_FLATTEN[i];
-        emit_ph2_ir(ph2_ir);
+    for (int i = 0; i < mop_flat_count; i++) {
+        vir_mop_t *mop = MOP_FLAT[i];
+        emit_mop(mop);
     }
 }
 

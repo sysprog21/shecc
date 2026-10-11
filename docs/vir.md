@@ -18,7 +18,7 @@ flowchart TD
     V["Typed VIR: control flow, values, ordered effects"]
     O["Shared VIR optimizations"]
     L["Shared lowering: ABI, register allocation, edge copies, spills"]
-    P["Allocated PH2 machine operations"]
+    P["Allocated VIR machine operations"]
     T["Machine peepholes and target lowering"]
     E["Armv7 / AArch64 / RV32 / x86-64 emitter"]
     ELF["ELF output"]
@@ -31,9 +31,10 @@ optional transformations but retains both verification boundaries.
 
 VIR owns values, control flow, and ordered effects. The shared lowerer assigns
 physical registers, resolves edge copies, handles ABI boundaries, and allocates
-spill storage. `ph2_ir_t` holds the resulting machine operations consumed by
-all four emitters. Function graphs and analysis tables are released after
-lowering; PH2 contains the operands needed for emission.
+spill storage. Its output is VIR's machine layer: `vir_mop_t` machine
+operations, in machine blocks, that all four emitters consume. Function graphs
+and analysis tables are released after lowering; the machine operations carry
+every operand emission needs.
 
 Reachability follows calls and function addresses from `main` and global
 initialization. Used functions must have definitions unless dynamic linking
@@ -227,7 +228,7 @@ values for machine lowering.
 | `--dump-ir` | Print optimized live-function VIR to standard output. |
 | `--dump-vir` | Print optimized live-function VIR to standard error. If both dump options are present, standard output is used. |
 | `--dot` | Write the live-function VIR CFG in Graphviz DOT format and stop before machine emission. |
-| `--stats` | Print deterministic layout, phase, VIR, PH2, and arena counters to standard error. |
+| `--stats` | Print deterministic layout, phase, VIR, machine-operation, and arena counters to standard error. |
 | `--no-opt` | Skip the optional VIR optimizations (O0). |
 
 Textual graphs start with `function NAME`, followed by block definitions.
