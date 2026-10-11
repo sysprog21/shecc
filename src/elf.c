@@ -1112,6 +1112,13 @@ void elf_generate_dynamic_sections(void)
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, 0x1);
     if (libdl_name)
         elf_write_dyn(dynamic_sections.elf_dynamic, 0x1, libdl_name);
+
+    if (imm_binding) {
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x18,
+                      0x0); /* DT_BIND_NOW */
+        elf_write_dyn(dynamic_sections.elf_dynamic, 0x1e,
+                      0x8); /* DF_BIND_NOW */
+    }
     elf_write_dyn(dynamic_sections.elf_dynamic, 0x0, 0x0);
 }
 
