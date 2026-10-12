@@ -178,6 +178,12 @@
 #define ELF_IS_64 0
 #endif
 
+/* What a use inside one loop is worth against one in straight-line code when
+ * ranking values for a register, and how many nesting levels still multiply it.
+ */
+#define LOOP_USE_WEIGHT 8
+#define MAX_WEIGHTED_LOOP_DEPTH 4
+
 /* How many registers at the top of the allocator's file a call preserves. Only
  * such a register can hold a value across a call, so only these may be given to
  * a variable for the whole of a function that calls anything. A target states

@@ -248,14 +248,16 @@ at O0; a graph that nothing references is released unverified.
 The compiler invokes these passes in order. Sparse conditional constant
 propagation (SCCP) combines constant propagation with reachability analysis.
 Common subexpression elimination (CSE) and global value numbering (GVN) remove
-redundant computations. Loop-invariant code motion (LICM) moves eligible pure
-computations out of loops, and dead-code elimination (DCE) removes unused work.
+redundant computations. Reassociation moves a constant off a block-local operand
+onto one computed earlier, so it leaves a loop-carried chain. Loop-invariant
+code motion (LICM) moves eligible pure computations out of loops, and dead-code
+elimination (DCE) removes unused work.
 
 1. Remove unreachable blocks.
 2. SCCP and CFG simplification.
 3. Local CSE.
 4. GVN.
-5. LICM and pointer-induction strength reduction.
+5. Reassociation, LICM and pointer-induction strength reduction.
 6. Local CSE and DCE, including ordinary overwritten-store elimination.
 7. CFG simplification, then a final local CSE and DCE over the simplified graph.
 8. Full graph verification before dumps and machine lowering.
@@ -263,7 +265,7 @@ computations out of loops, and dead-code elimination (DCE) removes unused work.
 | Level | Scheduled transformations |
 | --- | --- |
 | O0 | Construction folds, unreachable-block removal, and mandatory verification; optional optimization passes return without transforming the graph. |
-| O2 (default) | SCCP, CFG simplification, local CSE, GVN, LICM, strength reduction, and DCE. |
+| O2 (default) | SCCP, CFG simplification, local CSE, GVN, reassociation, LICM, strength reduction, and DCE. |
 
 Pass-local tables are temporary. O0 does not allocate the optional CSE, GVN,
 loop, or optimization worklists. Mandatory verification still checks dominance,

@@ -119,6 +119,7 @@ static void optimize_native_graph(vir_function_t *graph)
     check_native_pass("cfg", vir_simplify_cfg(graph, level));
     check_native_pass("cse", vir_local_cse(graph, level));
     check_native_pass("gvn", vir_gvn_with_stats(graph, level, NULL));
+    check_native_pass("reassociate", vir_reassociate(graph, level));
     check_native_pass("licm", vir_licm(graph, level));
     int strengthened = vir_strength_reduce(graph, level);
     check_native_pass("strength", strengthened);

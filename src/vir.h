@@ -504,6 +504,7 @@ int vir_replace_all_uses(vir_function_t *func,
                          vir_value_t *to);
 int vir_local_cse(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level);
+int vir_reassociate(vir_function_t *func, vir_opt_level_t opt_level);
 
 /* Optional pass-local accounting; no state is retained in VIR objects. Stats
  * are zeroed before validation and before O0's no-work return. A failed table

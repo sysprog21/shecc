@@ -1209,6 +1209,21 @@ static void vir_affinity_queue_feeders(vir_affinity_queue_t *queue,
     }
 }
 
+/* Count @block into the body of the loop being walked under @mark, once. */
+static void vir_loop_body_visit(int *seen,
+                                int *depth,
+                                vir_block_t **work,
+                                int *pending,
+                                vir_block_t *block,
+                                int mark)
+{
+    if (seen[block->id] == mark)
+        return;
+    seen[block->id] = mark;
+    depth[block->id]++;
+    work[(*pending)++] = block;
+}
+
 /* Build conservative intervals from actual SSA uses and predecessor paths. Back
  * edges extend intervals through the loop, while short-lived values in a
  * straight block reuse the same homes. Buckets avoid sorting by source IDs.
@@ -1228,14 +1243,57 @@ static bool vir_machine_slots(vir_lower_t *lower)
     int *next_end = malloc(count * sizeof(int));
     int *heads = NULL, *ends = NULL, *pinned = NULL, *param_source = NULL;
     int *crosses = NULL, *order = NULL;
+    int *depth = calloc(function->next_block_id, sizeof(int));
     vir_affinity_queue_t queue = {0};
     bool success = false;
 
     lower->block_positions = calloc(function->next_block_id, sizeof(int));
     if (!values || !seen || !work || !free_slots || !next_start || !next_end ||
-        !lower->block_positions)
+        !lower->block_positions || !depth)
         goto done;
 
+    /* Loop depth of each block: one for every natural loop containing it. A
+     * loop is identified by its header, and its body is the union of what each
+     * back edge into the header reaches backward from its source, so a loop
+     * with several latches (a continue, say) still counts once.
+     */
+    int loops = 0;
+    for (vir_block_t *header = function->blocks; header;
+         header = header->next) {
+        int mark = 0, pending = 0;
+        for (vir_edge_t *back = header->incoming; back;
+             back = back->next_incoming) {
+            if (!vir_dominance_block_dominates(lower->dominance, header,
+                                               back->from))
+                continue;
+            if (!mark) {
+                mark = -++loops;
+                seen[header->id] = mark;
+                depth[header->id]++;
+            }
+            vir_loop_body_visit(seen, depth, work, &pending, back->from, mark);
+        }
+        while (pending) {
+            const vir_block_t *block = work[--pending];
+            for (vir_edge_t *edge = block->incoming; edge;
+                 edge = edge->next_incoming)
+                vir_loop_body_visit(seen, depth, work, &pending, edge->from,
+                                    mark);
+        }
+    }
+
+    /* From here on depth[] holds the weight of a use in each block: a use
+     * reloaded from memory costs once per iteration of every loop around it.
+     */
+    for (vir_block_t *block = function->blocks; block; block = block->next) {
+        int weight = 16;
+        for (int level = 0;
+             level < depth[block->id] && level < MAX_WEIGHTED_LOOP_DEPTH;
+             level++)
+            weight *= LOOP_USE_WEIGHT;
+        depth[block->id] = weight;
+    }
+    memset(seen, 0, function->next_block_id * sizeof(int));
     for (vir_block_t *block = function->blocks; block; block = block->next) {
         lower->block_positions[block->id] = positions;
         positions += block->next_order + 1;
@@ -1270,9 +1328,13 @@ static bool vir_machine_slots(vir_lower_t *lower)
             ordinary_uses += !use->edge;
             vir_block_t *block = vir_use_block(use);
             int used = lower->block_positions[block->id] + vir_use_order(use);
-            if (block != value->block)
-                score += 16;
-            else if (vir_use_order(use) > last_local_use)
+            if (block != value->block) {
+                /* A literal is rebuilt as cheaply inside a loop as outside. */
+                int weight = lower->locations[id].rematerializable
+                                 ? 16
+                                 : depth[block->id];
+                score = score > INT_MAX - weight ? INT_MAX : score + weight;
+            } else if (vir_use_order(use) > last_local_use)
                 last_local_use = vir_use_order(use);
             if (used > end)
                 end = used;
@@ -1289,7 +1351,7 @@ static bool vir_machine_slots(vir_lower_t *lower)
                 if (effect->kind == VIR_EFFECT_CALL &&
                     effect->order > value->order &&
                     effect->order < last_local_use)
-                    score += 16;
+                    score = score > INT_MAX - 16 ? INT_MAX : score + 16;
         while (pending) {
             const vir_block_t *block = work[--pending];
             int begin = lower->block_positions[block->id];
@@ -1553,6 +1615,7 @@ done:
     free(param_source);
     free(crosses);
     free(order);
+    free(depth);
     free(queue.queued);
     free(queue.pass);
     free(queue.next);

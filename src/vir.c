@@ -3913,6 +3913,22 @@ static bool vir_sr_descending_uses(vir_sr_descending_t *loop,
     return true;
 }
 
+/* Rebind operand @index of @user to @value. Fails only when the operand's use
+ * list has lost the use, which the verifier would report.
+ */
+static bool vir_rebind_operand(vir_value_t *user, int index, vir_value_t *value)
+{
+    vir_value_t **slot = index ? &user->op1 : &user->op0;
+    vir_use_t *use = (*slot)->uses;
+    while (use && (use->user != user || use->operand != index))
+        use = use->next;
+    if (!use)
+        return false;
+    vir_set_use_slot(slot, value, use);
+    return true;
+}
+
+/* Retarget the existing address without changing its effect ordering. */
 static vir_value_t *vir_sr_derived_pointer(vir_function_t *func,
                                            vir_block_t *pre,
                                            vir_value_t *address,
@@ -3925,18 +3941,88 @@ static vir_value_t *vir_sr_derived_pointer(vir_function_t *func,
     vir_value_t *delta = vir_const_int(func, pre, width, bias);
     if (!delta)
         return NULL;
-    for (int operand = 0; operand < 2; operand++) {
-        vir_value_t **slot = operand ? &address->op1 : &address->op0;
-        vir_use_t *use = (*slot)->uses;
-        while (use && (use->user != address || use->operand != operand))
-            use = use->next;
-        if (!use)
-            return NULL;
-        vir_set_use_slot(slot, operand ? delta : pointer, use);
-    }
+    if (!vir_rebind_operand(address, 0, pointer) ||
+        !vir_rebind_operand(address, 1, delta))
+        return NULL;
     return address;
 }
 
+/* A value computed in @block itself, as opposed to one that is ready on entry
+ * (a parameter, or a definition in a dominating block).
+ */
+static bool vir_reassociate_local(const vir_value_t *value,
+                                  const vir_block_t *block)
+{
+    return !value->is_block_param && value->block == block &&
+           !vir_is_constant(value);
+}
+
+/* Rewrite (local + ready) + C as local + (ready + C) when the inner sum has no
+ * other use. Integer addition wraps, so any grouping yields the same value; the
+ * constant then joins the operand that is ready on block entry, shortening a
+ * chain that runs through the local operand (a loop-carried recurrence such as
+ * a = a * k + i + C) by one addition.
+ */
+int vir_reassociate(vir_function_t *func, vir_opt_level_t opt_level)
+{
+    int changed = 0;
+    if (!func || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level == VIR_OPT_O0)
+        return 0;
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        for (vir_value_t *outer = block->head; outer; outer = outer->next) {
+            if (outer->opcode != VIR_OP_ADD ||
+                (outer->type != VIR_TYPE_I32 && outer->type != VIR_TYPE_I64))
+                continue;
+            int constant_index = vir_is_constant(outer->op1)   ? 1
+                                 : vir_is_constant(outer->op0) ? 0
+                                                               : -1;
+            if (constant_index < 0)
+                continue;
+            vir_value_t *constant = constant_index ? outer->op1 : outer->op0;
+            vir_value_t *inner = constant_index ? outer->op0 : outer->op1;
+            if (inner->opcode != VIR_OP_ADD || inner->type != outer->type ||
+                inner->block != block || !inner->uses || inner->uses->next ||
+                inner->uses->user != outer)
+                continue;
+            vir_value_t *local = inner->op0, *ready = inner->op1;
+            if (!vir_reassociate_local(local, block)) {
+                local = inner->op1;
+                ready = inner->op0;
+            }
+            if (!vir_reassociate_local(local, block) ||
+                vir_reassociate_local(ready, block) || vir_is_constant(ready))
+                continue;
+
+            /* inner becomes ready + C, so it must follow C: move it to just
+             * before outer. It is pure and its operands precede it already, and
+             * it precedes its user outer, so one walk finds both.
+             */
+            vir_value_t **link = &block->head;
+            while (*link != inner)
+                link = &(*link)->next;
+            *link = inner->next;
+            while (*link != outer)
+                link = &(*link)->next;
+            inner->next = outer;
+            *link = inner;
+            inner->order = outer->order;
+            vir_repair_value_positions(block);
+            vir_value_t *first = ready, *second = constant;
+            vir_order_commutative(&first, &second);
+            vir_rebind_operand(inner, 0, first);
+            vir_rebind_operand(inner, 1, second);
+            first = local;
+            second = inner;
+            vir_order_commutative(&first, &second);
+            vir_rebind_operand(outer, 0, first);
+            vir_rebind_operand(outer, 1, second);
+            changed++;
+        }
+    }
+    return changed;
+}
 
 /* Reduce proven bounded ascending or widened unsigned descending counters to
  * pointer recurrences; retire counters when a pointer endpoint suffices.
