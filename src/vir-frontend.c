@@ -955,7 +955,6 @@ static void native_complete_bindings(native_function_t *ctx)
 }
 static void native_finish(native_function_t *ctx)
 {
-    char *error = NULL;
     if (ctx->finished)
         return;
     native_flush_call(ctx, NULL);
@@ -1037,13 +1036,16 @@ static void native_finish(native_function_t *ctx)
             native_require(vir_effect_remove(&ctx->graph, store->effect),
                            "unused local storage");
     native_require(vir_remove_unreachable(&ctx->graph), "CFG reachability");
-    if (!vir_verify(&ctx->graph, &error)) {
-        fprintf(stderr, "VIR function %s: %s\n",
-                ctx->source->return_def.var_name, error ? error : "invalid");
-        free(error);
-        fatal("Native VIR verification failed");
-    }
-    /* Variable bindings only matter while the graph is being built. */
+
+    /* No vir_verify here. Every graph that is dumped, drawn or lowered first
+     * passes through optimize_native_graph() in main.c, which verifies the
+     * optimized result; a frontend defect survives the passes into that check.
+     * Graphs of unreferenced functions are released unlowered, so checking them
+     * too bought nothing but a second full verification of every function,
+     * about 8% of a self-compile.
+     *
+     * Variable bindings only matter while the graph is being built.
+     */
     vir_ssa_release(ctx->ssa);
     ctx->ssa = NULL;
     ctx->finished = true;

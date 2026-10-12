@@ -589,6 +589,7 @@ static vir_value_t *vir_new_value(vir_function_t *func,
     else
         block->head = value;
     block->tail = value;
+    value->member = value;
     return value;
 }
 
@@ -633,6 +634,81 @@ vir_value_t *vir_const_ptr(vir_function_t *func,
     return vir_const(func, block, VIR_TYPE_PTR, bits);
 }
 
+static unsigned int vir_root_hash(vir_address_kind_t kind,
+                                  unsigned int slot,
+                                  const char *name)
+{
+    unsigned int hash = 2166136261u;
+
+    if (kind != VIR_ADDRESS_STACK) {
+        for (; name && *name; name++)
+            hash = (hash ^ (unsigned char) *name) * 16777619u;
+        return hash;
+    }
+    return slot * 2654435761u;
+}
+
+static unsigned int vir_root_bucket(vir_address_kind_t kind,
+                                    unsigned int slot,
+                                    const char *name,
+                                    int capacity)
+{
+    return vir_root_hash(kind, slot, name) & (unsigned int) (capacity - 1);
+}
+
+/* Address values are indexed when created; a root's slot or name never changes
+ * afterwards (only its size may be refined), so the bucket stays valid. The
+ * table lives in the function's arena: a separate heap table would cost a whole
+ * page per function under shecc's own malloc. A grown table leaves the old one
+ * behind, at most doubling its footprint.
+ */
+static bool vir_root_index_insert(vir_function_t *func, vir_value_t *value)
+{
+    if (func->root_count >= func->root_capacity / 2) {
+        int capacity = func->root_capacity ? func->root_capacity * 2 : 64;
+        vir_value_t **table;
+
+        if (capacity > INT_MAX / (int) sizeof(*table) / 2)
+            return false;
+        table = vir_arena_alloc(&func->arena, capacity * (int) sizeof(*table));
+        if (!table)
+            return false;
+        memset(table, 0, (size_t) capacity * sizeof(*table));
+        for (int i = 0; i < func->root_capacity; i++) {
+            vir_value_t *entry = func->root_table[i];
+            while (entry) {
+                vir_value_t *next = entry->root_next;
+                unsigned int bucket =
+                    vir_root_bucket(entry->address_kind, entry->address_slot,
+                                    entry->address_name, capacity);
+                entry->root_next = table[bucket];
+                table[bucket] = entry;
+                entry = next;
+            }
+        }
+        func->root_table = table;
+        func->root_capacity = capacity;
+    }
+    if (value) {
+        unsigned int bucket =
+            vir_root_bucket(value->address_kind, value->address_slot,
+                            value->address_name, func->root_capacity);
+        value->root_next = func->root_table[bucket];
+        func->root_table[bucket] = value;
+        func->root_count++;
+    }
+    return true;
+}
+
+/* Whether @value sits in the value list of a block of @func. Removal clears
+ * @member, so only stale block metadata needs the full scan.
+ */
+static bool vir_value_listed(const vir_function_t *func,
+                             const vir_value_t *value)
+{
+    return value->member == value && vir_has_value(func, value);
+}
+
 static bool vir_address_root_conflicts(const vir_function_t *func,
                                        vir_address_kind_t kind,
                                        unsigned int slot,
@@ -640,22 +716,24 @@ static bool vir_address_root_conflicts(const vir_function_t *func,
                                        unsigned int size,
                                        unsigned int alignment)
 {
-    const vir_block_t *block;
+    if (!func->root_capacity)
+        return 0;
+    unsigned int bucket =
+        vir_root_bucket(kind, slot, name, func->root_capacity);
+    for (const vir_value_t *value = func->root_table[bucket]; value;
+         value = value->root_next) {
+        bool same_root = kind == VIR_ADDRESS_STACK
+                             ? value->opcode == VIR_OP_STACK_ADDR &&
+                                   value->address_slot == slot
+                             : value->opcode == VIR_OP_GLOBAL_ADDR &&
+                                   value->address_name &&
+                                   !strcmp(value->address_name, name);
 
-    for (block = func->blocks; block; block = block->next) {
-        const vir_value_t *value;
-        for (value = block->head; value; value = value->next) {
-            bool same_root = kind == VIR_ADDRESS_STACK
-                                 ? value->opcode == VIR_OP_STACK_ADDR &&
-                                       value->address_slot == slot
-                                 : value->opcode == VIR_OP_GLOBAL_ADDR &&
-                                       value->address_name &&
-                                       !strcmp(value->address_name, name);
-
-            if (same_root && (value->address_size != size ||
-                              value->address_alignment != alignment))
-                return 1;
-        }
+        if (same_root &&
+            (value->address_size != size ||
+             value->address_alignment != alignment) &&
+            vir_value_listed(func, value))
+            return 1;
     }
     return 0;
 }
@@ -674,7 +752,8 @@ static vir_value_t *new_addr(vir_function_t *func,
     if (!vir_has_block(func, block) || !vir_type_width(func, VIR_TYPE_PTR) ||
         !size || !vir_valid_alignment(alignment) ||
         (kind == VIR_ADDRESS_GLOBAL && (!name || !*name)) ||
-        vir_address_root_conflicts(func, kind, slot, name, size, alignment))
+        vir_address_root_conflicts(func, kind, slot, name, size, alignment) ||
+        !vir_root_index_insert(func, NULL))
         return NULL;
     if (kind == VIR_ADDRESS_GLOBAL) {
         size_t length = strlen(name) + 1;
@@ -695,6 +774,7 @@ static vir_value_t *new_addr(vir_function_t *func,
     value->address_size = size;
     value->address_alignment = alignment;
     value->address_name = copy;
+    vir_root_index_insert(func, value);
     return value;
 }
 
@@ -757,6 +837,7 @@ static void vir_block_append_param(vir_block_t *block, vir_value_t *param)
     param->is_block_param = 1;
     param->opcode = VIR_OP_PARAM;
     param->block = block;
+    param->member = param;
     if (block->last_param)
         block->last_param->param_next = param;
     else
@@ -1946,6 +2027,7 @@ bool vir_effect_remove(vir_function_t *func, vir_effect_t *effect)
             return false;
         *value_link = effect->result->next;
         effect->result->next = NULL;
+        effect->result->member = NULL;
         effect->result->def_effect = NULL;
     }
     vir_remove_effect_uses(effect);
@@ -2620,6 +2702,7 @@ int vir_dce_with_stats(vir_function_t *func,
 
             if (dead[value->id]) {
                 *link = value->next;
+                value->member = NULL;
                 removed++;
             } else {
                 link = &value->next;
@@ -3219,6 +3302,7 @@ static void vir_param_edit_apply(vir_block_t *block,
         if (block->last_param == param)
             block->last_param = previous;
         block->param_count--;
+        param->member = NULL;
     }
 }
 
@@ -3320,20 +3404,15 @@ static bool vir_has_value_with_context(const vir_function_t *func,
     if (!needle)
         return false;
 
-    /* Most queries find the value in its recorded block. Keep the full scan as
-     * a fallback for detached values and malformed ownership metadata.
+    /* A value still linked into a block of this function answers in O(1): only
+     * vir.c links and unlinks values, and it keeps @member in step. Keep the
+     * full scan as a fallback for detached values, struct copies and malformed
+     * ownership metadata.
      */
-    if (dominance ? vir_dominance_index(dominance, needle->block) >= 0
-                  : vir_has_block(func, needle->block)) {
-        for (const vir_value_t *value = needle->block->params; value;
-             value = value->param_next)
-            if (value == needle)
-                return true;
-        for (const vir_value_t *value = needle->block->head; value;
-             value = value->next)
-            if (value == needle)
-                return true;
-    }
+    if (needle->member == needle &&
+        (dominance ? vir_dominance_index(dominance, needle->block) >= 0
+                   : vir_has_block(func, needle->block)))
+        return true;
     return vir_count_values(func, needle, 0) != 0;
 }
 
@@ -3913,7 +3992,6 @@ static bool vir_sr_descending_uses(vir_sr_descending_t *loop,
     return true;
 }
 
-/* Retarget the existing address without changing its effect ordering. */
 static vir_value_t *vir_sr_derived_pointer(vir_function_t *func,
                                            vir_block_t *pre,
                                            vir_value_t *address,
@@ -3937,6 +4015,7 @@ static vir_value_t *vir_sr_derived_pointer(vir_function_t *func,
     }
     return address;
 }
+
 
 /* Reduce proven bounded ascending or widened unsigned descending counters to
  * pointer recurrences; retire counters when a pointer endpoint suffices.
@@ -5473,7 +5552,17 @@ typedef struct vir_ssa_binding {
     vir_value_t *param;
     struct vir_ssa_binding *next;
     struct vir_ssa_binding *block_next;
+    /* Chains of the (block, variable) and parameter hash indexes. */
+    struct vir_ssa_binding *variable_next;
+    struct vir_ssa_binding *param_next;
 } vir_ssa_binding_t;
+
+/* Open hash of bindings: a lookup no longer walks every binding of a block. */
+typedef struct {
+    vir_ssa_binding_t **slots;
+    int capacity;
+    int count;
+} vir_ssa_index_t;
 
 typedef struct vir_ssa_block_state {
     vir_block_t *block;
@@ -5491,6 +5580,10 @@ struct vir_ssa {
     vir_ssa_binding_t *spare;
     vir_ssa_block_state_t **blocks;
     int block_capacity;
+    vir_ssa_index_t by_variable;
+    vir_ssa_index_t by_param;
+    /* Set if an index could not grow; lookups then walk the block lists. */
+    int unindexed;
 };
 
 static vir_ssa_binding_t *vir_ssa_new_binding(vir_ssa_t *ssa)
@@ -5518,6 +5611,88 @@ static vir_ssa_block_state_t *vir_ssa_find_block(const vir_ssa_t *ssa,
     return state && state->block == block ? state : NULL;
 }
 
+/* The by-parameter index hashes @param alone; the by-variable index hashes
+ * @block and @variable.
+ */
+static unsigned int vir_ssa_hash(const vir_block_t *block,
+                                 unsigned int variable,
+                                 const vir_value_t *param)
+{
+    return param ? (unsigned int) param->id * 2654435761u
+                 : (unsigned int) block->id * 2654435761u ^ variable * 40503u;
+}
+
+static unsigned int vir_ssa_key(const vir_ssa_binding_t *binding, bool by_param)
+{
+    return vir_ssa_hash(binding->block, binding->variable,
+                        by_param ? binding->param : NULL);
+}
+
+static vir_ssa_binding_t **vir_ssa_chain(vir_ssa_binding_t *binding,
+                                         bool by_param)
+{
+    return by_param ? &binding->param_next : &binding->variable_next;
+}
+
+static void vir_ssa_index_insert(vir_ssa_t *ssa,
+                                 vir_ssa_binding_t *binding,
+                                 bool by_param)
+{
+    vir_ssa_index_t *index = by_param ? &ssa->by_param : &ssa->by_variable;
+
+    if (ssa->unindexed)
+        return;
+    if (index->count >= index->capacity / 2) {
+        int capacity = index->capacity ? index->capacity * 2 : 256;
+        vir_ssa_binding_t **slots =
+            capacity <= INT_MAX / (int) sizeof(*slots) / 2
+                ? calloc((size_t) capacity, sizeof(*slots))
+                : NULL;
+        if (!slots) {
+            ssa->unindexed = 1;
+            return;
+        }
+        for (int i = 0; i < index->capacity; i++) {
+            vir_ssa_binding_t *entry = index->slots[i];
+            while (entry) {
+                vir_ssa_binding_t *next = *vir_ssa_chain(entry, by_param);
+                unsigned int bucket = vir_ssa_key(entry, by_param) &
+                                      (unsigned int) (capacity - 1);
+                *vir_ssa_chain(entry, by_param) = slots[bucket];
+                slots[bucket] = entry;
+                entry = next;
+            }
+        }
+        free(index->slots);
+        index->slots = slots;
+        index->capacity = capacity;
+    }
+    unsigned int bucket =
+        vir_ssa_key(binding, by_param) & (unsigned int) (index->capacity - 1);
+    *vir_ssa_chain(binding, by_param) = index->slots[bucket];
+    index->slots[bucket] = binding;
+    index->count++;
+}
+
+static void vir_ssa_index_remove(vir_ssa_t *ssa,
+                                 vir_ssa_binding_t *binding,
+                                 bool by_param)
+{
+    vir_ssa_index_t *index = by_param ? &ssa->by_param : &ssa->by_variable;
+
+    if (ssa->unindexed || !index->capacity)
+        return;
+    vir_ssa_binding_t **link =
+        &index->slots[vir_ssa_key(binding, by_param) &
+                      (unsigned int) (index->capacity - 1)];
+    while (*link && *link != binding)
+        link = vir_ssa_chain(*link, by_param);
+    if (*link) {
+        *link = *vir_ssa_chain(binding, by_param);
+        index->count--;
+    }
+}
+
 static void vir_ssa_link_binding(vir_ssa_t *ssa,
                                  vir_ssa_block_state_t *state,
                                  vir_ssa_binding_t *binding)
@@ -5526,6 +5701,9 @@ static void vir_ssa_link_binding(vir_ssa_t *ssa,
     ssa->bindings = binding;
     binding->block_next = state->bindings;
     state->bindings = binding;
+    vir_ssa_index_insert(ssa, binding, false);
+    if (binding->param)
+        vir_ssa_index_insert(ssa, binding, true);
 }
 
 bool vir_ssa_discard_variable(vir_ssa_t *ssa, unsigned int variable)
@@ -5565,6 +5743,9 @@ bool vir_ssa_discard_variable(vir_ssa_t *ssa, unsigned int variable)
             local = &(*local)->block_next;
         *local = binding->block_next;
         *link = binding->next;
+        vir_ssa_index_remove(ssa, binding, false);
+        if (binding->param)
+            vir_ssa_index_remove(ssa, binding, true);
         vir_ssa_drop_binding(ssa, binding);
     }
     return true;
@@ -5575,6 +5756,24 @@ static vir_ssa_binding_t *vir_ssa_find_binding(const vir_ssa_t *ssa,
                                                unsigned int variable,
                                                const vir_value_t *param)
 {
+    if (!ssa->unindexed) {
+        const vir_ssa_index_t *index =
+            param ? &ssa->by_param : &ssa->by_variable;
+        unsigned int hash;
+
+        if (!index->capacity || !block)
+            return NULL;
+        hash = vir_ssa_hash(block, variable, param);
+        for (vir_ssa_binding_t *binding =
+                 index->slots[hash & (unsigned int) (index->capacity - 1)];
+             binding;
+             binding = param ? binding->param_next : binding->variable_next)
+            if (binding->block == block &&
+                (param ? binding->param == param
+                       : binding->variable == variable))
+                return binding;
+        return NULL;
+    }
     vir_ssa_block_state_t *state = vir_ssa_find_block(ssa, block);
     for (vir_ssa_binding_t *binding = state ? state->bindings : NULL; binding;
          binding = binding->block_next)
@@ -5643,6 +5842,8 @@ void vir_ssa_release(vir_ssa_t *ssa)
         return;
     vir_arena_release(&ssa->arena);
     free(ssa->blocks);
+    free(ssa->by_variable.slots);
+    free(ssa->by_param.slots);
     free(ssa);
 }
 
@@ -5880,6 +6081,7 @@ static int vir_ssa_seal_with_context(vir_ssa_t *ssa,
         vir_param_edit_apply(block, trivial_params[i].param,
                              &trivial_params[i].edit);
         trivial_params[i].binding->value = trivial_params[i].candidate;
+        vir_ssa_index_remove(ssa, trivial_params[i].binding, true);
         trivial_params[i].binding->param = NULL;
     }
     for (i = 0; i < trivial_count; i++)

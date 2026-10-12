@@ -25,9 +25,9 @@ flowchart TD
     C --> V --> O --> L --> P --> T --> E --> ELF
 ```
 
-The frontend verifies VIR after construction. A second verification follows
-optimization, before dumps or machine lowering. At O0, the compiler skips
-optional transformations but retains both verification boundaries.
+The compiler verifies each graph after optimization, before dumps or machine
+lowering; a graph that nothing references is released unverified. At O0, the
+compiler skips optional transformations but still verifies.
 
 VIR owns values, control flow, and ordered effects. The shared lowerer assigns
 physical registers, resolves edge copies, handles ABI boundaries, and allocates
@@ -155,7 +155,7 @@ merges, effects, and ABI information are represented alongside those values.
   rather than being duplicated across the four backends.
 - **A standalone, verified core.** Unit tests (`tests/vir-core.c`) and a
   structural fuzzer (`tests/vir-fuzz.c`) exercise the core independently of
-  the frontend. Every graph is verified after construction and again after
+  the frontend. Every graph that is dumped or lowered is verified after
   optimization, at every level, and dumps are deterministic.
 
 ### Benefits and tradeoffs
@@ -241,9 +241,9 @@ their existing target-specific behavior.
 
 ## Optimization and verification
 
-Frontend completion always seals SSA bindings, removes unreachable blocks,
-and verifies the constructed graph. Each live graph is verified again after
-optimization, including at O0.
+Frontend completion always seals SSA bindings and removes unreachable blocks.
+Every graph that is dumped or lowered is verified after optimization, including
+at O0; a graph that nothing references is released unverified.
 
 The compiler invokes these passes in order. Sparse conditional constant
 propagation (SCCP) combines constant propagation with reachability analysis.

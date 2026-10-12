@@ -77,6 +77,14 @@ struct vir_value {
     int is_block_param;
     vir_effect_t *def_effect;
 
+    /* The value itself while it is linked into value->block's value or
+     * parameter list, NULL once removed. A struct copy never matches, so
+     * membership is one comparison instead of a list scan.
+     */
+    vir_value_t *member;
+    /* Next address value in the function's root index bucket. */
+    vir_value_t *root_next;
+
     /* Root-object metadata exists only on VIR_OP_{STACK,GLOBAL}_ADDR. The
      * slot/name is stable source-independent provenance, not a backend offset.
      */
@@ -222,6 +230,13 @@ typedef struct {
     int block_capacity;
     int next_value_id;
     int next_block_id;
+
+    /* Every STACK_ADDR/GLOBAL_ADDR value ever created, hashed by its root (slot
+     * or name), so root-consistency checks need not scan the graph.
+     */
+    vir_value_t **root_table;
+    int root_capacity;
+    int root_count;
     /* Selected target layout, never inferred from the compiler host. */
     int pointer_bits;
 } vir_function_t;

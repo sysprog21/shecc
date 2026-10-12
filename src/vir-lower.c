@@ -1111,6 +1111,31 @@ static bool vir_machine_crosses_call_cached(vir_lower_t *lower,
     return known[value->id] == 2;
 }
 
+/* Sort the @n value IDs in @ids by descending @score, keeping ascending ID
+ * among equal scores, using @tmp as scratch: a bottom-up merge, stable because
+ * each merge takes the left run on a tie.
+ */
+static void vir_machine_sort_by_score(int *ids,
+                                      int *tmp,
+                                      int n,
+                                      const int *score)
+{
+    for (int width = 1; width < n; width *= 2) {
+        for (int lo = 0; lo < n; lo += 2 * width) {
+            int mid = lo + width < n ? lo + width : n;
+            int hi = lo + 2 * width < n ? lo + 2 * width : n;
+            int i = lo, j = mid, k = lo;
+            while (i < mid && j < hi)
+                tmp[k++] = score[ids[j]] > score[ids[i]] ? ids[j++] : ids[i++];
+            while (i < mid)
+                tmp[k++] = ids[i++];
+            while (j < hi)
+                tmp[k++] = ids[j++];
+        }
+        memcpy(ids, tmp, n * sizeof(int));
+    }
+}
+
 /* Every value sharing physical lanes must survive either definition safely.
  * @pinned lists the IDs of the @count values given a fixed register.
  */
@@ -1135,6 +1160,55 @@ static bool vir_machine_pin_safe(vir_lower_t *lower,
     return true;
 }
 
+/* Phi-affinity worklist. Only fixing a block parameter can make a value that
+ * feeds it pinnable, so a pin queues the arguments its incoming edges pass
+ * instead of rescanning every value. Each value is visited in the order the
+ * repeated ascending scans would reach it: @pass holds the IDs still ahead of
+ * the scan, sorted, and @next those it has already passed.
+ */
+typedef struct {
+    int *queued; /* 1 while in @pass, 2 while in @next */
+    int *pass;
+    int *next;
+    int at;
+    int pass_count;
+    int next_count;
+} vir_affinity_queue_t;
+
+static void vir_affinity_queue_feeders(vir_affinity_queue_t *queue,
+                                       vir_value_t **values,
+                                       int count,
+                                       const vir_value_t *param,
+                                       int cursor)
+{
+    int index = 0;
+    for (const vir_value_t *cursor_param = param->block->params;
+         cursor_param && cursor_param != param;
+         cursor_param = cursor_param->param_next)
+        index++;
+    for (vir_edge_t *edge = param->block->incoming; edge;
+         edge = edge->next_incoming) {
+        if (index >= edge->arg_count)
+            continue;
+        vir_value_t *value = edge->args[index];
+        int id = value ? value->id : -1;
+        if (id < 0 || id >= count || values[id] != value)
+            continue;
+        if (id > cursor) {
+            if (queue->queued[id] == 1)
+                continue;
+            int at = queue->pass_count++;
+            for (; at > queue->at && queue->pass[at - 1] > id; at--)
+                queue->pass[at] = queue->pass[at - 1];
+            queue->pass[at] = id;
+            queue->queued[id] = 1;
+        } else if (queue->queued[id] != 2) {
+            queue->queued[id] = 2;
+            queue->next[queue->next_count++] = id;
+        }
+    }
+}
+
 /* Build conservative intervals from actual SSA uses and predecessor paths. Back
  * edges extend intervals through the loop, while short-lived values in a
  * straight block reuse the same homes. Buckets avoid sorting by source IDs.
@@ -1153,13 +1227,15 @@ static bool vir_machine_slots(vir_lower_t *lower)
     int *next_start = malloc(count * sizeof(int));
     int *next_end = malloc(count * sizeof(int));
     int *heads = NULL, *ends = NULL, *pinned = NULL, *param_source = NULL;
-    int *crosses = NULL;
+    int *crosses = NULL, *order = NULL;
+    vir_affinity_queue_t queue = {0};
     bool success = false;
 
     lower->block_positions = calloc(function->next_block_id, sizeof(int));
     if (!values || !seen || !work || !free_slots || !next_start || !next_end ||
         !lower->block_positions)
         goto done;
+
     for (vir_block_t *block = function->blocks; block; block = block->next) {
         lower->block_positions[block->id] = positions;
         positions += block->next_order + 1;
@@ -1273,7 +1349,12 @@ static bool vir_machine_slots(vir_lower_t *lower)
     unsigned int argument_regs = 0;
     param_source = malloc(count * sizeof(int));
     crosses = calloc(count, sizeof(int));
-    if (!param_source || !crosses)
+    order = malloc(count * 2 * sizeof(int));
+    queue.queued = calloc(count, sizeof(int));
+    queue.pass = malloc(count * sizeof(int));
+    queue.next = malloc(count * sizeof(int));
+    if (!param_source || !crosses || !order || !queue.queued || !queue.pass ||
+        !queue.next)
         goto done;
 
     /* With no call in the function, no value crosses one. */
@@ -1307,15 +1388,24 @@ static bool vir_machine_slots(vir_lower_t *lower)
                     argument_regs |= 1u << cursor;
         }
     }
+
+    /* Each round pins the best-scoring value that still fits a lane, the lower
+     * ID among equal scores. A value that fits no lane fits none once more are
+     * pinned, so it drops out for good, and the candidates can be ranked once:
+     * every round resumes where the last one stopped.
+     */
+    int candidates = 0, cursor = 0;
+    for (int id = 0; id < count; id++)
+        if (values[id] && lower->locations[id].fixed < 0 && free_slots[id] > 0)
+            order[candidates++] = id;
+    vir_machine_sort_by_score(order, order + count, candidates, free_slots);
     while (true) {
         vir_value_t *best = NULL;
-        int best_score = 0, best_reg = -1;
-        for (int id = 0; id < count; id++) {
+        int best_reg = -1;
+        for (; !best && cursor < candidates; cursor++) {
+            int id = order[cursor];
             vir_value_t *value = values[id];
-            if (!value || lower->locations[id].fixed >= 0)
-                continue;
-            int score = free_slots[id];
-            if (score <= best_score)
+            if (lower->locations[id].fixed >= 0)
                 continue;
             int words = vir_machine_pair(lower, value) ? 2 : 1;
             int reg = -1;
@@ -1350,10 +1440,8 @@ static bool vir_machine_slots(vir_lower_t *lower)
                 reg = -1;
             if (reg >= 0) {
                 best = value;
-                best_score = score;
                 best_reg = reg;
-            } else
-                free_slots[id] = 0;
+            }
         }
         if (!best)
             break;
@@ -1367,12 +1455,33 @@ static bool vir_machine_slots(vir_lower_t *lower)
         /* Phi affinity extends a pin through values feeding the same family.
          * Checking both directions against every member prevents alternate
          * branch results from overwriting one another before their outgoing
-         * copies.
+         * copies. This visits exactly the values that repeating ascending scans
+         * to a fixed point would pin, in the same order: a value is pinnable
+         * only once every parameter it feeds is fixed, and further pins only
+         * make vir_machine_pin_safe() stricter.
          */
-        bool changed = best->is_block_param;
-        while (changed) {
-            changed = false;
-            for (int id = 0; id < count; id++) {
+        queue.at = queue.pass_count = queue.next_count = 0;
+        if (best->is_block_param)
+            vir_affinity_queue_feeders(&queue, values, count, best, -1);
+        while (queue.at < queue.pass_count || queue.next_count) {
+            if (queue.at == queue.pass_count) {
+                /* The scan wraps: start the next pass in ascending order. */
+                for (int i = 1; i < queue.next_count; i++) {
+                    int id = queue.next[i], at = i;
+                    for (; at > 0 && queue.next[at - 1] > id; at--)
+                        queue.next[at] = queue.next[at - 1];
+                    queue.next[at] = id;
+                }
+                for (int i = 0; i < queue.next_count; i++) {
+                    queue.pass[i] = queue.next[i];
+                    queue.queued[queue.next[i]] = 1;
+                }
+                queue.pass_count = queue.next_count;
+                queue.at = queue.next_count = 0;
+            }
+            {
+                int id = queue.pass[queue.at++];
+                queue.queued[id] = 0;
                 vir_value_t *value = values[id];
                 if (!value || !value->uses || lower->locations[id].fixed >= 0 ||
                     value->def_effect)
@@ -1409,7 +1518,9 @@ static bool vir_machine_slots(vir_lower_t *lower)
                 lower->locations[id].high =
                     vir_machine_pair(lower, value) ? fixed + 1 : -1;
                 pinned[pinned_count++] = id;
-                changed = true;
+                if (value->is_block_param)
+                    vir_affinity_queue_feeders(&queue, values, count, value,
+                                               id);
             }
         }
     }
@@ -1441,6 +1552,10 @@ done:
     free(pinned);
     free(param_source);
     free(crosses);
+    free(order);
+    free(queue.queued);
+    free(queue.pass);
+    free(queue.next);
     return success;
 }
 
