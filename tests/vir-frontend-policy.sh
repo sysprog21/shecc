@@ -25,27 +25,20 @@ case "$1" in
         ;;
 esac
 
-frontend_flag=--dump-vir
 check_policy_workload()
 {
-    local name=$1 source=$2 _function_name=$3 expected_exit=$4
+    local name=$1 source=$2 expected_exit=$3
 
     for opt in 0 2; do
         opt_flags=()
         [ "$opt" -eq 2 ] || opt_flags=(--no-opt)
         local plain="$PWD/out/vir-frontend-$name-plain-o$opt-$suffix"
-        local output="$PWD/out/vir-frontend-$name-verified-o$opt-$suffix"
-        local stats="$output.stats"
-        local dump_option=()
-
-        if [ "$name" = multi-latch ] && [ "$opt" -eq 2 ]; then
-            dump_option=(--dump-vir)
-        fi
+        local output="$PWD/out/vir-frontend-$name-dumped-o$opt-$suffix"
+        local dump="$output.vir"
 
         "${compiler[@]}" "${opt_flags[@]}" -o "$plain" "$source"
-        "${compiler[@]}" "${opt_flags[@]}" --stats "${dump_option[@]}" \
-            "$frontend_flag" \
-            -o "$output" "$source" 2> "$stats"
+        "${compiler[@]}" "${opt_flags[@]}" --dump-vir \
+            -o "$output" "$source" 2> "$dump"
         cmp "$plain" "$output"
         if "${runner[@]}" "$output"; then
             actual_exit=0
@@ -58,7 +51,7 @@ check_policy_workload()
 
             # The entry jump and two loop-latch jumps must all target the loop
             # header; this guards against collapsing to a single latch.
-            vir_extract_callee main "$stats" | awk '
+            vir_extract_callee main "$dump" | awk '
                 index($0, "  jump b") == 1 {
                     target = substr($0, 8)
                     open = index(target, "(")
@@ -76,7 +69,7 @@ check_policy_workload()
     done
 }
 
-check_policy_workload gvn tests/vir-frontend-gvn.c gvn_cross 21
-check_policy_workload nested-loop tests/vir-frontend-nested-loop.c nested_licm 159
-check_policy_workload licm tests/vir-frontend-licm.c hoist 20
-check_policy_workload multi-latch tests/vir-frontend-multi-latch.c multi_latch 0
+check_policy_workload gvn tests/vir-frontend-gvn.c 21
+check_policy_workload nested-loop tests/vir-frontend-nested-loop.c 159
+check_policy_workload licm tests/vir-frontend-licm.c 20
+check_policy_workload multi-latch tests/vir-frontend-multi-latch.c 0

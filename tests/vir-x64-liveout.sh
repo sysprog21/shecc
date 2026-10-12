@@ -2,18 +2,22 @@
 set -euo pipefail
 task_dir=$(mktemp -d)
 trap 'rm -rf "$task_dir"' EXIT
-cc=${CC:-cc}
+read -r -a cc <<< "${CC:-cc}"
 
 # Build a test compiler that replaces two parsed placeholders with independent
 # VIR and machine-operation graphs. --no-folds is private to this harness, not a
 # compiler option.
+#
+# The hook goes in before the one peephole() call. Had that line changed, sed
+# would leave the compiler unhooked and the test would pass untested.
+[[ $(grep -c '^    peephole();$' src/main.c) == 1 ]]
 sed 's/    peephole();/    liveout_test_hook(); mop_compute_liveness(); peephole();/' src/main.c > "$task_dir/main.c"
 # Disable lookahead only in this temporary test compiler.
 sed '/^void emit_mop(vir_mop_t \*mop)$/,/^{/ { /^{$/a\
     if (liveout_no_folds) { folds_off = true; emit_next_ir = NULL; }
 }' src/x64-codegen.c > "$task_dir/codegen.c"
 [[ $(grep -Fc 'if (liveout_no_folds)' "$task_dir/codegen.c") == 1 ]]
-"$cc" -O0 -g -std=c99 -fwrapv \
+"${cc[@]}" -O0 -g -std=c99 -fwrapv \
     "-DVIR_LIVEOUT_TEST_MAIN=\"$task_dir/main.c\"" -iquote "$task_dir" -iquote src -Isrc \
     tests/vir-x64-liveout.c -o "$task_dir/compiler"
 cat > "$task_dir/source.c" << 'SOURCE'

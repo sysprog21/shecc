@@ -5,12 +5,12 @@ static int shared(int value)
 
 int (*saved)(int) = shared;
 
-int legacy_user(int value)
+int caller(int value)
 {
     return saved(value);
 }
 
 int main(void)
 {
-    return shared(10) + legacy_user(18);
+    return shared(10) + caller(18);
 }

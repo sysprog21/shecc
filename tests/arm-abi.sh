@@ -208,40 +208,6 @@ run_abi_test()
 
 # Parameter Passing Tests
 
-test_one_arg()
-{
-    run_abi_test "One argument (r0)" "Parameter Passing" '
-#include <stdio.h>
-int add_42(int x) { return x + 42; }
-int main() {
-    int result = add_42(8);
-    if (result == 50) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 50, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
-test_two_args()
-{
-    run_abi_test "Two arguments (r0, r1)" "Parameter Passing" '
-#include <stdio.h>
-int add(int a, int b) { return a + b; }
-int main() {
-    int result = add(10, 20);
-    if (result == 30) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 30, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
 test_four_args()
 {
     run_abi_test "Four arguments (r0-r3)" "Parameter Passing" '
@@ -706,8 +672,6 @@ int main() {
 # Run all tests
 
 echo -e "${CYAN}Running Parameter Passing Tests...${NC}"
-test_one_arg
-test_two_args
 test_four_args
 test_five_args
 test_eight_args

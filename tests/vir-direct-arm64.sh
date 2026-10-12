@@ -46,555 +46,193 @@ run_dynamic()
     "${dynamic_runner[@]}" "$@"
 }
 
+# Run a binary through the static or dynamic runner and require its status.
+run_status()
+{
+    local mode=$1 expected=$2
+    shift 2
+    vir_expect_status "$expected" "run_$mode" "$@"
+}
+
+# Most fixtures are tests/vir-direct-arm64-NAME.c; the shared ones drop the
+# target from their name.
+fixture_source()
+{
+    local name=$1
+
+    if test "$name" = direct; then
+        echo tests/vir-direct-arm64.c
+    elif test "$name" = narrow-global || [[ "$name" = global-ptradd* ]]; then
+        echo "tests/vir-direct-$name.c"
+    else
+        echo "tests/vir-direct-arm64-$name.c"
+    fi
+}
+
 check_external_pointer_join()
 {
-    local name=$1 source=$2 status
+    local name=$1 source=$2
 
-    run_compiler --no-libc --dynlink --dump-vir \
-        --stats --dump-vir \
+    run_compiler --no-libc --dynlink --stats --dump-vir \
         -o "$work/$name" "$source" 2> "$work/$name.stats"
-    run_compiler --no-libc --dynlink --dump-vir \
-        --stats --dump-vir \
+    run_compiler --no-libc --dynlink --stats --dump-vir \
         -o "$work/$name-repeat" "$source" 2> "$work/$name-repeat.stats"
     cmp "$work/$name" "$work/$name-repeat"
     cmp "$work/$name.stats" "$work/$name-repeat.stats"
+
+    # The entry block always carries argv as a ptr parameter; the join must be a
+    # later block.
     if test "$name" = external-pointer-loop-join; then
         vir_extract_function main \
             "$work/$name.stats" \
             | awk '/^b[0-9]+\(/ && !/^b0\(/ && gsub(/:ptr/, "&") >= 2 { header = 1 } / = ptradd / { ptradd = 1 } END { exit !(header && ptradd) }'
     else
-        grep -Eq '^b[0-9]+\(.*:ptr.*\):$' "$work/$name.stats"
+        vir_extract_function main "$work/$name.stats" \
+            | grep -Eq '^b[1-9][0-9]*\(.*:ptr.*\):$'
     fi
-    if run_dynamic "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 0
-    if run_dynamic "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq 0
+    run_status dynamic 0 "$work/$name"
+    run_status dynamic 0 "$work/$name" extra
 }
 
 check_direct()
 {
-    local name=$1 expected=$2 extra_expected=${3:--} status
-    local source="tests/vir-direct-arm64-$name.c"
+    local name=$1 expected=$2 extra_expected=${3:--}
 
-    if test "$name" = direct; then
-        source=tests/vir-direct-arm64.c
-    elif test "$name" = branch-initialized-root; then
-        source=tests/vir-direct-branch-initialized-root.c
-    elif test "$name" = narrow-global || [[ "$name" = global-ptradd* ]]; then
-        source="tests/vir-direct-$name.c"
-    fi
-    vir_build_deterministic run_compiler "$source" \
-        "$work/$name" "$work/$name-repeat" "$work/$name.stats" \
-        --dump-vir
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
+    vir_build_deterministic run_compiler "$(fixture_source "$name")" \
+        "$work/$name" "$work/$name-repeat" "$work/$name.stats"
+    run_status static "$expected" "$work/$name"
     if test "$extra_expected" != -; then
-        if run_static "$work/$name" extra; then status=0; else status=$?; fi
-        test "$status" -eq "$extra_expected"
+        run_status static "$extra_expected" "$work/$name" extra
     fi
 }
 
 check_args()
 {
-    local mode=$1 name=$2 expected=$3 status output stats
+    local mode=$1 name=$2 expected=$3 output
     shift 3
     output="$work/$name"
-    stats="$work/$name.stats"
-    if test "$mode" = dyn; then
+    if test "$mode" = dynamic; then
         output="$work/$name-dyn"
-        stats="$work/$name-dyn.stats"
-        run_compiler --dynlink --dump-vir --stats -o "$output" \
-            "tests/vir-direct-arm64-$name.c" 2> "$stats"
-        if run_dynamic "$output" "$@"; then status=0; else status=$?; fi
+        run_compiler --dynlink --dump-vir -o "$output" \
+            "tests/vir-direct-arm64-$name.c" 2> "$work/$name-dyn.vir"
+        run_status dynamic "$expected" "$output" "$@"
     else
         vir_build_deterministic run_compiler \
             "tests/vir-direct-arm64-$name.c" "$output" \
-            "$work/$name-repeat" "$stats" --dump-vir
-        if run_static "$output" "$@"; then status=0; else status=$?; fi
+            "$work/$name-repeat" "$work/$name.stats"
+        run_status static "$expected" "$output" "$@"
     fi
-    test "$status" -eq "$expected"
-}
-
-check_direct_args()
-{
-    check_args static "$@"
-}
-
-check_dynlink_args()
-{
-    check_args dyn "$@"
 }
 
 check_dynlink()
 {
-    local name=$1 expected=$2 extra_expected=$3 status
-    local source="tests/vir-direct-arm64-$name.c"
+    local name=$1 expected=$2 extra_expected=$3
 
-    if test "$name" = narrow-global || [[ "$name" = global-ptradd* ]]; then
-        source="tests/vir-direct-$name.c"
-    fi
-
-    run_compiler --dynlink --dump-vir --stats -o "$work/$name-dyn" \
-        "$source" 2> "$work/$name-dyn.stats"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
+    run_compiler --dynlink --dump-vir -o "$work/$name-dyn" \
+        "$(fixture_source "$name")" 2> "$work/$name-dyn.vir"
+    run_status dynamic "$expected" "$work/$name-dyn"
+    run_status dynamic "$extra_expected" "$work/$name-dyn" extra
 }
 
-check_direct_helper_leaf()
+# Build a helper fixture with its VIR dump in $work/NAME.vir, and require a
+# second build without the dump to produce the same binary.
+build_helper()
 {
-    local name=helper-leaf expected=2 extra_expected=3 status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dynlink --dump-vir --stats \
-        -o "$work/$name-dyn" "tests/vir-direct-arm64-$name.c" \
-        2> "$work/$name-dyn.stats"
-    run_compiler --dynlink --dump-vir \
-        -o "$work/$name-dyn-repeat" "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name-dyn" "$work/$name-dyn-repeat"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
+    vir_build_deterministic run_compiler "tests/vir-direct-arm64-$1.c" \
+        "$work/$1" "$work/$1-repeat" "$work/$1.vir"
 }
 
-check_direct_helper_two()
+# Require PATTERN (an ERE) to match EXPECTED lines of main's single callee.
+callee_count()
 {
-    local name=helper-two expected=19 extra_expected=37 status
+    local name=$1 pattern=$2 expected=$3 body
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dynlink --dump-vir --stats \
-        -o "$work/$name-dyn" "tests/vir-direct-arm64-$name.c" \
-        2> "$work/$name-dyn.stats"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
+    body=$(vir_extract_callee main "$work/$name.vir")
+    test "$(printf '%s\n' "$body" | grep -cE -- "$pattern")" -eq "$expected"
 }
 
-check_direct_helper_three()
+# Static and dynamic deterministic builds, each run with and without an extra
+# argument.
+check_helper()
 {
-    local name=helper-three expected=33 extra_expected=57 status
+    local name=$1 expected=$2 extra_expected=$3
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
+    build_helper "$name"
+    run_status static "$expected" "$work/$name"
+    run_status static "$extra_expected" "$work/$name" extra
 
-    run_compiler --dynlink --dump-vir --stats \
-        -o "$work/$name-dyn" "tests/vir-direct-arm64-$name.c" \
-        2> "$work/$name-dyn.stats"
-    run_compiler --dynlink --dump-vir \
-        -o "$work/$name-dyn-repeat" "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name-dyn" "$work/$name-dyn-repeat"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
+    vir_build_deterministic run_compiler "tests/vir-direct-arm64-$name.c" \
+        "$work/$name-dyn" "$work/$name-dyn-repeat" "$work/$name-dyn.vir" \
+        --dynlink
+    run_status dynamic "$expected" "$work/$name-dyn"
+    run_status dynamic "$extra_expected" "$work/$name-dyn" extra
 }
 
-check_direct_helper_i64()
+# A two-way branch whose arms both return, from a callee of BLOCKS blocks.
+check_helper_branch()
 {
-    local name=helper-i64 expected=2 extra_expected=3 status
+    local name=$1 blocks=$2
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dynlink --dump-vir --stats \
-        -o "$work/$name-dyn" "tests/vir-direct-arm64-$name.c" \
-        2> "$work/$name-dyn.stats"
-    run_compiler --dynlink --dump-vir \
-        -o "$work/$name-dyn-repeat" "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name-dyn" "$work/$name-dyn-repeat"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
+    check_helper "$name" 23 47
+    callee_count "$name" '^b[0-9]' "$blocks"
+    callee_count "$name" '^  branch ' 1
+    callee_count "$name" '^  return ' 2
 }
 
-check_direct_helper_i64_two()
+check_helper_loop()
 {
-    local name=helper-i64-two expected=3 extra_expected=4 status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dynlink --dump-vir --stats \
-        -o "$work/$name-dyn" "tests/vir-direct-arm64-$name.c" \
-        2> "$work/$name-dyn.stats"
-    run_compiler --dynlink --dump-vir \
-        -o "$work/$name-dyn-repeat" "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name-dyn" "$work/$name-dyn-repeat"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
+    check_helper helper-loop 1 2
+    callee_count helper-loop '^b[0-9]' 4
+    callee_count helper-loop '^  branch ' 1
+    callee_count helper-loop '^  jump ' 2
+    callee_count helper-loop '^b[0-9]+\([^)]*i32[^)]*\):$' 2
 }
 
-check_helper_i64_three_fallback()
+# LEVELS nested loops around one global store.
+check_helper_global_loop()
 {
-    local name=helper-i64-three-fallback status
+    local name=$1 levels=$2
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 4
-}
-
-check_direct_helper_branch()
-{
-    local name=helper-branch expected=23 extra_expected=47 status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dynlink --dump-vir --stats \
-        -o "$work/$name-dyn" "tests/vir-direct-arm64-$name.c" \
-        2> "$work/$name-dyn.stats"
-    run_compiler --dynlink --dump-vir \
-        -o "$work/$name-dyn-repeat" "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name-dyn" "$work/$name-dyn-repeat"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^b[0-9]' | grep -qx 4
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  branch ' | grep -qx 1
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  return ' | grep -qx 2
-}
-
-check_helper_branch_merge_fallback()
-{
-    local name=helper-branch-merge-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 23
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq 47
-}
-
-check_helper_branch_unsigned_fallback()
-{
-    local name=helper-branch-unsigned-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 70
-}
-
-check_direct_helper_merge()
-{
-    local name=helper-merge expected=23 extra_expected=47 status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dynlink --dump-vir --stats \
-        -o "$work/$name-dyn" "tests/vir-direct-arm64-$name.c" \
-        2> "$work/$name-dyn.stats"
-    run_compiler --dynlink --dump-vir \
-        -o "$work/$name-dyn-repeat" "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name-dyn" "$work/$name-dyn-repeat"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^b[0-9]' | grep -qx 3
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  branch ' | grep -qx 1
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  return ' | grep -qx 2
-}
-
-check_direct_helper_loop()
-{
-    local name=helper-loop expected=1 extra_expected=2 status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dynlink --dump-vir --stats \
-        -o "$work/$name-dyn" "tests/vir-direct-arm64-$name.c" \
-        2> "$work/$name-dyn.stats"
-    run_compiler --dynlink --dump-vir \
-        -o "$work/$name-dyn-repeat" "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name-dyn" "$work/$name-dyn-repeat"
-    if run_dynamic "$work/$name-dyn"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if run_dynamic "$work/$name-dyn" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^b[0-9]' | grep -qx 4
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  branch ' | grep -qx 1
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  jump ' | grep -qx 2
-    test "$(vir_extract_callee main \
-        "$work/$name.vir" | grep -Ec '^b[0-9]+\([^)]*i32[^)]*\):$')" -eq 2
-}
-
-check_helper_loop_fallback()
-{
-    local name=helper-loop-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq 2
-}
-
-check_helper_global_loop_direct()
-{
-    local name=helper-global-loop status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^b[0-9]' | grep -qx 4
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  branch ' | grep -qx 1
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  jump ' | grep -qx 2
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  store ' | grep -qx 1
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  %d[0-9]* = load.i32 ' | grep -qx 1
-}
-
-check_helper_global_loop_bounded_direct()
-{
-    local suffix=$1 levels=$2
-    local name=helper-global-loop-$suffix status blocks branches jumps
-
-    blocks=$((1 + 3 * levels))
-    branches=$levels
-    jumps=$((2 * levels))
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^b[0-9]' | grep -qx "$blocks"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  branch ' | grep -qx "$branches"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  jump ' | grep -qx "$jumps"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  store ' | grep -qx 1
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  %d[0-9]* = load.i32 ' | grep -qx 1
-}
-
-check_helper_global_loop_nested_direct()
-{
-    check_helper_global_loop_bounded_direct nested 2
-}
-
-check_helper_global_loop_deep_direct()
-{
-    check_helper_global_loop_bounded_direct deep 3
-}
-
-check_helper_global_loop_four_direct()
-{
-    check_helper_global_loop_bounded_direct four 4
-}
-
-check_helper_global_loop_five_direct()
-{
-    check_helper_global_loop_bounded_direct five 5
-}
-
-check_helper_global_loop_six_direct()
-{
-    check_helper_global_loop_bounded_direct six 6
-}
-
-check_helper_global_loop_seven_direct()
-{
-    check_helper_global_loop_bounded_direct seven 7
-}
-
-check_helper_global_loop_eight_direct()
-{
-    check_helper_global_loop_bounded_direct eight 8
-}
-
-check_helper_global_loop_nine_direct()
-{
-    check_helper_global_loop_bounded_direct nine 9
-}
-
-check_helper_global_loop_ten_direct()
-{
-    check_helper_global_loop_bounded_direct ten 10
-}
-
-check_helper_global_loop_fallback()
-{
-    local name=helper-global-loop-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-    # The general helper check admits what the shape matchers did not.
+    build_helper "$name"
+    run_status static 1 "$work/$name"
+    callee_count "$name" '^b[0-9]' $((1 + 3 * levels))
+    callee_count "$name" '^  branch ' "$levels"
+    callee_count "$name" '^  jump ' $((2 * levels))
+    callee_count "$name" '^  store ' 1
+    callee_count "$name" '^  %d[0-9]* = load\.i32 ' 1
 }
 
 # The third argument counts the loads left: a plain reload right after the store
 # is forwarded the stored value, a volatile one is not.
-check_helper_global_effect_direct()
+check_helper_global_effect()
 {
-    local name=$1 memory_prefix=$2 loads=$3 status
+    local name=$1 memory_prefix=$2 loads=$3
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq 2
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c "^  ${memory_prefix}store " | grep -qx 1
-    test "$(vir_extract_callee main "$work/$name.vir" \
-        | grep -c "^  %d[0-9]* = ${memory_prefix}load.i32 ")" -eq "$loads"
+    build_helper "$name"
+    run_status static 1 "$work/$name"
+    run_status static 2 "$work/$name" extra
+    callee_count "$name" "^  ${memory_prefix}store " 1
+    callee_count "$name" "^  %d[0-9]* = ${memory_prefix}load\.i32 " "$loads"
 }
 
-check_helper_global_pair_direct()
+check_helper_global_pair()
 {
-    local name=helper-global-pair status
+    local name=helper-global-pair
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq 2
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  store ' | grep -qx 2
+    build_helper "$name"
+    run_status static 1 "$work/$name"
+    run_status static 2 "$work/$name" extra
+    callee_count "$name" '^  store ' 2
     # The reload of the global just stored is forwarded the stored value.
-    if vir_extract_callee main "$work/$name.vir" \
-        | grep -q '^  %d[0-9]* = load.i32 '; then
-        return 1
-    fi
+    callee_count "$name" '^  %d[0-9]* = load\.i32 ' 0
 }
 
-check_helper_global_load_store_direct()
+check_helper_global_load_store()
 {
-    local name=helper-global-load-store status
+    local name=helper-global-load-store
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 17
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
+    build_helper "$name"
+    run_status static 17 "$work/$name"
     vir_extract_callee main \
         "$work/$name.vir" | awk '
             / = load\.i32 / { load = NR }
@@ -602,196 +240,76 @@ check_helper_global_load_store_direct()
             END { exit !(load && store && load < store) }'
 }
 
-check_helper_global_load_store_fallback()
+check_helper_global_branch()
 {
-    local name=helper-global-load-store-external-fallback status
+    local name=helper-global-branch
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 17
-    # The general helper check admits what the shape matchers did not.
-}
-
-check_helper_global_branch_direct()
-{
-    local name=${1:-helper-global-branch} status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    run_compiler --dump-vir -o "$work/$name-repeat" \
-        "tests/vir-direct-arm64-$name.c"
-    cmp "$work/$name" "$work/$name-repeat"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 7
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  branch ' | grep -qx 1
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  store ' | grep -qx 2
+    build_helper "$name"
+    run_status static 7 "$work/$name"
+    callee_count "$name" '^  branch ' 1
+    callee_count "$name" '^  store ' 2
     # Each arm's reload of the global it just stored is forwarded the value.
-    if vir_extract_callee main "$work/$name.vir" \
-        | grep -q '^  %d[0-9]* = load.i32 '; then
-        return 1
-    fi
+    callee_count "$name" '^  %d[0-9]* = load\.i32 ' 0
 }
 
-check_helper_global_branch_fallback()
+# Volatile globals: every store and reload stays, the reload after a store to
+# another volatile global included.
+check_helper_global_volatile()
 {
-    local name=helper-global-branch-fallback status
+    local name=$1 loads=$2
 
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq 2
-    # The general helper check admits what the shape matchers did not.
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  volatile.store ' | grep -qx 2
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  %d[0-9]* = volatile.load.i32 ' | grep -qx 2
+    build_helper "$name"
+    run_status static 1 "$work/$name"
+    run_status static 2 "$work/$name" extra
+    callee_count "$name" '^  volatile\.store ' 2
+    callee_count "$name" '^  %d[0-9]* = volatile\.load\.i32 ' "$loads"
 }
 
-check_helper_global_volatile_fallback()
+check_run()
 {
-    local name=helper-global-volatile-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-    if run_static "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq 2
-    # The general helper check admits what the shape matchers did not.
-
-    run_compiler --dump-vir -o "$work/$name-dump" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.vir"
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  volatile.store ' | grep -qx 2
-    vir_extract_callee main \
-        "$work/$name.vir" | grep -c '^  %d[0-9]* = volatile.load.i32 ' | grep -qx 1
-}
-
-check_helper_i64_mixed_fallback()
-{
-    local name=helper-i64-mixed-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-}
-
-check_helper_i64_local_mixed_fallback()
-{
-    local name=helper-i64-local-mixed-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 1
-}
-
-check_helper_four_fallback()
-{
-    local name=helper-four-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 50
-}
-
-check_legacy_helper_fallback()
-{
-    local name=helper-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 2
-}
-
-check_address_taken_helper_fallback()
-{
-    local name=helper-address-fallback status
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name.stats"
-    if run_static "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq 2
-}
-
-check_fallback()
-{
-    local name=$1 expected=$2 status
-    local -a args=("${@:4}")
+    local name=$1 expected=$2
+    local -a args=("${@:3}")
     local source="tests/vir-direct-arm64-$name.c"
 
-    if test "$name" = branch-volatile-root; then
-        source=tests/vir-direct-branch-volatile-root.c
-    fi
-
-    run_compiler --dump-vir --stats -o "$work/$name" \
-        "$source" 2> "$work/$name.stats"
-    if run_static "$work/$name" "${args[@]}"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
+    run_compiler --dump-vir -o "$work/$name" \
+        "$source" 2> "$work/$name.vir"
+    run_status static "$expected" "$work/$name" "${args[@]}"
 }
 
-check_fallback_o0()
+check_run_o0()
 {
-    local name=$1 expected=$2 status
+    local name=$1 expected=$2
 
-    run_compiler --no-opt --dump-vir --stats -o "$work/$name-o0" \
-        "tests/vir-direct-arm64-$name.c" 2> "$work/$name-o0.stats"
-    if run_static "$work/$name-o0"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
+    run_compiler --no-opt --dump-vir -o "$work/$name-o0" \
+        "tests/vir-direct-arm64-$name.c" 2> "$work/$name-o0.vir"
+    run_status static "$expected" "$work/$name-o0"
 }
 
 check_direct direct 62
-check_direct_helper_leaf
-check_direct_helper_two
-check_direct_helper_three
-check_helper_four_fallback
-check_direct_helper_i64
-check_direct_helper_i64_two
-check_helper_i64_three_fallback
-check_direct_helper_branch
-check_helper_branch_merge_fallback
-check_helper_branch_unsigned_fallback
-check_direct_helper_merge
-check_direct_helper_loop
-check_helper_loop_fallback
-check_helper_global_loop_direct
-check_helper_global_loop_nested_direct
-check_helper_global_loop_deep_direct
-check_helper_global_loop_four_direct
-check_helper_global_loop_five_direct
-check_helper_global_loop_six_direct
-check_helper_global_loop_seven_direct
-check_helper_global_loop_eight_direct
-check_helper_global_loop_nine_direct
-check_helper_global_loop_ten_direct
-check_helper_global_loop_fallback
-check_helper_global_effect_direct helper-global-volatile volatile. 1
-check_helper_global_effect_direct helper-global '' 0
-check_helper_global_pair_direct
-check_helper_global_load_store_direct
-check_helper_global_load_store_fallback
-check_helper_global_branch_direct
-check_helper_global_branch_direct helper-global-branch-external
-check_helper_global_branch_fallback
-check_helper_global_volatile_fallback
-check_helper_i64_mixed_fallback
-check_helper_i64_local_mixed_fallback
-check_legacy_helper_fallback
-check_address_taken_helper_fallback
+check_helper helper-leaf 2 3
+check_helper helper-two 19 37
+check_helper helper-three 33 57
+check_helper helper-i64 2 3
+check_helper helper-i64-two 3 4
+check_helper_branch helper-branch 4
+check_run helper-branch-unsigned 70
+check_helper_branch helper-merge 3
+check_helper_loop
+check_run helper-loop-break 1
+check_run helper-loop-break 2 extra
+check_helper_global_loop helper-global-loop 1
+check_helper_global_loop helper-global-loop-nested 2
+check_helper_global_loop helper-global-loop-deep 3
+check_helper_global_loop helper-global-loop-ten 10
+check_helper_global_effect helper-global-volatile volatile. 1
+check_helper_global_effect helper-global '' 0
+check_helper_global_pair
+check_helper_global_load_store
+check_helper_global_branch
+check_helper_global_volatile helper-global-branch-volatile 2
+check_helper_global_volatile helper-global-volatile-pair 1
+check_run helper-i64-mixed 1
+check_run helper-i64-local-mixed 1
 check_direct argc 8 15
 check_direct argc-return 1 2
 check_direct div 47 54
@@ -800,13 +318,11 @@ check_direct call-pointer 42
 check_direct argv 4 5
 check_direct argv-char-load 47
 check_direct argv-char-offset 116
-check_direct argv-char-offset-direct 116
 check_direct pointer-join 47 101
-check_fallback pointer-join-duplicate 47
-check_direct_args argv-index-char-load 101 extra
-check_direct_args argv-index-char-offset-one 120 extra
+check_run pointer-join-duplicate 47
+check_args static argv-index-char-load 101 extra
+check_args static argv-index-char-offset-one 120 extra
 check_direct cfg 30 29
-check_direct join 30 29
 check_direct join-pair 89 88
 check_direct ult 31 31
 check_direct compare 13 10
@@ -856,7 +372,7 @@ check_direct narrow-global 29
 check_direct global-ptradd 8 9
 check_direct global-ptradd-dynamic 8 9
 check_direct global-ptradd-unsigned 8 9
-check_direct global-pointer-fallback 13 14
+check_direct global-pointer-int 13 14
 check_direct global-pointer-narrow-signed 254 255
 check_direct global-pointer-narrow-unsigned 6 7
 check_direct global-pointer-wide 2 2
@@ -867,19 +383,7 @@ check_direct local-pointer-chain 41 42
 check_direct local-pointer-wide 4 4
 check_direct local-pointer-deep 51 52
 check_dynlink local-pointer-deep 51 52
-check_direct branch-initialized-root 31 29
-check_fallback branch-volatile-root 31 'root-address|volatile'
-run_compiler --dump-vir --dump-vir --stats \
-    -o "$work/branch-initialized-root-verified" \
-    tests/vir-direct-branch-initialized-root.c \
-    2> "$work/branch-initialized-root-verified.stats"
-vir_extract_function main \
-    "$work/branch-initialized-root-verified.stats" \
-    > "$work/branch-initialized-root.dump"
-test "$(grep -c ' = stackaddr ' "$work/branch-initialized-root.dump")" -eq 1
-test "$(grep -c '^  store ' "$work/branch-initialized-root.dump")" -eq 2
-grep -Eq '^b[0-9]+:$' "$work/branch-initialized-root.dump"
-grep -Eq ' = load\.i32 ' "$work/branch-initialized-root.dump"
+# Build twice at each level; the stats files hold the VIR dump and must match.
 for level in 0 2; do
     opt_flags=()
     [ "$level" -eq 2 ] || opt_flags=(--no-opt)
@@ -893,21 +397,26 @@ for level in 0 2; do
         "$work/branch-initialized-root-o$level-repeat"
     cmp "$work/branch-initialized-root-o$level.stats" \
         "$work/branch-initialized-root-o$level-repeat.stats"
-    if run_static "$work/branch-initialized-root-o$level"; then status=0; else status=$?; fi
-    test "$status" -eq 31
-    if run_static "$work/branch-initialized-root-o$level" extra; then status=0; else status=$?; fi
-    test "$status" -eq 29
+    run_status static 31 "$work/branch-initialized-root-o$level"
+    run_status static 29 "$work/branch-initialized-root-o$level" extra
 done
+vir_extract_function main \
+    "$work/branch-initialized-root-o2.stats" \
+    > "$work/branch-initialized-root.dump"
+test "$(grep -c ' = stackaddr ' "$work/branch-initialized-root.dump")" -eq 1
+test "$(grep -c '^  store ' "$work/branch-initialized-root.dump")" -eq 2
+grep -Eq '^b[0-9]+:$' "$work/branch-initialized-root.dump"
+grep -Eq ' = load\.i32 ' "$work/branch-initialized-root.dump"
 
 # Preserve explicit stack provenance through deep pointer chains.
 check_direct local-pointer-overdepth 52 53
 check_dynlink local-pointer-overdepth 52 53
 check_direct local-pointer-level4 52 53
-check_fallback local-pointer-volatile 52 root-address
-check_fallback local-pointer-reassigned 52 root-object-late-write
-check_fallback local-pointer-cyclic 1 root-object-late-write
-check_fallback local-pointer-collapsed 52 direct-arm64-subset
-check_fallback local-pointer-collapsed 53 direct-arm64-subset extra
+check_run local-pointer-volatile 52
+check_run local-pointer-reassigned 52
+check_run local-pointer-cyclic 1
+check_run local-pointer-collapsed 52
+check_run local-pointer-collapsed 53 extra
 run_compiler --dump-vir -o "$work/local-pointer-collapsed" \
     tests/vir-direct-arm64-local-pointer-collapsed.c \
     2> "$work/local-pointer-collapsed.vir"
@@ -949,11 +458,9 @@ check_dynlink cfg 30 29
 check_dynlink argv 4 5
 check_dynlink argv-char-load 47 47
 check_dynlink argv-char-offset 116 116
-check_dynlink argv-char-offset-direct 116 116
 check_dynlink pointer-join 47 101
-check_dynlink_args argv-index-char-load 101 extra
-check_dynlink_args argv-index-char-offset-one 120 extra
-check_dynlink join 30 29
+check_args dynamic argv-index-char-load 101 extra
+check_args dynamic argv-index-char-offset-one 120 extra
 check_dynlink join-pair 89 88
 check_dynlink ult 31 31
 check_dynlink compare 13 10
@@ -968,7 +475,7 @@ check_dynlink narrow-global 29 29
 check_dynlink global-ptradd 8 9
 check_dynlink global-ptradd-dynamic 8 9
 check_dynlink global-ptradd-unsigned 8 9
-check_dynlink global-pointer-fallback 13 14
+check_dynlink global-pointer-int 13 14
 check_dynlink global-pointer-narrow-signed 254 255
 check_dynlink global-pointer-narrow-unsigned 6 7
 check_dynlink volatile 8 8
@@ -1001,10 +508,8 @@ check_dynlink call-bool 0 0
 check_direct call-bool-arg 42 7
 check_dynlink call-bool-arg 42 7
 
-# The i1 argument is explicitly zero-extended to a byte before its four-byte
-# staging spill (UXTB X0, X0), and the check is tied to that caller sequence
-# rather than any helper-side boolean normalization.
-check_fallback call-bool-arg-fallback 0
+# Eight _Bool register arguments push the trailing int argument onto the stack.
+check_run call-bool-arg-int-stack 0
 check_direct call-bool-arg-stack 7 42
 check_dynlink call-bool-arg-stack 7 42
 check_direct call-bool-arg-stack-wide 7 42
@@ -1028,24 +533,22 @@ vir_extract_function main \
     | awk '/^  volatile.store %d[0-9]+, %d[0-9]+$/ { event = event "S"; stores++ } /^  %d[0-9]+ = volatile.load.i64/ { event = event "L"; loads++ } /volatile.load.ptr/ { pointer_loads++ } END { exit stores != 2 || loads != 1 || pointer_loads || event != "SSL" }'
 check_direct loop 21 12
 check_dynlink loop 21 12
-check_fallback shared-dag 0
-check_fallback ptradd-large 0
-check_fallback argv-deref 4 branches
-check_direct argv-char-intervening 47
-check_fallback argv-index 0 direct-arm64-subset
-check_fallback argv-index-other 1 direct-arm64-subset extra extra
-check_fallback argv-index-dynamic 0
-check_fallback_o0 argv-index-unused 0
-check_fallback argv-index-char-other 101 direct-arm64-subset extra extra
-check_fallback argv-index-char-dynamic 101 direct-arm64-subset extra
-check_fallback argv-index-char-intervening 101 direct-arm64-subset extra
-check_fallback argv-index-char-offset-two 116 direct-arm64-subset extra
-check_fallback argv-index-char-offset-other 120 direct-arm64-subset extra extra
-check_fallback argv-index-char-offset-dynamic 120 direct-arm64-subset extra
-check_fallback argv-index-char-offset-intervening 120 direct-arm64-subset extra
-check_fallback argv-char-offset-two 109
-check_fallback argv-char-offset-dynamic 116
-check_direct argv-char-offset-intervening 116
+check_run shared-dag 0
+check_run ptradd-large 0
+check_run argv-deref 4
+check_run argv-index 0
+check_run argv-index-other 1 extra extra
+check_run argv-index-dynamic 0
+check_run_o0 argv-index-unused 0
+check_run argv-index-char-other 101 extra extra
+check_run argv-index-char-dynamic 101 extra
+check_run argv-index-char-intervening 101 extra
+check_run argv-index-char-offset-two 116 extra
+check_run argv-index-char-offset-other 120 extra extra
+check_run argv-index-char-offset-dynamic 120 extra
+check_run argv-index-char-offset-intervening 120 extra
+check_run argv-char-offset-two 109
+check_run argv-char-offset-dynamic 116
 check_direct argv-pointer-compare 1 1
 check_direct argv-pointer-equal 0 0
 check_direct argv-index-compare 0 1
@@ -1054,27 +557,14 @@ check_dynlink argv-pointer-compare 1 1
 check_dynlink argv-pointer-equal 0 0
 check_dynlink argv-index-compare 0 1
 check_dynlink argv-index-equal 1 0
-check_fallback argv-wrong-first 4
-check_fallback argv-wrong-type 47
-check_fallback argv-const-char 4
-check_fallback argv-const-pointer 4
-check_fallback argv-signed-char 4
-check_fallback argv-unsigned-char 4
-check_fallback argv-volatile-char 4
-check_fallback argv-volatile-pointer 4
+check_run argv-wrong-type 47
 check_direct global-pointer-unknown 7
-check_fallback global-pointer-deep 7
+check_run global-pointer-deep 7
 
 run_compiler --dump-vir -o "$work/cfg-dump" tests/vir-direct-arm64-cfg.c \
     2> "$work/cfg.vir"
 vir_extract_function main "$work/cfg.vir" \
     | grep -Eq '^  jump b[0-9]+\(\)$'
-
-run_compiler --dump-vir -o "$work/argv-dump" \
-    tests/vir-direct-arm64-argv.c \
-    2> "$work/argv.vir"
-vir_extract_function main "$work/argv.vir" \
-    | grep -Eq '^b[0-9]+\(%d[0-9]+:i32, %d[0-9]+:ptr\):$'
 
 run_compiler --dump-vir -o "$work/argv-char-load-dump" \
     tests/vir-direct-arm64-argv-char-load.c 2> "$work/argv-char-load.vir"
@@ -1082,14 +572,6 @@ vir_extract_function main "$work/argv-char-load.vir" \
     | awk '$3 == "load.ptr" { ptr = $1; next } $3 == "load.i8" && $4 == ptr { byte = 1 } END { exit !byte }'
 if vir_extract_function main "$work/argv-char-load.vir" \
     | grep -q 'ptradd'; then exit 1; fi
-
-run_compiler --dump-vir \
-    -o "$work/argv-char-offset-direct-dump" \
-    tests/vir-direct-arm64-argv-char-offset-direct.c \
-    2> "$work/argv-char-offset-direct.vir"
-vir_extract_function main \
-    "$work/argv-char-offset-direct.vir" \
-    | awk '$3 == "load.ptr" { ptr = $1; next } $3 == "const.i64" && $4 == "1" { one = $1; next } $3 == "ptradd" { left = $4; sub(/,$/, "", left); if (left == ptr && $5 == one) add = $1; next } $3 == "load.i8" && $4 == add { byte = 1 } END { exit !byte }'
 
 run_compiler --dump-vir \
     -o "$work/argv-char-offset-dump" tests/vir-direct-arm64-argv-char-offset.c \
@@ -1218,79 +700,52 @@ vir_extract_function main \
 vir_extract_function main "$work/narrow.vir" \
     | grep -Eq '^  %d[0-9]+ = zext\.i16\.i32 %d[0-9]+$'
 
+# Each repeat build omits --dump-vir, so the cmp also proves the dump does not
+# perturb code generation.
 external_pointer_source=tests/vir-direct-external-pointer-origin.c
-run_compiler --no-libc --dynlink --dump-vir --stats \
-    -o "$work/external-pointer" "$external_pointer_source" \
-    2> "$work/external-pointer.stats"
 run_compiler --no-libc --dynlink --dump-vir \
+    -o "$work/external-pointer" "$external_pointer_source" \
+    2> "$work/external-pointer.vir"
+run_compiler --no-libc --dynlink \
     -o "$work/external-pointer-repeat" "$external_pointer_source"
 cmp "$work/external-pointer" "$work/external-pointer-repeat"
-if run_dynamic "$work/external-pointer"; then status=0; else status=$?; fi
-test "$status" -eq 0
-run_compiler --no-libc --dynlink -o "$work/external-pointer-legacy" \
-    "$external_pointer_source"
-if run_dynamic "$work/external-pointer-legacy"; then status=0; else status=$?; fi
-test "$status" -eq 0
+run_status dynamic 0 "$work/external-pointer"
 
 typed_external_pointer_source=tests/vir-direct-external-typed-pointer.c
-run_compiler --no-libc --dynlink --dump-vir --stats --dump-vir \
-    -o "$work/external-typed-pointer" "$typed_external_pointer_source" \
-    2> "$work/external-typed-pointer.stats"
 run_compiler --no-libc --dynlink --dump-vir \
+    -o "$work/external-typed-pointer" "$typed_external_pointer_source" \
+    2> "$work/external-typed-pointer.vir"
+run_compiler --no-libc --dynlink \
     -o "$work/external-typed-pointer-repeat" \
     "$typed_external_pointer_source"
 cmp "$work/external-typed-pointer" "$work/external-typed-pointer-repeat"
 # The reload right after the store is forwarded the stored value.
 vir_extract_function main \
-    "$work/external-typed-pointer.stats" \
+    "$work/external-typed-pointer.vir" \
     | grep -Eq '^  store %d[0-9]+, %d[0-9]+$'
-if run_dynamic "$work/external-typed-pointer"; then status=0; else status=$?; fi
-test "$status" -eq 0
-run_compiler --no-libc --dynlink -o "$work/external-typed-pointer-legacy" \
-    "$typed_external_pointer_source"
-if run_dynamic "$work/external-typed-pointer-legacy"; then status=0; else status=$?; fi
-test "$status" -eq 0
+run_status dynamic 0 "$work/external-typed-pointer"
 
 typed_pointer_offset_source=tests/vir-direct-external-typed-pointer-offset.c
-run_compiler --no-libc --dynlink --dump-vir --stats --dump-vir \
+run_compiler --no-libc --dynlink --dump-vir \
     -o "$work/external-typed-pointer-offset" \
     "$typed_pointer_offset_source" \
-    2> "$work/external-typed-pointer-offset.stats"
+    2> "$work/external-typed-pointer-offset.vir"
 vir_extract_function main \
-    "$work/external-typed-pointer-offset.stats" \
+    "$work/external-typed-pointer-offset.vir" \
     | grep -Eq ' = ptradd '
-if run_dynamic "$work/external-typed-pointer-offset"; then status=0; else status=$?; fi
-test "$status" -eq 0
-if run_dynamic "$work/external-typed-pointer-offset" extra; then status=0; else status=$?; fi
-test "$status" -eq 0
+run_status dynamic 0 "$work/external-typed-pointer-offset"
+run_status dynamic 0 "$work/external-typed-pointer-offset" extra
 
-external_pointer_join_source=tests/vir-direct-arm64-external-pointer-join.c
-check_external_pointer_join external-pointer-join \
-    "$external_pointer_join_source" selected
-
-external_pointer_join_offset_source=tests/vir-direct-arm64-external-pointer-join-offset.c
-check_external_pointer_join external-pointer-join-offset \
-    "$external_pointer_join_offset_source" selected
-
-mixed_external_pointer_join_source=tests/vir-direct-arm64-external-pointer-mixed-join.c
-check_external_pointer_join external-pointer-mixed-join \
-    "$mixed_external_pointer_join_source" fallback
-
-external_pointer_loop_join_source=tests/vir-direct-arm64-external-pointer-loop-join.c
-check_external_pointer_join external-pointer-loop-join \
-    "$external_pointer_loop_join_source" selected
-
-mixed_external_pointer_loop_join_source=tests/vir-direct-arm64-external-pointer-mixed-loop-join.c
-check_external_pointer_join external-pointer-mixed-loop-join \
-    "$mixed_external_pointer_loop_join_source" fallback
+for name in join join-offset mixed-join loop-join mixed-loop-join; do
+    check_external_pointer_join "external-pointer-$name" \
+        "tests/vir-direct-arm64-external-pointer-$name.c"
+done
 
 external_pointer_bound_source=tests/vir-direct-arm64-external-pointer-bound.c
-run_compiler --no-libc --dynlink --dump-vir \
-    --stats --dump-vir \
+run_compiler --no-libc --dynlink --stats --dump-vir \
     -o "$work/external-pointer-bound" "$external_pointer_bound_source" \
     2> "$work/external-pointer-bound.stats"
-run_compiler --no-libc --dynlink --dump-vir \
-    --stats --dump-vir \
+run_compiler --no-libc --dynlink --stats --dump-vir \
     -o "$work/external-pointer-bound-repeat" "$external_pointer_bound_source" \
     2> "$work/external-pointer-bound-repeat.stats"
 cmp "$work/external-pointer-bound" "$work/external-pointer-bound-repeat"
@@ -1298,24 +753,19 @@ cmp "$work/external-pointer-bound.stats" \
     "$work/external-pointer-bound-repeat.stats"
 test "$(vir_extract_function main \
     "$work/external-pointer-bound.stats" | grep -c ' = ptradd ')" -gt 256
-if run_dynamic "$work/external-pointer-bound"; then status=0; else status=$?; fi
-test "$status" -eq 0
+run_status dynamic 0 "$work/external-pointer-bound"
 
-mixed_pointer_offset_source=tests/vir-direct-arm64-external-pointer-offset-fallback.c
-run_compiler --no-libc --dynlink --dump-vir --stats \
-    -o "$work/external-pointer-offset-fallback" \
-    "$mixed_pointer_offset_source" \
-    2> "$work/external-pointer-offset-fallback.stats"
-if run_dynamic "$work/external-pointer-offset-fallback"; then status=0; else status=$?; fi
-test "$status" -eq 0
-if run_dynamic "$work/external-pointer-offset-fallback" extra; then status=0; else status=$?; fi
-test "$status" -eq 0
-
-opaque_wide_source=tests/vir-direct-arm64-external-void-pointer-wide.c
+# Offset a malloc'd pointer, replace it with a libc result, offset it again.
+run_compiler --no-libc --dynlink --dump-vir \
+    -o "$work/external-pointer-reoffset" \
+    tests/vir-direct-arm64-external-pointer-reoffset.c \
+    2> "$work/external-pointer-reoffset.vir"
+run_status dynamic 0 "$work/external-pointer-reoffset"
+run_status dynamic 0 "$work/external-pointer-reoffset" extra
 
 # Preserve wide accesses through a cast from malloc's opaque void pointer.
-run_compiler --no-libc --dynlink --dump-vir --stats \
-    -o "$work/external-void-pointer-wide" "$opaque_wide_source" \
-    2> "$work/external-void-pointer-wide.stats"
-if run_dynamic "$work/external-void-pointer-wide"; then status=0; else status=$?; fi
-test "$status" -eq 0
+run_compiler --no-libc --dynlink --dump-vir \
+    -o "$work/external-void-pointer-wide" \
+    tests/vir-direct-arm64-external-void-pointer-wide.c \
+    2> "$work/external-void-pointer-wide.vir"
+run_status dynamic 0 "$work/external-void-pointer-wide"

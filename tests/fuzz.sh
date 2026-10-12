@@ -26,12 +26,12 @@ runner=()
 read -r -a runner <<< "${TARGET_EXEC:-}"
 seeds=${FUZZ_SEEDS:-200}
 start=${FUZZ_START:-1}
-host_cc=${CC:-cc}
+read -r -a host_cc <<< "${CC:-cc}"
 
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
 
-"$host_cc" -O -o "$workdir/gen" tests/fuzz-gen.c || exit 1
+"${host_cc[@]}" -O -o "$workdir/gen" tests/fuzz-gen.c || exit 1
 
 # Output and exit status of one program, as a single string to compare.
 run()
@@ -44,7 +44,7 @@ failed=0
 for ((seed = start; seed < start + seeds; seed++)); do
     src="$workdir/p.c"
     "$workdir/gen" "$seed" > "$src"
-    if ! timeout 60 "$host_cc" -O0 -fwrapv -w -include stdio.h \
+    if ! timeout 60 "${host_cc[@]}" -O0 -fwrapv -w -include stdio.h \
         -o "$workdir/ref" "$src"; then
         echo "seed $seed: the host compiler rejects the program" >&2
         cp "$src" "out/fuzz-$seed.c"

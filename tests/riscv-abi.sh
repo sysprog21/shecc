@@ -208,57 +208,6 @@ run_abi_test()
 
 # Parameter Passing Tests
 
-test_one_arg()
-{
-    run_abi_test "One argument (a0)" "Parameter Passing" '
-#include <stdio.h>
-int add_42(int x) { return x + 42; }
-int main() {
-    int result = add_42(8);
-    if (result == 50) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 50, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
-test_two_args()
-{
-    run_abi_test "Two arguments (a0, a1)" "Parameter Passing" '
-#include <stdio.h>
-int add(int a, int b) { return a + b; }
-int main() {
-    int result = add(10, 20);
-    if (result == 30) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 30, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
-test_four_args()
-{
-    run_abi_test "Four arguments (a0-a3)" "Parameter Passing" '
-#include <stdio.h>
-int sum4(int a, int b, int c, int d) { return a + b + c + d; }
-int main() {
-    int result = sum4(10, 20, 30, 40);
-    if (result == 100) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 100, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
 test_five_args()
 {
     run_abi_test "Five arguments (a0-a4)" "Parameter Passing" '
@@ -640,9 +589,6 @@ int main() {
 # Run all tests
 
 echo -e "${CYAN}Running Parameter Passing Tests...${NC}"
-test_one_arg
-test_two_args
-test_four_args
 test_five_args
 test_eight_args
 test_long_long_after_int

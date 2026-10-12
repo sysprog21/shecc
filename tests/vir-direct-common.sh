@@ -11,6 +11,15 @@ vir_build_deterministic()
     cmp "$output" "$repeat"
 }
 
+# Run COMMAND and require it to exit with EXPECTED.
+vir_expect_status()
+{
+    local expected=$1 status
+    shift
+    if "$@"; then status=0; else status=$?; fi
+    test "$status" -eq "$expected"
+}
+
 # Extract exactly one graph and fail if its marker or block body is missing.
 vir_extract_function()
 {

@@ -187,14 +187,12 @@ config:
 .PHONY: check-vir-frontend-stage0 check-vir-frontend-stage2 \
 	check-vir-stage0 check-vir-stage2 \
 	check-vir-frontend-policy-stage0 check-vir-frontend-policy-stage2 \
-	check-vir-ssa-baseline check-vir-ssa-baseline-stage0 check-vir-ssa-baseline-stage2 \
-	check-vir-large-cfg-stage0 check-vir-large-cfg-stage2 \
-	check-vir-ssa-selfhost check-vir-ssa-selfhost-stage0 check-vir-ssa-selfhost-stage2
+	check-vir-opt-baseline
 
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2 \
-	check-vir-core check-vir-frontend-stage0 check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 check-vir-arm-verifier-stage0 \
+	check-vir-core check-vir-frontend-stage0 check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
 	check-vir-multi-input-stage0 check-vir-multi-input-stage2 \
-	check-vir-arm-verifier-stage2 check-vir-stats-stage0 check-vir-stats-stage2 check-vir-baseline check-vir-ssa-baseline check-vir-large-cfg-stage0 check-vir-large-cfg-stage2 check-vir-ssa-selfhost \
+	check-vir-baseline check-vir-opt-baseline \
 	check-vir-corpus-stage0 check-fuzz-stage0 check-vir-frontend-policy-stage0
 
 # Random programs checked against the host compiler and built by shecc.
@@ -219,12 +217,6 @@ check-vir-multi-input-stage0: $(OUT)/$(STAGE0) tests/vir-multi-input.sh tests/vi
 check-vir-multi-input-stage2: $(OUT)/$(STAGE2) tests/vir-multi-input.sh tests/vir-multi-input-root.c tests/vir-multi-input-main.c
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-multi-input.sh 2
 
-check-vir-large-cfg-stage0: $(OUT)/$(STAGE0) tests/vir-large-cfg.sh tests/vir-frontend-large-cfg.c
-	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-large-cfg.sh 0
-
-check-vir-large-cfg-stage2: $(OUT)/$(STAGE2) tests/vir-large-cfg.sh tests/vir-frontend-large-cfg.c
-	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-large-cfg.sh 2
-
 ifeq ($(ARCH),x64)
 .PHONY: check-vir-x64-encoders check-vir-x64-and-flags
 check: check-vir-x64-encoders check-vir-x64-and-flags
@@ -239,20 +231,19 @@ check-vir-x64-fold: $(OUT)/$(STAGE0) tests/vir-x64-fold.c tests/vir-x64-liveout.
 	$(OUT)/vir-x64-fold
 	CC="$(CC)" bash tests/vir-x64-liveout.sh $(OUT)/$(STAGE0)
 
-.PHONY: check-vir-native-x64-stage0 check-vir-native-x64-stage2 \
-	check-x64-startup-globals-stage0 check-x64-startup-globals-stage2
-check: check-x64-startup-globals-stage0 check-x64-startup-globals-stage2 \
-	check-vir-native-x64-stage0 check-vir-native-x64-stage2
+.PHONY: check-vir-native-x64-stage0 check-vir-native-x64-stage2
+check: check-vir-native-x64-stage0 check-vir-native-x64-stage2
 check-vir-native-x64-stage0: $(OUT)/$(STAGE0) $(VIR_NATIVE_X64_FIXTURES) tests/vir-direct-x64.sh tests/vir-direct-common.sh
 	bash tests/vir-direct-x64.sh 0
 check-vir-native-x64-stage2: $(OUT)/$(STAGE2) $(VIR_NATIVE_X64_FIXTURES) tests/vir-direct-x64.sh tests/vir-direct-common.sh
 	bash tests/vir-direct-x64.sh 2
 
-.PHONY: check-x64-startup-globals-stage0 check-x64-startup-globals-stage2
-check-x64-startup-globals-stage0: $(OUT)/$(STAGE0) tests/vir-direct-x64-startup-globals.c tests/x64-startup-globals.sh
-	bash tests/x64-startup-globals.sh 0
-check-x64-startup-globals-stage2: $(OUT)/$(STAGE2) tests/vir-direct-x64-startup-globals.c tests/x64-startup-globals.sh
-	bash tests/x64-startup-globals.sh 2
+# A foreign callee may leave garbage above a narrow return value, so the
+# caller has to extend it. The callee is host assembly, preloaded at run time.
+.PHONY: check-vir-call-return
+check: check-vir-call-return
+check-vir-call-return: $(OUT)/$(STAGE0) tests/vir-call-return.sh tests/vir-call-return.c
+	CC="$(CC)" bash tests/vir-call-return.sh $(OUT)/$(STAGE0)
 endif
 
 ifeq ($(ARCH),arm64)
@@ -306,10 +297,10 @@ vir-baseline: $(OUT)/$(STAGE0) tests/vir-baseline.sh tests/benchmark-time.sh \
 	tests/vir-baseline-workloads.txt
 	VIR_BASELINE_RUNS=$${VIR_BASELINE_RUNS:-5} tests/vir-baseline.sh
 
-.PHONY: vir-ssa-baseline
-vir-ssa-baseline: $(OUT)/$(STAGE0) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
-	tests/vir-ssa-baseline-workloads.txt tests/vir-frontend-large-cfg.c
-	tests/vir-ssa-baseline.sh 0
+.PHONY: vir-opt-baseline
+vir-opt-baseline: $(OUT)/$(STAGE0) tests/vir-opt-baseline.sh tests/benchmark-time.sh \
+	tests/vir-opt-baseline-workloads.txt
+	tests/vir-opt-baseline.sh 0
 
 .PHONY: vir-licm-profile
 VIR_LICM_PROFILE_SAMPLES ?= 7
@@ -411,7 +402,7 @@ check-vir: check-vir-core check-vir-frontend-stage0 \
 	check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
 	check-vir-frontend-policy-stage0 \
 	check-vir-frontend-policy-stage2 \
-	check-vir-arm-verifier-stage0 check-vir-arm-verifier-stage2 check-vir-sanitizer
+	check-vir-sanitizer
 
 check-vir-stage0: $(OUT)/$(STAGE0) tests/vir-stage0.c src/vir.c src/vir.h
 	$(OUT)/$(STAGE0) -o $(OUT)/vir-stage0 tests/vir-stage0.c
@@ -432,63 +423,20 @@ check-vir-native-regressions-stage2: $(OUT)/$(STAGE2)
 check-vir-lower: $(OUT)/$(STAGE0) tests/vir-lower.c tests/vir-lower-smoke.c tests/vir-lower.sh
 	CC="$(CC)" TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-lower.sh
 
-# This formerly exposed an Arm stage-0 verifier miscompile. Keep it in both
-# bootstrap gates and on every target so CFG-heavy verifier paths cannot regress.
-check-vir-arm-verifier-stage0: $(OUT)/$(STAGE0) tests/vir-arm-verifier.c src/vir.c src/vir.h
-	$(OUT)/$(STAGE0) -o $(OUT)/vir-arm-verifier-stage0 tests/vir-arm-verifier.c
-	$(TARGET_EXEC) $(OUT)/vir-arm-verifier-stage0
-
-check-vir-arm-verifier-stage2: $(OUT)/$(STAGE2) tests/vir-arm-verifier.c src/vir.c src/vir.h
-	$(TARGET_EXEC) $(OUT)/$(STAGE2) -o $(OUT)/vir-arm-verifier-stage2 tests/vir-arm-verifier.c
-	$(TARGET_EXEC) $(OUT)/vir-arm-verifier-stage2
-
-check-vir-stats-stage0: $(OUT)/$(STAGE0) tests/vir-stats.sh
-	tests/vir-stats.sh 0
-
-check-vir-stats-stage2: $(OUT)/$(STAGE2) tests/vir-stats.sh
-	tests/vir-stats.sh 2
-
 check-vir-baseline: $(OUT)/$(STAGE0) tests/vir-baseline.sh tests/benchmark-time.sh \
 	tests/vir-baseline-workloads.txt
 	VIR_BASELINE_RUNS=1 VIR_BASELINE_NO_TIMING=1 tests/vir-baseline.sh
 
-check-vir-ssa-baseline-stage0: $(OUT)/$(STAGE0) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
-	tests/vir-ssa-baseline-workloads.txt tests/vir-frontend-large-cfg.c
-	VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-baseline-workloads.txt tests/vir-ssa-baseline.sh 0
-
-check-vir-ssa-baseline-stage2: $(OUT)/$(STAGE2) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
-	tests/vir-ssa-baseline-workloads.txt tests/vir-frontend-large-cfg.c
-	TARGET_EXEC="$(TARGET_EXEC)" VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-baseline-workloads.txt tests/vir-ssa-baseline.sh 2
-
-VIR_SSA_BASELINE_NORMALIZE = sed -e 's/stage=[02] /stage=both /' -e 's/ output_bytes=[0-9][0-9]*//'
-
-# The recipe runs both stages itself to compare them, so depending on the
-# per-stage targets would run every workload twice.
-check-vir-ssa-baseline: $(OUT)/$(STAGE0) $(OUT)/$(STAGE2) tests/vir-ssa-baseline.sh \
-	tests/benchmark-time.sh tests/vir-ssa-baseline-workloads.txt tests/vir-frontend-large-cfg.c
-	@set -e; stage0=$$(mktemp); stage2=$$(mktemp); trap 'rm -f "$$stage0" "$$stage2" "$$stage0.normalized" "$$stage2.normalized"' EXIT; \
-	VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-baseline-workloads.txt tests/vir-ssa-baseline.sh 0 > "$$stage0"; \
-	TARGET_EXEC="$(TARGET_EXEC)" VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-baseline-workloads.txt tests/vir-ssa-baseline.sh 2 > "$$stage2"; \
-	$(VIR_SSA_BASELINE_NORMALIZE) "$$stage0" > "$$stage0.normalized"; \
-	$(VIR_SSA_BASELINE_NORMALIZE) "$$stage2" > "$$stage2.normalized"; \
-	cmp -s "$$stage0.normalized" "$$stage2.normalized"
-
-check-vir-ssa-selfhost-stage0: $(OUT)/$(STAGE0) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
-	tests/vir-ssa-selfhost-workloads.txt
-	VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-selfhost-workloads.txt tests/vir-ssa-baseline.sh 0
-
-check-vir-ssa-selfhost-stage2: $(OUT)/$(STAGE2) tests/vir-ssa-baseline.sh tests/benchmark-time.sh \
-	tests/vir-ssa-selfhost-workloads.txt
-	TARGET_EXEC="$(TARGET_EXEC)" VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-selfhost-workloads.txt tests/vir-ssa-baseline.sh 2
-
-check-vir-ssa-selfhost: $(OUT)/$(STAGE0) $(OUT)/$(STAGE2) tests/vir-ssa-baseline.sh \
-	tests/benchmark-time.sh tests/vir-ssa-selfhost-workloads.txt
-	@set -e; stage0=$$(mktemp); stage2=$$(mktemp); trap 'rm -f "$$stage0" "$$stage2" "$$stage0.normalized" "$$stage2.normalized"' EXIT; \
-	VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-selfhost-workloads.txt tests/vir-ssa-baseline.sh 0 > "$$stage0"; \
-	TARGET_EXEC="$(TARGET_EXEC)" VIR_SSA_BASELINE_NO_TIMING=1 VIR_SSA_BASELINE_RUNS=2 VIR_SSA_BASELINE_MANIFEST=tests/vir-ssa-selfhost-workloads.txt tests/vir-ssa-baseline.sh 2 > "$$stage2"; \
-	$(VIR_SSA_BASELINE_NORMALIZE) "$$stage0" > "$$stage0.normalized"; \
-	$(VIR_SSA_BASELINE_NORMALIZE) "$$stage2" > "$$stage2.normalized"; \
-	cmp -s "$$stage0.normalized" "$$stage2.normalized"
+# Each workload is compiled twice at both levels by each stage, and the two
+# compilers must agree on the output and on the VIR dump. The stats lines are
+# left out because they report host-dependent arena sizes.
+check-vir-opt-baseline: $(OUT)/$(STAGE0) $(OUT)/$(STAGE2) tests/vir-opt-baseline.sh \
+	tests/benchmark-time.sh tests/vir-opt-baseline-workloads.txt
+	@set -e; stage0=$$(mktemp); stage2=$$(mktemp); trap 'rm -f "$$stage0" "$$stage2"' EXIT; \
+	VIR_OPT_BASELINE_NO_TIMING=1 VIR_OPT_BASELINE_RUNS=2 tests/vir-opt-baseline.sh 0 > "$$stage0"; \
+	TARGET_EXEC="$(TARGET_EXEC)" VIR_OPT_BASELINE_NO_TIMING=1 VIR_OPT_BASELINE_RUNS=2 tests/vir-opt-baseline.sh 2 > "$$stage2"; \
+	sed -i 's/ stage=[02] / /' "$$stage0" "$$stage2"; \
+	diff "$$stage0" "$$stage2"
 
 # Both prerequisites are order-only, and both exist because "make -j" would
 # otherwise let a compile start beside the thing it reads. Selecting a target

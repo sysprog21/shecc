@@ -3,8 +3,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-cc=${CC:-cc}
-"$cc" -O1 -I"$ROOT/out" "$ROOT/tests/arm64-register-memory-unit.c" -o "$TMP/unit"
+read -r -a cc <<< "${CC:-cc}"
+"${cc[@]}" -O1 -I"$ROOT/out" "$ROOT/tests/arm64-register-memory-unit.c" -o "$TMP/unit"
 "$TMP/unit" "$TMP/actual.bin"
 if command -v aarch64-linux-gnu-as > /dev/null; then
     AS=aarch64-linux-gnu-as

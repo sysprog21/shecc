@@ -154,6 +154,7 @@ int main(void)
     vir_edge_args_t true_args;
     vir_edge_args_t false_args;
     vir_ssa_t *ssa;
+    char *error;
 
     vir_function_init(&func, 64);
     entry = vir_block_create(&func);
@@ -187,6 +188,12 @@ int main(void)
         return 17;
     if (!vir_block_set_return(&func, merge, param))
         return 19;
+
+    /* Both successors of the branch are the same block. Arm's stage 0 once
+     * miscompiled the verifier on exactly this shape.
+     */
+    if (!vir_verify(&func, &error))
+        return 22;
     if (!vir_edge_delete(&func, entry->true_edge))
         return 18;
     if (entry->terminator != VIR_TERM_JUMP || entry->branch_condition ||

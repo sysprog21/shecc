@@ -21,7 +21,8 @@ dirty_signed_short: mov $0x1234fffe, %eax; ret
 dirty_unsigned_short: mov $0x1234fffe, %eax; ret
 .section .note.GNU-stack,"",@progbits
 ASM
-"${CC:-cc}" -shared -fPIC "$task_dir/dirty.S" -o "$task_dir/dirty.so"
+read -r -a cc <<< "${CC:-cc}"
+"${cc[@]}" -shared -fPIC "$task_dir/dirty.S" -o "$task_dir/dirty.so"
 "$compiler" --dynlink -o "$task_dir/test" tests/vir-call-return.c
 chmod +x "$task_dir/test"
 LD_PRELOAD="$task_dir/dirty.so" "$task_dir/test"

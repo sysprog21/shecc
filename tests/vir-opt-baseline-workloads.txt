@@ -1,0 +1,10 @@
+# path                              purpose
+tests/vir-frontend-param.c          parameter_arithmetic
+tests/vir-frontend-join.c           block_parameter_cfg
+tests/vir-frontend-while-loop.c     loop_cfg
+tests/vir-frontend-cse.c            local_cse
+tests/vir-frontend-large-cfg.c      large_cfg
+tests/vir-frontend-nested-loop.c    nested_loop_licm
+tests/vir-frontend-licm.c           single_loop_licm
+src/main.c                          self_hosting_main
+src/vir.c                           self_hosting_vir_core

@@ -21,21 +21,21 @@ case "$1" in
         ;;
 esac
 
-manifest="${VIR_SSA_BASELINE_MANIFEST:-tests/vir-ssa-baseline-workloads.txt}"
-no_timing="${VIR_SSA_BASELINE_NO_TIMING:-0}"
-runs="${VIR_SSA_BASELINE_RUNS:-3}"
+manifest="${VIR_OPT_BASELINE_MANIFEST:-tests/vir-opt-baseline-workloads.txt}"
+no_timing="${VIR_OPT_BASELINE_NO_TIMING:-0}"
+runs="${VIR_OPT_BASELINE_RUNS:-3}"
 if [ "$no_timing" != 0 ] && [ "$no_timing" != 1 ]; then
-    echo "VIR_SSA_BASELINE_NO_TIMING must be 0 or 1" >&2
+    echo "VIR_OPT_BASELINE_NO_TIMING must be 0 or 1" >&2
     exit 1
 fi
 case "$runs" in
     '' | *[!0-9]*)
-        echo "VIR_SSA_BASELINE_RUNS must be a positive integer" >&2
+        echo "VIR_OPT_BASELINE_RUNS must be a positive integer" >&2
         exit 1
         ;;
 esac
 if [ "$runs" -lt 2 ]; then
-    echo "VIR_SSA_BASELINE_RUNS must be at least 2" >&2
+    echo "VIR_OPT_BASELINE_RUNS must be at least 2" >&2
     exit 1
 fi
 workdir=$(mktemp -d)
@@ -68,7 +68,7 @@ median_number()
     '
 }
 
-while read -r source purpose _expectation; do
+while read -r source purpose; do
     case "$source" in
         '' | '#'*)
             continue
@@ -111,26 +111,36 @@ while read -r source purpose _expectation; do
             fi
         fi
         output_bytes=$(wc -c < "$workdir/$opt-1.elf")
-        VIR_SSA_BASELINE_STAGE="$1" VIR_SSA_BASELINE_RUNS="$runs" \
-            VIR_SSA_BASELINE_SECONDS="$seconds" \
-            VIR_SSA_BASELINE_TIMING_SOURCE="$timing_source" \
-            VIR_SSA_BASELINE_PEAK_RSS_KB="$peak_rss_kb" \
-            VIR_SSA_BASELINE_RSS_SOURCE="$rss_source" \
-            VIR_SSA_BASELINE_OUTPUT_BYTES="$output_bytes" \
+
+        # The stats lines report host-dependent arena sizes; everything else
+        # must match between the stage 0 and stage 2 compilers.
+        output_cksum=$(cksum < "$workdir/$opt-1.elf")
+        vir_cksum=$(grep -v '^stats ' "$stats" | cksum)
+        VIR_OPT_BASELINE_STAGE="$1" VIR_OPT_BASELINE_RUNS="$runs" \
+            VIR_OPT_BASELINE_SECONDS="$seconds" \
+            VIR_OPT_BASELINE_TIMING_SOURCE="$timing_source" \
+            VIR_OPT_BASELINE_PEAK_RSS_KB="$peak_rss_kb" \
+            VIR_OPT_BASELINE_RSS_SOURCE="$rss_source" \
+            VIR_OPT_BASELINE_OUTPUT_BYTES="$output_bytes" \
+            VIR_OPT_BASELINE_OUTPUT_CKSUM="${output_cksum// /:}" \
+            VIR_OPT_BASELINE_VIR_CKSUM="${vir_cksum// /:}" \
             awk -v source="$source" -v purpose="$purpose" -v opt="$opt" '
             END {
-                printf("ssa-baseline stage=%s opt=%s workload=%s purpose=%s ",
-                       ENVIRON["VIR_SSA_BASELINE_STAGE"], opt, source, purpose)
+                printf("opt-baseline stage=%s opt=%s workload=%s purpose=%s ",
+                       ENVIRON["VIR_OPT_BASELINE_STAGE"], opt, source, purpose)
                 printf("runs=%s seconds=%s timing_source=%s ",
-                       ENVIRON["VIR_SSA_BASELINE_RUNS"],
-                       ENVIRON["VIR_SSA_BASELINE_SECONDS"],
-                       ENVIRON["VIR_SSA_BASELINE_TIMING_SOURCE"])
+                       ENVIRON["VIR_OPT_BASELINE_RUNS"],
+                       ENVIRON["VIR_OPT_BASELINE_SECONDS"],
+                       ENVIRON["VIR_OPT_BASELINE_TIMING_SOURCE"])
                 printf("median_peak_rss_kb=%s rss_source=%s output_bytes=%s ",
-                       ENVIRON["VIR_SSA_BASELINE_PEAK_RSS_KB"],
-                       ENVIRON["VIR_SSA_BASELINE_RSS_SOURCE"],
-                       ENVIRON["VIR_SSA_BASELINE_OUTPUT_BYTES"])
+                       ENVIRON["VIR_OPT_BASELINE_PEAK_RSS_KB"],
+                       ENVIRON["VIR_OPT_BASELINE_RSS_SOURCE"],
+                       ENVIRON["VIR_OPT_BASELINE_OUTPUT_BYTES"])
+                printf("output_cksum=%s vir_cksum=%s",
+                       ENVIRON["VIR_OPT_BASELINE_OUTPUT_CKSUM"],
+                       ENVIRON["VIR_OPT_BASELINE_VIR_CKSUM"])
                 printf("\n")
             }
-        ' < "$stats"
+        ' < /dev/null
     done
 done < "$manifest"

@@ -12,37 +12,24 @@ fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-check_direct()
+check_run()
 {
-    local name=$1 expected=$2 extra_expected=$3 status
+    local name=$1 expected=$2 extra_expected=$3
     local source="tests/vir-direct-x64-$name.c"
 
     if test "$name" = direct; then
         source=tests/vir-direct-x64.c
-    elif test "$name" = branch-initialized-root; then
-        source=tests/vir-direct-branch-initialized-root.c
-    elif test "$name" = narrow-global || [[ "$name" = global-ptradd* ]]; then
+    elif [[ "$name" = branch-*-root ]] || test "$name" = narrow-global \
+        || [[ "$name" = global-ptradd* ]]; then
         source="tests/vir-direct-$name.c"
     fi
 
     vir_build_deterministic "$compiler" "$source" \
-        "$work/$name" "$work/$name-repeat" "$work/$name.stats" \
-        --dump-vir
-    if "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
+        "$work/$name" "$work/$name-repeat" "$work/$name.dump"
+    vir_expect_status "$expected" "$work/$name"
     if test "$extra_expected" != -; then
-        if "$work/$name" extra; then status=0; else status=$?; fi
-        test "$status" -eq "$extra_expected"
+        vir_expect_status "$extra_expected" "$work/$name" extra
     fi
-}
-
-check_direct_binary()
-{
-    local name=$1 source="tests/vir-direct-x64-$1.c"
-
-    vir_build_deterministic "$compiler" "$source" \
-        "$work/$name" "$work/$name-repeat" "$work/$name.stats" \
-        --dump-vir
 }
 
 dump_main_vir()
@@ -244,105 +231,86 @@ check_unknown_pointer_alias_dump()
         "$dump.main")" -eq 2
 }
 
-check_main_case()
-{
-    local name=$1 expected=$2 status
-    local source="tests/vir-direct-x64-$name.c"
-
-    "$compiler" --dump-vir --stats -o "$work/$name" \
-        "$source" 2> "$work/$name.stats"
-    "$compiler" --dump-vir -o "$work/$name-repeat" "$source"
-    cmp "$work/$name" "$work/$name-repeat"
-    if "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-}
-
-check_direct direct 11 -
-check_direct cfg 23 7
-check_direct join 23 7
-check_direct loop 21 12
-check_direct ops 13 13
-check_direct div 0 0
-check_direct udiv 63 206
-check_direct div-i64 74 169
-check_direct casts 15 0
-check_direct truthy 0 31
-check_direct truthy-join 0 31
-check_direct pointer 0 29
-check_direct pointer-join 14 7
-check_direct pointer-store 0 29
-check_direct call 29 -
-check_direct r11-call 255 -
-check_direct param-scratch 13 -
-check_direct param-shift 250 -
-check_direct param-loop 3 6
-check_direct param-derived-join 8 -
-check_direct edge-update-computed 22 -
-check_direct r11-leaf 9 -
-"$compiler" --no-libc --dump-vir -o "$work/r11-leaf-nolibc" \
+check_run direct 11 -
+check_run cfg 23 7
+check_run join 23 7
+check_run loop 21 12
+check_run ops 13 13
+check_run div 0 0
+check_run udiv 63 206
+check_run div-i64 74 169
+check_run casts 15 0
+check_run truthy 0 31
+check_run truthy-join 0 31
+check_run pointer 0 29
+check_run pointer-join 14 7
+check_run pointer-store 0 29
+check_run call 29 -
+check_run r11-call 255 -
+check_run param-scratch 13 -
+check_run param-shift 250 -
+check_run param-loop 3 6
+check_run param-derived-join 8 -
+check_run edge-update-computed 22 -
+check_run r11-leaf 9 -
+"$compiler" --no-libc -o "$work/r11-leaf-nolibc" \
     tests/vir-direct-x64-r11-leaf.c
 
-check_direct call-direct-root 29 -
-check_direct call-direct-args 13 25
-check_direct call-direct-pointer 30 31
-check_direct call-direct-stack 28 -
-check_direct call-direct-stack-pointer 22 23
-check_direct call-narrow 37 -
-check_direct call-direct-legacy-reference 30 -
-check_direct call-direct-global-reference 30 -
-check_direct call-args 13 25
-check_direct call-argv 25 26
-check_direct call-pointer 30 31
-check_direct call-pointer-high 11 12
-check_direct call-pointer-result 29 -
-check_direct call-six 21 -
-check_direct call-seven 28 -
-check_direct call-eight 36 -
-check_direct call-stack-pointer 22 23
-check_direct call-void 29 -
-check_direct call-bool-arg 0 1
+check_run call-local-root 29 -
+check_run call-narrow 37 -
+check_run call-global-fnptr 30 -
+check_run call-args 13 25
+check_run call-argv 25 26
+check_run call-pointer 30 31
+check_run call-pointer-high 11 12
+check_run call-pointer-result 29 -
+check_run call-six 21 -
+check_run call-seven 28 -
+check_run call-eight 36 -
+check_run call-stack-pointer 22 23
+check_run call-void 29 -
+check_run call-bool-arg 0 1
 
-# SysV returns _Bool in AL; the direct caller canonicalizes the full EAX value
-# before storing the VIR i1 result (AND EAX, 1; then store).
-check_direct call-bool-arg-stack 0 1
-check_main_case call-bool-arg-fallback 0 direct-x64-subset
-check_direct call-i64 2 2
-check_direct call-i64-stack 1 -
-check_direct call-i64-mixed 4 -
-check_direct i64-memory 1 1
-check_direct i64-volatile 1 1
-check_direct volatile 29 30
-check_direct volatile-discard 29 30
-check_direct load 29 29
-check_direct store 29 29
-check_direct store-init 29 29
-check_direct store-stale-read 29 29
-check_direct store-read-arith 30 30
-check_direct store-read-pair 29 29
-check_direct store-read-branch 30 29
-check_direct merged-pointer-effect 29 30
-check_direct merged-pointer-load 29 30
-check_direct merged-volatile-pointer-effect 29 30
-check_direct merged-pointer-effect-void-call 29 30
+# SysV returns _Bool in AL; the caller canonicalizes the full EAX value before
+# storing the VIR i1 result (AND EAX, 1; then store).
+check_run call-bool-arg-stack 0 1
+check_run call-i64 2 2
+check_run call-i64-stack 1 -
+check_run call-i64-mixed 4 -
+check_run i64-memory 1 1
+check_run i64-volatile 1 1
+check_run volatile 29 30
+check_run volatile-discard 29 30
+check_run load 29 29
+check_run store 29 29
+check_run store-init 29 29
+check_run store-stale-read 29 29
+check_run store-read-arith 30 30
+check_run store-read-pair 29 29
+check_run store-read-branch 30 29
+check_run merged-pointer-effect 29 30
+check_run merged-pointer-load 29 30
+check_run merged-volatile-pointer-effect 29 30
+check_run merged-pointer-effect-void-call 29 30
 check_vir_effect_order merged-pointer-effect
 check_vir_effect_order merged-volatile-pointer-effect 1
-check_direct narrow-memory 29 -
-check_direct narrow-global 29 -
-check_direct narrow-array 229 -
-check_direct narrow-array-index 229 229
-check_direct narrow-array-index-unsigned 229 229
+check_run narrow-memory 29 -
+check_run narrow-global 29 -
+check_run narrow-array 229 -
+check_run narrow-array-index 229 229
+check_run narrow-array-index-unsigned 229 229
 check_vir_dump narrow-array-index sext zext
 check_vir_dump narrow-array-index-unsigned zext sext
-check_direct narrow-volatile 230 -
-check_direct narrow-volatile-local 230 -
-check_direct stack-array 29 -
-check_direct ptradd-narrow 29 -
-check_direct ptradd-narrow-signed 29 -
-check_direct ptrsub 29 -
-check_direct ptrsub-const 29 -
-check_direct ptrsub-unsigned 29 -
-check_direct ptrsub-unsigned-const 29 -
-check_direct_binary load-i32
+check_run narrow-volatile 230 -
+check_run narrow-volatile-local 230 -
+check_run stack-array 29 -
+check_run ptradd-narrow 29 -
+check_run ptradd-narrow-signed 29 -
+check_run ptrsub 29 -
+check_run ptrsub-const 29 -
+check_run ptrsub-unsigned 29 -
+check_run ptrsub-unsigned-const 29 -
+check_run load-i32 29 29
 pointer_join_dump="$work/pointer-join.vir"
 "$compiler" --dump-vir -o "$work/pointer-join-dump" \
     tests/vir-direct-x64-pointer-join.c 2> "$pointer_join_dump"
@@ -360,78 +328,42 @@ test "$(grep -Ec '^  (volatile\.)?store %' "$alias_dump.main")" -eq 3
 # The store's own reread is the unused assignment value, so DCE drops it.
 test "$(grep -Ec '^  %d[0-9]+ = (volatile\.)?load\.i64 ' "$alias_dump.main")" -eq 2
 
-# An assignment's value is reread only when it is used, so each store is no
-# longer followed by a load (and its address arithmetic) that nothing reads.
-
-check_case()
-{
-    local name=$1 expected=$2 extra_expected=$3 status
-    local source="tests/vir-direct-x64-$name.c"
-
-    if test "$name" = branch-volatile-root; then
-        source=tests/vir-direct-branch-volatile-root.c
-    fi
-
-    "$compiler" --dump-vir --stats -o "$work/$name" \
-        "$source" 2> "$work/$name.stats"
-    "$compiler" --dump-vir -o "$work/$name-repeat" "$source"
-    cmp "$work/$name" "$work/$name-repeat"
-    if "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-}
-
-check_program()
-{
-    local name=$1 expected=$2 extra_expected=$3 status
-    local source="tests/vir-direct-x64-$name.c"
-
-    "$compiler" -o "$work/$name" "$source"
-    "$compiler" -o "$work/$name-repeat" "$source"
-    cmp "$work/$name" "$work/$name-repeat"
-    if "$work/$name"; then status=0; else status=$?; fi
-    test "$status" -eq "$expected"
-    if "$work/$name" extra; then status=0; else status=$?; fi
-    test "$status" -eq "$extra_expected"
-}
-
-check_direct wide-cast 27 5
-check_case pointer-int-cast 0 1 'direct-x64-subset|instruction|unsupported'
-check_case pointer-int-return 1 1 'direct-x64-subset|instruction|unsupported'
-check_case wide-return 0 0
-check_case merged-narrow-effect 129 130 effects
-check_direct local-pointer-chain 41 42
-check_direct local-pointer-deep 51 52
-check_direct branch-local-root-call 23 17
+check_run wide-cast 27 5
+check_run pointer-int-cast 0 1
+check_run pointer-int-return 1 1
+check_run wide-return 0 0
+check_run merged-narrow-effect 129 130
+check_run local-pointer-chain 41 42
+check_run local-pointer-deep 51 52
+check_run branch-local-root-call 23 17
 dump_main_vir branch-local-root-call
 check_entry_root_effects branch-local-root-call 2 0 0
-check_direct i64-memory-alias 2 1
-check_direct selected-root-alias 31 222
+check_run i64-memory-alias 2 1
+check_run selected-root-alias 31 222
 dump_main_vir selected-root-alias
 check_entry_root_effects selected-root-alias 2 2 3
-check_direct global-pointer-slot 7 14
+check_run global-pointer-slot 7 14
 check_global_pointer_slot_dump
-check_direct global-pointer-call 7 14
+check_run global-pointer-call 7 14
 check_global_pointer_call_dump
-check_direct unknown-pointer-alias 0 13
+check_run unknown-pointer-alias 0 13
 check_unknown_pointer_alias_dump
-check_case i64-memory-aggregate 1 1 'direct-x64-subset|allocat|unsupported'
-check_case call-aggregate 29 29 'direct-x64-subset|unsupported|instruction|allocat'
+check_run i64-memory-aggregate 1 1
+check_run call-aggregate 29 29
 
 # Materialize the entry-only initializer before the branch and keep the later
 # branch-specific write as a separate ordered effect.
-check_direct store-branch 29 29
+check_run store-branch 29 29
 dump_main_vir store-branch
 check_entry_root_effects store-branch 1 1 1
-check_direct store-stale-branch 0 0
+check_run store-stale-branch 0 0
 dump_main_vir store-stale-branch
 check_entry_root_effects store-stale-branch 1 1 2 1
-check_direct branch-initialized-root 31 29
+check_run branch-initialized-root 31 29
 dump_main_vir branch-initialized-root tests/vir-direct-branch-initialized-root.c
 check_entry_root_effects branch-initialized-root 1 0 2
-check_case branch-volatile-root 31 29 'root-address|volatile'
-# check_direct and dump_main_vir cover the default level; repeat at --no-opt.
+check_run branch-volatile-root 31 29
+# check_run and dump_main_vir cover the default level; repeat at --no-opt.
 for suffix in '' -repeat; do
     "$compiler" --no-opt --dump-vir --stats \
         -o "$work/branch-initialized-root-o0$suffix" \
@@ -441,56 +373,30 @@ done
 cmp "$work/branch-initialized-root-o0" "$work/branch-initialized-root-o0-repeat"
 cmp "$work/branch-initialized-root-o0.stats" \
     "$work/branch-initialized-root-o0-repeat.stats"
-if "$work/branch-initialized-root-o0"; then status=0; else status=$?; fi
-test "$status" -eq 31
-if "$work/branch-initialized-root-o0" extra; then status=0; else status=$?; fi
-test "$status" -eq 29
-check_direct global-load 29 29
-check_direct global-ptradd 8 9
-check_direct global-ptradd-dynamic 8 9
-check_direct global-ptradd-unsigned 8 9
-# Both constant offsets fit in a sign-extended byte: "add rax, 4" (48 83 c0 04).
-check_direct ptradd 0 29
-check_direct ptradd-unsigned 0 29
+vir_expect_status 31 "$work/branch-initialized-root-o0"
+vir_expect_status 29 "$work/branch-initialized-root-o0" extra
+check_run global-load 29 29
+check_run startup-globals 29 28
+check_run global-ptradd 8 9
+check_run global-ptradd-dynamic 8 9
+check_run global-ptradd-unsigned 8 9
+check_run ptradd 0 29
+check_run ptradd-unsigned 0 29
 
-external_pointer_source=tests/vir-direct-external-pointer-origin.c
-"$compiler" --no-libc --dynlink --dump-vir --stats \
-    -o "$work/external-pointer" "$external_pointer_source" \
-    2> "$work/external-pointer.stats"
-"$compiler" --no-libc --dynlink --dump-vir \
-    -o "$work/external-pointer-repeat" "$external_pointer_source"
-cmp "$work/external-pointer" "$work/external-pointer-repeat"
-if "$work/external-pointer"; then status=0; else status=$?; fi
-test "$status" -eq 0
-"$compiler" --no-libc --dynlink -o "$work/external-pointer-legacy" \
-    "$external_pointer_source"
-if "$work/external-pointer-legacy"; then status=0; else status=$?; fi
-test "$status" -eq 0
-
-typed_external_pointer_source=tests/vir-direct-external-typed-pointer.c
-"$compiler" --no-libc --dynlink --dump-vir --stats \
-    -o "$work/external-typed-pointer" "$typed_external_pointer_source" \
-    2> "$work/external-typed-pointer.stats"
-"$compiler" --no-libc --dynlink --dump-vir \
-    -o "$work/external-typed-pointer-repeat" \
-    "$typed_external_pointer_source"
-cmp "$work/external-typed-pointer" "$work/external-typed-pointer-repeat"
-if "$work/external-typed-pointer"; then status=0; else status=$?; fi
-test "$status" -eq 0
-"$compiler" --no-libc --dynlink -o "$work/external-typed-pointer-legacy" \
-    "$typed_external_pointer_source"
-if "$work/external-typed-pointer-legacy"; then status=0; else status=$?; fi
-test "$status" -eq 0
+for name in external-pointer-origin external-typed-pointer; do
+    vir_build_deterministic "$compiler" "tests/vir-direct-$name.c" \
+        "$work/$name" "$work/$name-repeat" "$work/$name.vir" \
+        --no-libc --dynlink
+    vir_expect_status 0 "$work/$name"
+done
 
 typed_pointer_offset_source=tests/vir-direct-external-typed-pointer-offset.c
-"$compiler" --no-libc --dynlink --dump-vir --stats --dump-vir \
+"$compiler" --no-libc --dynlink --dump-vir \
     -o "$work/external-typed-pointer-offset" \
     "$typed_pointer_offset_source" \
-    2> "$work/external-typed-pointer-offset.stats"
+    2> "$work/external-typed-pointer-offset.vir"
 vir_extract_function main \
-    "$work/external-typed-pointer-offset.stats" \
+    "$work/external-typed-pointer-offset.vir" \
     | grep -Eq ' = ptradd '
-if "$work/external-typed-pointer-offset"; then status=0; else status=$?; fi
-test "$status" -eq 0
-if "$work/external-typed-pointer-offset" extra; then status=0; else status=$?; fi
-test "$status" -eq 0
+vir_expect_status 0 "$work/external-typed-pointer-offset"
+vir_expect_status 0 "$work/external-typed-pointer-offset" extra

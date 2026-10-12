@@ -3,8 +3,8 @@ set -euo pipefail
 
 task_dir=$(mktemp -d)
 trap 'rm -rf "$task_dir"' EXIT
-cc=${CC:-cc}
-a64_cc=${A64_CC:-aarch64-linux-gnu-gcc}
+read -r -a cc <<< "${CC:-cc}"
+read -r -a a64_cc <<< "${A64_CC:-aarch64-linux-gnu-gcc}"
 read -r -a runner <<< "${TARGET_EXEC-qemu-aarch64 -L /usr/aarch64-linux-gnu}"
 case "${runner[0]:-}" in
     *qemu-aarch64)
@@ -14,6 +14,9 @@ case "${runner[0]:-}" in
         ;;
 esac
 
+# The hook goes in before the one peephole() call. Had that line changed, sed
+# would leave the compiler unhooked and the test would pass untested.
+[[ $(grep -c '^    peephole();$' src/main.c) == 1 ]]
 # Exercise naked global code, where the usual callee-save prologue cannot
 # protect the startup registers. Every allocated lane is overwritten.
 {
@@ -32,7 +35,7 @@ static void startup_bank_clobber(void)
 }
 C
 } > "$task_dir/main.c"
-"$cc" -O0 -g -std=c99 -fwrapv -iquote src -Isrc "$task_dir/main.c" -o "$task_dir/compiler"
+"${cc[@]}" -O0 -g -std=c99 -fwrapv -iquote src -Isrc "$task_dir/main.c" -o "$task_dir/compiler"
 
 # glibc itself need not inspect stack_end. Interpose its entry so losing the
 # original process SP is checked independently of main's argc/argv checks.
@@ -48,7 +51,7 @@ int __libc_start_main(int (*entry)(int, char **, char **), int argc,
     _exit(entry(argc, argv, 0));
 }
 C
-"$a64_cc" -shared -fPIC "$task_dir/shim.c" -o "$task_dir/shim.so"
+"${a64_cc[@]}" -shared -fPIC "$task_dir/shim.c" -o "$task_dir/shim.so"
 
 for size in 16 40000; do
     cat > "$task_dir/input.c" << C
