@@ -302,15 +302,21 @@ static type_t *read_qualified_type_name_specifiers(block_t *scope,
         if (type)
             lex_expect(T_identifier);
     }
-    /* A qualifier may follow the record, enum or typedef name as well. */
+
+    /* A qualifier may follow the record, enum or typedef name as well; restrict
+     * qualifies only a pointer typedef.
+     */
     while (lex_peek(T_const, NULL) || lex_peek(T_volatile, NULL) ||
            lex_peek(T_restrict, NULL)) {
         if (lex_accept(T_const))
             is_const = true;
         else if (lex_accept(T_volatile))
             is_volatile = true;
-        else
+        else {
             lex_expect(T_restrict);
+            if (!type || !type->ptr_level)
+                error_at("restrict requires a pointer type", cur_token_loc());
+        }
     }
     *const_out |= is_const;
     *volatile_out |= is_volatile;
@@ -921,10 +927,10 @@ static void read_function_pointer_return_declarator(var_t *vd,
     cur_token = end;
 }
 
-void read_inner_var_decl(var_t *vd,
-                         bool anon,
-                         bool is_param,
-                         bool is_record_member)
+static void read_inner_var_decl_body(var_t *vd,
+                                     bool anon,
+                                     bool is_param,
+                                     bool is_record_member)
 {
     bool grouped_name;
 
@@ -1541,6 +1547,27 @@ void read_inner_var_decl(var_t *vd,
         error_at("void type cannot define an object", cur_token_loc());
 }
 
+/* The element count of a declarator is bounded as its suffixes are read, but
+ * size_var() scales it by the element size afterwards, which can wrap as well:
+ * `struct big a[4]` with a member array of a gigabyte. Check the extent once
+ * the declarator is complete, before layout or allocation relies on it.
+ */
+void read_inner_var_decl(var_t *vd,
+                         bool anon,
+                         bool is_param,
+                         bool is_record_member)
+{
+    int element;
+
+    read_inner_var_decl_body(vd, anon, is_param, is_record_member);
+    if (vd->array_size <= 0 || !vd->type)
+        return;
+    element = array_element_size(vd);
+    if (!element && vd->type->base_struct)
+        element = vd->type->base_struct->size;
+    reject_oversized_array(vd->array_size, element);
+}
+
 /* C99 6.7p2 lets the storage-class specifiers appear anywhere among the
  * declaration specifiers: "int static x;" is "static int x;" and "unsigned
  * register int z;" is "register unsigned int z;". The order carries no meaning,
@@ -1699,6 +1726,14 @@ type_t *read_record_body(block_t *parent,
             else
                 reject_flexible_array_member_container(last);
             mark_flexible_array_member(last, is_union);
+
+            /* A member needs a complete type to have a size, and a record is
+             * not complete until its closing brace, so `struct s { struct s x;
+             * }` is invalid as well. Pointers to it remain valid. A flexible
+             * array has no size of its own, but its elements still need one.
+             */
+            if (is_incomplete_record_object(last))
+                error_at("Record member has incomplete type", cur_token_loc());
             if (is_union) {
                 last->offset = 0;
                 int field_size =
@@ -1743,10 +1778,10 @@ type_t *read_record_body(block_t *parent,
         }
     } while (!lex_accept(T_close_curly));
 
+    if (!is_union)
+        max_size = flush_bitfield_layout(size, &bits);
     type->alignment = alignment;
-    type->size = is_union
-                     ? ALIGN_UP(max_size, alignment)
-                     : ALIGN_UP(flush_bitfield_layout(size, &bits), alignment);
+    type->size = align_record_offset(max_size, alignment);
     type->num_fields = i;
     type->is_union = is_union;
     type->has_flexible_array_member = has_flexible_array_member;

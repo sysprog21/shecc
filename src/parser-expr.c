@@ -3787,7 +3787,7 @@ bool is_null_pointer_constant(var_t *value)
            !value->is_func && !value->init_val && !value->init_val_hi;
 }
 
-void read_ternary_operation(block_t *parent, basic_block_t **bb)
+static void read_ternary_operation_body(block_t *parent, basic_block_t **bb)
 {
     var_t *vd;
 
@@ -3986,6 +3986,21 @@ void read_ternary_operation(block_t *parent, basic_block_t **bb)
     vd->is_ternary_ret = true;
     opstack_push(vd);
     bb[0] = end_ternary;
+}
+
+/* The third operand of `?:' re-enters the conditional grammar through
+ * read_assignment_or_expression(), whose read_expr() call has already returned
+ * by then, so a chain such as `x ? 1 : x ? 1 : ...' never raises expr_depth.
+ * Count each conditional against the same limit to diagnose a long chain before
+ * it exhausts the machine stack.
+ */
+void read_ternary_operation(block_t *parent, basic_block_t **bb)
+{
+    expr_depth++;
+    if (expr_depth > MAX_EXPR_DEPTH)
+        error_at("Expression nesting too deep", cur_token_loc());
+    read_ternary_operation_body(parent, bb);
+    expr_depth--;
 }
 
 /* Lower the assignment whose left operand starts with the identifier ahead,

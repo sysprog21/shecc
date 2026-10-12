@@ -2979,6 +2979,21 @@ try_compile_error_message "restrict requires a pointer type" << EOF
 typedef int restrict R;
 int main(void) { return 0; }
 EOF
+try_compile_error_message "restrict requires a pointer type" << EOF
+typedef int I;
+static int *p = (I restrict *) 0;
+int main(void) { return p != 0; }
+EOF
+try_compile_error_message "conflicting types for typedef" << EOF
+typedef int T;
+typedef char T;
+int main(void) { return sizeof(T); }
+EOF
+try_ 0 << EOF
+typedef int T;
+typedef int T;
+int main(void) { T t = 0; return t; }
+EOF
 try_compile_error_message "Shift count out of range in constant expression" << EOF
 static unsigned long long x = 1ULL << 64;
 int main(void) { return x != 0; }
@@ -14653,6 +14668,95 @@ int main(void)
     int x = 3;
     return $(printf '(int)%.0s' $(seq 20000))x;
 }
+EOF
+
+# The third operand of a conditional re-enters the grammar after read_expr() has
+# returned, so a long `?:` chain bypassed the nesting limit and overflowed the
+# stack. A chain within the limit still compiles.
+try_ 3 << EOF
+int main(void)
+{
+    int x = 0;
+    return $(printf 'x ? 1 : %.0s' $(seq 100))3;
+}
+EOF
+try_compile_error_message "Expression nesting too deep" << EOF
+int main(void)
+{
+    int x = 1;
+    return $(printf 'x ? 1 : %.0s' $(seq 50000))0;
+}
+EOF
+
+# Nested function-like macro calls recursed in the expander without a bound, and
+# #if parentheses in the constant-expression evaluator likewise.
+try_ 7 << EOF
+#define F(x) x
+int main(void) { return $(printf 'F(%.0s' $(seq 50))7$(printf ')%.0s' $(seq 50)); }
+EOF
+try_compile_error_message "Macro expansion nesting too deep" << EOF
+#define F(x) x
+int main(void) { return $(printf 'F(%.0s' $(seq 2000))0$(printf ')%.0s' $(seq 2000)); }
+EOF
+try_compile_error_message "Expression nesting too deep" << EOF
+#if $(printf '(%.0s' $(seq 30000))1$(printf ')%.0s' $(seq 30000))
+#endif
+int main(void) { return 0; }
+EOF
+
+# An array extent is an int, so one whose element count or byte size exceeds
+# INT_MAX must be rejected rather than wrapped to a small or zero size.
+try_compile_error_message "Array is too large" << EOF
+int a[1073741825];
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Array is too large" << EOF
+int a[1073741824];
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Array is too large" << EOF
+char a[65536][65537];
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Array is too large" << EOF
+int main(void) { int a[1073741824]; return 0; }
+EOF
+try_compile_error_message "Array is too large" << EOF
+struct big { char m[1073741824]; };
+struct big a[2];
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Record is too large" << EOF
+struct s { char a[1073741824]; char b[1073741824]; };
+int main(void) { return 0; }
+EOF
+
+# Padding to the alignment must not wrap, but a size already aligned up to the
+# largest one an int can hold is fine.
+try_ 0 << EOF
+union u { char bytes[2147483644]; int i; };
+int main(void) { return sizeof(union u) == 2147483644 ? 0 : 1; }
+EOF
+try_ 0 << EOF
+struct s { char bytes[2147483644]; int tail[]; };
+int main(void) { return sizeof(struct s) == 2147483644 ? 0 : 1; }
+EOF
+
+# A record is incomplete until its closing brace, so it cannot contain itself;
+# size_var() dereferenced the missing layout and crashed.
+try_compile_error_message "Record member has incomplete type" << EOF
+struct s { struct s x; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Record member has incomplete type" << EOF
+struct t;
+struct s { int a; struct t y[2]; };
+int main(void) { return 0; }
+EOF
+try_compile_error_message "Record member has incomplete type" << EOF
+struct t;
+struct s { int n; struct t y[]; };
+int main(void) { return 0; }
 EOF
 
 # The address of a member has the member's pointer type, so arithmetic on it

@@ -97,6 +97,19 @@ static token_t *skip_balanced_delimiter(token_t *token,
 }
 
 basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb);
+
+/* Sizes and element counts are ints throughout shecc, as sizeof's result is, so
+ * an array whose count or extent exceeds INT_MAX would wrap: `int
+ * a[1073741825]` got four bytes and `int a[1073741824]` none. The limit also
+ * keeps every object below the address space of the 32-bit targets. sizeof
+ * applies the same bound to the array type names it reads.
+ */
+static void reject_oversized_array(int count, int scale)
+{
+    if (scale > 0 && count > INT_MAX / scale)
+        error_at("Array is too large", cur_token_loc());
+}
+
 static fixed_array_shape_t fixed_array_shape_from_bounds(int size,
                                                          int dim2,
                                                          int dim3,
@@ -159,6 +172,7 @@ static void fixed_array_shape_write(const fixed_array_shape_t *shape,
     *size = shape->rank ? shape->bounds[0] : 0;
     *dim2 = *dim3 = *dim4 = 0;
     for (int i = 1; i < shape->rank; i++) {
+        reject_oversized_array(*size, shape->bounds[i]);
         *size *= shape->bounds[i];
         if (i == 1)
             *dim2 = shape->bounds[i];
@@ -1384,14 +1398,29 @@ int alignment_var(var_t *var)
     return alignment_type(var->type);
 }
 
+/* Round a record offset or size up to @alignment. Each member fits on its own,
+ * but their sum may still wrap the int.
+ */
+static int align_record_offset(int size, int alignment)
+{
+    if (size < 0 || size > INT_MAX - (alignment - 1))
+        error_at("Record is too large", cur_token_loc());
+    return ALIGN_UP(size, alignment);
+}
+
 int layout_struct_field(int size, var_t *field, int *record_alignment)
 {
     int alignment = alignment_var(field);
+    int field_size;
 
     if (alignment > *record_alignment)
         *record_alignment = alignment;
-    field->offset = ALIGN_UP(size, alignment);
-    return field->offset + size_var(field);
+
+    field->offset = align_record_offset(size, alignment);
+    field_size = size_var(field);
+    if (field_size > INT_MAX - field->offset)
+        error_at("Record is too large", cur_token_loc());
+    return field->offset + field_size;
 }
 
 /* Stateful packing cursor for the C99 bit-field layout path. Ordinary fields
@@ -1434,8 +1463,10 @@ static void set_array_dimension(int *size,
         *dimensions[dimension - 1] = bound;
         if (!*size && infer_missing_size)
             *size = bound;
-        else
+        else {
+            reject_oversized_array(*size, bound);
             *size *= bound;
+        }
     }
 }
 
@@ -1576,12 +1607,12 @@ int layout_bitfield_field(int size,
         *record_alignment = alignment;
     if (!field->bit_width) {
         size = flush_bitfield_layout(size, bits);
-        return ALIGN_UP(size, alignment);
+        return align_record_offset(size, alignment);
     }
     if (!bits->used_bits || bits->unit_size != field->bit_storage_size ||
         bits->used_bits + field->bit_width > unit_bits) {
         size = flush_bitfield_layout(size, bits);
-        bits->unit_offset = ALIGN_UP(size, alignment);
+        bits->unit_offset = align_record_offset(size, alignment);
         bits->unit_size = field->bit_storage_size;
     }
     field->offset = bits->unit_offset;

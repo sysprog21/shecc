@@ -1445,10 +1445,10 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
     return tk;
 }
 
-token_t *pp_read_constant_infix_expr(int precedence,
-                                     token_t *tk,
-                                     pp_integer_t *val,
-                                     bool evaluate)
+static token_t *pp_read_constant_infix_body(int precedence,
+                                            token_t *tk,
+                                            pp_integer_t *val,
+                                            bool evaluate)
 {
     pp_integer_t lhs = {0}, rhs = {0};
 
@@ -1634,6 +1634,25 @@ token_t *pp_read_constant_infix_expr(int precedence,
     val->hi = lhs.hi;
     val->is_unsigned = lhs.is_unsigned;
     val->enum_width = lhs.enum_width;
+    return tk;
+}
+
+/* Each parenthesis, unary operator and conditional of a #if expression recurses
+ * once here, so `#if ((((...1...))))' nested tens of thousands deep exhausted
+ * the machine stack. Bound it with the limit the C expression parser uses.
+ */
+static int pp_expr_depth = 0;
+
+token_t *pp_read_constant_infix_expr(int precedence,
+                                     token_t *tk,
+                                     pp_integer_t *val,
+                                     bool evaluate)
+{
+    pp_expr_depth++;
+    if (pp_expr_depth > MAX_EXPR_DEPTH)
+        error_at("Expression nesting too deep", tk ? &tk->location : NULL);
+    tk = pp_read_constant_infix_body(precedence, tk, val, evaluate);
+    pp_expr_depth--;
     return tk;
 }
 
@@ -2074,7 +2093,7 @@ static bool pp_resume_or_append(token_t *expanded,
     return false;
 }
 
-token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
+static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
 {
     token_t head;
     token_t *cur = &head;
@@ -2764,6 +2783,24 @@ token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
      */
     ctx->end_of_token = cur == &head ? NULL : cur;
     return head.next;
+}
+
+/* Each nested macro argument, rescanned replacement and included file re-enters
+ * the expander, whose frame is large, so `F(F(F(...)))' nested a few thousand
+ * deep exhausted the machine stack. Bound the recursion and report it instead.
+ */
+static int pp_depth = 0;
+
+token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx)
+{
+    token_t *result;
+
+    pp_depth++;
+    if (pp_depth > MAX_MACRO_DEPTH)
+        error_at("Macro expansion nesting too deep", tk ? &tk->location : NULL);
+    result = pp_preprocess_body(tk, ctx);
+    pp_depth--;
+    return result;
 }
 
 /* Report whether a string literal payload ends inside a numeric escape that a

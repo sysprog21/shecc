@@ -100,12 +100,13 @@
 #define MAX_GOTPLT 1024
 #define MAX_NESTING 128
 
-/* Recursion limits for nesting in the input. The parser descends recursively
- * for each of these, so a deeply nested program would otherwise exhaust the
- * machine stack before any diagnostic could be produced.
+/* Recursion limits for nesting in the input. The parser and the preprocessor
+ * descend recursively for each of these, so a deeply nested program would
+ * otherwise exhaust the machine stack before any diagnostic could be produced.
  */
 #define MAX_EXPR_DEPTH 256
 #define MAX_BLOCK_DEPTH 256
+#define MAX_MACRO_DEPTH 256
 #define MAX_OPERAND_STACK_SIZE 32
 
 /* Depth of the operator stack that read_expr() and the constant-expression
