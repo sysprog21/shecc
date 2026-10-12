@@ -389,11 +389,6 @@ bool emit_lea_disp_width(int rd, int base, int disp, bool wide)
     return true;
 }
 
-bool emit_lea_disp(int rd, int base, int disp)
-{
-    return emit_lea_disp_width(rd, base, disp, true);
-}
-
 /* op rd, imm -- @ext selects the operation, and @wide selects a 64-bit operand.
  * Uses the sign-extended imm8 form when it fits.
  */

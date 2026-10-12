@@ -139,42 +139,6 @@ bool vir_call_shape_valid(const vir_effect_t *effect, int max_args)
            (!effect->arg_count || (effect->args && effect->arg_uses));
 }
 
-bool vir_function_shape(const vir_function_t *func, vir_function_shape_t *shape)
-{
-    if (!func || !shape)
-        return false;
-    memset(shape, 0, sizeof(*shape));
-    for (const vir_block_t *block = func->blocks; block; block = block->next) {
-        shape->has_effects |= block->effects != NULL;
-        for (const vir_edge_t *edge = block->outgoing; edge;
-             edge = edge->next_outgoing) {
-            if (edge->arg_count < 0)
-                return false;
-            if (edge->arg_count > shape->max_edge_args)
-                shape->max_edge_args = edge->arg_count;
-        }
-        for (const vir_effect_t *effect = block->effects; effect;
-             effect = effect->next)
-            if (effect->kind == VIR_EFFECT_CALL) {
-                if (effect->arg_count < 0)
-                    return false;
-                shape->has_calls = true;
-                if (effect->arg_count > shape->max_call_args)
-                    shape->max_call_args = effect->arg_count;
-            }
-        for (const vir_value_t *value = block->head; value; value = value->next)
-            if (value->opcode == VIR_OP_STACK_ADDR) {
-                if (value->address_slot >= INT_MAX)
-                    return false;
-                if (shape->root_count <= (int) value->address_slot)
-                    shape->root_count = value->address_slot + 1;
-            } else if (value->opcode == VIR_OP_GLOBAL_ADDR) {
-                shape->has_globals = true;
-            }
-    }
-    return true;
-}
-
 static bool vir_opt_level_valid(vir_opt_level_t level)
 {
     return level >= VIR_OPT_O0 && level <= VIR_OPT_O2;
@@ -1363,40 +1327,11 @@ DEFINE_MEMORY_STORE(vir_volatile_store, true)
 #undef DEFINE_MEMORY_LOAD
 #undef DEFINE_MEMORY_STORE
 
-vir_value_t *vir_deferred_load(vir_function_t *func,
-                               vir_block_t *block,
-                               vir_type_t type,
-                               bool is_volatile)
-{
-    return vir_load_impl(func, block, NULL, type, is_volatile);
-}
-
 vir_effect_t *vir_deferred_store(vir_function_t *func,
                                  vir_block_t *block,
                                  bool is_volatile)
 {
     return vir_store_impl(func, block, NULL, NULL, is_volatile);
-}
-
-bool vir_deferred_load_resolve(vir_function_t *func,
-                               vir_effect_t *effect,
-                               vir_value_t *address)
-{
-    vir_use_t *use;
-
-    if (!func || !effect || !address || !effect->block || !effect->result ||
-        !vir_effect_is_load(effect->kind) || effect->address ||
-        effect->address_use || !vir_has_block(func, effect->block) ||
-        !vir_has_value(func, address) || address->type != VIR_TYPE_PTR ||
-        effect->result->def_effect != effect ||
-        !vir_value_dominates_effect(func, NULL, address, effect))
-        return false;
-    use = vir_arena_alloc(&func->arena, sizeof(*use));
-    if (!use)
-        return false;
-    vir_link_effect_operand(effect, &effect->address, &effect->address_use,
-                            address, use, 0);
-    return true;
 }
 
 bool vir_deferred_store_resolve(vir_function_t *func,
@@ -3717,20 +3652,6 @@ static int vir_simplify_params_with_context(vir_function_t *func,
     return changed;
 }
 
-int vir_simplify_params(vir_function_t *func, vir_opt_level_t opt_level)
-{
-    vir_dominance_t dominance;
-    if (!func || !vir_opt_level_valid(opt_level))
-        return -1;
-    if (opt_level == VIR_OPT_O0)
-        return 0;
-    if (!vir_dominance_init(func, &dominance))
-        return -1;
-    int changed = vir_simplify_params_with_context(func, &dominance);
-    vir_dominance_release(&dominance);
-    return changed;
-}
-
 /* An affine offset is safe to recur only while every narrower intermediate
  * stays nonnegative and fits its signed type. Pointer-width arithmetic itself
  * is modular, so ILP32 does not need the LP64 narrowing proof.
@@ -5885,18 +5806,6 @@ vir_value_t *vir_ssa_read(const vir_ssa_t *ssa,
         return NULL;
     binding = vir_ssa_find_binding(ssa, block, variable, NULL);
     return binding ? binding->value : NULL;
-}
-
-bool vir_ssa_is_param(const vir_ssa_t *ssa,
-                      const vir_block_t *block,
-                      unsigned int variable)
-{
-    vir_ssa_binding_t *binding;
-
-    if (!ssa || !vir_has_block(ssa->func, block))
-        return 0;
-    binding = vir_ssa_find_binding(ssa, block, variable, NULL);
-    return binding && binding->param && binding->value == binding->param;
 }
 
 static vir_value_t *vir_ssa_read_sealed_impl(vir_ssa_t *ssa,

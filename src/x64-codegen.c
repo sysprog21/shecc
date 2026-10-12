@@ -146,11 +146,6 @@ int x64_incoming_arg_base(int stack_size, int saved)
     return x64_frame_bytes(stack_size, saved) + saved * 8 + 8 + 8;
 }
 
-/* Set to true to trace x86-64 code emission on stderr. Off in normal builds:
- * the trace is far larger than the program being compiled.
- */
-bool x64_debug = false;
-
 /* Print a function -> address map on stderr; used to locate faults in the
  * emitted binary, which carries no symbol table.
  */
@@ -354,10 +349,10 @@ int map_ir_reg(int ir_reg)
     /* R12 and R13 come last because their low three bits are the SIB and disp32
      * escapes in ModR/M: naming them costs an extra byte wherever they address
      * memory, which emit_mem_base() and emit_mem_sib() already spell out, and
-     * emit_lea_disp() declines. Handing them out after the others keeps that
-     * cost on the least-used registers, and both are callee-saved, so a
-     * function that calls anything has four registers it can keep a value in
-     * rather than two.
+     * emit_lea_disp_width() declines R12. Handing them out after the others
+     * keeps that cost on the least-used registers, and both are callee-saved,
+     * so a function that calls anything has four registers it can keep a value
+     * in rather than two.
      */
     case 9:
         return 12; /* r12 */
@@ -2170,10 +2165,11 @@ void emit_call_return(vir_mop_t *mop, int rs1)
             func_t *target_func = find_func(mop->func_name);
 
             if (target_func && target_func->is_static && !target_func->bbs) {
-                printf("Error: Undefined static function called: %s\n",
-                       function_source_name(target_func));
-                fflush(stdout); /* see fatal() */
-                abort();
+                char message[MAX_LINE_LEN];
+                snprintf(message, MAX_LINE_LEN,
+                         "x64 call to undefined static function '%s'",
+                         function_source_name(target_func));
+                fatal(message);
             } else if (dynlink && target_func && !target_func->bbs) {
                 /* An external symbol: call its PLT entry, which the loader
                  * redirects to the real function on first use.
@@ -2189,10 +2185,10 @@ void emit_call_return(vir_mop_t *mop, int rs1)
                  * emit the image instead of shipping one that misbehaves
                  * silently.
                  */
-                printf("Error: Undefined function called: %s\n",
-                       mop->func_name);
-                fflush(stdout); /* see fatal() */
-                abort();
+                char message[MAX_LINE_LEN];
+                snprintf(message, MAX_LINE_LEN,
+                         "x64 call to undefined function '%s'", mop->func_name);
+                fatal(message);
             } else {
                 x64_record_call(elf_code->size, target_func->bbs);
                 emit_byte(0xE8); /* CALL rel32 */
@@ -2465,16 +2461,6 @@ void emit_read_write(vir_mop_t *mop, int rd, int rs1, int rs2)
         {
             int val_reg = rs2;
             x64_memory_operand_t address = take_memory_operand(rs1);
-            /* Debug: trace write width mismatches for pointers */
-            if (mop->is_pointer && mop->size_bytes != PTR_SIZE) {
-                if (x64_debug)
-                    fprintf(stderr,
-                            "[EMIT] OP_write ptr width mismatch: size=%d "
-                            "ptr=%d "
-                            "addr=%d val=%d\n",
-                            mop->size_bytes, mop->is_pointer, mop->src0,
-                            mop->src1);
-            }
 
             /* The store width the IR asks for lives in dest (1, 2 or 4);
              * pointer-typed writes must store a full pointer. As with OP_read,
@@ -3511,8 +3497,6 @@ void code_generate(void)
     int main_wrapper_ofs = 0, wrapper_r15_patch = 0, wrapper_jmp_patch = 0;
 
     /* Reset forward references for this compilation unit */
-    if (x64_debug)
-        fprintf(stderr, "[x64] codegen begin\n");
     forward_ref_count = 0;
 
     /* Block offsets are filled in as the code is emitted, and every section
@@ -3532,9 +3516,6 @@ void code_generate(void)
         GLOBAL_FUNC->bbs->elf_offset = elf_code->size;
 
         for (mop = GLOBAL_FUNC->bbs->mops.head; mop; mop = mop->next) {
-            if (x64_debug)
-                fprintf(stderr, "[x64] emit global op=%d\n", mop->op);
-
             /* The initializer runs through a CALL with no frame of its own, and
              * the slots it spills temporaries to are allocated from the global
              * data area, which sits behind R15 on this target rather than on
@@ -3769,8 +3750,6 @@ void code_generate(void)
                  * BEFORE the prologue was emitted
                  */
             }
-            if (x64_debug)
-                fprintf(stderr, "[x64] define %s\n", mop->func_name);
         }
 
         /* Check if this instruction starts a new BB */
@@ -3833,36 +3812,8 @@ void code_generate(void)
             /* The next instruction will be in a different BB */
             emit_bb = NULL;
         }
-
-        /* (removed debug tracing) */
-
-        /* (removed debug context dump) */
-
-        /* Emission-time assertion: pointer stores must be PTR_SIZE wide */
-        if ((mop->op == OP_store || mop->op == OP_write) && mop->is_pointer &&
-            mop->size_bytes != PTR_SIZE) {
-            /* Split across two calls: nine arguments exceeds MAX_PARAMS, so the
-             * last one was garbage in a self-hosted build.
-             */
-            if (x64_debug) {
-                char *fname = "<unknown>";
-                if (emit_func)
-                    fname = emit_func->return_def.var_name;
-                fprintf(stderr,
-                        "WARN: pointer store width mismatch at IR idx %d in "
-                        "%s: op=%d size=%d\n",
-                        i, fname, mop->op, mop->size_bytes);
-                fprintf(stderr, "      src0=%d src1=%d dest=%d\n", mop->src0,
-                        mop->src1, mop->dest);
-            }
-            /* Continue without aborting */
-        }
-        if (x64_debug)
-            fprintf(stderr, "[x64] emit op=%d\n", mop->op);
         emit_fell_through = true;
         emit_mop(mop);
-        if (x64_debug)
-            fprintf(stderr, "[x64] done op=%d\n", mop->op);
     }
     fold_state_check(mop_flat_count);
 
@@ -3898,9 +3849,6 @@ void code_generate(void)
                  */
             } else {
                 /* This BB has instructions - emit them */
-                if (x64_debug)
-                    fprintf(stderr, "[x64] late-emit unreached BB at 0x%x\n",
-                            elf_code->size);
                 bb->elf_offset = elf_code->size;
 
                 /* Nothing reaches this block by falling into it -- it is placed
@@ -3953,22 +3901,7 @@ void code_generate(void)
         int entry_start = elf_code->size;
         elf_entry_offset = entry_start; /* Entry relative to code start */
 
-        /* Debug: check if any BB has this offset */
-        for (func_t *func = x64_debug ? FUNC_LIST.head : NULL; func;
-             func = func->next) {
-            for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-                if (bb->elf_offset == entry_start) {
-                    fprintf(stderr,
-                            "[x64] ERROR: a basic block shares the entry "
-                            "stub's offset (0x%x); jumps to it will land on "
-                            "the entry instead\n",
-                            entry_start);
-                }
-            }
-        }
-
-        /* Removed debug output that was corrupting file writes POP rdi (argc)
-         */
+        /* POP rdi (argc) */
         emit_byte(0x5F);
         /* MOV rsi, rsp (argv) */
         emit_reg_move(6, 4, true);
@@ -4204,16 +4137,6 @@ void code_generate(void)
             continue;
         }
 
-        /* Check if this patch would overwrite the entry stub */
-        if (x64_debug && elf_entry_offset > 0 &&
-            ref->patch_location >= elf_entry_offset &&
-            ref->patch_location < elf_entry_offset + 64) {
-            fprintf(stderr,
-                    "[x64] WARNING: Forward ref %d would overwrite entry "
-                    "stub! patch_loc=0x%x, entry_offset=0x%x\n",
-                    i, ref->patch_location, elf_entry_offset);
-        }
-
         int target_offset = ref->target_bb->elf_offset;
         /* Debug check for invalid offsets */
         if (target_offset < 0) {
@@ -4242,29 +4165,9 @@ void code_generate(void)
          */
         int relative_offset = target_offset - (ref->patch_location + 4);
 
-        /* Debug: check for suspiciously large offsets */
-        if (x64_debug && relative_offset > 0x10000) {
-            fprintf(stderr,
-                    "[x64] WARNING: Large relative offset 0x%x at "
-                    "patch_loc=0x%x to target=0x%x\n",
-                    relative_offset, ref->patch_location, target_offset);
-        }
-
         patch_dword(ref->patch_location, relative_offset);
     }
 
-    /* Debug: dump first bytes of main entry to help diagnose crashes */
-    if (x64_debug && MAIN_BB && MAIN_BB->elf_offset >= 0 &&
-        MAIN_BB->elf_offset < elf_code->size) {
-        int start = MAIN_BB->elf_offset;
-        int end = start + 32;
-        if (end > elf_code->size)
-            end = elf_code->size;
-        fprintf(stderr, "[x64] main head @%d: ", start);
-        for (int i = start; i < end; i++)
-            fprintf(stderr, "%02x ", elf_code->elements[i] & 0xFF);
-        fprintf(stderr, "\n");
-    }
     if (arena_bytes_since(GENERAL_ARENA, instruction_to_bb_mark) ==
         instruction_to_bb_bytes)
         arena_rewind(GENERAL_ARENA, instruction_to_bb_mark);

@@ -366,7 +366,6 @@ static int riscv_bitwise_insn(opcode_t op,
 
 void emit_mop(vir_mop_t *mop)
 {
-    func_t *func;
     int rd = rv_reg_of(mop->dest);
     int rs1 = rv_reg_of(mop->src0);
     int rs2 = rv_reg_of(mop->src1);
@@ -558,25 +557,14 @@ void emit_mop(vir_mop_t *mop)
         emit_rv32_split_address(true, __zero, __t0, ofs);
         return;
     case OP_call:
-        func = find_func(mop->func_name);
-        if (func->bbs) {
-            ofs = func->bbs->elf_offset - elf_code->size;
-            emit_rv32_split_address(true, __ra, __ra, ofs);
-            return;
-        } else if (dynlink) {
-            /* The PLT follows the code and read-only data, so a large image
-             * puts it beyond the 1 MiB a JAL reaches. Call it PC-relative
-             * through AUIPC and JALR, which reach anywhere.
-             */
-            ofs = (dynamic_sections.elf_plt_start + func->plt_offset) -
-                  (elf_code_start + elf_code->size);
-            emit_rv32_split_address(true, __ra, __ra, ofs);
-            return;
-        } else {
-            printf("The '%s' function is not implemented\n", mop->func_name);
-            fflush(stdout); /* see fatal() */
-            abort();
-        }
+        /* The PLT follows the code and read-only data, so a large image puts it
+         * beyond the 1 MiB a JAL reaches. Call it PC-relative through AUIPC and
+         * JALR, which reach anywhere, as for a defined function.
+         */
+        ofs = function_entry_address(mop->func_name) -
+              (elf_code_start + elf_code->size);
+        emit_rv32_split_address(true, __ra, __ra, ofs);
+        return;
     case OP_load_data_address:
         emit_rv32_split_address(false, rd, rd, elf_data_start + mop->src0);
         return;

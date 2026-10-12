@@ -95,7 +95,8 @@ typedef enum {
 
 int rv_extract_bits(int imm, int i_start, int i_end, int d_start, int d_end)
 {
-    int v;
+    /* Unsigned, so a field placed in bit 31 does not overflow a signed int. */
+    unsigned int v;
 
     if (d_end - d_start != i_end - i_start || i_start > i_end ||
         d_start > d_end)
@@ -132,7 +133,7 @@ static int rv_imm12(int imm)
 int rv_encode_I(rv_op op, rv_reg rd, rv_reg rs1, int imm)
 {
     imm = rv_imm12(imm);
-    return op + (rd << 7) + (rs1 << 15) + (imm << 20);
+    return op + (rd << 7) + (rs1 << 15) + ((unsigned int) imm << 20);
 }
 
 int rv_encode_S(rv_op op, rv_reg rs1, rv_reg rs2, int imm)
@@ -155,7 +156,7 @@ int rv_encode_B(rv_op op, rv_reg rs1, rv_reg rs2, int imm)
 
     return op + (rs1 << 15) + (rs2 << 20) + rv_extract_bits(imm, 11, 11, 7, 7) +
            rv_extract_bits(imm, 1, 4, 8, 11) +
-           rv_extract_bits(imm, 5, 10, 25, 30) + (sign << 31);
+           rv_extract_bits(imm, 5, 10, 25, 30) + ((unsigned int) sign << 31);
 }
 
 int rv_encode_J(rv_op op, rv_reg rd, int imm)
@@ -173,7 +174,7 @@ int rv_encode_J(rv_op op, rv_reg rd, int imm)
     }
     return op + (rd << 7) + rv_extract_bits(imm, 1, 10, 21, 30) +
            rv_extract_bits(imm, 11, 11, 20, 20) +
-           rv_extract_bits(imm, 12, 19, 12, 19) + (sign << 31);
+           rv_extract_bits(imm, 12, 19, 12, 19) + ((unsigned int) sign << 31);
 }
 
 int rv_encode_U(rv_op op, rv_reg rd, int imm)

@@ -121,7 +121,6 @@ static int arm_bitwise_insn(opcode_t op,
 
 void emit_mop(vir_mop_t *mop)
 {
-    func_t *func;
     const int rd = mop->dest;
     const int rn = mop->src0;
     int rm = mop->src1; /* Not const because OP_trunc modifies it */
@@ -370,18 +369,9 @@ void emit_mop(vir_mop_t *mop)
             emit(__b(__AL, mop->next_bb->elf_offset - elf_code->size));
         return;
     case OP_call:
-        func = find_func(mop->func_name);
-        if (func->bbs)
-            ofs = func->bbs->elf_offset - elf_code->size;
-        else if (dynlink) {
-            ofs = (dynamic_sections.elf_plt_start + func->plt_offset) -
-                  (elf_code_start + elf_code->size);
-            is_external_call = true;
-        } else {
-            printf("The '%s' function is not implemented\n", mop->func_name);
-            fflush(stdout); /* see fatal() */
-            abort();
-        }
+        ofs = function_entry_address(mop->func_name) -
+              (elf_code_start + elf_code->size);
+        is_external_call = !find_func(mop->func_name)->bbs;
 
         /* When calling external functions in dynamic linking mode, the
          * following instructions are required:

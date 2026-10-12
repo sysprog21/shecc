@@ -974,8 +974,8 @@ static void read_global_typedef(block_t *block)
             lex_ident_n(T_identifier, type->type_name, MAX_TYPE_LEN);
 
         /* A defining alias carries the layout itself; a forward one reaches the
-         * tag through base_struct, which in 'find_type' also sees a later
-         * completion of it.
+         * tag through base_struct, which in resolve_type_alias() also sees a
+         * later completion of it.
          */
         int size = record ? record->size : 0;
         int alignment = record ? record->alignment : 1;

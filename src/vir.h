@@ -254,15 +254,6 @@ typedef struct {
 } vir_stats_t;
 
 typedef struct {
-    int root_count;
-    int max_edge_args;
-    int max_call_args;
-    bool has_calls;
-    bool has_effects;
-    bool has_globals;
-} vir_function_shape_t;
-
-typedef struct {
     /* Successfully allocated per-block tables; an empty block has one slot. */
     int tables;
     int table_slots; /* Slots in successfully allocated tables only. */
@@ -291,8 +282,6 @@ vir_type_t vir_integer_type_from_size(int bytes);
 bool vir_fold_i32_binary(vir_opcode_t opcode, int left, int right, int *result);
 bool vir_type_is_scalar(vir_type_t type);
 bool vir_call_shape_valid(const vir_effect_t *effect, int max_args);
-bool vir_function_shape(const vir_function_t *func,
-                        vir_function_shape_t *shape);
 static inline bool vir_type_is_i32_or_i64(vir_type_t type)
 {
     return type == VIR_TYPE_I32 || type == VIR_TYPE_I64;
@@ -401,19 +390,12 @@ vir_effect_t *vir_volatile_store(vir_function_t *func,
                                  vir_value_t *address,
                                  vir_value_t *value);
 
-/* Frontend construction may reserve a source-ordered load/store before its
- * merged operands are available. Resolve it only after CFG construction.
+/* Frontend construction may reserve a source-ordered store before its merged
+ * operands are available. Resolve it only after CFG construction.
  */
-vir_value_t *vir_deferred_load(vir_function_t *func,
-                               vir_block_t *block,
-                               vir_type_t type,
-                               bool is_volatile);
 vir_effect_t *vir_deferred_store(vir_function_t *func,
                                  vir_block_t *block,
                                  bool is_volatile);
-bool vir_deferred_load_resolve(vir_function_t *func,
-                               vir_effect_t *effect,
-                               vir_value_t *address);
 bool vir_deferred_store_resolve(vir_function_t *func,
                                 vir_effect_t *effect,
                                 vir_value_t *address,
@@ -521,7 +503,6 @@ int vir_replace_all_uses(vir_function_t *func,
                          vir_value_t *from,
                          vir_value_t *to);
 int vir_local_cse(vir_function_t *func, vir_opt_level_t opt_level);
-int vir_simplify_params(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level);
 
 /* Optional pass-local accounting; no state is retained in VIR objects. Stats
@@ -627,9 +608,6 @@ int vir_ssa_write(vir_ssa_t *ssa,
 vir_value_t *vir_ssa_read(const vir_ssa_t *ssa,
                           const vir_block_t *block,
                           unsigned int variable);
-bool vir_ssa_is_param(const vir_ssa_t *ssa,
-                      const vir_block_t *block,
-                      unsigned int variable);
 vir_value_t *vir_ssa_read_sealed(vir_ssa_t *ssa,
                                  vir_block_t *block,
                                  unsigned int variable);

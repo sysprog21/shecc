@@ -126,7 +126,9 @@ int arm_extract_bits(int imm, int i_start, int i_end, int d_start, int d_end)
 
 int arm_encode(arm_cond_t cond, int opcode, int rn, int rd, int op2)
 {
-    return (cond << 28) + (opcode << 20) + (rn << 16) + (rd << 12) + op2;
+    /* The condition fills bits 31:28, which a signed shift cannot reach. */
+    return ((unsigned int) cond << 28) + (opcode << 20) + (rn << 16) +
+           (rd << 12) + op2;
 }
 
 /* ARM A8.8.247: unsigned 32x32 -> 64 multiply. RdLo/RdHi receive the complete
@@ -134,8 +136,8 @@ int arm_encode(arm_cond_t cond, int opcode, int rn, int rd, int op2)
  */
 int __umull(arm_cond_t cond, arm_reg rdlo, arm_reg rdhi, arm_reg rm, arm_reg rs)
 {
-    return (cond << 28) + 0x00800090 + (rdhi << 16) + (rdlo << 12) + (rs << 8) +
-           rm;
+    return ((unsigned int) cond << 28) + 0x00800090 + (rdhi << 16) +
+           (rdlo << 12) + (rs << 8) + rm;
 }
 
 int __svc(void)
@@ -410,7 +412,7 @@ int __bl(arm_cond_t cond, int ofs)
 int __bx(arm_cond_t cond, arm_reg rm)
 {
     /* BX: Branch and Exchange */
-    return (cond << 28) | 0x012FFF10 | rm;
+    return ((unsigned int) cond << 28) | 0x012FFF10 | rm;
 }
 
 int __blx(arm_cond_t cond, arm_reg rd)

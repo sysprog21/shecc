@@ -10,9 +10,6 @@
 
 /* definitions */
 
-/* Common macro functions */
-#define is_newline(c) (c == '\r' || c == '\n')
-
 /* Whether the C library in the output buffers its own stream I/O, so that a
  * whole block can be handed to fread() or fwrite() in one call.
  *
@@ -43,14 +40,6 @@
 #define MAX_STRING_LEN 4096
 #define MAX_INCLUDE_DIRS 16
 #define MAX_VAR_LEN 128
-/* ".label." plus an int, for basic_block_t's dump name. */
-#define MAX_LABEL_LEN 24
-
-/* Staging buffer for one instruction's Graphviz label in bb_dump(). The widest
- * case is a binary operator: three MAX_VAR_LEN names, three subscripts, an
- * operator and 41 bytes of markup.
- */
-#define DUMP_INSN_LEN 512
 
 /* A type name is a struct, union, enum or typedef identifier, which the lexer
  * already bounds by MAX_ID_LEN; a narrower buffer rejects valid tags.
@@ -67,7 +56,6 @@
 #ifndef MAX_PARAMS
 #define MAX_PARAMS 8
 #endif
-#define MAX_LOCALS 3200
 
 /* var_t itself is parsed as a record by every bootstrap stage. Leave room for
  * compiler metadata as well as user records with many declarators; C99 5.2.4.1
@@ -113,7 +101,6 @@
  * evaluator shunt through, and of the value stack the latter keeps beside it.
  */
 #define MAX_OPERATOR_STACK_SIZE 10
-#define MAX_ANALYSIS_STACK_SIZE 1600
 
 /* Default capacities for common data structures, with the arena sizes taken
  * from typical usage patterns.
@@ -149,12 +136,6 @@
         ;         \
     } while (0)
 
-/* shecc runs on the target it compiles for, so the host pointer width is the
- * target's. This must not be hardcoded to 4: on an LP64 target the var_list
- * allocations and memcpy sizes below would be half what they need.
- */
-#define HOST_PTR_SIZE PTR_SIZE
-
 /* shecc parses no attributes, and does not need the hint: it reports what it
  * cannot compile rather than warning about it.
  */
@@ -162,8 +143,6 @@
 #else
 /* suppress GCC/Clang warnings */
 #define UNUSED(x) (void) (x)
-/* configure host data model when using 'memcpy'. */
-#define HOST_PTR_SIZE __SIZEOF_POINTER__
 
 /* Marks the diagnostic paths that never come back. Without it the host compiler
  * cannot see that a variable set on every surviving path is initialized, and
@@ -198,40 +177,6 @@
 #else
 #define ELF_IS_64 0
 #endif
-
-/* Ceilings for strength_reduce(): how long a chain of instructions may compute
- * one address, and how many rounds the step analysis takes to settle.
- */
-#define MAX_IV_CHAIN 12
-#define MAX_IV_ROUNDS 4
-
-/* A pointer the loop advances costs a register for the whole loop and an
- * addition at the bottom of it, so it only pays where it replaces more work
- * than that -- and only a couple of them fit before the loop's own variables
- * start going to the frame instead.
- */
-#define MIN_IV_CHAIN 3
-#define MAX_IV_PER_LOOP 2
-
-/* How many blocks one natural loop's walk keeps in hand at once. Past this the
- * walk stops widening, which can only understate a depth.
- */
-#define MAX_LOOP_WALK 512
-
-/* Limits on copying a function into its callers: how big a body is worth
- * copying, how many distinct variables one such body may name, and how many
- * times the pass sweeps the program so that a function which becomes copyable
- * only after its own callee was copied into it still gets copied.
- */
-#define MAX_INLINE_INSNS 16
-#define MAX_INLINE_VARS 32
-#define MAX_INLINE_ROUNDS 3
-
-/* What a naming inside one loop is worth against one in straight-line code, and
- * how many nesting levels still multiply it.
- */
-#define LOOP_USE_WEIGHT 8
-#define MAX_WEIGHTED_LOOP_DEPTH 4
 
 /* How many registers at the top of the allocator's file a call preserves. Only
  * such a register can hold a value across a call, so only these may be given to
@@ -285,7 +230,6 @@ typedef struct {
 } hashmap_t;
 
 hashmap_t *hashmap_create(int cap);
-void hashmap_put(hashmap_t *map, char *key, void *val);
 void hashmap_put_borrowed(hashmap_t *map, char *key, void *val);
 hashmap_node_t *hashmap_get_node(hashmap_t *map, char *key);
 void *hashmap_get(hashmap_t *map, char *key);
@@ -1101,7 +1045,6 @@ struct func {
     /* Parser cursors become the allocated machine CFG after lowering. */
     basic_block_t *bbs;
     basic_block_t *exit;
-    int visited;
 
     /* Callee-saved registers the backend must preserve. */
     int saved_regs;

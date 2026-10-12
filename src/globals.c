@@ -796,11 +796,6 @@ static void hashmap_put_impl(hashmap_t *map,
     node->val = val;
 }
 
-void hashmap_put(hashmap_t *map, char *key, void *val)
-{
-    hashmap_put_impl(map, key, val, true);
-}
-
 /* The caller must provide a non-NULL key and keep it alive for the map's
  * lifetime.
  */
@@ -957,32 +952,6 @@ static bool identifier_matches(const char *name, const char *query)
 {
     return name[0] == query[0] && (!query[0] || name[1] == query[1]) &&
            !strcmp(name, query);
-}
-
-/* Find the type by the given name.
- * @type_name: The name to be searched.
- * @flag:
- *      0 - Search in all type names.
- *      1 - Search in all names, excluding the tags of structure.
- *      2 - Only search in tags.
- *
- * Return: The pointer to the type, or NULL if not found.
- */
-type_t *find_type(const char *type_name, int flag)
-{
-    for (int i = 0; i < types_idx; i++) {
-        type_t *type = &TYPES[i];
-
-        if (!identifier_matches(type->type_name, type_name))
-            continue;
-        bool is_tag =
-            type->base_type == TYPE_struct || type->base_type == TYPE_union;
-
-        if ((is_tag && flag == 1) || (!is_tag && flag == 2))
-            continue;
-        return is_tag ? type : resolve_type_alias(type);
-    }
-    return NULL;
 }
 
 /* Builtin types are initialized once before translation units are parsed. User
@@ -2018,9 +1987,12 @@ int function_entry_address(char *name)
         return elf_code_start + func->bbs->elf_offset;
     if (dynlink)
         return dynamic_sections.elf_plt_start + func->plt_offset;
-    printf("The '%s' function is not implemented\n", name);
-    fflush(stdout);
-    abort();
+
+    /* compile_native_vir() rejects a used, undefined function first. */
+    char message[MAX_LINE_LEN];
+    snprintf(message, MAX_LINE_LEN, "call to undefined function '%s'", name);
+    fatal(message);
+    return 0;
 }
 
 /* Create a basic block and set the scope of variables to 'parent' block */
