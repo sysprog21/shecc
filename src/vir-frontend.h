@@ -7,6 +7,7 @@
 const vir_function_t *vir_frontend_function(const func_t *func);
 bool vir_frontend_fold_i32(opcode_t opcode, int left, int right, int *result);
 void vir_frontend_finish_globals(void);
+void vir_frontend_release_function(func_t *func);
 void vir_frontend_release(void);
 
 void vir_frontend_begin(func_t *func);

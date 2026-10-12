@@ -258,6 +258,12 @@ typedef struct {
     int replacements; /* Successful RAUW operations. */
 } vir_cse_stats_t;
 
+/* A first arena block that, with the arena's and malloc's headers, still fits
+ * in one 4 KiB page: shecc's own libc rounds every allocation up to whole
+ * pages.
+ */
+#define VIR_ARENA_BLOCK_SIZE 4000
+
 void vir_function_init(vir_function_t *func, int arena_block_size);
 
 /* Bit width of an integer type; 0 for void and pointers. */

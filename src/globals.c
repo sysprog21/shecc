@@ -2299,11 +2299,15 @@ void dump_stats_phase(const char *phase)
     fprintf(stderr, "stats phase=%s arena_capacity_peak block=%d bb=%d\n",
             phase, BLOCK_ARENA ? BLOCK_ARENA->peak_bytes : 0,
             BB_ARENA ? BB_ARENA->peak_bytes : 0);
-    fprintf(
-        stderr, "stats phase=%s arena_capacity_peak token=%d general=%d\n",
-        phase,
-        TOKEN_ARENA ? TOKEN_ARENA->peak_bytes : stats_retired_token_arena_peak,
-        GENERAL_ARENA ? GENERAL_ARENA->peak_bytes : 0);
+
+    /* The preprocessor's arena is retired once the parser's stream is copied
+     * out of it, so the high-water mark is the larger of the two.
+     */
+    int token_peak = stats_retired_token_arena_peak;
+    if (TOKEN_ARENA && TOKEN_ARENA->peak_bytes > token_peak)
+        token_peak = TOKEN_ARENA->peak_bytes;
+    fprintf(stderr, "stats phase=%s arena_capacity_peak token=%d general=%d\n",
+            phase, token_peak, GENERAL_ARENA ? GENERAL_ARENA->peak_bytes : 0);
     fprintf(stderr, "stats phase=%s arena_total_capacity=%d\n", phase,
             stats_live_arena_capacity);
     fprintf(stderr, "stats phase=%s arena_total_capacity_peak=%d\n", phase,
@@ -2529,32 +2533,39 @@ int arena_free_trailing_blocks(arena_t *arena)
     return freed;
 }
 
+/* Free @retired, a token arena, keeping its peak for --stats. The lexer maps
+ * borrow storage from the token arena, so they go first; they rebuild
+ * themselves in TOKEN_ARENA should anything look a keyword up.
+ */
+void retire_token_arena(arena_t *retired)
+{
+    lexer_cleanup();
+    if (!retired)
+        return;
+    if (retired->peak_bytes > stats_retired_token_arena_peak)
+        stats_retired_token_arena_peak = retired->peak_bytes;
+    arena_free(retired);
+}
+
 /* Release the whole token arena and the source buffers behind it.
  *
- * Every token, macro, hide set and conditional-inclusion record lives in
- * TOKEN_ARENA, and nothing survives parsing: identifiers and string literals
- * reach the parser through intern_string(), which copies into GENERAL_ARENA,
- * and every parser entry point copies a token's text into a local buffer before
- * storing it. So once parse() returns, all 17 MiB of it is garbage that would
- * otherwise stay resident through the memory peak in machine lowering.
+ * By now TOKEN_ARENA holds the parsed token stream and whatever constant
+ * evaluation copied during parsing, and nothing survives parsing: identifiers
+ * and string literals reach the parser through intern_string(), which copies
+ * into GENERAL_ARENA, and every parser entry point copies a token's text into a
+ * local buffer before storing it. So once parse() returns, all of it is garbage
+ * that would otherwise stay resident through machine lowering.
  *
  * The source buffers in SRC_FILE_MAP exist only to quote a line in a parse
  * error, so they go at the same time.
  */
 void release_token_arena(void)
 {
-    /* The lexer maps borrow pointers into TOKEN_ARENA, so destroy them before
-     * releasing their values. Parsing is complete and they have no later
-     * readers. global_release() may call this cleanup again safely.
+    /* Parsing is complete, so nothing reads the tokens or the lexer maps again.
+     * global_release() may call this cleanup again safely.
      */
-    lexer_cleanup();
-
-    if (TOKEN_ARENA) {
-        if (TOKEN_ARENA->peak_bytes > stats_retired_token_arena_peak)
-            stats_retired_token_arena_peak = TOKEN_ARENA->peak_bytes;
-        arena_free(TOKEN_ARENA);
-        TOKEN_ARENA = NULL;
-    }
+    retire_token_arena(TOKEN_ARENA);
+    TOKEN_ARENA = NULL;
 
     /* Every error_at() site is in the preprocessor or the parser, and both are
      * done by the time this runs, so no line will be quoted again. LIBC_SRC is

@@ -184,6 +184,8 @@ typedef struct native_function {
     vir_value_t *target;
     vir_value_t *va_start;
     bool finished;
+    /* The graph has been freed; the signature and global roots remain. */
+    bool released;
     struct native_function *next;
 } native_function_t;
 static native_function_t *native_functions;
@@ -226,7 +228,7 @@ static native_function_t *native_context(func_t *func)
     ctx = arena_calloc(GENERAL_ARENA, 1, sizeof(*ctx));
     ctx->source = func;
     ctx->signature.va_start_slot = (unsigned int) -1;
-    vir_function_init(&ctx->graph, 1024);
+    vir_function_init(&ctx->graph, VIR_ARENA_BLOCK_SIZE);
     native_require(vir_function_set_pointer_bits(&ctx->graph, PTR_SIZE * 8),
                    "pointer width");
     ctx->ssa = vir_ssa_create(&ctx->graph);
@@ -1041,6 +1043,9 @@ static void native_finish(native_function_t *ctx)
         free(error);
         fatal("Native VIR verification failed");
     }
+    /* Variable bindings only matter while the graph is being built. */
+    vir_ssa_release(ctx->ssa);
+    ctx->ssa = NULL;
     ctx->finished = true;
 }
 void vir_frontend_begin(func_t *func)
@@ -1107,7 +1112,20 @@ void vir_frontend_finish_globals(void)
 const vir_function_t *vir_frontend_function(const func_t *func)
 {
     native_function_t *ctx = func ? func->vir_context : NULL;
-    return ctx ? &ctx->graph : NULL;
+    return ctx && !ctx->released ? &ctx->graph : NULL;
+}
+
+/* Lowering copies everything it needs out of the graph and interns the names,
+ * so a function's graph can go as soon as it is lowered or found unused. The
+ * context stays: its signature and global roots are read until the end.
+ */
+void vir_frontend_release_function(func_t *func)
+{
+    native_function_t *ctx = func ? func->vir_context : NULL;
+    if (ctx && !ctx->released) {
+        vir_function_release(&ctx->graph);
+        ctx->released = true;
+    }
 }
 void vir_frontend_release(void)
 {

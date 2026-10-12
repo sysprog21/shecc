@@ -207,6 +207,9 @@ static void lower_native_function(func_t *func, bool global)
     }
     for (basic_block_t *block = machine.entry; block; block = block->rpo_next)
         block->belong_to = func;
+
+    /* The machine blocks own copies of everything emission reads. */
+    vir_frontend_release_function(func);
 }
 
 static void compile_native_vir(const char *output)
@@ -243,6 +246,8 @@ static void compile_native_vir(const char *output)
         mark_native_references(graph);
     }
     free(native_worklist);
+    /* Report the optimized graphs here: lowering releases each one. */
+    dump_stats_phase("vir");
     FILE *dot = dump_dot ? fopen(output, "w") : NULL;
     if (dump_dot && !dot)
         fatal("Cannot open DOT output");
@@ -269,6 +274,7 @@ static void compile_native_vir(const char *output)
             }
         }
         if (!func->is_used || !graph) {
+            vir_frontend_release_function(func);
             func->bbs = NULL;
             continue;
         }
@@ -288,15 +294,16 @@ static void compile_native_vir(const char *output)
                     fprintf(dot, "f%d_b%d -> f%d_b%d;\n", function_index,
                             block->id, function_index, edge->to->id);
             }
-        } else
+        } else {
             lower_native_function(func, false);
+        }
     }
     if (dot) {
         fprintf(dot, "}\n");
         fclose(dot);
-    } else if (global)
+    } else if (global) {
         lower_native_function(GLOBAL_FUNC, true);
-    dump_stats_phase("vir");
+    }
 }
 
 int main(int argc, char *argv[])
@@ -461,12 +468,12 @@ int main(int argc, char *argv[])
 
     /* load and parse source code into IR; each input is one unit */
     translation_unit_count = input_count;
-    parse(pp_strip_layout(input_tokens));
+    parse(compact_token_stream(pp_strip_layout(input_tokens)));
     free(inputs);
     dump_stats_phase("parse");
 
-    /* Tokens, macros and the source buffers they point into are dead once
-     * parsing finishes; releasing them here keeps 17 MiB out of the peak.
+    /* The token stream and the source buffers it points into are dead once
+     * parsing finishes.
      */
     release_token_arena();
 

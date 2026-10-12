@@ -877,15 +877,18 @@ static void vir_edge_link_uses(vir_edge_t *edge)
     }
 }
 
+static void vir_edge_unlink_uses(vir_edge_t *edge)
+{
+    for (int i = 0; i < edge->arg_count; i++)
+        vir_remove_use(edge->args[i], &edge->arg_uses[i]);
+}
+
 static void vir_edge_replace_args(vir_edge_t *edge,
                                   vir_value_t **args,
                                   vir_use_t *uses,
                                   int count)
 {
-    int i;
-
-    for (i = 0; i < edge->arg_count; i++)
-        vir_remove_use(edge->args[i], &edge->arg_uses[i]);
+    vir_edge_unlink_uses(edge);
     edge->args = args;
     edge->arg_uses = uses;
     edge->arg_count = count;
@@ -941,12 +944,9 @@ vir_edge_t *vir_edge_create(vir_function_t *func,
 
 static void vir_edge_unlink(vir_edge_t *edge)
 {
-    int i;
-
     vir_edge_remove_from_list(&edge->from->outgoing, edge, true);
     vir_edge_remove_from_list(&edge->to->incoming, edge, false);
-    for (i = 0; i < edge->arg_count; i++)
-        vir_remove_use(edge->args[i], &edge->arg_uses[i]);
+    vir_edge_unlink_uses(edge);
 }
 
 int vir_edge_delete(vir_function_t *func, vir_edge_t *edge)
@@ -3086,6 +3086,9 @@ int vir_sccp_with_stats(vir_function_t *func,
     return vir_sccp_with_stats_and_pruning(func, opt_level, stats, true);
 }
 
+/* Only an insertion allocates new arrays; a removal compacts the edge's own,
+ * which sealing does for every trivial parameter it drops.
+ */
 typedef struct {
     vir_edge_t *edge;
     vir_value_t **args;
@@ -3150,10 +3153,10 @@ static bool vir_param_edit_prepare(vir_function_t *func,
     edit->old_count = old_count;
     edit->index = index;
     edit->insert = insert;
-    new_count = old_count + (insert ? 1 : -1);
+    new_count = old_count + 1;
     for (edge = block->incoming, i = 0; edge; edge = edge->next_incoming, i++) {
         edit->edges[i].edge = edge;
-        if (!new_count)
+        if (!insert)
             continue;
         edit->edges[i].args = vir_arena_alloc(
             &func->arena, sizeof(*edit->edges[i].args) * new_count);
@@ -3178,19 +3181,29 @@ static void vir_param_edit_apply(vir_block_t *block,
 
     for (i = 0; i < edit->count; i++) {
         vir_edge_t *edge = edit->edges[i].edge;
+        vir_value_t **args = edit->edges[i].args;
         int source, destination = 0;
 
-        for (source = 0; source < edge->arg_count; source++) {
-            if (edit->insert && source == edit->index)
-                edit->edges[i].args[destination++] = edit->edges[i].inserted;
-            if (!edit->insert && source == edit->index)
-                continue;
-            edit->edges[i].args[destination++] = edge->args[source];
+        /* A removal shifts the arguments down within the edge's own arrays, so
+         * their uses are unlinked first and relinked in index order, as
+         * vir_edge_replace_args does.
+         */
+        if (!edit->insert) {
+            vir_edge_unlink_uses(edge);
+            for (source = edit->index + 1; source < edge->arg_count; source++)
+                edge->args[source - 1] = edge->args[source];
+            edge->arg_count = new_count;
+            vir_edge_link_uses(edge);
+            continue;
         }
-        if (edit->insert && edit->index == edge->arg_count)
-            edit->edges[i].args[destination++] = edit->edges[i].inserted;
-        vir_edge_replace_args(edge, edit->edges[i].args, edit->edges[i].uses,
-                              new_count);
+        for (source = 0; source < edge->arg_count; source++) {
+            if (source == edit->index)
+                args[destination++] = edit->edges[i].inserted;
+            args[destination++] = edge->args[source];
+        }
+        if (edit->index == edge->arg_count)
+            args[destination++] = edit->edges[i].inserted;
+        vir_edge_replace_args(edge, args, edit->edges[i].uses, new_count);
     }
     if (edit->insert) {
         vir_block_append_param(block, param);
@@ -5618,7 +5631,7 @@ vir_ssa_t *vir_ssa_create(vir_function_t *func)
     ssa = calloc(1, sizeof(*ssa));
     if (ssa) {
         ssa->func = func;
-        ssa->arena.block_size = 4096;
+        ssa->arena.block_size = VIR_ARENA_BLOCK_SIZE;
         ssa->arena.fail_after = -1;
     }
     return ssa;

@@ -1454,13 +1454,13 @@ int main(void)
     assert(param && product && two &&
            vir_ssa_branch(ssa, entry, sum, merge, merge));
     assert(vir_block_set_return(&func, merge, param));
-    func.arena.fail_after = 4;
-    assert(!vir_ssa_seal(ssa, merge));
-    assert(merge->param_count == 3 && entry->true_edge->arg_count == 3 &&
-           entry->false_edge->arg_count == 3 && merge->return_value == param &&
-           param->uses && vir_verify(&func, &error));
-    func.arena.fail_after = -1;
+
+    /* Removing the trivial parameters edits the edges in place, so sealing
+     * allocates nothing from the function arena and cannot fail there.
+     */
+    func.arena.fail_after = 0;
     assert(vir_ssa_seal(ssa, merge));
+    func.arena.fail_after = -1;
     assert(!vir_ssa_seal(ssa, merge) && merge->param_count == 0 &&
            merge->return_value == one && entry->true_edge->arg_count == 0 &&
            entry->false_edge->arg_count == 0);

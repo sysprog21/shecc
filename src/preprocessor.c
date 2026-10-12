@@ -76,6 +76,29 @@ token_t *copy_token(const token_t *tk)
     return new_tk;
 }
 
+/* Move the token stream the parser reads into a fresh arena and drop the old
+ * one. Preprocessing lexes every included file and copies every token a macro
+ * expands, so the old arena holds about three dead tokens for each one that
+ * reaches the parser, along with macros, hide sets and conditional-inclusion
+ * records. A token owns nothing else in it: literals are interned, and the
+ * source buffers that diagnostics quote live in SRC_FILE_MAP.
+ */
+token_t *compact_token_stream(token_t *head)
+{
+    arena_t *preprocessed = TOKEN_ARENA;
+    token_t first;
+    token_t *tail = &first;
+
+    TOKEN_ARENA = arena_init(LARGE_ARENA_SIZE);
+    for (token_t *tk = head; tk; tk = tk->next) {
+        tail->next = copy_token(tk);
+        tail = tail->next;
+    }
+    tail->next = NULL;
+    retire_token_arena(preprocessed);
+    return first.next;
+}
+
 typedef struct macro {
     char *name;
     int param_num;
@@ -1696,7 +1719,7 @@ token_t *pp_stringify(token_t *arg, source_location_t *loc)
     text[n] = 0;
 
     token_t *out = new_token(T_string, loc, n);
-    out->literal = arena_strdup(TOKEN_ARENA, text);
+    out->literal = intern_string(text);
     return out;
 }
 
