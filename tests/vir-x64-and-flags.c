@@ -42,6 +42,7 @@ static void check_flags(int width, int mode, int mask)
     for (int i = 0; i < MAX_SKIP_IR; i++)
         skip_ir_index[i] = -1;
     addr_fold = addr_sib = fused_cc_pending = false;
+    fused_known = -1;
     gaddr_pending_ir = src0_override = cmp_mem_slot = -1;
     const_reg_valid[1] = const_reg_valid[3] = true;
     const_reg_val[1] = 0;
@@ -63,7 +64,14 @@ static void check_flags(int width, int mode, int mask)
     int before = elf_code->size;
     emit_mop(&compare);
     assert(fused_cc_pending && fused_cc == 0x84);
-    assert((elf_code->size == before) == (mode == 0 || mode == 1));
+
+    /* With the gap loading 0 into the register compared with itself, a 32-bit
+     * comparison of two known constants is settled: no CMP, and the branch goes
+     * to its then block.
+     */
+    bool settled = mode == 4 && width == 4;
+    assert((elf_code->size == before) == (mode == 0 || mode == 1 || settled));
+    assert(fused_known == (settled ? 1 : -1));
     assert(!cmp_imm_known);
     strbuf_free(elf_code);
 }

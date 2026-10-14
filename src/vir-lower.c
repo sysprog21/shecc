@@ -819,9 +819,7 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
      */
     if (op0 && op1 && op0->opcode == VIR_OP_CONST &&
         op1->opcode != VIR_OP_CONST &&
-        (value->opcode == VIR_OP_ADD || value->opcode == VIR_OP_MUL ||
-         value->opcode == VIR_OP_BITAND || value->opcode == VIR_OP_BITOR ||
-         value->opcode == VIR_OP_BITXOR)) {
+        vir_opcode_is_commutative(value->opcode)) {
         op0 = value->op1;
         op1 = value->op0;
     }

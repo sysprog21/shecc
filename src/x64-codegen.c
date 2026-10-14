@@ -59,15 +59,20 @@ void emit_test_self(bool wide, int reg)
  */
 void emit_setcc_bool(int rd, int setcc)
 {
-    emit_byte(REX_BASE | REX_B);
+    /* SETcc writes a byte register. AL to BL are the low bytes of RAX to RBX
+     * without a prefix; any other destination takes the byte through R11B.
+     * MOVZX to the 32-bit register clears the rest of the 64.
+     */
+    int low = rd < 4 ? rd : 11;
+    emit_rex(0, 0, low);
     emit_byte(0x0F);
     emit_byte(setcc);
-    emit_byte(modrm(MOD_DIRECT, 0, 3));
+    emit_byte(modrm(MOD_DIRECT, 0, reg_low3(low)));
 
-    emit_rex(1, rd, 11); /* MOVZX rd, r11b */
+    emit_rex(0, rd, low); /* MOVZX rd32, low8 */
     emit_byte(0x0F);
     emit_byte(0xB6);
-    emit_byte(modrm(MOD_DIRECT, reg_low3(rd), 3));
+    emit_byte(modrm(MOD_DIRECT, reg_low3(rd), reg_low3(low)));
 }
 
 /* The allocator's register file, in the order map_ir_reg() assigns it: IR
@@ -261,8 +266,9 @@ void add_forward_ref(basic_block_t *target_bb)
 typedef struct {
     int start;
     int old_size;
-    int kind; /* 0: JMP, 0x80-0x8F: Jcc, -1: loop-header padding */
-    basic_block_t *target;
+    int kind; /* 0: JMP, 0x80-0x8F: Jcc, -1: loop padding, -2: function's */
+    basic_block_t *target; /* for loop padding, the block it aligns */
+    int align;             /* for padding, the boundary it pads to */
     int new_start;
     int new_size;
     bool fixed_long; /* the short form did not reach in some layout */
@@ -272,6 +278,12 @@ typedef struct {
     int start;
     basic_block_t *target;
 } x64_call_site_t;
+
+/* See x64_widen_loop_padding(). */
+#define X64_FETCH_BLOCK 64
+#define X64_LOOP_PADDING 32
+#define X64_LONG_LOOP 256
+#define X64_ALIGN_ROUNDS 3
 
 x64_edit_t *x64_edits;
 int x64_edit_count;
@@ -295,16 +307,18 @@ static void x64_record_edit(int start,
     edit->new_start = start;
     edit->new_size = old_size;
     edit->fixed_long = false;
+    edit->align = 16;
 }
 
 /* Pad to the next 16-byte boundary, recorded so that x64_relax() can redo the
- * padding once the code before it shrinks.
+ * padding once the code before it shrinks, and widen it for the loop starting
+ * at @loop when that would otherwise straddle a fetch block.
  */
-static void x64_align16(void)
+static void x64_align16(basic_block_t *loop)
 {
     int start = elf_code->size;
     emit_nop_bytes((16 - (start & 15)) & 15);
-    x64_record_edit(start, elf_code->size - start, -1, NULL);
+    x64_record_edit(start, elf_code->size - start, loop ? -1 : -2, loop);
 }
 
 static void x64_record_call(int start, basic_block_t *target)
@@ -371,6 +385,11 @@ vir_mop_t *emit_next_ir;
 /* A comparison that emitted only its CMP, leaving the flags for the branch. */
 int fused_cc;
 bool fused_cc_pending;
+
+/* With fused_cc_pending, a comparison of two known constants that emitted
+ * nothing at all: 1 when its branch goes to the then block, 0 to the else.
+ */
+int fused_known = -1;
 
 /* The Jcc opcode matching a comparison opcode, or 0 if it is not a comparison.
  * CMP is emitted as "cmp rs1, rs2", so the sense matches the SETcc already used
@@ -453,6 +472,35 @@ void emit_bb_rel32(basic_block_t *bb)
     }
     add_forward_ref(bb);
     emit_dword(0);
+}
+
+/* The current function's first epilogue, which its later returns branch to
+ * instead of repeating it once it is at least X64_SHARED_EPILOGUE bytes: a
+ * two-byte JMP then saves five or more, for one taken branch on the return
+ * path. A shorter one, as a leaf's POP and RET, stays inline.
+ */
+#define X64_SHARED_EPILOGUE 7
+basic_block_t *x64_epilogue;
+
+/* Code positions that are not blocks but that branches target, so that
+ * x64_relax() moves them along with the code.
+ */
+basic_block_t **x64_labels;
+int x64_label_count;
+int x64_label_cap;
+
+/* A branch target at code offset @at. Its one operation is a placeholder that
+ * keeps bb_code_target() from looking past it for code.
+ */
+static basic_block_t *x64_code_label(int at)
+{
+    basic_block_t *label = arena_alloc_bb();
+    label->mops.head = label->mops.tail = mop_create(OP_return);
+    label->elf_offset = at;
+    x64_labels = reloc_reserve(x64_labels, x64_label_count, &x64_label_cap,
+                               sizeof(basic_block_t *));
+    x64_labels[x64_label_count++] = label;
+    return label;
 }
 
 /* JMP rel32 (@condition 0) or Jcc rel32 to @bb, recorded for relaxation. */
@@ -727,6 +775,12 @@ int src0_override_at;
  */
 int cmp_mem_slot;
 
+/* A load emit_read_write() left for the comparison after it to read from
+ * memory, and whether the loaded value is that comparison's first operand.
+ */
+bool cmp_mem_read;
+bool cmp_mem_read_first;
+
 /* A comparison whose second operand is a tracked literal, so it becomes an
  * immediate and the instruction that materialised it falls away.
  */
@@ -740,7 +794,7 @@ int cmp_imm_val;
  */
 void fold_state_check(int first_ir)
 {
-    bool pending = addr_fold || addr_sib || cmp_mem_slot >= 0 ||
+    bool pending = addr_fold || addr_sib || cmp_mem_slot >= 0 || cmp_mem_read ||
                    src0_override >= 0 || fused_cc_pending ||
                    gaddr_pending_ir >= 0;
 
@@ -1435,9 +1489,87 @@ basic_block_t *bb_sole_code_pred(basic_block_t *bb)
     return pred;
 }
 
-/* CMP rs1 against rs2, or against the slot a folded load named instead. */
+/* The block whose code runs before @bb when control can reach it one way only,
+ * else NULL. A rotated loop's header counts its latch out: the latch branches
+ * to the body through its own copy of the test, so the header runs only on
+ * entry, after its one other predecessor.
+ */
+static basic_block_t *x64_entry_pred(basic_block_t *bb)
+{
+    basic_block_t *latch = x64_rotated_loop(bb), *entry = NULL;
+    if (!latch)
+        return bb->is_branch_target ? NULL : bb_sole_code_pred(bb);
+    for (int i = 0; i < bb->prev_idx; i++) {
+        basic_block_t *pred = bb->prev[i].bb;
+        if (!pred || pred == latch)
+            continue;
+        if (entry)
+            return NULL;
+        entry = pred;
+    }
+    for (int guard = 0; entry && !entry->mops.head && guard < MAX_BB_DOM_SUCC;
+         guard++)
+        entry = bb_sole_pred(entry);
+    return entry;
+}
+
+typedef struct {
+    int base, index, scale, displacement;
+    bool sib, has_displacement;
+} x64_memory_operand_t;
+
+static void emit_memory_operand(int reg, const x64_memory_operand_t *operand)
+{
+    if (operand->sib)
+        emit_mem_sib(reg, operand->base, operand->index, operand->scale,
+                     operand->displacement);
+    else
+        emit_mem_base(reg, operand->base, operand->displacement,
+                      operand->has_displacement);
+}
+
+/* The memory operand of the load cmp_mem_read defers. */
+x64_memory_operand_t cmp_mem_operand;
+
+/* CMP rs1 against rs2, or against the slot a folded load named instead, or with
+ * the memory operand of a load deferred into it by emit_read_write().
+ */
 void emit_cmp(int size_bytes, int rs1, int rs2)
 {
+    if (cmp_mem_read) {
+        bool wide = size_bytes > 4;
+        x64_memory_operand_t *memory = &cmp_mem_operand;
+        cmp_mem_read = false;
+        if (cmp_mem_read_first && cmp_imm_known) {
+            /* CMP r/m, imm: /7 with an 8-bit immediate when one fits. */
+            bool small = cmp_imm_val >= -128 && cmp_imm_val <= 127;
+            cmp_imm_known = false;
+            if (memory->sib)
+                emit_rex_sib(wide, 0, memory->base, memory->index);
+            else
+                emit_rex(wide, 0, memory->base);
+            emit_byte(small ? 0x83 : 0x81);
+            emit_memory_operand(7, memory);
+            if (small)
+                emit_byte(cmp_imm_val);
+            else
+                emit_dword(cmp_imm_val);
+            return;
+        }
+
+        /* CMP r/m, r when memory holds the first operand; CMP r, r/m when it
+         * holds the second. Either way the flags are first minus second.
+         */
+        int reg = cmp_mem_read_first ? rs2 : rs1;
+        cmp_imm_known = false;
+        if (memory->sib)
+            emit_rex_sib(wide, reg, memory->base, memory->index);
+        else
+            emit_rex(wide, reg, memory->base);
+        emit_byte(cmp_mem_read_first ? 0x39 : 0x3B);
+        emit_memory_operand(reg, memory);
+        return;
+    }
     if (cmp_imm_known) {
         cmp_imm_known = false;
         cmp_mem_slot = -1;
@@ -2050,10 +2182,43 @@ void emit_bitwise(vir_mop_t *mop,
     }
 }
 
+/* The index of the return that a comparison's 0 or 1 in @mop goes straight to,
+ * directly or through one copy, an extension or a move, that leaves it as it
+ * is; -1 when it goes anywhere else. A return that zero-extends its value is
+ * left alone, as it would extend RAX in place.
+ */
+static int x64_returned_result(vir_mop_t *mop)
+{
+    if (!next_in_same_bb() || mop->dest < 0)
+        return -1;
+    int at = emit_ir_index + 1, value = mop->dest;
+    vir_mop_t *next = emit_next_ir;
+    if ((next->op == OP_assign || next->op == OP_cast || next->op == OP_trunc ||
+         next->op == OP_sign_ext) &&
+        next->src0 == value && next->dest_hi < 0) {
+        if (at + 1 >= mop_flat_count || at + 1 >= instruction_to_bb_capacity ||
+            instruction_to_bb[at + 1] != instruction_to_bb[at])
+            return -1;
+        value = next->dest;
+        next = MOP_FLAT[++at];
+    }
+    if (next->op != OP_return || next->src0 != value || next->src0_hi >= 0 ||
+        (next->src0_is_unsigned && next->size_bytes < PTR_SIZE))
+        return -1;
+    return at;
+}
+
 /* Comparisons, and the jumps and branches they feed. */
 void emit_compare_jump(vir_mop_t *mop, int rd, int rs1, int rs2)
 {
     if (op_is_comparison(mop->op)) {
+        /* A result only returned is formed in RAX, where the return wants it,
+         * and any copy on the way is dropped.
+         */
+        int returned = x64_returned_result(mop);
+        if (returned >= 0)
+            rd = 0;
+
         /* CMP rs1, rs2, then turn the flags into 0 or 1 in rd. The six
          * comparisons differ only in the condition, and SETcc is the matching
          * Jcc opcode plus 0x10, so branch_cc_for() supplies both forms.
@@ -2062,6 +2227,18 @@ void emit_compare_jump(vir_mop_t *mop, int rd, int rs1, int rs2)
         emit_setcc_bool(rd, branch_cc_for(mop->op, mop->src0_is_unsigned ||
                                                        mop->src1_is_unsigned) +
                                 0x10);
+        if (returned >= 0) {
+            if (returned > emit_ir_index + 1) {
+                vir_mop_t *copy = MOP_FLAT[emit_ir_index + 1];
+                if (copy->dest >= 0 && copy->dest < REG_CNT)
+                    const_reg_valid[copy->dest] = false;
+                skip_ir_add(emit_ir_index + 1);
+            }
+            if (mop->dest < REG_CNT)
+                const_reg_valid[mop->dest] = false;
+            src0_override = 0;
+            src0_override_at = returned;
+        }
         return;
     }
     switch (mop->op) {
@@ -2121,6 +2298,16 @@ void emit_compare_jump(vir_mop_t *mop, int rd, int rs1, int rs2)
     case OP_branch: {
         int condition;
 
+        if (fused_cc_pending && fused_known >= 0) {
+            basic_block_t *target = fused_known ? mop->then_bb : mop->else_bb;
+            fused_cc_pending = false;
+            fused_known = -1;
+            if (!bb_falls_through(target)) {
+                x64_emit_branch(0, target);
+                emit_fell_through = false;
+            }
+            return;
+        }
         if (fused_cc_pending) {
             fused_cc_pending = false;
             condition = fused_cc;
@@ -2138,7 +2325,9 @@ void emit_compare_jump(vir_mop_t *mop, int rd, int rs1, int rs2)
     }
 }
 
-/* Keep a call result in RAX when its only consumer can read it directly. */
+/* Keep a call result in RAX when its only consumer can read it directly, and
+ * leave it there when nothing reads it at all.
+ */
 static void emit_call_result(void)
 {
     if (next_in_same_bb() && emit_next_ir->op == OP_assign &&
@@ -2150,7 +2339,7 @@ static void emit_call_result(void)
         reg_dead_after(emit_ir_index + 2, 0)) {
         src0_override = 0;
         src0_override_at = emit_ir_index + 1;
-    } else
+    } else if (!reg_dead_after(emit_ir_index + 1, 0))
         emit_reg_move(7, 0, true); /* System V RAX to machine register 0. */
 }
 
@@ -2232,6 +2421,16 @@ void emit_call_return(vir_mop_t *mop, int rs1)
                 emit_reg_move(0, ret_reg, true); /* MOV RAX, ret_reg */
             }
         }
+
+        /* A later return jumps to the function's first epilogue when that is
+         * long enough for the jump to save space; see X64_SHARED_EPILOGUE.
+         */
+        if (x64_epilogue) {
+            x64_emit_branch(0, x64_epilogue);
+            return;
+        }
+        int epilogue_start = elf_code->size;
+
         /* Function epilogue: ADD rsp, aligned_size; POP r13; POP r12; POP rbx;
          * POP rbp; RET (R15 is reserved for global base pointer)
          */
@@ -2250,6 +2449,8 @@ void emit_call_return(vir_mop_t *mop, int rs1)
         if (cur_frame_rbp)
             emit_byte(0x5D); /* POP rbp */
         emit_byte(0xC3);     /* RET */
+        if (elf_code->size - epilogue_start >= X64_SHARED_EPILOGUE)
+            x64_epilogue = x64_code_label(epilogue_start);
         return;
 
     case OP_func_ret:
@@ -2326,10 +2527,6 @@ static void emit_slot_store(vir_mop_t *ir, int reg, int base, bool packed)
     emit_store_instruction(width, reg, base, -1, false, false);
 }
 
-typedef struct {
-    int base, index, scale, displacement;
-    bool sib, has_displacement;
-} x64_memory_operand_t;
 
 static x64_memory_operand_t take_memory_operand(int base)
 {
@@ -2349,15 +2546,6 @@ static x64_memory_operand_t take_memory_operand(int base)
     return operand;
 }
 
-static void emit_memory_operand(int reg, const x64_memory_operand_t *operand)
-{
-    if (operand->sib)
-        emit_mem_sib(reg, operand->base, operand->index, operand->scale,
-                     operand->displacement);
-    else
-        emit_mem_base(reg, operand->base, operand->displacement,
-                      operand->has_displacement);
-}
 
 void emit_memory(vir_mop_t *mop, int rd, int rs1)
 {
@@ -2447,6 +2635,23 @@ void emit_read_write(vir_mop_t *mop, int rd, int rs1, int rs2)
                 reg_mirror_valid[alu->dest] = false;
                 shift_cache_kill(alu->dest);
                 skip_ir_add(at);
+                return;
+            }
+
+            /* A value loaded only to be compared needs no register: CMP takes
+             * either of its operands from memory, at the comparison's width.
+             */
+            vir_mop_t *compare = emit_next_ir;
+            if (!folds_off && next_in_same_bb() &&
+                branch_cc_for(compare->op, compare->src0_is_unsigned ||
+                                               compare->src1_is_unsigned) &&
+                (rsize == 4 || rsize == 8) && compare->size_bytes == rsize &&
+                (compare->src0 == mop->dest) != (compare->src1 == mop->dest) &&
+                compare->src0_hi < 0 && compare->src1_hi < 0 &&
+                reg_dead_after(emit_ir_index + 2, mop->dest)) {
+                cmp_mem_read = true;
+                cmp_mem_read_first = compare->src0 == mop->dest;
+                cmp_mem_operand = address;
                 return;
             }
 
@@ -2543,8 +2748,8 @@ void emit_global(vir_mop_t *mop, int rd, int rs1)
          */
         {
             func_t *target = find_func(mop->func_name);
-            emit_byte(REX_W | REX_B);
-            emit_byte(0xB8 + 3); /* MOVABS r11, imm64 */
+            emit_byte(REX_B);
+            emit_byte(0xB8 + 3); /* MOV r11d, imm32 */
             if (target && (target->bbs || dynlink)) {
                 funcaddr_refs =
                     reloc_reserve(funcaddr_refs, funcaddr_ref_count,
@@ -2556,7 +2761,6 @@ void emit_global(vir_mop_t *mop, int rd, int rs1)
                     target->plt_offset;
                 funcaddr_ref_count++;
             }
-            emit_dword(0);
             emit_dword(0);
 
             /* MOV [rs1], r11. Built with statements rather than a conditional
@@ -2629,10 +2833,14 @@ void emit_global(vir_mop_t *mop, int rd, int rs1)
         return;
 
     case OP_load_rodata_address: {
-        /* MOVABS rd, imm64 with a placeholder address, recorded for patching
-         * once .rodata's final location is known.
+        /* MOV rd32, imm32 with a placeholder address, recorded for patching
+         * once .rodata's final location is known. The image is not position
+         * independent and loads below 4 GiB, so the 32-bit write, which
+         * zero-extends, forms the whole address in five or six bytes instead of
+         * MOVABS's ten.
          */
-        emit_rex(1, -1, rd);
+        if (rd >= 8)
+            emit_byte(REX_B);
         emit_byte(0xB8 + reg_low3(rd));
         {
             rodata_refs = reloc_reserve(rodata_refs, rodata_ref_count,
@@ -2645,7 +2853,6 @@ void emit_global(vir_mop_t *mop, int rd, int rs1)
             rodata_refs[rodata_ref_count].rodata_offset = mop->src0;
             rodata_ref_count++;
         }
-        emit_dword(0);
         emit_dword(0);
         return;
     }
@@ -2771,16 +2978,28 @@ void emit_mop(vir_mop_t *mop)
     }
     int rs2 = map_ir_reg(mop->src1);
 
-    /* Read the tracked value before invalidating, since dest may alias src1. */
+    /* Read the tracked values before invalidating, since dest may alias a
+     * source. src0's is good only while rs1 still names its register.
+     */
     bool src1_const_known = false;
     int src1_const = 0;
     if (mop->src1 >= 0 && mop->src1 < REG_CNT && const_reg_valid[mop->src1]) {
         src1_const_known = true;
         src1_const = const_reg_val[mop->src1];
     }
+    bool src0_const_known = mop->src0 >= 0 && mop->src0 < REG_CNT &&
+                            rs1 == map_ir_reg(mop->src0) &&
+                            const_reg_valid[mop->src0];
+    int src0_const = src0_const_known ? const_reg_val[mop->src0] : 0;
     if (op_writes_dest(mop->op) && mop->dest >= 0 && mop->dest < REG_CNT) {
         const_reg_valid[mop->dest] = false;
         shift_cache_kill(mop->dest);
+
+        /* A copy of a constant is that constant too. */
+        if (mop->op == OP_assign && src0_const_known && mop->dest_hi < 0) {
+            const_reg_valid[mop->dest] = true;
+            const_reg_val[mop->dest] = src0_const;
+        }
     }
 
     /* Anything that can touch a register this table does not name -- a call, or
@@ -2791,12 +3010,16 @@ void emit_mop(vir_mop_t *mop)
         const_track_reset();
         shift_cache_reset();
     }
-    if (mop->op != OP_branch)
+    if (mop->op != OP_branch) {
         fused_cc_pending = false;
+        fused_known = -1;
+    }
     if (!branch_cc_for(mop->op,
                        mop->src0_is_unsigned || mop->src1_is_unsigned)) {
         cmp_mem_slot = -1;
         cmp_imm_known = false;
+        if (mop->op != OP_read)
+            cmp_mem_read = false;
     } else if (src1_const_known) {
         cmp_imm_known = true;
         cmp_imm_val = src1_const;
@@ -2939,6 +3162,42 @@ void emit_mop(vir_mop_t *mop)
         branch_cc_for(mop->op, mop->src0_is_unsigned || mop->src1_is_unsigned);
     if (fuse_cc && branch_result_dead(mop->dest) && next_in_same_bb() &&
         emit_next_ir->op == OP_branch && emit_next_ir->src0 == mop->dest) {
+        /* Two known constants decide the branch here, as at the entry of a
+         * rotated loop whose counter starts at a literal: no CMP, and the
+         * branch becomes a jump or nothing. Only 32-bit ones, as the table
+         * keeps the low word of a constant.
+         */
+        if (!folds_off && src0_const_known && src1_const_known &&
+            mop->size_bytes == 4 && cmp_mem_slot < 0) {
+            unsigned int a = src0_const, b = src1_const;
+            bool less = mop->src0_is_unsigned || mop->src1_is_unsigned
+                            ? a < b
+                            : (int) a < (int) b;
+            switch (mop->op) {
+            case OP_eq:
+                fused_known = a == b;
+                break;
+            case OP_neq:
+                fused_known = a != b;
+                break;
+            case OP_lt:
+                fused_known = less;
+                break;
+            case OP_geq:
+                fused_known = !less;
+                break;
+            case OP_gt:
+                fused_known = !less && a != b;
+                break;
+            default:
+                fused_known = less || a == b;
+                break;
+            }
+            cmp_imm_known = false;
+            fused_cc = fuse_cc;
+            fused_cc_pending = true;
+            return;
+        }
         int producer = emit_ir_index - 1;
         if (!folds_off && producer >= 0 && src1_const_known &&
             src1_const == 0 && mop->op == OP_eq && cmp_mem_slot < 0 &&
@@ -2977,7 +3236,17 @@ void emit_mop(vir_mop_t *mop)
         !folds_off && branch_result_dead(mop->dest)) {
         bool wide = test_is_wide(mop->size_bytes, mop->is_pointer);
 
-        if (src1_const_known) {
+        if (src1_const_known && src1_const >= 0 && src1_const < 0x80) {
+            if (rs1 == 0) {
+                emit_byte(0xA8); /* TEST al, imm8 */
+            } else {
+                if (rs1 >= 4)
+                    emit_byte(REX_BASE | (rs1 >= 8 ? REX_B : 0));
+                emit_byte(0xF6); /* TEST r8, imm8 */
+                emit_byte(modrm(MOD_DIRECT, 0, reg_low3(rs1)));
+            }
+            emit_byte(src1_const);
+        } else if (src1_const_known) {
             emit_rex(wide, 0, rs1);
             emit_byte(0xF7); /* TEST rs1, imm32 */
             emit_byte(modrm(MOD_DIRECT, 0, reg_low3(rs1)));
@@ -3033,10 +3302,17 @@ void emit_mop(vir_mop_t *mop)
 
         /* A 32-bit register write zero-extends to 64 bits, which is exactly the
          * representation an unsigned scalar needs before a logical shift or
-         * unsigned comparison.
+         * unsigned comparison. Zero is XOR, three bytes shorter than MOV, but
+         * it writes the flags: not before a comparison or branch, as the one
+         * that reuses an AND's flags reads them past a zero constant.
          */
-        emit_mov_imm32(rd, mop->src0,
-                       !(mop->is_unsigned && mop->size_bytes <= 4));
+        if (!mop->src0 &&
+            !(emit_next_ir && (op_is_comparison(emit_next_ir->op) ||
+                               emit_next_ir->op == OP_branch)))
+            emit_opcode_reg(0x31, rd, rd, false); /* XOR r32, r32 */
+        else
+            emit_mov_imm32(rd, mop->src0,
+                           !(mop->is_unsigned && mop->size_bytes <= 4));
         if (returned) {
             /* The constant went to RAX; the destination was never written. */
             if (mop->dest >= 0 && mop->dest < REG_CNT)
@@ -3130,7 +3406,7 @@ void emit_mop(vir_mop_t *mop)
             func_t *func = find_func(mop->func_name);
             if (!func || !func->bbs)
                 return;
-            x64_align16();
+            x64_align16(NULL);
             func->bbs->elf_offset = elf_code->size;
         }
 
@@ -3145,6 +3421,7 @@ void emit_mop(vir_mop_t *mop)
          * aligned_size; LEA rbp, [rsp + bias]
          */
         x64_frame_bias = 0;
+        x64_epilogue = NULL;
         cur_frame_rbp = x64_needs_frame(find_func(mop->func_name));
         if (cur_frame_rbp)
             emit_byte(0x55); /* PUSH rbp */
@@ -3204,13 +3481,86 @@ void emit_mop(vir_mop_t *mop)
     }
 }
 
-/* Flatten control flow graph for code generation */
+/* Flatten control flow graph for code generation An access through a global's
+ * address, right after the LEA that formed it, becomes an access to the global
+ * itself, [r15 + offset], when nothing else reads the address: a load or store
+ * with a displacement instead of a LEA and a load or store through a register.
+ * The access's width comes from the operation, since is_pointer names the
+ * address and not the element.
+ */
+static void x64_fold_global_access(func_t *func)
+{
+    /* A global's address depends on nothing but R15, so it moves down to the
+     * first operation that reads or writes its register, when that is an
+     * access, to meet the fold below.
+     */
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        for (vir_mop_t **link = &bb->mops.head; *link && (*link)->next;) {
+            vir_mop_t *address = *link, *last = address->next, *reader;
+            int a = address->dest;
+            if (address->op != OP_global_address_of || address->dest_hi >= 0 ||
+                a < 0 || a >= REG_CNT) {
+                link = &address->next;
+                continue;
+            }
+            for (reader = last; reader; reader = reader->next) {
+                if (ir_reads_reg(reader, a) || (mop_defs(reader) & (1u << a)) ||
+                    reader->op == OP_branch || reader->op == OP_jump ||
+                    reader->op == OP_return)
+                    break;
+                last = reader;
+            }
+            if (!reader || reader == address->next ||
+                (reader->op != OP_read && reader->op != OP_write) ||
+                reader->src0 != a) {
+                link = &address->next;
+                continue;
+            }
+            *link = address->next;
+            address->next = reader;
+            last->next = address;
+        }
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        for (vir_mop_t **link = &bb->mops.head; *link && (*link)->next;) {
+            vir_mop_t *address = *link, *memory = address->next;
+            bool read = memory->op == OP_read;
+            int a = address->dest;
+            if (address->op != OP_global_address_of || address->dest_hi >= 0 ||
+                (!read && memory->op != OP_write) || memory->src0 != a ||
+                memory->src0_hi >= 0 || memory->src2 ||
+                (!read && memory->src1 == a) ||
+                (!(read && memory->dest == a) &&
+                 reg_read_after(bb, memory, a))) {
+                link = &address->next;
+                continue;
+            }
+            if (read) {
+                memory->op = OP_global_load;
+                memory->size_bytes = memory->src1;
+                memory->src0 = address->src0;
+                memory->src1 = -1;
+            } else {
+                memory->op = OP_global_store;
+                memory->size_bytes = memory->dest;
+                memory->src0 = memory->src1;
+                memory->src1 = address->src0;
+                memory->dest = -1;
+            }
+            memory->is_pointer = false;
+            *link = memory;
+        }
+}
+
 void cfg_flatten(void)
 {
     /* __syscall offset will be set when it's actually emitted in code_generate
      */
     func_t *func;
     mop_flat_prepare(true);
+
+    /* The global initializer is one block, so nothing is live out of it. */
+    if (GLOBAL_FUNC && GLOBAL_FUNC->bbs)
+        x64_fold_global_access(GLOBAL_FUNC);
 
     /* Entry point code varies based on globals: POP rdi (1) + MOV rsi,rsp (3) +
      * global_setup (varies) + CALL globals (0 or 5) + CALL main (5) + MOV
@@ -3264,6 +3614,7 @@ void cfg_flatten(void)
          * The rounding has to match the prologue's SUB exactly, otherwise every
          * stacked argument is read from the wrong slot.
          */
+        x64_fold_global_access(func);
         func->saved_regs = func_saved_regs(func);
         int stack_top_ofs =
             x64_incoming_arg_base(func->stack_size, func->saved_regs);
@@ -3366,9 +3717,14 @@ static void x64_relax_layout(void)
     for (int i = 0; i < x64_edit_count; i++) {
         x64_edit_t *edit = &x64_edits[i];
         edit->new_start = edit->start + delta;
-        if (edit->kind < 0)
-            edit->new_size = (16 - (edit->new_start & 15)) & 15;
-        else if (edit->fixed_long)
+        if (edit->kind < 0) {
+            /* Code starts right after the headers, a multiple of 16 but not of
+             * 64, so the wider boundaries are those of the address.
+             */
+            int at = elf_header_size() + edit->new_start;
+            edit->new_size =
+                (edit->align - (at & (edit->align - 1))) & (edit->align - 1);
+        } else if (edit->fixed_long)
             edit->new_size = edit->old_size;
         else if (edit->kind == 0 &&
                  edit->target->elf_offset == edit->start + edit->old_size)
@@ -3377,6 +3733,80 @@ static void x64_relax_layout(void)
             edit->new_size = 2;
         delta += edit->new_size - edit->old_size;
     }
+}
+
+/* Lay the edits out until every short branch reaches its target. */
+static void x64_relax_converge(void)
+{
+    for (bool changed = true; changed;) {
+        changed = false;
+        x64_relax_layout();
+        for (int i = 0; i < x64_edit_count; i++) {
+            x64_edit_t *edit = &x64_edits[i];
+            if (edit->kind < 0 || edit->new_size != 2)
+                continue;
+            int disp = x64_relax_newpos(edit->target->elf_offset) -
+                       (edit->new_start + 2);
+            if (disp < -128 || disp > 127) {
+                edit->fixed_long = true;
+                changed = true;
+            }
+        }
+    }
+}
+
+/* A small loop should not straddle a 64-byte fetch block: on Zen 1 a 57-byte
+ * loop that did ran at six sevenths of its speed, with the same code one block
+ * earlier. A loop of up to 64 bytes, measured to the end of its last branch
+ * back to its first block, that would cross one moves to a 32-byte boundary
+ * when it fits in 32 bytes and to a 64-byte one otherwise, unless that takes
+ * more than X64_LOOP_PADDING bytes. A function of up to 64 bytes is placed the
+ * same way, as all of a small recursive one is as hot as a loop: fib crossing a
+ * block ran at nine tenths of its speed. A longer loop, up to X64_LONG_LOOP
+ * bytes, starts on a 32-byte fetch window instead: sort's 118-byte insertion
+ * loop starting halfway into one took 3% more cycles.
+ *
+ * Returns whether any padding changed, so that the layout runs again.
+ */
+static bool x64_widen_loop_padding(void)
+{
+    bool changed = false;
+    for (int i = 0; i < x64_edit_count; i++) {
+        x64_edit_t *pad = &x64_edits[i];
+        if (pad->kind >= 0)
+            continue;
+        int body = pad->new_start + pad->new_size, end = -1;
+        for (int j = i + 1; j < x64_edit_count &&
+                            x64_edits[j].new_start < body + X64_LONG_LOOP;
+             j++) {
+            if (pad->kind == -2 && x64_edits[j].kind == -2) {
+                end = x64_edits[j].new_start;
+                break;
+            }
+            if (pad->kind == -1 && x64_edits[j].kind >= 0 &&
+                x64_edits[j].target == pad->target)
+                end = x64_edits[j].new_start + x64_edits[j].new_size;
+        }
+        int length = end - body, align = 16;
+        int at = elf_header_size() + body;
+        int start = elf_header_size() + pad->new_start;
+        if (pad->kind == -1 && end > body && length > X64_FETCH_BLOCK) {
+            if (((32 - (start & 31)) & 31) <= X64_LOOP_PADDING)
+                align = 32;
+        } else if (end > body && length <= X64_FETCH_BLOCK &&
+                   (at & (X64_FETCH_BLOCK - 1)) + length > X64_FETCH_BLOCK) {
+            int want = length <= 32 ? 32 : X64_FETCH_BLOCK;
+            if (((want - (start & (want - 1))) & (want - 1)) <=
+                X64_LOOP_PADDING)
+                align = want;
+        }
+        /* Keep a wider boundary once taken, so the rounds settle. */
+        if (align > pad->align) {
+            pad->align = align;
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 /* Shrink the branches recorded during emission. Every edit only ever moves
@@ -3399,21 +3829,12 @@ static void x64_relax(void)
             x64_call_sites[i].target->elf_offset < 0)
             return;
 
-    for (bool changed = true; changed;) {
-        changed = false;
-        x64_relax_layout();
-        for (int i = 0; i < x64_edit_count; i++) {
-            x64_edit_t *edit = &x64_edits[i];
-            if (edit->kind < 0 || edit->new_size != 2)
-                continue;
-            int disp = x64_relax_newpos(edit->target->elf_offset) -
-                       (edit->new_start + 2);
-            if (disp < -128 || disp > 127) {
-                edit->fixed_long = true;
-                changed = true;
-            }
-        }
+    for (int round = 0; round < X64_ALIGN_ROUNDS; round++) {
+        x64_relax_converge();
+        if (!x64_widen_loop_padding())
+            break;
     }
+    x64_relax_converge();
 
     int old_size = elf_code->size;
     char *old = malloc(old_size);
@@ -3465,6 +3886,8 @@ static void x64_relax(void)
         for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
             if (bb->elf_offset >= 0)
                 bb->elf_offset = x64_relax_newpos(bb->elf_offset);
+    for (int i = 0; i < x64_label_count; i++)
+        x64_labels[i]->elf_offset = x64_relax_newpos(x64_labels[i]->elf_offset);
     main_code_offset = x64_relax_newpos(main_code_offset);
     for (int i = 0; i < pltcall_ref_count; i++)
         pltcall_refs[i].patch_location =
@@ -3505,9 +3928,11 @@ void code_generate(void)
      * an estimate would be wrong for every section that followed it.
      */
 
-    /* Generate code for the global function */
+    /* Generate code for the global function. With nothing to initialize, the
+     * entry stub never calls it, so it is left out entirely.
+     */
     vir_mop_t *mop;
-    if (GLOBAL_FUNC && GLOBAL_FUNC->bbs) {
+    if (GLOBAL_FUNC && GLOBAL_FUNC->bbs && GLOBAL_FUNC->bbs->mops.head) {
         /* Record where the global initializer actually starts. cfg_flatten only
          * computed a predicted offset, and x86-64 instruction lengths are
          * variable, so the prediction does not survive; the entry stub's CALL
@@ -3771,7 +4196,7 @@ void code_generate(void)
                  * one aligned.
                  */
                 if (x64_aligns_block(current_instr_bb))
-                    x64_align16();
+                    x64_align16(current_instr_bb);
 
                 /* Entering a new basic block: record where it starts. A block
                  * can be reached from several predecessors, so nothing learned
@@ -3789,8 +4214,8 @@ void code_generate(void)
                  * that branch's block, so it keeps what the registers hold; the
                  * taken side is a jump target and does not.
                  */
-                if (!emit_fell_through || current_instr_bb->is_branch_target ||
-                    bb_sole_code_pred(current_instr_bb) != prev_emitted_bb) {
+                if (!emit_fell_through ||
+                    x64_entry_pred(current_instr_bb) != prev_emitted_bb) {
                     frame_mirror_reset();
                     const_track_reset();
                     shift_cache_reset();
@@ -3798,9 +4223,11 @@ void code_generate(void)
                 emit_bb = current_instr_bb;
                 prev_emitted_bb = current_instr_bb;
                 fused_cc_pending = false;
+                fused_known = -1;
                 src0_override = -1;
                 src0_override_at = -1;
                 cmp_mem_slot = -1;
+                cmp_mem_read = false;
                 addr_fold = false;
                 addr_sib = false;
                 skip_ir_reset();
@@ -3901,20 +4328,25 @@ void code_generate(void)
         int entry_start = elf_code->size;
         elf_entry_offset = entry_start; /* Entry relative to code start */
 
-        /* POP rdi (argc) */
-        emit_byte(0x5F);
-        /* MOV rsi, rsp (argv) */
-        emit_reg_move(6, 4, true);
+        func_t *main_fn = find_func("main");
+        bool main_args =
+            dynlink || !main_fn || main_fn->num_params > 0 ||
+            (GLOBAL_FUNC && GLOBAL_FUNC->bbs && GLOBAL_FUNC->bbs->mops.head);
+        if (main_args) {
+            /* POP rdi (argc) */
+            emit_byte(0x5F);
+            /* MOV rsi, rsp (argv) */
+            emit_reg_move(6, 4, true);
+        }
 
-        /* Initialize R15 to point to global data area before calling globals
-         * MOV r15, imm64 - Load absolute address of data section We'll patch
-         * this later when we know the final data address
+        /* Point R15 at the global data area before the initializer runs. The
+         * address is patched once it is known; like every address in the image
+         * it is below 4 GiB, so MOV r15d, imm32 zero-extends to it.
          */
-        emit_byte(0x49); /* REX.W + REX.B */
-        emit_byte(0xBF); /* MOV r15, imm64 */
+        emit_byte(0x41); /* REX.B */
+        emit_byte(0xBF); /* MOV r15d, imm32 */
         r15_patch_offset = elf_code->size;
-        emit_dword(0); /* Lower 32 bits - will be patched */
-        emit_dword(0); /* Upper 32 bits - will be patched */
+        emit_dword(0);
 
         /* Globals setup: if any */
         if (GLOBAL_FUNC && GLOBAL_FUNC->bbs && GLOBAL_FUNC->bbs->mops.head) {
@@ -3961,8 +4393,9 @@ void code_generate(void)
             add_pltcall_ref(PLT_FIXUP_SIZE);
             emit_byte(0xF4); /* hlt: __libc_start_main does not return */
         } else {
-            /* Align stack by 8 for call */
-            emit_alu_imm_width(4, 5, 8, true);
+            /* Realign after the POP: PUSH rax is one byte, SUB four */
+            if (main_args)
+                emit_byte(0x50);
             /* CALL main */
             emit_byte(0xE8);
             {
@@ -3978,10 +4411,8 @@ void code_generate(void)
                 int disp_m = main_off - (patch_at_m + 4);
                 emit_dword(disp_m);
             }
-            /* Undo stack adjust */
-            emit_alu_imm_width(4, 0, 8, true);
-            /* Move exit code (rax) to rdi and syscall exit(60) */
-            emit_reg_move(7, 0, true);
+            /* exit(main's int result): the stack is never used again */
+            emit_reg_move(7, 0, false);
             emit_mov_imm32(0, 60, true);
             emit_byte(0x0F);
             emit_byte(0x05);
@@ -4072,13 +4503,13 @@ void code_generate(void)
             addr = elf_code_start + funcaddr_refs[i].target_bb->elf_offset;
         else
             addr = dynamic_sections.elf_plt_start + funcaddr_refs[i].plt_offset;
-        patch_qword(at, addr);
+        patch_dword(at, addr);
     }
 
     for (int i = 0; i < rodata_ref_count; i++) {
         int at = rodata_refs[i].patch_location;
         int addr = elf_rodata_start + rodata_refs[i].rodata_offset;
-        patch_qword(at, addr);
+        patch_dword(at, addr);
     }
 
     /* Set BSS size to accommodate global variables */
@@ -4091,7 +4522,7 @@ void code_generate(void)
         /* Write the 64-bit address of the data section The data section's
          * runtime address is elf_data_start (which includes load address)
          */
-        patch_qword(r15_patch_offset, elf_data_start);
+        patch_dword(r15_patch_offset, elf_data_start);
     }
 
     /* No RIP-relative patching needed when using RSP-based globals */
