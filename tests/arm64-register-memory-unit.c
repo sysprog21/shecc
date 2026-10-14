@@ -109,7 +109,8 @@ int main(int argc, char **argv)
     mem.dest_hi = mem.src0_hi = mem.src1_hi = REG_CNT;
     bb.mops.head = &mem;
     assert(func_highest_used_reg(&f, A64_FIRST_CALLEE) == A64_FIRST_CALLEE - 1);
-    for (int reject = 0; reject < 5; reject++) {
+    /* An int index extends in the access: UXTW from -5, SXTW from -9. */
+    for (int sign = 0; sign < 2; sign++) {
         basic_block_t block = {0};
         func_t func = {0};
         func.bbs = &block;
@@ -118,7 +119,31 @@ int main(int argc, char **argv)
         extend.src0 = 1;
         extend.dest = 2;
         extend.src1 = (4 << 16) | 8;
-        extend.src0_is_unsigned = reject != 0;
+        extend.src0_is_unsigned = !sign;
+        extend.dest_hi = extend.src0_hi = extend.src1_hi = -1;
+        memory.op = OP_read;
+        memory.dest = 2;
+        memory.src0 = 0;
+        memory.src1 = 8;
+        memory.src0_hi = 2;
+        memory.src1_hi = memory.dest_hi = -1;
+        memory.src2 = -4;
+        extend.next = &memory;
+        block.mops.head = &extend;
+        arm64_fold_immediates(&func);
+        assert(block.mops.head == &memory && memory.src0_hi == 1);
+        assert(memory.src2 == (sign ? -12 : -8));
+    }
+    for (int reject = 1; reject < 5; reject++) {
+        basic_block_t block = {0};
+        func_t func = {0};
+        func.bbs = &block;
+        vir_mop_t extend = {0}, memory = {0};
+        extend.op = OP_sign_ext;
+        extend.src0 = 1;
+        extend.dest = 2;
+        extend.src1 = (4 << 16) | 8;
+        extend.src0_is_unsigned = true;
         extend.is_pointer = reject == 1;
         extend.dest_hi = extend.src0_hi = extend.src1_hi = -1;
         memory.op = reject == 3 ? OP_write : OP_read;

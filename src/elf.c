@@ -918,20 +918,25 @@ void elf_add_symbol(const char *symbol, int pc)
     elf_symbol_index++;
 }
 
-void elf_preprocess(void)
+/* Bytes of file and program headers in front of the code, which starts right
+ * after them.
+ */
+int elf_header_size(void)
 {
 #if ELF_IS_64 == 1
     /* ELF64 header (64) plus two program headers (56 each), and two more --
      * PT_INTERP and PT_DYNAMIC -- when linking dynamically.
      */
-    elf_header_len = 64 + (56 << 1);
-    if (dynlink)
-        elf_header_len += (56 << 1);
+    return 64 + (56 << 1) + (dynlink ? 56 << 1 : 0);
 #else
-    elf_header_len = sizeof(elf32_hdr_t) + (sizeof(elf32_phdr_t) << 1);
-    if (dynlink)
-        elf_header_len += (sizeof(elf32_phdr_t) << 1);
+    return sizeof(elf32_hdr_t) + (sizeof(elf32_phdr_t) << 1) +
+           (dynlink ? sizeof(elf32_phdr_t) << 1 : 0);
 #endif
+}
+
+void elf_preprocess(void)
+{
+    elf_header_len = elf_header_size();
     elf_align(elf_data);
     elf_align(elf_rodata);
     elf_code_start = ELF_START + elf_header_len;

@@ -47,14 +47,17 @@ int main(void)
                            (unsigned) (a64_cond(ops[i], uns) ^ (layout == 2)));
                     strbuf_free(elf_code);
                 }
-    int frames[] = {0, 16, 4080, 4096, 65536};
+
+    /* Below 16 MiB a frame takes one shifted and one plain immediate, either of
+     * them left out when it is zero; past that, MOVZ/MOVK and a register form.
+     */
+    int frames[] = {0, 16, 4080, 4096, 4112, 65536, 1 << 24};
+    int bytes[] = {0, 4, 4, 4, 8, 4, 12};
     for (unsigned i = 0; i < sizeof(frames) / sizeof(frames[0]); i++)
         for (int subtract = 0; subtract < 2; subtract++) {
             elf_code = strbuf_create(32);
             a64_adjust_frame(frames[i], subtract);
-            assert(elf_code->size == (frames[i] == 0     ? 0
-                                      : frames[i] < 4096 ? 4
-                                                         : 12));
+            assert(elf_code->size == bytes[i]);
             strbuf_free(elf_code);
         }
     for (int used = 0; used <= CALLEE_SAVED_REGS; used++)

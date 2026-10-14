@@ -59,6 +59,22 @@ static long long signed_masks(long long x)
 {
     return (x & 0x7fffffffLL) ^ 0xffffLL;
 }
+/* LLONG_MIN has no immediate form, so its magnitude must not wrap into one. */
+static long long add_min(long long x)
+{
+    return x + (-9223372036854775807LL - 1);
+}
+static long long sub_min(long long x)
+{
+    return x - (-9223372036854775807LL - 1);
+}
+/* A 64-bit product added to another value becomes one MADD. */
+static unsigned long long multiply_add(unsigned long long a,
+                                       unsigned long long b,
+                                       unsigned long long c)
+{
+    return a * b + c;
+}
 
 int main(void)
 {
@@ -90,5 +106,12 @@ int main(void)
         return 8;
     if (signed_masks(-9223372036854775807LL) != (1LL ^ 0xffffLL))
         return 9;
+    if (add_min(1) != -9223372036854775807LL)
+        return 10;
+    if (sub_min(2) != -9223372036854775806LL)
+        return 11;
+    if (multiply_add(0x100000001ULL, 0xfffffffffULL, 0x8000000000000000ULL) !=
+        0x8000000effffffffULL)
+        return 12;
     return 0;
 }

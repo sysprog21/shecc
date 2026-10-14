@@ -433,7 +433,9 @@ bool eliminate_load_store_pairs(basic_block_t *bb, vir_mop_t *mop)
     /* Pattern 5: Global store/load optimizations (carefully enabled) */
     if (mop->op == OP_global_store && next->op == OP_global_store) {
         /* Consecutive global stores to same location */
-        if (mop->src0 == next->src0 && mop->src1 == next->src1) {
+        if (mop->src0 == next->src0 && mop->src1 == next->src1 &&
+            mop->size_bytes == next->size_bytes && !mop->is_volatile &&
+            !next->is_volatile) {
             /* Remove first store - it's dead */
             mop->dest = next->dest;
             mop_drop_after(bb, mop, next);

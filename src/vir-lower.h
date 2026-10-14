@@ -11,6 +11,11 @@ typedef struct {
     basic_block_t *entry;
     int stack_size;
     int block_count;
+
+    /* Whether a call passes arguments on the stack, which then sit at the
+     * bottom of the frame where the callee expects them.
+     */
+    bool passes_stack_args;
 } vir_machine_function_t;
 
 bool vir_lower_machine(const vir_function_t *function,
@@ -112,4 +117,6 @@ bool func_is_frameless_leaf(func_t *func);
 void emit_mop(vir_mop_t *mop);
 int mop_count_words(vir_mop_t *mop);
 unsigned int mop_defs(vir_mop_t *ir);
+unsigned int mop_reads(vir_mop_t *ir);
+void mop_function_liveness(func_t *func);
 void mop_compute_liveness(void);

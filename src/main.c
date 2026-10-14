@@ -176,6 +176,7 @@ static void lower_native_function(func_t *func, bool global)
     func->bbs = machine.entry;
     if (!global) {
         func->stack_size = machine.stack_size;
+        func->passes_stack_args = machine.passes_stack_args;
         if (!strcmp(func->return_def.var_name, "main"))
             MAIN_BB = machine.entry;
     } else {

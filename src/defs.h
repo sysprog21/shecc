@@ -1007,6 +1007,11 @@ struct basic_block {
      * registers hold across the boundary.
      */
     bool is_branch_target;
+
+    /* Whether a branch from later in the layout targets this block, so that it
+     * starts a loop body. ARM64 aligns such blocks.
+     */
+    bool is_loop_start;
 };
 
 typedef struct {
@@ -1046,6 +1051,14 @@ struct func {
     bool is_inline;
 
     int stack_size;
+    bool passes_stack_args;
+
+    /* A test the ARM64 prologue runs ahead of the frame, returning at once when
+     * it holds; see a64_early_exit(). NULL when there is none.
+     */
+    vir_mop_t *early_test;
+    int early_cond;
+    int early_value;
     void *vir_context;
 
     /* Parser cursors become the allocated machine CFG after lowering. */

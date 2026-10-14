@@ -375,6 +375,22 @@ bool ir_reads_reg(vir_mop_t *ir, int reg)
     return op_src1_is_reg(ir->op) && ir->src1 == reg;
 }
 
+/* The registers @ir reads: every one ir_reads_reg() says it reads, at once. */
+unsigned int mop_reads(vir_mop_t *ir)
+{
+    unsigned int reads = reg_bit(ir->src0_hi) | reg_bit(ir->src1_hi);
+    if (ir->op == OP_call || ir->op == OP_indirect) {
+        int words = call_arg_regs(ir);
+        reads |=
+            (1u << (words < MAX_ARGS_IN_REG ? words : MAX_ARGS_IN_REG)) - 1;
+    }
+    if (op_src0_is_reg(ir->op))
+        reads |= reg_bit(ir->src0);
+    if (op_src1_is_reg(ir->op))
+        reads |= reg_bit(ir->src1);
+    return reads;
+}
+
 /* The registers @ir writes. A call clobbers every caller-saved register, after
  * reading its arguments.
  */
@@ -391,47 +407,50 @@ unsigned int mop_defs(vir_mop_t *ir)
 /* Allocated registers can cross machine edges. Three block masks suffice:
  * live-in is use | (live-out & ~def), including both halves of a pair.
  */
+void mop_function_liveness(func_t *func)
+{
+    int count = 0;
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
+        count++;
+    basic_block_t **blocks = malloc(count * sizeof(*blocks));
+    if (!blocks)
+        fatal("Machine liveness allocation failed");
+    int index = 0;
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        blocks[index++] = bb;
+        bb->machine_use = bb->machine_def = bb->machine_liveout = 0;
+        for (vir_mop_t *ir = bb->mops.head; ir; ir = ir->next) {
+            bb->machine_use |= mop_reads(ir) & ~bb->machine_def;
+            bb->machine_def |= mop_defs(ir);
+        }
+    }
+    bool changed;
+    do {
+        changed = false;
+        for (int at = count - 1; at >= 0; at--) {
+            basic_block_t *bb = blocks[at];
+            basic_block_t *successors[3] = {bb->next, bb->then_, bb->else_};
+            unsigned int out = 0;
+            for (int edge = 0; edge < 3; edge++) {
+                basic_block_t *next = successors[edge];
+                if (next)
+                    out |= next->machine_use |
+                           (next->machine_liveout & ~next->machine_def);
+            }
+            if (out != bb->machine_liveout) {
+                bb->machine_liveout = out;
+                changed = true;
+            }
+        }
+    } while (changed);
+    free(blocks);
+}
+
 void mop_compute_liveness(void)
 {
     FOR_EACH_FUNCTION_BODY(func)
     {
-        int count = 0;
-        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next)
-            count++;
-        basic_block_t **blocks = malloc(count * sizeof(*blocks));
-        if (!blocks)
-            fatal("Machine liveness allocation failed");
-        int index = 0;
-        for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
-            blocks[index++] = bb;
-            bb->machine_use = bb->machine_def = bb->machine_liveout = 0;
-            for (vir_mop_t *ir = bb->mops.head; ir; ir = ir->next) {
-                for (int reg = 0; reg < REG_CNT; reg++)
-                    if (ir_reads_reg(ir, reg))
-                        bb->machine_use |= (1u << reg) & ~bb->machine_def;
-                bb->machine_def |= mop_defs(ir);
-            }
-        }
-        bool changed;
-        do {
-            changed = false;
-            for (int at = count - 1; at >= 0; at--) {
-                basic_block_t *bb = blocks[at];
-                basic_block_t *successors[3] = {bb->next, bb->then_, bb->else_};
-                unsigned int out = 0;
-                for (int edge = 0; edge < 3; edge++) {
-                    basic_block_t *next = successors[edge];
-                    if (next)
-                        out |= next->machine_use |
-                               (next->machine_liveout & ~next->machine_def);
-                }
-                if (out != bb->machine_liveout) {
-                    bb->machine_liveout = out;
-                    changed = true;
-                }
-            }
-        } while (changed);
-        free(blocks);
+        mop_function_liveness(func);
     }
 }
 
@@ -557,6 +576,28 @@ static bool vir_machine_rematerializable(const vir_value_t *value)
         if (use->effect && use->effect->kind == VIR_EFFECT_CALL)
             return false;
     return true;
+}
+
+/* Whether @use of the literal @value is better served by rebuilding it there
+ * than by holding it in a register: a constant that fits the 12-bit immediates
+ * instructions take, or on AArch64, whose backend folds it, a global address
+ * that a load or store takes as an offset from the global base. Elsewhere that
+ * address would only be rebuilt beside the access.
+ */
+static bool vir_machine_folds_literal(const vir_value_t *value,
+                                      const vir_use_t *use)
+{
+#if ELF_MACHINE == ELF_MACHINE_AARCH64
+    if (value->opcode == VIR_OP_GLOBAL_ADDR)
+        return use->effect && use == use->effect->address_use;
+#else
+    (void) use;
+#endif
+    return value->opcode == VIR_OP_CONST &&
+           (value->constant < 4096 ||
+            (value->type == VIR_TYPE_I64 && -value->constant <= 4096) ||
+            (value->type == VIR_TYPE_I32 &&
+             (unsigned int) -value->constant <= 4096));
 }
 
 static void vir_machine_materialize(vir_lower_t *lower,
@@ -1329,10 +1370,14 @@ static bool vir_machine_slots(vir_lower_t *lower)
             vir_block_t *block = vir_use_block(use);
             int used = lower->block_positions[block->id] + vir_use_order(use);
             if (block != value->block) {
-                /* A literal is rebuilt as cheaply inside a loop as outside. */
-                int weight = lower->locations[id].rematerializable
-                                 ? 16
-                                 : depth[block->id];
+                /* A literal is rebuilt as cheaply inside a loop as outside, and
+                 * a small one is better rebuilt next to its use, where it can
+                 * become an immediate operand.
+                 */
+                int weight = !lower->locations[id].rematerializable
+                                 ? depth[block->id]
+                             : vir_machine_folds_literal(value, use) ? 0
+                                                                     : 16;
                 score = score > INT_MAX - weight ? INT_MAX : score + weight;
             } else if (vir_use_order(use) > last_local_use)
                 last_local_use = vir_use_order(use);
@@ -1556,10 +1601,20 @@ static bool vir_machine_slots(vir_lower_t *lower)
                     vir_value_t *param = use->edge->to->params;
                     for (int index = 0; param && index < use->operand; index++)
                         param = param->param_next;
+
+                    /* A value from inside the parameter's region, or an outer
+                     * loop's parameter entering an inner loop. Only these meet
+                     * the parameter's register on every path, and
+                     * vir_machine_pin_safe() still rules out interference.
+                     */
                     if (!param || param->type != value->type ||
                         lower->locations[param->id].fixed < 0 ||
-                        !vir_dominance_block_dominates(
-                            lower->dominance, param->block, value->block)) {
+                        (!vir_dominance_block_dominates(
+                             lower->dominance, param->block, value->block) &&
+                         !(value->is_block_param &&
+                           vir_dominance_block_dominates(lower->dominance,
+                                                         value->block,
+                                                         param->block)))) {
                         safe = false;
                         break;
                     }
@@ -2568,6 +2623,7 @@ bool vir_lower_machine(const vir_function_t *function,
     if (!vir_machine_layout(output))
         goto unsupported;
     output->stack_size = ALIGN_UP(output->stack_size, PTR_SIZE);
+    output->passes_stack_args = outgoing > MAX_ARGS_IN_REG;
     for (basic_block_t *block = output->entry; block; block = block->rpo_next)
         for (vir_mop_t *instruction = block->mops.head; instruction;
              instruction = instruction->next)

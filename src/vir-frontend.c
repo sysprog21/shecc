@@ -1150,19 +1150,26 @@ void vir_frontend_layout_globals(void)
     native_function_t *ctx = GLOBAL_FUNC ? GLOBAL_FUNC->vir_context : NULL;
     if (!ctx)
         return;
-    for (native_root_t *root = ctx->roots; root; root = root->next) {
-        var_t *object = root->object;
-        int alignment;
-        if (!object->is_global || object->space_is_allocated)
-            continue;
-        alignment = alignment_var(object);
-        GLOBAL_FUNC->stack_size =
-            (GLOBAL_FUNC->stack_size + alignment - 1) & -alignment;
-        object->offset = GLOBAL_FUNC->stack_size;
-        GLOBAL_FUNC->stack_size += size_var(object);
-        object->space_is_allocated = true;
-        object->has_backing_storage = true;
-    }
+
+    /* Scalars and pointers go first, so that they stay within the immediate
+     * offsets that reach the global area from its base register, and arrays and
+     * records take the room beyond them.
+     */
+    for (int pass = 0; pass < 2; pass++)
+        for (native_root_t *root = ctx->roots; root; root = root->next) {
+            var_t *object = root->object;
+            int alignment;
+            if (!object->is_global || object->space_is_allocated ||
+                (!pass && size_var(object) > PTR_SIZE))
+                continue;
+            alignment = alignment_var(object);
+            GLOBAL_FUNC->stack_size =
+                (GLOBAL_FUNC->stack_size + alignment - 1) & -alignment;
+            object->offset = GLOBAL_FUNC->stack_size;
+            GLOBAL_FUNC->stack_size += size_var(object);
+            object->space_is_allocated = true;
+            object->has_backing_storage = true;
+        }
 }
 int vir_frontend_global_offset(const char *name, void *context)
 {
