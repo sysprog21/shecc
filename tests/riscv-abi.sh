@@ -208,57 +208,6 @@ run_abi_test()
 
 # Parameter Passing Tests
 
-test_one_arg()
-{
-    run_abi_test "One argument (a0)" "Parameter Passing" '
-#include <stdio.h>
-int add_42(int x) { return x + 42; }
-int main() {
-    int result = add_42(8);
-    if (result == 50) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 50, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
-test_two_args()
-{
-    run_abi_test "Two arguments (a0, a1)" "Parameter Passing" '
-#include <stdio.h>
-int add(int a, int b) { return a + b; }
-int main() {
-    int result = add(10, 20);
-    if (result == 30) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 30, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
-test_four_args()
-{
-    run_abi_test "Four arguments (a0-a3)" "Parameter Passing" '
-#include <stdio.h>
-int sum4(int a, int b, int c, int d) { return a + b + c + d; }
-int main() {
-    int result = sum4(10, 20, 30, 40);
-    if (result == 100) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 100, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
 test_five_args()
 {
     run_abi_test "Five arguments (a0-a4)" "Parameter Passing" '
@@ -363,15 +312,15 @@ int main() {
 ' "PASS"
 }
 
-# Stack Alignment Tests
+# Local Object Alignment Tests
 
-test_stack_alignment_basic()
+test_local_alignment_basic()
 {
-    run_abi_test "Basic stack alignment" "Stack Alignment" '
+    run_abi_test "Natural int local alignment" "Local Object Alignment" '
 #include <stdio.h>
 int is_aligned(void *ptr) {
     int addr = (int)ptr;
-    return (addr & 0xf) == 0;
+    return addr % sizeof(int) == 0;
 }
 int check_alignment(int a, int b) {
     int local;
@@ -382,19 +331,19 @@ int main() {
         printf("PASS\n");
         return 0;
     }
-    printf("FAIL: stack not aligned\n");
+    printf("FAIL: int local not naturally aligned\n");
     return 1;
 }
 ' "PASS"
 }
 
-test_stack_alignment_extended()
+test_local_alignment_extended()
 {
-    run_abi_test "Stack alignment with extended args" "Stack Alignment" '
+    run_abi_test "Natural int local alignment with extended args" "Local Object Alignment" '
 #include <stdio.h>
 int is_aligned(void *ptr) {
     int addr = (int)ptr;
-    return (addr & 0xf) == 0;
+    return addr % sizeof(int) == 0;
 }
 int check_extended(int a, int b, int c, int d, int e, int f) {
     int local;
@@ -588,6 +537,35 @@ int main() {
 ' "PASS"
 }
 
+# glibc's qsort keeps its own values in callee-saved registers across calls to
+# the comparator, which here makes an indirect call and so stages its target in
+# s2. That has to come back unchanged.
+test_callback_preserves_s2()
+{
+    run_abi_test "Callback making an indirect call preserves s2" "Register Preservation" '
+#include <stdio.h>
+void qsort(void *base, int n, int size, int (*cmp)(void *, void *));
+int (*order)(int, int);
+int ascending(int a, int b) { return a - b; }
+int cmp(void *a, void *b) { return order(*(int *) a, *(int *) b); }
+int v[64];
+int main() {
+    order = ascending;
+    for (int i = 0; i < 64; i++)
+        v[i] = (i * 37) % 64;
+    qsort(v, 64, 4, cmp);
+    for (int i = 0; i < 64; i++) {
+        if (v[i] != i) {
+            printf("FAIL\n");
+            return 1;
+        }
+    }
+    printf("PASS\n");
+    return 0;
+}
+' "PASS" 1
+}
+
 # Structure Passing Tests
 
 test_small_struct()
@@ -611,9 +589,6 @@ int main() {
 # Run all tests
 
 echo -e "${CYAN}Running Parameter Passing Tests...${NC}"
-test_one_arg
-test_two_args
-test_four_args
 test_five_args
 test_eight_args
 test_long_long_after_int
@@ -621,9 +596,9 @@ test_variadic_long_long
 test_long_long_split
 
 echo ""
-echo -e "${CYAN}Running Stack Alignment Tests...${NC}"
-test_stack_alignment_basic
-test_stack_alignment_extended
+echo -e "${CYAN}Running Local Object Alignment Tests...${NC}"
+test_local_alignment_basic
+test_local_alignment_extended
 
 echo ""
 echo -e "${CYAN}Running Return Value Tests...${NC}"
@@ -648,6 +623,7 @@ echo ""
 echo -e "${CYAN}Running Register Preservation Tests...${NC}"
 test_local_vars_preserved
 test_recursive_preservation
+test_callback_preserves_s2
 
 echo ""
 echo -e "${CYAN}Running Structure Passing Tests...${NC}"

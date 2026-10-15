@@ -62,9 +62,12 @@ runs:
         # An Arm64 host runs the AArch64 output natively, so mk/arm64.mk
         # turns USE_QEMU off and the build resolves the interpreter and libc
         # from the running system instead of from a cross sysroot.
-        if [ "$LINK_MODE" = dynamic ] && [ "$ARCHITECTURE" = arm64 ] && \
-           [ "$(uname -m)" != aarch64 ]; then
-            packages+=(gcc-aarch64-linux-gnu)
+        # ARM64 encoder and startup ABI tests also need the cross tools in
+        # static builds on an x86 host, with the cross libc headers the
+        # startup test's preload shim includes; without recommends, apt
+        # installs the compiler alone.
+        if [ "$ARCHITECTURE" = arm64 ] && [ "$(uname -m)" != aarch64 ]; then
+            packages+=(gcc-aarch64-linux-gnu libc6-dev-arm64-cross)
         fi
         sudo apt-get update -q -y
         sudo apt-get install -q -y --no-install-recommends "${packages[@]}"

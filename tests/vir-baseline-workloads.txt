@@ -1,0 +1,6 @@
+# path                 purpose
+tests/fib.c            tiny_arithmetic
+tests/vir-baseline-branch.c branch_heavy_control_flow
+tests/strength-reduce.c loop_and_pointer_arithmetic
+tests/vir-baseline-pointer.c pointer_heavy_memory
+src/main.c             compiler_source_compile

@@ -10,9 +10,8 @@
 
 /* Staging buffer for the printf family that writes straight to a descriptor.
  *
- * The longest single call in the tree is ssa.c's "insn_%p [label=%s]": a
- * DUMP_INSN_LEN staging buffer plus 26 bytes around it, so 537. Every byte here
- * is stack in every program shecc emits, so it stays close to that.
+ * Keep the buffer bounded: every byte here occupies stack space in programs
+ * compiled by shecc.
  */
 #define FMT_BUF_LEN 576
 
@@ -792,27 +791,27 @@ int fputc(int c, FILE *stream)
 
 int fseek(FILE *stream, int offset, int whence)
 {
-    int result;
-
     /* RV32 has only _llseek, which splits the offset and returns the result
      * through a pointer. Every other target takes (fd, offset, whence)
      * directly. lib/c.h rejects an architecture that is neither.
      */
 #if defined(__riscv)
-    result = __syscall(__syscall_lseek, stream, 0, offset, NULL, whence);
+    long long position;
+    return __syscall(__syscall_lseek, stream, offset < 0 ? -1 : 0, offset,
+                     &position, whence) < 0;
 #else
-    result = __syscall(__syscall_lseek, stream, offset, whence);
+    return __syscall(__syscall_lseek, stream, offset, whence) < 0;
 #endif
-    return result == -1;
 }
 
 int ftell(FILE *stream)
 {
     /* See fseek(): only RV32 needs the split-offset _llseek form. */
 #if defined(__riscv)
-    int result;
-    __syscall(__syscall_lseek, stream, 0, 0, &result, SEEK_CUR);
-    return result;
+    long long result;
+    if (__syscall(__syscall_lseek, stream, 0, 0, &result, SEEK_CUR) < 0)
+        return -1;
+    return (int) result;
 #else
     return __syscall(__syscall_lseek, stream, 0, SEEK_CUR);
 #endif
@@ -843,13 +842,35 @@ int __align_up(int size)
     return ALIGN_UP(size, PAGESIZE);
 }
 
+/* The raw mmap2 system call reports failure as -errno, -4095 to -1, not the -1
+ * of libc's wrapper. Success is always page aligned and those values never are,
+ * so the low bits alone tell them apart on every word size.
+ */
+#define __mmap_failed(addr) (((int) (addr) & (PAGESIZE - 1)) != 0)
+
 chunk_t *__alloc_head;
 chunk_t *__alloc_tail;
-chunk_t *__freelist_head;
+
+/* Freed chunks, binned by size and linked through next. Every chunk is a whole
+ * number of pages, so the chunks in one bin are all the same size and the first
+ * non-empty bin at or above a request holds its best fit. A single list kept
+ * every freed chunk, so a program that frees as it goes scanned all of them on
+ * every allocation. Chunks are never split, so a request takes nothing twice
+ * its size or more, and chunks too large for a bin go back to the kernel.
+ */
+#define __FREE_BIN_PAGES 128
+chunk_t *__free_bins[__FREE_BIN_PAGES];
+
+int __free_bin(int size)
+{
+    return size / PAGESIZE;
+}
 
 void *malloc(int size)
 {
-    if (size <= 0)
+    /* Rounding up to MIN_ALIGNMENT and then to whole pages must not wrap. */
+    if (size <= 0 ||
+        size > INT_MAX - PAGESIZE - MIN_ALIGNMENT - (int) sizeof(chunk_t))
         return NULL;
 
     int flags = 34; /* MAP_PRIVATE (0x02) | MAP_ANONYMOUS (0x20) */
@@ -862,7 +883,7 @@ void *malloc(int size)
         chunk_t *tmp = (chunk_t *) __syscall(__syscall_mmap2, NULL,
                                              __align_up(sizeof(chunk_t)), prot,
                                              flags, -1, 0);
-        if (tmp == (void *) -1)
+        if (__mmap_failed(tmp))
             return NULL;
         __alloc_head = tmp;
         __alloc_tail = tmp;
@@ -871,55 +892,25 @@ void *malloc(int size)
         __alloc_head->size = 0;
     }
 
-    if (!__freelist_head) {
-        chunk_t *tmp = (chunk_t *) __syscall(__syscall_mmap2, NULL,
-                                             __align_up(sizeof(chunk_t)), prot,
-                                             flags, -1, 0);
-        if (tmp == (void *) -1)
-            return NULL;
-        __freelist_head = tmp;
-        __freelist_head->next = NULL;
-        __freelist_head->prev = NULL;
-        __freelist_head->size = -1;
-    }
+    int needed = __align_up(sizeof(chunk_t) + size);
+    int bin = __free_bin(needed);
+    int last = bin * 2 < __FREE_BIN_PAGES ? bin * 2 : __FREE_BIN_PAGES;
+    chunk_t *allocated = NULL;
 
-    /* Search for the best fit chunk in the free list */
-    chunk_t *best_fit_chunk = NULL;
-    chunk_t *allocated;
-    int best_size = 0;
-
-    if (!__freelist_head->next) {
-        allocated = NULL;
-    } else {
-        for (chunk_t *fh = __freelist_head; fh->next; fh = fh->next) {
-            int fh_size = CHUNK_GET_SIZE(fh->size);
-            if (fh_size >= size && (!best_fit_chunk || fh_size < best_size)) {
-                best_fit_chunk = fh;
-                best_size = fh_size;
-            }
+    for (; bin < last; bin++) {
+        if (__free_bins[bin]) {
+            allocated = __free_bins[bin];
+            __free_bins[bin] = allocated->next;
+            break;
         }
-
-        if (best_fit_chunk) {
-            /* Remove from freelist */
-            if (best_fit_chunk->prev) {
-                best_fit_chunk->prev->next = best_fit_chunk->next;
-            } else {
-                __freelist_head = best_fit_chunk->next;
-            }
-            if (best_fit_chunk->next) {
-                best_fit_chunk->next->prev = best_fit_chunk->prev;
-            }
-        }
-        allocated = best_fit_chunk;
     }
 
     if (!allocated) {
-        allocated = (chunk_t *) __syscall(__syscall_mmap2, NULL,
-                                          __align_up(sizeof(chunk_t) + size),
-                                          prot, flags, -1, 0);
-        if (allocated == (void *) -1)
+        allocated = (chunk_t *) __syscall(__syscall_mmap2, NULL, needed, prot,
+                                          flags, -1, 0);
+        if (__mmap_failed(allocated))
             return NULL;
-        allocated->size = __align_up(sizeof(chunk_t) + size);
+        allocated->size = needed;
     }
 
     /* Add to allocation list */
@@ -960,21 +951,20 @@ void __rfree(void *ptr, int size)
 
 int __free_all(void)
 {
-    if (!__freelist_head && !__alloc_head)
-        return 0;
-
-    chunk_t *cur = __freelist_head;
+    chunk_t *cur;
     chunk_t *rel;
     int size;
 
-    /* release freelist */
-    while (cur && cur->next) {
-        rel = cur;
-        cur = cur->next;
-        rel->next = NULL;
-        rel->prev = NULL;
-        size = CHUNK_GET_SIZE(rel->size);
-        __rfree(rel, size);
+    /* release the freed chunks */
+    for (int bin = 0; bin < __FREE_BIN_PAGES; bin++) {
+        cur = __free_bins[bin];
+        while (cur) {
+            rel = cur;
+            cur = cur->next;
+            size = CHUNK_GET_SIZE(rel->size);
+            __rfree(rel, size);
+        }
+        __free_bins[bin] = NULL;
     }
 
     if (__alloc_head && __alloc_head->next) {
@@ -1015,16 +1005,23 @@ void free(void *ptr)
     if (cur->next) {
         chunk_t *next = cur->next;
         next->prev = cur->prev;
-    } else if (prev) {
-        prev->next = NULL;
+    } else {
+        if (prev)
+            prev->next = NULL;
         __alloc_tail = prev;
     }
 
-    /* Insert head in __freelist_head */
-    cur->next = __freelist_head;
-    cur->prev = NULL;
+    int size = CHUNK_GET_SIZE(cur->size);
+    int bin = __free_bin(size);
+    if (bin >= __FREE_BIN_PAGES) {
+        __rfree(cur, size);
+        return;
+    }
+
+    /* Most recently freed first, so equal-sized chunks are reused in that order
+     * as before.
+     */
+    cur->next = __free_bins[bin];
     chunk_set_freed(cur);
-    if (__freelist_head)
-        __freelist_head->prev = cur;
-    __freelist_head = cur;
+    __free_bins[bin] = cur;
 }

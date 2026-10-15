@@ -75,13 +75,11 @@ int sizeof_grouped_literal_depth(token_t *token, token_kind_t kind)
  */
 static void push_sizeof_result(block_t *parent, basic_block_t *bb, int size)
 {
-    var_t *result = require_typed_var(parent, find_type("size_t", true));
+    var_t *result =
+        load_constant(parent, bb, size, find_builtin_type("size_t"));
 
-    result->init_val = size;
     result->is_const = true;
-    result->var_name = gen_name();
     opstack_push(result);
-    add_insn(parent, bb, OP_load_constant, result, NULL, NULL, 0, NULL);
 }
 
 int sizeof_array_object(const var_t *array)
@@ -91,6 +89,22 @@ int sizeof_array_object(const var_t *array)
     if (array->ptr_level || array->type->ptr_level || array->is_func)
         element_size = PTR_SIZE;
     return array->array_size * element_size;
+}
+
+static void sizeof_expression_type(var_t *expr,
+                                   token_t *sizeof_token,
+                                   type_t **type,
+                                   int *ptr_cnt,
+                                   int *array_size,
+                                   bool *is_function)
+{
+    if (is_bitfield(expr))
+        error_at("sizeof cannot be applied to a bit-field",
+                 &sizeof_token->location);
+    *type = expr->type;
+    *ptr_cnt = expr->ptr_level;
+    *array_size = expr->array_size;
+    *is_function = expr->is_func;
 }
 
 /* What a type-only walk over a sizeof operand has seen. */
@@ -198,8 +212,7 @@ static void sizeof_walk_address(var_t *object, sizeof_walk_t *walk, token_t *op)
         fixed_array_shape_t shape = fixed_array_shape_from_var(object);
         fixed_array_shape_t scalar = {0};
 
-        fixed_array_shape_to_pointee_var(object, &shape);
-        object->pointee_array_element_ptr_level = object->ptr_level;
+        set_pointee_array_shape(object, &shape, object->ptr_level);
         fixed_array_shape_to_var(object, &scalar);
     }
     object->ptr_level++;
@@ -231,9 +244,7 @@ static type_t *read_sizeof_cast_type(block_t *scope, int *ptr_level)
 
     while (type && lex_accept(T_asterisk)) {
         stars++;
-        while (lex_accept(T_const) || lex_accept(T_volatile) ||
-               lex_accept(T_restrict))
-            ;
+        skip_type_qualifiers();
     }
     *ptr_level = stars;
     if (!type || type->is_floating || type->array_size ||
@@ -357,8 +368,7 @@ static bool scan_sizeof_postfix_operand(block_t *scope,
                 fixed_array_shape_drop_outer(&shape);
                 fixed_array_shape_to_var(object, &scalar);
                 if (shape.rank) {
-                    fixed_array_shape_to_pointee_var(object, &shape);
-                    object->pointee_array_element_ptr_level = root->ptr_level;
+                    set_pointee_array_shape(object, &shape, root->ptr_level);
                 }
                 object->ptr_level++;
                 walk->operators++;
@@ -672,7 +682,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
             !strcmp(token, "__func__")) {
             lex_expect(T_identifier);
             push_sizeof_result(parent, *bb,
-                               strlen(parent->func->return_def.var_name) + 1);
+                               strlen(function_source_name(parent->func)) + 1);
             return;
         }
 
@@ -691,13 +701,8 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         read_expr_operand(parent, &unevaluated_bb);
         unevaluated_expression_depth--;
         var_t *expr_var = opstack_pop();
-        if (is_bitfield(expr_var))
-            error_at("sizeof cannot be applied to a bit-field",
-                     &sizeof_tk->location);
-        type = expr_var->type;
-        ptr_cnt = expr_var->ptr_level;
-        array_size = expr_var->array_size;
-        is_function = expr_var->is_func;
+        sizeof_expression_type(expr_var, sizeof_tk, &type, &ptr_cnt,
+                               &array_size, &is_function);
         if (type == TY_void && ptr_cnt == 0)
             error_at("sizeof(void) is invalid", &sizeof_tk->location);
         if (is_function && ptr_cnt == 0)
@@ -725,7 +730,7 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         lex_expect(T_identifier);
         lex_expect(T_close_bracket);
         push_sizeof_result(parent, *bb,
-                           strlen(parent->func->return_def.var_name) + 1);
+                           strlen(function_source_name(parent->func)) + 1);
         return;
     }
 
@@ -773,19 +778,11 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     /* sizeof(expression) - parse the expression and get its type */
     basic_block_t *unevaluated_bb = bb_create(parent);
     unevaluated_expression_depth++;
-    if (!read_assignment_expression(parent, &unevaluated_bb)) {
-        read_expr(parent, &unevaluated_bb);
-        read_ternary_operation(parent, &unevaluated_bb);
-    }
+    read_assignment_or_expression(parent, &unevaluated_bb);
     unevaluated_expression_depth--;
     var_t *expr_var = opstack_pop();
-    if (is_bitfield(expr_var))
-        error_at("sizeof cannot be applied to a bit-field",
-                 &sizeof_tk->location);
-    type = expr_var->type;
-    ptr_cnt = expr_var->ptr_level;
-    array_size = expr_var->array_size;
-    is_function = expr_var->is_func;
+    sizeof_expression_type(expr_var, sizeof_tk, &type, &ptr_cnt, &array_size,
+                           &is_function);
     if (is_incomplete_record_object(expr_var))
         error_at("sizeof cannot be applied to an incomplete record type",
                  &sizeof_tk->location);

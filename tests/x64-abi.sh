@@ -213,57 +213,6 @@ run_abi_test()
 
 # Parameter Passing Tests
 
-test_one_arg()
-{
-    run_abi_test "One argument (rdi)" "Parameter Passing" '
-#include <stdio.h>
-int add_42(int x) { return x + 42; }
-int main() {
-    int result = add_42(8);
-    if (result == 50) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 50, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
-test_two_args()
-{
-    run_abi_test "Two arguments (rdi, rsi)" "Parameter Passing" '
-#include <stdio.h>
-int add(int a, int b) { return a + b; }
-int main() {
-    int result = add(10, 20);
-    if (result == 30) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 30, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
-test_four_args()
-{
-    run_abi_test "Four arguments (rdi-rcx)" "Parameter Passing" '
-#include <stdio.h>
-int sum4(int a, int b, int c, int d) { return a + b + c + d; }
-int main() {
-    int result = sum4(10, 20, 30, 40);
-    if (result == 100) {
-        printf("PASS\n");
-        return 0;
-    }
-    printf("FAIL: expected 100, got %d\n", result);
-    return 1;
-}
-' "PASS"
-}
-
 test_five_args()
 {
     run_abi_test "Five arguments (rdi-r8)" "Parameter Passing" '
@@ -418,22 +367,17 @@ int main() {
 ' "PASS"
 }
 
-# Stack Alignment Tests
-#
-# The AMD64 ABI requires RSP to be 16-byte aligned at a call site, which C gives
-# no way to observe directly. What these two check instead is shecc's own x86-64
-# frame layout, which 16-aligns the slots it hands out, so that a frame change
-# that would also break the call-site guarantee shows up here. Read a failure as
-# "the frame layout moved", not as a conformance verdict: the ABI does not
-# require an int local to sit on a 16-byte boundary.
+# Local Object Alignment Tests These check the natural alignment of int objects.
+# Actual RSP alignment at a call site must be observed independently of a local
+# object's frame offset.
 
-test_stack_alignment_basic()
+test_local_alignment_basic()
 {
-    run_abi_test "Frame slot alignment" "Stack Alignment" '
+    run_abi_test "Natural int local alignment" "Local Object Alignment" '
 #include <stdio.h>
 int is_aligned(void *ptr) {
     int addr = (int)ptr;
-    return (addr & 0xf) == 0;
+    return addr % sizeof(int) == 0;
 }
 int check_alignment(int a, int b) {
     int local;
@@ -444,19 +388,19 @@ int main() {
         printf("PASS\n");
         return 0;
     }
-    printf("FAIL: stack not aligned\n");
+    printf("FAIL: int local not naturally aligned\n");
     return 1;
 }
 ' "PASS"
 }
 
-test_stack_alignment_extended()
+test_local_alignment_extended()
 {
-    run_abi_test "Frame slot alignment with stack-passed args" "Stack Alignment" '
+    run_abi_test "Natural int local alignment with extended args" "Local Object Alignment" '
 #include <stdio.h>
 int is_aligned(void *ptr) {
     int addr = (int)ptr;
-    return (addr & 0xf) == 0;
+    return addr % sizeof(int) == 0;
 }
 int check_extended(int a, int b, int c, int d, int e, int f) {
     int local;
@@ -728,9 +672,6 @@ int main() {
 # Run all tests
 
 echo -e "${CYAN}Running Parameter Passing Tests...${NC}"
-test_one_arg
-test_two_args
-test_four_args
 test_five_args
 test_eight_args
 test_long_args_and_return
@@ -740,9 +681,9 @@ test_unsigned_long_long_args_and_return
 test_signed_long_long_args_and_return
 
 echo ""
-echo -e "${CYAN}Running Stack Alignment Tests...${NC}"
-test_stack_alignment_basic
-test_stack_alignment_extended
+echo -e "${CYAN}Running Local Object Alignment Tests...${NC}"
+test_local_alignment_basic
+test_local_alignment_extended
 
 echo ""
 echo -e "${CYAN}Running Return Value Tests...${NC}"

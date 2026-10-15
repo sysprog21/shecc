@@ -126,7 +126,9 @@ int arm_extract_bits(int imm, int i_start, int i_end, int d_start, int d_end)
 
 int arm_encode(arm_cond_t cond, int opcode, int rn, int rd, int op2)
 {
-    return (cond << 28) + (opcode << 20) + (rn << 16) + (rd << 12) + op2;
+    /* The condition fills bits 31:28, which a signed shift cannot reach. */
+    return ((unsigned int) cond << 28) + (opcode << 20) + (rn << 16) +
+           (rd << 12) + op2;
 }
 
 /* ARM A8.8.247: unsigned 32x32 -> 64 multiply. RdLo/RdHi receive the complete
@@ -134,8 +136,8 @@ int arm_encode(arm_cond_t cond, int opcode, int rn, int rd, int op2)
  */
 int __umull(arm_cond_t cond, arm_reg rdlo, arm_reg rdhi, arm_reg rm, arm_reg rs)
 {
-    return (cond << 28) + 0x00800090 + (rdhi << 16) + (rdlo << 12) + (rs << 8) +
-           rm;
+    return ((unsigned int) cond << 28) + 0x00800090 + (rdhi << 16) +
+           (rdlo << 12) + (rs << 8) + rm;
 }
 
 int __svc(void)
@@ -167,20 +169,15 @@ int __mov(arm_cond_t cond, int io, int opcode, int s, int rn, int rd, int op2)
                       (shift << 8) + (encoded_op2 & 255));
 }
 
-int __and_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
-{
-    return __mov(cond, 0, arm_and, 0, rs, rd, rm);
-}
-
-int __or_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
-{
-    return __mov(cond, 0, arm_orr, 0, rs, rd, rm);
-}
-
-int __eor_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg rm)
-{
-    return __mov(cond, 0, arm_eor, 0, rs, rd, rm);
-}
+/* Preserve each register ALU helper's opcode, flag update and operand name. */
+#define ARM_REGISTER_INSN(name, opcode, flags, operand)                \
+    int name(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg operand) \
+    {                                                                  \
+        return __mov(cond, 0, opcode, flags, rs, rd, operand);         \
+    }
+ARM_REGISTER_INSN(__and_r, arm_and, 0, rm)
+ARM_REGISTER_INSN(__or_r, arm_orr, 0, rm)
+ARM_REGISTER_INSN(__eor_r, arm_eor, 0, rm)
 
 int __mvn_r(arm_cond_t cond, arm_reg rd, arm_reg rm)
 {
@@ -218,32 +215,21 @@ int __srl(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
                       rm + (1 << 4) + (1 << 5) + (rs << 8));
 }
 
-int __srl_amt(arm_cond_t cond,
-              int s,
-              shift_type shift,
-              arm_reg rd,
-              arm_reg rm,
-              int amt)
-{
-    return arm_encode(cond, s + (arm_mov << 1) + (0 << 5), 0, rd,
-                      rm + (0 << 4) + (shift << 5) + (amt << 7));
-}
+#define DEFINE_SHIFT_IMMEDIATE(name)                                           \
+    int name(arm_cond_t cond, int s, shift_type shift, arm_reg rd, arm_reg rm, \
+             int amt)                                                          \
+    {                                                                          \
+        return arm_encode(cond, s + (arm_mov << 1) + (0 << 5), 0, rd,          \
+                          rm + (0 << 4) + (shift << 5) + (amt << 7));          \
+    }
+DEFINE_SHIFT_IMMEDIATE(__srl_amt)
+DEFINE_SHIFT_IMMEDIATE(__sll_amt)
+#undef DEFINE_SHIFT_IMMEDIATE
 
 int __sll(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
 {
     return arm_encode(cond, 0 + (arm_mov << 1) + (0 << 5), 0, rd,
                       rm + (1 << 4) + (0 << 5) + (rs << 8));
-}
-
-int __sll_amt(arm_cond_t cond,
-              int s,
-              shift_type shift,
-              arm_reg rd,
-              arm_reg rm,
-              int amt)
-{
-    return arm_encode(cond, s + (arm_mov << 1) + (0 << 5), 0, rd,
-                      rm + (0 << 4) + (shift << 5) + (amt << 7));
 }
 
 int __sra(arm_cond_t cond, arm_reg rd, arm_reg rm, arm_reg rs)
@@ -261,41 +247,13 @@ int __add_i(arm_cond_t cond, arm_reg rd, arm_reg rs, int imm)
         return __mov(cond, 1, arm_add, 0, rs, rd, imm);
     return __mov(cond, 1, arm_sub, 0, rs, rd, -imm);
 }
-
-int __add_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_add, 0, rs, rd, ro);
-}
-
-int __adds_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_add, 1, rs, rd, ro);
-}
-
-int __adc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_adc, 0, rs, rd, ro);
-}
-
-int __sub_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_sub, 0, rs, rd, ro);
-}
-
-int __subs_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_sub, 1, rs, rd, ro);
-}
-
-int __sbc_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_sbc, 0, rs, rd, ro);
-}
-
-int __sbcs_r(arm_cond_t cond, arm_reg rd, arm_reg rs, arm_reg ro)
-{
-    return __mov(cond, 0, arm_sbc, 1, rs, rd, ro);
-}
+ARM_REGISTER_INSN(__add_r, arm_add, 0, ro)
+ARM_REGISTER_INSN(__adds_r, arm_add, 1, ro)
+ARM_REGISTER_INSN(__adc_r, arm_adc, 0, ro)
+ARM_REGISTER_INSN(__sub_r, arm_sub, 0, ro)
+ARM_REGISTER_INSN(__subs_r, arm_sub, 1, ro)
+ARM_REGISTER_INSN(__sbc_r, arm_sbc, 0, ro)
+ARM_REGISTER_INSN(__sbcs_r, arm_sbc, 1, ro)
 
 int __rsbs_i(arm_cond_t cond, arm_reg rd, int imm, arm_reg rn)
 {
@@ -454,7 +412,7 @@ int __bl(arm_cond_t cond, int ofs)
 int __bx(arm_cond_t cond, arm_reg rm)
 {
     /* BX: Branch and Exchange */
-    return (cond << 28) | 0x012FFF10 | rm;
+    return ((unsigned int) cond << 28) | 0x012FFF10 | rm;
 }
 
 int __blx(arm_cond_t cond, arm_reg rd)
@@ -514,3 +472,5 @@ int __sxth(arm_cond_t cond, arm_reg rd, arm_reg rm, int rotation)
     return arm_encode(cond, 107, 0xF, rd,
                       rm | ((rotation >> 3) << 10) | (0x7 << 4));
 }
+
+#undef ARM_REGISTER_INSN
