@@ -256,17 +256,20 @@ elimination (DCE) removes unused work.
 
 1. Remove unreachable blocks.
 2. SCCP and CFG simplification.
-3. Local CSE.
-4. GVN.
-5. Reassociation, LICM and pointer-induction strength reduction.
-6. Local CSE and DCE, including ordinary overwritten-store elimination.
-7. CFG simplification, then a final local CSE and DCE over the simplified graph.
-8. Full graph verification before dumps and machine lowering.
+3. Block-parameter simplification: a parameter that receives one value on
+   every edge, or itself on a back edge, is replaced by that value, so a
+   loop-invariant input does not look loop-defined to CSE, GVN and LICM.
+4. Local CSE.
+5. GVN.
+6. Reassociation, LICM and pointer-induction strength reduction.
+7. Local CSE and DCE, including ordinary overwritten-store elimination.
+8. CFG simplification, then a final local CSE and DCE over the simplified graph.
+9. Full graph verification before dumps and machine lowering.
 
 | Level | Scheduled transformations |
 | --- | --- |
 | O0 | Construction folds, unreachable-block removal, and mandatory verification; optional optimization passes return without transforming the graph. |
-| O2 (default) | SCCP, CFG simplification, local CSE, GVN, reassociation, LICM, strength reduction, and DCE. |
+| O2 (default) | SCCP, CFG simplification, block-parameter simplification, local CSE, GVN, reassociation, LICM, strength reduction, and DCE. |
 
 Pass-local tables are temporary. O0 does not allocate the optional CSE, GVN,
 loop, or optimization worklists. Mandatory verification still checks dominance,

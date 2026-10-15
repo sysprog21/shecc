@@ -416,6 +416,14 @@ int vir_simplify_cfg(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_simplify_cfg_with_pruning(vir_function_t *func,
                                   vir_opt_level_t opt_level,
                                   bool prune_unreachable);
+
+/* At O1/O2, replace each block parameter that receives one value on every edge,
+ * or itself on a back edge, by that value. The entry block's parameters are the
+ * function's arguments and stay. A loop-invariant input otherwise reaches CSE,
+ * GVN and LICM as a value defined inside the loop. The CFG is unchanged.
+ */
+int vir_simplify_params(vir_function_t *func, vir_opt_level_t opt_level);
+
 int vir_block_set_branch(vir_function_t *func,
                          vir_block_t *block,
                          vir_value_t *condition,

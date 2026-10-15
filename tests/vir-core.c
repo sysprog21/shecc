@@ -2273,6 +2273,52 @@ int main(void)
     assert(vir_verify(&func, &error));
     vir_function_release(&func);
 
+    /* A header parameter that only carries an input around its loop hides a
+     * product of that input from GVN. Parameter simplification, skipped at O0,
+     * replaces it by the input; GVN then reuses the product computed before the
+     * loop inside it.
+     */
+    vir_function_init(&func, 64);
+    assert(vir_function_set_pointer_bits(&func, 64));
+    entry = vir_block_create(&func);
+    merge = vir_block_create(&func);
+    otherwise = vir_block_create(&func);
+    dead = vir_block_create(&func);
+    entry_param = vir_block_add_param(&func, entry, VIR_TYPE_I1);
+    one = vir_block_add_param(&func, entry, VIR_TYPE_I32);
+    two = vir_block_add_param(&func, entry, VIR_TYPE_I32);
+    stack_duplicate = vir_block_add_param(&func, entry, VIR_TYPE_PTR);
+    sum = vir_binary(&func, entry, VIR_OP_MUL, VIR_TYPE_I32, one, two);
+    param = vir_block_add_param(&func, merge, VIR_TYPE_I32);
+    product =
+        vir_binary(&func, otherwise, VIR_OP_MUL, VIR_TYPE_I32, param, two);
+    {
+        vir_value_t *entry_args[] = {one};
+        vir_value_t *backedge_args[] = {param};
+        vir_edge_args_t loop_true = {otherwise, NULL, 0};
+        vir_edge_args_t loop_false = {dead, NULL, 0};
+        vir_cse_stats_t gvn_stats;
+
+        assert(entry_param && one && two && sum && param && product &&
+               stack_duplicate &&
+               vir_store(&func, otherwise, stack_duplicate, product) &&
+               vir_edge_create(&func, entry, merge, entry_args, 1) &&
+               vir_edge_create(&func, otherwise, merge, backedge_args, 1) &&
+               vir_block_set_branch(&func, merge, entry_param, &loop_true,
+                                    &loop_false) &&
+               vir_block_set_return(&func, dead, sum) &&
+               vir_verify(&func, &error));
+        assert(vir_gvn_with_stats(&func, VIR_OPT_O2, &gvn_stats) == 0 &&
+               product->uses && merge->param_count == 1);
+        assert(vir_simplify_params(&func, VIR_OPT_O0) == 0 &&
+               merge->param_count == 1);
+        assert(vir_simplify_params(&func, VIR_OPT_O2) == 1 &&
+               merge->param_count == 0 && product->op0 == one);
+        assert(vir_gvn_with_stats(&func, VIR_OPT_O2, &gvn_stats) == 1 &&
+               !product->uses && sum->uses && vir_verify(&func, &error));
+    }
+    vir_function_release(&func);
+
     /* LICM derives a natural loop only at O2 and hoists an effect-free value
      * with operands defined outside the loop into its single-edge preheader.
      */
@@ -2394,6 +2440,73 @@ int main(void)
                multi_latch_stats[VIR_LICM_STAT_VALUES_HOISTED] == 1 &&
                multi_latch_stats[VIR_LICM_STAT_TEMPORARY_BYTES] > 0 &&
                product->block == entry && vir_verify(&func, &error));
+    }
+    vir_function_release(&func);
+
+    /* An input that reaches the header unchanged around the loop sits behind a
+     * header parameter, so LICM treats a value computed from it as
+     * loop-defined. Once parameter simplification drops it, the value moves to
+     * the preheader.
+     */
+    vir_function_init(&func, 64);
+    entry = vir_block_create(&func);
+    merge = vir_block_create(&func);
+    otherwise = vir_block_create(&func);
+    dead = vir_block_create(&func);
+    entry_param = vir_block_add_param(&func, entry, VIR_TYPE_I1);
+    one = vir_block_add_param(&func, entry, VIR_TYPE_I32);
+    two = vir_block_add_param(&func, entry, VIR_TYPE_I32);
+    param = vir_block_add_param(&func, merge, VIR_TYPE_I32);
+    product =
+        vir_binary(&func, otherwise, VIR_OP_MUL, VIR_TYPE_I32, param, two);
+    {
+        vir_value_t *entry_args[] = {one};
+        vir_value_t *backedge_args[] = {param};
+        vir_edge_args_t loop_true = {otherwise, NULL, 0};
+        vir_edge_args_t loop_false = {dead, NULL, 0};
+
+        assert(entry && merge && otherwise && dead && entry_param && one &&
+               two && param && product &&
+               vir_edge_create(&func, entry, merge, entry_args, 1) &&
+               vir_edge_create(&func, otherwise, merge, backedge_args, 1) &&
+               vir_block_set_branch(&func, merge, entry_param, &loop_true,
+                                    &loop_false) &&
+               vir_block_set_return(&func, dead, param) &&
+               vir_verify(&func, &error));
+        assert(vir_licm(&func, VIR_OPT_O2) == 0 && product->block == otherwise);
+        assert(vir_simplify_params(&func, VIR_OPT_O2) == 1 &&
+               merge->param_count == 0 && product->op0 == one);
+        assert(vir_licm(&func, VIR_OPT_O2) == 1 && product->block == entry &&
+               vir_verify(&func, &error));
+    }
+    vir_function_release(&func);
+
+    /* The entry block's parameters are the function's arguments. A back edge
+     * into the entry block passing one value must not replace an argument.
+     */
+    vir_function_init(&func, 64);
+    entry = vir_block_create(&func);
+    merge = vir_block_create(&func);
+    dead = vir_block_create(&func);
+    one = vir_block_add_param(&func, entry, VIR_TYPE_I32);
+    entry_param = vir_block_add_param(&func, entry, VIR_TYPE_I1);
+    two = vir_const_i32(&func, merge, 5);
+    sum = vir_binary(&func, merge, VIR_OP_ADD, VIR_TYPE_I32, one, two);
+    {
+        vir_value_t *backedge_args[] = {two, entry_param};
+        vir_edge_args_t loop_true = {entry, backedge_args, 2};
+        vir_edge_args_t loop_false = {dead, NULL, 0};
+
+        assert(entry && merge && dead && one && entry_param && two && sum &&
+               vir_edge_create(&func, entry, merge, NULL, 0) &&
+               vir_block_set_branch(&func, merge, entry_param, &loop_true,
+                                    &loop_false) &&
+               vir_block_set_return(&func, dead, sum) &&
+               vir_verify(&func, &error));
+        assert(vir_simplify_params(&func, VIR_OPT_O2) == 0 &&
+               entry->param_count == 2 &&
+               (sum->op0 == one || sum->op1 == one) &&
+               vir_verify(&func, &error));
     }
     vir_function_release(&func);
 

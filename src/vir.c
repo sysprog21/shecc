@@ -4073,32 +4073,46 @@ static bool vir_dominance_init(const vir_function_t *func,
     return true;
 }
 
-/* Drop loop-invariant and forwarding parameters without source SSA bindings. */
+/* The one value @param, the @index-th parameter of @block, receives on every
+ * incoming edge apart from itself, or NULL when the edges disagree.
+ */
+static vir_value_t *vir_param_trivial_value(const vir_block_t *block,
+                                            const vir_value_t *param,
+                                            int index)
+{
+    vir_value_t *candidate = NULL;
+
+    for (vir_edge_t *edge = block->incoming; edge; edge = edge->next_incoming) {
+        vir_value_t *value = edge->args[index];
+        if (value == param)
+            continue;
+        if (candidate && candidate != value)
+            return NULL;
+        candidate = value;
+    }
+    return candidate;
+}
+
+/* Drop loop-invariant and forwarding parameters without source SSA bindings.
+ * The entry block's parameters are the function's arguments, whose caller
+ * supplies a value no edge shows, so they always stay.
+ */
 static int vir_simplify_params_with_context(vir_function_t *func,
                                             const vir_dominance_t *dominance)
 {
     int changed = 0, previous;
     do {
         previous = changed;
-        for (vir_block_t *block = func->blocks; block; block = block->next) {
+        for (vir_block_t *block = func->blocks->next; block;
+             block = block->next) {
             int index = 0;
             for (vir_value_t *param = block->params, *next; param;
                  param = next) {
-                vir_value_t *candidate = NULL;
-                bool trivial = true;
+                vir_value_t *candidate =
+                    vir_param_trivial_value(block, param, index);
                 next = param->param_next;
-                for (vir_edge_t *edge = block->incoming; edge;
-                     edge = edge->next_incoming) {
-                    vir_value_t *value = edge->args[index];
-                    if (value == param)
-                        continue;
-                    if (candidate && candidate != value)
-                        trivial = false;
-                    candidate = value;
-                }
-                if (!trivial || !candidate ||
-                    !vir_replacement_dominates_with_context(func, dominance,
-                                                            param, candidate)) {
+                if (!candidate || !vir_replacement_dominates_with_context(
+                                      func, dominance, param, candidate)) {
                     index++;
                     continue;
                 }
@@ -4114,6 +4128,32 @@ static int vir_simplify_params_with_context(vir_function_t *func,
             }
         }
     } while (changed != previous);
+    return changed;
+}
+
+/* Dominance is built only once some parameter has a single incoming value. */
+int vir_simplify_params(vir_function_t *func, vir_opt_level_t opt_level)
+{
+    vir_dominance_t dominance;
+    int changed;
+
+    if (!func || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level == VIR_OPT_O0 || !func->blocks)
+        return 0;
+    for (vir_block_t *block = func->blocks->next; block; block = block->next) {
+        int index = 0;
+        for (vir_value_t *param = block->params; param;
+             param = param->param_next, index++)
+            if (vir_param_trivial_value(block, param, index))
+                goto simplify;
+    }
+    return 0;
+simplify:
+    if (!vir_dominance_init(func, &dominance))
+        return -1;
+    changed = vir_simplify_params_with_context(func, &dominance);
+    vir_dominance_release(&dominance);
     return changed;
 }
 
