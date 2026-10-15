@@ -24134,6 +24134,23 @@ out:
 }
 EOF
 
+# Sealing such a loop finds parameters that only pass each other around, so
+# neither dominates the other; they stay parameters until the loop is removed.
+try_ 3 << EOF
+int main()
+{
+    int x = 3;
+    goto out;
+a:
+    x++;
+    goto b;
+b:
+    goto a;
+out:
+    return x;
+}
+EOF
+
 # Simple loop
 try_ 10 << EOF
 int main()

@@ -3883,6 +3883,25 @@ static bool vir_mark_reachable_blocks(const vir_function_t *func,
     return true;
 }
 
+/* Whether the entry reaches @block. Anything that stops the walk counts as
+ * reachable, so a caller relaxing a check for dead code stays strict.
+ */
+static bool vir_block_reachable(const vir_function_t *func,
+                                const vir_block_t *block)
+{
+    int index = vir_block_index(func, block);
+    unsigned char *reachable =
+        calloc((size_t) func->block_count, sizeof(*reachable));
+    int *work = malloc((size_t) func->block_count * sizeof(*work));
+    bool result = index < 0 || !reachable || !work ||
+                  !vir_mark_reachable_blocks(func, NULL, reachable, work) ||
+                  reachable[index];
+
+    free(reachable);
+    free(work);
+    return result;
+}
+
 /* Non-verifier transformations use a bounded reachability query rather than the
  * old quadratic int matrix. The verifier itself builds a compact bitset matrix
  * once per function below.
@@ -6475,6 +6494,7 @@ static int vir_ssa_seal_with_context(vir_ssa_t *ssa,
     vir_ssa_trivial_param_t *trivial_params;
     int param_count;
     int trivial_count = 0;
+    int reachable = -1;
     int index;
     int i;
 
@@ -6515,10 +6535,21 @@ static int vir_ssa_seal_with_context(vir_ssa_t *ssa,
             else if (candidate != edge->args[index])
                 trivial = 0;
         }
+
+        /* In reachable code the one other incoming value always dominates the
+         * block, and a frontend that breaks that is caught here. A cycle cut
+         * off from the entry can fail it; reachability removes that cycle
+         * later, so its parameter is simply kept.
+         */
         if (candidate && candidate != param && trivial) {
             if (!vir_replacement_dominates_with_context(ssa->func, dominance,
-                                                        param, candidate))
-                goto fail;
+                                                        param, candidate)) {
+                if (reachable < 0)
+                    reachable = vir_block_reachable(ssa->func, block);
+                if (reachable)
+                    goto fail;
+                continue;
+            }
             trivial_params[trivial_count].param = param;
             trivial_params[trivial_count].candidate = candidate;
             trivial_params[trivial_count].binding =
