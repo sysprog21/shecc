@@ -1385,6 +1385,7 @@ void parse_internal(void)
             continue;
         }
         read_global_statement();
+        release_parsed_tokens();
     } while (!lex_accept(T_eof));
 
     /* Aggregate returns use shecc's internal destination-pointer convention,

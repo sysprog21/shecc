@@ -657,7 +657,7 @@ static void test_va_start_root(void)
     assert(vir_block_add_param(&function, block, VIR_TYPE_PTR));
     vir_value_t *start =
         vir_stack_addr(&function, block, 1, PTR_SIZE, PTR_SIZE);
-    type.va_start_slot = start->address_slot;
+    type.va_start_slot = start->addr->slot;
     /* RV32 aligns an unnamed register pair to an even ABI word. */
     vir_type_t width = PTR_SIZE == 8 ? VIR_TYPE_I64 : VIR_TYPE_I32;
     if (PTR_SIZE == 4)
@@ -1215,7 +1215,9 @@ static void test_literal_rematerialization(void)
     lower.locked = 1;
     literal.type = VIR_TYPE_PTR;
     literal.opcode = VIR_OP_GLOBAL_ADDR;
-    literal.address_name = "object";
+    vir_address_t literal_addr = {0};
+    literal_addr.name = "object";
+    literal.addr = &literal_addr;
     reg = vir_machine_read(&lower, &literal);
     instruction = lower.block->mops.tail;
     assert(instruction->op == OP_global_address_of && instruction->src0 == 24 &&
@@ -1231,7 +1233,7 @@ static void test_literal_rematerialization(void)
     vir_effect_t call = {0};
     call.kind = VIR_EFFECT_CALL;
     vir_use_t use = {0};
-    use.effect = &call;
+    vir_use_set_owner(&use, VIR_USE_EFFECT, &call);
     literal.uses = &use;
     locations[1].rematerializable = vir_machine_rematerializable(&literal);
     assert(!locations[1].rematerializable);
@@ -1240,9 +1242,9 @@ static void test_literal_rematerialization(void)
     lower.locations[1].dirty = true;
     vir_machine_spill(&lower, reg);
     assert(lower.block->mops.tail->op == OP_store);
-    use.effect = NULL;
+    vir_use_set_owner(&use, VIR_USE_EFFECT, NULL);
     vir_edge_t edge = {0};
-    use.edge = &edge;
+    vir_use_set_owner(&use, VIR_USE_EDGE, &edge);
     locations[1].rematerializable = vir_machine_rematerializable(&literal);
 
     /* An edge copy rebuilds a literal in its destination, so it needs no home.

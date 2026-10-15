@@ -95,6 +95,7 @@ token_t *compact_token_stream(token_t *head)
         tail = tail->next;
     }
     tail->next = NULL;
+    mark_token_stream_end();
     retire_token_arena(preprocessed);
     return first.next;
 }

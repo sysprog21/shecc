@@ -393,12 +393,12 @@ void *arena_alloc(arena_t *arena, int size)
     size = (size + alignment - 1) & ~(alignment - 1);
 
     if (!arena->head || arena->head->offset + size > arena->head->capacity) {
-        /* Need a new block: choose capacity = max(DEFAULT_ARENA_SIZE,
-         * arena->block_size, size)
+        /* Grow by the arena's own block size, or by @size when that is larger.
+         * A small arena growing in small blocks fits them into the holes the
+         * freed VIR graphs leave during lowering, where 256 KiB blocks took
+         * fresh pages and raised the peak by 10 MB.
          */
-        const int base =
-            (arena->block_size > DEFAULT_ARENA_SIZE ? arena->block_size
-                                                    : DEFAULT_ARENA_SIZE);
+        const int base = arena->block_size;
         const int new_capacity = (size > base ? size : base);
         arena_block_t *new_block = arena_block_create(new_capacity);
         new_block->next = arena->head;
@@ -613,15 +613,11 @@ void arena_free(arena_t *arena)
     free(arena);
 }
 
-/* Hash a string with FNV-1a hash function and converts into usable hashmap
- * index. The range of returned hashmap index is ranged from "(0 ~
- * 2,147,483,647) mod size" due to lack of unsigned integer implementation.
- * @size: The size of map. Must not be negative or 0.
+/* Hash a string with FNV-1a, folded to a non-negative int because there is no
+ * unsigned arithmetic to do it in; a map masks it down to its capacity.
  * @key: The key string. May be NULL.
- *
- * Return: The usable hashmap index.
  */
-int hashmap_hash_index(int size, char *key)
+int hashmap_hash(char *key)
 {
     if (!key)
         return 0;
@@ -634,7 +630,12 @@ int hashmap_hash_index(int size, char *key)
     }
 
     const int mask = hash >> 31;
-    return ((hash ^ mask) - mask) & (size - 1);
+    return (hash ^ mask) - mask;
+}
+
+static bool hashmap_node_matches(hashmap_node_t *node, int hash, char *key)
+{
+    return node->hash == hash && (node->key == key || !strcmp(node->key, key));
 }
 
 int round_up_pow2(int v)
@@ -704,7 +705,7 @@ static void hashmap_rehash(hashmap_t *map)
             char *key = old_table[i].key;
             void *val = old_table[i].val;
 
-            int index = hashmap_hash_index(map->cap, key);
+            int index = old_table[i].hash & (map->cap - 1);
             int start = index;
 
             while (map->table[index].occupied) {
@@ -718,6 +719,7 @@ static void hashmap_rehash(hashmap_t *map)
 
             map->table[index].key = key;
             map->table[index].val = val;
+            map->table[index].hash = old_table[i].hash;
             map->table[index].occupied = true;
             map->table[index].owns_key = old_table[i].owns_key;
             map->size++;
@@ -731,6 +733,7 @@ static void hashmap_rehash(hashmap_t *map)
  */
 static hashmap_node_t *hashmap_prepare_slot(hashmap_t *map, char *key)
 {
+    int hash;
     int index;
     int start;
 
@@ -740,10 +743,11 @@ static hashmap_node_t *hashmap_prepare_slot(hashmap_t *map, char *key)
     if ((map->cap >> 1) <= map->size)
         hashmap_rehash(map);
 
-    index = hashmap_hash_index(map->cap, key);
+    hash = hashmap_hash(key);
+    index = hash & (map->cap - 1);
     start = index;
     while (map->table[index].occupied) {
-        if (!strcmp(map->table[index].key, key))
+        if (hashmap_node_matches(&map->table[index], hash, key))
             return &map->table[index];
 
         index = (index + 1) & (map->cap - 1);
@@ -754,6 +758,7 @@ static hashmap_node_t *hashmap_prepare_slot(hashmap_t *map, char *key)
         }
     }
 
+    map->table[index].hash = hash;
     return &map->table[index];
 }
 
@@ -816,11 +821,12 @@ hashmap_node_t *hashmap_get_node(hashmap_t *map, char *key)
     if (!map)
         return NULL;
 
-    int index = hashmap_hash_index(map->cap, key);
+    int hash = hashmap_hash(key);
+    int index = hash & (map->cap - 1);
     int start = index;
 
     while (map->table[index].occupied) {
-        if (!strcmp(map->table[index].key, key))
+        if (hashmap_node_matches(&map->table[index], hash, key))
             return &map->table[index];
 
         index = (index + 1) & (map->cap - 1);
@@ -2303,7 +2309,7 @@ strbuf_t *strbuf_create(int init_capacity)
 
     array->size = 0;
     array->capacity = init_capacity;
-    array->plain_source = false;
+    array->plain_end = 0;
     array->elements = malloc(array->capacity * sizeof(char));
     if (!array->elements) {
         free(array);
@@ -2365,7 +2371,7 @@ bool strbuf_puts(strbuf_t *src, const char *value)
             return false;
     }
 
-    strncpy(src->elements + src->size, value, len);
+    memcpy(src->elements + src->size, value, len);
     src->size += len;
 
     return true;
@@ -2453,6 +2459,23 @@ void global_init(void)
 /* Forward declaration for lexer cleanup */
 void lexer_cleanup(void);
 
+/* Free every block of @arena older than @keep, returning the bytes freed. */
+static int arena_free_blocks_after(arena_t *arena, arena_block_t *keep)
+{
+    int freed = 0;
+
+    while (keep->next) {
+        arena_block_t *done = keep->next;
+
+        keep->next = done->next;
+        freed += done->capacity;
+        arena->total_bytes -= done->capacity;
+        stats_live_arena_capacity -= done->capacity;
+        arena_block_free(done);
+    }
+    return freed;
+}
+
 /* Free empty trailing blocks from an arena safely. This only frees blocks that
  * come after the last used block, ensuring no pointers are invalidated.
  *
@@ -2486,23 +2509,7 @@ int arena_free_trailing_blocks(arena_t *arena)
     if (!last_used)
         last_used = arena->head;
 
-    /* Free all blocks after last_used */
-    int freed = 0;
-    if (last_used->next) {
-        block = last_used->next;
-        last_used->next = NULL;
-
-        while (block) {
-            arena_block_t *next = block->next;
-            freed += block->capacity;
-            arena->total_bytes -= block->capacity;
-            stats_live_arena_capacity -= block->capacity;
-            arena_block_free(block);
-            block = next;
-        }
-    }
-
-    return freed;
+    return arena_free_blocks_after(arena, last_used);
 }
 
 /* Free @retired, a token arena, keeping its peak for --stats. The lexer maps
@@ -2519,6 +2526,36 @@ void retire_token_arena(arena_t *retired)
     arena_free(retired);
 }
 
+/* The newest block of the compacted token stream and the end of the stream in
+ * it. Older blocks hold nothing but stream tokens, in order, so once the parser
+ * has moved past one at file scope, where no earlier token is held, it is
+ * garbage. Anything allocated after compaction is newer than both, and tokens
+ * spliced in during parsing are never in a block that gets freed.
+ */
+static arena_block_t *token_stream_block;
+static char *token_stream_end;
+
+void mark_token_stream_end(void)
+{
+    token_stream_block = TOKEN_ARENA->head;
+    token_stream_end = token_stream_block->memory + token_stream_block->offset;
+}
+
+/* Free the stream blocks the parser has read past. */
+void release_parsed_tokens(void)
+{
+    arena_block_t *block = token_stream_block;
+    char *at = (char *) cur_token;
+    char *end = token_stream_end;
+
+    while (block && !(at >= block->memory && at < end)) {
+        block = block->next;
+        end = block ? block->memory + block->offset : NULL;
+    }
+    if (block)
+        arena_free_blocks_after(TOKEN_ARENA, block);
+}
+
 /* Release the whole token arena and the source buffers behind it.
  *
  * By now TOKEN_ARENA holds the parsed token stream and whatever constant
@@ -2533,6 +2570,8 @@ void retire_token_arena(arena_t *retired)
  */
 void release_token_arena(void)
 {
+    token_stream_block = NULL;
+
     /* Parsing is complete, so nothing reads the tokens or the lexer maps again.
      * global_release() may call this cleanup again safely.
      */
@@ -2556,6 +2595,50 @@ void release_token_arena(void)
         hashmap_free(SRC_FILE_MAP);
         SRC_FILE_MAP = NULL;
     }
+}
+
+/* The parser's basic blocks only carry a function to its VIR graph, and the
+ * last graph, the global one, is finished before lowering starts. Lowering
+ * gives every function with a graph blocks of its own, or none when it is
+ * unused, so the parser's blocks go now. A function with no graph, such as the
+ * synthesized __syscall, keeps an empty block as its call target.
+ */
+void release_parse_blocks(void)
+{
+    arena_t *parsed = BB_ARENA;
+
+    BB_ARENA = arena_init(SMALL_ARENA_SIZE);
+    for (int i = 0; i < FUNC_MAP->cap; i++) {
+        func_t *func =
+            FUNC_MAP->table[i].occupied ? FUNC_MAP->table[i].val : NULL;
+        basic_block_t *bb;
+
+        if (!func || !func->bbs)
+            continue;
+        if (func->vir_context) {
+            func->bbs = NULL;
+            continue;
+        }
+        bb = arena_alloc_bb();
+        bb->belong_to = func->bbs->belong_to;
+        bb->elf_offset = func->bbs->elf_offset;
+        func->bbs = bb;
+    }
+    arena_free(parsed);
+}
+
+void release_block_arena(void)
+{
+    arena_free(BLOCK_ARENA);
+    BLOCK_ARENA = NULL;
+#ifdef __GLIBC__
+    /* main() keeps freed memory around for reuse, but these variables sit in
+     * the middle of the heap and the backend allocates nothing like them.
+     * Handing the pages back once costs a little refaulting and lowers the peak
+     * the ELF writer would otherwise set on top of them.
+     */
+    malloc_trim(0);
+#endif
 }
 
 static int compact_arenas(int phase_mask)

@@ -50,15 +50,74 @@ typedef enum {
     VIR_ADDRESS_GLOBAL,
 } vir_address_kind_t;
 
+/* What holds a use. VIR_USE_EXACT never owns one; removal matches the use
+ * record itself under it.
+ */
+typedef enum {
+    VIR_USE_EXACT,
+    VIR_USE_USER,
+    VIR_USE_EDGE,
+    VIR_USE_EFFECT,
+    VIR_USE_RETURN,
+    VIR_USE_BRANCH,
+} vir_use_owner_t;
+
+/* One owner pointer tagged by its kind. Five pointers of which exactly one was
+ * set made a use 56 bytes, and a self-compile holds about 430K of them.
+ */
 struct vir_use {
-    vir_value_t *user;
-    vir_edge_t *edge;
-    vir_effect_t *effect;
-    vir_block_t *return_block;
-    vir_block_t *branch_block;
+    void *owner;
     vir_use_t *next;
     int operand;
+    vir_use_owner_t kind;
 };
+
+static inline void vir_use_set_owner(vir_use_t *use,
+                                     vir_use_owner_t kind,
+                                     void *owner)
+{
+    use->kind = kind;
+    use->owner = owner;
+}
+
+static inline vir_value_t *vir_use_user(const vir_use_t *use)
+{
+    return use->kind == VIR_USE_USER ? use->owner : NULL;
+}
+
+static inline vir_edge_t *vir_use_edge(const vir_use_t *use)
+{
+    return use->kind == VIR_USE_EDGE ? use->owner : NULL;
+}
+
+static inline vir_effect_t *vir_use_effect(const vir_use_t *use)
+{
+    return use->kind == VIR_USE_EFFECT ? use->owner : NULL;
+}
+
+static inline vir_block_t *vir_use_return_block(const vir_use_t *use)
+{
+    return use->kind == VIR_USE_RETURN ? use->owner : NULL;
+}
+
+static inline vir_block_t *vir_use_branch_block(const vir_use_t *use)
+{
+    return use->kind == VIR_USE_BRANCH ? use->owner : NULL;
+}
+
+/* Root-object metadata of an address value. The slot/name is stable
+ * source-independent provenance, not a backend offset. A function address keeps
+ * only its name, with kind VIR_ADDRESS_NONE.
+ */
+typedef struct vir_address {
+    vir_address_kind_t kind;
+    unsigned int slot;
+    unsigned int size;
+    unsigned int alignment;
+    const char *name;
+    /* Next address value in the function's root index bucket. */
+    vir_value_t *root_next;
+} vir_address_t;
 
 struct vir_value {
     int id;
@@ -82,17 +141,11 @@ struct vir_value {
      * membership is one comparison instead of a list scan.
      */
     vir_value_t *member;
-    /* Next address value in the function's root index bucket. */
-    vir_value_t *root_next;
 
-    /* Root-object metadata exists only on VIR_OP_{STACK,GLOBAL}_ADDR. The
-     * slot/name is stable source-independent provenance, not a backend offset.
+    /* Set only on VIR_OP_{STACK,GLOBAL,FUNC}_ADDR, which are a small share of
+     * all values, so the others do not carry the fields.
      */
-    vir_address_kind_t address_kind;
-    unsigned int address_slot;
-    unsigned int address_size;
-    unsigned int address_alignment;
-    const char *address_name;
+    vir_address_t *addr;
 };
 
 typedef enum {
@@ -271,6 +324,11 @@ typedef struct {
 #define VIR_ARENA_BLOCK_SIZE 4000
 
 void vir_function_init(vir_function_t *func, int arena_block_size);
+
+/* Copy the live graph into a fresh arena and release the old one. False only
+ * when memory runs out, which leaves the graph unusable.
+ */
+bool vir_function_compact(vir_function_t *func);
 
 /* Bit width of an integer type; 0 for void and pointers. */
 int vir_integer_type_width(vir_type_t type);
@@ -606,6 +664,10 @@ int vir_ssa_write(vir_ssa_t *ssa,
                   vir_block_t *block,
                   unsigned int variable,
                   vir_value_t *value);
+int vir_ssa_forward(vir_ssa_t *ssa,
+                    vir_block_t *block,
+                    unsigned int variable,
+                    vir_value_t *value);
 vir_value_t *vir_ssa_read(const vir_ssa_t *ssa,
                           const vir_block_t *block,
                           unsigned int variable);

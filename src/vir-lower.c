@@ -573,7 +573,7 @@ static bool vir_machine_rematerializable(const vir_value_t *value)
     if (!vir_machine_literal(value))
         return false;
     for (const vir_use_t *use = value->uses; use; use = use->next)
-        if (use->effect && use->effect->kind == VIR_EFFECT_CALL)
+        if (vir_use_effect(use) && vir_use_effect(use)->kind == VIR_EFFECT_CALL)
             return false;
     return true;
 }
@@ -589,7 +589,7 @@ static bool vir_machine_folds_literal(const vir_value_t *value,
 {
 #if ELF_MACHINE == ELF_MACHINE_AARCH64
     if (value->opcode == VIR_OP_GLOBAL_ADDR)
-        return use->effect && use == use->effect->address_use;
+        return vir_use_effect(use) && use == vir_use_effect(use)->address_use;
 #else
     (void) use;
 #endif
@@ -613,7 +613,7 @@ static void vir_machine_materialize(vir_lower_t *lower,
     } else if (value->opcode == VIR_OP_GLOBAL_ADDR) {
         instruction->op = OP_global_address_of;
         instruction->src0 =
-            lower->global_offset(value->address_name, lower->global_context);
+            lower->global_offset(value->addr->name, lower->global_context);
     } else {
         instruction->op = OP_load_rodata_address;
         instruction->src0 = (int) value->constant;
@@ -889,7 +889,7 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
         instruction->src0 = lower->locations[value->id].slot;
         instruction = vir_machine_insn(lower, OP_address_of_func);
         instruction->src0 = lower->locations[value->id].reg;
-        instruction->func_name = intern_string((char *) value->address_name);
+        instruction->func_name = intern_string((char *) value->addr->name);
         instruction = vir_machine_insn(lower, OP_load);
         vir_machine_result(lower, instruction, value);
         instruction->src0 = lower->locations[value->id].slot;
@@ -1019,7 +1019,8 @@ static void vir_machine_flush_successor(vir_lower_t *lower,
             boundary.order = block->next_order;
             bool argument = false;
             for (vir_use_t *use = value->uses; use; use = use->next)
-                argument |= use->edge && use->edge->from == block;
+                argument |=
+                    vir_use_edge(use) && vir_use_edge(use)->from == block;
             if (!value->is_block_param && !argument &&
                 value != block->branch_condition &&
                 !vir_machine_interferes(lower, &boundary, value,
@@ -1364,7 +1365,7 @@ static bool vir_machine_slots(vir_lower_t *lower)
         int end = start, last_local_use = value->order;
         int pending = 0;
         for (vir_use_t *use = value->uses; use; use = use->next) {
-            ordinary_uses += !use->edge;
+            ordinary_uses += !vir_use_edge(use);
             vir_block_t *block = vir_use_block(use);
             int used = lower->block_positions[block->id] + vir_use_order(use);
             if (block != value->block) {
@@ -1594,9 +1595,9 @@ static bool vir_machine_slots(vir_lower_t *lower)
                 int fixed = -1;
                 bool safe = true;
                 for (vir_use_t *use = value->uses; use; use = use->next) {
-                    if (!use->edge)
+                    if (!vir_use_edge(use))
                         continue;
-                    vir_value_t *param = use->edge->to->params;
+                    vir_value_t *param = vir_use_edge(use)->to->params;
                     for (int index = 0; param && index < use->operand; index++)
                         param = param->param_next;
 
@@ -2219,12 +2220,12 @@ static void vir_machine_edge_temporaries(vir_lower_t *lower, vir_block_t *block)
             continue;
         bool resident = true;
         for (vir_use_t *use = value->uses; use; use = use->next) {
-            if (!use->edge || use->edge->from != block) {
+            if (!vir_use_edge(use) || vir_use_edge(use)->from != block) {
                 resident = false;
                 break;
             }
-            for (vir_value_t *parameter = use->edge->to->params; parameter;
-                 parameter = parameter->param_next)
+            for (vir_value_t *parameter = vir_use_edge(use)->to->params;
+                 parameter; parameter = parameter->param_next)
                 if (lower->locations[parameter->id].fixed < 0)
                     resident = false;
         }
@@ -2510,12 +2511,12 @@ bool vir_lower_machine(const vir_function_t *function,
         for (vir_value_t *value = block->head; value; value = value->next) {
             if (value->opcode != VIR_OP_STACK_ADDR)
                 continue;
-            if (value->address_slot >= (unsigned int) function->next_value_id)
+            if (value->addr->slot >= (unsigned int) function->next_value_id)
                 goto unsupported;
-            if (objects[value->address_slot] < 0) {
-                lower.frame = ALIGN_UP(lower.frame, value->address_alignment);
-                objects[value->address_slot] = lower.frame;
-                lower.frame += value->address_size;
+            if (objects[value->addr->slot] < 0) {
+                lower.frame = ALIGN_UP(lower.frame, value->addr->alignment);
+                objects[value->addr->slot] = lower.frame;
+                lower.frame += value->addr->size;
                 object_end = lower.frame;
             }
         }
@@ -2539,7 +2540,7 @@ bool vir_lower_machine(const vir_function_t *function,
                     lower.block_positions[block->id] + value->order;
                 vir_machine_value(&lower, value);
                 if (value->opcode == VIR_OP_STACK_ADDR)
-                    lower.block->mops.tail->src0 = objects[value->address_slot];
+                    lower.block->mops.tail->src0 = objects[value->addr->slot];
                 value = value->next;
             } else {
                 lower.position =
@@ -2587,7 +2588,7 @@ bool vir_lower_machine(const vir_function_t *function,
             basic_block_t *no = vir_machine_edge(&lower, block->false_edge);
             vir_machine_edge_temporaries(&lower, block);
             vir_use_t *use = block->branch_condition->uses;
-            if (use && !use->next && use->branch_block == block)
+            if (use && !use->next && vir_use_branch_block(use) == block)
                 lower.locations[block->branch_condition->id].dirty = false;
             vir_machine_flush_successor(&lower, block, &dominance);
             instruction = vir_machine_insn(&lower, OP_branch);

@@ -20,6 +20,8 @@ void vir_frontend_note_insn(basic_block_t *bb,
                             const char *symbol);
 void vir_frontend_note_edge(basic_block_t *pred, basic_block_t *succ);
 void vir_frontend_end(func_t *func);
+/* Run the optimization pipeline on @graph and verify the result. */
+void vir_frontend_optimize(vir_function_t *graph);
 
 const vir_call_signature_t *vir_frontend_signature(const func_t *func);
 void vir_frontend_layout_globals(void);

@@ -5,15 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum {
-    VIR_USE_EXACT,
-    VIR_USE_USER,
-    VIR_USE_EDGE,
-    VIR_USE_EFFECT,
-    VIR_USE_RETURN,
-    VIR_USE_BRANCH,
-} vir_use_owner_t;
-
 typedef struct vir_dominance vir_dominance_t;
 
 static int vir_dominance_index(const vir_dominance_t *dominance,
@@ -80,32 +71,11 @@ static bool vir_use_matches(const vir_use_t *use,
                             const void *owner,
                             int operand)
 {
-    bool matches;
+    const void *held = use;
 
-    switch (kind) {
-    case VIR_USE_EXACT:
-        matches = use == owner;
-        break;
-    case VIR_USE_USER:
-        matches = use->user == owner;
-        break;
-    case VIR_USE_EDGE:
-        matches = use->edge == owner;
-        break;
-    case VIR_USE_EFFECT:
-        matches = use->effect == owner;
-        break;
-    case VIR_USE_RETURN:
-        matches = use->return_block == owner;
-        break;
-    case VIR_USE_BRANCH:
-        matches = use->branch_block == owner;
-        break;
-    default:
-        matches = false;
-        break;
-    }
-    return matches && (operand < 0 || use->operand == operand);
+    if (kind != VIR_USE_EXACT)
+        held = use->kind == kind ? use->owner : NULL;
+    return held == owner && (operand < 0 || use->operand == operand);
 }
 
 int vir_integer_type_width(vir_type_t type)
@@ -381,7 +351,8 @@ static void vir_arena_release(vir_arena_t *arena)
     }
 }
 
-static void *vir_arena_alloc(vir_arena_t *arena, int size)
+/* Allocation for a caller that writes every byte itself. */
+static void *vir_arena_alloc_raw(vir_arena_t *arena, int size)
 {
     const int align = sizeof(void *);
     vir_arena_block_t *block;
@@ -420,7 +391,16 @@ static void *vir_arena_alloc(vir_arena_t *arena, int size)
 
     void *ptr = block->data + block->used;
     block->used += size;
-    memset(ptr, 0, size);
+    return ptr;
+}
+
+/* Every allocation comes back zero-filled. */
+static void *vir_arena_alloc(vir_arena_t *arena, int size)
+{
+    void *ptr = vir_arena_alloc_raw(arena, size);
+
+    if (ptr)
+        memset(ptr, 0, size);
     return ptr;
 }
 
@@ -444,6 +424,450 @@ void vir_function_release(vir_function_t *func)
     free(func->block_table);
     vir_arena_release(&func->arena);
     memset(func, 0, sizeof(*func));
+}
+
+/* Graph compaction. Removing values, effects, edges and blocks unlinks them but
+ * leaves their bytes in the arena, so a finished graph carries every object its
+ * construction and optimization ever made. vir_function_compact() copies the
+ * live graph into a fresh arena and releases the old one.
+ *
+ * Copying keeps ids, positions, construction order and the order of every list,
+ * use lists included, so passes and lowering see the same graph. While a copy
+ * is made, the old object forwards to its copy through one of its own links: a
+ * value through @member, an effect through @next and an edge through
+ * @next_outgoing. Blocks forward by their index in the block table.
+ */
+typedef struct {
+    vir_function_t *func;
+    vir_arena_t *arena;
+    vir_block_t **blocks;
+    /* By value id, the copy's operand uses, indexed by operand. */
+    vir_use_t **operand_uses;
+} vir_compact_t;
+
+static bool vir_root_index_insert(vir_function_t *func, vir_value_t *value);
+
+static vir_value_t *vir_compact_value(const vir_value_t *value)
+{
+    return value ? value->member : NULL;
+}
+
+static vir_effect_t *vir_compact_effect(const vir_effect_t *effect)
+{
+    return effect ? effect->next : NULL;
+}
+
+static vir_edge_t *vir_compact_edge(const vir_edge_t *edge)
+{
+    return edge ? edge->next_outgoing : NULL;
+}
+
+static vir_block_t *vir_compact_block(const vir_compact_t *compact,
+                                      const vir_block_t *block)
+{
+    return block ? compact->blocks[block->index] : NULL;
+}
+
+static void *vir_compact_bytes(vir_compact_t *compact,
+                               const void *from,
+                               int size)
+{
+    void *copy;
+
+    if (!from || size <= 0)
+        return NULL;
+    copy = vir_arena_alloc_raw(compact->arena, size);
+    if (copy)
+        memcpy(copy, from, (size_t) size);
+    return copy;
+}
+
+/* A copy of @name, or NULL when there is none or memory runs out. */
+static char *vir_compact_string(vir_compact_t *compact, const char *name)
+{
+    size_t length;
+
+    if (!name)
+        return NULL;
+    length = strlen(name) + 1;
+    return length > INT_MAX ? NULL
+                            : vir_compact_bytes(compact, name, (int) length);
+}
+
+/* Copy one value and point the old one at the copy. The copy keeps old links
+ * until vir_compact_link_value() translates them.
+ */
+static vir_value_t *vir_compact_copy_value(vir_compact_t *compact,
+                                           vir_value_t *value)
+{
+    vir_value_t *copy = vir_compact_bytes(compact, value, sizeof(*value));
+
+    if (!copy)
+        return NULL;
+    if (value->addr) {
+        copy->addr =
+            vir_compact_bytes(compact, value->addr, sizeof(*value->addr));
+        if (!copy->addr ||
+            (value->addr->name && !(copy->addr->name = vir_compact_string(
+                                        compact, value->addr->name))))
+            return NULL;
+        copy->addr->root_next = NULL;
+    }
+    /* Operand uses are found again by their operand index. */
+    if (value->op0) {
+        compact->operand_uses[value->id] = vir_arena_alloc(
+            compact->arena, (int) sizeof(vir_use_t) * (value->op1 ? 2 : 1));
+        if (!compact->operand_uses[value->id])
+            return NULL;
+    }
+    value->member = copy;
+    return copy;
+}
+
+static vir_effect_t *vir_compact_copy_effect(vir_compact_t *compact,
+                                             vir_effect_t *effect)
+{
+    vir_effect_t *copy = vir_compact_bytes(compact, effect, sizeof(*effect));
+    int count = effect->arg_count;
+
+    if (!copy || (effect->callee && !(copy->callee = vir_compact_string(
+                                          compact, effect->callee))))
+        return NULL;
+    if (effect->address_use && !(copy->address_use = vir_arena_alloc(
+                                     compact->arena, sizeof(vir_use_t))))
+        return NULL;
+    if (effect->stored_value_use && !(copy->stored_value_use = vir_arena_alloc(
+                                          compact->arena, sizeof(vir_use_t))))
+        return NULL;
+    if (effect->callee_value_use && !(copy->callee_value_use = vir_arena_alloc(
+                                          compact->arena, sizeof(vir_use_t))))
+        return NULL;
+    copy->args = NULL;
+    copy->arg_uses = NULL;
+    if (effect->args && count &&
+        !(copy->args = vir_compact_bytes(compact, effect->args,
+                                         (int) sizeof(*copy->args) * count)))
+        return NULL;
+    if (effect->arg_uses && count &&
+        !(copy->arg_uses = vir_arena_alloc(
+              compact->arena, (int) sizeof(*copy->arg_uses) * count)))
+        return NULL;
+    if (effect->signature) {
+        const vir_call_signature_t *signature = effect->signature;
+        vir_call_signature_t *sig =
+            vir_compact_bytes(compact, signature, sizeof(*signature));
+
+        if (!sig)
+            return NULL;
+        sig->params = NULL;
+        sig->param_slots = NULL;
+        if (signature->param_count &&
+            !(sig->params = vir_compact_bytes(
+                  compact, signature->params,
+                  (int) sizeof(*signature->params) * signature->param_count)))
+            return NULL;
+        if (signature->param_slots && signature->param_count &&
+            !(sig->param_slots =
+                  vir_compact_bytes(compact, signature->param_slots,
+                                    (int) sizeof(*signature->param_slots) *
+                                        signature->param_count)))
+            return NULL;
+        copy->signature = sig;
+    }
+    effect->next = copy;
+    return copy;
+}
+
+static vir_edge_t *vir_compact_copy_edge(vir_compact_t *compact,
+                                         vir_edge_t *edge)
+{
+    vir_edge_t *copy = vir_compact_bytes(compact, edge, sizeof(*edge));
+
+    if (!copy)
+        return NULL;
+    copy->args = NULL;
+    copy->arg_uses = NULL;
+    if (edge->arg_count) {
+        copy->args = vir_compact_bytes(
+            compact, edge->args, (int) sizeof(*edge->args) * edge->arg_count);
+        copy->arg_uses = vir_arena_alloc(
+            compact->arena, (int) sizeof(*edge->arg_uses) * edge->arg_count);
+        if (!copy->args || !copy->arg_uses)
+            return NULL;
+    }
+    edge->next_outgoing = copy;
+    return copy;
+}
+
+/* The copy of the use @use of an old value, or a new use for a terminator. */
+static vir_use_t *vir_compact_use(vir_compact_t *compact, const vir_use_t *use)
+{
+    vir_effect_t *effect;
+    vir_edge_t *edge;
+    vir_value_t *user;
+
+    switch (use->kind) {
+    case VIR_USE_USER:
+        user = use->owner;
+        return &compact->operand_uses[user->id][use->operand];
+    case VIR_USE_EDGE:
+        edge = vir_compact_edge(use->owner);
+        return &edge->arg_uses[use->operand];
+    case VIR_USE_EFFECT:
+        effect = vir_compact_effect(use->owner);
+        if (effect->kind == VIR_EFFECT_CALL)
+            return use->operand < 0 ? effect->callee_value_use
+                                    : &effect->arg_uses[use->operand];
+        return use->operand == 0 ? effect->address_use
+                                 : effect->stored_value_use;
+    default:
+        return vir_arena_alloc(compact->arena, sizeof(vir_use_t));
+    }
+}
+
+static void *vir_compact_owner(vir_compact_t *compact, const vir_use_t *use)
+{
+    switch (use->kind) {
+    case VIR_USE_USER:
+        return vir_compact_value(use->owner);
+    case VIR_USE_EDGE:
+        return vir_compact_edge(use->owner);
+    case VIR_USE_EFFECT:
+        return vir_compact_effect(use->owner);
+    default:
+        return vir_compact_block(compact, use->owner);
+    }
+}
+
+/* Translate the copy's links and rebuild its use list in the old order. The
+ * copy's @uses still heads the old list, whose records are left untouched.
+ */
+static bool vir_compact_link_value(vir_compact_t *compact, vir_value_t *copy)
+{
+    vir_use_t **tail = &copy->uses;
+    const vir_use_t *use = copy->uses;
+
+    copy->op0 = vir_compact_value(copy->op0);
+    copy->op1 = vir_compact_value(copy->op1);
+    copy->block = vir_compact_block(compact, copy->block);
+    copy->next = vir_compact_value(copy->next);
+    copy->param_next = vir_compact_value(copy->param_next);
+    copy->def_effect = vir_compact_effect(copy->def_effect);
+    copy->member = copy;
+    for (; use; use = use->next) {
+        vir_use_t *fresh = vir_compact_use(compact, use);
+
+        if (!fresh)
+            return false;
+        fresh->kind = use->kind;
+        fresh->owner = vir_compact_owner(compact, use);
+        fresh->operand = use->operand;
+        *tail = fresh;
+        tail = &fresh->next;
+    }
+    *tail = NULL;
+    return !copy->addr || copy->opcode == VIR_OP_FUNC_ADDR ||
+           vir_root_index_insert(compact->func, copy);
+}
+
+static void vir_compact_link_effect(vir_compact_t *compact, vir_effect_t *copy)
+{
+    copy->block = vir_compact_block(compact, copy->block);
+    copy->address = vir_compact_value(copy->address);
+    copy->stored_value = vir_compact_value(copy->stored_value);
+    copy->result = vir_compact_value(copy->result);
+    copy->callee_value = vir_compact_value(copy->callee_value);
+    copy->next = vir_compact_effect(copy->next);
+    if (copy->args)
+        for (int i = 0; i < copy->arg_count; i++)
+            copy->args[i] = vir_compact_value(copy->args[i]);
+}
+
+static void vir_compact_link_edge(vir_compact_t *compact, vir_edge_t *copy)
+{
+    copy->from = vir_compact_block(compact, copy->from);
+    copy->to = vir_compact_block(compact, copy->to);
+    copy->next_outgoing = vir_compact_edge(copy->next_outgoing);
+    copy->next_incoming = vir_compact_edge(copy->next_incoming);
+    for (int i = 0; i < copy->arg_count; i++)
+        copy->args[i] = vir_compact_value(copy->args[i]);
+}
+
+static bool vir_compact_copy_block(vir_compact_t *compact, vir_block_t *block)
+{
+    vir_value_t *value, *next;
+    vir_effect_t *effect, *next_effect;
+    vir_edge_t *edge, *next_edge;
+
+    for (value = block->params; value; value = value->param_next)
+        if (!vir_compact_copy_value(compact, value))
+            return false;
+    for (value = block->head; value; value = next) {
+        next = value->next;
+        if (!vir_compact_copy_value(compact, value))
+            return false;
+    }
+    for (effect = block->effects; effect; effect = next_effect) {
+        next_effect = effect->next;
+        if (!vir_compact_copy_effect(compact, effect))
+            return false;
+    }
+    for (edge = block->outgoing; edge; edge = next_edge) {
+        next_edge = edge->next_outgoing;
+        if (!vir_compact_copy_edge(compact, edge))
+            return false;
+    }
+    return true;
+}
+
+/* Once copied, the old lists can no longer be walked: their links forward to
+ * copies. The copies are walked instead, translating each old link they hold.
+ */
+static bool vir_compact_link_block(vir_compact_t *compact, vir_block_t *copy)
+{
+    vir_value_t *value;
+    vir_effect_t *effect;
+    vir_edge_t *edge;
+
+    copy->params = vir_compact_value(copy->params);
+    copy->last_param = vir_compact_value(copy->last_param);
+    copy->head = vir_compact_value(copy->head);
+    copy->tail = vir_compact_value(copy->tail);
+    copy->effects = vir_compact_effect(copy->effects);
+    copy->last_effect = vir_compact_effect(copy->last_effect);
+    copy->incoming = vir_compact_edge(copy->incoming);
+    copy->outgoing = vir_compact_edge(copy->outgoing);
+    copy->return_value = vir_compact_value(copy->return_value);
+    copy->branch_condition = vir_compact_value(copy->branch_condition);
+    copy->true_edge = vir_compact_edge(copy->true_edge);
+    copy->false_edge = vir_compact_edge(copy->false_edge);
+    copy->next = vir_compact_block(compact, copy->next);
+
+    /* Linking a copy translates its own next link, so each walk advances on
+     * links that already point at copies.
+     */
+    for (value = copy->params; value; value = value->param_next)
+        if (!vir_compact_link_value(compact, value))
+            return false;
+    for (value = copy->head; value; value = value->next)
+        if (!vir_compact_link_value(compact, value))
+            return false;
+    for (effect = copy->effects; effect; effect = effect->next)
+        vir_compact_link_effect(compact, effect);
+    for (edge = copy->outgoing; edge; edge = edge->next_outgoing)
+        vir_compact_link_edge(compact, edge);
+    return true;
+}
+
+static int vir_compact_round(size_t bytes)
+{
+    return (int) ((bytes + sizeof(void *) - 1) & ~(sizeof(void *) - 1));
+}
+
+/* Bytes the copy will take, so that it lands in one arena block of that size
+ * rather than in blocks grown with spare room at their ends.
+ */
+static long vir_compact_size(const vir_function_t *func)
+{
+    long bytes = 0;
+    int roots = 0, capacity = 64;
+
+    for (int i = 0; i < func->block_count; i++) {
+        const vir_block_t *block = func->block_table[i];
+
+        bytes += vir_compact_round(sizeof(*block));
+        for (int list = 0; list < 2; list++)
+            for (const vir_value_t *value = list ? block->head : block->params;
+                 value; value = list ? value->next : value->param_next) {
+                bytes += vir_compact_round(sizeof(*value));
+                if (value->op0)
+                    bytes += vir_compact_round(sizeof(vir_use_t) *
+                                               (value->op1 ? 2 : 1));
+                if (value->addr) {
+                    bytes += vir_compact_round(sizeof(*value->addr));
+                    if (value->addr->name)
+                        bytes +=
+                            vir_compact_round(strlen(value->addr->name) + 1);
+                    roots += value->opcode != VIR_OP_FUNC_ADDR;
+                }
+            }
+        for (const vir_effect_t *effect = block->effects; effect;
+             effect = effect->next) {
+            bytes +=
+                vir_compact_round(sizeof(*effect)) +
+                3 * vir_compact_round(sizeof(vir_use_t)) +
+                vir_compact_round((sizeof(vir_value_t *) + sizeof(vir_use_t)) *
+                                  effect->arg_count);
+            if (effect->callee)
+                bytes += vir_compact_round(strlen(effect->callee) + 1);
+            if (effect->signature)
+                bytes += vir_compact_round(sizeof(*effect->signature)) +
+                         vir_compact_round(
+                             (sizeof(*effect->signature->params) +
+                              sizeof(*effect->signature->param_slots)) *
+                             effect->signature->param_count);
+        }
+        for (const vir_edge_t *edge = block->outgoing; edge;
+             edge = edge->next_outgoing)
+            bytes +=
+                vir_compact_round(sizeof(*edge)) +
+                vir_compact_round((sizeof(vir_value_t *) + sizeof(vir_use_t)) *
+                                  edge->arg_count);
+        if (block->return_value || block->branch_condition)
+            bytes += vir_compact_round(sizeof(vir_use_t));
+    }
+    /* The root index doubles as it fills, leaving each smaller table behind. */
+    while (capacity / 2 <= roots)
+        capacity *= 2;
+    return bytes + 2L * capacity * (long) sizeof(vir_value_t *);
+}
+
+bool vir_function_compact(vir_function_t *func)
+{
+    vir_function_t fresh = *func;
+    vir_compact_t compact;
+    bool ok;
+    long size;
+    int i;
+
+    if (!func->blocks)
+        return true;
+    size = vir_compact_size(func);
+    memset(&fresh.arena, 0, sizeof(fresh.arena));
+    fresh.arena.block_size = size < INT_MAX ? (int) size : INT_MAX;
+    fresh.arena.fail_after = func->arena.fail_after;
+    fresh.root_table = NULL;
+    fresh.root_capacity = 0;
+    fresh.root_count = 0;
+    compact.func = &fresh;
+    compact.arena = &fresh.arena;
+    compact.blocks = calloc((size_t) func->block_count, sizeof(vir_block_t *));
+    compact.operand_uses =
+        calloc((size_t) func->next_value_id + 1, sizeof(vir_use_t *));
+    ok = compact.blocks && compact.operand_uses &&
+         vir_root_index_insert(&fresh, NULL);
+    for (i = 0; ok && i < func->block_count; i++)
+        ok = (compact.blocks[i] = vir_compact_bytes(
+                  &compact, func->block_table[i], sizeof(vir_block_t))) != NULL;
+    for (i = 0; ok && i < func->block_count; i++)
+        ok = vir_compact_copy_block(&compact, func->block_table[i]);
+    /* Past this point the old graph is no longer intact. */
+    for (i = 0; ok && i < func->block_count; i++)
+        ok = vir_compact_link_block(&compact, compact.blocks[i]);
+    if (ok) {
+        for (i = 0; i < func->block_count; i++)
+            fresh.block_table[i] = compact.blocks[i];
+        fresh.blocks = compact.blocks[0];
+        fresh.last_block = compact.blocks[func->block_count - 1];
+        fresh.arena.block_size = func->arena.block_size;
+        vir_arena_release(&func->arena);
+        *func = fresh;
+    } else {
+        vir_arena_release(&fresh.arena);
+    }
+    free(compact.blocks);
+    free(compact.operand_uses);
+    return ok;
 }
 
 static void vir_collect_value_stats(const vir_value_t *value,
@@ -641,11 +1065,11 @@ static bool vir_root_index_insert(vir_function_t *func, vir_value_t *value)
         for (int i = 0; i < func->root_capacity; i++) {
             vir_value_t *entry = func->root_table[i];
             while (entry) {
-                vir_value_t *next = entry->root_next;
+                vir_value_t *next = entry->addr->root_next;
                 unsigned int bucket =
-                    vir_root_bucket(entry->address_kind, entry->address_slot,
-                                    entry->address_name, capacity);
-                entry->root_next = table[bucket];
+                    vir_root_bucket(entry->addr->kind, entry->addr->slot,
+                                    entry->addr->name, capacity);
+                entry->addr->root_next = table[bucket];
                 table[bucket] = entry;
                 entry = next;
             }
@@ -655,9 +1079,9 @@ static bool vir_root_index_insert(vir_function_t *func, vir_value_t *value)
     }
     if (value) {
         unsigned int bucket =
-            vir_root_bucket(value->address_kind, value->address_slot,
-                            value->address_name, func->root_capacity);
-        value->root_next = func->root_table[bucket];
+            vir_root_bucket(value->addr->kind, value->addr->slot,
+                            value->addr->name, func->root_capacity);
+        value->addr->root_next = func->root_table[bucket];
         func->root_table[bucket] = value;
         func->root_count++;
     }
@@ -685,17 +1109,17 @@ static bool vir_address_root_conflicts(const vir_function_t *func,
     unsigned int bucket =
         vir_root_bucket(kind, slot, name, func->root_capacity);
     for (const vir_value_t *value = func->root_table[bucket]; value;
-         value = value->root_next) {
+         value = value->addr->root_next) {
         bool same_root = kind == VIR_ADDRESS_STACK
                              ? value->opcode == VIR_OP_STACK_ADDR &&
-                                   value->address_slot == slot
+                                   value->addr->slot == slot
                              : value->opcode == VIR_OP_GLOBAL_ADDR &&
-                                   value->address_name &&
-                                   !strcmp(value->address_name, name);
+                                   value->addr->name &&
+                                   !strcmp(value->addr->name, name);
 
         if (same_root &&
-            (value->address_size != size ||
-             value->address_alignment != alignment) &&
+            (value->addr->size != size ||
+             value->addr->alignment != alignment) &&
             vir_value_listed(func, value))
             return 1;
     }
@@ -711,6 +1135,7 @@ static vir_value_t *new_addr(vir_function_t *func,
                              unsigned int alignment)
 {
     char *copy = NULL;
+    vir_address_t *addr;
     vir_value_t *value;
 
     if (!vir_has_block(func, block) || !vir_type_width(func, VIR_TYPE_PTR) ||
@@ -727,17 +1152,20 @@ static vir_value_t *new_addr(vir_function_t *func,
             return NULL;
         memcpy(copy, name, length);
     }
+    if (!(addr = vir_arena_alloc(&func->arena, sizeof(*addr))))
+        return NULL;
     value = vir_new_value(
         func, block,
         kind == VIR_ADDRESS_STACK ? VIR_OP_STACK_ADDR : VIR_OP_GLOBAL_ADDR,
         VIR_TYPE_PTR, 0);
     if (!value)
         return NULL;
-    value->address_kind = kind;
-    value->address_slot = slot;
-    value->address_size = size;
-    value->address_alignment = alignment;
-    value->address_name = copy;
+    addr->kind = kind;
+    addr->slot = slot;
+    addr->size = size;
+    addr->alignment = alignment;
+    addr->name = copy;
+    value->addr = addr;
     vir_root_index_insert(func, value);
     return value;
 }
@@ -766,6 +1194,7 @@ vir_value_t *vir_function_addr(vir_function_t *func,
                                const char *name)
 {
     vir_value_t *value;
+    vir_address_t *addr;
     char *copy;
     size_t length;
 
@@ -773,12 +1202,14 @@ vir_value_t *vir_function_addr(vir_function_t *func,
         return NULL;
     length = strlen(name) + 1;
     if (length > INT_MAX ||
-        !(copy = vir_arena_alloc(&func->arena, (int) length)))
+        !(copy = vir_arena_alloc(&func->arena, (int) length)) ||
+        !(addr = vir_arena_alloc(&func->arena, sizeof(*addr))))
         return NULL;
     memcpy(copy, name, length);
+    addr->name = copy;
     value = vir_new_value(func, block, VIR_OP_FUNC_ADDR, VIR_TYPE_PTR, 0);
     if (value)
-        value->address_name = copy;
+        value->addr = addr;
     return value;
 }
 
@@ -907,7 +1338,7 @@ static void vir_link_effect_use(vir_effect_t *effect,
                                 vir_use_t *use,
                                 int operand)
 {
-    use->effect = effect;
+    vir_use_set_owner(use, VIR_USE_EFFECT, effect);
     use->operand = operand;
     vir_link_use(value, use);
 }
@@ -916,7 +1347,7 @@ static void vir_edge_link_uses(vir_edge_t *edge)
 {
     for (int i = 0; i < edge->arg_count; i++) {
         vir_use_t *use = &edge->arg_uses[i];
-        use->edge = edge;
+        vir_use_set_owner(use, VIR_USE_EDGE, edge);
         use->operand = i;
         vir_link_use(edge->args[i], use);
     }
@@ -1116,7 +1547,7 @@ int vir_block_set_branch(vir_function_t *func,
     block->branch_condition = condition;
     block->true_edge = true_edge;
     block->false_edge = false_edge;
-    condition_use->branch_block = block;
+    vir_use_set_owner(condition_use, VIR_USE_BRANCH, block);
     vir_link_use(condition, condition_use);
     return 1;
 }
@@ -1139,7 +1570,7 @@ int vir_block_set_return(vir_function_t *func,
         return 0;
     block->terminator = VIR_TERM_RETURN;
     block->return_value = value;
-    use->return_block = block;
+    vir_use_set_owner(use, VIR_USE_RETURN, block);
     vir_link_use(value, use);
     return 1;
 }
@@ -1202,7 +1633,7 @@ static void vir_link_user_operand(vir_value_t *user,
                                   vir_use_t *use,
                                   int index)
 {
-    use->user = user;
+    vir_use_set_owner(use, VIR_USE_USER, user);
     use->operand = index;
     vir_link_use(operand, use);
 }
@@ -1985,35 +2416,47 @@ static void vir_set_use_slot(vir_value_t **slot,
 
 static vir_value_t **vir_use_value_slot(const vir_use_t *use)
 {
-    if (use->user)
-        return use->operand == 0 ? &use->user->op0 : &use->user->op1;
-    if (use->edge)
-        return &use->edge->args[use->operand];
-    if (use->effect) {
-        if (use->effect->kind == VIR_EFFECT_CALL)
-            return use->operand < 0 ? &use->effect->callee_value
-                                    : &use->effect->args[use->operand];
-        return use->operand == 0 ? &use->effect->address
-                                 : &use->effect->stored_value;
+    vir_value_t *user;
+    vir_edge_t *edge;
+    vir_effect_t *effect;
+    vir_block_t *block;
+
+    switch (use->kind) {
+    case VIR_USE_USER:
+        user = use->owner;
+        return use->operand == 0 ? &user->op0 : &user->op1;
+    case VIR_USE_EDGE:
+        edge = use->owner;
+        return &edge->args[use->operand];
+    case VIR_USE_EFFECT:
+        effect = use->owner;
+        if (effect->kind == VIR_EFFECT_CALL)
+            return use->operand < 0 ? &effect->callee_value
+                                    : &effect->args[use->operand];
+        return use->operand == 0 ? &effect->address : &effect->stored_value;
+    case VIR_USE_RETURN:
+        block = use->owner;
+        return &block->return_value;
+    default:
+        block = use->owner;
+        return &block->branch_condition;
     }
-    return use->return_block ? &use->return_block->return_value
-                             : &use->branch_block->branch_condition;
 }
 
 vir_block_t *vir_use_block(const vir_use_t *use)
 {
-    return use->user           ? use->user->block
-           : use->edge         ? use->edge->from
-           : use->effect       ? use->effect->block
-           : use->return_block ? use->return_block
-                               : use->branch_block;
+    return vir_use_user(use)           ? vir_use_user(use)->block
+           : vir_use_edge(use)         ? vir_use_edge(use)->from
+           : vir_use_effect(use)       ? vir_use_effect(use)->block
+           : vir_use_return_block(use) ? vir_use_return_block(use)
+                                       : vir_use_branch_block(use);
 }
 
 int vir_use_order(const vir_use_t *use)
 {
-    return use->user     ? use->user->order
-           : use->effect ? use->effect->order
-                         : vir_use_block(use)->next_order;
+    return vir_use_user(use)     ? vir_use_user(use)->order
+           : vir_use_effect(use) ? vir_use_effect(use)->order
+                                 : vir_use_block(use)->next_order;
 }
 
 static bool vir_replacement_dominates_with_context(
@@ -2034,9 +2477,9 @@ static bool vir_replacement_dominates_with_context(
     for (use = from->uses; use && dominates; use = use->next) {
         const vir_block_t *block;
         int position;
-        if (!use->user && !use->edge && use->effect) {
-            dominates =
-                vir_value_dominates_effect(func, dominance, to, use->effect);
+        if (vir_use_effect(use)) {
+            dominates = vir_value_dominates_effect(func, dominance, to,
+                                                   vir_use_effect(use));
             continue;
         }
         if (!(block = vir_use_block(use))) {
@@ -2060,9 +2503,9 @@ static bool vir_replacement_dominates_with_context(
             dominates = dominates && !reachable[index];
             continue;
         }
-        position = use->user     ? use->user->position
-                   : block->tail ? block->tail->position + 1
-                                 : 0;
+        position = vir_use_user(use) ? vir_use_user(use)->position
+                   : block->tail     ? block->tail->position + 1
+                                     : 0;
         dominates = vir_value_dominates(func, dominance, to, block, position);
     }
     free(reachable);
@@ -2406,9 +2849,9 @@ static void vir_sink_pointer_adds(vir_block_t *block)
                 if (vir_use_block(use) != block || order <= value->order ||
                     order >= limit)
                     continue;
-                vir_value_t *user = use->user;
-                if (!user && use->effect)
-                    user = use->effect->result;
+                vir_value_t *user = vir_use_user(use);
+                if (!user && vir_use_effect(use))
+                    user = vir_use_effect(use)->result;
                 if (user && (!after || user->order > after->order))
                     after = user;
             }
@@ -2445,17 +2888,16 @@ static bool vir_promote_private_stack(vir_function_t *func,
     vir_type_t access_type = VIR_TYPE_VOID;
 
     if (address->opcode != VIR_OP_STACK_ADDR || address->block != block ||
-        address->address_kind != VIR_ADDRESS_STACK || !address->uses)
+        address->addr->kind != VIR_ADDRESS_STACK || !address->uses)
         return false;
     for (vir_block_t *owner = func->blocks; owner; owner = owner->next)
         for (vir_value_t *value = owner->head; value; value = value->next)
             if (value != address && value->opcode == VIR_OP_STACK_ADDR &&
-                value->address_slot == address->address_slot)
+                value->addr->slot == address->addr->slot)
                 return false;
     for (use = address->uses; use; use = use->next) {
-        effect = use->effect;
-        if (use->user || use->edge || use->return_block || use->branch_block ||
-            use->operand != 0 || !effect || effect->block != block ||
+        effect = vir_use_effect(use);
+        if (use->operand != 0 || !effect || effect->block != block ||
             effect->address != address ||
             (effect->kind != VIR_EFFECT_LOAD &&
              effect->kind != VIR_EFFECT_STORE))
@@ -2782,15 +3224,19 @@ static void vir_sccp_schedule_uses(vir_sccp_worklist_t *worklist,
                                    const unsigned char *executable_edges)
 {
     for (const vir_use_t *use = value->uses; use; use = use->next) {
-        if (use->user && use->user->block != current_block)
-            vir_sccp_queue_block(worklist, func, use->user->block, true);
-        else if (use->branch_block && use->branch_block != current_block)
-            vir_sccp_queue_block(worklist, func, use->branch_block, true);
-        else if (use->edge) {
-            int index = use->edge->sccp_index;
+        if (vir_use_user(use) && vir_use_user(use)->block != current_block)
+            vir_sccp_queue_block(worklist, func, vir_use_user(use)->block,
+                                 true);
+        else if (vir_use_branch_block(use) &&
+                 vir_use_branch_block(use) != current_block)
+            vir_sccp_queue_block(worklist, func, vir_use_branch_block(use),
+                                 true);
+        else if (vir_use_edge(use)) {
+            int index = vir_use_edge(use)->sccp_index;
 
             if (index >= 0 && executable_edges[index])
-                vir_sccp_queue_block(worklist, func, use->edge->to, true);
+                vir_sccp_queue_block(worklist, func, vir_use_edge(use)->to,
+                                     true);
         }
     }
 }
@@ -3727,15 +4173,15 @@ static vir_value_t *vir_sr_base(vir_function_t *func,
         for (vir_value_t *root = pre->head; root; root = root->next)
             if (root->opcode == value->opcode &&
                 (value->opcode == VIR_OP_STACK_ADDR
-                     ? root->address_slot == value->address_slot
-                     : !strcmp(root->address_name, value->address_name)))
+                     ? root->addr->slot == value->addr->slot
+                     : !strcmp(root->addr->name, value->addr->name)))
                 return root;
     if (value->opcode == VIR_OP_GLOBAL_ADDR)
-        return vir_global_addr(func, pre, value->address_name,
-                               value->address_size, value->address_alignment);
+        return vir_global_addr(func, pre, value->addr->name, value->addr->size,
+                               value->addr->alignment);
     if (value->opcode == VIR_OP_STACK_ADDR)
-        return vir_stack_addr(func, pre, value->address_slot,
-                              value->address_size, value->address_alignment);
+        return vir_stack_addr(func, pre, value->addr->slot, value->addr->size,
+                              value->addr->alignment);
     if (value->opcode == VIR_OP_CONST)
         return vir_const(func, pre, value->type, value->constant);
     if (!value->nr_ops)
@@ -3885,12 +4331,12 @@ static bool vir_sr_descending_uses(vir_sr_descending_t *loop,
     if (depth == 8)
         return false;
     for (vir_use_t *use = value->uses; use; use = use->next) {
-        if (use->user == loop->condition)
+        if (vir_use_user(use) == loop->condition)
             continue;
-        if (value == loop->increment && use->edge == loop->back &&
+        if (value == loop->increment && vir_use_edge(use) == loop->back &&
             use->operand == loop->index)
             continue;
-        vir_value_t *user = use->user;
+        vir_value_t *user = vir_use_user(use);
         if (!user)
             return false;
         if (user->opcode == VIR_OP_PTRADD) {
@@ -3920,7 +4366,7 @@ static bool vir_rebind_operand(vir_value_t *user, int index, vir_value_t *value)
 {
     vir_value_t **slot = index ? &user->op1 : &user->op0;
     vir_use_t *use = (*slot)->uses;
-    while (use && (use->user != user || use->operand != index))
+    while (use && (vir_use_user(use) != user || use->operand != index))
         use = use->next;
     if (!use)
         return false;
@@ -3984,7 +4430,7 @@ int vir_reassociate(vir_function_t *func, vir_opt_level_t opt_level)
             vir_value_t *inner = constant_index ? outer->op0 : outer->op1;
             if (inner->opcode != VIR_OP_ADD || inner->type != outer->type ||
                 inner->block != block || !inner->uses || inner->uses->next ||
-                inner->uses->user != outer)
+                vir_use_user(inner->uses) != outer)
                 continue;
             vir_value_t *local = inner->op0, *ready = inner->op1;
             if (!vir_reassociate_local(local, block)) {
@@ -4129,11 +4575,11 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
         if (unsigned_counter && !descending) {
             bool counter_only = vir_is_constant(limit) && increment->uses &&
                                 !increment->uses->next &&
-                                increment->uses->edge == back &&
+                                vir_use_edge(increment->uses) == back &&
                                 increment->uses->operand == index;
             for (vir_use_t *use = iv->uses; use; use = use->next)
-                counter_only &=
-                    use->user == condition || use->user == increment;
+                counter_only &= vir_use_user(use) == condition ||
+                                vir_use_user(use) == increment;
             if (!counter_only)
                 continue;
         }
@@ -4245,7 +4691,7 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
              (bound - initial->constant) >
                  vir_width_mask(func->pointer_bits) / walk_scale) ||
             !branch->uses || branch->uses->next ||
-            branch->uses->branch_block != header)
+            vir_use_branch_block(branch->uses) != header)
             continue;
         if (unsigned_counter && !descending)
             changed++;
@@ -4274,9 +4720,9 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
             changed = -1;
             goto done;
         }
-        if (iv->uses && !iv->uses->next && iv->uses->user == increment &&
-            increment->uses && !increment->uses->next &&
-            increment->uses->edge == back &&
+        if (iv->uses && !iv->uses->next &&
+            vir_use_user(iv->uses) == increment && increment->uses &&
+            !increment->uses->next && vir_use_edge(increment->uses) == back &&
             increment->uses->operand == index) {
             vir_param_edit_t edit;
             if (!vir_param_edit_prepare(func, header, iv, header->param_count,
@@ -4515,7 +4961,7 @@ static int vir_inline_return_param(vir_function_t *func, vir_block_t *block)
             return -1;
         from->terminator = VIR_TERM_RETURN;
         from->return_value = value;
-        use->return_block = from;
+        vir_use_set_owner(use, VIR_USE_RETURN, from);
         vir_link_use(value, use);
         edge = next;
     }
@@ -4556,7 +5002,7 @@ static bool vir_fold_branch_condition(vir_block_t *block)
             return false;
         operand = operand->op0;
     }
-    for (use = condition->uses; use && use->branch_block != block;
+    for (use = condition->uses; use && vir_use_branch_block(use) != block;
          use = use->next)
         ;
     if (!use)
@@ -5093,7 +5539,7 @@ int vir_licm_with_stats(vir_function_t *func,
             vir_licm_move_value(value->block, preheader, value);
             hoisted++;
             for (use = value->uses; use; use = use->next) {
-                vir_value_t *user = use->user;
+                vir_value_t *user = vir_use_user(use);
                 int user_block;
 
                 if (!user || user->id < 0 || user->id >= value_count)
@@ -5133,35 +5579,38 @@ static bool vir_verify_reverse_uses(const vir_function_t *func,
 {
     const vir_use_t *use;
     for (use = value->uses; use; use = use->next) {
-        if (!!use->user + !!use->edge + !!use->effect + !!use->return_block +
-                !!use->branch_block !=
-            1)
+        if (use->kind < VIR_USE_USER || use->kind > VIR_USE_BRANCH ||
+            !use->owner)
             return 0;
-        if (use->user) {
-            if (!vir_has_value_with_context(func, dominance, use->user) ||
+        if (vir_use_user(use)) {
+            if (!vir_has_value_with_context(func, dominance,
+                                            vir_use_user(use)) ||
                 (use->operand != 0 && use->operand != 1))
                 return 0;
-        } else if (use->edge) {
-            if (vir_dominance_index(dominance, use->edge->from) < 0 ||
-                vir_dominance_index(dominance, use->edge->to) < 0 ||
-                !vir_has_outgoing_edge(use->edge->from, use->edge) ||
-                use->operand < 0 || use->operand >= use->edge->arg_count)
+        } else if (vir_use_edge(use)) {
+            if (vir_dominance_index(dominance, vir_use_edge(use)->from) < 0 ||
+                vir_dominance_index(dominance, vir_use_edge(use)->to) < 0 ||
+                !vir_has_outgoing_edge(vir_use_edge(use)->from,
+                                       vir_use_edge(use)) ||
+                use->operand < 0 ||
+                use->operand >= vir_use_edge(use)->arg_count)
                 return 0;
-        } else if (use->effect) {
-            const vir_effect_t *effect = use->effect;
+        } else if (vir_use_effect(use)) {
+            const vir_effect_t *effect = vir_use_effect(use);
             if (vir_dominance_index(dominance, effect->block) < 0 ||
                 !vir_has_effect(effect->block, effect))
                 return 0;
             if (effect->kind == VIR_EFFECT_CALL) {
                 if (use->operand == -1) {
                     if (effect->callee_value_use != use ||
-                        effect->callee_value_use->effect != effect ||
+                        vir_use_effect(effect->callee_value_use) != effect ||
                         effect->callee_value_use->operand != -1)
                         return 0;
                 } else {
                     if (use->operand < 0 || use->operand >= effect->arg_count ||
                         !effect->args || !effect->arg_uses ||
-                        effect->arg_uses[use->operand].effect != effect ||
+                        vir_use_effect(&effect->arg_uses[use->operand]) !=
+                            effect ||
                         effect->arg_uses[use->operand].operand != use->operand)
                         return 0;
                 }
@@ -5169,12 +5618,13 @@ static bool vir_verify_reverse_uses(const vir_function_t *func,
                 if (use->operand != 0 && use->operand != 1)
                     return 0;
             }
-        } else if (use->return_block) {
-            if (vir_dominance_index(dominance, use->return_block) < 0 ||
-                use->return_block->terminator != VIR_TERM_RETURN)
+        } else if (vir_use_return_block(use)) {
+            if (vir_dominance_index(dominance, vir_use_return_block(use)) < 0 ||
+                vir_use_return_block(use)->terminator != VIR_TERM_RETURN)
                 return 0;
-        } else if (vir_dominance_index(dominance, use->branch_block) < 0 ||
-                   use->branch_block->terminator != VIR_TERM_BRANCH) {
+        } else if (vir_dominance_index(dominance, vir_use_branch_block(use)) <
+                       0 ||
+                   vir_use_branch_block(use)->terminator != VIR_TERM_BRANCH) {
             return 0;
         }
         if (*vir_use_value_slot(use) != value)
@@ -5202,9 +5652,7 @@ static int vir_verify_invalid_order(char **error)
 
 static bool vir_has_no_address_metadata(const vir_value_t *value)
 {
-    return value->address_kind == VIR_ADDRESS_NONE && !value->address_slot &&
-           !value->address_size && !value->address_alignment &&
-           !value->address_name;
+    return !value->addr;
 }
 
 static bool vir_effect_has_call_metadata(const vir_effect_t *effect)
@@ -5217,14 +5665,14 @@ static bool vir_effect_has_call_metadata(const vir_effect_t *effect)
 static bool vir_verify_address_value(const vir_value_t *value)
 {
     if (value->type != VIR_TYPE_PTR || value->constant || value->op0 ||
-        value->op1 || value->def_effect || !value->address_size ||
-        !vir_valid_alignment(value->address_alignment))
+        value->op1 || value->def_effect || !value->addr || !value->addr->size ||
+        !vir_valid_alignment(value->addr->alignment))
         return 0;
     if (value->opcode == VIR_OP_STACK_ADDR)
-        return value->address_kind == VIR_ADDRESS_STACK && !value->address_name;
+        return value->addr->kind == VIR_ADDRESS_STACK && !value->addr->name;
     return value->opcode == VIR_OP_GLOBAL_ADDR &&
-           value->address_kind == VIR_ADDRESS_GLOBAL && !value->address_slot &&
-           value->address_name && *value->address_name;
+           value->addr->kind == VIR_ADDRESS_GLOBAL && !value->addr->slot &&
+           value->addr->name && *value->addr->name;
 }
 
 static bool vir_verify_effect_operand(const vir_function_t *func,
@@ -5235,7 +5683,7 @@ static bool vir_verify_effect_operand(const vir_function_t *func,
                                       int operand)
 {
     return value && vir_has_value_with_context(func, dominance, value) && use &&
-           use->effect == effect && use->operand == operand &&
+           vir_use_effect(use) == effect && use->operand == operand &&
            vir_value_dominates_effect(func, dominance, value, effect) &&
            vir_effect_use_count(value, effect, operand) == 1;
 }
@@ -5314,10 +5762,10 @@ static int vir_verify_block(const vir_function_t *func,
                     return vir_verify_invalid_value(error);
             } else if (value->opcode == VIR_OP_FUNC_ADDR) {
                 if (value->type != VIR_TYPE_PTR || value->def_effect ||
-                    value->constant || value->address_kind ||
-                    value->address_slot || value->address_size ||
-                    value->address_alignment || !value->address_name ||
-                    !*value->address_name)
+                    value->constant || !value->addr || value->addr->kind ||
+                    value->addr->slot || value->addr->size ||
+                    value->addr->alignment || !value->addr->name ||
+                    !*value->addr->name)
                     return vir_verify_invalid_value(error);
             } else if (value->opcode == VIR_OP_RODATA_ADDR) {
                 if (value->type != VIR_TYPE_PTR || value->def_effect)
@@ -5326,9 +5774,9 @@ static int vir_verify_block(const vir_function_t *func,
                        value->opcode == VIR_OP_GLOBAL_ADDR) {
                 if (!vir_verify_address_value(value) ||
                     vir_address_root_conflicts(
-                        func, value->address_kind, value->address_slot,
-                        value->address_name, value->address_size,
-                        value->address_alignment))
+                        func, value->addr->kind, value->addr->slot,
+                        value->addr->name, value->addr->size,
+                        value->addr->alignment))
                     return vir_verify_invalid_value(error);
             } else if ((value->opcode != VIR_OP_LOAD &&
                         value->opcode != VIR_OP_CALL) ||
@@ -5854,17 +6302,18 @@ void vir_ssa_release(vir_ssa_t *ssa)
     free(ssa);
 }
 
-int vir_ssa_write(vir_ssa_t *ssa,
-                  vir_block_t *block,
-                  unsigned int variable,
-                  vir_value_t *value)
+/* The dominance check in vir_ssa_write walks the whole function. A block whose
+ * only predecessor already sees @value is dominated by that value's block, so
+ * forwarding along such an edge skips the walk.
+ */
+int vir_ssa_forward(vir_ssa_t *ssa,
+                    vir_block_t *block,
+                    unsigned int variable,
+                    vir_value_t *value)
 {
     vir_ssa_binding_t *binding;
     if (!ssa || !value || !vir_has_block(ssa->func, block) ||
         !vir_has_value(ssa->func, value))
-        return 0;
-    if (!vir_value_dominates(ssa->func, NULL, value, block,
-                             block->tail ? block->tail->position + 1 : 0))
         return 0;
     binding = vir_ssa_find_binding(ssa, block, variable, NULL);
     if (!binding) {
@@ -5880,6 +6329,19 @@ int vir_ssa_write(vir_ssa_t *ssa,
     }
     binding->value = value;
     return 1;
+}
+
+int vir_ssa_write(vir_ssa_t *ssa,
+                  vir_block_t *block,
+                  unsigned int variable,
+                  vir_value_t *value)
+{
+    if (!ssa || !value || !vir_has_block(ssa->func, block) ||
+        !vir_has_value(ssa->func, value) ||
+        !vir_value_dominates(ssa->func, NULL, value, block,
+                             block->tail ? block->tail->position + 1 : 0))
+        return 0;
+    return vir_ssa_forward(ssa, block, variable, value);
 }
 
 vir_value_t *vir_ssa_read(const vir_ssa_t *ssa,
@@ -5917,7 +6379,7 @@ static vir_value_t *vir_ssa_read_sealed_impl(vir_ssa_t *ssa,
         return NULL;
     value =
         vir_ssa_read_sealed_impl(ssa, block->incoming->from, variable, visited);
-    if (!value || !vir_ssa_write(ssa, block, variable, value))
+    if (!value || !vir_ssa_forward(ssa, block, variable, value))
         return NULL;
     return value;
 }
@@ -6232,15 +6694,12 @@ static void vir_print_value(const vir_value_t *value, FILE *out)
                 vir_type_name(value->type), value->constant);
     else if (value->opcode == VIR_OP_STACK_ADDR)
         fprintf(out, "  %%d%d = stackaddr %u, %u, align %u\n", value->id,
-                value->address_slot, value->address_size,
-                value->address_alignment);
+                value->addr->slot, value->addr->size, value->addr->alignment);
     else if (value->opcode == VIR_OP_GLOBAL_ADDR)
         fprintf(out, "  %%d%d = globaladdr @%s, %u, align %u\n", value->id,
-                value->address_name, value->address_size,
-                value->address_alignment);
+                value->addr->name, value->addr->size, value->addr->alignment);
     else if (value->opcode == VIR_OP_FUNC_ADDR)
-        fprintf(out, "  %%d%d = funcaddr @%s\n", value->id,
-                value->address_name);
+        fprintf(out, "  %%d%d = funcaddr @%s\n", value->id, value->addr->name);
     else if (value->opcode == VIR_OP_RODATA_ADDR)
         fprintf(out, "  %%d%d = rodataaddr %llu\n", value->id, value->constant);
     else if (value->opcode == VIR_OP_LOAD && value->def_effect->address)

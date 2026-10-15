@@ -708,8 +708,16 @@ var_t *require_var(block_t *blk)
     return var;
 }
 
+/* A generated name never matches an identifier, so a temporary just made by
+ * require_var() leaves its scope's lookup list again. Over a hundred thousand
+ * of them would otherwise sit in front of every name lookup.
+ */
 static var_t *name_var(var_t *var)
 {
+    var_list_t *locals = &((block_t *) var->scope)->locals;
+
+    if (locals->size && locals->elements[locals->size - 1] == var)
+        locals->size--;
     var->var_name = gen_name();
     return var;
 }

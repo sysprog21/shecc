@@ -271,6 +271,7 @@ typedef struct {
     int align;             /* for padding, the boundary it pads to */
     int new_start;
     int new_size;
+    int target_edit; /* last edit ending at or before the target, or -1 */
     bool fixed_long; /* the short form did not reach in some layout */
 } x64_edit_t;
 
@@ -3686,10 +3687,8 @@ void plt_generate(void)
     }
 }
 
-/* Where old code offset @p lands once the edits are laid out: shifted by what
- * every edit ending at or before it gained or lost.
- */
-static int x64_relax_newpos(int p)
+/* The last edit ending at or before old code offset @p, or -1. */
+static int x64_relax_edit_before(int p)
 {
     int lo = 0, hi = x64_edit_count - 1, found = -1;
     while (lo <= hi) {
@@ -3700,11 +3699,24 @@ static int x64_relax_newpos(int p)
         } else
             hi = mid - 1;
     }
+    return found;
+}
+
+/* Where old code offset @p lands once the edits are laid out: shifted by what
+ * every edit ending at or before it, up to edit @found, gained or lost.
+ */
+static int x64_relax_shift(int p, int found)
+{
     if (found < 0)
         return p;
     x64_edit_t *edit = &x64_edits[found];
     return p + (edit->new_start + edit->new_size) -
            (edit->start + edit->old_size);
+}
+
+static int x64_relax_newpos(int p)
+{
+    return x64_relax_shift(p, x64_relax_edit_before(p));
 }
 
 /* Lay the edits out front to back: a branch takes the size its current decision
@@ -3745,8 +3757,9 @@ static void x64_relax_converge(void)
             x64_edit_t *edit = &x64_edits[i];
             if (edit->kind < 0 || edit->new_size != 2)
                 continue;
-            int disp = x64_relax_newpos(edit->target->elf_offset) -
-                       (edit->new_start + 2);
+            int disp =
+                x64_relax_shift(edit->target->elf_offset, edit->target_edit) -
+                (edit->new_start + 2);
             if (disp < -128 || disp > 127) {
                 edit->fixed_long = true;
                 changed = true;
@@ -3829,6 +3842,14 @@ static void x64_relax(void)
             x64_call_sites[i].target->elf_offset < 0)
             return;
 
+    /* Old offsets stay put while the layout iterates, so each branch target
+     * falls after the same edit in every round.
+     */
+    for (int i = 0; i < x64_edit_count; i++) {
+        x64_edit_t *edit = &x64_edits[i];
+        if (edit->kind >= 0)
+            edit->target_edit = x64_relax_edit_before(edit->target->elf_offset);
+    }
     for (int round = 0; round < X64_ALIGN_ROUNDS; round++) {
         x64_relax_converge();
         if (!x64_widen_loop_padding())

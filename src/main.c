@@ -9,6 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 /* Define target machine */
 #include "../config"
@@ -100,46 +103,8 @@ char *dot_output_name(char *input)
 }
 
 
-static void check_native_pass(const char *name, int result)
-{
-    if (result < 0) {
-        fprintf(stderr, "VIR %s failed in %s\n", name,
-                fatal_function_context ? fatal_function_context : "globals");
-        fatal("VIR optimization failed");
-    }
-}
-
-static void optimize_native_graph(vir_function_t *graph)
-{
-    vir_opt_level_t level = optimize ? VIR_OPT_O2 : VIR_OPT_O0;
-
-    if (!vir_remove_unreachable(graph))
-        fatal("Invalid VIR reachability");
-    check_native_pass("sccp", vir_sccp(graph, level));
-    check_native_pass("cfg", vir_simplify_cfg(graph, level));
-    check_native_pass("cse", vir_local_cse(graph, level));
-    check_native_pass("gvn", vir_gvn_with_stats(graph, level, NULL));
-    check_native_pass("reassociate", vir_reassociate(graph, level));
-    check_native_pass("licm", vir_licm(graph, level));
-    int strengthened = vir_strength_reduce(graph, level);
-    check_native_pass("strength", strengthened);
-    check_native_pass("cse", vir_local_cse(graph, level));
-    check_native_pass("dce", vir_dce(graph, level));
-    check_native_pass("cfg", vir_simplify_cfg(graph, level));
-    check_native_pass("final-cse", vir_local_cse(graph, level));
-    check_native_pass("final-dce", vir_dce(graph, level));
-    char *error = NULL;
-    if (!vir_verify(graph, &error)) {
-        fprintf(stderr, "Invalid optimized VIR in %s: %s\n",
-                fatal_function_context ? fatal_function_context : "globals",
-                error ? error : "verification failed");
-        free(error);
-        fatal("Invalid optimized VIR");
-    }
-}
-
-/* Functions marked used but not yet optimized. Each enters once, when it is
- * first marked, so reachability costs one visit per function.
+/* Functions marked used but not yet scanned. Each enters once, when it is first
+ * marked, so reachability costs one visit per function.
  */
 static func_t **native_worklist;
 static int native_worklist_count;
@@ -161,7 +126,7 @@ static void mark_native_references(const vir_function_t *graph)
                 mark_native_used(find_func((char *) effect->callee));
         for (const vir_value_t *value = block->head; value; value = value->next)
             if (value->opcode == VIR_OP_FUNC_ADDR)
-                mark_native_used(find_func((char *) value->address_name));
+                mark_native_used(find_func((char *) value->addr->name));
     }
 }
 
@@ -228,7 +193,7 @@ static void compile_native_vir(const char *output)
     vir_function_t *global =
         (vir_function_t *) vir_frontend_function(GLOBAL_FUNC);
     if (global) {
-        optimize_native_graph(global);
+        vir_frontend_optimize(global);
         mark_native_references(global);
     }
     func_t *main_func = find_func("main");
@@ -241,11 +206,8 @@ static void compile_native_vir(const char *output)
     while (native_worklist_count) {
         func_t *func = native_worklist[--native_worklist_count];
         vir_function_t *graph = (vir_function_t *) vir_frontend_function(func);
-        if (!graph)
-            continue;
-        fatal_function_context = func->return_def.var_name;
-        optimize_native_graph(graph);
-        mark_native_references(graph);
+        if (graph)
+            mark_native_references(graph);
     }
     free(native_worklist);
     /* Report the optimized graphs here: lowering releases each one. */
@@ -333,6 +295,17 @@ int main(int argc, char *argv[])
     token_stream_t *libc_token_stream = NULL, *token_stream;
     token_t *input_tokens = NULL, *input_tail = NULL;
     bool has_binding_option = false;
+
+#ifdef __GLIBC__
+    /* glibc maps each large block on its own and hands back the top of the heap
+     * as soon as it is free, so the tens of megabytes of tokens dropped before
+     * parsing go back to the system, and the parser faults in fresh pages for
+     * what it builds in their place. Keeping freed memory for reuse removes two
+     * fifths of the page faults without raising the peak.
+     */
+    mallopt(M_MMAP_THRESHOLD, 16 * 1024 * 1024);
+    mallopt(M_TRIM_THRESHOLD, 64 * 1024 * 1024);
+#endif
 
     inputs = malloc((size_t) argc * sizeof(*inputs));
     if (!inputs)
@@ -481,6 +454,7 @@ int main(int argc, char *argv[])
 
     /* Finalize graphs after all declarations and initializers are known. */
     vir_frontend_finish_globals();
+    release_parse_blocks();
     compile_native_vir(out);
     if (dump_dot) {
         vir_frontend_release();
@@ -501,7 +475,14 @@ int main(int argc, char *argv[])
     /* Compact after CFG flattening - BB and GENERAL no longer needed */
     compact_arenas_selective(COMPACT_ARENA_BB | COMPACT_ARENA_GENERAL);
 
-
+    /* Lowering was the last reader of variables and scopes: the machine
+     * operations carry registers, offsets and interned names, and functions and
+     * types live in GENERAL_ARENA.
+     *
+     * Return them and every spare block before the backend and the ELF writer
+     * start allocating.
+     */
+    release_block_arena();
 
     /* ELF preprocess:
      * 1. generate all sections except for .text section.

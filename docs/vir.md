@@ -25,9 +25,10 @@ flowchart TD
     C --> V --> O --> L --> P --> T --> E --> ELF
 ```
 
-The compiler verifies each graph after optimization, before dumps or machine
-lowering; a graph that nothing references is released unverified. At O0, the
-compiler skips optional transformations but still verifies.
+The compiler optimizes and verifies each function's graph as soon as the
+function is parsed, then copies the live graph into a compact arena; the global
+initializer graph follows at the end of parsing. At O0, the compiler skips
+optional transformations but still verifies.
 
 VIR owns values, control flow, and ordered effects. The shared lowerer assigns
 physical registers, resolves edge copies, handles ABI boundaries, and allocates
@@ -242,8 +243,8 @@ their existing target-specific behavior.
 ## Optimization and verification
 
 Frontend completion always seals SSA bindings and removes unreachable blocks.
-Every graph that is dumped or lowered is verified after optimization, including
-at O0; a graph that nothing references is released unverified.
+Every graph is verified after optimization, including at O0, whether or not
+anything references it.
 
 The compiler invokes these passes in order. Sparse conditional constant
 propagation (SCCP) combines constant propagation with reachability analysis.
@@ -304,7 +305,8 @@ already supplied `-L`.
 | Native frontend and sealed SSA construction | `src/vir-frontend.c`, `src/vir-frontend.h` |
 | Shared ABI lowering, register allocation, and spills | `src/vir-lower.c`, `src/vir-lower.h` |
 | Machine emission | `src/arm-codegen.c`, `src/arm64-codegen.c`, `src/riscv-codegen.c`, `src/x64-codegen.c` |
-| Pass scheduling, reachability, dumps, and graph lifetime | `src/main.c` |
+| Pass scheduling and graph compaction | `src/vir-frontend.c` |
+| Reachability, dumps, and graph lifetime | `src/main.c` |
 | Core and frontend fixtures | `tests/vir-core.c`, `tests/vir-frontend-*.c`, and their manifests |
 | Native execution and graph quality harnesses | `tests/vir-direct-*.sh`, `tests/vir-qualifiers.sh` |
 | Aggregate and bootstrap gates | `Makefile` targets beginning with `check-vir` |

@@ -1,7 +1,7 @@
-# -fwrapv is required, not probed: hashmap_hash_index() carries the FNV-1a
+# -fwrapv is required, not probed: hashmap_hash() carries the FNV-1a
 # accumulator in a signed int, because shecc has no 'unsigned' to compile
 # itself with, and the multiply there overflows by design.
-CFLAGS := -O -g \
+CFLAGS := -O2 -g \
 	-std=c99 -pedantic -fwrapv
 
 # Every -Wno- that used to sit here has been earned away rather than renewed:

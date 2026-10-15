@@ -190,6 +190,29 @@ typedef struct native_function {
 } native_function_t;
 static native_function_t *native_functions;
 
+/* Block, source, parameter, load and store records only serve while a function
+ * is being built. The function being parsed takes them from one scratch arena,
+ * rewound by native_finish, so that over ten megabytes of them do not outlive
+ * their graphs. Any other context, the global one included, keeps using the
+ * general arena.
+ */
+static arena_t *native_scratch;
+static arena_mark_t native_scratch_empty;
+static native_function_t *native_scratch_owner;
+
+static arena_t *native_arena(native_function_t *ctx)
+{
+    if (ctx->source == GLOBAL_FUNC || ctx->finished ||
+        (native_scratch_owner && native_scratch_owner != ctx))
+        return GENERAL_ARENA;
+    if (!native_scratch) {
+        native_scratch = arena_init(DEFAULT_ARENA_SIZE);
+        native_scratch_empty = arena_mark(native_scratch);
+    }
+    native_scratch_owner = ctx;
+    return native_scratch;
+}
+
 static void native_require(bool ok, const char *operation)
 {
     if (!ok) {
@@ -250,11 +273,11 @@ static native_block_t *native_block(native_function_t *ctx,
     if (index >= 0 && index < ctx->block_count &&
         ctx->block_table[index]->cursor == cursor)
         return ctx->block_table[index];
-    node = arena_calloc(GENERAL_ARENA, 1, sizeof(*node));
+    node = arena_calloc(native_arena(ctx), 1, sizeof(*node));
     if (ctx->block_count >= ctx->block_capacity)
-        ctx->block_table = arena_grow(GENERAL_ARENA, (char *) ctx->block_table,
-                                      &ctx->block_capacity,
-                                      sizeof(*ctx->block_table), 8, 0, NULL);
+        ctx->block_table = arena_grow(
+            native_arena(ctx), (char *) ctx->block_table, &ctx->block_capacity,
+            sizeof(*ctx->block_table), 8, 0, NULL);
     ctx->block_table[ctx->block_count++] = node;
     cursor->vir_map_id = ctx->block_count;
     node->cursor = cursor;
@@ -276,9 +299,9 @@ static unsigned int native_source(native_function_t *ctx, var_t *var)
         return index;
     if ((int) ctx->source_count >= ctx->source_capacity)
         ctx->source_table = arena_grow(
-            GENERAL_ARENA, (char *) ctx->source_table, &ctx->source_capacity,
-            sizeof(*ctx->source_table), 16, 0, NULL);
-    source = arena_alloc(GENERAL_ARENA, sizeof(*source));
+            native_arena(ctx), (char *) ctx->source_table,
+            &ctx->source_capacity, sizeof(*ctx->source_table), 16, 0, NULL);
+    source = arena_alloc(native_arena(ctx), sizeof(*source));
     source->object = var;
     source->id = ctx->source_count++;
     source->type = native_type(var);
@@ -460,7 +483,7 @@ static vir_value_t *native_predeclare(native_function_t *ctx,
     vir_value_t *value =
         vir_ssa_predeclare(ctx->ssa, cursor->vir, native_source(ctx, var),
                            native_source_info(ctx, var)->type);
-    native_param_t *param = arena_alloc(GENERAL_ARENA, sizeof(*param));
+    native_param_t *param = arena_alloc(native_arena(ctx), sizeof(*param));
     native_require(value != NULL, "source parameter");
     param->cursor = cursor;
     param->object = var;
@@ -510,7 +533,7 @@ static vir_value_t *native_read(native_function_t *ctx,
                     ? vir_volatile_load(&ctx->graph, block, address, type)
                     : vir_load(&ctx->graph, block, address, type);
         if (!native_memory(ctx, var)) {
-            native_load_t *load = arena_alloc(GENERAL_ARENA, sizeof(*load));
+            native_load_t *load = arena_alloc(native_arena(ctx), sizeof(*load));
             id = native_source(ctx, var);
             load->ssa_value = vir_ssa_read(ctx->ssa, block, id);
             if (!load->ssa_value)
@@ -583,7 +606,8 @@ static void native_write(native_function_t *ctx,
                 : vir_store(&ctx->graph, block, address, stored);
         native_require(effect != NULL, "object assignment");
         if (!native_memory(ctx, var)) {
-            native_store_t *store = arena_alloc(GENERAL_ARENA, sizeof(*store));
+            native_store_t *store =
+                arena_alloc(native_arena(ctx), sizeof(*store));
             store->object = var;
             store->effect = effect;
             store->next = ctx->stores;
@@ -934,6 +958,39 @@ static vir_value_t *native_incoming(native_function_t *ctx,
     native_require(value != NULL, "incoming block argument");
     return value;
 }
+
+/* The value @var has where @cursor ends, once every predecessor is known. A
+ * block with one predecessor and no binding of its own ends with whatever that
+ * predecessor ends with, so such a chain is walked up to a block that decides,
+ * and the answer is bound in each block on the way instead of a parameter: on a
+ * self-compile seven in ten of the parameters completion would otherwise
+ * declare are in such blocks. Every block the walk visits is registered, so a
+ * walk taking more steps than there are registered blocks has gone round a
+ * cycle no entry reaches, and the parameter goes at @cursor instead.
+ */
+static vir_value_t *native_incoming_complete(native_function_t *ctx,
+                                             basic_block_t *cursor,
+                                             var_t *var)
+{
+    unsigned int id = native_source(ctx, var);
+    basic_block_t *top = cursor;
+    int steps = 0;
+    while (top != ctx->source->bbs && top->prev_idx == 1 && top->prev[0].bb &&
+           !vir_ssa_read(ctx->ssa, native_block(ctx, top)->cursor->vir, id)) {
+        top = top->prev[0].bb;
+        if (++steps > ctx->block_count) {
+            top = cursor;
+            break;
+        }
+    }
+    vir_value_t *value = native_incoming(ctx, top, var);
+    for (basic_block_t *bb = cursor; bb != top; bb = bb->prev[0].bb)
+        native_require(
+            vir_ssa_forward(ctx->ssa, native_block(ctx, bb)->cursor->vir, id,
+                            value),
+            "incoming chain binding");
+    return value;
+}
 static void native_complete_bindings(native_function_t *ctx)
 {
     for (native_param_t *param = ctx->params; param; param = param->next)
@@ -947,7 +1004,8 @@ static void native_complete_bindings(native_function_t *ctx)
             basic_block_t *cursor = param->cursor;
             for (int p = 0; p < cursor->prev_idx; p++)
                 if (cursor->prev[p].bb) {
-                    native_incoming(ctx, cursor->prev[p].bb, param->object);
+                    native_incoming_complete(ctx, cursor->prev[p].bb,
+                                             param->object);
                 }
         }
         completed = batch;
@@ -958,18 +1016,27 @@ static void native_finish(native_function_t *ctx)
     if (ctx->finished)
         return;
     native_flush_call(ctx, NULL);
-    for (native_root_t *root = ctx->roots; root; root = root->next) {
-        for (vir_block_t *block = ctx->graph.blocks; block; block = block->next)
-            for (vir_value_t *value = block->head; value; value = value->next)
-                if ((value->opcode == VIR_OP_STACK_ADDR &&
-                     !root->object->is_global &&
-                     value->address_slot == root->slot) ||
-                    (value->opcode == VIR_OP_GLOBAL_ADDR &&
-                     root->object->is_global &&
-                     !strcmp(value->address_name, root->symbol)))
-                    value->address_size =
-                        native_storage_size(ctx, root->object);
-    }
+
+    /* Each address takes the size of the object its root names, the last root
+     * to match when several do. Visiting the roots only for addresses keeps
+     * this linear in the function's values.
+     */
+    for (vir_block_t *block = ctx->graph.blocks; block; block = block->next)
+        for (vir_value_t *value = block->head; value; value = value->next) {
+            if (value->opcode != VIR_OP_STACK_ADDR &&
+                value->opcode != VIR_OP_GLOBAL_ADDR)
+                continue;
+            native_root_t *match = NULL;
+            for (native_root_t *root = ctx->roots; root; root = root->next)
+                if (value->opcode == VIR_OP_STACK_ADDR
+                        ? !root->object->is_global &&
+                              value->addr->slot == root->slot
+                        : root->object->is_global &&
+                              !strcmp(value->addr->name, root->symbol))
+                    match = root;
+            if (match)
+                value->addr->size = native_storage_size(ctx, match->object);
+        }
     for (native_source_t *source = ctx->sources; source;
          source = source->next) {
         if (!native_memory(ctx, source->object) ||
@@ -1037,18 +1104,32 @@ static void native_finish(native_function_t *ctx)
                            "unused local storage");
     native_require(vir_remove_unreachable(&ctx->graph), "CFG reachability");
 
-    /* No vir_verify here. Every graph that is dumped, drawn or lowered first
-     * passes through optimize_native_graph() in main.c, which verifies the
-     * optimized result; a frontend defect survives the passes into that check.
-     * Graphs of unreferenced functions are released unlowered, so checking them
-     * too bought nothing but a second full verification of every function,
-     * about 8% of a self-compile.
+    /* No vir_verify here. Every graph first passes through
+     * vir_frontend_optimize(), which verifies the optimized result; a frontend
+     * defect survives the passes into that check, and checking here too would
+     * cost a second full verification of every function, about 8% of a
+     * self-compile.
      *
      * Variable bindings only matter while the graph is being built.
      */
     vir_ssa_release(ctx->ssa);
     ctx->ssa = NULL;
     ctx->finished = true;
+    if (native_scratch_owner == ctx) {
+        native_require(arena_rewind(native_scratch, native_scratch_empty),
+                       "scratch release");
+        native_scratch_owner = NULL;
+        ctx->blocks = ctx->last_block = NULL;
+        ctx->block_table = NULL;
+        ctx->block_count = ctx->block_capacity = 0;
+        ctx->sources = NULL;
+        ctx->source_table = NULL;
+        ctx->source_count = 0;
+        ctx->source_capacity = 0;
+        ctx->params = NULL;
+        ctx->loads = NULL;
+        ctx->stores = NULL;
+    }
 }
 void vir_frontend_begin(func_t *func)
 {
@@ -1092,9 +1173,60 @@ void vir_frontend_begin(func_t *func)
     ctx->signature.param_count = ctx->signature.fixed_param_count = count;
     ctx->signature.is_variadic = func->va_args;
 }
+static void check_native_pass(const char *name, int result)
+{
+    if (result < 0) {
+        fprintf(stderr, "VIR %s failed in %s\n", name,
+                fatal_function_context ? fatal_function_context : "globals");
+        fatal("VIR optimization failed");
+    }
+}
+
+void vir_frontend_optimize(vir_function_t *graph)
+{
+    vir_opt_level_t level = optimize ? VIR_OPT_O2 : VIR_OPT_O0;
+
+    if (!vir_remove_unreachable(graph))
+        fatal("Invalid VIR reachability");
+    check_native_pass("sccp", vir_sccp(graph, level));
+    check_native_pass("cfg", vir_simplify_cfg(graph, level));
+    check_native_pass("cse", vir_local_cse(graph, level));
+    check_native_pass("gvn", vir_gvn_with_stats(graph, level, NULL));
+    check_native_pass("reassociate", vir_reassociate(graph, level));
+    check_native_pass("licm", vir_licm(graph, level));
+    int strengthened = vir_strength_reduce(graph, level);
+    check_native_pass("strength", strengthened);
+    check_native_pass("cse", vir_local_cse(graph, level));
+    check_native_pass("dce", vir_dce(graph, level));
+    check_native_pass("cfg", vir_simplify_cfg(graph, level));
+    check_native_pass("final-cse", vir_local_cse(graph, level));
+    check_native_pass("final-dce", vir_dce(graph, level));
+    char *error = NULL;
+    if (!vir_verify(graph, &error)) {
+        fprintf(stderr, "Invalid optimized VIR in %s: %s\n",
+                fatal_function_context ? fatal_function_context : "globals",
+                error ? error : "verification failed");
+        free(error);
+        fatal("Invalid optimized VIR");
+    }
+}
+
+/* A finished function is optimized and compacted at once; only the global
+ * initializer graph waits for the end of parsing. Promotion and the passes
+ * leave most of what they allocated unreachable, and only the copy gives that
+ * memory back. Reachability is still decided from the optimized graphs after
+ * parsing, so a function never called is optimized for nothing.
+ */
 void vir_frontend_end(func_t *func)
 {
-    native_finish(native_context(func));
+    native_function_t *ctx = native_context(func);
+    char *context = fatal_function_context;
+
+    native_finish(ctx);
+    fatal_function_context = func->return_def.var_name;
+    vir_frontend_optimize(&ctx->graph);
+    fatal_function_context = context;
+    native_require(vir_function_compact(&ctx->graph), "graph compaction");
 }
 void vir_frontend_note_edge(basic_block_t *pred, basic_block_t *succ)
 {

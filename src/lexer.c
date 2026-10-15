@@ -156,8 +156,8 @@ char trigraph_char_at(strbuf_t *buf, int pos)
 {
     char third;
 
-    if (buf->plain_source || pos + 2 >= buf->capacity ||
-        buf->elements[pos] != '?' || buf->elements[pos + 1] != '?')
+    if (pos + 2 >= buf->capacity || buf->elements[pos] != '?' ||
+        buf->elements[pos + 1] != '?')
         return '\0';
     third = buf->elements[pos + 2];
     switch (third) {
@@ -206,8 +206,6 @@ int skip_splices(strbuf_t *buf, int pos)
 {
     int width;
 
-    if (buf->plain_source)
-        return pos;
     while (pos < buf->capacity) {
         width = source_char_width(buf, pos);
         if (source_char_at(buf, pos) != '\\' ||
@@ -218,18 +216,33 @@ int skip_splices(strbuf_t *buf, int pos)
     return pos;
 }
 
+/* Where the next "??" or backslash-newline at or after @pos starts, or the end
+ * of @buf. Either may begin a trigraph or a splice; a "??" that turns out not
+ * to be one only costs the slow path a character early.
+ */
+static int next_phase_mark(strbuf_t *buf, int pos)
+{
+    for (; pos + 1 < buf->capacity; pos++) {
+        char c = buf->elements[pos];
+
+        if ((c == '?' && buf->elements[pos + 1] == '?') ||
+            (c == '\\' && buf->elements[pos + 1] == '\n'))
+            return pos;
+    }
+    return buf->capacity;
+}
+
+/* Translation phases 1 and 2 are the identity below @plain_end, so the
+ * per-character readers index the bytes directly there and only step through
+ * trigraphs and splices near one. The read cursor never moves backwards, so a
+ * mark found once stays ahead of it until the cursor passes it.
+ */
 char peek_char(strbuf_t *buf, int offset)
 {
     int pos = buf->size;
 
-    if (buf->plain_source) {
-        if (pos < buf->capacity) {
-            pos += offset;
-            if (pos > buf->capacity)
-                pos = buf->capacity;
-        }
-        return pos >= buf->capacity ? '\0' : buf->elements[pos];
-    }
+    if (pos + offset < buf->plain_end)
+        return buf->elements[pos + offset];
 
     pos = skip_splices(buf, pos);
 
@@ -244,11 +257,9 @@ char read_char(strbuf_t *buf)
 {
     int pos = buf->size;
 
-    if (buf->plain_source) {
-        if (pos + 1 >= buf->capacity)
-            return buf->elements[buf->capacity - 1];
+    if (pos + 1 < buf->plain_end) {
         buf->size = pos + 1;
-        return buf->elements[buf->size];
+        return buf->elements[pos + 1];
     }
 
     pos = skip_splices(buf, pos);
@@ -257,26 +268,9 @@ char read_char(strbuf_t *buf)
         return source_char_at(buf, buf->capacity - 1);
     pos += source_char_width(buf, pos);
     buf->size = skip_splices(buf, pos);
+    if (buf->size >= buf->plain_end)
+        buf->plain_end = next_phase_mark(buf, buf->size);
     return source_char_at(buf, buf->size);
-}
-
-/* Translation phases 1 and 2 are the identity on a source with no "??" and no
- * backslash-newline, which is nearly every file. Check that once per buffer so
- * the per-character readers above can index its bytes directly instead of
- * testing each position for a trigraph and a splice.
- */
-void classify_plain_source(strbuf_t *buf)
-{
-    buf->plain_source = true;
-    for (int i = 0; i + 1 < buf->capacity; i++) {
-        char c = buf->elements[i];
-
-        if ((c == '?' && buf->elements[i + 1] == '?') ||
-            (c == '\\' && buf->elements[i + 1] == '\n')) {
-            buf->plain_source = false;
-            return;
-        }
-    }
 }
 
 /* Fill @dst with @len bytes of @f, returning how many arrived.
@@ -1215,7 +1209,8 @@ token_t *lex_token(strbuf_t *buf, source_location_t *loc)
     token_t *token;
     char ch;
 
-    while (source_char_at(buf, buf->size) == '\\' &&
+    while (buf->size >= buf->plain_end &&
+           source_char_at(buf, buf->size) == '\\' &&
            source_char_at(buf, buf->size + source_char_width(buf, buf->size)) ==
                '\n') {
         buf->size += source_char_width(buf, buf->size) + 1;
@@ -1396,7 +1391,7 @@ token_stream_t *gen_file_token_stream(char *filename)
         return tks;
 
     buf = get_file_buf(filename);
-    classify_plain_source(buf);
+    buf->plain_end = next_phase_mark(buf, 0);
 
     /* Borrows strbuf_t#size to use as source index */
     buf->size = 0;
@@ -1453,7 +1448,7 @@ token_stream_t *gen_libc_token_stream(void)
     if (!buf->size || buf->elements[buf->size - 1])
         strbuf_putc(buf, 0);
     buf->capacity = buf->size;
-    classify_plain_source(buf);
+    buf->plain_end = next_phase_mark(buf, 0);
 
     /* Borrows strbuf_t#size to use as source index */
     buf->size = 0;

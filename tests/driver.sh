@@ -24116,6 +24116,24 @@ end:
 }
 EOF
 
+# Loops of labels no entry reaches. Each block there has one predecessor, so
+# resolving a variable along single-predecessor chains must stop at the cycle.
+try_ 3 << EOF
+int g;
+int main()
+{
+    int x = 3;
+    goto out;
+a:
+    goto b;
+b:
+    if (g)
+        goto a;
+out:
+    return x;
+}
+EOF
+
 # Simple loop
 try_ 10 << EOF
 int main()

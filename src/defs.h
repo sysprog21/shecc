@@ -224,6 +224,7 @@ bool arena_rewind(arena_t *arena, arena_mark_t mark);
 typedef struct hashmap_node {
     char *key;
     void *val;
+    int hash; /* hashmap_hash() of key, so a probe compares strings rarely */
     bool occupied;
     bool owns_key;
 } hashmap_node_t;
@@ -508,6 +509,7 @@ typedef struct var_list {
 
 struct var {
     type_t *type;
+
     /* Lexical owner, used while parsing declarator constant expressions. */
     void *scope;
 
@@ -524,26 +526,80 @@ struct var {
      * merged object/function tables. NULL for names emitted as-is.
      */
     char *source_name;
-    int ptr_level;
-    bool is_func;
-    bool is_function_designator;
 
     /* A pointer-to-callback object is not callable itself. Its compact callback
      * pointee signature is restored only after one dereference.
      */
     void *pointee_func_signature;
+    struct var *compound_literal_address;
 
-    /* Set only for the unparenthesized `result name(parameters)` spelling.
-     * Block typedef support uses it to keep direct function aliases distinct
-     * from the older parenthesized pointer-to-function declarator path.
+    /* A non-NULL field means the reference is a bit-field and must use the
+     * mask-and-merge store path rather than a byte/word OP_write.
      */
-    bool is_direct_function_declarator;
+    struct var *compound_literal_bitfield;
+
+    /* A function-pointer declarator owns a prototype separately from its value
+     * type. Keeping this syntax-only object lets an indirect call use the same
+     * argument lowering as a direct call (notably record-by-value arguments)
+     * without putting function ABI details into type_t. Kept void-typed so the
+     * self-hosted parser does not need an incomplete `struct func` declaration
+     * while reading var_t itself. parser.c owns the cast back to func_t.
+     */
+    void *func_signature;
+    int ptr_level;
 
     /* The parenthesized callback spelling `int (*name)(int)` is distinct from a
      * direct function declarator. Block typedef lowering uses this count to
      * admit exactly one pointer layer as a callback-pointer alias.
      */
     int parenthesized_function_pointer_level;
+
+    /* One bit per pointer level, counted from the base type. The legacy
+     * is_const_pointer flag describes only the outermost level; this retains
+     * qualifiers on intermediate pointers such as `int * const *`.
+     */
+    unsigned int pointer_const_mask;
+    unsigned int pointer_volatile_mask;
+    int array_size;
+    int array_dim2; /* second dimension size for multidimensional arrays */
+    int array_dim3; /* third dimension size for multidimensional arrays */
+    int array_dim4; /* fourth dimension size for multidimensional arrays */
+
+    /* Bounds of the array addressed by a parenthesized pointer declarator, e.g.
+     * `int (*row)[2]`. They describe the pointee, not this pointer-sized
+     * object, so they must never participate in size_var().
+     */
+    int pointee_array_size;
+    int pointee_array_dim2;
+    int pointee_array_dim3;
+    int pointee_array_dim4;
+
+    /* Pointer depth of one element in the array described above. This
+     * distinguishes `int (*p)[2]` from `int *(*p)[2]`: both address rows, but
+     * the latter's row elements are pointers.
+     */
+    int pointee_array_element_ptr_level;
+    int offset; /* offset from stack or frame, index 0 is reserved */
+    int vir_source_index;
+    int bit_width;
+    int bit_offset;
+    int bit_storage_size;
+    int init_val;    /* for global initialization */
+    int init_val_hi; /* upper word of an 8-byte integer constant */
+
+    /* For the address of a static object in a constant initializer, the bytes
+     * one integer step moves it by, so `1 + array` advances as `array + 1`
+     * does; 0 where no such step is known.
+     */
+    int address_stride;
+    bool is_func;
+    bool is_function_designator;
+
+    /* Set only for the unparenthesized `result name(parameters)` spelling.
+     * Block typedef support uses it to keep direct function aliases distinct
+     * from the older parenthesized pointer-to-function declarator path.
+     */
+    bool is_direct_function_declarator;
     bool parenthesized_function_pointer_const;
     bool parenthesized_function_pointer_restrict;
 
@@ -581,51 +637,21 @@ struct var {
     bool is_volatile;        /* declaration used the volatile qualifier */
     bool is_volatile_access; /* computed address designates volatile storage */
     bool is_const_pointer;   /* true for the outermost `* const` qualifier */
-    /* One bit per pointer level, counted from the base type. The legacy
-     * is_const_pointer flag describes only the outermost level; this retains
-     * qualifiers on intermediate pointers such as `int * const *`.
-     */
-    unsigned int pointer_const_mask;
-    unsigned int pointer_volatile_mask;
-    bool address_taken; /* true if variable address was taken (&var) */
-    int array_size;
+    bool address_taken;      /* true if variable address was taken (&var) */
     bool has_direct_array_declarator;
     bool has_unsized_array; /* `T name[]`: bound is supplied by initializer */
+
     /* `T member[]` at the end of a struct has no initializer-supplied bound and
      * contributes no bytes to the record's fixed layout.
      */
     bool is_flexible_array_member;
-    int array_dim2; /* second dimension size for multidimensional arrays */
-    int array_dim3; /* third dimension size for multidimensional arrays */
-    int array_dim4; /* fourth dimension size for multidimensional arrays */
-    /* Bounds of the array addressed by a parenthesized pointer declarator, e.g.
-     * `int (*row)[2]`. They describe the pointee, not this pointer-sized
-     * object, so they must never participate in size_var().
-     */
-    int pointee_array_size;
     bool has_direct_pointee_array_declarator;
-    int pointee_array_dim2;
-    int pointee_array_dim3;
-    int pointee_array_dim4;
-
-    /* Pointer depth of one element in the array described above. This
-     * distinguishes `int (*p)[2]` from `int *(*p)[2]`: both address rows, but
-     * the latter's row elements are pointers.
-     */
-    int pointee_array_element_ptr_level;
-    int offset; /* offset from stack or frame, index 0 is reserved */
-    int vir_source_index;
 
     /* Record bit-field metadata. `offset` is the containing storage unit's byte
      * offset. `is_bitfield` distinguishes an ordinary member from the valid
      * unnamed zero-width field used as an allocation-unit barrier.
      */
     bool is_bitfield;
-    int bit_width;
-    int bit_offset;
-    int bit_storage_size;
-    int init_val;    /* for global initialization */
-    int init_val_hi; /* upper word of an 8-byte integer constant */
     bool is_ternary_ret;
     bool is_logical_ret;
     bool is_const; /* whether a constant representaion or not */
@@ -651,7 +677,6 @@ struct var {
      * object rather than the temporary.
      */
     bool is_compound_literal_reference;
-    struct var *compound_literal_address;
 
     /* A record value with no storage of its own: its bytes are those of the
      * object at compound_literal_address. A member selection or address-of uses
@@ -659,22 +684,11 @@ struct var {
      */
     bool defers_record_copy;
 
-    /* A non-NULL field means the reference is a bit-field and must use the
-     * mask-and-merge store path rather than a byte/word OP_write.
-     */
-    struct var *compound_literal_bitfield;
-
     /* String literals have immutable storage duration in C. Preserve that
      * provenance separately from the pointer type so the compatibility warning
      * can remain opt-in while legacy source still compiles.
      */
     bool is_string_literal;
-
-    /* For the address of a static object in a constant initializer, the bytes
-     * one integer step moves it by, so `1 + array` advances as `array + 1`
-     * does; 0 where no such step is known.
-     */
-    int address_stride;
 
     /* The null pointer constant `(void *) 0` (C99 6.3.2.3p3), which unlike any
      * other void pointer converts to a function pointer.
@@ -693,15 +707,6 @@ struct var {
      * first bytes of the string as an address.
      */
     bool is_func_name_array_address;
-
-    /* A function-pointer declarator owns a prototype separately from its value
-     * type. Keeping this syntax-only object lets an indirect call use the same
-     * argument lowering as a direct call (notably record-by-value arguments)
-     * without putting function ABI details into type_t. Kept void-typed so the
-     * self-hosted parser does not need an incomplete `struct func` declaration
-     * while reading var_t itself. parser.c owns the cast back to func_t.
-     */
-    void *func_signature;
 
     /* C ABI lowering passes record parameters as pointers to caller-owned
      * copies. The source-level declaration remains a record so field access and
@@ -758,15 +763,15 @@ typedef struct basic_block basic_block_t;
  * @size: Current number of elements in the array
  * @capacity: Number of elements that can be stored without resizing
  * @elements: Pointer to the array of characters
- * @plain_source: set by the lexer once it has checked that a source buffer has
- *                no trigraph and no line splice, so phases 1 and 2 are the
- *                identity on it
+ * @plain_end: the lexer's mark of the next possible trigraph or line splice,
+ *             so phases 1 and 2 are the identity from its read cursor, which
+ *             it keeps in @size, up to it
  */
 typedef struct {
     int size;
     int capacity;
     char *elements;
-    bool plain_source;
+    int plain_end;
 } strbuf_t;
 
 /* An allocated machine operation, defined with VIR's machine layer in

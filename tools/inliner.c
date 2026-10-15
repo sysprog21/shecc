@@ -94,7 +94,7 @@ bool strbuf_puts(strbuf_t *src, char *value)
     if (!strbuf_extend(src, len))
         return false;
 
-    strncpy(src->elements + src->size, value, len);
+    memcpy(src->elements + src->size, value, len);
     src->size += len;
 
     return true;

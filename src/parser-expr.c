@@ -2284,8 +2284,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
      */
     bool has_prev_log_op = false;
     opcode_t prev_log_op = 0, pprev_log_op = 0;
-    basic_block_t *log_and_shared_bb = bb_create(parent),
-                  *log_or_shared_bb = bb_create(parent);
+    basic_block_t *log_and_shared_bb = NULL, *log_or_shared_bb = NULL;
 
     read_expr_operand(parent, bb);
 
@@ -2293,6 +2292,11 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
     if (op == OP_generic || op == OP_ternary)
         return;
     if (is_logical(op)) {
+        /* Most expressions have no logical operator, so the shared blocks are
+         * created on the first one.
+         */
+        log_and_shared_bb = bb_create(parent);
+        log_or_shared_bb = bb_create(parent);
         bb_connect(*bb, op == OP_log_and ? log_and_shared_bb : log_or_shared_bb,
                    op == OP_log_and ? ELSE : THEN);
         read_logical(op, parent, bb);
@@ -2328,6 +2332,10 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
             } while (oper_stack_idx > 0 && same == 0);
         }
         if (is_logical(op)) {
+            if (!log_and_shared_bb) {
+                log_and_shared_bb = bb_create(parent);
+                log_or_shared_bb = bb_create(parent);
+            }
             if (prev_log_op == 0 || prev_log_op == op) {
                 bb_connect(
                     *bb,
@@ -3614,7 +3622,7 @@ void finalize_logical(opcode_t op,
                       basic_block_t **bb,
                       basic_block_t *shared_bb)
 {
-    basic_block_t *then, *then_next, *else_if, *else_bb;
+    basic_block_t *then, *then_next = NULL, *else_if, *else_bb;
     basic_block_t *end = bb_create(parent);
     var_t *vd, *log_op_res;
 

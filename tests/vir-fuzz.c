@@ -109,7 +109,7 @@ int main(void)
         assert(vir_verify(&func, &error));
 
         use = values[1]->uses;
-        while (use && !use->user)
+        while (use && !vir_use_user(use))
             use = use->next;
         assert(use);
         old_operand = use->operand;
@@ -119,33 +119,33 @@ int main(void)
         assert(vir_verify(&func, &error));
 
         use = values[16]->uses;
-        while (use && !use->edge)
+        while (use && !vir_use_edge(use))
             use = use->next;
         assert(use);
-        old_edge = use->edge;
-        use->edge = NULL;
+        old_edge = vir_use_edge(use);
+        vir_use_set_owner(use, VIR_USE_EDGE, NULL);
         assert(!vir_verify(&func, &error));
-        use->edge = old_edge;
+        vir_use_set_owner(use, VIR_USE_EDGE, old_edge);
         assert(vir_verify(&func, &error));
 
         use = values[16]->uses;
-        while (use && !use->return_block)
+        while (use && !vir_use_return_block(use))
             use = use->next;
         assert(use);
-        old_return_block = use->return_block;
-        use->return_block = NULL;
+        old_return_block = vir_use_return_block(use);
+        vir_use_set_owner(use, VIR_USE_RETURN, NULL);
         assert(!vir_verify(&func, &error));
-        use->return_block = old_return_block;
+        vir_use_set_owner(use, VIR_USE_RETURN, old_return_block);
         assert(vir_verify(&func, &error));
 
         use = alternate_condition->uses;
-        while (use && !use->branch_block)
+        while (use && !vir_use_branch_block(use))
             use = use->next;
         assert(use);
-        old_branch_block = use->branch_block;
-        use->branch_block = NULL;
+        old_branch_block = vir_use_branch_block(use);
+        vir_use_set_owner(use, VIR_USE_BRANCH, NULL);
         assert(!vir_verify(&func, &error));
-        use->branch_block = old_branch_block;
+        vir_use_set_owner(use, VIR_USE_BRANCH, old_branch_block);
         assert(vir_verify(&func, &error));
         vir_function_release(&func);
     }

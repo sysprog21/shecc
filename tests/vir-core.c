@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void test_constant_edge_threading(void)
@@ -587,8 +588,101 @@ static void test_incoming_load_reuse(void)
     }
 }
 
+static char *print_graph(const vir_function_t *f)
+{
+    FILE *out = tmpfile();
+    long length;
+    char *text;
+
+    assert(out);
+    vir_print(f, out);
+    length = ftell(out);
+    text = malloc((size_t) length + 1);
+    assert(text);
+    rewind(out);
+    assert(fread(text, 1, (size_t) length, out) == (size_t) length);
+    text[length] = 0;
+    fclose(out);
+    return text;
+}
+
+/* Compaction copies the live graph: printing, verification and every use list
+ * must come out unchanged.
+ */
+static void test_compaction(void)
+{
+    vir_function_t f;
+    char *error = NULL, *before, *after;
+    vir_use_owner_t kinds[16];
+    int operands[16], count = 0, i;
+
+    vir_function_init(&f, 64);
+    assert(vir_function_set_pointer_bits(&f, 64));
+    vir_block_t *entry = vir_block_create(&f);
+    vir_block_t *merge = vir_block_create(&f);
+    vir_block_t *other = vir_block_create(&f);
+    vir_value_t *input = vir_block_add_param(&f, entry, VIR_TYPE_I32);
+    vir_value_t *merged = vir_block_add_param(&f, merge, VIR_TYPE_I32);
+    vir_value_t *slot = vir_stack_addr(&f, entry, 3, 8, 4);
+    vir_value_t *global = vir_global_addr(&f, entry, "table", 16, 8);
+    vir_value_t *callee = vir_function_addr(&f, entry, "helper");
+    vir_value_t *one = vir_const_i32(&f, entry, 1);
+    vir_value_t *dead = vir_add(&f, entry, input, one);
+    vir_value_t *sum = vir_add(&f, entry, input, one);
+    vir_value_t *args[2] = {sum, input};
+    vir_call_abi_type_t params[2] = {{VIR_TYPE_I32, false, false},
+                                     {VIR_TYPE_I32, true, false}};
+    vir_call_signature_t signature = {0};
+    vir_effect_t *call;
+
+    assert(dead && vir_store(&f, entry, slot, sum));
+    assert(vir_store(&f, entry, global, input));
+    call = vir_call(&f, entry, "helper", args, 2, VIR_TYPE_I32);
+    signature.result.type = VIR_TYPE_I32;
+    signature.params = params;
+    signature.param_count = signature.fixed_param_count = 2;
+    signature.va_start_slot = (unsigned int) -1;
+    assert(call && vir_call_set_signature(&f, call, &signature));
+    assert(vir_call_indirect(&f, entry, callee, args, 1, VIR_TYPE_VOID));
+    vir_value_t *loaded = vir_load(&f, entry, slot, VIR_TYPE_I32);
+    vir_value_t *condition = vir_eq(&f, entry, loaded, call->result);
+    vir_value_t *edge_args[1] = {sum};
+    vir_edge_args_t yes = {merge, edge_args, 1};
+    vir_edge_args_t no = {other, NULL, 0};
+    assert(vir_block_set_branch(&f, entry, condition, &yes, &no));
+    assert(vir_block_set_return(&f, merge, merged));
+    assert(vir_block_set_return(&f, other, sum));
+    assert(vir_dce(&f, VIR_OPT_O1) > 0);
+    assert(vir_verify(&f, &error));
+    for (vir_use_t *use = sum->uses; use; use = use->next) {
+        kinds[count] = use->kind;
+        operands[count++] = use->operand;
+    }
+    before = print_graph(&f);
+    assert(vir_function_compact(&f));
+    after = print_graph(&f);
+    assert(!strcmp(before, after));
+    assert(vir_verify(&f, &error));
+    sum = NULL;
+    for (vir_value_t *value = f.blocks->head; value; value = value->next)
+        if (value->opcode == VIR_OP_ADD)
+            sum = value;
+    assert(sum);
+    i = 0;
+    for (vir_use_t *use = sum->uses; use; use = use->next, i++)
+        assert(i < count && use->kind == kinds[i] &&
+               use->operand == operands[i]);
+    assert(i == count);
+    assert(vir_dce(&f, VIR_OPT_O1) == 0 && vir_local_cse(&f, VIR_OPT_O1) == 0);
+    assert(vir_verify(&f, &error));
+    free(before);
+    free(after);
+    vir_function_release(&f);
+}
+
 int main(void)
 {
+    test_compaction();
     test_incoming_load_reuse();
     test_constant_edge_threading();
     test_pointer_add_scheduling();
@@ -768,8 +862,8 @@ int main(void)
     assert(vir_edge_redirect(&func, pointer_left->outgoing, otherwise));
     assert(pointer_left->outgoing->to == otherwise &&
            pointer_left->outgoing->args[0] == one && one->uses &&
-           one->uses->edge == pointer_left->outgoing && !one->uses->next &&
-           vir_verify(&func, &error));
+           vir_use_edge(one->uses) == pointer_left->outgoing &&
+           !one->uses->next && vir_verify(&func, &error));
     vir_block_t *pointer_split = vir_edge_split(&func, pointer_left->outgoing);
     assert(pointer_split && pointer_split->param_count == 1 &&
            pointer_split->params->type == VIR_TYPE_PTR &&
@@ -777,9 +871,10 @@ int main(void)
            pointer_left->outgoing->args[0] == one &&
            pointer_split->outgoing->to == otherwise &&
            pointer_split->outgoing->args[0] == pointer_split->params &&
-           one->uses && one->uses->edge == pointer_left->outgoing &&
+           one->uses && vir_use_edge(one->uses) == pointer_left->outgoing &&
            pointer_split->params->uses &&
-           pointer_split->params->uses->edge == pointer_split->outgoing &&
+           vir_use_edge(pointer_split->params->uses) ==
+               pointer_split->outgoing &&
            vir_verify(&func, &error));
     vir_function_release(&func);
 
@@ -1073,9 +1168,9 @@ int main(void)
     assert(vir_block_set_return(&func, entry, one));
     assert(vir_verify(&func, &error));
     assert(vir_remove_unreachable(&func));
-    assert(!param->uses && one->uses && one->uses->return_block == entry &&
-           !one->uses->next && !sum->uses && !product->uses &&
-           vir_verify(&func, &error));
+    assert(!param->uses && one->uses &&
+           vir_use_return_block(one->uses) == entry && !one->uses->next &&
+           !sum->uses && !product->uses && vir_verify(&func, &error));
     vir_function_release(&func);
 
     vir_function_init(&func, 64);
@@ -1191,7 +1286,7 @@ int main(void)
     assert(vir_remove_unreachable(&func));
     vir_collect_stats(&func, &stats);
     assert(stats.blocks == 2 && stats.values == 1 && one->uses &&
-           one->uses->return_block == merge && !one->uses->next);
+           vir_use_return_block(one->uses) == merge && !one->uses->next);
     vir_block_t *after_remove = vir_block_create(&func);
     product = vir_const_i32(&func, after_remove, 2);
     assert(after_remove->id == 3 && product->id > sum->id &&
@@ -1727,9 +1822,9 @@ int main(void)
     assert(!vir_stack_addr(&func, entry, 0, 4, 3));
     assert(!vir_global_addr(&func, entry, "", 4, 4));
     param = vir_stack_addr(&func, entry, 7, 12, 4);
-    assert(param && param->address_kind == VIR_ADDRESS_STACK &&
-           param->address_slot == 7 && param->address_size == 12 &&
-           param->address_alignment == 4);
+    assert(param && param->addr->kind == VIR_ADDRESS_STACK &&
+           param->addr->slot == 7 && param->addr->size == 12 &&
+           param->addr->alignment == 4);
     func.arena.fail_after = 0;
     assert(!vir_stack_addr(&func, entry, 8, 4, 4));
     assert(entry->tail == param && !param->next);
@@ -1750,9 +1845,9 @@ int main(void)
         one = vir_global_addr(&func, entry, name, 8, 8);
         name[0] = 'X';
     }
-    assert(one && one->address_kind == VIR_ADDRESS_GLOBAL &&
-           !strcmp(one->address_name, "object") && one->address_size == 8 &&
-           one->address_alignment == 8);
+    assert(one && one->addr->kind == VIR_ADDRESS_GLOBAL &&
+           !strcmp(one->addr->name, "object") && one->addr->size == 8 &&
+           one->addr->alignment == 8);
     global_duplicate = vir_global_addr(&func, entry, "object", 8, 8);
     assert(global_duplicate);
     assert(!vir_global_addr(&func, entry, "object", 4, 4));
@@ -1763,18 +1858,18 @@ int main(void)
     product = vir_load(&func, entry, sum, VIR_TYPE_I32);
     assert(effect && product && vir_block_set_return(&func, entry, product));
     assert(vir_verify(&func, &error));
-    one->address_alignment = 3;
+    one->addr->alignment = 3;
     assert(!vir_verify(&func, &error));
-    one->address_alignment = 8;
-    stack_duplicate->address_alignment = 8;
+    one->addr->alignment = 8;
+    stack_duplicate->addr->alignment = 8;
     assert(!vir_verify(&func, &error));
-    stack_duplicate->address_alignment = 4;
-    global_duplicate->address_size = 4;
+    stack_duplicate->addr->alignment = 4;
+    global_duplicate->addr->size = 4;
     assert(!vir_verify(&func, &error));
-    global_duplicate->address_size = 8;
-    two->address_kind = VIR_ADDRESS_STACK;
+    global_duplicate->addr->size = 8;
+    two->addr = param->addr;
     assert(!vir_verify(&func, &error));
-    two->address_kind = VIR_ADDRESS_NONE;
+    two->addr = NULL;
     assert(vir_verify(&func, &error));
     out = tmpfile();
     assert(out);
@@ -2888,7 +2983,8 @@ int main(void)
     product = vir_block_add_param(&func, entry, VIR_TYPE_I64);
     param = vir_const_i32(&func, entry, 1);
     two = vir_shl(&func, entry, product, param);
-    assert(product && param && two && param->uses && param->uses->user == two);
+    assert(product && param && two && param->uses &&
+           vir_use_user(param->uses) == two);
     {
         vir_use_t *shift_count_use = param->uses;
 
