@@ -1190,6 +1190,7 @@ void vir_frontend_optimize(vir_function_t *graph)
         fatal("Invalid VIR reachability");
     check_native_pass("sccp", vir_sccp(graph, level));
     check_native_pass("cfg", vir_simplify_cfg(graph, level));
+    check_native_pass("params", vir_simplify_params(graph, level));
     check_native_pass("cse", vir_local_cse(graph, level));
     check_native_pass("gvn", vir_gvn_with_stats(graph, level, NULL));
     check_native_pass("reassociate", vir_reassociate(graph, level));

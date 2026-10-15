@@ -4073,32 +4073,46 @@ static bool vir_dominance_init(const vir_function_t *func,
     return true;
 }
 
-/* Drop loop-invariant and forwarding parameters without source SSA bindings. */
+/* The one value @param, the @index-th parameter of @block, receives on every
+ * incoming edge apart from itself, or NULL when the edges disagree.
+ */
+static vir_value_t *vir_param_trivial_value(const vir_block_t *block,
+                                            const vir_value_t *param,
+                                            int index)
+{
+    vir_value_t *candidate = NULL;
+
+    for (vir_edge_t *edge = block->incoming; edge; edge = edge->next_incoming) {
+        vir_value_t *value = edge->args[index];
+        if (value == param)
+            continue;
+        if (candidate && candidate != value)
+            return NULL;
+        candidate = value;
+    }
+    return candidate;
+}
+
+/* Drop loop-invariant and forwarding parameters without source SSA bindings.
+ * The entry block's parameters are the function's arguments, whose caller
+ * supplies a value no edge shows, so they always stay.
+ */
 static int vir_simplify_params_with_context(vir_function_t *func,
                                             const vir_dominance_t *dominance)
 {
     int changed = 0, previous;
     do {
         previous = changed;
-        for (vir_block_t *block = func->blocks; block; block = block->next) {
+        for (vir_block_t *block = func->blocks->next; block;
+             block = block->next) {
             int index = 0;
             for (vir_value_t *param = block->params, *next; param;
                  param = next) {
-                vir_value_t *candidate = NULL;
-                bool trivial = true;
+                vir_value_t *candidate =
+                    vir_param_trivial_value(block, param, index);
                 next = param->param_next;
-                for (vir_edge_t *edge = block->incoming; edge;
-                     edge = edge->next_incoming) {
-                    vir_value_t *value = edge->args[index];
-                    if (value == param)
-                        continue;
-                    if (candidate && candidate != value)
-                        trivial = false;
-                    candidate = value;
-                }
-                if (!trivial || !candidate ||
-                    !vir_replacement_dominates_with_context(func, dominance,
-                                                            param, candidate)) {
+                if (!candidate || !vir_replacement_dominates_with_context(
+                                      func, dominance, param, candidate)) {
                     index++;
                     continue;
                 }
@@ -4114,6 +4128,32 @@ static int vir_simplify_params_with_context(vir_function_t *func,
             }
         }
     } while (changed != previous);
+    return changed;
+}
+
+/* Dominance is built only once some parameter has a single incoming value. */
+int vir_simplify_params(vir_function_t *func, vir_opt_level_t opt_level)
+{
+    vir_dominance_t dominance;
+    int changed;
+
+    if (!func || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level == VIR_OPT_O0 || !func->blocks)
+        return 0;
+    for (vir_block_t *block = func->blocks->next; block; block = block->next) {
+        int index = 0;
+        for (vir_value_t *param = block->params; param;
+             param = param->param_next, index++)
+            if (vir_param_trivial_value(block, param, index))
+                goto simplify;
+    }
+    return 0;
+simplify:
+    if (!vir_dominance_init(func, &dominance))
+        return -1;
+    changed = vir_simplify_params_with_context(func, &dominance);
+    vir_dominance_release(&dominance);
     return changed;
 }
 
@@ -5036,6 +5076,22 @@ static bool vir_fold_branch_condition(vir_block_t *block)
     return true;
 }
 
+/* A branch whose two edges reach the same block with the same arguments goes
+ * there either way, so it is a jump, and DCE can drop its condition.
+ */
+static int vir_fold_same_target_branch(vir_function_t *func, vir_block_t *block)
+{
+    vir_edge_t *taken = block->true_edge, *other = block->false_edge;
+
+    if (block->terminator != VIR_TERM_BRANCH || taken->to != other->to ||
+        taken->arg_count != other->arg_count)
+        return 0;
+    for (int i = 0; i < taken->arg_count; i++)
+        if (taken->args[i] != other->args[i])
+            return 0;
+    return vir_edge_delete(func, other) ? 1 : -1;
+}
+
 /* An incoming constant can select a branch without materializing its boolean
  * parameter. Keep the bypassed computations local and successors argument-free.
  */
@@ -5117,6 +5173,14 @@ int vir_simplify_cfg_with_pruning(vir_function_t *func,
             vir_block_t *target;
             int inlined;
 
+            /* Folding only drops an edge, so the scan can go on in place. */
+            inlined = vir_fold_same_target_branch(func, block);
+            if (inlined < 0)
+                return -1;
+            if (inlined) {
+                changes++;
+                changed = true;
+            }
             inlined = vir_thread_constant_edge(func, block);
             if (!inlined)
                 inlined = vir_inline_return_param(func, block);

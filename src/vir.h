@@ -406,16 +406,25 @@ int vir_remove_unreachable(vir_function_t *func);
 int vir_function_block_count(const vir_function_t *func);
 
 /* At O1/O2, bypass empty jump blocks and local branches selected by constant
- * incoming arguments. The regular helper also drops newly unreachable blocks;
- * the explicit helper can defer that deletion for a caller that must run
- * another pass on the rewritten topology. Branch threading excludes effects and
- * successor arguments. A deferred caller must prune before lowering (and before
- * any final reachability-sensitive verification).
+ * incoming arguments, and turn a branch whose arms reach one block with the
+ * same arguments into a jump. The regular helper also drops newly unreachable
+ * blocks; the explicit helper can defer that deletion for a caller that must
+ * run another pass on the rewritten topology. Branch threading excludes effects
+ * and successor arguments. A deferred caller must prune before lowering (and
+ * before any final reachability-sensitive verification).
  */
 int vir_simplify_cfg(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_simplify_cfg_with_pruning(vir_function_t *func,
                                   vir_opt_level_t opt_level,
                                   bool prune_unreachable);
+
+/* At O1/O2, replace each block parameter that receives one value on every edge,
+ * or itself on a back edge, by that value. The entry block's parameters are the
+ * function's arguments and stay. A loop-invariant input otherwise reaches CSE,
+ * GVN and LICM as a value defined inside the loop. The CFG is unchanged.
+ */
+int vir_simplify_params(vir_function_t *func, vir_opt_level_t opt_level);
+
 int vir_block_set_branch(vir_function_t *func,
                          vir_block_t *block,
                          vir_value_t *condition,
