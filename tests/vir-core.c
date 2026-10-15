@@ -2631,7 +2631,8 @@ int main(void)
     vir_function_release(&func);
 
     /* CFG simplification redirects each predecessor through an empty jump
-     * block, preserves a duplicate branch target, and removes the forwarder.
+     * block, which leaves both branch arms on one target, collapses that branch
+     * into a jump, and removes the forwarders.
      */
     vir_function_init(&func, 64);
     entry = vir_block_create(&func);
@@ -2651,11 +2652,47 @@ int main(void)
                                     &cfg_false_desc));
         assert(vir_simplify_cfg(&func, VIR_OPT_O0) == 0);
         assert(vir_simplify_cfg(&func, VIR_OPT_O1) > 0 &&
-               entry->true_edge->to == dead && entry->false_edge->to == dead &&
+               entry->terminator == VIR_TERM_JUMP && entry->outgoing &&
+               entry->outgoing->to == dead && !entry->outgoing->next_outgoing &&
                func.blocks == entry && entry->next == dead && !dead->next);
     }
     assert(vir_verify(&func, &error));
     vir_function_release(&func);
+
+    /* Both arms on one target fold to a jump only when they also pass the same
+     * arguments; different arguments still select a value and stay a branch.
+     */
+    for (int same = 0; same < 2; same++) {
+        vir_function_init(&func, 64);
+        entry = vir_block_create(&func);
+        merge = vir_block_create(&func);
+        entry_param = vir_block_add_param(&func, entry, VIR_TYPE_I1);
+        one = vir_const_i32(&func, entry, 1);
+        two = vir_const_i32(&func, entry, 2);
+        param = vir_block_add_param(&func, merge, VIR_TYPE_I32);
+        vir_edge_args_t arm_true = {merge, &one, 1};
+        vir_edge_args_t arm_false = {merge, same ? &one : &two, 1};
+
+        assert(entry && merge && entry_param && one && two && param &&
+               vir_block_set_branch(&func, entry, entry_param, &arm_true,
+                                    &arm_false) &&
+               vir_block_set_return(&func, merge, param));
+
+        /* The folded jump then feeds a block that only returns its parameter,
+         * so CFG simplification goes on to return the value from the entry.
+         */
+        if (same)
+            assert(vir_simplify_cfg(&func, VIR_OPT_O2) > 0 &&
+                   entry->terminator == VIR_TERM_RETURN &&
+                   entry->return_value == one && !entry_param->uses);
+        else
+            assert(vir_simplify_cfg(&func, VIR_OPT_O2) == 0 &&
+                   entry->terminator == VIR_TERM_BRANCH &&
+                   entry->true_edge->args[0] == one &&
+                   entry->false_edge->args[0] == two);
+        assert(vir_verify(&func, &error));
+        vir_function_release(&func);
+    }
 
     /* Branches on promoted booleans preserve polarity and reverse-use links. */
     for (int width = 0; width < 2; width++) {

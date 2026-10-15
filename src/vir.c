@@ -5076,6 +5076,22 @@ static bool vir_fold_branch_condition(vir_block_t *block)
     return true;
 }
 
+/* A branch whose two edges reach the same block with the same arguments goes
+ * there either way, so it is a jump, and DCE can drop its condition.
+ */
+static int vir_fold_same_target_branch(vir_function_t *func, vir_block_t *block)
+{
+    vir_edge_t *taken = block->true_edge, *other = block->false_edge;
+
+    if (block->terminator != VIR_TERM_BRANCH || taken->to != other->to ||
+        taken->arg_count != other->arg_count)
+        return 0;
+    for (int i = 0; i < taken->arg_count; i++)
+        if (taken->args[i] != other->args[i])
+            return 0;
+    return vir_edge_delete(func, other) ? 1 : -1;
+}
+
 /* An incoming constant can select a branch without materializing its boolean
  * parameter. Keep the bypassed computations local and successors argument-free.
  */
@@ -5157,6 +5173,14 @@ int vir_simplify_cfg_with_pruning(vir_function_t *func,
             vir_block_t *target;
             int inlined;
 
+            /* Folding only drops an edge, so the scan can go on in place. */
+            inlined = vir_fold_same_target_branch(func, block);
+            if (inlined < 0)
+                return -1;
+            if (inlined) {
+                changes++;
+                changed = true;
+            }
             inlined = vir_thread_constant_edge(func, block);
             if (!inlined)
                 inlined = vir_inline_return_param(func, block);
