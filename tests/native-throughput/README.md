@@ -30,70 +30,40 @@ and system load. Build/runtime failure writes `failure.json` and returns nonzero
 completed results remain available. Results describe these seven synthetic
 workloads on the measured host.
 
-## Native measurements
+## Latest results
 
-October 6, 2026: nine rounds of eight executions on each host; all 1,022 checksum
-executions passed per host. Results below are throughput relative to GCC `-O1`.
-ARM64: native eMag, Linux 6.8, GCC 13.3, CPU 31, performance governor restored
-after measurement. x86-64: Ryzen Threadripper 2990WX, Linux 6.8, GCC 14.2,
-CPU 63, unchanged schedutil governor.
+Native x86-64: AMD Ryzen Threadripper 2990WX, Linux 6.8, GCC 14.2.0
+`-O1 -fwrapv`, CPU 63, unchanged schedutil governor, nine rotating rounds of
+eight executions after warmup, `--target 1`. Every checksum execution passed and
+the source/compiler/binary SHA256 checks were unchanged. Throughput is GCC time
+divided by shecc time; values above 1 favor shecc.
 
-| Workload | ARM64 wall | ARM64 CPU | x86-64 wall | x86-64 CPU |
-| --- | ---: | ---: | ---: | ---: |
-| rng | 83.74% | 83.41% | 80.74% | 80.28% |
-| branch | 92.50% | 92.35% | 91.89% | 91.66% |
-| pointer | 89.34% | 88.83% | 82.83% | 81.33% |
-| recursion | 89.88% | 89.69% | 92.93% | 92.71% |
-| calls | 87.47% | 86.12% | 101.52% | 101.83% |
-| sort | 81.52% | 81.28% | 86.57% | 86.48% |
-| indexed | 89.29% | 88.85% | 99.67% | 99.73% |
+| Workload | Wall | Child CPU |
+| --- | ---: | ---: |
+| rng | 150.09x | 265.18x |
+| branch | 0.97x | 0.97x |
+| pointer | 1.41x | 1.48x |
+| recursion | 1.18x | 1.19x |
+| calls | 1.00x | 1.00x |
+| sort | 1.11x | 1.11x |
+| indexed | 1.00x | 1.00x |
 
-## Essential VIR optimizations: October 16, 2026
-
-The compiler now summarizes proven finite affine arithmetic loops, eliminates
-direct/additive tail recursion, inlines bounded pure leaves, and lowers
-power-of-two integer multiplication/division/remainder. The working-tree
-compiler saved before these changes includes the earlier bitwise normalization.
-Both comparisons used the unchanged seven workload sources, GCC 14.2.0
-`-O1 -fwrapv`, Linux 6.8, CPU 63, and the existing schedutil governor. Nine
-rotating rounds of eight executions followed warmup; each comparison passed
-1,022 full checksum executions and its source/compiler/binary immutability check.
-
-Throughput is GCC time divided by shecc time; values above 1 favor shecc.
-
-| Workload | Before: wall | After: wall | After: child CPU |
-| --- | ---: | ---: | ---: |
-| rng | 1.0002x | 148.7932x | 262.9735x |
-| branch | 0.9539x | 0.9541x | 0.9528x |
-| pointer | 1.0036x | 1.0080x | 1.0084x |
-| recursion | 0.9845x | 1.1926x | 1.2008x |
-| calls | 0.9995x | 1.0023x | 1.0022x |
-| sort | 0.9775x | 0.9767x | 0.9763x |
-| indexed | 1.0029x | 0.9998x | 1.0001x |
-
-The wall geometric mean rose from 0.9887x to 2.0775x; the new child-CPU geometric
-mean is 2.2554x. The RNG result is driven by eliminating its entire constant-trip,
-effect-free affine loop: its process time becomes startup dominated. Recursion
-improves by 1.21x relative to the previous compiler and reaches 1.19x GCC's wall
-throughput. The other workloads remain close to their previous performance.
-
-The strict `--target 1` gate passes four of seven workloads, so both commands
-below return status 1 for the unmet per-workload target. Branch and sort remain
-below GCC, and indexed wall throughput is within 0.03% of parity. The geometric
-mean is descriptive and does not replace the existing per-workload gate.
+The wall geometric mean is 2.23x and the child-CPU geometric mean 2.43x. RNG's
+constant-trip, effect-free affine loop is summarized away, so its process time
+is startup dominated. Five of seven workloads meet the strict per-workload
+target; branch stays below GCC and calls is at parity, so the command returns
+status 1. The geometric mean is descriptive and does not replace the gate.
 
 ```sh
-# Save the baseline compiler before applying the optimization changes.
-cp out/shecc out/shecc-before-essential
-# Build/check the updated compiler, then measure serially without build/test jobs.
-python3 tests/native-throughput.py --shecc out/shecc-before-essential \
-    --output out/essential-baseline-final --rounds 9 --runs 8 --target 1
 python3 tests/native-throughput.py --shecc out/shecc \
-    --output out/essential-final --rounds 9 --runs 8 --target 1
+    --output out/throughput --rounds 9 --runs 8 --target 1
 ```
 
-Each output directory contains `results.json`, commands, environment, raw samples,
-and SHA256 provenance. Use fresh output directories for another measurement.
+To compare two compilers, save the baseline binary before rebuilding and run
+the same command against each, serially and without concurrent build or test
+jobs. Each output directory contains `results.json`, commands, environment, raw
+samples, and SHA256 provenance. Use fresh output directories for another
+measurement. Replace this section with the newest run rather than appending.
 
 ## Compilation time
 
@@ -118,7 +88,8 @@ throughput measurements above. Results depend on the input and native host.
 
 ### Profiling compilation with uftrace
 
-Build a separate instrumented host compiler after configuring the native target.
+Build a separate instrumented host compiler after `make` for the native target:
+`src/main.c` includes the generated `config` and `out/libc.inc`.
 Use a shallow trace to find expensive phases, then restrict recording to a hot
 function. Disabling host inlining exposes helper call counts but increases tracing
 overhead; instrumented timings are for attribution, not speedup claims.
@@ -138,36 +109,8 @@ uftrace record --no-libcall -F vir_dce_with_stats -D 4 \
 uftrace report -d out/uftrace-compile/dce -s self --color=no
 ```
 
-October 16, 2026, uftrace 0.15, native x86-64: the detailed self-compilation
-trace identified repeated use-list dispatch and effect scans in pointer-address
-scheduling, plus unconditional rebuilding of block positions during DCE. The
-updated scheduler keeps a forward effect-barrier cursor, skips operand-use scans
-when no motion is possible, and resolves each candidate value user directly.
-Use accessors dispatch once on the owner tag, and DCE repairs positions only in
-blocks it changes. Volatile accesses, calls, and stores retain their ordering.
-
-On the same frozen compiler source, the DCE trace records 51,014 calls to
-`vir_use_block` instead of 1,312,819, 49,219 calls to `vir_use_order` instead of
-542,664, and 26,017 position repairs instead of 191,852. These are helper counts
-inside DCE, not whole-compilation counts. Both traces run 4,296 DCE invocations
-and 95,920 block scheduling visits.
-
-An uninstrumented comparison on CPU 63 used a frozen copy of `src`, `config`,
-and `out/libc.inc`, two warmup rounds, then 20 alternating before/after rounds.
-The host governor was unchanged. Median wall time fell from 0.5415 s to 0.5221 s
-(1.0371x throughput, 3.58% less time); median child CPU time fell from 0.5412 s
-to 0.5218 s (1.0371x). Every pair produced byte-identical ELF output. Compiler
-and complete frozen-input SHA256 checks passed before/after measurement. These
-results describe native self-compilation on this host, not all compilation
-workloads. The raw samples and profiles stayed in the gitignored `out/` tree and
-are not part of the repository; rerun the commands above to reproduce them.
-This comparison isolates the DCE and scheduling changes: its baseline already
-contained the other optimizations described in this file, unlike the throughput
-table above, whose baseline predates them.
-
-Validation passed `make ARCH=x64 USE_QEMU=0 check` and
-`make ARCH=x64 USE_QEMU=0 check-vir-core check-vir-sanitizer`, including both
-3,075-test compiler stages, 341 corpus programs, and 200 differential fuzz seeds.
-A scheduling regression exercises multiple ordinary-load/volatile-store groups
-and repeated DCE. Each address is used only after every group, so the volatile
-store alone must stop it; removing the barrier check makes the test fail.
+Compare an optimization by self-compiling a frozen copy of `src`, `config`, and
+`out/libc.inc` with the before and after compilers, alternating rounds after
+warmup, and require byte-identical ELF output from every pair. Prefer
+instruction counts (`perf stat -e instructions:u`) over wall time on a loaded
+host.
