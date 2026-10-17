@@ -3148,18 +3148,30 @@ void emit_mop(vir_mop_t *mop)
             reg_mirror_size[mop->dest] = load_width(mop);
             reg_mirror_sext[mop->dest] = false;
         } else if (mop->op == OP_store) {
+            /* A load elided into src0_override leaves its value in another
+             * register, which is the one this store writes and which mirrors
+             * the slot afterwards; the IR source never received it.
+             */
+            int stored = mop->src0;
+            if (stored >= 0 && stored < REG_CNT && rs1 != map_ir_reg(stored)) {
+                stored = -1;
+                for (int i = 0; i < REG_CNT; i++)
+                    if (map_ir_reg(i) == rs1)
+                        stored = i;
+            }
+
             /* Storing a register into the slot it already mirrors writes the
              * bytes that are there. Coalescing a phi with its operand makes
              * this common: the value's own write-back and the phi's copy become
              * the same store.
              */
-            if (mop->src0 >= 0 && mop->src0 < REG_CNT && !mop->is_volatile &&
-                reg_mirror_valid[mop->src0] &&
-                reg_mirror_slot[mop->src0] == mop->src1) {
+            if (stored >= 0 && stored < REG_CNT && !mop->is_volatile &&
+                reg_mirror_valid[stored] &&
+                reg_mirror_slot[stored] == mop->src1) {
                 int keep = mop->size_bytes;
                 if (mop->is_pointer && keep != PTR_SIZE)
                     keep = PTR_SIZE;
-                if (reg_mirror_size[mop->src0] == keep)
+                if (reg_mirror_size[stored] == keep)
                     return;
             }
 
@@ -3177,15 +3189,15 @@ void emit_mop(vir_mop_t *mop)
              * slot sign-extends what was written -- which the sext flag
              * records, so the reload becomes a MOVSX rather than a copy.
              */
-            if (mop->src0 >= 0 && mop->src0 < REG_CNT) {
+            if (stored >= 0 && stored < REG_CNT) {
                 int eff = mop->size_bytes;
                 if (mop->is_pointer && eff != PTR_SIZE)
                     eff = PTR_SIZE;
                 if (eff == 1 || eff == 2 || eff == 4 || eff == 8) {
-                    reg_mirror_valid[mop->src0] = true;
-                    reg_mirror_slot[mop->src0] = mop->src1;
-                    reg_mirror_size[mop->src0] = eff;
-                    reg_mirror_sext[mop->src0] = eff < 8;
+                    reg_mirror_valid[stored] = true;
+                    reg_mirror_slot[stored] = mop->src1;
+                    reg_mirror_size[stored] = eff;
+                    reg_mirror_sext[stored] = eff < 8;
                 }
             }
         }
