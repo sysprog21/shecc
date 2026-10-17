@@ -2798,7 +2798,11 @@ __noreturn void error_at(char *msg, source_location_t *loc)
     len = loc->len;
     pos = loc->pos;
 
-    strbuf_t *src = hashmap_get(SRC_FILE_MAP, loc->filename);
+    /* The buffer is keyed by the physical path, which #line leaves alone, and
+     * @pos indexes it; the message names the logical file.
+     */
+    strbuf_t *src =
+        loc->file ? hashmap_get(SRC_FILE_MAP, loc->file->physical) : NULL;
 
     /* The source text is no longer on hand, which changes what can be shown and
      * not what went wrong: still a mistake in the input, so still an exit
@@ -2813,8 +2817,8 @@ __noreturn void error_at(char *msg, source_location_t *loc)
     if (len < 1)
         len = 1;
 
-    printf("%s:%d:%d: [Error]: %s\n", loc->filename, loc->line, loc->column,
-           msg);
+    printf("%s:%d:%d: [Error]: %s\n", loc->file->logical, loc->line,
+           loc->column, msg);
     printf("%6d |  ", loc->line);
 
     /* Finds line's start position */

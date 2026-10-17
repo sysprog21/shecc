@@ -1358,6 +1358,17 @@ static char *normalize_filename(const char *filename)
     return intern_string(path);
 }
 
+/* A file record naming @physical, reported as @logical. It outlives the token
+ * arenas, which compaction retires while the copied tokens still point here.
+ */
+source_file_t *new_source_file(char *physical, char *logical)
+{
+    source_file_t *file = arena_alloc(GENERAL_ARENA, sizeof(source_file_t));
+    file->physical = physical;
+    file->logical = logical;
+    return file;
+}
+
 static token_stream_t *cache_token_stream(char *filename,
                                           token_t *head,
                                           token_t *tail)
@@ -1381,7 +1392,7 @@ token_stream_t *gen_file_token_stream(char *filename)
      * set to 1.
      */
     filename = normalize_filename(filename);
-    source_location_t loc = {0, 1, 1, 1, filename, filename};
+    source_location_t loc = {0, 1, 1, 1, NULL};
     strbuf_t *buf;
 
     tks = hashmap_get(TOKEN_CACHE, filename);
@@ -1389,6 +1400,7 @@ token_stream_t *gen_file_token_stream(char *filename)
     /* Already cached, just return the computed token stream */
     if (tks)
         return tks;
+    loc.file = new_source_file(filename, filename);
 
     buf = get_file_buf(filename);
     buf->plain_end = next_phase_mark(buf, 0);
@@ -1426,12 +1438,13 @@ token_stream_t *gen_libc_token_stream(void)
     token_stream_t *tks;
     char *filename = dynlink ? "lib/c.h" : "lib/c.c";
     strbuf_t *buf = LIBC_SRC;
-    source_location_t loc = {0, 1, 1, 1, filename, filename};
+    source_location_t loc = {0, 1, 1, 1, NULL};
 
     tks = hashmap_get(TOKEN_CACHE, filename);
 
     if (tks)
         return tks;
+    loc.file = new_source_file(filename, filename);
 
     if (!hashmap_contains(SRC_FILE_MAP, filename))
         hashmap_put_borrowed(SRC_FILE_MAP, filename, LIBC_SRC);
