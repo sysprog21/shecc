@@ -107,6 +107,14 @@ type_t *TY_long_double;
 /* BLOCK_ARENA is responsible for block_t / var_t allocation */
 arena_t *BLOCK_ARENA;
 
+/* TEMP_VAR_ARENA holds the generated temporaries of the function being parsed.
+ * Nothing reads them once its graph is built, so it is rewound to
+ * temp_var_empty after each function; they were most of the variables a
+ * self-compile kept alive until the end.
+ */
+arena_t *TEMP_VAR_ARENA;
+arena_mark_t temp_var_empty;
+
 /* BB_ARENA is responsible for basic_block_t / vir_mop_t allocation */
 arena_t *BB_ARENA;
 
@@ -467,6 +475,13 @@ bool arena_rewind(arena_t *arena, arena_mark_t mark)
     }
     arena->head->offset = mark.offset;
     return true;
+}
+
+/* Drop the temporaries of the function just finished; see TEMP_VAR_ARENA. */
+void release_function_temporaries(void)
+{
+    if (!arena_rewind(TEMP_VAR_ARENA, temp_var_empty))
+        fatal("Cannot release function temporaries");
 }
 
 /* arena_alloc() plus explicit zero‑initialization.
@@ -2399,6 +2414,8 @@ void global_init(void)
     BLOCK_ARENA = arena_init(DEFAULT_ARENA_SIZE); /* Variables/blocks */
     BB_ARENA = arena_init(SMALL_ARENA_SIZE);      /* Basic blocks - low usage */
     TOKEN_ARENA = arena_init(LARGE_ARENA_SIZE);
+    TEMP_VAR_ARENA = arena_init(DEFAULT_ARENA_SIZE);
+    temp_var_empty = arena_mark(TEMP_VAR_ARENA);
     GENERAL_ARENA =
         arena_init(DEFAULT_ARENA_SIZE); /* For TYPES and flattened IR */
 
@@ -2631,6 +2648,8 @@ void release_block_arena(void)
 {
     arena_free(BLOCK_ARENA);
     BLOCK_ARENA = NULL;
+    arena_free(TEMP_VAR_ARENA);
+    TEMP_VAR_ARENA = NULL;
 #ifdef __GLIBC__
     /* main() keeps freed memory around for reuse, but these variables sit in
      * the middle of the heap and the backend allocates nothing like them.
@@ -2675,6 +2694,7 @@ void global_release(void)
     TU_ORDINARY_MAP = NULL;
 
     arena_free(BLOCK_ARENA);
+    arena_free(TEMP_VAR_ARENA);
     arena_free(BB_ARENA);
     arena_free(GENERAL_ARENA); /* free TYPES */
 
@@ -2798,7 +2818,11 @@ __noreturn void error_at(char *msg, source_location_t *loc)
     len = loc->len;
     pos = loc->pos;
 
-    strbuf_t *src = hashmap_get(SRC_FILE_MAP, loc->filename);
+    /* The buffer is keyed by the physical path, which #line leaves alone, and
+     * @pos indexes it; the message names the logical file.
+     */
+    strbuf_t *src =
+        loc->file ? hashmap_get(SRC_FILE_MAP, loc->file->physical) : NULL;
 
     /* The source text is no longer on hand, which changes what can be shown and
      * not what went wrong: still a mistake in the input, so still an exit
@@ -2813,8 +2837,8 @@ __noreturn void error_at(char *msg, source_location_t *loc)
     if (len < 1)
         len = 1;
 
-    printf("%s:%d:%d: [Error]: %s\n", loc->filename, loc->line, loc->column,
-           msg);
+    printf("%s:%d:%d: [Error]: %s\n", loc->file->logical, loc->line,
+           loc->column, msg);
     printf("%6d |  ", loc->line);
 
     /* Finds line's start position */

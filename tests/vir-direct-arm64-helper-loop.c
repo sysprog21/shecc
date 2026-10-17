@@ -1,3 +1,9 @@
+static int helper(int value);
+
+int main(int argc)
+{
+    return helper(argc);
+}
 static int helper(int value)
 {
     int i = 0;
@@ -5,9 +11,4 @@ static int helper(int value)
     while (i < value)
         i++;
     return i;
-}
-
-int main(int argc)
-{
-    return helper(argc);
 }

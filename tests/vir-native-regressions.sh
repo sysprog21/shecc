@@ -6,7 +6,7 @@ compiler=("$@")
 task_dir=$(mktemp -d)
 trap 'rm -rf "$task_dir"' EXIT
 read -r -a runner <<< "${TARGET_EXEC:-}"
-for fixture in shift-width adjusted-array operand-signedness global-scratch call-return-internal volatile-member void-callback-array bool-compound file-seek pointer-offset typed-arithmetic constant-relations global-value-reader machine-live machine-affinity pair-scratch subtract-alias typedef-alias-builder machine-transfers loop-update if-join call-result-pins entry-parameters comparison-inversion global-slot-void global-cast-metadata global-cast-scope global-wide-string-operands global-dead-operands typedef-callback-rows typedef-nested-row-sizes typedef-pointer-row-elements volatile-pointer-row-elements \
+for fixture in essential bitwise-normalization store-override shift-width adjusted-array operand-signedness global-scratch call-return-internal volatile-member void-callback-array bool-compound file-seek pointer-offset typed-arithmetic constant-relations global-value-reader machine-live machine-affinity pair-scratch subtract-alias typedef-alias-builder machine-transfers loop-update if-join call-result-pins entry-parameters comparison-inversion global-slot-void global-cast-metadata global-cast-scope global-wide-string-operands global-dead-operands typedef-callback-rows typedef-nested-row-sizes typedef-pointer-row-elements volatile-pointer-row-elements \
     pointer-scale-width pointer-scale-rows x64-and-loop global-conditional-compound \
     arm64-select-runtime arm64-indexed-widths; do
     source="tests/vir-$fixture.c"
@@ -30,5 +30,7 @@ grep -q 'Typedef parenthesized declarator must be a function pointer' "$task_dir
 bash tests/vir-global-slot-initializers.sh "${compiler[@]}"
 bash tests/vir-global-conditional-compound.sh "${compiler[@]}"
 bash tests/vir-strength.sh "${compiler[@]}"
+bash tests/vir-bitwise-normalization.sh "${compiler[@]}"
+bash tests/vir-essential.sh "${compiler[@]}"
 bash tests/vir-qualifiers.sh "${compiler[@]}"
 echo 'Native VIR regression programs passed with and without optimization'

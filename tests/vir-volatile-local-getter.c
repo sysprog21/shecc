@@ -1,4 +1,11 @@
 typedef int (*callback_t)(int);
+int increment(int value);
+callback_t get(void);
+int touch(void);
+int main(void)
+{
+    return touch();
+}
 int increment(int value)
 {
     return value + 1;
@@ -13,8 +20,4 @@ int touch(void)
     getter_t getter = get;
     getter;
     return 0;
-}
-int main(void)
-{
-    return touch();
 }

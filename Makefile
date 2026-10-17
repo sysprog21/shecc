@@ -190,7 +190,7 @@ config:
 	check-vir-opt-baseline
 
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2 \
-	check-vir-core check-vir-frontend-stage0 check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
+	check-vir-core check-vir-essential check-vir-frontend-stage0 check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
 	check-vir-multi-input-stage0 check-vir-multi-input-stage2 \
 	check-vir-baseline check-vir-opt-baseline \
 	check-vir-corpus-stage0 check-fuzz-stage0 check-vir-frontend-policy-stage0
@@ -375,6 +375,11 @@ check-vir-core: tests/vir-core.c src/vir.c src/vir.h
 	$(CC) $(CFLAGS) -Isrc tests/vir-core.c src/vir.c -o $(OUT)/vir-core
 	$(OUT)/vir-core
 
+.PHONY: check-vir-essential
+check-vir-essential: tests/vir-essential-core.c src/vir.c src/vir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-essential-core.c src/vir.c -o $(OUT)/vir-essential-core
+	$(OUT)/vir-essential-core
+
 check-vir-frontend-stage0: $(OUT)/$(STAGE0) tests/vir-frontend.sh tests/vir-frontend-workloads.txt $(VIR_FRONTEND_FIXTURES)
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-frontend.sh 0
 
@@ -391,14 +396,16 @@ check-vir-fuzz: tests/vir-fuzz.c src/vir.c src/vir.h
 	$(CC) $(CFLAGS) -Isrc tests/vir-fuzz.c src/vir.c -o $(OUT)/vir-fuzz
 	$(OUT)/vir-fuzz
 
-check-vir-sanitizer: tests/vir-core.c tests/vir-fuzz.c src/vir.c src/vir.h
+check-vir-sanitizer: tests/vir-core.c tests/vir-essential-core.c tests/vir-fuzz.c src/vir.c src/vir.h
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-core.c src/vir.c -o $(OUT)/vir-core-sanitize
 	ASAN_OPTIONS=detect_leaks=1 $(OUT)/vir-core-sanitize
 	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-fuzz.c src/vir.c -o $(OUT)/vir-fuzz-sanitize
 	ASAN_OPTIONS=detect_leaks=1 $(OUT)/vir-fuzz-sanitize
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-essential-core.c src/vir.c -o $(OUT)/vir-essential-sanitize
+	ASAN_OPTIONS=detect_leaks=1 $(OUT)/vir-essential-sanitize
 
 .PHONY: check-vir
-check-vir: check-vir-core check-vir-frontend-stage0 \
+check-vir: check-vir-core check-vir-essential check-vir-frontend-stage0 \
 	check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
 	check-vir-frontend-policy-stage0 \
 	check-vir-frontend-policy-stage2 \

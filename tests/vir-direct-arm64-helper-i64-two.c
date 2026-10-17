@@ -1,7 +1,4 @@
-static long long helper(long long left, long long right)
-{
-    return left + (right >> 1);
-}
+static long long helper(long long left, long long right);
 
 int main(int argc)
 {
@@ -9,4 +6,8 @@ int main(int argc)
     long long right = (long long) (argc + 3) << 32;
 
     return (int) (helper(left, right) >> 32);
+}
+static long long helper(long long left, long long right)
+{
+    return left + (right >> 1);
 }

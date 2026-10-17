@@ -569,6 +569,35 @@ vir_value_t *vir_ptradd(vir_function_t *func,
 int vir_replace_all_uses(vir_function_t *func,
                          vir_value_t *from,
                          vir_value_t *to);
+
+/* Reapply integer/bitwise/unary identities after SSA/CSE; returns replacements,
+ * -1 for invalid arguments, or 0 at O0. Allocation failure skips that fold; any
+ * values a partial strength reduction built stay unused for DCE.
+ */
+int vir_normalize(vir_function_t *func, vir_opt_level_t opt_level);
+/* Summarize proven finite, effect-free modular affine recurrences. */
+int vir_summarize_affine_loops(vir_function_t *func, vir_opt_level_t opt_level);
+/* Unroll even-count pointer add reductions by two into a second accumulator. */
+int vir_unroll_reductions(vir_function_t *func, vir_opt_level_t opt_level);
+
+/* The graph of a direct callee the caller may inline, or NULL. *@is_static is
+ * set for a static callee, which vir_inline_calls() copies at a larger size.
+ */
+typedef const vir_function_t *(*vir_inline_lookup_t)(const char *name,
+                                                     void *context,
+                                                     bool *is_static);
+
+/* Replace calls to small leaf callees with copies of their graphs.
+ *
+ * Returns the number inlined, or -1 when the graph could not be rewritten.
+ */
+int vir_inline_calls(vir_function_t *caller,
+                     vir_inline_lookup_t lookup,
+                     void *context,
+                     vir_opt_level_t opt_level);
+int vir_eliminate_tail_recursion(vir_function_t *func,
+                                 const char *name,
+                                 vir_opt_level_t opt_level);
 int vir_local_cse(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_reassociate(vir_function_t *func, vir_opt_level_t opt_level);

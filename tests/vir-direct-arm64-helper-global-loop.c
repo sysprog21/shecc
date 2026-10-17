@@ -1,5 +1,12 @@
 static int slot;
 
+static int helper(int value);
+
+int main(int argc, char **argv)
+{
+    (void) argv;
+    return helper(argc) + 1;
+}
 static int helper(int value)
 {
     int i = 0;
@@ -9,10 +16,4 @@ static int helper(int value)
         i++;
     }
     return slot;
-}
-
-int main(int argc, char **argv)
-{
-    (void) argv;
-    return helper(argc) + 1;
 }

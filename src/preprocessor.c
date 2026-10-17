@@ -564,7 +564,7 @@ bool resolve_angle_include(token_t *open,
                            char *resolved,
                            int resolved_size)
 {
-    strbuf_t *source = get_file_buf(open->location.physical_filename);
+    strbuf_t *source = get_file_buf(open->location.file->physical);
     int pos = open->location.pos + open->location.len;
     int end = close->location.pos;
     int len = 0;
@@ -640,7 +640,7 @@ token_t *file_macro_handler(token_t *tk)
 {
     token_t *new_tk = copy_token(tk);
     new_tk->kind = T_string;
-    new_tk->literal = tk->location.filename;
+    new_tk->literal = tk->location.file->logical;
     memcpy(&new_tk->location, &tk->location, sizeof(source_location_t));
     return new_tk;
 }
@@ -697,12 +697,17 @@ void pp_apply_line_directive(token_t *first,
                              char *logical_filename,
                              int line_delta)
 {
+    source_file_t *renamed = NULL;
     for (token_t *it = first; it && it->kind != T_eof; it = it->next) {
-        if (strcmp(it->location.physical_filename, original_filename))
+        if (strcmp(it->location.file->physical, original_filename))
             continue;
         it->location.line += line_delta;
-        if (logical_filename)
-            it->location.filename = logical_filename;
+        if (!logical_filename)
+            continue;
+        if (!renamed)
+            renamed =
+                new_source_file(it->location.file->physical, logical_filename);
+        it->location.file = renamed;
     }
 }
 
@@ -1804,8 +1809,7 @@ token_t *pp_pragma_operator(token_t *tk, token_t *owner)
     while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t'))
         len--;
     if (len == 4 && !strncmp(p, "once", 4))
-        hashmap_put_borrowed(PRAGMA_ONCE, owner->location.physical_filename,
-                             NULL);
+        hashmap_put_borrowed(PRAGMA_ONCE, owner->location.file->physical, NULL);
 
     return pp_lex_expect_token(tk, T_close_bracket, true);
 }
@@ -2497,7 +2501,7 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
             if (!angle_header) {
                 /* Quoted headers are relative to the physical source path. */
                 char path[MAX_LINE_LEN];
-                const char *file = include_tk->location.physical_filename;
+                const char *file = include_tk->location.file->physical;
                 int c = strlen(file) - 1;
 
                 while (c > 0 && file[c] != '/')
@@ -2538,7 +2542,7 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
              * include directive.
              */
             if (hashmap_contains(PRAGMA_ONCE,
-                                 file_tks->head->location.physical_filename))
+                                 file_tks->head->location.file->physical))
                 continue;
 
             token_t *included =
@@ -2720,7 +2724,7 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
 
                 if (!strcmp("once", tk->literal))
                     hashmap_put_borrowed(PRAGMA_ONCE,
-                                         tk->location.physical_filename, NULL);
+                                         tk->location.file->physical, NULL);
             }
 
             while (!pp_lex_peek_token(tk, T_newline, true))
@@ -2730,7 +2734,7 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
             continue;
         }
         case T_cppd_line: {
-            char *original_filename = tk->location.physical_filename;
+            char *original_filename = tk->location.file->physical;
             char *logical_filename = NULL;
             int requested_line;
 
@@ -2940,7 +2944,7 @@ token_t *preprocess(token_t *tk)
     synth_built_in_loc.len = 1;
     synth_built_in_loc.column = 1;
     synth_built_in_loc.line = 1;
-    synth_built_in_loc.filename = "<built-in>";
+    synth_built_in_loc.file = new_source_file("<built-in>", "<built-in>");
 
     macro_t *macro = new_macro("__FILE__");
     macro->handler = file_macro_handler;

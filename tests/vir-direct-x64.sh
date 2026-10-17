@@ -122,6 +122,13 @@ check_vir_dump()
     awk -v extension="$extension" '
         $3 == extension ".i32.i64" { extended[$1] = 1 }
         / = const.i64 2$/ { scale[$1] = 1 }
+        / = const.i32 1$/ { shift[$1] = 1 }
+        / = shl\.i[0-9]+ / {
+            sub(/,$/, "", $4)
+            if (extended[$4] && shift[$5]) scaled[$1] = 1
+            else failed = 1
+            multiplies++
+        }
         / = mul\.i[0-9]+ / {
             sub(/,$/, "", $4)
             if (extended[$4] && scale[$5] || scale[$4] && extended[$5])

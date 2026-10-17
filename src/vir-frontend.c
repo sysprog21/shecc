@@ -520,8 +520,12 @@ static vir_value_t *native_read(native_function_t *ctx,
         (!var->ptr_level && is_record_type(var->type) &&
          !native_array_parameter(ctx, var)))
         return native_address(ctx, block, var);
-    if (var->is_function_designator)
+    if (var->is_function_designator) {
+        func_t *target = find_func(var->var_name);
+        if (target)
+            target->address_taken = true;
         return vir_function_addr(&ctx->graph, block, var->var_name);
+    }
     if (native_memory(ctx, var) || native_object(var) ||
         native_source_info(ctx, var)->is_object) {
         vir_value_t *address = native_address(ctx, block, var);
@@ -1182,9 +1186,14 @@ static void check_native_pass(const char *name, int result)
     }
 }
 
+static vir_opt_level_t native_opt_level(void)
+{
+    return optimize ? VIR_OPT_O2 : VIR_OPT_O0;
+}
+
 void vir_frontend_optimize(vir_function_t *graph)
 {
-    vir_opt_level_t level = optimize ? VIR_OPT_O2 : VIR_OPT_O0;
+    vir_opt_level_t level = native_opt_level();
 
     if (!vir_remove_unreachable(graph))
         fatal("Invalid VIR reachability");
@@ -1193,12 +1202,23 @@ void vir_frontend_optimize(vir_function_t *graph)
     check_native_pass("params", vir_simplify_params(graph, level));
     check_native_pass("cse", vir_local_cse(graph, level));
     check_native_pass("gvn", vir_gvn_with_stats(graph, level, NULL));
+    int normalized = vir_normalize(graph, level);
+    check_native_pass("normalize", normalized);
+    if (normalized)
+        check_native_pass("normalize-sccp", vir_sccp(graph, level));
     check_native_pass("reassociate", vir_reassociate(graph, level));
     check_native_pass("licm", vir_licm(graph, level));
+    int summarized = vir_summarize_affine_loops(graph, level);
+    check_native_pass("affine-loops", summarized);
+    if (summarized) {
+        check_native_pass("affine-params", vir_simplify_params(graph, level));
+        check_native_pass("affine-sccp", vir_sccp(graph, level));
+    }
     int strengthened = vir_strength_reduce(graph, level);
     check_native_pass("strength", strengthened);
     check_native_pass("cse", vir_local_cse(graph, level));
     check_native_pass("dce", vir_dce(graph, level));
+    check_native_pass("unroll", vir_unroll_reductions(graph, level));
     check_native_pass("cfg", vir_simplify_cfg(graph, level));
     check_native_pass("final-cse", vir_local_cse(graph, level));
     check_native_pass("final-dce", vir_dce(graph, level));
@@ -1210,6 +1230,25 @@ void vir_frontend_optimize(vir_function_t *graph)
         free(error);
         fatal("Invalid optimized VIR");
     }
+}
+
+/* The optimized graph of a function defined earlier, for inlining into the
+ * function being finished: only one whose calls the VIR can rewrite without its
+ * ABI (no variadic or aggregate-returning ones) and that no one used as a
+ * function pointer, since that keeps its out-of-line copy anyway.
+ */
+static const vir_function_t *native_inline_callee(const char *name,
+                                                  void *context,
+                                                  bool *is_static)
+{
+    func_t *func = find_func((char *) name);
+    native_function_t *callee = func ? func->vir_context : NULL;
+    (void) context;
+    if (!callee || !callee->finished || callee->released ||
+        func->returns_aggregate || func->address_taken)
+        return NULL;
+    *is_static = func->is_static;
+    return &callee->graph;
 }
 
 /* A finished function is optimized and compacted at once; only the global
@@ -1225,7 +1264,15 @@ void vir_frontend_end(func_t *func)
 
     native_finish(ctx);
     fatal_function_context = func->return_def.var_name;
+    check_native_pass("inline",
+                      vir_inline_calls(&ctx->graph, native_inline_callee, ctx,
+                                       native_opt_level()));
     vir_frontend_optimize(&ctx->graph);
+    int tail_calls = vir_eliminate_tail_recursion(
+        &ctx->graph, func->return_def.var_name, native_opt_level());
+    check_native_pass("tail-recursion", tail_calls);
+    if (tail_calls)
+        vir_frontend_optimize(&ctx->graph);
     fatal_function_context = context;
     native_require(vir_function_compact(&ctx->graph), "graph compaction");
 }

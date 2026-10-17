@@ -13,18 +13,20 @@ static short combine(signed char a,
     return 37;
 }
 
-static signed char negative(void)
-{
-    return -1;
-}
+static signed char negative(void);
+static unsigned short maximum(void);
 
-static unsigned short maximum(void)
-{
-    return 65535;
-}
 
 int main(void)
 {
     return combine(-5, 250, -20, 40000, 2, 3, 4, 50000) + negative() +
            (maximum() == 65535);
+}
+static signed char negative(void)
+{
+    return -1;
+}
+static unsigned short maximum(void)
+{
+    return 65535;
 }

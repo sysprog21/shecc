@@ -2,10 +2,7 @@ int left;
 int right;
 int result;
 
-static void set_result(int *address)
-{
-    result = *address;
-}
+static void set_result(int *address);
 
 int main(int argc)
 {
@@ -18,4 +15,8 @@ int main(int argc)
     *address = argc + 28;
     set_result(address);
     return result;
+}
+static void set_result(int *address)
+{
+    result = *address;
 }

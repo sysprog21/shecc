@@ -363,18 +363,25 @@ typedef enum {
     T_hashhash
 } token_kind_t;
 
+/* The file a token came from. One record is shared by every token of a file,
+ * and #line points the tokens after it at a new one, so a location carries one
+ * pointer for both names.
+ */
+typedef struct {
+    /* Immutable physical path used for quoted-include lookup. #line changes the
+     * logical name only, which diagnostics and __FILE__ report.
+     */
+    char *physical;
+    char *logical;
+} source_file_t;
+
 /* Source location tracking for better error reporting */
 typedef struct {
     int pos; /* raw source file position */
     int len; /* length of token */
     int line;
     int column;
-
-    /* Immutable physical path used for quoted-include lookup. #line changes
-     * filename only, which remains the logical diagnostic/__FILE__ name.
-     */
-    char *physical_filename;
-    char *filename;
+    source_file_t *file;
 } source_location_t;
 
 typedef struct token {
@@ -1072,6 +1079,12 @@ struct func {
 
     /* Callee-saved registers the backend must preserve. */
     int saved_regs;
+
+    /* Seen as a function pointer while parsing. A heuristic for inlining: such
+     * a callee keeps its out-of-line copy anyway, so copying it into its direct
+     * callers too would only duplicate code.
+     */
+    bool address_taken;
 
     /* Information used for dynamic linking */
     bool is_used;

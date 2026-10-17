@@ -66,11 +66,11 @@ void read_func_parameters_with_sret(func_t *func,
                 if (!is_record_object(param))
                     error_at("Record argument required", cur_token_loc());
 
-                var_t *copy = name_var(require_typed_var(parent, target->type));
+                var_t *copy = require_temp_typed_var(parent, target->type);
                 add_insn(parent, *bb, OP_allocat, copy, NULL, NULL, 0, NULL);
                 emit_record_copy(parent, bb, copy, param);
 
-                param = name_var(require_ref_var(parent, target->type, 0));
+                param = require_temp_ref_var(parent, target->type, 0);
                 add_insn(parent, *bb, OP_address_of, param, copy, NULL, 0,
                          NULL);
             } else if (!has_effective_pointer(target) && !target->array_size) {
@@ -93,7 +93,7 @@ void read_func_parameters_with_sret(func_t *func,
                 var_t *copy = require_typed_var(parent, param->type);
                 add_insn(parent, *bb, OP_allocat, copy, NULL, NULL, 0, NULL);
                 emit_record_copy(parent, bb, copy, param);
-                param = name_var(require_ref_var(parent, param->type, 0));
+                param = require_temp_ref_var(parent, param->type, 0);
                 add_insn(parent, *bb, OP_address_of, param, copy, NULL, 0,
                          NULL);
             } else if (!is_pointer_like_value(param) &&
@@ -230,14 +230,12 @@ static var_t *array_subscript_remainder(block_t *parent,
     for (int i = 0; i < consumed; i++)
         fixed_array_shape_drop_outer(&shape);
     if (unevaluated_expression_depth) {
-        result =
-            name_var(require_typed_ptr_var(parent, type, element_ptr_level));
+        result = require_temp_typed_ptr_var(parent, type, element_ptr_level);
         fixed_array_shape_to_var(result, &shape);
         return result;
     }
     fixed_array_shape_drop_outer(&shape);
-    result =
-        name_var(require_typed_ptr_var(parent, type, element_ptr_level + 1));
+    result = require_temp_typed_ptr_var(parent, type, element_ptr_level + 1);
     fixed_array_shape_to_pointee_var(result, &shape);
     if (shape.rank)
         result->pointee_array_element_ptr_level = element_ptr_level;
@@ -296,8 +294,8 @@ void lower_call_result_array_postfix(var_t **value,
     } while (lex_peek(T_open_square, NULL));
 
     if (depth == dimensions) {
-        var_t *element = name_var(
-            require_typed_ptr_var(parent, element_type, element_ptr_level));
+        var_t *element =
+            require_temp_typed_ptr_var(parent, element_type, element_ptr_level);
 
         /* A call returning a pointer to an array of callbacks carries their
          * prototype on the result rather than on its scalar base type.
@@ -538,7 +536,7 @@ void emit_record_copy_from_address(block_t *parent,
                                    var_t *dest,
                                    var_t *src_addr)
 {
-    var_t *dest_addr = name_var(require_ref_var(parent, dest->type, 0));
+    var_t *dest_addr = require_temp_ref_var(parent, dest->type, 0);
     add_insn(parent, *bb, OP_address_of, dest_addr, dest, NULL, 0, NULL);
     emit_record_copy_between(parent, bb, dest_addr, src_addr, size_var(dest));
 }
@@ -625,7 +623,7 @@ var_t *lower_reference_update(var_t *object,
         handle_pointer_arithmetic(parent, bb, op, object, one);
         updated = opstack_pop();
     } else {
-        updated = require_named_var(parent);
+        updated = require_temp_var(parent);
         updated->type = integer_binary_result_type(op, object, one);
         add_insn(parent, *bb, op, updated, object, one, 0, NULL);
     }
@@ -673,10 +671,10 @@ void read_builtin_va_start(block_t *parent, basic_block_t **bb)
         error_at("va_start requires the last named variadic parameter",
                  cur_token_loc());
     lex_expect(T_close_bracket);
-    var_t *value = name_var(require_typed_ptr_var(parent, TY_int, 1));
+    var_t *value = require_temp_typed_ptr_var(parent, TY_int, 1);
     add_insn(parent, *bb, OP_va_start, value, NULL, NULL, 0, NULL);
     add_insn(parent, *bb, OP_write, NULL, destination, value, PTR_SIZE, NULL);
-    opstack_push(name_var(require_typed_var(parent, TY_void)));
+    opstack_push(require_temp_typed_var(parent, TY_void));
 }
 
 void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
@@ -706,9 +704,9 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
     if (requested.is_array || requested.is_function)
         error_at("va_arg type must be an object type", cur_token_loc());
 
-    old = name_var(require_typed_ptr_var(parent, TY_int, 1));
+    old = require_temp_typed_ptr_var(parent, TY_int, 1);
     add_insn(parent, *bb, OP_read, old, ap_addr, NULL, PTR_SIZE, NULL);
-    step = name_var(require_typed_var(parent, TY_int));
+    step = require_temp_typed_var(parent, TY_int);
 
     /* A long long on a 32-bit target takes two ABI words starting at an even
      * one, both for AAPCS32 and for a variadic argument on RV32, and the callee
@@ -717,9 +715,9 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
      */
     if (PTR_SIZE < 8 && !requested.ptr_level &&
         !is_record_type(requested.type) && requested.type->size == 8) {
-        var_t *mask = name_var(require_typed_var(parent, TY_int));
-        var_t *word = name_var(require_typed_var(parent, TY_uint));
-        var_t *aligned = name_var(require_typed_var(parent, TY_uint));
+        var_t *mask = require_temp_typed_var(parent, TY_int);
+        var_t *word = require_temp_typed_var(parent, TY_uint);
+        var_t *aligned = require_temp_typed_var(parent, TY_uint);
 
         add_insn(parent, *bb, OP_cast, word, old, NULL, PTR_SIZE, NULL);
         step->init_val = 7;
@@ -729,11 +727,11 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
         mask->init_val = -8;
         mask->is_const = true;
         add_insn(parent, *bb, OP_load_constant, mask, NULL, NULL, 0, NULL);
-        word = name_var(require_typed_var(parent, TY_uint));
+        word = require_temp_typed_var(parent, TY_uint);
         add_insn(parent, *bb, OP_bit_and, word, aligned, mask, 0, NULL);
-        old = name_var(require_typed_ptr_var(parent, TY_int, 1));
+        old = require_temp_typed_ptr_var(parent, TY_int, 1);
         add_insn(parent, *bb, OP_cast, old, word, NULL, PTR_SIZE, NULL);
-        step = name_var(require_typed_var(parent, TY_int));
+        step = require_temp_typed_var(parent, TY_int);
     }
 
     /* This direct IR add is byte-addressed; unlike parsed pointer arithmetic it
@@ -746,20 +744,20 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
                          : PTR_SIZE;
     step->is_const = true;
     add_insn(parent, *bb, OP_load_constant, step, NULL, NULL, 0, NULL);
-    next = name_var(require_typed_ptr_var(parent, TY_int, 1));
+    next = require_temp_typed_ptr_var(parent, TY_int, 1);
     add_insn(parent, *bb, OP_add, next, old, step, 0, NULL);
     add_insn(parent, *bb, OP_write, NULL, ap_addr, next, PTR_SIZE, NULL);
 
     if (is_record_type(requested.type) && !requested.ptr_level) {
-        var_t *source = name_var(require_ref_var(parent, requested.type, 0));
-        var_t *result = name_var(require_typed_var(parent, requested.type));
+        var_t *source = require_temp_ref_var(parent, requested.type, 0);
+        var_t *result = require_temp_typed_var(parent, requested.type);
         add_insn(parent, *bb, OP_read, source, old, NULL, PTR_SIZE, NULL);
         add_insn(parent, *bb, OP_allocat, result, NULL, NULL, 0, NULL);
         emit_record_copy_from_address(parent, bb, result, source);
         opstack_push(result);
     } else {
-        var_t *result = name_var(
-            require_typed_ptr_var(parent, requested.type, requested.ptr_level));
+        var_t *result = require_temp_typed_ptr_var(parent, requested.type,
+                                                   requested.ptr_level);
         add_insn(parent, *bb, OP_read, result, old, NULL,
                  requested.ptr_level ? PTR_SIZE : requested.type->size, NULL);
         result->func_signature = requested.func_signature;
@@ -829,15 +827,15 @@ void read_builtin_va_arg(block_t *parent, basic_block_t **bb)
                      * and is a width no narrow backend can load.
                      */
                     var_t *value =
-                        name_var(require_typed_var(parent, requested.type));
+                        require_temp_typed_var(parent, requested.type);
                     add_insn(parent, *bb, OP_allocat, value, NULL, NULL, 0,
                              NULL);
                     emit_record_copy_from_address(parent, bb, value, address);
                     base = value;
                 } else if (depth == dimension_count + 1) {
-                    var_t *value = name_var(require_typed_ptr_var(
+                    var_t *value = require_temp_typed_ptr_var(
                         parent, element_type,
-                        requested.pointee_element_ptr_level));
+                        requested.pointee_element_ptr_level);
                     add_insn(parent, *bb, OP_read, value, address, NULL,
                              element_size, NULL);
                     base = value;
@@ -884,8 +882,8 @@ var_t *load_function_pointer_object(block_t *parent,
 
             if (object == param) {
                 func_t *param_signature = get_func_signature(object);
-                var_t *value = name_var(require_typed_ptr_var(
-                    parent, param_signature->return_def.type, 1));
+                var_t *value = require_temp_typed_ptr_var(
+                    parent, param_signature->return_def.type, 1);
                 value->func_signature = param_signature;
                 add_insn(parent, *bb, OP_assign, value, object, NULL, 0, NULL);
                 return value;
@@ -895,8 +893,8 @@ var_t *load_function_pointer_object(block_t *parent,
 
     var_t *address = require_ref_var(parent, object->type, object->ptr_level);
     func_t *signature = get_func_signature(object);
-    var_t *target = name_var(require_typed_ptr_var(
-        parent, signature ? signature->return_def.type : object->type, 1));
+    var_t *target = require_temp_typed_ptr_var(
+        parent, signature ? signature->return_def.type : object->type, 1);
     add_insn(parent, *bb, OP_address_of, address, object, NULL, 0, NULL);
     target->func_signature = object->func_signature;
     add_insn(parent, *bb, OP_read, target, address, NULL, PTR_SIZE, NULL);
@@ -929,8 +927,8 @@ var_t *materialize_function_designator(block_t *parent,
     if (!func)
         return value;
 
-    object = name_var(require_typed_ptr_var(parent, func->return_def.type,
-                                            func->return_def.ptr_level));
+    object = require_temp_typed_ptr_var(parent, func->return_def.type,
+                                        func->return_def.ptr_level);
     object->is_func = true;
     object->func_signature = func;
     add_insn(parent, *bb, OP_allocat, object, NULL, NULL, 0, NULL);
@@ -982,14 +980,12 @@ var_t *prepare_aggregate_call_result(block_t *parent,
                                      func_t *signature,
                                      var_t **sret)
 {
-    var_t *result =
-        name_var(require_typed_var(parent, signature->return_def.type));
+    var_t *result = require_temp_typed_var(parent, signature->return_def.type);
     var_t *destination;
 
     add_insn(parent, *bb, OP_allocat, result, NULL, NULL, 0, NULL);
 
-    destination =
-        name_var(require_ref_var(parent, signature->return_def.type, 0));
+    destination = require_temp_ref_var(parent, signature->return_def.type, 0);
     add_insn(parent, *bb, OP_address_of, destination, result, NULL, 0, NULL);
     *sret = destination;
     return result;
@@ -1021,9 +1017,9 @@ static var_t *callback_slot_call_result(block_t *parent,
     if (!callback || return_def->type->is_direct_function_type ||
         return_def->type->array_size || return_def->ptr_level < 1)
         return NULL;
-    result = name_var(require_typed_ptr_var(
+    result = require_temp_typed_ptr_var(
         parent, callback->return_def.type,
-        callback->return_def.ptr_level + return_def->ptr_level));
+        callback->return_def.ptr_level + return_def->ptr_level);
     result->pointee_func_signature = callback;
     return result;
 }
@@ -1039,11 +1035,11 @@ static var_t *emit_call_result_value(block_t *parent,
         func_t *returned_signature = return_def->type->func_signature;
         bool returns_function = direct_call && returned_signature;
 
-        result = name_var(require_typed_ptr_var(
+        result = require_temp_typed_ptr_var(
             parent,
             returns_function ? returned_signature->return_def.type
                              : return_def->type,
-            returns_function ? 1 : return_def->ptr_level));
+            returns_function ? 1 : return_def->ptr_level);
         result->func_signature = returned_signature;
         copy_call_result_array_shape(result, return_def);
     }
@@ -1122,7 +1118,7 @@ var_t *bitfield_binary(block_t *parent,
                        var_t *right,
                        type_t *type)
 {
-    var_t *result = require_named_var(parent);
+    var_t *result = require_temp_var(parent);
     result->type = type;
     add_insn(parent, *bb, op, result, left, right, 0, NULL);
     return result;
@@ -1139,7 +1135,7 @@ static var_t *read_bitfield_value_impl(block_t *parent,
                                        const var_t *field,
                                        bool assignment_reload)
 {
-    var_t *value = require_named_var(parent);
+    var_t *value = require_temp_var(parent);
     value->is_assignment_reload = assignment_reload;
     value->type = TY_uint;
     add_insn(parent, *bb, OP_read, value, address, NULL,
@@ -1217,7 +1213,7 @@ void write_bitfield_value(block_t *parent,
 {
     if (is_bool_type(field->type))
         value = normalize_bool(parent, bb, value);
-    var_t *old = require_named_var(parent);
+    var_t *old = require_temp_var(parent);
     old->type = TY_uint;
     add_insn(parent, *bb, OP_read, old, address, NULL, field->bit_storage_size,
              NULL);
@@ -1229,7 +1225,7 @@ void write_bitfield_value(block_t *parent,
             parent, bb, OP_lshift, value,
             bitfield_constant(parent, bb, field->bit_offset), TY_uint);
     unsigned mask = bitfield_mask(field) << field->bit_offset;
-    var_t *clear = require_named_var(parent);
+    var_t *clear = require_temp_var(parent);
     clear->type = TY_uint;
     add_insn(parent, *bb, OP_bit_not, clear,
              bitfield_constant(parent, bb, mask), NULL, 0, NULL);
@@ -1329,8 +1325,8 @@ static void take_expression_address(block_t *parent, basic_block_t **bb)
         if (!effective_pointer_depth(operand) && !operand->array_size)
             error_at("Cannot dereference from non-pointer typed variable",
                      cur_token_loc());
-        result = name_var(require_typed_ptr_var(
-            parent, operand->type, operand->ptr_level + !!operand->array_size));
+        result = require_temp_typed_ptr_var(
+            parent, operand->type, operand->ptr_level + !!operand->array_size);
         result->is_const_qualified = operand->is_const_qualified;
         result->pointer_const_mask = operand->pointer_const_mask;
         result->func_signature = operand->func_signature;
@@ -1362,8 +1358,8 @@ static void take_expression_address(block_t *parent, basic_block_t **bb)
     } else {
         error_at("Address-of requires an lvalue operand", cur_token_loc());
     }
-    result = name_var(
-        require_typed_ptr_var(parent, operand->type, operand->ptr_level + 1));
+    result = require_temp_typed_ptr_var(parent, operand->type,
+                                        operand->ptr_level + 1);
     result->is_const_qualified = operand->is_const_qualified;
     result->is_string_literal = operand->is_string_literal;
     if (operand->func_signature)
@@ -1396,7 +1392,7 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
             error_at("__func__ is only defined inside a function",
                      next_token_loc());
         lex_expect(T_identifier);
-        vd = name_var(require_typed_ptr_var(parent, TY_char, 1));
+        vd = require_temp_typed_ptr_var(parent, TY_char, 1);
         vd->init_val = write_symbol(function_source_name(parent->func));
         vd->is_string_literal = true;
         vd->is_func_name_array_address = true;
@@ -1444,7 +1440,7 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
             fixed_array_shape_drop_outer(&shape);
         if (shape.rank) {
             rs1 = opstack_pop();
-            vd = require_named_var(parent);
+            vd = require_temp_var(parent);
             vd->type = lvalue.decl->type;
             vd->ptr_level = lvalue.decl->ptr_level;
             vd->is_const_qualified = lvalue.decl->is_const_qualified;
@@ -1458,7 +1454,7 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
 
     if (!lvalue.is_reference) {
         rs1 = opstack_pop();
-        vd = name_var(require_ref_var(parent, lvalue.type, lvalue.ptr_level));
+        vd = require_temp_ref_var(parent, lvalue.type, lvalue.ptr_level);
 
         /* Address-of moves a pointer object's qualification one level inward:
          * `&p`, for `int * const p`, is `int * const *`, not `const int **`.
@@ -1565,7 +1561,7 @@ static bool lower_pointee_array_dereference(var_t *source,
      */
     if (!element_type->ptr_level)
         element_type = array_typedef_element_type(element_type);
-    row = name_var(require_typed_var(parent, element_type));
+    row = require_temp_typed_var(parent, element_type);
     fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
 
     fixed_array_shape_to_var(row, &shape);
@@ -1696,8 +1692,8 @@ static var_t *decay_dereferenced_array(block_t *parent,
                                        basic_block_t **bb,
                                        var_t *array)
 {
-    var_t *pointer = name_var(
-        require_typed_ptr_var(parent, array->type, array->ptr_level + 1));
+    var_t *pointer =
+        require_temp_typed_ptr_var(parent, array->type, array->ptr_level + 1);
 
     if (array->array_dim2) {
         fixed_array_shape_t shape = fixed_array_shape_from_var(array);
@@ -1751,7 +1747,7 @@ void push_dereference(block_t *parent, basic_block_t **bb, var_t *rs1)
          * element. Dereferencing it restores the array, which immediately
          * decays back to char * in this expression context.
          */
-        vd = name_var(require_typed_ptr_var(parent, TY_char, 1));
+        vd = require_temp_typed_ptr_var(parent, TY_char, 1);
         vd->is_string_literal = true;
         opstack_push(vd);
         add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
@@ -1848,8 +1844,8 @@ static bool push_dereferenced_function(block_t *parent,
         /* An array of function pointers decays to the address of its first
          * element, from which `*fps` reads the pointer, as fps[0] does.
          */
-        var_t *address = name_var(require_typed_ptr_var(parent, rs1->type, 1));
-        var_t *target = name_var(require_typed_ptr_var(parent, rs1->type, 1));
+        var_t *address = require_temp_typed_ptr_var(parent, rs1->type, 1);
+        var_t *target = require_temp_typed_ptr_var(parent, rs1->type, 1);
         add_insn(parent, *bb, OP_assign, address, rs1, NULL, 0, NULL);
         target->func_signature = rs1->func_signature;
         add_insn(parent, *bb, OP_read, target, address, NULL, PTR_SIZE, NULL);
@@ -2066,8 +2062,8 @@ void lower_member_postfix(var_t *address,
             if (depth < shape.rank || effective_pointer_depth(field) != 1 ||
                 field->is_func || !is_record_type(pointee))
                 error_at("Invalid record member access", cur_token_loc());
-            var_t *pointer = name_var(
-                require_typed_ptr_var(parent, field->type, field->ptr_level));
+            var_t *pointer = require_temp_typed_ptr_var(parent, field->type,
+                                                        field->ptr_level);
             add_insn(parent, *bb, OP_read, pointer, address, NULL, PTR_SIZE,
                      NULL);
             address = pointer;
@@ -2101,15 +2097,15 @@ void lower_member_postfix(var_t *address,
         /* sizeof observes the array itself, before any decay. */
         for (int i = 0; i < depth; i++)
             fixed_array_shape_drop_outer(&shape);
-        result = name_var(
-            require_typed_ptr_var(parent, field->type, field->ptr_level));
+        result =
+            require_temp_typed_ptr_var(parent, field->type, field->ptr_level);
         fixed_array_shape_to_var(result, &shape);
         opstack_push(result);
     } else if (decayed) {
         for (int i = 0; i <= depth; i++)
             fixed_array_shape_drop_outer(&shape);
-        result = name_var(
-            require_typed_ptr_var(parent, field->type, field->ptr_level + 1));
+        result = require_temp_typed_ptr_var(parent, field->type,
+                                            field->ptr_level + 1);
         set_pointee_array_shape(result, &shape, field->ptr_level);
         add_insn(parent, *bb, OP_assign, result, address, NULL, 0, NULL);
         opstack_push(result);
@@ -2119,8 +2115,8 @@ void lower_member_postfix(var_t *address,
         if (is_lvalue)
             mark_value_reference(result, address, field);
     } else {
-        result = name_var(
-            require_typed_ptr_var(parent, field->type, field->ptr_level));
+        result =
+            require_temp_typed_ptr_var(parent, field->type, field->ptr_level);
         result->func_signature = field->func_signature;
 
         /* A function-pointer member is loaded as the pointer value a call

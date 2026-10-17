@@ -1,11 +1,21 @@
 typedef int *(*volatile callback_t)(int);
 static int value;
+int *get(int n);
+int typedef_object(void);
+int typedef_slot(void);
+int typedef_outer_slot(void);
+int direct_slot(void);
+static callback_t callback;
+int main(void)
+{
+    return typedef_object() != 7 || typedef_slot() != 8 ||
+           typedef_outer_slot() != 10 || direct_slot() != 9;
+}
 int *get(int n)
 {
     value = n;
     return &value;
 }
-static callback_t callback;
 int typedef_object(void)
 {
     callback = get;
@@ -32,9 +42,4 @@ int direct_slot(void)
     int *(*volatile * slot)(int) = &local;
     *slot;
     return *(*slot)(9);
-}
-int main(void)
-{
-    return typedef_object() != 7 || typedef_slot() != 8 ||
-           typedef_outer_slot() != 10 || direct_slot() != 9;
 }

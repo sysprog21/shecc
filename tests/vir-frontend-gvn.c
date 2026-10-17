@@ -1,3 +1,9 @@
+int gvn_cross(int flag, int a, int b);
+
+int main(void)
+{
+    return gvn_cross(0, 9, 12);
+}
 int gvn_cross(int flag, int a, int b)
 {
     int value = a + b;
@@ -8,9 +14,4 @@ int gvn_cross(int flag, int a, int b)
     else
         result = a + b;
     return result;
-}
-
-int main(void)
-{
-    return gvn_cross(0, 9, 12);
 }

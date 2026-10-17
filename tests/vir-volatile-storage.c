@@ -8,6 +8,11 @@ static volatile int *pointee = &volvalue;
 static volatile P aliasown = &value;
 static VP aliaspointee = &volvalue;
 static PV aliasstar = &value;
+int check(void);
+int main(void)
+{
+    return check();
+}
 int check(void)
 {
     own;
@@ -16,8 +21,4 @@ int check(void)
     *pointee;
     *aliaspointee;
     return 0;
-}
-int main(void)
-{
-    return check();
 }

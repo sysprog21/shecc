@@ -2,6 +2,18 @@
  * Local arrays are represented as stack roots. Their backing storage comes from
  * OP_allocat, so each object must retain its full size and alignment.
  */
+int local_arrays(int seed);
+int last_element(void);
+
+/* The pointer is spilled while the store through it is pending; with only a
+ * pointer slot reserved, that spill landed inside the array and the store
+ * overwrote it.
+ */
+
+int main(int argc)
+{
+    return local_arrays(argc) + last_element();
+}
 int local_arrays(int seed)
 {
     int words[3];
@@ -17,11 +29,6 @@ int local_arrays(int seed)
     *alias = *alias + words[2];
     return words[0] + words[1] + words[2] + bytes[4] + scalar;
 }
-
-/* The pointer is spilled while the store through it is pending; with only a
- * pointer slot reserved, that spill landed inside the array and the store
- * overwrote it.
- */
 int last_element(void)
 {
     int a[3];
@@ -29,9 +36,4 @@ int last_element(void)
 
     *p = 7;
     return a[2] - 7;
-}
-
-int main(int argc)
-{
-    return local_arrays(argc) + last_element();
 }

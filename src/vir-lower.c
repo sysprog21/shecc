@@ -826,6 +826,14 @@ static void vir_machine_value(vir_lower_t *lower, vir_value_t *value)
 
     if (value->is_block_param || value->def_effect)
         return;
+
+    /* read() rebuilds an unpinned literal where it is used. Holding it from its
+     * definition would only take a register, and under pressure push a live
+     * value out to its frame slot.
+     */
+    if (lower->locations[value->id].rematerializable &&
+        lower->locations[value->id].fixed < 0)
+        return;
     lower->locked = 0;
     vir_machine_expire(lower);
     if (op0)
@@ -1601,19 +1609,25 @@ static bool vir_machine_slots(vir_lower_t *lower)
                     for (int index = 0; param && index < use->operand; index++)
                         param = param->param_next;
 
-                    /* A value from inside the parameter's region, or an outer
-                     * loop's parameter entering an inner loop. Only these meet
-                     * the parameter's register on every path, and
-                     * vir_machine_pin_safe() still rules out interference.
+                    /* A value from inside the parameter's region, an outer
+                     * loop's parameter entering an inner loop, or one arm's
+                     * result computed in the block whose edge passes it to a
+                     * join. Only these meet the parameter's register on every
+                     * path, and vir_machine_pin_safe() still rules out
+                     * interference. The arm-result case leaves a literal to its
+                     * edge copy: pinning an entry literal into a loop-carried
+                     * register this way miscompiled a counted loop on x64.
+                     * Literals the first two cases admit are pinned as before.
                      */
                     if (!param || param->type != value->type ||
                         lower->locations[param->id].fixed < 0 ||
                         (!vir_dominance_block_dominates(
                              lower->dominance, param->block, value->block) &&
                          !(value->is_block_param &&
-                           vir_dominance_block_dominates(lower->dominance,
-                                                         value->block,
-                                                         param->block)))) {
+                           vir_dominance_block_dominates(
+                               lower->dominance, value->block, param->block)) &&
+                         (vir_use_edge(use)->from != value->block ||
+                          lower->locations[id].rematerializable))) {
                         safe = false;
                         break;
                     }

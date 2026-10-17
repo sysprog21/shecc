@@ -155,6 +155,47 @@ static void test_independent_pointer_add_scheduling(void)
     }
 }
 
+static void test_pointer_add_barrier_groups(void)
+{
+    for (int level = VIR_OPT_O1; level <= VIR_OPT_O2; level++) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, 64));
+        vir_block_t *block = vir_block_create(&f);
+        vir_value_t *pointer = vir_block_add_param(&f, block, VIR_TYPE_PTR);
+        vir_value_t *addresses[3], *loads[3];
+        vir_effect_t *stores[3];
+
+        /* Each address is consumed only after every group, so the volatile
+         * store, not the use limit, must stop it. Later plain loads of the base
+         * pointer would otherwise pull it across that store.
+         */
+        for (int i = 0; i < 3; i++) {
+            vir_value_t *offset = vir_const_i32(&f, block, 4 * (i + 1));
+            addresses[i] = vir_ptradd(&f, block, pointer, offset);
+            loads[i] = vir_load(&f, block, pointer, VIR_TYPE_I32);
+            stores[i] = vir_volatile_store(&f, block, pointer, loads[i]);
+            assert(addresses[i] && loads[i] && stores[i]);
+        }
+        for (int i = 0; i < 2; i++)
+            assert(vir_volatile_store(&f, block, addresses[i], loads[2]));
+        assert(vir_block_set_return(&f, block, addresses[2]));
+        assert(vir_verify(&f, &error));
+        for (int pass = 0; pass < 2; pass++) {
+            assert(vir_dce(&f, level) >= 0);
+            for (int i = 0; i < 3; i++) {
+                assert(loads[i]->order < addresses[i]->order);
+                assert(addresses[i]->order < stores[i]->order);
+                if (i)
+                    assert(stores[i - 1]->order < addresses[i]->order);
+            }
+            assert(vir_verify(&f, &error));
+        }
+        vir_function_release(&f);
+    }
+}
+
 static void test_overwritten_stores(void)
 {
     for (int barrier = 0; barrier < 7; barrier++) {
@@ -680,13 +721,145 @@ static void test_compaction(void)
     vir_function_release(&f);
 }
 
+static void test_post_ssa_normalization(void)
+{
+    for (int wide = 0; wide < 2; wide++) {
+        for (int mode = 0; mode < 10; mode++) {
+            vir_function_t f;
+            char *error = NULL;
+            vir_function_init(&f, 64);
+            assert(vir_function_set_pointer_bits(&f, 64));
+            vir_block_t *b = vir_block_create(&f);
+            vir_type_t type = wide ? VIR_TYPE_I64 : VIR_TYPE_I32;
+            vir_value_t *x = vir_block_add_param(&f, b, type);
+            vir_value_t *y = vir_block_add_param(&f, b, type);
+            vir_value_t *pointer = vir_block_add_param(&f, b, VIR_TYPE_PTR);
+            vir_value_t *loaded = vir_volatile_load(&f, b, pointer, type);
+            vir_value_t *inv = vir_bitnot(&f, b, x);
+            vir_value_t *inner = vir_bitor(&f, b, x, y);
+            vir_value_t *result;
+            if (mode == 0)
+                result = vir_binary(&f, b, VIR_OP_BITXOR, type, loaded, loaded);
+            else if (mode == 1)
+                result = vir_binary(&f, b, VIR_OP_BITAND, type, x, inv);
+            else if (mode == 2)
+                result = vir_binary(&f, b, VIR_OP_BITOR, type, x, inv);
+            else if (mode == 3)
+                result = vir_binary(&f, b, VIR_OP_BITAND, type, x, inner);
+            else if (mode == 4)
+                result = vir_binary(&f, b, VIR_OP_BITOR, type, x, inner);
+            else if (mode == 5) {
+                vir_value_t *ones = vir_const_int(&f, b, type, ~0ULL);
+                result = vir_binary(&f, b, VIR_OP_BITXOR, type, y, ones);
+            } else if (mode < 8) {
+                /* Create two distinct leaves, then simulate SSA replacement. */
+                result =
+                    vir_binary(&f, b, mode == 6 ? VIR_OP_BITAND : VIR_OP_BITOR,
+                               type, x, y);
+                assert(vir_replace_all_uses(&f, y, x));
+            } else {
+                vir_value_t *leaf = vir_block_add_param(&f, b, type);
+                vir_value_t *first = mode == 8 ? vir_neg(&f, b, x) : inv;
+                result =
+                    mode == 8 ? vir_neg(&f, b, leaf) : vir_bitnot(&f, b, leaf);
+                assert(vir_replace_all_uses(&f, leaf, first));
+            }
+            assert(result && loaded && vir_block_set_return(&f, b, result));
+            assert(vir_verify(&f, &error));
+            assert(vir_normalize(&f, VIR_OPT_O0) == 0);
+            assert(vir_normalize(&f, VIR_OPT_O1) == 1);
+            assert(vir_verify(&f, &error));
+            vir_value_t *normalized = b->return_value;
+            if (mode < 3)
+                assert(normalized->opcode == VIR_OP_CONST &&
+                       normalized->constant ==
+                           (mode == 2 ? (wide ? ~0ULL : 0xffffffffULL) : 0));
+            else if (mode == 3 || mode >= 6)
+                assert(normalized == x);
+            else if (mode == 4)
+                assert(normalized == inner);
+            else
+                assert(normalized->opcode == VIR_OP_BITNOT &&
+                       normalized->op0 == y);
+            assert(vir_normalize(&f, VIR_OPT_O2) == 0);
+            assert(vir_dce(&f, VIR_OPT_O1) >= 0);
+            assert(b->effects && b->effects->kind == VIR_EFFECT_VOLATILE_LOAD);
+            assert(vir_verify(&f, &error));
+            vir_function_release(&f);
+        }
+    }
+}
+
+static void test_bitwise_normalization(void)
+{
+    for (int wide = 0; wide < 2; wide++) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, 64));
+        vir_block_t *b = vir_block_create(&f);
+        vir_type_t type = wide ? VIR_TYPE_I64 : VIR_TYPE_I32;
+        unsigned long long mask = wide ? ~0ULL : 0xffffffffULL;
+        vir_value_t *x = vir_block_add_param(&f, b, type);
+        vir_value_t *y = vir_block_add_param(&f, b, type);
+        vir_value_t *ones = vir_const_int(&f, b, type, mask);
+        vir_value_t *inv = vir_bitnot(&f, b, x);
+        assert(vir_bitnot(&f, b, inv) == x);
+        assert(vir_neg(&f, b, vir_neg(&f, b, x)) == x);
+        assert(vir_bitand(&f, b, x, x) == x);
+        assert(vir_bitor(&f, b, x, x) == x);
+        assert(vir_bitxor(&f, b, x, x)->constant == 0);
+        for (int reverse = 0; reverse < 2; reverse++) {
+            vir_value_t *a = reverse ? inv : x;
+            vir_value_t *c = reverse ? x : inv;
+            assert(vir_bitand(&f, b, a, c)->constant == 0);
+            assert(vir_bitor(&f, b, a, c)->constant == mask);
+            assert(vir_bitxor(&f, b, a, c)->constant == mask);
+            a = reverse ? ones : x;
+            c = reverse ? x : ones;
+            assert(vir_bitor(&f, b, a, c)->constant == mask);
+            vir_value_t *negated = vir_bitxor(&f, b, a, c);
+            assert(negated->opcode == VIR_OP_BITNOT && negated->op0 == x);
+            for (int inner_reverse = 0; inner_reverse < 2; inner_reverse++) {
+                vir_value_t *first = inner_reverse ? y : x;
+                vir_value_t *second = inner_reverse ? x : y;
+                vir_value_t *both = vir_bitand(&f, b, first, second);
+                vir_value_t *either = vir_bitor(&f, b, first, second);
+                a = reverse ? both : x;
+                c = reverse ? x : both;
+                assert(vir_bitand(&f, b, a, c) == both);
+                assert(vir_bitor(&f, b, a, c) == x);
+                a = reverse ? either : x;
+                c = reverse ? x : either;
+                assert(vir_bitor(&f, b, a, c) == either);
+                assert(vir_bitand(&f, b, a, c) == x);
+            }
+        }
+        /* Similar shapes with a different leaf must survive normalization. */
+        assert(vir_bitand(&f, b, inv, y)->opcode == VIR_OP_BITAND);
+        assert(vir_bitxor(&f, b, x, y)->opcode == VIR_OP_BITXOR);
+        vir_value_t *pointer = vir_block_add_param(&f, b, VIR_TYPE_PTR);
+        vir_value_t *loaded = vir_load(&f, b, pointer, type);
+        assert(loaded);
+        vir_effect_t *effect = loaded->def_effect;
+        vir_value_t *zero = vir_bitxor(&f, b, loaded, loaded);
+        assert(zero->constant == 0 && loaded->def_effect == effect);
+        assert(vir_block_set_return(&f, b, zero));
+        assert(vir_verify(&f, &error));
+        vir_function_release(&f);
+    }
+}
+
 int main(void)
 {
+    test_bitwise_normalization();
+    test_post_ssa_normalization();
     test_compaction();
     test_incoming_load_reuse();
     test_constant_edge_threading();
     test_pointer_add_scheduling();
     test_independent_pointer_add_scheduling();
+    test_pointer_add_barrier_groups();
     test_overwritten_stores();
     test_va_start_signature_metadata();
     test_sccp_effect_first_param();
@@ -1257,7 +1430,7 @@ int main(void)
     assert(cse_stats.tables == 1 && cse_stats.values == 2 &&
            cse_stats.lookups == 2 && cse_stats.hits == 1 &&
            cse_stats.probes == 1 && cse_stats.replacements == 1 &&
-           cse_stats.table_slots == 4);
+           cse_stats.table_slots == 8);
     assert(vir_local_cse(&func, VIR_OPT_O2) == 0 &&
            vir_local_cse_with_stats(&func, (vir_opt_level_t) 99, &cse_stats) ==
                -1 &&

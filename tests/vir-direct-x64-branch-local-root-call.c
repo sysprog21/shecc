@@ -1,8 +1,4 @@
-static int set_then_read(int *pointer, int value)
-{
-    *pointer = value;
-    return *pointer;
-}
+static int set_then_read(int *pointer, int value);
 
 int main(int argc)
 {
@@ -12,4 +8,9 @@ int main(int argc)
     if (argc > 1)
         return set_then_read(&left, 17);
     return set_then_read(&right, 23);
+}
+static int set_then_read(int *pointer, int value)
+{
+    *pointer = value;
+    return *pointer;
 }

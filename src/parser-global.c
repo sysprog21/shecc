@@ -626,7 +626,7 @@ void parse_global_compound_array_init(var_t *var, block_t *block)
     parenthesized_array = read_compound_array_shape(
                               GLOBAL_BLOCK, element_ptr_level, true, &shape) &&
                           shape.parenthesized_array;
-    array = name_var(require_typed_var(GLOBAL_BLOCK, element_type));
+    array = require_temp_typed_var(GLOBAL_BLOCK, element_type);
     array->is_global = true;
     array->ptr_level =
         parenthesized_array ? shape.array_element_ptr_level : element_ptr_level;

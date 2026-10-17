@@ -1,7 +1,4 @@
-void helper(int *value)
-{
-    *value = 41;
-}
+void helper(int *value);
 
 int main(void)
 {
@@ -9,4 +6,8 @@ int main(void)
 
     helper(&value);
     return value + 1;
+}
+void helper(int *value)
+{
+    *value = 41;
 }

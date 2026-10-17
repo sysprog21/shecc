@@ -157,14 +157,14 @@ basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
             context->seen_cases = seen;
         }
 
-        constant = name_var(require_typed_var(context->dispatch_parent,
-                                              context->control->type));
+        constant = require_temp_typed_var(context->dispatch_parent,
+                                          context->control->type);
         constant->init_val = case_lo;
         constant->init_val_hi = case_hi;
         add_insn(context->dispatch_parent, context->dispatch_tail,
                  OP_load_constant, constant, NULL, NULL, 0, NULL);
 
-        comparison = require_named_var(context->dispatch_parent);
+        comparison = require_temp_var(context->dispatch_parent);
         add_insn(context->dispatch_parent, context->dispatch_tail, OP_eq,
                  comparison, constant, context->control, 0, NULL);
         add_insn(context->dispatch_parent, context->dispatch_tail, OP_branch,
@@ -831,7 +831,7 @@ static void emit_scalar_initializer(block_t *parent,
          var->type->base_type == TYPE_short) &&
         expr_result->var_name[0] == '.') {
         /* Extract first element from compound literal array */
-        var_t *first_elem = name_var(require_typed_var(parent, var->type));
+        var_t *first_elem = require_temp_typed_var(parent, var->type);
 
         /* Read first element from array at offset 0 expr_result is the array
          * itself, so we can read directly from it
@@ -905,7 +905,7 @@ static void read_block_declarator_storage(block_t *parent,
                 struct_type->base_struct)
                 struct_type = struct_type->base_struct;
 
-            var_t *struct_addr = require_named_var(parent);
+            var_t *struct_addr = require_temp_var(parent);
             add_insn(parent, *bb, OP_address_of, struct_addr, var, NULL, 0,
                      NULL);
             lex_expect(T_open_curly);
@@ -1913,4 +1913,5 @@ void read_func_body(func_t *func)
     backpatch_bb_idx = 0;
     label_idx = 0;
     vir_frontend_end(func);
+    release_function_temporaries();
 }

@@ -68,7 +68,7 @@ static var_t *compute_byte_offset_address(block_t *parent,
 
     var_t *offset = load_constant(parent, *bb, byte_offset, TY_int);
 
-    var_t *addr = require_named_var(parent);
+    var_t *addr = require_temp_var(parent);
     add_insn(parent, *bb, OP_add, addr, base_addr, offset, 0, NULL);
     return addr;
 }
@@ -143,7 +143,7 @@ void emit_record_copy_between(block_t *parent,
             compute_element_address(parent, bb, src_addr, offset, 1);
         var_t *dest_part =
             compute_element_address(parent, bb, dest_addr, offset, 1);
-        var_t *value = require_named_var(parent);
+        var_t *value = require_temp_var(parent);
         add_insn(parent, *bb, OP_read, value, src_part, NULL, width, NULL);
         add_insn(parent, *bb, OP_write, NULL, dest_part, value, width, NULL);
         offset += width;
@@ -160,7 +160,7 @@ var_t *record_value_address(block_t *parent, basic_block_t *bb, var_t *record)
 
     if (record->defers_record_copy)
         return record->compound_literal_address;
-    address = name_var(require_ref_var(parent, record->type, 0));
+    address = require_temp_ref_var(parent, record->type, 0);
     add_insn(parent, bb, OP_address_of, address, record, NULL, 0, NULL);
     return address;
 }
@@ -552,7 +552,7 @@ static var_t *read_global_object_address(block_t *scope,
                                          bool decays)
 {
     var_t *address =
-        name_var(require_ref_var(parent, object->type, object->ptr_level));
+        require_temp_ref_var(parent, object->type, object->ptr_level);
 
     address->is_global_address = true;
     add_insn(parent, *bb, OP_address_of, address, object, NULL, 0, NULL);
@@ -622,7 +622,7 @@ static var_t *read_global_compound_address(block_t *parent,
     declaration.is_func = callback != NULL;
     declaration.func_signature = callback;
     validate_global_compound_address(ctx->dest, &declaration);
-    var_t *literal = name_var(require_typed_var(GLOBAL_BLOCK, type));
+    var_t *literal = require_temp_typed_var(GLOBAL_BLOCK, type);
     literal->is_global = true;
     literal->ptr_level = callback && type->func_signature ? 0 : depth;
     literal->is_func = callback != NULL;
@@ -639,8 +639,7 @@ static var_t *read_global_compound_address(block_t *parent,
         lex_accept(T_comma);
         lex_expect(T_close_curly);
     }
-    var_t *address =
-        name_var(require_ref_var(parent, type, literal->ptr_level));
+    var_t *address = require_temp_ref_var(parent, type, literal->ptr_level);
     address->is_global_address = true;
     address->pointee_func_signature = callback;
     add_insn(parent, *bb, OP_address_of, address, literal, NULL, 0, NULL);
@@ -2029,7 +2028,7 @@ bool parse_struct_field_values(block_t *parent,
 
 void parse_array_literal_expr(block_t *parent, basic_block_t **bb)
 {
-    var_t *array_var = require_named_var(parent);
+    var_t *array_var = require_temp_var(parent);
     array_var->is_compound_literal = true;
 
     int element_count = 0;
@@ -2096,7 +2095,7 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
                  cur_token_loc());
 
     if (rs1 && rs1->array_size > 0 && rs1->var_name[0] == '.' && !strict_c99) {
-        var_t *val = name_var(require_typed_var(parent, rs1->type));
+        var_t *val = require_temp_typed_var(parent, rs1->type);
         val->init_val = rs1->init_val;
         add_insn(parent, bb, OP_load_constant, val, NULL, NULL, 0, NULL);
         rs1 = val;
@@ -2631,7 +2630,7 @@ var_t *scalarize_array_literal(block_t *parent,
     /* Create a new scalar temporary, giving it a unique name and copying over
      * the literal data so downstream code can treat it like a normal value.
      */
-    var_t *scalar = name_var(require_typed_ptr_var(parent, result_type, 0));
+    var_t *scalar = require_temp_typed_ptr_var(parent, result_type, 0);
     scalar->init_val = array_var->init_val;
 
     /* Materialize the literal data into the scalar temporary via an OP_read. */

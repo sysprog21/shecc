@@ -3,6 +3,12 @@
  * forty blocks before O2 cleanup, exercising deferred large-CFG pruning through
  * LICM without relying on a target-specific backend form.
  */
+static int vir_large_cfg(int x);
+
+int main(void)
+{
+    return vir_large_cfg(0) != 23;
+}
 static int vir_large_cfg(int x)
 {
     int result = 0;
@@ -58,9 +64,4 @@ static int vir_large_cfg(int x)
     else
         result += 23;
     return result;
-}
-
-int main(void)
-{
-    return vir_large_cfg(0) != 23;
 }

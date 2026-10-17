@@ -106,19 +106,24 @@ if "${compiler[@]}" --no-libc -o "$work/typedef-leak" \
     exit 1
 fi
 
+# Each helper follows its caller, so the calls the checks below resolve stay
+# calls instead of being inlined.
 printf '%s\n' \
     'static int unit_value = 17;' \
-    'static int unit_helper(void) { return unit_value; }' \
+    'static int unit_helper(void);' \
     'int unit_result(void) { return unit_value + unit_helper(); }' \
+    'static int unit_helper(void) { return unit_value; }' \
     > "$work/static-root.c"
 printf '%s\n' \
     'static int unit_value = 29;' \
-    'static int unit_helper(void) { return unit_value; }' \
+    'static int unit_helper(void);' \
     'extern int unit_result(void);' \
     'int main(void) {' \
     '    return unit_value == 29 && unit_helper() == 29 &&' \
     '           unit_result() == 34 ? 0 : 1;' \
-    '}' > "$work/static-main.c"
+    '}' \
+    'static int unit_helper(void) { return unit_value; }' \
+    > "$work/static-main.c"
 "${compiler[@]}" --no-libc -o "$work/static-scope" \
     "$work/static-root.c" "$work/static-main.c"
 "${runner[@]}" "$work/static-scope"

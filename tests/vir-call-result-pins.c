@@ -1,32 +1,11 @@
-static unsigned long long wide(int n)
-{
-    return 0x123456789abcdef0ULL + (unsigned long long) n * 0x100000001ULL;
-}
+static unsigned long long wide(int n);
+static unsigned long long combine(unsigned long long a, unsigned long long b);
+static signed char narrow(int n);
+static _Bool truth(int n);
+static short narrow16(int n);
+static unsigned int step(unsigned int x);
 
-static unsigned long long combine(unsigned long long a, unsigned long long b)
-{
-    return a * 3ULL ^ (b + 17ULL);
-}
 
-static signed char narrow(int n)
-{
-    return n - 130;
-}
-
-static _Bool truth(int n)
-{
-    return n & 1;
-}
-
-static short narrow16(int n)
-{
-    return 30000 - n;
-}
-
-static unsigned int step(unsigned int x)
-{
-    return x * 1664525u + 1013904223u;
-}
 
 int main(void)
 {
@@ -48,4 +27,28 @@ int main(void)
            c != 2641737194205234155ULL || d != 1311768549068168963ULL ||
            x != -125 || y != -121 || !t || f || u != -20000 || v != -30000 ||
            state != 463890471u || a + b + c + d != 6577042764100329698ULL;
+}
+static unsigned long long wide(int n)
+{
+    return 0x123456789abcdef0ULL + (unsigned long long) n * 0x100000001ULL;
+}
+static unsigned long long combine(unsigned long long a, unsigned long long b)
+{
+    return a * 3ULL ^ (b + 17ULL);
+}
+static signed char narrow(int n)
+{
+    return n - 130;
+}
+static _Bool truth(int n)
+{
+    return n & 1;
+}
+static short narrow16(int n)
+{
+    return 30000 - n;
+}
+static unsigned int step(unsigned int x)
+{
+    return x * 1664525u + 1013904223u;
 }

@@ -524,7 +524,7 @@ static var_t *promote_wide_global_operand(block_t *parent,
     if (value->ptr_level || wide_global_address_operand(value) ||
         value->type->size >= TY_int->size)
         return value;
-    promoted = name_var(require_typed_var(parent, TY_int));
+    promoted = require_temp_typed_var(parent, TY_int);
     promoted->init_val = value->init_val;
     promoted->init_val_hi = wide_global_narrow_high(value->init_val, false);
     promoted->is_const = true;
@@ -547,8 +547,8 @@ static var_t *read_unevaluated_global_value(block_t *parent,
     unevaluated_expression_depth--;
     wide_global_unevaluated_depth = saved_depth;
     var_t *operand = opstack_pop();
-    var_t *value = name_var(
-        require_typed_ptr_var(parent, operand->type, operand->ptr_level));
+    var_t *value =
+        require_temp_typed_ptr_var(parent, operand->type, operand->ptr_level);
     value->is_func = operand->is_func;
     value->func_signature = operand->func_signature;
     value->pointee_func_signature = operand->pointee_func_signature;
@@ -601,7 +601,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         zero->type = value->type;
         zero->init_val = 0;
         add_insn(parent, bb, OP_load_constant, zero, NULL, NULL, 0, NULL);
-        result = require_named_var(parent);
+        result = require_temp_var(parent);
         result->type = value->type;
         emit_wide_global_word_arithmetic(parent, bb, result, OP_sub, zero,
                                          value);
@@ -612,7 +612,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
 
         value = promote_wide_global_operand(
             parent, bb, read_wide_global_literal_primary(parent, bb, scope));
-        result = require_named_var(parent);
+        result = require_temp_var(parent);
         result->type = value->type;
         emit_wide_global_word_arithmetic(parent, bb, result, OP_bit_not, value,
                                          NULL);
@@ -622,7 +622,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         var_t *result;
 
         value = read_wide_global_literal_primary(parent, bb, scope);
-        result = name_var(require_typed_var(parent, TY_int));
+        result = require_temp_typed_var(parent, TY_int);
         result->init_val = !wide_global_operand_is_true(value);
         result->init_val_hi = 0;
         result->is_const = true;
@@ -653,8 +653,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
         return address;
     }
     if (lex_accept(T_sizeof)) {
-        value =
-            name_var(require_typed_var(parent, find_builtin_type("size_t")));
+        value = require_temp_typed_var(parent, find_builtin_type("size_t"));
         value->init_val = read_sizeof_constant(scope);
         value->init_val_hi = 0;
         value->is_const = true;
@@ -688,7 +687,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
             operand->type->size <= TY_int->size)
             hi = wide_global_narrow_high(operand->init_val,
                                          operand->type->is_unsigned);
-        value = name_var(require_typed_var(parent, type));
+        value = require_temp_typed_var(parent, type);
         fold_integer_constant_cast(value, (unsigned int) operand->init_val, hi);
         value->is_const = true;
         add_insn(parent, bb, OP_load_constant, value, NULL, NULL, 0, NULL);
@@ -710,7 +709,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
             return value;
         }
         lex_expect(T_identifier);
-        value = name_var(require_typed_var(parent, TY_int));
+        value = require_temp_typed_var(parent, TY_int);
 
         /* Every operand this reader returns carries its high word, the
          * extension of an int-sized value, so no consumer rebuilds it.
@@ -731,7 +730,7 @@ var_t *read_wide_global_literal_primary(block_t *parent,
             error_at("Wide string literal element is not a constant",
                      next_token_loc());
         read_string_literal_element(scope, &element);
-        value = name_var(require_typed_var(parent, TY_int));
+        value = require_temp_typed_var(parent, TY_int);
         value->init_val = element;
         value->init_val_hi = wide_global_narrow_high(element, false);
         value->is_const = true;

@@ -64,7 +64,7 @@ static var_t *scale_pointer_index(block_t *parent,
                              integer_promoted_type(index));
     scale = load_constant(parent, bb, stride, TY_int);
     scale->is_const = rematerialize_scale;
-    result = name_var(require_typed_var(parent, integer_promoted_type(index)));
+    result = require_temp_typed_var(parent, integer_promoted_type(index));
     add_insn(parent, bb, OP_mul, result, index, scale, 0, NULL);
     return result;
 }
@@ -81,8 +81,7 @@ static var_t *lower_array_element_address(block_t *parent,
     var_t *address;
 
     index = scale_pointer_index(parent, bb, index, stride, rematerialize_scale);
-    address =
-        name_var(require_typed_ptr_var(parent, element_type, pointer_level));
+    address = require_temp_typed_ptr_var(parent, element_type, pointer_level);
     add_insn(parent, bb, OP_add, address, base, index, 0, NULL);
     return address;
 }
@@ -268,8 +267,8 @@ static void lower_value_subscript(block_t *parent, basic_block_t **bb)
                 element_ptr_level += element_type->array_element_ptr_level;
                 element_type = element_type->array_element_type;
             }
-            vd = name_var(
-                require_typed_ptr_var(parent, element_type, element_ptr_level));
+            vd = require_temp_typed_ptr_var(parent, element_type,
+                                            element_ptr_level);
             vd->is_const_qualified = base->is_const_qualified;
             vd->pointer_const_mask = base->pointer_const_mask;
             vd->pointer_volatile_mask = base->pointer_volatile_mask;
@@ -357,7 +356,7 @@ static void lower_value_member(block_t *parent, basic_block_t **bb)
          * as a call or assignment result, is not.
          */
         is_lvalue = base->is_compound_literal || is_named_object(base, parent);
-        address = name_var(require_ref_var(parent, base->type, 0));
+        address = require_temp_ref_var(parent, base->type, 0);
         address->is_const_qualified = base->is_const_qualified;
         add_insn(parent, *bb, OP_address_of, address, base, NULL, 0, NULL);
     }
@@ -419,8 +418,8 @@ void lower_postfix_operators(block_t *parent, basic_block_t **bb)
         if (!object->is_compound_literal_reference &&
             is_named_object(object, parent)) {
             /* A grouped named object, `(count)++`, updates the variable. */
-            var_t *old = name_var(
-                require_typed_ptr_var(parent, object->type, object->ptr_level));
+            var_t *old = require_temp_typed_ptr_var(parent, object->type,
+                                                    object->ptr_level);
             var_t *one;
             var_t *updated;
 
@@ -533,7 +532,7 @@ static void lower_array_literal_subscripts(block_t *parent,
             &(lvalue_t) {.size = element_size,
                          .value_ptr_level = compound_var->ptr_level,
                          .type = compound_var->type});
-        element = name_var(require_typed_var(parent, compound_var->type));
+        element = require_temp_typed_var(parent, compound_var->type);
         add_insn(parent, *bb, OP_read, element, address, NULL, element_size,
                  NULL);
         element->is_const_qualified = compound_var->is_const_qualified;
@@ -557,7 +556,7 @@ static void lower_record_literal_members(block_t *parent,
 {
     char field_name[MAX_ID_LEN];
     var_t *base = opstack_pop();
-    var_t *base_addr = name_var(require_ref_var(parent, base->type, 0));
+    var_t *base_addr = require_temp_ref_var(parent, base->type, 0);
     var_t *field;
     var_t *address;
     var_t *element;
@@ -620,8 +619,8 @@ static void lower_record_literal_members(block_t *parent,
         if (is_bitfield(field))
             old = read_bitfield_value(parent, bb, address, field);
         else {
-            old = name_var(
-                require_typed_ptr_var(parent, value_type, value_ptr_level));
+            old =
+                require_temp_typed_ptr_var(parent, value_type, value_ptr_level);
             add_insn(parent, *bb, OP_read, old, address, NULL, value_size,
                      NULL);
         }
@@ -633,8 +632,8 @@ static void lower_record_literal_members(block_t *parent,
         element = read_bitfield_value(parent, bb, address, field);
         element->is_bitfield = false;
     } else {
-        element = name_var(
-            require_typed_ptr_var(parent, value_type, value_ptr_level));
+        element =
+            require_temp_typed_ptr_var(parent, value_type, value_ptr_level);
         add_insn(parent, *bb, OP_read, element, address, NULL, value_size,
                  NULL);
     }
@@ -670,7 +669,7 @@ static void read_compound_literal_operand(block_t *parent,
     var_t *compound_object = NULL;
 
     /* Create variable for compound literal result */
-    var_t *compound_var = name_var(require_typed_var(parent, tn->type));
+    var_t *compound_var = require_temp_typed_var(parent, tn->type);
     compound_var->is_compound_literal = true;
     compound_var->is_const_qualified = tn->const_qualified;
     compound_var->is_const_pointer = tn->const_pointer;
@@ -737,7 +736,7 @@ static void read_compound_literal_operand(block_t *parent,
             compound_var->pointee_func_signature = tn->func_signature;
         }
         if (lex_peek(T_close_curly, NULL)) {
-            initializer = require_named_var(parent);
+            initializer = require_temp_var(parent);
             initializer->is_const = true;
             add_insn(parent, *bb, OP_load_constant, initializer, NULL, NULL, 0,
                      NULL);
@@ -780,8 +779,8 @@ static void read_compound_literal_operand(block_t *parent,
                                                    false);
         } else {
             /* Empty pointer compound literal: (int*){} */
-            initializer = name_var(
-                require_typed_ptr_var(parent, tn->type, tn->ptr_level));
+            initializer =
+                require_temp_typed_ptr_var(parent, tn->type, tn->ptr_level);
             initializer->init_val = 0;
             add_insn(parent, *bb, OP_load_constant, initializer, NULL, NULL, 0,
                      NULL);
@@ -806,7 +805,7 @@ static void read_compound_literal_operand(block_t *parent,
 
         add_insn(parent, *bb, OP_allocat, compound_var, NULL, NULL, 0, NULL);
         var_t *compound_addr =
-            name_var(require_ref_var(parent, compound_var->type, 0));
+            require_temp_ref_var(parent, compound_var->type, 0);
         add_insn(parent, *bb, OP_address_of, compound_addr, compound_var, NULL,
                  0, NULL);
         parse_struct_field_init(parent, bb, struct_type, compound_addr);
@@ -893,8 +892,8 @@ static void read_compound_literal_operand(block_t *parent,
             compound_object->is_const_pointer)
             error_at("assignment of read-only location", cur_token_loc());
         opstack_pop();
-        old = name_var(require_typed_ptr_var(parent, compound_object->type,
-                                             compound_object->ptr_level));
+        old = require_temp_typed_ptr_var(parent, compound_object->type,
+                                         compound_object->ptr_level);
         add_insn(parent, *bb, OP_assign, old, compound_object, NULL, 0, NULL);
         one = load_constant(parent, *bb, 1, TY_int);
         updated =
@@ -999,7 +998,7 @@ static void read_cast_operand(block_t *parent,
 
     /* Create variable for cast result */
     var_t *cast_var =
-        name_var(require_typed_ptr_var(parent, tn->type, tn->ptr_level));
+        require_temp_typed_ptr_var(parent, tn->type, tn->ptr_level);
     cast_var->is_const_qualified = tn->const_qualified;
     cast_var->is_const_pointer = tn->const_pointer;
     cast_var->pointer_const_mask = tn->pointer_const_mask;
@@ -1283,7 +1282,7 @@ static void read_integer_unary_operand(block_t *parent,
                  cur_token_loc());
     rs1 = integer_promote_operand(parent, bb, rs1);
 
-    vd = require_named_var(parent);
+    vd = require_temp_var(parent);
     vd->type = rs1->type;
     if (rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
         vd->is_const = true;
@@ -1424,14 +1423,14 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
 
         /* Constant folding for logical NOT */
         if (rs1 && rs1->is_const && !rs1->ptr_level && !rs1->is_global) {
-            vd = require_named_var(parent);
+            vd = require_temp_var(parent);
             vd->type = TY_int;
             vd->is_const = true;
             vd->init_val = !(rs1->init_val || rs1->init_val_hi);
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
         } else {
-            vd = require_named_var(parent);
+            vd = require_temp_var(parent);
 
             /* C99 6.5.3.3: logical negation always yields int. Preserving the
              * operand's type made !pointer inherit the pointed-to record size,
@@ -1494,7 +1493,7 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
                 error_at("__func__ is only defined inside a function",
                          next_token_loc());
             lex_expect(T_identifier);
-            vd = name_var(require_typed_ptr_var(parent, TY_char, true));
+            vd = require_temp_typed_ptr_var(parent, TY_char, true);
             vd->init_val = write_symbol(function_source_name(parent->func));
             vd->is_string_literal = true;
             opstack_push(vd);
@@ -1503,7 +1502,7 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
             if (lex_accept(T_open_square)) {
                 var_t *address = read_subscript_address(
                     parent, bb, opstack_pop(), TY_char, true, 1);
-                vd = name_var(require_typed_var(parent, TY_char));
+                vd = require_temp_typed_var(parent, TY_char);
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_read, vd, address, NULL, 1, NULL);
             }
@@ -1511,7 +1510,7 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
             /* An enumeration constant is an integer constant, so one that is
              * zero is a null pointer constant (C99 6.3.2.3p3).
              */
-            vd = name_var(require_var(parent));
+            vd = require_temp_var(parent);
             vd->init_val = con->value;
             vd->is_const = true;
             opstack_push(vd);
@@ -1824,7 +1823,7 @@ static var_t *decay_function_pointer_array(block_t *parent,
     if (!var || !var->is_func || !var->func_signature || var->array_dim2 ||
         !(var->array_size || var->has_unsized_array))
         return var;
-    pointer = name_var(require_typed_ptr_var(parent, var->type, 1));
+    pointer = require_temp_typed_ptr_var(parent, var->type, 1);
     pointer->pointee_func_signature = var->func_signature;
     add_insn(parent, *bb, OP_assign, pointer, var, NULL, 0, NULL);
     return pointer;
@@ -1941,7 +1940,7 @@ void handle_pointer_arithmetic(block_t *parent,
             element_size = pointer_arithmetic_stride(orig_rs1);
 
             /* Perform subtraction first */
-            var_t *diff = require_named_var(parent);
+            var_t *diff = require_temp_var(parent);
             add_insn(parent, *bb, OP_sub, diff, rs1, rs2, 0, NULL);
 
             /* Then divide by element size if needed */
@@ -1950,7 +1949,7 @@ void handle_pointer_arithmetic(block_t *parent,
                 var_t *size_const = load_constant(
                     parent, *bb, shift >= 0 ? shift : element_size, TY_int);
 
-                var_t *result = require_named_var(parent);
+                var_t *result = require_temp_var(parent);
                 add_insn(parent, *bb, shift >= 0 ? OP_rshift : OP_div, result,
                          diff, size_const, 0, NULL);
                 opstack_push(result);
@@ -1990,7 +1989,7 @@ void handle_pointer_arithmetic(block_t *parent,
     }
 
     /* Perform the operation */
-    var_t *vd = name_var(require_var(parent));
+    var_t *vd = require_temp_var(parent);
     /* Preserve pointer type metadata on results of pointer arithmetic */
     if (ptr_var) {
         vd->type = ptr_var->type;
@@ -2174,7 +2173,7 @@ static var_t *emit_binary_result(block_t *parent,
                                  var_t *right,
                                  type_t *result_type)
 {
-    var_t *result = require_named_var(parent);
+    var_t *result = require_temp_var(parent);
     result->type = result_type;
     add_insn(parent, *bb, op, result, left, right, 0, NULL);
     return result;
@@ -2245,8 +2244,8 @@ static bool fold_wide_constant_binary(block_t *parent,
         (rs2->type->size <= TY_int->size || rs2->init_val_hi == -1))
         return false;
 
-    vd = name_var(
-        require_typed_var(parent, integer_binary_result_type(op, rs1, rs2)));
+    vd = require_temp_typed_var(parent,
+                                integer_binary_result_type(op, rs1, rs2));
     emit_wide_global_word_arithmetic(parent, *bb, vd, op, rs1, rs2);
     opstack_push(vd);
     return true;
@@ -2526,7 +2525,7 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
 
             if (folded) {
                 /* Create constant result */
-                vd = require_named_var(parent);
+                vd = require_temp_var(parent);
                 vd->type = result_type;
                 vd->is_const = true;
                 vd->init_val = result;
@@ -2671,8 +2670,8 @@ static var_t *read_addressed_value(block_t *parent,
         return assignment_result
                    ? reload_assigned_bitfield(parent, bb, address, lvalue->decl)
                    : read_bitfield_value(parent, bb, address, lvalue->decl);
-    value = name_var(
-        require_typed_ptr_var(parent, lvalue->type, lvalue->value_ptr_level));
+    value = require_temp_typed_ptr_var(parent, lvalue->type,
+                                       lvalue->value_ptr_level);
     value->is_assignment_reload = removable && assignment_result;
     add_insn(parent, *bb, OP_read, value, address, NULL, lvalue->size, NULL);
     return value;
@@ -2755,7 +2754,7 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
      */
     if (lvalue->is_reference) {
         rs1 = operand_stack[operand_stack_idx - 1];
-        t = require_named_var(parent);
+        t = require_temp_var(parent);
         t->type = pointee_type_from_pointer_typedef(
             pointer_row_element_type ? pointer_row_element_type : lvalue->type);
         t->ptr_level = lvalue->value_ptr_level;
@@ -2916,7 +2915,7 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
             var_t *old = opstack_pop();
             var_t *address = opstack_pop();
             var_t *one = bitfield_constant(parent, bb, 1);
-            var_t *updated = require_named_var(parent);
+            var_t *updated = require_temp_var(parent);
             updated->type = integer_binary_result_type(postfix_op, old, one);
             add_insn(parent, *bb, postfix_op, updated, old, one, 0, NULL);
             write_bitfield_value(parent, bb, address, updated, lvalue->decl);
@@ -2952,7 +2951,7 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
             rs1 = opstack_pop();
         } else {
             rs1 = operand_stack[operand_stack_idx - 1];
-            t = require_named_var(parent);
+            t = require_temp_var(parent);
             t->type = rs1->type;
             t->ptr_level = rs1->ptr_level;
             t->func_signature = rs1->func_signature;
@@ -2962,7 +2961,7 @@ static void lower_lvalue_tail(lvalue_t *lvalue,
                 copy_pointee_array_shape(t, rs1);
             add_insn(parent, *bb, OP_assign, t, rs1, NULL, 0, NULL);
         }
-        vd = require_named_var(parent);
+        vd = require_temp_var(parent);
         if (!lvalue->is_reference && is_pointee_array_pointer(var)) {
             vd->type = lvalue->type;
             vd->ptr_level = var->ptr_level;
@@ -3148,7 +3147,7 @@ void read_lvalue(lvalue_t *lvalue,
                 (lvalue->value_ptr_level || pending_fixed_array_pointer_slot) &&
                 is_member) {
                 rs1 = opstack_pop();
-                vd = require_named_var(parent);
+                vd = require_temp_var(parent);
                 vd->type = pointee_type_from_pointer_typedef(lvalue->type);
                 vd->ptr_level = lvalue->value_ptr_level;
                 if (pending_scalar_row_pointer_slot) {
@@ -3338,7 +3337,7 @@ void read_lvalue(lvalue_t *lvalue,
 
             rs2 = opstack_pop();
             rs1 = opstack_pop();
-            vd = name_var(require_var(parent));
+            vd = require_temp_var(parent);
 
             /* A subscript expression computes the address of its selected
              * element. Preserve that pointer provenance: unary '&' leaves an
@@ -3472,7 +3471,7 @@ void read_lvalue(lvalue_t *lvalue,
                  */
                 if (is_member) {
                     rs1 = opstack_pop();
-                    vd = require_named_var(parent);
+                    vd = require_temp_var(parent);
                     vd->type = pointee_type_from_pointer_typedef(lvalue->type);
                     vd->ptr_level = lvalue->value_ptr_level;
                     opstack_push(vd);
@@ -3486,7 +3485,7 @@ void read_lvalue(lvalue_t *lvalue,
 
                 if (!is_address_got) {
                     rs1 = opstack_pop();
-                    vd = require_named_var(parent);
+                    vd = require_temp_var(parent);
                     opstack_push(vd);
                     add_insn(parent, *bb, OP_address_of, vd, rs1, NULL, 0,
                              NULL);
@@ -3533,14 +3532,14 @@ void read_lvalue(lvalue_t *lvalue,
             lvalue->is_reference = !is_array_declarator(var);
 
             /* move pointer to offset of structure */
-            vd = require_named_var(parent);
+            vd = require_temp_var(parent);
             vd->init_val = var->offset;
             opstack_push(vd);
             add_insn(parent, *bb, OP_load_constant, vd, NULL, NULL, 0, NULL);
 
             rs2 = opstack_pop();
             rs1 = opstack_pop();
-            vd = require_named_var(parent);
+            vd = require_temp_var(parent);
             vd->is_volatile_access = object_is_volatile;
 
             if (is_array_declarator(var)) {
@@ -3718,7 +3717,7 @@ void finalize_logical(opcode_t op,
     vd = load_constant(parent, op == OP_log_and ? then_next : else_bb,
                        op == OP_log_and, TY_int);
 
-    log_op_res = require_named_var(parent);
+    log_op_res = require_temp_var(parent);
     add_insn(parent, op == OP_log_and ? then_next : else_bb, OP_assign,
              log_op_res, vd, NULL, 0, NULL);
 
@@ -3885,13 +3884,13 @@ static void read_ternary_operation_body(block_t *parent, basic_block_t **bb)
          */
         true_addr = record_value_address(parent, then_, true_val);
         false_addr = record_value_address(parent, else_, false_val);
-        selected = name_var(require_ref_var(parent, true_val->type, 0));
+        selected = require_temp_ref_var(parent, true_val->type, 0);
         add_insn(parent, then_, OP_assign, selected, true_addr, NULL, 0, NULL);
         add_insn(parent, else_, OP_assign, selected, false_addr, NULL, 0, NULL);
         bb_connect(then_, end_ternary, NEXT);
         bb_connect(else_, end_ternary, NEXT);
 
-        vd = name_var(require_typed_var(parent, true_val->type));
+        vd = require_temp_typed_var(parent, true_val->type);
         add_insn(parent, end_ternary, OP_allocat, vd, NULL, NULL, 0, NULL);
         emit_record_copy_from_address(parent, &end_ternary, vd, selected);
         opstack_push(vd);
@@ -3899,7 +3898,7 @@ static void read_ternary_operation_body(block_t *parent, basic_block_t **bb)
         return;
     }
 
-    vd = require_named_var(parent);
+    vd = require_temp_var(parent);
     if (true_val->type == TY_void && !true_val->ptr_level &&
         false_val->type == TY_void && !false_val->ptr_level) {
         vd->type = TY_void;
@@ -4058,7 +4057,7 @@ bool read_body_assignment(var_t *var,
              */
             if (lvalue.is_reference) {
                 rs1 = opstack_pop();
-                vd = require_named_var(parent);
+                vd = require_temp_var(parent);
                 opstack_push(vd);
                 add_insn(parent, *bb, OP_read, vd, rs1, NULL, PTR_SIZE, NULL);
             }
@@ -4099,7 +4098,7 @@ bool read_body_assignment(var_t *var,
 
                 rs2 = vd;
                 rs1 = opstack_pop();
-                vd = require_named_var(parent);
+                vd = require_temp_var(parent);
                 add_insn(parent, *bb, op, vd, rs1, rs2, 0, NULL);
 
                 if (lvalue.is_reference)
@@ -4199,11 +4198,10 @@ bool read_body_assignment(var_t *var,
                  * function address.
                  */
                 if (rs2->is_func && find_var(rs2->var_name, parent) == rs2) {
-                    t = name_var(
-                        require_ref_var(parent, rs2->type, rs2->ptr_level));
+                    t = require_temp_ref_var(parent, rs2->type, rs2->ptr_level);
                     add_insn(parent, *bb, OP_address_of, t, rs2, NULL, 0, NULL);
 
-                    vd = require_named_var(parent);
+                    vd = require_temp_var(parent);
                     add_insn(parent, *bb, OP_read, vd, t, NULL, PTR_SIZE, NULL);
                     rs2 = vd;
                 }
@@ -4212,8 +4210,8 @@ bool read_body_assignment(var_t *var,
                  * variable.
                  */
                 if (!lvalue.is_reference) {
-                    var_t *addr = name_var(
-                        require_ref_var(parent, lvalue.type, lvalue.ptr_level));
+                    var_t *addr = require_temp_ref_var(parent, lvalue.type,
+                                                       lvalue.ptr_level);
                     add_insn(parent, *bb, OP_address_of, addr, rs1, NULL, 0,
                              NULL);
                     rs1 = addr;

@@ -20,14 +20,17 @@ sed '/^void emit_mop(vir_mop_t \*mop)$/,/^{/ { /^{$/a\
 "${cc[@]}" -O0 -g -std=c99 -fwrapv \
     "-DVIR_LIVEOUT_TEST_MAIN=\"$task_dir/main.c\"" -iquote "$task_dir" -iquote src -Isrc \
     tests/vir-x64-liveout.c -o "$task_dir/compiler"
+# The probes follow main, so they stay calls for the hook to replace.
 cat > "$task_dir/source.c" << 'SOURCE'
-int probe_cmp(int a, int b) { return -1; }
-int probe_and(int a, int b) { return -1; }
+int probe_cmp(int a, int b);
+int probe_and(int a, int b);
 int main(int argc, char **argv)
 {
     if (argc > 2) return probe_and(5, 3) != 1;
     return probe_cmp(5, 5) != 1;
 }
+int probe_cmp(int a, int b) { return -1; }
+int probe_and(int a, int b) { return -1; }
 SOURCE
 for mode in default no-folds; do
     flags=()

@@ -30,23 +30,40 @@ and system load. Build/runtime failure writes `failure.json` and returns nonzero
 completed results remain available. Results describe these seven synthetic
 workloads on the measured host.
 
-## Native measurements
+## Latest results
 
-October 6, 2026: nine rounds of eight executions on each host; all 1,022 checksum
-executions passed per host. Results below are throughput relative to GCC `-O1`.
-ARM64: native eMag, Linux 6.8, GCC 13.3, CPU 31, performance governor restored
-after measurement. x86-64: Ryzen Threadripper 2990WX, Linux 6.8, GCC 14.2,
-CPU 63, unchanged schedutil governor.
+Native x86-64: AMD Ryzen Threadripper 2990WX, Linux 6.8, GCC 14.2.0
+`-O1 -fwrapv`, CPU 63, unchanged schedutil governor, nine rotating rounds of
+eight executions after warmup, `--target 1`. Every checksum execution passed and
+the source/compiler/binary SHA256 checks were unchanged. Throughput is GCC time
+divided by shecc time; values above 1 favor shecc.
 
-| Workload | ARM64 wall | ARM64 CPU | x86-64 wall | x86-64 CPU |
-| --- | ---: | ---: | ---: | ---: |
-| rng | 83.74% | 83.41% | 80.74% | 80.28% |
-| branch | 92.50% | 92.35% | 91.89% | 91.66% |
-| pointer | 89.34% | 88.83% | 82.83% | 81.33% |
-| recursion | 89.88% | 89.69% | 92.93% | 92.71% |
-| calls | 87.47% | 86.12% | 101.52% | 101.83% |
-| sort | 81.52% | 81.28% | 86.57% | 86.48% |
-| indexed | 89.29% | 88.85% | 99.67% | 99.73% |
+| Workload | Wall | Child CPU |
+| --- | ---: | ---: |
+| rng | 150.09x | 265.18x |
+| branch | 0.97x | 0.97x |
+| pointer | 1.41x | 1.48x |
+| recursion | 1.18x | 1.19x |
+| calls | 1.00x | 1.00x |
+| sort | 1.11x | 1.11x |
+| indexed | 1.00x | 1.00x |
+
+The wall geometric mean is 2.23x and the child-CPU geometric mean 2.43x. RNG's
+constant-trip, effect-free affine loop is summarized away, so its process time
+is startup dominated. Five of seven workloads meet the strict per-workload
+target; branch stays below GCC and calls is at parity, so the command returns
+status 1. The geometric mean is descriptive and does not replace the gate.
+
+```sh
+python3 tests/native-throughput.py --shecc out/shecc \
+    --output out/throughput --rounds 9 --runs 8 --target 1
+```
+
+To compare two compilers, save the baseline binary before rebuilding and run
+the same command against each, serially and without concurrent build or test
+jobs. Each output directory contains `results.json`, commands, environment, raw
+samples, and SHA256 provenance. Use fresh output directories for another
+measurement. Replace this section with the newest run rather than appending.
 
 ## Compilation time
 
@@ -68,3 +85,32 @@ Add `--no-libc` to measure programs that omit shecc's bundled libc.
 
 These measure compilation speed separately from the generated-program
 throughput measurements above. Results depend on the input and native host.
+
+### Profiling compilation with uftrace
+
+Build a separate instrumented host compiler after `make` for the native target:
+`src/main.c` includes the generated `config` and `out/libc.inc`.
+Use a shallow trace to find expensive phases, then restrict recording to a hot
+function. Disabling host inlining exposes helper call counts but increases tracing
+overhead; instrumented timings are for attribution, not speedup claims.
+
+```sh
+mkdir -p out/uftrace-compile
+cc -O2 -g -std=c99 -pedantic -fwrapv -pg -fno-omit-frame-pointer \
+    src/main.c -o out/uftrace-compile/shecc-profile
+uftrace record --no-libcall -D 5 -d out/uftrace-compile/phases \
+    out/uftrace-compile/shecc-profile -o out/uftrace-compile/self.elf src/main.c
+uftrace report -d out/uftrace-compile/phases -s self --color=no
+cc -O2 -g -std=c99 -pedantic -fwrapv -pg -fno-inline \
+    -fno-omit-frame-pointer src/main.c -o out/uftrace-compile/shecc-detail
+uftrace record --no-libcall -F vir_dce_with_stats -D 4 \
+    -d out/uftrace-compile/dce out/uftrace-compile/shecc-detail \
+    -o out/uftrace-compile/self-detail.elf src/main.c
+uftrace report -d out/uftrace-compile/dce -s self --color=no
+```
+
+Compare an optimization by self-compiling a frozen copy of `src`, `config`, and
+`out/libc.inc` with the before and after compilers, alternating rounds after
+warmup, and require byte-identical ELF output from every pair. Prefer
+instruction counts (`perf stat -e instructions:u`) over wall time on a loaded
+host.

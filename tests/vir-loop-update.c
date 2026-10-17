@@ -14,19 +14,7 @@ struct Value {
 struct Block {
     Value *params, *head;
 };
-int guard(Block *block)
-{
-    for (int list = 0; list < 2; list++)
-        for (Value *value = list ? block->head : block->params; value;
-             value = list ? value->next : value->param_next) {
-            if (list && value->opcode != 1 && value->opcode != 2)
-                return 0;
-            for (Use *use = value->uses; use; use = use->next)
-                if (use->owner != block)
-                    return 0;
-        }
-    return 1;
-}
+int guard(Block *block);
 int main(void)
 {
     unsigned hash = 0;
@@ -89,4 +77,17 @@ int main(void)
     if (i || effects)
         return 6;
     return 0;
+}
+int guard(Block *block)
+{
+    for (int list = 0; list < 2; list++)
+        for (Value *value = list ? block->head : block->params; value;
+             value = list ? value->next : value->param_next) {
+            if (list && value->opcode != 1 && value->opcode != 2)
+                return 0;
+            for (Use *use = value->uses; use; use = use->next)
+                if (use->owner != block)
+                    return 0;
+        }
+    return 1;
 }

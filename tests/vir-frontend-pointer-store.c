@@ -1,8 +1,4 @@
-int store_pointer(int **address, int *value)
-{
-    *address = value;
-    return **address;
-}
+int store_pointer(int **address, int *value);
 
 int main(void)
 {
@@ -10,4 +6,9 @@ int main(void)
     int *pointer = 0;
 
     return store_pointer(&pointer, &value);
+}
+int store_pointer(int **address, int *value)
+{
+    *address = value;
+    return **address;
 }

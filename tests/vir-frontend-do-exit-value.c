@@ -1,3 +1,9 @@
+int last_before(int limit);
+
+int main(void)
+{
+    return last_before(4);
+}
 int last_before(int limit)
 {
     int value;
@@ -8,9 +14,4 @@ int last_before(int limit)
         index = index + 1;
     } while (index < limit);
     return value;
-}
-
-int main(void)
-{
-    return last_before(4);
 }

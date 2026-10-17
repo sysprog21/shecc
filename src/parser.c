@@ -681,11 +681,19 @@ char *gen_name(void)
     return arena_strdup(GENERAL_ARENA, buf);
 }
 
-var_t *require_var(block_t *blk)
+/* A new variable of @blk. A temporary takes a generated name, which never
+ * matches an identifier, so it stays off the scope's lookup list; over a
+ * hundred thousand of them would otherwise sit in front of every name lookup.
+ * Inside a function it lives in TEMP_VAR_ARENA, rewound once the function's
+ * graph is built; at file scope it belongs to the global initializer, built at
+ * the end of parsing.
+ */
+static var_t *new_var(block_t *blk, bool temp)
 {
     var_list_t *var_list = &blk->locals;
+    arena_t *arena = temp && blk != GLOBAL_BLOCK ? TEMP_VAR_ARENA : BLOCK_ARENA;
 
-    if (var_list->size >= var_list->capacity) {
+    if (!temp && var_list->size >= var_list->capacity) {
         int old_cap = var_list->capacity;
         var_list->capacity <<= 1;
         var_list->elements = arena_realloc(
@@ -693,14 +701,15 @@ var_t *require_var(block_t *blk)
             var_list->capacity * sizeof(var_t *));
     }
 
-    var_t *var = arena_calloc(BLOCK_ARENA, 1, sizeof(var_t));
+    var_t *var = arena_calloc(arena, 1, sizeof(var_t));
     stats_var_count++;
-    var_list->elements[var_list->size++] = var;
+    if (!temp)
+        var_list->elements[var_list->size++] = var;
 
     /* var_name is a pointer now; every reader dereferences it unconditionally,
      * so an unnamed variable points at the empty string rather than NULL.
      */
-    var->var_name = "";
+    var->var_name = temp ? gen_name() : "";
     var->type = TY_int;
     var->scope = blk;
     var->space_is_allocated = false;
@@ -708,33 +717,34 @@ var_t *require_var(block_t *blk)
     return var;
 }
 
-/* A generated name never matches an identifier, so a temporary just made by
- * require_var() leaves its scope's lookup list again. Over a hundred thousand
- * of them would otherwise sit in front of every name lookup.
- */
-static var_t *name_var(var_t *var)
+var_t *require_var(block_t *blk)
 {
-    var_list_t *locals = &((block_t *) var->scope)->locals;
-
-    if (locals->size && locals->elements[locals->size - 1] == var)
-        locals->size--;
-    var->var_name = gen_name();
-    return var;
+    return new_var(blk, false);
 }
 
-static var_t *require_named_var(block_t *blk)
+static var_t *require_temp_var(block_t *blk)
 {
-    return name_var(require_var(blk));
+    return new_var(blk, true);
 }
 
-var_t *require_typed_var(block_t *blk, type_t *type)
+static var_t *new_typed_var(block_t *blk, type_t *type, bool temp)
 {
     if (!type)
         error_at("Type must not be NULL", cur_token_loc());
 
-    var_t *var = require_var(blk);
+    var_t *var = new_var(blk, temp);
     var->type = type;
     return var;
+}
+
+var_t *require_typed_var(block_t *blk, type_t *type)
+{
+    return new_typed_var(blk, type, false);
+}
+
+static var_t *require_temp_typed_var(block_t *blk, type_t *type)
+{
+    return new_typed_var(blk, type, true);
 }
 
 static var_t *load_constant(block_t *parent,
@@ -742,7 +752,7 @@ static var_t *load_constant(block_t *parent,
                             int value,
                             type_t *type)
 {
-    var_t *constant = name_var(require_typed_var(parent, type));
+    var_t *constant = require_temp_typed_var(parent, type);
     constant->init_val = value;
     add_insn(parent, bb, OP_load_constant, constant, NULL, NULL, 0, NULL);
     return constant;
@@ -778,16 +788,33 @@ var_t *require_typed_ptr_var(block_t *blk, type_t *type, int ptr)
     return var;
 }
 
+static var_t *require_temp_typed_ptr_var(block_t *blk, type_t *type, int ptr)
+{
+    var_t *var = require_temp_typed_var(blk, type);
+    var->ptr_level = ptr;
+    return var;
+}
+
 type_t *pointee_type_from_pointer_typedef(type_t *type);
 
-var_t *require_ref_var(block_t *blk, type_t *type, int ptr)
+static var_t *new_ref_var(block_t *blk, type_t *type, int ptr, bool temp)
 {
     if (!type)
         error_at("Cannot reference variable from NULL type", cur_token_loc());
 
-    var_t *var = require_typed_var(blk, type);
+    var_t *var = new_typed_var(blk, type, temp);
     var->ptr_level = ptr + 1;
     return var;
+}
+
+var_t *require_ref_var(block_t *blk, type_t *type, int ptr)
+{
+    return new_ref_var(blk, type, ptr, false);
+}
+
+static var_t *require_temp_ref_var(block_t *blk, type_t *type, int ptr)
+{
+    return new_ref_var(blk, type, ptr, true);
 }
 
 var_t *require_deref_var(block_t *blk, type_t *type, int ptr)
@@ -1722,8 +1749,8 @@ void discard_operand(block_t *parent, basic_block_t *bb)
         (!var->is_func && !var->ptr_level && is_record_type(var->type)))
         return;
 
-    var_t *copy = name_var(require_typed_ptr_var(
-        parent, var->type, var->is_func ? 1 : var->ptr_level));
+    var_t *copy = require_temp_typed_ptr_var(parent, var->type,
+                                             var->is_func ? 1 : var->ptr_level);
     add_insn(parent, bb, OP_assign, copy, var, NULL, 0, NULL);
 }
 
@@ -1842,7 +1869,7 @@ var_t *promote_unchecked(block_t *block,
                          type_t *target_type,
                          int target_ptr)
 {
-    var_t *rd = name_var(require_typed_ptr_var(block, target_type, target_ptr));
+    var_t *rd = require_temp_typed_ptr_var(block, target_type, target_ptr);
 
     /* Encode both source and target sizes in src1: Lower 16 bits: target size
      * Upper 16 bits: source size This allows codegen to distinguish between
@@ -1883,7 +1910,7 @@ var_t *truncate_unchecked(block_t *block,
                           type_t *target_type,
                           int target_ptr)
 {
-    var_t *rd = name_var(require_typed_ptr_var(block, target_type, target_ptr));
+    var_t *rd = require_temp_typed_ptr_var(block, target_type, target_ptr);
     add_insn(block, *bb, OP_trunc, rd, var, NULL,
              target_ptr ? PTR_SIZE : target_type->size, NULL);
     preserve_integer_constant(rd, var);
@@ -1907,7 +1934,7 @@ var_t *normalize_bool(block_t *block, basic_block_t **bb, var_t *var)
     zero = load_constant(block, *bb, 0, TY_int);
     zero->is_const = true;
 
-    rd = name_var(require_typed_var(block, TY_bool));
+    rd = require_temp_typed_var(block, TY_bool);
     add_insn(block, *bb, OP_neq, rd, var, zero, 0, NULL);
     return rd;
 }
