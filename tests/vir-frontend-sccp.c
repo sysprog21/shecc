@@ -1,3 +1,9 @@
+int sccp_branch(void);
+
+int main(void)
+{
+    return sccp_branch();
+}
 int sccp_branch(void)
 {
     int first = 8;
@@ -6,9 +12,4 @@ int sccp_branch(void)
     if (first == 8)
         return second * 7;
     return first;
-}
-
-int main(void)
-{
-    return sccp_branch();
 }

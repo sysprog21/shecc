@@ -1,3 +1,9 @@
+static int helper(int value);
+
+int main(int argc)
+{
+    return helper(3 * argc - 2);
+}
 static int helper(int value)
 {
     int i = 0;
@@ -8,9 +14,4 @@ static int helper(int value)
             break;
     }
     return i;
-}
-
-int main(int argc)
-{
-    return helper(3 * argc - 2);
 }

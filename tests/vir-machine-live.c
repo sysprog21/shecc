@@ -1,8 +1,5 @@
 /* Constants and branch results remain live through allocated edge copies. */
-static unsigned int tick(unsigned int x)
-{
-    return x * 1664525u + 1013904223u;
-}
+static unsigned int tick(unsigned int x);
 int main(void)
 {
     unsigned int x = 1, sum = 0;
@@ -23,4 +20,8 @@ int main(void)
         x = tick(x);
     }
     return a != 0x345678901LL || b != 0x123456789LL;
+}
+static unsigned int tick(unsigned int x)
+{
+    return x * 1664525u + 1013904223u;
 }

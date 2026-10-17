@@ -11,13 +11,14 @@ typedef struct {
 
 static const entry_t table[] = {{"a", 10}, {"b", 20}, {"c", 30}, {"d", 40}};
 
-int pick(int t)
-{
-    return (unsigned int) t < sizeof(table) / sizeof(*table) ? table[t].width
-                                                             : 0;
-}
+int pick(int t);
 
 int main()
 {
     return pick(1) + pick(3) + pick(4) + pick(-1);
+}
+int pick(int t)
+{
+    return (unsigned int) t < sizeof(table) / sizeof(*table) ? table[t].width
+                                                             : 0;
 }

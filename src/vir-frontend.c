@@ -520,8 +520,12 @@ static vir_value_t *native_read(native_function_t *ctx,
         (!var->ptr_level && is_record_type(var->type) &&
          !native_array_parameter(ctx, var)))
         return native_address(ctx, block, var);
-    if (var->is_function_designator)
+    if (var->is_function_designator) {
+        func_t *target = find_func(var->var_name);
+        if (target)
+            target->address_taken = true;
         return vir_function_addr(&ctx->graph, block, var->var_name);
+    }
     if (native_memory(ctx, var) || native_object(var) ||
         native_source_info(ctx, var)->is_object) {
         vir_value_t *address = native_address(ctx, block, var);
@@ -642,20 +646,6 @@ static void native_flush_call(native_function_t *ctx, var_t *result)
     type = result ? native_type(result) : VIR_TYPE_VOID;
     if (signature && !signature->returns_aggregate)
         type = native_type(&signature->return_def);
-    /* An inlined call needs none of the ABI built below. */
-    native_function_t *leaf = signature ? signature->vir_context : NULL;
-    vir_value_t *inlined = NULL;
-    if (optimize && inline_functions && !ctx->target && result && leaf &&
-        leaf->finished && !leaf->released && !signature->va_args &&
-        !signature->returns_aggregate)
-        inlined = vir_inline_pure_call(&ctx->graph, ctx->call_block->vir,
-                                       &leaf->graph, ctx->args, ctx->arg_count);
-    if (inlined) {
-        native_write(ctx, ctx->call_block, result, inlined);
-        ctx->callee = NULL;
-        ctx->arg_count = 0;
-        return;
-    }
     params = arena_alloc(GENERAL_ARENA, sizeof(*params) * (ctx->arg_count + 1));
     for (int i = 0; i < ctx->arg_count; i++) {
         params[i] = native_abi(ctx->arg_sources[i]);
@@ -1242,6 +1232,25 @@ void vir_frontend_optimize(vir_function_t *graph)
     }
 }
 
+/* The optimized graph of a function defined earlier, for inlining into the
+ * function being finished: only one whose calls the VIR can rewrite without its
+ * ABI (no variadic or aggregate-returning ones) and that no one used as a
+ * function pointer, since that keeps its out-of-line copy anyway.
+ */
+static const vir_function_t *native_inline_callee(const char *name,
+                                                  void *context,
+                                                  bool *is_static)
+{
+    func_t *func = find_func((char *) name);
+    native_function_t *callee = func ? func->vir_context : NULL;
+    (void) context;
+    if (!callee || !callee->finished || callee->released ||
+        func->returns_aggregate || func->address_taken)
+        return NULL;
+    *is_static = func->is_static;
+    return &callee->graph;
+}
+
 /* A finished function is optimized and compacted at once; only the global
  * initializer graph waits for the end of parsing. Promotion and the passes
  * leave most of what they allocated unreachable, and only the copy gives that
@@ -1255,6 +1264,9 @@ void vir_frontend_end(func_t *func)
 
     native_finish(ctx);
     fatal_function_context = func->return_def.var_name;
+    check_native_pass("inline",
+                      vir_inline_calls(&ctx->graph, native_inline_callee, ctx,
+                                       native_opt_level()));
     vir_frontend_optimize(&ctx->graph);
     int tail_calls = vir_eliminate_tail_recursion(
         &ctx->graph, func->return_def.var_name, native_opt_level());

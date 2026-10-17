@@ -1,7 +1,4 @@
-int *helper(int *value)
-{
-    return value;
-}
+int *helper(int *value);
 
 int main(void)
 {
@@ -9,4 +6,8 @@ int main(void)
     int *result = helper(&value);
 
     return *result + 1;
+}
+int *helper(int *value)
+{
+    return value;
 }

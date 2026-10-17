@@ -12,19 +12,10 @@ double_pointer_row_t double_row = {&indirect, &indirect};
 double_row_slots_t double_slots = {&double_row, &double_row, &double_row};
 
 typedef int (*callback_row_t[2])(int);
-int add_one(int value)
-{
-    return value + 1;
-}
-int add_two(int value)
-{
-    return value + 2;
-}
+int add_one(int value);
+int add_two(int value);
+callback_row_t *callback_rows(void);
 static int (*callbacks[2])(int) = {add_one, add_two};
-callback_row_t *callback_rows(void)
-{
-    return &callbacks;
-}
 
 int main(void)
 {
@@ -68,4 +59,16 @@ int main(void)
         return 9;
     local_slots[1] = &local_row;
     return *(*local_slots[1])[1] != 7;
+}
+int add_one(int value)
+{
+    return value + 1;
+}
+int add_two(int value)
+{
+    return value + 2;
+}
+callback_row_t *callback_rows(void)
+{
+    return &callbacks;
 }

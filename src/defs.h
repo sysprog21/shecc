@@ -1073,6 +1073,12 @@ struct func {
     /* Callee-saved registers the backend must preserve. */
     int saved_regs;
 
+    /* Seen as a function pointer while parsing. A heuristic for inlining: such
+     * a callee keeps its out-of-line copy anyway, so copying it into its direct
+     * callers too would only duplicate code.
+     */
+    bool address_taken;
+
     /* Information used for dynamic linking */
     bool is_used;
     /* A direct aggregate-return call requires shecc's private sret ABI. */

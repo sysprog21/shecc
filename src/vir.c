@@ -4417,71 +4417,458 @@ simplify:
     return changed;
 }
 
-/* A bounded straight-line leaf can be cloned at its call site without CFG,
- * alias, or stack-object remapping. Keep source and destination graphs separate
- * and require exact word-sized arguments so ABI narrowing cannot be skipped.
+/* Inlining limits in VIR values. With a main, only functions reachable from it
+ * are emitted, so any callee whose calls are all inlined leaves the image,
+ * static or not. Linkage still predicts the cost: a static function is a helper
+ * with a few local callers, so it may hold up to VIR_INLINE_STATIC_LIMIT, while
+ * an extern one tends to have callers that are not inlined and keep it, so it
+ * is copied only when tiny, or into a loop, where the call costs every
+ * iteration. Measured on a self-compile, raising the extern limits or dropping
+ * the static one both made the generated compiler larger and slower. One caller
+ * absorbs at most VIR_INLINE_CALLER_BUDGET cloned values.
  */
-vir_value_t *vir_inline_pure_call(vir_function_t *caller,
-                                  vir_block_t *block,
-                                  const vir_function_t *callee,
-                                  vir_value_t *const *args,
-                                  int arg_count)
+#define VIR_INLINE_STATIC_LIMIT 40
+#define VIR_INLINE_EXTERN_LIMIT 6
+#define VIR_INLINE_LOOP_LIMIT 16
+#define VIR_INLINE_CALLER_BUDGET 400
+#define VIR_INLINE_MAX_BLOCKS 16
+#define VIR_INLINE_MAX_ARGS 16
+
+/* The value count of @callee if it can replace @call and holds at most @limit
+ * values, else -1: a leaf with no stack objects whose parameters and returns
+ * match the call's types exactly, so no ABI conversion is skipped.
+ */
+static int vir_inline_size(const vir_function_t *callee,
+                           const vir_effect_t *call,
+                           int limit)
 {
-    if (!caller || !callee || caller == callee ||
-        !vir_has_block(caller, block) || !callee->blocks ||
-        callee->blocks->next || arg_count < 0 || arg_count > 16 ||
-        (arg_count && !args))
-        return NULL;
-    vir_block_t *source = callee->blocks;
-    if (source->effects || source->terminator != VIR_TERM_RETURN ||
-        !source->return_value ||
-        !vir_type_is_i32_or_i64(source->return_value->type) ||
-        source->param_count != arg_count)
-        return NULL;
-    vir_value_t *original[64], *copy[64];
-    int count = 0, values = 0;
-    for (vir_value_t *param = source->params; param;
-         param = param->param_next) {
-        if (!vir_type_is_i32_or_i64(param->type) ||
-            !vir_has_value(caller, args[count]) ||
-            args[count]->type != param->type)
-            return NULL;
-        original[count] = param;
-        copy[count] = args[count];
-        count++;
+    const vir_block_t *entry = callee->blocks;
+    int values = 0;
+    if (!entry || callee->block_count > VIR_INLINE_MAX_BLOCKS ||
+        entry->param_count != call->arg_count ||
+        (call->signature &&
+         (call->signature->is_variadic || call->signature->result.is_bool)))
+        return -1;
+    int index = 0;
+    for (const vir_value_t *param = entry->params; param;
+         param = param->param_next, index++)
+        if (param->type != call->args[index]->type ||
+            (call->signature && call->signature->params[index].is_bool))
+            return -1;
+    for (const vir_block_t *block = entry; block; block = block->next) {
+        if (block->param_count > VIR_INLINE_MAX_ARGS ||
+            block->terminator == VIR_TERM_NONE ||
+            (block->terminator == VIR_TERM_RETURN && call->result &&
+             (!block->return_value ||
+              block->return_value->type != call->result_type)))
+            return -1;
+        for (const vir_effect_t *effect = block->effects; effect;
+             effect = effect->next)
+            if ((effect->kind != VIR_EFFECT_LOAD &&
+                 effect->kind != VIR_EFFECT_VOLATILE_LOAD &&
+                 effect->kind != VIR_EFFECT_STORE &&
+                 effect->kind != VIR_EFFECT_VOLATILE_STORE) ||
+                (vir_effect_is_store(effect->kind) && !effect->stored_value))
+                return -1;
+        for (const vir_value_t *value = block->head; value; value = value->next)
+            if (value->opcode == VIR_OP_STACK_ADDR ||
+                value->opcode == VIR_OP_CALL || value->opcode == VIR_OP_PARAM ||
+                ++values > limit)
+                return -1;
     }
-    for (vir_value_t *value = source->head; value; value = value->next) {
-        if (++values > 24 ||
-            (value->opcode != VIR_OP_CONST &&
-             !vir_is_pure_binary_opcode(value->opcode) &&
-             !vir_is_pure_unary_opcode(value->opcode)) ||
-            value->type == VIR_TYPE_PTR)
+    return values;
+}
+
+/* Clone one callee value whose operands are already mapped. */
+static vir_value_t *vir_inline_value(vir_function_t *caller,
+                                     vir_block_t *block,
+                                     const vir_value_t *value,
+                                     vir_value_t **map)
+{
+    vir_value_t *op0 = value->op0 ? map[value->op0->id] : NULL;
+    vir_value_t *op1 = value->op1 ? map[value->op1->id] : NULL;
+    switch (value->opcode) {
+    case VIR_OP_CONST:
+        return vir_const_int(caller, block, value->type, value->constant);
+    case VIR_OP_GLOBAL_ADDR:
+        return vir_global_addr(caller, block, value->addr->name,
+                               value->addr->size, value->addr->alignment);
+    case VIR_OP_RODATA_ADDR:
+        return vir_rodata_addr(caller, block, (unsigned int) value->constant);
+    case VIR_OP_FUNC_ADDR:
+        return vir_function_addr(caller, block, value->addr->name);
+    default:
+        if (value->nr_ops < 1 || value->nr_ops > 2 || !op0 ||
+            (value->nr_ops == 2 && !op1))
             return NULL;
+        return vir_user_operation(caller, block, value->opcode, value->type,
+                                  op0, value->nr_ops == 2 ? op1 : NULL);
     }
-    for (vir_value_t *value = source->head; value; value = value->next) {
-        vir_value_t *operands[2] = {NULL, NULL};
-        for (int i = 0; i < value->nr_ops; i++) {
-            vir_value_t *operand = i ? value->op1 : value->op0;
-            for (int j = 0; j < count; j++)
-                if (original[j] == operand)
-                    operands[i] = copy[j];
-            if (!operands[i])
-                return NULL;
+}
+
+static bool vir_inline_effect(vir_function_t *caller,
+                              vir_block_t *block,
+                              const vir_effect_t *effect,
+                              vir_value_t **map)
+{
+    vir_value_t *address = effect->address ? map[effect->address->id] : NULL;
+    if (!address)
+        return false;
+    if (vir_effect_is_load(effect->kind)) {
+        vir_value_t *value =
+            vir_load_impl(caller, block, address, effect->result->type,
+                          effect->kind == VIR_EFFECT_VOLATILE_LOAD);
+        map[effect->result->id] = value;
+        return value != NULL;
+    }
+    vir_value_t *stored = map[effect->stored_value->id];
+    if (!stored)
+        return false;
+    return (effect->kind == VIR_EFFECT_VOLATILE_STORE
+                ? vir_volatile_store(caller, block, address, stored)
+                : vir_store(caller, block, address, stored)) != NULL;
+}
+
+/* Clone @source's values and effects into @block in their shared order. */
+static bool vir_inline_block_body(vir_function_t *caller,
+                                  vir_block_t *block,
+                                  const vir_block_t *source,
+                                  vir_value_t **map)
+{
+    const vir_value_t *value = source->head;
+    const vir_effect_t *effect = source->effects;
+    while (value || effect) {
+        if (value && value->def_effect) {
+            value = value->next;
+            continue;
         }
-        original[count] = value;
-        copy[count] =
-            value->opcode == VIR_OP_CONST
-                ? vir_const_int(caller, block, value->type, value->constant)
-                : vir_user_operation(caller, block, value->opcode, value->type,
-                                     operands[0], operands[1]);
-        if (!copy[count])
-            return NULL;
-        count++;
+        if (effect && (!value || effect->order <= value->order)) {
+            if (!vir_inline_effect(caller, block, effect, map))
+                return false;
+            effect = effect->next;
+            continue;
+        }
+        if (!(map[value->id] = vir_inline_value(caller, block, value, map)))
+            return false;
+        value = value->next;
+    }
+    return true;
+}
+
+/* An edge's arguments mapped into the caller; parameter counts are bounded. */
+static void vir_inline_edge_args(const vir_edge_t *edge,
+                                 vir_value_t **map,
+                                 vir_value_t **args)
+{
+    for (int i = 0; i < edge->arg_count; i++)
+        args[i] = map[edge->args[i]->id];
+}
+
+/* Move everything @call's block holds after @call -- values, effects and the
+ * terminator with its edges -- into a new block, and return it. The caller
+ * unlinks @call next, which repairs @call's block.
+ */
+static vir_block_t *vir_inline_split(vir_function_t *caller, vir_effect_t *call)
+{
+    vir_block_t *block = call->block, *rest = vir_block_create(caller);
+    if (!rest)
+        return NULL;
+    vir_value_t **link = &block->head;
+    while (*link && (*link)->order <= call->order)
+        link = &(*link)->next;
+    rest->head = *link;
+    *link = NULL;
+    for (vir_value_t *value = rest->head; value; value = value->next)
+        value->block = rest;
+    rest->effects = call->next;
+    call->next = NULL;
+    for (vir_effect_t *effect = rest->effects; effect; effect = effect->next)
+        effect->block = rest;
+
+    /* The terminator fields of vir_block_t, which move as one. */
+    rest->terminator = block->terminator;
+    rest->return_value = block->return_value;
+    rest->branch_condition = block->branch_condition;
+    rest->true_edge = block->true_edge;
+    rest->false_edge = block->false_edge;
+    rest->outgoing = block->outgoing;
+    for (vir_edge_t *edge = rest->outgoing; edge; edge = edge->next_outgoing)
+        edge->from = rest;
+    vir_value_t *owned[2] = {rest->return_value, rest->branch_condition};
+    vir_use_owner_t kinds[2] = {VIR_USE_RETURN, VIR_USE_BRANCH};
+    for (int i = 0; i < 2; i++)
+        for (vir_use_t *use = owned[i] ? owned[i]->uses : NULL; use;
+             use = use->next)
+            if (vir_use_matches(use, kinds[i], block, -1))
+                vir_use_set_owner(use, kinds[i], rest);
+    block->terminator = VIR_TERM_NONE;
+    block->return_value = NULL;
+    block->branch_condition = NULL;
+    block->true_edge = NULL;
+    block->false_edge = NULL;
+    block->outgoing = NULL;
+    vir_repair_value_positions(rest);
+    return rest;
+}
+
+/* Store the indices of the callee blocks reachable from its entry in reverse
+ * post-order, which reaches every dominator of a block before the block, so
+ * every operand is cloned before its users; returns how many.
+ */
+static int vir_inline_order(const vir_function_t *callee,
+                            int *order,
+                            unsigned char *seen)
+{
+    vir_block_t *stack[VIR_INLINE_MAX_BLOCKS];
+    vir_edge_t *cursor[VIR_INLINE_MAX_BLOCKS];
+    int depth = 0, count = callee->block_count;
+    stack[depth] = callee->blocks;
+    cursor[depth++] = callee->blocks->outgoing;
+    seen[callee->blocks->index] = 1;
+    while (depth) {
+        vir_edge_t *edge = cursor[depth - 1];
+        if (!edge) {
+            order[--count] = stack[--depth]->index;
+            continue;
+        }
+        cursor[depth - 1] = edge->next_outgoing;
+        if (!seen[edge->to->index]) {
+            seen[edge->to->index] = 1;
+            stack[depth] = edge->to;
+            cursor[depth++] = edge->to->outgoing;
+        }
+    }
+    /* Shift the reachable blocks to the front. */
+    int reachable = callee->block_count - count;
+    for (int i = 0; i < reachable; i++)
+        order[i] = order[count + i];
+    return reachable;
+}
+
+/* Replace @call with a copy of @callee and return the block now holding what
+ * followed the call, or NULL. The call's block jumps to the cloned entry with
+ * the arguments, and every cloned return jumps to that block, whose parameter
+ * carries the result.
+ */
+static vir_block_t *vir_inline_call(vir_function_t *caller,
+                                    vir_effect_t *call,
+                                    const vir_function_t *callee)
+{
+    int order[VIR_INLINE_MAX_BLOCKS];
+    unsigned char reachable[VIR_INLINE_MAX_BLOCKS] = {0};
+    vir_block_t *clone_of[VIR_INLINE_MAX_BLOCKS] = {0};
+    vir_value_t *args[VIR_INLINE_MAX_ARGS], *other[VIR_INLINE_MAX_ARGS];
+    vir_block_t *rest = NULL, *result_block = NULL;
+    vir_value_t *result = NULL;
+    vir_value_t **map =
+        calloc((size_t) callee->next_value_id + 1, sizeof(*map));
+    if (!map)
+        goto done;
+    int count = vir_inline_order(callee, order, reachable);
+
+    /* Blocks and parameters first: edges and operands may name any of them. */
+    for (int i = 0; i < count; i++) {
+        const vir_block_t *source = callee->block_table[order[i]];
+        if (!(clone_of[order[i]] = vir_block_create(caller)))
+            goto done;
+        for (vir_value_t *param = source->params; param;
+             param = param->param_next)
+            if (!(map[param->id] = vir_block_add_param(
+                      caller, clone_of[order[i]], param->type)))
+                goto done;
     }
     for (int i = 0; i < count; i++)
-        if (original[i] == source->return_value)
-            return copy[i];
-    return NULL;
+        if (!vir_inline_block_body(caller, clone_of[order[i]],
+                                   callee->block_table[order[i]], map))
+            goto done;
+
+    /* Splice the clone in, then give each cloned block its terminator. */
+    if (!(rest = vir_inline_split(caller, call)))
+        goto done;
+    if (call->result && call->result->uses) {
+        if (!(result = vir_block_add_param(caller, rest, call->result_type)))
+            goto done;
+        vir_replace_all_uses_unchecked(call->result, result);
+    }
+    if (!vir_edge_create(caller, call->block, clone_of[callee->blocks->index],
+                         call->args, call->arg_count) ||
+        !vir_effect_unlink(call))
+        goto done;
+    for (int i = 0; i < count; i++) {
+        const vir_block_t *source = callee->block_table[order[i]];
+        vir_block_t *block = clone_of[order[i]];
+        if (source->terminator == VIR_TERM_RETURN) {
+            vir_value_t *value = result ? map[source->return_value->id] : NULL;
+            if (!vir_edge_create(caller, block, rest, value ? &value : NULL,
+                                 value ? 1 : 0))
+                goto done;
+            continue;
+        }
+        const vir_edge_t *taken = source->terminator == VIR_TERM_JUMP
+                                      ? source->outgoing
+                                      : source->true_edge;
+        vir_inline_edge_args(taken, map, args);
+        if (source->terminator == VIR_TERM_JUMP) {
+            if (!vir_edge_create(caller, block, clone_of[taken->to->index],
+                                 args, taken->arg_count))
+                goto done;
+            continue;
+        }
+        const vir_edge_t *other_edge = source->false_edge;
+        vir_inline_edge_args(other_edge, map, other);
+        vir_edge_args_t true_edge = {clone_of[taken->to->index], args,
+                                     taken->arg_count};
+        vir_edge_args_t false_edge = {clone_of[other_edge->to->index], other,
+                                      other_edge->arg_count};
+        if (!vir_block_set_branch(caller, block,
+                                  map[source->branch_condition->id], &true_edge,
+                                  &false_edge))
+            goto done;
+    }
+    result_block = rest;
+done:
+    free(map);
+    return result_block;
+}
+
+/* Mark the blocks that lie on a cycle of @func: Tarjan's strongly connected
+ * components, iterative so a long CFG cannot exhaust the stack. LICM's natural
+ * loops need dominance, which is not built yet here, and would miss the
+ * irreducible cycles a goto can make.
+ */
+static bool vir_inline_cycles(const vir_function_t *func, unsigned char *cyclic)
+{
+    int count = func->block_count;
+    int *index = malloc(sizeof(int) * (size_t) count * 3);
+    vir_edge_t **cursor = malloc(sizeof(*cursor) * (size_t) count);
+    vir_block_t **stack = malloc(sizeof(*stack) * (size_t) count * 2);
+    if (!index || !cursor || !stack) {
+        free(index);
+        free(cursor);
+        free(stack);
+        return false;
+    }
+    int *low = index + count, *on_stack = low + count;
+    vir_block_t **walk = stack + count;
+    int next = 0, top = 0;
+    for (int i = 0; i < count; i++) {
+        index[i] = -1;
+        on_stack[i] = 0;
+        cyclic[i] = 0;
+    }
+    for (int root = 0; root < count; root++) {
+        if (index[root] >= 0)
+            continue;
+        int depth = 0;
+        walk[depth++] = func->block_table[root];
+        index[root] = low[root] = next++;
+        stack[top++] = func->block_table[root];
+        on_stack[root] = 1;
+        cursor[root] = func->block_table[root]->outgoing;
+        while (depth) {
+            vir_block_t *block = walk[depth - 1];
+            vir_edge_t *edge = cursor[block->index];
+            if (edge) {
+                cursor[block->index] = edge->next_outgoing;
+                int to = edge->to->index;
+                if (to == block->index)
+                    cyclic[to] = 1;
+                if (index[to] < 0) {
+                    index[to] = low[to] = next++;
+                    stack[top++] = edge->to;
+                    on_stack[to] = 1;
+                    cursor[to] = edge->to->outgoing;
+                    walk[depth++] = edge->to;
+                } else if (on_stack[to] && index[to] < low[block->index]) {
+                    low[block->index] = index[to];
+                }
+                continue;
+            }
+            depth--;
+            if (depth && low[block->index] < low[walk[depth - 1]->index])
+                low[walk[depth - 1]->index] = low[block->index];
+            if (low[block->index] != index[block->index])
+                continue;
+            int first = top;
+            do
+                on_stack[stack[--first]->index] = 0;
+            while (stack[first] != block);
+            if (top - first > 1)
+                for (int k = first; k < top; k++)
+                    cyclic[stack[k]->index] = 1;
+            top = first;
+        }
+    }
+    free(index);
+    free(cursor);
+    free(stack);
+    return true;
+}
+
+int vir_inline_calls(vir_function_t *caller,
+                     vir_inline_lookup_t lookup,
+                     void *context,
+                     vir_opt_level_t opt_level)
+{
+    if (!caller || !lookup || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level != VIR_OPT_O2)
+        return 0;
+    int inlined = 0, budget = VIR_INLINE_CALLER_BUDGET;
+    int original = caller->block_count;
+
+    /* Loop membership decides only an extern callee too large to copy anywhere,
+     * so it is computed for the first such candidate. Inlining only appends
+     * blocks: cloned ones hold no call, and the rest of a split block is
+     * rescanned in its place.
+     */
+    unsigned char *cyclic = NULL;
+    for (int index = 0; index < original; index++) {
+        vir_block_t *block = caller->block_table[index];
+        for (vir_effect_t *effect = block->effects; effect;) {
+            if (effect->kind != VIR_EFFECT_CALL || !effect->callee) {
+                effect = effect->next;
+                continue;
+            }
+            bool is_static = false;
+            const vir_function_t *callee =
+                lookup(effect->callee, context, &is_static);
+            int cap =
+                is_static ? VIR_INLINE_STATIC_LIMIT : VIR_INLINE_LOOP_LIMIT;
+            if (cap > budget)
+                cap = budget;
+            int size = callee && callee != caller &&
+                               callee->pointer_bits == caller->pointer_bits
+                           ? vir_inline_size(callee, effect, cap)
+                           : -1;
+            if (size > VIR_INLINE_EXTERN_LIMIT && !is_static) {
+                if (!cyclic) {
+                    /* Sized for the blocks earlier inlines appended too. */
+                    cyclic = calloc((size_t) caller->block_count + 1, 1);
+                    if (!cyclic || !vir_inline_cycles(caller, cyclic)) {
+                        free(cyclic);
+                        return -1;
+                    }
+                }
+                if (!cyclic[index])
+                    size = -1;
+            }
+            if (size < 0) {
+                effect = effect->next;
+                continue;
+            }
+            vir_block_t *rest = vir_inline_call(caller, effect, callee);
+            if (!rest) {
+                free(cyclic);
+                return -1;
+            }
+            budget -= size;
+            inlined++;
+            effect = rest->effects;
+        }
+    }
+    free(cyclic);
+    return inlined;
 }
 
 /* vir_tail_recursion_type() has already proven every effect is a nonvariadic

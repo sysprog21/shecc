@@ -6,13 +6,14 @@ int b = 11;
 pointer_row_t row = {&a, &b};
 row_slots_t slots = {&row, &row};
 
-int touch_row(void)
-{
-    int *value = (*slots[0])[0];
-    return *value + *(*slots[1])[1];
-}
+int touch_row(void);
 
 int main(void)
 {
     return touch_row() != 18;
+}
+int touch_row(void)
+{
+    int *value = (*slots[0])[0];
+    return *value + *(*slots[1])[1];
 }

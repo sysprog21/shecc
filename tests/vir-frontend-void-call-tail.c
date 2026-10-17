@@ -4,21 +4,23 @@
  */
 static int total;
 
-void bump(int n)
-{
-    total += n;
-}
+void bump(int n);
+void bump_if(int n);
 
-void bump_if(int n)
-{
-    if (n > 2)
-        bump(n);
-    bump(1);
-}
 
 int main()
 {
     bump_if(5);
     bump_if(1);
     return total;
+}
+void bump(int n)
+{
+    total += n;
+}
+void bump_if(int n)
+{
+    if (n > 2)
+        bump(n);
+    bump(1);
 }

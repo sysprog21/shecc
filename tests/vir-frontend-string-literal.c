@@ -2,6 +2,14 @@
  * String literals as values: passed to a call, chosen between by a branch, and
  * walked through by the callee.
  */
+int count(char *s, char c);
+int greet(int k);
+
+
+int main()
+{
+    return greet(1) + greet(0);
+}
 int count(char *s, char c)
 {
     int n = 0;
@@ -13,15 +21,9 @@ int count(char *s, char c)
     }
     return n;
 }
-
 int greet(int k)
 {
     char *m = k ? "hello, world" : "bye";
 
     return count(m, 'o') + count("xoxo", 'o') * 10;
-}
-
-int main()
-{
-    return greet(1) + greet(0);
 }

@@ -4,8 +4,8 @@ compiler=("$@")
 [ "${#compiler[@]}" -gt 0 ] || compiler=(out/shecc)
 task_dir=$(mktemp -d)
 trap 'rm -rf "$task_dir"' EXIT
-# Retain the helper graphs to inspect their transformations independently.
-"${compiler[@]}" --no-inline --dump-ir -o "$task_dir/test" tests/vir-essential.c > "$task_dir/graph"
+# The helpers follow main, so they keep their own graphs for inspection.
+"${compiler[@]}" --dump-ir -o "$task_dir/test" tests/vir-essential.c > "$task_dir/graph"
 python3 - "$task_dir/graph" << 'PY'
 import re
 import sys
@@ -32,20 +32,12 @@ for name in ('signed_divide', 'signed_remainder', 'unsigned_divide',
              'unsigned_remainder', 'wide_divide', 'wide_remainder'):
     assert not re.search(r' = [su](?:div|rem)\.', functions[name]), name
 PY
-"${compiler[@]}" --dump-ir -o "$task_dir/test" tests/vir-essential.c > "$task_dir/inlined"
-# The leaf's call and unreachable definition both disappear.
-if grep -q 'call.* @mix_leaf(' "$task_dir/inlined"; then
-    echo 'Pure leaf call was not inlined' >&2
-    exit 1
-fi
-if grep -q '^function mix_leaf$' "$task_dir/inlined"; then
-    echo 'Inlined pure leaf definition was still emitted' >&2
-    exit 1
-fi
-# Leaves with narrow arguments keep their calls so the ABI conversions run.
-for leaf in narrow_leaf short_leaf; do
-    if ! grep -q "call.* @$leaf(" "$task_dir/inlined"; then
-        echo "Narrow leaf $leaf was inlined" >&2
+
+# The leaves defined above main are inlined, narrow arguments included: their
+# calls and their unreachable definitions both disappear.
+for leaf in mix_leaf narrow_leaf short_leaf; do
+    if grep -q "call.* @$leaf(\|^function $leaf\$" "$task_dir/graph"; then
+        echo "Leaf $leaf was not inlined" >&2
         exit 1
     fi
 done

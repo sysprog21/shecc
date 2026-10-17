@@ -4,7 +4,7 @@ compiler=("$@")
 [ "${#compiler[@]}" -gt 0 ] || compiler=(out/shecc)
 task_dir=$(mktemp -d)
 trap 'rm -rf "$task_dir"' EXIT
-"${compiler[@]}" --no-inline --dump-ir -o "$task_dir/test" tests/vir-bitwise-normalization.c > "$task_dir/graph"
+"${compiler[@]}" --dump-ir -o "$task_dir/test" tests/vir-bitwise-normalization.c > "$task_dir/graph"
 python3 - "$task_dir/graph" << 'PY'
 import re
 import sys

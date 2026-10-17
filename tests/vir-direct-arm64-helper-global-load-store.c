@@ -1,13 +1,7 @@
 static int first;
 static int second;
 
-static int helper(int value)
-{
-    int old = first;
-
-    second = value;
-    return old;
-}
+static int helper(int value);
 
 int main(int argc, char **argv)
 {
@@ -18,4 +12,11 @@ int main(int argc, char **argv)
     first = 7;
     result = helper(3);
     return result + first + second;
+}
+static int helper(int value)
+{
+    int old = first;
+
+    second = value;
+    return old;
 }

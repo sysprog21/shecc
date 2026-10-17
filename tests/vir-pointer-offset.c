@@ -1,13 +1,7 @@
 volatile long long wide_index;
 int object = 73;
-long long address_bits(char *base, long long offset)
-{
-    return (long long) (base + offset);
-}
-int read_scaled(char *base, long long index)
-{
-    return *(int *) (base + (index << 2));
-}
+long long address_bits(char *base, long long offset);
+int read_scaled(char *base, long long index);
 int main(void)
 {
     if (sizeof(void *) != 8)
@@ -23,4 +17,12 @@ int main(void)
     wide_index = -0x100000001LL;
     base = (char *) ((unsigned long long) &object + 0x400000004ULL);
     return read_scaled(base, wide_index) != 73;
+}
+long long address_bits(char *base, long long offset)
+{
+    return (long long) (base + offset);
+}
+int read_scaled(char *base, long long index)
+{
+    return *(int *) (base + (index << 2));
 }

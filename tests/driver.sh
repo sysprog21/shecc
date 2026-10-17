@@ -854,13 +854,7 @@ EOF
 try_ir_count 0 dot ' = const\.i(32|64) 1$' << EOF
 int a[8][64];
 int b[64][8];
-int dot(int i)
-{
-    int s = 0;
-    for (int k = 0; k < 64; k++)
-        s += a[i][k] * b[k][i];
-    return s;
-}
+int dot(int i);
 int main()
 {
     for (int i = 0; i < 8; i++)
@@ -869,6 +863,13 @@ int main()
             b[k][i] = 64 - k;
         }
     return dot(3) != 49920;
+}
+int dot(int i)
+{
+    int s = 0;
+    for (int k = 0; k < 64; k++)
+        s += a[i][k] * b[k][i];
+    return s;
 }
 EOF
 try_ 0 << EOF
@@ -929,13 +930,7 @@ EOF
 try_ir_count 0 dot ' = const\.i(32|64) 1$' << EOF
 int a[64];
 int b[64];
-int dot(void)
-{
-    int s = 0;
-    for (int k = 0; k < 64; k++)
-        s += a[k] * b[k];
-    return s;
-}
+int dot(void);
 int main()
 {
     for (int i = 0; i < 64; i++) {
@@ -943,6 +938,13 @@ int main()
         b[i] = 64 - i;
     }
     return dot() != 43680;
+}
+int dot(void)
+{
+    int s = 0;
+    for (int k = 0; k < 64; k++)
+        s += a[k] * b[k];
+    return s;
 }
 EOF
 try_ 0 << EOF
@@ -1136,6 +1138,20 @@ EOF
 try_ir_count 0 reuse ' = const\.i(32|64) 1$' << EOF
 int a[64], b[64];
 int m[8][64];
+int reuse(void);
+int incl(int r);
+void bump(int r);
+int main()
+{
+    for (int i = 0; i < 64; i++) {
+        a[i] = i;
+        b[i] = 64 - i;
+        for (int r = 0; r < 8; r++)
+            m[r][i] = r * 100 + i;
+    }
+    bump(3);
+    return (reuse() + incl(3) + m[3][5]) & 255;
+}
 int reuse(void)
 {
     int s = 0, i;
@@ -1158,22 +1174,25 @@ void bump(int r)
 {
     for (int k = 0; k < 64; k++)
         m[r][k] = m[r][k] + 1;
-}
-int main()
-{
-    for (int i = 0; i < 64; i++) {
-        a[i] = i;
-        b[i] = 64 - i;
-        for (int r = 0; r < 8; r++)
-            m[r][i] = r * 100 + i;
-    }
-    bump(3);
-    return (reuse() + incl(3) + m[3][5]) & 255;
 }
 EOF
 try_ir_count 2 bump ptrstride:4 << EOF
 int a[64], b[64];
 int m[8][64];
+int reuse(void);
+int incl(int r);
+void bump(int r);
+int main()
+{
+    for (int i = 0; i < 64; i++) {
+        a[i] = i;
+        b[i] = 64 - i;
+        for (int r = 0; r < 8; r++)
+            m[r][i] = r * 100 + i;
+    }
+    bump(3);
+    return (reuse() + incl(3) + m[3][5]) & 255;
+}
 int reuse(void)
 {
     int s = 0, i;
@@ -1196,17 +1215,6 @@ void bump(int r)
 {
     for (int k = 0; k < 64; k++)
         m[r][k] = m[r][k] + 1;
-}
-int main()
-{
-    for (int i = 0; i < 64; i++) {
-        a[i] = i;
-        b[i] = 64 - i;
-        for (int r = 0; r < 8; r++)
-            m[r][i] = r * 100 + i;
-    }
-    bump(3);
-    return (reuse() + incl(3) + m[3][5]) & 255;
 }
 EOF
 
@@ -1214,19 +1222,20 @@ EOF
 # has to look through the copy, or no for loop written with ++ is reduced: the
 # address a[i * 4] then advances by 16 each trip instead of being rebuilt.
 try_ir_count "$((2 - PTR_SZ / 4))" stride ptrstride:16 << EOF
-int stride(int *a, int n)
-{
-    int s = 0;
-    for (int i = 0; i < n; i++)
-        s = s + a[i * 4];
-    return s;
-}
+int stride(int *a, int n);
 int main()
 {
     int a[16];
     for (int i = 0; i < 16; i++)
         a[i] = i;
     return stride(a, 4) != 24;
+}
+int stride(int *a, int n)
+{
+    int s = 0;
+    for (int i = 0; i < n; i++)
+        s = s + a[i * 4];
+    return s;
 }
 EOF
 try_file 0 '' "$TESTS_DIR/escaped-param.c"
@@ -2484,6 +2493,8 @@ EOF
 # stands in for it.
 try_ir_count 5 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
 volatile int status;
+int f(void);
+int main(void) { return f() - 1; }
 int f(void)
 {
     status;
@@ -2494,24 +2505,26 @@ int f(void)
         break;
     return 1;
 }
-int main(void) { return f() - 1; }
 EOF
 
 # A postfix update of a volatile object reads it once, where it is evaluated.
 try_ir_count 2 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
 volatile int status;
+int f(void);
+int main(void) { return f() - 1; }
 int f(void)
 {
     status++;
     status--, 0;
     return 1;
 }
-int main(void) { return f() - 1; }
 EOF
 
 # A volatile local lives in its slot: storing it does not let the next read
 # reuse the stored register.
 try_ir_count 2 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     volatile int local = 1;
@@ -2519,7 +2532,6 @@ int f(void)
     local;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 
 # Reads through a pointer to volatile, of a member of a volatile record and of
@@ -2530,6 +2542,8 @@ volatile int *p;
 volatile struct S s;
 volatile int a[4];
 volatile struct S *sp;
+int f(void);
+int main(void) { return f() - 7; }
 int f(void)
 {
     *p;
@@ -2538,59 +2552,63 @@ int f(void)
     sp->a;
     return 7;
 }
-int main(void) { return f() - 7; }
 EOF
 
 # A volatile parameter lives in its slot as a volatile local does: it is stored
 # there on entry, each read reloads it and each assignment stores it, the
 # register the value was just computed in notwithstanding.
 try_ir_count 2 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
+int f(volatile int x);
+int main(void) { return f(1); }
 int f(volatile int x)
 {
     x;
     x;
     return 0;
 }
-int main(void) { return f(1); }
 EOF
 try_ir_count 2 f '^[[:space:]]+volatile\.store ' << EOF
+int f(void);
+int main(void) { return f() - 5; }
 int f(void)
 {
     volatile int local = 4;
     local = local + 1;
     return local;
 }
-int main(void) { return f() - 5; }
 EOF
 
 # A volatile long long is one typed memory effect, including on targets that
 # lower it to a register pair. Parameter initialization is a volatile store.
 try_ir_count 1 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
 volatile long long wide;
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     wide;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 try_ir_count 3 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
+int f(volatile long long y);
+int main(void) { return f(3) - 4; }
 int f(volatile long long y)
 {
     y;
     y = y + 1;
     return (int) y;
 }
-int main(void) { return f(3) - 4; }
 EOF
 try_ir_count 2 f '^[[:space:]]+volatile\.store ' << EOF
+int f(volatile long long y);
+int main(void) { return f(3) - 4; }
 int f(volatile long long y)
 {
     y;
     y = y + 1;
     return (int) y;
 }
-int main(void) { return f(3) - 4; }
 EOF
 try_ 10 << EOF
 volatile long long vw;
@@ -2609,6 +2627,8 @@ EOF
 # and an object nothing reads by name included.
 try_ir_count 3 f '^[[:space:]]+volatile\.store ' << EOF
 volatile int control;
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     control = 1;
@@ -2616,9 +2636,10 @@ int f(void)
     control = 1;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 try_ir_count 3 f '^[[:space:]]+volatile\.store ' << EOF
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     volatile int local;
@@ -2627,9 +2648,10 @@ int f(void)
     local = 1;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 try_ir_count 4 f '^[[:space:]]+volatile\.store ' << EOF
+int f(volatile int x);
+int main(void) { return f(0); }
 int f(volatile int x)
 {
     x = 1;
@@ -2637,30 +2659,32 @@ int f(volatile int x)
     x = 1;
     return 0;
 }
-int main(void) { return f(0); }
 EOF
 try_ir_count 5 f '^[[:space:]]+volatile\.store ' << EOF
 struct S { int a; int b; };
 volatile int *p;
 volatile struct S s;
-int f(void)
-{
-    *p = 1;
-    *p = 1;
-    *p = 1;
-    s.b = 1;
-    s.b = 1;
-    return 0;
-}
+int f(void);
 int main(void)
 {
     static int backing;
     p = &backing;
     return f();
 }
+int f(void)
+{
+    *p = 1;
+    *p = 1;
+    *p = 1;
+    s.b = 1;
+    s.b = 1;
+    return 0;
+}
 EOF
 try_ir_count 3 f '^[[:space:]]+volatile\.store ' << EOF
 volatile long long wide;
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     wide = 1;
@@ -2668,9 +2692,10 @@ int f(void)
     wide = 1;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 try_ir_count 3 f '^[[:space:]]+volatile\.store ' << EOF
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     volatile long long local;
@@ -2679,7 +2704,6 @@ int f(void)
     local = 1;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 try_ 7 << EOF
 volatile long long wide;
@@ -2701,6 +2725,8 @@ EOF
 # unit once, for the bits it keeps.
 try_ir_count 0 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
 volatile int v;
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     volatile int local;
@@ -2709,17 +2735,17 @@ int f(void)
     v = 4, local = 4;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 try_ir_count 1 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
 volatile struct S { int a; int b : 3; } s;
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     s.a = 3;
     s.b = 1;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 try_ 2 << EOF
 struct S { int a; int b : 3; };
@@ -2738,22 +2764,24 @@ EOF
 try_ir_count 1 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
 volatile int v;
 int x;
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     x = v;
     sizeof v;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 try_ir_count 0 f ' = volatile\.load\.i(8|16|32|64) ' << EOF
 volatile int *p;
+int f(void);
+int main(void) { return f(); }
 int f(void)
 {
     *p = 1;
     return 0;
 }
-int main(void) { return f(); }
 EOF
 
 # Reading those objects still yields their values.

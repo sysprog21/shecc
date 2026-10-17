@@ -1,4 +1,10 @@
 /* The continue edge and the fallthrough edge form distinct loop backedges. */
+static int multi_latch(int n, int a, int b);
+
+int main(void)
+{
+    return multi_latch(5, 2, 3) != 30;
+}
 static int multi_latch(int n, int a, int b)
 {
     int i = 0;
@@ -11,9 +17,4 @@ static int multi_latch(int n, int a, int b)
             continue;
     }
     return sum;
-}
-
-int main(void)
-{
-    return multi_latch(5, 2, 3) != 30;
 }

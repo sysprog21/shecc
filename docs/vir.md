@@ -240,7 +240,6 @@ values for machine lowering.
 | `--dot` | Write the live-function VIR CFG in Graphviz DOT format and stop before machine emission. |
 | `--stats` | Print deterministic layout, phase, VIR, machine-operation, and arena counters to standard error. |
 | `--no-opt` | Skip the optional VIR optimizations (O0). |
-| `--no-inline` | Retain calls to small pure leaves; keep the other optional passes enabled. |
 
 Textual graphs start with `function NAME`, followed by block definitions.
 Tests resolve private functions and globals through their actual call and
@@ -264,7 +263,7 @@ onto one computed earlier, so it leaves a loop-carried chain. Loop-invariant
 code motion (LICM) moves eligible pure computations out of loops, and dead-code
 elimination (DCE) removes unused work.
 
-1. Remove unreachable blocks.
+1. Inline small leaf callees defined earlier, then remove unreachable blocks.
 2. SCCP and CFG simplification.
 3. Block-parameter simplification: a parameter that receives one value on
    every edge, or itself on a back edge, is replaced by that value, so a
@@ -285,7 +284,7 @@ elimination (DCE) removes unused work.
 | Level | Scheduled transformations |
 | --- | --- |
 | O0 | Construction folds, unreachable-block removal, and mandatory verification; optional optimization passes return without transforming the graph. |
-| O2 (default) | SCCP, CFG simplification, block-parameter simplification, local CSE, GVN, integer/bitwise/unary normalization, reassociation, LICM, affine-loop summarization, tail-recursion elimination, strength reduction, reduction unrolling, and DCE. |
+| O2 (default) | Leaf inlining, SCCP, CFG simplification, block-parameter simplification, local CSE, GVN, integer/bitwise/unary normalization, reassociation, LICM, affine-loop summarization, tail-recursion elimination, strength reduction, reduction unrolling, and DCE. |
 
 Integer normalization lowers multiplication by a power of two to a shift, and
 unsigned division/remainder to shifts/masks. Positive power-of-two signed
@@ -312,13 +311,23 @@ in logarithmic compile time, even when the accumulator wraps. Its initial
 value may be a runtime argument. Zero-trip, negative signed index, dynamic-bound,
 nonlinear, and potentially wrapping control loops are left intact.
 
-Small completed single-block pure leaves can be cloned during call construction
-at the default optimization level. The budget is 24 values and 16 exact i32/i64
-arguments. Indirect/variadic calls, memory effects, local objects, pointer values,
-and ABI narrowing stay as calls. `--no-inline` retains call paths for ABI tests.
-Inlining happens while the caller is parsed, so only a leaf whose definition
-precedes the call is eligible: forward-declared, later-defined, and mutually
-recursive leaves remain calls even when they would otherwise qualify.
+Inlining runs first at O2, before SCCP, on each function as its parsing ends. A
+direct call to a function defined earlier is replaced by a copy of that
+function's already optimized graph: the call's block is split at the call, its
+end jumps to the cloned entry with the arguments, and every cloned return jumps
+to a continuation block whose parameter carries the result, so multiple returns
+need no extra phi. The callee must be a leaf without stack objects, in at most
+16 blocks, whose parameter and result types match the call exactly; variadic,
+aggregate-returning, address-taken and recursive callees stay calls. A static
+callee of up to 40 values is copied. An extern callee is copied only when it
+holds at most 6 values, or 16 at a call inside a loop of the caller. Any callee
+whose calls are all inlined leaves the image, since only functions reachable
+from `main` are emitted when there is one; linkage serves as a proxy for how
+many callers keep a copy anyway, and on a self-compile both a uniform limit and
+dropping the static one made the generated compiler larger and slower. One
+caller absorbs at most 400 cloned values. A call to a function defined later is
+not a candidate, which is how a test keeps a call: declare the callee first and
+define it after its callers.
 
 Tail-recursion elimination accepts functions with i32/i64 parameters and returns,
 no stack objects, no trapping operations, and no effects other than direct self

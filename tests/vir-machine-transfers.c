@@ -13,10 +13,7 @@ static unsigned long long mix(signed char a,
     return (unsigned long long) a + 3ull * b + 5ull * c + 7ull * d + 11ull * e +
            13ull * f + 17ull * g + 19ull * h;
 }
-static unsigned long long swap(unsigned long long a, unsigned long long b)
-{
-    return a * 3 + b * 7;
-}
+static unsigned long long swap(unsigned long long a, unsigned long long b);
 int main(void)
 {
     unsigned long long (*call)(signed char, unsigned char, short,
@@ -33,4 +30,8 @@ int main(void)
             return 2;
     }
     return 0;
+}
+static unsigned long long swap(unsigned long long a, unsigned long long b)
+{
+    return a * 3 + b * 7;
 }

@@ -1,31 +1,15 @@
 int total;
 
-void set_explicit(int x)
-{
-    total = x;
-    return;
-}
+void set_explicit(int x);
+void add_implicit(int x);
+void add_early(int x);
+void do_nothing(void);
+void copy_bytes(char *dst, char *src, int n);
 
-void add_implicit(int x)
-{
-    total = total + x;
-}
 
-void add_early(int x)
-{
-    if (x < 0)
-        return;
-    total = total + x;
-}
 
 /* No values at all: empty blocks still need valid CFG representation. */
-void do_nothing(void) {}
 
-void copy_bytes(char *dst, char *src, int n)
-{
-    for (int i = 0; i < n; i++)
-        dst[i] = src[i];
-}
 
 int main(void)
 {
@@ -43,4 +27,25 @@ int main(void)
     add_early(4);
     copy_bytes(dst, src, 4);
     return total + dst[3];
+}
+void set_explicit(int x)
+{
+    total = x;
+    return;
+}
+void add_implicit(int x)
+{
+    total = total + x;
+}
+void add_early(int x)
+{
+    if (x < 0)
+        return;
+    total = total + x;
+}
+void do_nothing(void) {}
+void copy_bytes(char *dst, char *src, int n)
+{
+    for (int i = 0; i < n; i++)
+        dst[i] = src[i];
 }

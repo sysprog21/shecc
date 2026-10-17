@@ -1,3 +1,9 @@
+int nested_licm(int outer_limit, int inner_limit, int a, int b, int c);
+
+int main(void)
+{
+    return nested_licm(2, 3, 4, 5, 6);
+}
 int nested_licm(int outer_limit, int inner_limit, int a, int b, int c)
 {
     int i = 0;
@@ -13,9 +19,4 @@ int nested_licm(int outer_limit, int inner_limit, int a, int b, int c)
         i++;
     }
     return total;
-}
-
-int main(void)
-{
-    return nested_licm(2, 3, 4, 5, 6);
 }

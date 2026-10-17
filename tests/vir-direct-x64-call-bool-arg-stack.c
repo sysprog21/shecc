@@ -1,7 +1,4 @@
-_Bool helper(_Bool a, _Bool b, _Bool c, _Bool d, _Bool e, _Bool f, _Bool g)
-{
-    return a && b && c && d && e && f && g;
-}
+_Bool helper(_Bool a, _Bool b, _Bool c, _Bool d, _Bool e, _Bool f, _Bool g);
 
 int main(int argc)
 {
@@ -10,4 +7,8 @@ int main(int argc)
 
     return helper(value, value, value, value, value, value, stack_value) ? 0
                                                                          : 1;
+}
+_Bool helper(_Bool a, _Bool b, _Bool c, _Bool d, _Bool e, _Bool f, _Bool g)
+{
+    return a && b && c && d && e && f && g;
 }

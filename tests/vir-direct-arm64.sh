@@ -13,10 +13,9 @@ compiler_runner=()
 if test "$stage" -eq 2; then
     compiler_runner=("${runner[@]}")
 fi
-# Keep call ABI and callee graph checks active when leaf inlining is enabled.
 run_compiler()
 {
-    "${compiler_runner[@]}" "$compiler" --no-inline "$@"
+    "${compiler_runner[@]}" "$compiler" "$@"
 }
 dynamic_runner=("${runner[@]}")
 has_sysroot=0

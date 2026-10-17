@@ -3,6 +3,12 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <string.h>
+
+/* Block parameters bound by run_function(), newest last. */
+static vir_value_t *bound_param[64];
+static unsigned long long bound_bits[64];
+static int bound_count;
 
 static unsigned long long evaluate(vir_value_t *value,
                                    vir_value_t *input,
@@ -10,6 +16,12 @@ static unsigned long long evaluate(vir_value_t *value,
 {
     if (value == input)
         return bits;
+    if (value->is_block_param) {
+        for (int i = bound_count - 1; i >= 0; i--)
+            if (bound_param[i] == value)
+                return bound_bits[i];
+        assert(0);
+    }
     if (value->opcode == VIR_OP_CONST)
         return value->constant;
     unsigned long long left = evaluate(value->op0, input, bits);
@@ -26,6 +38,15 @@ static unsigned long long evaluate(vir_value_t *value,
     case VIR_OP_SUB:
         result = left - right;
         break;
+    case VIR_OP_NEG:
+        result = 0 - left;
+        break;
+    case VIR_OP_SLT: {
+        unsigned long long sign = value->op0->type == VIR_TYPE_I32
+                                      ? 0x80000000ULL
+                                      : 0x8000000000000000ULL;
+        return (left ^ sign) < (right ^ sign);
+    }
     case VIR_OP_MUL:
         result = left * right;
         break;
@@ -263,35 +284,125 @@ static void test_tail_recursion(void)
     }
 }
 
-static void test_pure_inlining(void)
+/* Run @func from its entry, whose first parameter is @input, through jumps and
+ * branches to the value it returns.
+ */
+static unsigned long long run_function(vir_function_t *func,
+                                       unsigned long long bits)
 {
-    for (int mode = 0; mode < 6; mode++) {
+    vir_block_t *block = func->blocks;
+    vir_value_t *input = block->params;
+    bound_count = 0;
+    for (int steps = 0; steps < 32; steps++) {
+        if (block->terminator == VIR_TERM_RETURN)
+            return evaluate(block->return_value, input, bits);
+        vir_edge_t *edge = block->outgoing;
+        if (block->terminator == VIR_TERM_BRANCH)
+            edge = evaluate(block->branch_condition, input, bits)
+                       ? block->true_edge
+                       : block->false_edge;
+        unsigned long long args[8];
+        assert(edge->arg_count <= 8);
+        for (int i = 0; i < edge->arg_count; i++)
+            args[i] = evaluate(edge->args[i], input, bits);
+        int i = 0;
+        for (vir_value_t *param = edge->to->params; param;
+             param = param->param_next) {
+            assert(bound_count < 64);
+            bound_param[bound_count] = param;
+            bound_bits[bound_count++] = args[i++];
+        }
+        block = edge->to;
+    }
+    assert(0);
+    return 0;
+}
+
+static const vir_function_t *inline_target;
+static bool inline_static = true;
+
+static const vir_function_t *inline_lookup(const char *name,
+                                           void *context,
+                                           bool *is_static)
+{
+    (void) context;
+    *is_static = inline_static;
+    return !strcmp(name, "leaf") ? inline_target : NULL;
+}
+
+static int count_effects(const vir_function_t *func, vir_effect_kind_t kind)
+{
+    int count = 0;
+    for (const vir_block_t *block = func->blocks; block; block = block->next)
+        for (const vir_effect_t *effect = block->effects; effect;
+             effect = effect->next)
+            count += effect->kind == kind;
+    return count;
+}
+
+/* Start a caller and a "leaf" callee whose entry @source takes i32 @x and y and
+ * computes the returned 3 * x + y.
+ */
+static vir_value_t *start_leaf(vir_function_t *caller,
+                               vir_function_t *callee,
+                               vir_block_t **source,
+                               vir_value_t **x)
+{
+    vir_function_init(caller, 4096);
+    vir_function_init(callee, 4096);
+    assert(vir_function_set_pointer_bits(caller, 64));
+    assert(vir_function_set_pointer_bits(callee, 64));
+    *source = vir_block_create(callee);
+    *x = vir_block_add_param(callee, *source, VIR_TYPE_I32);
+    vir_value_t *y = vir_block_add_param(callee, *source, VIR_TYPE_I32);
+    vir_value_t *three = vir_const_i32(callee, *source, 3);
+    return vir_add(callee, *source, vir_mul(callee, *source, *x, three), y);
+}
+
+/* Modes: 0 pure, 1 stores a global, 2 too large, 3 two blocks, 4 argument type
+ * mismatch, 5 one value passed twice, 6 two returns, 7 calls out.
+ */
+static void test_call_inlining(void)
+{
+    for (int mode = 0; mode < 8; mode++) {
         vir_function_t caller, callee;
         char *error = NULL;
-        vir_function_init(&caller, 4096);
-        vir_function_init(&callee, 4096);
-        assert(vir_function_set_pointer_bits(&caller, 64));
-        assert(vir_function_set_pointer_bits(&callee, 64));
-        vir_block_t *source = vir_block_create(&callee);
-        vir_value_t *x = vir_block_add_param(&callee, source, VIR_TYPE_I32);
-        vir_value_t *y = vir_block_add_param(&callee, source, VIR_TYPE_I32);
-        vir_value_t *three = vir_const_i32(&callee, source, 3);
-        vir_value_t *sum =
-            vir_add(&callee, source, vir_mul(&callee, source, x, three), y);
+        vir_block_t *source;
+        vir_value_t *x;
+        vir_value_t *sum = start_leaf(&caller, &callee, &source, &x);
         if (mode == 1) {
             vir_value_t *address =
                 vir_global_addr(&callee, source, "visible", 4, 4);
             assert(vir_store(&callee, source, address, x));
         }
         if (mode == 2)
-            for (int i = 0; i < 25; i++)
+            for (int i = 0; i < 45; i++)
                 sum = vir_add(&callee, source, sum, x);
         if (mode == 3) {
             vir_block_t *exit = vir_block_create(&callee);
             assert(vir_edge_create(&callee, source, exit, NULL, 0));
             source = exit;
         }
-        assert(vir_block_set_return(&callee, source, sum));
+        if (mode == 7)
+            assert(vir_call(&callee, source, "other", NULL, 0, VIR_TYPE_VOID));
+        if (mode == 6) {
+            vir_block_t *negative = vir_block_create(&callee);
+            vir_block_t *positive = vir_block_create(&callee);
+            vir_value_t *zero = vir_const_i32(&callee, source, 0);
+            vir_edge_args_t then_edge = {negative, NULL, 0};
+            vir_edge_args_t else_edge = {positive, NULL, 0};
+            assert(vir_block_set_branch(&callee, source,
+                                        vir_slt(&callee, source, x, zero),
+                                        &then_edge, &else_edge));
+            assert(vir_block_set_return(&callee, negative,
+                                        vir_neg(&callee, negative, x)));
+            assert(vir_block_set_return(&callee, positive, x));
+        } else {
+            assert(vir_block_set_return(&callee, source, sum));
+        }
+        assert(vir_verify(&callee, &error));
+        inline_target = &callee;
+
         vir_block_t *entry = vir_block_create(&caller);
         vir_value_t *input = vir_block_add_param(&caller, entry, VIR_TYPE_I32);
         vir_value_t *seven = vir_const_i32(&caller, entry, 7);
@@ -300,19 +411,30 @@ static void test_pure_inlining(void)
             args[0] = vir_const_int(&caller, entry, VIR_TYPE_I64, 1);
         if (mode == 5)
             args[1] = input;
-        assert(vir_verify(&callee, &error));
-        vir_value_t *inlined =
-            vir_inline_pure_call(&caller, entry, &callee, args, 2);
-        assert((inlined != NULL) == (mode == 0 || mode == 5));
-        assert(vir_block_set_return(&caller, entry, inlined ? inlined : input));
+        vir_effect_t *call =
+            vir_call(&caller, entry, "leaf", args, 2, VIR_TYPE_I32);
+        assert(call && call->result);
+        vir_value_t *one = vir_const_i32(&caller, entry, 1);
+        assert(vir_block_set_return(
+            &caller, entry, vir_add(&caller, entry, call->result, one)));
         assert(vir_verify(&caller, &error));
-        assert(!entry->effects);
-        if (inlined)
-            for (int i = 0; i < 16; i++) {
-                unsigned long long bits = 0xffffffffULL - 17 * i;
-                assert(evaluate(inlined, input, bits) ==
-                       ((3 * bits + (mode == 5 ? bits : 7)) & 0xffffffffULL));
-            }
+        assert(vir_inline_calls(&caller, inline_lookup, NULL, VIR_OPT_O0) == 0);
+        assert(count_effects(&caller, VIR_EFFECT_CALL) == 1);
+
+        bool expected = mode != 2 && mode != 4 && mode != 7;
+        assert(vir_inline_calls(&caller, inline_lookup, NULL, VIR_OPT_O2) ==
+               expected);
+        assert(vir_verify(&caller, &error));
+        assert(count_effects(&caller, VIR_EFFECT_CALL) == !expected);
+        for (int i = 0; expected && i < 16; i++) {
+            unsigned long long bits = 0xffffffffULL - 17 * i;
+            unsigned long long want = 3 * bits + (mode == 5 ? bits : 7);
+            if (mode == 6)
+                want = bits & 0x80000000ULL ? 0 - bits : bits;
+            assert(run_function(&caller, bits) == ((want + 1) & 0xffffffffULL));
+        }
+        if (mode == 1)
+            assert(count_effects(&caller, VIR_EFFECT_STORE) == 1);
         vir_function_release(&caller);
         vir_function_release(&callee);
     }
@@ -429,11 +551,73 @@ static void test_integer_strength_rejections(void)
     }
 }
 
+/* An extern callee of 3 + @extra values, called once outside any loop or from a
+ * block that branches back to itself. Only the tiny one, or the loop call of
+ * the larger one, is copied.
+ */
+static void test_extern_inlining(void)
+{
+    for (int mode = 0; mode < 4; mode++) {
+        int extra = mode & 1 ? 5 : 0;
+        bool loop = mode & 2;
+        vir_function_t caller, callee;
+        char *error = NULL;
+        vir_block_t *source;
+        vir_value_t *x;
+        vir_value_t *sum = start_leaf(&caller, &callee, &source, &x);
+        for (int i = 0; i < extra; i++)
+            sum = vir_add(&callee, source, sum, x);
+        assert(vir_block_set_return(&callee, source, sum));
+        assert(vir_verify(&callee, &error));
+        inline_target = &callee;
+        inline_static = false;
+
+        vir_block_t *entry = vir_block_create(&caller);
+        vir_block_t *body = vir_block_create(&caller);
+        vir_block_t *exit = vir_block_create(&caller);
+        vir_value_t *input = vir_block_add_param(&caller, entry, VIR_TYPE_I32);
+        vir_value_t *seven = vir_const_i32(&caller, entry, 7);
+        vir_value_t *args[2] = {input, seven};
+        assert(vir_edge_create(&caller, entry, body, NULL, 0));
+        vir_effect_t *call =
+            vir_call(&caller, body, "leaf", args, 2, VIR_TYPE_I32);
+        assert(call && call->result);
+        if (loop) {
+            /* slt r, r is false, so the walk leaves on the first pass. */
+            vir_edge_args_t again = {body, NULL, 0};
+            vir_edge_args_t leave = {exit, NULL, 0};
+            assert(vir_block_set_branch(
+                &caller, body,
+                vir_slt(&caller, body, call->result, call->result), &again,
+                &leave));
+        } else {
+            assert(vir_edge_create(&caller, body, exit, NULL, 0));
+        }
+        assert(vir_block_set_return(&caller, exit, call->result));
+        assert(vir_verify(&caller, &error));
+
+        bool expected = !extra || loop;
+        assert(vir_inline_calls(&caller, inline_lookup, NULL, VIR_OPT_O2) ==
+               expected);
+        assert(vir_verify(&caller, &error));
+        assert(count_effects(&caller, VIR_EFFECT_CALL) == !expected);
+        for (int i = 0; expected && i < 16; i++) {
+            unsigned long long bits = 0xffffffffULL - 17 * i;
+            assert(run_function(&caller, bits) ==
+                   ((3 * bits + 7 + extra * bits) & 0xffffffffULL));
+        }
+        inline_static = true;
+        vir_function_release(&caller);
+        vir_function_release(&callee);
+    }
+}
+
 int main(void)
 {
     test_integer_strength_rejections();
     test_integer_strength_reduction();
-    test_pure_inlining();
+    test_call_inlining();
+    test_extern_inlining();
     test_tail_recursion();
     test_affine_loops();
     test_affine_rejections();

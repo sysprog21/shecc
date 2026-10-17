@@ -579,11 +579,22 @@ int vir_normalize(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_summarize_affine_loops(vir_function_t *func, vir_opt_level_t opt_level);
 /* Unroll even-count pointer add reductions by two into a second accumulator. */
 int vir_unroll_reductions(vir_function_t *func, vir_opt_level_t opt_level);
-vir_value_t *vir_inline_pure_call(vir_function_t *caller,
-                                  vir_block_t *block,
-                                  const vir_function_t *callee,
-                                  vir_value_t *const *args,
-                                  int arg_count);
+
+/* The graph of a direct callee the caller may inline, or NULL. *@is_static is
+ * set for a static callee, which vir_inline_calls() copies at a larger size.
+ */
+typedef const vir_function_t *(*vir_inline_lookup_t)(const char *name,
+                                                     void *context,
+                                                     bool *is_static);
+
+/* Replace calls to small leaf callees with copies of their graphs.
+ *
+ * Returns the number inlined, or -1 when the graph could not be rewritten.
+ */
+int vir_inline_calls(vir_function_t *caller,
+                     vir_inline_lookup_t lookup,
+                     void *context,
+                     vir_opt_level_t opt_level);
 int vir_eliminate_tail_recursion(vir_function_t *func,
                                  const char *name,
                                  vir_opt_level_t opt_level);

@@ -1,4 +1,17 @@
 /* Alternate incoming values and overlapping old/new values must not alias. */
+static unsigned int alternatives(int n);
+static unsigned long long mix(unsigned long long x);
+static unsigned long long overlapping(unsigned int n);
+int main(void)
+{
+    unsigned int narrow = 0;
+    unsigned long long wide = 0;
+    for (int n = 0; n < 100; n++) {
+        narrow = narrow * 33u + alternatives(n);
+        wide = wide * 33 + overlapping(n);
+    }
+    return narrow != 1813477397u || wide != 7931923482355807455ULL;
+}
 static unsigned int alternatives(int n)
 {
     unsigned int a = 1, b = 3, c = 7;
@@ -30,14 +43,4 @@ static unsigned long long overlapping(unsigned int n)
         a = next;
     }
     return a + b + s;
-}
-int main(void)
-{
-    unsigned int narrow = 0;
-    unsigned long long wide = 0;
-    for (int n = 0; n < 100; n++) {
-        narrow = narrow * 33u + alternatives(n);
-        wide = wide * 33 + overlapping(n);
-    }
-    return narrow != 1813477397u || wide != 7931923482355807455ULL;
 }
