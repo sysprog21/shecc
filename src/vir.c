@@ -2095,13 +2095,190 @@ static void vir_order_commutative(vir_value_t **op0, vir_value_t **op1)
         return helper(func, block, op0, op1, opcode);           \
     }
 
+static vir_value_t *vir_normalize_bitwise(vir_function_t *func,
+                                          vir_block_t *block,
+                                          vir_value_t *op0,
+                                          vir_value_t *op1,
+                                          vir_opcode_t opcode)
+{
+    /* Normalize bitwise identities before allocating a value. Operands remain
+     * in the graph, so discarding a result cannot discard memory effects.
+     */
+    if (opcode == VIR_OP_BITAND || opcode == VIR_OP_BITOR ||
+        opcode == VIR_OP_BITXOR) {
+        if (op0 == op1)
+            return opcode == VIR_OP_BITXOR
+                       ? vir_const_int(func, block, op0->type, 0)
+                       : op0;
+        if ((op0->opcode == VIR_OP_BITNOT && op0->op0 == op1) ||
+            (op1->opcode == VIR_OP_BITNOT && op1->op0 == op0))
+            return vir_const_int(
+                func, block, op0->type,
+                opcode == VIR_OP_BITAND ? 0 : vir_integer_mask(op0->type));
+        if (opcode == VIR_OP_BITOR || opcode == VIR_OP_BITXOR) {
+            vir_value_t *other = NULL;
+            if (vir_is_const_int(op0, vir_integer_mask(op0->type)))
+                other = op1;
+            else if (vir_is_const_int(op1, vir_integer_mask(op1->type)))
+                other = op0;
+            if (other)
+                return opcode == VIR_OP_BITOR
+                           ? vir_const_int(func, block, op0->type,
+                                           vir_integer_mask(op0->type))
+                           : vir_bitnot(func, block, other);
+        }
+        if (opcode != VIR_OP_BITXOR) {
+            if (op0->opcode == opcode && (op0->op0 == op1 || op0->op1 == op1))
+                return op0;
+            if (op1->opcode == opcode && (op1->op0 == op0 || op1->op1 == op0))
+                return op1;
+            vir_opcode_t dual =
+                opcode == VIR_OP_BITAND ? VIR_OP_BITOR : VIR_OP_BITAND;
+            if (op0->opcode == dual && (op0->op0 == op1 || op0->op1 == op1))
+                return op1;
+            if (op1->opcode == dual && (op1->op0 == op0 || op1->op1 == op0))
+                return op0;
+        }
+    }
+    return NULL;
+}
+
+/* Identities and constant folds that construction applies at every level. */
+static vir_value_t *vir_normalize_integer(vir_function_t *func,
+                                          vir_block_t *block,
+                                          vir_value_t *op0,
+                                          vir_value_t *op1,
+                                          vir_opcode_t opcode)
+{
+    if (opcode == VIR_OP_ADD || opcode == VIR_OP_BITOR ||
+        opcode == VIR_OP_BITXOR) {
+        if (vir_is_const_int(op0, 0))
+            return op1;
+        if (vir_is_const_int(op1, 0))
+            return op0;
+    }
+    if (opcode == VIR_OP_SUB) {
+        if (op0 == op1)
+            return vir_const_int(func, block, op0->type, 0);
+        if (vir_is_const_int(op1, 0))
+            return op0;
+    }
+    if (opcode == VIR_OP_BITAND) {
+        if (vir_is_const_int(op0, 0) || vir_is_const_int(op1, 0))
+            return vir_const_int(func, block, op0->type, 0);
+        if (vir_is_const_int(op0, vir_integer_mask(op0->type)))
+            return op1;
+        if (vir_is_const_int(op1, vir_integer_mask(op0->type)))
+            return op0;
+    }
+    if (vir_opcode_is_shift(opcode) && vir_is_const_int(op1, 0))
+        return op0;
+    if (opcode == VIR_OP_MUL) {
+        if (vir_is_const_int(op0, 0) || vir_is_const_int(op1, 0))
+            return vir_const_int(func, block, op0->type, 0);
+        if (vir_is_const_int(op0, 1))
+            return op1;
+        if (vir_is_const_int(op1, 1))
+            return op0;
+    }
+    unsigned long long result;
+    if (vir_is_constant(op0) && vir_is_constant(op1) &&
+        vir_fold_binary(func, opcode, op0->type, op0->type, op0->constant,
+                        op1->constant, &result))
+        return vir_const_int(func, block, op0->type, result);
+    return NULL;
+}
+
+/* Rewrite multiplication, division and remainder by a power of two as shifts
+ * and masks. Only vir_normalize() applies it, so construction keeps the
+ * arithmetic shape the frontend asked for.
+ */
+static vir_value_t *vir_strength_reduce_integer(vir_function_t *func,
+                                                vir_block_t *block,
+                                                vir_value_t *op0,
+                                                vir_value_t *op1,
+                                                vir_opcode_t opcode)
+{
+    if (opcode != VIR_OP_MUL && !vir_opcode_is_division(opcode))
+        return NULL;
+    if (opcode == VIR_OP_MUL && vir_is_constant(op0)) {
+        vir_value_t *swap = op0;
+        op0 = op1;
+        op1 = swap;
+    }
+    if (!vir_is_constant(op1))
+        return NULL;
+    unsigned long long divisor = op1->constant;
+    int width = vir_integer_type_width(op0->type);
+    if (!divisor || (divisor & (divisor - 1)))
+        return NULL;
+    bool remainder = opcode == VIR_OP_SREM || opcode == VIR_OP_UREM;
+    bool signed_division = opcode == VIR_OP_SDIV || opcode == VIR_OP_SREM;
+    if (signed_division && (divisor >> (width - 1)))
+        return NULL;
+    if (divisor == 1)
+        return remainder ? vir_const_int(func, block, op0->type, 0) : op0;
+    int shift = 0;
+    for (unsigned long long bits = divisor; bits > 1; bits >>= 1)
+        shift++;
+    vir_value_t *count = vir_const_i32(func, block, shift);
+    if (!count)
+        return NULL;
+    if (opcode == VIR_OP_MUL)
+        return vir_shl(func, block, op0, count);
+    if (opcode == VIR_OP_UDIV)
+        return vir_lshr(func, block, op0, count);
+    vir_value_t *mask = vir_const_int(func, block, op0->type, divisor - 1);
+    if (!mask)
+        return NULL;
+    if (opcode == VIR_OP_UREM)
+        return vir_bitand(func, block, op0, mask);
+
+    /* Signed quotients truncate toward zero. Bias negative dividends by d-1
+     * before the arithmetic shift; their addition cannot overflow the type.
+     * Remainders retain the dividend's sign via x - quotient*d.
+     */
+    vir_value_t *sign_count = vir_const_i32(func, block, width - 1);
+    vir_value_t *sign =
+        sign_count ? vir_ashr(func, block, op0, sign_count) : NULL;
+    vir_value_t *bias = sign ? vir_bitand(func, block, sign, mask) : NULL;
+    vir_value_t *biased = bias ? vir_add(func, block, op0, bias) : NULL;
+    vir_value_t *quotient =
+        biased ? vir_ashr(func, block, biased, count) : NULL;
+    if (!quotient || !remainder)
+        return quotient;
+    vir_value_t *product = vir_shl(func, block, quotient, count);
+    return product ? vir_sub(func, block, op0, product) : NULL;
+}
+
+static vir_value_t *vir_normalize_binary(vir_function_t *func,
+                                         vir_block_t *block,
+                                         vir_value_t *op0,
+                                         vir_value_t *op1,
+                                         vir_opcode_t opcode)
+{
+    vir_value_t *normalized =
+        vir_normalize_bitwise(func, block, op0, op1, opcode);
+    return normalized ? normalized
+                      : vir_normalize_integer(func, block, op0, op1, opcode);
+}
+
+/* NEG and BITNOT undo themselves: op(op(x)) is x. */
+static vir_value_t *vir_unary_involution(vir_opcode_t opcode,
+                                         const vir_value_t *operand)
+{
+    return (opcode == VIR_OP_NEG || opcode == VIR_OP_BITNOT) &&
+                   operand->opcode == opcode
+               ? operand->op0
+               : NULL;
+}
+
 static vir_value_t *vir_integer_binary(vir_function_t *func,
                                        vir_block_t *block,
                                        vir_value_t *op0,
                                        vir_value_t *op1,
                                        vir_opcode_t opcode)
 {
-    unsigned long long result;
     bool division = vir_opcode_is_division(opcode);
     bool shift = vir_opcode_is_shift(opcode);
 
@@ -2110,43 +2287,17 @@ static vir_value_t *vir_integer_binary(vir_function_t *func,
                        op1->type == VIR_TYPE_I32)
                 : vir_integer_operands_are_local(func, block, op0, op1)))
         return NULL;
-    if (shift && vir_is_const_int(op1, 0))
-        return op0;
-    if (opcode == VIR_OP_SUB) {
-        if (op0 == op1)
-            return vir_const_int(func, block, op0->type, 0);
-        if (vir_is_const_int(op1, 0))
-            return op0;
-    } else if (opcode == VIR_OP_MUL) {
-        if (vir_is_const_int(op0, 0) || vir_is_const_int(op1, 0))
-            return vir_const_int(func, block, op0->type, 0);
-        if (vir_is_const_int(op0, 1))
-            return op1;
-        if (vir_is_const_int(op1, 1))
-            return op0;
-    } else if (opcode == VIR_OP_BITAND) {
-        if (vir_is_const_int(op0, 0) || vir_is_const_int(op1, 0))
-            return vir_const_int(func, block, op0->type, 0);
-        if (vir_is_const_int(op0, vir_integer_mask(op0->type)))
-            return op1;
-        if (vir_is_const_int(op1, vir_integer_mask(op1->type)))
-            return op0;
-    } else if (!division && !shift) {
-        if (vir_is_const_int(op0, 0))
-            return op1;
-        if (vir_is_const_int(op1, 0))
-            return op0;
-    }
+    vir_value_t *normalized =
+        vir_normalize_binary(func, block, op0, op1, opcode);
+    if (normalized)
+        return normalized;
     if (vir_opcode_is_commutative(opcode))
         vir_order_commutative(&op0, &op1);
-    if (vir_is_constant(op0) && vir_is_constant(op1)) {
-        if (!vir_fold_binary(func, opcode, op0->type, op0->type, op0->constant,
-                             op1->constant, &result))
-            return division || shift ? vir_user_operation(func, block, opcode,
-                                                          op0->type, op0, op1)
-                                     : NULL;
-        return vir_const_int(func, block, op0->type, result);
-    }
+    /* Normalization already folded every foldable constant pair; only a
+     * trapping division or out-of-range shift keeps its explicit operation.
+     */
+    if (vir_is_constant(op0) && vir_is_constant(op1) && !division && !shift)
+        return NULL;
     return vir_user_operation(func, block, opcode, op0->type, op0, op1);
 }
 
@@ -2188,6 +2339,9 @@ static vir_value_t *vir_integer_unary(vir_function_t *func,
         !vir_has_value(func, operand) ||
         !vir_unary_types_valid(func, opcode, type, operand->type))
         return NULL;
+    vir_value_t *involution = vir_unary_involution(opcode, operand);
+    if (involution)
+        return involution;
     if (!vir_is_constant(operand))
         return vir_user_operation(func, block, opcode, type, operand, NULL);
     if (cast)
@@ -2367,22 +2521,14 @@ static void vir_remove_effect_uses(vir_effect_t *effect)
         vir_remove_effect_use(effect->args[operand], effect, operand);
 }
 
-bool vir_effect_remove(vir_function_t *func, vir_effect_t *effect)
+/* Unlink EFFECT, its result value and its operand uses from its block. The
+ * caller has already dropped every use of the result.
+ */
+static bool vir_effect_unlink(vir_effect_t *effect)
 {
-    vir_effect_t **link;
-    vir_effect_t *previous = NULL;
-
-    if (!func || !effect ||
-        (effect->kind != VIR_EFFECT_STORE &&
-         (effect->kind != VIR_EFFECT_LOAD || !effect->result ||
-          effect->result->uses)) ||
-        !vir_has_block(func, effect->block))
-        return false;
-    link = &effect->block->effects;
-    while (*link && *link != effect) {
-        previous = *link;
+    vir_effect_t **link = &effect->block->effects;
+    while (*link && *link != effect)
         link = &(*link)->next;
-    }
     if (!*link)
         return false;
     if (effect->result) {
@@ -2398,11 +2544,20 @@ bool vir_effect_remove(vir_function_t *func, vir_effect_t *effect)
     }
     vir_remove_effect_uses(effect);
     *link = effect->next;
-    if (effect->block->last_effect == effect)
-        effect->block->last_effect = previous;
     effect->next = NULL;
     vir_repair_value_positions(effect->block);
     return true;
+}
+
+bool vir_effect_remove(vir_function_t *func, vir_effect_t *effect)
+{
+    if (!func || !effect ||
+        (effect->kind != VIR_EFFECT_STORE &&
+         (effect->kind != VIR_EFFECT_LOAD || !effect->result ||
+          effect->result->uses)) ||
+        !vir_has_block(func, effect->block))
+        return false;
+    return vir_effect_unlink(effect);
 }
 
 static void vir_set_use_slot(vir_value_t **slot,
@@ -2445,18 +2600,31 @@ static vir_value_t **vir_use_value_slot(const vir_use_t *use)
 
 vir_block_t *vir_use_block(const vir_use_t *use)
 {
-    return vir_use_user(use)           ? vir_use_user(use)->block
-           : vir_use_edge(use)         ? vir_use_edge(use)->from
-           : vir_use_effect(use)       ? vir_use_effect(use)->block
-           : vir_use_return_block(use) ? vir_use_return_block(use)
-                                       : vir_use_branch_block(use);
+    switch (use->kind) {
+    case VIR_USE_USER:
+        return ((vir_value_t *) use->owner)->block;
+    case VIR_USE_EDGE:
+        return ((vir_edge_t *) use->owner)->from;
+    case VIR_USE_EFFECT:
+        return ((vir_effect_t *) use->owner)->block;
+    case VIR_USE_RETURN:
+    case VIR_USE_BRANCH:
+        return use->owner;
+    default:
+        return NULL;
+    }
 }
 
 int vir_use_order(const vir_use_t *use)
 {
-    return vir_use_user(use)     ? vir_use_user(use)->order
-           : vir_use_effect(use) ? vir_use_effect(use)->order
-                                 : vir_use_block(use)->next_order;
+    switch (use->kind) {
+    case VIR_USE_USER:
+        return ((vir_value_t *) use->owner)->order;
+    case VIR_USE_EFFECT:
+        return ((vir_effect_t *) use->owner)->order;
+    default:
+        return vir_use_block(use)->next_order;
+    }
 }
 
 static bool vir_replacement_dominates_with_context(
@@ -2777,6 +2945,65 @@ int vir_gvn_with_stats(vir_function_t *func,
     return vir_cse_run(func, opt_level, stats, true);
 }
 
+/* Move the values a builder appended after OLD_TAIL in front of the value at
+ * *LINK, giving them its order so they keep its place among the effects.
+ * Return the link that now holds that value.
+ */
+static vir_value_t **vir_move_appended_before(vir_block_t *block,
+                                              vir_value_t *old_tail,
+                                              vir_value_t **link)
+{
+    vir_value_t *value = *link;
+    vir_value_t *first = old_tail->next;
+    vir_value_t *last = block->tail;
+    old_tail->next = NULL;
+    last->next = value;
+    *link = first;
+    for (vir_value_t *inserted = first; inserted != value;
+         inserted = inserted->next)
+        inserted->order = value->order;
+    vir_repair_value_positions(block);
+    return &last->next;
+}
+
+/* SSA parameter replacement and CSE expose identities after construction. Reuse
+ * the builders' rules, placing any fresh pure replacement before its original
+ * definition. Every replacement is then either new and in front of the value or
+ * one of its transitive operands, so it dominates all existing uses.
+ */
+int vir_normalize(vir_function_t *func, vir_opt_level_t opt_level)
+{
+    int changed = 0;
+    if (!func || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level == VIR_OPT_O0)
+        return 0;
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        for (vir_value_t **link = &block->head; *link; link = &(*link)->next) {
+            vir_value_t *value = *link;
+            if (!value->uses || value->def_effect)
+                continue;
+            vir_value_t *replacement = NULL;
+            vir_value_t *old_tail = block->tail;
+            if (value->nr_ops == 2 && vir_type_is_i32_or_i64(value->type)) {
+                replacement = vir_normalize_binary(func, block, value->op0,
+                                                   value->op1, value->opcode);
+                if (!replacement)
+                    replacement = vir_strength_reduce_integer(
+                        func, block, value->op0, value->op1, value->opcode);
+            } else if (value->nr_ops == 1)
+                replacement = vir_unary_involution(value->opcode, value->op0);
+            if (!replacement || replacement->type != value->type)
+                continue;
+            if (block->tail != old_tail)
+                link = vir_move_appended_before(block, old_tail, link);
+            vir_replace_all_uses_unchecked(value, replacement);
+            changed++;
+        }
+    }
+    return changed;
+}
+
 static bool vir_value_is_dead(const vir_value_t *value)
 {
     const vir_effect_t *effect = value->def_effect;
@@ -2827,8 +3054,10 @@ static void vir_repair_value_positions(vir_block_t *block)
 /* Delay nontrapping pointer arithmetic until old operands have been consumed,
  * so an outgoing pointer can reuse their register without changing effects.
  */
-static void vir_sink_pointer_adds(vir_block_t *block)
+static bool vir_sink_pointer_adds(vir_block_t *block)
 {
+    bool changed = false;
+    vir_effect_t *barrier = block->effects;
     for (vir_value_t **link = &block->head; *link; link = &(*link)->next) {
         vir_value_t *value = *link;
         if (value->opcode != VIR_OP_PTRADD)
@@ -2837,22 +3066,28 @@ static void vir_sink_pointer_adds(vir_block_t *block)
         for (vir_use_t *use = value->uses; use; use = use->next)
             if (vir_use_block(use) == block && vir_use_order(use) < limit)
                 limit = vir_use_order(use);
-        for (vir_effect_t *effect = block->effects;
-             effect && effect->order < limit; effect = effect->next)
-            if (effect->order > value->order && effect->kind != VIR_EFFECT_LOAD)
-                limit = effect->order;
+
+        /* The value walk only advances, even after sinking a value. Keep the
+         * first following barrier rather than rescanning all earlier effects.
+         */
+        while (barrier && (barrier->order <= value->order ||
+                           barrier->kind == VIR_EFFECT_LOAD))
+            barrier = barrier->next;
+        if (barrier && barrier->order < limit)
+            limit = barrier->order;
+        if (limit <= value->order + 1)
+            continue;
         vir_value_t *after = NULL;
         for (int operand = 0; operand < value->nr_ops; operand++) {
             vir_value_t *input = operand ? value->op1 : value->op0;
             for (vir_use_t *use = input->uses; use; use = use->next) {
-                int order = vir_use_order(use);
-                if (vir_use_block(use) != block || order <= value->order ||
-                    order >= limit)
-                    continue;
                 vir_value_t *user = vir_use_user(use);
                 if (!user && vir_use_effect(use))
                     user = vir_use_effect(use)->result;
-                if (user && (!after || user->order > after->order))
+                if (!user || user->block != block ||
+                    user->order <= value->order || user->order >= limit)
+                    continue;
+                if (!after || user->order > after->order)
                     after = user;
             }
         }
@@ -2872,7 +3107,9 @@ static void vir_sink_pointer_adds(vir_block_t *block)
         value->next = after->next;
         after->next = value;
         link = &after->next;
+        changed = true;
     }
+    return changed;
 }
 
 /* Promote a nonescaping stack scalar used only by direct, nonvolatile memory
@@ -2967,6 +3204,7 @@ static void vir_promote_private_stack_values(vir_function_t *func)
  */
 static void vir_drop_overwritten_stores(vir_block_t *block)
 {
+    bool changed = false;
     for (vir_effect_t **link = &block->effects; *link;) {
         vir_effect_t *effect = *link;
         if (effect->kind != VIR_EFFECT_STORE) {
@@ -2982,11 +3220,13 @@ static void vir_drop_overwritten_stores(vir_block_t *block)
             effect->stored_value->type == next->stored_value->type) {
             vir_remove_effect_uses(effect);
             *link = effect->next;
+            changed = true;
         } else {
             link = &effect->next;
         }
     }
-    vir_repair_value_positions(block);
+    if (changed)
+        vir_repair_value_positions(block);
 }
 
 int vir_dce_with_stats(vir_function_t *func,
@@ -3073,6 +3313,7 @@ int vir_dce_with_stats(vir_function_t *func,
     for (vir_block_t *block = func->blocks; block; block = block->next) {
         vir_value_t **link = &block->head;
         vir_effect_t **effect_link = &block->effects;
+        bool changed = false;
 
         while (*link) {
             vir_value_t *value = *link;
@@ -3081,6 +3322,7 @@ int vir_dce_with_stats(vir_function_t *func,
                 *link = value->next;
                 value->member = NULL;
                 removed++;
+                changed = true;
             } else {
                 link = &value->next;
             }
@@ -3091,12 +3333,14 @@ int vir_dce_with_stats(vir_function_t *func,
             if (effect->kind == VIR_EFFECT_LOAD && effect->result &&
                 dead[effect->result->id]) {
                 *effect_link = effect->next;
+                changed = true;
             } else {
                 effect_link = &effect->next;
             }
         }
-        vir_sink_pointer_adds(block);
-        vir_repair_value_positions(block);
+        changed |= vir_sink_pointer_adds(block);
+        if (changed)
+            vir_repair_value_positions(block);
     }
     result = removed;
 cleanup:
@@ -4154,6 +4398,493 @@ simplify:
         return -1;
     changed = vir_simplify_params_with_context(func, &dominance);
     vir_dominance_release(&dominance);
+    return changed;
+}
+
+/* A bounded straight-line leaf can be cloned at its call site without CFG,
+ * alias, or stack-object remapping. Keep source and destination graphs separate
+ * and require exact word-sized arguments so ABI narrowing cannot be skipped.
+ */
+vir_value_t *vir_inline_pure_call(vir_function_t *caller,
+                                  vir_block_t *block,
+                                  const vir_function_t *callee,
+                                  vir_value_t *const *args,
+                                  int arg_count)
+{
+    if (!caller || !callee || caller == callee ||
+        !vir_has_block(caller, block) || !callee->blocks ||
+        callee->blocks->next || arg_count < 0 || arg_count > 16 ||
+        (arg_count && !args))
+        return NULL;
+    vir_block_t *source = callee->blocks;
+    if (source->effects || source->terminator != VIR_TERM_RETURN ||
+        !source->return_value ||
+        !vir_type_is_i32_or_i64(source->return_value->type) ||
+        source->param_count != arg_count)
+        return NULL;
+    vir_value_t *original[64], *copy[64];
+    int count = 0, values = 0;
+    for (vir_value_t *param = source->params; param;
+         param = param->param_next) {
+        if (!vir_type_is_i32_or_i64(param->type) ||
+            !vir_has_value(caller, args[count]) ||
+            args[count]->type != param->type)
+            return NULL;
+        original[count] = param;
+        copy[count] = args[count];
+        count++;
+    }
+    for (vir_value_t *value = source->head; value; value = value->next) {
+        if (++values > 24 ||
+            (value->opcode != VIR_OP_CONST &&
+             !vir_is_pure_binary_opcode(value->opcode) &&
+             !vir_is_pure_unary_opcode(value->opcode)) ||
+            value->type == VIR_TYPE_PTR)
+            return NULL;
+    }
+    for (vir_value_t *value = source->head; value; value = value->next) {
+        vir_value_t *operands[2] = {NULL, NULL};
+        for (int i = 0; i < value->nr_ops; i++) {
+            vir_value_t *operand = i ? value->op1 : value->op0;
+            for (int j = 0; j < count; j++)
+                if (original[j] == operand)
+                    operands[i] = copy[j];
+            if (!operands[i])
+                return NULL;
+        }
+        original[count] = value;
+        copy[count] =
+            value->opcode == VIR_OP_CONST
+                ? vir_const_int(caller, block, value->type, value->constant)
+                : vir_user_operation(caller, block, value->opcode, value->type,
+                                     operands[0], operands[1]);
+        if (!copy[count])
+            return NULL;
+        count++;
+    }
+    for (int i = 0; i < count; i++)
+        if (original[i] == source->return_value)
+            return copy[i];
+    return NULL;
+}
+
+/* vir_tail_recursion_type() has already proven every effect is a nonvariadic
+ * self call with matching arguments; check only how its result is returned.
+ */
+static vir_effect_t *vir_tail_call(vir_block_t *block,
+                                   vir_type_t type,
+                                   vir_value_t **addend)
+{
+    vir_value_t *returned = block->return_value;
+    vir_effect_t *call = block->last_effect;
+    *addend = NULL;
+    if (block->terminator != VIR_TERM_RETURN || !returned || !call ||
+        !call->result || call->result_type != type ||
+        (call->signature && call->signature->result.is_bool))
+        return NULL;
+    vir_value_t *result = call->result;
+    if (!result->uses || result->uses->next)
+        return NULL;
+    if (returned == result)
+        return vir_use_return_block(result->uses) == block ? call : NULL;
+    if (returned->opcode != VIR_OP_ADD || returned->type != type ||
+        vir_use_user(result->uses) != returned || !returned->uses ||
+        returned->uses->next || vir_use_return_block(returned->uses) != block)
+        return NULL;
+    *addend = returned->op0 == result ? returned->op1 : returned->op0;
+    return call;
+}
+
+static void vir_tail_unlink_value(vir_block_t *block, vir_value_t *value)
+{
+    for (int operand = 0; operand < value->nr_ops; operand++)
+        vir_remove_user_use(operand ? value->op1 : value->op0, value, operand);
+    vir_value_t **link = &block->head;
+    while (*link != value)
+        link = &(*link)->next;
+    *link = value->next;
+    value->next = NULL;
+    value->member = NULL;
+}
+
+/* Return the common i32/i64 result type when FUNC may become a loop, or
+ * VIR_TYPE_VOID when a parameter, value, effect or return rules it out.
+ */
+static vir_type_t vir_tail_recursion_type(const vir_function_t *func,
+                                          const char *name)
+{
+    const vir_block_t *header = func->blocks;
+    int parameters = header->param_count;
+    vir_type_t type = VIR_TYPE_VOID;
+    bool self_tail = false;
+    /* Most functions end in no self call at all; say so before any scan. */
+    for (const vir_block_t *block = header; block && !self_tail;
+         block = block->next) {
+        const vir_effect_t *call = block->last_effect;
+        self_tail = block->terminator == VIR_TERM_RETURN && call &&
+                    call->kind == VIR_EFFECT_CALL && call->callee &&
+                    !strcmp(call->callee, name);
+    }
+    if (!self_tail)
+        return VIR_TYPE_VOID;
+    for (vir_value_t *param = header->params; param; param = param->param_next)
+        if (!vir_type_is_i32_or_i64(param->type))
+            return VIR_TYPE_VOID;
+    for (const vir_block_t *block = header; block; block = block->next) {
+        for (vir_effect_t *effect = block->effects; effect;
+             effect = effect->next) {
+            if (effect->kind != VIR_EFFECT_CALL || !effect->callee ||
+                strcmp(effect->callee, name) ||
+                effect->arg_count != parameters ||
+                (effect->signature && effect->signature->is_variadic))
+                return VIR_TYPE_VOID;
+            int index = 0;
+            for (vir_value_t *param = header->params; param;
+                 param = param->param_next, index++)
+                if (effect->args[index]->type != param->type)
+                    return VIR_TYPE_VOID;
+        }
+        for (vir_value_t *value = block->head; value; value = value->next)
+            if (value->opcode == VIR_OP_STACK_ADDR ||
+                vir_opcode_may_trap(value->opcode))
+                return VIR_TYPE_VOID;
+        if (block->terminator == VIR_TERM_RETURN) {
+            if (!block->return_value ||
+                !vir_type_is_i32_or_i64(block->return_value->type) ||
+                (type != VIR_TYPE_VOID && type != block->return_value->type))
+                return VIR_TYPE_VOID;
+            type = block->return_value->type;
+        }
+    }
+    return type;
+}
+
+/* Turn direct and additive tail recursion into a loop. Requiring scalar word
+ * parameters and no effects other than self calls avoids escaped stack objects,
+ * narrowing ABI conversions, memory ordering, and external function behavior.
+ */
+int vir_eliminate_tail_recursion(vir_function_t *func,
+                                 const char *name,
+                                 vir_opt_level_t opt_level)
+{
+    if (!func || !name || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level == VIR_OPT_O0 || !func->blocks || func->blocks->incoming)
+        return 0;
+    vir_type_t type = vir_tail_recursion_type(func, name);
+    if (type == VIR_TYPE_VOID)
+        return 0;
+    vir_block_t *header = func->blocks;
+    int parameters = header->param_count;
+    int candidates = 0;
+    for (vir_block_t *block = header; block; block = block->next) {
+        vir_value_t *addend;
+        if (vir_tail_call(block, type, &addend))
+            candidates++;
+    }
+    if (!candidates || parameters >= INT_MAX / (int) sizeof(vir_value_t *) - 1)
+        return 0;
+    vir_value_t **args = malloc((size_t) (parameters + 1) * sizeof(*args));
+    if (!args)
+        return -1;
+    int result = -1;
+    vir_block_t *last = func->last_block;
+    vir_block_t *entry = vir_block_create(func);
+    vir_value_t *accumulator = vir_block_add_param(func, header, type);
+    if (!entry || !accumulator)
+        goto fail;
+    int index = 0;
+    for (vir_value_t *param = header->params; param != accumulator;
+         param = param->param_next, index++) {
+        args[index] = vir_block_add_param(func, entry, param->type);
+        if (!args[index])
+            goto fail;
+    }
+    args[parameters] = vir_const_int(func, entry, type, 0);
+    if (!args[parameters])
+        goto fail;
+
+    /* The new ABI entry initializes the accumulator; the original entry is now
+     * the recurrence header and receives every recursive argument in SSA.
+     */
+    last->next = NULL;
+    entry->next = header;
+    func->blocks = entry;
+    func->last_block = last;
+    for (int i = func->block_count - 1; i > 0; i--)
+        func->block_table[i] = func->block_table[i - 1];
+    func->block_table[0] = entry;
+    for (int i = 0; i < func->block_count; i++)
+        func->block_table[i]->index = i;
+    if (!vir_edge_create(func, entry, header, args, parameters + 1))
+        goto fail;
+    for (vir_block_t *block = header; block; block = block->next) {
+        if (block->terminator != VIR_TERM_RETURN)
+            continue;
+        vir_value_t *addend;
+        vir_effect_t *call = vir_tail_call(block, type, &addend);
+        vir_value_t *returned = block->return_value;
+        vir_value_t *next = call && !addend ? accumulator
+                                            : vir_add(func, block, accumulator,
+                                                      call ? addend : returned);
+        if (!next)
+            goto fail;
+        vir_remove_return_use(returned, block);
+        block->return_value = NULL;
+        block->terminator = VIR_TERM_NONE;
+        if (!call) {
+            if (!vir_block_set_return(func, block, next))
+                goto fail;
+            continue;
+        }
+        for (int i = 0; i < parameters; i++)
+            args[i] = call->args[i];
+        args[parameters] = next;
+        if (addend)
+            vir_tail_unlink_value(block, returned);
+        if (!vir_effect_unlink(call) ||
+            !vir_edge_create(func, block, header, args, parameters + 1))
+            goto fail;
+    }
+    result = candidates;
+fail:
+    free(args);
+    return result;
+}
+
+/* Coefficients in the result type's modular integer domain. */
+typedef struct {
+    unsigned long long accumulator, index, constant;
+} vir_affine_form_t;
+
+static bool vir_affine_form(const vir_value_t *value,
+                            const vir_value_t *iv,
+                            const vir_value_t *accumulator,
+                            vir_affine_form_t *form,
+                            int depth,
+                            int *budget)
+{
+    vir_affine_form_t left = {0}, right = {0};
+    if (!value || depth == 32 || --*budget < 0 || value->type != iv->type)
+        return false;
+    memset(form, 0, sizeof(*form));
+    if (value == iv)
+        form->index = 1;
+    else if (value == accumulator)
+        form->accumulator = 1;
+    else if (vir_is_constant(value))
+        form->constant = value->constant;
+    else {
+        vir_opcode_t opcode = value->opcode;
+        if (value->is_block_param || value->def_effect ||
+            (opcode != VIR_OP_ADD && opcode != VIR_OP_SUB &&
+             opcode != VIR_OP_MUL && opcode != VIR_OP_SHL &&
+             opcode != VIR_OP_NEG) ||
+            !vir_affine_form(value->op0, iv, accumulator, &left, depth + 1,
+                             budget))
+            return false;
+        /* NEG is 0 - x and SHL by k is MUL by 2^k in the modular domain. */
+        if (opcode == VIR_OP_NEG) {
+            right = left;
+            memset(&left, 0, sizeof(left));
+            opcode = VIR_OP_SUB;
+        } else if (opcode == VIR_OP_SHL) {
+            if (!vir_is_constant(value->op1) ||
+                value->op1->constant >=
+                    (unsigned int) vir_integer_type_width(iv->type))
+                return false;
+            right.constant = 1ULL << value->op1->constant;
+            opcode = VIR_OP_MUL;
+        } else if (!vir_affine_form(value->op1, iv, accumulator, &right,
+                                    depth + 1, budget))
+            return false;
+        if (opcode == VIR_OP_MUL) {
+            if (!left.accumulator && !left.index) {
+                vir_affine_form_t swap = left;
+                left = right;
+                right = swap;
+            }
+            if (right.accumulator || right.index)
+                return false;
+            form->accumulator = left.accumulator * right.constant;
+            form->index = left.index * right.constant;
+            form->constant = left.constant * right.constant;
+        } else {
+            bool subtract = opcode == VIR_OP_SUB;
+            form->accumulator =
+                left.accumulator +
+                (subtract ? -right.accumulator : right.accumulator);
+            form->index = left.index + (subtract ? -right.index : right.index);
+            form->constant =
+                left.constant + (subtract ? -right.constant : right.constant);
+        }
+    }
+    unsigned long long mask = vir_integer_mask(iv->type);
+    form->accumulator &= mask;
+    form->index &= mask;
+    form->constant &= mask;
+    return true;
+}
+
+/* Accept a single-entry straight-line loop with no observable body effects.
+ * Values produced in its body must not escape the loop: only header parameters
+ * have a well-defined value when the body is replaced by its summary.
+ */
+static vir_edge_t *vir_affine_loop_body(vir_block_t *header,
+                                        unsigned char *members,
+                                        int block_count)
+{
+    vir_block_t *block = header->true_edge->to;
+    if (block == header)
+        return NULL;
+    members[header->index] = 1;
+    for (;;) {
+        if (members[block->index] || block->effects || block->params ||
+            block->terminator != VIR_TERM_JUMP || !block->outgoing ||
+            block->outgoing->next_outgoing || !block->incoming ||
+            block->incoming->next_incoming)
+            return NULL;
+        members[block->index] = 1;
+        if (block->outgoing->to == header)
+            break;
+        if (block->outgoing->arg_count)
+            return NULL;
+        block = block->outgoing->to;
+    }
+    for (vir_block_t *body = header->true_edge->to; body != header;
+         body = body->outgoing->to) {
+        for (vir_value_t *value = body->head; value; value = value->next) {
+            if (vir_opcode_is_division(value->opcode))
+                return NULL;
+            for (vir_use_t *use = value->uses; use; use = use->next) {
+                vir_block_t *user = vir_use_block(use);
+                if (!user || user->index < 0 || user->index >= block_count ||
+                    !members[user->index])
+                    return NULL;
+            }
+        }
+    }
+    return block->outgoing;
+}
+
+static int vir_summarize_affine_loop(vir_function_t *func,
+                                     vir_block_t *header,
+                                     unsigned char *members)
+{
+    if (header == func->blocks || header->param_count != 2 || header->effects ||
+        header->terminator != VIR_TERM_BRANCH || !header->incoming ||
+        !header->incoming->next_incoming ||
+        header->incoming->next_incoming->next_incoming)
+        return 0;
+    for (vir_value_t *value = header->head; value; value = value->next)
+        if (vir_opcode_may_trap(value->opcode))
+            return 0;
+    vir_value_t *condition = header->branch_condition;
+    if ((condition->opcode != VIR_OP_ULT && condition->opcode != VIR_OP_SLT) ||
+        !vir_is_constant(condition->op1))
+        return 0;
+    vir_value_t *iv = condition->op0;
+    if (!iv->is_block_param || iv->block != header ||
+        !vir_type_is_i32_or_i64(iv->type))
+        return 0;
+    int index = header->params == iv ? 0 : 1;
+    vir_value_t *accumulator = index ? header->params : iv->param_next;
+    if (accumulator->type != iv->type)
+        return 0;
+    vir_edge_t *back = vir_affine_loop_body(header, members, func->block_count);
+    bool leaves = back && !members[header->false_edge->to->index];
+    /* Clear only the marked chain, so each candidate costs its body size. */
+    members[header->index] = 0;
+    for (vir_block_t *block = header->true_edge->to; members[block->index];
+         block = block->outgoing->to)
+        members[block->index] = 0;
+    if (!leaves)
+        return 0;
+    /* The header has exactly two incoming edges and only the body's last
+     * block reaches it, so the other edge enters from outside the loop.
+     */
+    vir_edge_t *entry =
+        header->incoming == back ? back->next_incoming : header->incoming;
+    if (!vir_is_constant(entry->args[index]))
+        return 0;
+    vir_affine_form_t increment, recurrence;
+    int budget = 256;
+    if (!vir_affine_form(back->args[index], iv, accumulator, &increment, 0,
+                         &budget) ||
+        increment.accumulator || increment.index != 1 || !increment.constant ||
+        !vir_affine_form(back->args[1 - index], iv, accumulator, &recurrence, 0,
+                         &budget))
+        return 0;
+    unsigned long long first = entry->args[index]->constant;
+    unsigned long long limit = condition->op1->constant;
+    unsigned long long step = increment.constant;
+    unsigned long long mask = vir_integer_mask(iv->type);
+    unsigned long long maximum =
+        condition->opcode == VIR_OP_SLT ? mask >> 1 : mask;
+    if (first > maximum || limit > maximum || first >= limit)
+        return 0;
+    unsigned long long trips = (limit - first - 1) / step + 1;
+    if (trips > (maximum - first) / step)
+        return 0;
+
+    /* Exponentiate (a,i) -> (A*a+B*i+C,i+D). Composition is exact modulo the
+     * integer width, including overflow in the accumulator. The separate
+     * trip-count proof above rules out wrapping the controlling induction.
+     */
+    unsigned long long a = 1, b = 0, c = 0, d = 0;
+    unsigned long long aa = recurrence.accumulator, bb = recurrence.index;
+    unsigned long long cc = recurrence.constant, dd = step;
+    for (unsigned long long remaining = trips; remaining; remaining >>= 1) {
+        if (remaining & 1) {
+            c = (aa * c + bb * d + cc) & mask;
+            b = (aa * b + bb) & mask;
+            a = (aa * a) & mask;
+            d = (d + dd) & mask;
+        }
+        cc = (aa * cc + bb * dd + cc) & mask;
+        bb = (aa * bb + bb) & mask;
+        aa = (aa * aa) & mask;
+        dd = (dd + dd) & mask;
+    }
+    vir_block_t *pre = entry->from;
+    vir_value_t *scale = vir_const_int(func, pre, iv->type, a);
+    vir_value_t *bias = vir_const_int(func, pre, iv->type, b * first + c);
+    vir_value_t *final_iv =
+        vir_const_int(func, pre, iv->type, first + trips * step);
+    vir_value_t *product =
+        scale ? vir_mul(func, pre, entry->args[1 - index], scale) : NULL;
+    vir_value_t *final_acc =
+        product && bias ? vir_add(func, pre, product, bias) : NULL;
+    if (!final_acc || !final_iv)
+        return -1;
+    vir_set_use_slot(&entry->args[index], final_iv, &entry->arg_uses[index]);
+    vir_set_use_slot(&entry->args[1 - index], final_acc,
+                     &entry->arg_uses[1 - index]);
+    return vir_edge_delete(func, header->true_edge) ? 1 : -1;
+}
+
+int vir_summarize_affine_loops(vir_function_t *func, vir_opt_level_t opt_level)
+{
+    if (!func || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level == VIR_OPT_O0 || !func->blocks)
+        return 0;
+    unsigned char *members =
+        calloc((size_t) func->block_count, sizeof(*members));
+    if (!members)
+        return -1;
+    int changed = 0;
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        int result = vir_summarize_affine_loop(func, block, members);
+        if (result < 0) {
+            changed = -1;
+            break;
+        }
+        changed += result;
+    }
+    free(members);
+    if (changed > 0 && !vir_remove_unreachable(func))
+        return -1;
     return changed;
 }
 

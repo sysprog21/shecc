@@ -197,6 +197,15 @@ merges, effects, and ABI information are represented alongside those values.
   typed operands. Construction may fold constants, remove identities, and
   order commutative operands when their semantics permit it. Common unary
   and binary operands stay inline; unusual arities use side storage.
+- Typed i32/i64 bitwise builders normalize idempotence, complements,
+  absorption, repeated AND/OR operands, and XOR with an all-one mask. Unary
+  builders remove double negation and double complement. These construction
+  folds also apply at O0; raw `vir_binary()` retains its explicit shape.
+  At O1/O2, `vir_normalize()` reapplies the rules after SSA parameter
+  simplification and CSE/GVN, which can reveal equal operands after construction.
+  When normalization changes the graph, SCCP runs again to propagate newly
+  exposed constants and simplify dependent branches.
+  Folding a pure result leaves its operands' ordered effects in the graph.
 - Blocks and edges carry control. SSA merges use block parameters and edge
   arguments. Edge mutation must preserve argument indices, types, and reverse
   uses, including duplicate successors and loop backedges.
@@ -231,6 +240,7 @@ values for machine lowering.
 | `--dot` | Write the live-function VIR CFG in Graphviz DOT format and stop before machine emission. |
 | `--stats` | Print deterministic layout, phase, VIR, machine-operation, and arena counters to standard error. |
 | `--no-opt` | Skip the optional VIR optimizations (O0). |
+| `--no-inline` | Retain calls to small pure leaves; keep the other optional passes enabled. |
 
 Textual graphs start with `function NAME`, followed by block definitions.
 Tests resolve private functions and globals through their actual call and
@@ -261,15 +271,54 @@ elimination (DCE) removes unused work.
    loop-invariant input does not look loop-defined to CSE, GVN and LICM.
 4. Local CSE.
 5. GVN.
-6. Reassociation, LICM and pointer-induction strength reduction.
-7. Local CSE and DCE, including ordinary overwritten-store elimination.
-8. CFG simplification, then a final local CSE and DCE over the simplified graph.
-9. Full graph verification before dumps and machine lowering.
+6. Integer, bitwise and unary normalization, followed by SCCP when normalization changes
+   the graph.
+7. Reassociation and LICM, followed by affine-loop summarization. If loops
+   disappear, simplify their parameters and propagate constants again.
+8. Pointer-induction strength reduction, local CSE, and DCE, including ordinary
+   overwritten-store elimination.
+9. CFG simplification, then a final local CSE and DCE over the simplified graph.
+10. Full graph verification before dumps and machine lowering.
+11. Eliminate eligible direct/additive tail recursion, rerun the pipeline when
+    changed, then compact the graph.
 
 | Level | Scheduled transformations |
 | --- | --- |
 | O0 | Construction folds, unreachable-block removal, and mandatory verification; optional optimization passes return without transforming the graph. |
-| O2 (default) | SCCP, CFG simplification, block-parameter simplification, local CSE, GVN, reassociation, LICM, strength reduction, and DCE. |
+| O2 (default) | SCCP, CFG simplification, block-parameter simplification, local CSE, GVN, integer/bitwise/unary normalization, reassociation, LICM, affine-loop summarization, tail-recursion elimination, strength reduction, and DCE. |
+
+Integer normalization lowers multiplication by a power of two to a shift, and
+unsigned division/remainder to shifts/masks. Positive power-of-two signed
+quotients add a sign-dependent bias before shifting to preserve truncation
+toward zero; signed remainders use `x - quotient * divisor`. For nonconstant
+dividends, zero and negative signed divisors stay explicit. The signed minimum
+divided by minus one retains its explicit operation as well.
+
+Affine-loop summarization recognizes two word-sized header parameters: an
+induction `i += D` and a modular recurrence `a = A*a + B*i + C`. The initial
+index and bound must be constant and the controlling `<` test must be signed
+or unsigned with a proven positive, nonwrapping step. A single-entry linear
+body must have no memory/call effects, trapping operations, or escaping body
+values. Repeated composition by squaring computes the exact final recurrence
+in logarithmic compile time, even when the accumulator wraps. Its initial
+value may be a runtime argument. Zero-trip, negative signed index, dynamic-bound,
+nonlinear, and potentially wrapping control loops are left intact.
+
+Small completed single-block pure leaves can be cloned during call construction
+at the default optimization level. The budget is 24 values and 16 exact i32/i64
+arguments. Indirect/variadic calls, memory effects, local objects, pointer values,
+and ABI narrowing stay as calls. `--no-inline` retains call paths for ABI tests.
+Inlining happens while the caller is parsed, so only a leaf whose definition
+precedes the call is eligible: forward-declared, later-defined, and mutually
+recursive leaves remain calls even when they would otherwise qualify.
+
+Tail-recursion elimination accepts functions with i32/i64 parameters and returns,
+no stack objects, no trapping operations, and no effects other than direct self
+calls. Both `return self(args)` and `return self(args) + value` become back edges;
+an SSA accumulator preserves addition modulo the result width. Every ordinary
+return adds the accumulator, and every recursive edge passes all argument
+values together, preserving parameter permutations. Narrow and variadic return
+paths and calls with additional result uses remain unchanged.
 
 Pass-local tables are temporary. O0 does not allocate the optional CSE, GVN,
 loop, or optimization worklists. Mandatory verification still checks dominance,
@@ -280,6 +329,7 @@ types, use-def links, edges, and ordered effects.
 | Command | Coverage |
 | --- | --- |
 | `make check-vir-core` | Builders, core invariants, and transformations. |
+| `make check-vir-essential` | Integer strength reduction, affine recurrences, tail recursion, and pure leaf inlining. |
 | `make check-vir-lower` | Shared allocation and lowering invariants, plus an executable smoke test for the configured target. |
 | `make check-vir` | Core, frontend, optimization policy, self-hosted VIR, fuzzing, and sanitizer gates. |
 | `make check` | Full configured-target stage 0/2 behavior, ABI, and VIR checks. |
@@ -299,6 +349,17 @@ Changes must preserve execution, deterministic dumps and output, a clean
 verifier, and stage-1/stage-2 bootstrap identity. The AArch64 native harness
 adds its default dynamic QEMU sysroot only when the configured runner has not
 already supplied `-L`.
+
+### Reference-driven bitwise normalization
+
+The construction rules follow the width-aware folding approach in
+`ir_fold.h` of [IR](https://github.com/dstogov/ir) and
+`src/mim/plug/core/normalizers.cpp` of [MimIR](https://github.com/mimir/mimir).
+IR commit `62214815` fixes a wrong-operand return in nested MAX folding; the
+regressions here likewise distinguish retaining a nested AND/OR from returning
+its absorbed leaf. Mimir commit `6a1694301` ("more idx folding") illustrates why
+integer-domain restrictions matter: these rules apply only to shecc's i32/i64
+word domains, with all-one constants masked to the result width.
 
 ## Implementation map
 

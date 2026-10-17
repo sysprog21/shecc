@@ -286,6 +286,7 @@ int main(int argc, char *argv[])
         {"+m", &hard_mul_div, true},
         {"--no-libc", &libc, false},
         {"--no-opt", &optimize, false},
+        {"--no-inline", &inline_functions, false},
         {"--dynlink", &dynlink, true},
         {"-E", &expand_only, true},
     };
@@ -359,7 +360,7 @@ int main(int argc, char *argv[])
         printf(
             "Usage: shecc [-I directory] [-o output] [+m] [--dot] [--dump-ir] "
             "[--dump-vir] [--stats] "
-            "[--no-opt] "
+            "[--no-opt] [--no-inline] "
             "[--warn-string-literals] [--std=c99] [--no-libc] "
             "[--dynlink] [-z <lazy | now>] [-E] <input.c> [input.c ...]\n");
         usage_error("Missing source file");

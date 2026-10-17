@@ -185,7 +185,7 @@ $ make check-sanitizer
 
 File `out/shecc` is the first stage compiler. Its usage:
 ```shell
-$ shecc [-o output] [+m] [--dot] [--no-libc] [--dump-ir] [--dump-vir] [--stats] [--no-opt] [--dynlink] [-z <lazy | now>] [-E] <infile.c>
+$ shecc [-o output] [+m] [--dot] [--no-libc] [--dump-ir] [--dump-vir] [--stats] [--no-opt] [--no-inline] [--dynlink] [-z <lazy | now>] [-E] <infile.c>
 ```
 
 Compiler options:
@@ -196,6 +196,7 @@ Compiler options:
 - `--dump-ir` : Dump intermediate representation (IR)
 - `--stats` : Print deterministic compiler and VIR counters
 - `--no-opt` : Skip the optional VIR optimizations (default: enabled)
+- `--no-inline` : Keep calls to small pure functions while retaining other optimizations
 - VIR inspection and optimization options are
   documented in the [VIR reference](docs/vir.md).
 - `--dynlink` : Use dynamic linking (default: disabled)

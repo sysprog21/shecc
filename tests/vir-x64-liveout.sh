@@ -32,7 +32,7 @@ SOURCE
 for mode in default no-folds; do
     flags=()
     [[ $mode == default ]] || flags+=(--no-folds)
-    "$task_dir/compiler" "${flags[@]}" --no-libc -o "$task_dir/$mode.elf" "$task_dir/source.c"
+    "$task_dir/compiler" "${flags[@]}" --no-inline --no-libc -o "$task_dir/$mode.elf" "$task_dir/source.c"
     chmod +x "$task_dir/$mode.elf"
     "$task_dir/$mode.elf" cmp
     "$task_dir/$mode.elf" and two

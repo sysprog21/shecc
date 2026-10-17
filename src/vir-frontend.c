@@ -661,6 +661,19 @@ static void native_flush_call(native_function_t *ctx, var_t *result)
                      : (vir_call_abi_type_t) {type, false, false};
     if (signature && signature->returns_aggregate)
         abi.result.type = type = VIR_TYPE_VOID;
+    native_function_t *leaf = signature ? signature->vir_context : NULL;
+    vir_value_t *inlined = NULL;
+    if (optimize && inline_functions && !ctx->target && result && leaf &&
+        leaf->finished && !leaf->released && !signature->va_args &&
+        !signature->returns_aggregate)
+        inlined = vir_inline_pure_call(&ctx->graph, ctx->call_block->vir,
+                                       &leaf->graph, ctx->args, ctx->arg_count);
+    if (inlined) {
+        native_write(ctx, ctx->call_block, result, inlined);
+        ctx->callee = NULL;
+        ctx->arg_count = 0;
+        return;
+    }
     if (ctx->target)
         ctx->target = native_convert(ctx, ctx->call_block->vir, ctx->target,
                                      VIR_TYPE_PTR, true);
@@ -1182,9 +1195,14 @@ static void check_native_pass(const char *name, int result)
     }
 }
 
+static vir_opt_level_t native_opt_level(void)
+{
+    return optimize ? VIR_OPT_O2 : VIR_OPT_O0;
+}
+
 void vir_frontend_optimize(vir_function_t *graph)
 {
-    vir_opt_level_t level = optimize ? VIR_OPT_O2 : VIR_OPT_O0;
+    vir_opt_level_t level = native_opt_level();
 
     if (!vir_remove_unreachable(graph))
         fatal("Invalid VIR reachability");
@@ -1193,8 +1211,18 @@ void vir_frontend_optimize(vir_function_t *graph)
     check_native_pass("params", vir_simplify_params(graph, level));
     check_native_pass("cse", vir_local_cse(graph, level));
     check_native_pass("gvn", vir_gvn_with_stats(graph, level, NULL));
+    int normalized = vir_normalize(graph, level);
+    check_native_pass("normalize", normalized);
+    if (normalized)
+        check_native_pass("normalize-sccp", vir_sccp(graph, level));
     check_native_pass("reassociate", vir_reassociate(graph, level));
     check_native_pass("licm", vir_licm(graph, level));
+    int summarized = vir_summarize_affine_loops(graph, level);
+    check_native_pass("affine-loops", summarized);
+    if (summarized) {
+        check_native_pass("affine-params", vir_simplify_params(graph, level));
+        check_native_pass("affine-sccp", vir_sccp(graph, level));
+    }
     int strengthened = vir_strength_reduce(graph, level);
     check_native_pass("strength", strengthened);
     check_native_pass("cse", vir_local_cse(graph, level));
@@ -1226,6 +1254,11 @@ void vir_frontend_end(func_t *func)
     native_finish(ctx);
     fatal_function_context = func->return_def.var_name;
     vir_frontend_optimize(&ctx->graph);
+    int tail_calls = vir_eliminate_tail_recursion(
+        &ctx->graph, func->return_def.var_name, native_opt_level());
+    check_native_pass("tail-recursion", tail_calls);
+    if (tail_calls)
+        vir_frontend_optimize(&ctx->graph);
     fatal_function_context = context;
     native_require(vir_function_compact(&ctx->graph), "graph compaction");
 }

@@ -12,6 +12,12 @@ import statistics
 import subprocess
 import time
 
+def geometric_mean(values):
+    """Return None rather than raising when a sample is zero, e.g. coarse CPU time."""
+    values = list(values)
+    return statistics.geometric_mean(values) if values and min(values) > 0 else None
+
+
 NAMES = ('rng', 'branch', 'pointer', 'recursion', 'calls', 'sort', 'indexed')
 FAILURE_OUTPUT = None
 EXPECTED = (375426474, 2594414144, 2764537856, 7856720, 447236269,
@@ -124,6 +130,13 @@ def main():
                                  'throughput': throughput, 'target_pass': min(throughput.values()) >= args.target}
         print(name, json.dumps(throughput), flush=True)
         (output / 'results.json').write_text(json.dumps(proof, indent=2) + '\n')
+    proof['summary'] = {
+        'geometric_mean_throughput': {
+            kind: geometric_mean(row['throughput'][kind] for row in proof['results'].values())
+            for kind in ('wall', 'cpu')},
+        'workloads_at_target': sum(row['target_pass'] for row in proof['results'].values()),
+        'workloads': len(proof['results'])}
+    print('summary', json.dumps(proof['summary']), flush=True)
     after = {str(path): sha(path) for path in tracked}
     proof['sha256_after'] = after
     proof['environment']['load_after'] = os.getloadavg()

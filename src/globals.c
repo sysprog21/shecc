@@ -278,6 +278,7 @@ bool dynlink = false;
 bool imm_binding = false;
 bool libc = true;
 bool optimize = true;
+bool inline_functions = true;
 bool expand_only = false;
 bool dump_ir = false;
 bool dump_vir = false;

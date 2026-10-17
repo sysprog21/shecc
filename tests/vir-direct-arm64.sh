@@ -13,9 +13,10 @@ compiler_runner=()
 if test "$stage" -eq 2; then
     compiler_runner=("${runner[@]}")
 fi
+# Keep call ABI and callee graph checks active when leaf inlining is enabled.
 run_compiler()
 {
-    "${compiler_runner[@]}" "$compiler" "$@"
+    "${compiler_runner[@]}" "$compiler" --no-inline "$@"
 }
 dynamic_runner=("${runner[@]}")
 has_sysroot=0
@@ -650,53 +651,43 @@ vir_extract_function main "$work/global-ptradd.vir" \
 
 # Binary dump names retain .i32; the operand producers prove I64 scaling. A
 # forwarded reload drops its own extension, scale and ptradd.
-run_compiler --dump-vir -o "$work/global-ptradd-dynamic-dump" \
-    tests/vir-direct-global-ptradd-dynamic.c \
-    2> "$work/global-ptradd-dynamic.vir"
-vir_extract_function main \
-    "$work/global-ptradd-dynamic.vir" \
-    | awk '
-        /^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ }
-        $3 == "sext.i32.i64" { extended[$1] = 1; extensions++ }
-        $3 == "zext.i32.i64" { bad = 1 }
-        $3 == "const.i64" && $4 == "4" { scale[$1] = 1 }
-        $3 == "mul.i32" {
-            sub(/,$/, "", $4)
-            if (extended[$4] && scale[$5] || scale[$4] && extended[$5])
-                scaled[$1] = 1
-            else bad = 1
-            multiplies++
-        }
-        $3 == "ptradd" { if (!scaled[$5]) bad = 1; ptradd++ }
-        END {
-            exit bad || root < 1 || extensions < 1 || extensions > 2 ||
-                 multiplies != extensions || ptradd != extensions
-        }
-    '
-
-run_compiler --dump-vir -o "$work/global-ptradd-unsigned-dump" \
-    tests/vir-direct-global-ptradd-unsigned.c \
-    2> "$work/global-ptradd-unsigned.vir"
-vir_extract_function main \
-    "$work/global-ptradd-unsigned.vir" \
-    | awk '
-        /^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ }
-        $3 == "zext.i32.i64" { extended[$1] = 1; extensions++ }
-        $3 == "sext.i32.i64" { bad = 1 }
-        $3 == "const.i64" && $4 == "4" { scale[$1] = 1 }
-        $3 == "mul.i32" {
-            sub(/,$/, "", $4)
-            if (extended[$4] && scale[$5] || scale[$4] && extended[$5])
-                scaled[$1] = 1
-            else bad = 1
-            multiplies++
-        }
-        $3 == "ptradd" { if (!scaled[$5]) bad = 1; ptradd++ }
-        END {
-            exit bad || root < 1 || extensions < 1 || extensions > 2 ||
-                 multiplies != extensions || ptradd != extensions
-        }
-    '
+# Check a scaled global index: EXTENSION widens it, OPPOSITE must not appear,
+# and each scale is a multiply by 4 or, after normalization, a shift by 2.
+check_ptradd_scale()
+{
+    local name=$1 extension=$2 opposite=$3
+    run_compiler --dump-vir -o "$work/global-ptradd-$name-dump" \
+        "tests/vir-direct-global-ptradd-$name.c" \
+        2> "$work/global-ptradd-$name.vir"
+    vir_extract_function main "$work/global-ptradd-$name.vir" \
+        | awk -v extension="$extension" -v opposite="$opposite" '
+            /^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ }
+            $3 == extension ".i32.i64" { extended[$1] = 1; extensions++ }
+            $3 == opposite ".i32.i64" { bad = 1 }
+            $3 == "const.i64" && $4 == "4" { scale[$1] = 1 }
+            $3 == "const.i32" && $4 == "2" { shift[$1] = 1 }
+            $3 == "shl.i32" {
+                sub(/,$/, "", $4)
+                if (extended[$4] && shift[$5]) scaled[$1] = 1
+                else bad = 1
+                multiplies++
+            }
+            $3 == "mul.i32" {
+                sub(/,$/, "", $4)
+                if (extended[$4] && scale[$5] || scale[$4] && extended[$5])
+                    scaled[$1] = 1
+                else bad = 1
+                multiplies++
+            }
+            $3 == "ptradd" { if (!scaled[$5]) bad = 1; ptradd++ }
+            END {
+                exit bad || root < 1 || extensions < 1 || extensions > 2 ||
+                     multiplies != extensions || ptradd != extensions
+            }
+        '
+}
+check_ptradd_scale dynamic sext zext
+check_ptradd_scale unsigned zext sext
 vir_extract_function main "$work/narrow.vir" \
     | grep -Eq '^  %d[0-9]+ = zext\.i16\.i32 %d[0-9]+$'
 

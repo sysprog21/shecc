@@ -569,6 +569,22 @@ vir_value_t *vir_ptradd(vir_function_t *func,
 int vir_replace_all_uses(vir_function_t *func,
                          vir_value_t *from,
                          vir_value_t *to);
+
+/* Reapply integer/bitwise/unary identities after SSA/CSE; returns replacements,
+ * -1 for invalid arguments, or 0 at O0. Allocation failure skips that fold;
+ * any values a partial strength reduction built stay unused for DCE.
+ */
+int vir_normalize(vir_function_t *func, vir_opt_level_t opt_level);
+/* Summarize proven finite, effect-free modular affine recurrences. */
+int vir_summarize_affine_loops(vir_function_t *func, vir_opt_level_t opt_level);
+vir_value_t *vir_inline_pure_call(vir_function_t *caller,
+                                  vir_block_t *block,
+                                  const vir_function_t *callee,
+                                  vir_value_t *const *args,
+                                  int arg_count);
+int vir_eliminate_tail_recursion(vir_function_t *func,
+                                 const char *name,
+                                 vir_opt_level_t opt_level);
 int vir_local_cse(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level);
 int vir_reassociate(vir_function_t *func, vir_opt_level_t opt_level);
