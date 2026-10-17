@@ -387,6 +387,12 @@ vir_mop_t *emit_next_ir;
 int fused_cc;
 bool fused_cc_pending;
 
+/* The register an AND would have written when it emitted only a TEST for the
+ * "eq x, 0" and branch right behind it; that comparison must use the flags. -1
+ * when unused.
+ */
+int and_test_dest = -1;
+
 /* With fused_cc_pending, a comparison of two known constants that emitted
  * nothing at all: 1 when its branch goes to the then block, 0 to the else.
  */
@@ -797,7 +803,7 @@ void fold_state_check(int first_ir)
 {
     bool pending = addr_fold || addr_sib || cmp_mem_slot >= 0 || cmp_mem_read ||
                    src0_override >= 0 || fused_cc_pending ||
-                   gaddr_pending_ir >= 0;
+                   gaddr_pending_ir >= 0 || and_test_dest >= 0;
 
     for (int i = 0; i < MAX_SKIP_IR; i++) {
         if (skip_ir_index[i] >= first_ir)
@@ -869,6 +875,36 @@ static bool branch_result_dead(int reg)
     basic_block_t *bb = fold_scan_setup(emit_ir_index, &stop);
     return bb && reg >= 0 && reg < REG_CNT &&
            !(bb->machine_liveout & (1u << reg));
+}
+
+/* Whether the AND being emitted feeds only "load_constant 0; eq; branch" in its
+ * block, the shape a masked test against zero lowers to. The comparison then
+ * fuses into the branch on the AND's flags, so a TEST can stand in for the AND
+ * when neither its result nor the comparison's leaves the block.
+ */
+static bool and_feeds_zero_branch(const vir_mop_t *and_mop)
+{
+    int zero = emit_ir_index + 1, eq = zero + 1, branch = eq + 1;
+    if (branch >= mop_flat_count || branch >= instruction_to_bb_capacity ||
+        instruction_to_bb[branch] != instruction_to_bb[emit_ir_index])
+        return false;
+    const vir_mop_t *constant = MOP_FLAT[zero];
+    const vir_mop_t *compare = MOP_FLAT[eq];
+
+    /* The comparison reuses the flags only when it sees the zero as a known
+     * constant, which the table records for a register destination alone.
+     */
+    return constant->op == OP_load_constant && constant->src0 == 0 &&
+           constant->src1 == 0 && constant->dest >= 0 &&
+           constant->dest < REG_CNT && compare->op == OP_eq &&
+           compare->src0 == and_mop->dest && compare->src1 == constant->dest &&
+           compare->src0 != compare->src1 &&
+           compare->size_bytes == and_mop->size_bytes &&
+           (and_mop->size_bytes == 4 || and_mop->size_bytes == 8) &&
+           MOP_FLAT[branch]->op == OP_branch &&
+           MOP_FLAT[branch]->src0 == compare->dest &&
+           branch_result_dead(compare->dest) &&
+           branch_result_dead(and_mop->dest);
 }
 
 /* The opcode extension selecting an operation in the 0x81/0x83 group, or -1. */
@@ -3217,6 +3253,14 @@ void emit_mop(vir_mop_t *mop)
             MOP_FLAT[producer]->dest == mop->src0 &&
             MOP_FLAT[producer]->size_bytes == mop->size_bytes &&
             (mop->size_bytes == 4 || mop->size_bytes == 8);
+        if (and_test_dest >= 0) {
+            /* The AND emitted only a TEST, so its register holds nothing: these
+             * flags are the only record of the masked value.
+             */
+            if (!flags_ready || and_test_dest != mop->src0)
+                fatal("x64: a TEST stood in for an AND the comparison skipped");
+            and_test_dest = -1;
+        }
         if (!flags_ready)
             emit_cmp(mop->size_bytes, rs1, rs2);
         else
@@ -3232,9 +3276,12 @@ void emit_mop(vir_mop_t *mop)
      * otherwise emit -- three instructions down to one. Only when the masked
      * value is dead afterwards, since TEST does not write it.
      */
-    if (mop->op == OP_bit_and && next_in_same_bb() &&
-        emit_next_ir->op == OP_branch && emit_next_ir->src0 == mop->dest &&
-        !folds_off && branch_result_dead(mop->dest)) {
+    bool and_branches = mop->op == OP_bit_and && !folds_off &&
+                        next_in_same_bb() && emit_next_ir->op == OP_branch &&
+                        emit_next_ir->src0 == mop->dest &&
+                        branch_result_dead(mop->dest);
+    if (and_branches ||
+        (mop->op == OP_bit_and && !folds_off && and_feeds_zero_branch(mop))) {
         bool wide = test_is_wide(mop->size_bytes, mop->is_pointer);
 
         if (src1_const_known && src1_const >= 0 && src1_const < 0x80) {
@@ -3255,8 +3302,11 @@ void emit_mop(vir_mop_t *mop)
         } else {
             emit_opcode_reg(0x85, rs1, rs2, wide); /* TEST rs1, rs2 */
         }
-        fused_cc = 0x85; /* JNZ */
-        fused_cc_pending = true;
+        if (and_branches) {
+            fused_cc = 0x85; /* JNZ */
+            fused_cc_pending = true;
+        } else
+            and_test_dest = mop->dest;
         return;
     }
 
@@ -3931,6 +3981,7 @@ void code_generate(void)
     src0_override_at = -1;
     x64_frame_bias = 0;
     cmp_mem_slot = -1;
+    and_test_dest = -1;
     addr_fold = false;
     addr_sib = false;
     skip_ir_reset();
@@ -4248,6 +4299,7 @@ void code_generate(void)
                 src0_override = -1;
                 src0_override_at = -1;
                 cmp_mem_slot = -1;
+                and_test_dest = -1;
                 cmp_mem_read = false;
                 addr_fold = false;
                 addr_sib = false;

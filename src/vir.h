@@ -571,12 +571,14 @@ int vir_replace_all_uses(vir_function_t *func,
                          vir_value_t *to);
 
 /* Reapply integer/bitwise/unary identities after SSA/CSE; returns replacements,
- * -1 for invalid arguments, or 0 at O0. Allocation failure skips that fold;
- * any values a partial strength reduction built stay unused for DCE.
+ * -1 for invalid arguments, or 0 at O0. Allocation failure skips that fold; any
+ * values a partial strength reduction built stay unused for DCE.
  */
 int vir_normalize(vir_function_t *func, vir_opt_level_t opt_level);
 /* Summarize proven finite, effect-free modular affine recurrences. */
 int vir_summarize_affine_loops(vir_function_t *func, vir_opt_level_t opt_level);
+/* Unroll even-count pointer add reductions by two into a second accumulator. */
+int vir_unroll_reductions(vir_function_t *func, vir_opt_level_t opt_level);
 vir_value_t *vir_inline_pure_call(vir_function_t *caller,
                                   vir_block_t *block,
                                   const vir_function_t *callee,

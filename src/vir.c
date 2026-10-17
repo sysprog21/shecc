@@ -1670,7 +1670,7 @@ static vir_value_t *vir_load_impl(vir_function_t *func,
     vir_use_t *use;
     vir_value_t *value;
 
-    if (!vir_block_open(func, block) ||
+    if (!vir_has_block(func, block) ||
         (address &&
          (!vir_has_value(func, address) || address->type != VIR_TYPE_PTR)) ||
         !vir_type_width(func, type))
@@ -1696,7 +1696,7 @@ static vir_value_t *vir_load_impl(vir_function_t *func,
     vir_value_t *name(vir_function_t *func, vir_block_t *block,        \
                       vir_value_t *address, vir_type_t type)           \
     {                                                                  \
-        if (!address)                                                  \
+        if (!address || !vir_block_open(func, block))                  \
             return NULL;                                               \
         return vir_load_impl(func, block, address, type, is_volatile); \
     }
@@ -2293,6 +2293,7 @@ static vir_value_t *vir_integer_binary(vir_function_t *func,
         return normalized;
     if (vir_opcode_is_commutative(opcode))
         vir_order_commutative(&op0, &op1);
+
     /* Normalization already folded every foldable constant pair; only a
      * trapping division or out-of-range shift keeps its explicit operation.
      */
@@ -2719,24 +2720,39 @@ static unsigned int vir_cse_hash(const vir_value_t *value)
     return hash * 33u + (unsigned int) value->op1->id;
 }
 
-static unsigned int vir_cse_capacity(const vir_function_t *func,
-                                     const vir_block_t *only_block)
+/* Local CSE sizes each block's table from its order counter, which bounds the
+ * values it holds: one scan per block per run was a measurable share of a
+ * self-compile. The table size only changes probe order, not the leaders. The
+ * power-of-two table size keeping @count entries at most half full, or 0 when
+ * it would not fit an int.
+ */
+static unsigned int vir_cse_table_size(int count)
 {
-    int values = 0;
     unsigned int capacity = 1;
-    const vir_block_t *block = only_block ? only_block : func->blocks;
-    const vir_block_t *stop = only_block ? only_block->next : NULL;
-
-    for (; block != stop; block = block->next)
-        for (const vir_value_t *value = block->head; value; value = value->next)
-            if (value->nr_ops == 2 && ++values > INT_MAX / 2)
-                return 0;
-    while (capacity < (unsigned int) values * 2u) {
+    if (count > INT_MAX / 2)
+        return 0;
+    while (capacity < (unsigned int) count * 2u) {
         if (capacity > (unsigned int) INT_MAX / 2u)
             return 0;
         capacity <<= 1;
     }
     return capacity;
+}
+
+static unsigned int vir_cse_block_capacity(const vir_block_t *block)
+{
+    return vir_cse_table_size(block->next_order);
+}
+
+static unsigned int vir_cse_capacity(const vir_function_t *func)
+{
+    int values = 0;
+
+    for (const vir_block_t *block = func->blocks; block; block = block->next)
+        for (const vir_value_t *value = block->head; value; value = value->next)
+            if (value->nr_ops == 2 && ++values > INT_MAX / 2)
+                return 0;
+    return vir_cse_table_size(values);
 }
 
 /* Look up each binary value of @block in the open-addressed @table and fold it
@@ -2803,10 +2819,10 @@ static int vir_cse_run(vir_function_t *func,
     if (global ? opt_level != VIR_OPT_O2 : opt_level == VIR_OPT_O0)
         return 0;
     if (global)
-        capacity = vir_cse_capacity(func, NULL);
+        capacity = vir_cse_capacity(func);
     else
         for (vir_block_t *block = func->blocks; block; block = block->next) {
-            unsigned int block_capacity = vir_cse_capacity(func, block);
+            unsigned int block_capacity = vir_cse_block_capacity(block);
 
             if (block_capacity > capacity)
                 capacity = block_capacity;
@@ -2819,7 +2835,7 @@ static int vir_cse_run(vir_function_t *func,
     }
     for (vir_block_t *block = func->blocks; block; block = block->next) {
         unsigned int block_capacity =
-            global ? capacity : vir_cse_capacity(func, block);
+            global ? capacity : vir_cse_block_capacity(block);
 
         if (!block_capacity)
             continue;
@@ -4767,14 +4783,23 @@ static vir_edge_t *vir_affine_loop_body(vir_block_t *header,
     return block->outgoing;
 }
 
+/* A loop header carrying two parameters, entered once and from one back edge,
+ * whose only control is its branch.
+ */
+static bool vir_two_param_loop_header(const vir_function_t *func,
+                                      const vir_block_t *header)
+{
+    return header != func->blocks && header->param_count == 2 &&
+           !header->effects && header->terminator == VIR_TERM_BRANCH &&
+           header->incoming && header->incoming->next_incoming &&
+           !header->incoming->next_incoming->next_incoming;
+}
+
 static int vir_summarize_affine_loop(vir_function_t *func,
                                      vir_block_t *header,
                                      unsigned char *members)
 {
-    if (header == func->blocks || header->param_count != 2 || header->effects ||
-        header->terminator != VIR_TERM_BRANCH || !header->incoming ||
-        !header->incoming->next_incoming ||
-        header->incoming->next_incoming->next_incoming)
+    if (!vir_two_param_loop_header(func, header))
         return 0;
     for (vir_value_t *value = header->head; value; value = value->next)
         if (vir_opcode_may_trap(value->opcode))
@@ -4800,8 +4825,9 @@ static int vir_summarize_affine_loop(vir_function_t *func,
         members[block->index] = 0;
     if (!leaves)
         return 0;
-    /* The header has exactly two incoming edges and only the body's last
-     * block reaches it, so the other edge enters from outside the loop.
+
+    /* The header has exactly two incoming edges and only the body's last block
+     * reaches it, so the other edge enters from outside the loop.
      */
     vir_edge_t *entry =
         header->incoming == back ? back->next_incoming : header->incoming;
@@ -4885,6 +4911,231 @@ int vir_summarize_affine_loops(vir_function_t *func, vir_opt_level_t opt_level)
     free(members);
     if (changed > 0 && !vir_remove_unreachable(func))
         return -1;
+    return changed;
+}
+
+/* Split a pointer address into a base and a constant byte offset. */
+static const vir_value_t *vir_unroll_base(const vir_value_t *pointer,
+                                          long long *offset,
+                                          int pointer_bits)
+{
+    *offset = 0;
+    if (pointer->opcode == VIR_OP_PTRADD && vir_is_constant(pointer->op1)) {
+        unsigned long long bits = pointer->op1->constant;
+        if (pointer_bits < 64 && (bits >> (pointer_bits - 1) & 1))
+            bits |= ~0ULL << pointer_bits;
+        *offset = (long long) bits;
+        return pointer->op0;
+    }
+    return pointer;
+}
+
+static vir_value_t *vir_sr_condition(vir_value_t *value, bool *positive);
+
+/* Unroll one counted pointer reduction by two into a second accumulator. The
+ * header carries an accumulator and a pointer and exits when the pointer equals
+ * a loop-invariant end; the body's only effect is one ordinary load through the
+ * pointer, which it adds to the accumulator before stepping the pointer by a
+ * constant. Start and end must share a base and lie an even number of steps
+ * apart, so no remainder iteration is needed, and modular addition makes the
+ * regrouping exact. The accumulator may only be read after the loop, where the
+ * two partial sums are added.
+ */
+static int vir_unroll_reduction(vir_function_t *func,
+                                vir_block_t *header,
+                                unsigned char *members)
+{
+    if (!vir_two_param_loop_header(func, header) ||
+        header->true_edge->arg_count || header->false_edge->arg_count)
+        return 0;
+    bool positive = true;
+    vir_value_t *condition =
+        vir_sr_condition(header->branch_condition, &positive);
+    if (!condition || condition->opcode != VIR_OP_EQ)
+        return 0;
+    int index =
+        condition->op0->is_block_param && condition->op0->block == header ? 0
+                                                                          : 1;
+    vir_value_t *pointer = index ? condition->op1 : condition->op0;
+    vir_value_t *end = index ? condition->op0 : condition->op1;
+    if (!pointer->is_block_param || pointer->block != header ||
+        pointer->type != VIR_TYPE_PTR || end->type != VIR_TYPE_PTR)
+        return 0;
+    int pointer_index = header->params == pointer ? 0 : 1;
+    vir_value_t *accumulator =
+        pointer_index ? header->params : pointer->param_next;
+    if (!vir_type_is_i32_or_i64(accumulator->type))
+        return 0;
+
+    /* The body: a straight chain from the edge taken while the pointer has not
+     * reached the end back to the header.
+     */
+    vir_block_t *after =
+        positive ? header->true_edge->to : header->false_edge->to;
+    vir_block_t *start =
+        positive ? header->false_edge->to : header->true_edge->to;
+    vir_block_t *block = start;
+    vir_effect_t *load = NULL;
+    if (start == header)
+        return 0;
+    members[header->index] = 1;
+    int length = 0;
+    for (;;) {
+        if (members[block->index] || block->params || ++length > 8 ||
+            block->terminator != VIR_TERM_JUMP || !block->outgoing ||
+            block->outgoing->next_outgoing || !block->incoming ||
+            block->incoming->next_incoming)
+            return 0;
+        members[block->index] = 1;
+        for (vir_effect_t *effect = block->effects; effect;
+             effect = effect->next) {
+            if (load || effect->kind != VIR_EFFECT_LOAD ||
+                effect->address != pointer || !effect->result ||
+                effect->result->type != accumulator->type)
+                return 0;
+            load = effect;
+        }
+        if (block->outgoing->to != header && block->outgoing->arg_count)
+            return 0;
+        if (block->outgoing->to == header)
+            break;
+        block = block->outgoing->to;
+    }
+    if (!load || members[after->index] || after->incoming->next_incoming ||
+        members[end->block->index])
+        return 0;
+    vir_edge_t *back = block->outgoing;
+    vir_edge_t *entry =
+        header->incoming == back ? back->next_incoming : header->incoming;
+    vir_value_t *sum = back->args[1 - pointer_index];
+    vir_value_t *next = back->args[pointer_index];
+    long long step;
+    if (sum->opcode != VIR_OP_ADD || sum->type != accumulator->type ||
+        !((sum->op0 == accumulator && sum->op1 == load->result) ||
+          (sum->op1 == accumulator && sum->op0 == load->result)) ||
+        vir_unroll_base(next, &step, func->pointer_bits) != pointer || !step)
+        return 0;
+
+    /* Body values may leave the loop only through the back edge, and the
+     * accumulator only after it, through the exit.
+     */
+    for (vir_block_t *body = start; body != header; body = body->outgoing->to)
+        for (vir_value_t *value = body->head; value; value = value->next)
+            for (vir_use_t *use = value->uses; use; use = use->next)
+                if (!members[vir_use_block(use)->index])
+                    return 0;
+    for (vir_use_t *use = accumulator->uses; use; use = use->next)
+        if (vir_use_user(use) != sum && vir_use_block(use) != after)
+            return 0;
+
+    /* The unrolled loop skips every other pointer value; nothing else in the
+     * loop may observe one. After the loop it is the end either way.
+     */
+    for (vir_use_t *use = pointer->uses; use; use = use->next)
+        if (vir_use_user(use) != condition && vir_use_user(use) != next &&
+            vir_use_effect(use) != load && vir_use_block(use) != after)
+            return 0;
+
+    /* An even trip count between constant offsets from one base. */
+    long long first, last;
+    const vir_value_t *base =
+        vir_unroll_base(entry->args[pointer_index], &first, func->pointer_bits);
+    if (vir_unroll_base(end, &last, func->pointer_bits) != base)
+        return 0;
+    unsigned long long step_bits = (unsigned long long) step;
+    long long distance = last - first;
+    if (step == LLONG_MIN || distance % step || distance / step < 0 ||
+        (distance / step) % 2)
+        return 0;
+
+    vir_param_edit_t edit;
+    if (!vir_param_edit_prepare(func, header, NULL, header->param_count,
+                                header->param_count, true, &edit))
+        return -1;
+    vir_type_t width = func->pointer_bits == 64 ? VIR_TYPE_I64 : VIR_TYPE_I32;
+    vir_block_t *at = load->block;
+    vir_value_t *second = vir_value_alloc(func, header, accumulator->type);
+    vir_value_t *zero = vir_const_int(func, entry->from, accumulator->type, 0);
+    vir_value_t *offset = vir_const_int(func, at, width, step_bits);
+    vir_value_t *address =
+        offset ? vir_ptradd(func, at, pointer, offset) : NULL;
+
+    /* The public builders take effects only while a block is open; the second
+     * load joins the first in a body block that already ends in its jump.
+     */
+    vir_value_t *value =
+        address ? vir_load_impl(func, at, address, accumulator->type, false)
+                : NULL;
+    /* The new parameter joins the header only when the edit applies. */
+    vir_value_t *second_sum =
+        value && second ? vir_user_operation(func, at, VIR_OP_ADD,
+                                             accumulator->type, second, value)
+                        : NULL;
+    vir_value_t *double_step =
+        vir_const_int(func, back->from, width, step_bits * 2);
+    vir_value_t *advanced =
+        double_step ? vir_ptradd(func, back->from, pointer, double_step) : NULL;
+    if (!zero || !second_sum || !advanced) {
+        vir_param_edit_release(&edit);
+        return -1;
+    }
+    for (int i = 0; i < edit.count; i++)
+        edit.edges[i].inserted =
+            edit.edges[i].edge == entry ? zero : second_sum;
+    vir_param_edit_apply(header, second, &edit);
+    vir_param_edit_release(&edit);
+    vir_set_use_slot(&back->args[pointer_index], advanced,
+                     &back->arg_uses[pointer_index]);
+
+    /* Combine the partial sums at the top of the block after the loop, ahead of
+     * its effects too: a store or call there may read the result before any
+     * value of the block is defined.
+     */
+    vir_value_t *old_tail = after->tail;
+    vir_value_t *total = vir_add(func, after, accumulator, second);
+    if (!total)
+        return -1;
+    if (old_tail) {
+        old_tail->next = NULL;
+        total->next = after->head;
+        after->head = total;
+    }
+    total->order = -1;
+    vir_repair_value_positions(after);
+    for (vir_use_t *use = accumulator->uses, *following; use; use = following) {
+        following = use->next;
+        if (vir_use_user(use) != sum && vir_use_user(use) != total)
+            vir_set_use_slot(vir_use_value_slot(use), total, use);
+    }
+    return 1;
+}
+
+int vir_unroll_reductions(vir_function_t *func, vir_opt_level_t opt_level)
+{
+    if (!func || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level != VIR_OPT_O2 || !func->blocks)
+        return 0;
+    unsigned char *members =
+        calloc((size_t) func->block_count, sizeof(*members));
+    if (!members)
+        return -1;
+    int changed = 0;
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        int result = vir_unroll_reduction(func, block, members);
+
+        /* A candidate marks its header before any body block, so most blocks
+         * leave nothing to clear.
+         */
+        if (members[block->index])
+            memset(members, 0, (size_t) func->block_count);
+        if (result < 0) {
+            changed = -1;
+            break;
+        }
+        changed += result;
+    }
+    free(members);
     return changed;
 }
 
@@ -4990,7 +5241,13 @@ static vir_value_t *vir_sr_base(vir_function_t *func,
 typedef struct {
     unsigned long long first;
     unsigned long long step;
+
+    /* A runtime first offset, and a constant byte bias applied to the pointer
+     * it gives: the subscript's own address is then shared, and the bias folds
+     * into an addressing displacement.
+     */
     vir_value_t *dynamic_first;
+    unsigned long long dynamic_bias;
 } vir_sr_offset_t;
 
 static int vir_sr_pointer(vir_function_t *func,
@@ -5012,10 +5269,18 @@ static int vir_sr_pointer(vir_function_t *func,
                                    : initial->opcode == VIR_OP_PTRADD &&
                                          initial->op0 == base &&
                                          vir_is_const_int(initial->op1, first);
-        if (offsets->dynamic_first)
-            same_initial = initial->opcode == VIR_OP_PTRADD &&
-                           initial->op0 == base &&
-                           initial->op1 == offsets->dynamic_first;
+        if (offsets->dynamic_first) {
+            vir_value_t *scaled = initial;
+            if (offsets->dynamic_bias)
+                scaled = initial->opcode == VIR_OP_PTRADD &&
+                                 vir_is_const_int(initial->op1,
+                                                  offsets->dynamic_bias)
+                             ? initial->op0
+                             : NULL;
+            same_initial = scaled && scaled->opcode == VIR_OP_PTRADD &&
+                           scaled->op0 == base &&
+                           scaled->op1 == offsets->dynamic_first;
+        }
         if (param->type == VIR_TYPE_PTR && same_initial &&
             next->opcode == VIR_OP_PTRADD && next->op0 == param &&
             vir_is_const_int(next->op1, offsets->step)) {
@@ -5033,8 +5298,21 @@ static int vir_sr_pointer(vir_function_t *func,
     vir_value_t *offset = offsets->dynamic_first
                               ? offsets->dynamic_first
                               : vir_const_int(func, entry->from, width, first);
-    vir_value_t *initial =
-        offset ? vir_ptradd(func, entry->from, base, offset) : NULL;
+    vir_value_t *initial = NULL;
+    /* The subscript usually computed this address already, before the loop. */
+    if (offsets->dynamic_first)
+        for (vir_value_t *value = entry->from->head; value && !initial;
+             value = value->next)
+            if (value->opcode == VIR_OP_PTRADD && value->op0 == base &&
+                vir_same_address(value->op1, offsets->dynamic_first, 4))
+                initial = value;
+    if (!initial && offset)
+        initial = vir_ptradd(func, entry->from, base, offset);
+    if (initial && offsets->dynamic_first && offsets->dynamic_bias) {
+        vir_value_t *bias =
+            vir_const_int(func, entry->from, width, offsets->dynamic_bias);
+        initial = bias ? vir_ptradd(func, entry->from, initial, bias) : NULL;
+    }
     vir_value_t *step = vir_const_int(func, back->from, width, offsets->step);
     vir_value_t *param = vir_value_alloc(func, header, VIR_TYPE_PTR);
     vir_value_t *next =
@@ -5422,21 +5700,22 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
                 }
                 vir_value_t *dynamic_first = NULL;
                 if (descending) {
-                    dynamic_first =
+                    /* Scale the index exactly as normalization rewrote the
+                     * subscript, so vir_sr_pointer() finds the subscript's own
+                     * address in the entry block; the bias is applied to it.
+                     */
+                    vir_value_t *widened =
                         vir_zext(func, entry->from, initial, VIR_TYPE_I64);
                     vir_value_t *factor =
                         vir_const_int(func, entry->from, VIR_TYPE_I64, scale);
-                    dynamic_first =
-                        dynamic_first && factor
-                            ? vir_mul(func, entry->from, dynamic_first, factor)
-                            : NULL;
-                    if (dynamic_first && bias) {
-                        vir_value_t *add = vir_const_int(func, entry->from,
-                                                         VIR_TYPE_I64, bias);
+                    dynamic_first = widened && factor
+                                        ? vir_strength_reduce_integer(
+                                              func, entry->from, widened,
+                                              factor, VIR_OP_MUL)
+                                        : NULL;
+                    if (!dynamic_first && widened && factor)
                         dynamic_first =
-                            add ? vir_add(func, entry->from, dynamic_first, add)
-                                : NULL;
-                    }
+                            vir_mul(func, entry->from, widened, factor);
                     if (!dynamic_first) {
                         changed = -1;
                         goto done;
@@ -5446,7 +5725,8 @@ int vir_strength_reduce(vir_function_t *func, vir_opt_level_t opt_level)
                     descending ? 0
                                : (initial->constant * scale + bias) &
                                      vir_width_mask(func->pointer_bits),
-                    descending ? 0ULL - scale : scale, dynamic_first};
+                    descending ? 0ULL - scale : scale, dynamic_first,
+                    descending ? bias : 0};
                 if (vir_sr_pointer(func, header, entry, back, address, base,
                                    &offsets, &pointer) < 0) {
                     changed = -1;

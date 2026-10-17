@@ -166,9 +166,10 @@ static void test_pointer_add_barrier_groups(void)
         vir_value_t *pointer = vir_block_add_param(&f, block, VIR_TYPE_PTR);
         vir_value_t *addresses[3], *loads[3];
         vir_effect_t *stores[3];
+
         /* Each address is consumed only after every group, so the volatile
-         * store, not the use limit, must stop it. Later plain loads of the
-         * base pointer would otherwise pull it across that store.
+         * store, not the use limit, must stop it. Later plain loads of the base
+         * pointer would otherwise pull it across that store.
          */
         for (int i = 0; i < 3; i++) {
             vir_value_t *offset = vir_const_i32(&f, block, 4 * (i + 1));
@@ -1429,7 +1430,7 @@ int main(void)
     assert(cse_stats.tables == 1 && cse_stats.values == 2 &&
            cse_stats.lookups == 2 && cse_stats.hits == 1 &&
            cse_stats.probes == 1 && cse_stats.replacements == 1 &&
-           cse_stats.table_slots == 4);
+           cse_stats.table_slots == 8);
     assert(vir_local_cse(&func, VIR_OPT_O2) == 0 &&
            vir_local_cse_with_stats(&func, (vir_opt_level_t) 99, &cse_stats) ==
                -1 &&

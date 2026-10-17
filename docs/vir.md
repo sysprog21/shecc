@@ -276,7 +276,7 @@ elimination (DCE) removes unused work.
 7. Reassociation and LICM, followed by affine-loop summarization. If loops
    disappear, simplify their parameters and propagate constants again.
 8. Pointer-induction strength reduction, local CSE, and DCE, including ordinary
-   overwritten-store elimination.
+   overwritten-store elimination, then reduction unrolling.
 9. CFG simplification, then a final local CSE and DCE over the simplified graph.
 10. Full graph verification before dumps and machine lowering.
 11. Eliminate eligible direct/additive tail recursion, rerun the pipeline when
@@ -285,7 +285,7 @@ elimination (DCE) removes unused work.
 | Level | Scheduled transformations |
 | --- | --- |
 | O0 | Construction folds, unreachable-block removal, and mandatory verification; optional optimization passes return without transforming the graph. |
-| O2 (default) | SCCP, CFG simplification, block-parameter simplification, local CSE, GVN, integer/bitwise/unary normalization, reassociation, LICM, affine-loop summarization, tail-recursion elimination, strength reduction, and DCE. |
+| O2 (default) | SCCP, CFG simplification, block-parameter simplification, local CSE, GVN, integer/bitwise/unary normalization, reassociation, LICM, affine-loop summarization, tail-recursion elimination, strength reduction, reduction unrolling, and DCE. |
 
 Integer normalization lowers multiplication by a power of two to a shift, and
 unsigned division/remainder to shifts/masks. Positive power-of-two signed
@@ -293,6 +293,14 @@ quotients add a sign-dependent bias before shifting to preserve truncation
 toward zero; signed remainders use `x - quotient * divisor`. For nonconstant
 dividends, zero and negative signed divisors stay explicit. The signed minimum
 divided by minus one retains its explicit operation as well.
+
+Reduction unrolling doubles the step of a counted pointer loop whose body only
+loads through the pointer and adds the value into an i32/i64 accumulator,
+summing odd elements into a second accumulator that is added to the first after
+the loop. The pointer's start and end must be constant offsets from one base an
+even number of steps apart, so no remainder iteration is needed; the
+accumulator may be read only after the loop. Splitting the add chain halves the
+loop-carried dependency, which bounds such loops on wide cores.
 
 Affine-loop summarization recognizes two word-sized header parameters: an
 induction `i += D` and a modular recurrence `a = A*a + B*i + C`. The initial

@@ -642,6 +642,20 @@ static void native_flush_call(native_function_t *ctx, var_t *result)
     type = result ? native_type(result) : VIR_TYPE_VOID;
     if (signature && !signature->returns_aggregate)
         type = native_type(&signature->return_def);
+    /* An inlined call needs none of the ABI built below. */
+    native_function_t *leaf = signature ? signature->vir_context : NULL;
+    vir_value_t *inlined = NULL;
+    if (optimize && inline_functions && !ctx->target && result && leaf &&
+        leaf->finished && !leaf->released && !signature->va_args &&
+        !signature->returns_aggregate)
+        inlined = vir_inline_pure_call(&ctx->graph, ctx->call_block->vir,
+                                       &leaf->graph, ctx->args, ctx->arg_count);
+    if (inlined) {
+        native_write(ctx, ctx->call_block, result, inlined);
+        ctx->callee = NULL;
+        ctx->arg_count = 0;
+        return;
+    }
     params = arena_alloc(GENERAL_ARENA, sizeof(*params) * (ctx->arg_count + 1));
     for (int i = 0; i < ctx->arg_count; i++) {
         params[i] = native_abi(ctx->arg_sources[i]);
@@ -661,19 +675,6 @@ static void native_flush_call(native_function_t *ctx, var_t *result)
                      : (vir_call_abi_type_t) {type, false, false};
     if (signature && signature->returns_aggregate)
         abi.result.type = type = VIR_TYPE_VOID;
-    native_function_t *leaf = signature ? signature->vir_context : NULL;
-    vir_value_t *inlined = NULL;
-    if (optimize && inline_functions && !ctx->target && result && leaf &&
-        leaf->finished && !leaf->released && !signature->va_args &&
-        !signature->returns_aggregate)
-        inlined = vir_inline_pure_call(&ctx->graph, ctx->call_block->vir,
-                                       &leaf->graph, ctx->args, ctx->arg_count);
-    if (inlined) {
-        native_write(ctx, ctx->call_block, result, inlined);
-        ctx->callee = NULL;
-        ctx->arg_count = 0;
-        return;
-    }
     if (ctx->target)
         ctx->target = native_convert(ctx, ctx->call_block->vir, ctx->target,
                                      VIR_TYPE_PTR, true);
@@ -1227,6 +1228,7 @@ void vir_frontend_optimize(vir_function_t *graph)
     check_native_pass("strength", strengthened);
     check_native_pass("cse", vir_local_cse(graph, level));
     check_native_pass("dce", vir_dce(graph, level));
+    check_native_pass("unroll", vir_unroll_reductions(graph, level));
     check_native_pass("cfg", vir_simplify_cfg(graph, level));
     check_native_pass("final-cse", vir_local_cse(graph, level));
     check_native_pass("final-dce", vir_dce(graph, level));

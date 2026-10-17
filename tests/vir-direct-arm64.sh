@@ -650,9 +650,9 @@ vir_extract_function main "$work/global-ptradd.vir" \
     | awk '/^  %d[0-9]+ = globaladdr @values, 8, align 4$/ { root++ } /^  %d[0-9]+ = ptradd %d[0-9]+, %d[0-9]+$/ { ptradd++ } END { exit root < 1 || ptradd < 1 || ptradd > 2 }'
 
 # Binary dump names retain .i32; the operand producers prove I64 scaling. A
-# forwarded reload drops its own extension, scale and ptradd.
-# Check a scaled global index: EXTENSION widens it, OPPOSITE must not appear,
-# and each scale is a multiply by 4 or, after normalization, a shift by 2.
+# forwarded reload drops its own extension, scale and ptradd. Check a scaled
+# global index: EXTENSION widens it, OPPOSITE must not appear, and each scale is
+# a multiply by 4 or, after normalization, a shift by 2.
 check_ptradd_scale()
 {
     local name=$1 extension=$2 opposite=$3

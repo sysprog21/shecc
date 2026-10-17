@@ -96,6 +96,41 @@ int narrow_tail(signed char n, int total)
         return total;
     return narrow_tail(n - 1, total + n);
 }
+unsigned int reduce_data[37];
+unsigned long long reduce_wide_data[20];
+unsigned int reduce_even(void)
+{
+    unsigned int s = 5, *p = reduce_data;
+    for (unsigned int i = 0; i < 36; i++)
+        s += *p++;
+    return s;
+}
+unsigned int reduce_odd(void)
+{
+    unsigned int s = 5, *p = reduce_data;
+    for (unsigned int i = 0; i < 37; i++)
+        s += *p++;
+    return s;
+}
+
+/* The block after the loop stores the sum before defining any value, so the
+ * combined sum must precede that store.
+ */
+unsigned int reduce_sink;
+void reduce_store(void)
+{
+    unsigned int s = 5, *p = reduce_data;
+    for (unsigned int i = 0; i < 36; i++)
+        s += *p++;
+    reduce_sink = s;
+}
+unsigned long long reduce_wide(void)
+{
+    unsigned long long s = 0, *p = reduce_wide_data;
+    for (unsigned int i = 0; i < 20; i++)
+        s += *p++;
+    return s;
+}
 int signed_divide(int x)
 {
     return x / 16;
@@ -161,6 +196,17 @@ int main(void)
     if (narrow_tail(100, 0) != 5050 || narrow_tail(-1, 7) != 7 ||
         narrow_tail(300, 0) != 990)
         return 13;
+    for (unsigned int i = 0; i < 37; i++)
+        reduce_data[i] = i * 7 + 3 + (i == 36 ? 4294967000u : 0);
+    for (unsigned int i = 0; i < 20; i++)
+        reduce_wide_data[i] = 0x100000000ULL * i + 4294967295ULL;
+    /* 7 * 35 * 36 / 2 + 3 * 36 + 5; the last element wraps the odd sum. */
+    if (reduce_even() != 4523u || reduce_odd() != 4523u + 4294967255u ||
+        reduce_wide() != 0x100000000ULL * 190 + 4294967295ULL * 20)
+        return 14;
+    reduce_store();
+    if (reduce_sink != 4523u)
+        return 15;
     if (signed_divide(-2147483647 - 1) != -134217728 ||
         signed_remainder(-2147483647 - 1) != 0 ||
         wide_divide(-9223372036854775807LL - 1) != -8388608 ||

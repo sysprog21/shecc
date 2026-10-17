@@ -19,6 +19,11 @@ for name in ('reference32', 'reference64', 'signed_reference'):
 for name in ('triangle', 'rotate'):
     assert '@' + name + '(' not in functions[name], name
 assert functions['small_fib'].count('@small_fib(') == 1
+# An even-count pointer reduction gains a second load and accumulator; an odd
+# count would need a remainder iteration, so it stays as written.
+for name, loads in (('reduce_even', 2), ('reduce_wide', 2), ('reduce_store', 2),
+                    ('reduce_odd', 1)):
+    assert functions[name].count(' = load.') == loads, name
 assert '@effectful(' in functions['effectful']
 assert '@narrow(' in functions['narrow']
 # Narrow parameters need ABI conversion, so the recursion stays a call.

@@ -22,7 +22,9 @@ def strides(name):
             if base in params and offset in constants]
 assert not re.search(r' = const\.i(?:32|64) 1\n', functions['dot'])
 assert strides('bump') == [4]
-assert strides('stride') == [16]
+# Eight iterations is an even count, so reduction unrolling also reads the
+# element 16 bytes on and steps by 32.
+assert sorted(strides('stride')) == [16, 32]
 # The LP64 sign-extension discontinuity prohibits a constant pointer step.
 expected = [] if 'sext.i32.i64' in functions['dynamic_stride'] else [16]
 assert strides('dynamic_stride') == expected
