@@ -2090,7 +2090,7 @@ void read_literal_param(block_t *parent, basic_block_t *bb)
     int length = read_concatenated_string(combined);
     const int index = write_string_symbol(combined, length);
 
-    var_t *vd = name_var(require_typed_ptr_var(parent, TY_char, true));
+    var_t *vd = require_temp_typed_ptr_var(parent, TY_char, true);
     vd->init_val = index;
     vd->is_const_qualified = true;
     vd->is_string_literal = true;
@@ -2354,7 +2354,7 @@ void read_numeric_param(block_t *parent, basic_block_t *bb, bool is_neg)
                           !has_unsigned_suffix && !long_suffix_count &&
                           !value_hi && value == 0x80000000U;
 
-    var_t *vd = require_named_var(parent);
+    var_t *vd = require_temp_var(parent);
     if (narrow_int_min) {
         vd->type = TY_int;
     } else if (is_long_long || value_hi ||
@@ -2420,8 +2420,8 @@ void read_wstring_param(block_t *parent, basic_block_t *bb)
     int values[MAX_STRING_LEN];
     int length = read_wstring_units(values, MAX_STRING_LEN);
 
-    var_t *vd = name_var(
-        require_typed_ptr_var(parent, find_builtin_type("wchar_t"), 1));
+    var_t *vd =
+        require_temp_typed_ptr_var(parent, find_builtin_type("wchar_t"), 1);
     vd->init_val = write_wide_symbol(values, length);
     vd->is_const_qualified = true;
     vd->is_string_literal = true;
