@@ -53,7 +53,6 @@ OUT ?= out
 # Every architecture that can be selected as a build target. The first is the
 # default when ARCH is not given.
 ARCHS = arm arm64 riscv x64
-ARCH ?= $(firstword $(ARCHS))
 SRCDIR := $(shell find src -type d)
 LIBDIR := $(shell find lib -type d)
 
@@ -95,15 +94,53 @@ TRANSLATION_DEFS = "\#define SHECC_TRANSLATION_DATE \"$(TRANSLATION_DATE)\"\n\#d
 # vir_print(), and it is what a failed CI run uploads.
 STAGE0_FLAGS ?= --dump-ir
 STAGE1_FLAGS ?=
+
+# - DYNLINK: 0 -> static linking, 1 -> dynamic linking
+# - BINDING: (undefined), "lazy" -> lazy binding, "now" -> immediate binding
+#            If DYNLINK is 0 but BINDING is set to "lazy" or "now",
+#            the subsequent ifneq/ifeq checks will halt execution because
+#            the binding mode does not apply to static linking.
+#
+# By default, DYNLINK is set to 0 and BINDING is undefined.
 DYNLINK ?= 0
-BINDING ?= lazy
 
 COMMENTFLOW ?= commentflow
 SHFMT ?= shfmt
 ifeq ($(DYNLINK),1)
+    # If dynamic linking is enabled, lazy binding is used by default.
+    BINDING ?= lazy
     STAGE0_FLAGS += --dynlink -z $(BINDING)
     STAGE1_FLAGS += --dynlink -z $(BINDING)
+    # Accepted cases:
+    # $ make DYNLINK=1
+    # $ make DYNLINK=1 BINDING=now
+    # $ make DYNLINK=1 BINDING=lazy
+    #
+    # Rejected cases:
+    # $ make DYNLINK=1 BINDING=            # BINDING is empty
+    # $ make DYNLINK=1 BINDING="lazy now"  # Multiple words
+    # $ make DYNLINK=1 BINDING=n           # Neither lazy nor now
+    ifneq (1,$(words $(BINDING)))
+        $(error BINDING should contain exactly one word)
+    endif
+    ifeq (,$(filter lazy now,$(BINDING)))
+        $(error BINDING is neither "lazy" nor "now")
+    endif
+else
+    ifneq ($(DYNLINK),0)
+        # Reject the build if DYNLINK is neither 0 nor 1.
+        $(error DYNLINK should be 0 or 1 (static linking or dynamic linking))
+    endif
+    # If BINDING is specified on the command line or via an environment variable
+    # (e.g., "make ... BINDING=...", "BINDING=... make ..."),
+    # this variable must be empty in the static linking mode.
+    ifneq (,$(filter command line environment,$(origin BINDING)))
+        ifneq (,$(BINDING))
+            $(error BINDING is not used for static linking)
+        endif
+    endif
 endif
+
 
 SRCS := $(wildcard $(patsubst %,%/main.c, $(SRCDIR)))
 OBJS := $(SRCS:%.c=$(OUT)/%.o)
@@ -131,57 +168,99 @@ sanitizer check-sanitizer: LDFLAGS += $(SAN_LDFLAGS)
 sanitizer: config $(OUT)/$(STAGE0)-sanitizer
 	$(VECHO) "  Built stage 0 compiler with sanitizers\n"
 
-ifeq (,$(filter $(ARCH),$(ARCHS)))
-$(error Unsupported ARCH "$(ARCH)". Select one of: $(ARCHS))
+# If ARCH is undefined, the default value is set to the first item in ARCHS.
+ifeq ($(ARCH),)
+    ARCH := $(firstword $(ARCHS))
 endif
 
-# The tree carries the selected architecture in two generated files: "config",
-# which the compiler sources include, and the build session below. Both are
-# written together by the config target. Building with a different ARCH than the
-# one on record would pair this architecture's Makefile settings with the
-# previous architecture's generated config, so require an explicit reconfigure
-# instead.
+ifeq (,$(filter $(ARCH),$(ARCHS)))
+    $(error Unsupported ARCH "$(ARCH)". Select one of: $(ARCHS))
+endif
+
+# The config target writes the following files:
+# - "config": contains multiple macro definitions including the target
+#             architecture. Note that compiler sources need to include
+#             this file.
+# - ".session.mk": is a build session file to record the build configurations.
+#                  (ARCH/DYNLINK/BINDING)
 #
-# Naming "config", "distclean", or "check-all-targets" anywhere in the goals
-# is that reconfigure: the
-# record is about to be rewritten or removed, so the architecture it still holds
-# does not apply and the check must not fire. Testing for their presence rather
-# than filtering them out is what lets a goal list combine them with real work,
-# as "make distclean config check ARCH=riscv" does. "clean" touches no
-# generated config, so a mismatch cannot affect it either.
-CONFIGURED_ARCH := $(shell sed -n 's/^ARCH=//p' $(BUILD_SESSION) 2>/dev/null)
-ifneq (,$(CONFIGURED_ARCH))
-ifeq (,$(filter config distclean check-all-targets,$(MAKECMDGOALS)))
-ifneq (,$(filter-out clean,$(or $(MAKECMDGOALS),all)))
+# The build system uses the build session to detect configuration switches
+# and to perform a rebuild or reconfiguration if necessary.
+NEED_RECONFIGURE := $(if $(wildcard config),0,1)
+CONFIGURED_ARCH := $(shell sed -n 's/^ARCH?=//p' $(BUILD_SESSION) 2>/dev/null)
+CONFIGURED_DYNLINK := $(shell sed -n 's/^DYNLINK?=//p' $(BUILD_SESSION) 2>/dev/null)
+CONFIGURED_BINDING := $(shell sed -n 's/^BINDING?=//p' $(BUILD_SESSION) 2>/dev/null)
+
+# The first build must trigger a configuration. The snippets below set the
+# NEED_RECONFIGURE variable if one of the following cases is met
+# - Case 1: switch the target architecture.
+# - Case 2: switch the linking mode.
+# - Case 3: switch the binding mode (if dynamic linking is enabled).
+#
+# If NEED_RECONFIGURE is set, this means that a reconfiguration
+# is needed to run.
 ifneq ($(CONFIGURED_ARCH),$(ARCH))
-$(error Tree is configured for ARCH=$(CONFIGURED_ARCH). Run "make config ARCH=$(ARCH)" to switch)
+    NEED_RECONFIGURE := 1
 endif
+ifneq ($(CONFIGURED_DYNLINK),$(DYNLINK))
+    NEED_RECONFIGURE := 1
 endif
+ifneq ($(CONFIGURED_BINDING),$(BINDING))
+    # The cases that specify BINDING when DYNLINK is 0 have already been
+    # handled and rejected in the snippets above, so the static linking
+    # case does not need to be considered here.
+    #
+    # Directly set up the flag when changing the binding mode in the
+    # dynamic linking case.
+    NEED_RECONFIGURE := 1
 endif
+
+# The following two variables are used by the config target to output
+# hint messages.
+HINT_LINKING_MODE := static
+ifeq ($(DYNLINK),1)
+    HINT_LINKING_MODE := dynamic
+    HINT_BINDING_MODE := lazy
+    ifeq ($(BINDING),now)
+        HINT_BINDING_MODE := immediate
+    endif
 endif
 
 include mk/$(ARCH).mk
 include mk/common.mk
 
-# Selecting a target rewrites every file that records the choice, so switching
-# architectures never needs a manual clean first: the codegen symlink is
-# replaced in place, and the build session is rewritten rather than left saying
-# whatever the previous selection said.
-# "config" names a generated file, but selecting an architecture has to run
-# even when that file already exists -- otherwise "make config ARCH=..." on a
-# configured tree reports the file up to date and switches nothing. The
-# generated definitions are moved into place only when they actually differ, so
-# reasserting the current selection does not restamp the file and force a
-# rebuild of every source that includes it.
+# The existing "config" file may be removed by the distclean target, but the
+# config target may still retain the configuration. Running both targets in
+# the same invocation can trigger this situation.
+#
+# Therefore, the build system must force a reconfiguration when running a
+# command such as "make distclean config ...".
+ifneq (,$(filter distclean,$(MAKECMDGOALS)))
+    NEED_RECONFIGURE := 1
+endif
+
+# The build system uses the NEED_RECONFIGURE variable to determine whether
+# the config target needs to be run. The initial build or configuration, or
+# a configuration switch, can trigger this target to write the "config"
+# file and the build session file.
 .PHONY: config
 config:
+ifeq ($(NEED_RECONFIGURE),1)
 	$(Q)ln -sf $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
-	$(Q)$(PRINTF) $(ARCH_DEFS) > $@.tmp
-	$(Q)$(PRINTF) $(TRANSLATION_DEFS) >> $@.tmp
-	$(Q)if cmp -s $@.tmp $@; then $(RM) $@.tmp; else mv $@.tmp $@; fi
-	$(Q)$(PRINTF) "ARCH=$(ARCH)" > $(BUILD_SESSION)
-	$(VECHO) "Target machine code switch to %s\n" $(ARCH)
+	$(Q)$(PRINTF) $(ARCH_DEFS) > $@
+	$(Q)$(PRINTF) $(TRANSLATION_DEFS) >> $@
+	$(Q)$(PRINTF) "ARCH?=$(ARCH)\n" > $(BUILD_SESSION)
+	$(Q)$(PRINTF) "DYNLINK?=$(DYNLINK)\n" >> $(BUILD_SESSION)
+ifeq ($(DYNLINK),0)
+	$(VECHO) "Configurations: (%s, %s linking)\n" $(ARCH) $(HINT_LINKING_MODE)
+else
+	$(Q)$(PRINTF) "BINDING?=$(BINDING)\n" >> $(BUILD_SESSION)
+	$(VECHO) "Configurations: (%s, %s linking, %s binding)\n" $(ARCH) $(HINT_LINKING_MODE) $(HINT_BINDING_MODE)
+endif
 	$(Q)$(CONFIG_CHECK_CMD)
+else
+	$(Q)$(VECHO) "Keep configurations\n"
+endif
 
 .PHONY: $(STYLE_GOALS)
 .PHONY: check-vir-frontend-stage0 check-vir-frontend-stage2 \
@@ -509,7 +588,7 @@ clean:
 	-$(RM) $(OUT)/libc.inc
 
 distclean: clean
-	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config config.tmp $(BUILD_SESSION)
+	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config $(BUILD_SESSION)
 	-$(RM) DOM.dot CFG.dot
 
 -include $(deps)
