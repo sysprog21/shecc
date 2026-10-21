@@ -8,3 +8,7 @@ tests/vir-frontend-nested-loop.c    nested_loop_licm
 tests/vir-frontend-licm.c           single_loop_licm
 src/main.c                          self_hosting_main
 src/vir.c                           self_hosting_vir_core
+tests/fib.c                         tiny_arithmetic
+tests/vir-baseline-branch.c         branch_heavy_control_flow
+tests/strength-reduce.c             loop_and_pointer_arithmetic
+tests/vir-baseline-pointer.c        pointer_heavy_memory

@@ -31,18 +31,28 @@ for opt_flag in --no-opt ''; do
         "${compiler[@]}" ${opt_flag:+"$opt_flag"} -o "$task_dir/test" "tests/$fixture.c"
         "${runner[@]}" "$task_dir/test"
     done
-    while read -r fixture function pointers integers stores; do
-        "${compiler[@]}" --dump-vir ${opt_flag:+"$opt_flag"} -o "$task_dir/test" "tests/$fixture.c" 2> "$task_dir/graph"
-        "${runner[@]}" "$task_dir/test"
+
+    # The case table arrives on fd 3 so that a fixture reading stdin cannot
+    # consume it.
+    while read -r -u 3 fixture function pointers integers stores; do
+
+        # Several functions in one fixture have independent graph assertions.
+        # Compile and execute the fixture once per level, then inspect each
+        # function from the same dump.
+        graph_file="$task_dir/$fixture${opt_flag:-.default}.graph"
+        if [ ! -f "$graph_file" ]; then
+            "${compiler[@]}" --dump-vir ${opt_flag:+"$opt_flag"} -o "$task_dir/test" "tests/$fixture.c" 2> "$graph_file"
+            "${runner[@]}" "$task_dir/test"
+        fi
         graph=$(awk -v name="$function" '
             /^function / { active = ($2 == name); next }
             active { print }
-        ' "$task_dir/graph")
+        ' "$graph_file")
         [[ -n $graph ]]
         check_count "$graph" ' = volatile[.]load[.]ptr ' "$pointers" "$fixture ${opt_flag:-default} pointer loads"
         check_count "$graph" ' = volatile[.]load[.]i(8|16|32|64) ' "$integers" "$fixture ${opt_flag:-default} scalar loads"
         check_count "$graph" '^[[:space:]]+volatile[.]store ' "$stores" "$fixture ${opt_flag:-default} stores"
-    done << 'CASES'
+    done 3<< 'CASES'
 vir-volatile-pointer-row-elements touch_row 2 0 0
 vir-typedef-alias-builder touch_alias_qualifiers 3 0 1
 vir-volatile-arithmetic touch 0 3 0

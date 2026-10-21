@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
-# Differential run over every tests/*.c: each program is built by the native
-# compiler with --no-opt as the reference and again with optimization, checking
-# output and status. Files without main are checked by multi-input tests.
+# Differential execution of every standalone tests/*.c fixture: O0 against the
+# default level. Fixtures that cannot build standalone, or that a dedicated
+# harness already runs at both levels, are listed with their owner in
+# tests/vir-corpus-exclusions.txt; an unexpected compiler rejection is a
+# failure, never an implicit exclusion.
 
 set -uo pipefail
 
@@ -28,6 +30,34 @@ read -r -a runner <<< "${TARGET_EXEC:-}"
 ulimit -c 0
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
+
+# Each listed fixture maps to its owner, or to nothing on the one target where
+# it builds standalone and the corpus checks it after all.
+declare -A owner=()
+while read -r source source_owner standalone_arch; do
+    case "$source" in '' | '#'*) continue ;; esac
+    if [ ! -f "$source" ] || [ ! -f "$source_owner" ] || [ -n "${owner[$source]+x}" ]; then
+        echo "Invalid or duplicate corpus exclusion: $source $source_owner" >&2
+        exit 1
+    fi
+    case "$standalone_arch" in
+        '' | arm | arm64 | riscv | x64) ;;
+        *)
+            echo "Invalid standalone target for $source: $standalone_arch" >&2
+            exit 1
+            ;;
+    esac
+    owner[$source]=$source_owner
+    [ "$standalone_arch" = "$2" ] && owner[$source]=
+done < tests/vir-corpus-exclusions.txt
+while read -r source; do
+    case "$source" in '' | '#'*) continue ;; esac
+    if [ ! -f "$source" ] || [ -n "${owner[$source]+x}" ]; then
+        echo "Invalid or duplicate runtime workload: $source" >&2
+        exit 1
+    fi
+    owner[$source]=tests/vir-native-regressions.sh
+done < tests/vir-runtime-workloads.txt
 
 # Output and exit status of one program, as a single string to compare.
 run()
@@ -62,33 +92,42 @@ run()
 
 programs=0
 failed=0
+delegated=0
 for src in tests/*.c "$workdir"/gen-*.c; do
     name=$(basename "$src" .c)
-    case "$name" in
-        vir-x64-encoders | vir-x64-and-flags | vir-x64-liveout) continue ;;
-    esac
+    if [ -n "${owner[$src]:-}" ]; then
+        delegated=$((delegated + 1))
+        continue
+    fi
     # Redirecting the group, not just the command, also silences the shell's
-    # report should the compiler crash on a file it cannot build. A refusal
-    # skips the file; a crash is a failure of its own. Self-compiled compilers
-    # under emulation need time to parse compiler-sized unit files.
+    # report should the compiler crash. Self-compiled compilers under emulation
+    # need time to parse compiler-sized unit files.
     {
         timeout "$compile_timeout" "${compiler[@]}" --dump-ir --no-opt -o "$workdir/$name.o0" \
             "$src"
-    } > "$workdir/$name.ir" 2> /dev/null
+    } > "$workdir/$name.ir" 2> "$workdir/$name.err"
     status=$?
     if [ "$status" -gt 128 ] || [ "$status" -eq 124 ]; then
         echo "FAIL $name: the native O0 build crashes or hangs ($status)" >&2
         failed=$((failed + 1))
         continue
     fi
-    [ "$status" -eq 0 ] || continue
+    if [ "$status" -ne 0 ]; then
+        echo "FAIL $name: the native O0 build was rejected ($status)" >&2
+        cat "$workdir/$name.ir" "$workdir/$name.err" >&2
+        failed=$((failed + 1))
+        continue
+    fi
 
-    # A file without main is one part of a multi-file test, not a program.
-    grep -q '^function main$' "$workdir/$name.ir" || continue
+    if ! grep -q '^function main$' "$workdir/$name.ir"; then
+        echo "FAIL $name: no main; register its multi-input or host harness" >&2
+        failed=$((failed + 1))
+        continue
+    fi
     programs=$((programs + 1))
     expected=$(run "$workdir/$name.o0" "$name")
-    if [ "${expected##*exit=}" = 124 ]; then
-        echo "FAIL $name: the native O0 build times out" >&2
+    if [ "${expected##*exit=}" -eq 124 ]; then
+        echo "FAIL $name: the native O0 execution times out" >&2
         failed=$((failed + 1))
         continue
     fi
@@ -113,5 +152,5 @@ if [ "$programs" -eq 0 ]; then
     failed=$((failed + 1))
 fi
 
-echo "VIR corpus: $programs programs, $failed mismatches"
+echo "VIR corpus: $programs programs, $delegated delegated fixtures, $failed failures"
 [ "$failed" -eq 0 ]

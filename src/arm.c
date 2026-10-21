@@ -29,7 +29,7 @@
 #include "defs.h"
 
 /* opcode */
-typedef enum {
+enum {
     arm_and = 0,
     arm_eor = 1,
     arm_sub = 2,
@@ -45,7 +45,7 @@ typedef enum {
     arm_mov = 13,
     arm_mvn = 15,
     arm_stmdb = 16
-} arm_op_t;
+};
 
 /* Condition code Reference:
  * https://community.arm.com/developer/ip-products/processors/b/processors-ip-blog/posts/condition-codes-1-condition-flags-and-codes

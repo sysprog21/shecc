@@ -10,7 +10,6 @@ typedef int (*nullary_callback_t)(void);
 typedef int *(*int_pointer_result_callback_t)(void);
 typedef int (*pointer_callback_t)(void *);
 typedef long long (*wide_callback_t)(long long, long long);
-typedef int (*variadic_callback_t)(int, ...);
 
 static int check_values(signed char a, word_t b, _Bool c)
 {
@@ -108,11 +107,6 @@ static int *return_pointer_result(void)
 static int invoke_pointer_result(int_pointer_result_callback_t callback)
 {
     return callback()[1];
-}
-
-static int invoke_variadic(variadic_callback_t callback)
-{
-    return callback(1, 2);
 }
 
 static int check_pointer(void *pointer)

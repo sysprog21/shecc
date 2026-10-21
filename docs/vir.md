@@ -356,11 +356,32 @@ types, use-def links, edges, and ordered effects.
 | `make check-vir-native-regressions-stage0 check-vir-native-regressions-stage2` | Native frontend, ABI, and runtime regression fixtures with both compiler stages. |
 | `make check-vir-multi-input-stage0 check-vir-multi-input-stage2` | Translation-unit isolation, private symbol identity, and cross-input linking. |
 | `make check-vir-corpus-stage0` | Execution equivalence of the default build against O0 across the C fixture corpus. |
+| `make check-vir-opt-baseline` | Stage-0/stage-2 binary and dump determinism at O0 and the default level, including stats validation and compiler-sized workloads. |
 | `bash tests/vir-qualifiers.sh out/shecc` | Pointer and volatile qualifier execution and graph checks at O0 and the default level. |
 
 Corpus compilation defaults to 300 seconds per build. Set
 `VIR_CORPUS_COMPILE_TIMEOUT` for slower self-compiled runs under emulation;
 program execution retains its 10-second limit.
+
+The corpus checks every standalone `tests/*.c` fixture on every target,
+including the target-named direct-emission fixtures. Compilation failures and
+missing `main` functions fail the suite. Fixtures that cannot build standalone
+(host libraries, `--dynlink` against host libc, more than eight arguments
+outside arm64) and those owned by diagnostic, multi-input, and qualifier
+harnesses are recorded with their owner in `tests/vir-corpus-exclusions.txt`.
+An optional `standalone-arch` field names a target on which an excluded
+fixture builds, and the corpus checks it there. The external-libc fixtures run
+only under the x86-64 and AArch64 direct harnesses, at the default level.
+`tests/vir-runtime-workloads.txt` owns the zero-exit runtime cases executed at
+both optimization levels by both compiler stages. The two lists must remain
+disjoint and name existing files. Adding a C fixture automatically adds it to
+the corpus unless it is listed.
+
+`make check` includes optimization policy checks at both compiler stages.
+Use `make vir-opt-baseline` for timing and memory measurements; correctness
+checks disable timing.
+Sanitizer driver runs select their compiler with `SHECC_STAGE0` and leave the
+ordinary stage-0 binary available to the other suites.
 
 Changes must preserve execution, deterministic dumps and output, a clean
 verifier, and stage-1/stage-2 bootstrap identity. The AArch64 native harness

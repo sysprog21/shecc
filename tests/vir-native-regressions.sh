@@ -6,16 +6,15 @@ compiler=("$@")
 task_dir=$(mktemp -d)
 trap 'rm -rf "$task_dir"' EXIT
 read -r -a runner <<< "${TARGET_EXEC:-}"
-for fixture in essential bitwise-normalization store-override shift-width adjusted-array operand-signedness global-scratch call-return-internal volatile-member void-callback-array bool-compound file-seek pointer-offset typed-arithmetic constant-relations global-value-reader machine-live machine-affinity pair-scratch subtract-alias typedef-alias-builder machine-transfers loop-update if-join call-result-pins entry-parameters comparison-inversion global-slot-void global-cast-metadata global-cast-scope global-wide-string-operands global-dead-operands typedef-callback-rows typedef-nested-row-sizes typedef-pointer-row-elements volatile-pointer-row-elements \
-    pointer-scale-width pointer-scale-rows x64-and-loop global-conditional-compound \
-    arm64-select-runtime arm64-indexed-widths; do
-    source="tests/vir-$fixture.c"
+# The list arrives on fd 3 so that a fixture reading stdin cannot consume it.
+while read -r -u 3 source; do
+    case "$source" in '' | '#'*) continue ;; esac
     for opt_flag in --no-opt ''; do
         "${compiler[@]}" ${opt_flag:+"$opt_flag"} -o "$task_dir/test" "$source"
         chmod +x "$task_dir/test"
         "${runner[@]}" "$task_dir/test"
     done
-done
+done 3< tests/vir-runtime-workloads.txt
 if "${compiler[@]}" -o "$task_dir/test" tests/vir-typedef-direct-float.c > "$task_dir/diagnostic" 2>&1; then
     echo 'Floating direct-function typedef accepted' >&2
     exit 1

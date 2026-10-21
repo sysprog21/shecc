@@ -192,8 +192,9 @@ config:
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2 \
 	check-vir-core check-vir-essential check-vir-frontend-stage0 check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
 	check-vir-multi-input-stage0 check-vir-multi-input-stage2 \
-	check-vir-baseline check-vir-opt-baseline \
-	check-vir-corpus-stage0 check-fuzz-stage0 check-vir-frontend-policy-stage0
+	check-vir-opt-baseline \
+	check-vir-corpus-stage0 check-fuzz-stage0 \
+	check-vir-frontend-policy-stage0 check-vir-frontend-policy-stage2
 
 # Random programs checked against the host compiler and built by shecc.
 # FUZZ_SEEDS and FUZZ_START widen or move the run; a failing program is kept
@@ -206,9 +207,9 @@ check-fuzz-stage0: $(OUT)/$(STAGE0) tests/fuzz.sh tests/fuzz-gen.c
 # Only stage 0 is part of check: under emulation, stage 2 compiles the corpus
 # twice inside qemu, which costs more than the other checks.
 .PHONY: check-vir-corpus-stage0 check-vir-corpus-stage2
-check-vir-corpus-stage0: $(OUT)/$(STAGE0) tests/vir-corpus.sh
+check-vir-corpus-stage0: $(OUT)/$(STAGE0) tests/vir-corpus.sh tests/vir-corpus-exclusions.txt tests/vir-runtime-workloads.txt
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-corpus.sh 0 $(ARCH)
-check-vir-corpus-stage2: $(OUT)/$(STAGE2) tests/vir-corpus.sh
+check-vir-corpus-stage2: $(OUT)/$(STAGE2) tests/vir-corpus.sh tests/vir-corpus-exclusions.txt tests/vir-runtime-workloads.txt
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-corpus.sh 2 $(ARCH)
 
 .PHONY: check-vir-multi-input-stage0 check-vir-multi-input-stage2
@@ -292,11 +293,6 @@ check-all-targets:
 		$(MAKE) check ARCH="$$target_arch"; \
 	done
 
-.PHONY: vir-baseline
-vir-baseline: $(OUT)/$(STAGE0) tests/vir-baseline.sh tests/benchmark-time.sh \
-	tests/vir-baseline-workloads.txt
-	VIR_BASELINE_RUNS=$${VIR_BASELINE_RUNS:-5} tests/vir-baseline.sh
-
 .PHONY: vir-opt-baseline
 vir-opt-baseline: $(OUT)/$(STAGE0) tests/vir-opt-baseline.sh tests/benchmark-time.sh \
 	tests/vir-opt-baseline-workloads.txt
@@ -361,9 +357,7 @@ check-stage2: $(OUT)/$(STAGE2) tests/driver.sh
 
 check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh check-vir-sanitizer
 	$(VECHO) "  TEST STAGE 0 (with sanitizers)\n"
-	$(Q)cp $(OUT)/$(STAGE0)-sanitizer $(OUT)/shecc
-	tests/driver.sh 0 $(DYNLINK) $(BINDING)
-	$(Q)rm $(OUT)/shecc
+	SHECC_STAGE0="$(OUT)/$(STAGE0)-sanitizer" tests/driver.sh 0 $(DYNLINK) $(BINDING)
 
 check-abi-stage0: $(OUT)/$(STAGE0)
 	tests/$(ARCH)-abi.sh 0 $(DYNLINK) $(BINDING);
@@ -421,18 +415,14 @@ check-vir-stage2: $(OUT)/$(STAGE2) tests/vir-stage0.c src/vir.c src/vir.h
 
 .PHONY: check-vir-native-regressions-stage0 check-vir-native-regressions-stage2
 check: check-vir-native-regressions-stage0 check-vir-native-regressions-stage2 check-vir-lower
-check-vir-native-regressions-stage0: $(OUT)/$(STAGE0)
+check-vir-native-regressions-stage0: $(OUT)/$(STAGE0) tests/vir-native-regressions.sh tests/vir-runtime-workloads.txt
 	TARGET_EXEC="$(TARGET_EXEC)" tests/vir-native-regressions.sh $(OUT)/$(STAGE0)
-check-vir-native-regressions-stage2: $(OUT)/$(STAGE2)
+check-vir-native-regressions-stage2: $(OUT)/$(STAGE2) tests/vir-native-regressions.sh tests/vir-runtime-workloads.txt
 	TARGET_EXEC="$(TARGET_EXEC)" tests/vir-native-regressions.sh $(TARGET_EXEC) $(OUT)/$(STAGE2)
 
 .PHONY: check-vir-lower
 check-vir-lower: $(OUT)/$(STAGE0) tests/vir-lower.c tests/vir-lower-smoke.c tests/vir-lower.sh
 	CC="$(CC)" TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-lower.sh
-
-check-vir-baseline: $(OUT)/$(STAGE0) tests/vir-baseline.sh tests/benchmark-time.sh \
-	tests/vir-baseline-workloads.txt
-	VIR_BASELINE_RUNS=1 VIR_BASELINE_NO_TIMING=1 tests/vir-baseline.sh
 
 # Each workload is compiled twice at both levels by each stage, and the two
 # compilers must agree on the output and on the VIR dump. The stats lines are

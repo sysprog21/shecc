@@ -122,9 +122,8 @@ int a64_cmp_reg_insn(bool sf, int rn, int rm)
 }
 
 /* The extended-register forms of 64-bit ADD and SUB. UXTX is the plain form
- * that may name SP; SXTW widens a W register operand as it is added.
+ * that may name SP.
  */
-#define A64_EXT_SXTW 6
 #define A64_EXT_UXTX 3
 
 int a64_add_ext_insn(int rd, int rn, int rm, int option)

@@ -1248,10 +1248,7 @@ typedef struct {
 
 bool op_is_binary_alu(opcode_t op);
 bool op_writes_dest(opcode_t op);
-bool op_is_integer_binary(opcode_t op);
 bool op_is_comparison(opcode_t op);
-bool op_is_scalar_unary(opcode_t op);
-bool op_is_scalar_cast(opcode_t op);
 const char *opcode_mnemonic(opcode_t op);
 basic_block_t *bb_sole_pred(const basic_block_t *bb);
 

@@ -2498,8 +2498,10 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
                 continue;
             }
 
-            if (!angle_header) {
-                /* Quoted headers are relative to the physical source path. */
+            if (!angle_header && inclusion_path[0] != '/') {
+                /* Relative quoted headers use the physical source path;
+                 * absolute names already identify their own location.
+                 */
                 char path[MAX_LINE_LEN];
                 const char *file = include_tk->location.file->physical;
                 int c = strlen(file) - 1;
@@ -2528,7 +2530,8 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
              * lexer, under the name the lexer will ask for.
              */
             if (!try_get_file_buf(normalize_filename(inclusion_path)))
-                error_at("Included file cannot be found",
+                error_at(source_read_failed ? "Included file cannot be read"
+                                            : "Included file cannot be found",
                          &include_tk->location);
 
             tk = pp_lex_expect_token(tk, T_newline, true);
