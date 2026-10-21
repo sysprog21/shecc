@@ -732,7 +732,8 @@ FILE *fopen(const char *filename, const char *mode)
 
 int fclose(FILE *stream)
 {
-    __syscall(__syscall_close, stream);
+    if (__syscall(__syscall_close, stream) < 0)
+        return -1;
     return 0;
 }
 

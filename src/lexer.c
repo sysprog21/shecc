@@ -273,59 +273,90 @@ char read_char(strbuf_t *buf)
     return source_char_at(buf, buf->size);
 }
 
-/* Fill @dst with @len bytes of @f, returning how many arrived.
- *
- * The whole file is wanted and its size is already known, so it is asked for in
- * one piece. Reading it a line at a time instead cost a library call and a
- * second copy for every line of every source file -- and shecc's own libc has
- * no buffer behind fgets(), so each of those lines was a read(2) as well.
+/* Read up to @len bytes, distinguishing an I/O error from end of input. Static
+ * self-hosted builds use read(2) directly to avoid byte-at-a-time libc I/O.
  */
 #ifdef HOST_BUFFERED_STDIO
-int file_read_all(FILE *f, char *dst, int len)
+/* The dynamically linked compiler uses the host's stream error indicator; the
+ * embedded, unbuffered libc has no such state. Host builds take the declaration
+ * from <stdio.h>, where ferror may be a macro.
+ */
+#ifdef __SHECC__
+int ferror(FILE *stream);
+#endif
+
+int file_read_chunk(FILE *f, char *dst, int len)
 {
-    if (len <= 0)
-        return 0;
-    return fread(dst, 1, len, f);
+    int n = fread(dst, 1, len, f);
+    return ferror(f) ? -1 : n;
 }
 #else
-int file_read_all(FILE *f, char *dst, int len)
+int file_read_chunk(FILE *f, char *dst, int len)
 {
-    int got = 0;
-
-    while (got < len) {
-        int n = __syscall(__syscall_read, f, dst + got, len - got);
-        if (n <= 0)
-            return got;
-        got += n;
-    }
-    return got;
+    return __syscall(__syscall_read, f, dst, len);
 }
 #endif
 
-/* @filename's contents, or NULL when it cannot be opened. */
+/* Reports that @filename could not be opened or read: a usage error. */
+__noreturn void source_file_error(const char *action, const char *filename)
+{
+    char msg[MAX_LINE_LEN];
+
+    snprintf(msg, MAX_LINE_LEN, "cannot %s source file '%s'", action, filename);
+    usage_error(msg);
+}
+
+#define SOURCE_BUF_INIT 16384
+
+/* Set when the last try_read_file() opened its file but could not read it, so a
+ * caller can tell "cannot read" from "cannot open".
+ */
+bool source_read_failed;
+
+/* @filename's contents, or NULL when it cannot be opened or read. */
 strbuf_t *try_read_file(const char *filename)
 {
     FILE *f = fopen(filename, "rb");
     strbuf_t *src;
 
+    source_read_failed = false;
     if (!f)
         return NULL;
 
-    fseek(f, 0, SEEK_END);
-    int len = ftell(f);
-    src = strbuf_create(len + 1);
-    fseek(f, 0, SEEK_SET);
+    src = strbuf_create(SOURCE_BUF_INIT);
+    if (!src)
+        fatal("Unable to allocate source buffer");
 
-    src->size = file_read_all(f, src->elements, len);
+    /* Pipes and procfs files do not have a useful seek-derived length. Read
+     * through EOF into whatever room the buffer has, keeping one byte free for
+     * the lexer's NUL sentinel.
+     */
+    while (true) {
+        if (!strbuf_extend(src, 1))
+            fatal("Unable to grow source buffer");
+        int n = file_read_chunk(f, src->elements + src->size,
+                                src->capacity - src->size - 1);
+        if (n < 0) {
+            fclose(f);
+            strbuf_free(src);
+            source_read_failed = true;
+            return NULL;
+        }
+        if (!n)
+            break;
+        src->size += n;
+    }
 
     fclose(f);
-    src->elements[len] = '\0';
+    src->elements[src->size] = '\0';
+    /* The lexer treats the byte at capacity - 1 as the end of input. */
+    src->capacity = src->size + 1;
     return src;
 }
 
 /* @filename's contents, read once and kept for every later request; NULL when
- * it cannot be opened, so that a caller with a better place to report the
- * mistake can.
+ * it cannot be opened or read, so that a caller with a better place to report
+ * the mistake can.
  */
 strbuf_t *try_get_file_buf(char *filename)
 {
@@ -343,14 +374,8 @@ strbuf_t *get_file_buf(char *filename)
 {
     strbuf_t *buf = try_get_file_buf(filename);
 
-    /* A file that cannot be opened is a mistake in how the compiler was
-     * invoked, not a broken invariant, so it exits rather than abort()ing.
-     */
-    if (!buf) {
-        printf("[Error]: cannot open source file '%s'\n", filename);
-        fflush(NULL);
-        exit(1);
-    }
+    if (!buf)
+        source_file_error(source_read_failed ? "read" : "open", filename);
     return buf;
 }
 

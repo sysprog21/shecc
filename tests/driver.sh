@@ -753,6 +753,104 @@ try_file 0 'F(10) = 55' "$TESTS_DIR/fib.c"
 try_file 0 $'1\nHello World' "$TESTS_DIR/hello.c"
 try_file 0 '' "$TESTS_DIR/strength-reduce.c"
 
+# Count one check that does not fit the try helpers. Usage:
+#   record_check <passed:0|1> <label> <input> <exe> <expected> <actual> <output> \
+#       [files to remove on success...]
+function record_check()
+{
+    local passed="$1" label="$2" input="$3" exe="$4" expected="$5" actual="$6" output="$7"
+    shift 7
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$passed" = 1 ]; then
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+        rm -f "$@"
+    else
+        report_test_failure "$label" "$input" "$exe" "$expected" "$actual" "$output"
+    fi
+}
+
+# Source and header streams have no seekable length. Vary the size across the
+# reader's first buffer refill and a later growth, including a token split
+# between reads and EOF with no trailing newline. /dev/stdin also preserves the
+# test under QEMU.
+if test_selected; then
+    for stream_kind in source header; do
+        for stream_padding in 0 16382 16384 40000; do
+            stream_exe="$(mktemp)"
+            stream_log="$(mktemp)"
+
+            # Keep the streamed text in a file so that a failure report shows it
+            # instead of reading the driver's own stdin.
+            stream_src="$(mktemp --suffix .c)"
+            {
+                printf '%*s' "$stream_padding" ''
+                printf 'int main(void) { return 42; }'
+            } > "$stream_src"
+            stream_path=/dev/stdin
+            stream_header=""
+            if [ "$stream_kind" = header ]; then
+                stream_header="$(mktemp --suffix .c)"
+                echo '#include "/dev/stdin"' > "$stream_header"
+                stream_path="$stream_header"
+            fi
+            # A pipe, not a redirection, so the input has no seekable length.
+            cat "$stream_src" | $SHECC $SHECC_CFLAGS --no-libc -o "$stream_exe" "$stream_path" > "$stream_log" 2>&1
+            stream_status=$?
+            if [ "$stream_status" -eq 0 ]; then
+                chmod +x "$stream_exe"
+                ${TARGET_EXEC:-} "$stream_exe"
+                stream_status=$?
+            fi
+            passed=0
+            [ "$stream_status" -eq 42 ] && passed=1
+            record_check "$passed" \
+                "INPUT STREAM TEST ($stream_kind, $stream_padding)" \
+                "$stream_src" "$stream_exe" 42 "$stream_status" "$(< "$stream_log")" \
+                "$stream_exe" "$stream_log" "$stream_src" ${stream_header:+"$stream_header"}
+        done
+    done
+
+    # Opening a directory succeeds on Linux, but reading it fails. Report that
+    # failure rather than treating unread memory or a failed seek as C source.
+    read_error_exe="$(mktemp)"
+    read_error_log="$(mktemp)"
+    $SHECC $SHECC_CFLAGS -o "$read_error_exe" "$TESTS_DIR" > "$read_error_log" 2>&1
+    read_error_status=$?
+    passed=0
+    [ "$read_error_status" -eq 1 ] \
+        && grep -q 'cannot read source file' "$read_error_log" && passed=1
+    record_check "$passed" \
+        "INPUT READ ERROR TEST" "$TESTS_DIR" "$read_error_exe" \
+        "read diagnostic, exit 1" "$read_error_status" "$(< "$read_error_log")" \
+        "$read_error_exe" "$read_error_log"
+fi
+
+# A full output device must produce a diagnostic, including when a buffered
+# runtime only discovers the error on close. The small dynamic image fits in the
+# stdio buffer; the large static image fails during a section write.
+if test_selected && [ -c /dev/full ]; then
+    for output_size in 1 16384; do
+        output_in="$(mktemp --suffix .c)"
+        output_log="$(mktemp)"
+        output_flags=""
+        [ "$output_size" -eq 1 ] && output_flags="--dynlink"
+        echo "char data[$output_size] = {1}; int main(void) { return data[0]; }" > "$output_in"
+        $SHECC $output_flags --no-libc -o /dev/full "$output_in" > "$output_log" 2>&1
+        output_status=$?
+        passed=0
+        [ "$output_status" -eq 1 ] \
+            && grep -Eq 'Unable to (write|close) output file' "$output_log" && passed=1
+        record_check "$passed" \
+            "OUTPUT ERROR TEST ($output_size)" "$output_in" /dev/full \
+            "write/close diagnostic, exit 1" "$output_status" "$(< "$output_log")" \
+            "$output_in" "$output_log"
+    done
+fi
+
 # A loop accumulating a parameter: "s += i" and "k++" carry their values around
 # the loop as block arguments.
 try_ 0 << EOF

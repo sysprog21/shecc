@@ -1040,8 +1040,8 @@ void elf_postprocess(void)
 #ifdef HOST_BUFFERED_STDIO
 void elf_write_all(FILE *fp, const char *buf, int len)
 {
-    if (len > 0)
-        fwrite(buf, 1, len, fp);
+    if (len > 0 && (int) fwrite(buf, 1, len, fp) != len)
+        usage_error("Unable to write output file");
 }
 #else
 void elf_write_all(FILE *fp, const char *buf, int len)
@@ -1051,7 +1051,7 @@ void elf_write_all(FILE *fp, const char *buf, int len)
     while (off < len) {
         int n = __syscall(__syscall_write, fp, buf + off, len - off);
         if (n <= 0)
-            return;
+            usage_error("Unable to write output file");
         off += n;
     }
 }
@@ -1139,7 +1139,9 @@ void elf_generate(const char *outfile)
     elf_write_all(fp, elf_shstrtab->elements, elf_shstrtab->size);
     elf_write_all(fp, elf_section_header->elements, elf_section_header->size);
 #endif
-    fclose(fp);
+    /* Buffered runtimes may defer the actual write until fclose(). */
+    if (fclose(fp) != 0)
+        usage_error("Unable to close output file");
 
     /* A generated ELF is meant to be runnable directly, but the mode it gets
      * depends on which libc opened it, not on how the output is linked: the
