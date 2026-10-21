@@ -356,11 +356,15 @@ types, use-def links, edges, and ordered effects.
 | `make check-vir-native-regressions-stage0 check-vir-native-regressions-stage2` | Native frontend, ABI, and runtime regression fixtures with both compiler stages. |
 | `make check-vir-multi-input-stage0 check-vir-multi-input-stage2` | Translation-unit isolation, private symbol identity, and cross-input linking. |
 | `make check-vir-corpus-stage0` | Execution equivalence of the default build against O0 across the C fixture corpus. |
+| `make check-vir-opt-baseline` | Stage-0/stage-2 binary and dump determinism at O0 and the default level, including stats validation and compiler-sized workloads. |
 | `bash tests/vir-qualifiers.sh out/shecc` | Pointer and volatile qualifier execution and graph checks at O0 and the default level. |
 
 Corpus compilation defaults to 300 seconds per build. Set
 `VIR_CORPUS_COMPILE_TIMEOUT` for slower self-compiled runs under emulation;
 program execution retains its 10-second limit.
+
+Use `make vir-opt-baseline` for timing and memory measurements; correctness
+checks disable timing.
 
 Changes must preserve execution, deterministic dumps and output, a clean
 verifier, and stage-1/stage-2 bootstrap identity. The AArch64 native harness

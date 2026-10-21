@@ -77,19 +77,3 @@ benchmark_time_resource_command()
         printf '%s\n' "$rss" > "$rss_file"
     fi
 }
-
-benchmark_time_command()
-{
-    local elapsed_file=$1
-    shift
-
-    if [ -n "${EPOCHREALTIME:-}" ]; then
-        local start_us=${EPOCHREALTIME/./}
-        "$@"
-        local finish_us=${EPOCHREALTIME/./}
-        benchmark_time_write_elapsed "$elapsed_file" "$start_us" "$finish_us"
-    else
-        benchmark_time_prepare_rss
-        "$BENCHMARK_TIME_TOOL" -f '%e' -o "$elapsed_file" "$@"
-    fi
-}

@@ -192,7 +192,7 @@ config:
 check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2 \
 	check-vir-core check-vir-essential check-vir-frontend-stage0 check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
 	check-vir-multi-input-stage0 check-vir-multi-input-stage2 \
-	check-vir-baseline check-vir-opt-baseline \
+	check-vir-opt-baseline \
 	check-vir-corpus-stage0 check-fuzz-stage0 check-vir-frontend-policy-stage0
 
 # Random programs checked against the host compiler and built by shecc.
@@ -291,11 +291,6 @@ check-all-targets:
 		$(MAKE) config ARCH="$$target_arch"; \
 		$(MAKE) check ARCH="$$target_arch"; \
 	done
-
-.PHONY: vir-baseline
-vir-baseline: $(OUT)/$(STAGE0) tests/vir-baseline.sh tests/benchmark-time.sh \
-	tests/vir-baseline-workloads.txt
-	VIR_BASELINE_RUNS=$${VIR_BASELINE_RUNS:-5} tests/vir-baseline.sh
 
 .PHONY: vir-opt-baseline
 vir-opt-baseline: $(OUT)/$(STAGE0) tests/vir-opt-baseline.sh tests/benchmark-time.sh \
@@ -429,10 +424,6 @@ check-vir-native-regressions-stage2: $(OUT)/$(STAGE2)
 .PHONY: check-vir-lower
 check-vir-lower: $(OUT)/$(STAGE0) tests/vir-lower.c tests/vir-lower-smoke.c tests/vir-lower.sh
 	CC="$(CC)" TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-lower.sh
-
-check-vir-baseline: $(OUT)/$(STAGE0) tests/vir-baseline.sh tests/benchmark-time.sh \
-	tests/vir-baseline-workloads.txt
-	VIR_BASELINE_RUNS=1 VIR_BASELINE_NO_TIMING=1 tests/vir-baseline.sh
 
 # Each workload is compiled twice at both levels by each stage, and the two
 # compilers must agree on the output and on the VIR dump. The stats lines are

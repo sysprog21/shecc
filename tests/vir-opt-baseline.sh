@@ -93,6 +93,8 @@ while read -r source purpose; do
                     "${opt_flags[@]}" --dump-vir --stats \
                     -o "$output" "$source" > /dev/null 2> "$stats"
             fi
+            grep -q '^stats layout ' "$stats"
+            grep -q '^stats phase=lower ' "$stats"
             if [ "$run" -gt 1 ]; then
                 cmp -s "$workdir/$opt-1.elf" "$output"
                 cmp -s "$workdir/$opt-1.stats" "$stats"
