@@ -83,13 +83,14 @@ if [ "$#" -lt 1 ]; then
     echo "  SHOW_PROGRESS=1   Show progress dots (default)"
     echo "  COLOR_OUTPUT=1    Enable colored output (default)"
     echo "  TEST_FILTER=<str> Run only categories whose name contains <str>"
+    echo "  SHECC_STAGE0=<path> Use an alternate stage-0 compiler (e.g. sanitizer build)"
     echo "  FAIL_FAST=1       Stop at the first failure (default: report all)"
     exit 1
 fi
 
 case "$1" in
     "0")
-        readonly SHECC="$PWD/out/shecc"
+        readonly SHECC="${SHECC_STAGE0:-$PWD/out/shecc}"
         readonly STAGE="Stage 0 (Host Compiler)"
         ;;
     "1")

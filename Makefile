@@ -193,7 +193,8 @@ check: check-stage0 check-stage2 check-abi-stage0 check-abi-stage2 \
 	check-vir-core check-vir-essential check-vir-frontend-stage0 check-vir-frontend-stage2 check-vir-fuzz check-vir-stage0 check-vir-stage2 \
 	check-vir-multi-input-stage0 check-vir-multi-input-stage2 \
 	check-vir-opt-baseline \
-	check-vir-corpus-stage0 check-fuzz-stage0 check-vir-frontend-policy-stage0
+	check-vir-corpus-stage0 check-fuzz-stage0 \
+	check-vir-frontend-policy-stage0 check-vir-frontend-policy-stage2
 
 # Random programs checked against the host compiler and built by shecc.
 # FUZZ_SEEDS and FUZZ_START widen or move the run; a failing program is kept
@@ -356,9 +357,7 @@ check-stage2: $(OUT)/$(STAGE2) tests/driver.sh
 
 check-sanitizer: $(OUT)/$(STAGE0)-sanitizer tests/driver.sh check-vir-sanitizer
 	$(VECHO) "  TEST STAGE 0 (with sanitizers)\n"
-	$(Q)cp $(OUT)/$(STAGE0)-sanitizer $(OUT)/shecc
-	tests/driver.sh 0 $(DYNLINK) $(BINDING)
-	$(Q)rm $(OUT)/shecc
+	SHECC_STAGE0="$(OUT)/$(STAGE0)-sanitizer" tests/driver.sh 0 $(DYNLINK) $(BINDING)
 
 check-abi-stage0: $(OUT)/$(STAGE0)
 	tests/$(ARCH)-abi.sh 0 $(DYNLINK) $(BINDING);

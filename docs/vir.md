@@ -377,8 +377,11 @@ both optimization levels by both compiler stages. The two lists must remain
 disjoint and name existing files. Adding a C fixture automatically adds it to
 the corpus unless it is listed.
 
+`make check` includes optimization policy checks at both compiler stages.
 Use `make vir-opt-baseline` for timing and memory measurements; correctness
 checks disable timing.
+Sanitizer driver runs select their compiler with `SHECC_STAGE0` and leave the
+ordinary stage-0 binary available to the other suites.
 
 Changes must preserve execution, deterministic dumps and output, a clean
 verifier, and stage-1/stage-2 bootstrap identity. The AArch64 native harness
