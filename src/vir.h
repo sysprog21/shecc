@@ -344,14 +344,6 @@ static inline bool vir_type_is_i32_or_i64(vir_type_t type)
 {
     return type == VIR_TYPE_I32 || type == VIR_TYPE_I64;
 }
-static inline bool vir_type_is_i32_or_i64_or_pointer(vir_type_t type)
-{
-    return vir_type_is_i32_or_i64(type) || type == VIR_TYPE_PTR;
-}
-static inline bool vir_type_is_pointer_or_i64(vir_type_t type)
-{
-    return type == VIR_TYPE_PTR || type == VIR_TYPE_I64;
-}
 static inline bool vir_opcode_is_commutative(vir_opcode_t opcode)
 {
     return opcode == VIR_OP_ADD || opcode == VIR_OP_MUL ||
