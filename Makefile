@@ -206,9 +206,9 @@ check-fuzz-stage0: $(OUT)/$(STAGE0) tests/fuzz.sh tests/fuzz-gen.c
 # Only stage 0 is part of check: under emulation, stage 2 compiles the corpus
 # twice inside qemu, which costs more than the other checks.
 .PHONY: check-vir-corpus-stage0 check-vir-corpus-stage2
-check-vir-corpus-stage0: $(OUT)/$(STAGE0) tests/vir-corpus.sh
+check-vir-corpus-stage0: $(OUT)/$(STAGE0) tests/vir-corpus.sh tests/vir-corpus-exclusions.txt tests/vir-runtime-workloads.txt
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-corpus.sh 0 $(ARCH)
-check-vir-corpus-stage2: $(OUT)/$(STAGE2) tests/vir-corpus.sh
+check-vir-corpus-stage2: $(OUT)/$(STAGE2) tests/vir-corpus.sh tests/vir-corpus-exclusions.txt tests/vir-runtime-workloads.txt
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-corpus.sh 2 $(ARCH)
 
 .PHONY: check-vir-multi-input-stage0 check-vir-multi-input-stage2
@@ -416,9 +416,9 @@ check-vir-stage2: $(OUT)/$(STAGE2) tests/vir-stage0.c src/vir.c src/vir.h
 
 .PHONY: check-vir-native-regressions-stage0 check-vir-native-regressions-stage2
 check: check-vir-native-regressions-stage0 check-vir-native-regressions-stage2 check-vir-lower
-check-vir-native-regressions-stage0: $(OUT)/$(STAGE0)
+check-vir-native-regressions-stage0: $(OUT)/$(STAGE0) tests/vir-native-regressions.sh tests/vir-runtime-workloads.txt
 	TARGET_EXEC="$(TARGET_EXEC)" tests/vir-native-regressions.sh $(OUT)/$(STAGE0)
-check-vir-native-regressions-stage2: $(OUT)/$(STAGE2)
+check-vir-native-regressions-stage2: $(OUT)/$(STAGE2) tests/vir-native-regressions.sh tests/vir-runtime-workloads.txt
 	TARGET_EXEC="$(TARGET_EXEC)" tests/vir-native-regressions.sh $(TARGET_EXEC) $(OUT)/$(STAGE2)
 
 .PHONY: check-vir-lower

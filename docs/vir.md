@@ -363,6 +363,20 @@ Corpus compilation defaults to 300 seconds per build. Set
 `VIR_CORPUS_COMPILE_TIMEOUT` for slower self-compiled runs under emulation;
 program execution retains its 10-second limit.
 
+The corpus checks every standalone `tests/*.c` fixture on every target,
+including the target-named direct-emission fixtures. Compilation failures and
+missing `main` functions fail the suite. Fixtures that cannot build standalone
+(host libraries, `--dynlink` against host libc, more than eight arguments
+outside arm64) and those owned by diagnostic, multi-input, and qualifier
+harnesses are recorded with their owner in `tests/vir-corpus-exclusions.txt`.
+An optional `standalone-arch` field names a target on which an excluded
+fixture builds, and the corpus checks it there. The external-libc fixtures run
+only under the x86-64 and AArch64 direct harnesses, at the default level.
+`tests/vir-runtime-workloads.txt` owns the zero-exit runtime cases executed at
+both optimization levels by both compiler stages. The two lists must remain
+disjoint and name existing files. Adding a C fixture automatically adds it to
+the corpus unless it is listed.
+
 Use `make vir-opt-baseline` for timing and memory measurements; correctness
 checks disable timing.
 

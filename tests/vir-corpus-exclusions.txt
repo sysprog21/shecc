@@ -1,0 +1,78 @@
+# source owner [standalone-arch]
+#
+# Fixtures the corpus cannot or need not build as standalone programs, each
+# with the harness or Make target that exercises it. Not every owner covers
+# every target and level:
+# - vir-direct-*external-* call host libc and need --no-libc --dynlink; only
+#   vir-direct-x64.sh and vir-direct-arm64.sh build them, at the default level.
+# - vir-call-return.c links against an x86-64 assembly helper library.
+# - The arm64 call and frame fixtures pass more than eight arguments, which only
+#   arm64 accepts; the optional standalone-arch field names that target, where
+#   the corpus still compares both levels.
+# Runtime fixtures are separately owned by vir-runtime-workloads.txt.
+tests/arm64-register-memory-unit.c Makefile
+tests/fuzz-gen.c tests/fuzz.sh
+tests/vir-abstract-return-qualifiers.c tests/vir-qualifiers.sh
+tests/vir-arm64-branch-frame.c Makefile
+tests/vir-arm64-select-direct.c Makefile
+tests/vir-call-return.c tests/vir-call-return.sh
+tests/vir-callback-pointer-return-alias.c tests/vir-qualifiers.sh
+tests/vir-callback-qualifier-compatibility.c tests/vir-qualifiers.sh
+tests/vir-callback-return-metadata.c tests/vir-qualifiers.sh
+tests/vir-const-abstract-return-pointer.c tests/vir-qualifiers.sh
+tests/vir-const-callback-pointer-return-alias.c tests/vir-qualifiers.sh
+tests/vir-const-callback-return-pointee.c tests/vir-qualifiers.sh
+tests/vir-const-callback-return-pointer.c tests/vir-qualifiers.sh
+tests/vir-const-callback-row-write.c tests/vir-qualifiers.sh
+tests/vir-const-direct-pointer-row-write.c tests/vir-qualifiers.sh
+tests/vir-const-grouped-pointer-alias.c tests/vir-qualifiers.sh
+tests/vir-const-hidden-return-alias.c tests/vir-qualifiers.sh
+tests/vir-const-local-getter.c tests/vir-qualifiers.sh
+tests/vir-const-pointer-row-write.c tests/vir-qualifiers.sh
+tests/vir-const-slot-realias.c tests/vir-qualifiers.sh
+tests/vir-const-typedef-pointer-slot-write.c tests/vir-qualifiers.sh
+tests/vir-const-typedef-realias.c tests/vir-qualifiers.sh
+tests/vir-core.c Makefile
+tests/vir-direct-arm64-call-bool-arg-int-stack.c tests/vir-direct-arm64.sh arm64
+tests/vir-direct-arm64-call-bool-arg-stack-wide.c tests/vir-direct-arm64.sh arm64
+tests/vir-direct-arm64-call-bool-arg-stack.c tests/vir-direct-arm64.sh arm64
+tests/vir-direct-arm64-call.c tests/vir-direct-arm64.sh arm64
+tests/vir-direct-arm64-external-pointer-bound.c tests/vir-direct-arm64.sh
+tests/vir-direct-arm64-external-pointer-join-offset.c tests/vir-direct-arm64.sh
+tests/vir-direct-arm64-external-pointer-join.c tests/vir-direct-arm64.sh
+tests/vir-direct-arm64-external-pointer-loop-join.c tests/vir-direct-arm64.sh
+tests/vir-direct-arm64-external-pointer-mixed-join.c tests/vir-direct-arm64.sh
+tests/vir-direct-arm64-external-pointer-mixed-loop-join.c tests/vir-direct-arm64.sh
+tests/vir-direct-arm64-external-pointer-reoffset.c tests/vir-direct-arm64.sh
+tests/vir-direct-arm64-external-void-pointer-wide.c tests/vir-direct-arm64.sh
+tests/vir-direct-arm64-frame-runtime.c tests/vir-direct-arm64.sh arm64
+tests/vir-direct-arm64-i64-memory.c tests/vir-qualifiers.sh
+tests/vir-direct-external-pointer-origin.c tests/vir-direct-x64.sh
+tests/vir-direct-external-typed-pointer-offset.c tests/vir-direct-arm64.sh
+tests/vir-direct-external-typed-pointer.c tests/vir-direct-arm64.sh
+tests/vir-essential-core.c Makefile
+tests/vir-fuzz.c Makefile
+tests/vir-grouped-pointer-alias.c tests/vir-qualifiers.sh
+tests/vir-hidden-const-return-compatible.c tests/vir-qualifiers.sh
+tests/vir-licm-profile.c Makefile
+tests/vir-lower.c tests/vir-lower.sh
+tests/vir-multi-input-main.c tests/vir-multi-input.sh
+tests/vir-multi-input-root.c tests/vir-multi-input.sh
+tests/vir-pointer-comparison.c tests/vir-qualifiers.sh
+tests/vir-typedef-alias-builder.c tests/vir-qualifiers.sh
+tests/vir-typedef-direct-float.c tests/vir-native-regressions.sh
+tests/vir-volatile-arithmetic.c tests/vir-qualifiers.sh
+tests/vir-volatile-callback-pointer-return.c tests/vir-qualifiers.sh
+tests/vir-volatile-callback-return-pointer.c tests/vir-qualifiers.sh
+tests/vir-volatile-callback.c tests/vir-qualifiers.sh
+tests/vir-volatile-comma-alias.c tests/vir-qualifiers.sh
+tests/vir-volatile-local-getter.c tests/vir-qualifiers.sh
+tests/vir-volatile-local.c tests/vir-qualifiers.sh
+tests/vir-volatile-member.c tests/vir-qualifiers.sh
+tests/vir-volatile-pointer-member.c tests/vir-qualifiers.sh
+tests/vir-volatile-pointer-row-elements.c tests/vir-qualifiers.sh
+tests/vir-volatile-storage.c tests/vir-qualifiers.sh
+tests/vir-x64-and-flags.c Makefile
+tests/vir-x64-encoders.c Makefile
+tests/vir-x64-fold.c Makefile
+tests/vir-x64-liveout.c tests/vir-x64-liveout.sh
