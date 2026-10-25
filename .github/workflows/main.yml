@@ -72,8 +72,7 @@ jobs:
       CC: ${{ matrix.compiler }}
       ARCH: ${{ matrix.architecture }}
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
-      # This variable is ignored when verifying static linking mode
-      BINDING: ${{ matrix.binding_mode == 'immediate' && 'now' || 'lazy' }}
+      BINDING: ${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'now' || 'lazy') || '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -83,13 +82,10 @@ jobs:
           architecture: ${{ matrix.architecture }}
           link-mode: ${{ matrix.link_mode }}
           github-token: ${{ github.token }}
-      # ARCH, DYNLINK and BINDING are named on the command line rather than left
-      # to the environment: the build session the tree records assigns ARCH outright,
-      # and a makefile assignment wins over the environment.
       - name: Build artifacts
         run: make ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Unit tests
-        run: make check ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
+        run: make check
       - name: Upload the test logs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -137,8 +133,7 @@ jobs:
     env:
       ARCH: ${{ matrix.architecture }}
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
-      # This variable is ignored when verifying static linking mode
-      BINDING: ${{ matrix.binding_mode == 'immediate' && 'now' || 'lazy' }}
+      BINDING: ${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'now' || 'lazy') || '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -151,7 +146,7 @@ jobs:
       - name: Build the stage 0 compiler with sanitizers
         run: make sanitizer ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Sanitizer-enabled stage 0 tests
-        run: make check-sanitizer ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
+        run: make check-sanitizer
 
   # Preprocess shecc with itself, then compile the result: the stage 1 source
   # is the largest input the preprocessor gets, and the only one that exercises
@@ -208,8 +203,7 @@ jobs:
     env:
       ARCH: ${{ matrix.architecture }}
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
-      # This variable is ignored when verifying static linking mode
-      BINDING: ${{ matrix.binding_mode == 'immediate' && 'now' || 'lazy' }}
+      BINDING: ${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'now' || 'lazy') || '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -222,7 +216,7 @@ jobs:
       - name: Build artifacts
         run: make ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Unit tests
-        run: make check ARCH="$ARCH" DYNLINK="$DYNLINK" BINDING="$BINDING"
+        run: make check
       - name: Upload the test logs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -251,8 +245,7 @@ jobs:
             binding_mode: none
     env:
       DYNLINK: ${{ matrix.link_mode == 'dynamic' && '1' || '0' }}
-      # This variable is ignored when verifying static linking mode
-      BINDING: ${{ matrix.binding_mode == 'immediate' && 'now' || 'lazy' }}
+      BINDING: ${{ matrix.link_mode == 'dynamic' && (matrix.binding_mode == 'immediate' && 'now' || 'lazy') || '' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -265,7 +258,7 @@ jobs:
       - name: Build the stage 0 compiler with sanitizers
         run: make sanitizer ARCH=arm DYNLINK="$DYNLINK" BINDING="$BINDING"
       - name: Sanitizer-enabled stage 0 tests
-        run: make check-sanitizer ARCH=arm DYNLINK="$DYNLINK" BINDING="$BINDING"
+        run: make check-sanitizer
 
   coding-style:
     name: Coding style
