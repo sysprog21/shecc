@@ -229,6 +229,18 @@ endif
 include mk/$(ARCH).mk
 include mk/common.mk
 
+ARCH_DEFS_SHA256_FILE := archdefs.sha256
+SHA256_CMD := $(if $(shell command -v sha256sum),sha256sum,$(if $(shell command -v shasum),shasum -a 256,))
+ifeq (,$(SHA256_CMD))
+    $(error Unable to access a SHA-256 checksum command)
+endif
+ifneq (,$(wildcard archdefs.sha256))
+    ARCH_DEFS_CHANGED := $(shell $(PRINTF) $(ARCH_DEFS) | $(SHA256_CMD) | awk '{print $$1}' | diff - $(ARCH_DEFS_SHA256_FILE))
+    ifneq (,$(ARCH_DEFS_CHANGED))
+        NEED_RECONFIGURE := 1
+    endif
+endif
+
 # The existing "config" file may be removed by the distclean target, but the
 # config target may still retain the configuration. Running both targets in
 # the same invocation can trigger this situation.
@@ -249,6 +261,7 @@ ifeq ($(NEED_RECONFIGURE),1)
 	$(Q)ln -sf $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
 	$(Q)$(PRINTF) $(ARCH_DEFS) > $@
 	$(Q)$(PRINTF) $(TRANSLATION_DEFS) >> $@
+	$(Q)$(PRINTF) $(ARCH_DEFS) | $(SHA256_CMD) | awk '{print $$1}' > $(ARCH_DEFS_SHA256_FILE)
 	$(Q)$(PRINTF) "ARCH?=$(ARCH)\n" > $(BUILD_SESSION)
 	$(Q)$(PRINTF) "DYNLINK?=$(DYNLINK)\n" >> $(BUILD_SESSION)
 ifeq ($(DYNLINK),0)
@@ -588,7 +601,7 @@ clean:
 	-$(RM) $(OUT)/libc.inc
 
 distclean: clean
-	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config $(BUILD_SESSION)
+	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config $(BUILD_SESSION) $(ARCH_DEFS_SHA256_FILE)
 	-$(RM) DOM.dot CFG.dot
 
 -include $(deps)

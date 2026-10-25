@@ -8,6 +8,7 @@ a.out
 config
 src/codegen.c
 .session.mk
+archdefs.sha256
 
 # vscode C/C++ plugin generated files
 .vscode
