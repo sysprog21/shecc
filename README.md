@@ -117,38 +117,65 @@ Configure which backend you want. `shecc` supports the ARMv7-A, AArch64,
 RV32IM, and x86-64 backends, with Arm as the default:
 ```shell
 $ make config ARCH=arm
-# Target machine code switch to arm
+Configurations: (arm, static linking)
 
 $ make config ARCH=riscv
-# Target machine code switch to riscv
+Configurations: (riscv, static linking)
 
 $ make config ARCH=arm64
-# Target machine code switch to arm64
+Configurations: (arm64, static linking)
 
 $ make config ARCH=x64
-# Target machine code switch to x64
+Configurations: (x64, static linking)
 ```
 
-The selected target is recorded in the tree, so a later `make` with a different
-`ARCH` stops and asks for an explicit `make config ARCH=...` rather than pairing
-one target's settings with another target's generated configuration.
+The selected target and linking mode are recorded in the tree; the binding mode
+is recorded only for dynamic linking. A later `make` with a configuration switch
+(e.g., a target architecture switch) can directly trigger the build system to
+perform a reconfiguration or a rebuild. Otherwise, the `config` target only
+prints a `Keep configurations` hint message.
 
 Run `make` and you should see this:
 ```shell
 $ make
+Configurations: (arm, static linking)
   CC+LD	out/inliner
   GEN	out/libc.inc
   CC	out/src/main.o
   LD	out/shecc
   SHECC	out/shecc-stage1.elf
   SHECC	out/shecc-stage2.elf
+...
+```
+
+Running `make` with different configurations is supported:
+```shell
+# Initial build
+$ make
+Configurations: (arm, static linking)
+...
+
+# Switch to x86-64
+$ make ARCH=x64
+Configurations: (x64, static linking)
+...
+
+# Switch to dynamic linking with immediate binding
+$ make DYNLINK=1 BINDING=now
+Configurations: (x64, dynamic linking, immediate binding)
+
+# Switch back to static linking
+$ make DYNLINK=0
+Configurations: (x64, static linking)
+...
 ```
 
 Run `make DYNLINK=1` to use the dynamic linking mode and generate the dynamically linked compiler:
 ```shell
-# If using the dynamic linking mode, you should add 'DYNLINK=1' for each 'make' command.
+# If using the dynamic linking mode, pass 'DYNLINK=1' to enable such a build.
 # The target architecture comes from the last 'make config' (default: arm).
 $ make DYNLINK=1
+Configurations: (arm, dynamic linking, lazy binding)
   CC+LD	out/inliner
   GEN	out/libc.inc
   CC	out/src/main.o
@@ -172,9 +199,17 @@ $ make DYNLINK=1 BINDING=lazy
 # Dynamic linking with immediate binding
 $ make DYNLINK=1 BINDING=now
 
-# BINDING is ignored by the build system if the static linking mode is enabled.
+# BINDING is meaningful only with dynamic linking. If the initial build
+# passes it in the static linking mode, the build is aborted:
 $ make BINDING=now
+Makefile: *** BINDING is not used for static linking.  Stop.
 $ make DYNLINK=0 BINDING=lazy
+Makefile: *** BINDING is not used for static linking.  Stop.
+
+# Exception: if DYNLINK is switched from 1 to 0 but BINDING is left unchanged,
+# the build system can directly build the statically linked version:
+$ make DYNLINK=1 BINDING=now  # Build the dynamically linked version first
+$ make DYNLINK=0              # Accepted. Switch to static linking.
 ```
 
 For development builds with memory safety checks:
