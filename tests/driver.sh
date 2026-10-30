@@ -753,6 +753,7 @@ begin_category "Standalone Programs" "Testing checked-in end-to-end programs"
 try_file 0 'F(10) = 55' "$TESTS_DIR/fib.c"
 try_file 0 $'1\nHello World' "$TESTS_DIR/hello.c"
 try_file 0 '' "$TESTS_DIR/strength-reduce.c"
+try_file 0 '' "$TESTS_DIR/memory-forwarding.c"
 try_file 0 '' "$TESTS_DIR/libc-mem.c"
 
 # Count one check that does not fit the try helpers. Usage:
@@ -1276,7 +1277,9 @@ void bump(int r)
         m[r][k] = m[r][k] + 1;
 }
 EOF
-try_ir_count 2 bump ptrstride:4 << EOF
+# The load and the store of m[r][k] share one pointer recurrence now that CSE
+# merges their identical address computations, where each used to carry its own.
+try_ir_count 1 bump ptrstride:4 << EOF
 int a[64], b[64];
 int m[8][64];
 int reuse(void);

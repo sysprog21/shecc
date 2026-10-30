@@ -1199,6 +1199,16 @@ void vir_frontend_optimize(vir_function_t *graph)
         fatal("Invalid VIR reachability");
     check_native_pass("sccp", vir_sccp(graph, level));
     check_native_pass("cfg", vir_simplify_cfg(graph, level));
+    int duplicated = vir_duplicate_returns(graph, level);
+    check_native_pass("return-dup", duplicated);
+    if (duplicated) {
+        check_native_pass("return-dup-sccp", vir_sccp(graph, level));
+        check_native_pass("return-dup-cfg", vir_simplify_cfg(graph, level));
+    }
+    int ranged = vir_fuse_range_tests(graph, level);
+    check_native_pass("range", ranged);
+    if (ranged)
+        check_native_pass("range-cfg", vir_simplify_cfg(graph, level));
     check_native_pass("params", vir_simplify_params(graph, level));
     check_native_pass("cse", vir_local_cse(graph, level));
     check_native_pass("gvn", vir_gvn_with_stats(graph, level, NULL));

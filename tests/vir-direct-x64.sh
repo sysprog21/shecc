@@ -115,9 +115,9 @@ check_vir_dump()
 
     dump_main_vir "$name"
 
-    # Two stores and two loads each extend their index, unless the load right
-    # after the last store is forwarded the stored value instead.
-    test "$(grep -c " = $extension.i32.i64 " "$dump.main")" -ge 3
+    # The two stores extend their index; the loads after the barrier call
+    # reuse exactly those extensions and the addresses built from them.
+    test "$(grep -c " = $extension.i32.i64 " "$dump.main")" -eq 2
     if grep -q "$opposite.i32.i64" "$dump.main"; then exit 1; fi
     awk -v extension="$extension" '
         $3 == extension ".i32.i64" { extended[$1] = 1 }
@@ -143,7 +143,7 @@ check_vir_dump()
         }
         END {
             exit failed || direct < 1 || multiplied < 1 ||
-                 direct + multiplied < 3 || multiplies != multiplied
+                 direct + multiplied < 2 || multiplies != multiplied
         }
     ' "$dump.main"
 }
