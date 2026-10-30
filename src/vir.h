@@ -410,6 +410,19 @@ int vir_simplify_cfg_with_pruning(vir_function_t *func,
                                   vir_opt_level_t opt_level,
                                   bool prune_unreachable);
 
+/* At O1/O2, copy a short, effect-free block that returns a computed result into
+ * each block that jumps to it with a constant argument, so the copy returns at
+ * once and folds. The original loses those entries, and the caller prunes it
+ * with vir_simplify_cfg() once it has no entry left.
+ */
+int vir_duplicate_returns(vir_function_t *func, vir_opt_level_t opt_level);
+
+/* At O2, turn two branches `x < lo` and `x > hi` that reach one block into the
+ * single test `ult(x - lo, hi - lo + 1)`. The second branch's block loses its
+ * only entry; vir_simplify_cfg() removes it.
+ */
+int vir_fuse_range_tests(vir_function_t *func, vir_opt_level_t opt_level);
+
 /* At O1/O2, replace each block parameter that receives one value on every edge,
  * or itself on a back edge, by that value. The entry block's parameters are the
  * function's arguments and stay. A loop-invariant input otherwise reaches CSE,

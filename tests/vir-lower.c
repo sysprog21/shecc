@@ -759,6 +759,8 @@ static void test_descending_pointer_family(void)
         assert(effect);
         vir_value_t *updated[] = {next_j};
         assert(vir_edge_create(&f, body, header, updated, 1));
+        /* Something reads the slot, or its stores are dead and go. */
+        assert(vir_volatile_load(&f, done, root, VIR_TYPE_I32));
         wide = bits == 64 ? vir_zext(&f, done, j, width) : j;
         if (mode == 8)
             stride = vir_const_int(&f, pre, width, 8);

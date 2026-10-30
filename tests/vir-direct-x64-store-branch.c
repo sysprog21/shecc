@@ -1,6 +1,7 @@
+/* Volatile, or the slot is never read after forwarding and the stores go. */
 int main(int argc)
 {
-    int value = 29;
+    volatile int value = 29;
 
     if (argc)
         return *(&value);

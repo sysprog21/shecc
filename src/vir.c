@@ -2251,6 +2251,72 @@ static vir_value_t *vir_strength_reduce_integer(vir_function_t *func,
     return product ? vir_sub(func, block, op0, product) : NULL;
 }
 
+static vir_value_t *vir_integer_binary(vir_function_t *func,
+                                       vir_block_t *block,
+                                       vir_value_t *op0,
+                                       vir_value_t *op1,
+                                       vir_opcode_t opcode);
+
+/* The operations that associate with a constant: op(op(x, c1), c2) is op(x, c1
+ * op c2), and two shifts the same way make one shift by the sum while it stays
+ * below the width. This shortens the chain a field offset or a mask built in
+ * steps would otherwise keep.
+ */
+static vir_value_t *vir_normalize_chain(vir_function_t *func,
+                                        vir_block_t *block,
+                                        vir_value_t *op0,
+                                        vir_value_t *op1,
+                                        vir_opcode_t opcode)
+{
+    vir_value_t *constant = NULL, *inner = NULL, *inner_constant = NULL;
+    vir_value_t *x;
+    unsigned long long combined;
+    int width = vir_integer_type_width(op0->type);
+
+    if (opcode == VIR_OP_SHL || opcode == VIR_OP_ASHR ||
+        opcode == VIR_OP_LSHR) {
+        if (!vir_is_constant(op1) || op0->opcode != opcode || op0->def_effect ||
+            !vir_is_constant(op0->op1) ||
+            op0->op1->constant >= (unsigned long long) width ||
+            op1->constant >= (unsigned long long) width ||
+            op0->op1->constant + op1->constant >= (unsigned long long) width)
+            return NULL;
+        vir_value_t *count = vir_const_i32(
+            func, block, (int) (op0->op1->constant + op1->constant));
+        return count ? vir_integer_binary(func, block, op0->op0, count, opcode)
+                     : NULL;
+    }
+    if (opcode != VIR_OP_ADD && opcode != VIR_OP_MUL &&
+        opcode != VIR_OP_BITAND && opcode != VIR_OP_BITOR &&
+        opcode != VIR_OP_BITXOR)
+        return NULL;
+    if (vir_is_constant(op1) && !vir_is_constant(op0)) {
+        constant = op1;
+        inner = op0;
+    } else if (vir_is_constant(op0) && !vir_is_constant(op1)) {
+        constant = op0;
+        inner = op1;
+    }
+    if (!constant || inner->opcode != opcode || inner->def_effect)
+        return NULL;
+    if (vir_is_constant(inner->op1) && !vir_is_constant(inner->op0)) {
+        inner_constant = inner->op1;
+        x = inner->op0;
+    } else if (vir_is_constant(inner->op0) && !vir_is_constant(inner->op1)) {
+        inner_constant = inner->op0;
+        x = inner->op1;
+    } else {
+        return NULL;
+    }
+    if (!vir_fold_binary(func, opcode, op0->type, op0->type,
+                         inner_constant->constant, constant->constant,
+                         &combined))
+        return NULL;
+    constant = vir_const_int(func, block, op0->type, combined);
+    return constant ? vir_integer_binary(func, block, x, constant, opcode)
+                    : NULL;
+}
+
 static vir_value_t *vir_normalize_binary(vir_function_t *func,
                                          vir_block_t *block,
                                          vir_value_t *op0,
@@ -2259,8 +2325,54 @@ static vir_value_t *vir_normalize_binary(vir_function_t *func,
 {
     vir_value_t *normalized =
         vir_normalize_bitwise(func, block, op0, op1, opcode);
+    if (!normalized)
+        normalized = vir_normalize_integer(func, block, op0, op1, opcode);
     return normalized ? normalized
-                      : vir_normalize_integer(func, block, op0, op1, opcode);
+                      : vir_normalize_chain(func, block, op0, op1, opcode);
+}
+
+static vir_value_t *vir_integer_unary(vir_function_t *func,
+                                      vir_block_t *block,
+                                      vir_value_t *operand,
+                                      vir_type_t type,
+                                      vir_opcode_t opcode);
+
+/* A cast of a cast is one cast, or none: trunc(zext(y)) is y when it returns to
+ * y's width, a narrower trunc(y) when it goes below it, and zext(y) or sext(y)
+ * when it stops between. Extending a zero extension by zeros or by sign bits is
+ * the same zero extension.
+ */
+static vir_value_t *vir_cast_chain(vir_function_t *func,
+                                   vir_block_t *block,
+                                   vir_opcode_t opcode,
+                                   vir_type_t type,
+                                   vir_value_t *inner)
+{
+    vir_value_t *y = inner->op0;
+    int from, to;
+
+    if (inner->def_effect || inner->nr_ops != 1 ||
+        (inner->opcode != VIR_OP_ZEXT && inner->opcode != VIR_OP_SEXT &&
+         inner->opcode != VIR_OP_TRUNC))
+        return NULL;
+    from = vir_integer_type_width(y->type);
+    to = vir_integer_type_width(type);
+    if (!from || !to)
+        return NULL;
+    if (opcode == VIR_OP_TRUNC) {
+        if (inner->opcode == VIR_OP_TRUNC)
+            return vir_integer_unary(func, block, y, type, VIR_OP_TRUNC);
+        if (to == from)
+            return y;
+        return vir_integer_unary(func, block, y, type,
+                                 to < from ? VIR_OP_TRUNC : inner->opcode);
+    }
+    if (inner->opcode == VIR_OP_TRUNC)
+        return NULL;
+    if (inner->opcode == opcode ||
+        (opcode == VIR_OP_SEXT && inner->opcode == VIR_OP_ZEXT))
+        return vir_integer_unary(func, block, y, type, inner->opcode);
+    return NULL;
 }
 
 /* NEG and BITNOT undo themselves: op(op(x)) is x. */
@@ -2343,6 +2455,12 @@ static vir_value_t *vir_integer_unary(vir_function_t *func,
     vir_value_t *involution = vir_unary_involution(opcode, operand);
     if (involution)
         return involution;
+    if (cast && !vir_is_constant(operand)) {
+        vir_value_t *chained =
+            vir_cast_chain(func, block, opcode, type, operand);
+        if (chained)
+            return chained;
+    }
     if (!vir_is_constant(operand))
         return vir_user_operation(func, block, opcode, type, operand, NULL);
     if (cast)
@@ -2389,6 +2507,10 @@ static vir_value_t *vir_compare(vir_function_t *func,
             vir_order_commutative(&op0, &op1);
     } else if (!vir_integer_operands_are_local(func, block, op0, op1)) {
         return NULL;
+    } else if (op0 == op1 ||
+               (opcode == VIR_OP_ULT && vir_is_const_int(op1, 0))) {
+        /* Nothing is below itself, and nothing is unsigned-below zero. */
+        return vir_const_i1(func, block, 0);
     }
     if (vir_is_constant(op0) && vir_is_constant(op1)) {
         bits0 = op0->constant;
@@ -2467,6 +2589,23 @@ vir_value_t *vir_inttoptr(vir_function_t *func,
                             VIR_OP_INTTOPTR);
 }
 
+/* ptradd(ptradd(p, c1), c2) is ptradd(p, c1 + c2), the one displacement an
+ * access can take.
+ */
+static vir_value_t *vir_ptradd_fold(vir_function_t *func,
+                                    vir_block_t *block,
+                                    vir_value_t *base,
+                                    vir_value_t *byte_offset)
+{
+    if (base->opcode != VIR_OP_PTRADD || !vir_is_constant(base->op1) ||
+        !vir_is_constant(byte_offset) || base->op1->type != byte_offset->type)
+        return NULL;
+    vir_value_t *sum =
+        vir_const_int(func, block, byte_offset->type,
+                      base->op1->constant + byte_offset->constant);
+    return sum ? vir_ptradd(func, block, base->op0, sum) : NULL;
+}
+
 vir_value_t *vir_ptradd(vir_function_t *func,
                         vir_block_t *block,
                         vir_value_t *base,
@@ -2483,6 +2622,9 @@ vir_value_t *vir_ptradd(vir_function_t *func,
         return NULL;
     if (vir_is_constant(byte_offset) && byte_offset->constant == 0)
         return base;
+    vir_value_t *folded = vir_ptradd_fold(func, block, base, byte_offset);
+    if (folded)
+        return folded;
     if (vir_is_constant(base) && vir_is_constant(byte_offset))
         return vir_const_ptr(func, block,
                              base->constant + byte_offset->constant);
@@ -2712,12 +2854,100 @@ int vir_replace_all_uses(vir_function_t *func,
     return 1;
 }
 
-static unsigned int vir_cse_hash(const vir_value_t *value)
+/* What CSE treats as an operand's identity. Constants are not uniqued when they
+ * are built, so with @fold two equal ones stand for the same operand; every
+ * other value is itself.
+ */
+static unsigned int vir_cse_operand_key(const vir_value_t *operand, bool fold)
+{
+    if (fold && operand->opcode == VIR_OP_CONST)
+        return ((unsigned int) operand->constant ^
+                (unsigned int) (operand->constant >> 32)) *
+                   2654435761u +
+               (unsigned int) operand->type;
+    return (unsigned int) operand->id;
+}
+
+/* Two constants that hold the same bits, though built as separate values. */
+static bool vir_const_same(const vir_value_t *a, const vir_value_t *b)
+{
+    return a->opcode == VIR_OP_CONST && b->opcode == VIR_OP_CONST &&
+           a->type == b->type && a->constant == b->constant;
+}
+
+static bool vir_cse_operand_equal(const vir_value_t *a,
+                                  const vir_value_t *b,
+                                  bool fold)
+{
+    return a == b || (fold && vir_const_same(a, b));
+}
+
+/* Pure values worth numbering: binary and unary operations, and the address of
+ * a stack object, global, string or function, which the backend would otherwise
+ * rebuild at every use. Loads and calls carry an effect and constants are cheap
+ * to rematerialize, so neither takes part.
+ */
+static bool vir_cse_candidate(const vir_value_t *value)
+{
+    if (value->def_effect)
+        return false;
+
+    /* A constant displacement folds into the access that uses it: the x64 and
+     * AArch64 emitters take it as an addressing-mode offset (see sib_take and
+     * addr_fold_disp in x64-codegen.c), so a shared copy would only take a
+     * register.
+     */
+    if (value->opcode == VIR_OP_PTRADD && value->op1->opcode == VIR_OP_CONST)
+        return false;
+    if (value->nr_ops)
+        return true;
+    return value->opcode == VIR_OP_STACK_ADDR ||
+           value->opcode == VIR_OP_GLOBAL_ADDR ||
+           value->opcode == VIR_OP_RODATA_ADDR ||
+           value->opcode == VIR_OP_FUNC_ADDR;
+}
+
+static unsigned int vir_cse_hash(const vir_value_t *value, bool fold)
 {
     unsigned int hash = (unsigned int) value->opcode;
     hash = hash * 33u + (unsigned int) value->type;
-    hash = hash * 33u + (unsigned int) value->op0->id;
-    return hash * 33u + (unsigned int) value->op1->id;
+    if (value->nr_ops == 2) {
+        unsigned int left = vir_cse_operand_key(value->op0, fold);
+        unsigned int right = vir_cse_operand_key(value->op1, fold);
+        /* Commutative operands may sit in either order. */
+        if (vir_opcode_is_commutative(value->opcode))
+            return hash * 33u + (left + right) * 31u + (left ^ right);
+        return (hash * 33u + left) * 33u + right;
+    }
+    if (value->nr_ops == 1)
+        return hash * 33u + vir_cse_operand_key(value->op0, fold);
+    if (value->opcode == VIR_OP_STACK_ADDR)
+        return hash * 33u + value->addr->slot;
+    if (value->opcode == VIR_OP_RODATA_ADDR)
+        return hash * 33u + (unsigned int) value->constant;
+    for (const char *name = value->addr->name; *name; name++)
+        hash = hash * 33u + (unsigned char) *name;
+    return hash;
+}
+
+static bool vir_cse_equal(const vir_value_t *a, const vir_value_t *b, bool fold)
+{
+    if (a->opcode != b->opcode || a->type != b->type || a->nr_ops != b->nr_ops)
+        return false;
+    if (a->nr_ops == 2)
+        return (vir_cse_operand_equal(a->op0, b->op0, fold) &&
+                vir_cse_operand_equal(a->op1, b->op1, fold)) ||
+               (vir_opcode_is_commutative(a->opcode) &&
+                vir_cse_operand_equal(a->op0, b->op1, fold) &&
+                vir_cse_operand_equal(a->op1, b->op0, fold));
+    if (a->nr_ops == 1)
+        return vir_cse_operand_equal(a->op0, b->op0, fold);
+    if (a->opcode == VIR_OP_STACK_ADDR)
+        return a->addr->slot == b->addr->slot;
+    if (a->opcode == VIR_OP_RODATA_ADDR)
+        return a->constant == b->constant;
+    return a->addr->name == b->addr->name ||
+           !strcmp(a->addr->name, b->addr->name);
 }
 
 /* Local CSE sizes each block's table from its order counter, which bounds the
@@ -2750,7 +2980,7 @@ static unsigned int vir_cse_capacity(const vir_function_t *func)
 
     for (const vir_block_t *block = func->blocks; block; block = block->next)
         for (const vir_value_t *value = block->head; value; value = value->next)
-            if (value->nr_ops == 2 && ++values > INT_MAX / 2)
+            if (vir_cse_candidate(value) && ++values > INT_MAX / 2)
                 return 0;
     return vir_cse_table_size(values);
 }
@@ -2764,7 +2994,8 @@ static int vir_cse_scan_block(vir_function_t *func,
                               vir_block_t *block,
                               vir_value_t **table,
                               unsigned int capacity,
-                              vir_cse_stats_t *stats)
+                              vir_cse_stats_t *stats,
+                              bool fold)
 {
     int replacements = 0;
 
@@ -2772,19 +3003,17 @@ static int vir_cse_scan_block(vir_function_t *func,
         vir_value_t *leader;
         unsigned int slot;
 
-        if (value->nr_ops != 2)
+        if (!vir_cse_candidate(value))
             continue;
         if (stats) {
             stats->values++;
             stats->lookups++;
         }
-        slot = vir_cse_hash(value) & (capacity - 1);
+        slot = vir_cse_hash(value, fold) & (capacity - 1);
         while ((leader = table[slot])) {
             if (stats)
                 stats->probes++;
-            if (leader->opcode == value->opcode &&
-                leader->type == value->type && leader->op0 == value->op0 &&
-                leader->op1 == value->op1)
+            if (vir_cse_equal(leader, value, fold))
                 break;
             slot = (slot + 1) & (capacity - 1);
         }
@@ -2846,8 +3075,8 @@ static int vir_cse_run(vir_function_t *func,
                 stats->table_slots += (int) block_capacity;
             }
         }
-        replacements +=
-            vir_cse_scan_block(func, block, table, block_capacity, stats);
+        replacements += vir_cse_scan_block(func, block, table, block_capacity,
+                                           stats, !global);
     }
     free(table);
     return replacements;
@@ -2871,67 +3100,463 @@ static bool vir_same_address(const vir_value_t *a,
            (a->nr_ops == 1 || vir_same_address(a->op1, b->op1, depth - 1));
 }
 
-/* Only a single-entry, effect-free path may carry a prior load forward. */
-static int vir_reuse_incoming_loads(vir_function_t *func)
+/* Memory forwarding.
+ *
+ * A load that reads what an earlier load or store on every path to it already
+ * produced is that value. The walk follows each chain of blocks with a single
+ * predecessor, so the available values on entry to a block are exactly those at
+ * the end of its predecessor, and whatever defined one dominates the load.
+ * Everything else starts empty: a join or loop header has paths this walk has
+ * not seen.
+ *
+ * What a store may overwrite is decided from the address alone. An address is a
+ * root object (stack slot, global or string) plus an offset, or an opaque
+ * pointer plus an offset. Two different roots are different objects, so
+ * accesses through them never overlap. A pointer that came from anywhere else
+ * can only reach a stack slot whose address left the function (stored, passed,
+ * compared or cast). Strings are read-only and survive every store.
+ *
+ * A call forgets everything but strings, even slots it cannot reach: carrying a
+ * value across a call needs a callee-saved register or a spill, and measured on
+ * a self-compile that cost more than loading it again.
+ */
+#define VIR_MEM_ENTRIES 32
+/* Frames with more stack slots than this skip the analysis. */
+#define VIR_MEM_MAX_SLOTS 65536
+
+typedef enum {
+    VIR_MEM_ANY,    /* Unknown extent: may overlap anything. */
+    VIR_MEM_OPAQUE, /* Pointer of unknown origin plus offset. */
+    VIR_MEM_STACK,
+    VIR_MEM_GLOBAL,
+    VIR_MEM_RODATA,
+} vir_mem_kind_t;
+
+typedef enum {
+    VIR_MEM_DISJOINT,
+    VIR_MEM_SAME,
+    VIR_MEM_OVERLAP,
+} vir_mem_relation_t;
+
+typedef struct {
+    vir_mem_kind_t kind;
+    const vir_value_t *base; /* Opaque pointer the offset applies to. */
+    const char *name;        /* Global. */
+    unsigned int slot;       /* Stack. */
+    int offset;
+    bool variable; /* A non-constant amount was added: offset is unknown. */
+    unsigned int size;
+} vir_mem_loc_t;
+
+typedef struct {
+    vir_mem_loc_t loc;
+    const vir_value_t *address;
+    vir_value_t *value;
+} vir_mem_entry_t;
+
+typedef struct {
+    int count;
+    vir_mem_entry_t entries[VIR_MEM_ENTRIES];
+} vir_mem_state_t;
+
+typedef struct {
+    const vir_function_t *func;
+
+    /* One flag per stack slot: its address is used for more than loading and
+     * storing through it, so a call or an unknown pointer may reach it.
+     */
+    unsigned char *escaped;
+    unsigned int slots;
+} vir_mem_t;
+
+/* Whether the address held by @value, or something computed from it by pointer
+ * arithmetic, is used for anything but the address of a load or store.
+ */
+static bool vir_mem_address_escapes(const vir_value_t *value, int depth)
+{
+    for (const vir_use_t *use = value->uses; use; use = use->next) {
+        const vir_effect_t *effect = vir_use_effect(use);
+        const vir_value_t *user = vir_use_user(use);
+        if (effect) {
+            if (use->operand != 0 || effect->address != value ||
+                effect->kind == VIR_EFFECT_CALL)
+                return true;
+        } else if (user && user->opcode == VIR_OP_PTRADD && use->operand == 0 &&
+                   depth < 8) {
+            if (vir_mem_address_escapes(user, depth + 1))
+                return true;
+        } else {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Every stack address the function holds is in the root table, so finding them
+ * does not take a walk over all its values.
+ */
+static bool vir_mem_init(vir_mem_t *mem, const vir_function_t *func)
+{
+    unsigned int slots = 0;
+
+    mem->func = func;
+    mem->escaped = NULL;
+    mem->slots = 0;
+    for (int i = 0; i < func->root_capacity; i++)
+        for (const vir_value_t *value = func->root_table[i]; value;
+             value = value->addr->root_next)
+            if (value->opcode == VIR_OP_STACK_ADDR &&
+                vir_value_listed(func, value) && value->addr->slot >= slots)
+                slots = value->addr->slot + 1;
+    if (!slots)
+        return true;
+    if (slots > VIR_MEM_MAX_SLOTS || !(mem->escaped = calloc(slots, 1)))
+        return false;
+    mem->slots = slots;
+    for (int i = 0; i < func->root_capacity; i++)
+        for (const vir_value_t *value = func->root_table[i]; value;
+             value = value->addr->root_next)
+            if (value->opcode == VIR_OP_STACK_ADDR &&
+                vir_value_listed(func, value) &&
+                vir_mem_address_escapes(value, 0))
+                mem->escaped[value->addr->slot] = 1;
+    return true;
+}
+
+/* How many plain loads and stores @func holds. */
+static void vir_count_memory_effects(const vir_function_t *func,
+                                     int *loads,
+                                     int *stores)
+{
+    if (loads)
+        *loads = 0;
+    if (stores)
+        *stores = 0;
+    for (const vir_block_t *block = func->blocks; block; block = block->next)
+        for (const vir_effect_t *effect = block->effects; effect;
+             effect = effect->next) {
+            if (effect->kind == VIR_EFFECT_LOAD && loads)
+                ++*loads;
+            else if (effect->kind == VIR_EFFECT_STORE && stores)
+                ++*stores;
+        }
+}
+
+static bool vir_mem_slot_escaped(const vir_mem_t *mem, unsigned int slot)
+{
+    return slot >= mem->slots || mem->escaped[slot];
+}
+
+static void vir_mem_locate(const vir_mem_t *mem,
+                           const vir_value_t *address,
+                           unsigned int size,
+                           vir_mem_loc_t *loc)
+{
+    const vir_value_t *base = address;
+    int offset = 0;
+    bool variable = false;
+
+    for (int depth = 0; depth < 16 && base->opcode == VIR_OP_PTRADD; depth++) {
+        const vir_value_t *step = base->op1;
+        unsigned long long bits = step->constant;
+        if (step->opcode != VIR_OP_CONST) {
+            variable = true;
+        } else if (mem->func->pointer_bits == 32 || !(bits >> 31) ||
+                   (bits >> 31) == 0x1ffffffffULL) {
+            int delta = (int) (unsigned int) bits;
+            if (delta > 0x3fffffff - offset || delta < -0x3fffffff - offset)
+                variable = true;
+            else
+                offset += delta;
+        } else {
+            variable = true;
+        }
+        base = base->op0;
+    }
+    loc->kind = VIR_MEM_OPAQUE;
+    loc->base = base;
+    loc->name = NULL;
+    loc->slot = 0;
+    loc->offset = offset;
+    loc->variable = variable;
+    loc->size = size;
+    if (base->opcode == VIR_OP_STACK_ADDR ||
+        base->opcode == VIR_OP_GLOBAL_ADDR) {
+        /* A constant offset outside the object says nothing about what it
+         * reaches.
+         */
+        if (!variable &&
+            (offset < 0 || (unsigned int) offset > base->addr->size ||
+             size > base->addr->size - (unsigned int) offset)) {
+            loc->kind = VIR_MEM_ANY;
+        } else if (base->opcode == VIR_OP_STACK_ADDR) {
+            loc->kind = VIR_MEM_STACK;
+            loc->slot = base->addr->slot;
+        } else {
+            loc->kind = VIR_MEM_GLOBAL;
+            loc->name = base->addr->name;
+        }
+    } else if (base->opcode == VIR_OP_RODATA_ADDR) {
+        loc->kind = VIR_MEM_RODATA;
+        if (base->constant > 0x3fffffffULL)
+            loc->variable = true;
+        else
+            loc->offset = offset + (int) base->constant;
+    }
+}
+
+/* Whether two locations of the same kind sit in the same object: the same stack
+ * slot, the same global, the same string area, or off the same unknown pointer.
+ */
+static bool vir_mem_same_root(const vir_mem_loc_t *a, const vir_mem_loc_t *b)
+{
+    if (a->kind == VIR_MEM_STACK)
+        return a->slot == b->slot;
+    if (a->kind == VIR_MEM_GLOBAL)
+        return a->name == b->name || !strcmp(a->name, b->name);
+    if (a->kind == VIR_MEM_OPAQUE)
+        return a->base == b->base;
+    return true;
+}
+
+static vir_mem_relation_t vir_mem_relation(const vir_mem_t *mem,
+                                           const vir_mem_loc_t *a,
+                                           const vir_mem_loc_t *b)
+{
+    if (a->kind == VIR_MEM_ANY || b->kind == VIR_MEM_ANY)
+        return VIR_MEM_OVERLAP;
+    if ((a->kind == VIR_MEM_RODATA) != (b->kind == VIR_MEM_RODATA))
+        return VIR_MEM_DISJOINT;
+    if (a->kind != b->kind) {
+        /* Stack slots and globals are objects of their own; only a pointer of
+         * unknown origin can reach into either, and into a slot only when the
+         * slot's address got out.
+         */
+        const vir_mem_loc_t *other;
+        if (a->kind != VIR_MEM_OPAQUE && b->kind != VIR_MEM_OPAQUE)
+            return VIR_MEM_DISJOINT;
+        other = a->kind == VIR_MEM_OPAQUE ? b : a;
+        return other->kind == VIR_MEM_STACK &&
+                       !vir_mem_slot_escaped(mem, other->slot)
+                   ? VIR_MEM_DISJOINT
+                   : VIR_MEM_OVERLAP;
+    }
+    if (!vir_mem_same_root(a, b))
+        return a->kind == VIR_MEM_OPAQUE ? VIR_MEM_OVERLAP : VIR_MEM_DISJOINT;
+    if (a->variable || b->variable)
+        return VIR_MEM_OVERLAP;
+    if (a->offset + (int) a->size <= b->offset ||
+        b->offset + (int) b->size <= a->offset)
+        return VIR_MEM_DISJOINT;
+    return a->offset == b->offset && a->size == b->size ? VIR_MEM_SAME
+                                                        : VIR_MEM_OVERLAP;
+}
+
+static void vir_mem_drop(vir_mem_state_t *state, int index)
+{
+    state->entries[index] = state->entries[--state->count];
+}
+
+/* Forget whatever a store to @loc may have changed. */
+static void vir_mem_kill(const vir_mem_t *mem,
+                         vir_mem_state_t *state,
+                         const vir_mem_loc_t *loc)
+{
+    for (int i = 0; i < state->count;)
+        if (vir_mem_relation(mem, &state->entries[i].loc, loc) !=
+            VIR_MEM_DISJOINT)
+            vir_mem_drop(state, i);
+        else
+            i++;
+}
+
+static void vir_mem_kill_call(vir_mem_state_t *state)
+{
+    for (int i = 0; i < state->count;) {
+        const vir_mem_loc_t *loc = &state->entries[i].loc;
+        if (loc->kind == VIR_MEM_RODATA)
+            i++;
+        else
+            vir_mem_drop(state, i);
+    }
+}
+
+static void vir_mem_record(vir_mem_state_t *state,
+                           const vir_mem_loc_t *loc,
+                           const vir_value_t *address,
+                           vir_value_t *value)
+{
+    vir_mem_entry_t *entry;
+    if (state->count == VIR_MEM_ENTRIES)
+        vir_mem_drop(state, 0);
+    entry = &state->entries[state->count++];
+    entry->loc = *loc;
+    entry->address = address;
+    entry->value = value;
+}
+
+static unsigned int vir_mem_access_size(const vir_function_t *func,
+                                        vir_type_t type)
+{
+    return (unsigned int) (vir_type_width(func, type) + 7) / 8;
+}
+
+/* The earlier value that @loc, accessed as @type, is known to hold. */
+static vir_value_t *vir_mem_available(const vir_mem_t *mem,
+                                      const vir_mem_state_t *state,
+                                      const vir_value_t *address,
+                                      const vir_mem_loc_t *loc,
+                                      vir_type_t type)
+{
+    for (int i = state->count - 1; i >= 0; i--) {
+        const vir_mem_entry_t *entry = &state->entries[i];
+        vir_mem_relation_t relation;
+        if (entry->value->type != type)
+            continue;
+        if (entry->address == address)
+            return entry->value;
+        relation = vir_mem_relation(mem, &entry->loc, loc);
+        if (relation == VIR_MEM_SAME ||
+            (relation == VIR_MEM_OVERLAP &&
+             vir_same_address(entry->address, address, 8)))
+            return entry->value;
+    }
+    return NULL;
+}
+
+static int vir_mem_scan_block(const vir_mem_t *mem,
+                              const vir_block_t *block,
+                              vir_mem_state_t *state)
 {
     int changes = 0;
-    for (vir_block_t *block = func->blocks; block; block = block->next) {
-        vir_block_t *pred = block;
-        vir_effect_t *leader = NULL;
-        for (int depth = 0; depth < 8; depth++) {
-            if (!pred->incoming || pred->incoming->next_incoming)
-                break;
-            pred = pred->incoming->from;
-            if (pred == block)
-                break;
-            if (pred->last_effect) {
-                if (pred->last_effect->kind == VIR_EFFECT_LOAD)
-                    leader = pred->last_effect;
-                break;
+
+    for (vir_effect_t *effect = block->effects; effect; effect = effect->next) {
+        vir_mem_loc_t loc;
+        vir_value_t *known;
+        vir_type_t type;
+        switch (effect->kind) {
+        case VIR_EFFECT_LOAD:
+            type = effect->result->type;
+            vir_mem_locate(mem, effect->address,
+                           vir_mem_access_size(mem->func, type), &loc);
+            known = vir_mem_available(mem, state, effect->address, &loc, type);
+            if (known && known != effect->result) {
+                if (effect->result->uses) {
+                    vir_replace_all_uses_unchecked(effect->result, known);
+                    changes++;
+                }
+            } else if (!known) {
+                vir_mem_record(state, &loc, effect->address, effect->result);
             }
-        }
-        if (!leader)
-            continue;
-        for (vir_effect_t *effect = block->effects, *next; effect;
-             effect = next) {
-            next = effect->next;
-            if (effect->kind != VIR_EFFECT_LOAD)
-                break;
-            if (effect->result->type == leader->result->type &&
-                vir_same_address(effect->address, leader->address, 8) &&
-                vir_replace_all_uses(func, effect->result, leader->result) &&
-                vir_effect_remove(func, effect))
-                changes++;
+            break;
+        case VIR_EFFECT_STORE:
+            type = effect->stored_value->type;
+            vir_mem_locate(mem, effect->address,
+                           vir_mem_access_size(mem->func, type), &loc);
+            vir_mem_kill(mem, state, &loc);
+            vir_mem_record(state, &loc, effect->address, effect->stored_value);
+            break;
+        case VIR_EFFECT_CALL:
+            vir_mem_kill_call(state);
+            break;
+        default:
+            state->count = 0;
+            break;
         }
     }
     return changes;
 }
 
-/* A load that reads back what the block last stored there, with nothing but
- * other loads in between, is the stored value. Any other store, call or
- * volatile access may change the location, so it ends the forwarding.
- */
-static int vir_forward_stores(vir_function_t *func)
+static int vir_forward_memory(vir_function_t *func)
 {
+    vir_mem_t mem;
+    int blocks = func->block_count;
+    int slots = blocks < 16 ? blocks : 16;
     int changes = 0;
-    for (vir_block_t *block = func->blocks; block; block = block->next) {
-        vir_effect_t *store = NULL;
-        for (vir_effect_t *effect = block->effects, *next; effect;
-             effect = next) {
-            next = effect->next;
-            if (effect->kind == VIR_EFFECT_STORE)
-                store = effect;
-            else if (effect->kind != VIR_EFFECT_LOAD)
-                store = NULL;
-            else if (store &&
-                     effect->result->type == store->stored_value->type &&
-                     vir_same_address(effect->address, store->address, 8) &&
-                     vir_replace_all_uses(func, effect->result,
-                                          store->stored_value) &&
-                     vir_effect_remove(func, effect))
-                changes++;
+    unsigned char *visited = NULL;
+    vir_mem_state_t *states = NULL;
+    vir_block_t **work = NULL;
+    int *owner;
+    int *spare;
+    int loads, stores;
+
+    vir_count_memory_effects(func, &loads, &stores);
+    /* A load needs an earlier access to take its value from. */
+    if (blocks <= 0 || !loads || loads + stores < 2)
+        return 0;
+    /* The walk indexes its tables by block position. */
+    for (const vir_block_t *block = func->blocks; block; block = block->next)
+        if (vir_block_index(func, block) < 0)
+            return 0;
+    if (!vir_mem_init(&mem, func))
+        return 0;
+    states = malloc(sizeof(*states) * (size_t) slots);
+    work = malloc(sizeof(*work) * (size_t) slots +
+                  2 * sizeof(*owner) * (size_t) slots + (size_t) blocks);
+    if (!states || !work)
+        goto done;
+    owner = (int *) (work + slots);
+    spare = owner + slots;
+    visited = (unsigned char *) (spare + slots);
+    memset(visited, 0, (size_t) blocks);
+
+    /* Phase 0 starts a walk at every block that is not the only way into its
+     * successor; phase 1 sweeps up what those could not reach (a state pool
+     * that ran dry, or a cycle of single-entry blocks).
+     */
+    for (int phase = 0; phase < 2; phase++) {
+        for (vir_block_t *root = func->blocks; root; root = root->next) {
+            int depth = 1;
+            int spares = 0;
+            bool single = root != func->blocks && root->incoming &&
+                          !root->incoming->next_incoming;
+            if (visited[root->index] || (!phase && single))
+                continue;
+            for (int i = 1; i < slots; i++)
+                spare[spares++] = i;
+            states[0].count = 0;
+            work[0] = root;
+            owner[0] = 0;
+            while (depth) {
+                vir_block_t *block = work[--depth];
+                int mine = owner[depth];
+                vir_block_t *child[2];
+                int children = 0;
+                bool handed = false;
+                visited[block->index] = 1;
+                changes += vir_mem_scan_block(&mem, block, &states[mine]);
+                for (vir_edge_t *edge = block->outgoing; edge && children < 2;
+                     edge = edge->next_outgoing) {
+                    vir_block_t *to = edge->to;
+                    if (to != func->blocks && !visited[to->index] &&
+                        to->incoming && !to->incoming->next_incoming)
+                        child[children++] = to;
+                }
+                for (int i = 0; i < children; i++) {
+                    int slot = mine;
+                    if (i + 1 < children) {
+                        if (!spares)
+                            continue;
+                        slot = spare[--spares];
+                        states[slot].count = states[mine].count;
+                        memcpy(states[slot].entries, states[mine].entries,
+                               (size_t) states[mine].count *
+                                   sizeof(states[mine].entries[0]));
+                    } else {
+                        handed = true;
+                    }
+                    work[depth] = child[i];
+                    owner[depth++] = slot;
+                }
+                if (!handed)
+                    spare[spares++] = mine;
+            }
         }
     }
+done:
+    free(states);
+    free(work);
+    free(mem.escaped);
     return changes;
 }
 
@@ -2942,8 +3567,7 @@ int vir_local_cse_with_stats(vir_function_t *func,
     int changes = vir_cse_run(func, opt_level, stats, false);
     if (changes < 0 || opt_level == VIR_OPT_O0)
         return changes;
-    int loads = vir_forward_stores(func);
-    loads += vir_reuse_incoming_loads(func);
+    int loads = vir_forward_memory(func);
     if (stats)
         stats->replacements += loads;
     return changes + loads;
@@ -3007,8 +3631,17 @@ int vir_normalize(vir_function_t *func, vir_opt_level_t opt_level)
                 if (!replacement)
                     replacement = vir_strength_reduce_integer(
                         func, block, value->op0, value->op1, value->opcode);
-            } else if (value->nr_ops == 1)
+            } else if (value->nr_ops == 1) {
                 replacement = vir_unary_involution(value->opcode, value->op0);
+                if (!replacement && (value->opcode == VIR_OP_ZEXT ||
+                                     value->opcode == VIR_OP_SEXT ||
+                                     value->opcode == VIR_OP_TRUNC))
+                    replacement = vir_cast_chain(func, block, value->opcode,
+                                                 value->type, value->op0);
+            } else if (value->opcode == VIR_OP_PTRADD) {
+                replacement =
+                    vir_ptradd_fold(func, block, value->op0, value->op1);
+            }
             if (!replacement || replacement->type != value->type)
                 continue;
             if (block->tail != old_tail)
@@ -3215,34 +3848,160 @@ static void vir_promote_private_stack_values(vir_function_t *func)
     }
 }
 
-/* An unused ordinary read cannot observe a store. Every other effect remains a
- * barrier unless it overwrites exactly the same typed location.
- */
-static void vir_drop_overwritten_stores(vir_block_t *block)
+/* Whether a store to @later covers every byte of the one to @earlier. */
+static bool vir_mem_covers(const vir_value_t *later_address,
+                           const vir_mem_loc_t *later,
+                           const vir_value_t *earlier_address,
+                           const vir_mem_loc_t *earlier)
 {
-    bool changed = false;
-    for (vir_effect_t **link = &block->effects; *link;) {
-        vir_effect_t *effect = *link;
-        if (effect->kind != VIR_EFFECT_STORE) {
-            link = &effect->next;
-            continue;
-        }
-        vir_effect_t *next = effect->next;
-        while (next && next->kind == VIR_EFFECT_LOAD && next->result &&
-               !next->result->uses)
-            next = next->next;
-        if (next && next->kind == VIR_EFFECT_STORE &&
-            effect->address == next->address &&
-            effect->stored_value->type == next->stored_value->type) {
-            vir_remove_effect_uses(effect);
-            *link = effect->next;
-            changed = true;
-        } else {
-            link = &effect->next;
+    if (later->size >= earlier->size &&
+        (later_address == earlier_address ||
+         vir_same_address(later_address, earlier_address, 8)))
+        return true;
+    if (later->kind == VIR_MEM_ANY || later->kind != earlier->kind ||
+        later->variable || earlier->variable)
+        return false;
+    if (!vir_mem_same_root(later, earlier))
+        return false;
+    return later->offset <= earlier->offset &&
+           later->offset + (int) later->size >=
+               earlier->offset + (int) earlier->size;
+}
+
+/* How far past a store the search for its overwriting store goes. */
+#define VIR_DEAD_STORE_WINDOW 64
+
+/* Whether nothing can read the bytes @store writes before a later store in its
+ * block overwrites all of them. A read of a location that may overlap, a
+ * volatile access, and a call that can reach the location end the search; so
+ * does the end of the block, because other blocks are not followed.
+ */
+static bool vir_store_overwritten(const vir_mem_t *mem,
+                                  const vir_effect_t *store,
+                                  const vir_mem_loc_t *loc)
+{
+    int window = VIR_DEAD_STORE_WINDOW;
+
+    for (const vir_effect_t *effect = store->next; effect && window--;
+         effect = effect->next) {
+        vir_mem_loc_t other;
+        switch (effect->kind) {
+        case VIR_EFFECT_LOAD:
+            if (!effect->result->uses)
+                break;
+            vir_mem_locate(mem, effect->address,
+                           vir_mem_access_size(mem->func, effect->result->type),
+                           &other);
+            if (vir_mem_relation(mem, loc, &other) != VIR_MEM_DISJOINT)
+                return false;
+            break;
+        case VIR_EFFECT_STORE:
+            vir_mem_locate(
+                mem, effect->address,
+                vir_mem_access_size(mem->func, effect->stored_value->type),
+                &other);
+            if (vir_mem_covers(effect->address, &other, store->address, loc))
+                return true;
+            break;
+        case VIR_EFFECT_CALL:
+            if (loc->kind != VIR_MEM_STACK ||
+                vir_mem_slot_escaped(mem, loc->slot))
+                return false;
+            break;
+        default:
+            return false;
         }
     }
-    if (changed)
-        vir_repair_value_positions(block);
+    return false;
+}
+
+/* Remove stores nothing can observe: ones a later store in the block
+ * overwrites, and every store to a stack slot whose address stays inside the
+ * function and that nothing reads. With @overwrite false only the second kind
+ * is looked for: the round after unused loads went cannot find new overwritten
+ * stores.
+ */
+static int vir_eliminate_dead_stores(vir_function_t *func, bool overwrite)
+{
+    vir_mem_t mem;
+    unsigned char *read = NULL;
+    bool read_any = false;
+    int removed = 0;
+    int stores;
+
+    vir_count_memory_effects(func, NULL, &stores);
+    if (!stores || !vir_mem_init(&mem, func))
+        return 0;
+    if (mem.slots && !(read = calloc(mem.slots, 1))) {
+        free(mem.escaped);
+        return 0;
+    }
+    /* Without a stack slot no store can be dead for want of a reader. */
+    for (vir_block_t *block = mem.slots ? func->blocks : NULL; block;
+         block = block->next)
+        for (vir_effect_t *effect = block->effects; effect;
+             effect = effect->next) {
+            vir_mem_loc_t loc;
+            if (effect->kind == VIR_EFFECT_STORE ||
+                effect->kind == VIR_EFFECT_CALL)
+                continue;
+            if (effect->kind == VIR_EFFECT_VOLATILE) {
+                read_any = true;
+                continue;
+            }
+
+            /* Loads read the slot, and so does a volatile store: it may be
+             * watched from outside.
+             */
+            vir_mem_locate(
+                &mem, effect->address,
+                vir_mem_access_size(func, vir_effect_is_load(effect->kind)
+                                              ? effect->result->type
+                                              : effect->stored_value->type),
+                &loc);
+            if (loc.kind == VIR_MEM_STACK && loc.slot < mem.slots)
+                read[loc.slot] = 1;
+            else if (loc.kind != VIR_MEM_OPAQUE && loc.kind != VIR_MEM_GLOBAL &&
+                     loc.kind != VIR_MEM_RODATA)
+                read_any = true;
+        }
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        bool changed = false;
+        int pending = 0;
+        for (const vir_effect_t *e = block->effects; e; e = e->next)
+            if (e->kind == VIR_EFFECT_STORE)
+                pending++;
+        for (vir_effect_t **link = &block->effects; *link;) {
+            vir_effect_t *effect = *link;
+            vir_mem_loc_t loc;
+            bool dead = false;
+            if (effect->kind == VIR_EFFECT_STORE) {
+                pending--;
+                vir_mem_locate(
+                    &mem, effect->address,
+                    vir_mem_access_size(func, effect->stored_value->type),
+                    &loc);
+                dead = (loc.kind == VIR_MEM_STACK &&
+                        !vir_mem_slot_escaped(&mem, loc.slot) && !read_any &&
+                        !read[loc.slot]) ||
+                       (overwrite && pending &&
+                        vir_store_overwritten(&mem, effect, &loc));
+            }
+            if (dead) {
+                vir_remove_effect_uses(effect);
+                *link = effect->next;
+                changed = true;
+                removed++;
+            } else {
+                link = &effect->next;
+            }
+        }
+        if (changed)
+            vir_repair_value_positions(block);
+    }
+    free(read);
+    free(mem.escaped);
+    return removed;
 }
 
 int vir_dce_with_stats(vir_function_t *func,
@@ -3259,6 +4018,7 @@ int vir_dce_with_stats(vir_function_t *func,
     int head = 0;
     int tail = 0;
     int removed = 0;
+    int stores;
     int result = -1;
 
     if (passes)
@@ -3275,11 +4035,10 @@ int vir_dce_with_stats(vir_function_t *func,
         return -1;
     if (opt_level == VIR_OPT_O0)
         return 0;
-    for (vir_block_t *block = func->blocks; block; block = block->next)
-        vir_drop_overwritten_stores(block);
+    stores = vir_eliminate_dead_stores(func, true);
     capacity = func->next_value_id;
     if (capacity <= 0)
-        return 0;
+        return stores;
     if (capacity > INT_MAX / (int) (sizeof(*dead) + sizeof(*work)))
         return -1;
     dead = calloc((size_t) capacity, sizeof(*dead));
@@ -3358,7 +4117,13 @@ int vir_dce_with_stats(vir_function_t *func,
         if (changed)
             vir_repair_value_positions(block);
     }
-    result = removed;
+
+    /* Unused loads kept their slots read; with them gone, stores to those slots
+     * may be dead too.
+     */
+    if (removed)
+        stores += vir_eliminate_dead_stores(func, false);
+    result = removed + stores;
 cleanup:
     free(dead);
     free(work);
@@ -4246,6 +5011,9 @@ static bool vir_dominance_init(const vir_function_t *func,
     int count = vir_function_block_count(func);
     int words;
     int i;
+    int *order, *post, *stack;
+    vir_edge_t **cursor;
+    unsigned char *seen;
 
     memset(dominance, 0, sizeof(*dominance));
     if (count <= 0 || func->next_block_id <= 0 ||
@@ -4289,19 +5057,68 @@ static bool vir_dominance_init(const vir_function_t *func,
     for (i = 0; i < words; i++)
         dominance->dom[i] = 0;
     dominance->dom[0] = 1UL;
+
+    /* The maximal fixed point does not depend on the order blocks are visited
+     * in, but how many rounds it takes does: reverse postorder from the entry
+     * settles a reducible graph in two. Blocks the walk misses follow in list
+     * order.
+     */
+    cursor =
+        malloc((size_t) count * (sizeof(*cursor) + 3 * sizeof(*order) + 1));
+    if (!cursor) {
+        vir_dominance_release(dominance);
+        return false;
+    }
+    order = (int *) (cursor + count);
+    post = order + count;
+    stack = post + count;
+    seen = (unsigned char *) (stack + count);
+    memset(seen, 0, (size_t) count);
+    {
+        int depth = 0, posted = 0, visits = 0;
+        seen[0] = 1;
+        stack[0] = 0;
+        cursor[0] = dominance->blocks[0]->outgoing;
+        while (depth >= 0) {
+            vir_edge_t *edge = cursor[depth];
+            if (edge) {
+                int to = vir_dominance_index(dominance, edge->to);
+                cursor[depth] = edge->next_outgoing;
+                if (to >= 0 && !seen[to]) {
+                    seen[to] = 1;
+                    depth++;
+                    stack[depth] = to;
+                    cursor[depth] = dominance->blocks[to]->outgoing;
+                }
+            } else {
+                post[posted++] = stack[depth--];
+            }
+        }
+        while (posted)
+            order[visits++] = post[--posted];
+        for (i = 0; i < count; i++)
+            if (!seen[i])
+                order[visits++] = i;
+    }
     for (;;) {
         bool changed = false;
-        for (i = 1; i < count; i++) {
+        for (int visit = 0; visit < count; visit++) {
             const vir_edge_t *edge;
-            vir_block_t *current = dominance->blocks[i];
+            vir_block_t *current;
             int have_predecessor = 0;
             int word;
+
+            i = order[visit];
+            if (i == 0)
+                continue;
+            current = dominance->blocks[i];
 
             for (word = 0; word < words; word++)
                 dominance->candidate[word] = ~0UL;
             for (edge = current->incoming; edge; edge = edge->next_incoming) {
                 int predecessor = vir_dominance_index(dominance, edge->from);
                 if (predecessor < 0) {
+                    free(cursor);
                     vir_dominance_release(dominance);
                     return false;
                 }
@@ -4330,6 +5147,7 @@ static bool vir_dominance_init(const vir_function_t *func,
         if (!changed)
             break;
     }
+    free(cursor);
     return true;
 }
 
@@ -4479,31 +5297,41 @@ static int vir_inline_size(const vir_function_t *callee,
     return values;
 }
 
+/* Copy the pure @value into @block over the already mapped operands. */
+static vir_value_t *vir_clone_value(vir_function_t *func,
+                                    vir_block_t *block,
+                                    const vir_value_t *value,
+                                    vir_value_t *op0,
+                                    vir_value_t *op1)
+{
+    switch (value->opcode) {
+    case VIR_OP_CONST:
+        return vir_const_int(func, block, value->type, value->constant);
+    case VIR_OP_GLOBAL_ADDR:
+        return vir_global_addr(func, block, value->addr->name,
+                               value->addr->size, value->addr->alignment);
+    case VIR_OP_RODATA_ADDR:
+        return vir_rodata_addr(func, block, (unsigned int) value->constant);
+    case VIR_OP_FUNC_ADDR:
+        return vir_function_addr(func, block, value->addr->name);
+    default:
+        if (value->nr_ops < 1 || value->nr_ops > 2 || !op0 ||
+            (value->nr_ops == 2 && !op1))
+            return NULL;
+        return vir_user_operation(func, block, value->opcode, value->type, op0,
+                                  value->nr_ops == 2 ? op1 : NULL);
+    }
+}
+
 /* Clone one callee value whose operands are already mapped. */
 static vir_value_t *vir_inline_value(vir_function_t *caller,
                                      vir_block_t *block,
                                      const vir_value_t *value,
                                      vir_value_t **map)
 {
-    vir_value_t *op0 = value->op0 ? map[value->op0->id] : NULL;
-    vir_value_t *op1 = value->op1 ? map[value->op1->id] : NULL;
-    switch (value->opcode) {
-    case VIR_OP_CONST:
-        return vir_const_int(caller, block, value->type, value->constant);
-    case VIR_OP_GLOBAL_ADDR:
-        return vir_global_addr(caller, block, value->addr->name,
-                               value->addr->size, value->addr->alignment);
-    case VIR_OP_RODATA_ADDR:
-        return vir_rodata_addr(caller, block, (unsigned int) value->constant);
-    case VIR_OP_FUNC_ADDR:
-        return vir_function_addr(caller, block, value->addr->name);
-    default:
-        if (value->nr_ops < 1 || value->nr_ops > 2 || !op0 ||
-            (value->nr_ops == 2 && !op1))
-            return NULL;
-        return vir_user_operation(caller, block, value->opcode, value->type,
-                                  op0, value->nr_ops == 2 ? op1 : NULL);
-    }
+    return vir_clone_value(caller, block, value,
+                           value->op0 ? map[value->op0->id] : NULL,
+                           value->op1 ? map[value->op1->id] : NULL);
 }
 
 static bool vir_inline_effect(vir_function_t *caller,
@@ -6615,6 +7443,341 @@ int vir_simplify_cfg_with_pruning(vir_function_t *func,
 int vir_simplify_cfg(vir_function_t *func, vir_opt_level_t opt_level)
 {
     return vir_simplify_cfg_with_pruning(func, opt_level, true);
+}
+
+/* Return duplication.
+ *
+ * A short block that only computes a result and returns it, entered by a jump
+ * that passes a constant, is copied into that jump's block: the copy returns
+ * straight away and, with the constant in place of the parameter, usually folds
+ * to a constant. This is the shape of `return a && b` and `return x != y`,
+ * where each arm used to set a flag and join just to test it.
+ */
+#define VIR_RETURN_DUP_VALUES 6
+#define VIR_RETURN_DUP_PARAMS 4
+
+static bool vir_return_dup_candidate(const vir_function_t *func,
+                                     const vir_block_t *block)
+{
+    int count = 0;
+
+    if (block == func->blocks || block->terminator != VIR_TERM_RETURN ||
+        block->effects || !block->params ||
+        block->param_count > VIR_RETURN_DUP_PARAMS)
+        return false;
+    for (const vir_value_t *value = block->head; value; value = value->next) {
+        if (++count > VIR_RETURN_DUP_VALUES || value->def_effect)
+            return false;
+        if (value->opcode == VIR_OP_STACK_ADDR ||
+            (!value->nr_ops && value->opcode != VIR_OP_CONST &&
+             value->opcode != VIR_OP_GLOBAL_ADDR &&
+             value->opcode != VIR_OP_RODATA_ADDR &&
+             value->opcode != VIR_OP_FUNC_ADDR))
+            return false;
+    }
+    return true;
+}
+
+/* Position of @param among the parameters of @block, or -1. */
+static int vir_param_index(const vir_block_t *block, const vir_value_t *param)
+{
+    int index = 0;
+
+    for (const vir_value_t *p = block->params; p; p = p->param_next, index++)
+        if (p == param)
+            return index;
+    return -1;
+}
+
+/* What @operand, a value of @block, stands for in the copy. Values from outside
+ * the block already dominate every block that jumps into it.
+ */
+static vir_value_t *vir_return_dup_map(const vir_block_t *block,
+                                       vir_value_t *operand,
+                                       vir_value_t **args,
+                                       vir_value_t **source,
+                                       vir_value_t **copy,
+                                       int count)
+{
+    if (operand->block != block)
+        return operand;
+    if (operand->is_block_param) {
+        int index = vir_param_index(block, operand);
+        return index < 0 ? NULL : args[index];
+    }
+    for (int index = 0; index < count; index++)
+        if (source[index] == operand)
+            return copy[index];
+    return NULL;
+}
+
+/* Whether @operand is a constant once the block's parameters take @args:
+ * constants themselves, parameters given one, and values computed from such.
+ */
+static bool vir_return_dup_known(const vir_block_t *block,
+                                 const vir_value_t *operand,
+                                 vir_value_t **args,
+                                 bool *known,
+                                 vir_value_t **seen,
+                                 int count)
+{
+    if (operand->block != block)
+        return operand->opcode == VIR_OP_CONST;
+    if (operand->is_block_param) {
+        int index = vir_param_index(block, operand);
+        return index >= 0 && args[index]->opcode == VIR_OP_CONST;
+    }
+    for (int index = 0; index < count; index++)
+        if (seen[index] == operand)
+            return known[index];
+    return false;
+}
+
+/* Whether the copy returns a constant, so SCCP will leave only the return. */
+static bool vir_return_dup_folds(const vir_block_t *block, vir_value_t **args)
+{
+    bool known[VIR_RETURN_DUP_VALUES];
+    vir_value_t *seen[VIR_RETURN_DUP_VALUES];
+    int count = 0;
+
+    for (const vir_value_t *value = block->head; value; value = value->next) {
+        bool folds = value->opcode == VIR_OP_CONST || value->nr_ops > 0;
+        for (int i = 0; folds && i < value->nr_ops; i++)
+            folds = vir_return_dup_known(block, i ? value->op1 : value->op0,
+                                         args, known, seen, count);
+        known[count] = folds;
+        seen[count++] = (vir_value_t *) value;
+    }
+    return !block->return_value ||
+           vir_return_dup_known(block, block->return_value, args, known, seen,
+                                count);
+}
+
+/* 1 when @edge now returns, 0 when it was left alone, -1 when the graph could
+ * not be completed. Values are copied before the edge goes, so the only step
+ * that can fail afterwards is attaching the return.
+ */
+static int vir_return_dup_edge(vir_function_t *func,
+                               vir_block_t *block,
+                               vir_edge_t *edge)
+{
+    vir_block_t *from = edge->from;
+    vir_value_t *args[VIR_RETURN_DUP_PARAMS];
+    vir_value_t *source[VIR_RETURN_DUP_VALUES];
+    vir_value_t *copy[VIR_RETURN_DUP_VALUES];
+    vir_value_t *result = NULL;
+    int params = block->param_count;
+    int count = 0;
+    int constants = 0;
+
+    if (from == block || from->terminator != VIR_TERM_JUMP ||
+        from->outgoing != edge || edge->next_outgoing ||
+        edge->arg_count != params)
+        return 0;
+    for (int i = 0; i < params; i++) {
+        args[i] = edge->args[i];
+        if (args[i]->opcode == VIR_OP_CONST)
+            constants++;
+    }
+    for (const vir_value_t *value = block->head; value; value = value->next)
+        count++;
+    /* A copy that cannot fold would only grow the code. */
+    if (!constants || (count > 2 && !vir_return_dup_folds(block, args)))
+        return 0;
+    count = 0;
+    for (vir_value_t *value = block->head; value; value = value->next) {
+        vir_value_t *op0 = value->op0
+                               ? vir_return_dup_map(block, value->op0, args,
+                                                    source, copy, count)
+                               : NULL;
+        vir_value_t *op1 = value->op1
+                               ? vir_return_dup_map(block, value->op1, args,
+                                                    source, copy, count)
+                               : NULL;
+        vir_value_t *clone = vir_clone_value(func, from, value, op0, op1);
+        /* Failing here leaves only unused values, which DCE removes. */
+        if (!clone)
+            return 0;
+        source[count] = value;
+        copy[count++] = clone;
+    }
+    if (block->return_value) {
+        result = vir_return_dup_map(block, block->return_value, args, source,
+                                    copy, count);
+        if (!result)
+            return 0;
+    }
+    if (!vir_edge_delete(func, edge))
+        return 0;
+    return vir_block_set_return(func, from, result) ? 1 : -1;
+}
+
+/* Range fusion.
+ *
+ * `x < lo || x > hi` reaching one block, then one more, is two compares and two
+ * branches. Whether x lies in [lo, hi] is one unsigned compare of x - lo with
+ * hi - lo + 1, as long as lo <= hi and the range is not the whole type.
+ */
+#define VIR_RANGE_ARGS 8
+
+/* Take apart `x < k` (a lower bound at k) or `k < x` (an upper bound at k). */
+static bool vir_range_bound(const vir_value_t *condition,
+                            vir_value_t **x,
+                            unsigned long long *bound,
+                            bool *lower)
+{
+    if (condition->def_effect || condition->nr_ops != 2 ||
+        (condition->opcode != VIR_OP_SLT && condition->opcode != VIR_OP_ULT) ||
+        !vir_type_is_i32_or_i64(condition->op0->type))
+        return false;
+    if (vir_is_constant(condition->op1) && !vir_is_constant(condition->op0)) {
+        *x = condition->op0;
+        *bound = condition->op1->constant;
+        *lower = true;
+        return true;
+    }
+    if (vir_is_constant(condition->op0) && !vir_is_constant(condition->op1)) {
+        *x = condition->op1;
+        *bound = condition->op0->constant;
+        *lower = false;
+        return true;
+    }
+    return false;
+}
+
+/* Whether every use of the values of @block is inside it, so that the block can
+ * disappear without anything else noticing.
+ */
+static bool vir_range_block_private(const vir_block_t *block)
+{
+    for (const vir_value_t *value = block->head; value; value = value->next) {
+        if (value->def_effect)
+            return false;
+        for (const vir_use_t *use = value->uses; use; use = use->next) {
+            const vir_value_t *user = vir_use_user(use);
+            if (user ? user->block != block
+                     : vir_use_branch_block(use) != block)
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool vir_range_same_args(const vir_edge_t *a, const vir_edge_t *b)
+{
+    if (a->arg_count != b->arg_count || a->arg_count > VIR_RANGE_ARGS)
+        return false;
+    for (int i = 0; i < a->arg_count; i++)
+        if (a->args[i] != b->args[i] && !vir_const_same(a->args[i], b->args[i]))
+            return false;
+    return true;
+}
+
+/* 1 when the branch of @a and the one of the block after it became one, 0 when
+ * the shape does not match, -1 when the graph could not be completed.
+ */
+static int vir_fuse_range(vir_function_t *func, vir_block_t *a)
+{
+    vir_block_t *b;
+    vir_edge_t *out_a, *in_b;
+    vir_edge_args_t yes, no;
+    vir_value_t *x, *y, *low_const, *diff, *size_const, *inside;
+    vir_value_t *out_args[VIR_RANGE_ARGS], *in_args[VIR_RANGE_ARGS];
+    unsigned long long bound_a, bound_b, lo, hi, size, mask;
+    bool lower_a, lower_b;
+    vir_type_t type;
+    int width;
+
+    if (a->terminator != VIR_TERM_BRANCH || !a->true_edge || !a->false_edge ||
+        !vir_range_bound(a->branch_condition, &x, &bound_a, &lower_a))
+        return 0;
+    b = a->false_edge->to;
+    if (b == a || b == func->blocks || !b->incoming ||
+        b->incoming->next_incoming || b->params || b->effects ||
+        b->terminator != VIR_TERM_BRANCH || !b->true_edge || !b->false_edge ||
+        !vir_range_bound(b->branch_condition, &y, &bound_b, &lower_b) ||
+        y != x || lower_a == lower_b ||
+        a->branch_condition->opcode != b->branch_condition->opcode ||
+        a->true_edge->to != b->true_edge->to || a->true_edge->to == a ||
+        a->true_edge->to == b || b->false_edge->to == a ||
+        b->false_edge->to == b ||
+        !vir_range_same_args(a->true_edge, b->true_edge) ||
+        b->false_edge->arg_count > VIR_RANGE_ARGS ||
+        !vir_range_block_private(b))
+        return 0;
+    type = x->type;
+    width = vir_integer_type_width(type);
+    mask = vir_width_mask(width);
+    lo = lower_a ? bound_a : bound_b;
+    hi = lower_a ? bound_b : bound_a;
+    size = (hi - lo + 1) & mask;
+    if (!size)
+        return 0;
+    if (a->branch_condition->opcode == VIR_OP_ULT
+            ? lo > hi
+            : ((lo ^ (1ULL << (width - 1))) > (hi ^ (1ULL << (width - 1)))))
+        return 0;
+    out_a = a->true_edge;
+    in_b = b->false_edge;
+    for (int i = 0; i < out_a->arg_count; i++)
+        out_args[i] = out_a->args[i];
+    for (int i = 0; i < in_b->arg_count; i++)
+        in_args[i] = in_b->args[i];
+    yes.to = in_b->to;
+    yes.args = in_args;
+    yes.arg_count = in_b->arg_count;
+    no.to = out_a->to;
+    no.args = out_args;
+    no.arg_count = out_a->arg_count;
+
+    low_const = vir_const_int(func, a, type, lo);
+    diff = low_const ? vir_sub(func, a, x, low_const) : NULL;
+    size_const = diff ? vir_const_int(func, a, type, size) : NULL;
+    inside = size_const ? vir_ult(func, a, diff, size_const) : NULL;
+    if (!inside)
+        return 0;
+    if (!vir_edge_delete(func, out_a) || !vir_edge_delete(func, a->outgoing))
+        return -1;
+    return vir_block_set_branch(func, a, inside, &yes, &no) ? 1 : -1;
+}
+
+int vir_fuse_range_tests(vir_function_t *func, vir_opt_level_t opt_level)
+{
+    int changed = 0;
+
+    if (!func || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level != VIR_OPT_O2)
+        return 0;
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        int status = vir_fuse_range(func, block);
+        if (status < 0)
+            return -1;
+        changed += status;
+    }
+    return changed;
+}
+
+int vir_duplicate_returns(vir_function_t *func, vir_opt_level_t opt_level)
+{
+    int changed = 0;
+
+    if (!func || !vir_opt_level_valid(opt_level))
+        return -1;
+    if (opt_level == VIR_OPT_O0)
+        return 0;
+    for (vir_block_t *block = func->blocks; block; block = block->next) {
+        if (!vir_return_dup_candidate(func, block))
+            continue;
+        for (vir_edge_t *edge = block->incoming, *next; edge; edge = next) {
+            next = edge->next_incoming;
+            int status = vir_return_dup_edge(func, block, edge);
+            if (status < 0)
+                return -1;
+            changed += status;
+        }
+    }
+    return changed;
 }
 
 /* Dominance is queried by reachability only; no analysis state is retained in

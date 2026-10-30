@@ -264,18 +264,21 @@ code motion (LICM) moves eligible pure computations out of loops, and dead-code
 elimination (DCE) removes unused work.
 
 1. Inline small leaf callees defined earlier, then remove unreachable blocks.
-2. SCCP and CFG simplification.
+2. SCCP and CFG simplification, then return duplication: a short effect-free
+   block that returns a computed result, such as the join of `return a && b`,
+   is copied into each jump that reaches it with a constant argument, and SCCP
+   and CFG simplification run again over the folded copies.
 3. Block-parameter simplification: a parameter that receives one value on
    every edge, or itself on a back edge, is replaced by that value, so a
    loop-invariant input does not look loop-defined to CSE, GVN and LICM.
-4. Local CSE.
+4. Local CSE, which also forwards memory values (see below).
 5. GVN.
-6. Integer, bitwise and unary normalization, followed by SCCP when normalization changes
-   the graph.
+6. Integer, bitwise, cast and address normalization, followed by SCCP when
+   normalization changes the graph.
 7. Reassociation and LICM, followed by affine-loop summarization. If loops
    disappear, simplify their parameters and propagate constants again.
-8. Pointer-induction strength reduction, local CSE, and DCE, including ordinary
-   overwritten-store elimination, then reduction unrolling.
+8. Pointer-induction strength reduction, local CSE, and DCE, including
+   dead-store elimination (see below), then reduction unrolling.
 9. CFG simplification, then a final local CSE and DCE over the simplified graph.
 10. Full graph verification before dumps and machine lowering.
 11. Eliminate eligible direct/additive tail recursion, rerun the pipeline when
@@ -284,7 +287,23 @@ elimination (DCE) removes unused work.
 | Level | Scheduled transformations |
 | --- | --- |
 | O0 | Construction folds, unreachable-block removal, and mandatory verification; optional optimization passes return without transforming the graph. |
-| O2 (default) | Leaf inlining, SCCP, CFG simplification, block-parameter simplification, local CSE, GVN, integer/bitwise/unary normalization, reassociation, LICM, affine-loop summarization, tail-recursion elimination, strength reduction, reduction unrolling, and DCE. |
+| O2 (default) | Leaf inlining, SCCP, CFG simplification, return duplication, block-parameter simplification, local CSE with memory forwarding, GVN, integer/bitwise/cast/address normalization, reassociation, LICM, affine-loop summarization, tail-recursion elimination, strength reduction, reduction unrolling, and DCE with dead-store elimination. |
+
+CSE and GVN number binary and unary operations and the addresses of stack
+objects, globals, strings and functions; restricting GVN to binary operations
+made a self-compile larger. Within a block, equal constants count as one
+operand, because constants are not uniqued when built. GVN keeps matching
+constants by identity: merging operations that differ only in the copy of a
+constant across blocks stretched live ranges and grew the output. A `ptradd` of
+a constant stays as it is: the emitters fold it into the access that uses it,
+and a shared copy would only take a register.
+
+Construction and normalization also join the steps of a chain. A constant added,
+multiplied, ANDed, ORed or XORed twice becomes one operation, two shifts the
+same way become one while the total stays below the width, `ptradd` of a
+constant over `ptradd` of a constant is one displacement, and a cast of a cast
+is one cast or none (`trunc(sext(y))` back to `y`'s width is `y`). A signed or
+unsigned comparison of a value with itself, and `ult` against zero, are false.
 
 Integer normalization lowers multiplication by a power of two to a shift, and
 unsigned division/remainder to shifts/masks. Positive power-of-two signed
@@ -310,6 +329,24 @@ values. Repeated composition by squaring computes the exact final recurrence
 in logarithmic compile time, even when the accumulator wraps. Its initial
 value may be a runtime argument. Zero-trip, negative signed index, dynamic-bound,
 nonlinear, and potentially wrapping control loops are left intact.
+
+Memory forwarding replaces a load by the value an earlier load or store on
+every path to it produced. It follows each chain of blocks with one predecessor
+and starts empty at joins and loop headers. An address is a root object (stack
+slot, global or string) plus an offset, or a pointer of unknown origin plus an
+offset. Different roots never overlap; an unknown pointer can reach a stack slot
+only if the slot's address escaped, meaning it is used for more than the address
+of a load or store (or of a `ptradd` that is). Strings are read-only. A store
+removes whatever it may overlap, and a call removes everything but strings:
+holding a value across a call needs a callee-saved register or a spill, which
+measured worse than loading it again. Volatile accesses forget everything and
+are never forwarded.
+
+Dead-store elimination removes a store that a later store in the same block
+covers, with no read that may overlap, no volatile access, and no call that can
+reach the location in between. It also removes every store to a stack slot that
+does not escape and that no load or volatile access touches, which is what
+forwarding leaves behind for a local used only through registers.
 
 Inlining runs first at O2, before SCCP, on each function as its parsing ends. A
 direct call to a function defined earlier is replaced by a copy of that

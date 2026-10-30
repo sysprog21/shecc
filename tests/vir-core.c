@@ -5,6 +5,364 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool is_const(const vir_value_t *value, unsigned long long constant)
+{
+    return value->opcode == VIR_OP_CONST && value->constant == constant;
+}
+
+/* The one stored value a later load of the same address may take over, and what
+ * stands between them that must stop it.
+ */
+static void test_memory_forwarding(void)
+{
+    for (int mode = 0; mode < 12; mode++) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, 64));
+        vir_block_t *entry = vir_block_create(&f);
+        vir_block_t *join = mode == 10 ? vir_block_create(&f) : NULL;
+        vir_block_t *next = vir_block_create(&f);
+        vir_value_t *unknown = vir_block_add_param(&f, entry, VIR_TYPE_PTR);
+        vir_value_t *value = vir_block_add_param(&f, entry, VIR_TYPE_I32);
+        vir_value_t *global = vir_global_addr(&f, entry, "g", 8, 8);
+        vir_value_t *other = vir_global_addr(&f, entry, "h", 4, 4);
+        vir_value_t *slot = vir_stack_addr(&f, entry, 0, 4, 4);
+
+        /* Modes 4 and 5 keep the value in a stack slot; in 5 its address is
+         * also stored away, so an unknown pointer may be that slot.
+         */
+        vir_value_t *address = mode == 4 || mode == 5 ? slot : global;
+        vir_type_t type = mode == 9 ? VIR_TYPE_I64 : VIR_TYPE_I32;
+        assert(vir_store(&f, entry, address, value));
+        if (mode == 5)
+            assert(vir_store(&f, entry, other, slot));
+        if (mode == 1)
+            assert(vir_call(&f, entry, "observe", NULL, 0, VIR_TYPE_VOID));
+        if (mode == 2 || mode == 4 || mode == 5)
+            assert(vir_store(&f, entry, unknown, value));
+        if (mode == 3)
+            assert(vir_store(&f, entry, other, value));
+        if (mode == 6)
+            assert(
+                vir_store(&f, entry,
+                          vir_ptradd(&f, entry, global,
+                                     vir_const_int(&f, entry, VIR_TYPE_I64, 1)),
+                          vir_const_int(&f, entry, VIR_TYPE_I8, 1)));
+        if (mode == 7)
+            assert(vir_volatile_store(&f, entry, other, value));
+        if (mode == 8)
+            assert(
+                vir_store(&f, entry,
+                          vir_ptradd(&f, entry, global,
+                                     vir_const_int(&f, entry, VIR_TYPE_I64, 4)),
+                          value));
+        if (mode == 10) {
+            vir_value_t *zero = vir_const_i32(&f, entry, 0);
+            vir_value_t *choice = vir_eq(&f, entry, value, zero);
+            vir_edge_args_t left = {join, NULL, 0}, right = {next, NULL, 0};
+            assert(vir_block_set_branch(&f, entry, choice, &left, &right));
+            assert(vir_edge_create(&f, join, next, NULL, 0));
+        } else {
+            assert(vir_edge_create(&f, entry, next, NULL, 0));
+        }
+        vir_value_t *loaded =
+            vir_load(&f, next, mode == 11 ? other : address, type);
+        assert(vir_block_set_return(&f, next, loaded));
+        assert(vir_verify(&f, &error));
+        assert(vir_local_cse(&f, VIR_OPT_O0) == 0);
+        assert(next->return_value == loaded);
+        assert(vir_local_cse(&f, VIR_OPT_O1) >= 0);
+
+        /* Forwarded: nothing between them, other objects, a store that misses
+         * the loaded bytes, and an unknown pointer into a slot that never
+         * escaped. Everything else must reload.
+         */
+        bool forwarded = mode == 0 || mode == 3 || mode == 4 || mode == 8;
+        assert(next->return_value == (forwarded ? value : loaded));
+        assert(vir_verify(&f, &error));
+        vir_function_release(&f);
+    }
+}
+
+/* A store that a later, wider one covers goes; one it only partly covers, or
+ * misses, stays.
+ */
+static void test_store_coverage(void)
+{
+    for (int mode = 0; mode < 3; mode++) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, 64));
+        vir_block_t *block = vir_block_create(&f);
+        vir_value_t *global = vir_global_addr(&f, block, "g", 16, 8);
+        vir_value_t *narrow = vir_const_i32(&f, block, 1);
+        vir_value_t *wide = vir_const_int(&f, block, VIR_TYPE_I64, 2);
+        vir_value_t *four = vir_const_int(&f, block, VIR_TYPE_I64, 4);
+        vir_value_t *second =
+            mode == 2 ? vir_ptradd(&f, block, global, four) : global;
+        assert(vir_store(&f, block, global, mode == 1 ? wide : narrow));
+        assert(vir_store(&f, block, second, mode == 0 ? wide : narrow));
+        assert(vir_block_set_return(&f, block, narrow));
+        assert(vir_verify(&f, &error));
+        assert(vir_dce(&f, VIR_OPT_O1) >= 0);
+        int stores = 0;
+        for (vir_effect_t *e = block->effects; e; e = e->next)
+            stores++;
+        assert(stores == (mode == 0 ? 1 : 2));
+        assert(vir_verify(&f, &error));
+        vir_function_release(&f);
+    }
+}
+
+/* Strings survive a call; both arms of a branch inherit what the block before
+ * it knew.
+ */
+static void test_forwarding_paths(void)
+{
+    for (int mode = 0; mode < 2; mode++) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, 64));
+        vir_block_t *entry = vir_block_create(&f);
+        vir_block_t *left = vir_block_create(&f);
+        vir_block_t *right = vir_block_create(&f);
+        vir_value_t *choice = vir_block_add_param(&f, entry, VIR_TYPE_I1);
+        vir_value_t *value = vir_block_add_param(&f, entry, VIR_TYPE_I32);
+        vir_value_t *str = vir_rodata_addr(&f, entry, 0);
+        vir_value_t *global = vir_global_addr(&f, entry, "g", 4, 4);
+        vir_value_t *address = mode == 0 ? str : global;
+        vir_value_t *first = NULL;
+        if (mode == 0) {
+            first = vir_load(&f, entry, str, VIR_TYPE_I32);
+            assert(vir_call(&f, entry, "observe", NULL, 0, VIR_TYPE_VOID));
+        } else {
+            assert(vir_store(&f, entry, global, value));
+            first = value;
+        }
+        vir_edge_args_t l = {left, NULL, 0}, r = {right, NULL, 0};
+        assert(vir_block_set_branch(&f, entry, choice, &l, &r));
+        vir_value_t *a = vir_load(&f, left, address, VIR_TYPE_I32);
+        vir_value_t *b = vir_load(&f, right, address, VIR_TYPE_I32);
+        assert(vir_block_set_return(&f, left, a));
+        assert(vir_block_set_return(&f, right, b));
+        assert(vir_verify(&f, &error));
+        assert(vir_local_cse(&f, VIR_OPT_O1) >= 0);
+        assert(left->return_value == first && right->return_value == first);
+        assert(vir_verify(&f, &error));
+        vir_function_release(&f);
+    }
+}
+
+/* However early the arena runs out, return duplication either leaves a valid
+ * graph or reports the failure.
+ */
+static void test_return_duplication_exhaustion(void)
+{
+    for (int budget = 0; budget < 24; budget++) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, 64));
+        vir_block_t *entry = vir_block_create(&f);
+        vir_block_t *yes = vir_block_create(&f);
+        vir_block_t *no = vir_block_create(&f);
+        vir_block_t *join = vir_block_create(&f);
+        vir_value_t *choice = vir_block_add_param(&f, entry, VIR_TYPE_I1);
+        vir_value_t *flag = vir_block_add_param(&f, join, VIR_TYPE_I32);
+        vir_edge_args_t l = {yes, NULL, 0}, r = {no, NULL, 0};
+        assert(vir_block_set_branch(&f, entry, choice, &l, &r));
+        vir_value_t *one = vir_const_i32(&f, yes, 1);
+        vir_value_t *zero = vir_const_i32(&f, no, 0);
+        assert(vir_edge_create(&f, yes, join, &one, 1));
+        assert(vir_edge_create(&f, no, join, &zero, 1));
+        vir_value_t *sum = vir_add(&f, join, flag, vir_const_i32(&f, join, 5));
+        assert(vir_block_set_return(&f, join, sum));
+        assert(vir_verify(&f, &error));
+        f.arena.fail_after = budget;
+        int copies = vir_duplicate_returns(&f, VIR_OPT_O2);
+        f.arena.fail_after = -1;
+        if (copies >= 0)
+            assert(vir_verify(&f, &error));
+        vir_function_release(&f);
+    }
+}
+
+/* `x < lo || x > hi` into one block is one unsigned test of x - lo. */
+static void test_range_fusion(void)
+{
+    for (int mode = 0; mode < 4; mode++) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, 64));
+        vir_block_t *a = vir_block_create(&f);
+        vir_block_t *b = vir_block_create(&f);
+        vir_block_t *out = vir_block_create(&f);
+        vir_block_t *in = vir_block_create(&f);
+        vir_value_t *x = vir_block_add_param(&f, a, VIR_TYPE_I32);
+
+        /* Mode 1 swaps the order of the bounds, 2 makes the range empty, 3 uses
+         * different compares.
+         */
+        unsigned lo = mode == 2 ? 10 : 3, hi = mode == 2 ? 5 : 9;
+        vir_value_t *lo_c = vir_const_i32(&f, a, (int) lo);
+        vir_value_t *hi_c = vir_const_i32(&f, a, (int) hi);
+        vir_value_t *lower = vir_slt(&f, a, x, lo_c);
+        vir_value_t *upper = vir_slt(&f, a, hi_c, x);
+        if (mode == 3)
+            upper = vir_ult(&f, a, hi_c, x);
+        /* In mode 1 the upper bound is tested first. */
+        vir_value_t *below = mode == 1 ? upper : lower;
+        vir_value_t *above = mode == 1 ? lower : upper;
+        vir_edge_args_t first_hit = {out, NULL, 0}, first_miss = {b, NULL, 0};
+        vir_edge_args_t second_hit = {out, NULL, 0},
+                        second_miss = {in, NULL, 0};
+        assert(vir_block_set_branch(&f, a, below, &first_hit, &first_miss));
+        assert(vir_block_set_branch(&f, b, above, &second_hit, &second_miss));
+        assert(vir_block_set_return(&f, out, vir_const_i32(&f, out, 0)));
+        assert(vir_block_set_return(&f, in, vir_const_i32(&f, in, 1)));
+        assert(vir_verify(&f, &error));
+        assert(vir_fuse_range_tests(&f, VIR_OPT_O0) == 0);
+        int fused = vir_fuse_range_tests(&f, VIR_OPT_O2);
+        assert(vir_verify(&f, &error));
+
+        /* Either order of the bounds fuses; an empty range and a pair of
+         * different compares do not.
+         */
+        assert(fused == (mode < 2 ? 1 : 0));
+        if (mode < 2) {
+            assert(a->branch_condition->opcode == VIR_OP_ULT);
+            assert(a->true_edge->to == in && a->false_edge->to == out);
+            assert(is_const(a->branch_condition->op1, 7));
+        }
+        assert(vir_simplify_cfg(&f, VIR_OPT_O2) >= 0);
+        assert(vir_verify(&f, &error));
+        vir_function_release(&f);
+    }
+}
+
+static void test_chain_normalization(void)
+{
+    for (int bits = 32; bits <= 64; bits += 32) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, bits));
+        vir_type_t word = bits == 64 ? VIR_TYPE_I64 : VIR_TYPE_I32;
+        vir_block_t *block = vir_block_create(&f);
+        vir_value_t *x = vir_block_add_param(&f, block, VIR_TYPE_I32);
+        vir_value_t *y = vir_block_add_param(&f, block, VIR_TYPE_I8);
+        vir_value_t *p = vir_block_add_param(&f, block, VIR_TYPE_PTR);
+        vir_value_t *v, *inner;
+
+        inner = vir_add(&f, block, x, vir_const_i32(&f, block, 4));
+        v = vir_add(&f, block, inner, vir_const_i32(&f, block, 8));
+        assert(v->opcode == VIR_OP_ADD && v->op0 == x && is_const(v->op1, 12));
+        inner = vir_bitand(&f, block, vir_const_i32(&f, block, 0xf0), x);
+        v = vir_bitand(&f, block, inner, vir_const_i32(&f, block, 0x3c));
+        assert(v->opcode == VIR_OP_BITAND && v->op0 == x &&
+               is_const(v->op1, 0x30));
+        inner = vir_mul(&f, block, x, vir_const_i32(&f, block, 3));
+        v = vir_mul(&f, block, inner, vir_const_i32(&f, block, 5));
+        assert(v->opcode == VIR_OP_MUL && is_const(v->op1, 15));
+        inner = vir_shl(&f, block, x, vir_const_i32(&f, block, 3));
+        v = vir_shl(&f, block, inner, vir_const_i32(&f, block, 5));
+        assert(v->opcode == VIR_OP_SHL && v->op0 == x && is_const(v->op1, 8));
+        /* Shifts that add up to the width or more stay two shifts. */
+        inner = vir_lshr(&f, block, x, vir_const_i32(&f, block, 20));
+        v = vir_lshr(&f, block, inner, vir_const_i32(&f, block, 20));
+        assert(v->opcode == VIR_OP_LSHR && v->op0->opcode == VIR_OP_LSHR);
+
+        inner = vir_ptradd(&f, block, p, vir_const_int(&f, block, word, 4));
+        v = vir_ptradd(&f, block, inner, vir_const_int(&f, block, word, 16));
+        assert(v->opcode == VIR_OP_PTRADD && v->op0 == p &&
+               is_const(v->op1, 20));
+        v = vir_ptradd(&f, block, inner,
+                       vir_const_int(&f, block, word, (unsigned long long) -4));
+        assert(v == p);
+
+        inner = vir_sext(&f, block, x, VIR_TYPE_I64);
+        v = vir_trunc(&f, block, inner, VIR_TYPE_I32);
+        assert(v == x);
+        inner = vir_zext(&f, block, x, VIR_TYPE_I64);
+        v = vir_trunc(&f, block, inner, VIR_TYPE_I16);
+        assert(v->opcode == VIR_OP_TRUNC && v->op0 == x);
+        inner = vir_sext(&f, block, y, VIR_TYPE_I64);
+        v = vir_trunc(&f, block, inner, VIR_TYPE_I32);
+        assert(v->opcode == VIR_OP_SEXT && v->op0 == y);
+        inner = vir_zext(&f, block, y, VIR_TYPE_I32);
+        v = vir_sext(&f, block, inner, VIR_TYPE_I64);
+        assert(v->opcode == VIR_OP_ZEXT && v->op0 == y);
+        /* Zero bits after sign bits are not the zero extension of the byte. */
+        inner = vir_sext(&f, block, y, VIR_TYPE_I32);
+        v = vir_zext(&f, block, inner, VIR_TYPE_I64);
+        assert(v->opcode == VIR_OP_ZEXT && v->op0->opcode == VIR_OP_SEXT);
+
+        v = vir_slt(&f, block, x, x);
+        assert(is_const(v, 0) && v->type == VIR_TYPE_I1);
+        v = vir_ult(&f, block, x, vir_const_i32(&f, block, 0));
+        assert(is_const(v, 0));
+        v = vir_ult(&f, block, vir_const_i32(&f, block, 0), x);
+        assert(v->opcode == VIR_OP_ULT);
+        assert(vir_block_set_return(&f, block, x));
+        assert(vir_verify(&f, &error));
+        vir_function_release(&f);
+    }
+}
+
+/* A short block returning a computed result is copied into each jump that
+ * brings it a constant.
+ */
+static void test_return_duplication(void)
+{
+    for (int mode = 0; mode < 3; mode++) {
+        vir_function_t f;
+        char *error = NULL;
+        vir_function_init(&f, 64);
+        assert(vir_function_set_pointer_bits(&f, 64));
+        vir_block_t *entry = vir_block_create(&f);
+        vir_block_t *yes = vir_block_create(&f);
+        vir_block_t *no = vir_block_create(&f);
+        vir_block_t *join = vir_block_create(&f);
+        vir_value_t *choice = vir_block_add_param(&f, entry, VIR_TYPE_I1);
+        vir_value_t *dynamic = vir_block_add_param(&f, entry, VIR_TYPE_I32);
+        vir_value_t *flag = vir_block_add_param(&f, join, VIR_TYPE_I32);
+        vir_edge_args_t left = {yes, NULL, 0}, right = {no, NULL, 0};
+        assert(vir_block_set_branch(&f, entry, choice, &left, &right));
+        /* Mode 1 passes one value that is not a constant, mode 2 both. */
+        vir_value_t *one = vir_const_i32(&f, yes, 1);
+        vir_value_t *zero = vir_const_i32(&f, no, 0);
+        vir_value_t *from_yes = mode == 2 ? dynamic : one;
+        vir_value_t *from_no = mode >= 1 ? dynamic : zero;
+        assert(vir_edge_create(&f, yes, join, &from_yes, 1));
+        assert(vir_edge_create(&f, no, join, &from_no, 1));
+        vir_value_t *is_zero =
+            vir_eq(&f, join, flag, vir_const_i32(&f, join, 0));
+        vir_value_t *nonzero =
+            vir_eq(&f, join, is_zero, vir_const_i1(&f, join, 0));
+        vir_value_t *widened = vir_zext(&f, join, nonzero, VIR_TYPE_I32);
+        assert(vir_block_set_return(&f, join, widened));
+        assert(vir_verify(&f, &error));
+        assert(vir_duplicate_returns(&f, VIR_OPT_O0) == 0);
+        int copies = vir_duplicate_returns(&f, VIR_OPT_O2);
+        assert(copies == (mode == 0 ? 2 : mode == 1 ? 1 : 0));
+        assert(vir_verify(&f, &error));
+        assert(vir_sccp(&f, VIR_OPT_O2) >= 0);
+        assert(vir_simplify_cfg(&f, VIR_OPT_O2) >= 0);
+        if (mode == 0) {
+            assert(yes->terminator == VIR_TERM_RETURN &&
+                   is_const(yes->return_value, 1));
+            assert(no->terminator == VIR_TERM_RETURN &&
+                   is_const(no->return_value, 0));
+        }
+        assert(vir_verify(&f, &error));
+        vir_function_release(&f);
+    }
+}
+
 static void test_constant_edge_threading(void)
 {
     for (int test = 0; test < 12; test++) {
@@ -88,6 +446,12 @@ static void test_pointer_add_scheduling(void)
             vir_block_t *block = vir_block_create(&function);
             vir_value_t *pointer =
                 vir_block_add_param(&function, block, VIR_TYPE_PTR);
+
+            /* A second constant offset would fold into the first, so the second
+             * user of next needs one the compiler cannot see.
+             */
+            vir_value_t *step =
+                vir_block_add_param(&function, block, VIR_TYPE_I64);
             vir_value_t *offset = vir_const_i32(&function, block, 4);
             vir_value_t *next = vir_ptradd(&function, block, pointer, offset);
             vir_value_t *stride = next->op1;
@@ -105,7 +469,7 @@ static void test_pointer_add_scheduling(void)
                 assert(vir_volatile_load(&function, block, next, VIR_TYPE_I32));
             vir_value_t *result = next;
             if (barrier == 5)
-                result = vir_ptradd(&function, block, next, offset);
+                result = vir_ptradd(&function, block, next, step);
             vir_value_t *old =
                 vir_load(&function, block, pointer, VIR_TYPE_I32);
             assert(vir_store(&function, block, pointer, old));
@@ -198,7 +562,7 @@ static void test_pointer_add_barrier_groups(void)
 
 static void test_overwritten_stores(void)
 {
-    for (int barrier = 0; barrier < 7; barrier++) {
+    for (int barrier = 0; barrier < 8; barrier++) {
         vir_function_t function;
         char *error = NULL;
         vir_function_init(&function, 64);
@@ -222,13 +586,58 @@ static void test_overwritten_stores(void)
             two = vir_const_int(&function, block, VIR_TYPE_I8, 2);
         if (barrier == 6)
             assert(vir_load(&function, block, address, VIR_TYPE_I32));
+        if (barrier == 7)
+            assert(vir_call(&function, block, "observe", &address, 1,
+                            VIR_TYPE_VOID));
         assert(first && vir_store(&function, block, address, two));
+
+        /* Something reads the slot at the end, or no store to it would matter
+         * and all of them would go.
+         */
+        assert(vir_volatile_load(&function, block, address, VIR_TYPE_I32));
         assert(vir_block_set_return(&function, block, result));
         assert(vir_verify(&function, &error));
         assert(vir_dce(&function, VIR_OPT_O0) == 0);
         assert(block->effects == first);
         assert(vir_dce(&function, VIR_OPT_O1) >= 0);
-        assert((block->effects == first) == (barrier != 0 && barrier != 6));
+        /* A call cannot see a slot whose address it was never given. */
+        assert((block->effects == first) ==
+               (barrier != 0 && barrier != 3 && barrier != 6));
+        assert(vir_verify(&function, &error));
+        vir_function_release(&function);
+    }
+}
+
+static void test_dead_slot_stores(void)
+{
+    /* A slot nothing reads and whose address stays inside the function takes
+     * every store to it away; a read, an escaping address or a volatile access
+     * keeps them.
+     */
+    for (int mode = 0; mode < 4; mode++) {
+        vir_function_t function;
+        char *error = NULL;
+        vir_function_init(&function, 64);
+        assert(vir_function_set_pointer_bits(&function, 64));
+        vir_block_t *block = vir_block_create(&function);
+        vir_value_t *address = vir_stack_addr(&function, block, 0, 4, 4);
+        vir_value_t *one = vir_const_i32(&function, block, 1);
+        assert(vir_store(&function, block, address, one));
+        if (mode == 1)
+            assert(vir_load(&function, block, address, VIR_TYPE_I32));
+        if (mode == 2)
+            assert(vir_call(&function, block, "observe", &address, 1,
+                            VIR_TYPE_VOID));
+        if (mode == 3)
+            assert(vir_volatile_load(&function, block, address, VIR_TYPE_I32));
+        assert(vir_block_set_return(&function, block, one));
+        assert(vir_verify(&function, &error));
+        assert(vir_dce(&function, VIR_OPT_O1) >= 0);
+
+        /* The load of mode 1 is unused, so it goes and takes the slot's reader
+         * with it.
+         */
+        assert((block->effects == NULL) == (mode < 2));
         assert(vir_verify(&function, &error));
         vir_function_release(&function);
     }
@@ -856,11 +1265,19 @@ int main(void)
     test_post_ssa_normalization();
     test_compaction();
     test_incoming_load_reuse();
+    test_memory_forwarding();
+    test_chain_normalization();
+    test_range_fusion();
+    test_store_coverage();
+    test_forwarding_paths();
+    test_return_duplication();
+    test_return_duplication_exhaustion();
     test_constant_edge_threading();
     test_pointer_add_scheduling();
     test_independent_pointer_add_scheduling();
     test_pointer_add_barrier_groups();
     test_overwritten_stores();
+    test_dead_slot_stores();
     test_va_start_signature_metadata();
     test_sccp_effect_first_param();
     vir_function_t func;

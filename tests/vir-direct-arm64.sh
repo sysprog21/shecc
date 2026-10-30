@@ -440,14 +440,15 @@ awk '
     / = stackaddr [0-9]+, 4, align 4$/ { scalar[$1] = 1 }
     / = stackaddr [0-9]+, 8, align 8$/ { pointer[$1] = 1 }
     # A pointer reloaded right after its store is forwarded the stored
-    # address, so the write may land on the scalar itself.
+    # address, so the write may land on the scalar itself. Past the call that
+    # can reach every slot, each level is a load of the one before.
     /^  store / {
         address = $2; sub(/,$/, "", address)
         if (loaded_pointer[address] || scalar[address] && linked) mutated = 1
         if (scalar[address]) initialized = 1
         if (pointer[address] && scalar[$3]) linked = 1
     }
-    / = load.ptr / { if (pointer[$4]) loaded_pointer[$1] = 1 }
+    / = load.ptr / { if (pointer[$4] || loaded_pointer[$4]) loaded_pointer[$1] = 1 }
     / = load.i32 / { if (loaded_pointer[$4] || scalar[$4]) observed = 1 }
     END { exit !initialized || !linked || !mutated || !observed }
 ' "$work/local-pointer-deep.dump"

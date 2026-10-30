@@ -1,13 +1,16 @@
 static int values[265] = {11};
 extern int *wmemchr(const int *values, int value, unsigned long count);
 
-#define STEP(p) ((p) + 1)
+/* The step is read at run time, or constant steps would fold into one. */
+static volatile int unit = 1;
+#define STEP(p) ((p) + step)
 #define STEP_2(p) STEP(STEP(p))
 #define STEP_4(p) STEP_2(STEP_2(p))
 #define STEP_8(p) STEP_4(STEP_4(p))
 
 int main(void)
 {
+    int step = unit;
     int *p0 = wmemchr(values, 11, 265);
     int *p8 = STEP_8(p0);
     int *p16 = STEP_8(p8);

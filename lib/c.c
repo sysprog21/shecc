@@ -45,6 +45,12 @@ int isblank(int c)
     return c == ' ' || c == '\t';
 }
 
+/* Pointer width of the target, held in a variable rather than tested with the
+ * preprocessor: shecc must be able to compile this file for either target, and
+ * a constant condition would leave statically dead code behind.
+ */
+int __ptr_width = __SIZEOF_POINTER__;
+
 int strlen(const char *str)
 {
     /* process the string by checking 4 characters (a 32-bit word) at a time */
@@ -169,16 +175,47 @@ void *memcpy(void *dest, const void *src, int count)
     const char *s = src;
     int i = 0;
 
-    /* Continues as long as there are at least 4 bytes remaining to copy. */
-    for (; i + 4 <= count; i += 4) {
-        d[i] = s[i];
-        d[i + 1] = s[i + 1];
-        d[i + 2] = s[i + 2];
-        d[i + 3] = s[i + 3];
+    /* The compiler moves a lot of memory this way, so go a word at a time when
+     * both addresses allow it. The copy still runs forward, which is also what
+     * a caller relying on dest < src overlapping gets. The words are unsigned
+     * so nothing here can overflow; this file is only ever compiled by shecc,
+     * whose optimizer does no type-based alias analysis, so accessing a char
+     * buffer through word pointers is safe.
+     */
+    if (!(((int) d | (int) s) & 3)) {
+        if (__ptr_width == 8 && !(((int) d | (int) s) & 7)) {
+            unsigned long long *dw = (unsigned long long *) d;
+            const unsigned long long *sw = (const unsigned long long *) s;
+            int words = count >> 3, j = 0;
+
+            for (; j + 4 <= words; j += 4) {
+                dw[j] = sw[j];
+                dw[j + 1] = sw[j + 1];
+                dw[j + 2] = sw[j + 2];
+                dw[j + 3] = sw[j + 3];
+            }
+            for (; j < words; j++)
+                dw[j] = sw[j];
+            i = j << 3;
+        } else {
+            unsigned int *dw = (unsigned int *) d;
+            const unsigned int *sw = (const unsigned int *) s;
+            int words = count >> 2, j = 0;
+
+            for (; j + 4 <= words; j += 4) {
+                dw[j] = sw[j];
+                dw[j + 1] = sw[j + 1];
+                dw[j + 2] = sw[j + 2];
+                dw[j + 3] = sw[j + 3];
+            }
+            for (; j < words; j++)
+                dw[j] = sw[j];
+            i = j << 2;
+        }
     }
 
-    /* Ensure all @count bytes are copied, even if @count is not a multiple of
-     * 4, or if @count was less than 4 initially.
+    /* Ensure all @count bytes are copied, whatever is left over after the
+     * words, or if the addresses were not aligned.
      */
     for (; i < count; i++)
         d[i] = s[i];
@@ -205,11 +242,39 @@ void *memset(void *s, int c, int n)
     int i = 0;
     char *ptr = (char *) s;
     char byte_val = (char) c;
-    for (; i + 4 <= n; i += 4) {
-        ptr[i] = byte_val;
-        ptr[i + 1] = byte_val;
-        ptr[i + 2] = byte_val;
-        ptr[i + 3] = byte_val;
+
+    if (!((int) ptr & 3)) {
+        unsigned int pattern = (unsigned int) (c & 255) * 0x01010101u;
+
+        if (__ptr_width == 8 && !((int) ptr & 7)) {
+            unsigned long long *dw = (unsigned long long *) ptr;
+            unsigned long long wide = pattern;
+            int words = n >> 3, j = 0;
+
+            wide = wide | (wide << 32);
+            for (; j + 4 <= words; j += 4) {
+                dw[j] = wide;
+                dw[j + 1] = wide;
+                dw[j + 2] = wide;
+                dw[j + 3] = wide;
+            }
+            for (; j < words; j++)
+                dw[j] = wide;
+            i = j << 3;
+        } else {
+            unsigned int *dw = (unsigned int *) ptr;
+            int words = n >> 2, j = 0;
+
+            for (; j + 4 <= words; j += 4) {
+                dw[j] = pattern;
+                dw[j + 1] = pattern;
+                dw[j + 2] = pattern;
+                dw[j + 3] = pattern;
+            }
+            for (; j < words; j++)
+                dw[j] = pattern;
+            i = j << 2;
+        }
     }
 
     for (; i < n; i++)
@@ -217,12 +282,6 @@ void *memset(void *s, int c, int n)
 
     return s;
 }
-
-/* Pointer width of the target, held in a variable rather than tested with the
- * preprocessor: shecc must be able to compile this file for either target, and
- * a constant condition would leave statically dead code behind.
- */
-int __ptr_width = __SIZEOF_POINTER__;
 
 /* The specification of snprintf() is defined in C99 7.19.6.5, and its behavior
  * and return value should comply with the following description:
