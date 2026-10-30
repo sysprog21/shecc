@@ -1,4 +1,5 @@
-/* Defined after main, so the call stays and keeps the loads from being
+/*
+ * Defined after main, so the call stays and keeps the loads from being
  * forwarded the stored values.
  */
 void barrier(void);

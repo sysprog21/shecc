@@ -1,4 +1,5 @@
-/* Defined after main, so the call stays: it can reach every slot through ppp,
+/*
+ * Defined after main, so the call stays: it can reach every slot through ppp,
  * which keeps the stores to them and the loads that follow.
  */
 void sink(int ***p);

@@ -22,8 +22,8 @@ void expect(int got, int want)
         fails++;
 }
 
-/* A store through a pointer that names the global overrides the earlier
- * store; one through another object leaves it.
+/* A store through a pointer that names the global overrides the earlier store;
+ * one through another object leaves it.
  */
 int store_through(int *p)
 {

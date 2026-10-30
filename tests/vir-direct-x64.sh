@@ -115,8 +115,8 @@ check_vir_dump()
 
     dump_main_vir "$name"
 
-    # The two stores extend their index; the loads after the barrier call
-    # reuse exactly those extensions and the addresses built from them.
+    # The two stores extend their index; the loads after the barrier call reuse
+    # exactly those extensions and the addresses built from them.
     test "$(grep -c " = $extension.i32.i64 " "$dump.main")" -eq 2
     if grep -q "$opposite.i32.i64" "$dump.main"; then exit 1; fi
     awk -v extension="$extension" '

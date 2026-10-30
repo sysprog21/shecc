@@ -28,6 +28,7 @@ static void test_memory_forwarding(void)
         vir_value_t *global = vir_global_addr(&f, entry, "g", 8, 8);
         vir_value_t *other = vir_global_addr(&f, entry, "h", 4, 4);
         vir_value_t *slot = vir_stack_addr(&f, entry, 0, 4, 4);
+
         /* Modes 4 and 5 keep the value in a stack slot; in 5 its address is
          * also stored away, so an unknown pointer may be that slot.
          */
@@ -72,6 +73,7 @@ static void test_memory_forwarding(void)
         assert(vir_local_cse(&f, VIR_OPT_O0) == 0);
         assert(next->return_value == loaded);
         assert(vir_local_cse(&f, VIR_OPT_O1) >= 0);
+
         /* Forwarded: nothing between them, other objects, a store that misses
          * the loaded bytes, and an unknown pointer into a slot that never
          * escaped. Everything else must reload.
@@ -201,8 +203,10 @@ static void test_range_fusion(void)
         vir_block_t *out = vir_block_create(&f);
         vir_block_t *in = vir_block_create(&f);
         vir_value_t *x = vir_block_add_param(&f, a, VIR_TYPE_I32);
-        /* Mode 1 swaps the order of the bounds, 2 makes the range empty, 3
-         * uses different compares. */
+
+        /* Mode 1 swaps the order of the bounds, 2 makes the range empty, 3 uses
+         * different compares.
+         */
         unsigned lo = mode == 2 ? 10 : 3, hi = mode == 2 ? 5 : 9;
         vir_value_t *lo_c = vir_const_i32(&f, a, (int) lo);
         vir_value_t *hi_c = vir_const_i32(&f, a, (int) hi);
@@ -224,6 +228,7 @@ static void test_range_fusion(void)
         assert(vir_fuse_range_tests(&f, VIR_OPT_O0) == 0);
         int fused = vir_fuse_range_tests(&f, VIR_OPT_O2);
         assert(vir_verify(&f, &error));
+
         /* Either order of the bounds fuses; an empty range and a pair of
          * different compares do not.
          */
@@ -441,8 +446,9 @@ static void test_pointer_add_scheduling(void)
             vir_block_t *block = vir_block_create(&function);
             vir_value_t *pointer =
                 vir_block_add_param(&function, block, VIR_TYPE_PTR);
-            /* A second constant offset would fold into the first, so the
-             * second user of next needs one the compiler cannot see.
+
+            /* A second constant offset would fold into the first, so the second
+             * user of next needs one the compiler cannot see.
              */
             vir_value_t *step =
                 vir_block_add_param(&function, block, VIR_TYPE_I64);
@@ -584,6 +590,7 @@ static void test_overwritten_stores(void)
             assert(vir_call(&function, block, "observe", &address, 1,
                             VIR_TYPE_VOID));
         assert(first && vir_store(&function, block, address, two));
+
         /* Something reads the slot at the end, or no store to it would matter
          * and all of them would go.
          */
@@ -626,8 +633,9 @@ static void test_dead_slot_stores(void)
         assert(vir_block_set_return(&function, block, one));
         assert(vir_verify(&function, &error));
         assert(vir_dce(&function, VIR_OPT_O1) >= 0);
-        /* The load of mode 1 is unused, so it goes and takes the slot's
-         * reader with it.
+
+        /* The load of mode 1 is unused, so it goes and takes the slot's reader
+         * with it.
          */
         assert((block->effects == NULL) == (mode < 2));
         assert(vir_verify(&function, &error));

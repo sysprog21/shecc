@@ -2257,10 +2257,10 @@ static vir_value_t *vir_integer_binary(vir_function_t *func,
                                        vir_value_t *op1,
                                        vir_opcode_t opcode);
 
-/* The operations that associate with a constant: op(op(x, c1), c2) is
- * op(x, c1 op c2), and two shifts the same way make one shift by the sum while
- * it stays below the width. This shortens the chain a field offset or a mask
- * built in steps would otherwise keep.
+/* The operations that associate with a constant: op(op(x, c1), c2) is op(x, c1
+ * op c2), and two shifts the same way make one shift by the sum while it stays
+ * below the width. This shortens the chain a field offset or a mask built in
+ * steps would otherwise keep.
  */
 static vir_value_t *vir_normalize_chain(vir_function_t *func,
                                         vir_block_t *block,
@@ -2339,8 +2339,8 @@ static vir_value_t *vir_integer_unary(vir_function_t *func,
 
 /* A cast of a cast is one cast, or none: trunc(zext(y)) is y when it returns to
  * y's width, a narrower trunc(y) when it goes below it, and zext(y) or sext(y)
- * when it stops between. Extending a zero extension by zeros or by sign bits
- * is the same zero extension.
+ * when it stops between. Extending a zero extension by zeros or by sign bits is
+ * the same zero extension.
  */
 static vir_value_t *vir_cast_chain(vir_function_t *func,
                                    vir_block_t *block,
@@ -2854,9 +2854,9 @@ int vir_replace_all_uses(vir_function_t *func,
     return 1;
 }
 
-/* What CSE treats as an operand's identity. Constants are not uniqued when
- * they are built, so with @fold two equal ones stand for the same operand;
- * every other value is itself.
+/* What CSE treats as an operand's identity. Constants are not uniqued when they
+ * are built, so with @fold two equal ones stand for the same operand; every
+ * other value is itself.
  */
 static unsigned int vir_cse_operand_key(const vir_value_t *operand, bool fold)
 {
@@ -2883,14 +2883,15 @@ static bool vir_cse_operand_equal(const vir_value_t *a,
 }
 
 /* Pure values worth numbering: binary and unary operations, and the address of
- * a stack object, global, string or function, which the backend would
- * otherwise rebuild at every use. Loads and calls carry an effect and constants
- * are cheap to rematerialize, so neither takes part.
+ * a stack object, global, string or function, which the backend would otherwise
+ * rebuild at every use. Loads and calls carry an effect and constants are cheap
+ * to rematerialize, so neither takes part.
  */
 static bool vir_cse_candidate(const vir_value_t *value)
 {
     if (value->def_effect)
         return false;
+
     /* A constant displacement folds into the access that uses it: the x64 and
      * AArch64 emitters take it as an addressing-mode offset (see sib_take and
      * addr_fold_disp in x64-codegen.c), so a shared copy would only take a
@@ -3160,6 +3161,7 @@ typedef struct {
 
 typedef struct {
     const vir_function_t *func;
+
     /* One flag per stack slot: its address is used for more than loading and
      * storing through it, so a call or an unknown pointer may reach it.
      */
@@ -3303,9 +3305,8 @@ static void vir_mem_locate(const vir_mem_t *mem,
     }
 }
 
-/* Whether two locations of the same kind sit in the same object: the same
- * stack slot, the same global, the same string area, or off the same unknown
- * pointer.
+/* Whether two locations of the same kind sit in the same object: the same stack
+ * slot, the same global, the same string area, or off the same unknown pointer.
  */
 static bool vir_mem_same_root(const vir_mem_loc_t *a, const vir_mem_loc_t *b)
 {
@@ -3498,6 +3499,7 @@ static int vir_forward_memory(vir_function_t *func)
     spare = owner + slots;
     visited = (unsigned char *) (spare + slots);
     memset(visited, 0, (size_t) blocks);
+
     /* Phase 0 starts a walk at every block that is not the only way into its
      * successor; phase 1 sweeps up what those could not reach (a state pool
      * that ran dry, or a cycle of single-entry blocks).
@@ -3947,6 +3949,7 @@ static int vir_eliminate_dead_stores(vir_function_t *func, bool overwrite)
                 read_any = true;
                 continue;
             }
+
             /* Loads read the slot, and so does a volatile store: it may be
              * watched from outside.
              */
@@ -4114,8 +4117,9 @@ int vir_dce_with_stats(vir_function_t *func,
         if (changed)
             vir_repair_value_positions(block);
     }
-    /* Unused loads kept their slots read; with them gone, stores to those
-     * slots may be dead too.
+
+    /* Unused loads kept their slots read; with them gone, stores to those slots
+     * may be dead too.
      */
     if (removed)
         stores += vir_eliminate_dead_stores(func, false);
@@ -7445,9 +7449,9 @@ int vir_simplify_cfg(vir_function_t *func, vir_opt_level_t opt_level)
  *
  * A short block that only computes a result and returns it, entered by a jump
  * that passes a constant, is copied into that jump's block: the copy returns
- * straight away and, with the constant in place of the parameter, usually
- * folds to a constant. This is the shape of `return a && b` and `return x !=
- * y`, where each arm used to set a flag and join just to test it.
+ * straight away and, with the constant in place of the parameter, usually folds
+ * to a constant. This is the shape of `return a && b` and `return x != y`,
+ * where each arm used to set a flag and join just to test it.
  */
 #define VIR_RETURN_DUP_VALUES 6
 #define VIR_RETURN_DUP_PARAMS 4
@@ -7485,8 +7489,8 @@ static int vir_param_index(const vir_block_t *block, const vir_value_t *param)
     return -1;
 }
 
-/* What @operand, a value of @block, stands for in the copy. Values from
- * outside the block already dominate every block that jumps into it.
+/* What @operand, a value of @block, stands for in the copy. Values from outside
+ * the block already dominate every block that jumps into it.
  */
 static vir_value_t *vir_return_dup_map(const vir_block_t *block,
                                        vir_value_t *operand,
@@ -7641,8 +7645,8 @@ static bool vir_range_bound(const vir_value_t *condition,
     return false;
 }
 
-/* Whether every use of the values of @block is inside it, so that the block
- * can disappear without anything else noticing.
+/* Whether every use of the values of @block is inside it, so that the block can
+ * disappear without anything else noticing.
  */
 static bool vir_range_block_private(const vir_block_t *block)
 {

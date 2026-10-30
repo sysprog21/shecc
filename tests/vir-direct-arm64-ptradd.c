@@ -1,5 +1,6 @@
-/* Defined after main, so the call stays; the escaped array keeps its store
- * and its reload.
+/*
+ * Defined after main, so the call stays; the escaped array keeps its store and
+ * its reload.
  */
 void sink(int *p);
 int main(int argc)

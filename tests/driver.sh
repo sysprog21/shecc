@@ -1277,6 +1277,7 @@ void bump(int r)
         m[r][k] = m[r][k] + 1;
 }
 EOF
+
 # The load and the store of m[r][k] share one pointer recurrence now that CSE
 # merges their identical address computations, where each used to carry its own.
 try_ir_count 1 bump ptrstride:4 << EOF
