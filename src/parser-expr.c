@@ -1468,12 +1468,21 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
         else if (lex_accept(T_decrement))
             prefix_op = OP_sub;
 
-        lex_peek(T_identifier, token);
+        /* Only an identifier names a constant, variable or function. Any other
+         * token, such as the brace of an array literal, leaves the name empty
+         * and looks nothing up.
+         */
+        const constant_t *con = NULL;
+        var_t *var = NULL;
+        func_t *func = NULL;
 
-        /* is a constant or variable? */
-        const constant_t *con = find_scoped_constant(token, parent);
-        var_t *var = find_var(token, parent);
-        func_t *func = find_visible_func(token, parent);
+        if (lex_peek(T_identifier, token)) {
+            con = find_scoped_constant(token, parent);
+            var = find_var(token, parent);
+            func = find_visible_func(token, parent);
+        } else {
+            token[0] = '\0';
+        }
 
         /* A block-scope function prototype shadows an automatic object, but its
          * designator is the file-scope function rather than an indirect call
