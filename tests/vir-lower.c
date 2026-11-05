@@ -1738,6 +1738,24 @@ static void test_call_result_forwarding(void)
 }
 #endif
 
+#if ELF_MACHINE != 0x3e
+static void test_instruction_counting(void)
+{
+    int size = elf_code->size;
+
+    mop_count_only = true;
+    mop_counted_words = 0;
+    emit(0);
+    assert(mop_counted_words == 1);
+    mop_counted_words = INT_MAX;
+    emit(0);
+    assert(mop_counted_words == INT_MAX);
+    assert(elf_code->size == size);
+    mop_count_only = false;
+    mop_counted_words = 0;
+}
+#endif
+
 int main(int argc, char **argv)
 {
 #ifdef SHECC_VIR_LOWER_TEST
@@ -1746,6 +1764,9 @@ int main(int argc, char **argv)
     (void) argc;
     (void) argv;
     global_init();
+#if ELF_MACHINE != 0x3e
+    test_instruction_counting();
+#endif
 #if ELF_MACHINE == 0x3e
     test_call_result_forwarding();
 #endif

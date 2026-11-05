@@ -6,9 +6,10 @@
  */
 
 /* Translate IR to target machine code */
-#include "defs.h"
-#include "globals.c"
-#include "riscv.c"
+#include "../../defs.h"
+#include "../../globals.c"
+#include "../emit.c"
+#include "encode.c"
 
 #define RV32_ALIGNMENT 16
 
@@ -470,15 +471,6 @@ void cfg_flatten(void)
     rv_functions_start = elf_offset;
     mop_flatten_functions(rv_frame_layout, update_elf_offset);
     rv_relax_branches();
-}
-
-void emit(int code)
-{
-    if (mop_count_only) {
-        if (mop_counted_words < INT_MAX)
-            mop_counted_words++;
-    } else
-        elf_write_int(elf_code, code);
 }
 
 static void emit_rv32_split_address(bool pc_relative,

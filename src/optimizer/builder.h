@@ -1,8 +1,8 @@
 /* Native parser graph construction and lifecycle. */
 #pragma once
 
-#include "defs.h"
-#include "vir.h"
+#include "../defs.h"
+#include "ir.h"
 
 const vir_function_t *vir_frontend_function(const func_t *func);
 bool vir_frontend_fold_i32(opcode_t opcode, int left, int right, int *result);

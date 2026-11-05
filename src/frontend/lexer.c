@@ -7,8 +7,8 @@
 #include <ctype.h>
 #include <stdbool.h>
 
-#include "defs.h"
-#include "globals.c"
+#include "../defs.h"
+#include "../globals.c"
 
 typedef struct {
     char *name;
@@ -43,13 +43,8 @@ void lex_init_directives(void)
         return;
 
     token_mapping_t directives[] = {
-        {"#define", T_cppd_define},   {"#elif", T_cppd_elif},
-        {"#else", T_cppd_else},       {"#endif", T_cppd_endif},
-        {"#error", T_cppd_error},     {"#if", T_cppd_if},
-        {"#ifdef", T_cppd_ifdef},     {"#ifndef", T_cppd_ifndef},
-        {"#include", T_cppd_include}, {"#pragma", T_cppd_pragma},
-        {"#undef", T_cppd_undef},     {"#line", T_cppd_line},
-        {"#warning", T_cppd_warning},
+#define LEX_DIRECTIVE(kind, spelling) {spelling, kind},
+#include "tokens.h"
     };
     init_token_map(&DIRECTIVE_MAP, &directive_tokens_storage, directives,
                    sizeof(directives) / sizeof(*directives), 16);
@@ -61,38 +56,8 @@ void lex_init_keywords(void)
         return;
 
     token_mapping_t keywords[] = {
-        {"if", T_if},
-        {"while", T_while},
-        {"for", T_for},
-        {"do", T_do},
-        {"else", T_else},
-        {"return", T_return},
-        {"typedef", T_typedef},
-        {"enum", T_enum},
-        {"struct", T_struct},
-        {"sizeof", T_sizeof},
-        {"switch", T_switch},
-        {"case", T_case},
-        {"break", T_break},
-        {"default", T_default},
-        {"continue", T_continue},
-        {"goto", T_goto},
-        {"union", T_union},
-        {"const", T_const},
-        {"volatile", T_volatile},
-        {"static", T_static},
-        {"extern", T_extern},
-        {"register", T_register},
-        {"auto", T_auto},
-        {"restrict", T_restrict},
-        {"inline", T_inline},
-        {"signed", T_signed},
-        {"unsigned", T_unsigned},
-        {"long", T_long},
-        {"float", T_float},
-        {"double", T_double},
-        {"_Complex", T_complex},
-        {"_Imaginary", T_imaginary},
+#define LEX_KEYWORD(kind, spelling) {spelling, kind},
+#include "tokens.h"
     };
     init_token_map(&KEYWORD_MAP, &keyword_tokens_storage, keywords,
                    sizeof(keywords) / sizeof(*keywords), 32);

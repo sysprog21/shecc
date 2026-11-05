@@ -1,7 +1,7 @@
 #pragma once
 
-#include "defs.h"
-#include "vir.h"
+#include "../defs.h"
+#include "ir.h"
 
 /* Machine blocks hold the VIR machine operations (vir_mop_t) the four emitters
  * consume; neither source variables nor source instructions participate in

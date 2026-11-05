@@ -1,4 +1,4 @@
-#include "../src/vir.c"
+#include "../src/optimizer/ir.c"
 
 static int check_sccp_binary(vir_type_t type,
                              vir_opcode_t opcode,

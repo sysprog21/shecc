@@ -1,4 +1,4 @@
-#include "vir-lower.h"
+#include "lower.h"
 
 /* Machine operations: creation, and the flat emission order the backends walk
  * once lowering, peepholes and target marks are done.

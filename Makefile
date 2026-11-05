@@ -53,7 +53,8 @@ OUT ?= out
 # Every architecture that can be selected as a build target. The first is the
 # default when ARCH is not given.
 ARCHS = arm arm64 riscv x64
-SRCDIR := $(shell find src -type d)
+SRCDIR := src
+SRCFILES := $(shell find $(SRCDIR) -name '*.[ch]')
 LIBDIR := $(shell find lib -type d)
 
 BUILTIN_LIBC_SOURCE ?= c.c
@@ -142,7 +143,7 @@ else
 endif
 
 
-SRCS := $(wildcard $(patsubst %,%/main.c, $(SRCDIR)))
+SRCS := $(SRCDIR)/main.c
 OBJS := $(SRCS:%.c=$(OUT)/%.o)
 
 # The sanitizer build keeps its objects apart from the normal one. Sharing them
@@ -258,7 +259,6 @@ endif
 .PHONY: config
 config:
 ifeq ($(NEED_RECONFIGURE),1)
-	$(Q)ln -sf $(PWD)/$(SRCDIR)/$(ARCH)-codegen.c $(SRCDIR)/codegen.c
 	$(Q)$(PRINTF) $(ARCH_DEFS) > $@
 	$(Q)$(PRINTF) $(TRANSLATION_DEFS) >> $@
 	$(Q)$(PRINTF) $(ARCH_DEFS) | $(SHA256_CMD) | awk '{print $$1}' > $(ARCH_DEFS_SHA256_FILE)
@@ -313,13 +313,13 @@ check-vir-multi-input-stage2: $(OUT)/$(STAGE2) tests/vir-multi-input.sh tests/vi
 ifeq ($(ARCH),x64)
 .PHONY: check-vir-x64-encoders check-vir-x64-and-flags
 check: check-vir-x64-encoders check-vir-x64-and-flags
-check-vir-x64-encoders check-vir-x64-and-flags: check-vir-x64-%: $(OUT)/$(STAGE0) tests/vir-x64-%.c config $(wildcard src/*.c src/*.h)
+check-vir-x64-encoders check-vir-x64-and-flags: check-vir-x64-%: $(OUT)/$(STAGE0) tests/vir-x64-%.c config $(SRCFILES)
 	$(CC) $(CFLAGS) tests/vir-x64-$*.c -o $(OUT)/vir-x64-$*
 	$(OUT)/vir-x64-$*
 
 .PHONY: check-vir-x64-fold
 check: check-vir-x64-fold
-check-vir-x64-fold: $(OUT)/$(STAGE0) tests/vir-x64-fold.c tests/vir-x64-liveout.c tests/vir-x64-liveout.sh tests/vir-x64-shift-counts.c config $(wildcard src/*.c src/*.h)
+check-vir-x64-fold: $(OUT)/$(STAGE0) tests/vir-x64-fold.c tests/vir-x64-liveout.c tests/vir-x64-liveout.sh tests/vir-x64-shift-counts.c config $(SRCFILES)
 	$(CC) $(CFLAGS) tests/vir-x64-fold.c -o $(OUT)/vir-x64-fold
 	$(OUT)/vir-x64-fold
 	CC="$(CC)" bash tests/vir-x64-liveout.sh $(OUT)/$(STAGE0)
@@ -396,8 +396,8 @@ VIR_LICM_PROFILE_REPEATS ?= 5
 vir-licm-profile: $(OUT)/vir-licm-profile
 	$(OUT)/vir-licm-profile $(VIR_LICM_PROFILE_SAMPLES) $(VIR_LICM_PROFILE_REPEATS)
 
-$(OUT)/vir-licm-profile: tests/vir-licm-profile.c src/vir.c src/vir.h
-	$(CC) $(CFLAGS) -Isrc tests/vir-licm-profile.c src/vir.c -o $@
+$(OUT)/vir-licm-profile: tests/vir-licm-profile.c src/optimizer/ir.c src/optimizer/ir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-licm-profile.c src/optimizer/ir.c -o $@
 
 # One checker per target: they share nothing, so "make -j check-style" runs them
 # concurrently and finishes in the time the slowest one takes.
@@ -457,13 +457,13 @@ check-abi-stage0: $(OUT)/$(STAGE0)
 check-abi-stage2: $(OUT)/$(STAGE2)
 	tests/$(ARCH)-abi.sh 2 $(DYNLINK) $(BINDING);
 
-check-vir-core: tests/vir-core.c src/vir.c src/vir.h
-	$(CC) $(CFLAGS) -Isrc tests/vir-core.c src/vir.c -o $(OUT)/vir-core
+check-vir-core: tests/vir-core.c src/optimizer/ir.c src/optimizer/ir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-core.c src/optimizer/ir.c -o $(OUT)/vir-core
 	$(OUT)/vir-core
 
 .PHONY: check-vir-essential
-check-vir-essential: tests/vir-essential-core.c src/vir.c src/vir.h
-	$(CC) $(CFLAGS) -Isrc tests/vir-essential-core.c src/vir.c -o $(OUT)/vir-essential-core
+check-vir-essential: tests/vir-essential-core.c src/optimizer/ir.c src/optimizer/ir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-essential-core.c src/optimizer/ir.c -o $(OUT)/vir-essential-core
 	$(OUT)/vir-essential-core
 
 check-vir-frontend-stage0: $(OUT)/$(STAGE0) tests/vir-frontend.sh tests/vir-frontend-workloads.txt $(VIR_FRONTEND_FIXTURES)
@@ -478,16 +478,16 @@ check-vir-frontend-policy-stage0: $(OUT)/$(STAGE0) tests/vir-frontend-policy.sh 
 check-vir-frontend-policy-stage2: $(OUT)/$(STAGE2) tests/vir-frontend-policy.sh tests/vir-frontend-gvn.c tests/vir-frontend-licm.c tests/vir-frontend-nested-loop.c tests/vir-frontend-multi-latch.c
 	TARGET_EXEC="$(TARGET_EXEC)" bash tests/vir-frontend-policy.sh 2
 
-check-vir-fuzz: tests/vir-fuzz.c src/vir.c src/vir.h
-	$(CC) $(CFLAGS) -Isrc tests/vir-fuzz.c src/vir.c -o $(OUT)/vir-fuzz
+check-vir-fuzz: tests/vir-fuzz.c src/optimizer/ir.c src/optimizer/ir.h
+	$(CC) $(CFLAGS) -Isrc tests/vir-fuzz.c src/optimizer/ir.c -o $(OUT)/vir-fuzz
 	$(OUT)/vir-fuzz
 
-check-vir-sanitizer: tests/vir-core.c tests/vir-essential-core.c tests/vir-fuzz.c src/vir.c src/vir.h
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-core.c src/vir.c -o $(OUT)/vir-core-sanitize
+check-vir-sanitizer: tests/vir-core.c tests/vir-essential-core.c tests/vir-fuzz.c src/optimizer/ir.c src/optimizer/ir.h
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-core.c src/optimizer/ir.c -o $(OUT)/vir-core-sanitize
 	ASAN_OPTIONS=detect_leaks=1 $(OUT)/vir-core-sanitize
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-fuzz.c src/vir.c -o $(OUT)/vir-fuzz-sanitize
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-fuzz.c src/optimizer/ir.c -o $(OUT)/vir-fuzz-sanitize
 	ASAN_OPTIONS=detect_leaks=1 $(OUT)/vir-fuzz-sanitize
-	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-essential-core.c src/vir.c -o $(OUT)/vir-essential-sanitize
+	$(CC) $(CFLAGS) $(SAN_CFLAGS) -Isrc tests/vir-essential-core.c src/optimizer/ir.c -o $(OUT)/vir-essential-sanitize
 	ASAN_OPTIONS=detect_leaks=1 $(OUT)/vir-essential-sanitize
 
 .PHONY: check-vir
@@ -497,11 +497,11 @@ check-vir: check-vir-core check-vir-essential check-vir-frontend-stage0 \
 	check-vir-frontend-policy-stage2 \
 	check-vir-sanitizer
 
-check-vir-stage0: $(OUT)/$(STAGE0) tests/vir-stage0.c src/vir.c src/vir.h
+check-vir-stage0: $(OUT)/$(STAGE0) tests/vir-stage0.c src/optimizer/ir.c src/optimizer/ir.h
 	$(OUT)/$(STAGE0) -o $(OUT)/vir-stage0 tests/vir-stage0.c
 	$(TARGET_EXEC) $(OUT)/vir-stage0
 
-check-vir-stage2: $(OUT)/$(STAGE2) tests/vir-stage0.c src/vir.c src/vir.h
+check-vir-stage2: $(OUT)/$(STAGE2) tests/vir-stage0.c src/optimizer/ir.c src/optimizer/ir.h
 	$(TARGET_EXEC) $(OUT)/$(STAGE2) -o $(OUT)/vir-stage2 tests/vir-stage0.c
 	$(TARGET_EXEC) $(OUT)/vir-stage2
 
@@ -527,17 +527,14 @@ check-vir-opt-baseline: $(OUT)/$(STAGE0) $(OUT)/$(STAGE2) tests/vir-opt-baseline
 	sed -i 's/ stage=[02] / /' "$$stage0" "$$stage2"; \
 	diff "$$stage0" "$$stage2"
 
-# Both prerequisites are order-only, and both exist because "make -j" would
-# otherwise let a compile start beside the thing it reads. Selecting a target
-# replaces src/codegen.c with "ln -sf", which unlinks before it relinks, so a
-# compile racing "config" can find nothing there. And src/main.c includes
-# out/libc.inc, which is generated: listing it only on the stage0 link left
-# the two free to run in either order on a tree that has never been built.
+# Configuration must precede compilation, including parallel builds that switch
+# targets. The generated libc include is also needed by the object itself, not
+# just the final link.
 $(OBJS) $(SAN_OBJS): $(OUT)/libc.inc
 
 $(OUT)/%.o: %.c | config $(OUT)/libc.inc
 	$(VECHO) "  CC\t$@\n"
-	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
+	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MP -MF $@.d $<
 
 SHELL_HACK := $(shell mkdir -p $(OUT) $(OUT)/$(SRCDIR) $(OUT)/tests \
                       $(SAN_OUT)/$(SRCDIR))
@@ -563,7 +560,7 @@ $(OUT)/$(STAGE0): $(OUT)/libc.inc $(OBJS)
 
 $(SAN_OUT)/%.o: %.c | config $(OUT)/libc.inc
 	$(VECHO) "  CC\t$@\n"
-	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MF $@.d $<
+	$(Q)$(CC) -o $@ $(CFLAGS) -c -MMD -MP -MF $@.d $<
 
 $(OUT)/$(STAGE0)-sanitizer: $(OUT)/libc.inc $(SAN_OBJS)
 	$(VECHO) "  LD\t$@ (with sanitizers)\n"
@@ -601,7 +598,7 @@ clean:
 	-$(RM) $(OUT)/libc.inc
 
 distclean: clean
-	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target $(SRCDIR)/codegen.c config $(BUILD_SESSION) $(ARCH_DEFS_SHA256_FILE)
+	-$(RM) $(OUT)/inliner $(OUT)/norm-lf $(OUT)/target config $(BUILD_SESSION) $(ARCH_DEFS_SHA256_FILE) src/codegen.c
 	-$(RM) DOM.dot CFG.dot
 
 -include $(deps)

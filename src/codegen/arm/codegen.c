@@ -7,9 +7,10 @@
 
 /* Translate IR to target machine code */
 
-#include "arm.c"
-#include "defs.h"
-#include "globals.c"
+#include "../../defs.h"
+#include "../../globals.c"
+#include "../emit.c"
+#include "encode.c"
 
 /* Whether a load or store materializes its frame or data offset with
  * MOVW/MOVT/ADD because no immediate form reaches it. LDR, LDRB, STR and STRB
@@ -121,14 +122,6 @@ void cfg_flatten(void)
         elf_offset += 32; /* 6 insns for main call + 2 for exit */
 
     mop_flatten_functions(arm_frame_layout, update_elf_offset);
-}
-
-void emit(int code)
-{
-    if (mop_count_only)
-        ++mop_counted_words;
-    else
-        elf_write_int(elf_code, code);
 }
 
 static int arm_bitwise_insn(opcode_t op,

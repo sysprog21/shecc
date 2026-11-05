@@ -4,9 +4,9 @@
  * shecc is freely redistributable under the BSD 2 clause license. See the file
  * "LICENSE" for information on usage and redistribution of this file.
  */
-#include "../config"
-#include "defs.h"
-#include "globals.c"
+#include "../../config"
+#include "../defs.h"
+#include "../globals.c"
 
 source_location_t synth_built_in_loc;
 hashmap_t *PRAGMA_ONCE;

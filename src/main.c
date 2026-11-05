@@ -18,8 +18,8 @@
 
 /* The inclusion must follow the fixed order, otherwise it fails to build. */
 #include "defs.h"
-#include "vir-frontend.h"
-#include "vir-lower.h"
+#include "optimizer/builder.h"
+#include "optimizer/lower.h"
 
 /* Initialize global objects */
 #include "globals.c"
@@ -28,26 +28,26 @@
 #include "elf.c"
 
 /* C language lexical analyzer */
-#include "lexer.c"
+#include "frontend/lexer.c"
 
 /* C language pre-processor */
-#include "preprocessor.c"
+#include "frontend/preprocessor.c"
 
 /* C language syntactic analyzer */
-#include "parser.c"
+#include "frontend/parser/parser.c"
 
 /* Native value IR construction and optimization. */
-#include "vir-frontend.c"
-#include "vir.c"
+#include "optimizer/builder.c"
+#include "optimizer/ir.c"
 
 /* Register allocator */
-#include "vir-lower.c"
+#include "optimizer/lower.c"
 
 /* Machine peepholes, liveness and target lowering */
-#include "peephole.c"
+#include "optimizer/peephole.c"
 
-/* Machine code generation. support ARMv7-A and RV32I */
-#include "codegen.c"
+/* Target-specific machine code generation. */
+#include "codegen/codegen.c"
 
 /* inlined libc */
 #include "../out/libc.inc"

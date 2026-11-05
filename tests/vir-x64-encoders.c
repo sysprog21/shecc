@@ -76,8 +76,25 @@ static void compare(strbuf_t *expected)
     strbuf_free(expected);
     strbuf_free(elf_code);
 }
+
+/* A pointer slot must be measured as wide even when its size field retains the
+ * integer width. Folding a reload as a narrow access loses pointer bits.
+ */
+static void test_pointer_slot_width(void)
+{
+    vir_mop_t mop = {0};
+
+    mop.size_bytes = 4;
+    assert(load_width(&mop) == 4);
+    assert(store_width(&mop) == 4);
+    mop.is_pointer = true;
+    assert(load_width(&mop) == 8);
+    assert(store_width(&mop) == 8);
+}
+
 int main(void)
 {
+    test_pointer_slot_width();
     for (int n = -2; n <= 1024; n++) {
         elf_code = strbuf_create(128);
         reference_emit_nop_bytes(n);

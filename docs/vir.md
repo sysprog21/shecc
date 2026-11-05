@@ -440,11 +440,12 @@ word domains, with all-one constants masked to the result width.
 
 | Concern | Location |
 | --- | --- |
-| Values, CFG, builders, verification, and optimizations | `src/vir.h`, `src/vir.c` |
-| Native frontend and sealed SSA construction | `src/vir-frontend.c`, `src/vir-frontend.h` |
-| Shared ABI lowering, register allocation, and spills | `src/vir-lower.c`, `src/vir-lower.h` |
-| Machine emission | `src/arm-codegen.c`, `src/arm64-codegen.c`, `src/riscv-codegen.c`, `src/x64-codegen.c` |
-| Pass scheduling and graph compaction | `src/vir-frontend.c` |
+| Values, CFG, builders, verification, and optimizations | `src/optimizer/ir.h`, `src/optimizer/ir.c` |
+| Native frontend and sealed SSA construction | `src/optimizer/builder.c`, `src/optimizer/builder.h` |
+| Shared ABI lowering, register allocation, and spills | `src/optimizer/lower.c`, `src/optimizer/lower.h` |
+| Machine emission | `src/codegen/arm/codegen.c`, `src/codegen/arm64/codegen.c`, `src/codegen/riscv/codegen.c`, `src/codegen/x64/codegen.c` |
+| Pass scheduling | `src/optimizer/builder.c` |
+| Graph compaction | `src/optimizer/ir.c` |
 | Reachability, dumps, and graph lifetime | `src/main.c` |
 | Core and frontend fixtures | `tests/vir-core.c`, `tests/vir-frontend-*.c`, and their manifests |
 | Native execution and graph quality harnesses | `tests/vir-direct-*.sh`, `tests/vir-qualifiers.sh` |

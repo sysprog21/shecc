@@ -1,4 +1,4 @@
-#include "vir.h"
+#include "ir.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -4916,7 +4916,7 @@ static bool vir_has_value_with_context(const vir_function_t *func,
         return false;
 
     /* A value still linked into a block of this function answers in O(1): only
-     * vir.c links and unlinks values, and it keeps @member in step. Keep the
+     * ir.c links and unlinks values, and it keeps @member in step. Keep the
      * full scan as a fallback for detached values, struct copies and malformed
      * ownership metadata.
      */

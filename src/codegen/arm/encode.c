@@ -12,7 +12,7 @@
  *   - prefix __ : mnemonic symbols for Arm instruction, condition code,
  *                 registers, etc.
  *
- * An example of usage in src/codegen.c: (unconditional jump)
+ * An example of usage in codegen.c: (unconditional jump)
  *
  *         +---------------- write specified instruction into ELF
  *         |
@@ -26,7 +26,7 @@
  * current instruction.
  */
 
-#include "defs.h"
+#include "../../defs.h"
 
 /* opcode */
 enum {
