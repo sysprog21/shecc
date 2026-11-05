@@ -536,6 +536,35 @@ function try_compile_warning()
     fi
 }
 
+# Compile a program that must be rejected and check the compiler's output.
+# Usage: try_compile_error_output <expected text> [flags] << EOF
+function try_compile_error_output()
+{
+    local expected="$1"
+    local extra_flags="${2:-}"
+    local input=$(cat)
+    test_selected || return 0
+    local tmp_in="$(mktemp --suffix .c)"
+    local tmp_exe="$(mktemp)"
+    local tmp_log="$(mktemp)"
+    echo "$input" > "$tmp_in"
+
+    $SHECC $SHECC_CFLAGS $extra_flags -o "$tmp_exe" "$tmp_in" > "$tmp_log" 2>&1
+    local exit_code=$?
+
+    ((TOTAL_TESTS++))
+    ((CATEGORY_TESTS["$CURRENT_CATEGORY"]++))
+    if [ "$exit_code" -eq 0 ] || [ "$exit_code" -gt 128 ] \
+        || ! grep -Fq -- "$expected" "$tmp_log"; then
+        report_test_failure "COMPILE ERROR OUTPUT TEST" "$tmp_in" "$tmp_exe" \
+            "$expected" "$exit_code" "$(< "$tmp_log")"
+    else
+        ((PASSED_TESTS++))
+        ((CATEGORY_PASSED["$CURRENT_CATEGORY"]++))
+        show_progress
+    fi
+}
+
 # Count native VIR operations in one function. Volatile effect counts guard
 # accesses that runtime output cannot reveal. ptrstride:N checks an SSA pointer
 # recurrence advancing by N bytes, preserving the strength-reduction gate.
@@ -20842,7 +20871,7 @@ begin_category "Const Qualifiers" "Testing const qualifier support for variables
 
 # Explicit casts may remove const in C, but must be diagnosed. Adding const
 # remains legal and should not spuriously warn.
-try_compile_warning "Warning: discarding const qualifier in cast" << EOF
+try_compile_warning "[Warning]: discarding const qualifier in cast" << EOF
 int main(void) {
     const int value = 42;
     int *mutable = (int *)&value;
@@ -20850,21 +20879,21 @@ int main(void) {
 }
 EOF
 
-try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+try_compile_warning "[Warning]: string literal is read-only" "--warn-string-literals" << EOF
 int main(void) {
     char *text = "hello";
     return text[0];
 }
 EOF
 
-try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+try_compile_warning "[Warning]: string literal is read-only" "--warn-string-literals" << EOF
 char *message = "global";
 int main(void) {
     return message[0];
 }
 EOF
 
-try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+try_compile_warning "[Warning]: string literal is read-only" "--warn-string-literals" << EOF
 int first(char *text) { return text[0]; }
 int main(void) {
     return first("argument");
@@ -20886,7 +20915,7 @@ int main(void) {
     return s[1] != 'z' || g[1] != 'q' || t[0] != 'p';
 }
 EOF
-try_compile_warning "Warning: string literal is read-only" "--warn-string-literals" << EOF
+try_compile_warning "[Warning]: string literal is read-only" "--warn-string-literals" << EOF
 int main(void) {
     char *text;
     text = "hello";
@@ -30412,6 +30441,769 @@ int first(int count, ...) {
     return va_arg(ap, int);
 }
 int main(void) { return first(1, 0); }
+EOF
+
+begin_category "Constant expression arms" "Unselected conditional arms are not evaluated"
+
+try_ 0 << EOF
+enum { A = 1 || (2147483647 + 1), B = 0 && (2147483647 * 2) };
+int main(void) { return A + B - 1; }
+EOF
+
+try_ 0 << EOF
+enum { A = 1 ? 5 : 1 / 0, B = 0 ? 1 % 0 : 7, C = 0 ? 1 << 40 : 3 };
+int main(void) { return A + B + C - 15; }
+EOF
+
+try_ 0 << EOF
+int a[1 ? 2 : 1 / 0];
+int main(void) { return sizeof(a) / sizeof(a[0]) - 2; }
+EOF
+
+try_ 0 << EOF
+int f(int x, int y)
+{
+    return (x + 8 - 3 != x + 5) + (x - 3 + 8 != x + 5) +
+           (!!(x < y) != (x < y)) + (!(x != y) != (x == y)) +
+           ((x - 2 - 3) != x - 5);
+}
+int main(void) { return f(10, 20) + f(20, 10) + f(7, 7); }
+EOF
+
+try_ 0 << EOF
+enum { A = 1 || (1 / 0), B = 0 && (1 << 40), C = 1 + (0 && 1 / 0) + 2,
+       D = (0 && 1 / 0) || 5, E = 1 && 2 };
+int a[1 || (1 / 0)];
+int main(void)
+{
+    return (A + B + C + D + E != 6) + (sizeof(a) / sizeof(a[0]) != 1);
+}
+EOF
+
+try_compile_error << EOF
+enum { X = 1 && (1 / 0) };
+int main(void) { return 0; }
+EOF
+
+try_compile_error << EOF
+enum { X = 0 || (1 % 0) };
+int main(void) { return 0; }
+EOF
+
+try_flags 7 "-DFOO=7 -DEMPTY= -DGONE -UGONE" << EOF
+#ifdef GONE
+#error GONE should be undefined
+#endif
+#ifndef EMPTY
+#error EMPTY should be defined
+#endif
+int main(void) { return FOO; }
+EOF
+
+try_flags 1 "-DFLAG" << EOF
+int main(void) { return FLAG; }
+EOF
+
+try_flags 9 "-DADD=1+2 -DNEG=-1 -DE=(2*3) -DS=\"hi\" -DC='i'" << EOF
+int main(void) { char *s = S; return ADD + E + NEG + (s[1] == C); }
+EOF
+
+try_flags 7 "-DRET=return -DQUAL=const" << EOF
+int main(void) { QUAL int value = 7; RET value; }
+EOF
+
+try_ 0 << EOF
+int k(int c) {
+    switch (c) {
+    case 0: return 100;
+    case 1 ... 3: return 1;
+    case 4 ... 4: return 2;
+    case -5 ... -2: return 3;
+    case 10 ... 20: if (c == 15) return 9; return 4;
+    default: return 0;
+    }
+}
+int u(unsigned c) {
+    switch (c) {
+    case 0 ... 9: return 1;
+    case 4000000000U ... 4294967295U: return 2;
+    default: return 0;
+    }
+}
+int main(void) {
+    int r = 0;
+    r += k(0) != 100; r += k(1) != 1; r += k(3) != 1; r += k(4) != 2;
+    r += k(5) != 0; r += k(-5) != 3; r += k(-2) != 3; r += k(-1) != 0;
+    r += k(9) != 0; r += k(10) != 4; r += k(15) != 9; r += k(20) != 4; r += k(21) != 0;
+    r += u(0) != 1; r += u(9) != 1; r += u(10) != 0; r += u(4000000000U) != 2; r += u(4294967295U) != 2; r += u(3999999999U) != 0;
+    return r;
+}
+EOF
+
+try_ 0 << EOF
+__extension__ typedef int myint;
+static __inline__ int twice(int x) __attribute__((always_inline));
+static __inline__ int twice(int x) { return x * 2; }
+void stop(void) __attribute__((noreturn, __unused__));
+void stop(void) { for (;;) ; }
+struct __attribute__((packed)) P { char c; int i; };
+int main(void) {
+    __const int k = 4;
+    volatile myint v = __extension__ 3;
+    char * __restrict__ p = 0;
+    int f __attribute__((unused)) = 1;
+    return twice(k) + v + (p != 0) - 11 + f - 1;
+}
+EOF
+
+try_compile_error_output "Too many errors, stopping after 2" "-fmax-errors=2" << EOF
+int main(void) {
+    const int a = 1;
+    const int b = 2;
+    a = 3;
+    b++;
+    a += 2;
+    return a;
+}
+EOF
+
+try_flags 1 "--std=c99" << EOF
+int main(int c) { switch (c) { case 1 ... 2: return 1; } return 0; }
+EOF
+
+try_compile_warning "[Warning]: empty case range" << EOF
+int main(int c) { switch (c) { case 5 ... 1: return 1; } return 0; }
+EOF
+
+begin_category "Tail calls" "Calls in tail position keep results and frames correct"
+
+try_ 0 << EOF
+int leaf(int a, int b) { return a * 3 + b; }
+int fwd(int a, int b) { return leaf(a + 1, b); }
+int chain3(int a) { return fwd(a, a); }
+int count_down(int n, int acc) { if (n == 0) return acc; return count_down(n - 1, acc + n); }
+int even(int n);
+int odd(int n) { if (n == 0) return 0; return even(n - 1); }
+int even(int n) { if (n == 0) return 1; return odd(n - 1); }
+int big(int a, int b, int c, int d, int e, int f, int g) { return a + b + c + d + e + f + g; }
+int calls_big(int a) { return big(a, 1, 2, 3, 4, 5, 6); }
+int local_ptr(int a) { int x = a; return leaf(x, 0) + 0; }
+
+int deref(int *p) { return *p; }
+int escape(int a) { int x = a * 2; return deref(&x); }
+int main(void) {
+    int bad = 0;
+    bad += chain3(4) != 19;
+    bad += leaf(1, 2) != 5;
+    bad += fwd(2, 3) != 12;
+    bad += chain3(5) != (6 * 3 + 5);
+    bad += count_down(60000, 0) != 1800030000;
+    bad += count_down(10, 0) != 55;
+    bad += even(100001) != 0;
+    bad += odd(100001) != 1;
+    bad += calls_big(7) != 28;
+    bad += local_ptr(3) != 9;
+    bad += escape(21) != 42;
+    return bad;
+}
+EOF
+
+# 64-bit targets turn a call in tail position into a jump, so mutual recursion
+# far deeper than the stack completes there.
+if [ "$PTR_SZ" -eq 8 ]; then
+    try_ 0 << EOF
+int count_down(int n, int acc) { if (n == 0) return acc; return count_down(n - 1, acc + 1); }
+int even(int n);
+int odd(int n) { if (n == 0) return 0; return even(n - 1); }
+int even(int n) { if (n == 0) return 1; return odd(n - 1); }
+int main(void) { return (count_down(200000000, 0) == 200000000) + 2 * even(200000000) - 3; }
+EOF
+fi
+
+begin_category "Library headers" "C99 <ctype.h> and <time.h>"
+
+try_ 0 << EOF
+#include <ctype.h>
+#include <time.h>
+int main(void)
+{
+    time_t t = 951782400; /* 2000-02-29 00:00:00 UTC */
+    struct tm *g = gmtime(&t);
+    int r = 0;
+    if (g->tm_year != 100 || g->tm_mon != 1 || g->tm_mday != 29 || g->tm_wday != 2 || g->tm_yday != 59) r |= 1;
+    struct tm b = *g;
+    time_t t0 = mktime(&b); /* local time zone in a dynamic build */
+    b.tm_mday += 1;
+    struct tm c;
+    c.tm_sec = 0;
+    c.tm_min = 0;
+    c.tm_isdst = 0;
+    c.tm_mon = 0;
+    c.tm_year = 100;
+    c.tm_mday = 32; /* noon, so a zone offset cannot move the date */
+    c.tm_hour = 12;
+    time_t t1 = mktime(&b);
+    time_t t2 = mktime(&c);
+    if (t1 - t0 != 86400 || t2 == -1 || c.tm_mon != 1 || c.tm_mday != 1) r |= 2;
+    if (time(0) < 1700000000) r |= 4;
+    if (clock() < 0) r |= 8;
+    if (!isspace('\\n') || !isupper('A') || tolower('A') != 'a' || ispunct('a') || !ispunct('!') ) r |= 64;
+    return r;
+}
+EOF
+
+begin_category "setjmp.h" "C99 non-local jumps"
+
+try_ 0 << EOF
+#include <setjmp.h>
+static jmp_buf env;
+static int depth;
+static void deep(int n)
+{
+    if (n == 0)
+        longjmp(env, 7);
+    depth++;
+    deep(n - 1);
+}
+int main(void)
+{
+    int r = setjmp(env);
+    if (r == 0) {
+        deep(5);
+        return 1;
+    }
+    if (r != 7 || depth != 5)
+        return 2;
+    if (setjmp(env) == 0)
+        longjmp(env, 0);
+    return 0;
+}
+EOF
+
+try_ 0 << EOF
+#include <setjmp.h>
+static jmp_buf env;
+static void thrower(int v) { longjmp(env, v); }
+static int work(int a, int b, int c, int d, int e)
+{
+    int i, acc = 0;
+    int r = setjmp(env);
+    if (r == 0) {
+        for (i = 0; i < 4; i++) {
+            acc += a + i;
+            b += c;
+            if (i == 2)
+                thrower(d + e);
+        }
+    }
+    /* a, c, d and e were not changed after setjmp, so they keep their values;
+     * acc and b were, and hold what the loop left.
+     */
+    return r * 1000 + a + c + d + e + (acc == 6 && b == 11 ? 100 : 0);
+}
+int main(void)
+{
+    return work(1, 2, 3, 4, 5) == 9113 ? 0 : 1;
+}
+EOF
+
+try_ 0 << EOF
+#include <setjmp.h>
+static jmp_buf outer, inner;
+static int order;
+static int level2(void)
+{
+    if (setjmp(inner) == 0)
+        longjmp(inner, 3);
+    order = order * 10 + 2;
+    longjmp(outer, 9);
+    return 0;
+}
+int main(void)
+{
+    volatile int seen = 0;
+    int r = setjmp(outer);
+    if (r == 0) {
+        order = 1;
+        level2();
+        return 1;
+    }
+    seen = r;
+    return order == 12 && seen == 9 ? 0 : 2;
+}
+EOF
+
+# A call in tail position must not become a jump: longjmp returns into this
+# frame after the callee ran, so the frame has to be alive when it does.
+try_ 0 << EOF
+#include <setjmp.h>
+static jmp_buf env;
+static int thrower(void)
+{
+    longjmp(env, 7);
+    return 0;
+}
+static int h(void)
+{
+    int r = setjmp(env);
+    if (r)
+        return r + 100;
+    return thrower();
+}
+int main(void) { return h() != 107; }
+EOF
+
+begin_category "Variable length arrays" "C99 one-dimensional VLAs and VLA parameters"
+
+# abort() raises SIGABRT in a dynamic build and exits 255 in the embedded libc.
+vla_trap_status=255
+if [ "$LINK_MODE" = dynamic ]; then
+    vla_trap_status=134
+fi
+
+# A bound whose byte count wraps traps instead of allocating a small array.
+try_ "$vla_trap_status" << EOF
+#include <stddef.h>
+int main(int argc, char **argv)
+{
+    size_t n = (size_t) -1 / 2 + argc;
+    int a[n];
+    a[0] = 1;
+    return a[0];
+}
+EOF
+
+try_ 3 << EOF
+int main(int argc, char **argv)
+{
+    int n = argc + 2;
+    long long w[n];
+    w[n - 1] = 3;
+    return (int) w[n - 1];
+}
+EOF
+
+try_ 0 << EOF
+int main(void)
+{
+    int n = 3, calls = 0;
+    int a[n];
+    int fixed[3];
+    int (*rows[1])[3] = { &fixed };
+    char b[sizeof((calls++, a))];
+    if (sizeof b != sizeof(int *) || calls != 0)
+        return 1;
+    if (sizeof((calls++, a)) != sizeof(int *) ||
+        sizeof((calls++, fixed)) != sizeof(int *) ||
+        sizeof((calls++, *(&a))) != sizeof(int *) || calls != 0)
+        return 2;
+    int size = sizeof *((calls++, &a));
+    return size != 12 || calls != 1 ||
+           sizeof *((0, rows)[0]) != sizeof fixed;
+}
+EOF
+
+try_ 0 << EOF
+int main(void)
+{
+    int n = 3, i = 0;
+    int a[n];
+    int size = sizeof *((i++ ? &a : &a));
+    if (i != 1 || size != 12)
+        return 1;
+    char b[sizeof *((i++ ? &a : &a))];
+    if (i != 2 || sizeof b != 12)
+        return 2;
+    size = sizeof ((&a)[i++ - 2]);
+    if (i != 3 || size != 12)
+        return 3;
+    size = sizeof a[i++];
+    return i != 3 || size != 4;
+}
+EOF
+
+try_ 0 << EOF
+static int check(int choose)
+{
+    int n = 3, calls = 0;
+    int a[n];
+    int other[n];
+    char b[sizeof *(&a)];
+    char c[sizeof *(&(a))];
+    char d[sizeof *(choose ? &a : &other)];
+    char e[sizeof a[calls++]];
+    a[2] = 7;
+    return sizeof b != 12 || sizeof c != 12 || sizeof d != 12 ||
+           sizeof e != 4 || calls != 0 ||
+           sizeof *(choose ? &a : &other) != 12 ||
+           (char *)((choose ? &a : &other) + 1) -
+               (char *)(choose ? &a : &other) != 12 ||
+           sizeof *(choose ? &a : (choose ? 0 : &a)) != 12 ||
+           sizeof *(choose ? 0 : &a) != 12 ||
+           sizeof *(choose ? (void *)0 : &a) != 12 ||
+           sizeof *(choose ? &a : (void *)0) != 12;
+}
+int main(void) { return check(0) || check(1); }
+EOF
+
+try_ 0 << EOF
+int main(void)
+{
+    int n = 3;
+    int a[n];
+    a[0] = 7;
+    a[2] = 9;
+    n = 8;
+    return sizeof *(&a) != 12 || sizeof *(&a + 1) != 12 ||
+           (*(&a))[2] != 9 || sizeof(a[0]) != 4 ||
+           (void *)&a != (void *)&a[0] ||
+           (char *)(&a + 1) - (char *)&a != 12 ||
+           (char *)(&(a) + 1) - (char *)&a != 12 ||
+           (&a + 1) - &a != 1 || *(a + 2) != 9;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) { int n=3; int a[n], b[n]; a=b; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(void)
+{
+    int n = 3;
+    int a[n];
+    void *p = 0;
+    return sizeof *(1 ? &a : p);
+}
+EOF
+
+try_compile_error << EOF
+int main(void)
+{
+    int n = 3;
+    int a[n];
+    void *p = 0;
+    return sizeof *(1 ? p : &a);
+}
+EOF
+
+try_ 0 << EOF
+struct S { int a; char b; };
+static int fill(int n)
+{
+    int a[n];
+    for (int i = 0; i < n; i++)
+        a[i] = i;
+    return a[n - 1] + (int) (sizeof(a) / sizeof(a[0])) + (int) sizeof a / 4;
+}
+static int loop(int n)
+{
+    int total = 0;
+    for (int i = 1; i <= n; i++) {
+        int t[i];
+        t[i - 1] = i;
+        if (i == 3)
+            continue;
+        if (i == 6)
+            break;
+        total += t[i - 1];
+    }
+    return total;
+}
+static int early(int n)
+{
+    int a[n];
+    a[0] = 7;
+    if (n > 2) {
+        int b[n * 2];
+        b[0] = 1;
+        return a[0] + b[0];
+    }
+    return a[0];
+}
+static int rec(int n)
+{
+    if (n == 0)
+        return 0;
+    int a[n];
+    a[0] = n;
+    return a[0] + rec(n - 1);
+}
+static int structs(int n)
+{
+    struct S s[n];
+    for (int i = 0; i < n; i++) {
+        s[i].a = i;
+        s[i].b = 'a' + i;
+    }
+    return s[n - 1].a + s[n - 1].b;
+}
+static int ptrs(int n)
+{
+    int x = 5;
+    int *p[n];
+    for (int i = 0; i < n; i++)
+        p[i] = &x;
+    return *p[n - 1];
+}
+static int sw(int n)
+{
+    switch (n) {
+    case 1: {
+        int a[n + 2];
+        a[2] = 9;
+        return a[2];
+    }
+    default:
+        break;
+    }
+    return 0;
+}
+static int param(int n, int b[n]) { return b[n - 1]; }
+int main(void)
+{
+    int bad = 0, x[3] = {1, 2, 3};
+    bad += fill(10) != 9 + 10 + 10;
+    bad += loop(8) != 1 + 2 + 4 + 5;
+    bad += early(5) != 8;
+    bad += early(1) != 7;
+    bad += rec(100) != 5050;
+    bad += structs(4) != 3 + 'd';
+    bad += ptrs(3) != 5;
+    bad += sw(1) != 9;
+    bad += param(3, x) != 3;
+    for (int k = 0; k < 100000; k++) {
+        int a[(k % 7) + 1];
+        a[0] = k;
+        if (a[0] != k)
+            bad++;
+    }
+    return bad;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) { float n = 3; int a[n]; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(int c) { int a[c][3]; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(int c) { int a[c] = {1}; return 0; }
+EOF
+
+try_compile_error << EOF
+int main(int c) { static int a[c]; return 0; }
+EOF
+
+try_compile_error << EOF
+int n;
+int a[n];
+int main(void) { return 0; }
+EOF
+
+try_ 0 << EOF
+int f(int n, int a[n++]) { return n; }
+int g(int n, int a[n + sizeof(int)]) { return a[0]; }
+int main(void)
+{
+    int a[1] = {5}, n = 3;
+    int b[n + sizeof(int)];
+    int c[n];
+    b[6] = 1;
+    return (f(3, a) != 4) + (g(1, a) != 5) + ((int) sizeof((c)) != 12) +
+           ((int) sizeof(((c))) != 12) + ((int) sizeof(b) != 7 * 4);
+}
+EOF
+
+try_ 0 << EOF
+int main(void)
+{
+    int n = 3;
+    int a[n];
+    char b[sizeof a], c[sizeof((a))];
+    static char fixed[sizeof a[0]];
+    int i = 0;
+again:
+    {
+        int x[n];
+        x[0] = ++i;
+        if (x[0] < 5)
+            goto again;
+        goto outside;
+    }
+outside:
+    return sizeof b != 12 || sizeof c != 12 || sizeof fixed != 4;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) { int n = 3; goto inside; int a[n]; inside: return 0; }
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int n = 3;
+    { int a[n]; goto sibling; }
+    { int b[n]; sibling: return 0; }
+}
+EOF
+
+if [ "$PTR_SZ" -eq 8 ]; then
+    try_ 0 << EOF
+int main(void)
+{
+    unsigned long long n = 4294967297ULL;
+    char a[n];
+    int b[n];
+    a[n - 1] = 7;
+    b[n - 1] = 9;
+    return sizeof a != n || sizeof b != n * 4 ||
+           a[n - 1] != 7 || b[n - 1] != 9;
+}
+EOF
+fi
+
+try_ 0 << EOF
+int main(void)
+{
+    int n = 3, i = 0;
+    for (int a[n]; i < 3; i++) {
+        a[0] = i;
+        if (i == 1) continue;
+        if (i == 2) break;
+    }
+    goto done;
+done:
+    return i != 2;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) {
+    int n = 3;
+    switch (n) { int a[n]; case 3: return 0; }
+    return 1;
+}
+EOF
+
+try_compile_error << EOF
+int main(void) { int *n = 0; int a[n]; return 0; }
+EOF
+
+try_ 0 << EOF
+#include <stddef.h>
+struct VLABound { int x; int y; };
+int main(void) {
+    int n = 3;
+    int a[n];
+    char b[sizeof a + offsetof(struct VLABound, y)];
+    return sizeof b != 16;
+}
+EOF
+
+try_ 0 << EOF
+int main(void)
+{
+    int n = 3;
+    {
+        int n[n];
+        n[2] = 7;
+        return (int) sizeof(n) != 12 || n[2] != 7;
+    }
+}
+EOF
+
+# A postfix operator after the parenthesized name sizes the element.
+try_ 0 << EOF
+int main(int argc, char **argv)
+{
+    int n = argc + 2;
+    int a[n];
+    return sizeof (a)[0] != sizeof(int) || sizeof(a) != n * sizeof(int);
+}
+EOF
+
+try_flags 0 "-fmax-errors=123456789" << EOF
+int main(void) { return 0; }
+EOF
+
+begin_category "inttypes.h" "C99 <inttypes.h> printf conversion macros"
+
+try_ 0 << EOF
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+int main(void)
+{
+    char buf[64];
+    int32_t a = 5;
+    int64_t b = 1LL << 40;
+
+    snprintf(buf, sizeof(buf), "%" PRId32 " %" PRIx64 " %" PRIu8, a, b,
+             (uint8_t) 200);
+    return strcmp(buf, "5 10000000000 200") != 0;
+}
+EOF
+
+begin_category "GNU preprocessor extensions" "#warning, __COUNTER__ and __builtin_expect"
+
+try_ 0 << EOF
+int main(void) {
+    int calls = 0;
+    long long wide = 4294967296LL;
+    return (__builtin_expect(wide, 1) != 0) +
+           (sizeof(__builtin_expect(1LL, 1)) != sizeof(long)) +
+           (__builtin_expect((calls++, 7), 1) != 7) + (calls != 1) +
+           (2 * __builtin_expect(1 + 2, 1) != 6) +
+           (__builtin_expect(4294967295U, 1) != -1);
+}
+EOF
+
+try_compile_error << EOF
+#define ATTR __attribute__((packed
+int x ATTR;
+int main(void) { return 0; }
+EOF
+
+try_compile_warning "this only warns" << EOF
+#warning this only warns
+int main(void) { return 0; }
+EOF
+
+try_ 0 << EOF
+#warning this only warns
+#if 0
+#warning skipped
+#endif
+int a = __COUNTER__, b = __COUNTER__, c = __COUNTER__;
+int main(void)
+{
+    return (a != 0) + (b != 1) + (c != 2) +
+           (__builtin_expect(b == 1, 1) != 1);
+}
+EOF
+
+try_ 0 << EOF
+#define TWICE(x) ((x)*10+(x))
+#define FORWARD(x) TWICE(x) + (x)
+#define MIX(x) #x, (x), (x)
+#define PASTE(x) x ## _value
+#line 100
+int counter_value = 5;
+int main(void)
+{
+    int line = TWICE(__LINE__);
+    int a = TWICE(__COUNTER__);
+    int b = FORWARD(__COUNTER__);
+    int c = TWICE(__COUNTER__);
+    struct { char *text; int a; int b; } mixed = { MIX(__COUNTER__) };
+    return line != 1133 || a != 0 || b != 12 || c != 22 || __COUNTER__ != 4 ||
+           mixed.text[0] != '_' || mixed.a != 3 || mixed.b != 3 ||
+           PASTE(counter) != 5;
+}
 EOF
 
 # Test Results Summary
