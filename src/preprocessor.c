@@ -138,9 +138,11 @@ bool is_builtin_system_header(const char *name)
            !strcmp(name, "errno.h") || !strcmp(name, "limits.h") ||
            !strcmp(name, "stdarg.h") || !strcmp(name, "stdbool.h") ||
            !strcmp(name, "stddef.h") || !strcmp(name, "stdint.h") ||
-           !strcmp(name, "signal.h") || !strcmp(name, "wchar.h") ||
-           !strcmp(name, "stdio.h") || !strcmp(name, "stdlib.h") ||
-           !strcmp(name, "string.h") || !strcmp(name, "sys/stat.h");
+           !strcmp(name, "inttypes.h") || !strcmp(name, "signal.h") ||
+           !strcmp(name, "wchar.h") || !strcmp(name, "stdio.h") ||
+           !strcmp(name, "stdlib.h") || !strcmp(name, "string.h") ||
+           !strcmp(name, "sys/stat.h") || !strcmp(name, "time.h") ||
+           !strcmp(name, "setjmp.h");
 }
 
 void define_builtin_object_macro(const char *name,
@@ -293,6 +295,96 @@ void install_stddef_offsetof_macro(void)
     hashmap_put_borrowed(MACROS, macro->name, macro);
 }
 
+/* GNU spells several keywords with surrounding underscores so that headers can
+ * use them under any -std. Map each to the keyword shecc already has;
+ * __extension__ only silences pedantic warnings and expands to nothing.
+ */
+void install_gnu_keyword_spellings(void)
+{
+    static const struct {
+        const char *alias;
+        const char *keyword;
+    } spellings[] = {
+        {"__inline__", "inline"},     {"__inline", "inline"},
+        {"__restrict__", "restrict"}, {"__restrict", "restrict"},
+        {"__const__", "const"},       {"__const", "const"},
+        {"__volatile__", "volatile"}, {"__volatile", "volatile"},
+        {"__signed__", "signed"},     {"__signed", "signed"},
+    };
+    macro_t *macro;
+
+    for (int i = 0; i < (int) (sizeof(spellings) / sizeof(*spellings)); i++)
+        define_builtin_object_macro(
+            spellings[i].alias,
+            lookup_keyword((char *) spellings[i].keyword,
+                           strlen(spellings[i].keyword)),
+            spellings[i].keyword);
+    macro = new_macro("__extension__");
+    hashmap_put_borrowed(MACROS, macro->name, macro);
+}
+
+/* __attribute__((...)) is skipped through its balanced parentheses. Attributes
+ * that only advise the optimizer or the linker are harmless to drop; the ones
+ * that change layout, the object's section or when code runs are not, so say
+ * they are ignored.
+ */
+static token_t *pp_skip_attribute(token_t *tk)
+{
+    static const char *layout[] = {
+        "packed",      "aligned",    "section", "mode", "vector_size", "alias",
+        "constructor", "destructor", "cleanup", "weak", "naked",       "ifunc"};
+    source_location_t *loc = &tk->location;
+    int depth = 1;
+
+    tk = pp_lex_expect_token(tk, T_open_bracket, true);
+    while (depth) {
+        tk = pp_lex_next_token(tk, true);
+        if (!tk || tk->kind == T_eof)
+            error_at("unterminated __attribute__", loc);
+        if (tk->kind == T_open_bracket)
+            depth++;
+        else if (tk->kind == T_close_bracket)
+            depth--;
+        else if (tk->kind == T_identifier)
+            for (int i = 0; i < (int) (sizeof(layout) / sizeof(*layout)); i++) {
+                char name[MAX_ID_LEN + 40];
+                const char *spelled = tk->literal;
+                int len = strlen(layout[i]);
+
+                /* "packed" and "__packed__" are the same attribute. */
+                if (spelled[0] == '_' && spelled[1] == '_')
+                    spelled += 2;
+                if (strncmp(spelled, layout[i], len) ||
+                    (spelled[len] && strcmp(spelled + len, "__")))
+                    continue;
+                snprintf(name, sizeof(name), "attribute '%s' is ignored",
+                         layout[i]);
+                warn_at(name, &tk->location);
+                break;
+            }
+    }
+    return tk;
+}
+
+/* __builtin_expect(e, c) only hints branch probability, which shecc does not
+ * use, but accepts and returns long. Evaluating c is not required.
+ */
+void install_builtin_expect_macro(void)
+{
+    static const builtin_macro_token_t replacement[] = {
+        {T_open_bracket, "("},  {T_open_bracket, "("},  {T_long, "long"},
+        {T_close_bracket, ")"}, {T_open_bracket, "("},  {T_identifier, "expr"},
+        {T_close_bracket, ")"}, {T_close_bracket, ")"},
+    };
+    macro_t *macro =
+        new_builtin_function_macro("__builtin_expect", "expr", "hint");
+    token_t *tail = NULL;
+
+    append_builtin_macro_tokens(&macro->replacement, &tail, replacement,
+                                sizeof(replacement) / sizeof(*replacement));
+    hashmap_put_borrowed(MACROS, macro->name, macro);
+}
+
 /* shecc currently has signed plain char, 16-bit short, 32-bit int/long, and
  * 64-bit long long on every target. Keep <limits.h> tied to those actual
  * language types rather than to the host compiler's ABI.
@@ -334,6 +426,15 @@ void install_stddef_header(void)
 {
     LIMIT_OBJECT("NULL", "0");
     install_stddef_offsetof_macro();
+}
+
+/* The macros of <time.h>; its types and functions come with the embedded
+ * runtime.
+ */
+void install_time_header(void)
+{
+    LIMIT_OBJECT("NULL", "0");
+    LIMIT_OBJECT("CLOCKS_PER_SEC", "1000000");
 }
 
 /* <stdint.h>'s typedefs are parser-provided target types; install the target
@@ -447,6 +548,41 @@ void install_iso646_header(void)
     define_builtin_object_macro("or_eq", T_oreq, "|=");
     define_builtin_object_macro("xor", T_bit_xor, "^");
     define_builtin_object_macro("xor_eq", T_xoreq, "^=");
+}
+
+/* inttypes.h includes stdint.h and adds the printf conversion macros. Each is a
+ * string literal that adjacent literal concatenation splices into a format: "%"
+ * PRId32 "\n". The 8- and 16-bit and "fast" types promote to int, so they take
+ * no length modifier; only 64-bit types (and pointers on LP64) do.
+ */
+static void define_pri_macros(const char *suffix, const char *length)
+{
+    static const char *const conversions[] = {"d", "i", "o", "u", "x", "X"};
+    char name[MAX_ID_LEN];
+    char spec[8];
+
+    for (int i = 0; i < 6; i++) {
+        snprintf(name, sizeof(name), "PRI%s%s", conversions[i], suffix);
+        snprintf(spec, sizeof(spec), "%s%s", length, conversions[i]);
+        define_builtin_object_macro(name, T_string, spec);
+    }
+}
+
+void install_inttypes_header(void)
+{
+    static const char *const widths[] = {"8", "16", "32", "64"};
+    static const char *const kinds[] = {"", "LEAST", "FAST"};
+
+    install_stdint_header();
+    for (int k = 0; k < 3; k++)
+        for (int w = 0; w < 4; w++) {
+            char suffix[16];
+
+            snprintf(suffix, sizeof(suffix), "%s%s", kinds[k], widths[w]);
+            define_pri_macros(suffix, w == 3 ? "ll" : "");
+        }
+    define_pri_macros("MAX", "ll");
+    define_pri_macros("PTR", PTR_SIZE == 8 ? "ll" : "");
 }
 
 /* assert.h is a function-like macro header. Reinstall it on each inclusion so
@@ -619,6 +755,14 @@ bool resolve_angle_include(token_t *open,
         install_stdint_header();
         return false;
     }
+    if (!strcmp(name, "time.h")) {
+        install_time_header();
+        return false;
+    }
+    if (!strcmp(name, "inttypes.h")) {
+        install_inttypes_header();
+        return false;
+    }
     if (!strcmp(name, "assert.h")) {
         install_assert_header();
         return false;
@@ -656,6 +800,23 @@ token_t *line_macro_handler(token_t *tk)
     token_t *new_tk = copy_token(tk);
     new_tk->kind = T_numeric;
     new_tk->literal = intern_string(line);
+    memcpy(&new_tk->location, &tk->location, sizeof(source_location_t));
+    return new_tk;
+}
+
+/* __COUNTER__ expands to 0, 1, 2, ... in order of expansion. The count starts
+ * over with each compilation, so stage 1 and stage 2 number identically.
+ */
+static int counter_macro_value;
+
+token_t *counter_macro_handler(token_t *tk)
+{
+    char value[MAX_TOKEN_LEN];
+    snprintf(value, MAX_TOKEN_LEN, "%d", counter_macro_value++);
+
+    token_t *new_tk = copy_token(tk);
+    new_tk->kind = T_numeric;
+    new_tk->literal = intern_string(value);
     memcpy(&new_tk->location, &tk->location, sizeof(source_location_t));
     return new_tk;
 }
@@ -790,6 +951,7 @@ typedef struct preprocess_ctx {
      */
     hide_set_t *arg_hide_set;
     hashmap_t *macro_args;
+    hashmap_t *expanded_args;
     token_t *expanded_from;
     token_t *end_of_token; /* end of token stream of current context */
     bool trim_eof;
@@ -797,6 +959,39 @@ typedef struct preprocess_ctx {
 
 token_t *pp_preprocess_internal(token_t *tk, preprocess_ctx_t *ctx);
 char *token_to_string(token_t *tk, char *dest);
+
+/* Prescan each argument once, but never splice the cached list itself: the
+ * replacement rescan can append tokens or resume a function-like invocation.
+ */
+static token_t *pp_expanded_argument(preprocess_ctx_t *ctx,
+                                     token_t *parameter,
+                                     token_t **tail)
+{
+    char *name = parameter->literal;
+    token_t head;
+    token_t *cur = &head;
+    head.next = NULL;
+    if (!hashmap_contains(ctx->expanded_args, name)) {
+        preprocess_ctx_t arg_ctx;
+        arg_ctx.expanded_from =
+            ctx->expanded_from ? ctx->expanded_from : parameter;
+        arg_ctx.hide_set = ctx->arg_hide_set;
+        arg_ctx.arg_hide_set = NULL;
+        arg_ctx.macro_args = NULL;
+        arg_ctx.expanded_args = NULL;
+        arg_ctx.trim_eof = true;
+        token_t *expanded = pp_preprocess_internal(
+            hashmap_get(ctx->macro_args, name), &arg_ctx);
+        hashmap_put_borrowed(ctx->expanded_args, name, expanded);
+    }
+    for (token_t *arg = hashmap_get(ctx->expanded_args, name); arg;
+         arg = arg->next) {
+        cur->next = copy_token(arg);
+        cur = cur->next;
+    }
+    *tail = cur == &head ? NULL : cur;
+    return head.next;
+}
 
 /* Macro expansion for #line must be confined to its operands: sending the live
  * stream through pp_preprocess_internal() could consume following source
@@ -824,6 +1019,7 @@ token_t *pp_expand_line_operands(token_t *directive)
     ctx.hide_set = NULL;
     ctx.arg_hide_set = NULL;
     ctx.macro_args = NULL;
+    ctx.expanded_args = NULL;
     ctx.trim_eof = false;
     return pp_preprocess_internal(head.next, &ctx);
 }
@@ -1284,6 +1480,7 @@ token_t *pp_expand_function_macro_in_constant_expr(token_t *before)
     ctx.hide_set = NULL;
     ctx.arg_hide_set = NULL;
     ctx.macro_args = NULL;
+    ctx.expanded_args = NULL;
     ctx.trim_eof = true;
     token_t *expanded = pp_preprocess_internal(head.next, &ctx);
     token_t *after = end->next;
@@ -1427,6 +1624,7 @@ token_t *pp_read_constant_expr_operand(token_t *tk,
                 ctx.hide_set = NULL;
                 ctx.arg_hide_set = NULL;
                 ctx.macro_args = NULL;
+                ctx.expanded_args = NULL;
                 ctx.trim_eof = false;
                 expanded_tk = pp_preprocess_internal(macro->replacement, &ctx);
                 if (expanded_tk) {
@@ -1752,9 +1950,11 @@ token_t *pp_stringify(token_t *arg, source_location_t *loc)
  * diagnostic message. These are raw preprocessing tokens, not a macro
  * replacement list, so spell them directly and retain their source order.
  */
-__noreturn void pp_error_directive(token_t *directive)
+static source_location_t *pp_directive_message(token_t *directive,
+                                               char *message,
+                                               char *fallback)
 {
-    char message[MAX_LINE_LEN], scratch[MAX_TOKEN_LEN];
+    char scratch[MAX_TOKEN_LEN];
     int len = 0;
     bool needs_space = false;
     source_location_t *loc = &directive->location;
@@ -1779,10 +1979,32 @@ __noreturn void pp_error_directive(token_t *directive)
     }
 
     if (!len)
-        strcpy(message, "#error");
+        strcpy(message, fallback);
     else
         message[len] = '\0';
+    return loc;
+}
+
+__noreturn void pp_error_directive(token_t *directive)
+{
+    char message[MAX_LINE_LEN];
+    source_location_t *loc = pp_directive_message(directive, message, "#error");
+
     error_at(message, loc);
+}
+
+/* GCC's #warning shares #error's message but lets compilation go on. Strict C99
+ * has no such directive, so --std=c99 reports it as unsupported like before.
+ */
+void pp_warning_directive(token_t *directive)
+{
+    char message[MAX_LINE_LEN];
+    source_location_t *loc;
+
+    if (strict_c99)
+        error_at("Unsupported directive", &directive->location);
+    loc = pp_directive_message(directive, message, "#warning");
+    warn_at(message, loc);
 }
 
 /* C99's _Pragma operator is processed after macro replacement. The compiler has
@@ -2126,6 +2348,7 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
             expansion_ctx.expanded_from =
                 ctx->expanded_from ? ctx->expanded_from : tk;
             expansion_ctx.macro_args = ctx->macro_args;
+            expansion_ctx.expanded_args = ctx->expanded_args;
             expansion_ctx.arg_hide_set = ctx->arg_hide_set;
             expansion_ctx.trim_eof = true;
 
@@ -2151,21 +2374,22 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
                 macro_arg_replacement =
                     hashmap_get(ctx->macro_args, tk->literal);
                 if (macro_arg_replacement) {
-                    /* Recursively expand the argument to handle nested macros
-                     */
-                    expansion_ctx.hide_set = ctx->arg_hide_set;
-                    expansion_ctx.macro_args =
-                        NULL; /* Don't take account of macro arguments, this
-                                 might run into infinite loop
-                                 */
-                    macro_arg_replacement = pp_preprocess_internal(
-                        macro_arg_replacement, &expansion_ctx);
+                    macro_arg_replacement = pp_expanded_argument(
+                        ctx, tk, &expansion_ctx.end_of_token);
 
                     if (pp_resume_or_append(macro_arg_replacement,
                                             expansion_ctx.end_of_token, &tk,
                                             ctx, ctx->hide_set, &cur))
                         continue;
                 }
+                tk = pp_lex_next_token(tk, false);
+                continue;
+            }
+
+            if (!strict_c99 && tk->literal[0] == '_' && tk->literal[1] == '_' &&
+                (!strcmp(tk->literal, "__attribute__") ||
+                 !strcmp(tk->literal, "__attribute"))) {
+                tk = pp_skip_attribute(tk);
                 tk = pp_lex_next_token(tk, false);
                 continue;
             }
@@ -2219,6 +2443,7 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
                 expansion_ctx.arg_hide_set = ctx->hide_set;
                 /* Create parameter mapping table for this macro invocation */
                 expansion_ctx.macro_args = hashmap_create(8);
+                expansion_ctx.expanded_args = hashmap_create(8);
 
                 tk = pp_lex_next_token(tk, true);
 
@@ -2244,17 +2469,13 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
                             hashmap_get(ctx->macro_args, tk->next->literal);
 
                         if (arg_tk) {
-                            preprocess_ctx_t arg_expansion_ctx;
-                            arg_expansion_ctx.expanded_from = tk->next;
-                            arg_expansion_ctx.hide_set = ctx->arg_hide_set;
-                            arg_expansion_ctx.arg_hide_set = NULL;
-                            arg_expansion_ctx.macro_args = NULL;
-                            arg_tk = pp_preprocess_internal(arg_tk,
-                                                            &arg_expansion_ctx);
+                            token_t *arg_tail;
+                            arg_tk =
+                                pp_expanded_argument(ctx, tk->next, &arg_tail);
                             tk = pp_lex_next_token(tk, false);
                             if (arg_tk) {
                                 arg_cur->next = arg_tk;
-                                arg_cur = arg_expansion_ctx.end_of_token;
+                                arg_cur = arg_tail;
                             }
                             continue;
                         }
@@ -2372,6 +2593,7 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
                     pp_subst_hash(macro->replacement, expansion_ctx.macro_args),
                     &expansion_ctx);
                 hashmap_free(expansion_ctx.macro_args);
+                hashmap_free(expansion_ctx.expanded_args);
                 if (pp_resume_or_append(expanded, expansion_ctx.end_of_token,
                                         &tk, ctx, expansion_ctx.hide_set, &cur))
                     continue;
@@ -2419,6 +2641,7 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
             inclusion_ctx.arg_hide_set = NULL;
             inclusion_ctx.expanded_from = NULL;
             inclusion_ctx.macro_args = NULL;
+            inclusion_ctx.expanded_args = NULL;
             inclusion_ctx.trim_eof = true;
 
             if (pp_lex_peek_token(tk, T_string, true)) {
@@ -2756,6 +2979,18 @@ static token_t *pp_preprocess_body(token_t *tk, preprocess_ctx_t *ctx)
         case T_cppd_error: {
             pp_error_directive(tk);
         }
+        case T_cppd_warning: {
+            pp_warning_directive(tk);
+            while (tk->next && tk->next->kind != T_newline &&
+                   tk->next->kind != T_eof)
+                tk = pp_lex_next_token(tk, false);
+
+            /* Resume at the newline or EOF that ended the line; with neither,
+             * the list is exhausted and nothing is left to process.
+             */
+            tk = tk->next ? pp_lex_next_token(tk, false) : NULL;
+            continue;
+        }
         case T_cppd_unknown:
             error_at("Unsupported directive", &tk->location);
             break;
@@ -2930,6 +3165,37 @@ token_t *pp_strip_layout(token_t *tk)
     return head.next;
 }
 
+/* Lex @text, a macro value from the command line, into a replacement list the
+ * way pp_paste_tokens hands text to the lexer.
+ */
+static token_t *pp_lex_text(char *text)
+{
+    int len = strlen(text);
+    strbuf_t *buf = strbuf_create(len + 1);
+    source_location_t loc;
+    token_t head, *cur = &head;
+
+    strbuf_puts(buf, text);
+    buf->elements[len] = 0;
+    buf->capacity = len + 1;
+    buf->size = 0;
+    memcpy(&loc, &synth_built_in_loc, sizeof(source_location_t));
+    lex_at_line_start = false;
+    head.next = NULL;
+    while (buf->size < len) {
+        token_t *tk = lex_token(buf, &loc);
+
+        if (tk->kind == T_eof)
+            break;
+        tk->next = NULL;
+        memcpy(&tk->location, &synth_built_in_loc, sizeof(source_location_t));
+        cur->next = tk;
+        cur = tk;
+    }
+    strbuf_free(buf);
+    return head.next;
+}
+
 token_t *preprocess(token_t *tk)
 {
     preprocess_ctx_t ctx;
@@ -2937,6 +3203,7 @@ token_t *preprocess(token_t *tk)
     ctx.arg_hide_set = NULL;
     ctx.expanded_from = NULL;
     ctx.macro_args = NULL;
+    ctx.expanded_args = NULL;
     ctx.trim_eof = false;
 
     /* Initialize built-in macros */
@@ -2956,6 +3223,15 @@ token_t *preprocess(token_t *tk)
     macro = new_macro("__LINE__");
     macro->handler = line_macro_handler;
     hashmap_put_borrowed(MACROS, "__LINE__", macro);
+
+    counter_macro_value = 0;
+    if (!strict_c99) {
+        install_builtin_expect_macro();
+        install_gnu_keyword_spellings();
+    }
+    macro = new_macro("__COUNTER__");
+    macro->handler = counter_macro_handler;
+    hashmap_put_borrowed(MACROS, "__COUNTER__", macro);
 
     macro = new_macro("__DATE__");
     macro->handler = date_macro_handler;
@@ -3005,6 +3281,24 @@ token_t *preprocess(token_t *tk)
         macro->replacement = new_token(T_numeric, &synth_built_in_loc, 1);
         macro->replacement->literal = "1";
         hashmap_put_borrowed(MACROS, "__SHECC_DYNLINK__", macro);
+    }
+
+    /* The command line has the last word, in the order it was given. */
+    for (int i = 0; i < cmdline_macros_idx; i++) {
+        char *value = cmdline_macro_values[i];
+
+        if (!value) {
+            macro = hashmap_get(MACROS, cmdline_macro_names[i]);
+            if (macro)
+                macro->is_disabled = true;
+        } else if (!value[0]) {
+            macro = new_macro(cmdline_macro_names[i]);
+            hashmap_put_borrowed(MACROS, macro->name, macro);
+        } else {
+            macro = new_macro(intern_string(cmdline_macro_names[i]));
+            macro->replacement = pp_lex_text(value);
+            hashmap_put_borrowed(MACROS, macro->name, macro);
+        }
     }
 
     tk = pp_preprocess_internal(tk, &ctx);
@@ -3148,6 +3442,7 @@ char *token_to_string(token_t *tk, char *dest)
     case T_cppd_define:
     case T_cppd_undef:
     case T_cppd_error:
+    case T_cppd_warning:
     case T_cppd_if:
     case T_cppd_elif:
     case T_cppd_else:

@@ -617,7 +617,7 @@ var_t *lower_reference_update(var_t *object,
      */
     if (effective_pointer_depth(object) ? object->is_const_pointer
                                         : object->is_const_qualified)
-        error_at("assignment of read-only location", cur_token_loc());
+        error_continue("assignment of read-only location", cur_token_loc());
     one = load_constant(parent, *bb, 1, TY_int);
     if (is_pointer_operation(op, object, one)) {
         handle_pointer_arithmetic(parent, bb, op, object, one);
@@ -1271,6 +1271,8 @@ static void copy_pointee_array_shape(var_t *destination, const var_t *source)
 
     set_pointee_array_shape(destination, &shape,
                             source->pointee_array_element_ptr_level);
+    destination->vla_len = source->vla_len;
+    destination->vla_elem_size = source->vla_elem_size;
 }
 
 /* A dereference of a pointer to a pointer to an array, `*pp` for an int
@@ -1362,6 +1364,12 @@ static void take_expression_address(block_t *parent, basic_block_t **bb)
                                         operand->ptr_level + 1);
     result->is_const_qualified = operand->is_const_qualified;
     result->is_string_literal = operand->is_string_literal;
+    if (operand->array_size && operand->vla_len) {
+        fixed_array_shape_t shape = fixed_array_shape_from_var(operand);
+        set_pointee_array_shape(result, &shape, operand->ptr_level);
+        result->vla_len = operand->vla_len;
+        result->vla_elem_size = operand->vla_elem_size;
+    }
     if (operand->func_signature)
         result->pointee_func_signature = operand->func_signature;
     else if (operand->pointee_func_signature)
@@ -1506,6 +1514,8 @@ void handle_address_of_operator(block_t *parent, basic_block_t **bb)
                 for (int i = 0; i < lvalue.subscript_depth; i++)
                     fixed_array_shape_drop_outer(&shape);
                 set_pointee_array_shape(vd, &shape, lvalue.decl->ptr_level);
+                vd->vla_len = lvalue.decl->vla_len;
+                vd->vla_elem_size = lvalue.decl->vla_elem_size;
             }
             add_insn(parent, *bb, OP_assign, vd, rs1, NULL, 0, NULL);
         } else {
@@ -1565,6 +1575,8 @@ static bool lower_pointee_array_dereference(var_t *source,
     fixed_array_shape_t shape = fixed_array_shape_from_pointee_var(source);
 
     fixed_array_shape_to_var(row, &shape);
+    row->vla_len = source->vla_len;
+    row->vla_elem_size = source->vla_elem_size;
     row->ptr_level = source->pointee_array_element_ptr_level;
     row->is_const_qualified =
         source->is_const_qualified || element_type->is_const_qualified;
@@ -1695,7 +1707,14 @@ static var_t *decay_dereferenced_array(block_t *parent,
     var_t *pointer =
         require_temp_typed_ptr_var(parent, array->type, array->ptr_level + 1);
 
-    if (array->array_dim2) {
+    if (array->pointee_array_size) {
+        copy_pointee_array_shape(pointer, array);
+
+        /* An outer VLA's count describes its pointer slots, not the fixed
+         * arrays those slots point to.
+         */
+        pointer->vla_len = NULL;
+    } else if (array->array_dim2) {
         fixed_array_shape_t shape = fixed_array_shape_from_var(array);
 
         fixed_array_shape_drop_outer(&shape);
@@ -2152,4 +2171,73 @@ void lower_member_postfix(var_t *address,
          lex_peek(T_decrement, NULL)))
         error_at("member of a function call result is not assignable",
                  next_token_loc());
+}
+
+/* Call a one-argument libc function from generated code, as a variable length
+ * array's allocation and release do.
+ *
+ * Returns the call's result, if any.
+ */
+static var_t *emit_libc_call(block_t *parent,
+                             basic_block_t **bb,
+                             char *name,
+                             var_t *arg,
+                             bool has_result)
+{
+    /* Dynamic executables use the host allocator, whose malloc accepts a
+     * target-sized size_t. The private static-runtime helpers are not symbols
+     * exported by libc.
+     */
+    if (dynlink) {
+        if (!strcmp(name, "__shecc_vla_alloc"))
+            name = "malloc";
+        else if (!strcmp(name, "__shecc_vla_free"))
+            name = "free";
+    }
+    func_t *func = find_func(name);
+
+    if (!func)
+        error_at("variable length arrays need the embedded C library",
+                 cur_token_loc());
+    add_insn(parent, *bb, OP_push, NULL, arg, NULL, 1, NULL);
+    add_insn(parent, *bb, OP_call, NULL, NULL, NULL, 0,
+             func->return_def.var_name);
+    return has_result
+               ? emit_call_result_value(parent, bb, &func->return_def, true)
+               : NULL;
+}
+
+/* Release the variable length arrays live from index @from up, innermost first.
+ * A block's end, a return, and a break or continue leaving the block all end
+ * the lifetime of the arrays declared inside it; vla_live_n itself is only
+ * lowered where the block ends in the source.
+ */
+void emit_vla_frees(block_t *parent, basic_block_t **bb, int from)
+{
+    if (!*bb)
+        return;
+    for (int i = vla_live_n - 1; i >= from; i--)
+        emit_libc_call(parent, bb, "__shecc_vla_free", vla_live[i], false);
+}
+
+/* Release the variable length arrays a goto leaves: @live holds the @count of
+ * them live at the goto, @label those live at its target, and the arrays they
+ * share stay allocated. A target inside the scope of one the goto is not in is
+ * an error.
+ */
+void emit_goto_vla_frees(basic_block_t *bb,
+                         var_t **live,
+                         int count,
+                         label_t *label)
+{
+    int common = 0;
+
+    while (common < count && common < label->vla_count &&
+           live[common] == label->vlas[common])
+        common++;
+    if (common < label->vla_count)
+        error_at("goto enters the scope of a variable length array",
+                 cur_token_loc());
+    for (int i = count - 1; bb && i >= common; i--)
+        emit_libc_call(bb->scope, &bb, "__shecc_vla_free", live[i], false);
 }

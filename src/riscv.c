@@ -23,6 +23,7 @@ typedef enum {
     /* I type */
     rv_addi = 19 /* 0b0010011 */,
     rv_xori = 16403 /* 0b0010011 + (4 << 12) */,
+    rv_ori = 24595 /* 0b0010011 + (6 << 12) */,
     rv_andi = 28691 /* 0b0010011 + (7 << 12) */,
     rv_slli = 4115 /* 0b0010011 + (1 << 12) */,
     rv_srli = 20499 /* 0b0010011 + (5 << 12) */,
@@ -39,7 +40,10 @@ typedef enum {
     /* branch */
     rv_beq = 99 /* 0b1100011 */,
     rv_bne = 4195 /* 0b1100011 + (1 << 12) */,
+    rv_blt = 16483 /* 0b1100011 + (4 << 12) */,
+    rv_bge = 20579 /* 0b1100011 + (5 << 12) */,
     rv_bltu = 24675 /* 0b1100011 + (6 << 12) */,
+    rv_bgeu = 28771 /* 0b1100011 + (7 << 12) */,
     /* jumps */
     rv_jal = 111 /* 0b1101111 */,
     rv_jalr = 103 /* 0b1100111 */,
@@ -221,6 +225,7 @@ RV_INSN_R(__slt, rv_slt)
 RV_INSN_R(__sltu, rv_sltu)
 RV_INSN_I(__addi, rv_addi)
 RV_INSN_I(__xori, rv_xori)
+RV_INSN_I(__ori, rv_ori)
 RV_INSN_I(__andi, rv_andi)
 RV_INSN_I(__slli, rv_slli)
 RV_INSN_I(__srli, rv_srli)
@@ -235,7 +240,10 @@ RV_INSN_S(__sh, rv_sh)
 RV_INSN_S(__sw, rv_sw)
 RV_INSN_B(__beq, rv_beq)
 RV_INSN_B(__bne, rv_bne)
+RV_INSN_B(__blt, rv_blt)
+RV_INSN_B(__bge, rv_bge)
 RV_INSN_B(__bltu, rv_bltu)
+RV_INSN_B(__bgeu, rv_bgeu)
 
 int __jal(rv_reg rd, int imm)
 {

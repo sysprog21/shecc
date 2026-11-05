@@ -55,7 +55,13 @@ int eval_expression_imm(opcode_t op, int op1, int op2)
 {
     int res = 0;
 
-    if (checking_enum_constant) {
+    if (const_unevaluated_depth) {
+        if (((op == OP_div || op == OP_mod) &&
+             (!op2 || (op1 == INT_MIN && op2 == -1))) ||
+            ((op == OP_lshift || op == OP_rshift) && (op2 < 0 || op2 >= 32)))
+            return 0;
+    }
+    if (checking_enum_constant && !const_unevaluated_depth) {
         if (op == OP_add && ((op2 > 0 && op1 > INT_MAX - op2) ||
                              (op2 < 0 && op1 < INT_MIN - op2)))
             error_at("Enumerator value exceeds int range", cur_token_loc());

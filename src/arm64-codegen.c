@@ -29,6 +29,14 @@
  * epilogue, at the code offset its dest holds, instead of repeating it.
  */
 #define A64_SHARED_EXIT 64
+
+/* A call followed by a return of its result is one tail call. Flattening
+ * rewrites a return's src2 and size, so the call carries A64_TAIL_CALL in its
+ * own src2 and the return that it stands in for holds A64_TAIL_RETURN in dest,
+ * where a return has nothing else but a shared exit's offset.
+ */
+#define A64_TAIL_CALL 1
+#define A64_TAIL_RETURN -2
 #define A64_SHARED_EXIT_WORDS 4
 
 /* The last pair the prologue pushes also allocates the locals, which then sit
@@ -1542,6 +1550,8 @@ static int a64_place_loop(basic_block_t *start, int offset)
 static void a64_emit_entry(void);
 static void a64_emit_main_call(void);
 static void a64_emit_syscall(void);
+static void a64_emit_setjmp(void);
+static void a64_emit_longjmp(void);
 
 /* The instruction words @emitter produces, measured without writing them. */
 static int a64_count_words(void (*emitter)(void))
@@ -1567,6 +1577,13 @@ static bool a64_needs_syscall(void)
     return !dynlink && f && f->bbs && f->is_used;
 }
 
+/* setjmp and longjmp exist only for a static program that calls them. */
+static bool a64_needs_jump(char *name)
+{
+    func_t *f = find_func(name);
+    return !dynlink && f && f->bbs && f->is_used;
+}
+
 /* Give the entry sequence, the global initializers and every block their code
  * offsets, from the length of what emit_mop() produces for each operation.
  * cfg_flatten() has already put each function's definition in MOP_FLAT ahead of
@@ -1588,6 +1605,14 @@ static void a64_plan_offsets(void)
     if (a64_needs_syscall()) {
         find_func("__syscall")->bbs->elf_offset = elf_offset;
         elf_offset += a64_count_words(a64_emit_syscall) * 4;
+    }
+    if (a64_needs_jump("setjmp")) {
+        find_func("setjmp")->bbs->elf_offset = elf_offset;
+        elf_offset += a64_count_words(a64_emit_setjmp) * 4;
+    }
+    if (a64_needs_jump("longjmp")) {
+        find_func("longjmp")->bbs->elf_offset = elf_offset;
+        elf_offset += a64_count_words(a64_emit_longjmp) * 4;
     }
     for (f = FUNC_LIST.head; f; f = f->next) {
         if (!f->bbs)
@@ -2033,6 +2058,41 @@ static void a64_early_exit(func_t *f)
     exit->mops.head = exit->mops.tail = NULL;
 }
 
+/* A dynamic main saves the libc's global base register in its frame and loads
+ * the program's own in its place.
+ */
+static bool a64_dynamic_main(func_t *f)
+{
+    return dynlink && !strcmp(f->return_def.var_name, "main");
+}
+
+/* Mark each call whose result the next instruction returns unchanged as a tail
+ * call. The callee must take every argument in registers and the caller must
+ * hand out no address into its own frame, since the frame is gone when the
+ * callee runs; a callee without a body goes through the PLT and is left alone.
+ */
+static void a64_mark_tail_calls(func_t *f)
+{
+    /* A dynamic main restores the libc's global base in its epilogue, so a jump
+     * past that epilogue would run the callee with the libc's base, not the
+     * program's: its calls stay ordinary calls.
+     */
+    if (!func_tail_call_caller_ok(f) || a64_dynamic_main(f))
+        return;
+    for (basic_block_t *bb = f->bbs; bb; bb = bb->rpo_next)
+        for (vir_mop_t *call = bb->mops.head; call; call = call->next) {
+            vir_mop_t *ret = call->next;
+
+            if (call->op != OP_call || !ret || ret->op != OP_return ||
+                ret->src0_hi >= 0 || (ret->src0 >= 0 && a64_reg(ret->src0)))
+                continue;
+            if (!func_tail_call_target_ok(find_func(call->func_name)))
+                continue;
+            call->src2 |= A64_TAIL_CALL;
+            ret->dest = A64_TAIL_RETURN;
+        }
+}
+
 void cfg_flatten(void)
 {
     func_t *f;
@@ -2100,6 +2160,7 @@ void cfg_flatten(void)
             a64_place_exits(f);
             a64_post_index(f);
             a64_insert_fields(f);
+            a64_mark_tail_calls(f);
         }
     mop_flat_prepare(false);
     for (f = FUNC_LIST.head; f; f = f->next) {
@@ -2110,7 +2171,7 @@ void cfg_flatten(void)
         d->func_name = intern_string(f->return_def.var_name);
         int saved =
             func_highest_used_reg(f, A64_FIRST_CALLEE) - (A64_FIRST_CALLEE - 1);
-        if (dynlink && !strcmp(d->func_name, "main"))
+        if (a64_dynamic_main(f))
             saved |= A64_SAVE_GP;
         if (!saved && func_is_frameless_leaf(f))
             saved |= A64_FRAMELESS;
@@ -2159,6 +2220,27 @@ void cfg_flatten(void)
         a64_pc_relative = false;
         a64_plan_offsets();
     }
+}
+
+/* Release the frame the return @p describes and restore what the prologue
+ * saved, short of the RET.
+ */
+static void a64_emit_epilogue(vir_mop_t *p)
+{
+    int locals = ALIGN_UP(p->src1, A64_STACK_ALIGN), pop = 16;
+
+    if (p->src2 & A64_FOLDED_FRAME)
+        pop += locals;
+    else
+        a64_adjust_frame(locals, false);
+    for (int reg = (((p->src2 & 15) + !!(p->src2 & A64_SAVE_GP) + 1) & ~1) - 2;
+         reg >= 0; reg -= 2) {
+        emit(a64_ldp_post_insn(a64_saved_reg(p->src2, reg),
+                               a64_saved_reg(p->src2, reg + 1), A64_SP, pop));
+        pop = 16;
+    }
+    if (!(p->src2 & A64_FRAMELESS))
+        emit(a64_ldp_post_insn(A64_FP, A64_LR, A64_SP, pop));
 }
 
 void emit_mop(vir_mop_t *p)
@@ -2427,6 +2509,12 @@ void emit_mop(vir_mop_t *p)
             if (!dynlink)
                 fatal("arm64 external call requires --dynlink");
             a64_bl_addr(dynamic_sections.elf_plt_start + f->plt_offset);
+        } else if (p->src2 & A64_TAIL_CALL) {
+            /* The return that follows, less its RET, then a jump: the callee
+             * returns to this function's caller.
+             */
+            a64_emit_epilogue(p->next);
+            emit(a64_b_insn((f->bbs->elf_offset - elf_code->size) / 4));
         } else
             emit(a64_bl_insn((f->bbs->elf_offset - elf_code->size) / 4));
         return;
@@ -2463,27 +2551,15 @@ void emit_mop(vir_mop_t *p)
         emit(a64_blr_insn(A64_IP0));
         return;
     case OP_return: {
+        if (p->dest == A64_TAIL_RETURN)
+            return;
         if (p->src0 >= 0)
             a64_mov(0, n);
         if (p->src2 & A64_SHARED_EXIT) {
             a64_b(p->dest);
             return;
         }
-        int locals = ALIGN_UP(p->src1, A64_STACK_ALIGN), pop = 16;
-        if (p->src2 & A64_FOLDED_FRAME)
-            pop += locals;
-        else
-            a64_adjust_frame(locals, false);
-        for (int reg =
-                 (((p->src2 & 15) + !!(p->src2 & A64_SAVE_GP) + 1) & ~1) - 2;
-             reg >= 0; reg -= 2) {
-            emit(a64_ldp_post_insn(a64_saved_reg(p->src2, reg),
-                                   a64_saved_reg(p->src2, reg + 1), A64_SP,
-                                   pop));
-            pop = 16;
-        }
-        if (!(p->src2 & A64_FRAMELESS))
-            emit(a64_ldp_post_insn(A64_FP, A64_LR, A64_SP, pop));
+        a64_emit_epilogue(p);
         emit(a64_ret_insn());
         return;
     }
@@ -2646,6 +2722,38 @@ static void a64_emit_syscall(void)
     emit(a64_ret_insn());
 }
 
+/* A jump buffer holds x19..x28, x29, x30 and the stack pointer, in that order:
+ * the registers a callee preserves, with the return address and the frame of
+ * the call to setjmp. setjmp stores through x0, which then holds its result;
+ * longjmp copies the buffer to x17 first, for x0 is the value it delivers.
+ */
+#define A64_JMP_SP_SLOT 12
+
+static void a64_emit_setjmp(void)
+{
+    for (int i = 0; i < A64_JMP_SP_SLOT; i++)
+        emit(a64_mem_scaled_insn(A64_STORE, 8, 19 + i, 0, i * 8));
+    emit(a64_add_imm_insn(true, A64_IP0, A64_SP, 0));
+    emit(a64_mem_scaled_insn(A64_STORE, 8, A64_IP0, 0, A64_JMP_SP_SLOT * 8));
+    emit(a64_movz_insn(false, 0, 0, 0));
+    emit(a64_ret_insn());
+}
+
+/* longjmp(env, 0) makes setjmp return 1. */
+static void a64_emit_longjmp(void)
+{
+    emit(a64_mov_insn(true, A64_IP1, 0));
+    emit(a64_cbnz_insn(false, 1, 2));
+    emit(a64_movz_insn(false, 1, 1, 0));
+    emit(a64_mov_insn(false, 0, 1));
+    for (int i = 0; i < A64_JMP_SP_SLOT; i++)
+        emit(a64_mem_scaled_insn(A64_LOAD, 8, 19 + i, A64_IP1, i * 8));
+    emit(a64_mem_scaled_insn(A64_LOAD, 8, A64_IP0, A64_IP1,
+                             A64_JMP_SP_SLOT * 8));
+    emit(a64_add_imm_insn(true, A64_SP, A64_IP0, 0));
+    emit(a64_ret_insn());
+}
+
 /* Pad with NOPs up to @offset, where a64_plan_offsets() placed a block. */
 static void a64_pad_to(int offset)
 {
@@ -2661,6 +2769,10 @@ void code_generate(void)
         a64_emit_main_call();
     if (a64_needs_syscall())
         a64_emit_syscall();
+    if (a64_needs_jump("setjmp"))
+        a64_emit_setjmp();
+    if (a64_needs_jump("longjmp"))
+        a64_emit_longjmp();
 
     /* Walk the functions as a64_plan_offsets() did, padding up to the block
      * offsets it planned.

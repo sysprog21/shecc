@@ -528,9 +528,14 @@ int read_const_expr_operand(block_t *scope)
     if (lex_accept(T_minus)) {
         int value = read_const_expr_operand(scope);
 
-        if (checking_enum_constant && value == INT_MIN)
+        if (checking_enum_constant && !const_unevaluated_depth &&
+            value == INT_MIN)
             error_at("Enumerator value exceeds int range", cur_token_loc());
-        return -value;
+
+        /* Negate as unsigned: -INT_MIN in an unevaluated arm must not overflow
+         * the host's int.
+         */
+        return (int) (0U - (unsigned int) value);
     }
     if (lex_accept(T_plus))
         return read_const_expr_operand(scope);
@@ -574,9 +579,28 @@ int read_const_expr_operand(block_t *scope)
 
 bool constant_expression_needs_typed_value(token_t *token);
 
+/* Fold the operator on top of the stacks. An && or || whose left side decided
+ * the result marked its right side unevaluated (C99 6.6p3), and that mark ends
+ * once the operator itself is folded.
+ */
+static void fold_const_top(opcode_t *op_stack,
+                           bool *op_skip,
+                           int *val_stack,
+                           int *val_n,
+                           int *op_n)
+{
+    (*val_n)--;
+    (*op_n)--;
+    val_stack[*val_n - 1] = eval_expression_imm(
+        op_stack[*op_n], val_stack[*val_n - 1], val_stack[*val_n]);
+    if (op_skip[*op_n])
+        const_unevaluated_depth--;
+}
+
 int read_const_expr(block_t *scope)
 {
     opcode_t op_stack[MAX_CONST_EXPR_OPS];
+    bool op_skip[MAX_CONST_EXPR_OPS];
     int val_stack[MAX_CONST_EXPR_OPS];
     int op_n = 0, val_n = 0;
 
@@ -615,45 +639,42 @@ int read_const_expr(block_t *scope)
          * condition, and its arms are whole constant expressions of their own.
          */
         if (op == OP_ternary) {
-            while (op_n > 0) {
-                val_n--;
-                op_n--;
-                val_stack[val_n - 1] = eval_expression_imm(
-                    op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
-            }
+            while (op_n > 0)
+                fold_const_top(op_stack, op_skip, val_stack, &val_n, &op_n);
             lex_expect(T_question);
             bool saved_checking = checking_enum_constant;
             checking_enum_constant = saved_checking && val_stack[0];
+            bool taken = val_stack[0] != 0;
+            const_unevaluated_depth += !taken;
             int then_val = read_const_expr(scope);
+            const_unevaluated_depth -= !taken;
             lex_expect(T_colon);
-            checking_enum_constant = saved_checking && !val_stack[0];
+            checking_enum_constant = saved_checking && !taken;
+            const_unevaluated_depth += taken;
             int else_val = read_const_expr(scope);
+            const_unevaluated_depth -= taken;
             checking_enum_constant = saved_checking;
-            return val_stack[0] ? then_val : else_val;
+            return taken ? then_val : else_val;
         }
 
         /* Everything at least as tight as the operator just read is complete,
          * so fold it before pushing.
          */
         int prio = get_operator_prio(op);
-        while (op_n > 0 && get_operator_prio(op_stack[op_n - 1]) >= prio) {
-            val_n--;
-            op_n--;
-            val_stack[val_n - 1] = eval_expression_imm(
-                op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
-        }
+        while (op_n > 0 && get_operator_prio(op_stack[op_n - 1]) >= prio)
+            fold_const_top(op_stack, op_skip, val_stack, &val_n, &op_n);
         if (op_n >= MAX_CONST_EXPR_OPS - 1)
             error_at("Constant expression nests too deeply", next_token_loc());
+        /* The left side is complete here, so it may already decide && or || */
+        op_skip[op_n] = (op == OP_log_and && !val_stack[val_n - 1]) ||
+                        (op == OP_log_or && val_stack[val_n - 1]);
+        const_unevaluated_depth += op_skip[op_n];
         op_stack[op_n++] = op;
         val_stack[val_n++] = read_const_expr_operand(scope);
     }
 
-    while (op_n > 0) {
-        val_n--;
-        op_n--;
-        val_stack[val_n - 1] = eval_expression_imm(
-            op_stack[op_n], val_stack[val_n - 1], val_stack[val_n]);
-    }
+    while (op_n > 0)
+        fold_const_top(op_stack, op_skip, val_stack, &val_n, &op_n);
     return val_stack[0];
 }
 
@@ -800,6 +821,120 @@ static void read_array_parameter_qualifiers(var_t *vd,
     }
 }
 
+/* Return the last token of the operand of the sizeof at @sizeof_tk: a
+ * parenthesized expression or type, or a unary expression with its prefix
+ * operators and postfix subscripts, member accesses and calls.
+ */
+static token_t *skip_sizeof_operand(token_t *sizeof_tk)
+{
+    token_t *t = sizeof_tk->next;
+
+    while (t &&
+           (t->kind == T_asterisk || t->kind == T_ampersand ||
+            t->kind == T_minus || t->kind == T_plus || t->kind == T_log_not ||
+            t->kind == T_bit_not || t->kind == T_increment ||
+            t->kind == T_decrement || t->kind == T_sizeof))
+        t = t->next;
+    while (t) {
+        token_kind_t open = t->kind;
+        int nested = 0;
+
+        if (open == T_open_bracket || open == T_open_square) {
+            for (; t; t = t->next) {
+                nested +=
+                    (t->kind == T_open_bracket || t->kind == T_open_square) -
+                    (t->kind == T_close_bracket || t->kind == T_close_square);
+                if (!nested)
+                    break;
+            }
+        }
+        if (!t || !t->next ||
+            !(t->next->kind == T_open_square ||
+              t->next->kind == T_open_bracket || t->next->kind == T_dot ||
+              t->next->kind == T_arrow || t->next->kind == T_increment ||
+              t->next->kind == T_decrement))
+            return t;
+        t = t->next;
+        if ((t->kind == T_dot || t->kind == T_arrow) && t->next)
+            t = t->next;
+    }
+    return t;
+}
+
+/* Whether the array bound ahead, up to its "]", is not an integer constant
+ * expression: it names something other than an enumeration constant outside a
+ * sizeof. Such a bound makes a variable length array (C99 6.7.5.2).
+ */
+static bool sizeof_has_runtime_extent(block_t *scope, token_t *token);
+
+static bool variable_array_bound_follows(block_t *scope)
+{
+    int depth = 0;
+    bool names_object = false;
+    token_kind_t previous = T_eof;
+
+    for (token_t *t = cur_token->next; t; previous = t->kind, t = t->next) {
+        if (t->kind == T_open_bracket || t->kind == T_open_square)
+            depth++;
+        else if (t->kind == T_close_bracket)
+            depth--;
+        else if (t->kind == T_close_square && depth-- == 0)
+            break;
+        else if (t->kind == T_sizeof) {
+            /* The operand of sizeof is not evaluated: skip it, and keep looking
+             * at the rest of the bound.
+             */
+            token_t *end = skip_sizeof_operand(t);
+
+            /* Ask the sizeof parser when the operand mentions a runtime array.
+             * Address/dereference and conditional expressions carry type
+             * information that a bare-identifier scan cannot recover.
+             */
+            for (token_t *operand = t->next; operand; operand = operand->next) {
+                if (operand->kind == T_identifier) {
+                    var_t *object = find_var(operand->literal, scope);
+                    if (object && object->vla_len) {
+                        names_object |= sizeof_has_runtime_extent(scope, t);
+                        break;
+                    }
+                }
+                if (operand == end)
+                    break;
+            }
+            t = end;
+            if (!t)
+                break;
+        } else if (t->kind == T_identifier &&
+                   (!strcmp(t->literal, "__builtin_offsetof") ||
+                    !strcmp(t->literal, "offsetof"))) {
+            t = skip_sizeof_operand(t);
+            if (!t)
+                break;
+        } else if (t->kind == T_identifier && previous != T_struct &&
+                   previous != T_union && previous != T_enum &&
+                   !find_scoped_constant(t->literal, scope) &&
+                   !find_visible_type(t->literal, scope))
+            names_object = true;
+    }
+    return names_object;
+}
+
+/* Skip a variable array bound, leaving its closing "]" next. */
+static void skip_array_bound(void)
+{
+    int depth = 0;
+
+    while (cur_token->next) {
+        token_kind_t kind = cur_token->next->kind;
+
+        if (kind == T_close_square && !depth)
+            break;
+        depth += (kind == T_open_bracket || kind == T_open_square) -
+                 (kind == T_close_bracket || kind == T_close_square);
+        cur_token = cur_token->next;
+    }
+}
+
 static int read_array_parameter_bound(var_t *vd,
                                       bool is_param,
                                       int dim,
@@ -812,6 +947,21 @@ static int read_array_parameter_bound(var_t *vd,
     if (lex_peek(T_close_square, NULL)) {
         if (static_bound)
             error_at("static array parameter needs a bound", cur_token_loc());
+        return 0;
+    }
+    if (variable_array_bound_follows(vd->scope)) {
+        /* The bound of a parameter only documents it: `int a[n]` is `int *a`. A
+         * local one is evaluated where the declaration executes, which
+         * read_block_declarator_storage() does from vla_bound.
+         */
+        if (dim)
+            error_at("Only the outermost array bound may be variable",
+                     next_token_loc());
+        if (!is_param && (parsing_block_typedef_declarator || !block_depth))
+            error_at("variable length array needs a function body",
+                     next_token_loc());
+        vd->vla_bound = cur_token;
+        skip_array_bound();
         return 0;
     }
     int bound = read_const_expr(vd->scope);
@@ -1401,13 +1551,20 @@ static void read_inner_var_decl_body(var_t *vd,
             fixed_array_shape_to_var(vd, &shape);
             dims += element_shape.rank;
         }
+        if (vd->vla_bound &&
+            (is_record_member || dims > 1 || element_shape.rank))
+            error_at(is_record_member
+                         ? "A member cannot be a variable length array"
+                         : "Only one-dimensional variable length arrays are "
+                           "supported",
+                     cur_token_loc());
         if (first_dim_empty && is_record_member) {
             /* A record's omitted outer bound is its flexible array member.
              * Inner dimensions still describe the complete element type, so
              * retain their product and row stride for member indexing.
              */
             vd->has_unsized_array = true;
-        } else if (first_dim_empty && !is_param) {
+        } else if (first_dim_empty && !is_param && !vd->vla_bound) {
             /* An object declarator such as `char text[] = "hi"` has an inferred
              * outer bound. This also applies when it carries known inner
              * dimensions, e.g. `int table[][4]`.

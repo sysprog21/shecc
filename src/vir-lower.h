@@ -111,6 +111,8 @@ vir_mop_t *mop_flatten_insn(vir_mop_t *mop,
 int func_highest_used_reg(func_t *func, int first_callee_saved);
 unsigned int func_used_reg_mask(func_t *func);
 bool func_has_op(func_t *func, opcode_t a, opcode_t b);
+bool func_tail_call_caller_ok(func_t *func);
+bool func_tail_call_target_ok(func_t *func);
 bool func_makes_call(func_t *func);
 bool func_has_frame_slots(func_t *func);
 bool func_is_frameless_leaf(func_t *func);

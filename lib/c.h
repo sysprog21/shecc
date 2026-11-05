@@ -176,7 +176,85 @@ void __assert_fail(const char *expr,
                    unsigned int line,
                    const char *function);
 
+/* VLA storage and the host allocator use a target-sized extent. The embedded
+ * allocator retains its historical int parameter.
+ */
+#if defined(__aarch64__) || defined(__x86_64__)
+typedef unsigned long long __vla_size_t;
+#else
+typedef unsigned int __vla_size_t;
+#endif
+
 /* Dynamic memory allocation/deallocation functions */
+#ifdef __SHECC_DYNLINK__
+void *malloc(__vla_size_t size);
+#else
 void *malloc(int size);
+#endif
 void *calloc(int n, int size);
 void free(void *ptr);
+
+void *__shecc_vla_alloc(__vla_size_t size);
+void __shecc_vla_free(void *ptr);
+
+/* The remaining <ctype.h> classification and mapping functions. */
+int iscntrl(int c);
+int isgraph(int c);
+int islower(int c);
+int isprint(int c);
+int ispunct(int c);
+int isspace(int c);
+int isupper(int c);
+int tolower(int c);
+int toupper(int c);
+
+/* <time.h>, in UTC with no timezone database and no floating point, so difftime
+ * and strftime are absent. The two trailing members keep the layout the host
+ * library uses under --dynlink.
+ */
+#if defined(__aarch64__) || defined(__x86_64__)
+typedef long long time_t;
+typedef long long clock_t;
+#elif defined(__riscv) && defined(__SHECC_DYNLINK__)
+typedef long long time_t; /* glibc's riscv32 time_t is always 64 bits */
+typedef int clock_t;
+#else
+typedef int time_t;
+typedef int clock_t;
+#endif
+#ifndef __SHECC_TM_DEFINED
+#define __SHECC_TM_DEFINED
+struct tm {
+    int tm_sec;
+    int tm_min;
+    int tm_hour;
+    int tm_mday;
+    int tm_mon;
+    int tm_year;
+    int tm_wday;
+    int tm_yday;
+    int tm_isdst;
+#if defined(__aarch64__) || defined(__x86_64__)
+    int __tm_pad; /* shecc packs members; the host aligns gmtoff to 8 */
+    long long __tm_gmtoff;
+#else
+    long __tm_gmtoff;
+#endif
+    const char *__tm_zone;
+};
+#endif
+time_t time(time_t *t);
+clock_t clock(void);
+struct tm *gmtime(const time_t *t);
+struct tm *localtime(const time_t *t);
+time_t mktime(struct tm *tm);
+
+/* <setjmp.h>. A jmp_buf is large enough for every target's own layout, which
+ * matters for --dynlink where the host library fills it; a static program has
+ * the compiler's setjmp and longjmp, which use the first few words.
+ */
+typedef long long jmp_buf[64];
+#ifdef __SHECC_DYNLINK__
+int setjmp(jmp_buf env);
+void longjmp(jmp_buf env, int val);
+#endif

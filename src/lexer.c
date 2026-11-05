@@ -49,6 +49,7 @@ void lex_init_directives(void)
         {"#ifdef", T_cppd_ifdef},     {"#ifndef", T_cppd_ifndef},
         {"#include", T_cppd_include}, {"#pragma", T_cppd_pragma},
         {"#undef", T_cppd_undef},     {"#line", T_cppd_line},
+        {"#warning", T_cppd_warning},
     };
     init_token_map(&DIRECTIVE_MAP, &directive_tokens_storage, directives,
                    sizeof(directives) / sizeof(*directives), 16);
