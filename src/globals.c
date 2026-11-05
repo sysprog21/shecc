@@ -18,6 +18,8 @@
 
 source_location_t *cur_token_loc(void);
 __noreturn void error_at(char *msg, source_location_t *loc);
+void warn_at(char *msg, source_location_t *loc);
+void error_continue(char *msg, source_location_t *loc);
 __noreturn void limit_error(char *msg);
 
 /* Forward declaration for string interning */
@@ -283,6 +285,11 @@ int get_operator_prio(opcode_t op)
 
 /* Command line compilation flags */
 bool dynlink = false;
+
+/* The function being parsed calls setjmp, so its second return enters the code
+ * after that call with the registers of the first.
+ */
+bool func_calls_setjmp = false;
 bool imm_binding = false;
 bool libc = true;
 bool optimize = true;
@@ -296,6 +303,13 @@ bool strict_c99 = false;
 bool dump_stats = false;
 char *include_dirs[MAX_INCLUDE_DIRS];
 int include_dirs_idx = 0;
+
+/* -D and -U, in command-line order. A NULL value in @cmdline_macro_values marks
+ * a -U; an empty one defines the name to nothing.
+ */
+char *cmdline_macro_names[MAX_CMDLINE_MACROS];
+char *cmdline_macro_values[MAX_CMDLINE_MACROS];
+int cmdline_macros_idx = 0;
 
 /* Allocation counters are a stable pre-VIR baseline even when later passes
  * delete or rewrite the objects they counted.
@@ -2238,6 +2252,16 @@ void add_insn(block_t *block,
     if (op == OP_allocat && var_volatile_storage(rd) && !rd->is_global)
         rd->address_taken = true;
 
+    /* A second return from setjmp re-enters the function, through an edge that
+     * liveness never sees: nothing may share the storage of a value still live
+     * at the call, and a register may not hold it. Keeping every named local in
+     * its own slot gives longjmp the values it left, which C permits for a
+     * local changed after setjmp and guarantees for one that was not.
+     */
+    if (op == OP_allocat && func_calls_setjmp && !rd->is_global &&
+        rd->var_name && rd->var_name[0] != '.')
+        rd->address_taken = true;
+
     vir_frontend_note_insn(bb, op, rd, rs1, rs2, sz,
                            str ? intern_string(str) : NULL);
 }
@@ -2796,23 +2820,21 @@ __noreturn void limit_error(char *msg)
     error_at(msg, cur_token && TOKEN_ARENA ? cur_token_loc() : NULL);
 }
 
-/* Reports a mistake in the input, quoting the line it sits on. A program the
- * compiler refuses is not a broken invariant, so this exits the way
- * usage_error() does rather than abort()ing: an ordinary syntax error should
- * not raise SIGABRT, wake the system crash handler, or leave a core behind.
- *
- * Falls back to the same message without context when the location is NULL or
- * the source file is no longer on hand.
+/* Print one diagnostic with its source line and an underline. A warning and an
+ * error differ only in the label and in whether the caller exits afterwards.
  */
-__noreturn void error_at(char *msg, source_location_t *loc)
+static void report_at(char *label,
+                      char *note,
+                      char *msg,
+                      source_location_t *loc)
 {
     int offset, start_idx, i = 0, len, pos;
     char diagnostic[MAX_LINE_LEN];
 
     if (!loc) {
-        printf("[Error]: %s\n", msg);
+        printf("[%s]: %s\n", label, msg);
         fflush(NULL);
-        exit(1);
+        return;
     }
 
     len = loc->len;
@@ -2825,20 +2847,19 @@ __noreturn void error_at(char *msg, source_location_t *loc)
         loc->file ? hashmap_get(SRC_FILE_MAP, loc->file->physical) : NULL;
 
     /* The source text is no longer on hand, which changes what can be shown and
-     * not what went wrong: still a mistake in the input, so still an exit
-     * rather than the core dump fatal() would take.
+     * not what went wrong, so the message still goes out without the line.
      */
     if (!src) {
-        printf("[Error]: %s\n", msg);
+        printf("[%s]: %s\n", label, msg);
         fflush(NULL);
-        exit(1);
+        return;
     }
 
     if (len < 1)
         len = 1;
 
-    printf("%s:%d:%d: [Error]: %s\n", loc->file->logical, loc->line,
-           loc->column, msg);
+    printf("%s:%d:%d: [%s]: %s\n", loc->file->logical, loc->line, loc->column,
+           label, msg);
     printf("%6d |  ", loc->line);
 
     /* Finds line's start position */
@@ -2863,12 +2884,19 @@ __noreturn void error_at(char *msg, source_location_t *loc)
     printf("%6c |  ", ' ');
 
     /* Keep room for the note appended after the underline. */
-    const char *note = " Error occurs here";
     int limit = MAX_LINE_LEN - strlen(note) - 1;
 
     i = 0;
-    for (offset = start_idx; offset < pos && i < limit; offset++)
-        diagnostic[i++] = ' ';
+    for (offset = start_idx; offset < pos && i < limit; offset++) {
+        int ch = src->elements[offset] & 0xff;
+
+        /* Copy a tab so the caret lines up under the source line, and count a
+         * multibyte character once by skipping its continuation bytes.
+         */
+        if ((ch & 0xc0) == 0x80)
+            continue;
+        diagnostic[i++] = ch == '\t' ? '\t' : ' ';
+    }
     if (i < limit)
         diagnostic[i++] = '^';
     for (; len > 1 && i < limit; len--)
@@ -2876,8 +2904,48 @@ __noreturn void error_at(char *msg, source_location_t *loc)
 
     strcpy(diagnostic + i, note);
     printf("%s\n", diagnostic);
-    fflush(NULL); /* exit() flushes, but say so once rather than rely on it */
+    fflush(NULL);
+}
+
+/* Reports a mistake in the input, quoting the line it sits on. A program the
+ * compiler refuses is not a broken invariant, so this exits the way
+ * usage_error() does rather than abort()ing: an ordinary syntax error should
+ * not raise SIGABRT, wake the system crash handler, or leave a core behind.
+ *
+ * Falls back to the same message without context when the location is NULL or
+ * the source file is no longer on hand.
+ */
+__noreturn void error_at(char *msg, source_location_t *loc)
+{
+    report_at("Error", " Error occurs here", msg, loc);
     exit(1);
+}
+
+/* Number of errors reported so far by error_continue(), and how many end the
+ * run at once; 0 lifts the limit. main() stops after parsing if any occurred.
+ */
+int error_count = 0;
+int max_errors = 20;
+
+/* A mistake the parser can step over: report it, keep parsing to find more, and
+ * leave the exit to main(). Use error_at() whenever carrying on could read
+ * state the mistake left inconsistent.
+ */
+void error_continue(char *msg, source_location_t *loc)
+{
+    report_at("Error", " Error occurs here", msg, loc);
+    error_count++;
+    if (max_errors && error_count >= max_errors) {
+        printf("Too many errors, stopping after %d\n", error_count);
+        fflush(NULL);
+        exit(1);
+    }
+}
+
+/* A warning reports where the problem is and lets compilation go on. */
+void warn_at(char *msg, source_location_t *loc)
+{
+    report_at("Warning", " Warning issued here", msg, loc);
 }
 
 int abi_arg_next(int cursor, const var_t *var, bool variadic)

@@ -67,11 +67,11 @@ int sizeof_grouped_literal_depth(token_t *token, token_kind_t kind)
     return depth;
 }
 
-/* Push the value of a sizeof expression. VLA is intentionally outside shecc's
- * C99 scope, so every admitted sizeof result is an integer constant expression;
- * mark it so constant folding and the null pointer constant test treat every
- * operand form alike. Its type is size_t, so arithmetic and comparisons on the
- * result follow the unsigned conversions, as the file-scope constant path does.
+/* Push the value of a fixed-size sizeof expression. Each such result is an
+ * integer constant expression; mark it so constant folding and the null pointer
+ * constant test treat every operand form alike. Its type is size_t, so
+ * arithmetic and comparisons on the result follow the unsigned conversions, as
+ * the file-scope constant path does.
  */
 static void push_sizeof_result(block_t *parent, basic_block_t *bb, int size)
 {
@@ -80,6 +80,18 @@ static void push_sizeof_result(block_t *parent, basic_block_t *bb, int size)
 
     result->is_const = true;
     opstack_push(result);
+}
+
+static bool push_vla_size(block_t *parent, basic_block_t *bb, var_t *array)
+{
+    if (!array->array_size || !array->vla_len)
+        return false;
+    var_t *elem = load_constant(parent, bb, array->vla_elem_size,
+                                find_builtin_type("size_t"));
+    var_t *bytes = require_temp_typed_var(parent, find_builtin_type("size_t"));
+    add_insn(parent, bb, OP_mul, bytes, array->vla_len, elem, 0, NULL);
+    opstack_push(bytes);
+    return true;
 }
 
 int sizeof_array_object(const var_t *array)
@@ -147,6 +159,7 @@ static bool sizeof_walk_indirect(var_t *object,
     if (object->array_size > 0) {
         fixed_array_shape_t shape = fixed_array_shape_from_var(object);
 
+        object->vla_len = NULL;
         fixed_array_shape_drop_outer(&shape);
         fixed_array_shape_to_var(object, &shape);
         return true;
@@ -452,19 +465,20 @@ static bool scan_sizeof_postfix_operand(block_t *scope,
 }
 
 /* The preceding scan proves the exact token shape and type constraints before
- * this pass advances the lexer. Each subscript is read in a detached block so
- * its side effects remain unevaluated. @open_consumed says the operand's
- * opening parenthesis was already taken as the one following sizeof.
+ * this pass advances the lexer. A VLA operand evaluates its subscripts; other
+ * operands keep their side effects in a detached block. @open_consumed says the
+ * operand's opening parenthesis was already taken as the one following sizeof.
  */
 static void consume_sizeof_postfix_operand(block_t *parent,
                                            basic_block_t **bb,
-                                           bool open_consumed)
+                                           bool open_consumed,
+                                           bool evaluate)
 {
     if (open_consumed) {
-        consume_sizeof_postfix_operand(parent, bb, false);
+        consume_sizeof_postfix_operand(parent, bb, false, evaluate);
         lex_expect(T_close_bracket);
     } else if (lex_accept(T_asterisk) || lex_accept(T_ampersand))
-        consume_sizeof_postfix_operand(parent, bb, false);
+        consume_sizeof_postfix_operand(parent, bb, false, evaluate);
     else if (lex_peek(T_open_bracket, NULL) &&
              sizeof_cast_starts_at(parent, cur_token->next->next)) {
         int ptr_level;
@@ -472,9 +486,9 @@ static void consume_sizeof_postfix_operand(block_t *parent,
         lex_expect(T_open_bracket);
         read_sizeof_cast_type(parent, &ptr_level);
         if (!lex_accept(T_numeric) && !lex_accept(T_char))
-            consume_sizeof_postfix_operand(parent, bb, false);
+            consume_sizeof_postfix_operand(parent, bb, false, evaluate);
     } else if (lex_accept(T_open_bracket)) {
-        consume_sizeof_postfix_operand(parent, bb, false);
+        consume_sizeof_postfix_operand(parent, bb, false, evaluate);
         lex_expect(T_close_bracket);
     } else
         lex_expect(T_identifier);
@@ -487,10 +501,12 @@ static void consume_sizeof_postfix_operand(block_t *parent,
             basic_block_t *unevaluated_bb;
 
             lex_expect(T_open_square);
-            unevaluated_bb = bb_create(parent);
+            unevaluated_bb = evaluate ? *bb : bb_create(parent);
             read_expr(parent, &unevaluated_bb);
             read_ternary_operation(parent, &unevaluated_bb);
             opstack_pop();
+            if (evaluate)
+                *bb = unevaluated_bb;
             lex_expect(T_close_square);
         }
     }
@@ -576,9 +592,12 @@ static bool read_sizeof_postfix_operand(block_t *parent,
     if (is_bitfield(&object))
         error_at("sizeof cannot be applied to a bit-field", cur_token_loc());
 
-    consume_sizeof_postfix_operand(parent, bb, open_consumed);
+    consume_sizeof_postfix_operand(parent, bb, open_consumed,
+                                   object.array_size && object.vla_len);
     if (parenthesized && !open_consumed)
         lex_expect(T_close_bracket);
+    if (push_vla_size(parent, *bb, &object))
+        return true;
     if (object.array_size > 0) {
         size = sizeof_array_object(&object);
     } else if (object.ptr_level || object.type->ptr_level || object.is_func) {
@@ -605,6 +624,58 @@ static bool is_direct_fixed_array_pointer_slot(const var_t *pointer)
              pointer->type->array_element_ptr_level == 1));
 }
 
+/* sizeof applied to a variable length array is its element count times the
+ * element size, known only when the program runs. Handle `sizeof a` and
+ * `sizeof(a)` for the array object itself; a subscripted or otherwise larger
+ * operand measures something else and takes the ordinary path.
+ */
+static bool sizeof_variable_array(block_t *parent,
+                                  basic_block_t **bb,
+                                  bool parenthesized)
+{
+    token_t *name = cur_token->next;
+    token_t *after;
+    int extra = 0;
+    var_t *array;
+
+    /* sizeof((a)) names the same object as sizeof(a). */
+    for (; parenthesized && name && name->kind == T_open_bracket;
+         name = name->next)
+        extra++;
+    if (!name || name->kind != T_identifier)
+        return false;
+    after = name->next;
+    for (int i = 0; i < extra; i++, after = after ? after->next : NULL)
+        if (!after || after->kind != T_close_bracket)
+            return false;
+    if (!after)
+        return false;
+    if (parenthesized && after->kind != T_close_bracket)
+        return false;
+
+    /* `sizeof (a)[i]` and `sizeof a[i]` measure what follows the name, so the
+     * fast path applies only when no postfix operator continues the operand.
+     */
+    if (parenthesized)
+        after = after->next;
+    if (!after || after->kind == T_open_square || after->kind == T_dot ||
+        after->kind == T_arrow || after->kind == T_open_bracket ||
+        after->kind == T_increment || after->kind == T_decrement)
+        return false;
+    array = find_var(name->literal, parent);
+    if (!array || !array->vla_len || !array->array_size)
+        return false;
+
+    for (int i = 0; i < extra; i++)
+        lex_expect(T_open_bracket);
+    lex_expect(T_identifier);
+    for (int i = 0; i < extra; i++)
+        lex_expect(T_close_bracket);
+    if (parenthesized)
+        lex_expect(T_close_bracket);
+    return push_vla_size(parent, *bb, array);
+}
+
 void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
 {
     char token[MAX_ID_LEN];
@@ -615,6 +686,9 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     bool is_function = false;
 
     bool parenthesized = lex_accept(T_open_bracket);
+
+    if (sizeof_variable_array(parent, bb, parenthesized))
+        return;
 
     /* A string literal is an array, not a pointer, before the array-to-pointer
      * conversion that ordinary expression lowering applies. Parenthesized
@@ -696,11 +770,19 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
             }
         }
 
+        token_t *operand_start = cur_token;
         basic_block_t *unevaluated_bb = bb_create(parent);
         unevaluated_expression_depth++;
         read_expr_operand(parent, &unevaluated_bb);
         unevaluated_expression_depth--;
         var_t *expr_var = opstack_pop();
+        if (expr_var->array_size && expr_var->vla_len) {
+            cur_token = operand_start;
+            read_expr_operand(parent, bb);
+            opstack_pop();
+            push_vla_size(parent, *bb, expr_var);
+            return;
+        }
         sizeof_expression_type(expr_var, sizeof_tk, &type, &ptr_cnt,
                                &array_size, &is_function);
         if (type == TY_void && ptr_cnt == 0)
@@ -776,11 +858,20 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
     }
 
     /* sizeof(expression) - parse the expression and get its type */
+    token_t *operand_start = cur_token;
     basic_block_t *unevaluated_bb = bb_create(parent);
     unevaluated_expression_depth++;
     read_assignment_or_expression(parent, &unevaluated_bb);
     unevaluated_expression_depth--;
     var_t *expr_var = opstack_pop();
+    if (expr_var->array_size && expr_var->vla_len) {
+        cur_token = operand_start;
+        read_assignment_or_expression(parent, bb);
+        opstack_pop();
+        lex_expect(T_close_bracket);
+        push_vla_size(parent, *bb, expr_var);
+        return;
+    }
     sizeof_expression_type(expr_var, sizeof_tk, &type, &ptr_cnt, &array_size,
                            &is_function);
     if (is_incomplete_record_object(expr_var))
@@ -807,4 +898,19 @@ void handle_sizeof_operator(block_t *parent, basic_block_t **bb)
         size *= array_size;
     lex_expect(T_close_bracket);
     push_sizeof_result(parent, *bb, size);
+}
+
+/* Classify a declaration bound with the same sizeof rules used to lower it. The
+ * scratch block is unreachable: only the result's constantness matters, and no
+ * operand side effects may execute during this lookahead.
+ */
+static bool sizeof_has_runtime_extent(block_t *scope, token_t *token)
+{
+    token_t *saved = cur_token;
+    basic_block_t *scratch = bb_create(scope);
+    cur_token = token;
+    handle_sizeof_operator(scope, &scratch);
+    var_t *result = opstack_pop();
+    cur_token = saved;
+    return !result->is_const;
 }

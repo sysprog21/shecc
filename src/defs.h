@@ -39,6 +39,7 @@
  */
 #define MAX_STRING_LEN 4096
 #define MAX_INCLUDE_DIRS 16
+#define MAX_CMDLINE_MACROS 64
 #define MAX_VAR_LEN 128
 
 /* A type name is a struct, union, enum or typedef identifier, which the lexer
@@ -87,6 +88,7 @@
 #define MAX_PLT 1024
 #define MAX_GOTPLT 1024
 #define MAX_NESTING 128
+#define MAX_VLA 32 /* live variable length arrays in one function */
 
 /* Recursion limits for nesting in the input. The parser and the preprocessor
  * descend recursively for each of these, so a deeply nested program would
@@ -338,6 +340,7 @@ typedef enum {
     T_cppd_define,
     T_cppd_undef,
     T_cppd_error,
+    T_cppd_warning,
     T_cppd_if,
     T_cppd_elif,
     T_cppd_else,
@@ -647,6 +650,16 @@ struct var {
     bool address_taken;      /* true if variable address was taken (&var) */
     bool has_direct_array_declarator;
     bool has_unsized_array; /* `T name[]`: bound is supplied by initializer */
+
+    /* A variable length array `T name[n]` retains its array type and uses heap
+     * storage that is allocated where the declaration executes and released
+     * when its block is left. vla_bound is the first token of the runtime bound
+     * expression, kept until the declaration lowers it (the "[" is already
+     * consumed); vla_len holds the evaluated element count for sizeof.
+     */
+    struct token *vla_bound;
+    var_t *vla_len;
+    int vla_elem_size;
 
     /* `T member[]` at the end of a struct has no initializer-supplied bound and
      * contributes no bytes to the record's fixed layout.
@@ -1027,9 +1040,12 @@ struct basic_block {
 };
 
 typedef struct {
+    var_t *vlas[MAX_VLA];
+    int vla_count;
     char label_name[MAX_ID_LEN];
     basic_block_t *bb;
     bool used;
+    source_location_t loc; /* where the label was first seen */
 } label_t;
 
 struct func {
@@ -1045,6 +1061,7 @@ struct func {
     var_t param_defs[MAX_PARAMS];
     int num_params;
     int va_args;
+    bool calls_setjmp; /* the body names setjmp */
 
     /* `f()` has no prototype in C99, while `f(void)` and every typed parameter
      * list constrain call arity.

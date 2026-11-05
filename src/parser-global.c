@@ -1369,6 +1369,26 @@ void parse_internal(void)
         func->bbs->elf_offset = -1; /* not yet emitted */
     }
 
+    /* setjmp and longjmp are machine code the backend emits, for they save and
+     * restore the registers no C function can name. A dynamic program calls the
+     * host's through its declarations in lib/c.h instead.
+     */
+    if (!dynlink) {
+        func_t *func = add_func("setjmp", true);
+
+        func->return_def.type = TY_int;
+        func->num_params = 0;
+        func->va_args = 1;
+        func->bbs = arena_alloc_bb();
+        func->bbs->elf_offset = -1;
+        func = add_func("longjmp", true);
+        func->return_def.type = TY_void;
+        func->num_params = 0;
+        func->va_args = 1;
+        func->bbs = arena_alloc_bb();
+        func->bbs->elf_offset = -1;
+    }
+
     /* Add a global object to the .data section.
      *
      * This object saves the global stack pointer, so it is written back as a

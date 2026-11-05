@@ -270,6 +270,37 @@ static void compile_native_vir(const char *output)
     }
 }
 
+/* Record one -D name[=value] or -U name. The value is lexed into the macro's
+ * replacement tokens, so it may be several tokens but must stay on one line.
+ */
+static void add_cmdline_macro(char *arg, bool undef)
+{
+    char *name = arg, *value = NULL;
+    int i = 0;
+
+    if (cmdline_macros_idx == MAX_CMDLINE_MACROS)
+        usage_error("Too many -D and -U options");
+    if (!undef) {
+        while (arg[i] && arg[i] != '=')
+            i++;
+        value = arg[i] ? arg + i + 1 : "1";
+        /* arg is writable argv storage: end the name where '=' stood. */
+        if (arg[i])
+            arg[i] = '\0';
+    }
+    if (!(isalpha(name[0]) || name[0] == '_'))
+        usage_error("-D and -U require a macro name");
+    for (i = 1; name[i]; i++)
+        if (!(isalnum(name[i]) || name[i] == '_'))
+            usage_error("-D and -U require a macro name");
+    if (value)
+        for (i = 0; value[i]; i++)
+            if (value[i] == '\n')
+                usage_error("-D value must be on one line");
+    cmdline_macro_names[cmdline_macros_idx] = name;
+    cmdline_macro_values[cmdline_macros_idx++] = value;
+}
+
 int main(int argc, char *argv[])
 {
     static const struct {
@@ -343,6 +374,27 @@ int main(int argc, char *argv[])
             if (include_dirs_idx == MAX_INCLUDE_DIRS)
                 usage_error("Too many include directories");
             include_dirs[include_dirs_idx++] = argv[i] + 2;
+        } else if (!strncmp(argv[i], "-D", 2) || !strncmp(argv[i], "-U", 2)) {
+            bool undef = argv[i][1] == 'U';
+
+            if (argv[i][2]) {
+                add_cmdline_macro(argv[i] + 2, undef);
+            } else if (i + 1 < argc) {
+                add_cmdline_macro(argv[++i], undef);
+            } else {
+                usage_error("-D and -U require a macro name");
+            }
+        } else if (!strncmp(argv[i], "-fmax-errors=", 13)) {
+            char *digits = argv[i] + 13;
+
+            if (!*digits)
+                usage_error("-fmax-errors= requires a number");
+            max_errors = 0;
+            for (; *digits; digits++) {
+                if (*digits < '0' || *digits > '9' || max_errors > 99999999)
+                    usage_error("-fmax-errors= requires a number");
+                max_errors = max_errors * 10 + (*digits - '0');
+            }
         } else if (!strcmp(argv[i], "-o")) {
             if (i + 1 < argc) {
                 out = argv[i + 1];
@@ -357,7 +409,8 @@ int main(int argc, char *argv[])
 
     if (!input_count) {
         printf(
-            "Usage: shecc [-I directory] [-o output] [+m] [--dot] [--dump-ir] "
+            "Usage: shecc [-I directory] [-D name[=value]] [-U name] "
+            "[-fmax-errors=N] [-o output] [+m] [--dot] [--dump-ir] "
             "[--dump-vir] [--stats] "
             "[--no-opt] "
             "[--warn-string-literals] [--std=c99] [--no-libc] "
@@ -444,6 +497,12 @@ int main(int argc, char *argv[])
     /* load and parse source code into IR; each input is one unit */
     translation_unit_count = input_count;
     parse(compact_token_stream(pp_strip_layout(input_tokens)));
+    if (error_count) {
+        printf("%d error%s generated\n", error_count,
+               error_count == 1 ? "" : "s");
+        fflush(NULL);
+        exit(1);
+    }
     free(inputs);
     dump_stats_phase("parse");
 

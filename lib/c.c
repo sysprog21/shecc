@@ -45,6 +45,51 @@ int isblank(int c)
     return c == ' ' || c == '\t';
 }
 
+int iscntrl(int c)
+{
+    return (c >= 0 && c < 32) || c == 127;
+}
+
+int isgraph(int c)
+{
+    return c > 32 && c < 127;
+}
+
+int islower(int c)
+{
+    return c >= 'a' && c <= 'z';
+}
+
+int isprint(int c)
+{
+    return c >= 32 && c < 127;
+}
+
+int isupper(int c)
+{
+    return c >= 'A' && c <= 'Z';
+}
+
+int ispunct(int c)
+{
+    return isgraph(c) && !isalnum(c);
+}
+
+int isspace(int c)
+{
+    return c == ' ' || (c >= '\t' && c <= '\r');
+}
+
+int tolower(int c)
+{
+    return isupper(c) ? c + ('a' - 'A') : c;
+}
+
+int toupper(int c)
+{
+    return islower(c) ? c - ('a' - 'A') : c;
+}
+
 /* Pointer width of the target, held in a variable rather than tested with the
  * preprocessor: shecc must be able to compile this file for either target, and
  * a constant condition would leave statically dead code behind.
@@ -1084,4 +1129,182 @@ void free(void *ptr)
     cur->next = __free_bins[bin];
     chunk_set_freed(cur);
     __free_bins[bin] = cur;
+}
+
+/* Prefix each VLA allocation with its extent so large mmap allocations and
+ * ordinary heap allocations can be released through the same generated call.
+ */
+void *__shecc_vla_alloc(__vla_size_t size)
+{
+    __vla_size_t header = MIN_ALIGNMENT;
+    __vla_size_t total = size + header;
+    __vla_size_t *base;
+
+    if (total < size)
+        return NULL;
+    if (total <= INT_MAX)
+        base = malloc((int) total);
+    else {
+        base = (__vla_size_t *) __syscall(__syscall_mmap2, NULL, total, 3, 34,
+                                          -1, 0);
+        if (__mmap_failed(base))
+            return NULL;
+    }
+    if (!base)
+        return NULL;
+    *base = total;
+    return (char *) base + MIN_ALIGNMENT;
+}
+
+void __shecc_vla_free(void *ptr)
+{
+    __vla_size_t *base;
+    __vla_size_t total;
+
+    if (!ptr)
+        return;
+    base = (__vla_size_t *) ((char *) ptr - MIN_ALIGNMENT);
+    total = *base;
+    if (total <= INT_MAX)
+        free(base);
+    else
+        __syscall(__syscall_munmap, base, total);
+}
+
+/* clock_gettime's number differs per target, and so does the width of its
+ * timespec: 32-bit ARM keeps the two 32-bit words, every other target (RV32
+ * through its 64-bit-time call) fills two 64-bit ones.
+ */
+#if defined(__arm__)
+#define __syscall_clock_gettime 263
+#elif defined(__riscv)
+#define __syscall_clock_gettime 403
+#elif defined(__aarch64__)
+#define __syscall_clock_gettime 113
+#else
+#define __syscall_clock_gettime 228
+#endif
+
+/* Read clock @id into @sec and @nsec; return 0 when the kernel refuses. */
+static int __read_clock(int id, long long *sec, long long *nsec)
+{
+#if defined(__arm__)
+    int ts[2];
+#else
+    long long ts[2];
+#endif
+
+    if (__syscall(__syscall_clock_gettime, id, ts) != 0)
+        return 0;
+    *sec = ts[0];
+    *nsec = ts[1];
+    return 1;
+}
+
+time_t time(time_t *t)
+{
+    long long sec, nsec;
+    time_t now = -1;
+
+    if (__read_clock(0, &sec, &nsec) && (long long) (time_t) sec == sec)
+        now = (time_t) sec;
+    if (t)
+        *t = now;
+    return now;
+}
+
+/* CPU time of the process, in microseconds: CLOCKS_PER_SEC is 1000000. */
+clock_t clock(void)
+{
+    long long sec, nsec;
+
+    if (!__read_clock(2, &sec, &nsec))
+        return -1;
+    return (clock_t) (sec * 1000000 + nsec / 1000);
+}
+
+/* Days from 1970-01-01 to the civil date, valid for any proleptic Gregorian
+ * year (Hinnant's algorithm), with the month 1..12 and the year unshifted.
+ */
+static long long __days_from_civil(long long y, int m, int d)
+{
+    long long era, yoe, doy, doe;
+
+    if (m <= 2)
+        y--;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static struct tm __tm_buf;
+
+struct tm *gmtime(const time_t *t)
+{
+    long long secs = *t, days, rem, era, doe, yoe, doy, mp, y;
+    int m, d;
+
+    days = secs / 86400;
+    rem = secs % 86400;
+    if (rem < 0) {
+        rem += 86400;
+        days--;
+    }
+    __tm_buf.tm_hour = (int) (rem / 3600);
+    __tm_buf.tm_min = (int) (rem % 3600 / 60);
+    __tm_buf.tm_sec = (int) (rem % 60);
+    __tm_buf.tm_wday = (int) ((days + 4) % 7);
+    if (__tm_buf.tm_wday < 0)
+        __tm_buf.tm_wday += 7;
+
+    days += 719468;
+    era = (days >= 0 ? days : days - 146096) / 146097;
+    doe = days - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp = (5 * doy + 2) / 153;
+    d = (int) (doy - (153 * mp + 2) / 5 + 1);
+    m = (int) (mp < 10 ? mp + 3 : mp - 9);
+    if (m <= 2)
+        y++;
+    __tm_buf.tm_year = (int) (y - 1900);
+    __tm_buf.tm_mon = m - 1;
+    __tm_buf.tm_mday = d;
+    __tm_buf.tm_yday =
+        (int) (__days_from_civil(y, m, d) - __days_from_civil(y, 1, 1));
+    __tm_buf.tm_isdst = 0;
+    __tm_buf.__tm_gmtoff = 0;
+    __tm_buf.__tm_zone = "UTC";
+    return &__tm_buf;
+}
+
+/* There is no timezone database: local time is UTC. */
+struct tm *localtime(const time_t *t)
+{
+    return gmtime(t);
+}
+
+/* Normalise the broken-down time in place and return it as seconds, UTC. */
+time_t mktime(struct tm *tm)
+{
+    long long mon = tm->tm_mon, year = tm->tm_year + 1900LL, secs;
+    time_t result;
+
+    year += mon / 12;
+    mon %= 12;
+    if (mon < 0) {
+        mon += 12;
+        year--;
+    }
+    secs = (__days_from_civil(year, (int) mon + 1, 1) + tm->tm_mday - 1) *
+               86400LL +
+           tm->tm_hour * 3600LL + tm->tm_min * 60LL + tm->tm_sec;
+    result = (time_t) secs;
+    if ((long long) result != secs)
+        return (time_t) -1; /* not representable in a 32-bit time_t */
+    *tm = *gmtime(&result);
+    return result;
 }

@@ -461,9 +461,23 @@ static void read_comma_expression(block_t *parent,
     while (lex_accept(T_comma)) {
         discard_operand(parent, *bb);
         read_assignment_or_expression(parent, bb);
+
+        /* Comma operands undergo value conversions even inside sizeof. Only the
+         * array that sizeof directly names retains its array type.
+         */
+        var_t *value = opstack_pop();
+        if (is_array_declarator(value)) {
+            var_t *array = value;
+            value = decay_dereferenced_array(parent, bb, array);
+            value->pointee_func_signature = array->is_func
+                                                ? array->func_signature
+                                                : array->pointee_func_signature;
+        } else {
+            value = materialize_function_designator(parent, bb, value);
+        }
         if (clear_reference)
-            operand_stack[operand_stack_idx - 1]
-                ->is_compound_literal_reference = false;
+            value->is_compound_literal_reference = false;
+        opstack_push(value);
     }
 }
 
@@ -489,7 +503,7 @@ static void lower_compound_literal_assignment(block_t *parent,
     if (!accept_assignment_op(&op))
         return;
     if (is_const)
-        error_at("assignment of read-only location", cur_token_loc());
+        error_continue("assignment of read-only location", cur_token_loc());
     read_assignment_or_expression(parent, bb);
     value = combine_addressed_assignment(parent, bb, op, address, target,
                                          opstack_pop());
@@ -890,7 +904,7 @@ static void read_compound_literal_operand(block_t *parent,
 
         if (compound_object->is_const_qualified ||
             compound_object->is_const_pointer)
-            error_at("assignment of read-only location", cur_token_loc());
+            error_continue("assignment of read-only location", cur_token_loc());
         opstack_pop();
         old = require_temp_typed_ptr_var(parent, compound_object->type,
                                          compound_object->ptr_level);
@@ -907,7 +921,7 @@ static void read_compound_literal_operand(block_t *parent,
     if (compound_object && accept_assignment_op(&scalar_compound_op)) {
         if (compound_object->is_const_qualified ||
             compound_object->is_const_pointer)
-            error_at("assignment of read-only location", cur_token_loc());
+            error_continue("assignment of read-only location", cur_token_loc());
         opstack_pop();
         read_assignment_or_expression(parent, bb);
         var_t *value = opstack_pop();
@@ -1045,7 +1059,7 @@ static void read_cast_operand(block_t *parent,
      * implicit pointer assignments which are rejected.
      */
     if (incompatible_const_pointer_conversion(expr_var, cast_var))
-        printf("Warning: discarding const qualifier in cast\n");
+        warn_at("discarding const qualifier in cast", cur_token_loc());
     cast_var->is_void_null_pointer = tn->ptr_level == 1 &&
                                      tn->type == TY_void &&
                                      is_null_pointer_constant(expr_var);
@@ -1342,7 +1356,7 @@ static void read_expr_operand_body(block_t *parent, basic_block_t **bb)
             error_at("Prefix update requires a scalar modifiable lvalue",
                      cur_token_loc());
         if (object->is_const_qualified)
-            error_at("assignment of read-only location", cur_token_loc());
+            error_continue("assignment of read-only location", cur_token_loc());
         one = load_constant(parent, *bb, 1, TY_int);
         vd = combine_assignment_value(parent, bb, op, object, one);
         vd = resize_var(parent, bb, vd, object);
@@ -1839,6 +1853,23 @@ static int pointer_arithmetic_stride(var_t *pointer)
     return get_pointer_element_size(pointer);
 }
 
+/* A pointer to a VLA steps by the captured extent, unlike its decayed element
+ * pointer. array_size distinguishes the array object from &array.
+ */
+static var_t *runtime_array_stride(block_t *parent,
+                                   basic_block_t *bb,
+                                   var_t *pointer)
+{
+    if (!pointer->vla_len || pointer->array_size ||
+        !pointer->pointee_array_size)
+        return NULL;
+    var_t *elem = load_constant(parent, bb, pointer->vla_elem_size,
+                                find_builtin_type("size_t"));
+    var_t *stride = require_temp_typed_var(parent, find_builtin_type("size_t"));
+    add_insn(parent, bb, OP_mul, stride, pointer->vla_len, elem, 0, NULL);
+    return stride;
+}
+
 /* Helper function to handle pointer arithmetic (add/sub with scaling) */
 void handle_pointer_arithmetic(block_t *parent,
                                basic_block_t **bb,
@@ -1943,8 +1974,19 @@ void handle_pointer_arithmetic(block_t *parent,
             var_t *diff = require_temp_var(parent);
             add_insn(parent, *bb, OP_sub, diff, rs1, rs2, 0, NULL);
 
-            /* Then divide by element size if needed */
-            if (element_size > 1) {
+            var_t *runtime_stride = runtime_array_stride(parent, *bb, orig_rs1);
+            if (runtime_stride) {
+                /* The difference is signed: dividing it by the unsigned size_t
+                 * stride would divide as unsigned and wreck a negative one.
+                 */
+                var_t *signed_stride = require_temp_var(parent);
+                var_t *result = require_temp_var(parent);
+                add_insn(parent, *bb, OP_assign, signed_stride, runtime_stride,
+                         NULL, 0, NULL);
+                add_insn(parent, *bb, OP_div, result, diff, signed_stride, 0,
+                         NULL);
+                opstack_push(result);
+            } else if (element_size > 1) {
                 int shift = exact_log2(element_size);
                 var_t *size_const = load_constant(
                     parent, *bb, shift >= 0 ? shift : element_size, TY_int);
@@ -1983,8 +2025,12 @@ void handle_pointer_arithmetic(block_t *parent,
         return;
     }
 
-    /* If we need to scale the integer operand */
-    if (ptr_var && element_size > 1) {
+    var_t *runtime_stride =
+        ptr_var ? runtime_array_stride(parent, *bb, ptr_var) : NULL;
+    if (runtime_stride) {
+        rs2 = require_temp_typed_var(parent, find_builtin_type("size_t"));
+        add_insn(parent, *bb, OP_mul, rs2, int_var, runtime_stride, 0, NULL);
+    } else if (ptr_var && element_size > 1) {
         rs2 = scale_pointer_index(parent, *bb, int_var, element_size, true);
     }
 
@@ -2452,8 +2498,8 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
               (rs1->is_func || get_func_signature(rs1))) ||
              (rs2 && !is_array_declarator(rs2) &&
               (rs2->is_func || get_func_signature(rs2)))))
-            error_at("Relational comparison requires object pointers",
-                     cur_token_loc());
+            error_continue("Relational comparison requires object pointers",
+                           cur_token_loc());
 
         if (top_op == OP_eq || top_op == OP_neq) {
             func_t *left_signature = get_func_signature(rs1);
@@ -2492,8 +2538,8 @@ void read_expr_body(block_t *parent, basic_block_t **bb)
         if ((top_op == OP_eq || top_op == OP_neq || top_op == OP_lt ||
              top_op == OP_leq || top_op == OP_gt || top_op == OP_geq) &&
             incompatible_character_pointer_conversion(rs1, rs2))
-            error_at("incompatible character pointer types in comparison",
-                     cur_token_loc());
+            error_continue("incompatible character pointer types in comparison",
+                           cur_token_loc());
 
         if (rs1_is_placeholder && rs2_is_placeholder) {
             rs1 = scalarize_array_literal(parent, bb, rs1, NULL);
@@ -3587,7 +3633,7 @@ void read_lvalue(lvalue_t *lvalue,
     if (lvalue->is_const_qualified &&
         (prefix_op != OP_generic || lex_peek(T_increment, NULL) ||
          lex_peek(T_decrement, NULL)))
-        error_at("assignment of read-only location", next_token_loc());
+        error_continue("assignment of read-only location", next_token_loc());
 
     lower_lvalue_tail(lvalue, array_row ? array_row : var, parent, bb,
                       prefix_op, pointer_row_element_type);
@@ -3955,9 +4001,32 @@ static void read_ternary_operation_body(block_t *parent, basic_block_t **bb)
          * 6.5.15p6). An array operand converts to a pointer to its element.
          */
         var_t *pointer_value = true_ptr_like ? true_val : false_val;
+        if (true_val->is_void_null_pointer && false_ptr_like)
+            pointer_value = false_val;
 
         vd->type = pointer_value->type;
         vd->ptr_level = pointer_value->ptr_level + !!pointer_value->array_size;
+        if ((is_direct_void_pointer(true_val) &&
+             !true_val->is_void_null_pointer) ||
+            (is_direct_void_pointer(false_val) &&
+             !false_val->is_void_null_pointer)) {
+            /* A non-null-constant void pointer determines the composite type.
+             * Its result has no pointed-to array extent.
+             */
+            vd->type = TY_void;
+            vd->ptr_level = 1;
+        } else {
+            /* Runtime bounds of compatible VLA types must agree. Retain a VLA
+             * operand's captured extent even when the other operand is null or
+             * a compatible fixed array pointer.
+             */
+            var_t *array_pointer =
+                true_val->pointee_array_size ? true_val : false_val;
+            if (false_val->pointee_array_size && false_val->vla_len)
+                array_pointer = false_val;
+            if (array_pointer->pointee_array_size)
+                copy_pointee_array_shape(vd, array_pointer);
+        }
     }
     add_insn(parent, then_, OP_assign, vd, true_val, NULL, 0, NULL);
     add_insn(parent, else_, OP_assign, vd, false_val, NULL, 0, NULL);
@@ -4038,9 +4107,10 @@ bool read_body_assignment(var_t *var,
             error_at("assignment to expression with array type",
                      next_token_loc());
         if (lvalue.is_const_qualified && lvalue_write_follows(prefix_op))
-            error_at(lvalue.is_reference ? "assignment of read-only location"
-                                         : "assignment of read-only variable",
-                     next_token_loc());
+            error_continue(lvalue.is_reference
+                               ? "assignment of read-only location"
+                               : "assignment of read-only variable",
+                           next_token_loc());
 
         if (lex_accept(T_increment)) {
             op = OP_add;
@@ -4461,7 +4531,7 @@ static void read_grouped_postfix_assignment(block_t *parent, basic_block_t **bb)
     if ((pointer_object && target->is_const_pointer) ||
         (!pointer_object && target->is_const_qualified) ||
         (target->func_signature && target->is_const_qualified))
-        error_at("assignment of read-only location", cur_token_loc());
+        error_continue("assignment of read-only location", cur_token_loc());
     address = target->compound_literal_address;
     size = pointer_object || target->func_signature ? PTR_SIZE
                                                     : target->type->size;
@@ -4669,7 +4739,7 @@ bool read_assignment_expression(block_t *parent, basic_block_t **bb)
             (address_depth > 1 && address_depth <= 32 &&
              (address_mask & (1U << (address_depth - 2)))) ||
             (!field && points_to_const_callback(object_address)))
-            error_at("assignment of read-only location", cur_token_loc());
+            error_continue("assignment of read-only location", cur_token_loc());
         if (!accept_assignment_op(&compound_op))
             error_at("Expected assignment after pointer dereference",
                      cur_token_loc());

@@ -2070,6 +2070,7 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
              has_effective_pointer(&parent->func->return_def)))
             error_at("non-void function requires a return expression in C99",
                      cur_token_loc());
+        emit_vla_frees(parent, &bb, 0);
         add_insn(parent, bb, OP_return, NULL, NULL, NULL, 0, NULL);
         bb_connect(bb, parent->func->exit, NEXT);
         return NULL;
@@ -2116,6 +2117,7 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
             !compatible_decl_type(rs1->type, parent->func->return_def.type))
             error_at("incompatible record return expression", cur_token_loc());
         emit_record_copy_to_address(parent, &bb, &parent->func->sret_def, rs1);
+        emit_vla_frees(parent, &bb, 0);
         add_insn(parent, bb, OP_return, NULL, NULL, NULL, 0, NULL);
         bb_connect(bb, parent->func->exit, NEXT);
         return NULL;
@@ -2132,6 +2134,7 @@ basic_block_t *handle_return_statement(block_t *parent, basic_block_t *bb)
         rs1 = resize_to(parent, &bb, rs1, parent->func->return_def.type,
                         parent->func->return_def.ptr_level);
 
+    emit_vla_frees(parent, &bb, 0);
     add_insn(parent, bb, OP_return, NULL, rs1, NULL, 0, NULL);
     bb_connect(bb, parent->func->exit, NEXT);
     return NULL;
@@ -2215,12 +2218,16 @@ basic_block_t *handle_goto_statement(basic_block_t *bb)
 
     label_t *label = find_label(token);
     if (label) {
+        emit_goto_vla_frees(bb, vla_live, vla_live_n, label);
         label->used = true;
         bb_connect(bb, label->bb, NEXT);
     } else {
         if (backpatch_bb_idx >= MAX_LABELS)
             error_at("Too many forward-referenced labels", cur_token_loc());
         backpatch_label[backpatch_bb_idx] = intern_string(token);
+        backpatch_vla_count[backpatch_bb_idx] = vla_live_n;
+        for (int i = 0; i < vla_live_n; i++)
+            backpatch_vlas[backpatch_bb_idx][i] = vla_live[i];
         backpatch_bb[backpatch_bb_idx++] = bb;
     }
     return NULL;

@@ -24,12 +24,27 @@ int break_exit_idx = 0;
 basic_block_t *continue_bb[MAX_NESTING];
 int continue_pos_idx = 0;
 
+/* Nesting counter for read_code_block(), which recurses through
+ * read_body_statement() for every nested block.
+ */
+int block_depth = 0;
+
+/* Variable length arrays of the function being parsed that are live, innermost
+ * last, and how many were live when each break and continue target was opened.
+ */
+var_t *vla_live[MAX_VLA];
+int vla_live_n = 0;
+int break_vla_depth[MAX_NESTING];
+int continue_vla_depth[MAX_NESTING];
+
 /* Label utilities */
 label_t labels[MAX_LABELS];
 int label_idx = 0;
 basic_block_t *backpatch_bb[MAX_LABELS];
 char *backpatch_label[MAX_LABELS];
 int backpatch_bb_idx = 0;
+var_t *backpatch_vlas[MAX_LABELS][MAX_VLA];
+int backpatch_vla_count[MAX_LABELS];
 
 /* stack of the operands of 3AC */
 var_t *operand_stack[MAX_OPERAND_STACK_SIZE];
@@ -642,14 +657,18 @@ label_t *find_label(const char *name)
     return NULL;
 }
 
-void add_label(const char *name, basic_block_t *bb)
+void add_label(const char *name, basic_block_t *bb, source_location_t *loc)
 {
     if (label_idx > MAX_LABELS - 1)
-        error_at("Too many labels in function", cur_token_loc());
+        error_at("Too many labels in function", loc);
 
     label_t *l = &labels[label_idx++];
     strncpy(l->label_name, name, MAX_ID_LEN);
     l->bb = bb;
+    l->vla_count = vla_live_n;
+    for (int i = 0; i < vla_live_n; i++)
+        l->vlas[i] = vla_live[i];
+    memcpy(&l->loc, loc, sizeof(source_location_t));
 }
 
 /* Name for a compiler-generated temporary, interned so that the var_t only has
@@ -1546,6 +1565,12 @@ static void fixed_array_shape_apply(const fixed_array_shape_t *shape,
 
 /* Enumerator values must be representable as int. */
 bool checking_enum_constant = false;
+
+/* Nonzero while folding the arm of a conditional that is not selected: its
+ * operations are never evaluated, so a zero divisor or oversized shift there is
+ * not a constraint violation (C99 6.6p3).
+ */
+int const_unevaluated_depth = 0;
 bool typed_global_literal_appears_before_initializer_end(token_t *token);
 void read_literal_param(block_t *parent, basic_block_t *bb);
 var_t *bitfield_constant(block_t *parent, basic_block_t **bb, unsigned value);
@@ -1710,6 +1735,7 @@ void break_bb_push(basic_block_t *bb)
 {
     if (break_exit_idx >= MAX_NESTING)
         fatal("Too many nested loops or switch statements");
+    break_vla_depth[break_exit_idx] = vla_live_n;
     break_bb[break_exit_idx++] = bb;
 }
 
@@ -1717,6 +1743,7 @@ void continue_bb_push(basic_block_t *bb)
 {
     if (continue_pos_idx >= MAX_NESTING)
         fatal("Too many nested loops");
+    continue_vla_depth[continue_pos_idx] = vla_live_n;
     continue_bb[continue_pos_idx++] = bb;
 }
 
@@ -1897,7 +1924,11 @@ var_t *promote(block_t *block,
         return var;
 
     if (var->type->size > TY_int->size && !var->ptr_level) {
-        printf("Warning: Suspicious type promotion %s\n", var->type->type_name);
+        char message[MAX_TYPE_LEN + 32];
+
+        snprintf(message, sizeof(message), "Suspicious type promotion %s",
+                 var->type->type_name);
+        warn_at(message, cur_token_loc());
         return var;
     }
 
@@ -2107,7 +2138,7 @@ void diagnose_const_pointer_conversion(const var_t *from, const var_t *to)
 
     if (from->is_string_literal) {
         if (warn_string_literals)
-            printf("Warning: string literal is read-only\n");
+            warn_at("string literal is read-only", cur_token_loc());
         return;
     }
 
@@ -2373,6 +2404,12 @@ static void skip_type_qualifiers(void)
 
 static token_t *function_pointer_declarator_suffix(token_t *open,
                                                    int *star_count);
+
+void emit_vla_frees(block_t *parent, basic_block_t **bb, int from);
+void emit_goto_vla_frees(basic_block_t *bb,
+                         var_t **live,
+                         int count,
+                         label_t *label);
 
 static void read_assignment_or_expression(block_t *parent,
                                           basic_block_t **bb);

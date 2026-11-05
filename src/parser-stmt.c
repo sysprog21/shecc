@@ -27,6 +27,7 @@ typedef struct switch_label_context {
     basic_block_t *default_body;
     switch_case_value_t *seen_cases;
     bool has_default;
+    int vla_count;
 } switch_label_context_t;
 
 switch_label_context_t switch_label_contexts[MAX_NESTING];
@@ -93,6 +94,42 @@ bool constant_expression_needs_typed_value(token_t *token)
     return false;
 }
 
+/* One case constant as a low and high word, the high word being the sign or
+ * zero extension unless the constant needs a typed two-word value.
+ */
+static void read_case_constant(block_t *parent,
+                               unsigned int *lo,
+                               unsigned int *hi)
+{
+    if (constant_expression_needs_typed_value(cur_token->next)) {
+        pp_integer_t typed_value;
+        block_t *saved_scope = pp_integer_constant_scope;
+
+        pp_integer_constant_scope = parent;
+        cur_token =
+            pp_read_constant_infix_expr(0, cur_token, &typed_value, true);
+        pp_integer_constant_scope = saved_scope;
+        pp_enum_normalize(&typed_value);
+        *lo = typed_value.lo;
+        *hi = typed_value.hi;
+    } else {
+        *lo = read_const_expr(parent);
+        *hi = *lo & 0x80000000U ? ~0U : 0;
+    }
+}
+
+/* Whether the two-word value a is above b, read as signed or unsigned. */
+static bool case_value_above(unsigned int a_lo,
+                             unsigned int a_hi,
+                             unsigned int b_lo,
+                             unsigned int b_hi,
+                             bool is_unsigned)
+{
+    if (a_hi != b_hi)
+        return is_unsigned ? a_hi > b_hi : (int) a_hi > (int) b_hi;
+    return a_lo > b_lo;
+}
+
 basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
 {
     switch_label_context_t *context;
@@ -101,6 +138,9 @@ basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
     if (!switch_label_context_idx)
         error_at("case or default label outside switch", next_token_loc());
     context = &switch_label_contexts[switch_label_context_idx - 1];
+    if (vla_live_n > context->vla_count)
+        error_at("switch enters the scope of a variable length array",
+                 next_token_loc());
     label_body = bb_create(parent);
     if (body)
         bb_connect(body, label_body, NEXT);
@@ -111,27 +151,24 @@ basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
         context->has_default = true;
         context->default_body = label_body;
     } else {
-        unsigned int case_lo;
-        unsigned int case_hi;
+        unsigned int case_lo, case_hi;
+        unsigned int range_lo = 0, range_hi = 0;
+        bool range = false;
         var_t *constant;
         var_t *comparison;
         basic_block_t *next_dispatch;
 
         lex_expect(T_case);
-        if (constant_expression_needs_typed_value(cur_token->next)) {
-            pp_integer_t typed_value;
-            block_t *saved_scope = pp_integer_constant_scope;
+        read_case_constant(parent, &case_lo, &case_hi);
 
-            pp_integer_constant_scope = parent;
-            cur_token =
-                pp_read_constant_infix_expr(0, cur_token, &typed_value, true);
-            pp_integer_constant_scope = saved_scope;
-            pp_enum_normalize(&typed_value);
-            case_lo = typed_value.lo;
-            case_hi = typed_value.hi;
-        } else {
-            case_lo = read_const_expr(parent);
-            case_hi = case_lo & 0x80000000U ? ~0U : 0;
+        /* GNU's "case lo ... hi:" matches every value from lo through hi. */
+        if (lex_peek(T_elipsis, NULL)) {
+            if (strict_c99)
+                error_at("case range is a GNU extension, not C99",
+                         next_token_loc());
+            lex_expect(T_elipsis);
+            range = true;
+            read_case_constant(parent, &range_lo, &range_hi);
         }
 
         /* C99 6.8.4.2p5 converts each case constant to the promoted type of the
@@ -148,13 +185,71 @@ basic_block_t *read_switch_label_statement(block_t *parent, basic_block_t *body)
 
             for (seen = context->seen_cases; seen; seen = seen->next)
                 if (seen->value == case_lo && seen->value_hi == case_hi)
-                    error_at("duplicate case value in C99 switch",
-                             cur_token_loc());
+                    error_continue("duplicate case value in C99 switch",
+                                   cur_token_loc());
             seen = arena_alloc(GENERAL_ARENA, sizeof(*seen));
             seen->value = case_lo;
             seen->value_hi = case_hi;
             seen->next = context->seen_cases;
             context->seen_cases = seen;
+        }
+
+        if (range) {
+            var_t *bound;
+            basic_block_t *above, *skip;
+
+            if (context->control->type->size <= TY_int->size)
+                range_hi = context->control->type->is_unsigned ||
+                                   !(range_lo & 0x80000000U)
+                               ? 0
+                               : ~0U;
+            if (case_value_above(case_lo, case_hi, range_lo, range_hi,
+                                 context->control->type->is_unsigned)) {
+                /* No value is in the range: the label is unreachable, as GCC
+                 * warns, so emit no test for it.
+                 */
+                warn_at("empty case range", cur_token_loc());
+                lex_expect(T_colon);
+                reject_label_followed_by_declaration_in_strict_c99(parent);
+                return label_body;
+            }
+
+            /* Below the low bound misses the label, and so does above the high
+             * one; between them the label matches.
+             */
+            bound = require_temp_typed_var(context->dispatch_parent,
+                                           context->control->type);
+            bound->init_val = case_lo;
+            bound->init_val_hi = case_hi;
+            add_insn(context->dispatch_parent, context->dispatch_tail,
+                     OP_load_constant, bound, NULL, NULL, 0, NULL);
+            comparison = require_temp_var(context->dispatch_parent);
+            add_insn(context->dispatch_parent, context->dispatch_tail, OP_lt,
+                     comparison, context->control, bound, 0, NULL);
+            add_insn(context->dispatch_parent, context->dispatch_tail,
+                     OP_branch, NULL, comparison, NULL, 0, NULL);
+            above = bb_create(context->dispatch_parent);
+            skip = bb_create(context->dispatch_parent);
+            bb_connect(context->dispatch_tail, skip, THEN);
+            bb_connect(context->dispatch_tail, above, ELSE);
+
+            bound = require_temp_typed_var(context->dispatch_parent,
+                                           context->control->type);
+            bound->init_val = range_lo;
+            bound->init_val_hi = range_hi;
+            add_insn(context->dispatch_parent, above, OP_load_constant, bound,
+                     NULL, NULL, 0, NULL);
+            comparison = require_temp_var(context->dispatch_parent);
+            add_insn(context->dispatch_parent, above, OP_gt, comparison,
+                     context->control, bound, 0, NULL);
+            add_insn(context->dispatch_parent, above, OP_branch, NULL,
+                     comparison, NULL, 0, NULL);
+            bb_connect(above, skip, THEN);
+            bb_connect(above, label_body, ELSE);
+            context->dispatch_tail = skip;
+            lex_expect(T_colon);
+            reject_label_followed_by_declaration_in_strict_c99(parent);
+            return label_body;
         }
 
         constant = require_temp_typed_var(context->dispatch_parent,
@@ -218,6 +313,7 @@ basic_block_t *handle_switch_statement(block_t *parent, basic_block_t *bb)
     context->default_body = NULL;
     context->seen_cases = NULL;
     context->has_default = false;
+    context->vla_count = vla_live_n;
 
     /* Statements before the first label are legal but are not an entry point of
      * the switch. A following label supplies the source-order fallthrough edge
@@ -391,6 +487,7 @@ static basic_block_t *read_block_declarators(
 /* A for loop: setup, condition, body and increment. */
 basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
 {
+    int vla_base = vla_live_n;
     char token[MAX_ID_LEN];
     type_t *type;
     var_t *vd;
@@ -529,6 +626,8 @@ basic_block_t *handle_for_statement(block_t *parent, basic_block_t *bb)
     /* jump to increment */
     continue_pos_idx--;
     break_exit_idx--;
+    emit_vla_frees(blk, &for_end, vla_base);
+    vla_live_n = vla_base;
     return for_end;
 }
 
@@ -848,6 +947,104 @@ static void emit_scalar_initializer(block_t *parent,
     emit_object_assignment(parent, bb, var, expr_result);
 }
 
+/* Branch on @cond to a block that calls abort, as a variable length array that
+ * cannot be allocated does, and continue in a fresh block otherwise.
+ */
+static void vla_trap_if(block_t *parent, basic_block_t **bb, var_t *cond)
+{
+    func_t *func = find_func("abort");
+    basic_block_t *trap, *cont;
+
+    if (!func)
+        error_at("variable length arrays need the embedded C library",
+                 cur_token_loc());
+    trap = bb_create(parent);
+    cont = bb_create(parent);
+    add_insn(parent, *bb, OP_branch, NULL, cond, NULL, 0, NULL);
+    bb_connect(*bb, trap, THEN);
+    bb_connect(*bb, cont, ELSE);
+    add_insn(parent, trap, OP_call, NULL, NULL, NULL, 0,
+             func->return_def.var_name);
+    bb_connect(trap, cont, NEXT);
+    *bb = cont;
+}
+
+/* Lower the declaration of the variable length array @var, whose bound
+ * expression starts after var->vla_bound. The array is heap storage that lives
+ * until its block is left, so the internal base slot receives malloc's result
+ * here, and the element count is kept in a hidden local for sizeof.
+ */
+static void lower_vla_declaration(block_t *parent,
+                                  basic_block_t **bb,
+                                  var_t *var)
+{
+    token_t *resume = cur_token;
+    var_t *count, *len, *elem, *bytes;
+    char *name;
+
+    if (vla_live_n >= MAX_VLA)
+        error_at("Too many variable length arrays", cur_token_loc());
+
+    /* The declared name is not in scope in its own bound: `int n[n]` measures
+     * the outer n. Hide it while the bound is read again.
+     */
+    name = var->var_name;
+    var->var_name = ".vla_pending";
+    cur_token = var->vla_bound;
+    read_comma_expression(parent, bb, false);
+    count = opstack_pop();
+    var->var_name = name;
+    if (has_effective_pointer(count) || is_record_type(count->type) ||
+        count->type->is_floating || count->type == TY_void)
+        error_at("array bound must have integer type", cur_token_loc());
+    cur_token = resume;
+
+    len = require_typed_var(parent, find_builtin_type("size_t"));
+    len->var_name = ".vla_len";
+    add_insn(parent, *bb, OP_allocat, len, NULL, NULL, 0, NULL);
+    add_insn(parent, *bb, OP_assign, len,
+             resize_to(parent, bb, count, find_builtin_type("size_t"), 0), NULL,
+             0, NULL);
+
+    /* The slot holds an allocated base, as for a fixed array. Preserve an array
+     * declarator with a placeholder extent; vla_len supplies its runtime extent
+     * wherever the complete array size is required.
+     */
+    var->ptr_level--;
+    var->array_size = 1;
+    var->vla_len = len;
+    var->vla_elem_size =
+        var->ptr_level || var->type->ptr_level ? PTR_SIZE : var->type->size;
+    elem = load_constant(parent, *bb, var->vla_elem_size,
+                         find_builtin_type("size_t"));
+    bytes = require_temp_typed_var(parent, find_builtin_type("size_t"));
+    add_insn(parent, *bb, OP_mul, bytes, len, elem, 0, NULL);
+
+    /* A wrapped product would allocate less than the array spans; trap as an
+     * allocation failure does. One-byte elements cannot wrap.
+     */
+    if (var->vla_elem_size > 1) {
+        var_t *quotient = require_temp_typed_var(parent, bytes->type);
+        var_t *wrapped = require_temp_var(parent);
+
+        add_insn(parent, *bb, OP_div, quotient, bytes, elem, 0, NULL);
+        add_insn(parent, *bb, OP_neq, wrapped, quotient, len, 0, NULL);
+        vla_trap_if(parent, bb, wrapped);
+    }
+    add_insn(parent, *bb, OP_assign, var,
+             emit_libc_call(parent, bb, "__shecc_vla_alloc", bytes, true), NULL,
+             0, NULL);
+    {
+        var_t *failed = require_temp_var(parent);
+
+        add_insn(parent, *bb, OP_eq, failed, var,
+                 load_constant(parent, *bb, 0, find_builtin_type("size_t")), 0,
+                 NULL);
+        vla_trap_if(parent, bb, failed);
+    }
+    vla_live[vla_live_n++] = var;
+}
+
 /* Define the object that the block declarator @var declares, as @spec says, and
  * lower its initializer. Every declarator of a declaration shares this.
  */
@@ -863,6 +1060,15 @@ static void read_block_declarator_storage(block_t *parent,
     add_insn(spec->is_static ? GLOBAL_BLOCK : parent,
              spec->is_static ? GLOBAL_FUNC->bbs : *bb, OP_allocat, var, NULL,
              NULL, 0, NULL);
+    if (var->vla_bound) {
+        if (spec->is_static)
+            error_at("variable length array cannot have static storage",
+                     cur_token_loc());
+        if (lex_peek(T_assign, NULL))
+            error_at("variable length array cannot be initialized",
+                     next_token_loc());
+        lower_vla_declaration(parent, bb, var);
+    }
     if (lex_accept(T_assign)) {
         validate_string_array_initializer(var);
         if (spec->is_static) {
@@ -1234,7 +1440,7 @@ basic_block_t *handle_declaration(block_t *parent, basic_block_t *bb)
         reject_label_followed_by_declaration_in_strict_c99(parent);
         basic_block_t *n = bb_create(parent);
         bb_connect(bb, n, NEXT);
-        add_label(token, n);
+        add_label(token, n, &id_tk->location);
         return n;
     }
     return read_full_expression_statement(parent, bb);
@@ -1770,7 +1976,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
         return read_switch_label_statement(parent, bb);
 
     if (!bb)
-        printf("Warning: unreachable code detected\n");
+        warn_at("unreachable code detected", next_token_loc());
 
     if (lex_peek(T_open_curly, NULL))
         return read_code_block(parent->func, parent, bb);
@@ -1793,6 +1999,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (lex_accept(T_break)) {
         if (!break_exit_idx)
             error_at("'break' outside of a loop or switch", cur_token_loc());
+        emit_vla_frees(parent, &bb, break_vla_depth[break_exit_idx - 1]);
         bb_connect(bb, break_bb[break_exit_idx - 1], NEXT);
         lex_expect(T_semicolon);
         return NULL;
@@ -1801,6 +2008,7 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     if (lex_accept(T_continue)) {
         if (!continue_pos_idx)
             error_at("'continue' outside of a loop", cur_token_loc());
+        emit_vla_frees(parent, &bb, continue_vla_depth[continue_pos_idx - 1]);
         bb_connect(bb, continue_bb[continue_pos_idx - 1], NEXT);
         lex_expect(T_semicolon);
         return NULL;
@@ -1840,14 +2048,30 @@ basic_block_t *read_body_statement(block_t *parent, basic_block_t *bb)
     return handle_declaration(parent, bb);
 }
 
-/* Nesting counter for read_code_block(), which recurses through
- * read_body_statement() for every nested block.
+/* A variable array parameter bound, as in `int a[n++]`, is evaluated when the
+ * function is entered even though the parameter is only a pointer (C99
+ * 6.7.5.2p5). Evaluate those of the function being defined for their effects.
  */
-int block_depth = 0;
+static void evaluate_parameter_bounds(func_t *func,
+                                      block_t *scope,
+                                      basic_block_t **bb)
+{
+    token_t *resume = cur_token;
+
+    for (int i = 0; i < func->num_params; i++) {
+        if (!func->param_defs[i].vla_bound)
+            continue;
+        cur_token = func->param_defs[i].vla_bound;
+        read_comma_expression(scope, bb, false);
+        opstack_pop();
+    }
+    cur_token = resume;
+}
 
 basic_block_t *read_code_block(func_t *func, block_t *parent, basic_block_t *bb)
 {
     block_t *blk = add_block(parent, func);
+    int vla_base = vla_live_n;
 
     if (bb)
         bb->scope = blk;
@@ -1857,18 +2081,48 @@ basic_block_t *read_code_block(func_t *func, block_t *parent, basic_block_t *bb)
         error_at("Block nesting too deep", cur_token_loc());
 
     lex_expect(T_open_curly);
+    if (!parent)
+        evaluate_parameter_bounds(func, blk, &bb);
 
     while (!lex_accept(T_close_curly)) {
         bb = read_body_statement(blk, bb);
     }
 
+    emit_vla_frees(blk, &bb, vla_base);
+    vla_live_n = vla_base;
     block_depth--;
     return bb;
+}
+
+/* Whether the body about to be read, which begins at the next token, names
+ * setjmp. Parsing is single pass, so a local declared before the call has been
+ * allocated by the time the call is seen: the answer is needed first. The scan
+ * starts at the opening brace, so the body ends when its depth returns to 0.
+ */
+static bool body_calls_setjmp(void)
+{
+    int depth = 0;
+
+    for (token_t *tk = cur_token->next; tk && tk->kind != T_eof;
+         tk = tk->next) {
+        if (tk->kind == T_open_curly)
+            depth++;
+        else if (tk->kind == T_close_curly && --depth <= 0)
+            break;
+        else if (tk->kind == T_identifier && tk->literal &&
+                 (!strcmp(tk->literal, "setjmp") ||
+                  !strcmp(tk->literal, "_setjmp")))
+            return true;
+    }
+    return false;
 }
 
 void read_func_body(func_t *func)
 {
     block_t *blk = add_block(NULL, func);
+
+    func_calls_setjmp = body_calls_setjmp();
+    func->calls_setjmp = func_calls_setjmp;
     func->bbs = bb_create(blk);
     func->exit = bb_create(blk);
 
@@ -1884,10 +2138,11 @@ void read_func_body(func_t *func)
             is_record_type(func->param_defs[i].type) &&
             !func->param_defs[i].ptr_level;
         /* A volatile parameter lives in its slot, as a volatile local does. */
-        if (func->param_defs[i].is_volatile)
+        if (func->param_defs[i].is_volatile || func_calls_setjmp)
             func->param_defs[i].address_taken = true;
     }
     vir_frontend_begin(func);
+    vla_live_n = 0;
     basic_block_t *body = read_code_block(func, NULL, func->bbs);
     if (body)
         bb_connect(body, func->exit, NEXT);
@@ -1898,16 +2153,21 @@ void read_func_body(func_t *func)
         if (!label)
             error_at("goto label undefined", cur_token_loc());
 
+        emit_goto_vla_frees(bb, backpatch_vlas[i], backpatch_vla_count[i],
+                            label);
         label->used = true;
         bb_connect(bb, label->bb, NEXT);
     }
 
     for (int i = 0; i < label_idx; i++) {
         const label_t *label = &labels[i];
+        char message[MAX_ID_LEN + 32];
+
         if (label->used)
             continue;
-
-        printf("Warning: unused label %s\n", label->label_name);
+        snprintf(message, sizeof(message), "unused label %.*s", MAX_ID_LEN - 1,
+                 label->label_name);
+        warn_at(message, (source_location_t *) &label->loc);
     }
 
     backpatch_bb_idx = 0;
