@@ -2061,6 +2061,14 @@ static bool vir_is_const_int(const vir_value_t *value,
            value->constant == (constant & vir_integer_mask(value->type));
 }
 
+/* Whether @value is the one-bit constant @bit, which vir_is_const_int() skips.
+ */
+static bool vir_is_const_bit(const vir_value_t *value, unsigned bit)
+{
+    return vir_is_constant(value) && value->type == VIR_TYPE_I1 &&
+           value->constant == bit;
+}
+
 static bool vir_binary_operands_are_local(const vir_function_t *func,
                                           const vir_block_t *block,
                                           const vir_value_t *op0,
@@ -2258,9 +2266,9 @@ static vir_value_t *vir_integer_binary(vir_function_t *func,
                                        vir_opcode_t opcode);
 
 /* The operations that associate with a constant: op(op(x, c1), c2) is op(x, c1
- * op c2), and two shifts the same way make one shift by the sum while it stays
- * below the width. This shortens the chain a field offset or a mask built in
- * steps would otherwise keep.
+ * op c2), an add and a subtract mix into one add, and two shifts the same way
+ * make one shift by the sum while it stays below the width. This shortens the
+ * chain a field offset or a mask built in steps would otherwise keep.
  */
 static vir_value_t *vir_normalize_chain(vir_function_t *func,
                                         vir_block_t *block,
@@ -2285,6 +2293,49 @@ static vir_value_t *vir_normalize_chain(vir_function_t *func,
             func, block, (int) (op0->op1->constant + op1->constant));
         return count ? vir_integer_binary(func, block, op0->op0, count, opcode)
                      : NULL;
+    }
+
+    /* Additive chains mix the two spellings: (x + c1) - c2 and (x - c1) + c2
+     * are x + k (same-opcode pairs merge in the code above). A lone x - c keeps
+     * the shape the frontend built; only a constant already inside the chain is
+     * merged.
+     */
+    if (opcode == VIR_OP_ADD || opcode == VIR_OP_SUB) {
+        vir_value_t *c2 = NULL, *chain = NULL;
+        unsigned long long k, a, b;
+
+        if (vir_is_constant(op1) && !vir_is_constant(op0))
+            c2 = op1, chain = op0;
+        else if (opcode == VIR_OP_ADD && vir_is_constant(op0) &&
+                 !vir_is_constant(op1))
+            c2 = op0, chain = op1;
+        vir_value_t *c1 = NULL, *base = NULL;
+
+        if (c2 && !chain->def_effect &&
+            (chain->opcode == VIR_OP_ADD || chain->opcode == VIR_OP_SUB) &&
+            chain->opcode != opcode) {
+            /* Creation order may put the constant of an add first. */
+            if (vir_is_constant(chain->op1) && !vir_is_constant(chain->op0))
+                c1 = chain->op1, base = chain->op0;
+            else if (chain->opcode == VIR_OP_ADD &&
+                     vir_is_constant(chain->op0) &&
+                     !vir_is_constant(chain->op1))
+                c1 = chain->op0, base = chain->op1;
+        }
+        if (c1) {
+            /* x + c1 - c2 = x + (c1 - c2); x - c1 + c2 = x + (c2 - c1) */
+            a = opcode == VIR_OP_SUB ? c1->constant : c2->constant;
+            b = opcode == VIR_OP_SUB ? c2->constant : c1->constant;
+            if (!vir_fold_binary(func, VIR_OP_SUB, op0->type, op0->type, a, b,
+                                 &k))
+                return NULL;
+            constant = vir_const_int(func, block, op0->type, k);
+            return constant ? vir_integer_binary(func, block, base, constant,
+                                                 VIR_OP_ADD)
+                            : NULL;
+        }
+        if (opcode == VIR_OP_SUB)
+            return NULL;
     }
     if (opcode != VIR_OP_ADD && opcode != VIR_OP_MUL &&
         opcode != VIR_OP_BITAND && opcode != VIR_OP_BITOR &&
@@ -2317,6 +2368,47 @@ static vir_value_t *vir_normalize_chain(vir_function_t *func,
                     : NULL;
 }
 
+static vir_value_t *vir_integer_unary(vir_function_t *func,
+                                      vir_block_t *block,
+                                      vir_value_t *operand,
+                                      vir_type_t type,
+                                      vir_opcode_t opcode);
+
+/* A mask that keeps exactly the bits an extension copied from its narrow source
+ * makes the extension a zero extension: and(zext(y), M) is zext(y) when M
+ * covers y, and and(sext(y), M) is zext(y) when M is y's own width of ones. A
+ * byte read from a char then masked with 0xff is one load, not a load, a sign
+ * extension and a mask.
+ */
+static vir_value_t *vir_normalize_mask_extension(vir_function_t *func,
+                                                 vir_block_t *block,
+                                                 vir_value_t *op0,
+                                                 vir_value_t *op1,
+                                                 vir_opcode_t opcode)
+{
+    vir_value_t *mask, *ext;
+    unsigned long long narrow;
+
+    if (opcode != VIR_OP_BITAND)
+        return NULL;
+    if (vir_is_constant(op1) && !vir_is_constant(op0))
+        mask = op1, ext = op0;
+    else if (vir_is_constant(op0) && !vir_is_constant(op1))
+        mask = op0, ext = op1;
+    else
+        return NULL;
+    if (ext->def_effect || ext->nr_ops != 1 ||
+        (ext->opcode != VIR_OP_ZEXT && ext->opcode != VIR_OP_SEXT))
+        return NULL;
+    if (!vir_integer_type_width(ext->op0->type))
+        return NULL;
+    narrow = vir_integer_mask(ext->op0->type);
+    if (ext->opcode == VIR_OP_ZEXT ? (mask->constant & narrow) != narrow
+                                   : mask->constant != narrow)
+        return NULL;
+    return vir_integer_unary(func, block, ext->op0, ext->type, VIR_OP_ZEXT);
+}
+
 static vir_value_t *vir_normalize_binary(vir_function_t *func,
                                          vir_block_t *block,
                                          vir_value_t *op0,
@@ -2327,15 +2419,12 @@ static vir_value_t *vir_normalize_binary(vir_function_t *func,
         vir_normalize_bitwise(func, block, op0, op1, opcode);
     if (!normalized)
         normalized = vir_normalize_integer(func, block, op0, op1, opcode);
+    if (!normalized)
+        normalized =
+            vir_normalize_mask_extension(func, block, op0, op1, opcode);
     return normalized ? normalized
                       : vir_normalize_chain(func, block, op0, op1, opcode);
 }
-
-static vir_value_t *vir_integer_unary(vir_function_t *func,
-                                      vir_block_t *block,
-                                      vir_value_t *operand,
-                                      vir_type_t type,
-                                      vir_opcode_t opcode);
 
 /* A cast of a cast is one cast, or none: trunc(zext(y)) is y when it returns to
  * y's width, a narrower trunc(y) when it goes below it, and zext(y) or sext(y)
@@ -2503,6 +2592,22 @@ static vir_value_t *vir_compare(vir_function_t *func,
             return NULL;
         if (op0 == op1)
             return vir_const_i1(func, block, 1);
+        if (op0->type == VIR_TYPE_I1) {
+            /* eq(v, 1) is v, and eq(eq(w, 0), 0) is w: the frontend spells !
+             * and != this way, so double negation otherwise stays a chain.
+             */
+            vir_value_t *v = vir_is_const_bit(op1, 1)   ? op0
+                             : vir_is_const_bit(op0, 1) ? op1
+                                                        : NULL;
+            if (v)
+                return v;
+            vir_value_t *w = vir_is_const_bit(op1, 0)   ? op0
+                             : vir_is_const_bit(op0, 0) ? op1
+                                                        : NULL;
+            if (w && w->opcode == VIR_OP_EQ && !w->def_effect &&
+                w->op0->type == VIR_TYPE_I1 && vir_is_const_bit(w->op1, 0))
+                return w->op0;
+        }
         if (vir_opcode_is_commutative(opcode))
             vir_order_commutative(&op0, &op1);
     } else if (!vir_integer_operands_are_local(func, block, op0, op1)) {

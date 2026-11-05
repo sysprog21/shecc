@@ -348,7 +348,8 @@ static bool native_temporary(native_function_t *ctx, var_t *var)
 static unsigned int native_storage_size(native_function_t *ctx, var_t *var)
 {
     native_source_t *source = native_source_info(ctx, var);
-    if (source->is_parameter && (var->array_size || var->has_unsized_array))
+    if (var->vla_len ||
+        (source->is_parameter && (var->array_size || var->has_unsized_array)))
         return PTR_SIZE;
     if (var->var_name[0] == '.' && !var->array_size &&
         !var->has_unsized_array && !is_record_type(var->type))
@@ -515,10 +516,10 @@ static vir_value_t *native_read(native_function_t *ctx,
         value = vir_ssa_read(ctx->ssa, block, id);
         return value ? value : native_predeclare(ctx, cursor, var);
     }
-    if (((var->array_size || var->has_unsized_array) &&
-         !native_array_parameter(ctx, var)) ||
-        (!var->ptr_level && is_record_type(var->type) &&
-         !native_array_parameter(ctx, var)))
+    if (!var->vla_len && (((var->array_size || var->has_unsized_array) &&
+                           !native_array_parameter(ctx, var)) ||
+                          (!var->ptr_level && is_record_type(var->type) &&
+                           !native_array_parameter(ctx, var))))
         return native_address(ctx, block, var);
     if (var->is_function_designator) {
         func_t *target = find_func(var->var_name);

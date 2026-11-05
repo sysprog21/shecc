@@ -310,6 +310,24 @@ bool func_has_op(func_t *func, opcode_t a, opcode_t b)
     return false;
 }
 
+/* Whether calls from @func may become jumps: the frame is discarded before the
+ * callee runs, so nothing in it may have had its address taken.
+ */
+bool func_tail_call_caller_ok(func_t *func)
+{
+    return func && !func->va_args && !func->calls_setjmp &&
+           !func_has_op(func, OP_address_of, OP_allocat);
+}
+
+/* Whether a call to @func may become a jump: it has a body, and its arguments
+ * all travel in registers.
+ */
+bool func_tail_call_target_ok(func_t *func)
+{
+    return func && func->bbs && !func->va_args &&
+           func->num_params + func->returns_aggregate <= MAX_ARGS_IN_REG;
+}
+
 /* Whether @func calls anything, directly or through a pointer. */
 bool func_makes_call(func_t *func)
 {

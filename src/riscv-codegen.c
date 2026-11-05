@@ -26,6 +26,11 @@ enum {
 };
 
 enum {
+    RV_CALL_LONG, /* auipc/jalr, reaching anywhere */
+    RV_CALL_JAL,  /* one jal, to a defined function within a megabyte */
+};
+
+enum {
     RV_JUMP_LONG, /* auipc/jalr */
     RV_JUMP_JAL,
     RV_JUMP_FALL, /* the target follows */
@@ -111,6 +116,11 @@ static mop_frame_layout_t rv_frame_layout(func_t *func, vir_mop_t *define)
 /* Where the first function is placed, past the startup code and globals. */
 static int rv_functions_start;
 
+/* Words in the setjmp and longjmp stubs emitted below. */
+#define RV_JMP_REGS 14
+#define RV_SETJMP_WORDS (RV_JMP_REGS + 2)
+#define RV_LONGJMP_WORDS (RV_JMP_REGS + 5)
+
 static int rv_insn_bytes(vir_mop_t *ir)
 {
     return ir->op == OP_allocat ? 0 : mop_count_words(ir) * 4;
@@ -152,7 +162,8 @@ static int rv_layout_functions(void)
             if (bb == func->bbs)
                 offset += prologue;
             for (vir_mop_t *ir = bb->mops.head; ir; ir = ir->next) {
-                if (first || ir->op == OP_jump || ir->op == OP_branch)
+                if (first || ir->op == OP_jump || ir->op == OP_branch ||
+                    ir->op == OP_call)
                     rv_sizes[k] = rv_insn_bytes(ir);
                 offset += rv_sizes[k++];
             }
@@ -202,6 +213,16 @@ static bool rv_choose_branch_forms(void)
                     words = form == RV_JUMP_FALL  ? 0
                             : form == RV_JUMP_JAL ? 1
                                                   : 2;
+                } else if (ir->op == OP_call) {
+                    /* The PLT can lie past a jal's reach, so only a function
+                     * defined here is worth trying.
+                     */
+                    func_t *callee = find_func(ir->func_name);
+
+                    if (callee && callee->bbs &&
+                        rv_jal_reaches(callee->bbs->elf_offset - offset))
+                        form = RV_CALL_JAL;
+                    words = form == RV_CALL_JAL ? 1 : 2;
                 } else if (ir->op == OP_branch) {
                     int q = offset + (ir->src0_hi >= 0 ? 4 : 0);
                     int then_at = ir->then_bb->elf_offset;
@@ -244,9 +265,159 @@ static void rv_relax_branches(void)
     rv_sizes = NULL;
 }
 
+/* An immediate operand is kept in a mop's src2 biased by RV_IMM_BIAS, so that
+ * every 12-bit value, -1 and 0 included, stays distinct from "no immediate".
+ */
+#define RV_IMM_BIAS 4096
+#define RV_IMM_OF(mop) ((mop)->src2 - RV_IMM_BIAS)
+
+/* A branch that tests two registers itself, in place of a compare and a test of
+ * its result, keeps the compare's operation in dest, offset by RV_FUSED_BASE so
+ * it cannot be mistaken for a register number.
+ */
+#define RV_FUSED_BASE 1000
+
+/* Whether @mop branches on a fused comparison rather than a register's truth.
+ */
+static bool rv_branch_is_fused(vir_mop_t *mop)
+{
+    return mop->dest >= RV_FUSED_BASE;
+}
+
+/* The conditional branch taken when the condition is @when_true, over rs1 and
+ * rs2 for a fused comparison and over rs1 alone against zero otherwise.
+ */
+static int rv_cond_branch(vir_mop_t *mop,
+                          bool when_true,
+                          rv_reg rs1,
+                          rv_reg rs2,
+                          int ofs)
+{
+    opcode_t cmp;
+    bool is_unsigned;
+
+    if (!rv_branch_is_fused(mop))
+        return when_true ? __bne(rs1, __zero, ofs) : __beq(rs1, __zero, ofs);
+    cmp = mop->dest - RV_FUSED_BASE;
+    is_unsigned = mop->src0_is_unsigned || mop->src1_is_unsigned;
+    if (cmp == OP_eq || cmp == OP_neq)
+        return (cmp == OP_eq) == when_true ? __beq(rs1, rs2, ofs)
+                                           : __bne(rs1, rs2, ofs);
+
+    /* a > b is b < a and a <= b is b >= a. The branch that is taken when the
+     * condition fails is the opposite one over the same operands.
+     */
+    if (cmp == OP_gt || cmp == OP_leq) {
+        rv_reg swap = rs1;
+        rs1 = rs2;
+        rs2 = swap;
+    }
+    if ((cmp == OP_lt || cmp == OP_gt) == when_true)
+        return is_unsigned ? __bltu(rs1, rs2, ofs) : __blt(rs1, rs2, ofs);
+    return is_unsigned ? __bgeu(rs1, rs2, ofs) : __bge(rs1, rs2, ofs);
+}
+
+/* Fold a constant into the single-register ALU operation that follows its load,
+ * so x + 8, x & 255 and x << 3 take one instruction instead of two. Only an
+ * adjacent pair is looked at, and only when the constant fits the 12-bit
+ * immediate and is read nowhere else; a subtraction becomes an addition of the
+ * negated constant.
+ */
+static void riscv_fold_immediates(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        vir_mop_t **link = &bb->mops.head;
+
+        while (*link && (*link)->next) {
+            vir_mop_t *literal = *link, *use = literal->next;
+            int reg = literal->dest, value = literal->src0;
+            bool shift = use->op == OP_lshift || use->op == OP_rshift;
+            bool left, right;
+
+            if (literal->op != OP_load_constant || literal->dest_hi >= 0 ||
+                reg < 0 || reg >= REG_CNT || use->src2 || use->dest_hi >= 0 ||
+                use->src0_hi >= 0 || use->src1_hi >= 0 ||
+                !(use->op == OP_add || use->op == OP_sub ||
+                  use->op == OP_bit_and || use->op == OP_bit_or ||
+                  use->op == OP_bit_xor || shift)) {
+                link = &literal->next;
+                continue;
+            }
+            left = use->src0 == reg;
+            right = use->src1 == reg;
+
+            /* The literal is the right operand, or the left of a commutative
+             * operation, and the other operand is a different register.
+             */
+            if (left == right || (left && (use->op == OP_sub || shift))) {
+                link = &literal->next;
+                continue;
+            }
+            if (shift               ? value < 0 || value > 31
+                : use->op == OP_sub ? value < -2047 || value > 2048
+                                    : value < -2048 || value > 2047) {
+                link = &literal->next;
+                continue;
+            }
+            if (fold_loses_dest(bb, literal, use)) {
+                link = &literal->next;
+                continue;
+            }
+            if (left)
+                use->src0 = use->src1;
+            if (use->op == OP_sub) {
+                use->op = OP_add;
+                value = -value;
+            }
+            use->src1 = -1;
+            use->src2 = value + RV_IMM_BIAS;
+            *link = use;
+        }
+    }
+}
+
+/* Branch on a comparison directly. A compare whose only use is the branch that
+ * ends its block becomes the branch's own condition, saving the set-on-compare
+ * and the test of its result: "blt a, b" for "slt t, a, b; bnez t".
+ */
+static void riscv_fuse_branches(func_t *func)
+{
+    for (basic_block_t *bb = func->bbs; bb; bb = bb->rpo_next) {
+        vir_mop_t *branch = bb->mops.tail;
+
+        if (!branch || branch->op != OP_branch || branch->src0_hi >= 0 ||
+            branch->dest >= RV_FUSED_BASE)
+            continue;
+        for (vir_mop_t **link = &bb->mops.head; *link; link = &(*link)->next) {
+            vir_mop_t *cmp = *link;
+
+            if (cmp->next != branch)
+                continue;
+            if ((cmp->op == OP_eq || cmp->op == OP_neq || cmp->op == OP_lt ||
+                 cmp->op == OP_gt || cmp->op == OP_leq || cmp->op == OP_geq) &&
+                cmp->dest == branch->src0 && cmp->dest_hi < 0 &&
+                cmp->src0_hi < 0 && cmp->src1_hi < 0 && cmp->src0 >= 0 &&
+                cmp->src1 >= 0 && !reg_read_after(bb, branch, cmp->dest)) {
+                branch->src0 = cmp->src0;
+                branch->src1 = cmp->src1;
+                branch->src0_is_unsigned = cmp->src0_is_unsigned;
+                branch->src1_is_unsigned = cmp->src1_is_unsigned;
+                branch->dest = RV_FUSED_BASE + cmp->op;
+                *link = branch;
+            }
+            break;
+        }
+    }
+}
+
 void cfg_flatten(void)
 {
     func_t *func;
+    for (func = FUNC_LIST.head; func; func = func->next)
+        if (func->bbs) {
+            riscv_fold_immediates(func);
+            riscv_fuse_branches(func);
+        }
     mop_flat_prepare(false);
 
     if (dynlink) {
@@ -270,6 +441,18 @@ void cfg_flatten(void)
         func = find_func("__syscall");
         func->bbs->elf_offset = 28;
         elf_offset = 64;
+
+        /* setjmp and longjmp follow it, when the program calls them. */
+        func = find_func("setjmp");
+        if (func && func->bbs && func->is_used) {
+            func->bbs->elf_offset = elf_offset;
+            elf_offset += RV_SETJMP_WORDS * 4;
+        }
+        func = find_func("longjmp");
+        if (func && func->bbs && func->is_used) {
+            func->bbs->elf_offset = elf_offset;
+            elf_offset += RV_LONGJMP_WORDS * 4;
+        }
     }
 
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
@@ -364,6 +547,21 @@ static int riscv_bitwise_insn(opcode_t op,
     return 0;
 }
 
+static int riscv_bitwise_imm_insn(opcode_t op, rv_reg dest, rv_reg src, int imm)
+{
+    switch (op) {
+    case OP_bit_and:
+        return __andi(dest, src, imm);
+    case OP_bit_or:
+        return __ori(dest, src, imm);
+    case OP_bit_xor:
+        return __xori(dest, src, imm);
+    default:
+        fatal("unsupported RISC-V bitwise operation");
+    }
+    return 0;
+}
+
 void emit_mop(vir_mop_t *mop)
 {
     int rd = rv_reg_of(mop->dest);
@@ -391,6 +589,16 @@ void emit_mop(vir_mop_t *mop)
          * and a signal delivered in between would overwrite anything stored
          * below sp. t1 holds the old sp to address the saves from.
          */
+        if (ofs <= 2047) {
+            /* The frame is small enough for immediates: lower sp once and save
+             * through it.
+             */
+            emit(__addi(__sp, __sp, -ofs));
+            emit(__sw(__ra, __sp, ofs - 4));
+            for (int i = 0; i < rv_saved_words(mop->src2); i++)
+                emit(__sw(rv_saved_reg(mop->src2, i), __sp, ofs - 8 - i * 4));
+            return;
+        }
         emit_rv32_split_address(false, __t0, __t0, ofs);
         emit(__addi(__t1, __sp, 0));
         emit(__sub(__sp, __sp, __t0));
@@ -520,14 +728,14 @@ void emit_mop(vir_mop_t *mop)
             int then_ofs = mop->then_bb->elf_offset - here;
             int else_ofs = mop->else_bb->elf_offset - here;
             if (form == RV_BRANCH_THEN || form == RV_BRANCH_THEN_JAL)
-                emit(__bne(rs1, __zero, then_ofs));
+                emit(rv_cond_branch(mop, true, rs1, rs2, then_ofs));
             else if (form == RV_BRANCH_ELSE)
-                emit(__beq(rs1, __zero, else_ofs));
+                emit(rv_cond_branch(mop, false, rs1, rs2, else_ofs));
             else if (form == RV_BRANCH_SKIP_THEN) {
-                emit(__beq(rs1, __zero, 8));
+                emit(rv_cond_branch(mop, false, rs1, rs2, 8));
                 emit(__jal(__zero, then_ofs - 4));
             } else
-                emit(__bne(rs1, __zero, 8));
+                emit(rv_cond_branch(mop, true, rs1, rs2, 8));
             if (form == RV_BRANCH_THEN_JAL || form == RV_BRANCH_SKIP_ELSE)
                 emit(__jal(__zero, else_ofs - 4));
             return;
@@ -540,7 +748,7 @@ void emit_mop(vir_mop_t *mop)
             emit(__or(__t1, rs1, rs1_hi));
             rs1 = __t1;
         }
-        emit(__beq(rs1, __zero, 8));
+        emit(rv_cond_branch(mop, false, rs1, rs2, 8));
         emit(__jalr(__zero, __t0, 0));
         ofs = elf_code_start + mop->else_bb->elf_offset;
         emit_rv32_split_address(false, __t0, __t0, ofs);
@@ -563,6 +771,10 @@ void emit_mop(vir_mop_t *mop)
          */
         ofs = function_entry_address(mop->func_name) -
               (elf_code_start + elf_code->size);
+        if (mop->src2 == RV_CALL_JAL) {
+            emit(mop_count_only ? 0 : __jal(__ra, ofs));
+            return;
+        }
         emit_rv32_split_address(true, __ra, __ra, ofs);
         return;
     case OP_load_data_address:
@@ -591,6 +803,14 @@ void emit_mop(vir_mop_t *mop)
             emit(__addi(__a1, rs1_hi, 0));
         ofs = rv_frame_bytes(mop->src1, mop->src2);
         /* Reload the saved registers while sp still covers them. */
+        if (ofs <= 2047) {
+            emit(__lw(__ra, __sp, ofs - 4));
+            for (int i = 0; i < rv_saved_words(mop->src2); i++)
+                emit(__lw(rv_saved_reg(mop->src2, i), __sp, ofs - 8 - i * 4));
+            emit(__addi(__sp, __sp, ofs));
+            emit(__jalr(__zero, __ra, 0));
+            return;
+        }
         emit_rv32_split_address(false, __t0, __t0, ofs);
         emit(__add(__t1, __sp, __t0));
         emit(__lw(__ra, __t1, -4));
@@ -609,7 +829,9 @@ void emit_mop(vir_mop_t *mop)
             emit(__add(rd_hi, rs1_hi, rs2_hi));
             emit(__add(rd_hi, rd_hi, __t1));
             emit(__addi(rd, __t0, 0));
-        } else
+        } else if (mop->src2)
+            emit(__addi(rd, rs1, RV_IMM_OF(mop)));
+        else
             emit(__add(rd, rs1, rs2));
         return;
     case OP_sub:
@@ -881,7 +1103,7 @@ void emit_mop(vir_mop_t *mop)
             emit(__or(rd_hi, rd_hi, __t2));
             return;
         }
-        emit(__sll(rd, rs1, rs2));
+        emit(mop->src2 ? __slli(rd, rs1, RV_IMM_OF(mop)) : __sll(rd, rs1, rs2));
         return;
     case OP_rshift:
         if (MOP_PAIR_DEST_SRC0(mop)) {
@@ -913,7 +1135,12 @@ void emit_mop(vir_mop_t *mop)
                              : __sra(rd_hi, rs1_hi, rs2));
             return;
         }
-        emit(mop->src0_is_unsigned ? __srl(rd, rs1, rs2) : __sra(rd, rs1, rs2));
+        if (mop->src2)
+            emit(mop->src0_is_unsigned ? __srli(rd, rs1, RV_IMM_OF(mop))
+                                       : __srai(rd, rs1, RV_IMM_OF(mop)));
+        else
+            emit(mop->src0_is_unsigned ? __srl(rd, rs1, rs2)
+                                       : __sra(rd, rs1, rs2));
         return;
     case OP_eq:
         if (mop->src0_hi >= 0 && mop->src1_hi >= 0) {
@@ -989,6 +1216,10 @@ void emit_mop(vir_mop_t *mop)
     case OP_bit_and:
     case OP_bit_or:
     case OP_bit_xor:
+        if (mop->src2) {
+            emit(riscv_bitwise_imm_insn(mop->op, rd, rs1, RV_IMM_OF(mop)));
+            return;
+        }
         emit(riscv_bitwise_insn(mop->op, rd, rs1, rs2));
         if (MOP_PAIR_BINARY(mop))
             emit(riscv_bitwise_insn(mop->op, rd_hi, rs1_hi, rs2_hi));
@@ -1091,6 +1322,40 @@ void emit_mop(vir_mop_t *mop)
 }
 
 void plt_generate(void);
+
+/* A jump buffer holds s0, s1, s2..s11, ra and sp in that order: what a callee
+ * preserves, the return address and the stack of the call to setjmp. gp is the
+ * global base and constant.
+ */
+static rv_reg rv_jmp_reg(int i)
+{
+    if (i < 2)
+        return (rv_reg) (__s0 + i);
+    if (i < 12)
+        return (rv_reg) (__s2 + i - 2);
+    return i == 12 ? __ra : __sp;
+}
+
+static void emit_setjmp(void)
+{
+    for (int i = 0; i < RV_JMP_REGS; i++)
+        emit(__sw(rv_jmp_reg(i), __a0, i * 4));
+    emit(__addi(__a0, __zero, 0));
+    emit(__jalr(__zero, __ra, 0));
+}
+
+/* longjmp(env, 0) makes setjmp return 1. */
+static void emit_longjmp(void)
+{
+    emit(__bne(__a1, __zero, 8));
+    emit(__addi(__a1, __zero, 1));
+    emit(__addi(__t0, __a0, 0));
+    emit(__addi(__a0, __a1, 0));
+    for (int i = 0; i < RV_JMP_REGS; i++)
+        emit(__lw(rv_jmp_reg(i), __t0, i * 4));
+    emit(__jalr(__zero, __ra, 0));
+}
+
 void code_generate(void)
 {
     int global_stack_size;
@@ -1206,6 +1471,13 @@ void code_generate(void)
         emit(__addi(__a5, __a6, 0));
         emit(__ecall());
         emit(__jalr(__zero, __ra, 0));
+
+        func_t *jump = find_func("setjmp");
+        if (jump && jump->bbs && jump->is_used)
+            emit_setjmp();
+        jump = find_func("longjmp");
+        if (jump && jump->bbs && jump->is_used)
+            emit_longjmp();
     }
 
     mop_visit_globals(emit_mop);

@@ -64,6 +64,24 @@ static void arm_mark_fallthrough(void)
     }
 }
 
+/* A jump buffer holds r4..r12, sp and lr in that order: what a callee preserves
+ * (r12 is the global base), the stack of the call to setjmp and its return
+ * address. The word counts are those of the stubs emitted below.
+ */
+#define ARM_JMP_REGS 11
+#define ARM_SETJMP_WORDS (ARM_JMP_REGS + 2)
+#define ARM_LONGJMP_WORDS (ARM_JMP_REGS + 5)
+
+static arm_reg arm_jmp_reg(int i)
+{
+    if (i < 9)
+        return (arm_reg) (__r4 + i);
+    return i == 9 ? __sp : __lr;
+}
+
+static void emit_setjmp(void);
+static void emit_longjmp(void);
+
 void cfg_flatten(void)
 {
     func_t *func;
@@ -78,6 +96,18 @@ void cfg_flatten(void)
         func = find_func("__syscall");
         func->bbs->elf_offset = 32; /* offset of start + branch in codegen */
         elf_offset = 92; /* offset of start + branch + syscall in codegen */
+
+        /* setjmp and longjmp follow it, when the program calls them. */
+        func = find_func("setjmp");
+        if (func && func->bbs && func->is_used) {
+            func->bbs->elf_offset = elf_offset;
+            elf_offset += ARM_SETJMP_WORDS * 4;
+        }
+        func = find_func("longjmp");
+        if (func && func->bbs && func->is_used) {
+            func->bbs->elf_offset = elf_offset;
+            elf_offset += ARM_LONGJMP_WORDS * 4;
+        }
     }
 
     GLOBAL_FUNC->bbs->elf_offset = elf_offset;
@@ -890,6 +920,26 @@ void emit_mop(vir_mop_t *mop)
 }
 
 void plt_generate(void);
+static void emit_setjmp(void)
+{
+    for (int i = 0; i < ARM_JMP_REGS; i++)
+        emit(__sw(__AL, arm_jmp_reg(i), __r0, i * 4));
+    emit(__mov_i(__AL, __r0, 0));
+    emit(__bx(__AL, __lr));
+}
+
+/* longjmp(env, 0) makes setjmp return 1. */
+static void emit_longjmp(void)
+{
+    emit(__cmp_i(__AL, __r1, 0));
+    emit(__mov_i(__EQ, __r1, 1));
+    emit(__mov_r(__AL, __r2, __r0));
+    emit(__mov_r(__AL, __r0, __r1));
+    for (int i = 0; i < ARM_JMP_REGS; i++)
+        emit(__lw(__AL, arm_jmp_reg(i), __r2, i * 4));
+    emit(__bx(__AL, __lr));
+}
+
 void code_generate(void)
 {
     int ofs;
@@ -1035,6 +1085,13 @@ void code_generate(void)
         emit(__svc());
         emit(__ldm(__AL, 1, __sp, 0x00F0));
         emit(__bx(__AL, __lr));
+
+        func_t *jump = find_func("setjmp");
+        if (jump && jump->bbs && jump->is_used)
+            emit_setjmp();
+        jump = find_func("longjmp");
+        if (jump && jump->bbs && jump->is_used)
+            emit_longjmp();
     }
 
     mop_visit_globals(emit_mop);

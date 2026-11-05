@@ -2362,6 +2362,36 @@ void emit_compare_jump(vir_mop_t *mop, int rd, int rs1, int rs2)
     }
 }
 
+/* Whether the function being emitted may hand its frame to a tail call: it
+ * takes the address of nothing in its own frame, which would dangle once the
+ * frame is released, and it does not grow its frame at run time. Set at the
+ * function's OP_define.
+ */
+static bool cur_tail_calls_ok;
+
+/* The return the emitted tail call stands in for, so that its own emission is
+ * skipped.
+ */
+static bool x64_tail_return_pending;
+
+/* Whether @call, followed by a return of its result, can become a jump. The
+ * callee takes every argument in registers, so nothing of this frame is read
+ * after it is released; the return needs no widening of the value; and a
+ * function with a body is the only target whose displacement is known.
+ */
+static bool x64_can_tail_call(func_t *target)
+{
+    vir_mop_t *ret = emit_next_ir;
+
+    if (!cur_tail_calls_ok || !func_tail_call_target_ok(target))
+        return false;
+    if (!next_in_same_bb() || ret->op != OP_return || ret->src0_hi >= 0)
+        return false;
+    if (ret->src0 != -1 && ret->src0 != 0)
+        return false;
+    return !(ret->src0_is_unsigned && ret->size_bytes < PTR_SIZE);
+}
+
 /* Keep a call result in RAX when its only consumer can read it directly, and
  * leave it there when nothing reads it at all.
  */
@@ -2416,8 +2446,21 @@ void emit_call_return(vir_mop_t *mop, int rs1)
                          "x64 call to undefined function '%s'", mop->func_name);
                 fatal(message);
             } else {
+                bool tail = x64_can_tail_call(target_func);
+
+                if (tail) {
+                    /* The return's own epilogue, less the RET, then a jump: the
+                     * callee returns to this function's caller.
+                     */
+                    emit_frame_adjust(0, emit_next_ir->src1);
+                    for (int cs = cur_saved_regs - 1; cs >= 0; cs--)
+                        emit_pop_reg(map_ir_reg(X64_FIRST_CALLEE_SAVED + cs));
+                    if (cur_frame_rbp)
+                        emit_byte(0x5D); /* POP rbp */
+                    x64_tail_return_pending = true;
+                }
                 x64_record_call(elf_code->size, target_func->bbs);
-                emit_byte(0xE8); /* CALL rel32 */
+                emit_byte(tail ? 0xE9 : 0xE8); /* JMP or CALL rel32 */
 
                 /* Check if this is a forward reference (function not compiled
                  * yet)
@@ -2435,12 +2478,17 @@ void emit_call_return(vir_mop_t *mop, int rs1)
                 }
             }
 
-            emit_call_result();
+            if (!x64_tail_return_pending)
+                emit_call_result();
         }
         return;
 
     case OP_return:
         emit_fell_through = false;
+        if (x64_tail_return_pending) {
+            x64_tail_return_pending = false;
+            return;
+        }
         /* If there's a return value in src0, move it to RAX */
         if (mop->src0 >= 0) {
             /* rs1 already names the physical register, including the case where
@@ -3485,6 +3533,8 @@ void emit_mop(vir_mop_t *mop)
          */
         x64_frame_bias = 0;
         x64_epilogue = NULL;
+        x64_tail_return_pending = false;
+        cur_tail_calls_ok = func_tail_call_caller_ok(find_func(mop->func_name));
         cur_frame_rbp = x64_needs_frame(find_func(mop->func_name));
         if (cur_frame_rbp)
             emit_byte(0x55); /* PUSH rbp */
@@ -4127,6 +4177,50 @@ void code_generate(void)
         emit_byte(0xC3); /* RET */
     }
 
+    /* setjmp and longjmp, when the program calls them. The buffer holds, in
+     * order, RBX RBP R12 R13 R14, the caller's RSP and the return address: the
+     * registers a callee must preserve, which is all a function can be holding
+     * a value in across a call. R15 is the global base and never changes.
+     */
+    static const unsigned char setjmp_code[] = {
+        0x48, 0x89, 0x1F,             /* mov [rdi], rbx */
+        0x48, 0x89, 0x6F, 0x08,       /* mov [rdi+8], rbp */
+        0x4C, 0x89, 0x67, 0x10,       /* mov [rdi+16], r12 */
+        0x4C, 0x89, 0x6F, 0x18,       /* mov [rdi+24], r13 */
+        0x4C, 0x89, 0x77, 0x20,       /* mov [rdi+32], r14 */
+        0x48, 0x8D, 0x54, 0x24, 0x08, /* lea rdx, [rsp+8] */
+        0x48, 0x89, 0x57, 0x28,       /* mov [rdi+40], rdx */
+        0x48, 0x8B, 0x14, 0x24,       /* mov rdx, [rsp] */
+        0x48, 0x89, 0x57, 0x30,       /* mov [rdi+48], rdx */
+        0x31, 0xC0,                   /* xor eax, eax */
+        0xC3,                         /* ret */
+    };
+    static const unsigned char longjmp_code[] = {
+        0x89, 0xF0,                   /* mov eax, esi */
+        0x85, 0xC0,                   /* test eax, eax */
+        0x75, 0x05,                   /* jnz +5 */
+        0xB8, 0x01, 0x00, 0x00, 0x00, /* mov eax, 1: longjmp(env, 0) gives 1 */
+        0x48, 0x8B, 0x1F,             /* mov rbx, [rdi] */
+        0x48, 0x8B, 0x6F, 0x08,       /* mov rbp, [rdi+8] */
+        0x4C, 0x8B, 0x67, 0x10,       /* mov r12, [rdi+16] */
+        0x4C, 0x8B, 0x6F, 0x18,       /* mov r13, [rdi+24] */
+        0x4C, 0x8B, 0x77, 0x20,       /* mov r14, [rdi+32] */
+        0x48, 0x8B, 0x67, 0x28,       /* mov rsp, [rdi+40] */
+        0xFF, 0x67, 0x30,             /* jmp [rdi+48] */
+    };
+    func_t *jump_func = find_func("setjmp");
+    if (jump_func && jump_func->bbs && jump_func->is_used) {
+        jump_func->bbs->elf_offset = elf_code->size;
+        for (int i = 0; i < (int) sizeof(setjmp_code); i++)
+            emit_byte(setjmp_code[i]);
+    }
+    jump_func = find_func("longjmp");
+    if (jump_func && jump_func->bbs && jump_func->is_used) {
+        jump_func->bbs->elf_offset = elf_code->size;
+        for (int i = 0; i < (int) sizeof(longjmp_code); i++)
+            emit_byte(longjmp_code[i]);
+    }
+
     /* Emit all flattened IR - this includes all functions We need to track and
      * update basic block offsets as we emit them Track current function and
      * basic block during emission
@@ -4241,7 +4335,9 @@ void code_generate(void)
 
         /* Skip __syscall - it's emitted manually early (before other functions)
          */
-        if (mop->op == OP_define && !strcmp(mop->func_name, "__syscall")) {
+        if (mop->op == OP_define && (!strcmp(mop->func_name, "__syscall") ||
+                                     !strcmp(mop->func_name, "setjmp") ||
+                                     !strcmp(mop->func_name, "longjmp"))) {
             continue;
         }
 
