@@ -12,13 +12,14 @@ read -r -a cc <<< "${CC:-cc}"
 # would leave the compiler unhooked and the test would pass untested.
 [[ $(grep -c '^    peephole();$' src/main.c) == 1 ]]
 sed 's/    peephole();/    liveout_test_hook(); mop_compute_liveness(); peephole();/' src/main.c > "$task_dir/main.c"
-# Disable lookahead only in this temporary test compiler.
-sed '/^void emit_mop(vir_mop_t \*mop)$/,/^{/ { /^{$/a\
-    if (liveout_no_folds) { folds_off = true; emit_next_ir = NULL; }
-}' src/x64-codegen.c > "$task_dir/codegen.c"
-[[ $(grep -Fc 'if (liveout_no_folds)' "$task_dir/codegen.c") == 1 ]]
+
+# Disable lookahead only in this test compiler, through the backend's
+# X64_EMIT_MOP_HOOK, which is empty in every other build. An unhooked backend
+# would pass this test without exercising it.
+[[ $(grep -c 'X64_EMIT_MOP_HOOK' src/codegen/x64/codegen.c) == 2 ]]
+hook='if (liveout_no_folds) { folds_off = true; emit_next_ir = NULL; }'
 "${cc[@]}" -O0 -g -std=c99 -fwrapv \
-    "-DVIR_LIVEOUT_TEST_MAIN=\"$task_dir/main.c\"" -iquote "$task_dir" -iquote src -Isrc \
+    "-DVIR_LIVEOUT_TEST_MAIN=\"$task_dir/main.c\"" "-DX64_EMIT_MOP_HOOK=$hook" -iquote "$task_dir" -iquote src -Isrc \
     tests/vir-x64-liveout.c -o "$task_dir/compiler"
 # The probes follow main, so they stay calls for the hook to replace.
 cat > "$task_dir/source.c" << 'SOURCE'

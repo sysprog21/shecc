@@ -6,9 +6,9 @@
  */
 
 /* Translate IR to target machine code */
-#include "defs.h"
-#include "globals.c"
-#include "x64.c"
+#include "../../defs.h"
+#include "../../globals.c"
+#include "encode.c"
 
 /* Narrow an integer result in rd to 32 bits, matching shecc's 32-bit int.
  *
@@ -539,30 +539,28 @@ bool reg_mirror_valid[REG_CNT];
  */
 bool reg_mirror_sext[REG_CNT];
 
+static int slot_width(const vir_mop_t *ir)
+{
+    return ir->is_pointer ? PTR_SIZE : ir->size_bytes;
+}
+
 /* The width OP_load actually reads, matching the emitter's own bucketing. */
 int load_width(vir_mop_t *ir)
 {
-    if (ir->size_bytes == 1)
-        return 1;
-    if (ir->size_bytes == 2)
-        return 2;
-    if (ir->size_bytes == 4)
-        return 4;
+    int width = slot_width(ir);
+
+    if (width == 1 || width == 2 || width == 4)
+        return width;
     return 8;
 }
 
-/* The width OP_store actually writes: one byte, or the whole 64-bit register.
+/* The width OP_store actually writes: four bytes, or the whole 64-bit register.
  * Only the 8-byte form leaves the slot holding exactly what the register held,
  * which is what makes a later 8-byte load of that slot redundant.
  */
 int store_width(vir_mop_t *ir)
 {
-    int eff = ir->size_bytes;
-    if (ir->is_pointer && eff != PTR_SIZE)
-        eff = PTR_SIZE;
-    if (eff <= 4)
-        return 4;
-    return 8;
+    return slot_width(ir) <= 4 ? 4 : 8;
 }
 
 /* Each register's value expressed as "another register shifted left by a
@@ -2551,11 +2549,6 @@ void emit_call_return(vir_mop_t *mop, int rs1)
 }
 
 /* Stack slots, addresses, conditional moves, loads and stores. */
-static int slot_width(const vir_mop_t *ir)
-{
-    return ir->is_pointer && ir->size_bytes != PTR_SIZE ? PTR_SIZE
-                                                        : ir->size_bytes;
-}
 
 static void emit_load_instruction(int reg,
                                   int width,
@@ -2605,10 +2598,8 @@ static void emit_store_instruction(int width,
 
 static void emit_slot_store(vir_mop_t *ir, int reg, int base, bool packed)
 {
-    int width = slot_width(ir);
+    int width = packed ? slot_width(ir) : store_width(ir);
 
-    if (!packed && width <= 4)
-        width = 4;
     emit_store_instruction(width, reg, base, -1, false, false);
 }
 
@@ -3035,6 +3026,9 @@ void emit_logic_cast(vir_mop_t *mop, int rd, int rs1)
 
 void emit_mop(vir_mop_t *mop)
 {
+#ifdef X64_EMIT_MOP_HOOK /* test harnesses only */
+    X64_EMIT_MOP_HOOK;
+#endif
     for (int i = 0; i < MAX_SKIP_IR; i++) {
         if (skip_ir_index[i] >= 0 && skip_ir_index[i] == emit_ir_index) {
             skip_ir_index[i] = -1;
@@ -3215,13 +3209,9 @@ void emit_mop(vir_mop_t *mop)
              */
             if (stored >= 0 && stored < REG_CNT && !mop->is_volatile &&
                 reg_mirror_valid[stored] &&
-                reg_mirror_slot[stored] == mop->src1) {
-                int keep = mop->size_bytes;
-                if (mop->is_pointer && keep != PTR_SIZE)
-                    keep = PTR_SIZE;
-                if (reg_mirror_size[stored] == keep)
-                    return;
-            }
+                reg_mirror_slot[stored] == mop->src1 &&
+                reg_mirror_size[stored] == slot_width(mop))
+                return;
 
             /* The slot takes a new value, so any register mirroring it is now
              * stale.
@@ -3238,9 +3228,7 @@ void emit_mop(vir_mop_t *mop)
              * records, so the reload becomes a MOVSX rather than a copy.
              */
             if (stored >= 0 && stored < REG_CNT) {
-                int eff = mop->size_bytes;
-                if (mop->is_pointer && eff != PTR_SIZE)
-                    eff = PTR_SIZE;
+                int eff = slot_width(mop);
                 if (eff == 1 || eff == 2 || eff == 4 || eff == 8) {
                     reg_mirror_valid[stored] = true;
                     reg_mirror_slot[stored] = mop->src1;

@@ -3,7 +3,7 @@
 /* Host-only profiling keeps graph construction and verification outside the
  * timed region; each sample batches fresh functions to reduce clock noise.
  */
-#include "vir.h"
+#include "optimizer/ir.h"
 
 #include <stdbool.h>
 #include <stdint.h>

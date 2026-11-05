@@ -3,9 +3,10 @@
  * x0..x7, x9..x15, x20..x28; x16/x17 are reserved scratch and x19 is the global
  * base.
  */
-#include "arm64.c"
-#include "defs.h"
-#include "globals.c"
+#include "../../defs.h"
+#include "../../globals.c"
+#include "../emit.c"
+#include "encode.c"
 
 /* IP0, the linker's own scratch register, is free for a code generator to use
  * between instructions and never allocated to a value. x19 is the base of the
@@ -154,15 +155,6 @@ int a64_reg(int r)
     if (r == A64_ZERO)
         return A64_ZR;
     return r < 8 ? r : r < A64_FIRST_CALLEE ? r + 1 : r + 5;
-}
-void emit(int insn)
-{
-    if (mop_count_only) {
-        if (mop_counted_words < INT_MAX)
-            mop_counted_words++;
-    } else {
-        elf_write_int(elf_code, insn);
-    }
 }
 void a64_mov(int d, int n)
 {

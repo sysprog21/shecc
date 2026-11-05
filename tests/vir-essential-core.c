@@ -1,4 +1,4 @@
-#include "vir.h"
+#include "optimizer/ir.h"
 
 #include <assert.h>
 #include <limits.h>

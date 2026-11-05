@@ -12,18 +12,19 @@
  *                    code generator hands to emit().
  *   - prefix A64_  : architectural register numbers and condition codes.
  *
- * Every AArch64 instruction is one fixed-width word, so, as in src/arm.c and
- * src/riscv.c, each helper here returns that word rather than writing it. The
- * @sf argument selects the 64-bit X form when true and the 32-bit W form when
- * false; it is bit 31 of every data-processing encoding below.
+ * Every AArch64 instruction is one fixed-width word, so, as in the arm and
+ * riscv encoders, each helper here returns that word rather than writing it.
+ * The @sf argument selects the 64-bit X form when true and the 32-bit W form
+ * when false; it is bit 31 of every data-processing encoding below.
  *
  * What belongs here is anything whose arguments are purely architectural --
  * register numbers, immediates, displacements, widths. Anything that reads
  * shecc's IR, the register allocator's state or a basic block belongs in
- * src/arm64-codegen.c, as do the range checks, which report through fatal().
+ * src/codegen/arm64/codegen.c, as do the range checks, which report through
+ * fatal().
  */
 
-#include "defs.h"
+#include "../../defs.h"
 
 /* Register 31 is SP or the zero register depending on the instruction. */
 #define A64_SP 31

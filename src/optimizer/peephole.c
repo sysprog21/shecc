@@ -6,8 +6,8 @@
  */
 #include <stdbool.h>
 
-#include "defs.h"
-#include "globals.c"
+#include "../defs.h"
+#include "../globals.c"
 
 /* These instructions can write their result straight to a following move's
  * destination, eliminating the intermediate register copy.

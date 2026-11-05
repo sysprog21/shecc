@@ -13,7 +13,7 @@
  *   - no prefix (modrm, reg_low3) : pure encoding arithmetic.
  *
  * An x86-64 instruction is a variable-length sequence -- prefix, opcode, ModRM,
- * SIB, displacement, immediate -- so unlike src/arm.c and src/riscv.c, which
+ * SIB, displacement, immediate -- so unlike the arm and riscv encoders, which
  * return one fixed-width word, there is nothing to return. The helpers append
  * to elf_code and the caller composes them:
  *
@@ -24,10 +24,10 @@
  * What belongs here is anything whose arguments are purely architectural --
  * register numbers, immediates, displacements, opcode bytes. Anything that
  * reads shecc's IR, the register allocator's state or a basic block belongs in
- * src/x64-codegen.c.
+ * src/codegen/x64/codegen.c.
  */
 
-#include "defs.h"
+#include "../../defs.h"
 
 /* REX prefix bits */
 #define REX_W 0x48 /* 64-bit operand size */

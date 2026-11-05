@@ -9,9 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../config"
-#include "defs.h"
-#include "globals.c"
+#include "../../../config"
+#include "../../defs.h"
+#include "../../globals.c"
 
 func_t *find_visible_func(char *name, block_t *scope);
 
@@ -2432,7 +2432,7 @@ static var_t *read_subscript_address(block_t *parent,
                                        pointer_level, stride, false);
 }
 
-#include "parser-init.c"
+#include "init.c"
 static void read_assignment_or_expression(block_t *parent,
                                           basic_block_t **bb)
 {
@@ -2441,11 +2441,11 @@ static void read_assignment_or_expression(block_t *parent,
         read_ternary_operation(parent, bb);
     }
 }
-#include "parser-decl.c"
-#include "parser-call.c"
-#include "parser-sizeof.c"
-#include "parser-expr.c"
-#include "parser-const.c"
-#include "parser-stmt.c"
-#include "parser-global.c"
+#include "decl.c"
+#include "call.c"
+#include "sizeof.c"
+#include "expr.c"
+#include "const.c"
+#include "stmt.c"
+#include "global.c"
 /* clang-format on */

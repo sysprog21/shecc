@@ -1,7 +1,7 @@
-#include "vir-frontend.h"
+#include "builder.h"
 #include <stdlib.h>
 #include <string.h>
-#include "vir.h"
+#include "ir.h"
 
 extern int unevaluated_expression_depth;
 int alignment_var(var_t *var);
